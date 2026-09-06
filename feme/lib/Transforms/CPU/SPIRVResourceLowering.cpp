@@ -744,6 +744,29 @@ constexpr unsigned DrefSampleDrefIdx = 3;
 /// after its dref operand.
 constexpr unsigned DrefSampleOffsetIdx = DrefSampleDrefIdx + 1;
 
+/// Whether \p CI is one of the two SPIR-V LOD-query intrinsics
+/// `ImageQueryLodPattern` (`SPIRVToLLVMPatterns.cpp`) legalizes an
+/// `OpImageQueryLod` into (roadmap L52e), setting \p Unclamped to
+/// distinguish which of the two lanes of `OpImageQueryLod`'s own
+/// `<2 x float>` result \p CI itself computes: `calculate.lod` alone is
+/// the clamped "level" (lane 0, \p Unclamped false); `calculate.lod
+/// .unclamped` is the raw, unclamped LOD (lane 1, \p Unclamped true).
+/// Both share the identical `(image, sampler, coord)` operand order and
+/// return a scalar float each (unlike every sample intrinsic above, which
+/// return a texel).
+bool isQueryLodIntrinsic(const CallInst &CI, bool &Unclamped) {
+  Intrinsic::ID ID = getIntrinsicID(&CI);
+  if (ID == Intrinsic::spv_resource_calculate_lod) {
+    Unclamped = false;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_calculate_lod_unclamped) {
+    Unclamped = true;
+    return true;
+  }
+  return false;
+}
+
 /// Whether \p Ty is `<N x ElemTy>`.
 bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
   const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
@@ -968,6 +991,27 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
+    // Roadmap L52e: `OpImageQueryLod`'s own two intrinsic halves
+    // (`calculate.lod`/`calculate.lod.unclamped`), scoped to `Plain2D`
+    // only for now -- `Array2D`/`Cube`/`CubeArray`/`Plain1D`/`Array1D`/
+    // `Plain3D` counterparts remain unstarted follow-on work, mirroring
+    // this same narrowing's precedent (e.g. roadmap L46's own initial
+    // `Plain2D`-only depth-comparison-sample scope, later widened by
+    // L48). An integer-channel image is rejected the same way an
+    // ordinary/dref sample is above -- SPIR-V never legalizes
+    // `OpImageQueryLod` against one either.
+    bool Unclamped = false;
+    if (isQueryLodIntrinsic(*CI, Unclamped)) {
+      if (IsInteger || Shape != ImageShape::Plain2D)
+        return false;
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
+          !CI->getType()->isFloatTy())
+        return false;
+      continue;
+    }
+
 
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
         Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
@@ -1090,8 +1134,9 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
 }
 
 /// Checks that every use of a sampler handle is the sampler operand of a
-/// sample intrinsic (`isSampleIntrinsic`) or a depth-comparison sample
-/// intrinsic (`isDrefSampleIntrinsic`, roadmap L46). A sampler has no
+/// sample intrinsic (`isSampleIntrinsic`), a depth-comparison sample
+/// intrinsic (`isDrefSampleIntrinsic`, roadmap L46), or a LOD-query
+/// intrinsic (`isQueryLodIntrinsic`, roadmap L52e). A sampler has no
 /// accesses of its own -- it only ever pairs with an image -- so there is
 /// nothing else it can legitimately be.
 bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
@@ -1099,8 +1144,10 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
     const auto *CI = dyn_cast<CallInst>(U);
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
+    bool Unclamped = false;
     if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp) ||
-                 isDrefSampleIntrinsic(*CI, ExplicitLod)))
+                 isDrefSampleIntrinsic(*CI, ExplicitLod) ||
+                 isQueryLodIntrinsic(*CI, Unclamped)))
       return false;
     if (CI->getArgOperand(1) != &Handle)
       return false;
@@ -2357,8 +2404,53 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         continue;
       }
 
+      // Roadmap L52e: `OpImageQueryLod`'s clamped/unclamped intrinsic
+      // halves (`hasOnlySupportedImageUses` already restricts this to
+      // `Plain2D`, non-integer). Unlike an ordinary sample,
+      // `OpImageQueryLod` always measures the implicit LOD a
+      // coordinate's own derivatives would produce -- there is no
+      // explicit-LOD form to fall back to -- so derivatives are
+      // unconditionally synthesized via `getOrSynthesizeSample2DDeriv
+      // atives`, the same helper `Sample2D`'s own implicit-LOD path
+      // calls (which itself still only produces a *real* derivative in
+      // the one stage, `Fragment`, this instruction is ever legal from;
+      // outside it, it degenerates to zero constants exactly as
+      // `Sample2D`'s own call site does). `ImageQueryLodPattern` always
+      // legalizes a single `OpImageQueryLod` into two separate
+      // intrinsic calls sharing the same `(image, sampler, coord)`
+      // operands, so each is lowered to its own independent
+      // `createQueryLod2D` call here (redundantly recomputing the same
+      // `<2 x float>` result twice, once per lane) rather than attempting
+      // to share one call between them -- this pass does no cross-call
+      // CSE of its own anywhere else either, relying on a later
+      // optimization pipeline pass to fold the resulting duplicate,
+      // side-effect-free calls if it chooses to.
+      bool Unclamped = false;
+      if (isQueryLodIntrinsic(*CI, Unclamped)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        Value *Coord = CI->getArgOperand(2);
+        Value *SamplerIndex =
+            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        SampleDerivatives D = getOrSynthesizeSample2DDerivatives(
+            Builder, *CI->getFunction(), C0, C1);
+        CallInst *NewCall =
+            createQueryLod2D(Builder, Env, ImageIndex, SamplerIndex, D.DUdX,
+                             D.DUdY, D.DVdX, D.DVdY, Mask, "querylod2d");
+        // Lane 0 is the clamped level (`calculate.lod`), lane 1 the raw
+        // unclamped LOD (`calculate.lod.unclamped`) -- mirroring
+        // `ImageQueryLodPattern`'s own lane convention.
+        Value *Lane = Builder.CreateExtractElement(
+            NewCall, Unclamped ? uint64_t{1} : uint64_t{0});
+        CI->replaceAllUsesWith(Lane);
+        CI->eraseFromParent();
+        continue;
+      }
 
-      // `OpImageFetch`/`OpImageRead`/`OpImageWrite`: a `getpointer` whose
+
       // result is loaded from and/or (roadmap H19a, `StorageImage2D` only)
       // stored to. `hasOnlySupportedImageUses` already rejected this
       // branch for `Cube`/`CubeArray` (no fetch shape exists for either),

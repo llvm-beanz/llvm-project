@@ -4472,6 +4472,131 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
   return Sum * (1.0f / (float)Plan.TapCount);
 }
 
+// (Roadmap L52e) The raw, unclamped LOD `OpImageQueryLod`'s own second
+// (`calculate.lod.unclamped`) lane reports, computed from the same
+// texel-space "scale factor" construction `femeRTPlanImplicitLod` already
+// uses for an ordinary implicit-LOD sample (`log2(Pmax)`, `Pmax` the
+// larger of the footprint's two screen-axis extents) -- but, unlike that
+// helper's own `Lod = 0.0f` convention for a zero-footprint (no
+// measurable minification) input, `OpImageQueryLod`'s own reference
+// semantics (`computeLodFromDerivates`,
+// `vktShaderRenderTextureFunctionTests.cpp`) require `-infinity` here
+// instead: a real sample query of a coordinate with no derivatives at all
+// (e.g. every lane of a fragment-stage quad reading the exact same
+// coordinate) is defined to report an unboundedly negative raw LOD, not
+// the arbitrary `0.0` a real sample's own mip-level selection safely
+// treats an all-zero footprint as (level 0 is a fine, if technically
+// unjustified, choice for a case with nothing to minify; but a *query*
+// caller is asking for the LOD value itself, so an equally-arbitrary
+// `0.0` here would be an observably wrong answer, not just a merely
+// suboptimal one). No anisotropy/multi-tap concept applies to a LOD query
+// at all -- there is only ever one scalar LOD to report, unlike an actual
+// multi-tap anisotropic sample's own per-tap levels.
+__attribute__((always_inline)) static float
+femeRTComputeUnclampedQueryLod(const FemeRTImageDescriptor *Img, float DUdX,
+                               float DUdY, float DVdX, float DVdY) {
+  float Ux = DUdX * (float)Img->Width, Uy = DUdY * (float)Img->Width;
+  float Vx = DVdX * (float)Img->Height, Vy = DVdY * (float)Img->Height;
+  float Px = __builtin_sqrtf(Ux * Ux + Vx * Vx);
+  float Py = __builtin_sqrtf(Uy * Uy + Vy * Vy);
+  float Pmax = Px > Py ? Px : Py;
+  if (Pmax <= 0.0f)
+    return -__builtin_inff();
+  return femeRTFastLog2(Pmax);
+}
+
+// (Roadmap L52e) The clamped "level" `OpImageQueryLod`'s own first
+// (`calculate.lod`) lane reports: \p UnclampedLod (already biased and
+// min/max-clamped by `femeRTComputeClampedLod`, the same as an ordinary
+// implicit-LOD sample's own mip level derivation) further clamped to
+// `Img`'s own valid mip-level range `[0, MipLevels - 1]`, then --
+// mirroring the CTS reference oracle's own `computeLevelFromLod`
+// (`vktShaderRenderTextureFunctionTests.cpp`) -- either rounded to the
+// nearest whole level (`Samp->MipFilter == 0`, `VK_SAMPLER_MIPMAP_MODE_
+// NEAREST`, the same "round to nearest, ties up" convention
+// `femeRTNearestMipLevel` already uses for an ordinary nearest-mipmap
+// sample) or returned as the unrounded fractional value (`MipFilter ==
+// 1`, `VK_SAMPLER_MIPMAP_MODE_LINEAR`, whose real per-pixel sample would
+// itself blend two adjacent levels by this same fraction, so the query
+// reports that continuous value rather than rounding it away). A
+// non-mipmapped image (`MipLevels <= 1`, no second level to ever pick
+// between) always reports exactly `0.0`, matching the reference oracle's
+// own unconditional special case for that configuration.
+__attribute__((always_inline)) static float
+femeRTComputeClampedQueryLevel(const FemeRTImageDescriptor *Img,
+                               const FemeRTSamplerDescriptor *Samp,
+                               float ClampedLod) {
+  if (Img->MipLevels <= 1)
+    return 0.0f;
+  float MaxLevel = (float)(Img->MipLevels - 1);
+  float Level = __builtin_fmaxf(0.0f, __builtin_fminf(ClampedLod, MaxLevel));
+  if (Samp->MipFilter != 0) // VK_SAMPLER_MIPMAP_MODE_LINEAR.
+    return Level;
+  // VK_SAMPLER_MIPMAP_MODE_NEAREST: round to the nearest whole level, the
+  // same "round half up" convention `femeRTNearestMipLevel` uses (a
+  // `Frac == 0.5` tie rounds up), reimplemented directly on the
+  // continuous `Level` here rather than routing through
+  // `femeRTSelectMipLevels`'s own two-adjacent-level `FemeRTMipTrilinear
+  // Plan` shape, which this scalar-result query has no use for.
+  float Rounded = __builtin_floorf(Level + 0.5f);
+  return __builtin_fminf(Rounded, MaxLevel);
+}
+
+// `feme.cpu.image.querylod.2d.v2f32` (roadmap L52e): `Plain2D`'s own
+// `OpImageQueryLod` runtime entry point -- see `ImageCallKind::QueryLod2D`
+// (`ImageCalls.h`) for its `<2 x float>` result's own lane convention
+// (lane 0 the clamped level, lane 1 the raw unclamped LOD). Unlike
+// `femeCpuImageSample2DV4F32`, there is no `(U, V)` coordinate operand at
+// all -- a LOD query's result depends only on the coordinate's own
+// screen-space derivatives and the image's dimensions, never the
+// coordinate value itself -- and no `Lod`/`UseExplicitLod`/offset/
+// `MinLodClamp` operands either, since `OpImageQueryLod` always measures
+// an implicit LOD from real derivatives, with no explicit-LOD form and no
+// per-instruction `MinLod`/`ConstOffset` image operands of its own to
+// thread through. An inactive lane, an unsampled image, or a null
+// sampler reads as `{0.0, 0.0}` (see "Bounds checking"), the same
+// convention `femeCpuImageSample2DV4F32` uses for its own all-zero
+// `Zero` case.
+FemeRTv2f32 femeCpuImageQueryLod2DV2F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DUdX, float DUdY,
+    float DVdX, float DVdY,
+    _Bool Mask) asm("feme.cpu.image.querylod.2d.v2f32");
+
+__attribute__((always_inline)) FemeRTv2f32 femeCpuImageQueryLod2DV2F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DUdX, float DUdY,
+    float DVdX, float DVdY, _Bool Mask) {
+  FemeRTv2f32 Zero = {0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+
+  float UnclampedLod =
+      femeRTComputeUnclampedQueryLod(&Img, DUdX, DUdY, DVdX, DVdY);
+  // Roadmap L52e design note: unlike an ordinary implicit-LOD sample
+  // (`femeRTPlanImplicitLod`, whose `InstructionMinLod` models SPIR-V's
+  // own per-instruction `MinLod` operand), `OpImageQueryLod` has no such
+  // operand of its own -- `-infinity` (a no-op floor) is always passed
+  // here. `femeRTComputeClampedLod` still applies here unchanged: its own
+  // sampler-bias-plus-min/max-clamp logic is exactly what a real implicit
+  // sample of this same coordinate would also apply before mip-level
+  // selection, matching the CTS reference oracle's own
+  // `computeLevelFromLod`.
+  float ClampedLod = femeRTComputeClampedLod(UnclampedLod,
+                                             /*UseExplicitLod=*/1, &Samp,
+                                             /*InstructionMinLod=*/-__builtin_inff());
+  float ClampedLevel = femeRTComputeClampedQueryLevel(&Img, &Samp, ClampedLod);
+  return (FemeRTv2f32){ClampedLevel, UnclampedLod};
+}
+
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
 // image, comparing `Dref` against each fetched texel's first (depth)
 // component via `Samp->CompareFunc`, then filters the per-texel 0/1

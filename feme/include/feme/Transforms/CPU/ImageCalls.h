@@ -368,6 +368,31 @@ enum class ImageCallKind : uint8_t {
   /// `Texture1DArray` counterpart of `SampleCmp1D`, adding the same float
   /// array-layer coordinate `Sample1DArray` adds to `Sample1D`.
   SampleCmpArray1D,
+  /// `feme.cpu.image.querylod.2d.v2f32` (roadmap L52e): `Plain2D`'s own
+  /// counterpart of `OpImageQueryLod` (HLSL's
+  /// `Texture2D::CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`,
+  /// GLSL's `textureQueryLod`) -- given the caller's own screen-space
+  /// partial derivatives of the sampled coordinate (the same
+  /// `SampleDerivatives` shape `Sample2D`'s own implicit-LOD path
+  /// consults, synthesized the same way via
+  /// `getOrSynthesizeSample2DDerivatives`), returns a `<2 x float>` whose
+  /// lane 0 is the clamped level (the mip level/blend an ordinary
+  /// implicit-LOD sample of this same coordinate would actually use,
+  /// after the sampler's own `minLod`/`maxLod`/bias and the image's own
+  /// valid mip range are applied) and lane 1 is the raw, unclamped LOD
+  /// (before any of that) -- mirroring
+  /// `llvm.spv.resource.calculate.lod`/`.calculate.lod.unclamped`'s own
+  /// lane convention (see `ImageQueryLodPattern`,
+  /// `SPIRVToLLVMPatterns.cpp`). Unlike `Sample2D`, there is no
+  /// explicit-vs-implicit-LOD distinction at all -- `OpImageQueryLod`
+  /// always measures the implicit LOD a coordinate's own derivatives
+  /// would produce, so real derivatives are always required (never zero
+  /// constants, unlike `Sample2D`'s `ExplicitLod`-gated case) for every
+  /// caller in the one stage (`Fragment`) this instruction is ever legal
+  /// from. Scoped to `Plain2D` only for now -- `Array2D`/`Cube`/
+  /// `CubeArray`/`Plain1D`/`Array1D`/`Plain3D` counterparts remain
+  /// unstarted follow-on work.
+  QueryLod2D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -415,7 +440,12 @@ struct MatchedImageCall {
   llvm::Value *V = nullptr;
   /// `Sample2D` only (roadmap H7i): the caller's own screen-space partial
   /// derivatives of `U`/`V`, consulted only for an implicit-LOD sample
-  /// (see `createSample2D`'s doc); null for every other kind.
+  /// (see `createSample2D`'s doc); null for every other kind, except
+  /// `QueryLod2D` (roadmap L52e), which uses these the same way but
+  /// always requires real ones (see `createQueryLod2D`'s doc) -- `U`/`V`
+  /// themselves stay null for `QueryLod2D`, unlike `Sample2D`, since its
+  /// own runtime entry point never needs the coordinate itself, only its
+  /// derivatives.
   llvm::Value *DUdX = nullptr;
   llvm::Value *DUdY = nullptr;
   llvm::Value *DVdX = nullptr;
@@ -806,6 +836,21 @@ llvm::CallInst *createSampleCmpArray1D(llvm::IRBuilderBase &Builder,
                                       llvm::Value *UseExplicitLod,
                                       llvm::Value *Dref, llvm::Value *Mask,
                                       const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.querylod.2d.v2f32` call (roadmap L52e): see
+/// `ImageCallKind::QueryLod2D`'s own doc for its `<2 x float>` result
+/// shape. \p DUdX/\p DUdY/\p DVdX/\p DVdY are the caller's own screen-space
+/// partial derivatives of the sampled coordinate -- unlike `createSample2D`,
+/// always real ones (see `getOrSynthesizeSample2DDerivatives`), never zero
+/// constants, since `OpImageQueryLod` has no explicit-LOD form to fall
+/// back to.
+llvm::CallInst *createQueryLod2D(llvm::IRBuilderBase &Builder,
+                                 const ImageCallEnv &Env,
+                                 llvm::Value *ImageIndex,
+                                 llvm::Value *SamplerIndex, llvm::Value *DUdX,
+                                 llvm::Value *DUdY, llvm::Value *DVdX,
+                                 llvm::Value *DVdY, llvm::Value *Mask,
+                                 const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.
