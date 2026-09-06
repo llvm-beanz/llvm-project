@@ -66951,3 +66951,155 @@ Given the CTS-measured impact, `Plain3D` (L66(a)) looks like the highest-
 value next target for a future session, followed by the offset restriction
 (L66(d)) given how many cases it currently blocks across every shape it
 touches.
+
+# Session: roadmap L66(a) -- `Plain3D` ordinary sampled-image infrastructure
+
+## Starting point
+
+Picked up right where the last session's L65/L66 breakdown left off, with
+this session's explicit ask pointing at L66(a): `Plain3D` (`Texture3D`)
+sampling had zero infrastructure of any kind -- `classifySampledImage2DHandle`
+rejected `SPIRVDim3D` outright (only 1D/2D/Cube were ever checked), and
+`createSample3D` did not exist anywhere in `ImageCalls.cpp`/`.h`. This was
+called out in the prior session's own text as "a materially bigger
+prerequisite than any other shape's own gap here, on the same order as
+`Array2D`'s pre-L60(a) starting point" -- i.e. this row was expected to be
+one of the bigger ones in the L-series so far, not a small guard-widening
+like L65's `Plain1D`/`Array1D` `Grad` fix.
+
+## A pleasant surprise: the runtime was smaller than expected
+
+Before touching anything, I read the CPU runtime looking for what a `Plain3D`
+sampling implementation would need, expecting to write everything from
+scratch. Instead I found `femeRTFetchTexel3D`/`femeRTFetchTexel3DI32` already
+existed -- built for the storage-image `Load3D`/`Store3D` work from an
+earlier roadmap milestone (H19c, per an existing doc comment on
+`makeImage3D` in the runtime test file). Only the *filtered sampling* layer
+(point/trilinear blend, mip selection, implicit-LOD planning, and the
+`feme.cpu.image.sample.3d.v4f32` entry point itself) was actually missing.
+This made the runtime side of the task noticeably smaller than the
+`Array2D`-scale prerequisite the prior session's text predicted -- most of
+the genuinely new work ended up being in `SPIRVResourceLowering.cpp`'s
+classification/lowering logic and `ImageCalls.cpp`'s IR-call-builder
+plumbing, not the runtime math itself.
+
+## Scoping decision: ordinary sampling only, mirroring `Sample1D`'s own history
+
+Rather than trying to build `Bias`/`MinLodClamp`/`ConstOffset`/`Grad` support
+for `Plain3D` all at once, I deliberately scoped this row to ordinary
+sampling only -- a real `(U, V, W)` coordinate, real screen-space-derivative-
+driven implicit LOD, real trilinear/point mip filtering, nothing else. This
+mirrors `Sample1D`'s own incremental history (L52a: ordinary sampling only;
+L61(c): added `Bias`/`MinLodClamp`; L65: added `Grad`), which the project has
+now used enough times that it felt like the right default rather than a
+shortcut. I filed the remaining `Bias`/`MinLodClamp`/`ConstOffset`/`Grad`
+work as a new roadmap L67 row with its own (a)-(d) breakdown, each
+confirmed still failing by a real CTS re-run this session so the next
+session (or this one, in a future pass) has concrete, already-verified
+starting points rather than having to re-discover them.
+
+## Design decision: isotropic-only implicit LOD, again mirroring `Sample1D`
+
+`femeRTPlanImplicitLod3D` computes a single isotropic LOD scale factor
+across all three axes (`Ux/Uy` scaled by `Width`, `Vx/Vy` by `Height`,
+`Wx/Wy` by `Depth`, then `Pmax = max(sqrt(Ux^2+Vx^2+Wx^2),
+sqrt(Uy^2+Vy^2+Wy^2))`), deliberately *not* the full anisotropic multi-tap
+plan `femeRTPlanImplicitLod` (the 2D version) computes. This mirrors
+`femeRTPlanImplicitLod1D`'s own established precedent: no real CTS case
+exercises anisotropic filtering against a volume texture, and Vulkan itself
+has no meaningfully different anisotropic-footprint concept for a third
+axis with no screen-space analogue (a volume texture's "footprint" along its
+depth axis isn't something a rasterizer's per-pixel derivative naturally
+produces the way U/V footprints are). If a future CTS case is found that
+does exercise this, it should be revisited then, not preemptively built now.
+
+## The `W` field reuse and why it's safe
+
+`MatchedImageCall`'s existing `W` field was already used by `SampleCube`/
+`SampleCubeArray` for their direction vector's Z component. Rather than
+adding a new field purely for `Sample3D`'s depth-axis coordinate, I reused
+`W`, added a doc-comment note explaining the dual use, and confirmed the two
+kinds are mutually exclusive per any single `MatchedImageCall` instance (a
+match result only ever has one `Kind`, so nothing can accidentally read `W`
+under the wrong interpretation). This felt like the right tradeoff between
+struct bloat and clarity -- a dedicated `Sample3DW` field would have been
+more explicit but purely redundant given the mutual exclusion is structural,
+not just a convention.
+
+## Testing across all three touched phases
+
+Added tests mirroring the project's now-established three-phase pattern:
+- `ImageCallsTest.cpp`: a `createSample3D` round-trip test through
+  `matchImageCall`, verifying every one of its 18 arguments populates the
+  right `MatchedImageCall` field (image/sampler index, `U`/`V`/`W`, all six
+  derivative components, `Lod`/`UseExplicitLod`/`Mask`).
+- `SPIRVResourceLoweringTest.cpp`: a positive test lowering a real
+  `llvm.spv.resource.sample` call against a `Dim3D` handle down to
+  `createSample3D` with the right 18-argument arity, plus a negative test
+  pinning that `Bias` against the same handle is still correctly rejected
+  (i.e. this row's scoping decision is enforced by the existing guard, not
+  silently ignored).
+- `ImageSamplingTest.cpp`: three runtime-level tests -- exact point-sample
+  read of a corner texel, a real 8-corner trilinear blend (verifying
+  `femeRTSampleLinear3D`'s full corner set actually gets exercised, not just
+  its two 2D bilinear halves), and the established `Mask=false` inactive-lane
+  convention.
+- A new lit test (`spirv-resource-lowering-image-sample-3d.ll`) for the
+  IR-lowering phase end to end, deliberately single-function (the still-
+  unfixed roadmap L66(e) cross-function same-binding crash means multi-
+  function lit tests in this pass need distinct bindings or a single
+  function, and a single function was simpler and sufficient here).
+
+All new tests pass; `check-feme` is 2652/2711 (up from 2645), 0 fail, 59
+unsupported (unchanged unsupported count, confirming no regression).
+
+## Real CTS validation
+
+Direct re-run of `texture.sampler3d_{fixed,float}_{fragment,vertex,compute}`
+(8 cases): 4/8 Pass, up from 0/8 -- exactly the `_fragment`/`_vertex` cases,
+matching this row's scope. The 2 `_bias` Fails are the expected, in-scope-
+for-L67(a) gap; the 2 `_compute` NotSupported are a pre-existing, unrelated
+`VK_KHR_compute_shader_derivatives` gap (confirmed by the diagnostic text
+itself, not something this row touches). A broader 502-case
+`dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep confirms 8 Pass total
+(up from 0, since no sampled-image infrastructure existed for this shape at
+all before this session -- no case in this sweep could have passed
+previously by construction), 266 Fail, 228 NotSupported. I did not do a
+full `git stash`-based before/after rebuild for this broader sweep (the
+logical argument that 0 could have passed before is airtight given the
+classification-rejection was unconditional), but did directly re-confirm the
+narrower 8-case `texture.sampler3d_*` group's before/after via the existing
+`VulkanCTSReport.md` entry from the session that first identified this gap
+(0/8) against this session's own re-run (4/8).
+
+Also confirmed still-failing (both filed as L67, not fixed this session):
+`texture.sampler3d_bias_{fixed,float}_fragment` (2/2 Fail, L67(a)) and
+`texturegrad.sampler3d_{fixed,float}_{fragment,vertex,compute}` (6/6 Fail,
+L67(b) -- the `_compute` case fails `vkCreateComputePipelines` itself, same
+shape of gap as the ordinary-sample `_compute` case above).
+
+## Documentation updates
+
+Struck through L66(a) in `Roadmap.md` with a completion note summarizing the
+fix and its CTS validation; filed the new L67 row for the remaining `Bias`/
+`MinLodClamp`/`ConstOffset`/`Grad` follow-on work, each sub-item individually
+confirmed still-failing by a real CTS re-run this session (not speculative).
+Kept L67 to a single lowercase-letter nesting depth per this project's own
+standing instruction not to nest milestones more than one letter deep.
+Reviewed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+update needed, since ordinary `Plain3D` sampling is core SPIR-V/Vulkan with
+no gating feature bit or extension of its own. Updated `VulkanCTSReport.md`
+with this session's full CTS results.
+
+## What I'd hand off next
+
+Roadmap L67(a) (`Bias`/`MinLodClamp`) looks like the natural next step,
+since it directly unblocks re-measuring the `shaderResourceMinLod` flip
+experiment's own `sampler3d_*` cases under `texturegradclamp`/
+`textureoffsetclamp` (roadmap L66's own still-open scope) the same way
+`Array2D`'s equivalent fix did earlier in this chain. L67(b) (`Grad`) is
+independent and could be done in either order. L66(c)/(d)/(e) (the
+`Dref`+`Grad` shadow-sampling intrinsic gap, the `isSupportedOffset`
+`Plain2D`-only restriction, and the cross-function same-binding crash) all
+remain open from the prior session and are still unrelated to anything this
+session touched.
