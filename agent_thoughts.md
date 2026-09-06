@@ -65766,3 +65766,90 @@ combination all remain unimplemented. Reviewed
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed, this is internal CPU-lowering plumbing only, not a new
 advertised feature/extension surface.
+
+# Session: L52 re-investigation discovers and fixes explicit-Grad sampling (L59), plus L60 filed
+
+Asked to continue L52 or other prerequisites blocking L-series milestones.
+Started by re-checking L52's own still-open sub-items (b) `Dref`+`Bias` and
+(c) `samplecmp_clamp`'s `MinLod` operand -- both confirmed unchanged from
+prior sessions (zero real CTS cases for (c); (b) genuinely needs a new LLVM
+core intrinsic, out of feme-internal scope). Rather than stop there, I
+noticed the `shaderResourceMinLod` Vulkan feature bit is still advertised as
+`VK_FALSE` and gates four real CTS groups (`textureclamp`,
+`textureoffsetclamp`, `texturegradclamp`, `textureoffsetgradclamp`, 295
+cases total). Investigating whether that bit could be safely flipped on led
+me to discover that two of those four groups depend on explicit-`Grad`
+sampling, which turned out to have **zero implementation anywhere in feme**
+-- not just an incomplete corner, a totally missing MLIR legalization
+pattern. A quick CTS probe of the non-clamp `texturegrad`/`texturegradoffset`
+groups (726 cases) confirmed the scale: 459 Fail, 0 Pass -- larger than any
+gap found in any prior L-series session.
+
+This felt like a much higher-value target than continuing to poke at L52's
+own scoped-out sub-items, so I pivoted the session to it, planning to file it
+as its own new roadmap row per the project's established splitting
+convention rather than trying to shoehorn it under L52.
+
+**Design decision: reuse the existing derivative-based implicit-LOD sampling
+path rather than build new infrastructure for `Grad`.** My first instinct
+was that `Grad` would need its own new `ImageCallKind`, builder function, and
+runtime entry point, mirroring how `Bias` (L58) needed its own operand
+threaded through `createSample2D`/`createSampleCube`. But re-reading the
+runtime's `femeRTPlanImplicitLod` more carefully, I realized it already takes
+a screen-space-derivative pair (`DUdX`/`DUdY`/`DVdX`/`DVdY` for Plain2D, six
+components for Cube) that it uses to compute a mip level and anisotropic
+footprint -- originally added (H7i/L56) so that an ordinary implicit
+`texture()` sample in a fragment shader, which has no compiler-visible
+derivative operand at all, could still get correct mipmapping via
+auto-synthesized per-pixel-quad derivatives. That runtime math has no idea
+(and doesn't need to know) whether the derivative values it's handed came
+from that synthesis, from zero constants (an explicit-`Lod` sample bypasses
+this path entirely), or now from a real shader-supplied `Grad` operand. This
+meant the entire fix could live in the SPIR-V-to-LLVM legalization pattern
+(new `ImageSampleGradPattern`, matching `Grad` alongside optional
+`ConstOffset`/`MinLod`) and `SPIRVResourceLowering.cpp`'s handle-recognition
+plumbing (extending `isSampleIntrinsic`/`getSampleOffsetIdx`/
+`getSampleClampIdx`/`hasOnlySupportedImageUses` with a `HasGrad` flag,
+mirroring `HasBias`'s L58 precedent) -- zero new runtime code, a much smaller
+change than the original scoping estimate assumed. I want to flag this
+because it's a useful general lesson for this project: before assuming new
+runtime infrastructure is needed for a new sampling operand, check whether
+the existing derivative-based mip-selection plumbing (built for a completely
+different reason, auto-synthesis) can just be fed the real values directly.
+
+**Scope.** Followed the exact same narrowing precedent as L58 (`Plain2D`/
+`Cube` only, `fixed`/`float` non-integer formats, `fragment`/`vertex`
+stages) since it's the established convention for a first slice of new
+sampling functionality in this project, and confirmed via CTS re-run that a
+`compute`-stage `Grad` sample fails for the same unrelated pre-existing
+`vkCreateComputePipelines`/`VK_KHR_compute_shader_derivatives`-shaped gap
+noted in prior sessions, not something new to fix here.
+
+**Verification discipline.** Before running the full `check-feme` suite, I
+manually ran each of the 4 new MLIR lit test cases individually through
+`feme-opt`+`FileCheck` to confirm they matched the intended intrinsic-call
+shape, since a passing full-suite run alone wouldn't have told me whether a
+new test was accidentally checking something trivially true. Also ran a
+`git stash`-based before/after CTS comparison sweep to get exact regression
+arithmetic (431 = 459 - 28) rather than relying on eyeballing pass/fail
+counts across two separate runs.
+
+**Docs.** Filed the completed work as roadmap row L59 (struck through) and
+the deliberately-deferred remainder as L60, broken into 6 single-letter
+sub-items per the standing one-level-of-nesting instruction. Added a
+cross-reference "UPDATE" note to L52's own row pointing at the L59 split-out,
+mirroring the existing L48/L50/L51/L52/L58 precedent chain already present
+in that row's text. Updated `VulkanCTSReport.md` with a full write-up of the
+root cause, fix, and measured CTS impact. Updated `Design.md`'s conversion
+table and narrative "Sampling variants" bullet, and
+`FeMeGraphicsDesign.md`'s "Bias/gradient sampling and gather" future-work
+bullet, to reflect that gradient sampling is no longer entirely
+unimplemented -- these were genuine deviations from what those design docs
+previously said ("gradient sampling remain[s] entirely unimplemented"), so
+per the standing instruction to update the design document on deviation, I
+updated the prose rather than leaving it stale. Verified
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no changes:
+`shaderResourceMinLod` correctly remains `VK_FALSE` (this fix alone doesn't
+clear the `Grad`+`MinLod`-clamp subset that bit also gates), and no new
+feature/extension surface is advertised by this purely-internal
+CPU-lowering plumbing change.
