@@ -163,4 +163,41 @@ Can you work on L52 or other prerequisites blocking the L-series milestones?
 > `texturegrad`/`texturegradoffset` groups). That gap is filed and partially
 > fixed as its own row, **L59**, below, per this project's own established
 > splitting precedent; sub-items (b) and (c) here remain exactly as open as
-> before.)
+> before.) UPDATE: a later session implemented sub-item (c) --
+> `createSampleCmp2D`/`createSampleCmpArray2D`/`createSampleCmpCube`/`createSampleCmpCubeArray`
+> (`ImageCalls.h`/`.cpp`) each gained a real `MinLodClamp` parameter, mirroring
+> the ordinary-sample `createSample2D`-family's own roadmap L26/L58/L60(a)
+> precedent; `isDrefSampleIntrinsic` (`SPIRVResourceLowering.cpp`) now
+> recognizes `llvm.spv.resource.samplecmp.clamp` as a third intrinsic form (a
+> new `HasClamp` out-parameter alongside `samplecmp`/`samplecmplevelzero`),
+> threading the real clamp operand (`DrefSampleClampIdx`, fixed at index 5)
+> through for `Plain2D`/`Array2D`/`Cube`/`CubeArray`, while `Plain1D`/`Array1D`
+> continue to reject a `samplecmp_clamp` use entirely (no
+> `createSampleCmp1D`/`createSampleCmpArray1D` counterpart added), matching
+> those two shapes' pre-existing `ConstOffset` exclusion. `FeMeRuntimeCPU.c`'s 4
+> `femeCpuImageSampleCmp*F32` entry points thread the same parameter through in
+> place of the previous hardcoded `-inf` floor. New/updated tests:
+> `ImageSamplingTest.cpp`'s 4 `SampleCmp*` typedefs and ~14 call sites;
+> `SPIRVResourceLoweringTest.cpp` gained a positive
+> `LowersSampleCmpClampToImageSampleCmpWithMinLodClamp` test and a negative
+> `LeavesASampleCmpClampAgainstPlain1DAlone` test (replacing a now-stale
+> `LeavesASampleCmpClampAlone` that had asserted the opposite of this fix), plus
+> `arg_size()` bumps across the other 6 `SampleCmp*` tests; 3 `.ll` lit tests
+> updated (`spirv-resource-lowering-image-samplecmp.ll`, `-shapes.ll`) and the
+> old `-unsupported.ll` replaced with a new
+> `spirv-resource-lowering-image-samplecmp-clamp.ll` (a `samplecmp_clamp` use is
+> no longer entirely unsupported for these 4 shapes, only for `Plain1D`). `ninja
+> check-feme`: 2678 discovered, 59 Unsupported, 2619 Passed, 0 Failed (up by
+> exactly 1 test net of the file-rename/split). A real `deqp-vk` grep of the
+> CTS's own `textureclamp`/`texturegradclamp`/`textureoffsetgradclamp` groups'
+> source (`vktShaderRenderTextureFunctionTests.cpp`) confirms sub-item (c)'s own
+> note was correct: every shadow-sampler case in those groups pairs its `MinLod`
+> clamp with either `Bias` (blocked on the still-open sub-item (b)) or an
+> explicit `Grad` (a distinct dref+Grad gap, not yet implemented, unrelated to
+> L59's ordinary-sample `Grad` work) -- no real CTS case exercises the
+> implicit-LOD-only, no-bias, no-grad `Dref`+`MinLod`-clamp combination this
+> row's `samplecmp_clamp` recognizes, so `shaderResourceMinLod` is deliberately
+> left at its existing `VK_FALSE`/unstarted state and no CTS group newly passes;
+> this row's own value is the completed builder/lowering precedent sub-item
+> (b)'s own future fix can build on directly. Sub-item (b) remains open and
+> unstarted.)
