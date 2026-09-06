@@ -2453,7 +2453,13 @@ documented reason rather than an oversight:
   for comparison sampling/gather in this LLVM tree yet (see Design.md's
   status note), so only the DXIL import half is blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not
-  implemented yet.
+  implemented yet. Update (roadmap L58): an ordinary, non-comparison
+  `Bias` operand is now implemented on the SPIR-V import side, scoped to
+  `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
+  precedent); DXIL's own `Bias` operand still always lowers to a
+  zero-constant no-op (`ResourceLowering.cpp`), and a `Dref`+`Bias`
+  combination (depth-comparison sampling with a bias) and gradient
+  sampling remain entirely unimplemented on both frontends.
 - **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed or
   multisampled storage image, or a non-mandatory-format/format-agnostic
   storage image (roadmap H19a closed the non-arrayed, non-multisampled,

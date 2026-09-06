@@ -28030,3 +28030,135 @@ still-open L52 sub-items. `Plain1D`/`Array1D`/`Cube`/`CubeArray`
 LOD-query support and the pre-existing `usamplercube{,array}*`
 pipeline-creation gap are each their own future row if a real CTS case
 motivates one.
+
+## Roadmap L58: ordinary (non-`Dref`) `Bias` image operand for `Plain2D`/`Cube`
+
+**Context.** L52's own sub-item (b) named a `Bias`+`Dref` (depth
+comparison) combination as failing at `ConvertSPIRVToLLVMPass`
+legalization itself (`sampler{2d,cube}shadow_bias_fragment` and
+siblings). Investigating that gap found a distinct, more tractable
+one: the *ordinary* (non-comparison) SPIR-V `Bias` image operand
+(`llvm.spv.resource.samplebias`/`.samplebias_clamp`, HLSL's
+`Texture2D::Sample`/`TextureCube::Sample`'s trailing `bias` argument)
+had zero recognition in `SPIRVResourceLowering.cpp`'s
+`isSampleIntrinsic` at all, despite already being fully legalized
+upstream by `ImageSampleImplicitLodPattern`. A real `deqp-vk` probe
+confirmed 4 real failing cases:
+`sampler2d_{fixed,float}_bias_fragment`,
+`samplercube_{fixed,float}_bias_fragment`. Scoped to `Plain2D`/`Cube`
+only, matching `MinLodClamp`'s own roadmap L26 precedent.
+
+**Root cause.** `isSampleIntrinsic` never recognized
+`spv_resource_samplebias`/`.samplebias_clamp` at all, so any shader
+calling `Sample(sampler, coord, bias)` failed
+`hasOnlySupportedImageUses`'s all-or-nothing handle-normalization check
+and the whole function's resource handles were left unlowered,
+ultimately failing pipeline creation (exactly the same failure shape
+L26's `MinLodClamp` gap had before that fix).
+
+**Fix.**
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`: `isSampleIntrinsic`
+  gained a `bool &HasBias` out-parameter, recognizing
+  `Intrinsic::spv_resource_samplebias` (`HasBias=true,
+  HasMinLodClamp=false`) and `Intrinsic::spv_resource_samplebias_clamp`
+  (`HasBias=true, HasMinLodClamp=true`). `getSampleOffsetIdx`/
+  `getSampleClampIdx` now also take `HasBias` -- a `Bias` operand
+  occupies the exact same fixed operand index (3) that `Lod` occupies
+  for an explicit-LOD sample, since `ExplicitLod` and `HasBias` are
+  mutually exclusive per the SPIR-V spec. `hasOnlySupportedImageUses`/
+  `hasOnlySupportedSamplerUses` gained a `HasBias && Shape != Plain2D
+  && Shape != Cube` rejection mirroring `HasMinLodClamp`'s own check.
+  `lowerImageAccesses` extracts the `Bias` operand (or a `0.0f`
+  constant when absent) and threads it through to
+  `createSample2D`/`createSampleCube`.
+- `feme/include/feme/Transforms/CPU/ImageCalls.h` /
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: new `Bias` field on
+  `MatchedImageCall`; new `Bias` parameter on `createSample2D`
+  (after `UseExplicitLod`, before `OffsetX`) and `createSampleCube`
+  (after `UseExplicitLod`, before `MinLodClamp`); `matchImageCall`'s
+  decode switch and `getOrInsertImageCall`'s `FunctionType` argument
+  lists updated for the new argument-index shifts.
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: `femeRTComputeClampedLod`/
+  `femeRTComputeCubeClampedLod`/`femeRTPlanImplicitLod` gained a real
+  `Bias`/`InstructionBias` parameter, summed into the resolved LOD
+  alongside the sampler's own static `LodBias` and any screen-space-
+  derivative contribution -- an instruction-level `Bias` combines
+  additively with the sampler's own static bias, matching the SPIR-V
+  spec's own definition. `femeCpuImageSample2DV4F32`/`SampleCubeV4F32`
+  thread it through; all other `femeRTComputeClampedLod` call sites
+  (`Array2D`, `1D`, `1DArray`, the `samplecmp` family,
+  `QueryLod2D`) pass a `0.0f` no-op bias, out of this row's scope.
+- `feme/lib/Transforms/CPU/ResourceLowering.cpp` (DXIL path): always
+  passes a zero-constant `Bias` -- DXIL doesn't thread a real one
+  through yet, mirroring the existing `MinLodClamp`/`ConstOffset` DXIL
+  gaps.
+
+Scope deliberately limited to `Plain2D`/`Cube` only: `Array2D`/
+`Plain1D`/`Array1D`/`CubeArray` resolve implicit LOD via a path that
+always uses `Lod=0` today, with no real screen-space-derivative
+footprint, so a real per-instruction `Bias` wouldn't meaningfully
+combine there yet; `Plain3D` has no ordinary sampling infrastructure in
+feme at all. L52 sub-item (b)'s own literal `Dref`+`Bias` gap (5 real
+`sampler{2d,cube}shadow_bias_fragment`-shaped CTS cases) remains
+explicitly deferred -- it fails at `ConvertSPIRVToLLVMPass`
+legalization itself, before `SPIRVResourceLowering.cpp` ever sees it,
+and needs its own new LLVM core intrinsic (a
+`int_spv_resource_samplecmpbias`-style form) plus new
+`SPIRVInstructionSelector.cpp` selection logic -- a genuinely bigger,
+cross-cutting scope touching real LLVM SPIR-V backend intrinsic
+definitions, not just feme-internal code.
+
+**Tests.** 3 new `SPIRVResourceLoweringTest` unit tests
+(`LowersSampleBiasToPlain2DBias`, `LowersSampleBiasToCubeBias`,
+`LeavesASampleBiasAgainstArray2DAlone`), mirroring `MinLodClamp`'s own
+roadmap L26 positive/negative-test precedent. 3 new `ImageSamplingTest`
+runtime unit tests (`ImplicitLodBiasSelectsCoarserMipLevel`,
+`SampleCubeImplicitLodBiasSelectsCoarserMipLevel`) confirming a nonzero
+`Bias` with zero screen-space derivatives forces a coarser mip level
+than `ImplicitLodWithNoDerivativesReadsBaseLevel`'s own zero-bias base
+case; every existing `SampleFn`/`SampleCubeFn`-typed call site across
+`ImageSamplingTest.cpp` was updated for the new argument shape.
+
+**`ninja check-feme` (ccache + assertions, `build2`).** 2612/2671
+discovered, 59 pre-existing `Unsupported`, 0 `Failed` -- no
+regressions.
+
+**Measured impact.** Real
+`dEQP-VK.glsl.texture_functions.texture.sampler2d_{fixed,float}_bias_fragment`/
+`samplercube_{fixed,float}_bias_fragment` re-run: **4/4 now Pass, up
+from 0/4** before this fix. A broader
+`dEQP-VK.glsl.texture_functions.*bias*` sweep (1062 cases, compared
+via `git stash` against the pre-fix binary) confirms a strictly
+monotonic improvement and no regressions:
+
+| | Before | After |
+|---|---|---|
+| Pass | 0 | 14 |
+| Fail | 279 | 265 |
+| NotSupported | 783 | 783 |
+
+The extra 10 newly-passing cases beyond this row's own 4 motivating
+ones are `*offset*bias*` combinations against the same `Plain2D`/`Cube`
+float shapes, which this fix's offset-index-shift also happens to
+unblock. Every remaining `Fail` is a shape (`isampler`/`usampler`
+integer formats, `1D`/`3D`/array shapes) this row deliberately left out
+of scope, not a regression. The same sweep also incidentally
+re-confirmed a pre-existing, unrelated crash
+(`dEQP-VK.pipeline.fast_linked_library.extended_dynamic_state.after_pipelines.depth_bias_disable`
+segfaults, both before and after this fix via `git stash` -- an
+unrelated rasterization-state pipeline test, not an image-sampling
+one).
+
+**Design docs.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` reviewed:
+no deviation to record (neither ever scoped sampled-image support to
+exclude an ordinary `Bias` operand in a way this addition
+contradicts).
+
+**Feature/extension inventories.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed (internal
+CPU-lowering plumbing only, no new feature/extension surface
+advertised).
+
+**Remaining work.** L52 sub-item (b)'s own literal `Dref`+`Bias` gap
+and sub-item (c) `samplecmp_clamp`'s `MinLod` operand remain the only
+still-open L52 sub-items.
