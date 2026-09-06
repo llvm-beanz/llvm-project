@@ -243,13 +243,15 @@ using SampleCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
 /// The roadmap H7b-a `TextureCubeArray` counterpart of `SampleCubeFn`,
 /// adding a float `ArrayLayer` coordinate (selecting a six-layer cube
 /// element) before `Lod`; also gains its own roadmap L56
-/// `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY` operands,
+/// `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY` operands and
+/// (roadmap L60(a)) a float `Bias` and trailing float `MinLodClamp`,
 /// mirroring `SampleCubeFn`'s own new operands above.
 using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                    const FemeSamplerDescriptor *, uint32_t,
                                    uint32_t, uint32_t, float, float, float,
                                    float, float, float, float, float, float,
-                                   float, float, bool, bool, void *);
+                                   float, float, bool, float, float, bool,
+                                   void *);
 
 /// The roadmap L48 `Texture2DArray` counterpart of `SampleCmpFn`, adding
 /// a float `ArrayLayer` coordinate before `Lod` -- mirroring
@@ -3107,9 +3109,11 @@ TEST_F(ImageSamplingTest, SampleCubeArraySelectsRequestedCubeElement) {
       addWrapper("sample_cubearray", "feme.cpu.image.sample.cubearray.v4f32"));
   float Out0[4], Out1[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f, 0.0f, true, true, Out0);
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f, 0.0f, true, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), true, Out0);
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/1.0f, 0.0f, true, true, Out1);
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/1.0f, 0.0f, true, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), true, Out1);
   EXPECT_FLOAT_EQ(Out0[0], 0.0f);
   EXPECT_FLOAT_EQ(Out1[0], 100.0f);
 }
