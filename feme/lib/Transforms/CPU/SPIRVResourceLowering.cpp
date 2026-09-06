@@ -795,21 +795,42 @@ bool isZeroOffset(const Value *Offset) {
 
 /// Whether \p Offset is an acceptable texel offset for a sample against
 /// \p Shape. `Plain2D` (roadmap L26) accepts any compile-time-constant
-/// `<2 x i32>` -- SPIR-V's own `ConstOffset` image operand, which
+/// integer vector -- SPIR-V's own `ConstOffset` image operand, which
 /// `lowerImageAccesses` below applies to every fetched texel's own integer
 /// address before the sampler's addressing mode
 /// (`femeRTComputeBilinearSupport`/`femeRTSamplePoint2D`), matching the
 /// design doc's own "the backend itself folds away an all-zero
 /// `ConstOffset`" note -- a real, nonzero offset is now threaded through
-/// rather than rejecting the whole handle outright. Every other shape
-/// still requires the trivial always-zero case: `Cube`/`CubeArray` can
-/// never carry a real one (SPIR-V disallows `ConstOffset` against a cube
-/// image), and `Array2D`'s own offset lowering remains future work (see
-/// roadmap L33).
-bool isSupportedOffset(const Value *Offset, ImageShape Shape) {
-  if (Shape != ImageShape::Plain2D)
+/// rather than rejecting the whole handle outright. \p AllowArray2D
+/// (roadmap L50d) additionally accepts the same real, nonzero offset for
+/// `Array2D` too -- but only for a depth-comparison sample's own caller
+/// below, since an *ordinary* (non-comparison) `Array2D` sample's own
+/// offset lowering remains future work (roadmap L33) and must keep
+/// rejecting a nonzero offset outright. Every other shape still requires
+/// the trivial always-zero case regardless: `Cube`/`CubeArray` can never
+/// carry a real one at all (SPIR-V disallows `ConstOffset` against a cube
+/// image).
+///
+/// Only the offset's first two components (X/Y) are ever read (see
+/// `lowerImageAccesses`'s own `CreateExtractElement(Offset, 0/1)` below),
+/// so this deliberately does not require an exact vector width: an
+/// ordinary sample's own `Offset` operand is always 2-wide (its
+/// `ImageSampleImplicitLodPattern`-emitted type mirrors its 2-wide
+/// `Plain2D` coordinate), but a depth-comparison sample's own `Offset`
+/// operand mirrors its own *Dref*-widened coordinate instead
+/// (`ImageSampleDrefImplicitLodPattern`'s `OffsetType` -- 3-wide for
+/// `Plain2D`, 4-wide for `Array2D`), so a single fixed width would reject
+/// one of the two callers.
+bool isSupportedOffset(const Value *Offset, ImageShape Shape,
+                      bool AllowArray2D = false) {
+  if (Shape != ImageShape::Plain2D &&
+      !(AllowArray2D && Shape == ImageShape::Array2D))
     return isZeroOffset(Offset);
-  return isa<Constant>(Offset) && isCoordN(Offset, 2, /*Float=*/false);
+  if (!isa<Constant>(Offset))
+    return false;
+  const auto *VecTy = dyn_cast<FixedVectorType>(Offset->getType());
+  return VecTy && VecTy->getNumElements() >= 2 &&
+        VecTy->getElementType()->isIntegerTy(32);
 }
 
 /// Checks that every use of a sampled-image handle is one this pass can
@@ -873,10 +894,15 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // (roadmap L46) to also cover `Array2D`/`Cube`/`CubeArray`, each of
     // which now has its own `createSampleCmpArray2D`/`createSampleCmpCube`/
     // `createSampleCmpCubeArray` counterpart. `samplecmp_clamp`'s own
-    // trailing `MinLod` clamp operand, a nonzero `ConstOffset`, and
-    // `Plain1D`/`Array1D` shadow sampling (no ordinary, non-comparison
-    // sampled-image path exists for either yet) remain unstarted follow-on
-    // work (see `isDrefSampleIntrinsic`'s own comment).
+    // trailing `MinLod` clamp operand and `Plain1D`/`Array1D` shadow
+    // sampling (no ordinary, non-comparison sampled-image path exists for
+    // either yet) remain unstarted follow-on work (see
+    // `isDrefSampleIntrinsic`'s own comment); a nonzero `ConstOffset`
+    // (roadmap L50d) is now accepted for `Plain2D`/`Array2D`, mirroring
+    // `isSupportedOffset`'s identical `Plain2D`-only precedent for an
+    // ordinary sample -- `Cube`/`CubeArray` still require the trivial
+    // always-zero case, since SPIR-V forbids a real `ConstOffset` against
+    // either (see `isSupportedOffset`'s own comment).
     bool DrefExplicitLod = false;
     if (isDrefSampleIntrinsic(*CI, DrefExplicitLod)) {
       if (IsInteger || Shape == ImageShape::Plain1D ||
@@ -904,7 +930,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           SampleCoordWidth + 1 > 4 ? 4 : SampleCoordWidth + 1;
       if (!isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
-          !isZeroOffset(CI->getArgOperand(DrefSampleOffsetIdx)) ||
+          !isSupportedOffset(CI->getArgOperand(DrefSampleOffsetIdx), Shape,
+                            /*AllowArray2D=*/true) ||
           !CI->getType()->isFloatTy())
         return false;
       continue;
@@ -2158,19 +2185,31 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *ExplicitLodFlag = Builder.getInt1(DrefExplicitLod);
+        // Roadmap L50d: SPIR-V's own `ConstOffset` image operand --
+        // `hasOnlySupportedImageUses` already validated it via
+        // `isSupportedOffset`'s own `AllowArray2D` case, a real,
+        // possibly-nonzero one for `Plain2D`/`Array2D` alike -- split
+        // into its two components the same way `Coord`'s own `C0`/`C1`
+        // are. `Cube`/`CubeArray` never have a real one to extract
+        // (SPIR-V forbids `ConstOffset` against `Dim::Cube`, see
+        // `isSupportedOffset`'s own comment), so their own `switch` arms
+        // below still pass zero constants directly instead.
+        Value *Offset = CI->getArgOperand(DrefSampleOffsetIdx);
+        Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
         CallInst *NewCall;
         switch (Shape) {
         case ImageShape::Plain2D:
           NewCall = createSampleCmp2D(Builder, Env, ImageIndex, SamplerIndex,
                                       C0, C1, Lod, ExplicitLodFlag, Dref,
-                                      Mask, CI->getName());
+                                      OffsetX, OffsetY, Mask, CI->getName());
           break;
         case ImageShape::Array2D: {
           Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
           NewCall = createSampleCmpArray2D(Builder, Env, ImageIndex,
                                            SamplerIndex, C0, C1, ArrayLayer,
-                                           Lod, ExplicitLodFlag, Dref, Mask,
-                                           CI->getName());
+                                           Lod, ExplicitLodFlag, Dref, OffsetX,
+                                           OffsetY, Mask, CI->getName());
           break;
         }
         case ImageShape::Cube: {

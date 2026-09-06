@@ -139,8 +139,8 @@ using SampleFn = void (*)(const FemeImageDescriptor *, uint32_t,
                           void *);
 using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              const FemeSamplerDescriptor *, uint32_t, uint32_t,
-                             uint32_t, float, float, float, bool, float, bool,
-                             void *);
+                             uint32_t, float, float, float, bool, float,
+                             int32_t, int32_t, bool, void *);
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                         int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
@@ -189,7 +189,8 @@ using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
 using SampleCmpArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                   const FemeSamplerDescriptor *, uint32_t,
                                   uint32_t, uint32_t, float, float, float,
-                                  float, bool, float, bool, void *);
+                                  float, bool, float, int32_t, int32_t, bool,
+                                  void *);
 /// The roadmap L48 `TextureCube` counterpart of `SampleCmpFn`: a
 /// direction-vector coordinate (`DirX`, `DirY`, `DirZ`) instead of `(U,
 /// V)`, mirroring `SampleCubeFn`'s relationship to `SampleFn` (but with
@@ -1249,13 +1250,50 @@ TEST_F(ImageSamplingTest, ComparisonSamplingLessEqualPasses) {
       addWrapper("samplecmp", "feme.cpu.image.samplecmp.2d.f32"));
   float PassResult = 0.0f, FailResult = 1.0f;
   // Ref (0.4) <= Texel (0.5): pass.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, 0.4f, true,
-     &PassResult);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, 0.4f, 0, 0,
+     true, &PassResult);
   EXPECT_FLOAT_EQ(PassResult, 1.0f);
   // Ref (0.6) <= Texel (0.5): fail.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, 0.6f, true,
-     &FailResult);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, 0.6f, 0, 0,
+     true, &FailResult);
   EXPECT_FLOAT_EQ(FailResult, 0.0f);
+}
+
+TEST_F(ImageSamplingTest, ComparisonSamplingNonzeroOffsetShiftsFetchedTexel) {
+  // Roadmap L50d: a real, nonzero `ConstOffset` (`OffsetX`/`OffsetY`) must
+  // shift which depth texel is fetched and compared against `Dref`, the
+  // same way it already shifts an ordinary color sample's own fetched
+  // texel (roadmap L26) -- a 2x1 depth image whose two texels straddle a
+  // comparison reference of 0.5 (texel 0 is 0.4, below; texel 1 is 0.6,
+  // above) makes a `(+1, 0)` offset applied to a nearest-point sample
+  // pinned at texel 0's own coordinate flip a `LessEqual` compare's
+  // pass/fail outcome, unambiguously proving the offset was actually
+  // applied rather than silently dropped.
+  float Storage[1][2][4] = {{{0.4f, 0, 0, 0}, {0.6f, 0, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), /*Width=*/2, /*Height=*/1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpFn Fn = resolve<SampleCmpFn>(
+      addWrapper("samplecmp", "feme.cpu.image.samplecmp.2d.f32"));
+  // No offset: (0.25, 0.5) reads texel 0 (0.4). Ref (0.5) <= 0.4: fail.
+  float NoOffsetResult = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, 0.0f, true, 0.5f, 0, 0,
+     true, &NoOffsetResult);
+  EXPECT_FLOAT_EQ(NoOffsetResult, 0.0f);
+  // A `(+1, 0)` offset shifts the same (0.25, 0.5) coordinate's own
+  // fetched texel to texel 1 (0.6). Ref (0.5) <= 0.6: pass.
+  float OffsetResult = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, 0.0f, true, 0.5f, 1, 0,
+     true, &OffsetResult);
+  EXPECT_FLOAT_EQ(OffsetResult, 1.0f);
 }
 
 TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
@@ -2604,12 +2642,47 @@ TEST_F(ImageSamplingTest, SampleCmpArray2DComparesRequestedLayer) {
   float Result = 0.0f;
   // Ref (0.5) >= layer 1's own texel (0.5): pass.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/1.0f, 0.0f,
-     true, /*Dref=*/0.5f, true, &Result);
+     true, /*Dref=*/0.5f, 0, 0, true, &Result);
   EXPECT_FLOAT_EQ(Result, 1.0f);
   // Ref (0.5) >= layer 2's own texel (0.9): fail.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f, 0.0f,
-     true, /*Dref=*/0.5f, true, &Result);
+     true, /*Dref=*/0.5f, 0, 0, true, &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
+TEST_F(ImageSamplingTest,
+      SampleCmpArray2DNonzeroOffsetShiftsFetchedTexel) {
+  // Roadmap L50d: same real, nonzero `ConstOffset` proof as
+  // `ComparisonSamplingNonzeroOffsetShiftsFetchedTexel` above, but against
+  // `Array2D`'s own `feme.cpu.image.samplecmp.2darray.f32` entry point --
+  // confirms the offset is applied to the (U, V) address *within* the
+  // requested array layer, not just for the un-arrayed `Plain2D` shape.
+  float Storage[1][1][2][4] = {{{{0.4f, 0, 0, 0}, {0.6f, 0, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), /*Width=*/2, /*Height=*/1,
+                       /*ArrayLayers=*/1, ResourceFormat::R32G32B32A32_FLOAT,
+                       Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpArrayFn Fn = resolve<SampleCmpArrayFn>(addWrapper(
+      "samplecmp_array2d", "feme.cpu.image.samplecmp.2darray.f32"));
+  // No offset: (0.25, 0.5) reads texel 0 (0.4). Ref (0.5) <= 0.4: fail.
+  float NoOffsetResult = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, /*ArrayLayer=*/0.0f,
+     0.0f, true, /*Dref=*/0.5f, 0, 0, true, &NoOffsetResult);
+  EXPECT_FLOAT_EQ(NoOffsetResult, 0.0f);
+  // A `(+1, 0)` offset shifts the same coordinate's own fetched texel to
+  // texel 1 (0.6). Ref (0.5) <= 0.6: pass.
+  float OffsetResult = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, /*ArrayLayer=*/0.0f,
+     0.0f, true, /*Dref=*/0.5f, 1, 0, true, &OffsetResult);
+  EXPECT_FLOAT_EQ(OffsetResult, 1.0f);
 }
 
 TEST_F(ImageSamplingTest, SampleCmpCubeSelectsEachFaceByDirection) {

@@ -4382,16 +4382,22 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
 // `CubeArray`'s own new depth-comparison entry points below can reuse this
 // same per-level body, mirroring how `femeRTSampleFiltered2D`'s own
 // `Layer` parameter is shared across every ordinary-sample shape.
+// (Roadmap L50d) `OffsetX`/`OffsetY` generalize what used to be a
+// hard-coded zero, mirroring `femeRTSampleFiltered2D`'s own
+// `OffsetX`/`OffsetY` parameters (roadmap L26) for the same
+// `ConstOffset` image operand, now threaded through for a depth-comparison
+// sample against `Plain2D`/`Array2D` (SPIR-V forbids `ConstOffset` against
+// `Cube`/`CubeArray`, so their own callers below still always pass zero).
 __attribute__((always_inline)) static float
 femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
                          const FemeRTSamplerDescriptor *Samp, float U, float V,
                          uint32_t Layer, uint32_t Level, float Dref,
-                         _Bool UseLinear) {
+                         _Bool UseLinear, int32_t OffsetX, int32_t OffsetY) {
   if (!UseLinear) { // Point (nearest).
     uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
     uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
-    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
-    int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
+    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + OffsetX;
+    int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight) + OffsetY;
     _Bool BorderX = 0, BorderY = 0;
     int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
                                            Samp->AddressU, &BorderX);
@@ -4404,8 +4410,7 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
   }
 
   FemeRTBilinearSupport S =
-      femeRTComputeBilinearSupport(Img, U, V, Samp, Level, /*OffsetX=*/0,
-                                  /*OffsetY=*/0);
+      femeRTComputeBilinearSupport(Img, U, V, Samp, Level, OffsetX, OffsetY);
   FemeRTv4f32 T00 =
       femeRTFetchTexel2D(Img, Level, Layer, S.X0, S.Y0, /*Sample=*/0,
                          S.BorderX0 || S.BorderY0, Samp->BorderColor);
@@ -4431,14 +4436,15 @@ float femeCpuImageSampleCmp2DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    _Bool UseExplicitLod, float Dref,
+    _Bool UseExplicitLod, float Dref, int32_t OffsetX, int32_t OffsetY,
     _Bool Mask) asm("feme.cpu.image.samplecmp.2d.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    _Bool UseExplicitLod, float Dref, _Bool Mask) {
+    _Bool UseExplicitLod, float Dref, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -4455,11 +4461,12 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
   float Lo =
       femeRTSampleCmp2DAtLevel(&Img, &Samp, U, V, /*Layer=*/0, Level0, Dref,
-                               UseLinear);
+                               UseLinear, OffsetX, OffsetY);
   if (!Trilinear)
     return Lo;
   float Hi = femeRTSampleCmp2DAtLevel(&Img, &Samp, U, V, /*Layer=*/0,
-                                      MipPlan.Level1, Dref, UseLinear);
+                                      MipPlan.Level1, Dref, UseLinear, OffsetX,
+                                      OffsetY);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -5267,12 +5274,15 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
 // -- identical (U, V) depth-comparison filtering, plus `ArrayLayer`
 // (SPIR-V's own arrayed-sample coordinate convention: a float, rounded to
 // nearest and clamped to a valid layer by `femeRTRoundClampLayer`,
-// mirroring `femeCpuImageSample2DArrayV4F32`'s own precedent).
+// mirroring `femeCpuImageSample2DArrayV4F32`'s own precedent). `OffsetX`/
+// `OffsetY` (roadmap L50d) mirror `femeCpuImageSampleCmp2DF32`'s own new
+// `ConstOffset` operand.
 float femeCpuImageSampleCmpArray2DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
     float ArrayLayer, float Lod, _Bool UseExplicitLod, float Dref,
+    int32_t OffsetX, int32_t OffsetY,
     _Bool Mask) asm("feme.cpu.image.samplecmp.2darray.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmpArray2DF32(
@@ -5280,7 +5290,7 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray2DF32(
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
     float ArrayLayer, float Lod, _Bool UseExplicitLod, float Dref,
-    _Bool Mask) {
+    int32_t OffsetX, int32_t OffsetY, _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -5297,11 +5307,12 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray2DF32(
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   float Lo = femeRTSampleCmp2DAtLevel(&Img, &Samp, U, V, Layer, Level0, Dref,
-                                     UseLinear);
+                                     UseLinear, OffsetX, OffsetY);
   if (!Trilinear)
     return Lo;
   float Hi = femeRTSampleCmp2DAtLevel(&Img, &Samp, U, V, Layer,
-                                      MipPlan.Level1, Dref, UseLinear);
+                                      MipPlan.Level1, Dref, UseLinear, OffsetX,
+                                      OffsetY);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -5547,11 +5558,13 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeF32(
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   float Lo = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, CF.Face, Level0,
-                                     Dref, UseLinear);
+                                     Dref, UseLinear, /*OffsetX=*/0,
+                                     /*OffsetY=*/0);
   if (!Trilinear)
     return Lo;
   float Hi = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, CF.Face,
-                                      MipPlan.Level1, Dref, UseLinear);
+                                      MipPlan.Level1, Dref, UseLinear,
+                                      /*OffsetX=*/0, /*OffsetY=*/0);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -5593,11 +5606,13 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeArrayF32(
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
   uint32_t Layer = CubeIndex * 6 + CF.Face;
   float Lo = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, Layer, Level0,
-                                     Dref, UseLinear);
+                                     Dref, UseLinear, /*OffsetX=*/0,
+                                     /*OffsetY=*/0);
   if (!Trilinear)
     return Lo;
   float Hi = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, Layer,
-                                      MipPlan.Level1, Dref, UseLinear);
+                                      MipPlan.Level1, Dref, UseLinear,
+                                      /*OffsetX=*/0, /*OffsetY=*/0);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 

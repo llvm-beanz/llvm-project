@@ -1681,11 +1681,13 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpToImageSampleCmp) {
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, lod, use_explicit_lod, dref, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 12u);
+  //  u, v, lod, use_explicit_lod, dref, offset_x, offset_y, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 14u);
   EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(8))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(9))->isZero());
   EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(11))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(12))->isZero());
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
@@ -1752,10 +1754,11 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAlone) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonzeroOffsetAlone) {
-  // Roadmap L46/L48: `createSampleCmp2D` has no offset parameter, so a
-  // `samplecmp` with a real, nonzero `ConstOffset` is left unlowered
-  // rather than silently dropping the offset.
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpWithNonzeroOffsetToImageSampleCmp) {
+  // Roadmap L50d: `createSampleCmp2D` now has a real `OffsetX`/`OffsetY`
+  // pair, mirroring `createSample2D`'s own roadmap L26 support -- a
+  // `samplecmp` with a real, nonzero `ConstOffset` against `Plain2D` now
+  // lowers instead of being left unrewritten.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<3 x float> %coord, float %dref) {
@@ -1766,7 +1769,7 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonzeroOffsetAlone) {
       %r = call float @llvm.spv.resource.samplecmp(
           target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <3 x float> %coord,
-          float %dref, <3 x i32> <i32 -1, i32 -1, i32 -1>)
+          float %dref, <3 x i32> <i32 1, i32 -1, i32 0>)
       ret float %r
     }
     declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
@@ -1779,7 +1782,48 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonzeroOffsetAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
+  ASSERT_TRUE(SampleCmp);
+  ASSERT_EQ(SampleCmp->arg_size(), 14u);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(11))->getSExtValue(),
+           1);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(12))->getSExtValue(),
+           -1);
+}
+
+TEST(SPIRVResourceLoweringTest,
+    LeavesASampleCmpCubeWithNonzeroOffsetAlone) {
+  // Roadmap L50d: unlike `Plain2D`/`Array2D`, `Cube` can never carry a
+  // real `ConstOffset` at all (SPIR-V forbids it against `Dim::Cube`, see
+  // `isSupportedOffset`'s own comment) -- so a `samplecmp` against `Cube`
+  // with a (spec-illegal, but not otherwise rejected upstream) nonzero
+  // offset is still left entirely unlowered, matching
+  // `isSupportedOffset`'s own always-zero requirement for every shape
+  // besides `Plain2D`/`Array2D`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <4 x i32> <i32 1, i32 0, i32 0, i32 0>)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
@@ -1817,10 +1861,52 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpArray2DToImageSampleCmpArray2D) {
       findImageCall(*F, "feme.cpu.image.samplecmp.2darray.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, array_layer, lod, use_explicit_lod, dref, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 13u);
+  //  u, v, array_layer, lod, use_explicit_lod, dref, offset_x, offset_y,
+  //  mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 15u);
   EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(9))->isZero());
   EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(12))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isZero());
+}
+
+TEST(SPIRVResourceLoweringTest,
+    LowersSampleCmpArray2DWithNonzeroOffsetToImageSampleCmpArray2D) {
+  // Roadmap L50d: `createSampleCmpArray2D` now has a real `OffsetX`/
+  // `OffsetY` pair too, mirroring `createSampleCmp2D`'s own new support
+  // -- a `samplecmp` against `Array2D` with a real, nonzero `ConstOffset`
+  // now lowers instead of being left unrewritten.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <3 x i32> <i32 1, i32 -1, i32 0>)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp =
+      findImageCall(*F, "feme.cpu.image.samplecmp.2darray.f32");
+  ASSERT_TRUE(SampleCmp);
+  ASSERT_EQ(SampleCmp->arg_size(), 15u);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(12))->getSExtValue(),
+           1);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(13))->getSExtValue(),
+           -1);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeToImageSampleCmpCube) {

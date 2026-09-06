@@ -410,10 +410,11 @@ struct MatchedImageCall {
   llvm::Value *UseExplicitLod = nullptr;
   /// `SampleCmp2D` only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
-  /// `Sample2D` only (roadmap L26): the integer `<ConstOffset>` texel
-  /// offset's X/Y components (see `createSample2D`'s doc); null for every
-  /// other kind, including every non-`Plain2D` sampled kind (SPIR-V
-  /// forbids a real `ConstOffset` against any of those shapes -- see
+  /// `Sample2D`/`SampleCmp2D`/`SampleCmpArray2D` only (roadmap L26/L50d):
+  /// the integer `<ConstOffset>` texel offset's X/Y components (see
+  /// `createSample2D`'s doc); null for every other kind, including every
+  /// non-`Plain2D`/`Array2D` sampled kind (SPIR-V forbids a real
+  /// `ConstOffset` against any of those shapes -- see
   /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
@@ -490,12 +491,19 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                llvm::Value *MinLodClamp, llvm::Value *Mask,
                                const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.samplecmp.2d.f32` call.
+/// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY
+/// (roadmap L50d) are the same `ConstOffset` image operand
+/// `createSample2D` documents -- a depth-comparison sample against
+/// `Plain2D` can carry a real, possibly-nonzero one too (SPIR-V's
+/// `ConstOffset` image operand is equally legal against
+/// `OpImageSampleDrefImplicitLod`/`OpImageSampleDrefExplicitLod`) -- pass
+/// zero constants for a caller with none to give.
 llvm::CallInst *
 createSampleCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                   llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
                   llvm::Value *U, llvm::Value *V, llvm::Value *Lod,
                   llvm::Value *UseExplicitLod, llvm::Value *Dref,
+                  llvm::Value *OffsetX, llvm::Value *OffsetY,
                   llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
@@ -652,7 +660,9 @@ llvm::CallInst *createSampleCubeArray(
     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2darray.f32` call (roadmap L48), the
-/// `Texture2DArray` counterpart of `createSampleCmp2D`.
+/// `Texture2DArray` counterpart of `createSampleCmp2D`. \p OffsetX/\p
+/// OffsetY (roadmap L50d) mirror `createSampleCmp2D`'s own new
+/// `ConstOffset` parameters.
 llvm::CallInst *createSampleCmpArray2D(llvm::IRBuilderBase &Builder,
                                       const ImageCallEnv &Env,
                                       llvm::Value *ImageIndex,
@@ -660,7 +670,8 @@ llvm::CallInst *createSampleCmpArray2D(llvm::IRBuilderBase &Builder,
                                       llvm::Value *V, llvm::Value *ArrayLayer,
                                       llvm::Value *Lod,
                                       llvm::Value *UseExplicitLod,
-                                      llvm::Value *Dref, llvm::Value *Mask,
+                                      llvm::Value *Dref, llvm::Value *OffsetX,
+                                      llvm::Value *OffsetY, llvm::Value *Mask,
                                       const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.cube.f32` call (roadmap L48), the
