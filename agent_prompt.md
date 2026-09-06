@@ -46,10 +46,28 @@ Can you work on L60 or other prerequisites blocking the L-series milestones?
 
 The last session reported:
 
-> L64 closes the last shape-related blocker L60(a) named, so re-running the
-> `shaderResourceMinLod` flip/measure/revert experiment is now the highest-value
-> target -- the reason that bit stayed off may no longer hold. Separately, the
-> dref-path implicit-LOD gap from last session is still real and still unfiled.
+> Filed roadmap L66(a)-(e) as the real, CTS-measured breakdown of everything
+> still blocking `shaderResourceMinLod`:
+> - (a) `Plain3D`'s total lack of ordinary sampled-image infrastructure -- by
+>   far the biggest of the five, comparable in scope to what `Array2D` needed
+>   before L60(a)'s own predecessor work, and the natural next target since it
+>   blocks the *most* real cases across every one of `textureclamp`/
+>   `texturegradclamp`/`textureoffsetclamp`.
+> - (b) integer-sampler exclusion -- correctly by-design, named for
+>   completeness, not itself actionable.
+> - (c) `Dref`+`Grad` shadow sampling -- needs a new intrinsic, not yet
+>   designed.
+> - (d) `isSupportedOffset`'s `Plain2D`-only `ConstOffset` restriction --
+>   pre-existing, unrelated, already implicitly roadmap L33's scope; just
+>   newly confirmed as the actual root cause of `textureoffsetclamp`'s broad
+>   failures rather than anything `MinLod`-specific.
+> - (e) the cross-function same-binding crash discovered above.
+>
+> Given the CTS-measured impact, `Plain3D` (L66(a)) looks like the highest-
+> value next target for a future session, followed by the offset restriction
+> (L66(d)) given how many cases it currently blocks across every shape it
+> touches.
+
 
 Which seems like the right place to start.
 
@@ -87,31 +105,36 @@ Which seems like the right place to start.
 > `CubeArray`'s own `Grad` counterpart is separately blocked in the
 > `texturegrad` CTS group by a distinct, pre-existing, unrelated gap confirmed
 > present both before and after this session's fix (unaffected by it either
-> way): `llvm.spv.resource.handlefrombinding` rejects a register-bound
-> `VulkanBuffer` resource handle that this specific shader form's array-layer
-> uniform buffer produces, for both `CubeArray` and `Array2D` alike -- out of
-> scope for this row, not yet filed as its own line. `Array2D`'s own
-> `Bias`/`MinLodClamp`/`Grad` support remains entirely unstarted -- unlike
-> `CubeArray`, `createSample2DArray` has zero derivative-operand infrastructure
-> to build on today, a materially bigger prerequisite than `CubeArray`'s was,
-> and should be scoped as its own follow-on row rather than attempted together
-> with anything else. UPDATE: a later session added this missing
-> derivative-operand infrastructure to `createSample2DArray` itself (extending
-> its signature from 12 to 18 args with real
-> `DUdX`/`DUdY`/`DVdX`/`DVdY`/`Bias`/`MinLodClamp` operands, deliberately still
-> without an `OffsetX`/`OffsetY` `ConstOffset` pair, per `isSupportedOffset`'s
-> own doc comment scoping ordinary-sample `ConstOffset` against `Array2D` to
-> roadmap L33, not this row), and rewrote `femeCpuImageSample2DArrayV4F32` from
-> its previous always-single-tap `femeRTComputeClampedLod`-only body to the same
-> `femeRTPlanImplicitLod`-based anisotropic multi-tap implementation
-> `femeCpuImageSample2DV4F32` already used, reading a fixed array layer for
-> every tap -- a genuine behavioral upgrade (`Array2D` sampling now gets real
-> anisotropic filtering when a sampler enables it, which it never did before).
-> `hasOnlySupportedImageUses`'s three shape checks and `lowerImageAccesses`'s
-> `Array2D` case were widened identically to `CubeArray`'s own prior fix,
-> reusing the same `getOrSynthesizeSample2DDerivatives` helper `Plain2D` already
-> used (an arrayed sample's face-local (U, V) coordinate differentiates
-> identically). Real CTS re-run confirms both `Array2D`'s own
+> way), reported as `llvm.spv.resource.handlefrombinding` rejecting a
+> register-bound `VulkanBuffer` resource handle -- out of scope for this row,
+> not yet filed as its own line. **SUPERSEDED by roadmap L64**: that
+> `VulkanBuffer` framing was a misattribution. The real cause was an over-strict
+> `Grad` derivative-width check rejecting the arrayed sample itself; the
+> `VulkanBuffer` handle named in the diagnostic was an innocent scale/bias
+> uniform block that merely happened to be reported first once the rejected
+> sample left the whole function unlowered. Fixed in L64; both shapes'
+> `texturegrad` cases now pass. `Array2D`'s own `Bias`/`MinLodClamp`/`Grad`
+> support remains entirely unstarted -- unlike `CubeArray`,
+> `createSample2DArray` has zero derivative-operand infrastructure to build on
+> today, a materially bigger prerequisite than `CubeArray`'s was, and should be
+> scoped as its own follow-on row rather than attempted together with anything
+> else. UPDATE: a later session added this missing derivative-operand
+> infrastructure to `createSample2DArray` itself (extending its signature from
+> 12 to 18 args with real `DUdX`/`DUdY`/`DVdX`/`DVdY`/`Bias`/`MinLodClamp`
+> operands, deliberately still without an `OffsetX`/`OffsetY` `ConstOffset`
+> pair, per `isSupportedOffset`'s own doc comment scoping ordinary-sample
+> `ConstOffset` against `Array2D` to roadmap L33, not this row), and rewrote
+> `femeCpuImageSample2DArrayV4F32` from its previous always-single-tap
+> `femeRTComputeClampedLod`-only body to the same `femeRTPlanImplicitLod`-based
+> anisotropic multi-tap implementation `femeCpuImageSample2DV4F32` already used,
+> reading a fixed array layer for every tap -- a genuine behavioral upgrade
+> (`Array2D` sampling now gets real anisotropic filtering when a sampler enables
+> it, which it never did before). `hasOnlySupportedImageUses`'s three shape
+> checks and `lowerImageAccesses`'s `Array2D` case were widened identically to
+> `CubeArray`'s own prior fix, reusing the same
+> `getOrSynthesizeSample2DDerivatives` helper `Plain2D` already used (an arrayed
+> sample's face-local (U, V) coordinate differentiates identically). Real CTS
+> re-run confirms both `Array2D`'s own
 > `sampler2darray_bias_{fixed,float}_fragment` cases are now 2/2 Pass, up from
 > 0/2 before this fix; the broader `texture.*bias*` sweep (50 cases) now shows 8
 > Pass total (up from 6 after the `CubeArray` fix), 24 Fail (down from 26, by
@@ -125,9 +148,10 @@ Which seems like the right place to start.
 > 2 cases), 156 Fail after vs. 158 before (down by exactly 2), 146 NotSupported
 > unchanged in both -- no regressions anywhere in this shape's own CTS
 > footprint. `Array2D`'s own `Grad` counterpart remains blocked in the
-> `texturegrad` CTS group by the exact same pre-existing, unrelated
-> `VulkanBuffer` register-bound-resource-handle gap already confirmed blocking
-> `CubeArray`'s own `Grad` path above (confirmed via
+> `texturegrad` CTS group by the same gap already confirmed blocking
+> `CubeArray`'s own `Grad` path above (**since root-caused and fixed by roadmap
+> L64**, which showed it was never a `VulkanBuffer` gap at all but an
+> over-strict `Grad` derivative-width check) (confirmed via
 > `FEME_VULKAN_LOG_CREATION_ERRORS=1`: `vkCreateGraphicsPipelines` fails before
 > `Grad` lowering is ever reached, for both `fragment`/`vertex` stages and the
 > `compute` stage alike) -- out of scope for this row, same as `CubeArray`'s.
@@ -137,14 +161,15 @@ Which seems like the right place to start.
 > confirmed `NotSupported` for this exact reason this session). With this fix,
 > sub-item (a) is now fully done for both `CubeArray` and `Array2D`'s own
 > `Bias`/`MinLodClamp` (mod `shaderResourceMinLod` still being globally
-> disabled) and `Grad`-operand-lowering halves; only the shared, unrelated
-> `VulkanBuffer` handle gap stands between either shape and a passing
-> `texturegrad` case, which is not this sub-item's own scope to fix.); (b)
-> **integer-channel (`isampler`/`usampler`) `Grad` sampling** --
-> `hasOnlySupportedImageUses` already rejects any filtered sample (`Grad`
-> included) over an integer format outright (`IsInteger` check), matching every
-> other filtered-sample restriction, so this is arguably not a real gap
-> (GLSL/HLSL's own integer-sampler intrinsics are unfiltered
+> disabled) and `Grad`-operand-lowering halves; only the shared gap misfiled as
+> a `VulkanBuffer` handle problem stood between either shape and a passing
+> `texturegrad` case; roadmap L64 has since root-caused it to an over-strict
+> `Grad` derivative-width check and fixed it, so both shapes' `texturegrad`
+> cases now pass.); (b) **integer-channel (`isampler`/`usampler`) `Grad`
+> sampling** -- `hasOnlySupportedImageUses` already rejects any filtered sample
+> (`Grad` included) over an integer format outright (`IsInteger` check),
+> matching every other filtered-sample restriction, so this is arguably not a
+> real gap (GLSL/HLSL's own integer-sampler intrinsics are unfiltered
 > `texelFetch`-shaped, not `Grad`-shaped, in the first place) but is named here
 > for completeness, per this session's own real CTS sweep showing
 > `isampler*`/`usampler*` `texturegrad` cases still failing; (c)
