@@ -66620,3 +66620,128 @@ red flag, then the combined-pipeline repro — actually caught them.
   bigger and (d) is still blocked on other prerequisites — no new breakdown
   entries needed since L60's existing (a)-(f) breakdown already covers the
   remaining work.
+
+# Session: Roadmap L62 — `Bias`/`MinLod` clamp on a 1D depth-comparison sample
+
+## Picking a target
+
+The request was again "L60 or other prerequisites blocking the L-series
+milestones". L60's own six sub-items are mostly *not* tractable as written:
+(b) is documented as arguably not a real gap at all, (c) and (e) are
+materially bigger cross-cutting scopes, (f) is uninvestigated, and (d) is
+blocked on flipping `shaderResourceMinLod` — which is itself blocked on other
+rows. (a) is already done.
+
+So I looked for what actually blocks (d). The roadmap's own L63 write-up names
+three remaining blockers on that flip, one of which is **L62** by name. L62 was
+also the only open, unstruck, well-scoped L-series row with concrete named
+failing CTS cases. That made the choice easy: fixing L62 makes real progress on
+L60 by removing one of its prerequisites, rather than attempting a sub-item the
+roadmap itself says is blocked.
+
+## Confirming the premise before writing any code
+
+Both named cases (`texture.sampler1d{,array}shadow_bias_fragment`) did fail,
+but *not* where I expected. With `FEME_VULKAN_LOG_CREATION_ERRORS=1` they died
+at `vkCreateGraphicsPipelines` with "is a register-bound resource handle the
+FeMe CPU target cannot normalize" — a *handle* error, not a sample error.
+
+That turned out to be the single most useful thing I learned. It is not a
+separate bug: `hasOnlySupportedImageUses` rejects the *use*, and a handle with
+any unsupported use cannot be normalized at all, so the failure surfaces one
+level up from its cause. Worth remembering, because that error message is
+actively misleading — it reads like a resource-binding problem and is in fact
+almost always a missing shape/operand combination somewhere in the same
+function. Several earlier rows in `VulkanCTSReport.md` hit the same thing.
+
+## Why this was smaller than it looked
+
+L52(b) had already added `int_spv_resource_samplecmpbias{,_clamp}` and its
+lowering helpers, and — this is the key part — every one of those helpers
+(`isDrefSampleIntrinsic`, `DrefSampleBiasIdx`, `getDrefSampleOffsetIdx`,
+`getDrefSampleClampIdx`) is *shape-independent*. The `Bias`/`MinLodClamp`
+values were even already being computed above the lowering switch. The two 1D
+arms simply dropped them on the floor, and one explicit early return refused to
+let the call get that far.
+
+So the real change was three small things: two builder signatures, one deleted
+`if`, and two runtime call sites. I split them into three commits anyway,
+because each is independently testable at a different phase of translation.
+
+## The `matchImageCall` footgun, again
+
+`matchImageCall` is the reverse-direction decoder used by `FunctionWidener`'s
+divergence logic. Its per-kind arg-count guards must track the builder
+signatures exactly, and roadmap L61 and H19l have *each* separately caught this
+drifting. A stale guard makes it return `std::nullopt` for a legal call, which
+makes `feme-cpu-simdize` misclassify it as an unsupported divergent producer —
+a failure invisible to any builder-only unit test and only observable in a real
+CTS run.
+
+I updated it in the same commit as the signature change and added two explicit
+regression tests. Given this has now bitten three separate rows, the guards are
+arguably the wrong design (they should derive from the `FunctionType` table
+rather than restate it), but that refactor is not this row's scope.
+
+## Inverting tests rather than deleting them
+
+Three unit tests and two lit tests existed purely to pin the behavior this row
+removes. Deleting them would have quietly dropped the coverage. I inverted each
+in place instead, so the newly-supported behavior is asserted by exactly the
+case that previously documented its absence — and each inverted test says so in
+its comment, which keeps the git history legible.
+
+One nice detail fell out of this: the lit files had a comment explaining that
+the "unsupported" function was deliberately declared *first*, because the pass
+appends rewritten functions after unrewritten ones and `FileCheck` is
+order-sensitive. Once every function in the file gets rewritten, they are all
+appended in source order, so the ordering still holds and the comment could
+just be deleted rather than the tests reordered.
+
+## The `UseExplicitLod` decision
+
+This is where I deliberately diverged from last session's L63 fix. L63 had to
+pass a hardcoded `/*UseExplicitLod=*/1`, because `femeRTComputeClampedLod`
+discards its `Lod` argument when the flag is false and L63 had a real
+caller-derived implicit LOD to preserve.
+
+I checked whether the dref path needed the same, and it does not:
+`femeCpuImageSampleCmp2DF32` passes the flag straight through, because *no*
+shape's depth-comparison path computes an implicit LOD from screen-space
+derivatives today. Copying L63's override would have silently changed behavior
+for every existing 1D samplecmp call.
+
+That absence is itself a real gap — a dref sample with genuine minification
+will pick the wrong mip on every shape — but it is not this row's, and I left
+it alone rather than expanding scope. It is noted in the commit message and the
+CTS report so a future session can file it.
+
+## A methodology correction worth recording
+
+The established before/after recipe in this project is `git stash push` on the
+code files, rebuild, measure, `git stash pop`. I ran it — and it silently did
+nothing, because my changes were **already committed**. `git stash` only
+touches the working tree.
+
+I caught it because `git stash list` came back empty. Had I not, I would have
+"measured" the after-state twice and reported a zero delta as if it were a
+real comparison. The correct move for committed work is
+`git checkout <pre-session-sha> -- <paths>`, measure, then
+`git checkout HEAD -- <paths>`. I documented this in the CTS report so the
+recipe is not repeated incorrectly.
+
+The sweep itself came out clean: 24→26 Pass, 708→706 Fail, NotSupported
+unchanged across 1,355 cases, with a per-case diff proving exactly the two
+named cases flipped and nothing else moved. I also ran the two cases together
+in one `deqp-vk` process, since an earlier row found a bug that only appeared
+in that pairing.
+
+## Where this leaves L60
+
+L62 is struck. One of the three named blockers on the `shaderResourceMinLod`
+flip is gone; the `Array2D`/`Plain3D` `VulkanBuffer` register-bound-handle gap
+(L60(a)) and the integer-sampler restriction remain. That `VulkanBuffer` gap
+now appears in the roadmap as a blocker for L60(a), L60's `Grad` sub-items, and
+the feature flip alike — it is doing a lot of work for something never filed as
+its own row, and is probably the single highest-value next target in this
+series.
