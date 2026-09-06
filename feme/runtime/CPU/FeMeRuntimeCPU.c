@@ -4342,11 +4342,40 @@ femeRTSampleFiltered1D(const FemeRTImageDescriptor *Img,
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
+// (Roadmap L55) Depth-comparison sampling against a normalized
+// (fixed-point) depth format -- today, only `D16_UNORM` (format `31`) --
+// must clamp both the shader-supplied compare reference and the fetched
+// depth value to `[0, 1]` before comparing, matching VK-GL-CTS's own
+// reference oracle (`tcuTexture.cpp`'s `execCompare`, gated on its own
+// `isFixedPointDepth` flag) and the Vulkan spec's own depth-compare
+// operation (16.5, "Depth Compare Operation"): a `D16_UNORM` texel can
+// never itself represent a value outside `[0, 1]`, so an app-supplied
+// reference value outside that range is defined to clamp, not to always
+// trivially pass/fail every comparison against it. `D32_FLOAT` (format
+// `32`) is the floating-point case VK-GL-CTS's own `isFixedPointDepth`
+// leaves unclamped -- a float depth format can genuinely store (and
+// compare against) an out-of-`[0,1]` value, so no clamping happens
+// there. This mirrors `isFixedPointDepthTextureFormat`'s own
+// `D`/`R`-order channel-class check, simplified to feme's own small,
+// fixed set of supported depth formats.
+__attribute__((always_inline)) static _Bool
+femeRTIsFixedPointDepthFormat(uint32_t Format) {
+  return Format == 31; // D16_UNORM.
+}
+
 // Applies `SamplerCompareFunc` `Func` as `Ref Func StoredTexel` (Direct3D's
 // `SamplerComparisonFunc`/Vulkan's `VkCompareOp` convention), returning
-// `1.0f` for pass and `0.0f` for fail.
+// `1.0f` for pass and `0.0f` for fail. `IsFixedPointDepth` (roadmap L55,
+// see `femeRTIsFixedPointDepthFormat` above) clamps both `Ref` and
+// `Texel` to `[0, 1]` first when set, matching a normalized depth
+// format's own real representable range.
 __attribute__((always_inline)) static float
-femeRTApplyCompare(uint32_t Func, float Ref, float Texel) {
+femeRTApplyCompare(uint32_t Func, float Ref, float Texel,
+                   _Bool IsFixedPointDepth) {
+  if (IsFixedPointDepth) {
+    Ref = Ref < 0.0f ? 0.0f : (Ref > 1.0f ? 1.0f : Ref);
+    Texel = Texel < 0.0f ? 0.0f : (Texel > 1.0f ? 1.0f : Texel);
+  }
   switch (Func) {
   case 0: // Never
     return 0.0f;
@@ -4468,6 +4497,7 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
                          const FemeRTSamplerDescriptor *Samp, float U, float V,
                          uint32_t Layer, uint32_t Level, float Dref,
                          _Bool UseLinear, int32_t OffsetX, int32_t OffsetY) {
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img->Format);
   if (!UseLinear) { // Point (nearest).
     uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
     uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
@@ -4481,7 +4511,7 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
     FemeRTv4f32 T =
         femeRTFetchTexel2D(Img, Level, Layer, AddrX, AddrY,
                            /*Sample=*/0, BorderX || BorderY, Samp->BorderColor);
-    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0]);
+    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0], IsFixedPointDepth);
   }
 
   FemeRTBilinearSupport S =
@@ -4498,10 +4528,10 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
   FemeRTv4f32 T11 =
       femeRTFetchTexel2D(Img, Level, Layer, S.X1, S.Y1, /*Sample=*/0,
                          S.BorderX1 || S.BorderY1, Samp->BorderColor);
-  float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0]);
-  float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0]);
-  float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0]);
-  float C11 = femeRTApplyCompare(Samp->CompareFunc, Dref, T11[0]);
+  float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0], IsFixedPointDepth);
+  float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0], IsFixedPointDepth);
+  float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0], IsFixedPointDepth);
+  float C11 = femeRTApplyCompare(Samp->CompareFunc, Dref, T11[0], IsFixedPointDepth);
   float Top = C00 + (C10 - C00) * S.Wx;
   float Bottom = C01 + (C11 - C01) * S.Wx;
   return Top + (Bottom - Top) * S.Wy;
@@ -5430,6 +5460,7 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
                          const FemeRTSamplerDescriptor *Samp, float U,
                          uint32_t Layer, uint32_t Level, float Dref,
                          _Bool UseLinear) {
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img->Format);
   if (!UseLinear) { // Point (nearest).
     uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
     int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
@@ -5439,7 +5470,7 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
     FemeRTv4f32 T = femeRTFetchTexel1DArray(Img, Level, AddrX, Layer,
                                             /*Sample=*/0, BorderX,
                                             Samp->BorderColor);
-    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0]);
+    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0], IsFixedPointDepth);
   }
 
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
@@ -5458,8 +5489,8 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
   FemeRTv4f32 T1 = femeRTFetchTexel1DArray(Img, Level, X1, Layer,
                                           /*Sample=*/0, BorderX1,
                                           Samp->BorderColor);
-  float C0 = femeRTApplyCompare(Samp->CompareFunc, Dref, T0[0]);
-  float C1 = femeRTApplyCompare(Samp->CompareFunc, Dref, T1[0]);
+  float C0 = femeRTApplyCompare(Samp->CompareFunc, Dref, T0[0], IsFixedPointDepth);
+  float C1 = femeRTApplyCompare(Samp->CompareFunc, Dref, T1[0], IsFixedPointDepth);
   return C0 + (C1 - C0) * Wx;
 }
 
@@ -5995,6 +6026,7 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
                           const FemeRTSamplerDescriptor *Samp, float U,
                           float V, uint32_t LayerBase, uint32_t BaseFace,
                           uint32_t Level, float Dref, _Bool UseLinear) {
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img->Format);
   if (!UseLinear) { // Point (nearest): no seamless handling needed.
     uint32_t LevelSize = femeRTMipExtent(Img->Width, Level);
     int32_t X = (int32_t)__builtin_floorf(U * (float)LevelSize);
@@ -6007,7 +6039,7 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
     FemeRTv4f32 T = femeRTFetchTexel2D(Img, Level, LayerBase + BaseFace,
                                       AddrX, AddrY, /*Sample=*/0,
                                       BorderX || BorderY, Samp->BorderColor);
-    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0]);
+    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0], IsFixedPointDepth);
   }
 
   int32_t Size;
@@ -6026,10 +6058,10 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
   FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X1, S.Y1, Size,
                                                 &Amb11);
-  float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0]);
-  float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0]);
-  float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0]);
-  float C11 = femeRTApplyCompare(Samp->CompareFunc, Dref, T11[0]);
+  float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0], IsFixedPointDepth);
+  float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0], IsFixedPointDepth);
+  float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0], IsFixedPointDepth);
+  float C11 = femeRTApplyCompare(Samp->CompareFunc, Dref, T11[0], IsFixedPointDepth);
   if (Amb00)
     C00 = (C10 + C01 + C11) * (1.0f / 3.0f);
   else if (Amb10)
