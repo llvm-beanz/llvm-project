@@ -508,13 +508,13 @@ struct MatchedImageCall {
   /// null for `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32`, which
   /// always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
-  /// `Sample2D`/`SampleCube` only (roadmap L58): SPIR-V's own `Bias` image
-  /// operand, an additional term added to the implicit-LOD footprint's
-  /// own raw LOD before the sampler's own bias/clamp runs (see
-  /// `createSample2D`'s doc); null for every other kind, including
-  /// `Sample2DArray`/`SampleCubeArray`, which have no real implicit-LOD
-  /// footprint of their own to add a bias to (a pre-existing limitation
-  /// this row does not change).
+  /// `Sample2D`/`SampleCube`/`SampleCubeArray` (roadmap L58/L60(a)): SPIR-V's
+  /// own `Bias` image operand, an additional term added to the
+  /// implicit-LOD footprint's own raw LOD before the sampler's own
+  /// bias/clamp runs (see `createSample2D`'s doc); null for every other
+  /// kind, including `Sample2DArray`, which has no real implicit-LOD
+  /// footprint of its own to add a bias to (a pre-existing limitation this
+  /// row does not change).
   llvm::Value *Bias = nullptr;
   /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`/
   /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
@@ -528,11 +528,12 @@ struct MatchedImageCall {
   /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
-  /// `Sample2D`/`SampleCube` only (roadmap L26): the `MinLod` clamp floor
-  /// on the implicit LOD (see `createSample2D`'s doc); null for every
-  /// other kind, including `SampleCmp2D`/`Sample2DArray`/`SampleCubeArray`,
-  /// which `lowerImageAccesses` never threads a real clamp value through
-  /// (see its own `HasMinLodClamp` shape restriction).
+  /// `Sample2D`/`SampleCube`/`SampleCubeArray` (roadmap L26/L60(a)): the
+  /// `MinLod` clamp floor on the implicit LOD (see `createSample2D`'s
+  /// doc); null for every other kind, including
+  /// `SampleCmp2D`/`Sample2DArray`, which `lowerImageAccesses` never
+  /// threads a real clamp value through (see its own `HasMinLodClamp`
+  /// shape restriction).
   llvm::Value *MinLodClamp = nullptr;
   /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32` only (roadmap
   /// F8c/H19g/H19m): the multisample index a `subpassLoad`'s
@@ -780,13 +781,17 @@ llvm::CallInst *createSampleCube(llvm::IRBuilderBase &Builder,
 /// Builds a `feme.cpu.image.sample.cubearray.v4f32` call (roadmap H7b-a).
 /// \p DDirXdX/\p DDirXdY/\p DDirYdX/\p DDirYdY/\p DDirZdX/\p DDirZdY
 /// (roadmap L56) mirror `createSampleCube`'s own new derivative operands.
+/// \p Bias/\p MinLodClamp (roadmap L60(a)) mirror `createSampleCube`'s own
+/// `Bias`/`MinLodClamp` parameters -- pass a zero constant/negative
+/// infinity, respectively, for a caller with neither to give.
 llvm::CallInst *createSampleCubeArray(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
     llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *DDirXdX,
     llvm::Value *DDirXdY, llvm::Value *DDirYdX, llvm::Value *DDirYdY,
     llvm::Value *DDirZdX, llvm::Value *DDirZdY, llvm::Value *ArrayLayer,
-    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Mask,
+    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Bias,
+    llvm::Value *MinLodClamp, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2darray.f32` call (roadmap L48), the

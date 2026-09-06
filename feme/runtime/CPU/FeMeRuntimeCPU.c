@@ -6426,14 +6426,20 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
 // `Img.ArrayLayers` is the whole array's own total layer count (roadmap
 // H7b's own descriptor materialization already reports this, e.g. 12 for
 // a two-element cube array); dividing by 6 recovers the number of
-// selectable cube elements.
+// selectable cube elements. `Bias`/`MinLodClamp` (roadmap L60(a)) mirror
+// `femeCpuImageSampleCubeV4F32`'s own `Bias`/`MinLodClamp` parameters --
+// before this fix, this entry point always passed a hardcoded
+// `MinLodClamp=-inf`/`Bias=0.0f` no-op pair to
+// `femeRTComputeCubeClampedLod`, silently dropping any real bias/clamp a
+// caller supplied.
 FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
     float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
     float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
-    _Bool UseExplicitLod, _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4f32");
+    _Bool UseExplicitLod, float Bias, float MinLodClamp,
+    _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
@@ -6441,7 +6447,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
     float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
     float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
-    _Bool UseExplicitLod, _Bool Mask) {
+    _Bool UseExplicitLod, float Bias, float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -6456,8 +6462,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   float ClampedLod = femeRTComputeCubeClampedLod(
       &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX,
-      DDirYdY, DDirZdX, DDirZdY, /*MinLodClamp=*/-__builtin_inff(),
-      /*Bias=*/0.0f);
+      DDirYdY, DDirZdX, DDirZdY, MinLodClamp, Bias);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
   return femeRTSampleFilteredCube(&Img, &Samp, CF.U, CF.V,

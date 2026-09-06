@@ -549,6 +549,13 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
       Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
+      // DXIL's own `TextureCubeArray::Sample`/`SampleBias` clamp/bias
+      // overloads are not threaded through this pass yet -- pass the
+      // same no-op constants as Cube above (roadmap L26/L58/L60(a) are
+      // SPIR-V-only so far).
+      Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                     /*Negative=*/true);
+      Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
       // Roadmap L56: same derivative synthesis as Cube above.
       CubeDirectionDerivatives CD =
           IsSample ? getOrSynthesizeSampleCubeDerivatives(
@@ -564,7 +571,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
                                       X, Y, Z, CD.DDirXdX, CD.DDirXdY,
                                       CD.DDirYdX, CD.DDirYdY, CD.DDirZdX,
                                       CD.DDirZdY, Layer, Lod, UseExplicitLod,
-                                      Mask, CI->getName());
+                                      ZeroBias, NoMinLodClamp, Mask,
+                                      CI->getName());
       break;
     }
     }
