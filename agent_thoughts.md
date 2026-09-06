@@ -65291,3 +65291,144 @@ one shape had a CTS case currently proving the bug. Tying a fix's scope
 to "the one shape that happens to have a failing test" rather than "the
 actual code path the root cause lives in" would have left an identical,
 un-caught latent bug in five other sampling shapes.
+
+# L56: implicit-LOD mip selection for Cube/CubeArray sampling
+
+## Starting point
+
+L53's own incidental discovery (while validating its own seamless
+cube-filtering fix) left L56 filed with a specific leading hypothesis:
+a bug in cube-specific trilinear (cross-mip-level) blending, or in
+mip-level selection for a `Cube`/`CubeArray` image, confirmed via
+`git stash` to be pre-existing and unaffected by L53's own change. The
+row's own text was careful to scope the hypothesis narrowly ("the bug
+lies somewhere in cube-specific trilinear blending itself, or in
+mip-level selection... not in the single-level bilinear seamless-edge
+logic L53 just added") and explicitly called for "its own real
+IR/data reduction" before attempting a fix -- so I started by reading
+code, not by guessing at blend formulas.
+
+## Root-causing without a CTS-driven reduction
+
+Before reaching for a debug-dump reduction of one of the 25 failing
+CTS cases, I first just read `femeRTSampleFilteredCube`'s own
+`Trilinear` branch end-to-end, since the roadmap row itself already
+named it as one of two candidate locations. It looked entirely correct
+-- `MipPlan.Frac`-weighted blending between two `femeRTSampleCubeLinearAtLevel`
+taps, structurally identical to the already-proven-correct 2D trilinear
+path. That made me suspicious the bug wasn't in the blend arithmetic at
+all, but in what was feeding it a `MipPlan` in the first place.
+
+Tracing backward from there landed directly on
+`femeCpuImageSampleCubeV4F32`/`CubeArrayV4F32`: both entry points
+receive a `Lod` parameter, and grep of every call site showed it always
+being either an explicit user-supplied `SampleLevel` value, or --
+critically -- a hardcoded `0.0f` literal for the implicit-sample case,
+supplied all the way up from `SPIRVResourceLowering.cpp`'s
+`lowerImageAccesses`. Compare against `Plain2D`'s own equivalent call
+site there: it calls `getOrSynthesizeSample2DDerivatives` (the H7i
+fix) to get real, non-zero derivatives; the `Cube`/`CubeArray` cases
+never did anything of the sort. Cross-checked this against
+`ImageCalls.h`'s own doc comment, which had already flagged this
+exact gap in words ("Sample2DArray/SampleCube/SampleCubeArray still
+resolve every implicit sample to mip level 0") -- so this wasn't even
+an undocumented gap, just one that hadn't yet had a CTS case land on it
+hard enough to prioritize. This is a good example of a root cause
+findable purely by code reading plus one targeted grep across call
+sites, no CTS reduction needed at all -- the roadmap row's own
+"needs its own real IR/data reduction" framing turned out to be
+unnecessary caution once the actual code path was traced by hand,
+though I did still validate the fix against the real motivating CTS
+group afterward (mandatory per the user's standing instructions, and a
+good sanity check regardless of how confident the code reading made me).
+
+## Why Plain2D's fix can't just be copy-pasted for Cube
+
+The instinctive first move once I'd found the missing derivative
+synthesis was to try to just call `getOrSynthesizeSample2DDerivatives`
+on some `(U, V)`-shaped coordinate for cube sampling too. That doesn't
+work: `Plain2D`'s `(U, V)` coordinate exists as a concrete IR value at
+lowering time, so its screen-space derivative is an ordinary
+`feme.stage.derivative.x.coarse` call on that value. A cube sample's
+face-local `(U, V)` doesn't exist at lowering time at all -- it's a
+*runtime* quantity, computed inside `femeRTSelectCubeFace` from
+whichever of the direction vector's 3 components turns out to have the
+largest magnitude for a given invocation, a decision that can vary
+per-lane and isn't resolvable until the runtime actually executes.
+
+The direction vector itself (`DirX`/`DirY`/`DirZ`), though, *is* an
+ordinary per-invocation IR value at lowering time, just like `Plain2D`'s
+`(U, V)` -- so its screen-space derivative can be synthesized exactly
+the same way. The remaining piece is converting a direction-vector
+derivative into a face-local UV derivative, which requires knowing
+which face was selected and by what ratio -- information only available
+at runtime, after `femeRTSelectCubeFace` has run. That's the actual
+design insight this row needed: split the "synthesize a derivative"
+half at the IR level (works fine, no cube-specific complication) from
+the "turn a direction derivative into a UV derivative" half at the
+runtime level (needs the quotient rule, applied once a face is known).
+This is the same kind of split-by-what's-knowable-when reasoning that's
+come up repeatedly in this project's history (e.g. deferring
+seamless-edge blending to the runtime because the runtime already knows
+which face was chosen), so it wasn't a novel technique, just the right
+one to reach for again here.
+
+## The bug caught while updating the second (DXIL) lowering caller
+
+Updating `SPIRVResourceLowering.cpp` first and building only
+`FeMeTransformsCPU` seemed to succeed, which was momentarily
+reassuring -- until `ninja check-feme`'s full build surfaced a
+compile failure in `ResourceLowering.cpp`, the DXIL-frontend's parallel
+lowering pass, which turned out to have its own independent call sites
+to `createSampleCube`/`createSampleCubeArray` using the old signature.
+This wasn't caught by building `FeMeTransformsCPU` alone because both
+files apparently link into the same target and the linker/compiler
+ordering meant the SPIR-V file's translation unit got compiled and
+somehow didn't immediately surface the DXIL file's stale signature
+usage until a fuller rebuild forced it. Lesson reinforced (not new,
+but worth restating): a signature change to a shared helper needs a
+full-project grep for every call site before considering the change
+"done," not just a build of the one target you were actively editing --
+in this case `grep -rn "createSampleCube"` across all of `feme/lib`
+would have caught this in one step rather than via a build failure.
+
+## Test design: proving a derivative-driven LOD change, not just a lack of crash
+
+The two new `ImageSamplingTest` runtime tests were deliberately designed
+as a matched pair: one confirming the *zero*-derivative case still reads
+level 0 (a no-regression check -- easy to get right by accident if the
+new code path silently does nothing), and one confirming a real nonzero
+derivative actually changes which mip level gets read, using a
+`DDirYdX` large enough to push the computed LOD decisively past the
+1-vs-0 midpoint so the test reads the coarser 1x1 mip and can assert on
+its own distinct, independently-verifiable marker value rather than a
+near-boundary case that could pass for the wrong reason (e.g. floating-
+point rounding happening to land on the right side of a boundary by
+coincidence). This mirrors the same "use a large enough nonzero value to
+avoid boundary-adjacent false positives" testing discipline used
+earlier in this project for the original H7i anisotropic-filtering
+tests.
+
+## CTS validation scope
+
+Ran the motivating group first (`linear_mipmap_linear.linear.*.*.seamless`,
+25 cases) to confirm the fix, then deliberately widened to all 4
+mip-filter combinations (`*_mipmap_*.*.*.*.seamless`, 200 cases) rather
+than stopping at the one combination the roadmap row happened to name --
+the fix touches implicit-LOD selection generically, not specifically the
+`linear_mipmap_linear` combination, so a broader sweep was the right
+regression check even though the roadmap row's own text only named one
+combination as failing. Also ran a handful of narrower spot-checks
+(L53's own single-level `linear.linear.*.seamless` group, L55's own
+`samplercubearrayshadow_fragment`, and the ordinary
+`samplercube{,array}_{fixed,float}_*` cases) to make sure this fix
+didn't perturb any of the specific cases prior rows in this same
+`Cube`/`CubeArray` sampling area had already fixed and validated --
+a real risk given how much shared runtime state (`FemeRTCubeFace`,
+`femeRTSelectCubeFace`) this fix touches. All confirmed unaffected.
+Noticed, but did not investigate or file, a distinct
+`usamplercubearray*` pipeline-creation failure surfaced by the same
+broad `*cube*` sweep -- clearly unrelated (fails before any runtime
+sampling code runs at all), out of scope for this row, and not yet
+tracked as its own roadmap entry; a future session should decide
+whether it's worth filing.
