@@ -1093,10 +1093,6 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false; // No filtered/dref sample over an integer format.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if ((DrefHasClamp || DrefHasBias) &&
-          (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D))
-        return false; // No MinLod clamp/Bias for Plain1D/Array1D yet
-                      // (roadmap L52(b)/L52(c)).
       // SPIR-V's own validation rules give a depth-comparison sample's
       // Coordinate operand one extra component beyond the shape's own
       // ordinary addressing width, capped at SPIR-V's own 4-component

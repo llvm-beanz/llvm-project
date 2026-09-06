@@ -2549,13 +2549,14 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(SampleCmp->getArgOperand(13)->getName(), "clamp");
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpBiasAgainstPlain1DAlone) {
-  // Roadmap L52(b): `Plain1D`/`Array1D` deliberately do not support a
-  // `Bias` operand on a depth-comparison sample, for exactly the same
-  // reason they do not support a `MinLod` clamp -- neither
-  // `createSampleCmp1D` nor `createSampleCmpArray1D` threads one through.
-  // A `samplecmpbias` against `Plain1D` is therefore left entirely
-  // unlowered, unlike the same intrinsic against `Plain2D`/`Cube` above.
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpBiasToImageSampleCmp1DWithBias) {
+  // Roadmap L62: `Plain1D` now supports a `Bias` operand on a
+  // depth-comparison sample, closing the deferred half of L52(b). This
+  // test replaces an earlier negative one asserting the opposite (that a
+  // `samplecmpbias` against `Plain1D` was left entirely unlowered),
+  // deliberately inverted here rather than deleted, so the newly-supported
+  // behavior is covered by exactly the case that previously documented its
+  // absence.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<3 x float> %coord, float %dref, float %bias) {
@@ -2579,16 +2580,26 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpBiasAgainstPlain1DAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, lod, use_explicit_lod, dref, bias, min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 13u);
+  EXPECT_EQ(SampleCmp->getArgOperand(9)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "bias");
+  // No `MinLod` clamp of its own: `samplecmpbias` (unlike
+  // `samplecmpbias_clamp`) has no such operand, so the lowering passes
+  // negative infinity, a no-op floor.
+  auto *Clamp = cast<ConstantFP>(SampleCmp->getArgOperand(11));
+  EXPECT_TRUE(Clamp->getValueAPF().isNegInfinity());
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAgainstPlain1DAlone) {
-  // Roadmap L52(c): `Plain1D`/`Array1D` deliberately do not support a
-  // `MinLod` clamp yet (neither `createSampleCmp1D` nor
-  // `createSampleCmpArray1D` threads one through, matching those two
-  // shapes' pre-existing `ConstOffset` exclusion) -- so a
-  // `samplecmp_clamp` against `Plain1D` is still left entirely
-  // unlowered, unlike the same intrinsic against `Plain2D` above.
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpClampToImageSampleCmp1DWithMinLodClamp) {
+  // Roadmap L62: the `MinLod`-clamp counterpart of the test just above --
+  // `Plain1D` now threads a real `samplecmp_clamp` clamp operand through
+  // too, closing the deferred half of L52(c). Also previously a negative
+  // test asserting the opposite.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<3 x float> %coord, float %dref, float %clamp) {
@@ -2612,8 +2623,57 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAgainstPlain1DAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32");
+  ASSERT_TRUE(SampleCmp);
+  ASSERT_EQ(SampleCmp->arg_size(), 13u);
+  EXPECT_EQ(SampleCmp->getArgOperand(9)->getName(), "dref");
+  // No `Bias` of its own: `samplecmp_clamp` has no such operand, so the
+  // lowering passes a zero constant, a no-op LOD shift.
+  auto *Bias = cast<ConstantFP>(SampleCmp->getArgOperand(10));
+  EXPECT_TRUE(Bias->isZero());
+  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "clamp");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpBiasClampToImageSampleCmpArray1D) {
+  // Roadmap L62: the `Array1D` counterpart, threading both a real bias
+  // and a real `MinLod` clamp at once -- and confirming `Array1D`'s own
+  // `vec3(u, layer, compare)` coordinate still reads both leading
+  // components as real values (roadmap L54), unaffected by the two new
+  // trailing operands.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord, float %dref, float %bias, float %clamp) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmpbias.clamp(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, float %bias, <3 x i32> zeroinitializer, float %clamp)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp =
+      findImageCall(*F, "feme.cpu.image.samplecmp.1darray.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, array_layer, lod, use_explicit_lod, dref, bias, min_lod_clamp,
+  //  mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 14u);
+  EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "bias");
+  EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpWithNonzeroOffsetToImageSampleCmp) {

@@ -375,10 +375,12 @@ enum class ImageCallKind : uint8_t {
   Sample1DArray,
   /// `feme.cpu.image.samplecmp.1d.f32` (roadmap L54): the depth-comparison
   /// counterpart of `Sample1D`, mirroring `SampleCmp2D`'s own relationship
-  /// to `Sample2D` -- but, like `Sample1D`/`Sample1DArray` themselves, no
-  /// `ConstOffset`/`MinLod` clamp (SPIR-V's own `ConstOffset` image
-  /// operand is legal against `Dim::1D`, but no real CTS case exercises it
-  /// yet, matching `Sample1D`'s own scope decision).
+  /// to `Sample2D`. Carries a real `Bias`/`MinLod` clamp pair (roadmap
+  /// L62), like every other dref-sample shape, but -- like
+  /// `Sample1D`/`Sample1DArray` themselves -- still no `ConstOffset`
+  /// (SPIR-V's own `ConstOffset` image operand is legal against `Dim::1D`,
+  /// but no real CTS case exercises it yet, matching `Sample1D`'s own
+  /// scope decision).
   SampleCmp1D,
   /// `feme.cpu.image.samplecmp.1darray.f32` (roadmap L54): the
   /// `Texture1DArray` counterpart of `SampleCmp1D`, adding the same float

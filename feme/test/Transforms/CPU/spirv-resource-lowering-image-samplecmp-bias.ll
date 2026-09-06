@@ -10,22 +10,22 @@
 ; after `Dref` and ahead of `ConstOffset`/`MinLodClamp` to match SPIR-V's
 ; own fixed Image Operands bit order.
 ;
-; `Plain1D`/`Array1D` still do not support a biased `Dref` sample (neither
-; `createSampleCmp1D` nor `createSampleCmpArray1D` threads a `Bias`
-; through yet), matching those two shapes' pre-existing `ConstOffset`/
-; `MinLod`-clamp exclusion; `samplecmp_bias_1d_unsupported` below pins
-; that. It is defined first, deliberately: `SPIRVResourceLoweringPass::run`
-; leaves an unrewritten function's position in the module alone but
-; appends every *rewritten* function after every remaining declaration, so
-; `FileCheck`'s own top-to-bottom `CHECK-LABEL` ordering requires the
-; untouched function to come first.
+; Roadmap L62: `Plain1D`/`Array1D` now support a biased `Dref` sample too,
+; closing the deferred half of L52(b) -- `createSampleCmp1D`/
+; `createSampleCmpArray1D` each thread a real `Bias`/`MinLodClamp` pair.
+; `samplecmp_bias_1d` below pins that; it previously pinned the opposite
+; (that the same call was left entirely unlowered) and is inverted here
+; rather than deleted. Both shapes still carry no `ConstOffset` of their
+; own, per `ImageCallKind::SampleCmp1D`'s own doc.
 
 target triple = "spirv-unknown-vulkan-compute"
 
-; CHECK-LABEL: define float @samplecmp_bias_1d_unsupported(
-; CHECK-NOT: feme.cpu.image
-; CHECK: call float @llvm.spv.resource.samplecmpbias
-define float @samplecmp_bias_1d_unsupported(<3 x float> %coord, float %dref, float %bias) {
+; The trailing `min_lod_clamp` reads as negative infinity (a no-op floor):
+; `samplecmpbias`, unlike `samplecmpbias_clamp`, has no clamp of its own.
+; CHECK-LABEL: define float @samplecmp_bias_1d(
+; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(
+; CHECK-SAME: float %dref, float %bias, float -inf, i1 true)
+define float @samplecmp_bias_1d(<3 x float> %coord, float %dref, float %bias) {
   %img = call target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
       @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 8, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")

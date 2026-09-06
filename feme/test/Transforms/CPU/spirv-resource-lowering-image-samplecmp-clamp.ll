@@ -13,30 +13,21 @@
 ; parameter, instead of leaving the call entirely unrewritten the way
 ; this project's earlier sessions left it (this file used to be named
 ; spirv-resource-lowering-image-samplecmp-unsupported.ll and asserted the
-; opposite -- see git history). `Plain1D`/`Array1D` still do not support
-; a `MinLod` clamp (neither `createSampleCmp1D` nor
-; `createSampleCmpArray1D` threads one through yet), so their own
-; `samplecmp_clamp` case remains genuinely unsupported, exercised by
-; `samplecmp_clamp_1d_unsupported` below -- defined first, deliberately:
-; `SPIRVResourceLoweringPass::run` leaves an unrewritten function's
-; position in the module alone but appends every *rewritten* function
-; after every remaining declaration, so `FileCheck`'s own top-to-bottom
-; `CHECK-LABEL` ordering requires the one function this file leaves
-; untouched to be declared before the four this file rewrites.
+; opposite -- see git history). Roadmap L62 has since done the same for
+; `Plain1D`/`Array1D`: both now thread a real `MinLod` clamp through
+; `createSampleCmp1D`/`createSampleCmpArray1D`, so `samplecmp_clamp_1d`
+; below now pins a real lowering where it once pinned its absence.
 
 target triple = "spirv-unknown-vulkan-compute"
 
-; Roadmap L52(c): `Plain1D` (`Dim::1D(0)`) still has no `MinLod`-clamp
-; counterpart -- neither `createSampleCmp1D` nor `createSampleCmpArray1D`
-; threads a clamp value through yet, matching those two shapes'
-; pre-existing `ConstOffset` exclusion for the same "no real CTS case
-; reaches it yet" reason -- so this call is left entirely unrewritten,
-; matching spirv-resource-lowering-unsupported.ll's own "left untouched"
-; contract.
-; CHECK-LABEL: define float @samplecmp_clamp_1d_unsupported(
-; CHECK-NOT: feme.cpu.image
-; CHECK: call float @llvm.spv.resource.samplecmp.clamp
-define float @samplecmp_clamp_1d_unsupported(<3 x float> %coord, float %dref, float %clamp) {
+; Roadmap L62: `Plain1D` (`Dim::1D(0)`) now carries a real `MinLod`
+; clamp. The `bias` slot ahead of it reads as a zero constant, a no-op
+; LOD shift: `samplecmp_clamp`, unlike `samplecmpbias_clamp`, has no bias
+; operand of its own. Both 1D shapes still carry no `ConstOffset`.
+; CHECK-LABEL: define float @samplecmp_clamp_1d(
+; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(
+; CHECK-SAME: float %dref, float 0.000000e+00, float %clamp, i1 true)
+define float @samplecmp_clamp_1d(<3 x float> %coord, float %dref, float %clamp) {
   %img = call target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
       @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 8, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
