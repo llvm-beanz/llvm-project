@@ -163,4 +163,4 @@ Can you work on L52 or other prerequisites blocking the L-series milestones?
 > `texturegrad`/`texturegradoffset` groups). That gap is filed and partially
 > fixed as its own row, **L59**, below, per this project's own established
 > splitting precedent; sub-items (b) and (c) here remain exactly as open as
-> before.)
+s> before.)
