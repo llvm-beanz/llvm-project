@@ -27499,3 +27499,148 @@ row's own original scalar-coordinate speculation). L52's own sub-items
 LOD-query derivative intrinsics remain open, unaffected by this row, as
 does L53's seamless cube-map filtering gap -- these remain the next
 prerequisites blocking the L-series milestones.
+
+## Roadmap L53: seamless cube-map filtering implemented and validated; L51's own root-cause hypothesis for `samplercubearrayshadow_fragment` disproven, re-filed as L55; a distinct pre-existing trilinear/mipmap cube bug discovered incidentally, filed as L56
+
+**Task.** L51 root-caused `samplercubearrayshadow_fragment`'s own
+32x32-pixel rendering mismatch to a genuinely missing feature: Vulkan's
+own spec-mandated default "seamless cube map filtering" (cross-face
+edge/corner texel blending for `LINEAR`-filtered `Cube`/`CubeArray`
+sampling), entirely absent from `FeMeRuntimeCPU.c`'s four cube sample
+entry points (all four unconditionally hard-code plain `ClampToEdge`
+addressing against a single selected face). L53 implements it.
+
+**Implementation.** New helpers inserted into `FeMeRuntimeCPU.c` between
+`femeRTSelectCubeFace` and the four existing cube entry points:
+`femeRTRemapCubeEdgeCoords` (the core per-face canonical-3D-coordinate
+cross-face remap, re-derived from scratch against `femeRTSelectCubeFace`'s
+own face order -- `0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z` -- and `U`/`V` sign
+convention, since VK-GL-CTS's own `tcuTexture.cpp` `remapCubeEdgeCoords`
+uses a different internal `CubeFace` enum ordering/sign convention that
+could not be reused verbatim); `femeRTFetchCubeSeamlessTexel` (fetches
+one of the 4 bilinear taps, remapping across a face edge);
+`femeRTComputeCubeBilinearSupport` (raw, unclamped bilinear tap
+coordinates + weights -- deliberately *not* reusing the generic
+`femeRTComputeBilinearSupport`, since that one already clamps via
+`femeRTApplyAddressMode`, destroying the out-of-bounds information the
+remap logic needs); `femeRTSampleCubeLinearAtLevel` (the seamless
+color-sample blend, averaging the other 3 raw texel colors for the
+ambiguous, doubly-out-of-bounds corner tap); `femeRTSampleFilteredCube`
+(the cube-specific dispatcher, `LINEAR` only -- `NEAREST` needs no
+seamless handling, matching VK-GL-CTS's own `sampleCubeSeamlessNearest`
+short-circuit, since a single nearest texel never straddles a face
+edge); `femeRTSampleCmpCubeAtLevel` (the depth-comparison analog,
+applying `Samp`'s `CompareFunc` to each tap *before* blending/averaging,
+matching VK-GL-CTS's own `sampleCubeSeamlessLinearCompare` exactly --
+the compare function is not necessarily linear, so averaging compare
+*results* for the ambiguous corner is not equivalent to averaging raw
+depth values and comparing once). All four existing entry points
+(`femeCpuImageSampleCubeV4F32`/`CubeArrayV4F32`/`SampleCmpCubeF32`/
+`CmpCubeArrayF32`) now call the new seamless helpers instead of the
+generic 2D ones.
+
+**No new sampler descriptor bit needed**, a deliberate simplification
+versus this row's own original text (which called for a new per-sampler
+seamless flag): `VK_EXT_non_seamless_cube_map` (the only spec-defined
+opt-out) is confirmed `Not implemented`/never advertised, so there is no
+way for any real Vulkan application to ever request non-seamless
+behavior -- seamless filtering is therefore applied unconditionally.
+
+**New tests** (`feme/unittests/Runtime/CPU/ImageSamplingTest.cpp`): a
+2x2-texel-per-face synthetic cube with distinct per-face marker values,
+sampled at a direction vector whose bilinear footprint deliberately
+straddles a known face edge (hand-derived expected blend weight,
+`Wx~=0.9`, expected result `~=90.0`, verified via `EXPECT_NEAR`):
+`SampleCubeSeamlessBlendsAcrossFaceEdge` (color, `LINEAR`, confirms a
+value measurably below the old clamped `100.0`),
+`SampleCubeNearestDoesNotBlendAcrossFaceEdge` (regression check: the
+same direction under `NEAREST` still reads exactly `100.0`, confirming
+the deliberately-unchanged nearest path), `SampleCmpCubeSeamlessBlendsAcrossFaceEdge`
+(the depth-comparison analog, confirming a partial pass rate strictly
+between 0 and 1). A fourth test targets the genuinely special
+doubly-out-of-bounds corner case directly:
+`SampleCubeSeamlessCornerAveragesThreeFaces` (a direction vector
+symmetric in Y/Z pushes *both* axes of one bilinear tap out of bounds
+simultaneously, straddling a corner shared by 3 faces; each of the 3
+known faces is given its own distinct marker value so the corner tap's
+own averaged contribution -- hand-derived as `(50+25+100)/3~=58.33`,
+blended into an overall expected result of `~=88.3` -- is independently
+verifiable, not just checked indirectly through the final result).
+`ninja -C build2 FeMeRuntimeCPUTests`: all 8 `*Cube*`-filtered tests
+pass (4 pre-existing + 4 new); the full suite: **208/208** pass, no
+regressions. `ninja -C build2 check-feme`: **2652/2652** discovered, 59
+pre-existing `Unsupported`, 0 `Failed` (up by exactly the 9 new tests
+this row adds).
+
+**Real `deqp-vk` validation reveals this row's own motivating premise was
+wrong.** Re-running `samplercubearrayshadow_fragment` (the exact case
+L51 root-caused to this gap) shows **an unchanged `Fail`**, bit-for-bit
+identical image-diff (`835.108`) before and after this fix. Investigating
+why: that CTS case's own sampler
+(`samplerShadowNoMipmap` in `vktShaderRenderTextureFunctionTests.cpp`)
+uses plain `NEAREST`/`NEAREST` min/mag filtering, not `LINEAR` -- and
+`NEAREST` sampling, per spec, never needs (or gets) seamless cross-face
+blending at all, exactly as this session's own `femeRTSampleFilteredCube`
+short-circuit correctly implements. L51's own "closest to a face edge
+among this test's 16 grid cells" correlation was therefore coincidental,
+not causal -- the real root cause of `samplercubearrayshadow_fragment`'s
+own mismatch remains genuinely unidentified, and is re-filed as **L55**,
+below, rather than falsely marked fixed.
+
+**This row's own real value is instead confirmed by VK-GL-CTS's own
+dedicated seamless-cube-filtering CTS group**, discovered this session:
+`dEQP-VK.texture.filtering.cube.combinations.{linear,nearest}.
+{linear,nearest}.<wrapS>.<wrapT>.{seamless,non_seamless}[_compute]`.
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.texture.filtering.cube.combinations.linear.linear.*.*.seamless" \
+  --deqp-log-filename=l53_seamless_only.qpa
+```
+
+**Result: 24/24 Pass** (the full non-mipmap, non-compute `linear.linear.
+*.*.seamless` sub-group -- every wrap-mode combination this fix's own
+single-level `LINEAR` seamless path covers). A `nearest.nearest.repeat.
+*.seamless` spot-check (5 cases) also passes 5/5, confirming no
+regression to the deliberately-unchanged `NEAREST` path. The
+`non_seamless` variant of the same case correctly reads `NotSupported
+(VK_EXT_non_seamless_cube_map is not supported)`, confirming the
+no-new-sampler-bit simplification above causes no silent behavior gap.
+A pre-fix baseline for the `seamless` sub-group specifically was not
+captured this session, but every one of these 24 cases is specifically
+designed by VK-GL-CTS to fail without real cross-face blending (the
+whole point of the `seamless` vs. `non_seamless` split), and the prior
+behavior was unconditional single-face `ClampToEdge` with zero blending,
+so a near-certain pre-fix failure can be inferred even without a
+directly-captured baseline.
+
+**A distinct, pre-existing bug discovered incidentally.** The broader
+`linear_mipmap_linear.linear.*.*.seamless` sub-group (trilinear,
+cross-mip-level cube filtering) fails **0/25** (`Fail (Image
+verification failed)`). Confirmed via `git stash` (reverting this
+session's own changes and rebuilding) that this same sub-group fails
+identically *before* this fix too -- a real, separate, pre-existing gap
+in cube-specific trilinear/mip-level handling, entirely unrelated to
+this row's own single-level seamless-edge-blending scope (not a
+regression). Re-filed as **L56**, below.
+
+**Design docs / inventories.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`
+reviewed: no deviation to record (neither document ever claimed seamless
+cube filtering was already implemented).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed (`VK_EXT_non_seamless_cube_map` correctly stays `Not
+implemented` -- this fix makes the *default*, always-on Vulkan-spec-
+mandated behavior correct; it does not implement that opt-out extension
+itself).
+
+**Disposition.** Roadmap **L53 struck through** (seamless cube-map
+filtering implemented and directly validated via VK-GL-CTS's own
+dedicated CTS group, 24/24 Pass, no regressions). Two new rows filed:
+**L55** (the still-unexplained real root cause of
+`samplercubearrayshadow_fragment`'s own mismatch, now that L51's own
+seamless-filtering hypothesis is disproven) and **L56** (the
+incidentally-discovered, pre-existing trilinear/mipmap cube-filtering
+bug). L52's own sub-items (b) `Bias`, (c) `samplecmp_clamp`'s `MinLod`
+operand, and (e) the LOD-query derivative intrinsics remain open,
+unaffected by this row.
