@@ -64664,3 +64664,82 @@ relationship to what this session's prompt asked me to unblock.
 1. `feme: strike through L47 (resolved by L49's own fix)` --
    `Roadmap.md`/`VulkanCTSReport.md` updates only, no source change.
 2. This `agent_thoughts.md` entry (its own final commit).
+
+# Session: L50 -- depth-comparison `ConstOffset` (sub-item (d))
+
+## Picking a scope within L50
+
+L50 breaks into 5 sub-items ((a)-(f), (f) already re-filed as L51 by a
+prior session). I looked at (b) `Bias` first since it was listed first,
+but investigating it showed it needs a genuinely new real LLVM SPIR-V
+backend intrinsic: `SPIRVInstructionSelector.cpp`'s
+`selectSampleCmpIntrinsic`/`selectSampleCmpLevelZeroIntrinsic` already
+select real codegen for the existing `llvm.spv.resource.samplecmp{,.
+clamp}` intrinsics (added via real upstream PR #179312), so a
+`Bias`+`Dref` combined form would need real `IntrinsicsSPIRV.td` +
+`SPIRVInstructionSelector.cpp` changes -- a substantial, genuinely
+cross-cutting backend change, and (per HLSL never emitting this
+combination -- it's GLSL-only) low-value relative to its cost for one
+session.
+
+(d) -- a real, nonzero depth-comparison `ConstOffset` -- turned out to be
+entirely feme-internal: the MLIR pattern
+(`ImageSampleDrefImplicitLodPattern`) already threads a `ConstOffset`
+operand through unconditionally; the entire gap was that feme's own CPU
+lowering (`SPIRVResourceLowering.cpp`'s `isSupportedOffset`) rejected any
+nonzero offset for a dref sample regardless of shape. Picked this as the
+right size for a single session, confirmed via grep against a real CTS
+case list (`glsl.txt`) that ~70 real cases exercise exactly this gap
+(minus the 5 `_bias_fragment` cases also gated by (b)).
+
+## A width-checking bug caught by the real CTS re-run, not by unit tests
+
+My first implementation attempt passed all hand-written C++ unit tests
+(which used literal `ConstantVector`s for the offset) but failed both
+new `.ll` lit tests, which built the offset via a runtime `insertelement`
+chain instead (mirroring the "unsupported" test's own pre-existing
+style, which never actually needed the result to *be* a `Constant` since
+it only ever exercised the always-rejected always-zero-required path).
+That surfaced a genuine bug: `isSupportedOffset`'s width check
+(`isCoordN(Offset, 2, ...)`) was copy-pasted from the ordinary-sample
+path, where the `Offset` operand is genuinely always 2-wide (mirroring a
+2-wide `Plain2D` coordinate). But a depth-comparison sample's own
+`Offset` operand mirrors its *Dref*-widened coordinate instead --
+3-wide for `Plain2D`, 4-wide for `Array2D` (confirmed by reading
+`ImageSampleDrefImplicitLodPattern`'s own `OffsetType` construction in
+`SPIRVToLLVMPatterns.cpp`, which explicitly matches the vector shape of
+`Coordinate`, not a fixed 2). A single fixed-width check couldn't be
+correct for both callers. Fixed by relaxing the check to "a `Constant`
+fixed vector of i32 with at least 2 elements" -- correct for both, since
+only the first two elements are ever read regardless of the shape's own
+total coordinate width.
+
+Separately (and unrelated to the real width bug above), the two lit
+tests also needed their `insertelement`-built offsets replaced with
+literal constant vectors, since `isSupportedOffset` deliberately requires
+`isa<Constant>(Offset)` (matching SPIR-V's own `ConstOffset` image
+operand being inherently a compile-time constant) -- an `insertelement`
+chain of literals is not itself a `Constant` unless something like
+InstCombine has already folded it, which this pass-only lit-test
+pipeline never runs. This is pre-existing behavior (not something this
+session's change touched), but the two new lit tests were still built
+the "unsupported-test" way at first, which happened to work for the
+always-rejected case but not for the newly-accepted one.
+
+## Real CTS confirms the fix
+
+`dEQP-VK.glsl.texture_functions.textureoffset.*sampler2d*shadow*`: 20/70
+Pass (up from 0/70), 5 Fail (exactly the still-unfixed `Bias` cases), 45
+NotSupported (unrelated format/extension gaps). See
+`VulkanCTSReport.md`'s own new section for the full breakdown.
+
+## Commits this session
+
+1. Core fix: `isSupportedOffset`'s `AllowArray2D` param,
+   `createSampleCmp2D`/`createSampleCmpArray2D`'s new `OffsetX`/`OffsetY`
+   params, runtime entry points, and all touch-point tests (C++ unit
+   tests + lit tests), committed together as one atomic cross-layer
+   change.
+2. `Roadmap.md`/`VulkanCTSReport.md` updates (L50 struck for sub-item
+   (d), new L52 row filed for the remaining sub-items).
+3. This `agent_thoughts.md` entry (its own final commit).
