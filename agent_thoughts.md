@@ -66745,3 +66745,91 @@ now appears in the roadmap as a blocker for L60(a), L60's `Grad` sub-items, and
 the feature flip alike — it is doing a lot of work for something never filed as
 its own row, and is probably the single highest-value next target in this
 series.
+
+# Session: L60's `VulkanBuffer` blocker (roadmap L64)
+
+## The request, and why I started by doubting it
+
+I was asked to work on L60 or its prerequisites, with a specific pointer: the
+`VulkanBuffer` register-bound-resource-handle gap that L60(a), L60's `Grad`
+sub-items, and the `shaderResourceMinLod` flip all named as their blocker, and
+which the previous session flagged as "doing a lot of work for something never
+filed as its own row."
+
+That framing is what made me suspicious. A single UBO defect blocking three
+unrelated roadmap items is a smell: it is the shape of a *misattribution*, not
+of a real bug. So before writing any fix I read `classifyVulkanBufferHandle`,
+and it plainly accepted the shape in question -- a `Uniform`-storage-class,
+non-writable struct classifies cleanly as `HandleKind::Uniform`. The code
+allegedly at fault already worked.
+
+## The decisive experiment
+
+I added a temporary env-gated `PrintModulePass` before `SPIRVResourceLowering`
+and captured the real IR for the failing case. The two `VulkanBuffer` handles
+were the CTS scale/bias uniforms present in *every* `texture_functions` shader
+-- not the "array-layer uniform buffer" prior rows described.
+
+The step that actually settled it was dumping a **passing** case of the same
+shape and diffing. The `VulkanBuffer` handles were byte-identical. A construct
+that appears unchanged in both a passing and a failing case cannot be the
+cause. Comparing against a known-good case, rather than only studying the
+failing one, collapsed a multi-session misattribution in minutes. I want to
+generalize that: when a diagnostic names something, the cheapest next move is
+to check whether that same something is present in a case that works.
+
+## The real bug
+
+The IR showed a `<3 x float>` coordinate paired with `<2 x float>`
+derivatives. `hasOnlySupportedImageUses` demanded derivatives match the
+coordinate width exactly. But SPIR-V gives a `Grad` derivative one component
+per image dimension *not counting* the array layer -- a layer index selects a
+discrete slice rather than addressing a filtered axis, so it has no
+derivative. `Array2D` is coord 3 / deriv 2; `CubeArray` is 4 / 3.
+
+The satisfying part: `lowerImageAccesses` already extracted exactly elements
+0/1 and 0/1/2. Only the guard disagreed with the code it was guarding. The fix
+was one width computation and zero lowering changes.
+
+## Two tests were defending the bug
+
+`LowersSampleGradToArray2DDerivatives` and its `CubeArray` twin passed
+coordinate-width derivatives no real shader emits, with comments explicitly
+rationalizing the "present but unused" trailing component. They had been
+written to match the implementation rather than the spec, so they encoded the
+bug as intended behavior and would have blocked anyone who tried to fix it.
+Worth remembering: a test derived from the code it tests provides no
+independent signal, and is worse than no test, because it looks like evidence.
+
+Because the correction rejects in one direction too, I added two negative
+tests -- a coordinate-width derivative against `Array2D` (now correctly
+rejected) and a narrowed one against `Plain2D` (pinning that the narrowing is
+conditional on arrayedness, not a blanket rule).
+
+## The mechanism behind the bad diagnostic, and fixing it
+
+Rejecting one unsupported *use* prevents its handle from normalizing, which
+makes `SPIRVResourceLoweringPass` abandon the *entire function*, leaving every
+handle unlowered; `checkSupportedRaisedOps` then reports whichever
+`handlefrombinding` comes first in the module. So the error reliably names a
+handle while the cause is usually an unsupported use elsewhere, often on a
+different resource. This is the second confirmed instance (L62 was the first).
+
+Since diagnosing this cost several sessions twice over, I did not just fix the
+sample check -- I amended the diagnostic itself to say the named handle may be
+an unrelated bystander, with a test pinning that wording. Fixing the
+instance without fixing the misleading signal would have invited a third
+recurrence.
+
+## Results
+
+`check-feme` 2641/2641. The `texturegrad` group went 8 -> 16 Pass with a
+per-case diff confirming exactly the 8 expected arrayed cases changed and zero
+regressions; a 2,234-case `*array*` sweep confirmed the same 8 and no others.
+
+## What I would look at next
+
+L64 closes the last shape-related blocker L60(a) named, so re-running the
+`shaderResourceMinLod` flip/measure/revert experiment is now the highest-value
+target -- the reason that bit stayed off may no longer hold. Separately, the
+dref-path implicit-LOD gap from last session is still real and still unfiled.
