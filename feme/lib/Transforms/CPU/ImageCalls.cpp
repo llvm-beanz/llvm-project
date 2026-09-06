@@ -489,25 +489,29 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::Sample1D:
-    // Roadmap L52a: a single float u coordinate, no derivatives/offset
-    // (mirroring Sample2DArray's own simpler scope). Roadmap L61(c) adds
-    // a real Bias/min_lod_clamp pair, mirroring Sample2D's own operand
-    // order (lod, use_explicit_lod, bias, ..., min_lod_clamp, mask).
+    // Roadmap L52a: a single float u coordinate, no offset (mirroring
+    // Sample2DArray's own simpler scope). Roadmap L61(c) adds a real
+    // Bias/min_lod_clamp pair, mirroring Sample2D's own operand order
+    // (lod, use_explicit_lod, bias, ..., min_lod_clamp, mask). Roadmap
+    // L63 adds a real du_dx/du_dy screen-space derivative pair, mirroring
+    // Sample2D's own du_dx/du_dy/dv_dx/dv_dy placement immediately after
+    // the coordinate.
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
-    //  image_index, sampler_index, u, lod, use_explicit_lod, bias,
-    //  min_lod_clamp, mask) -> <4 x float>
+    //  image_index, sampler_index, u, du_dx, du_dy, lod, use_explicit_lod,
+    //  bias, min_lod_clamp, mask) -> <4 x float>
     FTy = FunctionType::get(
         V4F32Ty,
-        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, I1Ty, F32Ty,
-         F32Ty, I1Ty},
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         I1Ty, F32Ty, F32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
   case ImageCallKind::Sample1DArray:
-    // Same as Sample1D, plus a float array_layer operand before lod,
+    // Same as Sample1D, plus a float array_layer operand before du_dx,
     // mirroring Sample2DArray's own relationship to Sample2D.
     FTy = FunctionType::get(V4F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, I1Ty},
+                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty,
+                             I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCmp1D:
@@ -881,7 +885,8 @@ CallInst *feme::cpu::createSampleCmpCubeArray(
 
 CallInst *feme::cpu::createSample1D(IRBuilderBase &Builder,
                                     const ImageCallEnv &Env, Value *ImageIndex,
-                                    Value *SamplerIndex, Value *U, Value *Lod,
+                                    Value *SamplerIndex, Value *U,
+                                    Value *DUdX, Value *DUdY, Value *Lod,
                                     Value *UseExplicitLod, Value *Bias,
                                     Value *MinLodClamp, Value *Mask,
                                     const Twine &Name) {
@@ -890,7 +895,8 @@ CallInst *feme::cpu::createSample1D(IRBuilderBase &Builder,
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
-                             Lod, UseExplicitLod, Bias, MinLodClamp, Mask},
+                             DUdX, DUdY, Lod, UseExplicitLod, Bias,
+                             MinLodClamp, Mask},
                             Name);
 }
 
@@ -898,7 +904,8 @@ CallInst *feme::cpu::createSample1DArray(IRBuilderBase &Builder,
                                          const ImageCallEnv &Env,
                                          Value *ImageIndex,
                                          Value *SamplerIndex, Value *U,
-                                         Value *ArrayLayer, Value *Lod,
+                                         Value *ArrayLayer, Value *DUdX,
+                                         Value *DUdY, Value *Lod,
                                          Value *UseExplicitLod, Value *Bias,
                                          Value *MinLodClamp, Value *Mask,
                                          const Twine &Name) {
@@ -907,7 +914,7 @@ CallInst *feme::cpu::createSample1DArray(IRBuilderBase &Builder,
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
-                             ArrayLayer, Lod, UseExplicitLod, Bias,
+                             ArrayLayer, DUdX, DUdY, Lod, UseExplicitLod, Bias,
                              MinLodClamp, Mask},
                             Name);
 }
@@ -1687,7 +1694,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(15);
     break;
   case ImageCallKind::Sample1D:
-    if (CI.arg_size() != 12)
+    if (CI.arg_size() != 14)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1696,14 +1703,16 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.ImageIndex = CI.getArgOperand(4);
     Result.SamplerIndex = CI.getArgOperand(5);
     Result.U = CI.getArgOperand(6);
-    Result.Lod = CI.getArgOperand(7);
-    Result.UseExplicitLod = CI.getArgOperand(8);
-    Result.Bias = CI.getArgOperand(9);
-    Result.MinLodClamp = CI.getArgOperand(10);
-    Result.Mask = CI.getArgOperand(11);
+    Result.DUdX = CI.getArgOperand(7);
+    Result.DUdY = CI.getArgOperand(8);
+    Result.Lod = CI.getArgOperand(9);
+    Result.UseExplicitLod = CI.getArgOperand(10);
+    Result.Bias = CI.getArgOperand(11);
+    Result.MinLodClamp = CI.getArgOperand(12);
+    Result.Mask = CI.getArgOperand(13);
     break;
   case ImageCallKind::Sample1DArray:
-    if (CI.arg_size() != 13)
+    if (CI.arg_size() != 15)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1713,11 +1722,13 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.SamplerIndex = CI.getArgOperand(5);
     Result.U = CI.getArgOperand(6);
     Result.ArrayLayer = CI.getArgOperand(7);
-    Result.Lod = CI.getArgOperand(8);
-    Result.UseExplicitLod = CI.getArgOperand(9);
-    Result.Bias = CI.getArgOperand(10);
-    Result.MinLodClamp = CI.getArgOperand(11);
-    Result.Mask = CI.getArgOperand(12);
+    Result.DUdX = CI.getArgOperand(8);
+    Result.DUdY = CI.getArgOperand(9);
+    Result.Lod = CI.getArgOperand(10);
+    Result.UseExplicitLod = CI.getArgOperand(11);
+    Result.Bias = CI.getArgOperand(12);
+    Result.MinLodClamp = CI.getArgOperand(13);
+    Result.Mask = CI.getArgOperand(14);
     break;
   case ImageCallKind::SampleCmp1D:
     if (CI.arg_size() != 11)
@@ -1786,6 +1797,20 @@ feme::cpu::getOrSynthesizeSample2DDerivatives(IRBuilderBase &B,
                                       V),
           feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
                                       V)};
+}
+
+SampleDerivatives1D
+feme::cpu::getOrSynthesizeSample1DDerivatives(IRBuilderBase &B,
+                                              Function &Caller, Value *U) {
+  std::optional<feme::ShaderStage> Stage = feme::getShaderStage(Caller);
+  if (Stage != feme::ShaderStage::Fragment) {
+    Value *Zero = ConstantFP::get(B.getFloatTy(), 0.0);
+    return {Zero, Zero};
+  }
+  return {feme::createStageDerivative(B, feme::StageOpKind::DerivativeXCoarse,
+                                      U),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
+                                      U)};
 }
 
 CubeDirectionDerivatives feme::cpu::getOrSynthesizeSampleCubeDerivatives(

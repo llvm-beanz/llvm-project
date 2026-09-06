@@ -860,29 +860,38 @@ llvm::CallInst *createSampleCmpCubeArray(
     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.1d.v4f32` call (roadmap L52a). \p U is
-/// the single normalized coordinate -- see `ImageCallKind::Sample1D`'s own
-/// doc for why this shape carries no derivatives/`ConstOffset`. \p Bias/
-/// \p MinLodClamp (roadmap L61(c)) mirror `createSample2D`'s own
-/// identically-named parameters -- a `Plain1D` sample can carry a real
-/// `Bias`/`MinLod` clamp too, unlike the screen-space derivatives/
-/// `ConstOffset` this shape still has no infrastructure for.
+/// the single normalized coordinate. \p DUdX/\p DUdY (roadmap L63) mirror
+/// `createSample2D`'s own screen-space partial-derivative operands,
+/// narrowed to this shape's single addressed component -- pass zero
+/// constants for a caller with none to give (a non-fragment stage, or an
+/// explicit-LOD sample); see `getOrSynthesizeSample1DDerivatives`'s own
+/// doc. \p Bias/\p MinLodClamp (roadmap L61(c)) mirror `createSample2D`'s
+/// own identically-named parameters -- a `Plain1D` sample can carry a real
+/// `Bias`/`MinLod` clamp too. Unlike `createSample2D`, there is still no
+/// `ConstOffset` operand here (roadmap L52a's own original scope note).
 llvm::CallInst *createSample1D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env,
                                llvm::Value *ImageIndex,
                                llvm::Value *SamplerIndex, llvm::Value *U,
+                               llvm::Value *DUdX, llvm::Value *DUdY,
                                llvm::Value *Lod, llvm::Value *UseExplicitLod,
                                llvm::Value *Bias, llvm::Value *MinLodClamp,
                                llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.1darray.v4f32` call (roadmap L52a), the
-/// `Texture1DArray` counterpart of `createSample1D`. \p Bias/\p
-/// MinLodClamp (roadmap L61(c)) mirror `createSample1D`'s own identically
-/// new parameters.
+/// `Texture1DArray` counterpart of `createSample1D`. \p DUdX/\p DUdY
+/// (roadmap L63) mirror `createSample1D`'s own new derivative parameters --
+/// only \p U itself is ever differentiated, never \p ArrayLayer, mirroring
+/// `createSample2DArray`'s own layer-agnostic derivative handling. \p
+/// Bias/\p MinLodClamp (roadmap L61(c)) mirror `createSample1D`'s own
+/// identically new parameters.
 llvm::CallInst *createSample1DArray(llvm::IRBuilderBase &Builder,
                                     const ImageCallEnv &Env,
                                     llvm::Value *ImageIndex,
                                     llvm::Value *SamplerIndex, llvm::Value *U,
-                                    llvm::Value *ArrayLayer, llvm::Value *Lod,
+                                    llvm::Value *ArrayLayer,
+                                    llvm::Value *DUdX, llvm::Value *DUdY,
+                                    llvm::Value *Lod,
                                     llvm::Value *UseExplicitLod,
                                     llvm::Value *Bias, llvm::Value *MinLodClamp,
                                     llvm::Value *Mask,
@@ -1157,6 +1166,33 @@ SampleDerivatives getOrSynthesizeSample2DDerivatives(llvm::IRBuilderBase &B,
                                                      llvm::Function &Caller,
                                                      llvm::Value *U,
                                                      llvm::Value *V);
+
+/// (Roadmap L63) The two screen-space partial-derivative operands
+/// `createSample1D`/`createSample1DArray`'s implicit-LOD path consults:
+/// `DUdX`, `DUdY` -- the `Plain1D`/`Array1D` counterpart of
+/// `SampleDerivatives` above, narrowed to a single addressed coordinate
+/// component (this shape's own `U` is the only one ever differentiated;
+/// `Array1D`'s own array layer, like `Array2D`'s, is never
+/// differentiated).
+struct SampleDerivatives1D {
+  llvm::Value *DUdX;
+  llvm::Value *DUdY;
+};
+
+/// Returns the two screen-space partial derivatives of \p U an
+/// implicit-LOD `Sample1D`/`Sample1DArray` call should pass to
+/// `createSample1D`/`createSample1DArray`, mirroring
+/// `getOrSynthesizeSample2DDerivatives`'s own `Caller`-stage-gated
+/// real-derivatives-or-zero-constants behavior: real derivatives
+/// (synthesized via `feme::createStageDerivative`) only when \p Caller's
+/// own stage is `Fragment`, else two zero constants, leaving that
+/// sample's own implicit level resolved to mip 0 exactly as before this
+/// row (roadmap L52a's original, deliberately-narrower `Plain1D`/
+/// `Array1D` scope) -- not a regression for any caller not in a position
+/// to synthesize a real derivative.
+SampleDerivatives1D getOrSynthesizeSample1DDerivatives(llvm::IRBuilderBase &B,
+                                                       llvm::Function &Caller,
+                                                       llvm::Value *U);
 
 /// (Roadmap L56) The six screen-space partial-derivative operands
 /// `createSampleCube`/`createSampleCubeArray`'s implicit-LOD path
