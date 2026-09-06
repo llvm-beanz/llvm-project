@@ -65023,3 +65023,107 @@ investigation, fix, and CTS results).
 4. Unit tests (`SPIRVResourceLoweringTest.cpp`, `ImageSamplingTest.cpp`).
 5. `Roadmap.md`/`VulkanCTSReport.md` updates.
 6. This `agent_thoughts.md` entry (its own final commit).
+
+# L54: SampleCmp1D/SampleCmpArray1D depth-comparison sampling
+
+The user's request this turn ("work on L52 or other prerequisites") was
+verbatim identical to the immediately preceding turn's request, and a
+`git log`/roadmap check confirmed that prior turn's L52(a) work (ordinary
+`Plain1D`/`Array1D` sampling) was already fully committed. Rather than
+redo already-completed work, I picked up the next logical prerequisite:
+L54, the `SampleCmp1D`/`SampleCmpArray1D` depth-comparison counterpart
+L52(a) itself had explicitly deferred as its own follow-on row.
+
+## The value of a real capture before writing any code
+
+L54's own roadmap text (written by the prior session, before any of this
+session's own investigation) speculated that `Plain1D`'s dref coordinate
+would stay a bare scalar, "unlike every other shape's vector-wrapped
+dref coordinate" -- reasoning by analogy with L52(a)'s own genuinely
+scalar *ordinary*-sample coordinate. Before writing any lowering code, I
+captured real SPIR-V for `sampler1dshadow_fragment`/
+`sampler1darrayshadow_fragment` via `deqp-vk --deqp-log-decompiled-spirv=
+enable` against the already-built feme ICD. This directly disproved the
+roadmap's own guess: both shapes' dref coordinates are genuine 3-wide
+vectors (`vec3(u, <unused-or-layer>, compare)`), matching GLSL's own
+`sampler1DShadow`/`sampler1DArrayShadow` spec table, not the "+1 padding"
+convention every 2D-family shape uses, and *not* a bare scalar either.
+
+This is exactly the kind of case where reasoning by analogy from a
+neighboring, superficially-similar fix (L52(a)'s scalar special case)
+would have led to real bugs -- an early scalar-coordinate special case
+copy-pasted from the ordinary-sample path would have been actively wrong
+here, crashing or misreading `CreateExtractElement` against a value that
+was never a scalar to begin with. The real capture turned what the
+roadmap scoped as a materially harder problem into an actually *simpler*
+one: no early special case needed at all in `lowerImageAccesses`'s dref
+switch, since the pre-existing generic `C0`/`C1` extraction already
+handles a 3-wide vector correctly. The only real correction needed was
+to `DrefCoordWidth`'s "+1 padding" heuristic, which silently produces the
+wrong answer (`2` instead of `3`) for `Plain1D` specifically (`Array1D`
+happens to still get the right answer, `2+1=3`, by coincidence of its own
+`SampleCoordWidth=2`).
+
+This reinforces something worth remembering for future L/H-series work:
+whenever a roadmap row's own text includes a speculative claim about a
+SPIR-V/IR shape not yet confirmed by a real capture (this one literally
+said "the coordinate stays a bare scalar" as an assumption, not a
+confirmed fact), it is worth a cheap real capture up front before
+committing to an implementation plan built on that assumption -- the
+capture here took a few minutes and completely changed (simplified) the
+implementation approach.
+
+## Implementation summary
+
+New `ImageCallKind::SampleCmp1D`/`SampleCmpArray1D` entries and builders
+(`ImageCalls.h`/`.cpp`), narrowed `hasOnlySupportedImageUses`'s dref
+rejection to no longer exclude `Plain1D`/`Array1D`, a `Plain1D`-specific
+`DrefCoordWidth` override, new `lowerImageAccesses` dref-switch cases
+reusing the existing generic coordinate extraction, and new runtime
+entry points `femeCpuImageSampleCmp1DF32`/`SampleCmpArray1DF32` backed by
+a new `femeRTSampleCmp1DAtLevel` helper mirroring the existing 2D
+counterpart. New tests at both the SPIR-V-lowering-classification layer
+(`SPIRVResourceLoweringTest`, replacing a now-stale test that had assumed
+the disproven scalar/2-wide shape) and the runtime-filtering layer
+(`ImageSamplingTest`).
+
+One test-authoring mistake worth noting for my own future reference:
+while drafting the `SampleCmpArray1DReadsRequestedLayer` runtime test, I
+initially got the `LessEqual` compare-function semantics backwards in my
+own test's comments/expectations (writing "Ref 0.5 <= Texel 0.2: pass"
+when the correct evaluation is that 0.5 is *not* <= 0.2, so it should
+fail) -- caught immediately by the test actually failing on first run,
+not by the implementation being wrong. Fixed by re-deriving the
+comparison correctly and swapping the two layers' expected results
+(layer 0's shallower depth now correctly expected to fail the compare,
+layer 2's deeper depth to pass it).
+
+## Verification
+
+- `ninja -C build2 check-feme`: 2648 discovered, 59 pre-existing
+  `Unsupported`, 0 `Failed` (up from L52(a)'s own 2642/2643 baseline by
+  the 6 new tests this row adds: 2 net `SPIRVResourceLoweringTest`
+  (+3/-1 stale) + 3 new `ImageSamplingTest`, plus wrapping build/link
+  fixed counts along the way).
+- `FeMeRuntimeCPUTests` full suite: 204/204 (up from 201).
+- `FeMeTransformsCPUTests` full suite: 321/321 (net +2 from L52(a)'s own
+  319, matching the already-recorded prior-session count).
+- Real `deqp-vk` re-run of the 4 targeted cases
+  (`sampler1d{,array}shadow_{fragment,vertex}`): 4/4 now Pass, up from
+  0/4.
+- Broader `sampler1d*` sweep (24 cases): 12 Pass (up from 8) / 6 Fail
+  (down from 10, all bias-blocked, unrelated to this fix) / 6
+  NotSupported (unchanged, unrelated compute-shader-derivatives gap).
+
+## Docs
+
+`Roadmap.md`'s L54 row struck through with a completion note (including
+the real-capture correction). `VulkanCTSReport.md` gained a new "Roadmap
+L54" section documenting the capture finding, fix, tests, and CTS
+results. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/
+`FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` all reviewed -- no changes
+needed (internal CPU-lowering plumbing only, no feature/extension
+surface or design-doc deviation). L52's own remaining sub-items (b)
+`Bias`, (c) `samplecmp_clamp`'s `MinLod` operand, (e) LOD-query
+intrinsics, and L53's seamless cube-map filtering gap remain the open
+prerequisites for a future L-series session.
