@@ -844,21 +844,23 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // re-run.
   Info.Features.shaderStorageImageReadWithoutFormat = VK_TRUE;
   Info.Features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-  // `shaderResourceMinLod` is still not advertised: roadmap L65's own
-  // flip/measure/revert experiment (this session) confirms the
-  // `VulkanBuffer` framing prior sessions used here never described a
-  // real gap (roadmap L64 disproved it) -- the current, real per-shape
-  // blocker set, measured directly with the feature bit temporarily
-  // forced on, is `Plain3D`'s still-nonexistent ordinary sampled-image
-  // infrastructure (a materially bigger prerequisite than any other
-  // shape's own gap here), the by-design integer-sampler filtered-sample
-  // exclusion (not a real gap), a still-unimplemented `Dref`+`Grad`
-  // depth-comparison intrinsic (`texturegradclamp`'s 5 shadow-sampler
-  // cases), and `isSupportedOffset`'s pre-existing, unrelated
-  // `Plain2D`-only `ConstOffset` restriction (`textureoffsetclamp`
-  // regresses every other shape). See VulkanCTSReport.md's own
-  // `shaderResourceMinLod` section for the current per-shape breakdown
-  // and Roadmap.md's L65 row for the full sub-item list.
+  // `shaderResourceMinLod`: roadmap L66(j)'s own flip/measure/revert
+  // experiment (this session) temporarily forced this bit `VK_TRUE`
+  // (reverted here before commit, as this comment's own conclusion
+  // requires) to re-measure `textureclamp`/`texturegradclamp`/
+  // `textureoffsetclamp`/`texturegradoffsetclamp` against L66(c)/(f)-(i)'s
+  // now-complete `Dref`+`Grad` shape support. The re-run found and fixed a
+  // real, previously-undiscovered bug along the way (a synthesized
+  // all-zero sample `Offset` operand's type was derived from the
+  // coordinate's own vector shape instead of the image's real
+  // dimensionality, wrongly widening it for `Array1D`), but also
+  // surfaced a genuine remaining gap this bit still depends on: a real,
+  // nonzero `ConstOffset` against a `Plain1D`/`Array1D` depth-comparison
+  // (shadow) sample is rejected outright (roadmap L66(k)). See
+  // VulkanCTSReport.md's own `shaderResourceMinLod` section for the full
+  // measured per-case breakdown and Roadmap.md's L66(j)/L66(k) rows for
+  // why the bit stays off until L66(k) is resolved.
+  Info.Features.shaderResourceMinLod = VK_FALSE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
