@@ -343,7 +343,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_KHR_bind_memory2` | Implemented (core, not advertised by name) | vkBindBufferMemory2/vkBindImageMemory2 implemented (Buffer.cpp, Image.cpp) |
 | `VK_KHR_buffer_device_address` | Planned (in scope, not implemented) | roadmap J1 |
 | `VK_KHR_calibrated_timestamps` | Not implemented |  |
-| `VK_KHR_compute_shader_derivatives` | Not implemented |  |
+| `VK_KHR_compute_shader_derivatives` | Not implemented | roadmap L69: confirmed the sole remaining reason every `_compute`-stage screen-space-derivative-dependent sampling case (`Grad`, or an ordinary implicit-LOD `texture()` call) fails outright at `vkCreateComputePipelines`; needs a real compute-stage quad-grouped invocation scheduling design, not yet started |
 | `VK_KHR_cooperative_matrix` | Not implemented |  |
 | `VK_KHR_copy_commands2` | Implemented (core, not advertised by name) | roadmap D0: vkCmdCopyBuffer2/vkCmdCopyImage2/vkCmdBlitImage2/vkCmdCopyBufferToImage2/vkCmdCopyImageToBuffer2/vkCmdResolveImage2 all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case |
 | `VK_KHR_copy_memory_indirect` | Not implemented |  |
