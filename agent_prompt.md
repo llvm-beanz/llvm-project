@@ -42,12 +42,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L66(g) or other prerequisites blocking the L-series milestones?
+Can you work on L66(h) or other prerequisites blocking the L-series milestones?
 
-> **`Array2D` `Dref`+`Grad` shadow sampling** (`sampler2darrayshadow_fragment`
-> under `texturegrad`/`texturegradoffset`) -- the arrayed counterpart of
-> L66(c)'s own `Plain2D` fix, needing a real IR reduction to confirm the
-> coordinate/array-layer extraction shape for a `Dref`+`Grad` sample against
-> this shape (mirroring L64's own arrayed-`Grad` precedent for a non-`Dref`
-> sample), plus a widened `createSampleCmpArray2D` and matching
-> `femeCpuImageSampleCmpArray2DV4F32` runtime entry point.
+> **`Cube` `Dref`+`Grad` shadow sampling** (`samplercubeshadow_fragment` under
+> `texturegrad`) -- this session's own new
+> `spirv-resource-lowering-image-samplecmpgrad.ll` negative test already
+> confirms `Cube` is correctly left unrewritten by L66(c)'s own `Plain2D`-only
+> fix (`LeavesASampleCmpGradAgainstCubeAlone`); a real fix needs the same
+> per-face derivative handling `createSampleCmp` (`Cube`)'s own existing
+> non-`Grad` path already has, widened with a real `Grad` derivative pair,
+> mirroring L60(a)'s own `Cube` `Bias`/`MinLodClamp`/`Grad` precedent for a
+> non-`Dref` sample.
