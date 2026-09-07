@@ -29664,3 +29664,102 @@ crash), both untouched this session.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 update needed -- `ConstOffset` is core SPIR-V, gated by no feature bit or
 extension, same as every other shape's own `ConstOffset` support.
+
+## Session: roadmap L66(e) -- `SPIRVResourceLoweringPass` cross-handle use-after-free
+
+Root-causes and fixes the `SPIRVResourceLoweringPass` crash roadmap L65's
+own aside first discovered (filed as roadmap L66(e), left un-investigated
+by every session since). The crash is not actually specific to "two
+functions" -- it is `lowerImageAccesses`'s own trailing cleanup loop
+unconditionally erasing every handle in its own `HeapIndices` map, without
+checking whether all of that handle's own users were actually rewritten
+away first.
+
+A sample call is only ever rewritten (and its own image/sampler handles'
+use-count decremented) from its *image* handle's own side
+(`CI->getArgOperand(0) != Handle` deliberately skips the sampler side, to
+avoid a double rewrite). If that image handle's own `(set, binding)`
+identity conflicts with a *different* declaration anywhere else in the
+module (`run`'s own per-handle `Entry.Conflicting` check, not per-function),
+the image handle -- and therefore the whole sample call reached through it
+-- is correctly excluded from `HeapIndices` and left entirely unrewritten.
+But if the paired *sampler* handle's own identity happens not to conflict
+(a real, plausible shape: one shared sampler binding used consistently by
+multiple entry points, each sampling a *different* shape of image at
+another, conflicting binding), that sampler handle is still accepted into
+`HeapIndices` on its own -- and the old code erased it unconditionally at
+the end regardless, even though the still-unrewritten sample call was
+still a live user of it. `Instruction::eraseFromParent` on a `Value` with
+remaining uses aborts in an assertions-enabled build
+(`Uses remain when a value is destroyed!`).
+
+Fixed with a one-line guard (`if (Handle->use_empty())`) before erasing
+each handle, leaving any handle that still has real users (because its own
+paired handle was excluded elsewhere) alone -- exactly the same "left
+un-rewritten, for `checkSupportedRaisedOps` to reject" outcome a
+conflicting *buffer* handle already gets, just extended to cover this
+image/sampler pairing's own extra cross-handle dependency.
+
+Confirmed via a minimal repro (two functions, one `Plain2D` image handle
+and one `Plain3D` image handle at the same `(set, binding)`, sharing one
+single non-conflicting sampler binding between them) that reliably crashed
+`feme-opt` before this fix:
+
+```
+$ ./build2/bin/feme-opt --llvm -passes=feme-cpu-lower-spirv-resources -S crash.ll
+Uses remain when a value is destroyed!
+UNREACHABLE executed at .../llvm/lib/IR/Value.cpp:99!
+```
+
+and no longer does after it -- the module now lowers cleanly, leaving both
+functions' image/sampler handles and sample calls entirely unrewritten
+(correctly, since both image identities conflict), while each function
+still gets real bound-resource metadata for its own non-conflicting
+sampler handle.
+
+New test coverage at both touched phases: `SPIRVResourceLoweringTest.cpp`'s
+new `LeavesConflictingImageShapeWithSharedSamplerBindingAlone` asserts the
+pass no longer crashes and both functions' sample calls remain correctly
+unrewritten while each function's own non-conflicting sampler handle still
+contributes real bound-resource metadata; a mirrored new lit test
+(`spirv-resource-lowering-conflicting-image-shape.ll`) extends
+`spirv-resource-lowering-conflicting.ll`'s own existing buffer-conflict
+precedent to this image-shape-conflict shape.
+
+`check-feme`: 2664/2723 pass, 0 fail, 59 unsupported (up from 2662/2721,
++2 net new tests, 0 regressions).
+
+### Real `deqp-vk` results
+
+No direct real CTS case was found that exercises this exact cross-handle
+scenario -- a single SPIR-V module with two entry points, one shared
+sampler binding, and two conflicting image bindings of different shapes is
+an unusual authoring pattern this session's own sweeps did not surface.
+This remains a defensive robustness fix for a real, confirmed-reproducible
+crash rather than one directly observed unblocking a specific failing CTS
+case.
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.textureoffset.*.sampler1d*" \
+  --deqp-log-filename=post_l66e_offset1d.qpa
+```
+
+A `textureoffset.*.sampler1d*` re-run (120 cases, confirming roadmap
+L66(d) itself is unaffected): **60 Pass, 30 Fail, 30 NotSupported**,
+identical to before this fix. Two broad regression sweeps --
+`dEQP-VK.glsl.texture_functions.texture.*` (208 cases: 51 Pass, 48 Fail,
+109 NotSupported) and the full `dEQP-VK.image.*` group (49,229 cases: 463
+Pass, 7,912 Fail, 40,854 NotSupported) -- both complete cleanly with no
+crashes, confirming no regression anywhere.
+
+This resolves roadmap L66(e). Roadmap L66's own only remaining open
+sub-item is now (c) (the `Dref`+`Grad` shadow-sampling intrinsic gap,
+untouched this session): a genuinely bigger, cross-cutting scope needing a
+new `llvm.spv.resource.samplecmpgrad`-shaped intrinsic in
+`IntrinsicsSPIRV.td`, which does not exist today.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- this is a compiler-internal crash fix with no feature or
+extension surface of its own.
