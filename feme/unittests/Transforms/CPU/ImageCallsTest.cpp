@@ -572,6 +572,57 @@ TEST_F(ImageCallsTest, MatchesSampleCmpCubeCallWithRealGradDerivatives) {
   EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
+
+// Roadmap L66(i): the `CubeArray` counterpart of the test just above -- a
+// real nonzero `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY`
+// sextuple threaded through alongside a real `ArrayLayer`.
+TEST_F(ImageCallsTest, MatchesSampleCmpCubeArrayCallWithRealGradDerivatives) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *DirX = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *DirY = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *DirZ = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  Value *DDirXdX = ConstantFP::get(Builder.getFloatTy(), 0.1);
+  Value *DDirXdY = ConstantFP::get(Builder.getFloatTy(), 0.2);
+  Value *DDirYdX = ConstantFP::get(Builder.getFloatTy(), 0.3);
+  Value *DDirYdY = ConstantFP::get(Builder.getFloatTy(), 0.4);
+  Value *DDirZdX = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  Value *DDirZdY = ConstantFP::get(Builder.getFloatTy(), 0.6);
+  Value *ArrayLayer = ConstantFP::get(Builder.getFloatTy(), 2.0);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(),
+                                       -std::numeric_limits<float>::infinity());
+  CallInst *CI = createSampleCmpCubeArray(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), DirX, DirY, DirZ,
+      DDirXdX, DDirXdY, DDirYdX, DDirYdY, DDirZdX, DDirZdY, ArrayLayer, Lod,
+      Builder.getInt1(false), Dref, Bias, MinLodClamp, Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::SampleCmpCubeArray);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, DirX);
+  EXPECT_EQ(Matched->V, DirY);
+  EXPECT_EQ(Matched->W, DirZ);
+  EXPECT_EQ(Matched->DDirXdX, DDirXdX);
+  EXPECT_EQ(Matched->DDirXdY, DDirXdY);
+  EXPECT_EQ(Matched->DDirYdX, DDirYdX);
+  EXPECT_EQ(Matched->DDirYdY, DDirYdY);
+  EXPECT_EQ(Matched->DDirZdX, DDirZdX);
+  EXPECT_EQ(Matched->DDirZdY, DDirZdY);
+  EXPECT_EQ(Matched->ArrayLayer, ArrayLayer);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Dref, Dref);
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
 // roadmap L67(a) and a real `ConstOffset` triple by roadmap L67(c))
 // `createSample3D`'s own ordinary `Plain3D` sample: a real `(U, V, W)`
 // coordinate plus its own screen-space derivative triple, a real

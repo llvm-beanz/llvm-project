@@ -917,11 +917,17 @@ llvm::CallInst *createSampleCmpCube(
 /// the `TextureCubeArray` counterpart of `createSampleCmp2D`. \p
 /// MinLodClamp (roadmap L52(c)) mirrors `createSampleCmpCube`'s own new
 /// `MinLod` clamp parameter, and \p Bias (roadmap L52(b)) its own new
-/// `Bias` parameter.
+/// `Bias` parameter. \p DDirXdX/\p DDirXdY/\p DDirYdX/\p DDirYdY/\p
+/// DDirZdX/\p DDirZdY (roadmap L66(i)) mirror `createSampleCmpCube`'s own
+/// identically-named screen-space direction-vector derivative operands
+/// (roadmap L66(h)), consulted only for an implicit-LOD `Grad` sample --
+/// pass six zero constants for a caller with none to give.
 llvm::CallInst *createSampleCmpCubeArray(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
-    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *DDirXdX,
+    llvm::Value *DDirXdY, llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+    llvm::Value *DDirZdX, llvm::Value *DDirZdY, llvm::Value *ArrayLayer,
     llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Dref,
     llvm::Value *Bias, llvm::Value *MinLodClamp, llvm::Value *Mask,
     const llvm::Twine &Name = "");
