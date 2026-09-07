@@ -3996,20 +3996,28 @@ public:
   }
 };
 /// Converts a `spirv.ImageSampleExplicitLod` with the `Lod` image operand
-/// (not `Grad`, and not combined with any other modifier besides the
-/// discarded `Nontemporal` bit, see `hasImageOperands` above) into the
-/// `llvm.spv.resource.samplelevel` intrinsic call, mirroring
-/// `ImageSampleImplicitLodPattern` above but threading the explicit LOD
-/// operand through instead of defaulting it (see roadmap R30, "SPIR-V
-/// (including Design.md's §1.2 sampling variants)"). A `Grad` (gradient)
-/// operand -- `ImageSampleExplicitLod`'s other legal modifier -- is handled
-/// by the separate `ImageSampleGradPattern` below instead, since it needs
-/// an entirely different intrinsic/operand shape and SPIR-V forbids
-/// combining `Lod` and `Grad` on the same instruction; this pattern's own
-/// exact `Lod`-only check below simply fails to match a `Grad` call,
-/// letting the greedy pattern rewriter try `ImageSampleGradPattern` next
-/// (both are registered against the same `ImageSampleExplicitLodOp` type,
-/// see `populateSPIRVToLLVMTargetPatterns`).
+/// (mandatory here -- SPIR-V requires exactly one of `Lod`/`Grad` on this
+/// op), optionally combined with `ConstOffset` (roadmap L68: GLSL's own
+/// vertex-stage `texture()`/`textureOffset()` calls lower to an explicit
+/// `Lod` rather than `ImageSampleImplicitLod`, since vertex shaders have no
+/// automatic derivatives to drive an implicit LOD -- confirmed via a real
+/// CTS sweep hitting `Lod|ConstOffset` identically across every shape's own
+/// `_vertex`-stage `textureoffset*` group, not modeled here before this
+/// roadmap row), into the `llvm.spv.resource.samplelevel` intrinsic call,
+/// mirroring `ImageSampleImplicitLodPattern`'s own combinatorial operand
+/// handling above (see roadmap R30, "SPIR-V (including Design.md's §1.2
+/// sampling variants)"). Unlike `ImageSampleImplicitLodPattern`'s `Bias`/
+/// `MinLod`, `Lod` has no optional counterpart of its own here to omit --
+/// it is this op's own mandatory modifier, not a combinatorial choice --
+/// so only `ConstOffset`'s presence varies the operand count. A `Grad`
+/// (gradient) operand -- `ImageSampleExplicitLod`'s other legal modifier --
+/// is handled by the separate `ImageSampleGradPattern` below instead, since
+/// it needs an entirely different intrinsic/operand shape and SPIR-V
+/// forbids combining `Lod` and `Grad` on the same instruction; this
+/// pattern's own missing-`Lod` check below simply fails to match a `Grad`
+/// call, letting the greedy pattern rewriter try `ImageSampleGradPattern`
+/// next (both are registered against the same `ImageSampleExplicitLodOp`
+/// type, see `populateSPIRVToLLVMTargetPatterns`).
 class ImageSampleExplicitLodPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::ImageSampleExplicitLodOp> {
@@ -4020,11 +4028,24 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageSampleExplicitLodOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (!hasExactImageOperands(Op.getImageOperands(),
-                               mlir::spirv::ImageOperands::Lod) ||
-        Adaptor.getOperandArguments().size() != 1)
-      return Rewriter.notifyMatchFailure(
-          Op, "only a lone Lod image operand is supported");
+    std::optional<mlir::spirv::ImageOperands> ImageOperandsAttr =
+        Op.getImageOperands();
+    mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
+    if (ImageOperandsAttr)
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+
+    if (!mlir::spirv::bitEnumContainsAny(Actual,
+                                         mlir::spirv::ImageOperands::Lod))
+      return Rewriter.notifyMatchFailure(Op, "Lod image operand is required");
+
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::Lod |
+        mlir::spirv::ImageOperands::ConstOffset;
+    if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -4036,7 +4057,18 @@ public:
         Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
     mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
         Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
-    mlir::Value Lod = Adaptor.getOperandArguments()[0];
+
+    // Positional order follows the fixed SPIR-V Image Operands bit order
+    // (`Bias, Lod, Grad, ConstOffset, ...`, see `SPIRV_BitEnumAttr<
+    // "ImageOperands", ...>`): `Lod` first (always present), then
+    // `ConstOffset` if present.
+    mlir::ValueRange OperandArguments = Adaptor.getOperandArguments();
+    size_t Index = 0;
+    mlir::Value Lod = OperandArguments[Index++];
+    mlir::Value Offset =
+        HasConstOffset ? OperandArguments[Index++] : mlir::Value();
+    if (Index != OperandArguments.size())
+      return Rewriter.notifyMatchFailure(Op, "unexpected operand count");
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
     auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
@@ -4044,8 +4076,9 @@ public:
         CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
                          CoordVecTy.getShape(), Rewriter.getI32Type()))
                    : mlir::cast<mlir::Type>(Rewriter.getI32Type());
-    mlir::Value Offset = mlir::LLVM::ConstantOp::create(
-        Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
 
     Rewriter.replaceOp(
         Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.samplelevel",

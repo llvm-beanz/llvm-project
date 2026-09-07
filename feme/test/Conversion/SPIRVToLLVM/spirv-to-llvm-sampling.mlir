@@ -128,6 +128,59 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader], []> {
 
 // -----
 
+// Roadmap L68: `spirv.ImageSampleExplicitLod` with `Lod|ConstOffset` --
+// what GLSL's own vertex-stage `textureOffset()` lowers to, since vertex
+// shaders have no automatic derivatives to drive an implicit LOD the way
+// `ImageSampleImplicitLodPattern`'s own `@sample_const_offset` case above
+// does -- converts to `llvm.spv.resource.samplelevel`, threading the real
+// offset operand through instead of hardcoding zero the way the lone-`Lod`
+// `@sample_level` case above does.
+
+// CHECK-LABEL: llvm.func @sample_level_const_offset
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplelevel"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %[[OFFSET:.*]])
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @sample_level_const_offset(%coord : vector<2xf32>, %lod : f32, %offset : vector<2xsi32>) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleExplicitLod %4, %coord ["Lod|ConstOffset"], %lod, %offset : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, vector<2xsi32> -> vector<4xf32>
+    spirv.ReturnValue %5 : vector<4xf32>
+  }
+}
+
+// -----
+
+// Roadmap L68: `spirv.ImageSampleExplicitLod` with `Lod|ConstOffset|
+// Nontemporal` still converts to `llvm.spv.resource.samplelevel` the same
+// way -- the cache hint is discarded, not rejected, mirroring
+// `@sample_level_nontemporal`'s own lone-`Lod` precedent above.
+
+// CHECK-LABEL: llvm.func @sample_level_const_offset_nontemporal
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplelevel"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %[[OFFSET:.*]])
+spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @sample_level_const_offset_nontemporal(%coord : vector<2xf32>, %lod : f32, %offset : vector<2xsi32>) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleExplicitLod %4, %coord ["Lod|ConstOffset|Nontemporal"], %lod, %offset : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, vector<2xsi32> -> vector<4xf32>
+    spirv.ReturnValue %5 : vector<4xf32>
+  }
+}
+
+// -----
+
 // `spirv.ImageFetch` with a lone `Lod` image operand -- what `dxc` always
 // emits for `Texture2D<T>::Load`, even a literal 0 mip -- converts to
 // `llvm.spv.resource.load.level`, threading the explicit mip level through
