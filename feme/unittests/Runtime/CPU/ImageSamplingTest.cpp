@@ -51,20 +51,22 @@ Function *getRuntimeFunction(Module &M, StringRef Name) {
 
 /// A host-side re-implementation of `femeRTFastLog2`'s exact approximation
 /// formula (FeMeRuntimeCPU.c), used only by the `QueryLod2D*` tests below
-/// to compute an expected raw/unclamped lod value -- this approximation
-/// has a real, small, *constant* bias even at an exact power of two
-/// (e.g. `femeRTFastLog2(1.0) ~= 0.0573`, not `0.0`, despite this file's
-/// own doc comment calling it "exact at each power of two" -- that claim
-/// describes the mantissa's own linear term, not this fixed-point
-/// additive constant), so a test asserting against true mathematical
-/// `log2` would need an unreasonably loose tolerance to pass; comparing
-/// against this identical formula instead lets every test below use a
-/// tight one.
+/// to compute an expected raw/unclamped lod value against a tight
+/// tolerance (roadmap L66(h) tightened this approximation's own max
+/// mid-octave error from ~0.057 to ~0.0013 log2 units -- see that
+/// function's own doc for why -- and, unlike the single-term linear
+/// formula it replaced, this one genuinely is exact at every power of
+/// two, e.g. `femeRTFastLog2(1.0) == 0.0` exactly, not just approximately).
 float expectedFastLog2(float X) {
   uint32_t Bits;
   memcpy(&Bits, &X, sizeof(Bits));
-  float Y = (float)Bits;
-  return Y * (1.0f / 8388608.0f) - 126.94269504f;
+  int32_t Exp = (int32_t)(Bits >> 23) - 127;
+  uint32_t MantissaBits = (Bits & 0x007FFFFFu) | (127u << 23);
+  float M;
+  memcpy(&M, &MantissaBits, sizeof(M));
+  float F = M - 1.0f;
+  float Poly = F * (1.42349512f + F * (-0.58777299f + F * 0.16559316f));
+  return (float)Exp + Poly;
 }
 
 class ImageSamplingTest : public testing::Test {
@@ -323,10 +325,15 @@ using SampleCmpArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
 /// (roadmap L52(c)) its own trailing float `MinLodClamp`, matching
 /// `SampleCmp2D`'s own new operand (unlike SPIR-V's `ConstOffset`, which
 /// forbids `Dim::Cube`, `MinLod` is legal against any dimensionality).
+/// Roadmap L66(h) widens it again with a real `DDirXdX`/`DDirXdY`/
+/// `DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY` sextuple (inserted after
+/// `DirZ`, before `Lod`), mirroring `SampleCubeFn`'s own identical
+/// direction-vector derivative widening.
 using SampleCmpCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  const FemeSamplerDescriptor *, uint32_t,
                                  uint32_t, uint32_t, float, float, float, float,
-                                 bool, float, float, float, bool, void *);
+                                 float, float, float, float, float, float, bool,
+                                 float, float, float, bool, void *);
 /// The roadmap L48 `TextureCubeArray` counterpart of `SampleCmpCubeFn`,
 /// adding a float `ArrayLayer` coordinate before `Lod`. Also gains
 /// (roadmap L52(c)) its own trailing float `MinLodClamp`, mirroring
@@ -3693,7 +3700,91 @@ TEST_F(ImageSamplingTest, SampleCmpArray2DGradSelectsCoarserMipLevel) {
   EXPECT_FLOAT_EQ(WithGrad, 1.0f);
 }
 
-// Roadmap L52e: `Texture2D`'s own `OpImageQueryLod` runtime entry point
+TEST_F(ImageSamplingTest, SampleCmpCubeGradSelectsCoarserMipLevel) {
+  // Roadmap L66(h): the `Cube` counterpart of
+  // `ComparisonSamplingGradSelectsCoarserMipLevel` above -- a real
+  // direction-vector derivative sextuple resolves through
+  // `femeRTComputeCubeUVDerivatives` (the same face-local `(U, V)`
+  // derivative conversion
+  // `SampleCubeImplicitLodSelectsCoarserMipFromDerivatives` already exercises
+  // for an ordinary cube sample) to a real, non-level-0 implicit LOD. Level 0
+  // (2x2 per face) stores 0.2, level 1 (1x1 per face) stores 0.8; a `LessEqual`
+  // compare against a reference of 0.5 fails at level 0 and passes at level 1,
+  // mirroring `SampleCmpArray2DGradSelectsCoarserMipLevel`'s own identical
+  // pass/fail math.
+  float Level0[6][2][2][4];
+  float Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 0.2f;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 0.8f;
+  }
+  struct {
+    float L0[6][2][2][4];
+    float L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(float), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(float), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED | FEME_IMAGE_DEPTH;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpCubeFn Fn = resolve<SampleCmpCubeFn>(
+      addWrapper("samplecmp_cube_grad", "feme.cpu.image.samplecmp.cube.f32"));
+
+  // No derivatives: the base level's own 0.2 fails the 0.5 reference,
+  // proving zero derivatives still degenerate to level 0.
+  float NoGrad = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), true, &NoGrad);
+  EXPECT_FLOAT_EQ(NoGrad, 0.0f);
+
+  // The same `DDirYdX=4.0` sextuple
+  // `SampleCubeImplicitLodSelectsCoarserMipFromDerivatives` already
+  // confirms resolves face 0's own real minification well past the
+  // midpoint LOD, rounding the selected mip level up to level 1, whose
+  // own 0.8 passes the same reference.
+  float WithGrad = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/4.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), true, &WithGrad);
+  EXPECT_FLOAT_EQ(WithGrad, 1.0f);
+}
+
 // (`femeCpuImageQueryLod2DV2F32`) -- isolating its clamped-level/
 // unclamped-lod computation, independent of the already-tested ordinary
 // sampling math above. Every test below uses a single-layer, `Width ==
@@ -3734,10 +3825,11 @@ TEST_F(ImageSamplingTest, QueryLod2DReportsRawLodFromDerivatives) {
   // space footprint (`Pmax == 1.0`); the clamped level is this
   // non-mipmapped image's own `MipLevels <= 1` special case, always
   // `0.0` (per `femeRTComputeClampedQueryLevel`'s doc), while the
-  // unclamped lod is `femeRTFastLog2(1.0)` -- compared against
-  // `expectedFastLog2`'s identical formula, not true `log2` (see its own
-  // doc for why: this approximation has a small but real, nonzero bias
-  // even at an exact power of two).
+  // unclamped lod is `femeRTFastLog2(1.0)`, exactly `0.0` (this
+  // approximation is exact at every power of two) -- compared against
+  // `expectedFastLog2`'s identical formula rather than asserted as a
+  // literal `0.0f`, so this test still exercises the real function this
+  // approximation actually is, not an assumption about it.
   float Storage[4][4][4] = {};
   FemeImageSubresourceLayout Layout;
   FemeImageDescriptor Img =
@@ -3764,7 +3856,7 @@ TEST_F(ImageSamplingTest, QueryLod2DClampedLevelRoundsForNearestMipFilter) {
   // the nearest whole level -- unlike `MipFilter=Linear`, which reports
   // the continuous fractional value unrounded (see the test below).
   // `DUdX` below is chosen so the texel-space footprint is `1.6`, whose
-  // `expectedFastLog2` value (~0.657, comfortably past the `NEAREST`
+  // `expectedFastLog2` value (~0.678, comfortably past the `NEAREST`
   // rounding threshold's own midpoint of `0.5`, and still comfortably
   // inside this two-level image's own valid `[0, 1]` range) must round
   // up to level 1.
@@ -3811,7 +3903,7 @@ TEST_F(ImageSamplingTest, QueryLod2DClampedLevelRoundsForNearestMipFilter) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, DUdX, 0.0f, 0.0f, 0.0f, true, Out);
   float ExpectedLod = expectedFastLog2(1.6f);
   EXPECT_NEAR(Out[1], ExpectedLod, 1e-5f); // Unclamped lod: unrounded, as-is.
-  EXPECT_FLOAT_EQ(Out[0], 1.0f); // Clamped level: rounds ~0.657 up to 1.
+  EXPECT_FLOAT_EQ(Out[0], 1.0f); // Clamped level: rounds ~0.678 up to 1.
 }
 
 TEST_F(ImageSamplingTest, QueryLod2DClampedLevelStaysFractionalForLinearMipFilter) {
@@ -3819,7 +3911,7 @@ TEST_F(ImageSamplingTest, QueryLod2DClampedLevelStaysFractionalForLinearMipFilte
   // `QueryLod2DClampedLevelRoundsForNearestMipFilter` above, but this
   // sampler's own `MipFilter=Linear` (explicitly overridden below --
   // `makeSampler` itself always defaults to `Nearest`) must instead
-  // report the clamped level as the same unrounded ~0.657 fractional
+  // report the clamped level as the same unrounded ~0.678 fractional
   // value a real trilinear sample's own two-level blend would use, not
   // round it to a whole level the way `MipFilter=Nearest` does.
   float Level0[4][4][4] = {};
@@ -4144,13 +4236,15 @@ TEST_F(ImageSamplingTest, SampleCmpCubeSelectsEachFaceByDirection) {
   // Face 0 (+X) reads 0.0: a 0.5 reference (Dref >= Texel) passes
   // GreaterEqual.
   float Pass = 0.0f;
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, true,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, 0.0f, true,
      /*Dref=*/0.5f, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(),
      true, &Pass);
   EXPECT_FLOAT_EQ(Pass, 1.0f);
   // Face 5 (-Z) reads 0.9: a 0.5 reference fails GreaterEqual.
   float Fail = 1.0f;
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.0f, 0.0f, -1.0f, 0.0f, true,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, 0.0f, true,
      /*Dref=*/0.5f, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(),
      true, &Fail);
   EXPECT_FLOAT_EQ(Fail, 0.0f);
@@ -4592,8 +4686,9 @@ TEST_F(ImageSamplingTest, SampleCmpCubeSeamlessBlendsAcrossFaceEdge) {
       "samplecmp_cube_seamless", "feme.cpu.image.samplecmp.cube.f32"));
   float Out = 9.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
-     /*DirZ=*/0.6f, 0.0f, true, /*Dref=*/0.5f, /*Bias=*/0.0f,
-     -std::numeric_limits<float>::infinity(), true, &Out);
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
+     /*Dref=*/0.5f, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(),
+     true, &Out);
   EXPECT_GT(Out, 0.0f) << "expected a nonzero contribution from face 4's "
                           "own passing texel";
   EXPECT_LT(Out, 1.0f) << "expected face 0's own failing taps to still "

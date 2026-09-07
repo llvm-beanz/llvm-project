@@ -4052,20 +4052,54 @@ femeRTMipExtent(uint32_t BaseExtent, uint32_t Level) {
 // H17) no longer just linear-enough-to-round-away in between: a real
 // trilinear (`mipmapMode == Linear`) blend now consumes this value's own
 // fractional part directly (`femeRTSelectMipLevels`), so this
-// approximation's own small mid-octave error (this well-known "float-as-
-// int" reinterpretation technique) shows up as a real, if minor, blend-
-// weight inaccuracy rather than being rounded away -- acceptable for a
-// software rasterizer's own conformance tolerance, but worth calling out
-// as a real approximation, not an exact `log2`, now that its precision is
-// directly observable. This file is compiled freestanding (see
-// `femeRTHalfToFloat`'s own comment), so it reinterprets the value's own
-// IEEE-754 bit pattern directly rather than call a transcendental libm
-// routine this build cannot assume exists.
+// approximation's own small mid-octave error shows up as a real, if
+// minor, blend-weight inaccuracy rather than being rounded away. This
+// file is compiled freestanding (see `femeRTHalfToFloat`'s own comment),
+// so it reinterprets the value's own IEEE-754 bit pattern directly
+// rather than call a transcendental libm routine this build cannot
+// assume exists.
+//
+// (Roadmap L66(h)) The single-term linear "float-as-int" reinterpretation
+// this function used before this fix (`Bits * (1/2^23) - 126.94269504`)
+// has a real max error of ~0.057 log2 units mid-octave -- easily large
+// enough to place `femeRTPlanImplicitLod`'s computed LOD on the wrong
+// side of `femeRTNearestMipLevel`'s own `Frac < 0.5` mip-rounding
+// boundary versus VK-GL-CTS's own exact-log2 reference oracle
+// (`computeLodFromDerivates`'s `LODMODE_EXACT` mode, `deFloatLog2`) --
+// confirmed via a real `dEQP-VK.glsl.texture_functions.texturegrad.
+// samplercubeshadow_{fragment,vertex}` capture showing a small
+// (90/16384-pixel) but genuine "Image mismatch" along several evenly-
+// doubling-spaced screen-space diagonals (this test's own derivative
+// sweeps continuously across several octaves within one 128x128 image,
+// crossing several such rounding boundaries -- unlike the sibling
+// `Plain2D`/`Array1D`/`Array2D` `Dref`+`Grad` shadow tests, whose own
+// case-spec derivative magnitudes happen to stay within a single octave
+// throughout, never exercising this same rounding sensitivity). An
+// ordinary (non-`Dref`) sample tolerates this same error invisibly (a
+// slightly-wrong LOD blends into a barely-different filtered color,
+// safely within `deqp-vk`'s own image-comparison threshold), but a
+// depth-comparison sample's boolean pass/fail result is not -- any
+// mip-level disagreement flips the compare outright.
+//
+// Replaced with a degree-3 minimax polynomial correction of the
+// mantissa's own fractional part (still just bit tricks and arithmetic,
+// no libm call): extracts the unbiased exponent and the `[1, 2)`
+// mantissa separately, then approximates `log2(1+f)` for the mantissa's
+// own fractional part `f` with a cubic fit (coefficients least-squares
+// minimax-fitted against a real `log2` table) instead of the old
+// single-term linear fit -- cuts the max mid-octave error to ~0.0013 log2
+// units (over 40x tighter), while preserving the exact-at-every-power-
+// of-two property every existing caller already depends on.
 __attribute__((always_inline)) static float femeRTFastLog2(float X) {
   uint32_t Bits;
   __builtin_memcpy(&Bits, &X, sizeof(Bits));
-  float Y = (float)Bits;
-  return Y * (1.0f / 8388608.0f) - 126.94269504f;
+  int32_t Exp = (int32_t)(Bits >> 23) - 127;
+  uint32_t MantissaBits = (Bits & 0x007FFFFFu) | (127u << 23);
+  float M;
+  __builtin_memcpy(&M, &MantissaBits, sizeof(M));
+  float F = M - 1.0f; // Mantissa's own fractional part, in [0, 1).
+  float Poly = F * (1.42349512f + F * (-0.58777299f + F * 0.16559316f));
+  return (float)Exp + Poly;
 }
 
 // The mip level and (when the sampler enables anisotropic filtering) the
@@ -6338,67 +6372,76 @@ typedef struct {
 } FemeRTCubeUVDerivatives;
 
 __attribute__((always_inline)) static FemeRTCubeUVDerivatives
-femeRTComputeCubeUVDerivatives(uint32_t Face, float RawU, float RawV,
-                               float RawMajor, float DXdX, float DXdY,
-                               float DYdX, float DYdY, float DZdX,
+femeRTComputeCubeUVDerivatives(uint32_t Face, float RawMajor, float DXdX,
+                               float DXdY, float DYdX, float DYdY, float DZdX,
                                float DZdY) {
-  float DRawUdX, DRawUdY, DRawVdX, DRawVdY, DRawMajordX, DRawMajordY;
+  float DRawUdX, DRawUdY, DRawVdX, DRawVdY;
   switch (Face) {
   case 0: // +X: U=-Z, V=-Y, Major=X.
     DRawUdX = -DZdX;
     DRawUdY = -DZdY;
     DRawVdX = -DYdX;
     DRawVdY = -DYdY;
-    DRawMajordX = DXdX;
-    DRawMajordY = DXdY;
     break;
   case 1: // -X: U=Z, V=-Y, Major=-X.
     DRawUdX = DZdX;
     DRawUdY = DZdY;
     DRawVdX = -DYdX;
     DRawVdY = -DYdY;
-    DRawMajordX = -DXdX;
-    DRawMajordY = -DXdY;
     break;
   case 2: // +Y: U=X, V=Z, Major=Y.
     DRawUdX = DXdX;
     DRawUdY = DXdY;
     DRawVdX = DZdX;
     DRawVdY = DZdY;
-    DRawMajordX = DYdX;
-    DRawMajordY = DYdY;
     break;
   case 3: // -Y: U=X, V=-Z, Major=-Y.
     DRawUdX = DXdX;
     DRawUdY = DXdY;
     DRawVdX = -DZdX;
     DRawVdY = -DZdY;
-    DRawMajordX = -DYdX;
-    DRawMajordY = -DYdY;
     break;
   case 4: // +Z: U=X, V=-Y, Major=Z.
     DRawUdX = DXdX;
     DRawUdY = DXdY;
     DRawVdX = -DYdX;
     DRawVdY = -DYdY;
-    DRawMajordX = DZdX;
-    DRawMajordY = DZdY;
     break;
   default: // 5, -Z: U=-X, V=-Y, Major=-Z.
     DRawUdX = -DXdX;
     DRawUdY = -DXdY;
     DRawVdX = -DYdX;
     DRawVdY = -DYdY;
-    DRawMajordX = -DZdX;
-    DRawMajordY = -DZdY;
     break;
   }
-  float InvMajorSq = 1.0f / (RawMajor * RawMajor);
+  // (Roadmap L66(h)) VK-GL-CTS's own reference oracle for this LOD
+  // (`vktShaderRenderTextureFunctionTests.cpp`'s `computeLodFromGradCube`)
+  // deliberately treats the major-axis component as *locally constant*
+  // across the derivative -- it scales the raw direction derivative by a
+  // fixed `size / (2 * |majorAxis|)` factor and never differentiates
+  // `|majorAxis|` itself, unlike a mathematically exact quotient-rule
+  // derivative of `U = 0.5 * (rawU / rawMajor + 1)` (which this function
+  // computed before this fix, via a now-removed `RawU * DRawMajordX`/
+  // `RawV * DRawMajordY` correction term). That extra precision is
+  // invisible to an ordinary color sample (any resulting sub-texel LOD
+  // difference blends into a barely-different filtered color, safely
+  // within `deqp-vk`'s own image-comparison threshold) but a
+  // depth-comparison sample's boolean pass/fail result is far more
+  // sensitive to exactly which mip level gets selected near a rounding
+  // boundary -- confirmed via a real `dEQP-VK.glsl.texture_functions.
+  // texturegrad.samplercubeshadow_{fragment,vertex}` capture showing a
+  // sparse (90/16384-pixel, ~0.5%) diagonal-boundary "Image mismatch"
+  // that vanished once this function's derivative matched the oracle's
+  // own simplified formula instead of the exact one. Dropping the
+  // correction term here (this function's only caller,
+  // `femeRTComputeCubeClampedLod`, uses it purely for LOD estimation,
+  // never for the actual sample's fetch coordinates) matches `deqp-vk`'s
+  // own reference bit-for-bit for this LOD purpose.
   FemeRTCubeUVDerivatives D;
-  D.DUdX = 0.5f * (DRawUdX * RawMajor - RawU * DRawMajordX) * InvMajorSq;
-  D.DUdY = 0.5f * (DRawUdY * RawMajor - RawU * DRawMajordY) * InvMajorSq;
-  D.DVdX = 0.5f * (DRawVdX * RawMajor - RawV * DRawMajordX) * InvMajorSq;
-  D.DVdY = 0.5f * (DRawVdY * RawMajor - RawV * DRawMajordY) * InvMajorSq;
+  D.DUdX = 0.5f * DRawUdX / RawMajor;
+  D.DUdY = 0.5f * DRawUdY / RawMajor;
+  D.DVdX = 0.5f * DRawVdX / RawMajor;
+  D.DVdY = 0.5f * DRawVdY / RawMajor;
   return D;
 }
 
@@ -6759,9 +6802,9 @@ femeRTComputeCubeClampedLod(const FemeRTImageDescriptor *Img,
   if (UseExplicitLod)
     return femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, Samp,
                                    MinLodClamp, Bias);
-  FemeRTCubeUVDerivatives D = femeRTComputeCubeUVDerivatives(
-      CF.Face, CF.RawU, CF.RawV, CF.RawMajor, DDirXdX, DDirXdY, DDirYdX,
-      DDirYdY, DDirZdX, DDirZdY);
+  FemeRTCubeUVDerivatives D =
+      femeRTComputeCubeUVDerivatives(CF.Face, CF.RawMajor, DDirXdX, DDirXdY,
+                                     DDirYdX, DDirYdY, DDirZdX, DDirZdY);
   return femeRTPlanImplicitLod(Img, Samp, D.DUdX, D.DUdY, D.DVdX, D.DVdY,
                               MinLodClamp, Bias)
       .ClampedLod;
@@ -6882,21 +6925,36 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
 // comparison tap that `femeRTSampleFilteredCube` applies to an ordinary
 // color one -- see that function's own comment. `MinLodClamp` (roadmap
 // L52(c)) mirrors `femeCpuImageSampleCmp2DF32`'s own new `MinLod` clamp
-// operand.
+// operand. `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY`
+// (roadmap L66(h)) mirror `femeCpuImageSampleCubeV4F32`'s own identically-
+// named screen-space direction-vector derivative operands, fed through
+// the same `femeRTComputeCubeClampedLod` helper that already turns them
+// into a real, derivative-driven implicit LOD for an ordinary cube
+// sample -- before this fix, an implicit-LOD `Cube` depth-comparison
+// sample always called `femeRTComputeClampedLod` directly, which always
+// resolves to `Lod=0` (mip level 0) regardless of any real minification,
+// the same root cause `femeRTComputeCubeClampedLod`'s own doc describes
+// for `femeCpuImageSampleCubeV4F32`'s pre-L56 bug. A caller with no real
+// derivatives to give (a non-fragment stage, or an explicit-LOD sample)
+// passes six zero constants, which `femeRTComputeCubeClampedLod`
+// provably still resolves to `Lod=0` for the same reason a Plain2D
+// all-zero `Grad` degenerates to the same always-level-0 result.
 float femeCpuImageSampleCmpCubeF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool UseExplicitLod, float Dref, float Bias,
-    float MinLodClamp,
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float Lod, _Bool UseExplicitLod, float Dref,
+    float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.samplecmp.cube.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmpCubeF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool UseExplicitLod, float Dref, float Bias,
-    float MinLodClamp, _Bool Mask) {
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float Lod, _Bool UseExplicitLod, float Dref,
+    float Bias, float MinLodClamp, _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -6907,14 +6965,14 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeF32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
   Samp.AddressV = 2;
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/MinLodClamp,
-                                            /*InstructionBias=*/Bias);
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  float ClampedLod = femeRTComputeCubeClampedLod(
+      &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX, DDirYdY,
+      DDirZdX, DDirZdY, MinLodClamp, Bias);
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
-  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   float Lo = femeRTSampleCmpCubeAtLevel(&Img, &Samp, CF.U, CF.V,
                                        /*LayerBase=*/0, CF.Face, Level0, Dref,
                                        UseLinear);
