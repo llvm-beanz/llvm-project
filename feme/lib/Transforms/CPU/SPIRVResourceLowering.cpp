@@ -1226,13 +1226,14 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false; // No filtered/dref sample over an integer format.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      // Roadmap L66(c): a depth-comparison `Grad` sample is scoped to
-      // `Plain2D` only for now -- `Array2D`/`Cube`/`CubeArray`/
-      // `Plain1D`/`Array1D` counterparts remain unstarted follow-on work,
-      // mirroring this same narrowing's own precedent (e.g. roadmap
-      // L46's initial `Plain2D`-only depth-comparison-sample scope,
-      // later widened by L48/L54).
-      if (DrefHasGrad && Shape != ImageShape::Plain2D)
+      // Roadmap L66(c) scoped a depth-comparison `Grad` sample to
+      // `Plain2D` only; roadmap L66(f) widens this to also accept
+      // `Plain1D`/`Array1D` -- `Array2D`/`Cube`/`CubeArray` counterparts
+      // remain unstarted follow-on work, mirroring this same narrowing's
+      // own precedent (e.g. roadmap L46's initial `Plain2D`-only
+      // depth-comparison-sample scope, later widened by L48/L54).
+      if (DrefHasGrad && Shape != ImageShape::Plain2D &&
+          Shape != ImageShape::Plain1D && Shape != ImageShape::Array1D)
         return false;
       // SPIR-V's own validation rules give a depth-comparison sample's
       // Coordinate operand one extra component beyond the shape's own
@@ -1275,17 +1276,26 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                              /*AllowArray2D=*/true) ||
           (DrefHasBias &&
            !CI->getArgOperand(DrefSampleBiasIdx)->getType()->isFloatTy()) ||
-          // Roadmap L66(c): `Grad`'s own `dPdx`/`dPdy` pair is validated
-          // the same width as an ordinary sample's own coordinate
-          // (`SampleCoordWidth`, not `DrefCoordWidth`) -- a screen-space
-          // derivative tracks the shape's real addressing dimensionality
-          // only, never the dref-padded coordinate width, mirroring
-          // `GradDerivativeWidth`'s own identical precedent for a
-          // non-`Dref` `Grad` sample.
-          (DrefHasGrad && (!isCoordN(CI->getArgOperand(DrefSampleGradDPdxIdx),
-                                     SampleCoordWidth, /*Float=*/true) ||
-                           !isCoordN(CI->getArgOperand(DrefSampleGradDPdyIdx),
-                                     SampleCoordWidth, /*Float=*/true))) ||
+          // Roadmap L66(c)/L66(f): `Grad`'s own `dPdx`/`dPdy` pair is
+          // validated against the same derivative width an ordinary
+          // sample's own `Grad` operand uses (`GradDerivativeWidth`,
+          // narrowed by one for an arrayed shape since the array layer
+          // has no derivative of its own) -- never the dref-padded
+          // `DrefCoordWidth` -- mirroring `GradDerivativeWidth`'s own
+          // identical precedent for a non-`Dref` `Grad` sample. For
+          // `Plain2D` this is 2 (unarrayed, matches `SampleCoordWidth`);
+          // for `Plain1D` it is 1 (unarrayed, `SampleCoordWidth` is
+          // already 1); for `Array1D` it is 1 too (arrayed,
+          // `SampleCoordWidth` 2 minus the array layer).
+          (DrefHasGrad &&
+           (!isCoordN(CI->getArgOperand(DrefSampleGradDPdxIdx),
+                      isArrayedShape(Shape) ? SampleCoordWidth - 1
+                                            : SampleCoordWidth,
+                      /*Float=*/true) ||
+            !isCoordN(CI->getArgOperand(DrefSampleGradDPdyIdx),
+                      isArrayedShape(Shape) ? SampleCoordWidth - 1
+                                            : SampleCoordWidth,
+                      /*Float=*/true))) ||
           (DrefHasClamp &&
            !CI->getArgOperand(getDrefSampleClampIdx(DrefHasBias, DrefHasGrad))
                 ->getType()
@@ -2910,25 +2920,39 @@ void lowerImageAccesses(
                                   : ConstantFP::get(Builder.getFloatTy(), 0.0);
         // Roadmap L66(c): SPIR-V's own `Grad` image operand pair
         // (`spv_resource_samplecmpgrad{,_clamp}`'s `dPdx`/`dPdy`, which
-        // `hasOnlySupportedImageUses` already restricted to `Plain2D`
-        // only) -- unpacked into four scalars the same way `Coord`'s own
-        // `C0`/`C1` are, and threaded through only for the `Plain2D` arm
-        // below. Zero constants for the non-`Grad` forms, which have no
-        // such operand of their own -- `femeCpuImageSampleCmp2DF32`
-        // provably degenerates to the exact same level-0 result its own
-        // narrower pre-L66(c) implementation always computed for
-        // all-zero derivatives.
+        // `hasOnlySupportedImageUses` now restricts to `Plain2D`/
+        // `Plain1D`/`Array1D`, roadmap L66(f)) -- unpacked into four
+        // scalars the same way `Coord`'s own `C0`/`C1` are for `Plain2D`,
+        // and threaded through only for that arm below. Zero constants
+        // for the non-`Grad` forms, which have no such operand of their
+        // own -- `femeCpuImageSampleCmp2DF32` provably degenerates to the
+        // exact same level-0 result its own narrower pre-L66(c)
+        // implementation always computed for all-zero derivatives.
         Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *DVdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *DVdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        // Roadmap L66(f): `Plain1D`/`Array1D`'s own `dPdx`/`dPdy` are
+        // already bare scalar floats (`hasOnlySupportedImageUses`'s own
+        // narrowed `GradDerivativeWidth`-style check gives both shapes a
+        // 1-wide derivative), not 2-wide vectors `CreateExtractElement`
+        // could apply to the way `Plain2D`'s own pair requires -- read
+        // directly into `Grad1DDUdX`/`Grad1DDUdY` instead, consumed only
+        // by their own switch arms below.
+        Value *Grad1DDUdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *Grad1DDUdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
         if (DrefHasGrad) {
           Value *GradDPdx = CI->getArgOperand(DrefSampleGradDPdxIdx);
           Value *GradDPdy = CI->getArgOperand(DrefSampleGradDPdyIdx);
-          DUdX = Builder.CreateExtractElement(GradDPdx, uint64_t{0});
-          DUdY = Builder.CreateExtractElement(GradDPdy, uint64_t{0});
-          DVdX = Builder.CreateExtractElement(GradDPdx, uint64_t{1});
-          DVdY = Builder.CreateExtractElement(GradDPdy, uint64_t{1});
+          if (Shape == ImageShape::Plain2D) {
+            DUdX = Builder.CreateExtractElement(GradDPdx, uint64_t{0});
+            DUdY = Builder.CreateExtractElement(GradDPdy, uint64_t{0});
+            DVdX = Builder.CreateExtractElement(GradDPdx, uint64_t{1});
+            DVdY = Builder.CreateExtractElement(GradDPdy, uint64_t{1});
+          } else {
+            Grad1DDUdX = GradDPdx;
+            Grad1DDUdY = GradDPdy;
+          }
         }
         // Roadmap L50d: SPIR-V's own `ConstOffset` image operand --
         // `hasOnlySupportedImageUses` already validated it via
@@ -2985,17 +3009,27 @@ void lowerImageAccesses(
           // already works unmodified; only `C0` (the real `u`) is used.
           // Roadmap L62: `Bias`/`MinLodClamp` are the same two generically
           // extracted values every other shape's arm already passes.
-          NewCall = createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex,
-                                      C0, Lod, ExplicitLodFlag, Dref, Bias,
-                                      MinLodClamp, Mask, CI->getName());
+          // Roadmap L66(f): `Grad1DDUdX`/`Grad1DDUdY` thread a real
+          // derivative-driven implicit LOD through, mirroring `Plain2D`'s
+          // own `DUdX`/`DUdY` -- zero constants for every non-`Grad` form,
+          // degenerating to the same always-level-0 result as before.
+          NewCall =
+              createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex, C0,
+                                Grad1DDUdX, Grad1DDUdY, Lod, ExplicitLodFlag,
+                                Dref, Bias, MinLodClamp, Mask, CI->getName());
           break;
         case ImageShape::Array1D:
           // Same real-capture-confirmed shape as Plain1D just above, but
           // `vec3(u, layer, compare)` -- both `C0` (u) and `C1` (layer)
-          // are real, meaningful components here.
+          // are real, meaningful components here. Roadmap L66(f):
+          // `Grad1DDUdX`/`Grad1DDUdY` mirror `Plain1D`'s own identical new
+          // parameters immediately above -- only `U`, never `ArrayLayer`,
+          // is ever differentiated, matching `createSample1DArray`'s own
+          // identical precedent for an ordinary sample.
           NewCall = createSampleCmpArray1D(
-              Builder, Env, ImageIndex, SamplerIndex, C0, C1, Lod,
-              ExplicitLodFlag, Dref, Bias, MinLodClamp, Mask, CI->getName());
+              Builder, Env, ImageIndex, SamplerIndex, C0, C1, Grad1DDUdX,
+              Grad1DDUdY, Lod, ExplicitLodFlag, Dref, Bias, MinLodClamp, Mask,
+              CI->getName());
           break;
         case ImageShape::Plain3D:
         case ImageShape::Plain2DMS:

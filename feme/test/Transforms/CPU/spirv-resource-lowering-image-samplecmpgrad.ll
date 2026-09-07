@@ -13,11 +13,14 @@
 ; Image Operands bit order (mirroring `samplecmpbias`'s own single `Bias`
 ; scalar in that same position).
 ;
-; Only `Plain2D` supports this today -- `hasOnlySupportedImageUses`'s own
-; new `DrefHasGrad` restriction leaves every other depth-comparison-capable
-; shape (`Array2D`/`Cube`/`CubeArray`/`Plain1D`/`Array1D`) unrewritten,
-; matching this project's own "extend one shape at a time" precedent (see
-; `samplecmp_grad_cube_unsupported` below).
+; Roadmap L66(f) widens this support to `Plain1D`/`Array1D` too, whose own
+; `dPdx`/`dPdy` are bare scalar floats rather than `Plain2D`'s 2-wide
+; vectors (`GradDerivativeWidth`'s own generalized "arrayed shapes drop one
+; component" formula, mirroring the equivalent non-`Dref` `Grad` precedent
+; roadmap L64 already established) -- see `samplecmp_grad_1d`/
+; `samplecmp_grad_array1d` below. `Array2D`/`Cube`/`CubeArray` remain
+; unrewritten, matching this project's own "extend one shape at a time"
+; precedent (see `samplecmp_grad_cube_unsupported` below).
 
 target triple = "spirv-unknown-vulkan-compute"
 
@@ -102,6 +105,46 @@ define float @samplecmp_grad_clamp(<3 x float> %coord, float %dref,
   ret float %r
 }
 
+; Texture1D: [Dim=1D(0), Depth=2, Arrayed=0, MS=0, Sampled=1, Format=0].
+; Roadmap L66(f): `Plain1D`'s own `dPdx`/`dPdy` are bare scalar floats, not
+; a 2-wide vector -- read directly as `DUdX`/`DUdY` with no
+; `CreateExtractElement` needed. Its own `Coordinate` stays the
+; pre-existing fixed 3-wide `Dref` shape (`vec3(u, <unused>, compare)`,
+; the same quirk every other `Plain1D` `Dref` intrinsic already has),
+; unaffected by this row.
+; CHECK-LABEL: define float @samplecmp_grad_1d(
+define float @samplecmp_grad_1d(<3 x float> %coord, float %dref, float %dpdx,
+                                float %dpdy) {
+  %img = call target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg.1d(i32 0, i32 6, i32 1, i32 0, ptr null)
+  %samp = call target("spirv.Sampler")
+      @llvm.spv.resource.handlefrombinding.tsamp.1d(i32 0, i32 7, i32 1, i32 0, ptr null)
+  ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 1, i32 1, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  %r = call float @llvm.spv.resource.samplecmpgrad(
+      target("spirv.Image", float, 0, 2, 0, 0, 1, 0) %img,
+      target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
+      float %dpdx, float %dpdy, <3 x i32> zeroinitializer)
+  ret float %r
+}
+
+; Texture1DArray: [Dim=1D(0), Depth=2, Arrayed=1, MS=0, Sampled=1, Format=0].
+; Roadmap L66(f): the `Array1D` counterpart of the test just above -- only
+; `U`, never `ArrayLayer`, is ever differentiated.
+; CHECK-LABEL: define float @samplecmp_grad_array1d(
+define float @samplecmp_grad_array1d(<3 x float> %coord, float %dref,
+                                     float %dpdx, float %dpdy) {
+  %img = call target("spirv.Image", float, 0, 2, 1, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg.array1d(i32 0, i32 8, i32 1, i32 0, ptr null)
+  %samp = call target("spirv.Sampler")
+      @llvm.spv.resource.handlefrombinding.tsamp.array1d(i32 0, i32 9, i32 1, i32 0, ptr null)
+  ; CHECK: call float @feme.cpu.image.samplecmp.1darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 2, i32 2, float %{{.*}}, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  %r = call float @llvm.spv.resource.samplecmpgrad(
+      target("spirv.Image", float, 0, 2, 1, 0, 1, 0) %img,
+      target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
+      float %dpdx, float %dpdy, <3 x i32> zeroinitializer)
+  ret float %r
+}
+
 declare target("spirv.Image", float, 1, 2, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")
@@ -110,3 +153,11 @@ declare target("spirv.Image", float, 3, 2, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg.cube(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")
     @llvm.spv.resource.handlefrombinding.tsamp.cube(i32, i32, i32, i32, ptr)
+declare target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
+    @llvm.spv.resource.handlefrombinding.timg.1d(i32, i32, i32, i32, ptr)
+declare target("spirv.Sampler")
+    @llvm.spv.resource.handlefrombinding.tsamp.1d(i32, i32, i32, i32, ptr)
+declare target("spirv.Image", float, 0, 2, 1, 0, 1, 0)
+    @llvm.spv.resource.handlefrombinding.timg.array1d(i32, i32, i32, i32, ptr)
+declare target("spirv.Sampler")
+    @llvm.spv.resource.handlefrombinding.tsamp.array1d(i32, i32, i32, i32, ptr)

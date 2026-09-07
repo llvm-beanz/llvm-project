@@ -4293,12 +4293,15 @@ public:
 /// `Grad` sibling of `ImageSampleDrefImplicitLodPattern`'s own `Bias`
 /// handling (roadmap L52(b)/L66(c)): `Grad` and `Bias` are mutually
 /// exclusive on the same instruction, so there is no combined shape to
-/// also cover here. Only `Plain2D` image handles reach a real
-/// `feme.cpu.image.samplecmp.2d.f32` call once lowered
-/// (`SPIRVResourceLowering.cpp`'s own `DrefHasGrad` restriction) --
-/// registered ahead of `ImageSampleDrefExplicitLodPattern` below so this
-/// pattern gets first refusal on a `Grad` operand before that pattern's
-/// own (mutually exclusive) literal-zero-`Lod` handling is tried.
+/// also cover here. `Plain2D` (roadmap L66(c)), `Plain1D`, and `Array1D`
+/// (roadmap L66(f)) image handles reach a real
+/// `feme.cpu.image.samplecmp.{2d,1d,1darray}.f32` call once lowered
+/// (`SPIRVResourceLowering.cpp`'s own `DrefHasGrad` restriction; every
+/// other depth-comparison-capable shape remains unstarted follow-on
+/// work) -- registered ahead of `ImageSampleDrefExplicitLodPattern` below
+/// so this pattern gets first refusal on a `Grad` operand before that
+/// pattern's own (mutually exclusive) literal-zero-`Lod` handling is
+/// tried.
 class ImageSampleDrefGradPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::ImageSampleDrefExplicitLodOp> {

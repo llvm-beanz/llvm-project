@@ -380,11 +380,18 @@ enum class ImageCallKind : uint8_t {
   /// `Sample1D`/`Sample1DArray` themselves -- still no `ConstOffset`
   /// (SPIR-V's own `ConstOffset` image operand is legal against `Dim::1D`,
   /// but no real CTS case exercises it yet, matching `Sample1D`'s own
-  /// scope decision).
+  /// scope decision). Roadmap L66(f) added a real `DUdX`/`DUdY` scalar
+  /// derivative pair too, mirroring `SampleCmp2D`'s own `Grad` support
+  /// (roadmap L66(c)) -- a bare scalar here rather than a 2-wide pair,
+  /// since `Plain1D`'s own addressing is itself already a bare scalar
+  /// `U` with no `V`.
   SampleCmp1D,
   /// `feme.cpu.image.samplecmp.1darray.f32` (roadmap L54): the
   /// `Texture1DArray` counterpart of `SampleCmp1D`, adding the same float
-  /// array-layer coordinate `Sample1DArray` adds to `Sample1D`.
+  /// array-layer coordinate `Sample1DArray` adds to `Sample1D`. Roadmap
+  /// L66(f) added the same `DUdX`/`DUdY` scalar derivative pair
+  /// `SampleCmp1D` gained -- only `U`, never `ArrayLayer`, is ever
+  /// differentiated, mirroring `Sample1DArray`'s own identical precedent.
   SampleCmpArray1D,
   /// `feme.cpu.image.querylod.2d.v2f32` (roadmap L52e): `Plain2D`'s own
   /// counterpart of `OpImageQueryLod` (HLSL's
@@ -959,25 +966,32 @@ createSample1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
 /// depth-comparison counterpart of `createSample1D`. \p Bias/\p MinLodClamp
 /// (roadmap L62) mirror `createSampleCmpCube`'s own identically-named
 /// parameters; this shape still carries no `ConstOffset`, per
-/// `ImageCallKind::SampleCmp1D`'s own doc.
-llvm::CallInst *createSampleCmp1D(llvm::IRBuilderBase &Builder,
-                                  const ImageCallEnv &Env,
-                                  llvm::Value *ImageIndex,
-                                  llvm::Value *SamplerIndex, llvm::Value *U,
-                                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                                  llvm::Value *Dref, llvm::Value *Bias,
-                                  llvm::Value *MinLodClamp, llvm::Value *Mask,
-                                  const llvm::Twine &Name = "");
+/// `ImageCallKind::SampleCmp1D`'s own doc. \p DUdX/\p DUdY (roadmap
+/// L66(f)) are a real screen-space derivative pair for a `Grad` sample --
+/// bare scalars, mirroring `createSample1D`'s own identically-named
+/// parameters, since `Plain1D`'s addressing is itself already a bare
+/// scalar; zero constants for every non-`Grad` form.
+llvm::CallInst *createSampleCmp1D(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *Lod,
+    llvm::Value *UseExplicitLod, llvm::Value *Dref, llvm::Value *Bias,
+    llvm::Value *MinLodClamp, llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.1darray.f32` call (roadmap L54), the
 /// `Texture1DArray` counterpart of `createSampleCmp1D`. \p Bias/\p
 /// MinLodClamp (roadmap L62) mirror that function's own new parameters.
-llvm::CallInst *createSampleCmpArray1D(
-    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
-    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
-    llvm::Value *ArrayLayer, llvm::Value *Lod, llvm::Value *UseExplicitLod,
-    llvm::Value *Dref, llvm::Value *Bias, llvm::Value *MinLodClamp,
-    llvm::Value *Mask, const llvm::Twine &Name = "");
+/// \p DUdX/\p DUdY (roadmap L66(f)) mirror `createSampleCmp1D`'s own
+/// identically-named new parameters -- only `U`, never `ArrayLayer`, is
+/// ever differentiated.
+llvm::CallInst *
+createSampleCmpArray1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                       llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                       llvm::Value *U, llvm::Value *ArrayLayer,
+                       llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *Lod,
+                       llvm::Value *UseExplicitLod, llvm::Value *Dref,
+                       llvm::Value *Bias, llvm::Value *MinLodClamp,
+                       llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.querylod.2d.v2f32` call (roadmap L52e): see
 /// `ImageCallKind::QueryLod2D`'s own doc for its `<2 x float>` result

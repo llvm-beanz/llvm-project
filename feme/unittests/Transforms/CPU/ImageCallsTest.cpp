@@ -14,6 +14,8 @@
 #include "llvm/IR/Module.h"
 #include "gtest/gtest.h"
 
+#include <limits>
+
 using namespace feme::cpu;
 using namespace llvm;
 
@@ -343,17 +345,26 @@ TEST_F(ImageCallsTest, MatchesSample1DArrayCallWithBiasAndMinLodClamp) {
 // added for the same reason: `createSampleCmp1D`/`createSampleCmpArray1D`
 // each grew a real `Bias`/`MinLodClamp` operand pair, so `matchImageCall`'s
 // own hardcoded arg-count guards had to grow with them (11 -> 13, 12 -> 14).
+// Roadmap L66(f) grew both again with a real `DUdX`/`DUdY` scalar
+// derivative pair (13 -> 15, 14 -> 16); these two tests pass zero
+// constants for that pair, mirroring an explicit-LOD/non-`Grad` caller,
+// while `MatchesSampleCmp1DCallWithRealGradDerivatives`/
+// `MatchesSampleCmpArray1DCallWithRealGradDerivatives` below cover a real
+// nonzero derivative.
 TEST_F(ImageCallsTest, MatchesSampleCmp1DCallWithBiasAndMinLodClamp) {
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
   Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
   Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
-  CallInst *CI = createSampleCmp1D(
-      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, Lod,
-      Builder.getInt1(false), Dref, Bias, MinLodClamp, Builder.getInt1(true));
+  CallInst *CI =
+      createSampleCmp1D(Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+                        U, DUdX, DUdY, Lod, Builder.getInt1(false), Dref, Bias,
+                        MinLodClamp, Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -363,6 +374,8 @@ TEST_F(ImageCallsTest, MatchesSampleCmp1DCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
   EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
   EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->DUdX, DUdX);
+  EXPECT_EQ(Matched->DUdY, DUdY);
   EXPECT_EQ(Matched->Lod, Lod);
   EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
   EXPECT_EQ(Matched->Dref, Dref);
@@ -371,19 +384,47 @@ TEST_F(ImageCallsTest, MatchesSampleCmp1DCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// Roadmap L66(f): a real nonzero `DUdX`/`DUdY` pair, confirming
+// `createSampleCmp1D`'s newly widened signature and `matchImageCall`'s
+// decode both thread it through correctly.
+TEST_F(ImageCallsTest, MatchesSampleCmp1DCallWithRealGradDerivatives) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.125);
+  Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0625);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(),
+                                       -std::numeric_limits<float>::infinity());
+  CallInst *CI =
+      createSampleCmp1D(Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+                        U, DUdX, DUdY, Lod, Builder.getInt1(false), Dref, Bias,
+                        MinLodClamp, Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->DUdX, DUdX);
+  EXPECT_EQ(Matched->DUdY, DUdY);
+}
+
 TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithBiasAndMinLodClamp) {
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
   Value *ArrayLayer = ConstantFP::get(Builder.getFloatTy(), 2.0);
+  Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
   Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
   Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
-  CallInst *CI = createSampleCmpArray1D(Builder, Env, Builder.getInt32(2),
-                                        Builder.getInt32(1), U, ArrayLayer, Lod,
-                                        Builder.getInt1(false), Dref, Bias,
-                                        MinLodClamp, Builder.getInt1(true));
+  CallInst *CI = createSampleCmpArray1D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, ArrayLayer,
+      DUdX, DUdY, Lod, Builder.getInt1(false), Dref, Bias, MinLodClamp,
+      Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -394,12 +435,41 @@ TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
   EXPECT_EQ(Matched->U, U);
   EXPECT_EQ(Matched->ArrayLayer, ArrayLayer);
+  EXPECT_EQ(Matched->DUdX, DUdX);
+  EXPECT_EQ(Matched->DUdY, DUdY);
   EXPECT_EQ(Matched->Lod, Lod);
   EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
   EXPECT_EQ(Matched->Dref, Dref);
   EXPECT_EQ(Matched->Bias, Bias);
   EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L66(f): a real nonzero `DUdX`/`DUdY` pair for `Array1D` too --
+// only `U` is ever differentiated, `ArrayLayer` never is.
+TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithRealGradDerivatives) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *ArrayLayer = ConstantFP::get(Builder.getFloatTy(), 2.0);
+  Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.125);
+  Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0625);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(),
+                                       -std::numeric_limits<float>::infinity());
+  CallInst *CI = createSampleCmpArray1D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, ArrayLayer,
+      DUdX, DUdY, Lod, Builder.getInt1(false), Dref, Bias, MinLodClamp,
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->ArrayLayer, ArrayLayer);
+  EXPECT_EQ(Matched->DUdX, DUdX);
+  EXPECT_EQ(Matched->DUdY, DUdY);
 }
 
 // (Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by

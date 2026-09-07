@@ -533,20 +533,24 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // ConstOffset (mirroring Sample1D's own simpler scope). Roadmap L62
     // adds a real bias/min_lod_clamp pair, mirroring SampleCmpCube's own
     // operand order (lod, use_explicit_lod, dref, bias, min_lod_clamp).
+    // Roadmap L66(f) adds a real du_dx/du_dy scalar derivative pair
+    // between u and lod, mirroring Sample1D's own du_dx/du_dy placement.
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
-    //  image_index, sampler_index, u, lod, use_explicit_lod, dref, bias,
-    //  min_lod_clamp, mask) -> float
+    //  image_index, sampler_index, u, du_dx, du_dy, lod, use_explicit_lod,
+    //  dref, bias, min_lod_clamp, mask) -> float
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, I1Ty, F32Ty, F32Ty, F32Ty, I1Ty},
+                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, F32Ty,
+                             I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCmpArray1D:
-    // Same as SampleCmp1D, plus a float array_layer operand before lod,
-    // mirroring Sample1DArray's own relationship to Sample1D.
+    // Same as SampleCmp1D, plus a float array_layer operand before
+    // du_dx, mirroring Sample1DArray's own relationship to Sample1D.
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, F32Ty, I1Ty},
+                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty,
+                             F32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::QueryLod2D: {
@@ -987,35 +991,33 @@ CallInst *feme::cpu::createSample1DArray(
                             Name);
 }
 
-CallInst *feme::cpu::createSampleCmp1D(IRBuilderBase &Builder,
-                                       const ImageCallEnv &Env,
-                                       Value *ImageIndex, Value *SamplerIndex,
-                                       Value *U, Value *Lod,
-                                       Value *UseExplicitLod, Value *Dref,
-                                       Value *Bias, Value *MinLodClamp,
-                                       Value *Mask, const Twine &Name) {
+CallInst *feme::cpu::createSampleCmp1D(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *U, Value *DUdX, Value *DUdY, Value *Lod,
+    Value *UseExplicitLod, Value *Dref, Value *Bias, Value *MinLodClamp,
+    Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmp1D);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
-                             Lod, UseExplicitLod, Dref, Bias, MinLodClamp,
-                             Mask},
+                             DUdX, DUdY, Lod, UseExplicitLod, Dref, Bias,
+                             MinLodClamp, Mask},
                             Name);
 }
 
 CallInst *feme::cpu::createSampleCmpArray1D(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
-    Value *SamplerIndex, Value *U, Value *ArrayLayer, Value *Lod,
-    Value *UseExplicitLod, Value *Dref, Value *Bias, Value *MinLodClamp,
-    Value *Mask, const Twine &Name) {
+    Value *SamplerIndex, Value *U, Value *ArrayLayer, Value *DUdX, Value *DUdY,
+    Value *Lod, Value *UseExplicitLod, Value *Dref, Value *Bias,
+    Value *MinLodClamp, Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpArray1D);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
-                             ArrayLayer, Lod, UseExplicitLod, Dref, Bias,
-                             MinLodClamp, Mask},
+                             ArrayLayer, DUdX, DUdY, Lod, UseExplicitLod, Dref,
+                             Bias, MinLodClamp, Mask},
                             Name);
 }
 
@@ -1829,7 +1831,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(15);
     break;
   case ImageCallKind::SampleCmp1D:
-    if (CI.arg_size() != 13)
+    if (CI.arg_size() != 15)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1838,15 +1840,17 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.ImageIndex = CI.getArgOperand(4);
     Result.SamplerIndex = CI.getArgOperand(5);
     Result.U = CI.getArgOperand(6);
-    Result.Lod = CI.getArgOperand(7);
-    Result.UseExplicitLod = CI.getArgOperand(8);
-    Result.Dref = CI.getArgOperand(9);
-    Result.Bias = CI.getArgOperand(10);
-    Result.MinLodClamp = CI.getArgOperand(11);
-    Result.Mask = CI.getArgOperand(12);
+    Result.DUdX = CI.getArgOperand(7);
+    Result.DUdY = CI.getArgOperand(8);
+    Result.Lod = CI.getArgOperand(9);
+    Result.UseExplicitLod = CI.getArgOperand(10);
+    Result.Dref = CI.getArgOperand(11);
+    Result.Bias = CI.getArgOperand(12);
+    Result.MinLodClamp = CI.getArgOperand(13);
+    Result.Mask = CI.getArgOperand(14);
     break;
   case ImageCallKind::SampleCmpArray1D:
-    if (CI.arg_size() != 14)
+    if (CI.arg_size() != 16)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1856,12 +1860,14 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.SamplerIndex = CI.getArgOperand(5);
     Result.U = CI.getArgOperand(6);
     Result.ArrayLayer = CI.getArgOperand(7);
-    Result.Lod = CI.getArgOperand(8);
-    Result.UseExplicitLod = CI.getArgOperand(9);
-    Result.Dref = CI.getArgOperand(10);
-    Result.Bias = CI.getArgOperand(11);
-    Result.MinLodClamp = CI.getArgOperand(12);
-    Result.Mask = CI.getArgOperand(13);
+    Result.DUdX = CI.getArgOperand(8);
+    Result.DUdY = CI.getArgOperand(9);
+    Result.Lod = CI.getArgOperand(10);
+    Result.UseExplicitLod = CI.getArgOperand(11);
+    Result.Dref = CI.getArgOperand(12);
+    Result.Bias = CI.getArgOperand(13);
+    Result.MinLodClamp = CI.getArgOperand(14);
+    Result.Mask = CI.getArgOperand(15);
     break;
   case ImageCallKind::QueryLod2D:
     if (CI.arg_size() != 11)

@@ -217,18 +217,22 @@ using Sample3DFn = void (*)(const FemeImageDescriptor *, uint32_t,
 /// mirroring `SampleCmpFn`'s relationship to `SampleFn` -- a single `U`
 /// coordinate, and no `ConstOffset` (see `ImageCallKind::SampleCmp1D`'s
 /// own doc for why), but a real `Bias`/`MinLodClamp` pair after `Dref` as
-/// of roadmap L62.
+/// of roadmap L62. Roadmap L66(f) added a real `DUdX`/`DUdY` scalar
+/// derivative pair after `U`, mirroring `Sample1DFn`'s own identically-
+/// named parameters.
 using SampleCmp1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                const FemeSamplerDescriptor *, uint32_t,
-                               uint32_t, uint32_t, float, float, bool, float,
-                               float, float, bool, void *);
+                               uint32_t, uint32_t, float, float, float, float,
+                               bool, float, float, float, bool, void *);
 /// Roadmap L54: the `Texture1DArray` counterpart of `SampleCmp1DFn`,
 /// adding a float `ArrayLayer` coordinate before `Lod`, mirroring
-/// `Sample1DArrayFn`'s relationship to `Sample1DFn`.
+/// `Sample1DArrayFn`'s relationship to `Sample1DFn`. Roadmap L66(f) added
+/// the same `DUdX`/`DUdY` pair `SampleCmp1DFn` gained, after `ArrayLayer`.
 using SampleCmpArray1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                     const FemeSamplerDescriptor *, uint32_t,
                                     uint32_t, uint32_t, float, float, float,
-                                    bool, float, float, float, bool, void *);
+                                    float, float, bool, float, float, float,
+                                    bool, void *);
 /// Roadmap L52e: `Texture2D`'s own `OpImageQueryLod` counterpart -- no
 /// `(U, V)` coordinate operand at all (see `ImageCallKind::QueryLod2D`'s
 /// own doc for why), just the caller's own screen-space partial
@@ -3342,12 +3346,14 @@ TEST_F(ImageSamplingTest, SampleCmp1DLessEqualPasses) {
       addWrapper("samplecmp_1d", "feme.cpu.image.samplecmp.1d.f32"));
   float PassResult = 0.0f, FailResult = 1.0f;
   // Ref (0.4) <= Texel (0.5): pass.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, 0.4f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     0.0f, true, 0.4f,
      /*Bias=*/0.0f, /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      true, &PassResult);
   EXPECT_FLOAT_EQ(PassResult, 1.0f);
   // Ref (0.6) <= Texel (0.5): fail.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, 0.6f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     0.0f, true, 0.6f,
      /*Bias=*/0.0f, /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      true, &FailResult);
   EXPECT_FLOAT_EQ(FailResult, 0.0f);
@@ -3376,13 +3382,13 @@ TEST_F(ImageSamplingTest, SampleCmpArray1DReadsRequestedLayer) {
   SampleCmpArray1DFn Fn = resolve<SampleCmpArray1DFn>(addWrapper(
       "samplecmp_1d_array", "feme.cpu.image.samplecmp.1darray.f32"));
   float LayerZeroResult = 1.0f, LayerTwoResult = 0.0f;
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f, 0.0f, true,
-     0.5f, /*Bias=*/0.0f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, 0.0f, true, 0.5f, /*Bias=*/0.0f,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(), true,
      &LayerZeroResult);
   EXPECT_FLOAT_EQ(LayerZeroResult, 0.0f); // Ref 0.5 <= Texel 0.2: fail.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/2.0f, 0.0f, true,
-     0.5f, /*Bias=*/0.0f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/2.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, 0.0f, true, 0.5f, /*Bias=*/0.0f,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(), true,
      &LayerTwoResult);
   EXPECT_FLOAT_EQ(LayerTwoResult, 1.0f); // Ref 0.5 <= Texel 0.8: pass.
@@ -3405,7 +3411,8 @@ TEST_F(ImageSamplingTest, SampleCmp1DInactiveLaneReadsZero) {
   SampleCmp1DFn Fn = resolve<SampleCmp1DFn>(
       addWrapper("samplecmp_1d", "feme.cpu.image.samplecmp.1d.f32"));
   float Result = 9.0f;
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, 0.4f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     0.0f, true, 0.4f,
      /*Bias=*/0.0f, /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      /*Mask=*/false, &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
@@ -3470,15 +3477,15 @@ TEST_F(ImageSamplingTest, SampleCmp1DBiasSelectsCoarserMipLevel) {
   SampleCmp1DFn Fn = resolve<SampleCmp1DFn>(
       addWrapper("samplecmp_1d", "feme.cpu.image.samplecmp.1d.f32"));
   float Biased = 0.0f, Unbiased = 1.0f;
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/1.0f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/1.0f,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      /*Mask=*/true, &Biased);
   EXPECT_FLOAT_EQ(Biased, 1.0f);
   // The same call with a zero bias still reads level 0, proving the value
   // above came from the bias and not from the image itself.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      /*Mask=*/true, &Unbiased);
   EXPECT_FLOAT_EQ(Unbiased, 0.0f);
@@ -3508,14 +3515,105 @@ TEST_F(ImageSamplingTest, SampleCmpArray1DMinLodClampRaisesLevel) {
       addWrapper("samplecmp_1d_array", "feme.cpu.image.samplecmp.1darray.f32"));
   float Clamped = 0.0f, Unclamped = 1.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
-     /*MinLodClamp=*/1.0f, /*Mask=*/true, &Clamped);
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Dref=*/0.5f, /*Bias=*/0.0f, /*MinLodClamp=*/1.0f, /*Mask=*/true,
+     &Clamped);
   EXPECT_FLOAT_EQ(Clamped, 1.0f);
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Dref=*/0.5f, /*Bias=*/0.0f,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      /*Mask=*/true, &Unclamped);
   EXPECT_FLOAT_EQ(Unclamped, 0.0f);
+}
+
+TEST_F(ImageSamplingTest, SampleCmp1DGradSelectsCoarserMipLevel) {
+  // Roadmap L66(f): widens roadmap L66(c)'s `Plain2D`-only `Grad` support
+  // to `Plain1D` too -- mirrors
+  // `ComparisonSamplingGradSelectsCoarserMipLevel`'s own `Plain2D` precedent,
+  // but through `femeCpuImageSampleCmp1DF32`'s new `DUdX`/`DUdY` scalar pair
+  // instead of a `(DUdX, DVdX, DUdY, DVdY)` quartet. Same two-level depth image
+  // as `SampleCmp1DBiasSelectsCoarserMipLevel` above: level 0 stores 0.2, level
+  // 1 stores 0.8; a `LessEqual` compare against a reference of 0.5 fails at
+  // level 0 and passes at level 1.
+  struct {
+    float L0[2][4];
+    float L1[1][4];
+  } Storage = {{{0.2f, 0, 0, 0}, {0.2f, 0, 0, 0}}, {{0.8f, 0, 0, 0}}};
+
+  FemeImageSubresourceLayout Layouts[2];
+  FemeImageDescriptor Img;
+  makeTwoLevelDepth1D(&Storage, sizeof(Storage), sizeof(Storage.L0),
+                      /*ArrayLayers=*/1, Layouts, Img);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmp1DFn Fn = resolve<SampleCmp1DFn>(
+      addWrapper("samplecmp_1d", "feme.cpu.image.samplecmp.1d.f32"));
+
+  // No derivatives: the base level's own 0.2 fails the 0.5 reference,
+  // proving zero derivatives still degenerate to level 0.
+  float NoGrad = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(), /*Mask=*/true,
+     &NoGrad);
+  EXPECT_FLOAT_EQ(NoGrad, 0.0f);
+
+  // A `DUdX` of exactly 1.0 against this 2-texel-wide image resolves to
+  // an implicit LOD of exactly 1.0 (`femeRTPlanImplicitLod1D`'s own
+  // `Ux = DUdX * Width = 2.0`, `Lod = log2(2.0) = 1.0`), rounding the
+  // selected mip level up to level 1, whose own 0.8 passes the same
+  // reference.
+  float WithGrad = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/1.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f, /*Bias=*/0.0f,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(), /*Mask=*/true,
+     &WithGrad);
+  EXPECT_FLOAT_EQ(WithGrad, 1.0f);
+}
+
+TEST_F(ImageSamplingTest, SampleCmpArray1DGradSelectsCoarserMipLevel) {
+  // Roadmap L66(f): the `Array1D` counterpart of the test just above --
+  // only `U`, never `ArrayLayer`, is ever differentiated.
+  struct {
+    float L0[2][4];
+    float L1[1][4];
+  } Storage = {{{0.2f, 0, 0, 0}, {0.2f, 0, 0, 0}}, {{0.8f, 0, 0, 0}}};
+
+  FemeImageSubresourceLayout Layouts[2];
+  FemeImageDescriptor Img;
+  makeTwoLevelDepth1D(&Storage, sizeof(Storage), sizeof(Storage.L0),
+                      /*ArrayLayers=*/1, Layouts, Img);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpArray1DFn Fn = resolve<SampleCmpArray1DFn>(
+      addWrapper("samplecmp_1d_array", "feme.cpu.image.samplecmp.1darray.f32"));
+
+  float NoGrad = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Dref=*/0.5f, /*Bias=*/0.0f,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(), /*Mask=*/true,
+     &NoGrad);
+  EXPECT_FLOAT_EQ(NoGrad, 0.0f);
+
+  float WithGrad = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
+     /*DUdX=*/1.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Dref=*/0.5f, /*Bias=*/0.0f,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(), /*Mask=*/true,
+     &WithGrad);
+  EXPECT_FLOAT_EQ(WithGrad, 1.0f);
 }
 
 // Roadmap L52e: `Texture2D`'s own `OpImageQueryLod` runtime entry point
