@@ -46,19 +46,21 @@ Can you work on L67 or other prerequisites blocking the L-series milestones?
 
 The last session reported:
 
-> L67(b) (explicit `Grad` sampling for `Plain3D`) is the natural next small
-> step in this same chain — independent of (a), could be done in either
-> order per the prior session's own note, and now has a real negative test
-> (`LeavesAPlain3DSampleGradAlone`, added this session) that will need
-> converting to a positive test the same way `LeavesAPlain3DSampleBiasAlone`
-> was converted here, once that operand gets real support. L67(c) (blocked
-> on the pre-existing `isSupportedOffset` `Plain2D`-only restriction,
-> roadmap L33's own scope) and L67(d) (integer-format rejection, correct by
-> design) remain out of scope for any single-shape row. L66(c)/(d)/(e) — the
-> `Dref`+`Grad` shadow-sampling intrinsic gap, the same `isSupportedOffset`
-> restriction from the `shaderResourceMinLod` flip's own perspective, and the
-> cross-function same-binding crash — all remain open and untouched this
-> session.
+> With both L67(a) and L67(b) now done, `Plain3D` sampling is functionally
+> complete except for L67(c) (`ConstOffset`, blocked on the pre-existing
+> `isSupportedOffset` `Plain2D`-only restriction, roadmap L33's own scope)
+> and L67(d) (integer-format rejection, correct by design, not actionable).
+> L67(c) is the same restriction named in roadmap L66(d) from the
+> `shaderResourceMinLod` flip's own perspective — fixing `isSupportedOffset`
+> to accept a real `ConstOffset` against more shapes than just `Plain2D`
+> would be a genuinely cross-cutting change (every shape's own
+> `textureoffset*` CTS group depends on it, not just `Plain3D`'s), and is
+> probably the highest-value next target across the whole L-series now that
+> L66(a)/L67(a)/L67(b) have each independently confirmed it as their own
+> respective blocker. L66(c) (the `Dref`+`Grad` shadow-sampling intrinsic
+> gap) and L66(e) (the cross-function same-binding crash) remain open and
+> untouched this session, unrelated to anything `Plain3D`-specific.
+
 
 Which seems like the right place to start.
 
@@ -110,7 +112,7 @@ Which seems like the right place to start.
 > supported`), unchanged, since `shaderResourceMinLod` itself remains `VK_FALSE`
 > (roadmap L66's own still-open scope) -- this row only unblocks *re-measuring*
 > that flip experiment once L66(c)/(d)/(e) are also resolved, it does not itself
-> flip the bit.); (b) **explicit `Grad` sampling** -- no
+> flip the bit.); ~~(b) **explicit `Grad` sampling** -- no
 > `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` operand is threaded from a
 > caller-supplied derivative yet (`lowerImageAccesses`'s new `Plain3D` branch
 > always synthesizes/zeroes each axis independently, mirroring `Plain1D`'s own
@@ -118,7 +120,43 @@ Which seems like the right place to start.
 > (`texturegrad.sampler3d_{fixed,float}_{fragment,vertex,compute}`, 6/6 Fail --
 > the `_compute` cases fail `vkCreateComputePipelines` itself rather than
 > `vkCreateGraphicsPipelines`, the same shape of failure as
-> `Plain1D`/`CubeArray`'s own pre-existing `_compute`-stage `Grad` gap); (c)
+> `Plain1D`/`CubeArray`'s own pre-existing `_compute`-stage `Grad` gap)~~
+> (fixed: `hasOnlySupportedImageUses`'s `HasGrad` restriction now accepts
+> `Plain3D`, and `lowerImageAccesses`'s `Plain3D` branch extracts a real
+> per-axis derivative triple from the caller's own `dPdx`/`dPdy` operands (one
+> component per axis, since `hasOnlySupportedImageUses`'s own
+> `GradDerivativeWidth` check already guarantees these are real 3-wide vectors
+> for this non-arrayed shape) in place of a synthesized/zeroed one -- no
+> `createSample3D`/runtime signature change needed at all, since roadmap L66(a)
+> already gave this builder a real derivative-operand slot for its synthesized
+> implicit-LOD case; this row is purely a lowering-phase change reusing that
+> same slot for a caller-supplied `Grad` instead, mirroring `Plain1D`'s own
+> roadmap L65 precedent exactly. New unit-test coverage:
+> `SPIRVResourceLoweringTest.cpp`'s now-obsolete negative
+> `LeavesAPlain3DSampleGradAlone` test (asserting `Grad` against `Plain3D` must
+> NOT lower, no longer true) was replaced with a new positive
+> `LowersSampleGradToPlain3D` test asserting each of the 6 new per-axis
+> derivative operands is a real `ExtractElementInst`, plus a fresh
+> `LeavesANonZeroTexelOffsetPlain3DSampleAlone` negative test (mirroring
+> `LeavesANonZeroTexelOffsetArray2DSampleAlone`'s own `Array2D` precedent) to
+> preserve this shape's own negative-test coverage, now naming its real
+> remaining gap (`ConstOffset`, sub-item (c) below) rather than `Grad`. A new
+> lit-test case (`sample_3d_grad` in
+> `spirv-resource-lowering-image-sample-3d.ll`) confirms
+> `llvm.spv.resource.samplegrad` against a `Dim3D` handle now lowers
+> successfully. `check-feme`: 2655/2714 pass, 0 fail, 59 unsupported (up from
+> 2654/2713, +1 net new test, 0 regressions). Real CTS, direct re-run of
+> `texturegrad.sampler3d_{fixed,float}_{fragment,vertex,compute}`: **4/6 Pass,
+> up from 0/6** (the `_fragment`/`_vertex` cases; the 2 `_compute` cases remain
+> `Fail` via `vkCreateComputePipelines` itself, the same pre-existing, unrelated
+> gap other compute-stage sampling groups hit -- unaffected by this row). A
+> broader `dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502 cases)
+> confirms **14 Pass total (up from 10), 260 Fail (down from 264, by exactly
+> these 4 newly-passing cases), 228 NotSupported (unchanged)** -- no regressions
+> anywhere in this shape's own CTS footprint. `texturegradclamp`'s own
+> `sampler3d_*` cases remain confirmed `NotSupported` (`ShaderResourceMinLod
+> feature not supported`), unchanged, since `shaderResourceMinLod` itself
+> remains `VK_FALSE` (roadmap L66's own still-open scope).); (c)
 > **`ConstOffset`** -- blocked by the same pre-existing `isSupportedOffset`
 > `Plain2D`-only restriction roadmap L66(d)/L33 already scope, not a
 > `Plain3D`-specific gap of its own; (d) **integer-format
