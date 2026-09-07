@@ -42,5 +42,5 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L66 and/or L67 from the roadmap or other prerequisites
+Can you close out L60 and/or L61 from the roadmap or other prerequisites
 blocking the L-series milestones?
