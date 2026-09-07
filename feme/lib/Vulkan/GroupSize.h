@@ -79,6 +79,48 @@ resolveComputeGroupSize(llvm::ArrayRef<uint32_t> Words,
                         llvm::StringRef EntryPoint,
                         llvm::ArrayRef<SpecializationOverride> Overrides);
 
+/// (roadmap L69) Which of `VK_KHR_compute_shader_derivatives`'s two mutually
+/// exclusive execution modes \p EntryPoint declares, if any -- `None` if
+/// neither `DerivativeGroupQuadsKHR` nor `DerivativeGroupLinearKHR` is
+/// present (the common case: a compute entry that never uses `dFdx`/`dFdy`,
+/// nor an implicit-LOD `texture()` call that needs one internally, declares
+/// neither, per the SPIR-V specification's own "extension requires this
+/// execution mode" validation rule for any such use).
+enum class ComputeDerivativeGroupMode {
+  None,
+  /// `DerivativeGroupQuadsKHR`: derivatives are computed across a 2x2 tile
+  /// of invocations grouped by their `LocalInvocationId.xy`'s low bit in
+  /// each of X and Y (`(2m+{0,1}, 2n+{0,1})`) -- the spatial analogue of a
+  /// fragment shader's own guaranteed 2x2 helper-invocation quad. This CPU
+  /// target's compute-stage lane assignment (`feme::cpu::SIMDizePass`) is a
+  /// flat `LocalInvocationIndex`-ordered widening with no notion of a
+  /// spatial X/Y tile at all, so this mode is not yet supported (see
+  /// roadmap L69(a)); `resolveComputeDerivativeGroupMode`'s caller rejects
+  /// pipeline creation with a clear diagnostic rather than silently
+  /// computing a wrong derivative.
+  Quads,
+  /// `DerivativeGroupLinearKHR`: derivatives are computed across any 4
+  /// consecutive `LocalInvocationIndex` values (`4m+{0,1,2,3}`), each
+  /// group's own "x"/"y" direction assigned by that index's low/second-low
+  /// bit exactly like a fragment quad's own four lanes -- this already
+  /// matches this CPU target's own flat, `LocalInvocationIndex`-ordered
+  /// lane assignment exactly (`WaveLowering.cpp`'s `flat = WaveIndex * W +
+  /// lane` is that same linear order), so `lowerDerivative`'s existing
+  /// quad-shuffle math (unchanged since it predates this mode entirely --
+  /// it was only ever written for a fragment quad) already computes the
+  /// spec-correct answer for this mode with no further change.
+  Linear,
+};
+
+/// Resolves \p EntryPoint's `VK_KHR_compute_shader_derivatives` execution
+/// mode from \p Words, the same native-endian SPIR-V binary module
+/// `resolveComputeGroupSize` scans. Returns `ComputeDerivativeGroupMode::
+/// None` if \p EntryPoint cannot be found or declares neither mode (not an
+/// error: most compute entry points use neither).
+llvm::Expected<ComputeDerivativeGroupMode>
+resolveComputeDerivativeGroupMode(llvm::ArrayRef<uint32_t> Words,
+                                  llvm::StringRef EntryPoint);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_GROUPSIZE_H

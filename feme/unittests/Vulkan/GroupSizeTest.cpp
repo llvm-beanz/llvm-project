@@ -89,6 +89,12 @@ public:
                    {FnId, ExecutionModeLocalSizeId, Ids[0], Ids[1], Ids[2]});
   }
 
+  // (roadmap L69) A bare `OpExecutionMode` with no operands beyond the
+  // mode itself, e.g. `DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR`.
+  void addExecutionMode(uint32_t FnId, uint32_t Mode) {
+    addInstruction(OpExecutionMode, {FnId, Mode});
+  }
+
   void addSpecId(uint32_t TargetId, uint32_t SpecId) {
     addInstruction(OpDecorate, {TargetId, DecorationSpecId, SpecId});
   }
@@ -227,6 +233,60 @@ TEST(GroupSize, ResolvesFromLocalSizeForTaskEntryPoint) {
       resolveComputeGroupSize(Builder.words(), "main", /*Overrides=*/{});
   ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
   EXPECT_EQ(*Result, (std::array<uint32_t, 3>{32, 2, 1}));
+}
+
+// (roadmap L69) `resolveComputeDerivativeGroupMode` reports `None` for the
+// common case (a compute entry that never declares either derivative-group
+// execution mode), and correctly distinguishes the two real modes from one
+// another once one is present.
+constexpr uint32_t ExecutionModeDerivativeGroupQuadsKHR = 5289;
+constexpr uint32_t ExecutionModeDerivativeGroupLinearKHR = 5290;
+
+TEST(GroupSize, DerivativeGroupModeIsNoneWithoutEitherExecutionMode) {
+  ModuleBuilder Builder;
+  Builder.addEntryPoint(/*FnId=*/10, "main");
+  Builder.addLocalSize(/*FnId=*/10, {8, 1, 1});
+
+  Expected<ComputeDerivativeGroupMode> Result =
+      resolveComputeDerivativeGroupMode(Builder.words(), "main");
+  ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
+  EXPECT_EQ(*Result, ComputeDerivativeGroupMode::None);
+}
+
+TEST(GroupSize, DerivativeGroupModeResolvesQuads) {
+  ModuleBuilder Builder;
+  Builder.addEntryPoint(/*FnId=*/10, "main");
+  Builder.addLocalSize(/*FnId=*/10, {8, 8, 1});
+  Builder.addExecutionMode(/*FnId=*/10, ExecutionModeDerivativeGroupQuadsKHR);
+
+  Expected<ComputeDerivativeGroupMode> Result =
+      resolveComputeDerivativeGroupMode(Builder.words(), "main");
+  ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
+  EXPECT_EQ(*Result, ComputeDerivativeGroupMode::Quads);
+}
+
+TEST(GroupSize, DerivativeGroupModeResolvesLinear) {
+  ModuleBuilder Builder;
+  Builder.addEntryPoint(/*FnId=*/10, "main");
+  Builder.addLocalSize(/*FnId=*/10, {64, 1, 1});
+  Builder.addExecutionMode(/*FnId=*/10, ExecutionModeDerivativeGroupLinearKHR);
+
+  Expected<ComputeDerivativeGroupMode> Result =
+      resolveComputeDerivativeGroupMode(Builder.words(), "main");
+  ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
+  EXPECT_EQ(*Result, ComputeDerivativeGroupMode::Linear);
+}
+
+TEST(GroupSize, DerivativeGroupModeIsNoneWhenEntryPointNotFound) {
+  ModuleBuilder Builder;
+  Builder.addEntryPoint(/*FnId=*/10, "main");
+  Builder.addLocalSize(/*FnId=*/10, {8, 1, 1});
+  Builder.addExecutionMode(/*FnId=*/10, ExecutionModeDerivativeGroupLinearKHR);
+
+  Expected<ComputeDerivativeGroupMode> Result =
+      resolveComputeDerivativeGroupMode(Builder.words(), "other");
+  ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
+  EXPECT_EQ(*Result, ComputeDerivativeGroupMode::None);
 }
 
 } // namespace

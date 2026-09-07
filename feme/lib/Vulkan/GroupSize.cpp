@@ -50,6 +50,17 @@ enum : uint32_t {
   ExecutionModeLocalSizeId = 38,
 };
 
+// (roadmap L69) `VK_KHR_compute_shader_derivatives`'s two execution modes;
+// numerically identical to their original `NV`-suffixed forms
+// (`SPIRVSymbolicOperands.td`'s `DerivativeGroupQuadsNV`/
+// `DerivativeGroupLinearNV`, 5289/5290) since the `KHR` extension promoted
+// the same SPIR-V enumerant values under a new capability name rather than
+// assigning new ones.
+enum : uint32_t {
+  ExecutionModeDerivativeGroupQuadsKHR = 5289,
+  ExecutionModeDerivativeGroupLinearKHR = 5290,
+};
+
 enum : uint32_t {
   DecorationSpecId = 1,
   DecorationBuiltIn = 11,
@@ -293,4 +304,51 @@ Expected<std::array<uint32_t, 3>> feme::vulkan::resolveComputeGroupSize(
       "entry point '%s' declares none of LocalSize, LocalSizeId, or a "
       "BuiltIn WorkgroupSize specialization constant",
       EntryPoint.str().c_str());
+}
+
+Expected<feme::vulkan::ComputeDerivativeGroupMode>
+feme::vulkan::resolveComputeDerivativeGroupMode(ArrayRef<uint32_t> Words,
+                                                StringRef EntryPoint) {
+  if (Words.size() < 5)
+    return createStringError(inconvertibleErrorCode(),
+                             "SPIR-V module is too short to contain a header");
+
+  SmallVector<Instruction, 64> Instructions =
+      decodeInstructions(Words.drop_front(5));
+
+  // Same entry-point-id lookup `resolveComputeGroupSize`'s own pass 1 does
+  // (see that function's comment); duplicated rather than shared so this
+  // scanner stays a self-contained, independently testable pass over the
+  // same raw words, mirroring how `resolveComputeGroupSize` itself already
+  // stands alone as this file's own file comment explains.
+  uint32_t EntryFn = 0;
+  bool FoundEntry = false;
+  for (const Instruction &Insn : Instructions) {
+    if (Insn.Opcode != OpEntryPoint || Insn.Operands.size() < 3)
+      continue;
+    if (Insn.Operands[0] != ExecutionModelGLCompute &&
+        Insn.Operands[0] != ExecutionModelTaskEXT &&
+        Insn.Operands[0] != ExecutionModelMeshEXT)
+      continue;
+    size_t NameIndex = 2;
+    std::string Name = decodeLiteralString(Insn.Operands, NameIndex);
+    if (Name != EntryPoint)
+      continue;
+    EntryFn = Insn.Operands[1];
+    FoundEntry = true;
+    break;
+  }
+  if (!FoundEntry)
+    return ComputeDerivativeGroupMode::None;
+
+  for (const Instruction &Insn : Instructions) {
+    if (Insn.Opcode != OpExecutionMode || Insn.Operands.size() < 2 ||
+        Insn.Operands[0] != EntryFn)
+      continue;
+    if (Insn.Operands[1] == ExecutionModeDerivativeGroupQuadsKHR)
+      return ComputeDerivativeGroupMode::Quads;
+    if (Insn.Operands[1] == ExecutionModeDerivativeGroupLinearKHR)
+      return ComputeDerivativeGroupMode::Linear;
+  }
+  return ComputeDerivativeGroupMode::None;
 }
