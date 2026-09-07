@@ -1240,6 +1240,20 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           VK_FALSE;
       break;
     }
+    // (roadmap L69) `VK_KHR_compute_shader_derivatives`'s own properties
+    // struct: `meshAndTaskShaderDerivatives` stays false since the fix
+    // this row landed (`CanonicalizeStage.cpp`'s stage-filter list, wired
+    // through `compileComputePipeline`) was scoped to the `_compute`
+    // stage's own dedicated pipeline-creation entry point only --
+    // `compileGraphicsPipeline`'s mesh/task-stage path does not resolve or
+    // validate a `DerivativeGroupLinearKHR`/`QuadsKHR` execution mode at
+    // all yet, so claiming this bit would be false advertising.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_PROPERTIES_KHR: {
+      auto *Props = reinterpret_cast<
+          VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR *>(Base);
+      Props->meshAndTaskShaderDerivatives = VK_FALSE;
+      break;
+    }
     default:
       break;
     }
@@ -2147,6 +2161,24 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features = reinterpret_cast<
           VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *>(Base);
       Features->graphicsPipelineLibrary = VK_TRUE;
+      break;
+    }
+    // (roadmap L69) `VK_KHR_compute_shader_derivatives`'s own feature
+    // struct: `compileComputePipeline` (Pipeline.cpp) now accepts an entry
+    // point declaring `DerivativeGroupLinearKHR` (this CPU target's
+    // already-`LocalInvocationIndex`-ordered compute-stage lane
+    // assignment matches this mode's own spec-defined grouping exactly,
+    // see `WaveLowering.cpp`'s `lowerDerivative`), so
+    // `computeDerivativeGroupLinear` is genuinely true. `computeDerivative
+    // GroupQuads` stays false: real support needs this CPU target's own
+    // compute-stage invocation scheduling to actually group lanes into a
+    // 2x2 spatial tile, which no code here does yet (roadmap L69(a)), and
+    // `compileComputePipeline` rejects any entry point that declares it.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR *>(Base);
+      Features->computeDerivativeGroupQuads = VK_FALSE;
+      Features->computeDerivativeGroupLinear = VK_TRUE;
       break;
     }
     default:

@@ -1919,4 +1919,51 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_TRUE(FoundPipelineLibrary);
 }
 
+TEST_F(PhysicalDeviceProperties2Test,
+       ComputeShaderDerivativesLinearModeIsImplementedAndAdvertised) {
+  // Roadmap L69: `compileComputePipeline` (Pipeline.cpp) now resolves and
+  // validates a `DerivativeGroupLinearKHR`/`QuadsKHR` execution mode via
+  // `resolveComputeDerivativeGroupMode` (GroupSize.cpp); this CPU target's
+  // compute-stage lane assignment is already `LocalInvocationIndex`-
+  // ordered, matching `DerivativeGroupLinearKHR`'s own spec-defined
+  // grouping exactly (see `WaveLowering.cpp`'s `lowerDerivative`), so
+  // `computeDerivativeGroupLinear` is genuinely advertised true.
+  // `computeDerivativeGroupQuads` stays false and is rejected outright at
+  // pipeline-creation time -- see `PipelineTest.cpp`'s own
+  // `RejectsDerivativeGroupQuads`/`AcceptsDerivativeGroupLinear*` tests
+  // for the real pipeline-creation coverage.
+  VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR DerivFeatures{};
+  DerivFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &DerivFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(DerivFeatures.computeDerivativeGroupQuads, VK_FALSE);
+  EXPECT_EQ(DerivFeatures.computeDerivativeGroupLinear, VK_TRUE);
+
+  // `meshAndTaskShaderDerivatives` stays false: this fix was scoped to the
+  // `_compute` stage's own dedicated pipeline-creation entry point only,
+  // not the mesh/task-stage path.
+  VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR DerivProps{};
+  DerivProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_PROPERTIES_KHR;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &DerivProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(DerivProps.meshAndTaskShaderDerivatives, VK_FALSE);
+
+  bool FoundExtension = false;
+  for (const VkExtensionProperties &Extension :
+       feme::vulkan::getSupportedDeviceExtensions()) {
+    if (std::strcmp(Extension.extensionName,
+                    VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) == 0)
+      FoundExtension = true;
+  }
+  EXPECT_TRUE(FoundExtension);
+}
+
 } // namespace
