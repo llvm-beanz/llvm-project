@@ -112,6 +112,61 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 // -----
 
+// Roadmap L66(c): `spirv.ImageSampleDrefExplicitLod` with a `Grad` image
+// operand converts to `llvm.spv.resource.samplecmpgrad`, the
+// depth-comparison counterpart of the non-`Dref` sibling pattern's own
+// `llvm.spv.resource.samplegrad` (roadmap L59) -- `ImageSampleDrefGradPattern`
+// threads the `dPdx`/`dPdy` pair through immediately after the dref
+// operand and ahead of the (here defaulted-to-zero) offset, matching
+// `samplecmpbias`'s own single `Bias` scalar in that same position.
+
+// CHECK-LABEL: llvm.func @samplecmp_grad
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: %[[OFFSET:.*]] = llvm.mlir.constant(dense<0> : vector<2xi32>) : vector<2xi32>
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplecmpgrad"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[OFFSET]])
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @samplecmp_grad(%coord : vector<2xf32>, %dref : f32, %dx : vector<2xf32>, %dy : vector<2xf32>) -> f32 "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleDrefExplicitLod %4, %coord, %dref ["Grad"], %dx, %dy : !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, vector<2xf32>, vector<2xf32> -> f32
+    spirv.ReturnValue %5 : f32
+  }
+}
+
+// -----
+
+// Roadmap L66(c): `Grad|ConstOffset|MinLod` all together converts to
+// `llvm.spv.resource.samplecmpgrad.clamp`, threading every real operand
+// through in SPIR-V's own fixed bit order (dPdx/dPdy, offset, clamp) after
+// the dref -- the depth-comparison counterpart of the non-`Dref` sibling
+// pattern's `llvm.spv.resource.samplegrad.clamp`.
+
+// CHECK-LABEL: llvm.func @samplecmp_grad_const_offset_minlod
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplecmpgrad.clamp"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @samplecmp_grad_const_offset_minlod(%coord : vector<2xf32>, %dref : f32, %dx : vector<2xf32>, %dy : vector<2xf32>, %offset : vector<2xsi32>, %clamp : f32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleDrefExplicitLod %4, %coord, %dref ["Grad|ConstOffset|MinLod"], %dx, %dy, %offset, %clamp : !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, vector<2xf32>, vector<2xf32>, vector<2xsi32>, f32 -> f32
+    spirv.ReturnValue %5 : f32
+  }
+}
+
+// -----
+
 // Roadmap L31: `spirv.ImageSampleDrefExplicitLod` with a literal `Lod =
 // 0.0` image operand (what `dxc` emits for
 // `Texture2D<T>::SampleCmpLevelZero(sampler, coord, dref)`) converts to the
