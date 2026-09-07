@@ -46,28 +46,37 @@ Can you work on L66 or other prerequisites blocking the L-series milestones?
 
 The last session reported:
 
-> With L66(d) now fully closed (both `Plain3D`'s share via the earlier
-> L67(c) work, and this session's own final `Plain1D`/`Array1D` share),
-> roadmap L66's own still-open sub-items are:
+> With L66(e) now closed, roadmap L66's own only remaining open sub-item
+> is **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap. No
+> `llvm.spv.resource.samplecmpgrad`-shaped intrinsic exists in
+> `IntrinsicsSPIRV.td` today (unlike `Grad`'s own non-comparison
+> intrinsics, which roadmap L59 already consumes) -- this needs:
 >
-> - **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap -- no
->   `llvm.spv.resource.samplecmpgrad`-shaped intrinsic exists in
->   `IntrinsicsSPIRV.td` today, a genuinely bigger, cross-cutting scope
->   mirroring roadmap L52(b)'s own `Dref`+`Bias` gap. Untouched again this
->   session.
-> - **L66(e)**: the `SPIRVResourceLoweringPass` crash when two functions in
->   one module each declare a resource handle at an identical binding
->   number for two different image shapes -- a real use-after-free, not yet
->   root-caused. Untouched again this session, and now the sole remaining
->   blocker (alongside L66(c)) before the `shaderResourceMinLod` flip
->   experiment can be safely re-run and (assuming success) the bit actually
->   enabled.
+> 1. A new SPIR-V-to-LLVM raising pattern recognizing `OpImageSampleDrefExplicitLod`/
+>    `OpImageSampleDrefImplicitLod` with a `Grad` image operand (today's
+>    `Dref`-raising code presumably only recognizes `Lod`/`Bias`/no-operand
+>    variants -- needs checking).
+> 2. A new intrinsic declaration in `IntrinsicsSPIRV.td` (mirroring
+>    `llvm.spv.resource.samplegrad`'s own non-`Dref` shape, but with an
+>    added `Dref` operand, mirroring how the existing non-`Grad`
+>    `llvm.spv.resource.samplecmp`/`.samplecmp.clamp` already add `Dref` to
+>    the ordinary `sample`/`sample.clamp` shape).
+> 3. `isDrefSampleIntrinsic`/`hasOnlySupportedImageUses`'s own `Dref`
+>    handling in `SPIRVResourceLowering.cpp` extended to recognize this new
+>    intrinsic shape, plus real lowering to a runtime entry point (likely a
+>    new `femeCpuImageSampleCmpGradXXX` family, one per already-supported
+>    `Dref`-capable shape: `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Cube`/
+>    `CubeArray`).
+> 4. This is a genuinely bigger, more cross-cutting scope than L66(d)/(e)
+>    were -- likely deserves its own further breakdown into per-shape rows
+>    (mirroring how L67 broke `Plain3D`'s own `Bias`/`Grad`/`ConstOffset`
+>    into separate rows) rather than being attempted as one single change,
+>    once someone begins investigating it in earnest.
 >
-> Of these two, L66(e) is probably the better next target: it's a crash
-> (unconditionally wrong regardless of feature-bit state) rather than a
-> missing-capability gap, and its scope (a lowering-pass bug, not new
-> intrinsic/runtime infrastructure) is more self-contained and likely
-> smaller than L66(c)'s cross-cutting `IntrinsicsSPIRV.td` addition.
+> Once L66(c) is resolved (or confirmed out of scope), roadmap L66 will be
+> fully complete, and the `shaderResourceMinLod` flip/measure/revert
+> experiment (L65's own scope) can finally be re-run once more before
+> actually enabling the bit for real.
 
 Which seems like the right place to start.
 
@@ -207,7 +216,7 @@ Which seems like the right place to start.
 > lowers), no regression is possible by construction. No
 > `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update is needed:
 > `ConstOffset` is a core SPIR-V image operand with no gating Vulkan feature or
-> extension.)  (e) **a newly discovered `SPIRVResourceLoweringPass` crash**
+> extension.)  ~~(e) **a newly discovered `SPIRVResourceLoweringPass` crash**
 > (roadmap L65's own aside) when two functions in one module each declare a
 > resource handle at an identical binding number for two different image shapes
 > -- a real use-after-free (`Instruction::eraseFromParent` deletes a `%samp`
@@ -215,7 +224,55 @@ Which seems like the right place to start.
 > it), reproduced with a minimal ordinary-sample (non-`Grad`) repro, so
 > unrelated to any of (a)-(d) above; not yet root-caused, needs its own
 > investigation before it can be ruled in or out as a real CTS-reachable
-> multi-entry-point hazard. Once (a), (c), and (d) are resolved (or confirmed
-> out of scope), the flip experiment should be re-run once more before actually
+> multi-entry-point hazard.~~ (root-caused and fixed: the crash is not actually
+> about "two functions" specifically -- it is `lowerImageAccesses`'s own
+> trailing cleanup loop unconditionally erasing every handle in its own
+> `HeapIndices` map, without checking whether all of that handle's *own* users
+> were actually rewritten away first. A sample call is only ever rewritten (and
+> its own image/sampler handles' use-count decremented) from its *image*
+> handle's own side (`CI->getArgOperand(0) != Handle` skips the sampler side
+> deliberately, to avoid a double rewrite); if that image handle's own (set,
+> binding) identity conflicts with a *different* declaration anywhere else in
+> the module (`run`'s own per-handle `Entry.Conflicting` check, not
+> per-function), the image handle -- and therefore the whole sample call reached
+> through it -- is correctly excluded from `HeapIndices` and left entirely
+> unrewritten. But if the *paired sampler* handle's own identity happens not to
+> conflict (a real, plausible shape: one shared sampler binding used
+> consistently by multiple entry points, each sampling a *different* shape of
+> image at another, conflicting binding), that sampler handle is still accepted
+> into `HeapIndices` on its own -- and the old code erased it unconditionally at
+> the end regardless, even though the still-unrewritten sample call was still a
+> live user of it. Fixed with a one-line guard (`if (Handle->use_empty())`)
+> before erasing each handle, leaving any handle that still has real users
+> (because its own paired handle was excluded elsewhere) alone -- exactly the
+> same "left un-rewritten, for `checkSupportedRaisedOps` to reject" outcome a
+> conflicting *buffer* handle already gets, just extended to cover this
+> image/sampler pairing's own extra cross-handle dependency. Confirmed via a
+> minimal repro (two functions, one `Plain2D` image handle and one `Plain3D`
+> image handle at the same (set, binding), sharing one single non-conflicting
+> sampler binding between them) that reliably crashed `feme-opt` before this fix
+> and no longer does after it. New test coverage at both the IR-lowering-pass
+> phase (`SPIRVResourceLoweringTest.cpp`'s new
+> `LeavesConflictingImageShapeWithSharedSamplerBindingAlone`, asserting the pass
+> no longer crashes and both functions' sample calls remain correctly
+> unrewritten while each function's own non-conflicting sampler handle still
+> contributes real bound-resource metadata) and a mirrored new lit test
+> (`spirv-resource-lowering-conflicting-image-shape.ll`, extending
+> `spirv-resource-lowering-conflicting.ll`'s own existing buffer-conflict
+> precedent to this image-shape-conflict shape). `check-feme`: 2664/2723 pass, 0
+> fail, 59 unsupported (+2 net new tests, 0 regressions). Real CTS: no direct
+> real CTS case was found that exercises this exact cross-handle scenario (a
+> single SPIR-V module with two entry points, one shared sampler binding, and
+> two conflicting image bindings of different shapes is an unusual authoring
+> pattern this session's own sweeps did not surface) -- this remains a defensive
+> robustness fix for a real, confirmed-reproducible crash rather than one
+> directly observed unblocking a specific failing CTS case. A
+> `dEQP-VK.glsl.texture_functions.textureoffset.*.sampler1d*` re-run (120 cases,
+> confirming roadmap L66(d) itself is unaffected) and two broad regression
+> sweeps -- `dEQP-VK.glsl.texture_functions.texture.*` (208 cases) and the full
+> `dEQP-VK.image.*` group (49,229 cases) -- all complete cleanly with no crashes
+> and identical Pass/Fail/NotSupported counts to before this fix, confirming no
+> regression anywhere.)  Once (a), (c), and (d) are resolved (or confirmed out
+> of scope), the flip experiment should be re-run once more before actually
 > enabling the bit, since (b) is by design and (e) is orthogonal to sampling
 > shape support.
