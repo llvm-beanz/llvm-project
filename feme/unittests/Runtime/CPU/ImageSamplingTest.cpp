@@ -168,22 +168,28 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
 /// parameters. Roadmap L63 adds a real `DUdX`/`DUdY` screen-space
 /// partial-derivative pair right after `U`, mirroring `SampleFn`'s own
 /// identically-named parameters narrowed to this shape's single
-/// addressed coordinate component.
+/// addressed coordinate component. Roadmap L66(d) adds a real `int32_t`
+/// `ConstOffset` operand between `Bias` and `MinLodClamp` -- a bare
+/// scalar rather than `SampleFn`'s own `OffsetX`/`OffsetY` pair (see
+/// `isSupportedOffset`'s own comment for why this shape's offset is
+/// scalar, not a vector).
 using Sample1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
                             uint32_t, float, float, float, float, bool, float,
-                            float, bool, void *);
+                            int32_t, float, bool, void *);
 /// Roadmap L52a: the `Texture1DArray` counterpart of `Sample1DFn`, adding
 /// a float `ArrayLayer` coordinate before `Lod`, mirroring
 /// `SampleArrayFn`'s relationship to `SampleFn`. Roadmap L61(c) adds the
 /// same `Bias`/`MinLodClamp` pair `Sample1DFn` gained. Roadmap L63 adds
 /// the same `DUdX`/`DUdY` pair `Sample1DFn` gained, right after
-/// `ArrayLayer`.
+/// `ArrayLayer`. Roadmap L66(d) adds the same scalar `int32_t`
+/// `ConstOffset` operand `Sample1DFn` gained.
 using Sample1DArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  const FemeSamplerDescriptor *, uint32_t,
-                                 uint32_t, uint32_t, float, float, float,
-                                 float, float, bool, float, float, bool,
+                                 uint32_t, uint32_t, float, float, float, float,
+                                 float, bool, float, int32_t, float, bool,
                                  void *);
+
 /// Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by
 /// roadmap L67(a) and a real `ConstOffset` triple by roadmap L67(c): the
 /// `Texture3D` counterpart of `Sample1DFn` -- a real `(U, V, W)`
@@ -2755,7 +2761,8 @@ TEST_F(ImageSamplingTest, Sample1DLinearBlendsTwoTexels) {
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
-     0.0f, true, 0.0f, -std::numeric_limits<float>::infinity(), true, Out);
+     0.0f, true, 0.0f, /*Offset=*/0, -std::numeric_limits<float>::infinity(),
+     true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
 }
 
@@ -2776,7 +2783,8 @@ TEST_F(ImageSamplingTest, Sample1DPointSampleReadsExactTexel) {
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
-     0.0f, true, 0.0f, -std::numeric_limits<float>::infinity(), true, Out);
+     0.0f, true, 0.0f, /*Offset=*/0, -std::numeric_limits<float>::infinity(),
+     true, Out);
   EXPECT_FLOAT_EQ(Out[0], 5.0f);
   EXPECT_FLOAT_EQ(Out[1], 6.0f);
   EXPECT_FLOAT_EQ(Out[2], 7.0f);
@@ -2800,7 +2808,7 @@ TEST_F(ImageSamplingTest, Sample1DArrayReadsRequestedLayer) {
       addWrapper("sample_1d_array", "feme.cpu.image.sample.1darray.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/2.0f,
-     /*DUdX=*/0.0f, /*DUdY=*/0.0f, 0.0f, true, 0.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, 0.0f, true, 0.0f, /*Offset=*/0,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
 }
@@ -2822,7 +2830,7 @@ TEST_F(ImageSamplingTest, Sample1DInactiveLaneReadsZero) {
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4] = {9, 9, 9, 9};
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
-     0.0f, true, 0.0f, -std::numeric_limits<float>::infinity(),
+     0.0f, true, 0.0f, /*Offset=*/0, -std::numeric_limits<float>::infinity(),
      /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
@@ -2876,7 +2884,7 @@ TEST_F(ImageSamplingTest, Sample1DBiasSelectsCoarserMipLevel) {
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/1.0f, /*Offset=*/0,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
@@ -2930,7 +2938,7 @@ TEST_F(ImageSamplingTest, Sample1DRealDerivativeSelectsCoarserMipLevel) {
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/1.0f, /*DUdY=*/0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/0.0f, /*Offset=*/0,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
@@ -2982,7 +2990,59 @@ TEST_F(ImageSamplingTest, Sample1DArrayMinLodClampRaisesImplicitLevel) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
      /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
-     /*Bias=*/0.0f, /*MinLodClamp=*/1.0f, true, Out);
+     /*Bias=*/0.0f, /*Offset=*/0, /*MinLodClamp=*/1.0f, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample1DHonorsNonZeroTexelOffset) {
+  // Roadmap L66(d): a real, nonzero scalar `Offset` shifts the tap's own
+  // integer address by that amount before the sampler's addressing mode
+  // is applied, mirroring `Sample3DHonorsNonZeroTexelOffset`'s own
+  // `Plain3D` coverage, narrowed to a single spatial axis. Point-sampling
+  // texel 0 of a 2-wide 1D image with an offset of 1 must instead read
+  // texel 1.
+  float Storage[2][4] = {{0, 0, 0, 0}, {9, 9, 9, 9}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 2, ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DFn Fn = resolve<Sample1DFn>(
+      addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f, /*Offset=*/1,
+     -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample1DArrayHonorsNonZeroTexelOffset) {
+  // Roadmap L66(d): the `Array1D` counterpart immediately above --
+  // confirming the real scalar `Offset` shifts only the `U` axis, never
+  // `ArrayLayer` (mirroring the "SPIR-V's own `ConstOffset` dimensionality
+  // excludes the array layer" rule `isSupportedOffset`'s own comment
+  // documents).
+  float Storage[2][2][4] = {{{0, 0, 0, 0}, {0, 0, 0, 0}},
+                            {{0, 0, 0, 0}, {9, 9, 9, 9}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage1DArray(Storage, sizeof(Storage), 2, 2,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DArrayFn Fn = resolve<Sample1DArrayFn>(
+      addWrapper("sample_1d_array", "feme.cpu.image.sample.1darray.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, /*ArrayLayer=*/1.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true,
+     /*Bias=*/0.0f, /*Offset=*/1, -std::numeric_limits<float>::infinity(),
+     /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 

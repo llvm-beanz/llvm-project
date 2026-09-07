@@ -14,6 +14,15 @@
 ; `createSample1D`/`createSample1DArray` needed already existed --
 ; unlike `Plain3D`, which has no ordinary sampled-image infrastructure of
 ; its own at all yet (a materially bigger prerequisite, roadmap L65(a)).
+;
+; Roadmap L66(d) corrects this file's own trailing `ConstOffset` operand
+; from a `<1 x i32>` vector to a bare scalar `i32`, matching the real,
+; confirmed-via-`deqp-vk`-capture ABI `isSupportedOffset`'s own
+; `AllowPlain1DArray1D` case now requires for these two shapes (this
+; intrinsic's ordinary-sample `isSupportedOffset` check applies to a
+; `Grad` sample too, not just a plain one) -- this file predates that
+; discovery and had used the same vector shape every other (2D-and-wider)
+; shape's own always-zero `Grad` offset uses.
 
 target triple = "spirv-unknown-vulkan-compute"
 
@@ -29,7 +38,7 @@ define <4 x float> @samplegrad_1d(float %u, float %dpdx, float %dpdy) {
   %r = call <4 x float> @llvm.spv.resource.samplegrad.v4f32.timg1d(
       target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, float %u, float %dpdx, float %dpdy,
-      <1 x i32> zeroinitializer)
+      i32 0)
   ret <4 x float> %r
 }
 
@@ -51,7 +60,7 @@ define <4 x float> @samplegrad_1darray(<2 x float> %uandlayer, float %dpdx,
   %r = call <4 x float> @llvm.spv.resource.samplegrad.v4f32.timg1darray(
       target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <2 x float> %uandlayer, float %dpdx,
-      float %dpdy, <1 x i32> zeroinitializer)
+      float %dpdy, i32 0)
   ret <4 x float> %r
 }
 
@@ -63,7 +72,7 @@ declare target("spirv.Sampler")
     @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
 declare <4 x float> @llvm.spv.resource.samplegrad.v4f32.timg1d(
     target("spirv.Image", float, 0, 0, 0, 0, 1, 0), target("spirv.Sampler"),
-    float, float, float, <1 x i32>)
+    float, float, float, i32)
 declare <4 x float> @llvm.spv.resource.samplegrad.v4f32.timg1darray(
     target("spirv.Image", float, 0, 0, 1, 0, 1, 0), target("spirv.Sampler"),
-    <2 x float>, float, float, <1 x i32>)
+    <2 x float>, float, float, i32)

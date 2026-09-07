@@ -5827,19 +5827,24 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
 // `texture(sampler1D, u, bias)`/`MinLod`-clamp pair through to
 // `femeRTComputeClampedLod`, mirroring
 // `feme.cpu.image.sample.2d.v4f32`'s own identical parameters, in place
-// of the previous hardcoded `0.0f`/`-inf` no-op values.
+// of the previous hardcoded `0.0f`/`-inf` no-op values. `Offset` (roadmap
+// L66(d)) threads a real `textureOffset(sampler1D, u, offset)` texel
+// offset through to `femeRTSampleFiltered1D`'s own pre-existing `OffsetX`
+// parameter (added ahead of this row but never wired up to a real
+// operand until now), in place of the previous hardcoded `0` no-op
+// value.
 FemeRTv4f32 femeCpuImageSample1DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX,
-    float DUdY, float Lod, _Bool UseExplicitLod, float Bias,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX, float DUdY,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t Offset,
     float MinLodClamp, _Bool Mask) asm("feme.cpu.image.sample.1d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX,
-    float DUdY, float Lod, _Bool UseExplicitLod, float Bias,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX, float DUdY,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t Offset,
     float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
@@ -5865,7 +5870,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
                              /*InstructionMinLod=*/MinLodClamp,
                              /*InstructionBias=*/Bias);
   return femeRTSampleFiltered1D(&Img, &Samp, U, /*Layer=*/0, ClampedLod,
-                              /*OffsetX=*/0);
+                                Offset);
 }
 
 // `feme.cpu.image.sample.1darray.v4f32` (roadmap L52a): the `Texture1DArray`
@@ -5879,20 +5884,24 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
 // `ArrayLayer`, mirroring `feme.cpu.image.sample.2darray.v4f32`'s own
 // layer-agnostic derivative handling. `Bias`/`MinLodClamp` (roadmap
 // L61(c)) mirror `femeCpuImageSample1DV4F32`'s own identical new
-// parameters.
+// parameters. `Offset` (roadmap L66(d)) mirrors
+// `femeCpuImageSample1DV4F32`'s own identical new parameter -- `Array1D`'s
+// own `ConstOffset` never touches `ArrayLayer`, matching `Plain1D`'s
+// scalar (non-vector) offset shape.
 FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
     float DUdX, float DUdY, float Lod, _Bool UseExplicitLod, float Bias,
-    float MinLodClamp, _Bool Mask) asm("feme.cpu.image.sample.1darray.v4f32");
+    int32_t Offset, float MinLodClamp,
+    _Bool Mask) asm("feme.cpu.image.sample.1darray.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
     float DUdX, float DUdY, float Lod, _Bool UseExplicitLod, float Bias,
-    float MinLodClamp, _Bool Mask) {
+    int32_t Offset, float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -5911,8 +5920,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
                              /*InstructionMinLod=*/MinLodClamp,
                              /*InstructionBias=*/Bias);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
-  return femeRTSampleFiltered1D(&Img, &Samp, U, Layer, ClampedLod,
-                              /*OffsetX=*/0);
+  return femeRTSampleFiltered1D(&Img, &Samp, U, Layer, ClampedLod, Offset);
 }
 
 // (Roadmap L54) The single-level body of `femeCpuImageSampleCmp1DF32`/

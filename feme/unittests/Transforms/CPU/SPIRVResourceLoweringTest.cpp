@@ -1572,7 +1572,7 @@ TEST(SPIRVResourceLoweringTest, LowersPlain1DSampledImageToImageSample1D) {
           @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call <4 x float> @llvm.spv.resource.sample(
           target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, float %u, <1 x i32> zeroinitializer)
+          target("spirv.Sampler") %samp, float %u, i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
@@ -1589,7 +1589,7 @@ TEST(SPIRVResourceLoweringTest, LowersPlain1DSampledImageToImageSample1D) {
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, du_dx, du_dy, lod, use_explicit_lod, bias, min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 14u);
+  EXPECT_EQ(Sample->arg_size(), 15u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
@@ -1607,7 +1607,7 @@ TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
       %r = call <4 x float> @llvm.spv.resource.sample(
           target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <2 x float> %uandlayer,
-          <1 x i32> zeroinitializer)
+          i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
@@ -1625,7 +1625,7 @@ TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, array_layer, du_dx, du_dy, lod, use_explicit_lod, bias,
   //  min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 15u);
+  EXPECT_EQ(Sample->arg_size(), 16u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain1DBias) {
@@ -1647,7 +1647,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain1DBias) {
       %r = call <4 x float> @llvm.spv.resource.samplebias(
           target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, float %u, float %bias,
-          <1 x i32> zeroinitializer)
+          i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
@@ -1662,7 +1662,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain1DBias) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 14u);
+  ASSERT_EQ(Sample->arg_size(), 15u);
+
   EXPECT_EQ(Sample->getArgOperand(11)->getName(), "bias");
 }
 
@@ -1685,7 +1686,7 @@ TEST(SPIRVResourceLoweringTest,
       %r = call <4 x float> @llvm.spv.resource.sample(
           target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, float %u,
-          <1 x i32> zeroinitializer)
+          i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
@@ -1731,7 +1732,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToArray1DWithMinLodClamp) {
       %r = call <4 x float> @llvm.spv.resource.samplebias.clamp(
           target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <2 x float> %uandlayer, float %bias,
-          <1 x i32> zeroinitializer, float %clamp)
+          i32 0, float %clamp)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
@@ -1746,9 +1747,10 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToArray1DWithMinLodClamp) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 15u);
+  ASSERT_EQ(Sample->arg_size(), 16u);
+
   EXPECT_EQ(Sample->getArgOperand(12)->getName(), "bias");
-  EXPECT_EQ(Sample->getArgOperand(13)->getName(), "clamp");
+  EXPECT_EQ(Sample->getArgOperand(14)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesAPlain1DImageFetchAlone) {
@@ -2326,7 +2328,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain1DDerivatives) {
       %r = call <4 x float> @llvm.spv.resource.samplegrad(
           target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, float %u, float %dpdx,
-          float %dpdy, <1 x i32> zeroinitializer)
+          float %dpdy, i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
@@ -2341,7 +2343,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain1DDerivatives) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 14u);
+  ASSERT_EQ(Sample->arg_size(), 15u);
+
   EXPECT_EQ(Sample->getArgOperand(7)->getName(), "dpdx");
   EXPECT_EQ(Sample->getArgOperand(8)->getName(), "dpdy");
   // A `Grad` sample is never an explicit-LOD sample of its own; the
@@ -2366,7 +2369,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray1DDerivatives) {
       %r = call <4 x float> @llvm.spv.resource.samplegrad(
           target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <2 x float> %uandlayer, float %dpdx,
-          float %dpdy, <1 x i32> zeroinitializer)
+          float %dpdy, i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
@@ -2381,7 +2384,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray1DDerivatives) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 15u);
+  ASSERT_EQ(Sample->arg_size(), 16u);
+
   EXPECT_EQ(Sample->getArgOperand(8)->getName(), "dpdx");
   EXPECT_EQ(Sample->getArgOperand(9)->getName(), "dpdy");
 }
@@ -2405,7 +2409,7 @@ TEST(SPIRVResourceLoweringTest,
       %r = call <4 x float> @llvm.spv.resource.samplegrad(
           target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, float %u, <1 x float> %dpdx,
-          <1 x float> %dpdy, <1 x i32> zeroinitializer)
+          <1 x float> %dpdy, i32 0)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
@@ -2581,6 +2585,85 @@ TEST(SPIRVResourceLoweringTest, LowersSampleConstOffsetToPlain3D) {
   EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(18))->getSExtValue(), 1);
   EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(19))->getSExtValue(), -1);
   EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(20))->getSExtValue(), 2);
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleConstOffsetToPlain1D) {
+  // Roadmap L66(d): an ordinary `Plain1D` sample's real, nonzero constant
+  // `ConstOffset` is now threaded through too, mirroring
+  // `LowersSampleConstOffsetToPlain3D`'s own `Plain3D` precedent -- but,
+  // confirmed via a real `deqp-vk` SPIR-V capture, `Plain1D`'s own
+  // `ConstOffset` is a bare scalar `i32`, not a vector (unlike every
+  // other supported shape), so `isSupportedOffset`'s new `Plain1D`/
+  // `Array1D` branch accepts a scalar constant instead of requiring a
+  // `FixedVectorType`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(float %u) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %u, i32 7)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, du_dx, du_dy, lod, use_explicit_lod, bias, offset, min_lod_clamp,
+  //  mask).
+  ASSERT_EQ(Sample->arg_size(), 15u);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(12))->getSExtValue(), 7);
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleConstOffsetToArray1D) {
+  // Roadmap L66(d): the `Array1D` counterpart immediately above --
+  // confirmed via a real `deqp-vk` SPIR-V capture that `Array1D`'s own
+  // `ConstOffset` stays a bare scalar `i32` too, despite its own
+  // 2-component `(U, ArrayLayer)` coordinate: SPIR-V's own `ConstOffset`
+  // dimensionality excludes the array layer, the same "+1" carve-out
+  // `GradDerivativeWidth` (roadmap L64) already applies to a `Grad`
+  // derivative.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %uandlayer) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1darr(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1darr(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %uandlayer, i32 7)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1darr(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1darr(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, array_layer, du_dx, du_dy, lod, use_explicit_lod, bias, offset,
+  //  min_lod_clamp, mask).
+  ASSERT_EQ(Sample->arg_size(), 16u);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(13))->getSExtValue(), 7);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {

@@ -951,12 +951,18 @@ bool isZeroOffset(const Value *Offset) {
 /// accepts a real, nonzero offset too -- unlike `Array2D`, which is only
 /// widened for an ordinary/depth-comparison sample's own caller
 /// specifically (there being no depth-comparison `Plain3D` sample for
-/// `AllowArray2D`'s own distinction to matter for). Every other shape
-/// still requires the trivial always-zero case regardless: `Cube`/
-/// `CubeArray` can never carry a real one at all (SPIR-V disallows
-/// `ConstOffset` against a cube image), and `Plain1D`/`Array1D` remain
-/// unsupported (roadmap L66(d), no real CTS case has yet motivated
-/// extending this any further than `Array2D`/`Plain3D`).
+/// `AllowArray2D`'s own distinction to matter for). \p
+/// AllowPlain1DArray1D (roadmap L66(d)) similarly accepts the same real,
+/// nonzero offset for `Plain1D`/`Array1D` -- but only for an ordinary
+/// (non-comparison) sample's own caller, mirroring `AllowArray2D`'s own
+/// "only where a real CTS case actually motivates it" precedent, since no
+/// real CTS case exercises a nonzero `ConstOffset` against a depth-
+/// comparison `Plain1D`/`Array1D` sample yet (`createSampleCmp1D`/
+/// `createSampleCmpArray1D` thread no such operand). Only `Cube`/
+/// `CubeArray` still require the trivial always-zero case unconditionally
+/// regardless of caller: SPIR-V disallows `ConstOffset` against a cube
+/// image outright, so there is no real, nonzero case to ever accept
+/// there.
 ///
 /// For `Plain2D`/`Array2D`, only the offset's first two components (X/Y)
 /// are ever read (see `lowerImageAccesses`'s own
@@ -976,15 +982,30 @@ bool isZeroOffset(const Value *Offset) {
 /// against a 3D sampler -- confirmed via a real `deqp-vk` SPIR-V capture,
 /// roadmap L67(c)), so a minimum width of 3 (rather than 2) is required
 /// there, with the third (Z) component read by `lowerImageAccesses`'s own
-/// `Plain3D` branch alongside X/Y.
+/// `Plain3D` branch alongside X/Y. `Plain1D`/`Array1D`'s own `Offset`
+/// operand is a bare scalar `i32`, never a vector at all -- confirmed via
+/// a real `deqp-vk` SPIR-V capture of both `sampler1d`/`sampler1darray`'s
+/// own `textureOffset()` cases (roadmap L66(d)): SPIR-V's own
+/// `ConstOffset` dimensionality tracks the image's real dimension count
+/// (1 for a 1D image), *excluding* any array layer, the same "+1"
+/// carve-out `GradDerivativeWidth` (roadmap L64) already applies to a
+/// `Grad` derivative -- `Array1D`'s own 2-component `(U, ArrayLayer)`
+/// coordinate does not widen its own `ConstOffset` into a vector the way
+/// a depth-comparison sample's `Dref`-widened coordinate does for
+/// `Plain2D`/`Array2D` above.
 bool isSupportedOffset(const Value *Offset, ImageShape Shape,
-                       bool AllowArray2D = false) {
+                       bool AllowArray2D = false,
+                       bool AllowPlain1DArray1D = false) {
   bool IsPlain3D = Shape == ImageShape::Plain3D;
-  if (Shape != ImageShape::Plain2D && !IsPlain3D &&
+  bool Is1D = AllowPlain1DArray1D &&
+              (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D);
+  if (Shape != ImageShape::Plain2D && !IsPlain3D && !Is1D &&
       !(AllowArray2D && Shape == ImageShape::Array2D))
     return isZeroOffset(Offset);
   if (!isa<Constant>(Offset))
     return false;
+  if (Is1D)
+    return Offset->getType()->isIntegerTy(32);
   const auto *VecTy = dyn_cast<FixedVectorType>(Offset->getType());
   unsigned MinWidth = IsPlain3D ? 3 : 2;
   return VecTy && VecTy->getNumElements() >= MinWidth &&
@@ -1133,10 +1154,15 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // acceptance immediately below (roadmap L50d) -- SPIR-V's own
       // `ConstOffset` image operand is equally legal against an arrayed
       // `OpImageSampleImplicitLod`/`OpImageSampleExplicitLod` as it is
-      // against a plain one.
+      // against a plain one. Roadmap L66(d): `AllowPlain1DArray1D`
+      // additionally accepts the same real, nonzero offset against
+      // `Plain1D`/`Array1D`, but only here -- the depth-comparison path
+      // below still requires the trivial always-zero case for those two
+      // shapes (see `isSupportedOffset`'s own comment).
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape,
-                             /*AllowArray2D=*/true) ||
+                             /*AllowArray2D=*/true,
+                             /*AllowPlain1DArray1D=*/true) ||
           !isV4F32(CI->getType()))
         return false;
       continue;
@@ -2434,6 +2460,14 @@ void lowerImageAccesses(
           // unused, mistyped derivative of the whole vector for every
           // `Array1D` sample, alongside the real scalar-`U` one `ArrayD`
           // below already computes correctly.
+          // Roadmap L66(d): a real, nonzero `ConstOffset` against
+          // `Plain1D`/`Array1D` is a bare scalar `i32`, unlike every
+          // other supported shape's own vector-typed offset -- no
+          // `CreateExtractElement` is needed the way `Plain2D`'s/
+          // `Array2D`'s/`Plain3D`'s own vector offsets require (see
+          // `isSupportedOffset`'s own updated comment for why).
+          Value *Offset = CI->getArgOperand(
+              getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
           CallInst *NewSample1DCall;
           if (Shape == ImageShape::Plain1D) {
             SampleDerivatives1D D =
@@ -2444,9 +2478,10 @@ void lowerImageAccesses(
                     : SampleDerivatives1D{
                           ConstantFP::get(Builder.getFloatTy(), 0.0),
                           ConstantFP::get(Builder.getFloatTy(), 0.0)};
-            NewSample1DCall = createSample1D(
-                Builder, Env, ImageIndex, SamplerIndex, Coord, D.DUdX, D.DUdY,
-                Lod, ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
+            NewSample1DCall =
+                createSample1D(Builder, Env, ImageIndex, SamplerIndex, Coord,
+                               D.DUdX, D.DUdY, Lod, ExplicitLodFlag, Bias,
+                               Offset, MinLodClamp, Mask, CI->getName());
           } else {
             Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *ArrayLayer =
@@ -2461,7 +2496,7 @@ void lowerImageAccesses(
                           ConstantFP::get(Builder.getFloatTy(), 0.0)};
             NewSample1DCall = createSample1DArray(
                 Builder, Env, ImageIndex, SamplerIndex, U, ArrayLayer,
-                ArrayD.DUdX, ArrayD.DUdY, Lod, ExplicitLodFlag, Bias,
+                ArrayD.DUdX, ArrayD.DUdY, Lod, ExplicitLodFlag, Bias, Offset,
                 MinLodClamp, Mask, CI->getName());
           }
           CI->replaceAllUsesWith(NewSample1DCall);

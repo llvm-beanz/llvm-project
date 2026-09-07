@@ -551,6 +551,10 @@ struct MatchedImageCall {
   /// non-`Plain2D`/`Array2D`/`Plain3D` sampled kind (SPIR-V forbids a real
   /// `ConstOffset` against any of those shapes -- see
   /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
+  /// `Sample1D`/`Sample1DArray` (roadmap L66(d)) also populate `OffsetX`
+  /// alone (never `OffsetY`) with their own bare scalar `ConstOffset`,
+  /// rather than a vector's first component -- see `createSample1D`'s own
+  /// updated doc for why this shape's offset is a scalar, not a vector.
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
   /// `Sample3D` only (roadmap L67(c)): the same `<ConstOffset>` texel
@@ -902,16 +906,24 @@ llvm::CallInst *createSampleCmpCubeArray(
 /// explicit-LOD sample); see `getOrSynthesizeSample1DDerivatives`'s own
 /// doc. \p Bias/\p MinLodClamp (roadmap L61(c)) mirror `createSample2D`'s
 /// own identically-named parameters -- a `Plain1D` sample can carry a real
-/// `Bias`/`MinLod` clamp too. Unlike `createSample2D`, there is still no
-/// `ConstOffset` operand here (roadmap L52a's own original scope note).
+/// `Bias`/`MinLod` clamp too. \p Offset (roadmap L66(d)) is the same
+/// `ConstOffset` image operand `createSample2D`'s own `OffsetX`/`OffsetY`
+/// document, narrowed to a single scalar `i32` -- unlike `Plain2D`'s/
+/// `Array2D`'s/`Plain3D`'s own vector-typed offset, a real `deqp-vk` SPIR-V
+/// capture confirms glslang always emits a bare scalar `ConstOffset`
+/// against a 1D (possibly arrayed) sampler, matching `Plain1D`'s own bare
+/// scalar `U` coordinate rather than a vector the array layer would
+/// otherwise widen (see `isSupportedOffset`'s own updated comment in
+/// `SPIRVResourceLowering.cpp`) -- pass a zero constant for a caller with
+/// none to give.
 llvm::CallInst *createSample1D(llvm::IRBuilderBase &Builder,
-                               const ImageCallEnv &Env,
-                               llvm::Value *ImageIndex,
+                               const ImageCallEnv &Env, llvm::Value *ImageIndex,
                                llvm::Value *SamplerIndex, llvm::Value *U,
                                llvm::Value *DUdX, llvm::Value *DUdY,
                                llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                               llvm::Value *Bias, llvm::Value *MinLodClamp,
-                               llvm::Value *Mask, const llvm::Twine &Name = "");
+                               llvm::Value *Bias, llvm::Value *Offset,
+                               llvm::Value *MinLodClamp, llvm::Value *Mask,
+                               const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.1darray.v4f32` call (roadmap L52a), the
 /// `Texture1DArray` counterpart of `createSample1D`. \p DUdX/\p DUdY
@@ -919,18 +931,21 @@ llvm::CallInst *createSample1D(llvm::IRBuilderBase &Builder,
 /// only \p U itself is ever differentiated, never \p ArrayLayer, mirroring
 /// `createSample2DArray`'s own layer-agnostic derivative handling. \p
 /// Bias/\p MinLodClamp (roadmap L61(c)) mirror `createSample1D`'s own
-/// identically new parameters.
-llvm::CallInst *createSample1DArray(llvm::IRBuilderBase &Builder,
-                                    const ImageCallEnv &Env,
-                                    llvm::Value *ImageIndex,
-                                    llvm::Value *SamplerIndex, llvm::Value *U,
-                                    llvm::Value *ArrayLayer,
-                                    llvm::Value *DUdX, llvm::Value *DUdY,
-                                    llvm::Value *Lod,
-                                    llvm::Value *UseExplicitLod,
-                                    llvm::Value *Bias, llvm::Value *MinLodClamp,
-                                    llvm::Value *Mask,
-                                    const llvm::Twine &Name = "");
+/// identically new parameters. \p Offset (roadmap L66(d)) mirrors
+/// `createSample1D`'s own new, bare-scalar `Offset` parameter -- confirmed
+/// via a real `deqp-vk` SPIR-V capture that `Array1D`'s own `ConstOffset`
+/// stays a scalar too, despite its own 2-component `(U, ArrayLayer)`
+/// coordinate: SPIR-V's own `ConstOffset` dimensionality excludes the
+/// array layer, the same "+1" carve-out `GradDerivativeWidth`
+/// (roadmap L64) already applies to a `Grad` derivative.
+llvm::CallInst *
+createSample1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                    llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                    llvm::Value *U, llvm::Value *ArrayLayer, llvm::Value *DUdX,
+                    llvm::Value *DUdY, llvm::Value *Lod,
+                    llvm::Value *UseExplicitLod, llvm::Value *Bias,
+                    llvm::Value *Offset, llvm::Value *MinLodClamp,
+                    llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.1d.f32` call (roadmap L54), the
 /// depth-comparison counterpart of `createSample1D`. \p Bias/\p MinLodClamp

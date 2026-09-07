@@ -277,11 +277,12 @@ TEST_F(ImageCallsTest, MatchesSample1DCallWithBiasAndMinLodClamp) {
   Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.2);
   Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *Offset = Builder.getInt32(7);
   Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
-  CallInst *CI = createSample1D(Builder, Env, Builder.getInt32(2),
-                                Builder.getInt32(1), U, DUdX, DUdY, Lod,
-                                Builder.getInt1(false), Bias, MinLodClamp,
-                                Builder.getInt1(true));
+  CallInst *CI =
+      createSample1D(Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U,
+                     DUdX, DUdY, Lod, Builder.getInt1(false), Bias, Offset,
+                     MinLodClamp, Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -296,6 +297,8 @@ TEST_F(ImageCallsTest, MatchesSample1DCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->Lod, Lod);
   EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
   EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->OffsetX, Offset);
+  EXPECT_EQ(Matched->OffsetY, nullptr);
   EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
@@ -309,10 +312,11 @@ TEST_F(ImageCallsTest, MatchesSample1DArrayCallWithBiasAndMinLodClamp) {
   Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.2);
   Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *Offset = Builder.getInt32(7);
   Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
   CallInst *CI = createSample1DArray(
       Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, ArrayLayer,
-      DUdX, DUdY, Lod, Builder.getInt1(false), Bias, MinLodClamp,
+      DUdX, DUdY, Lod, Builder.getInt1(false), Bias, Offset, MinLodClamp,
       Builder.getInt1(true));
   Builder.CreateRetVoid();
 
@@ -329,6 +333,8 @@ TEST_F(ImageCallsTest, MatchesSample1DArrayCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->Lod, Lod);
   EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
   EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->OffsetX, Offset);
+  EXPECT_EQ(Matched->OffsetY, nullptr);
   EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
