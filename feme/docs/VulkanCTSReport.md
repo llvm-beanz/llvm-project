@@ -29348,3 +29348,43 @@ bit.
 deviation or update needed -- `Bias`/`MinLodClamp` sampling is core SPIR-V
 with no gating feature bit or extension of its own, and `shaderResourceMinLod`
 remains correctly advertised as `VK_FALSE` (unaffected by this row).
+
+## Session: roadmap L67(b) -- `Plain3D` explicit `Grad` sampling
+
+`hasOnlySupportedImageUses`'s `HasGrad` restriction now accepts `Plain3D`,
+and `lowerImageAccesses`'s `Plain3D` branch extracts a real per-axis
+derivative triple from the caller's own `dPdx`/`dPdy` operands (one
+component per axis) in place of a synthesized/zeroed one -- no
+`createSample3D`/runtime signature change was needed at all, since roadmap
+L66(a) already gave this builder a real derivative-operand slot for its
+synthesized implicit-LOD case; this row is purely a lowering-phase change
+reusing that same slot for a caller-supplied `Grad` instead, mirroring
+`Plain1D`'s own roadmap L65 precedent exactly.
+
+`check-feme`: 2655/2714 pass, 0 fail, 59 unsupported (up from 2654/2713, +1
+net new test: a new positive `LowersSampleGradToPlain3D` lowering-phase test
+replacing the now-obsolete negative `LeavesAPlain3DSampleGradAlone` test,
+plus a new negative `LeavesANonZeroTexelOffsetPlain3DSampleAlone` test to
+preserve this shape's own negative-test coverage now naming its real
+remaining gap (`ConstOffset`); a new lit-test case exercising
+`llvm.spv.resource.samplegrad` against a `Dim3D` handle). 0 regressions.
+
+Real CTS, direct re-run of `texturegrad.sampler3d_{fixed,float}_
+{fragment,vertex,compute}` (6 cases): **4/6 Pass, up from 0/6** (the
+`_fragment`/`_vertex` cases; the 2 `_compute` cases remain `Fail` via
+`vkCreateComputePipelines` itself, the same pre-existing, unrelated gap
+other compute-stage sampling groups hit -- unaffected by this row). A
+broader `dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502 cases,
+every texture-function group against this one shape) confirms **14 Pass
+total (up from 10), 260 Fail (down from 264, by exactly these 4
+newly-passing cases), 228 NotSupported (unchanged)** -- no regressions
+anywhere in this shape's own CTS footprint. `texturegradclamp`'s own
+`sampler3d_*` cases remain confirmed `NotSupported`
+(`ShaderResourceMinLod feature not supported`), unchanged, since
+`shaderResourceMinLod` itself remains `VK_FALSE` (roadmap L66's own
+still-open scope).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+deviation or update needed -- `Grad` sampling is core SPIR-V with no gating
+feature bit or extension of its own, and `shaderResourceMinLod` remains
+correctly advertised as `VK_FALSE` (unaffected by this row).
