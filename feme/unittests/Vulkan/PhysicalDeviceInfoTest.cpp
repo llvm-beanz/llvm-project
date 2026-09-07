@@ -213,6 +213,14 @@ TEST(PhysicalDeviceInfo,
   // {READ,WRITE}_WITHOUT_FORMAT_BIT` computation.
   EXPECT_EQ(Info.Features.shaderStorageImageReadWithoutFormat, VK_TRUE);
   EXPECT_EQ(Info.Features.shaderStorageImageWriteWithoutFormat, VK_TRUE);
+  // (Roadmap L66) a real, regression-free flip/measure/revert re-run
+  // across all four `shaderResourceMinLod`-gated CTS groups (plus a full
+  // `dEQP-VK.glsl.texture_functions.*` before/after diff) found every
+  // previously-`NotSupported` case now either genuinely passes or fails
+  // only for the same pre-existing, by-design integer-sampler exclusion
+  // every other shape already has -- see PhysicalDeviceInfo.cpp's own
+  // comment for the full measured breakdown.
+  EXPECT_EQ(Info.Features.shaderResourceMinLod, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -245,6 +253,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.shaderStorageImageExtendedFormats = VK_FALSE;
   Cleared.shaderStorageImageReadWithoutFormat = VK_FALSE;
   Cleared.shaderStorageImageWriteWithoutFormat = VK_FALSE;
+  Cleared.shaderResourceMinLod = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

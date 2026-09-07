@@ -845,22 +845,28 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.Features.shaderStorageImageReadWithoutFormat = VK_TRUE;
   Info.Features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
   // `shaderResourceMinLod`: roadmap L66(j)'s own flip/measure/revert
-  // experiment (this session) temporarily forced this bit `VK_TRUE`
-  // (reverted here before commit, as this comment's own conclusion
-  // requires) to re-measure `textureclamp`/`texturegradclamp`/
-  // `textureoffsetclamp`/`texturegradoffsetclamp` against L66(c)/(f)-(i)'s
-  // now-complete `Dref`+`Grad` shape support. The re-run found and fixed a
-  // real, previously-undiscovered bug along the way (a synthesized
-  // all-zero sample `Offset` operand's type was derived from the
-  // coordinate's own vector shape instead of the image's real
-  // dimensionality, wrongly widening it for `Array1D`), but also
-  // surfaced a genuine remaining gap this bit still depends on: a real,
-  // nonzero `ConstOffset` against a `Plain1D`/`Array1D` depth-comparison
-  // (shadow) sample is rejected outright (roadmap L66(k)). See
+  // experiment found and fixed a real bug (a synthesized all-zero sample
+  // `Offset` operand's type was derived from the coordinate's own vector
+  // shape instead of the image's real dimensionality, wrongly widening it
+  // for `Array1D`) but also surfaced one remaining gap: a real, nonzero
+  // `ConstOffset` against a `Plain1D`/`Array1D` depth-comparison (shadow)
+  // sample was rejected outright. Roadmap L66(k) fixed that gap, and this
+  // row's own final re-run (roadmap L66, concluding entry) re-measured all
+  // four `shaderResourceMinLod`-gated CTS groups
+  // (`textureclamp`/`texturegradclamp`/`textureoffsetclamp`/
+  // `texturegradoffsetclamp`, plus a full `dEQP-VK.glsl.texture_functions.*`
+  // 7,945-case before/after diff) with the bit forced `VK_TRUE`: every one
+  // of the 300 cases that used to report `NotSupported` with the bit off
+  // now reports either `Pass` (172 cases, genuine new coverage) or `Fail`
+  // (128 cases, all confirmed the same pre-existing, by-design
+  // `isampler*`/`usampler*` filtered-integer-sampling exclusion every other
+  // shape already has, never a `MinLod`-specific gap) -- zero cases that
+  // previously reported `Pass`/`Fail` changed status at all, so flipping
+  // this bit is a pure, regression-free addition. See
   // VulkanCTSReport.md's own `shaderResourceMinLod` section for the full
-  // measured per-case breakdown and Roadmap.md's L66(j)/L66(k) rows for
-  // why the bit stays off until L66(k) is resolved.
-  Info.Features.shaderResourceMinLod = VK_FALSE;
+  // measured per-case breakdown and Roadmap.md's L66 row for the
+  // conclusion that closes out this entire flip/measure/revert chain.
+  Info.Features.shaderResourceMinLod = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
