@@ -29763,3 +29763,119 @@ new `llvm.spv.resource.samplecmpgrad`-shaped intrinsic in
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 update needed -- this is a compiler-internal crash fix with no feature or
 extension surface of its own.
+
+## Session: roadmap L66(c) -- `Dref`+`Grad` shadow-sampling for `Plain2D`
+
+Closes roadmap L66's own last remaining open sub-item for `Plain2D` (the
+non-arrayed, non-cube depth-comparison shape that `sampler2dshadow` maps
+to): a real `llvm.spv.resource.samplecmpgrad`/`.samplecmpgrad.clamp`
+intrinsic pair now exists in `IntrinsicsSPIRV.td`, a new
+`ImageSampleDrefGradPattern` raises `OpImageSampleDrefExplicitLod`/
+`OpImageSampleDrefImplicitLod` with a `Grad` image operand to it
+(mirroring `ImageSampleGradPattern`'s own non-`Dref` precedent, with
+`Dref` inserted after the coordinate), and `SPIRVResourceLowering.cpp`
+lowers it to a real widened `femeCpuImageSampleCmp2DF32` runtime entry
+point that now accepts a genuine `DUdX`/`DUdY`/`DVdX`/`DVdY` screen-space
+partial-derivative quartet (feeding the same `femeRTPlanImplicitLod`
+implicit-LOD resolution an ordinary sample's own `Grad` operand already
+drives), deliberately scoped to `Plain2D` only -- `hasOnlySupportedImageUses`
+restricts `DrefHasGrad` to that one shape, leaving every other
+`Dref`-capable shape (`Plain1D`/`Array1D`/`Array2D`/`Cube`/`CubeArray`)
+unrewritten for now, each filed as its own new roadmap L66 follow-on row
+below.
+
+New test coverage across all three touched phases: two new positive MLIR
+raising-pattern lit tests (`samplecmp_grad`/
+`samplecmp_grad_const_offset_minlod` in
+`spirv-to-llvm-sample-dref-and-query-lod.mlir`); a new CPU-lowering-pass
+lit test (`spirv-resource-lowering-image-samplecmpgrad.ll`, covering a
+plain `Grad` sample, a `Grad`+`ConstOffset` sample, a `Grad`+`MinLodClamp`
+sample, and a negative case proving `Cube` is correctly left unrewritten);
+3 new `SPIRVResourceLoweringTest.cpp` unit tests
+(`LowersSampleCmpGradToImageSampleCmpWithGrad`,
+`LowersSampleCmpGradClampToImageSampleCmpWithGradAndMinLodClamp`,
+`LeavesASampleCmpGradAgainstCubeAlone`); and a new
+`ImageSamplingTest.cpp` correctness test
+(`ComparisonSamplingGradSelectsCoarserMipLevel`, mirroring
+`ComparisonSamplingBiasSelectsCoarserMipLevel`'s own precedent, proving a
+real nonzero `DUdX` -- not just `Bias` -- changes which mip level a
+depth-comparison sample's reference is compared against). `check-feme`:
+2669/2728 pass, 0 fail, 59 unsupported (+5 net new tests, 0 regressions).
+
+### A mid-session recovery note
+
+Partway through this session, an attempt to run whole-file `clang-format
+-i` on the touched C++/C files produced a huge, mostly-unrelated
+reformat (these files were not clang-format-clean before this session's
+own edits), and the subsequent `git checkout --` used to back that out
+accidentally discarded all of this session's uncommitted functional work
+too (nothing had been committed yet). The lost work was fully
+reconstructed from the detailed technical notes retained in-session and
+re-verified via the same lit/unit tests before proceeding; see
+`agent_thoughts.md`'s own account of this mistake for the full narrative.
+Formatting was subsequently re-applied safely via `git clang-format
+HEAD`, scoped to only this session's own diff.
+
+### Real `deqp-vk` results
+
+```
+cd /tmp/cts_l66c
+ln -sfn <VK-GL-CTS>/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.texturegrad.sampler2dshadow*"
+```
+
+`texturegrad.sampler2dshadow_{fragment,vertex}` (plain `Dref`+`Grad`, no
+`MinLodClamp` operand, so unblocked by `shaderResourceMinLod` staying
+disabled): **2/2 Pass**, up from an outright `vkCreateGraphicsPipelines`-
+stage failure before this session (the exact
+`"feme-cpu-wrap-patch-constant"`-adjacent class of gap this row closes --
+here manifesting instead as the sample call being left unrewritten and
+rejected by `checkSupportedRaisedOps`). `texturegrad.sampler2dshadow_compute`
+still fails (`VK_ERROR_INITIALIZATION_FAILED`), the same pre-existing,
+unrelated `VK_KHR_compute_shader_derivatives` gap every other
+derivative-consuming CTS group already hits in a compute stage.
+
+A broader `texturegradoffset.*.sampler2dshadow_{fragment,vertex}` sweep
+(10 cases, exercising `Grad`+`ConstOffset` together, all 5 wrap modes):
+**8/10 Pass** (the non-sparse `_fragment`/`_vertex` cases across all 5
+modes), 2 NotSupported (`sparse_sampler2dshadow`'s own pre-existing,
+unrelated "Format not supported" gap -- sparse residency is untouched by
+this row). A regression check with a real `texturegradclamp.
+*.sampler2dshadow_fragment` re-run (the `MinLodClamp`-bearing variant)
+confirms it is still correctly `NotSupported` ("ShaderResourceMinLod
+feature not supported"), exactly as `shaderResourceMinLod` staying
+disabled predicts -- this row's own new code path is real and reachable,
+but the `MinLodClamp`-bearing CTS cases still require L65's own re-run
+(now unblocked, since this closes L66(c), L66's own last open item) before
+they can exercise it.
+
+A full `dEQP-VK.glsl.texture_functions.*sampler2dshadow*` sweep (340
+cases, every texture-function group against this one shape): 35 Pass, 84
+Fail, 221 NotSupported. A broader `dEQP-VK.glsl.texture_functions.*`
+sweep (7,945 cases, every texture-function group against every shape):
+521 Pass, 2,829 Fail, 4,595 NotSupported, completing cleanly with no
+crashes -- consistent with (not a regression from) this session's own
+targeted improvement, since this row is purely additive (only a
+previously-unrewritten `Dref`+`Grad` `Plain2D` sample call now lowers).
+
+This closes roadmap L66(c), and therefore roadmap L66 itself for
+`Plain2D`; `Plain1D`/`Array1D`/`Array2D`/`Cube`/`CubeArray` are filed as
+new roadmap L66 follow-on rows (L66(f)-(j)) below, since `Dref`+`Grad`
+sampling for those shapes needs its own real IR reduction and
+per-shape-argument-count/derivative-width investigation this session did
+not attempt. With `Plain2D`'s own gap closed, roadmap L65's own
+`shaderResourceMinLod` flip/measure/revert experiment can be re-run once
+more, since (a) `Plain3D` ordinary sampling and (d) `Plain1D`/`Array1D`
+`ConstOffset` are already resolved (roadmap L67(a), L66(d)), leaving only
+this session's own newly-filed `Plain1D`/`Array1D`/`Array2D`/`Cube`/
+`CubeArray` `Dref`+`Grad` gaps as this feature's remaining known blockers
+for a shadow-sampling CTS case specifically (an ordinary, non-`Dref`
+sample's own `MinLodClamp` path is already fully supported across every
+shape per L60/L61/L62/L63/L64).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
+gated on no Vulkan feature or extension bit of its own (only the
+*separate* `MinLodClamp` operand this row's own CTS cases correctly still
+reject is gated on `shaderResourceMinLod`, already tracked there).
