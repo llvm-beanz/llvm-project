@@ -531,3 +531,38 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %5 : vector<4xf32>
   }
 }
+
+// -----
+
+// Roadmap L66(j): a `Grad|MinLod` sample against an *arrayed 1D* image (no
+// `ConstOffset` operand of its own -- this pattern's own synthesized
+// all-zero default offset is the only thing under test here). `Array1D`'s
+// own `Coordinate` is a genuine 2-wide `(U, ArrayLayer)` vector, unlike
+// `Plain1D`'s bare scalar one, but SPIR-V's own `ConstOffset` convention for
+// a `Dim1D` image is still always a bare scalar `i32` regardless of
+// arrayedness (`SPIRVResourceLowering.cpp`'s own `isSupportedOffset`,
+// roadmap L66(d)) -- this pattern's synthesized zero offset must match
+// that scalar shape too, not `Coordinate`'s own wider one, or
+// `hasOnlySupportedImageUses`'s `isSupportedOffset` check rejects the
+// sample outright (a real `dEQP-VK.glsl.texture_functions.texturegradclamp.
+// sampler1darray_{fixed,float}_fragment` regression this row's own fix
+// resolves).
+
+// CHECK-LABEL: llvm.func @sample_grad_minlod_array1d
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: %[[OFFSET:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplegrad.clamp"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %{{.*}}, %[[OFFSET]], %{{.*}})
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim1D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @sample_grad_minlod_array1d(%coord : vector<2xf32>, %dpdx : f32, %dpdy : f32, %clamp : f32) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim1D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim1D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim1D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim1D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleExplicitLod %4, %coord ["Grad|MinLod"], %dpdx, %dpdy, %clamp : !spirv.sampled_image<!spirv.image<f32, Dim1D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, f32, f32 -> vector<4xf32>
+    spirv.ReturnValue %5 : vector<4xf32>
+  }
+}

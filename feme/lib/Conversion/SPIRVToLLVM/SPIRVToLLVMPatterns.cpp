@@ -3125,6 +3125,39 @@ bool isMultisampled2DImage(mlir::spirv::ImageType ImageType) {
 constexpr mlir::spirv::ImageOperands NontemporalBit =
     mlir::spirv::ImageOperands::Nontemporal;
 
+/// Returns the type a synthesized all-zero `Offset` operand should have when
+/// a sample or fetch op has no real `ConstOffset` operand of its own to
+/// borrow the type from (every pattern below that defaults a missing offset
+/// to zero calls this, passing \p ImageTy -- either a sample op's own
+/// `SampledImageType::getImageType()`, or a fetch op's own plain
+/// `getImage()` type -- instead of deriving the shape from \p Coordinate's
+/// own type directly). Mirrors `SPIRVResourceLowering.cpp`'s own
+/// `isSupportedOffset` dimensionality rule: a `Dim::Dim1D` image's real
+/// `ConstOffset` (`Plain1D`/`Array1D`, confirmed via a real `deqp-vk`
+/// SPIR-V capture, roadmap L66(d)) is always a bare scalar `i32`, matching
+/// the image's own 1-dimensional extent and excluding any array layer --
+/// unlike every other coordinate component here, this never widens for
+/// `Array1D`'s own arrayed 2-component `(U, ArrayLayer)` coordinate. Every
+/// other dimension's own `ConstOffset` does mirror \p Coordinate's vector
+/// width, so this only special-cases `Dim1D`, falling back to the original
+/// coordinate-shape-mirroring logic otherwise. Roadmap L66(j): this bug was
+/// silent for every already-working `Array1D` combination that carries a
+/// real `ConstOffset` operand (whose type comes from SPIR-V import
+/// directly, always correctly scalar), and only surfaced for a `Grad`+
+/// `MinLod` sample with no `ConstOffset` at all -- the fallback zero-offset
+/// type is the only path that ever went through this (buggy,
+/// coordinate-derived) computation instead.
+mlir::Type getDefaultZeroOffsetType(mlir::spirv::ImageType ImageTy,
+                                    mlir::Type CoordinateType,
+                                    mlir::OpBuilder &Builder) {
+  if (ImageTy.getDim() == mlir::spirv::Dim::Dim1D)
+    return Builder.getI32Type();
+  auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(CoordinateType);
+  return CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                          CoordVecTy.getShape(), Builder.getI32Type()))
+                    : mlir::cast<mlir::Type>(Builder.getI32Type());
+}
+
 /// Returns true if \p ImageOperands names any actual modifier (e.g. `Lod`,
 /// `Bias`) rather than being absent, the empty `None` bit-enum value, or the
 /// discarded `Nontemporal` cache hint -- real `dxc`-compiled SPIR-V spells
@@ -3607,11 +3640,9 @@ public:
     // `llvm.spv.resource.load.level` always takes a texel offset, unlike
     // `spirv.ImageFetch`, which has none here (the `Lod`-only match above
     // already ruled out a `ConstOffset`/`Offset` modifier); pass zero.
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(Op.getImage().getType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
     mlir::Value Offset = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
 
@@ -3955,11 +3986,12 @@ public:
         Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(
+        mlir::cast<mlir::spirv::SampledImageType>(
+            Op.getSampledImage().getType())
+            .getImageType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
 
     // Positional order follows the fixed SPIR-V Image Operands bit order
     // (`Bias, Lod, Grad, ConstOffset, Offset, ConstOffsets, Sample,
@@ -4071,11 +4103,12 @@ public:
       return Rewriter.notifyMatchFailure(Op, "unexpected operand count");
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(
+        mlir::cast<mlir::spirv::SampledImageType>(
+            Op.getSampledImage().getType())
+            .getImageType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
     if (!Offset)
       Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
                                               Rewriter.getZeroAttr(OffsetType));
@@ -4151,11 +4184,12 @@ public:
         Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(
+        mlir::cast<mlir::spirv::SampledImageType>(
+            Op.getSampledImage().getType())
+            .getImageType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
 
     // `Grad`'s own pair (`dPdx` then `dPdy`) always comes first -- it is
     // this pattern's own mandatory operand, unlike `ImageSampleImplicitLodPattern`'s
@@ -4244,11 +4278,21 @@ public:
     mlir::Value Dref = Adaptor.getDref();
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    // Unlike an ordinary sample's own `getDefaultZeroOffsetType` (see its
+    // own comment), a depth-comparison sample's `Coordinate` is always a
+    // genuine vector, even against `Plain1D`/`Array1D` (a real `deqp-vk`
+    // SPIR-V capture confirms a shadow sampler's own coordinate is a
+    // `vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
+    // `ImageSampleDrefImplicitLodPattern`'s own comment), so this
+    // synthesized zero offset must mirror it directly instead: every
+    // shape's own switch arm in `SPIRVResourceLowering.cpp`'s dref-sample
+    // handling always extracts `OffsetX`/`OffsetY` from it unconditionally
+    // before dispatching per-shape (`Plain1D`/`Array1D`'s own arms simply
+    // never consume the extracted values), so it can never be a bare
+    // scalar here even for `Dim::Dim1D`.
+    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
 
     // Same fixed Image Operands bit order as `ImageSampleImplicitLodPattern`
     // above (`Bias` before `ConstOffset` before `MinLod`), whichever subset
@@ -4345,11 +4389,21 @@ public:
     mlir::Value Dref = Adaptor.getDref();
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    // Unlike an ordinary sample's own `getDefaultZeroOffsetType` (see its
+    // own comment), a depth-comparison sample's `Coordinate` is always a
+    // genuine vector, even against `Plain1D`/`Array1D` (a real `deqp-vk`
+    // SPIR-V capture confirms a shadow sampler's own coordinate is a
+    // `vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
+    // `ImageSampleDrefImplicitLodPattern`'s own comment), so this
+    // synthesized zero offset must mirror it directly instead: every
+    // shape's own switch arm in `SPIRVResourceLowering.cpp`'s dref-sample
+    // handling always extracts `OffsetX`/`OffsetY` from it unconditionally
+    // before dispatching per-shape (`Plain1D`/`Array1D`'s own arms simply
+    // never consume the extracted values), so it can never be a bare
+    // scalar here even for `Dim::Dim1D`.
+    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
 
     // Same fixed order as `ImageSampleGradPattern` above (`Grad`'s own
     // pair always comes first, then `ConstOffset`, then `MinLod`), but
@@ -4445,11 +4499,21 @@ public:
     mlir::Value Dref = Adaptor.getDref();
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    // Unlike an ordinary sample's own `getDefaultZeroOffsetType` (see its
+    // own comment), a depth-comparison sample's `Coordinate` is always a
+    // genuine vector, even against `Plain1D`/`Array1D` (a real `deqp-vk`
+    // SPIR-V capture confirms a shadow sampler's own coordinate is a
+    // `vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
+    // `ImageSampleDrefImplicitLodPattern`'s own comment), so this
+    // synthesized zero offset must mirror it directly instead: every
+    // shape's own switch arm in `SPIRVResourceLowering.cpp`'s dref-sample
+    // handling always extracts `OffsetX`/`OffsetY` from it unconditionally
+    // before dispatching per-shape (`Plain1D`/`Array1D`'s own arms simply
+    // never consume the extracted values), so it can never be a bare
+    // scalar here even for `Dim::Dim1D`.
+    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
     mlir::Type OffsetType =
-        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
-                         CoordVecTy.getShape(), Rewriter.getI32Type()))
-                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
     mlir::Value Offset =
         HasConstOffset ? Adaptor.getOperandArguments()[1] : mlir::Value();
     if (!Offset)
