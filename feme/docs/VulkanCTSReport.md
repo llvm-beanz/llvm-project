@@ -30414,3 +30414,123 @@ coverage is included in that total, and no regression was found).
 `shaderResourceMinLod`'s own advertised value is unchanged by this
 session, matching every prior flip/measure/revert row's identical
 finding.
+
+## Session: roadmap L66(k) -- `Plain1D`/`Array1D` depth-comparison `ConstOffset` sampling
+
+Closed roadmap L66(j)'s own sole remaining prerequisite finding: a real,
+nonzero `ConstOffset` against a `Plain1D`/`Array1D` depth-comparison
+(shadow) sample was rejected outright, even though the *ordinary*
+(non-`Dref`) sample path already supports the identical shape (roadmap
+L66(d)).
+
+### Root cause and fix
+
+A real IR reduction (`glslangValidator -V` + `spirv-dis` of a compiled
+`sampler1dshadow`/`sampler1darrayshadow` case) confirmed the real
+`ConstOffset` shape for a `Plain1D`/`Array1D` depth-comparison sample is
+the same bare scalar `i32` L66(d) already established for the ordinary
+path -- `SPIRVToLLVMPatterns.cpp` needed no change at all, since its own
+`Dref`-path patterns (`ImageSampleDrefImplicitLodPattern`,
+`ImageSampleDrefGradPattern`, `ImageSampleDrefExplicitLodPattern`) already
+thread a real `ConstOffset` operand through unconditionally with whatever
+type SPIR-V itself supplies, only ever synthesizing a `Coordinate`-shaped
+zero-vector fallback when no real `ConstOffset` exists (per L66(j)'s own
+finding above).
+
+The actual gap was entirely in `SPIRVResourceLowering.cpp`: its `Dref`-path
+call to `isSupportedOffset` never passed `AllowPlain1DArray1D=true`, so a
+real scalar offset still fell through to `isZeroOffset`'s always-zero
+requirement. Flipping that flag on surfaced a second, previously-latent
+bug before it could ship: `isSupportedOffset`'s own `Is1D` branch used to
+accept *only* a scalar `i32`, which would have silently broken the
+pre-existing zero-offset fallback case (a `<3 x i32> zeroinitializer`,
+still deliberately vector-shaped per L66(j)'s own design) for these two
+shapes' `Dref` samples the moment `AllowPlain1DArray1D` turned on -- fixed
+by widening the check to `isIntegerTy(32) || isZeroOffset(Offset)`,
+accepting either shape. The `Dref`-lowering switch's own offset extraction
+(previously an unconditional `CreateExtractElement`, assuming `Offset` is
+always a vector) now dynamically checks `Offset->getType()->isVectorTy()`
+before deciding whether to extract `OffsetX` or use the scalar value
+directly.
+
+`createSampleCmp1D`/`createSampleCmpArray1D` (`ImageCalls.h`/`.cpp`) each
+gained a new `Offset` parameter (placed between `Bias` and `MinLodClamp`,
+matching SPIR-V's own fixed Image Operands bit order), and
+`femeCpuImageSampleCmp1DF32`/`femeCpuImageSampleCmpArray1DF32`
+(`FeMeRuntimeCPU.c`) each gained a matching `int32_t Offset` parameter,
+threaded through a new `OffsetX` parameter on `femeRTSampleCmp1DAtLevel`
+into both the point and linear sampling branches.
+
+### A test-authoring bug caught before it could ship
+
+The two new runtime tests (`SampleCmp1DHonorsNonZeroTexelOffset`/
+`SampleCmpArray1DHonorsNonZeroTexelOffset`) initially had their texel
+values backwards: the depth-comparison semantics are `Dref <= Texel`
+(pass when true, per the pre-existing `SampleCmp1DLessEqualPasses` test's
+own comment), the opposite of what might naively be assumed. Caught by
+actually running the new tests (not just design review) -- fixed by
+swapping the texel values so the intended "fails"/"passes" cases actually
+exercise those outcomes.
+
+### Testing
+
+Two new lit tests confirm the fix at the transform-pass level:
+`spirv-resource-lowering-image-samplecmp-1d-offset.ll` (`Plain1D`) and
+`spirv-resource-lowering-image-samplecmp-array1d-offset.ll` (`Array1D`),
+kept as separate files rather than combined in one, as
+`.samplecmpbias`/`.samplecmpgrad`'s own sibling files already do:
+combining `Plain1D`'s and `Array1D`'s own `llvm.spv.resource.samplecmp`
+calls in a single module trips an unrelated, pre-existing LLVM
+intrinsic-overload-mangling quirk specific to this intrinsic name once
+two different `Dim1D`-family image handle types coexist -- confirmed via
+manual `feme-opt` runs that isolate the quirk to that co-presence alone
+(reproducing it even with a same-shape, already-supported zero-vector
+offset pair), unrelated to this row's own fix. `check-feme`: 2693/2752
+pass, 0 fail, 59 unsupported (up from L66(j)'s own 2685/2744, +8 net new
+tests across the lit/unit-test suites, 0 regressions).
+`FeMeTransformsCPUTests`: 378/378 pass. `FeMeRuntimeCPUTests`: 242/242
+pass (both full suites).
+
+### Real CTS re-measurement
+
+Since this fix only matters once `shaderResourceMinLod` is advertised,
+re-used L66(j)'s own flip/measure/revert methodology:
+`Info.Features.shaderResourceMinLod` temporarily forced to `VK_TRUE`,
+`feme_vulkan` rebuilt, the fix measured, then reverted to `VK_FALSE`
+before committing.
+
+Direct re-run of the exact 20 cases this row names
+(`sampler1d{,array}shadow_{bias,}fragment`, every wrap mode of
+`textureoffsetclamp`/`texturegradoffsetclamp`): **20/20 Pass, up from
+0/20** (all 20 were `NotSupported` with the bit off, and would have
+`Fail`ed post-flip without this fix, per L66(j)'s own original finding).
+
+A broader same-flip re-run of the full `textureoffsetclamp`/
+`texturegradoffsetclamp` groups confirms no regressions elsewhere:
+
+- `textureoffsetclamp`: 65/180 Pass (up from L66(j)'s own 55/180), 50 Fail
+  (down from 60, by exactly these 10 newly-passing
+  `sampler1d{,array}shadow_bias_fragment` cases), 65 NotSupported
+  (unchanged).
+- `texturegradoffsetclamp`: 70/190 Pass (up from 60/190), 50 Fail (down
+  from 60, by exactly the other 10 `sampler1d{,array}shadow_fragment`
+  cases), 70 NotSupported (unchanged).
+
+Every remaining `Fail` in both groups is confirmed the same by-design
+`isampler*`/`usampler*` integer-sampler exclusion every other roadmap
+row's own sweep already finds -- none newly broken.
+
+### Conclusion
+
+`shaderResourceMinLod` still cannot be advertised as `VK_TRUE` on its own
+merits (the flip is reverted back to `VK_FALSE` in the committed tree,
+unchanged from L66(j)'s own conclusion), but roadmap L66(j)'s own
+methodology has now had its sole surfaced prerequisite gap fully closed:
+no further shape-specific `ConstOffset`/`Grad` gap remains open against
+any of the four `shaderResourceMinLod`-gated CTS groups this project's
+own flip/measure/revert chain (L61/L63/L65/L66(j)) has swept.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`ConstOffset` is core SPIR-V, gated by no feature bit or extension, same
+as every other shape's own `ConstOffset` support (mirroring L67(c)'s own
+identical finding), and `shaderResourceMinLod`'s own advertised value is
+unchanged by this session.
