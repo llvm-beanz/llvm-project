@@ -68722,3 +68722,116 @@ or (worse) inventing a plausible-sounding CTS delta that never actually
 happened. Always let the real `deqp-vk` run be the source of truth,
 even when -- especially when -- it disagrees with a plausible prior
 guess.
+
+# Session: roadmap L66(j) -- shaderResourceMinLod flip/measure/revert re-run
+
+Picked up L66(j) from the roadmap: re-run L65's own `shaderResourceMinLod`
+flip/measure/revert experiment now that every image shape's own `Dref`+
+`Grad` shadow-sampling support has landed (L66(c)/(f)/(g)/(h)/(i)), to see
+whether the feature bit could finally be safely advertised as `VK_TRUE`.
+
+## The reduction dead end
+
+Wanted a real IR reduction of the originally-reported `Array1D` Grad+
+MinLodClamp regression (`sampler1darray_{fixed,float}_fragment` under
+`texturegradclamp`), matching this project's own established H6/H8/H9-series
+technique. Every attempt via `feme-translate --import-spirv` (and
+`--deserialize-spirv`) hit the same pre-existing `mlir::verifyImageOperands`
+assertion crash on a `Grad|MinLod` combined image-operand mask. Checked for
+a way to disable MLIR's post-translation verifier via CLI flag -- none
+exists; `mlir::verify()` is called unconditionally in
+`mlir-translate`'s own `Translation.cpp`, regardless of any flag. This is a
+CLI-tool-only artifact (the production deserialization path bypasses it),
+but it fully blocks IR-reduction-based root-causing for this exact operand
+combination. Concluded direct code inspection plus real CTS re-testing was
+the only viable path forward here -- no synthetic reduced test case could
+be constructed.
+
+## Root-causing via code inspection instead
+
+Traced `hasOnlySupportedImageUses`/`isSupportedOffset` in
+`SPIRVResourceLowering.cpp` against `ImageSampleGradPattern` (and its
+sibling patterns) in `SPIRVToLLVMPatterns.cpp`. Found it: every pattern
+synthesizing a default all-zero `Offset` (when no real `ConstOffset` image
+operand exists on the sample) derived that offset's *type* by mirroring
+`Coordinate`'s own vector shape. Correct everywhere except `Dim::Dim1D` --
+`Array1D`'s own `Coordinate` is a genuine 2-wide `(U, ArrayLayer)` vector,
+but SPIR-V's own `ConstOffset` convention for a 1D image is always a bare
+scalar `i32` regardless of arrayedness. The synthesized zero offset
+therefore became 2-wide when it should have stayed scalar, and
+`isSupportedOffset`'s own `Dim1D` special case (roadmap L66(d)) rejected it
+outright. This bug was silent for every other `Array1D` case because a
+*real* `ConstOffset` always imports from SPIR-V with the correct scalar
+type directly -- it only ever manifested on the *fallback* defaulting path,
+i.e. only `Grad`/`Bias`/`MinLodClamp` samples with no explicit offset of
+their own at all (`textureclamp`/`texturegradclamp`, not
+`textureoffsetclamp`/`texturegradoffsetclamp`).
+
+## A near-miss regression, caught by the same regression sweep this project always insists on
+
+First fix attempt applied the new `Dim1D`-scalar special case uniformly to
+every pattern that synthesizes a default offset, including the three
+depth-comparison (`Dref`, shadow-sampling) patterns. Rebuilt, re-ran
+`texturegradclamp` -- and hit a brand new crash instead of the original
+regression:
+`llvm::ConstantExpr::getExtractElement`'s own assertion
+(`"Tried to create extractelement operation on non-vector type!"`) on
+`sampler1darrayshadow_fragment`. Traced it: a `Dref` sample's own
+`Coordinate` is *always* a genuine vector even against `Plain1D`/
+`Array1D` (confirmed via a real `deqp-vk` SPIR-V capture --
+`vec3(u, <unused-or-layer>, compare)`), and `SPIRVResourceLowering.cpp`'s
+own `Dref`-lowering switch unconditionally extracts `OffsetX`/`OffsetY`
+via `CreateExtractElement` before ever dispatching per-shape -- even
+though `Plain1D`/`Array1D`'s own switch arms never actually consume those
+extracted values. Applying the `Dim1D`-scalar special case there broke
+that unconditional extraction. Fixed by reverting just the three `Dref`
+call sites back to their original coordinate-shape-derived logic, with a
+new comment explaining exactly why they must stay that way. This is
+precisely the kind of asymmetry this project's own standing instructions
+(regression-test every phase, re-run the real CTS after every change) are
+designed to catch before it ships -- caught here on the very first
+post-fix CTS re-run, before any commit was made.
+
+## An expensive lesson in `git checkout --`
+
+While trying to isolate an unwanted whole-file `clang-format` reformatting
+diff from the real fix in `SPIRVToLLVMPatterns.cpp`, ran
+`git checkout -- <file>` to "undo just the formatting." This discarded
+*all* uncommitted changes to that file, including the actual bug fix, not
+just the unwanted reformatting -- had to redo the entire fix from scratch.
+Lesson for next time: never use `git checkout --` to selectively undo part
+of an uncommitted diff; either hand-revert just the unwanted hunks, or
+(better, as done the second time around) constrain formatting to only the
+touched lines from the start via
+`git diff -U0 -- <file> | clang-format-diff.py -p1 -i`, which avoids
+triggering a whole-file reformat in the first place if the file wasn't
+already clang-format-clean.
+
+## Re-measurement and conclusion
+
+With the corrected fix, re-ran all four `shaderResourceMinLod`-gated CTS
+groups against the real ICD (flip active): `textureclamp` improved 16→18/50
+Pass (the fix's reach turned out broader than originally reported -- it
+also fixes the equivalent `Bias`+`MinLodClamp`-without-offset case, not
+just `Grad`+`MinLodClamp`), `texturegradclamp` improved 17→19/52 Pass (the
+originally-reported regression, resolved), and `textureoffsetclamp`/
+`texturegradoffsetclamp` held steady in Pass/Fail terms but exposed 10 new
+fails each -- not a regression from this fix (confirmed: this fix only
+changes a *synthesized* offset's type, never touches offset *acceptance*),
+but a genuine, real, pre-existing, unrelated gap: `Plain1D`/`Array1D`
+depth-comparison sampling rejects a real, nonzero `ConstOffset` outright.
+Filed as roadmap L66(k) for future work.
+
+Reverted the `shaderResourceMinLod` flip back to `VK_FALSE` (a Vulkan
+feature bit is monolithic -- can't be "partially" advertised per test
+group), rebuilt, confirmed `check-feme` still green (2685/2744, 0 fail, 59
+unsupported, matching the pre-session baseline plus this session's own new
+test).
+
+Overall: this row's own re-run methodology continues to pay for itself --
+even though the ultimate answer ("not yet safe to flip") didn't change from
+L65's own prior conclusion, the process of re-verifying it surfaced and
+fixed a real, previously-undiscovered bug (benefiting two CTS groups
+immediately) and converted what could have been an open-ended "something
+still blocks this" into a single, concretely-scoped, well-understood
+remaining prerequisite (L66(k)).
