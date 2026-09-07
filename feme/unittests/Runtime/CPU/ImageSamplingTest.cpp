@@ -231,15 +231,15 @@ using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 /// The roadmap H7b-a `Texture2DArray` counterpart of `SampleFn`, adding a
 /// float `ArrayLayer` coordinate (rounded to nearest, clamped) before the
 /// four screen-space partial derivatives of `(U, V)` -- also gains
-/// (roadmap L60(a)) its own float `Bias` and trailing float
-/// `MinLodClamp`, mirroring `SampleFn`'s own operands above, but with no
-/// integer texel offset (an ordinary Array2D sample's own `ConstOffset`
-/// lowering remains future work, roadmap L33).
+/// (roadmap L60(a)) its own float `Bias`, and (roadmap L33) the same
+/// integer `(OffsetX, OffsetY)` texel offset `SampleFn` documents, plus a
+/// trailing float `MinLodClamp`, mirroring `SampleFn`'s own operands
+/// above.
 using SampleArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                const FemeSamplerDescriptor *, uint32_t,
                                uint32_t, uint32_t, float, float, float, float,
-                               float, float, float, float, bool, float, float,
-                               bool, void *);
+                               float, float, float, float, bool, float, int32_t,
+                               int32_t, float, bool, void *);
 /// The roadmap H7b-a `Texture2DArray` counterpart of `LoadFn`, adding an
 /// integer `Layer` coordinate before `Mip`.
 using LoadArrayFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
@@ -2673,7 +2673,7 @@ TEST_F(ImageSamplingTest, Sample2DArrayReadsRequestedLayer) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f,
      /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*UseExplicitLod=*/true, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
@@ -2696,10 +2696,39 @@ TEST_F(ImageSamplingTest, Sample2DArrayRoundsLayerToNearest) {
   // 0.6 rounds to nearest layer 1, not truncates to layer 0.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.6f,
      /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*UseExplicitLod=*/true, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
      /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
      /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample2DArrayHonorsNonZeroTexelOffset) {
+  // Roadmap L33: a real, nonzero (OffsetX, OffsetY) shifts every tap's
+  // own integer address by that amount before the sampler's addressing
+  // mode is applied, mirroring `femeCpuImageSample2DV4F32`'s own
+  // `Sample2DHonorsNonZeroTexelOffset`-shaped coverage. Point-sampling
+  // texel (0, 0) of layer 1 with an offset of (1, 0) must instead read
+  // texel (1, 0) of that same layer.
+  float Storage[2][1][2][4] = {{{{0, 0, 0, 0}, {1, 1, 1, 1}}},
+                               {{{2, 2, 2, 2}, {3, 3, 3, 3}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 1, 2,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleArrayFn Fn = resolve<SampleArrayFn>(
+      addWrapper("sample_array", "feme.cpu.image.sample.2darray.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, /*ArrayLayer=*/1.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/true, /*Bias=*/0.0f, /*OffsetX=*/1, /*OffsetY=*/0,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
+     /*Mask=*/true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 3.0f);
 }
 
 // Roadmap L52a: ordinary (non-comparison) `Texture1D`/`Texture1DArray`

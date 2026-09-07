@@ -1398,8 +1398,11 @@ TEST(SPIRVResourceLoweringTest, LowersSampledImageArrayToImageSampleArray) {
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, v, array_layer, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod,
-  //  bias, min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 18u);
+  //  bias, offset_x, offset_y, min_lod_clamp, mask). Roadmap L33 widens
+  // this call's own arg count from 18 to 20, adding a real offset_x/
+  // offset_y pair (here always zero, since the source's own `ConstOffset`
+  // is `<3 x i32> zeroinitializer`).
+  EXPECT_EQ(Sample->arg_size(), 20u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersImageArrayFetchToImageLoadArray) {
@@ -1843,11 +1846,11 @@ TEST(SPIRVResourceLoweringTest, LowersNonZeroTexelOffsetPlain2DSample) {
   EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(16))->getSExtValue(), -1);
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetArray2DSampleAlone) {
-  // Unlike `Plain2D` (roadmap L26), `Array2D`'s own offset lowering
-  // remains future work (see `isSupportedOffset`'s comment, roadmap L33)
-  // -- a nonzero offset against this shape is still left unlowered rather
-  // than dropped.
+TEST(SPIRVResourceLoweringTest, LowersNonZeroTexelOffsetArray2DSample) {
+  // Roadmap L33: an ordinary (non-comparison) `Array2D` sample's real,
+  // nonzero constant `ConstOffset` is now threaded through too, mirroring
+  // `LowersNonZeroTexelOffsetPlain2DSample`'s own `Plain2D` precedent
+  // (see `isSupportedOffset`'s comment) -- no longer left unlowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x float> %coord) {
@@ -1857,7 +1860,7 @@ TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetArray2DSampleAlone) {
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call <4 x float> @llvm.spv.resource.sample(
           target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <3 x float> %coord, <2 x i32> <i32 1, i32 0>)
+          target("spirv.Sampler") %samp, <3 x float> %coord, <2 x i32> <i32 1, i32 -1>)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
@@ -1870,8 +1873,14 @@ TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetArray2DSampleAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index, u,
+  //  v, array_layer, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, bias,
+  //  offset_x, offset_y, min_lod_clamp, mask).
+  ASSERT_EQ(Sample->arg_size(), 20u);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(16))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(17))->getSExtValue(), -1);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleClampToPlain2DMinLodClamp) {
@@ -2125,7 +2134,10 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasToArray2DBias) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 18u);
+  // Roadmap L33 widens this call's own arg count from 18 to 20 (a new
+  // offset_x/offset_y pair inserted after bias, before min_lod_clamp) --
+  // bias itself stays at index 15, unaffected.
+  ASSERT_EQ(Sample->arg_size(), 20u);
   EXPECT_EQ(Sample->getArgOperand(15)->getName(), "bias");
 }
 
@@ -2158,8 +2170,11 @@ TEST(SPIRVResourceLoweringTest, LowersSampleClampToArray2DMinLodClamp) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 18u);
-  EXPECT_EQ(Sample->getArgOperand(16)->getName(), "clamp");
+  // Roadmap L33 widens this call's own arg count from 18 to 20 and
+  // inserts a new offset_x/offset_y pair before min_lod_clamp, shifting
+  // it from index 16 to 18.
+  ASSERT_EQ(Sample->arg_size(), 20u);
+  EXPECT_EQ(Sample->getArgOperand(18)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray2DDerivatives) {
@@ -2200,7 +2215,10 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray2DDerivatives) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 18u);
+  // Roadmap L33 widens this call's own arg count from 18 to 20 (a new
+  // offset_x/offset_y pair inserted after bias) -- the derivative
+  // operands checked below (indices 9-12) are unaffected.
+  ASSERT_EQ(Sample->arg_size(), 20u);
   auto GetExtractIndex = [](Value *V) -> const ExtractElementInst * {
     return dyn_cast<ExtractElementInst>(V);
   };
@@ -2522,10 +2540,13 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain3D) {
 TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetPlain3DSampleAlone) {
   // Roadmap L67(c): `Plain3D`'s own `ConstOffset` support remains
   // unstarted, blocked on the same pre-existing `isSupportedOffset`
-  // `Plain2D`-only restriction roadmap L66(d)/L33 already scope -- a
-  // nonzero offset against this shape must still leave the whole handle
-  // unlowered, mirroring `LeavesANonZeroTexelOffsetArray2DSampleAlone`'s
-  // own `Array2D` precedent.
+  // `Plain2D`/`Array2D`-only restriction roadmap L66(d) already scopes
+  // (roadmap L33 extended this from `Plain2D`-only to also include
+  // `Array2D`, but `Plain3D` remains unsupported) -- a nonzero offset
+  // against this shape must still leave the whole handle unlowered,
+  // mirroring `LowersNonZeroTexelOffsetArray2DSample`'s own now-supported
+  // `Array2D` case just above (this shape is the negative-test
+  // counterpart, not (yet) a positive one).
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x float> %coord) {
