@@ -29500,3 +29500,72 @@ pre-existing and unaffected by this row.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 deviation or update needed -- `ConstOffset` combined with an explicit
 `Lod` is core SPIR-V with no gating feature bit or extension of its own.
+
+## Session: roadmap L67(c) -- `Plain3D` `ConstOffset` sampling
+
+`isSupportedOffset` (`SPIRVResourceLowering.cpp`) previously accepted a real,
+nonzero `ConstOffset` for only `Plain2D` (unconditionally) and `Array2D`
+(behind an `AllowArray2D` flag), rejecting `Plain1D`/`Array1D`/`Plain3D`
+regardless. This session widened it to also accept `Plain3D`, requiring a
+3-wide minimum offset vector width (vs. 2 for `Plain2D`/`Array2D`) to match
+this shape's own 3-component `(U, V, W)` coordinate. `lowerImageAccesses`'s
+`Plain3D` branch now extracts a real `(OffsetX, OffsetY, OffsetZ)` triple via
+`CreateExtractElement` and threads it through a newly widened
+`createSample3D`/`ImageCallKind::Sample3D` (argument count 20 -> 23,
+inserting the offset triple between `Bias` and `MinLodClamp`, mirroring
+`createSample2D`'s own `OffsetX`/`OffsetY` placement extended to a third
+axis). `femeCpuImageSample3DV4F32`'s runtime entry point (and its
+`femeRTSamplePoint3D`/`femeRTSampleLinear3D`/`femeRTSampleFiltered3D` helper
+chain) now takes real `OffsetX`/`OffsetY`/`OffsetZ` (`int32_t`) parameters
+threaded through to the point/linear texel-address computation, mirroring
+the existing 2D offset-handling precedent exactly.
+
+New unit-test coverage across all three touched phases: `ImageCallsTest.cpp`'s
+`MatchesSample3DCall` round-trip now asserts real `OffsetX`/`OffsetY`/
+`OffsetZ` values; `SPIRVResourceLoweringTest.cpp`'s now-obsolete negative
+`LeavesANonZeroTexelOffsetPlain3DSampleAlone` test (asserting a nonzero
+`ConstOffset` against `Plain3D` must NOT lower, no longer true) was replaced
+with a new positive `LowersSampleConstOffsetToPlain3D` test mirroring
+`LowersNonZeroTexelOffsetArray2DSample`'s own `Array2D` precedent;
+`ImageSamplingTest.cpp`'s `Sample3DFn` typedef and its 4 existing tests were
+updated for the new 23-argument runtime signature, plus a new
+`Sample3DHonorsNonZeroTexelOffset` test (mirroring
+`Sample2DArrayHonorsNonZeroTexelOffset`) gives real correctness coverage of
+the new operand triple, not just a compile-fix. A new lit-test case
+(`sample_3d_offset` in `spirv-resource-lowering-image-sample-3d.ll`) confirms
+a real, nonzero `ConstOffset` against a `Dim3D` handle now lowers
+successfully.
+
+`check-feme`: 2657/2716 pass, 0 fail, 59 unsupported (up from 2655/2714, +2
+net new tests, 0 regressions).
+
+### Real `deqp-vk` results
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.textureoffset.*.sampler3d_*" \
+  --deqp-log-filename=l67c_offset.qpa
+```
+
+Direct re-run of `textureoffset.*.sampler3d_*` (40 cases, all 5 wrap modes):
+**30/40 Pass, 0 Fail** (10 `NotSupported` -- the same pre-existing
+`VK_KHR_compute_shader_derivatives` gap other compute-stage sampling groups
+already hit, unaffected by this row).
+
+A broader `dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502 cases,
+every texture-function group against this one shape) confirms **84 Pass
+total (up from 14), 190 Fail (down from 260, by exactly these 70
+newly-passing cases spanning `textureoffset`/`textureoffsetclamp`/every
+other offset-shaped group this restriction used to gate), 228 NotSupported
+(unchanged)** -- no regressions anywhere in this shape's own CTS footprint.
+
+This also fully resolves roadmap L66(d)'s own `Plain3D` share of the
+`isSupportedOffset` restriction (L66(d)'s remaining `Plain1D`/`Array1D`
+share is unaffected by this row and remains its own separate, still-open
+gap). With L67(a)/(b)/(c) all now fixed and L67(d) correctly out of scope by
+design, **roadmap L67 is now fully complete**.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `ConstOffset` is core SPIR-V, gated by no feature bit or
+extension, same as every other shape's own `ConstOffset` support.
