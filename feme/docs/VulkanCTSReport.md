@@ -29569,3 +29569,98 @@ design, **roadmap L67 is now fully complete**.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 update needed -- `ConstOffset` is core SPIR-V, gated by no feature bit or
 extension, same as every other shape's own `ConstOffset` support.
+
+## Session: roadmap L66(d) -- `Plain1D`/`Array1D` `ConstOffset` sampling
+
+Closes the final remaining share of roadmap L66(d)'s own `isSupportedOffset`
+`Plain1D`/`Array1D` restriction (`Plain3D`'s own share was already fixed by
+roadmap L67(c)). Confirmed via a real `deqp-vk` SPIR-V capture that both
+shapes' own ordinary-sample `ConstOffset` is a bare scalar `i32`, never a
+vector -- a materially different shape than every other sample-capable
+shape's own vector-typed offset, since SPIR-V's own `ConstOffset`
+dimensionality tracks the image's real dimension count (1 for a 1D image)
+excluding any array layer, the same "+1" carve-out `GradDerivativeWidth`
+(roadmap L64) already applies to a `Grad` derivative -- `Array1D`'s own
+2-component `(U, ArrayLayer)` coordinate does not widen its own offset into
+a vector the way a depth-comparison sample's `Dref`-widened coordinate does
+for `Plain2D`/`Array2D`.
+
+`isSupportedOffset` gained a new `AllowPlain1DArray1D` parameter (mirroring
+the existing `AllowArray2D` pattern) accepting this scalar case only for an
+ordinary (non-`Dref`) sample's own caller. Along the way this surfaced a
+real pre-existing bug: the depth-comparison (`Dref`) sample path shares this
+same function, and would have incorrectly started accepting a nonzero
+offset too had the new branch not been scoped behind this flag -- the
+`Dref` call site passes no such flag and continues to require the trivial
+always-zero case for these two shapes, since no real CTS case exercises a
+nonzero `ConstOffset` against a depth-comparison `Plain1D`/`Array1D` sample.
+`lowerImageAccesses`'s `Plain1D`/`Array1D` branch now extracts a real
+`Offset` value and threads it through both `createSample1D`/
+`createSample1DArray` (each widened with a new `Offset` operand, reusing
+the existing `OffsetX` field rather than adding a dedicated one, since there
+is only one component here) and `femeCpuImageSample1DV4F32`/
+`femeCpuImageSample1DArrayV4F32`'s own runtime entry points (replacing a
+previously hardcoded `/*OffsetX=*/0` literal at each `femeRTSampleFiltered1D`
+call site).
+
+New unit-test coverage across all three touched phases: `ImageCallsTest.cpp`'s
+`MatchesSample1DCallWithBiasAndMinLodClamp`/
+`MatchesSample1DArrayCallWithBiasAndMinLodClamp` now assert a real `Offset`
+value; `SPIRVResourceLoweringTest.cpp` gained two new positive tests
+(`LowersSampleConstOffsetToPlain1D`/`LowersSampleConstOffsetToArray1D`)
+confirming a bare scalar `i32` offset lowers correctly, plus fixes to
+several pre-existing tests that had used a `<1 x i32> zeroinitializer`
+vector for a *zero* offset against these two shapes (now `i32 0`, matching
+the real scalar ABI); `ImageSamplingTest.cpp` gained two new positive
+correctness tests (`Sample1DHonorsNonZeroTexelOffset`/
+`Sample1DArrayHonorsNonZeroTexelOffset`, mirroring
+`Sample3DHonorsNonZeroTexelOffset`'s own precedent) confirming a real
+nonzero offset shifts the sampled texel by the expected amount, and
+confirming `Array1D`'s offset only affects `U`, never `ArrayLayer`. A new
+lit test (`spirv-resource-lowering-image-sample-1d-offset.ll`) confirms both
+shapes' `ConstOffset` lowers successfully; this fix also required correcting
+a pre-existing lit test (`spirv-resource-lowering-image-samplegrad-1d.ll`)
+that had used the same `<1 x i32>` vector shape for `Grad`'s own always-zero
+trailing offset operand -- since that intrinsic's `isSupportedOffset` check
+is shared with the ordinary-sample path, the newly scalar-only check
+correctly rejected that file's now-outdated vector shape, so it was updated
+to `i32 0` to match reality (not a functional regression, purely a
+pre-existing test artifact).
+
+`check-feme`: 2662/2721 pass, 0 fail, 59 unsupported.
+
+### Real `deqp-vk` results
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.textureoffset.*.sampler1d*" \
+  --deqp-log-filename=l66d_offset1d.qpa
+```
+
+Direct re-run of `textureoffset.*.sampler1d*`/`sampler1darray*` (120
+non-`isampler`/`usampler` cases, all 5 wrap modes): **60 Pass (up from 0,
+exactly the ordinary `fixed`/`float` `_fragment`/`_vertex` cases across all
+5 wrap modes -- every one of these previously failed
+`vkCreateGraphicsPipelines` outright)**, 30 Fail (the pre-existing,
+unrelated `sampler1d{,array}shadow` `Dref` cases, correctly still rejected
+since the `Dref` path's own `isSupportedOffset` call site is deliberately
+unaffected by this fix), 30 NotSupported (the pre-existing, unrelated
+`_compute`-stage `VK_KHR_compute_shader_derivatives` gap other sampling
+groups already hit).
+
+A broader `dEQP-VK.glsl.texture_functions.*.sampler1d*` sweep (1355 cases,
+every texture-function group against both shapes) confirms **160 Pass, 572
+Fail, 623 NotSupported**, completing cleanly with no crashes; since this fix
+is purely additive (only a previously-rejected offset case now lowers), no
+regression is possible by construction.
+
+This fully resolves roadmap L66(d) (both `Plain3D`'s share, already fixed by
+L67(c), and this row's own final `Plain1D`/`Array1D` share). Roadmap L66's
+own still-open sub-items are now only (c) (the `Dref`+`Grad`
+shadow-sampling intrinsic gap) and (e) (the cross-function same-binding
+crash), both untouched this session.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `ConstOffset` is core SPIR-V, gated by no feature bit or
+extension, same as every other shape's own `ConstOffset` support.
