@@ -29388,3 +29388,60 @@ still-open scope).
 deviation or update needed -- `Grad` sampling is core SPIR-V with no gating
 feature bit or extension of its own, and `shaderResourceMinLod` remains
 correctly advertised as `VK_FALSE` (unaffected by this row).
+
+## Session: roadmap L33 -- `Array2D` explicit `ConstOffset` sampling
+
+A real CTS sweep first (per L33's own roadmap text: "a real CTS/offloader
+sweep to confirm whether any case actually exercises this combination
+before spending implementation effort") confirmed genuine value:
+`textureoffset`'s own `sampler2darray_*` cases (non-Dref, non-integer)
+uniformly failed `vkCreateGraphicsPipelines` (`VK_ERROR_INITIALIZATION_FAILED`)
+with the handle left unlowered, exactly as `isSupportedOffset`'s
+`Plain2D`-only restriction predicted.
+
+`isSupportedOffset`'s own `AllowArray2D` parameter (previously threaded only
+from the Dref-sample caller, roadmap L50d) is now also passed `true` from
+the ordinary-sample caller in `hasOnlySupportedImageUses`;
+`createSample2DArray`/`ImageCallKind::Sample2DArray` gained a real
+`OffsetX`/`OffsetY` operand pair (widening its argument count from 18 to
+20, inserted between `Bias` and `MinLodClamp`, mirroring `Plain2D`'s own
+`createSample2D` ordering), `lowerImageAccesses`'s `Array2D` branch now
+extracts and threads them via the same shape-agnostic `getSampleOffsetIdx`
+helper `Plain2D` already uses, and the CPU runtime's
+`femeCpuImageSample2DArrayV4F32` now threads real values into all 3 of its
+own `femeRTSampleFiltered2D` call sites in place of previously-hardcoded
+`0`/`0` constants (that helper already accepted `OffsetX`/`OffsetY` -- no
+new offset-application math needed, purely a plumbing fix). A previously
+unknown third caller, the **DXIL**-side `ResourceLowering.cpp`, was
+discovered only via a build failure after widening the signature and
+updated to pass zero-constant offsets (matching its own pre-existing
+`Plain2D` case immediately above it -- DXIL doesn't thread a real offset
+through this pass yet, out of scope here).
+
+`check-feme`: 2656/2715 pass, 0 fail, 59 unsupported (up from 2655/2714, +1
+net new test: a new positive `LowersNonZeroTexelOffsetArray2DSample`
+lowering-phase test replacing the now-obsolete negative
+`LeavesANonZeroTexelOffsetArray2DSampleAlone` test, 3 pre-existing `Array2D`
+lowering tests fixed in place for the widened 20-argument shape, and a new
+positive `Sample2DArrayHonorsNonZeroTexelOffset` runtime test). 0
+regressions.
+
+Real CTS, direct re-run of `textureoffset.*.sampler2darray_*` (non-integer,
+non-shadow, 40 cases across all 5 wrap modes -- `clamp_to_border`,
+`clamp_to_edge`, `mirrored`, `mirrored_repeat`, `repeat`): **20 Pass (up
+from 0), 10 Fail, 10 NotSupported**. The 10 remaining Fails are all
+`_vertex`-stage cases and are a newly discovered, **pre-existing and
+unrelated** gap (roadmap L68, filed this session) one level earlier in the
+pipeline than anything this row touches -- confirmed to affect `Plain2D`'s
+own `_vertex`-stage `textureoffset*` cases identically, so not something
+this row's own `ConstOffset` threading left incomplete. The 10 NotSupported
+are the same pre-existing, unrelated `VK_KHR_compute_shader_derivatives`
+gap other compute-stage sampling groups already hit. A broader regression
+sweep confirms **0 Fail** in both `texture.*.sampler2darray_*` (8 cases)
+and `textureoffset.*.sampler2darrayshadow_*` (the pre-existing Dref+offset
+path, 15 cases) -- no regressions anywhere in this shape's own CTS
+footprint.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+deviation or update needed -- `ConstOffset` is core SPIR-V with no gating
+feature bit or extension of its own.
