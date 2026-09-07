@@ -67363,3 +67363,118 @@ L66(a)/L67(a)/L67(b) have each independently confirmed it as their own
 respective blocker. L66(c) (the `Dref`+`Grad` shadow-sampling intrinsic
 gap) and L66(e) (the cross-function same-binding crash) remain open and
 untouched this session, unrelated to anything `Plain3D`-specific.
+
+# Session: roadmap L33 -- `Array2D` explicit `ConstOffset` sampling
+
+Picked up from the prior session's own final recommendation: roadmap L33
+(`Array2D`'s `ConstOffset` restriction, the same blocker L66(d)/L67(c) both
+name from their own perspectives) as "probably the highest-value next
+target across the whole L-series," since it's a cross-cutting fix multiple
+shapes' rows depend on, rather than another single-shape row.
+
+**Followed L33's own explicit process note first**: "(1) a real
+CTS/offloader sweep to confirm whether any case actually exercises this
+combination before spending implementation effort." Swept 420 cases across
+`textureoffset`/`textureoffsetclamp`/`textureprojoffset` for
+`sampler1d`/`sampler1darray`/`sampler2darray`/`sampler3d` (non-integer,
+non-shadow). Confirmed real value: `textureoffset`'s `sampler2darray_*`
+cases uniformly failed pipeline creation with the handle left unlowered,
+exactly matching `isSupportedOffset`'s restriction. `textureoffsetclamp`
+was uniformly `NotSupported` (the pre-existing `shaderResourceMinLod` gate,
+unrelated), and `textureprojoffset` failed via a completely different,
+unrelated "unhandled opcode" gap (no `textureProj`+offset legalization at
+all -- out of scope, not touched).
+
+**Key simplification found**: `femeRTSampleFiltered2D` (the shared CPU
+runtime helper both `femeCpuImageSample2DV4F32` and
+`femeCpuImageSample2DArrayV4F32` already call) already accepted
+`OffsetX`/`OffsetY` parameters -- `femeCpuImageSample2DArrayV4F32` was just
+hardcoding `0`/`0` at all 3 of its own call sites. This meant the runtime
+fix was purely "thread real values instead of hardcoded zeros," not new
+math, mirroring how small a lot of this project's later L-series rows turn
+out to be once the earlier rows (`Plain2D`'s own L26) already built the
+real machinery.
+
+**A previously unknown third caller of `createSample2DArray` surfaced only
+via a build failure**: `ResourceLowering.cpp`, the **DXIL**-side resource
+lowering pass (distinct from `SPIRVResourceLowering.cpp`, which is where
+all of this project's L-series work otherwise lives). A useful reminder
+--- when widening a shared builder function's signature, grep for *every*
+caller first, not just the SPIR-V-side ones that dominate this project's
+own work, since a compile error is a much more expensive way to discover a
+second caller than a five-second grep would have been.
+
+**Extended the existing `SPIRVResourceLoweringTest.cpp` `Array2D` tests
+rather than treating them as newly obsolete**: `LowersSampleBiasToArray2DBias`,
+`LowersSampleClampToArray2DMinLodClamp`, `LowersSampleGradToArray2DDerivatives`,
+and `LowersSampledImageArrayToImageSampleArray` all needed their own
+`arg_size()`/operand-index assertions bumped for the widened 20-argument
+call shape, but their own underlying behavior remained correct -- worth
+distinguishing this case (a test whose assertions need updating because the
+call shape it's already exercising grew) from the "obsolete negative test"
+case (`LeavesANonZeroTexelOffsetArray2DSampleAlone`, whose entire premise --
+that this combination must NOT lower -- stopped being true and needed
+replacing with a new positive test) that's been this project's more common
+pattern so far.
+
+**A second, genuinely new and distinct gap surfaced from the same CTS
+sweep, one level earlier in the pipeline than anything this row touches**:
+a real re-run of `textureoffset.*.sampler2darray_*` (40 cases, all 5 wrap
+modes) after the fix landed showed 20 Pass (up from 0) but all 10
+`_vertex`-stage cases still failing, this time via a completely different
+error -- `error: failed to legalize operation 'spirv.ImageSampleExplicitLod'`
+in the MLIR SPIR-V-dialect-to-LLVM conversion layer
+(`SPIRVToLLVMPatterns.cpp`), not anything in `SPIRVResourceLowering.cpp`.
+Root-caused to `ImageSampleExplicitLodPattern` only matching a *lone* `Lod`
+image operand, with no handling at all for `Lod` combined with
+`ConstOffset` (vertex shaders lack automatic derivatives, so GLSL's own
+`texture()`/`textureOffset()` calls there lower to an explicit `Lod` rather
+than the implicit-LOD path `ImageSampleImplicitLodPattern` already handles
+`ConstOffset` against). Confirmed this is **not** `Array2D`-specific by
+running the identical sweep against `Plain2D`'s own `sampler2d_*_vertex`
+cases -- same 5/5 Fail, same error -- proving this predates and is entirely
+unrelated to this session's own `Array2D` work, just never CTS-measured
+against a `_vertex` case until this sweep happened to reach one. Filed as a
+new roadmap L68 (deliberately *not* folded into L33's own text, since it's
+a distinct pass, a distinct root cause, and a distinct fix) rather than
+either silently leaving it out of the roadmap or conflating it with L33's
+own, already-real, already-verified fix.
+
+Also updated L67(c)'s own cross-reference text (previously describing
+`isSupportedOffset`'s restriction as "the same pre-existing `Plain2D`-only
+restriction roadmap L66(d)/L33 already scope") to reflect that L33 has
+since widened it to `Plain2D`/`Array2D`, while `Plain1D`/`Array1D`/`Plain3D`
+remain unsupported -- L67(c)'s own scope (`Plain3D`) is unaffected by this
+session's fix, but the stale "`Plain2D`-only" wording would have become
+actively misleading if left unchanged. Left L66(d)'s own historical
+narrative text alone, since it's an accurate record of what was true in
+the session that wrote it, not a currently-live claim.
+
+All changes ran through `git-clang-format`'s underlying `clang-format-diff`
+tool against just the touched hunks (not whole-file reformatting, since
+several of the touched files -- e.g. `ImageCalls.h` -- have pre-existing,
+unrelated formatting violations elsewhere that aren't this session's to
+fix) before the full test suite was re-run to confirm the reformatting
+introduced no behavioral change.
+
+**Validation**: `check-feme`: 2656/2715 pass, 0 fail, 59 unsupported (up
+from 2655/2714, +1 net test, 0 regressions). Full `FeMeTransformsCPUTests`
+(357 tests) and `FeMeRuntimeCPUTests` (231 tests) suites both 100% pass.
+Real CTS: `textureoffset.*.sampler2darray_*` (40 cases) 20 Pass/10 Fail/10
+NotSupported (up from 0 Pass); the 10 Fails are entirely the newly filed
+L68 gap, the 10 NotSupported are the pre-existing, unrelated
+`VK_KHR_compute_shader_derivatives` gap. Regression sweeps of
+`texture.*.sampler2darray_*` (8 cases) and
+`textureoffset.*.sampler2darrayshadow_*` (the pre-existing Dref+offset
+path, 15 cases) both confirm 0 Fail.
+
+**Forward-looking notes for the next session**: roadmap L68 (the
+`Lod|ConstOffset` legalization gap in `SPIRVToLLVMPatterns.cpp`) is now
+probably the single highest-value next target across the *entire*
+L-series, since it's confirmed to block every shape's own `_vertex`-stage
+`textureoffset*`/`textureoffsetclamp*` cases uniformly, not just one
+shape's row -- likely a bigger CTS win than any single-shape fix remaining.
+L67(c) (`Plain3D` `ConstOffset`, blocked on the same restriction L33 just
+partially widened) and L66(c)/(e) (the `Dref`+`Grad` shadow-sampling
+intrinsic gap and the cross-function same-binding crash) all remain open
+and untouched this session.
