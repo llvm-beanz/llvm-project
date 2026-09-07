@@ -68983,3 +68983,63 @@ Roadmap.md. `Vulkan14FeatureInventory.md` updated (`shaderResourceMinLod`
 now `yes`). `check-feme`: 2693/2752 pass, 0 fail (unchanged -- this is a
 pure runtime feature flip, no new lowering logic, so no new unit/lit
 test coverage was needed beyond the updated advertisement test).
+
+# Session: closing out roadmap L60 and L61
+
+With L66/L67 closed last session (and `shaderResourceMinLod` now
+permanently enabled), this session's job was to see whether L60 and L61
+could finally close too.
+
+## L61 was mostly a documentation archaeology exercise
+
+L61's own row named four prerequisites blocking a safe
+`shaderResourceMinLod` flip. Three of the four had actually already been
+fixed by other, unrelated sessions (L66(a) for `Plain3D`, L64 for the
+`VulkanBuffer` misattribution) -- but the *fourth*, `Dref`+`Bias`
+legalization, turned out to have already been fixed too, just never
+cross-referenced back to L61's own row. Found this by grepping git log
+for commits mentioning "L52(b)" (the sub-item's own home row) and
+finding a whole "UPDATE:" paragraph already embedded deep inside L52's
+own giant row text, describing the fix in full. This is a good argument
+for why these giant single-row entries, however useful their append-only
+history is, make it easy to lose track of *who else* depends on a given
+sub-item being fixed -- L61 itself never got updated when L52(b) closed,
+even though L52(b) was its own literal blocker. Worth watching for this
+pattern again: when closing any row, grep for every *other* row that
+names it as a dependency, not just the row's own text.
+
+## L60: real measurement work, not just archaeology
+
+Unlike L61, L60's own sub-items (d)/(e)/(f) genuinely hadn't been
+re-confirmed since the bit flipped. Did real, targeted CTS re-runs for
+each (`texturegradclamp`, `texturegrad.*shadow*`,
+`texturegradoffset.*shadow*`, and a full sparse-residency `Grad` sweep)
+and confirmed by name, not just aggregate count, that every remaining
+failure in each group was an already-understood, out-of-scope gap
+(integer-sampler exclusion, sparse-residency infrastructure, or
+compute-stage derivatives) rather than something new.
+
+That last one -- compute-stage derivatives -- was the genuinely
+interesting finding. It's been named as "the same
+`VK_KHR_compute_shader_derivatives` gap other compute-stage sampling
+groups already hit" by well over a dozen separate rows across this
+project's history, but never once got its own tracking line. Every
+session that ran into it treated it as someone else's problem to file
+properly later, and "later" never actually arrived. Filed it now as
+roadmap L69, broken into four phases (extension advertisement, SPIR-V
+execution-mode recognition, the real compute-stage invocation-scheduling
+design work, and threading a real derivative through the existing
+runtime machinery) -- this felt like the single highest-value thing this
+session could do for future L-series (and honestly H-series too, since
+compute-stage sampling isn't L-specific) work, even though it isn't a
+fix itself.
+
+## Outcome
+
+L61 struck through as complete. L60 stays open (correctly, since (c) is
+a real, unstarted, cross-cutting gap) with an "UPDATE" documenting all
+five other sub-items' now-confirmed status and a pointer to the new L69
+row. No code changes were needed this session -- purely a re-measurement
+and documentation session, but one that closes a real row and prevents a
+long-standing gap from continuing to be silently re-discovered by every
+future session that happens to run into it.
