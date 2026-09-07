@@ -3369,10 +3369,11 @@ TEST(SPIRVResourceLoweringTest,
       findImageCall(*F, "feme.cpu.image.samplecmp.cubearray.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, array_layer, lod, use_explicit_lod, dref, bias,
+  //  dir_x, dir_y, dir_z, ddir_x_dx, ddir_x_dy, ddir_y_dx, ddir_y_dy,
+  //  ddir_z_dx, ddir_z_dy, array_layer, lod, use_explicit_lod, dref, bias,
   //  min_lod_clamp, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 16u);
-  EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "dref");
+  ASSERT_EQ(SampleCmp->arg_size(), 22u);
+  EXPECT_EQ(SampleCmp->getArgOperand(18)->getName(), "dref");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmp1DToImageSampleCmp1D) {
@@ -3902,6 +3903,75 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(DDirZdY->getVectorOperand()->getName(), "dpdy");
   EXPECT_EQ(cast<ConstantInt>(DDirZdY->getIndexOperand())->getZExtValue(), 2u);
   EXPECT_EQ(SampleCmp->getArgOperand(17)->getName(), "dref");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpGradToImageSampleCmpCubeArrayWithGrad) {
+  // Roadmap L66(i): widens roadmap L66(h)'s support to `CubeArray` too --
+  // `hasOnlySupportedImageUses`'s own `DrefHasGrad` gate now accepts this
+  // shape as well, and `CubeArray`'s own `dPdx`/`dPdy` needed no further
+  // width change at all: `GradDerivativeWidth`'s own generalized "arrayed
+  // shapes drop one component" formula already resolves `CubeArray`
+  // (arrayed, `SampleCoordWidth == 4`) to the same 3-wide direction-vector
+  // derivative `Cube` itself uses, unpacked into six scalars the same way
+  // `Cube`'s own `HasGrad` handling above unpacks its own derivative
+  // pair.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref,
+                       <3 x float> %dpdx, <3 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 3, 2, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmpgrad(
+          target("spirv.Image", float, 3, 2, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <3 x float> %dpdx, <3 x float> %dpdy,
+          <4 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 3, 2, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp =
+      findImageCall(*F, "feme.cpu.image.samplecmp.cubearray.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, ddir_x_dx, ddir_x_dy, ddir_y_dx, ddir_y_dy,
+  //  ddir_z_dx, ddir_z_dy, array_layer, lod, use_explicit_lod, dref, bias,
+  //  min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 22u);
+  auto *DDirXdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(9));
+  auto *DDirXdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(10));
+  auto *DDirYdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(11));
+  auto *DDirYdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(12));
+  auto *DDirZdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(13));
+  auto *DDirZdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(14));
+  EXPECT_EQ(DDirXdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DDirXdX->getIndexOperand())->getZExtValue(), 0u);
+  EXPECT_EQ(DDirXdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DDirXdY->getIndexOperand())->getZExtValue(), 0u);
+  EXPECT_EQ(DDirYdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DDirYdX->getIndexOperand())->getZExtValue(), 1u);
+  EXPECT_EQ(DDirYdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DDirYdY->getIndexOperand())->getZExtValue(), 1u);
+  EXPECT_EQ(DDirZdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DDirZdX->getIndexOperand())->getZExtValue(), 2u);
+  EXPECT_EQ(DDirZdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DDirZdY->getIndexOperand())->getZExtValue(), 2u);
+  auto *ArrayLayer = cast<ExtractElementInst>(SampleCmp->getArgOperand(15));
+  EXPECT_EQ(ArrayLayer->getVectorOperand()->getName(), "coord");
+  EXPECT_EQ(cast<ConstantInt>(ArrayLayer->getIndexOperand())->getZExtValue(),
+            3u);
+  EXPECT_EQ(SampleCmp->getArgOperand(18)->getName(), "dref");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
