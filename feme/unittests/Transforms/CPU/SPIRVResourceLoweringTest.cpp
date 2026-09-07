@@ -2477,14 +2477,15 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToPlain3DWithMinLodClamp) {
   EXPECT_EQ(Sample->getArgOperand(18)->getName(), "clamp");
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAPlain3DSampleGradAlone) {
-  // Roadmap L67(a)'s own negative counterpart, updated for roadmap L67(b):
-  // `Plain3D` has no `Grad` support at all yet (unlike `Bias`/
-  // `MinLodClamp`, just fixed by roadmap L67(a) above) --
-  // `hasOnlySupportedImageUses`'s `HasGrad` restriction still rejects
-  // this shape, so a `samplegrad` against it must leave the handle (and
-  // its `sample` call) entirely unlowered rather than silently dropping
-  // the derivative.
+TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain3D) {
+  // Roadmap L67(b): `llvm.spv.resource.samplegrad` against a `Plain3D`
+  // handle now lowers a real, caller-supplied per-axis derivative triple
+  // through to `createSample3D` (extracted one component per axis from
+  // the real `dPdx`/`dPdy` operands), mirroring `Plain1D`'s own roadmap
+  // L65 precedent -- previously `hasOnlySupportedImageUses` rejected this
+  // shape/operand combination outright (see the now-obsolete
+  // `LeavesAPlain3DSampleGradAlone` test this one replaces), leaving the
+  // whole handle unlowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x float> %coord, <3 x float> %dpdx, <3 x float> %dpdy) {
@@ -2508,7 +2509,47 @@ TEST(SPIRVResourceLoweringTest, LeavesAPlain3DSampleGradAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 20u);
+  // (..., u, v, w, dudx, dudy, dvdx, dvdy, dwdx, dwdy, lod,
+  //  use_explicit_lod, bias, min_lod_clamp, mask) -- operands 9-14 are the
+  // per-axis derivative components extracted from the real %dpdx/%dpdy.
+  for (unsigned ArgNo : {9, 10, 11, 12, 13, 14})
+    EXPECT_TRUE(isa<ExtractElementInst>(Sample->getArgOperand(ArgNo)));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetPlain3DSampleAlone) {
+  // Roadmap L67(c): `Plain3D`'s own `ConstOffset` support remains
+  // unstarted, blocked on the same pre-existing `isSupportedOffset`
+  // `Plain2D`-only restriction roadmap L66(d)/L33 already scope -- a
+  // nonzero offset against this shape must still leave the whole handle
+  // unlowered, mirroring `LeavesANonZeroTexelOffsetArray2DSampleAlone`'s
+  // own `Array2D` precedent.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg3d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp3d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord, <3 x i32> <i32 1, i32 0, i32 0>)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg3d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp3d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {
