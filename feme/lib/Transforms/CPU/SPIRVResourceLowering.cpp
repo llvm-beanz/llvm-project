@@ -2363,13 +2363,24 @@ struct ImageHeapEntry {
 /// sampler handles in \p HeapIndices -- a map from each accepted
 /// `handlefrombinding` call to the range-checked heap index (and, for an
 /// image handle, `ImageShape`) it resolves to -- into the corresponding
-/// canonical `feme.cpu.image.*` call (see ImageCalls.h), then erases the
-/// handles themselves.
+/// canonical `feme.cpu.image.*` call (see ImageCalls.h), then erases each
+/// handle that ends up with no remaining users.
 ///
 /// `hasOnlySupportedImageUses`/`hasOnlySupportedSamplerUses` already
-/// guaranteed at collection time that every use is one of these shapes, so
-/// there is no partially-rewritten state to worry about: either the whole
-/// function was accepted, or none of it was.
+/// guaranteed at collection time that every use *this* handle has is one of
+/// these shapes, so there is no partially-rewritten state to worry about
+/// *for a single handle*: either all of it was accepted, or none of it was.
+/// Roadmap L66(e): that guarantee does not extend to a sample/fetch call's
+/// *other* handle (its image side's own sampler, or vice versa) -- \p
+/// HeapIndices only contains handles from `run`'s own per-handle
+/// `Entry.Conflicting` skip, so a sample call's image handle can be present
+/// here while its paired sampler handle was excluded (its own, unrelated
+/// (set, binding) identity conflicting with a different declaration
+/// elsewhere in the module), or vice versa; such a call is deliberately left
+/// entirely unrewritten below rather than only partially so (see each
+/// shape's own `CI->getArgOperand(0) != Handle` skip), which means the
+/// handle that *is* present here is not always fully dead by the time this
+/// function returns.
 void lowerImageAccesses(
     const MapVector<CallInst *, ImageHeapEntry> &HeapIndices,
     const ImageCallEnv &Env) {
@@ -3283,10 +3294,31 @@ void lowerImageAccesses(
   }
 
   // Erased last: a sampler handle still had the sample calls as users while
-  // the image side of the loop above was rewriting them.
+  // the image side of the loop above was rewriting them. Roadmap L66(e): a
+  // handle can still have real, live users here even after the loop above --
+  // not the "either the whole function was accepted, or none of it was"
+  // state this function's own header comment describes -- when its own
+  // paired image/sampler handle was excluded from `HeapIndices` entirely
+  // because *that* handle's own (set, binding) identity conflicted with a
+  // different declaration elsewhere in the module (`run`'s own
+  // `Entry.Conflicting` skip, checked per handle, not per function). Every
+  // sample/fetch call reached only from such an excluded handle's own
+  // partner is deliberately left unrewritten above
+  // (`CI->getArgOperand(0) != Handle` for a sample, mirrored for a fetch's
+  // own image-only pointer), so this handle is not actually dead:
+  // unconditionally erasing it here was a real use-after-free (confirmed via
+  // a minimal repro: two functions each declaring an image handle at an
+  // identical binding for two different shapes, sharing one consistent,
+  // non-conflicting sampler binding between them) -- `Instruction::
+  // eraseFromParent` deletes a handle a still-live call elsewhere still
+  // references. Leave any handle with remaining users alone instead, for
+  // `feme::cpu::checkSupportedRaisedOps` to reject, exactly like a
+  // conflicting buffer handle already is (see `lowerAccesses`'s own
+  // `Conflicting` skip in `run` above).
   for (const auto &[Handle, Entry] : HeapIndices) {
     (void)Entry;
-    Handle->eraseFromParent();
+    if (Handle->use_empty())
+      Handle->eraseFromParent();
   }
 }
 

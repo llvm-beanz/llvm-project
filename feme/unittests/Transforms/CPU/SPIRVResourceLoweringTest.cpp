@@ -4588,3 +4588,81 @@ TEST(SPIRVResourceLoweringTest, LeavesAnArrayedQueryLodHandleAlone) {
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
+
+// Roadmap L66(e): a real use-after-free, found via CTS re-runs once L66's
+// other sub-items began clearing more pipelines. Two functions each declare
+// an *image* handle at the same (set, binding) identity but with two
+// different shapes (`Plain2D` here, `Plain3D` in the other function) -- a
+// conflicting re-declaration `run` correctly excludes both image handles
+// from their own function's `ImageHeapIndices` (mirroring every other
+// conflicting-identity test above) -- while each function's own *sampler*
+// handle shares one single, non-conflicting (set, binding) identity between
+// them, so each sampler handle *is* accepted. Before this fix,
+// `lowerImageAccesses`'s own trailing cleanup loop unconditionally erased
+// every handle in `ImageHeapIndices` -- including an accepted sampler
+// handle whose paired (excluded) image handle meant the sample call
+// through it was deliberately left unrewritten and still live, referencing
+// that sampler handle as an operand: `Instruction::eraseFromParent` on a
+// still-used `Value` aborts (`Uses remain when a value is destroyed!`) in
+// an assertions-enabled build, confirmed via a minimal repro before this
+// fix landed. The regression this test actually exercises is simply that
+// `runPass` completes at all, rather than crashing -- the specific
+// assertions below (both handles/calls survive, each function still gets
+// its own sampler-only heap-index metadata) document the exact state that
+// makes the old unconditional erase unsafe.
+TEST(SPIRVResourceLoweringTest,
+     LeavesConflictingImageShapeWithSharedSamplerBindingAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @sample_2d(<2 x float> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg2d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample.v4f32.timg2d(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    define <4 x float> @sample_3d(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg3d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample.v4f32.timg3d(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord, <3 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg2d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg3d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+    declare <4 x float> @llvm.spv.resource.sample.v4f32.timg2d(
+        target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler"),
+        <2 x float>, <2 x i32>)
+    declare <4 x float> @llvm.spv.resource.sample.v4f32.timg3d(
+        target("spirv.Image", float, 2, 0, 0, 0, 1, 0), target("spirv.Sampler"),
+        <3 x float>, <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M); // Must not crash.
+
+  Function *F2D = M->getFunction("sample_2d");
+  Function *F3D = M->getFunction("sample_3d");
+  ASSERT_TRUE(F2D);
+  ASSERT_TRUE(F3D);
+  // Neither function's own sample ever lowers: each one's image handle is
+  // the conflicting side of its own (set, binding) identity.
+  EXPECT_FALSE(findImageCall(*F2D, "feme.cpu.image.sample.2d.v4f32"));
+  EXPECT_FALSE(findImageCall(*F3D, "feme.cpu.image.sample.3d.v4f32"));
+  // Each function's own (non-conflicting) sampler handle is still accepted
+  // on its own, so each still gets bound-resource metadata (a real,
+  // observable difference from `LeavesConflictingRangeSizeUnchanged`'s own
+  // fully-conflicting case above, where neither handle in either function
+  // is ever accepted and no metadata is attached at all).
+  EXPECT_TRUE(findBoundNode(*M, "sample_2d"));
+  EXPECT_TRUE(findBoundNode(*M, "sample_3d"));
+}
