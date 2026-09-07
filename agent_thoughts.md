@@ -68587,3 +68587,138 @@ likely to hit this exact same rounding-boundary class of bug -- but it's
 still worth re-checking the real CTS output pixel-for-pixel rather than
 assuming a clean unit-test pass is sufficient, since this session is
 concrete proof that it isn't always.
+
+# Session: roadmap L66(i) -- `CubeArray` `Dref`+`Grad` shadow sampling
+
+Picked up L66(i), the last open item in L66's `Cube`/`CubeArray`
+follow-on pair: extend `Dref`+`Grad` depth-comparison sampling, already
+closed for `Plain2D` (L66c), `Plain1D`/`Array1D` (L66f), `Array2D`
+(L66g), and `Cube` (L66h), to also cover `CubeArray`. The previous
+session's own thoughts (end of the L66(g) entry) had flagged that
+`Cube`/`CubeArray` might not follow the same simple "arrayed shapes
+drop one component" derivative-width pattern every non-cube shape had
+confirmed, since their own ordinary coordinate widths already sit at
+SPIR-V's 4-component ceiling. L66(h)'s own session (picked up next,
+`Cube` itself) settled that: `GradDerivativeWidth`'s existing
+generalized formula already resolves `Cube` to width 3 with no code
+change, and by direct inspection so does `CubeArray` -- confirmed again
+this session by the same reasoning, no test needed to prove it.
+
+## The widening itself: no surprises
+
+Unlike L66(h)'s own session, this one had no genuine surprises. The
+mechanical widening across all three phases (`ImageCalls.h`/`.cpp`'s
+`createSampleCmpCubeArray`, `SPIRVResourceLowering.cpp`'s `DrefHasGrad`
+gate and derivative extraction, `FeMeRuntimeCPU.c`'s
+`femeCpuImageSampleCmpCubeArrayF32`) mirrored L66(h)'s own `Cube` fix
+almost exactly: widen the builder/decode with 6 new derivative params
+inserted after `DirZ`; widen the shape gate; widen the derivative-
+extraction `else if` to cover both `Cube` and `CubeArray` (they share
+identical 3-wide direction-vector unpacking); replace the runtime
+entry point's old always-level-0 `femeRTComputeClampedLod` call with
+`femeRTComputeCubeClampedLod`, reordering `FemeRTCubeFace CF`'s
+computation to precede the LOD calculation.
+
+Crucially, `femeRTComputeCubeClampedLod` is the *same* shared helper
+`Cube`'s own L66(h) fix, the ordinary (non-`Dref`) `CubeArray` sample
+entry point, and `Cube`'s own `Dref`-only (non-`Grad`) entry point all
+already use. Both bugs L66(h) found and fixed (`femeRTComputeCubeUVDerivatives`'s
+quotient-rule term, `femeRTFastLog2`'s precision) live inside that same
+shared helper -- so this row's own widening automatically inherits both
+fixes for free, with no new numerical investigation needed. This is
+exactly what "reuse the shared helper" was supposed to buy: L66(h)'s
+own real bug-hunting work already paid off project-wide before this
+session even started.
+
+All new unit tests passed on the first try: `ImageCallsTest.cpp`'s
+`MatchesSampleCmpCubeArrayCallWithRealGradDerivatives`,
+`SPIRVResourceLoweringTest.cpp`'s `LowersSampleCmpGradToImageSampleCmpCubeArrayWithGrad`,
+and a new `ImageSamplingTest.cpp` correctness test,
+`SampleCmpCubeArrayGradSelectsCoarserMipLevel`, deliberately exercising
+cube element 1 (not element 0) with a real nonzero derivative, to
+confirm `ArrayLayer` selection and `Grad` derivative handling compose
+correctly rather than one silently overriding the other -- a
+combination none of the individual sibling fixes (L66(g)'s own
+`ArrayLayer`-only widening, L66(h)'s own `Grad`-only widening for
+non-arrayed `Cube`) had tested together before. `check-feme`:
+2685/2744 pass, 0 fail, 59 unsupported.
+
+## The real finding: this exact CTS build has zero coverage for this combination
+
+Ran the real `deqp-vk` re-run this project's standing process requires
+after every change, same as always, not expecting anything different
+from L66(h)'s own clean 2/2-Pass outcome. Instead: **zero matching
+cases at all.** A direct `--deqp-case="dEQP-VK.glsl.texture_functions.
+texturegrad.samplercubearrayshadow_*"` run returned `0/0`. Rather than
+assuming this was some environment misconfiguration (I double-checked
+`VK_DRIVER_FILES` and `vulkaninfo --summary` first, confirming `FeMe
+CPU Vulkan Device` really was the active ICD), I regenerated a fresh
+`--deqp-runmode=txt-caselist` dump (with the `vulkan -> data/vulkan`
+symlink in place, per this report's own documented gotcha) and grepped
+it directly: this exact VK-GL-CTS checkout genuinely has no
+`texturegrad`/`texturegradoffset`/`texturegradclamp` cases for
+`samplercubearrayshadow` at all. The only cases that exist for this
+sampler type are under `texture.*` (ordinary `Dref`, unrelated to this
+row) and the `query.*` groups (`texturequerylevels`/`texturequerylod`/
+`texturesize`, also unrelated).
+
+This mirrors L66(f)'s own earlier finding that
+`texturegradclamp.*.sampler1d{,array}shadow_*` returns 0/0 for a
+different shape/group combination -- a reminder that "the roadmap
+request's own text says N real failing cases exist" is a claim worth
+verifying against the actual CTS build in hand, not assuming true by
+default, especially for a shape/function combination this specific.
+I do not think this makes the fix pointless: the widening is still
+correct (proven by the new correctness unit test, and by the fact that
+it reuses an already-CTS-validated shared helper verbatim), and any
+future CTS version -- or any real application -- exercising this exact
+combination will now get correct behavior instead of an outright
+`vkCreateGraphicsPipelines` rejection or a silently-wrong always-
+level-0 LOD. But it does mean this session's own real CTS re-run has
+no Pass-count delta to report, unlike every other row in this L66(c)-
+(h) chain, and I documented that honestly in `VulkanCTSReport.md`
+rather than papering over it.
+
+Confirmed no regression: a direct `*cubearray*shadow*` sweep across
+every `texture_functions` group (13 cases) still shows `texture.
+samplercubearrayshadow_fragment` Pass (the pre-existing, non-`Grad`
+`Dref` path this row's own `DrefHasGrad` gate widening runs alongside
+is unaffected) and the same 11 pre-existing, unrelated
+`texturequerylod`/`unhandled opcode 103` failures L66(g) already found.
+A full `dEQP-VK.glsl.texture_functions.*` sweep (7,945 cases)
+reproduces L66(h)'s own exact baseline verbatim (539 Pass, 2,811 Fail,
+4,595 NotSupported) -- 0 regressions, 0 newly-passing cases, exactly as
+the coverage-gap finding predicts.
+
+## Wrapping up L66(h)-(i)
+
+This closes roadmap L66(i), and with it, L66's own `Cube`/`CubeArray`
+follow-on pair in full. Updated L66's own shared trailing note (which
+used to read "once (c)'s own remaining Cube/CubeArray follow-on rows
+are resolved") to reflect that both are now done, and flipped L66(j)'s
+dependency list to `none` -- L65's own `shaderResourceMinLod`
+flip/measure/revert experiment is now unblocked and ready to re-run,
+though per this session's own coverage-gap finding, its measured
+impact may still be limited by how many `MinLodClamp`-bearing
+shadow-sampling cases this exact CTS version actually exercises per
+shape. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no update needed, matching every sibling row in this chain.
+
+## What I'd do differently next time
+
+Nothing about the fix itself -- it went as smoothly as a "widen the
+shape gate, reuse the shared helper" row can go, precisely because
+L66(h)'s own prior session had already done the hard numerical
+debugging this row could just inherit. The one thing worth internalizing
+project-wide: a roadmap entry's own opening description (written by a
+*previous* session, based on its own read of the code, not a fresh CTS
+run) can overstate real CTS impact with total sincerity -- L66(i)'s own
+opening text called this "likely the largest of these five follow-on
+rows" purely from code complexity, with no way to know in advance that
+this exact combination has zero CTS coverage today. Trusting the
+roadmap's own framing without independently re-measuring would have
+meant either quietly under-reporting this row's own real-world impact,
+or (worse) inventing a plausible-sounding CTS delta that never actually
+happened. Always let the real `deqp-vk` run be the source of truth,
+even when -- especially when -- it disagrees with a plausible prior
+guess.
