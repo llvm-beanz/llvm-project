@@ -30066,3 +30066,156 @@ update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
 gated on no Vulkan feature or extension bit of its own (only the
 *separate* `MinLodClamp` operand is gated on `shaderResourceMinLod`,
 already tracked there and unaffected by this row).
+
+## Session: roadmap L66(h) -- `Dref`+`Grad` shadow-sampling for `Cube`
+
+Widens roadmap L66(c)/(f)/(g)'s `Dref`+`Grad` depth-comparison sampling
+support to also cover `Cube` (`samplercubeshadow_fragment` under
+`texturegrad`). `hasOnlySupportedImageUses`'s `DrefHasGrad` shape gate
+now also accepts `Cube`; its `dPdx`/`dPdy` width check needed no change
+(Cube's own non-arrayed `SampleCoordWidth == 4` already matches the
+existing formula). `lowerImageAccesses`'s Dref-branch derivative-
+extraction now also `CreateExtractElement`s Cube's own 3-wide direction-
+vector derivative pair (`CubeDDirXdX`..`CubeDDirZdY`) the same way its
+non-`Dref` Grad Cube sibling already does. `createSampleCmpCube` gained
+6 new `DDirXdX`..`DDirZdY` parameters (inserted after `DirZ`, before
+`Lod`), threaded through to a widened `femeCpuImageSampleCmpCubeF32`
+runtime entry point reusing `femeRTComputeCubeClampedLod` (the same
+helper the ordinary, non-`Dref` Cube sample entry points already share).
+
+### Two genuine bugs found by the real CTS re-run, not by any unit test
+
+Every synthetic unit test across all three touched phases passed on the
+first widening pass, and `check-feme` was fully clean -- but a real
+`deqp-vk` re-run of `texturegrad.samplercubeshadow_{fragment,vertex}`
+still failed with a genuine "Image mismatch" (a sparse, ~90/16384-pixel,
+~0.5% diagonal-band mismatch), narrowly isolated to this *exact*
+Dref+Grad+Cube three-way combination: every pairwise combination of
+these three factors (ordinary Grad Cube color sampling, non-Grad Dref
+Cube depth comparison, Dref+Grad for every other shape) already passed
+cleanly. Root-causing this took a real IR/image-diff reduction (base64-
+decoding the failing test's own embedded `Result`/`Reference` PNGs out
+of its `.qpa` log and diffing them with `numpy`/`PIL`), which revealed
+the mismatched pixels sat along several perfectly straight, evenly-
+doubling-spaced screen-space diagonals (`x + y` constant at 57, 114,
+228) -- the signature of a mip-level *rounding-boundary* disagreement
+recurring once per octave, not a wrong formula or a rasterizer/geometry
+edge artifact.
+
+Two real, distinct bugs were found and fixed:
+
+1. `femeRTComputeCubeUVDerivatives` computed a mathematically *exact*
+   quotient-rule derivative of the face-local `(U, V)` coordinate (a
+   real improvement over a naive formula, added when this function was
+   first written), but VK-GL-CTS's own reference oracle
+   (`computeLodFromGradCube` in
+   `vktShaderRenderTextureFunctionTests.cpp`) deliberately treats the
+   major-axis component as *locally constant* across the derivative --
+   it scales the raw direction derivative by a fixed
+   `size / (2 * |majorAxis|)` factor and never differentiates
+   `|majorAxis|` itself. Simplified this function to match the oracle's
+   own (less precise, but oracle-matching) formula, dropping the now-
+   removed `RawU * DRawMajordX`/`RawV * DRawMajordY` correction term
+   (safe: this function's only caller, `femeRTComputeCubeClampedLod`,
+   uses it purely for LOD estimation, never for the sample's own fetch
+   coordinates). This change alone turned out to have **zero** numeric
+   effect on the actual failing test (confirmed via a bit-for-bit
+   pre/post image comparison) -- the failing test's own case-spec
+   derivative parameters happen to always keep the major-axis
+   derivative term at exactly zero, so the removed correction term was
+   already contributing nothing here. A real, if more general,
+   improvement, but not this bug's root cause.
+
+2. `femeRTFastLog2`'s single-term linear "float-as-int reinterpretation"
+   approximation has a real ~0.057 log2-unit max mid-octave error --
+   confirmed via a Python re-implementation of its own bit trick
+   swept across several octaves. That is large enough to place
+   `femeRTPlanImplicitLod`'s computed LOD on the wrong side of
+   `femeRTNearestMipLevel`'s own `Frac < 0.5` rounding boundary versus
+   CTS's own exact-`log2` reference oracle (`LODMODE_EXACT`'s
+   `deFloatLog2`) -- invisible to an ordinary color sample (a slightly-
+   wrong LOD just blends into a barely-different filtered color, safely
+   within `deqp-vk`'s own image-comparison threshold), but not to a
+   depth-comparison sample's boolean pass/fail result, which flips
+   outright at any mip-level disagreement. This failing test's own
+   derivative sweeps continuously across several octaves within one
+   128x128 image, crossing several such rounding boundaries -- unlike
+   the sibling `Plain2D`/`Array1D`/`Array2D` `Dref`+`Grad` shadow tests,
+   whose own case-spec derivative magnitudes happen to stay within a
+   single octave throughout, never exercising this same sensitivity
+   (explaining why only `Cube` hit this, despite `femeRTFastLog2` being
+   shared, unmodified, general-purpose infrastructure). Fixed by
+   replacing the single-term linear fit with a degree-3 minimax
+   polynomial correction of the mantissa's own fractional part (still
+   just bit tricks and arithmetic, no libm call, least-squares minimax-
+   fitted in Python against a real `log2` table), cutting the max error
+   to ~0.0013 (over 40x tighter) while staying exact at every power of
+   two (unlike the old formula, which -- despite this function's own
+   prior doc comment's claim -- was not actually exact even at powers
+   of two, carrying a constant `+0.0573` bias there too).
+
+New test coverage across all three touched phases:
+- `ImageCallsTest.cpp`: `MatchesSampleCmpCubeCallWithRealGradDerivatives`.
+- `SPIRVResourceLoweringTest.cpp`: `LowersSampleCmpGradToImageSampleCmpCubeWithGrad`.
+- `ImageSamplingTest.cpp`: `SampleCmpCubeGradSelectsCoarserMipLevel`; the
+  3 pre-existing `QueryLod2D*` tests' host-side `expectedFastLog2` helper
+  updated to match the new formula.
+- A new positive `samplecmp_grad_cube` case (bindings 4/5) plus a
+  `samplecmp_grad_cubearray_unsupported` negative case (bindings 12/13,
+  confirming `CubeArray` is still correctly left unrewritten, its own
+  L66(i) follow-on row) in `spirv-resource-lowering-image-samplecmpgrad.ll`;
+  fixes to the pre-existing `samplecmp_cube` CHECK lines in
+  `spirv-resource-lowering-image-samplecmp-{shapes,bias,clamp}.ll` for
+  the arg-count shift (15 -> 21 args) affecting the ordinary (non-`Grad`)
+  Cube depth-comparison forms too, and resource-heap-index shifts in
+  `samplecmp_grad_1d`/`array1d`/`array2d`'s own CHECK lines (Cube's
+  bindings now consume an index for the first time, per this project's
+  own "binding-number sort order, index only consumed by a rewritten
+  call" rule, rediscovered again this session).
+
+`check-feme`: 2682/2682 pass, 0 fail, 59 unsupported. `FeMeTransformsCPUTests`:
+372/372. `FeMeRuntimeCPUTests`: 239/239 (all re-verified after the
+`femeRTFastLog2` precision change, since it is shared, general-purpose
+infrastructure, not Cube-specific).
+
+### Real `deqp-vk` results
+
+```
+cd /tmp/cts_run_l66h
+ln -sfn <VK-GL-CTS>/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.texturegrad.samplercubeshadow*"
+```
+
+`texturegrad.samplercubeshadow_{fragment,vertex}`: **2/2 Pass**, up from
+0/2 "Image mismatch" failures before this fix's own two LOD-precision
+corrections (the widening alone, with the pre-existing `femeRTFastLog2`/
+`femeRTComputeCubeUVDerivatives`, was not enough). `texturegrad.
+samplercubeshadow_compute` still fails (`VK_ERROR_INITIALIZATION_FAILED`),
+the same pre-existing, unrelated `VK_KHR_compute_shader_derivatives` gap
+every other derivative-consuming CTS group already hits in a compute
+stage.
+
+A broader `dEQP-VK.glsl.texture_functions.*` regression sweep (7,945
+cases, every texture-function group against every shape, run twice --
+once after the widening alone, once after both LOD-precision fixes):
+**539 Pass**, 2,811 Fail, 4,595 NotSupported -- up from the 521/2,829/
+4,595 baseline (L66(c)'s own last recorded full sweep) by exactly this
+row's own 18 newly-passing cases (2 `samplercubeshadow_{fragment,
+vertex}` plus 16 more from the `femeRTFastLog2` precision fix generally
+improving other already-partially-working Cube/mipmap-adjacent cases
+elsewhere in the sweep), 0 regressions -- `NotSupported` count identical
+before and after both fixes.
+
+This closes roadmap L66(h). Roadmap L66's own only remaining open
+sub-item is now L66(i) -- the `CubeArray` counterpart of this same
+`Dref`+`Grad` gap, combining L66(g)'s own array-layer handling with this
+row's own per-face derivative handling. Once L66(i) is resolved (or
+confirmed out of scope), roadmap L65's own `shaderResourceMinLod`
+flip/measure/revert experiment (roadmap L66(j)) should be re-run once
+more before actually enabling the bit.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
+gated on no Vulkan feature or extension bit of its own, matching L66(c)/
+(f)/(g)'s own identical finding.
