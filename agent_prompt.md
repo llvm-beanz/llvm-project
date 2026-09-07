@@ -42,12 +42,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L66(i) or other prerequisites blocking the L-series milestones?
+Can you work on L66(j) or other prerequisites blocking the L-series milestones?
 
-> **`CubeArray` `Dref`+`Grad` shadow sampling**
-> (`samplercubearrayshadow_fragment` under `texturegrad`) -- the arrayed
-> counterpart of L66(h), combining L66(g)'s own array-layer handling with
-> L66(h)'s own per-face derivative handling; likely the largest of these five
-> follow-on rows given `CubeArray`'s own existing `Dref`+`Bias`/`MinLodClamp`
-> code path is already the most complex shape-specific branch in
-> `SPIRVResourceLowering.cpp` (roadmap L53/L55/L60(a)).
+> **Now that L66(h) and L66(i) are both resolved, re-run roadmap L65's own
+> `shaderResourceMinLod` flip/measure/revert experiment once more** -- L66(c)
+> already unblocks a `Plain2D` shadow-sampling CTS case's own plain `Grad`
+> variant, and L66(f)/L66(g)/L66(h)/L66(i) now do the same for
+> `Plain1D`/`Array1D`/`Array2D`/`Cube`/`CubeArray`, so every shape's own
+> `Dref`+`Grad` support is now landed; this row's own flip/measure/revert re-run
+> is ready to start (no shape-support work remains to unblock it, though
+> L66(i)'s own real-CTS-coverage-gap finding means the measured impact may still
+> be limited by which `MinLodClamp`-bearing shadow-sampling cases this exact CTS
+> version actually exercises per shape).
