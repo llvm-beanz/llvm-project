@@ -29445,3 +29445,58 @@ footprint.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 deviation or update needed -- `ConstOffset` is core SPIR-V with no gating
 feature bit or extension of its own.
+
+## Session: roadmap L68 -- `Lod|ConstOffset` legalization gap
+
+A real CTS sweep for the prior session's own roadmap L33 fix surfaced a
+distinct, pre-existing, cross-cutting gap one level earlier in the
+pipeline than anything `SPIRVResourceLowering.cpp` touches:
+`SPIRVToLLVMPatterns.cpp`'s `ImageSampleExplicitLodPattern` (the MLIR
+SPIR-V-dialect-to-LLVM legalization pattern for
+`spirv.ImageSampleExplicitLod`) only matched a *lone* `Lod` image operand
+and had no handling at all for `Lod` combined with `ConstOffset` -- hit
+identically for every shape's own `_vertex`-stage `textureoffset*` case
+(vertex shaders have no automatic derivatives, so GLSL's compiler lowers
+their `texture()`/`textureOffset()` calls to an explicit `Lod` rather than
+the implicit-LOD path `ImageSampleImplicitLodPattern` already handles
+`ConstOffset` against, per roadmap L26).
+
+`ImageSampleExplicitLodPattern` now checks for a mandatory `Lod` bit plus
+an optional `ConstOffset` bit (`SupportedMask = Lod | ConstOffset`,
+mirroring `ImageSampleImplicitLodPattern`'s own combinatorial style
+exactly) and extracts the real offset operand (present only when
+`ConstOffset` is set) instead of always synthesizing a zero constant. No
+runtime/intrinsic-signature change was needed at all:
+`llvm.spv.resource.samplelevel` already had a trailing `Offset` operand
+slot, and `SPIRVResourceLowering.cpp`'s own `isSampleIntrinsic`/
+`getSampleOffsetIdx`/`isSupportedOffset` already handled `ExplicitLod=true`
+generically (confirmed by inspection -- no changes needed there), so this
+was purely a legalization-layer fix.
+
+`check-feme`: 2656/2715 pass, 0 fail, 59 unsupported (unchanged test count
+-- the 2 new lit-test cases live inside the same existing
+`spirv-to-llvm-sampling.mlir` file via `--split-input-file`, not a new
+file of their own; 0 regressions).
+
+Real CTS, direct re-run of `textureoffset.*.sampler2darray_*` and
+`textureoffset.*.sampler2d_*` (40 cases each, all 5 wrap modes): **30/40
+Pass (up from 20/40), 0 Fail** in both -- every previously-failing
+`_vertex` case now passes. A broader sweep of every shape's own
+`textureoffset`/`textureoffsetclamp` groups (340 cases, non-integer,
+non-sparse) confirms 85 Pass, 120 Fail, 135 NotSupported; the 120 Fails
+are exclusively `sampler1d`/`sampler1darray`/`sampler1d{,array}shadow`/
+`sampler3d` cases -- exactly roadmap L67(c)/L66(d)'s own still-open,
+pre-existing `isSupportedOffset` shape restriction, unrelated to this
+row -- with **0 Fails anywhere against `sampler2d`/`sampler2darray`/
+`sampler2dshadow`/`sampler2darrayshadow`**. A regression sweep of 36
+non-offset `_vertex`-stage `texture`/`texturelod` cases (every shape)
+confirms 33 Pass, 3 Fail -- and a literal rebuild without this row's own
+changes, re-running the identical 36-case sweep against that clean
+baseline, reproduced the identical 33/36 Pass, 3/36 Fail split
+(`texturelod.sampler{1d,1darray,2d}shadow_vertex`, all via the separate,
+untouched `ImageSampleDrefExplicitLodPattern`), confirming these 3 are
+pre-existing and unaffected by this row.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+deviation or update needed -- `ConstOffset` combined with an explicit
+`Lod` is core SPIR-V with no gating feature bit or extension of its own.
