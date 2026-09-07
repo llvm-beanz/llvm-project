@@ -133,7 +133,7 @@ define float @samplecmp_grad_1d(<3 x float> %coord, float %dref, float %dpdx,
       @llvm.spv.resource.handlefrombinding.timg.1d(i32 0, i32 6, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.1d(i32 0, i32 7, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 2, i32 2, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 2, i32 2, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpgrad(
       target("spirv.Image", float, 0, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -151,7 +151,7 @@ define float @samplecmp_grad_array1d(<3 x float> %coord, float %dref,
       @llvm.spv.resource.handlefrombinding.timg.array1d(i32 0, i32 8, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.array1d(i32 0, i32 9, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.1darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 3, i32 3, float %{{.*}}, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.1darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 3, i32 3, float %{{.*}}, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpgrad(
       target("spirv.Image", float, 0, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,

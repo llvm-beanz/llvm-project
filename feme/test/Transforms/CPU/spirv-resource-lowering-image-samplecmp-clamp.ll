@@ -26,7 +26,7 @@ target triple = "spirv-unknown-vulkan-compute"
 ; operand of its own. Both 1D shapes still carry no `ConstOffset`.
 ; CHECK-LABEL: define float @samplecmp_clamp_1d(
 ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(
-; CHECK-SAME: float %dref, float 0.000000e+00, float %clamp, i1 true)
+; CHECK-SAME: float %dref, float 0.000000e+00, i32 0, float %clamp, i1 true)
 define float @samplecmp_clamp_1d(<3 x float> %coord, float %dref, float %clamp) {
   %img = call target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
       @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 8, i32 1, i32 0, ptr null)

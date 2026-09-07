@@ -562,6 +562,12 @@ struct MatchedImageCall {
   /// alone (never `OffsetY`) with their own bare scalar `ConstOffset`,
   /// rather than a vector's first component -- see `createSample1D`'s own
   /// updated doc for why this shape's offset is a scalar, not a vector.
+  /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L66(k)) populate `OffsetX`
+  /// the same scalar way, now that a real `deqp-vk` SPIR-V capture of
+  /// `sampler1d{,array}shadow_bias_fragment` confirms a depth-comparison
+  /// sample's own `ConstOffset` is the same bare scalar `i32` an ordinary
+  /// sample's is, despite this shape's own dref-widened `Coordinate`
+  /// staying a genuine vector (see `createSampleCmp1D`'s own updated doc).
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
   /// `Sample3D` only (roadmap L67(c)): the same `<ConstOffset>` texel
@@ -984,33 +990,44 @@ createSample1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
 /// Builds a `feme.cpu.image.samplecmp.1d.f32` call (roadmap L54), the
 /// depth-comparison counterpart of `createSample1D`. \p Bias/\p MinLodClamp
 /// (roadmap L62) mirror `createSampleCmpCube`'s own identically-named
-/// parameters; this shape still carries no `ConstOffset`, per
-/// `ImageCallKind::SampleCmp1D`'s own doc. \p DUdX/\p DUdY (roadmap
-/// L66(f)) are a real screen-space derivative pair for a `Grad` sample --
-/// bare scalars, mirroring `createSample1D`'s own identically-named
-/// parameters, since `Plain1D`'s addressing is itself already a bare
-/// scalar; zero constants for every non-`Grad` form.
-llvm::CallInst *createSampleCmp1D(
-    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
-    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
-    llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *Lod,
-    llvm::Value *UseExplicitLod, llvm::Value *Dref, llvm::Value *Bias,
-    llvm::Value *MinLodClamp, llvm::Value *Mask, const llvm::Twine &Name = "");
+/// parameters. \p DUdX/\p DUdY (roadmap L66(f)) are a real screen-space
+/// derivative pair for a `Grad` sample -- bare scalars, mirroring
+/// `createSample1D`'s own identically-named parameters, since `Plain1D`'s
+/// addressing is itself already a bare scalar; zero constants for every
+/// non-`Grad` form. \p Offset (roadmap L66(k)) mirrors `createSample1D`'s
+/// own bare-scalar `Offset` parameter -- a real `deqp-vk` SPIR-V capture
+/// of `sampler1dshadow_bias_fragment` confirms a depth-comparison
+/// sample's own `ConstOffset` is a scalar `i32` too, despite this shape's
+/// own dref-widened `Coordinate` staying a genuine vector (see
+/// `hasOnlySupportedImageUses`'s own updated comment in
+/// `SPIRVResourceLowering.cpp`); a zero constant for the trivial
+/// always-zero case.
+llvm::CallInst *
+createSampleCmp1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                  llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                  llvm::Value *U, llvm::Value *DUdX, llvm::Value *DUdY,
+                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                  llvm::Value *Dref, llvm::Value *Bias, llvm::Value *Offset,
+                  llvm::Value *MinLodClamp, llvm::Value *Mask,
+                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.1darray.f32` call (roadmap L54), the
 /// `Texture1DArray` counterpart of `createSampleCmp1D`. \p Bias/\p
 /// MinLodClamp (roadmap L62) mirror that function's own new parameters.
 /// \p DUdX/\p DUdY (roadmap L66(f)) mirror `createSampleCmp1D`'s own
 /// identically-named new parameters -- only `U`, never `ArrayLayer`, is
-/// ever differentiated.
-llvm::CallInst *
-createSampleCmpArray1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
-                       llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
-                       llvm::Value *U, llvm::Value *ArrayLayer,
-                       llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *Lod,
-                       llvm::Value *UseExplicitLod, llvm::Value *Dref,
-                       llvm::Value *Bias, llvm::Value *MinLodClamp,
-                       llvm::Value *Mask, const llvm::Twine &Name = "");
+/// ever differentiated. \p Offset (roadmap L66(k)) mirrors
+/// `createSampleCmp1D`'s own new, bare-scalar `Offset` parameter --
+/// `Array1D`'s own `ConstOffset` never touches `ArrayLayer` either,
+/// matching `createSample1DArray`'s own identical precedent for an
+/// ordinary sample.
+llvm::CallInst *createSampleCmpArray1D(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *ArrayLayer, llvm::Value *DUdX, llvm::Value *DUdY,
+    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Dref,
+    llvm::Value *Bias, llvm::Value *Offset, llvm::Value *MinLodClamp,
+    llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.querylod.2d.v2f32` call (roadmap L52e): see
 /// `ImageCallKind::QueryLod2D`'s own doc for its `<2 x float>` result

@@ -24,7 +24,7 @@ target triple = "spirv-unknown-vulkan-compute"
 ; `samplecmpbias`, unlike `samplecmpbias_clamp`, has no clamp of its own.
 ; CHECK-LABEL: define float @samplecmp_bias_1d(
 ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(
-; CHECK-SAME: float %dref, float %bias, float -inf, i1 true)
+; CHECK-SAME: float %dref, float %bias, i32 0, float -inf, i1 true)
 define float @samplecmp_bias_1d(<3 x float> %coord, float %dref, float %bias) {
   %img = call target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
       @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 8, i32 1, i32 0, ptr null)
