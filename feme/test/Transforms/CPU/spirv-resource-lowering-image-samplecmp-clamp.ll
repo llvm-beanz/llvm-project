@@ -60,7 +60,7 @@ define float @samplecmp_clamp_array2d(<4 x float> %coord, float %dref, float %cl
       @llvm.spv.resource.handlefrombinding.timg.array2d(i32 0, i32 2, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.array2d(i32 0, i32 3, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.2darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 {{[0-9]+}}, i32 {{[0-9]+}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float %clamp, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 {{[0-9]+}}, i32 {{[0-9]+}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float %clamp, i1 true)
   %r = call float @llvm.spv.resource.samplecmp.clamp(
       target("spirv.Image", float, 1, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,

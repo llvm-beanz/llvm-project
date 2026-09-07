@@ -18,9 +18,12 @@
 ; vectors (`GradDerivativeWidth`'s own generalized "arrayed shapes drop one
 ; component" formula, mirroring the equivalent non-`Dref` `Grad` precedent
 ; roadmap L64 already established) -- see `samplecmp_grad_1d`/
-; `samplecmp_grad_array1d` below. `Array2D`/`Cube`/`CubeArray` remain
-; unrewritten, matching this project's own "extend one shape at a time"
-; precedent (see `samplecmp_grad_cube_unsupported` below).
+; `samplecmp_grad_array1d` below. Roadmap L66(g) further widens it to
+; `Array2D`, whose own `dPdx`/`dPdy` are a 2-wide vector again (the same
+; width as `Plain2D`, per that same generalized formula) -- see
+; `samplecmp_grad_array2d` below. `Cube`/`CubeArray` remain unrewritten,
+; matching this project's own "extend one shape at a time" precedent (see
+; `samplecmp_grad_cube_unsupported` below).
 
 target triple = "spirv-unknown-vulkan-compute"
 
@@ -145,6 +148,28 @@ define float @samplecmp_grad_array1d(<3 x float> %coord, float %dref,
   ret float %r
 }
 
+; Texture2DArray: [Dim=2D(1), Depth=2, Arrayed=1, MS=0, Sampled=1, Format=0].
+; Roadmap L66(g): the `Array2D` counterpart of `samplecmp_grad` above --
+; only `U`/`V`, never `ArrayLayer` (the trailing lane of the 4-wide
+; `Coordinate`), is ever differentiated, mirroring
+; `samplecmp_grad_array1d`'s own identical `Array1D` precedent. Its own
+; `dPdx`/`dPdy` are a 2-wide vector, extracted with `CreateExtractElement`
+; the same way `Plain2D`'s own `samplecmp_grad` above is.
+; CHECK-LABEL: define float @samplecmp_grad_array2d(
+define float @samplecmp_grad_array2d(<4 x float> %coord, float %dref,
+                                     <2 x float> %dpdx, <2 x float> %dpdy) {
+  %img = call target("spirv.Image", float, 1, 2, 1, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg.array2d(i32 0, i32 10, i32 1, i32 0, ptr null)
+  %samp = call target("spirv.Sampler")
+      @llvm.spv.resource.handlefrombinding.tsamp.array2d(i32 0, i32 11, i32 1, i32 0, ptr null)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 3, i32 3, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
+  %r = call float @llvm.spv.resource.samplecmpgrad(
+      target("spirv.Image", float, 1, 2, 1, 0, 1, 0) %img,
+      target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,
+      <2 x float> %dpdx, <2 x float> %dpdy, <3 x i32> zeroinitializer)
+  ret float %r
+}
+
 declare target("spirv.Image", float, 1, 2, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")
@@ -161,3 +186,7 @@ declare target("spirv.Image", float, 0, 2, 1, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg.array1d(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")
     @llvm.spv.resource.handlefrombinding.tsamp.array1d(i32, i32, i32, i32, ptr)
+declare target("spirv.Image", float, 1, 2, 1, 0, 1, 0)
+    @llvm.spv.resource.handlefrombinding.timg.array2d(i32, i32, i32, i32, ptr)
+declare target("spirv.Sampler")
+    @llvm.spv.resource.handlefrombinding.tsamp.array2d(i32, i32, i32, i32, ptr)
