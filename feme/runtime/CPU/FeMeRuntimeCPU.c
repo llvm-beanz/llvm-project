@@ -5983,21 +5983,22 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
 // `femeRTSampleCmp2DAtLevel`'s own point/bilinear comparison-filtering
 // logic (percentage-closer filtering: compare each fetched texel first,
 // then filter the 0/1 results) but reusing the 1D(-array) fetch/addressing
-// helpers (`femeRTFetchTexel1DArray`, minus the `V` axis) `femeRTSamplePoint1D`/
-// `femeRTSampleLinear1D` above already established for an ordinary 1D
-// color sample. No `OffsetX` parameter: unlike `Plain2D`/`Array2D`
-// (roadmap L50d), no real CTS case exercises a nonzero `ConstOffset`
-// against a 1D shadow sampler yet, matching `Sample1D`/`Sample1DArray`'s
-// own scope decision (see `ImageCalls.h`'s `SampleCmp1D` doc).
+// helpers (`femeRTFetchTexel1DArray`, minus the `V` axis)
+// `femeRTSamplePoint1D`/ `femeRTSampleLinear1D` above already established for
+// an ordinary 1D color sample. `OffsetX` (roadmap L66(k)) mirrors those two
+// helpers' own identically-named parameter: a real `deqp-vk` SPIR-V capture
+// confirms a 1D shadow sampler's own `ConstOffset` is the same bare scalar
+// `i32` an ordinary sample's is, so it is applied to `X`/`BaseX` the same way,
+// before `femeRTApplyAddressMode`.
 __attribute__((always_inline)) static float
 femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
                          const FemeRTSamplerDescriptor *Samp, float U,
                          uint32_t Layer, uint32_t Level, float Dref,
-                         _Bool UseLinear) {
+                         _Bool UseLinear, int32_t OffsetX) {
   _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img->Format);
   if (!UseLinear) { // Point (nearest).
     uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
-    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
+    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + OffsetX;
     _Bool BorderX = 0;
     int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
                                            Samp->AddressU, &BorderX);
@@ -6010,13 +6011,13 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   float TexelU = U * (float)LevelWidth - 0.5f;
   float FloorU = __builtin_floorf(TexelU);
+  int32_t BaseX = (int32_t)FloorU + OffsetX;
   float Wx = TexelU - FloorU;
   _Bool BorderX0 = 0, BorderX1 = 0;
-  int32_t X0 = femeRTApplyAddressMode((int32_t)FloorU, (int32_t)LevelWidth,
+  int32_t X0 = femeRTApplyAddressMode(BaseX, (int32_t)LevelWidth,
                                       Samp->AddressU, &BorderX0);
-  int32_t X1 = femeRTApplyAddressMode((int32_t)FloorU + 1,
-                                      (int32_t)LevelWidth, Samp->AddressU,
-                                      &BorderX1);
+  int32_t X1 = femeRTApplyAddressMode(BaseX + 1, (int32_t)LevelWidth,
+                                      Samp->AddressU, &BorderX1);
   FemeRTv4f32 T0 = femeRTFetchTexel1DArray(Img, Level, X0, Layer,
                                           /*Sample=*/0, BorderX0,
                                           Samp->BorderColor);
@@ -6032,30 +6033,31 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
 // counterpart of `feme.cpu.image.sample.1d.v4f32`, mirroring
 // `feme.cpu.image.samplecmp.2d.f32`'s own trilinear-blend body above
 // (`femeRTSampleCmp2DAtLevel`) but reusing `femeRTSampleCmp1DAtLevel`
-// instead -- a single `U` coordinate instead of `(U, V)`, no
-// `ConstOffset` (see `femeRTSampleCmp1DAtLevel`'s own comment), but a
-// real `Bias`/`MinLodClamp` pair as of roadmap L62. (Roadmap L66(f))
-// `DUdX`/`DUdY` generalize what used to always be implicitly zero,
-// mirroring `femeCpuImageSampleCmp2DF32`'s own identical `Grad`
-// generalization (roadmap L66(c)): for an implicit-LOD call
-// (`UseExplicitLod` false), these now drive a real `femeRTPlanImplicitLod1D`
-// derivative-based LOD calculation -- a bare scalar pair, not a
-// `(DUdX, DVdX, DUdY, DVdY)` quartet, since `Plain1D`'s own addressing is
-// itself already a bare scalar `U`, mirroring `femeCpuImageSample1DV4F32`'s
-// own identical `DUdX`/`DUdY` parameters for an ordinary sample.
+// instead -- a single `U` coordinate instead of `(U, V)`, a real
+// `Bias`/`MinLodClamp` pair as of roadmap L62, and a real, bare-scalar
+// `Offset` as of roadmap L66(k) (see `femeRTSampleCmp1DAtLevel`'s own
+// comment). (Roadmap L66(f)) `DUdX`/`DUdY` generalize what used to always
+// be implicitly zero, mirroring `femeCpuImageSampleCmp2DF32`'s own
+// identical `Grad` generalization (roadmap L66(c)): for an implicit-LOD
+// call (`UseExplicitLod` false), these now drive a real
+// `femeRTPlanImplicitLod1D` derivative-based LOD calculation -- a bare
+// scalar pair, not a `(DUdX, DVdX, DUdY, DVdY)` quartet, since `Plain1D`'s
+// own addressing is itself already a bare scalar `U`, mirroring
+// `femeCpuImageSample1DV4F32`'s own identical `DUdX`/`DUdY` parameters for
+// an ordinary sample.
 float femeCpuImageSampleCmp1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX, float DUdY,
-    float Lod, _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
-    _Bool Mask) asm("feme.cpu.image.samplecmp.1d.f32");
+    float Lod, _Bool UseExplicitLod, float Dref, float Bias, int32_t Offset,
+    float MinLodClamp, _Bool Mask) asm("feme.cpu.image.samplecmp.1d.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmp1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX, float DUdY,
-    float Lod, _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
-    _Bool Mask) {
+    float Lod, _Bool UseExplicitLod, float Dref, float Bias, int32_t Offset,
+    float MinLodClamp, _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -6079,12 +6081,12 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp1DF32(
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
-  float Lo = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, /*Layer=*/0, Level0,
-                                     Dref, UseLinear);
+  float Lo = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, /*Layer=*/0, Level0, Dref,
+                                      UseLinear, Offset);
   if (!Trilinear)
     return Lo;
   float Hi = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, /*Layer=*/0,
-                                      MipPlan.Level1, Dref, UseLinear);
+                                      MipPlan.Level1, Dref, UseLinear, Offset);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -6093,13 +6095,15 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp1DF32(
 // mirroring `feme.cpu.image.sample.1darray.v4f32`'s own relationship to
 // `feme.cpu.image.sample.1d.v4f32`. (Roadmap L66(f)) `DUdX`/`DUdY` mirror
 // `femeCpuImageSampleCmp1DF32`'s own identical new parameters -- only `U`,
-// never `ArrayLayer`, is ever differentiated.
+// never `ArrayLayer`, is ever differentiated. (Roadmap L66(k)) `Offset`
+// mirrors that function's own new, bare-scalar `Offset` parameter --
+// `Array1D`'s own `ConstOffset` never touches `ArrayLayer` either.
 float femeCpuImageSampleCmpArray1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
     float DUdX, float DUdY, float Lod, _Bool UseExplicitLod, float Dref,
-    float Bias, float MinLodClamp,
+    float Bias, int32_t Offset, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.samplecmp.1darray.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
@@ -6107,7 +6111,7 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
     float DUdX, float DUdY, float Lod, _Bool UseExplicitLod, float Dref,
-    float Bias, float MinLodClamp, _Bool Mask) {
+    float Bias, int32_t Offset, float MinLodClamp, _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -6133,11 +6137,11 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
   float Lo = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, Layer, Level0, Dref,
-                                     UseLinear);
+                                      UseLinear, Offset);
   if (!Trilinear)
     return Lo;
   float Hi = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, Layer, MipPlan.Level1,
-                                      Dref, UseLinear);
+                                      Dref, UseLinear, Offset);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
