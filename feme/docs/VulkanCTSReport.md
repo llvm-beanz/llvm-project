@@ -30294,3 +30294,123 @@ actually exercises per shape.
 update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
 gated on no Vulkan feature or extension bit of its own, matching L66(c)/
 (f)/(g)/(h)'s own identical finding.
+
+## Session: roadmap L66(j) -- `shaderResourceMinLod` flip/measure/revert re-run; `Array1D` default-offset-type bug found and fixed
+
+Re-ran roadmap L65's own `shaderResourceMinLod` flip/measure/revert
+experiment, now that L66(c)/(f)/(g)/(h)/(i) have landed every shape's own
+`Dref`+`Grad` shadow-sampling support. Methodology unchanged from L65:
+`feme/lib/Vulkan/PhysicalDeviceInfo.cpp`'s `Info.Features.shaderResourceMinLod`
+temporarily forced to `VK_TRUE`, `feme_vulkan` rebuilt, all four
+`shaderResourceMinLod`-gated CTS groups re-run against the real ICD
+(`VK_DRIVER_FILES` pointed at `build2/tools/feme/tools/feme-vulkan/feme_icd.json`),
+then reverted to `VK_FALSE` before committing (a Vulkan feature bit is a
+monolithic on/off switch, not something that can be partially advertised
+per test group).
+
+### A genuine bug found along the way: `Array1D`'s synthesized default `Offset` was wrongly widened
+
+`texturegradclamp.sampler1darray_{fixed,float}_fragment` (`Array1D`, not
+`Plain1D`) failed pipeline creation outright, even though the equivalent
+`Plain1D` cases already passed. Root cause: every
+`SPIRVToLLVMPatterns.cpp` conversion pattern that synthesizes an all-zero
+default `Offset` operand (used whenever a sample has no real SPIR-V
+`ConstOffset` image operand of its own to borrow a type from --
+`ImageFetchLodPattern`, `ImageSampleImplicitLodPattern`,
+`ImageSampleExplicitLodPattern`, `ImageSampleGradPattern`) derived that
+offset's *type* purely from the sample's own `Coordinate` operand's vector
+shape. This is correct for every shape except `Dim::Dim1D`: SPIR-V's own
+`ConstOffset` convention for a 1D image is always a bare scalar `i32`
+(`SPIRVResourceLowering.cpp`'s own `isSupportedOffset`, roadmap L66(d)),
+excluding any array layer -- but `Array1D`'s own `Coordinate` operand is a
+genuine 2-wide `(U, ArrayLayer)` vector, so the synthesized zero offset
+became a 2-wide `vector<2xi32>` too, which `isSupportedOffset`'s own
+`Dim1D` special case then rejected outright (it requires a bare scalar
+there).
+
+This was silent for every other already-working `Array1D` combination
+because a *real*, non-defaulted `ConstOffset` operand (as
+`textureoffsetclamp`/`texturegradoffsetclamp`'s own offset-bearing cases
+supply) always imports from SPIR-V with the correct scalar type directly
+-- only a `ConstOffset`-less sample (`textureclamp`/`texturegradclamp`)
+ever took the buggy defaulting path at all, and only `Array1D` (not
+`Plain1D`, whose `Coordinate` is already a bare scalar) was ever affected.
+
+**Fix**: added a new shared `getDefaultZeroOffsetType` helper that checks
+the sampled image's own `Dim` (via `SampledImageType::getImageType()` for
+a sample op, or the fetch op's own plain `getImage()` type) instead of
+`Coordinate`'s shape, special-casing `Dim1D` to a scalar `i32` regardless
+of `Array1D`'s wider coordinate. The three depth-comparison (`Dref`,
+shadow-sampling) patterns -- `ImageSampleDrefImplicitLodPattern`,
+`ImageSampleDrefGradPattern`, `ImageSampleDrefExplicitLodPattern` --
+deliberately keep their original coordinate-shape-derived logic instead:
+a shadow sample's own `Coordinate` is *always* a genuine vector even
+against `Plain1D`/`Array1D` (a real `deqp-vk` SPIR-V capture confirms
+`vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
+`ImageSampleDrefImplicitLodPattern`'s own comment), and
+`SPIRVResourceLowering.cpp`'s dref-sample lowering always unconditionally
+extracts `OffsetX`/`OffsetY` from the offset before dispatching per-shape,
+whether or not a given shape's own switch arm actually consumes them.
+Applying the new `Dim1D`-scalar special case there instead crashed a real
+`llvm::ConstantExpr::getExtractElement` assertion
+(`"Tried to create extractelement operation on non-vector type!"`) on
+`sampler1darrayshadow_fragment` -- caught immediately by this session's
+own before/after regression sweep across all four CTS groups (see below)
+and reverted for those three patterns specifically before this fix was
+finalized.
+
+New test coverage: a new `@sample_grad_minlod_array1d` case in
+`spirv-to-llvm-sampling.mlir` (Conversion/SPIRVToLLVM lit suite) pins the
+exact regression -- an `Array1D` `Grad|MinLod` sample with no
+`ConstOffset` operand of its own -- confirming the synthesized offset is
+now `llvm.mlir.constant(0 : i32) : i32`, not
+`dense<0> : vector<2xi32>`. No `SPIRVResourceLoweringTest.cpp` case needed
+updating: the bug was purely in the *type* of a synthesized IR-only
+fallback value one MLIR conversion pass upstream, not in any acceptance
+check a hand-built LLVM-IR-level unit test already exercises independently
+of a real SPIR-V-shaped module.
+
+### Full four-group re-measurement (flip active)
+
+| Group | Passed | Failed | Not supported | Failed breakdown |
+|---|---|---|---|---|
+| `textureclamp` | 18/50 (up from 16/50 pre-fix, +2) | 14 | 18 | all 14 are the by-design `isampler*`/`usampler*` integer-sampler exclusion (no filtered sample against an integer-channel image) |
+| `texturegradclamp` | 19/52 (up from 17/52 pre-fix, +2) | 14 | 19 | same by-design integer-sampler set; the +2 here are this row's own originally-reported `sampler1darray_{fixed,float}_fragment` cases |
+| `textureoffsetclamp` | 55/180 | 60 | 65 | 50 by-design integer-sampler cases, plus 10 newly-surfaced `sampler1d{,array}shadow_bias_fragment` cases (every one of the 5 wrap modes) |
+| `texturegradoffsetclamp` | 60/190 | 60 | 70 | 50 by-design integer-sampler cases, plus 10 newly-surfaced `sampler1d{,array}shadow_fragment` cases (every one of the 5 wrap modes) |
+
+The `textureclamp` group's own +2 confirms the fix's reach was broader
+than the originally-reported `texturegradclamp` gap: `Plain1D`/`Array1D`
+`Bias`+`MinLodClamp`-without-offset samples (`ImageSampleImplicitLodPattern`/
+`ImageSampleExplicitLodPattern`) hit the exact same buggy code path as the
+`Grad`+`MinLodClamp` case originally reported, and are fixed by the same
+change.
+
+### Remaining gap: `Plain1D`/`Array1D` depth-comparison sampling still rejects a real `ConstOffset`
+
+Both offset-bearing groups' own extra 10 fails each (`sampler1d{,array}
+shadow_{bias,}fragment`, every wrap mode) are **not** a regression from
+this session's fix (confirmed unrelated: this fix only changes a
+*synthesized* offset's *type*, never touches offset *acceptance*, and this
+restriction already predates this session, per `isSupportedOffset`'s own
+pre-existing comment that "the depth-comparison path below still requires
+the trivial always-zero case for those two shapes"). This is a genuine,
+real, still-open prerequisite gap: a real, nonzero `ConstOffset` against a
+`Plain1D`/`Array1D` depth-comparison (shadow) sample is rejected outright,
+filed as roadmap **L66(k)**.
+
+### Conclusion
+
+`shaderResourceMinLod` still cannot be safely advertised as `VK_TRUE` --
+the flip is reverted back to `VK_FALSE` in the committed tree -- but this
+row's own re-run found and fixed real, previously-undiscovered value along
+the way (the `Array1D` default-offset-type bug, benefiting both
+`textureclamp` and `texturegradclamp`), and the experiment's own
+methodology has now surfaced exactly one remaining prerequisite (L66(k))
+rather than an open-ended set. `check-feme`: 2685/2744 pass, 0 fail, 59
+unsupported (unchanged from the L66(i) baseline -- this fix's own new test
+coverage is included in that total, and no regression was found).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`shaderResourceMinLod`'s own advertised value is unchanged by this
+session, matching every prior flip/measure/revert row's identical
+finding.
