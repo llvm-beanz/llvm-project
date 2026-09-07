@@ -68914,3 +68914,72 @@ and no regressions. `shaderResourceMinLod` itself remains `VK_FALSE` in
 the committed tree, unchanged -- this row closes L66(j)'s own sole
 surfaced prerequisite gap, but doesn't by itself change whether that
 feature bit can be advertised.
+
+# Session: closing out roadmap L66 and L67
+
+Picked up where the last L66(k) session left off: with L66(k) fixed
+(the sole remaining prerequisite gap L66(j)'s own re-run had surfaced),
+this session's job was to see whether L66 and L67 could actually be
+closed out for good, or whether more sub-items needed filing.
+
+## L67: a pure documentation fix
+
+Read through L67's own row text carefully and found all four of its
+sub-items already resolved: (a) `Bias`/`MinLodClamp`, (b) explicit
+`Grad`, and (c) `ConstOffset` were all fixed in prior sessions for
+`Plain3D`, and (d) (integer-format filtered sampling) was correctly out
+of scope by design. The row's own text even said "roadmap L67 is now
+fully complete" -- but the row's own heading was never actually struck
+through to reflect that. Fixed the formatting (wrapped the whole
+description in `~~...~~`) with no code change needed at all. A good
+reminder to double check that a milestone's own *formatting* matches
+its own *stated conclusion*, not just to trust the prose.
+
+## L66: the big one -- actually flipping the bit
+
+L66(k)'s own fix meant L66(j)'s own re-run had no more sub-items left
+to file. That made this session's real task: re-run the
+`shaderResourceMinLod` flip/measure/revert experiment one final time and
+see if the answer had actually changed from "not yet" to "yes".
+
+Did this carefully, in three stages:
+1. Flipped the bit, re-ran the four gated CTS groups directly -- all
+   four matched L66(j)/L66(k)'s own prior per-group numbers exactly (no
+   surprises, a good sanity check that nothing else had silently
+   drifted).
+2. To rule out anything outside those four groups, ran the *entire*
+   `dEQP-VK.glsl.texture_functions.*` suite (7,945 cases) twice: once
+   with the bit on, once with it off (against the otherwise-identical
+   tree), and diffed the two runs by test *name*, not just aggregate
+   counts. This is a meaningfully stronger check than just comparing
+   Pass/Fail totals before and after -- totals matching by coincidence
+   is possible; every individual case's status matching except for a
+   confirmed, understood, bounded set is a much stronger claim.
+3. The diff came back about as clean as this kind of experiment could
+   ever hope to: exactly the 300 cases that were `NotSupported` with the
+   bit off changed status, split 172-to-`Pass` / 128-to-`Fail`, and
+   every single one of those 128 was confirmed (again, by name, not
+   assumption) to be the same by-design `isampler`/`usampler`
+   filtered-integer-sampling exclusion this project has run into
+   repeatedly elsewhere. Zero cases that were already `Pass`/`Fail`
+   changed to anything else, and no crash anywhere in either run.
+
+That's a genuinely conclusive result by this project's own established
+standard -- flipped `shaderResourceMinLod` to `VK_TRUE` permanently.
+
+One small thing caught along the way: `PhysicalDeviceInfoTest.cpp` has a
+single test that asserts the *complete* set of advertised feature bits
+by clearing every known-`VK_TRUE` bit and expecting the whole struct to
+zero out -- a good, strict test shape, but it meant flipping this bit
+without updating that test would have been silently missed by every
+other test file and only caught by `check-feme`'s own full run. Good
+argument for always re-running the full `check-feme` target after a
+change like this, not just the unit tests you'd expect to be affected.
+
+## Outcome
+
+Both L66 and L67 are now struck through as fully complete in
+Roadmap.md. `Vulkan14FeatureInventory.md` updated (`shaderResourceMinLod`
+now `yes`). `check-feme`: 2693/2752 pass, 0 fail (unchanged -- this is a
+pure runtime feature flip, no new lowering logic, so no new unit/lit
+test coverage was needed beyond the updated advertisement test).
