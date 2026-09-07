@@ -67999,3 +67999,112 @@ Once L66(c) is resolved (or confirmed out of scope), roadmap L66 will be
 fully complete, and the `shaderResourceMinLod` flip/measure/revert
 experiment (L65's own scope) can finally be re-run once more before
 actually enabling the bit for real.
+
+# Session: roadmap L66(c) -- `Dref`+`Grad` shadow-sampling for `Plain2D`
+
+Assigned task: "work on L66 or other prerequisites blocking the L-series
+milestones," with the prior session's own report pointing squarely at
+L66(c), the last remaining open sub-item of L66 -- the `Dref`+`Grad`
+shadow-sampling intrinsic gap. Given that prior session's own note that
+this was "a genuinely bigger, more cross-cutting scope" deserving its own
+further per-shape breakdown, I scoped this session to `Plain2D` only
+(mirroring how L46 originally started `Dref` sampling `Plain2D`-only,
+and how L67 later broke `Plain3D`'s own follow-on gaps into separate
+rows), planning to file explicit follow-on rows for the other five
+shapes rather than attempt all six in one sitting.
+
+## Design
+
+The design mirrors the existing non-`Dref` `Grad` precedent
+(`ImageSampleGradPattern`/`llvm.spv.resource.samplegrad`) crossed with
+the existing non-`Grad` `Dref` precedent (`ImageSampleDrefExplicitLodPattern`/
+`llvm.spv.resource.samplecmp`): a new `llvm.spv.resource.samplecmpgrad`/
+`.samplecmpgrad.clamp` intrinsic pair, a new `ImageSampleDrefGradPattern`
+MLIR raising pattern, and CPU lowering that widens `createSampleCmp2D`/
+`femeCpuImageSampleCmp2DF32` with a real `DUdX`/`DUdY`/`DVdX`/`DVdY`
+derivative quartet feeding `femeRTPlanImplicitLod`'s existing implicit-LOD
+resolution (already used by every non-`Dref` `Grad` sample). I confirmed
+this runtime widening is provably behavior-preserving for every existing
+caller before touching anything, since `femeRTPlanImplicitLod` with
+all-zero derivatives degenerates to exactly the prior hardcoded
+`Lod=0`-point-sampling path.
+
+## A costly mistake: whole-file `clang-format -i` followed by `git checkout --`
+
+Partway through this session, after the functional implementation, tests,
+and a full `check-feme` run had all confirmed correct (2669/2728 pass, 0
+fail, 59 unsupported), I ran `clang-format -i` directly on the 7 touched
+C++/C files as the last step before committing. This produced a massive,
+almost entirely unrelated reformat (2108 insertions / 1557 deletions) --
+these files simply were not clang-format-clean to begin with, so a
+whole-file format touches every line that doesn't match current style,
+not just this session's own diff. Unhappy with that result, I ran `git
+checkout -- <all 7 files>` intending to revert just the formatting noise.
+This was a mistake: since nothing had been committed yet, `git checkout
+--` reverted those files entirely back to their pre-session state,
+destroying all of this session's own uncommitted functional work along
+with the unwanted formatting.
+
+There was no way to recover the lost work via git (no stash, no commit,
+no reflog entry for uncommitted changes). I spent the remainder of the
+session painstakingly reconstructing it file-by-file from the detailed
+technical notes I had retained in my own context up to that point --
+intrinsic declarations (which had survived, since `IntrinsicsSPIRV.td`
+wasn't in the reformatted/reverted file list), the MLIR raising pattern,
+the CPU lowering pass changes (hitting and fixing one transcription bug,
+a duplicate `DrefHasGrad` declaration, along the way), the `ImageCalls`
+widening, the runtime widening, and finally both unit test files --
+rebuilding and re-running the relevant lit/unit tests after each piece to
+confirm the reconstruction was faithful before moving to the next. This
+took substantially longer than the original implementation had, but the
+end state, verified via the same full `check-feme` run plus real CTS,
+matches what would have been committed had I not made the mistake.
+
+**The lesson, for next time**: `git checkout --` is irreversible for
+uncommitted changes with no other backup. Before running any
+potentially-destructive whole-file tool like `clang-format -i` against
+files that might not already be format-clean, either commit the working
+functional change first (so a bad formatting pass can be reverted safely
+without touching it), or use a scoped/diff-based formatting tool from the
+start. I used `git clang-format HEAD` (scoped to the session's own diff
+against the last commit) to actually apply formatting this time, staging
+the changes first since `git-clang-format` refuses to touch files with
+unstaged changes -- this produced a small, clearly-scoped diff (touching
+only lines this session's own edits had introduced) that I could inspect
+and trust before unstaging and moving on to commit the work properly.
+
+## Verification
+
+- `check-feme`: 2669/2728 pass, 0 fail, 59 unsupported, both before and
+  after the `git clang-format` pass (identical counts, confirming
+  formatting introduced no behavior change).
+- Real `deqp-vk` (with `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` explicitly
+  pointed at this build's own `feme_icd.json`, double-checked via
+  `vulkaninfo --summary` showing `FeMe CPU Vulkan Device` before trusting
+  any result -- a discipline a much earlier session's own mistake, later
+  corrected, established as mandatory): `texturegrad.sampler2dshadow_
+  {fragment,vertex}` (the plain `Dref`+`Grad` case with no `MinLodClamp`
+  operand, so unblocked even with `shaderResourceMinLod` still disabled)
+  went from an outright `vkCreateGraphicsPipelines`-stage rejection to
+  2/2 Pass. A broader `texturegradoffset.*.sampler2dshadow_{fragment,
+  vertex}` sweep (10 cases, `Grad`+`ConstOffset` together, all 5 wrap
+  modes) confirmed 8/10 Pass (2 NotSupported for the pre-existing,
+  unrelated sparse-residency gap). A `texturegradclamp.*.sampler2dshadow_
+  fragment` regression check confirmed it still correctly reports
+  `NotSupported` ("ShaderResourceMinLod feature not supported"), exactly
+  as expected since that feature bit remains disabled pending the
+  remaining L66(f)-(j) follow-on rows. A full
+  `dEQP-VK.glsl.texture_functions.*` sweep (7,945 cases) completed
+  cleanly with no crashes, confirming no regression anywhere.
+
+## What's left
+
+Roadmap L66 is now closed for `Plain2D`. I filed L66(f)-(j) as new
+follow-on rows: `Plain1D`/`Array1D`, `Array2D`, `Cube`, and `CubeArray`
+`Dref`+`Grad` shadow sampling each need their own real IR reduction and
+per-shape argument-count/derivative-width investigation (mirroring L67's
+own precedent for `Plain3D`'s follow-on gaps), plus a final row to re-run
+L65's own `shaderResourceMinLod` flip/measure/revert experiment once all
+four land -- since a `MinLodClamp`-bearing shadow-sampling CTS case,
+across every shape, still needs all of them before that feature bit can
+be safely advertised end-to-end.
