@@ -25,31 +25,37 @@
 ; `Cube`, whose own `dPdx`/`dPdy` are a genuine 3-wide direction-vector
 ; derivative pair (`GradDerivativeWidth`'s own unarrayed-shape case,
 ; `SampleCoordWidth` itself already being 3 for `Cube`) -- see
-; `samplecmp_grad_cube` below. `CubeArray` remains unrewritten, matching
-; this project's own "extend one shape at a time" precedent (see
-; `samplecmp_grad_cubearray_unsupported` below).
+; `samplecmp_grad_cube` below. Roadmap L66(i) further widens it to
+; `CubeArray`, whose own `dPdx`/`dPdy` needed no further width change at
+; all (the same generalized "arrayed shapes drop one component" formula
+; already resolves `CubeArray`'s 4-wide `SampleCoordWidth` down to the
+; same 3-wide derivative `Cube` itself uses) -- see
+; `samplecmp_grad_cubearray` below.
 
 target triple = "spirv-unknown-vulkan-compute"
 
 ; TextureCubeArray: [Dim=Cube(3), Depth=2, Arrayed=1, MS=0, Sampled=1,
-; Format=0]. Roadmap L66(h) deliberately scopes its own `Cube` `Grad` fix
-; to `Cube` alone -- `CubeArray`'s own `samplecmpgrad` call is left
-; entirely unrewritten, mirroring how this project has always widened
-; `Dref` support one shape at a time (see roadmap L46's own initial
-; `Plain2D`-only scope for ordinary `Dref` sampling). This function stays
-; unrewritten by the pass and so is emitted first, ahead of every other
-; (rewritten) function below -- hence this check comes first too.
-; CHECK-LABEL: define float @samplecmp_grad_cubearray_unsupported(
-; CHECK-NOT: call float @feme.cpu.image.samplecmp.cubearray.f32(
-; CHECK: call float @llvm.spv.resource.samplecmpgrad{{[.a-zA-Z0-9_]*}}(
-define float @samplecmp_grad_cubearray_unsupported(<4 x float> %coord,
-                                                    float %dref,
-                                                    <3 x float> %dpdx,
-                                                    <3 x float> %dpdy) {
+; Format=0]. Roadmap L66(i): the `CubeArray` counterpart of
+; `samplecmp_grad_cube` below -- only `DirX`/`DirY`/`DirZ`, never
+; `ArrayLayer` (the trailing lane of the 4-wide `Coordinate`), is ever
+; differentiated, mirroring `samplecmp_grad_array2d`'s own identical
+; `Array2D`-versus-`Plain2D` precedent. Its own `dPdx`/`dPdy` are a
+; 3-wide direction-vector, unpacked with `CreateExtractElement` the same
+; way `Cube`'s own `samplecmp_grad_cube` below is.
+; CHECK-LABEL: define float @samplecmp_grad_cubearray(
+define float @samplecmp_grad_cubearray(<4 x float> %coord,
+                                       float %dref,
+                                       <3 x float> %dpdx,
+                                       <3 x float> %dpdy) {
   %img = call target("spirv.Image", float, 3, 2, 1, 0, 1, 0)
       @llvm.spv.resource.handlefrombinding.timg.cubearray(i32 0, i32 12, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.cubearray(i32 0, i32 13, i32 1, i32 0, ptr null)
+  ; CHECK: %[[DX:.*]] = extractelement <4 x float> %coord, i64 0
+  ; CHECK: %[[DY:.*]] = extractelement <4 x float> %coord, i64 1
+  ; CHECK: %[[DZ:.*]] = extractelement <4 x float> %coord, i64 2
+  ; CHECK: %[[LAYER:.*]] = extractelement <4 x float> %coord, i64 3
+  ; CHECK: call float @feme.cpu.image.samplecmp.cubearray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 {{[0-9]+}}, i32 {{[0-9]+}}, float %[[DX]], float %[[DY]], float %[[DZ]], float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %[[LAYER]], float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpgrad(
       target("spirv.Image", float, 3, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,

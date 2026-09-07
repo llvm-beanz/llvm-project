@@ -90,7 +90,7 @@ define float @samplecmp_cubearray(<4 x float> %coord, float %dref) {
   ; CHECK: %[[DY:.*]] = extractelement <4 x float> %coord, i64 1
   ; CHECK: %[[DZ:.*]] = extractelement <4 x float> %coord, i64 2
   ; CHECK: %[[LAYER:.*]] = extractelement <4 x float> %coord, i64 3
-  ; CHECK: call float @feme.cpu.image.samplecmp.cubearray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 {{[0-9]+}}, i32 {{[0-9]+}}, float %[[DX]], float %[[DY]], float %[[DZ]], float %[[LAYER]], float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.cubearray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 {{[0-9]+}}, i32 {{[0-9]+}}, float %[[DX]], float %[[DY]], float %[[DZ]], float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float %[[LAYER]], float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmp(
       target("spirv.Image", float, 3, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,
