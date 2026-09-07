@@ -29879,3 +29879,95 @@ update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
 gated on no Vulkan feature or extension bit of its own (only the
 *separate* `MinLodClamp` operand this row's own CTS cases correctly still
 reject is gated on `shaderResourceMinLod`, already tracked there).
+
+## Session: roadmap L66(f) -- `Dref`+`Grad` shadow-sampling for `Plain1D`/`Array1D`
+
+Closes the first of roadmap L66(c)'s own five follow-on rows: extends
+`Dref`+`Grad` depth-comparison sampling from `Plain2D` only to also cover
+`Plain1D`/`Array1D` (the shapes `sampler1dshadow`/`sampler1darrayshadow`
+map to). A real IR reduction confirmed the derivative width for both
+shapes is a bare scalar, mirroring `GradDerivativeWidth`'s own existing
+`Plain1D`/`Array1D` precedent for a non-`Dref` `Grad` sample --
+`hasOnlySupportedImageUses`'s own `DrefHasGrad` shape gate now accepts
+`Plain1D`/`Array1D` alongside `Plain2D`, and its `dPdx`/`dPdy` width check
+is generalized from a hardcoded `SampleCoordWidth` to the same
+`isArrayedShape(Shape) ? SampleCoordWidth - 1 : SampleCoordWidth` formula
+`GradDerivativeWidth` already uses (giving 1 for both shapes, versus 2 for
+`Plain2D`). `lowerImageAccesses`'s Dref-branch derivative extraction is
+now shape-conditional: `Plain2D` still `CreateExtractElement`s its 2-wide
+vector pair, while `Plain1D`/`Array1D` read their own bare scalar
+`dPdx`/`dPdy` directly. `createSampleCmp1D`/`createSampleCmpArray1D`
+gained new `DUdX`/`DUdY` parameters, threaded through to widened
+`femeCpuImageSampleCmp1DF32`/`femeCpuImageSampleCmpArray1DF32` runtime
+entry points, each now calling `femeRTPlanImplicitLod1D(&Img, DUdX, DUdY)`
+for a real derivative-driven implicit LOD on the implicit-LOD path (the
+explicit-LOD path is unchanged). The MLIR-level `ImageSampleDrefGradPattern`
+raising pattern needed no functional change at all -- it was already
+shape-agnostic, forwarding whatever values the adaptor provides without
+inspecting vector width; only its doc comment was updated.
+
+New test coverage across all three touched phases: `ImageCallsTest.cpp`
+gained two new tests (`MatchesSampleCmp1DCallWithRealGradDerivatives`/
+`MatchesSampleCmpArray1DCallWithRealGradDerivatives`) plus fixes to two
+existing tests now passing zero-constant `DUdX`/`DUdY`;
+`SPIRVResourceLoweringTest.cpp` gained three new tests
+(`LowersSampleCmpGradToImageSampleCmp1DWithGrad`,
+`LowersSampleCmpGradToImageSampleCmpArray1DWithGrad`, and a negative
+`LeavesASampleCmpGradAgainstPlain1DWithVectorDerivativesAlone` confirming
+a 2-wide vector derivative -- the shape `Plain2D` needs -- is correctly
+rejected for `Plain1D`) plus fixes to five existing tests for the
+arg-count/index shift, and two new positive `Plain1D`/`Array1D` cases
+added to `spirv-resource-lowering-image-samplecmpgrad.ll` (using distinct
+resource bindings from the pre-existing `Plain2D`/`Cube` cases in that
+same file, to avoid tripping the roadmap L66(e) cross-handle-shape
+conflict guard -- an early attempt reusing binding `(0,0)`/`(0,1)` for the
+new declarations caused every function in the file to be left
+unrewritten, since those bindings already identified a different image
+shape (`Plain2D`) elsewhere in the same module); `ImageSamplingTest.cpp`
+gained two new correctness tests (`SampleCmp1DGradSelectsCoarserMipLevel`/
+`SampleCmpArray1DGradSelectsCoarserMipLevel`, mirroring
+`ComparisonSamplingGradSelectsCoarserMipLevel`'s own `Plain2D` precedent)
+confirming a real nonzero `DUdX` of exactly `1.0` against a 2-texel-wide
+image resolves to an implicit LOD of exactly `1.0`, flipping a
+`LessEqual` depth comparison's result from Fail (level 0's `0.2`) to Pass
+(level 1's `0.8`) -- plus fixes to five existing tests now passing
+zero-constant `DUdX`/`DUdY`.
+
+`check-feme`: 2676/2735 pass, 0 fail, 59 unsupported (up from 2664/2723,
++12 net new tests, 0 regressions).
+
+Real CTS: `texturegrad.sampler1dshadow_{fragment,vertex}` and
+`texturegrad.sampler1darrayshadow_{fragment,vertex}` (4 cases) all now
+**Pass**, up from an outright `vkCreateGraphicsPipelines`-stage rejection
+before this fix (the sample call was left unrewritten and rejected by
+`checkSupportedRaisedOps`); a broader
+`texturegradoffset.*.sampler1d{,array}shadow_*` sweep across all 5 wrap
+modes (30 cases) confirms 20 Pass, 0 Fail, 10 NotSupported (the
+pre-existing, unrelated `_compute`-stage `VK_KHR_compute_shader_
+derivatives` gap other sampling groups already hit);
+`texturegradclamp.sampler1d{,array}shadow_fragment` (2 cases, the only
+stage/shape combination this group exercises for these two shapes) both
+Pass. Two broader regression sweeps --
+`dEQP-VK.glsl.texture_functions.*.sampler1d*shadow*` (351 cases, every
+texture-function group against both shapes) and
+`dEQP-VK.glsl.texture_functions.texturegrad*.sampler*shadow*` (160 cases,
+every `Grad`-bearing group against every depth-comparison-capable shape)
+-- both complete cleanly with 0 Fail, confirming no regression anywhere.
+
+This closes roadmap L66(f). Roadmap L66's own only remaining open
+sub-items are now L66(g)/(h)/(i) -- the `Array2D`/`Cube`/`CubeArray`
+counterparts of this same `Dref`+`Grad` gap -- each needing its own real
+IR reduction and per-shape argument-count/derivative-width investigation
+this session did not attempt (`Cube`/`CubeArray`'s own coordinate widths
+already sit at SPIR-V's 4-component ceiling, so their own derivative-width
+formula may not follow the same simple "arrayed shapes drop one
+component" pattern this row and L66(c) both confirmed). Once those are
+resolved (or confirmed out of scope), roadmap L65's own
+`shaderResourceMinLod` flip/measure/revert experiment (roadmap L66(j))
+should be re-run once more before actually enabling the bit.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
+gated on no Vulkan feature or extension bit of its own (only the
+*separate* `MinLodClamp` operand is gated on `shaderResourceMinLod`,
+already tracked there and unaffected by this row).
