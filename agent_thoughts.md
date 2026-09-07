@@ -67231,3 +67231,135 @@ design) remain out of scope for any single-shape row. L66(c)/(d)/(e) — the
 restriction from the `shaderResourceMinLod` flip's own perspective, and the
 cross-function same-binding crash — all remain open and untouched this
 session.
+
+# Session: roadmap L67(b) -- `Plain3D` explicit `Grad` sampling
+
+The prior session's own summary named L67(b) as the natural next step,
+independent of L67(a) which it had just completed. I followed that
+recommendation directly.
+
+## This turned out much smaller than L67(a)
+
+I initially expected this row to need a `createSample3D`/runtime signature
+change, the same way L67(a) did for `Bias`/`MinLodClamp`. It didn't:
+roadmap L66(a) had *already* given `createSample3D` a real
+`DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` derivative-operand slot, used at
+the time only for synthesized implicit-LOD derivatives. `Grad` support
+turned out to be purely a **lowering-phase** change: feed that same slot
+the caller's own real `dPdx`/`dPdy` operands (extracted one component per
+axis) instead of a synthesized or zeroed value, exactly the same pattern
+`Plain1D`'s own roadmap L65 fix already established. No `ImageCalls.h`/
+`.cpp` change, no `FeMeRuntimeCPU.c` change, no `ImageSamplingTest.cpp`
+change — just `SPIRVResourceLowering.cpp`'s two touch points
+(`hasOnlySupportedImageUses`'s `HasGrad` shape check, and
+`lowerImageAccesses`'s `Plain3D` branch) plus test updates.
+
+This is a useful confirmation that L66(a)'s original `Plain3D` scoping
+decision — building the derivative-operand plumbing once, then filing
+`Bias`/`MinLodClamp`/`Grad` as separate follow-on rows — was the right
+call: each follow-on row only had to extend *how* an already-existing
+operand slot gets filled, not add a new one, keeping every one of these
+rows genuinely small and independently committable.
+
+## `GradDerivativeWidth` needed no change
+
+`hasOnlySupportedImageUses`'s existing `GradDerivativeWidth` computation
+(`isArrayedShape(Shape) ? SampleCoordWidth - 1 : SampleCoordWidth`) already
+produces the correct width (3) for `Plain3D`, since it isn't an arrayed
+shape — no special-casing needed, the same way `getSampleClampIdx` needed
+none for L67(a). This is now the third `Plain3D` follow-on row in a row
+where an existing shape-agnostic helper "just worked" without modification
+once the shape was added to whatever allow-list gated it.
+
+## Test-file changes: converting a negative test again
+
+The same pattern as L67(a) repeated: the prior session's own
+`LeavesAPlain3DSampleGradAlone` negative test (correctly asserting `Grad`
+against `Plain3D` must NOT lower, at the time) became false the moment
+this fix landed. I converted it to a positive test
+(`LowersSampleGradToPlain3D`), asserting each of the 6 new per-axis
+derivative operands in the lowered call is a real `ExtractElementInst`
+(not a zero constant or synthesized derivative call) — a meaningfully
+different assertion shape than a plain arg-count check, since the whole
+point of this row is that these operands come from the caller's own
+`dPdx`/`dPdy` now, not from `getOrSynthesizeSample1DDerivatives`.
+
+I then added a *fresh* negative test, `LeavesANonZeroTexelOffsetPlain3D
+SampleAlone`, mirroring the existing `LeavesANonZeroTexelOffsetArray2D
+SampleAlone` precedent, to keep `Plain3D` with real negative-test coverage
+on file — this one names `ConstOffset` (filed as L67(c), still blocked on
+the pre-existing `isSupportedOffset` `Plain2D`-only restriction), which is
+now genuinely the shape's only remaining rejected sample-intrinsic
+combination after this session (`Bias`/`MinLodClamp`/`Grad` all now lower;
+only `ConstOffset` and integer-format filtered sampling — the latter
+correct by design — remain).
+
+## A subtle bug caught by rebuilding `feme-opt` before trusting the lit test
+
+When I first added the new `sample_3d_grad` lit-test function and ran
+`feme-opt` against it, the function came back completely unlowered — its
+handles and `samplegrad` intrinsic call were still present verbatim in the
+output, as if `hasOnlySupportedImageUses` had rejected it. This looked like
+a real bug in my `SPIRVResourceLowering.cpp` change. It wasn't: I had
+already rebuilt `FeMeTransformsCPU`/`FeMeTransformsCPUTests` (which pick up
+library changes), but `feme-opt` itself is a separate binary that links
+against `FeMeTransformsCPU` and needed its own explicit rebuild
+(`ninja -C build2 feme-opt`) to pick up the new library code. After
+rebuilding it, the lit test passed cleanly. Worth remembering for any
+future row: a stale `feme-opt` binary can silently make a real fix look
+broken when spot-checking with it directly, rather than through
+`check-feme`'s own dependency-ordered build.
+
+## Validation
+
+- `ninja -C build2 FeMeTransformsCPU` then `feme-opt` — clean, ccache +
+  assertions builds.
+- `ninja -C build2 FeMeTransformsCPUTests` — clean build after the test
+  file fix; filtered run (`--gtest_filter="*Plain3D*:*Sample3D*"`): 8/8
+  pass, including the new `LowersSampleGradToPlain3D` and
+  `LeavesANonZeroTexelOffsetPlain3DSampleAlone` tests.
+- Manually ran the new lit-test case through `feme-opt` piped to
+  `FileCheck` directly to confirm it passes before trusting `check-feme`'s
+  own aggregate count.
+- `ninja -C build2 check-feme` — 2655/2714 pass (up from 2654/2713), 0
+  fail, 59 unsupported (unchanged unsupported count, +1 net new test from
+  the new lit-test case).
+- Real CTS (`deqp-vk`, `VK_ICD_FILENAMES` pointed at `build2`'s
+  `feme_icd.json`, `VK_ICD_FILENAME` singular unset): direct re-run of
+  `texturegrad.sampler3d_{fixed,float}_{fragment,vertex,compute}` — **4/6
+  Pass, up from 0/6** (`_fragment`/`_vertex`; the 2 `_compute` cases remain
+  `Fail` via `vkCreateComputePipelines` itself, the same pre-existing,
+  unrelated gap other compute-stage sampling groups hit, unaffected by this
+  row). Broader `*.sampler3d_*` sweep (502 cases): **14 Pass (up from 10),
+  260 Fail (down from 264), 228 NotSupported (unchanged)** — exactly the
+  expected +4 delta, 0 regressions. Spot-checked `texturegradclamp`'s own
+  `sampler3d_*` cases remain `NotSupported` (`ShaderResourceMinLod feature
+  not supported`), confirming no interaction with roadmap L66's own
+  still-open `shaderResourceMinLod` scope.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+  update needed — `Grad` sampling is core SPIR-V with no gating feature
+  bit, and `shaderResourceMinLod` remains correctly `VK_FALSE`.
+
+## Roadmap/report updates
+
+Struck through roadmap L67(b) with a completion note in the same
+parenthetical style used for L67(a)/L66(a). Added a new
+`VulkanCTSReport.md` session section with this session's real CTS numbers.
+L67(c)/(d) remain open, unstruck, unchanged from the prior session's text.
+
+## What's next
+
+With both L67(a) and L67(b) now done, `Plain3D` sampling is functionally
+complete except for L67(c) (`ConstOffset`, blocked on the pre-existing
+`isSupportedOffset` `Plain2D`-only restriction, roadmap L33's own scope)
+and L67(d) (integer-format rejection, correct by design, not actionable).
+L67(c) is the same restriction named in roadmap L66(d) from the
+`shaderResourceMinLod` flip's own perspective — fixing `isSupportedOffset`
+to accept a real `ConstOffset` against more shapes than just `Plain2D`
+would be a genuinely cross-cutting change (every shape's own
+`textureoffset*` CTS group depends on it, not just `Plain3D`'s), and is
+probably the highest-value next target across the whole L-series now that
+L66(a)/L67(a)/L67(b) have each independently confirmed it as their own
+respective blocker. L66(c) (the `Dref`+`Grad` shadow-sampling intrinsic
+gap) and L66(e) (the cross-function same-binding crash) remain open and
+untouched this session, unrelated to anything `Plain3D`-specific.
