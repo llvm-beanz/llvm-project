@@ -29971,3 +29971,98 @@ update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
 gated on no Vulkan feature or extension bit of its own (only the
 *separate* `MinLodClamp` operand is gated on `shaderResourceMinLod`,
 already tracked there and unaffected by this row).
+
+## Session: roadmap L66(g) -- `Dref`+`Grad` shadow-sampling for `Array2D`
+
+Widens roadmap L66(c)'s `Plain2D`-only `Dref`+`Grad` depth-comparison
+sampling support (and L66(f)'s `Plain1D`/`Array1D` widening) to also
+cover `Array2D` (`sampler2darrayshadow_fragment` under
+`texturegrad`/`texturegradoffset`).
+
+`hasOnlySupportedImageUses`'s `DrefHasGrad` shape gate now also accepts
+`Array2D`; its `dPdx`/`dPdy` derivative-width check needed no further
+change at all -- the existing generalized formula (`isArrayedShape(Shape)
+? SampleCoordWidth - 1 : SampleCoordWidth`, already covering `Plain1D`/
+`Array1D` from L66(f)) already resolves `Array2D` (arrayed,
+`SampleCoordWidth == 3`) to the same 2-wide derivative `Plain2D` itself
+uses. `lowerImageAccesses`'s Dref-branch derivative-extraction condition
+widened to also `CreateExtractElement` `Array2D`'s own 2-wide vector pair
+the same way `Plain2D` already does.
+
+`createSampleCmpArray2D` gained new `DUdX`/`DUdY`/`DVdX`/`DVdY`
+parameters, inserted after `ArrayLayer` and before `Lod` (mirroring
+`createSample2DArray`'s own existing `Grad` parameter ordering for an
+ordinary sample), threaded through to a widened
+`femeCpuImageSampleCmpArray2DF32` runtime entry point (the real name --
+not the `...V4F32` guess in the milestone prompt, since a
+depth-comparison sample always returns a scalar), now branching on
+`UseExplicitLod` to call `femeRTPlanImplicitLod` (the 2D/general variant,
+not `femeRTPlanImplicitLod1D`, since `Array2D`'s own `(U, V)` pair needs
+anisotropic-footprint-capable derivative math, unlike `Plain1D`/
+`Array1D`'s own single-scalar derivative) for a real derivative-driven
+implicit LOD on the implicit-LOD path. `SPIRVToLLVMPatterns.cpp`'s
+`ImageSampleDrefGradPattern` needed no functional change (already
+shape-agnostic); only its doc comment was updated.
+
+New test coverage across all three touched phases:
+- `ImageCallsTest.cpp`: a new `MatchesSampleCmpArray2DCallWithRealGradDerivatives`
+  test, plus fixes to two existing tests
+  (`LowersSampleCmpArray2DToImageSampleCmpArray2D`/
+  `LowersSampleCmpArray2DWithNonzeroOffsetToImageSampleCmpArray2D`, in
+  `SPIRVResourceLoweringTest.cpp`) for the arg-count/index shift (17 ->
+  21 args).
+- `SPIRVResourceLoweringTest.cpp`: a new
+  `LowersSampleCmpGradToImageSampleCmpArray2DWithGrad` positive test.
+- `ImageSamplingTest.cpp`: a new `SampleCmpArray2DGradSelectsCoarserMipLevel`
+  correctness test (mirroring `SampleCmpArray1DGradSelectsCoarserMipLevel`'s
+  own `Array1D` precedent) confirming a real nonzero `DUdX` of exactly
+  `1.0` against a 2-texel-wide image flips a `LessEqual` depth
+  comparison's result from Fail (level 0's `0.2`) to Pass (level 1's
+  `0.8`); a widened `SampleCmpArrayFn` typedef and fixes to its four
+  existing call sites for the new parameters.
+- A new positive `samplecmp_grad_array2d` case added to
+  `spirv-resource-lowering-image-samplecmpgrad.ll` (using distinct
+  bindings 10/11, learning from L66(f)'s own binding-conflict lesson),
+  plus fixes to four pre-existing lit-test CHECK lines in
+  `spirv-resource-lowering-image-samplecmp-{shapes,bias,clamp}.ll` for
+  the same arg-count shift.
+
+`check-feme`: 2679/2738 pass, 0 fail, 59 unsupported (up from 2678/2737,
++1 net new lit test plus this row's own new unit tests, 0 regressions).
+
+Real CTS: `texturegrad.sampler2darrayshadow_{fragment,vertex}` (2 cases)
+both **Pass**, up from an outright `vkCreateGraphicsPipelines`-stage
+rejection before this fix (the `_compute` case in the same group still
+fails with the same pre-existing, unrelated `VK_KHR_compute_shader_
+derivatives` gap every other compute-stage derivative-consuming CTS group
+already hits); a broader `texturegradoffset.*.sampler2darrayshadow_*`
+sweep across all 5 wrap modes (15 cases) confirms 10 Pass, 5 Fail (all 5
+the same pre-existing `_compute`-stage gap, one per wrap mode);
+`texturegradclamp.*.sampler2darrayshadow_*` has no CTS cases at all for
+this shape (0/0), matching L66(f)'s own identical finding for `Plain1D`/
+`Array1D`. A broader `dEQP-VK.glsl.texture_functions.*.sampler2darray*
+shadow*` regression sweep (78 cases, every texture-function group
+against this shape) confirms 24 Pass, 17 Fail, 37 NotSupported,
+completing cleanly with no crashes; every one of the 17 failures was
+individually confirmed pre-existing and unrelated to this fix
+(`_compute`-stage `VK_KHR_compute_shader_derivatives` gaps and a
+separate, unrelated `texturequerylod`/`unhandled opcode` gap), confirming
+no regression anywhere.
+
+This closes roadmap L66(g). Roadmap L66's own only remaining open
+sub-items are now L66(h)/(i) -- the `Cube`/`CubeArray` counterparts of
+this same `Dref`+`Grad` gap -- each needing its own real IR reduction and
+per-shape argument-count/derivative-width investigation this session did
+not attempt (`Cube`/`CubeArray`'s own coordinate widths already sit at
+SPIR-V's 4-component ceiling, so their own derivative-width formula may
+not follow the same simple "arrayed shapes drop one component" pattern
+this row and L66(c)/L66(f) all confirmed). Once those are resolved (or
+confirmed out of scope), roadmap L65's own `shaderResourceMinLod`
+flip/measure/revert experiment (roadmap L66(j)) should be re-run once
+more before actually enabling the bit.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
+gated on no Vulkan feature or extension bit of its own (only the
+*separate* `MinLodClamp` operand is gated on `shaderResourceMinLod`,
+already tracked there and unaffected by this row).
