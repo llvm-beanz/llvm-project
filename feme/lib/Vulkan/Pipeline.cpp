@@ -519,6 +519,40 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
                              "resolved group size exceeds "
                              "maxComputeWorkGroupSize/Invocations");
 
+  // (roadmap L69) `VK_KHR_compute_shader_derivatives`: an entry point that
+  // declares `DerivativeGroupLinearKHR` gets real support (see
+  // `WaveLowering.cpp`'s `lowerDerivative`, whose existing fragment-quad
+  // shuffle math already computes this mode's own spec-defined answer
+  // unchanged, since this CPU target's compute-stage lane assignment is
+  // already `LocalInvocationIndex`-ordered -- the exact grouping this mode
+  // itself uses), gated only by the same "total invocation count is a
+  // multiple of 4" requirement the Vulkan specification itself imposes on
+  // this mode (every 4-lane group this mode forms must be wholly contained
+  // in one workgroup). `DerivativeGroupQuadsKHR` is rejected outright:
+  // giving it a genuinely correct answer needs this CPU target's own
+  // compute-stage invocation scheduling to actually group lanes into 2x2
+  // spatial tiles, which no code here does yet (roadmap L69(a) tracks that
+  // real invocation-scheduling redesign as its own follow-on row) --
+  // rejecting pipeline creation here is deliberately preferred over
+  // silently compiling a shader whose derivatives would compute the wrong
+  // values.
+  Expected<ComputeDerivativeGroupMode> DerivativeGroupMode =
+      resolveComputeDerivativeGroupMode(Module->words(), EntryPoint);
+  if (!DerivativeGroupMode)
+    return DerivativeGroupMode.takeError();
+  if (*DerivativeGroupMode == ComputeDerivativeGroupMode::Quads)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "DerivativeGroupQuadsKHR is not yet supported (roadmap L69(a)); "
+        "only DerivativeGroupLinearKHR is implemented");
+  if (*DerivativeGroupMode == ComputeDerivativeGroupMode::Linear &&
+      Invocations % 4 != 0)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "DerivativeGroupLinearKHR requires the entry point's total "
+        "invocation count (%llu) to be a multiple of 4",
+        static_cast<unsigned long long>(Invocations));
+
   const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
 
   auto Ctx = std::make_unique<feme::Context>();

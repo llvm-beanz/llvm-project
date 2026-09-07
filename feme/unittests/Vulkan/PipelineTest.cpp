@@ -174,6 +174,47 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+// (roadmap L69) `VK_KHR_compute_shader_derivatives`'s two execution modes;
+// `DerivativeGroupLinearNV`/`QuadsNV` are this dialect's own (pre-`KHR`
+// promotion) spelling of the identical SPIR-V enumerants (see
+// `resolveComputeDerivativeGroupMode`'s own comment).
+const char *kDerivativeGroupQuadsComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ComputeDerivativeGroupQuadsNV], [SPV_NV_compute_shader_derivatives]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionMode @main "LocalSize", 2, 2, 1
+  spirv.ExecutionMode @main "DerivativeGroupQuadsNV"
+}
+)mlir";
+
+/// A local size total (`8 * 1 * 1 == 8`) that *is* a multiple of 4, the
+/// Vulkan specification's own requirement for `DerivativeGroupLinearKHR`.
+const char *kDerivativeGroupLinearComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ComputeDerivativeGroupLinearNV], [SPV_NV_compute_shader_derivatives]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionMode @main "LocalSize", 8, 1, 1
+  spirv.ExecutionMode @main "DerivativeGroupLinearNV"
+}
+)mlir";
+
+/// The converse: a local size total (`3 * 1 * 1 == 3`) that is *not* a
+/// multiple of 4.
+const char *kDerivativeGroupLinearNotMultipleOfFourComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ComputeDerivativeGroupLinearNV], [SPV_NV_compute_shader_derivatives]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionMode @main "LocalSize", 3, 1, 1
+  spirv.ExecutionMode @main "DerivativeGroupLinearNV"
+}
+)mlir";
+
 class PipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -481,6 +522,84 @@ TEST_F(PipelineTest,
   EXPECT_NE(Pipeline, VK_NULL_HANDLE);
 
   vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// (roadmap L69) `DerivativeGroupQuadsKHR` is rejected outright at pipeline
+/// creation: this CPU target's compute-stage lane assignment has no notion
+/// of a 2x2 spatial tile (see `resolveComputeDerivativeGroupMode`'s own
+/// `ComputeDerivativeGroupMode::Quads` comment), so accepting it would
+/// silently compute wrong derivatives rather than reject cleanly.
+TEST_F(PipelineTest, RejectsDerivativeGroupQuads) {
+  VkShaderModule Module =
+      createShaderModule(kDerivativeGroupQuadsComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// `DerivativeGroupLinearKHR` gets real support: this CPU target's own
+/// flat, `LocalInvocationIndex`-ordered compute-stage lane assignment
+/// already matches this mode's own spec-defined grouping exactly (see
+/// `WaveLowering.cpp`'s `lowerDerivative`), so a shader declaring it with a
+/// total invocation count that is a multiple of 4 compiles successfully.
+TEST_F(PipelineTest,
+       AcceptsDerivativeGroupLinearWithMultipleOfFourInvocations) {
+  VkShaderModule Module =
+      createShaderModule(kDerivativeGroupLinearComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// The Vulkan specification requires `DerivativeGroupLinearKHR`'s own
+/// total invocation count to be a multiple of 4 (every 4-lane group this
+/// mode forms must be wholly contained in one workgroup); pipeline
+/// creation must reject a shader that violates it rather than silently
+/// forming a partial, cross-workgroup-boundary group.
+TEST_F(PipelineTest,
+       RejectsDerivativeGroupLinearWithInvocationCountNotAMultipleOfFour) {
+  VkShaderModule Module =
+      createShaderModule(kDerivativeGroupLinearNotMultipleOfFourComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
