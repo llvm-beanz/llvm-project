@@ -42,22 +42,5 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L66(k) or other prerequisites blocking the L-series milestones?
-
-> **`Plain1D`/`Array1D` depth-comparison (shadow) sampling rejects a real,
-> nonzero `ConstOffset` outright** (`sampler1d{,array}shadow_{bias,}fragment`
-> under every wrap mode of `textureoffsetclamp`/`texturegradoffsetclamp`, 20
-> real CTS cases total, discovered by L66(j)'s own four-group
-> `shaderResourceMinLod` re-measurement) -- `SPIRVResourceLowering.cpp`'s
-> `isSupportedOffset` already special-cases a bare scalar `i32` `ConstOffset`
-> for the *ordinary* (non-`Dref`) `Plain1D`/`Array1D` sample path (roadmap
-> L66(d)), but the depth-comparison path deliberately never passes
-> `AllowPlain1DArray1D=true`, so it still falls through to `isZeroOffset`'s
-> always-zero requirement for these two shapes -- needs its own real IR
-> reduction of one of these exact cases to confirm the same bare-scalar-`i32`
-> `ConstOffset` shape applies here too (mirroring L66(d)'s own precedent for the
-> non-`Dref` path), then widening `isSupportedOffset`'s `Dref`-path gate plus
-> `createSampleCmp1D`/`createSampleCmpArray1D` (neither of which threads an
-> offset parameter at all today) and their
-> `femeCpuImageSampleCmp1DV4F32`/`femeCpuImageSampleCmpArray1DV4F32` runtime
-> counterparts to actually apply it.
+Can you close out L66 and/or L67 from the roadmap or other prerequisites
+blocking the L-series milestones?
