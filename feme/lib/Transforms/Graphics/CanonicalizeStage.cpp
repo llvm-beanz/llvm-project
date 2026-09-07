@@ -2763,9 +2763,30 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
         (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment &&
          *Stage != ShaderStage::Hull && *Stage != ShaderStage::Domain &&
          *Stage != ShaderStage::Geometry && *Stage != ShaderStage::Mesh &&
-         *Stage != ShaderStage::Amplification))
+         *Stage != ShaderStage::Amplification &&
+         *Stage != ShaderStage::Compute))
       continue;
 
+    // (roadmap L69) `ShaderStage::Compute` joins this list so a compute
+    // entry's own `llvm.spv.ddx`/`.ddy`/discard/quad-read intrinsics get
+    // the same `feme.stage.derivative.*`/`feme.stage.discard`/... rewrite
+    // below that every other stage already gets -- previously, a compute
+    // entry using `VK_KHR_compute_shader_derivatives` (`dFdx`/`dFdy`, or
+    // any implicit-LOD `texture()` call that needs one internally) left
+    // its raw `llvm.spv.ddx`/`.ddy` calls unconverted, which nothing later
+    // in this CPU target's own pipeline (`feme::cpu::SIMDizePass`/
+    // `WaveLowering.cpp`) recognizes, since both only ever look for the
+    // canonical `feme.stage.derivative.*` call this rewrite produces --
+    // the actual cause of `vkCreateComputePipelines` failing outright on
+    // any such shader, not a gap in the derivative math itself (see
+    // `WaveLowering.cpp`'s `lowerDerivative`, which is already stage-
+    // agnostic). A compute entry has no stage-IO globals of its own
+    // (`InputGlobals`/`OutputGlobals` below are always empty for one), so
+    // every other branch this loop takes for a "real" graphics stage
+    // simply never fires for it; only the signature-independent discard/
+    // derivative/quad-read/helper-lane rewrite at the bottom of
+    // `canonicalizeSPIRVStage` applies.
+    //
     // An absent signature (e.g. a hand-written test exercising only the
     // signature-independent rewrites below) is treated as an empty one:
     // `loadInput`/`storeOutput` then simply fail to resolve (left

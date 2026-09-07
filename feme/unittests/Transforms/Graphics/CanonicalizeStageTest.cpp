@@ -49,8 +49,14 @@ bool run(Module &M) {
   return !PA.areAllPreserved();
 }
 
-/// Non-vertex/fragment entry points (here, compute) are left untouched: G0
-/// scopes `feme.stage.*` to the vertex/fragment stages only.
+/// A DXIL-shaped `dx.op.loadInput` call in a compute entry point is left
+/// untouched: `canonicalizeDXILStage` (which alone understands that
+/// intrinsic family) only ever runs for the vertex/fragment stages, and
+/// (roadmap L69) compute's own participation in `canonicalizeSPIRVStage`
+/// below only rewrites SPIR-V-raised stage-IO/discard/derivative/quad-read
+/// constructs, none of which this DXIL-shaped input uses -- see
+/// spirv-canonicalize-stage-raised-compute.ll for a compute entry point
+/// whose SPIR-V-raised derivative calls *do* get rewritten.
 TEST(CanonicalizeStageTest, LeavesNonGraphicsStagesAlone) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -120,6 +126,39 @@ TEST(CanonicalizeStageTest, RaisesAlreadyRaisedDiscard) {
       }
     }
   EXPECT_TRUE(SawDiscard);
+}
+
+/// (roadmap L69) A compute entry point's own `llvm.spv.ddx`/`.ddy` calls
+/// (the raised form of `OpDPdx`/`OpDPdy`, which `VK_KHR_compute_shader_
+/// derivatives` lets a compute shader use) now get the same
+/// `feme.stage.derivative.*` rewrite a fragment entry's already did --
+/// mirroring spirv-canonicalize-stage-raised-compute.ll's lit-level
+/// coverage of the same fix, at the `CanonicalizeStagePass::run` dispatch
+/// level this file's other tests exercise directly.
+TEST(CanonicalizeStageTest, RewritesSPIRVDerivativesInComputeStage) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %v = fadd float 1.0, 2.0
+      %ddx = call float @llvm.spv.ddx.f32(float %v)
+      ret void
+    }
+    declare float @llvm.spv.ddx.f32(float)
+    attributes #0 = { "feme.shader.stage"="compute" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  bool SawDerivative = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      StageOpKind Kind;
+      if (isStageOpCall(*CI, &Kind)) {
+        EXPECT_EQ(Kind, StageOpKind::DerivativeXFine);
+        SawDerivative = true;
+      }
+    }
+  EXPECT_TRUE(SawDerivative);
 }
 
 /// A non-builtin SPIR-V `Input`/`Output` global's load/store rewrites to
