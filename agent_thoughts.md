@@ -68259,3 +68259,199 @@ coordinate widths already sit at SPIR-V's 4-component ceiling -- that
 needs its own real capture before assuming the formula generalizes
 further. Once all three land, L66(j) (re-running L65's own
 `shaderResourceMinLod` flip/measure/revert experiment) becomes ready.
+
+# Session: roadmap L66(g) -- `Array2D` `Dref`+`Grad` shadow sampling
+
+## Task
+
+The user asked me to work on roadmap L66(g) or other prerequisites
+blocking the L-series milestones: widening `Dref`+`Grad`
+depth-comparison shadow sampling (already closed for `Plain2D` by
+L66(c) and `Plain1D`/`Array1D` by L66(f) earlier in this same session)
+to also cover `Array2D` (`sampler2darrayshadow_fragment` under
+`texturegrad`/`texturegradoffset`).
+
+## Investigation
+
+I started by re-reading `feme/.instructions.md` (coding standards
+reminder, plus the mandatory `VK_ICD_FILENAMES` export before any real
+`deqp-vk` run -- the container's Vulkan loader defaults to Mesa
+lavapipe otherwise). Then I compared `createSampleCmpArray2D`'s
+existing (pre-this-session) signature against `createSampleCmp2D`'s
+own already-widened (post-L66c) signature and `createSample2DArray`'s
+existing `Grad`-aware ordinary-sample signature, to determine the
+correct new-parameter ordering: `DUdX`/`DUdY`/`DVdX`/`DVdY` inserted
+after `ArrayLayer`, before `Lod` -- mirroring `createSample2DArray`'s
+own precedent exactly, keeping the ordinary-sample and
+depth-comparison-sample signatures for this shape structurally
+parallel.
+
+The key question I needed to answer before writing any code was
+whether `GradDerivativeWidth`'s existing generalized formula
+(`isArrayedShape(Shape) ? SampleCoordWidth - 1 : SampleCoordWidth`,
+already established during L66(f) for `Plain1D`/`Array1D`) also
+correctly covers `Array2D`. Working it out: `Array2D` is arrayed, with
+`SampleCoordWidth == 3` (a `(U, V, Layer)` coordinate), so the formula
+gives `3 - 1 == 2` -- the same 2-wide derivative width `Plain2D` itself
+already uses. This meant the derivative-width *check* itself needed no
+functional change at all for this row -- only the `DrefHasGrad` shape
+*gate* needed widening to admit `Array2D`. This was a nice confirmation
+that the formula's design (generalized during L66(f) specifically to
+anticipate this kind of extension) was already correct, saving a
+chunk of otherwise-necessary investigation.
+
+## Implementation
+
+Widened, in order:
+
+1. `ImageCalls.h`/`.cpp`: `createSampleCmpArray2D`'s declaration and
+   definition, the `SampleCmpArray2D` `FunctionType` construction
+   (17 -> 21 args), and the `MatchedImageCall` decode switch case
+   (shifting every operand index for `Lod`/`UseExplicitLod`/`Dref`/
+   `Bias`/`OffsetX`/`OffsetY`/`MinLodClamp`/`Mask` by 4).
+2. `SPIRVResourceLowering.cpp`: widened the `DrefHasGrad` shape gate to
+   accept `Array2D` alongside `Plain2D`/`Plain1D`/`Array1D`; widened
+   `lowerImageAccesses`'s Dref-branch derivative-extraction condition
+   from `Shape == ImageShape::Plain2D` to also include `Array2D` (both
+   now `CreateExtractElement` their own 2-wide vector the same way);
+   updated the `Array2D` switch arm to thread real derivatives into
+   `createSampleCmpArray2D` instead of the previous always-zero
+   constants.
+3. `FeMeRuntimeCPU.c`: widened `femeCpuImageSampleCmpArray2DF32` (both
+   the `asm` declaration and the `always_inline` definition) with the
+   same four new parameters, branching on `UseExplicitLod` to call
+   `femeRTPlanImplicitLod` (the 2D/general variant, **not**
+   `femeRTPlanImplicitLod1D`, which L66(f) used for the two 1D shapes)
+   on the implicit-LOD path -- this distinction mattered because
+   `Array2D`'s own `(U, V)` coordinate pair needs the same
+   anisotropic-footprint-capable derivative math an ordinary
+   `Array2D` sample already gets via `femeCpuImageSample2DArrayV4F32`,
+   not the simpler single-scalar-derivative path the two 1D shapes
+   use. I double-checked this by re-reading
+   `femeCpuImageSample2DArrayV4F32`'s own existing implementation
+   before writing the widened depth-comparison version, confirming
+   `femeRTPlanImplicitLod` already handles an arrayed image correctly
+   (the array `Layer` is applied per-tap, entirely independent of the
+   LOD-plan computation itself).
+4. `SPIRVToLLVMPatterns.cpp`: updated `ImageSampleDrefGradPattern`'s
+   doc comment to list `Array2D` alongside the shapes it already
+   documented reaching a real lowered call -- no functional change,
+   since this MLIR-level raising pattern was already shape-agnostic.
+
+Building after step 1-2 immediately surfaced two pre-existing unit
+tests (`LowersSampleCmpArray2DToImageSampleCmpArray2D`/
+`LowersSampleCmpArray2DWithNonzeroOffsetToImageSampleCmpArray2D` in
+`SPIRVResourceLoweringTest.cpp`) that asserted a hardcoded 17-arg-count
+and fixed operand indices -- exactly the same class of breakage L66(f)
+hit for its own two shapes. Fixed both by shifting every index by 4
+and the arg-count assertion from 17 to 21.
+
+## New test coverage
+
+- `ImageCallsTest.cpp`: a new
+  `MatchesSampleCmpArray2DCallWithRealGradDerivatives` test (mirroring
+  `MatchesSampleCmpArray1DCallWithRealGradDerivatives`'s own `Array1D`
+  precedent), confirming a real nonzero `DUdX`/`DUdY`/`DVdX`/`DVdY`
+  round-trips correctly through both `createSampleCmpArray2D` and
+  `matchImageCall`'s own decode.
+- `SPIRVResourceLoweringTest.cpp`: a new
+  `LowersSampleCmpGradToImageSampleCmpArray2DWithGrad` positive test,
+  confirming a real `dPdx`/`dPdy` 2-wide vector pair against an
+  `Array2D` handle correctly lowers with `CreateExtractElement`-based
+  derivative extraction (mirroring `LowersSampleCmpGradToImageSampleCmp
+  WithGrad`'s own `Plain2D` precedent, but with a 4-wide `Coordinate`
+  and the array-layer lane skipped for differentiation).
+- `ImageSamplingTest.cpp`: a new
+  `SampleCmpArray2DGradSelectsCoarserMipLevel` correctness test
+  (mirroring `SampleCmpArray1DGradSelectsCoarserMipLevel`'s own
+  `Array1D` precedent, reusing `ComparisonSamplingGradSelectsCoarser
+  MipLevel`'s own two-level depth-image fixture with `ArrayLayers=1`
+  added), confirming a real nonzero `DUdX` of exactly `1.0` against a
+  2-texel-wide image flips a `LessEqual` depth comparison's result from
+  Fail (level 0's `0.2`) to Pass (level 1's `0.8`). This required
+  widening the existing `SampleCmpArrayFn` typedef and its four
+  existing call sites (`SampleCmpArray2DComparesRequestedLayer`/
+  `SampleCmpArray2DNonzeroOffsetShiftsFetchedTexel`) with the new
+  parameters -- I was careful this time, having been bitten once
+  already during L66(f) by accidentally dropping the `Lod` parameter
+  when widening a similar typedef, to preserve every existing
+  parameter and insert the four new ones in exactly the position the
+  real runtime function expects (after `ArrayLayer`, before `Lod`).
+- A new positive `samplecmp_grad_array2d` lit test case added to
+  `spirv-resource-lowering-image-samplecmpgrad.ll`, using distinct
+  bindings 10/11 (learning from L66(f)'s own binding-conflict lesson:
+  reusing any `(set, binding)` pair already used by a different image
+  shape elsewhere in the same file silently leaves the *entire* file's
+  functions unrewritten via the L66(e) cross-handle-shape conflict
+  guard).
+
+## An extra lit-test breakage I had to track down
+
+After the unit tests and my own new lit test both passed, a full
+`ninja -C build2 check-feme` run surfaced one additional failure I
+had not anticipated: `spirv-resource-lowering-image-samplecmp-shapes.ll`,
+a *pre-existing* lit test file (from roadmap L48, well before this
+session) that also has CHECK lines pinned to
+`feme.cpu.image.samplecmp.2darray.f32`'s old 17-argument arity, for its
+own *non*-`Grad` `Array2D` test cases (`samplecmp_array2d`/
+`samplecmp_array2d_offset`). Since every caller of this entry point
+(not just `Grad` ones) now gets four new zero-constant derivative
+arguments threaded through by `createSampleCmpArray2D`, these CHECK
+lines needed the same four-argument insertion even though they have
+nothing to do with `Grad` themselves. A quick grep for every other lit
+test referencing this same intrinsic name turned up two more affected
+files (`spirv-resource-lowering-image-samplecmp-bias.ll` and
+`-clamp.ll`), both fixed the same way. This is exactly the kind of
+"widen once, fix every caller" ripple L66(f) predicted might recur for
+follow-on shapes, and a good reminder to always grep for every
+existing reference to a widened intrinsic name across the whole test
+tree, not just the specific test file most directly related to the
+current change.
+
+## Verification
+
+`check-feme`: 2679/2738 pass, 0 fail, 59 unsupported (up from
+2678/2737 pre-session baseline). Real `deqp-vk` (with `VK_ICD_FILENAMES`
+explicitly exported and `vulkaninfo --summary` confirming `FeMe CPU
+Vulkan Device` as the active device):
+`texturegrad.sampler2darrayshadow_{fragment,vertex}` (2/2 Pass, up from
+an outright `vkCreateGraphicsPipelines` rejection); the `_compute` case
+in the same group still fails, confirmed pre-existing and unrelated
+(the same `VK_KHR_compute_shader_derivatives` gap every other
+compute-stage derivative-consuming CTS group already hits, exactly
+matching L66(c)/L66(f)'s own identical finding). A broader
+`texturegradoffset.*.sampler2darrayshadow_*` sweep (15 cases, all 5
+wrap modes): 10 Pass, 5 Fail (the same `_compute`-stage gap, one per
+wrap mode). `texturegradclamp.*.sampler2darrayshadow_*` returned 0/0 --
+no CTS cases exist for this combination, matching L66(f)'s own
+identical finding for `Plain1D`/`Array1D`. A broader
+`dEQP-VK.glsl.texture_functions.*.sampler2darray*shadow*` regression
+sweep (78 cases) confirmed 24 Pass/17 Fail/37 NotSupported, completing
+cleanly with no crashes; I individually checked every one of the 17
+failures and confirmed each was pre-existing and unrelated to this
+change (`_compute`-stage gaps, plus a separate, unrelated
+`texturequerylod`/`unhandled opcode` gap that has nothing to do with
+`Dref`+`Grad` sampling).
+
+Updated `Roadmap.md` (struck through L66(g), updated L66's own shared
+trailing note and L66(i)/L66(j)'s dependency lists down to just
+L66(h)), and appended a new `VulkanCTSReport.md` session section.
+Reviewed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no update needed, matching L66(c)/L66(f)'s own identical reasoning --
+`Dref`+`Grad` sampling is core SPIR-V/GLSL functionality with no
+gating Vulkan feature or extension bit of its own.
+
+## What's left
+
+Roadmap L66 now has two open sub-items: L66(h) (`Cube`) and L66(i)
+(`CubeArray`) `Dref`+`Grad` shadow sampling, each still needing its own
+real IR reduction and per-shape argument-count/derivative-width
+investigation. As noted in the previous session's own thoughts,
+`Cube`/`CubeArray` in particular may not follow the same simple
+"arrayed shapes drop one component" derivative-width pattern this row
+and L66(c)/L66(f) have all now confirmed for every non-cube shape,
+since their own ordinary coordinate widths already sit at SPIR-V's
+4-component ceiling -- that needs its own real capture before assuming
+the formula generalizes further. Once both land, L66(j) (re-running
+L65's own `shaderResourceMinLod` flip/measure/revert experiment)
+becomes ready.
