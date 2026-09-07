@@ -326,6 +326,30 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
                                llvm_float_ty, llvm_any_ty],
                               [IntrReadMem]>;
 
+  // The depth-comparison counterparts of int_spv_resource_samplegrad and
+  // int_spv_resource_samplegrad_clamp: an OpImageSampleDrefExplicitLod
+  // carrying a Grad image operand, which int_spv_resource_samplecmp has no
+  // way to represent (it has no derivative operands at all). The dref
+  // operand keeps int_spv_resource_samplecmp's position, and the Grad
+  // pair -- dPdx then dPdy -- follows it, ahead of the offset, matching
+  // SPIR-V's own fixed Image Operands bit order (Bias, Lod, Grad,
+  // ConstOffset, ..., MinLod); Grad and Bias are mutually exclusive on
+  // the same instruction, so there is no combined
+  // int_spv_resource_samplecmpbiasgrad shape to also cover.
+  def int_spv_resource_samplecmpgrad
+      : DefaultAttrsIntrinsic<[llvm_any_ty],
+                              [llvm_any_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_float_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_any_ty],
+                              [IntrReadMem]>;
+
+  def int_spv_resource_samplecmpgrad_clamp
+      : DefaultAttrsIntrinsic<[llvm_any_ty],
+                              [llvm_any_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_float_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_any_ty, llvm_float_ty],
+                              [IntrReadMem]>;
+
   def int_spv_resource_calculate_lod
       : DefaultAttrsIntrinsic<[llvm_any_ty],
                               [llvm_any_ty, llvm_any_ty, llvm_any_ty],
