@@ -225,4 +225,48 @@ TEST(PipelineTest, CanonicalizesRawDXILStageIOBeforeWidening) {
   EXPECT_TRUE(M->getFunction(Result->WrapperName));
 }
 
+// Roadmap L69: before this row, this pipeline's own pre-mutation
+// `CanonicalizeStagePass`/`ValidateStagePass` pair only ran for a non-
+// `Compute` stage (see this file's own header comment for why that gate
+// used to look safe: an ordinary compute entry point has no
+// `feme.stage.*` stage-IO to canonicalize or validate at all), so a
+// compute-stage entry point's own raw `llvm.spv.ddx`/`.ddy` call (the
+// raised form `VK_KHR_compute_shader_derivatives` lets a
+// `DerivativeGroupLinearKHR` compute shader use, per
+// CanonicalizeStageTest.cpp's own
+// `RewritesSPIRVDerivativesInComputeStage` unit) reached this driver's
+// later passes -- `feme::cpu::PreparePass` onward -- as a raw,
+// un-canonicalized intrinsic call rather than the
+// `feme.stage.derivative.*` call those later passes actually know how to
+// widen/lower, and this pipeline had no way to lower it at all. Removing
+// the stage gate around that pass pair (this row's own fix) lets this
+// compile cleanly end to end, mirroring
+// `CanonicalizesRawSPIRVStageIOBeforeWidening`'s identical fragment-stage
+// precedent for the same underlying "raw op reaches later passes
+// un-canonicalized" gap.
+TEST(PipelineTest, CanonicalizesRawComputeDerivativeBeforeWidening) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_buf = external addrspace(1) global float
+
+    define void @main() #0 {
+      %v = fadd float 1.0, 2.0
+      %ddx = call float @llvm.spv.ddx.f32(float %v)
+      store float %ddx, ptr addrspace(1) @out_buf
+      ret void
+    }
+    declare float @llvm.spv.ddx.f32(float)
+    attributes #0 = { "feme.shader.stage"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  StageCompileOptions Opts;
+  Opts.Stage = ShaderStage::Compute;
+  Opts.WaveSize = 4;
+  Expected<PipelineResult> Result = runPipeline(*M, Opts);
+  ASSERT_THAT_EXPECTED(Result, Succeeded());
+  EXPECT_EQ(Result->Stage, ShaderStage::Compute);
+  EXPECT_TRUE(M->getFunction(Result->WrapperName));
+}
+
 } // namespace

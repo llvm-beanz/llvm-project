@@ -217,9 +217,15 @@ Expected<PipelineResult> runPipeline(Module &M,
   // whether from `CanonicalizeStagePass` or written by hand"), which
   // already assumed this ordering. Every existing (compute) caller selects
   // `ShaderStage::Compute`, which has no `feme.stage.*` operations (nor any
-  // stage-IO global in address space 7/8) to canonicalize or validate, so
-  // this remains a no-op for them.
-  if (Opts.Stage != feme::ShaderStage::Compute) {
+  // stage-IO global in address space 7/8) to canonicalize or validate --
+  // but (roadmap L69) `CanonicalizeStagePass` also rewrites a raw SPIR-V
+  // `llvm.spv.ddx`/`.ddy`/discard/quad-read intrinsic into feme's own
+  // `feme.stage.derivative.*`/etc. calls, and a compute-stage entry point
+  // using `dFdx`/`dFdy` under `DerivativeGroupLinearKHR` genuinely has
+  // those to convert; `ValidateStagePass` itself already filters to
+  // `Vertex`/`Fragment`/`Mesh` only (a real no-op for `Compute` either
+  // way), so both passes are safe to run for every stage uniformly.
+  {
     PassBuilder ValidatePB;
     ModuleAnalysisManager ValidateMAM;
     ValidatePB.registerModuleAnalyses(ValidateMAM);
