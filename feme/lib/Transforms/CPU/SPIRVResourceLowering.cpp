@@ -1229,13 +1229,18 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // Roadmap L66(c) scoped a depth-comparison `Grad` sample to
       // `Plain2D` only; roadmap L66(f) widened this to also accept
       // `Plain1D`/`Array1D`; roadmap L66(g) further widens it to
-      // `Array2D` too -- `Cube`/`CubeArray` counterparts remain
+      // `Array2D`; roadmap L66(h) further widens it to `Cube` too, whose
+      // own `dPdx`/`dPdy` are a 3-wide direction-vector derivative pair
+      // (mirroring `GradDerivativeWidth`'s own unarrayed-shape case,
+      // `SampleCoordWidth` itself already being 3 for `Cube`, and
+      // matching `createSampleCube`'s own identical `Grad` precedent for
+      // a non-`Dref` sample, roadmap L59) -- `CubeArray` remains
       // unstarted follow-on work, mirroring this same narrowing's own
       // precedent (e.g. roadmap L46's initial `Plain2D`-only
       // depth-comparison-sample scope, later widened by L48/L54).
       if (DrefHasGrad && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Plain1D && Shape != ImageShape::Array1D &&
-          Shape != ImageShape::Array2D)
+          Shape != ImageShape::Array2D && Shape != ImageShape::Cube)
         return false;
       // SPIR-V's own validation rules give a depth-comparison sample's
       // Coordinate operand one extra component beyond the shape's own
@@ -1278,9 +1283,9 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                              /*AllowArray2D=*/true) ||
           (DrefHasBias &&
            !CI->getArgOperand(DrefSampleBiasIdx)->getType()->isFloatTy()) ||
-          // Roadmap L66(c)/L66(f)/L66(g): `Grad`'s own `dPdx`/`dPdy` pair
-          // is validated against the same derivative width an ordinary
-          // sample's own `Grad` operand uses (`GradDerivativeWidth`,
+          // Roadmap L66(c)/L66(f)/L66(g)/L66(h): `Grad`'s own `dPdx`/`dPdy`
+          // pair is validated against the same derivative width an
+          // ordinary sample's own `Grad` operand uses (`GradDerivativeWidth`,
           // narrowed by one for an arrayed shape since the array layer
           // has no derivative of its own) -- never the dref-padded
           // `DrefCoordWidth` -- mirroring `GradDerivativeWidth`'s own
@@ -1292,7 +1297,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           // is 2 (arrayed, `SampleCoordWidth` 3 minus the array layer --
           // the same 2-wide derivative width `Plain2D` has, just over a
           // `(U, V)` pair extracted ahead of the array layer rather than
-          // the whole coordinate).
+          // the whole coordinate); for `Cube` it is 3 (unarrayed,
+          // `SampleCoordWidth` is already 3 -- a full 3-component
+          // direction-vector derivative, mirroring `createSampleCube`'s
+          // own identical `Grad` precedent, roadmap L59).
           (DrefHasGrad &&
            (!isCoordN(CI->getArgOperand(DrefSampleGradDPdxIdx),
                       isArrayedShape(Shape) ? SampleCoordWidth - 1
@@ -2927,13 +2935,13 @@ void lowerImageAccesses(
         // Roadmap L66(c)/L66(g): SPIR-V's own `Grad` image operand pair
         // (`spv_resource_samplecmpgrad{,_clamp}`'s `dPdx`/`dPdy`, which
         // `hasOnlySupportedImageUses` now restricts to `Plain2D`/
-        // `Plain1D`/`Array1D`/`Array2D`) -- unpacked into four scalars the
-        // same way `Coord`'s own `C0`/`C1` are for `Plain2D`/`Array2D`
-        // (both have a genuine 2-wide derivative, `Array2D`'s own array
-        // layer having none of its own), and threaded through only for
-        // those two arms below. Zero constants for the non-`Grad` forms,
-        // which have no such operand of their own --
-        // `femeCpuImageSampleCmp2DF32`/`femeCpuImageSampleCmpArray2DF32`
+        // `Plain1D`/`Array1D`/`Array2D`/`Cube`) -- unpacked into four
+        // scalars the same way `Coord`'s own `C0`/`C1` are for
+        // `Plain2D`/`Array2D` (both have a genuine 2-wide derivative,
+        // `Array2D`'s own array layer having none of its own), and
+        // threaded through only for those two arms below. Zero constants
+        // for the non-`Grad` forms, which have no such operand of their
+        // own -- `femeCpuImageSampleCmp2DF32`/`femeCpuImageSampleCmpArray2DF32`
         // provably degenerate to the exact same level-0 result their own
         // narrower pre-L66(c)/pre-L66(g) implementations always computed
         // for all-zero derivatives.
@@ -2950,6 +2958,20 @@ void lowerImageAccesses(
         // by their own switch arms below.
         Value *Grad1DDUdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *Grad1DDUdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        // Roadmap L66(h): `Cube`'s own `dPdx`/`dPdy` are a genuine 3-wide
+        // direction-vector derivative (`hasOnlySupportedImageUses`'s own
+        // `GradDerivativeWidth`-style check gives it a width of 3, since
+        // `Cube` is unarrayed and its own `SampleCoordWidth` is already
+        // 3), unpacked into six scalars the same way `createSampleCube`'s
+        // own `HasGrad` handling above unpacks an ordinary sample's
+        // `Grad` operand -- read into their own `CubeDDir*` variables,
+        // consumed only by the `Cube` switch arm below.
+        Value *CubeDDirXdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *CubeDDirXdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *CubeDDirYdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *CubeDDirYdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *CubeDDirZdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *CubeDDirZdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
         if (DrefHasGrad) {
           Value *GradDPdx = CI->getArgOperand(DrefSampleGradDPdxIdx);
           Value *GradDPdy = CI->getArgOperand(DrefSampleGradDPdyIdx);
@@ -2958,6 +2980,13 @@ void lowerImageAccesses(
             DUdY = Builder.CreateExtractElement(GradDPdy, uint64_t{0});
             DVdX = Builder.CreateExtractElement(GradDPdx, uint64_t{1});
             DVdY = Builder.CreateExtractElement(GradDPdy, uint64_t{1});
+          } else if (Shape == ImageShape::Cube) {
+            CubeDDirXdX = Builder.CreateExtractElement(GradDPdx, uint64_t{0});
+            CubeDDirXdY = Builder.CreateExtractElement(GradDPdy, uint64_t{0});
+            CubeDDirYdX = Builder.CreateExtractElement(GradDPdx, uint64_t{1});
+            CubeDDirYdY = Builder.CreateExtractElement(GradDPdy, uint64_t{1});
+            CubeDDirZdX = Builder.CreateExtractElement(GradDPdx, uint64_t{2});
+            CubeDDirZdY = Builder.CreateExtractElement(GradDPdy, uint64_t{2});
           } else {
             Grad1DDUdX = GradDPdx;
             Grad1DDUdY = GradDPdy;
@@ -2999,8 +3028,16 @@ void lowerImageAccesses(
         }
         case ImageShape::Cube: {
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          // Roadmap L66(h): `CubeDDirXdX`/`CubeDDirXdY`/`CubeDDirYdX`/
+          // `CubeDDirYdY`/`CubeDDirZdX`/`CubeDDirZdY` thread a real
+          // direction-vector derivative sextuple through, mirroring
+          // `createSampleCube`'s own identical parameters -- zero
+          // constants for every non-`Grad` form, degenerating to the same
+          // always-level-0 result as before.
           NewCall = createSampleCmpCube(Builder, Env, ImageIndex, SamplerIndex,
-                                        C0, C1, C2, Lod, ExplicitLodFlag, Dref,
+                                        C0, C1, C2, CubeDDirXdX, CubeDDirXdY,
+                                        CubeDDirYdX, CubeDDirYdY, CubeDDirZdX,
+                                        CubeDDirZdY, Lod, ExplicitLodFlag, Dref,
                                         Bias, MinLodClamp, Mask, CI->getName());
           break;
         }

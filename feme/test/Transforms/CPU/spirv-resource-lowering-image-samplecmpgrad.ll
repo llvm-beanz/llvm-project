@@ -21,34 +21,39 @@
 ; `samplecmp_grad_array1d` below. Roadmap L66(g) further widens it to
 ; `Array2D`, whose own `dPdx`/`dPdy` are a 2-wide vector again (the same
 ; width as `Plain2D`, per that same generalized formula) -- see
-; `samplecmp_grad_array2d` below. `Cube`/`CubeArray` remain unrewritten,
-; matching this project's own "extend one shape at a time" precedent (see
-; `samplecmp_grad_cube_unsupported` below).
+; `samplecmp_grad_array2d` below. Roadmap L66(h) further widens it to
+; `Cube`, whose own `dPdx`/`dPdy` are a genuine 3-wide direction-vector
+; derivative pair (`GradDerivativeWidth`'s own unarrayed-shape case,
+; `SampleCoordWidth` itself already being 3 for `Cube`) -- see
+; `samplecmp_grad_cube` below. `CubeArray` remains unrewritten, matching
+; this project's own "extend one shape at a time" precedent (see
+; `samplecmp_grad_cubearray_unsupported` below).
 
 target triple = "spirv-unknown-vulkan-compute"
 
-; TextureCube: [Dim=Cube(3), Depth=2, Arrayed=0, MS=0, Sampled=1, Format=0].
-; Roadmap L66(c) deliberately scopes `Grad` support to `Plain2D` only --
-; every other depth-comparison-capable shape's own `samplecmpgrad` call is
-; left entirely unrewritten, mirroring how this project has always widened
+; TextureCubeArray: [Dim=Cube(3), Depth=2, Arrayed=1, MS=0, Sampled=1,
+; Format=0]. Roadmap L66(h) deliberately scopes its own `Cube` `Grad` fix
+; to `Cube` alone -- `CubeArray`'s own `samplecmpgrad` call is left
+; entirely unrewritten, mirroring how this project has always widened
 ; `Dref` support one shape at a time (see roadmap L46's own initial
 ; `Plain2D`-only scope for ordinary `Dref` sampling). This function stays
 ; unrewritten by the pass and so is emitted first, ahead of every other
 ; (rewritten) function below -- hence this check comes first too.
-; CHECK-LABEL: define float @samplecmp_grad_cube_unsupported(
-; CHECK-NOT: call float @feme.cpu.image.samplecmp.cube.f32(
+; CHECK-LABEL: define float @samplecmp_grad_cubearray_unsupported(
+; CHECK-NOT: call float @feme.cpu.image.samplecmp.cubearray.f32(
 ; CHECK: call float @llvm.spv.resource.samplecmpgrad{{[.a-zA-Z0-9_]*}}(
-define float @samplecmp_grad_cube_unsupported(<4 x float> %coord, float %dref,
-                                              <2 x float> %dpdx,
-                                              <2 x float> %dpdy) {
-  %img = call target("spirv.Image", float, 3, 2, 0, 0, 1, 0)
-      @llvm.spv.resource.handlefrombinding.timg.cube(i32 0, i32 4, i32 1, i32 0, ptr null)
+define float @samplecmp_grad_cubearray_unsupported(<4 x float> %coord,
+                                                    float %dref,
+                                                    <3 x float> %dpdx,
+                                                    <3 x float> %dpdy) {
+  %img = call target("spirv.Image", float, 3, 2, 1, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg.cubearray(i32 0, i32 12, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
-      @llvm.spv.resource.handlefrombinding.tsamp.cube(i32 0, i32 5, i32 1, i32 0, ptr null)
+      @llvm.spv.resource.handlefrombinding.tsamp.cubearray(i32 0, i32 13, i32 1, i32 0, ptr null)
   %r = call float @llvm.spv.resource.samplecmpgrad(
-      target("spirv.Image", float, 3, 2, 0, 0, 1, 0) %img,
+      target("spirv.Image", float, 3, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,
-      <2 x float> %dpdx, <2 x float> %dpdy, <4 x i32> zeroinitializer)
+      <3 x float> %dpdx, <3 x float> %dpdy, <4 x i32> zeroinitializer)
   ret float %r
 }
 
@@ -122,7 +127,7 @@ define float @samplecmp_grad_1d(<3 x float> %coord, float %dref, float %dpdx,
       @llvm.spv.resource.handlefrombinding.timg.1d(i32 0, i32 6, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.1d(i32 0, i32 7, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 1, i32 1, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.1d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 2, i32 2, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpgrad(
       target("spirv.Image", float, 0, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -140,7 +145,7 @@ define float @samplecmp_grad_array1d(<3 x float> %coord, float %dref,
       @llvm.spv.resource.handlefrombinding.timg.array1d(i32 0, i32 8, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.array1d(i32 0, i32 9, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.1darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 2, i32 2, float %{{.*}}, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.1darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 3, i32 3, float %{{.*}}, float %{{.*}}, float %dpdx, float %dpdy, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpgrad(
       target("spirv.Image", float, 0, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -162,11 +167,36 @@ define float @samplecmp_grad_array2d(<4 x float> %coord, float %dref,
       @llvm.spv.resource.handlefrombinding.timg.array2d(i32 0, i32 10, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp.array2d(i32 0, i32 11, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.2darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 3, i32 3, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2darray.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 4, i32 4, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpgrad(
       target("spirv.Image", float, 1, 2, 1, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,
       <2 x float> %dpdx, <2 x float> %dpdy, <3 x i32> zeroinitializer)
+  ret float %r
+}
+
+; TextureCube: [Dim=Cube(3), Depth=2, Arrayed=0, MS=0, Sampled=1, Format=0].
+; Roadmap L66(h): the `Cube` counterpart of `samplecmp_grad` above --
+; `dPdx`/`dPdy` are a genuine 3-wide direction-vector derivative pair
+; (`GradDerivativeWidth`'s own unarrayed-shape case, `SampleCoordWidth`
+; itself already being 3 for `Cube`), unpacked into six scalars the same
+; way `createSampleCube`'s own `Grad` handling unpacks an ordinary
+; sample's derivative pair (roadmap L59). No `ConstOffset` (SPIR-V
+; forbids `ConstOffset` against `Dim::Cube`), but `min_lod_clamp` reads as
+; negative infinity (a no-op floor) the same way `samplecmp_grad`'s own
+; trailing operand does above.
+; CHECK-LABEL: define float @samplecmp_grad_cube(
+define float @samplecmp_grad_cube(<4 x float> %coord, float %dref,
+                                  <3 x float> %dpdx, <3 x float> %dpdy) {
+  %img = call target("spirv.Image", float, 3, 2, 0, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg.cube(i32 0, i32 4, i32 1, i32 0, ptr null)
+  %samp = call target("spirv.Sampler")
+      @llvm.spv.resource.handlefrombinding.tsamp.cube(i32 0, i32 5, i32 1, i32 0, ptr null)
+  ; CHECK: call float @feme.cpu.image.samplecmp.cube.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 1, i32 1, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, float -inf, i1 true)
+  %r = call float @llvm.spv.resource.samplecmpgrad(
+      target("spirv.Image", float, 3, 2, 0, 0, 1, 0) %img,
+      target("spirv.Sampler") %samp, <4 x float> %coord, float %dref,
+      <3 x float> %dpdx, <3 x float> %dpdy, <4 x i32> zeroinitializer)
   ret float %r
 }
 
@@ -178,6 +208,10 @@ declare target("spirv.Image", float, 3, 2, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg.cube(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")
     @llvm.spv.resource.handlefrombinding.tsamp.cube(i32, i32, i32, i32, ptr)
+declare target("spirv.Image", float, 3, 2, 1, 0, 1, 0)
+    @llvm.spv.resource.handlefrombinding.timg.cubearray(i32, i32, i32, i32, ptr)
+declare target("spirv.Sampler")
+    @llvm.spv.resource.handlefrombinding.tsamp.cubearray(i32, i32, i32, i32, ptr)
 declare target("spirv.Image", float, 0, 2, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg.1d(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")

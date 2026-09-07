@@ -3003,12 +3003,13 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, lod, use_explicit_lod, dref, bias,
+  //  dir_x, dir_y, dir_z, ddir_x_dx, ddir_x_dy, ddir_y_dx, ddir_y_dy,
+  //  ddir_z_dx, ddir_z_dy, lod, use_explicit_lod, dref, bias,
   //  min_lod_clamp, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 15u);
-  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
-  EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "bias");
-  EXPECT_EQ(SampleCmp->getArgOperand(13)->getName(), "clamp");
+  ASSERT_EQ(SampleCmp->arg_size(), 21u);
+  EXPECT_EQ(SampleCmp->getArgOperand(17)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(18)->getName(), "bias");
+  EXPECT_EQ(SampleCmp->getArgOperand(19)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpBiasToImageSampleCmp1DWithBias) {
@@ -3324,10 +3325,11 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeToImageSampleCmpCube) {
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, lod, use_explicit_lod, dref, bias,
+  //  dir_x, dir_y, dir_z, ddir_x_dx, ddir_x_dy, ddir_y_dx, ddir_y_dy,
+  //  ddir_z_dx, ddir_z_dy, lod, use_explicit_lod, dref, bias,
   //  min_lod_clamp, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 15u);
-  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
+  ASSERT_EQ(SampleCmp->arg_size(), 21u);
+  EXPECT_EQ(SampleCmp->getArgOperand(17)->getName(), "dref");
 }
 
 TEST(SPIRVResourceLoweringTest,
@@ -3837,6 +3839,69 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(DVdY->getVectorOperand()->getName(), "dpdy");
   EXPECT_EQ(cast<ConstantInt>(DVdY->getIndexOperand())->getZExtValue(), 1u);
   EXPECT_EQ(SampleCmp->getArgOperand(15)->getName(), "dref");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpGradToImageSampleCmpCubeWithGrad) {
+  // Roadmap L66(h): widens roadmap L66(g)'s support to `Cube` too --
+  // `hasOnlySupportedImageUses`'s own `DrefHasGrad` gate now accepts this
+  // shape, and `Cube`'s own `dPdx`/`dPdy` are a genuine 3-wide
+  // direction-vector derivative pair (`GradDerivativeWidth`'s own
+  // "unarrayed, matches SampleCoordWidth" precedent, `SampleCoordWidth`
+  // itself already being 3 for `Cube`), unpacked into six scalars the
+  // same way `createSampleCube`'s own `HasGrad` handling unpacks an
+  // ordinary sample's `Grad` operand (roadmap L59).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref,
+                       <3 x float> %dpdx, <3 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 3, 2, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmpgrad(
+          target("spirv.Image", float, 3, 2, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <3 x float> %dpdx, <3 x float> %dpdy,
+          <4 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 3, 2, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, ddir_x_dx, ddir_x_dy, ddir_y_dx, ddir_y_dy,
+  //  ddir_z_dx, ddir_z_dy, lod, use_explicit_lod, dref, bias,
+  //  min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 21u);
+  auto *DDirXdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(9));
+  auto *DDirXdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(10));
+  auto *DDirYdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(11));
+  auto *DDirYdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(12));
+  auto *DDirZdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(13));
+  auto *DDirZdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(14));
+  EXPECT_EQ(DDirXdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DDirXdX->getIndexOperand())->getZExtValue(), 0u);
+  EXPECT_EQ(DDirXdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DDirXdY->getIndexOperand())->getZExtValue(), 0u);
+  EXPECT_EQ(DDirYdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DDirYdX->getIndexOperand())->getZExtValue(), 1u);
+  EXPECT_EQ(DDirYdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DDirYdY->getIndexOperand())->getZExtValue(), 1u);
+  EXPECT_EQ(DDirZdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DDirZdX->getIndexOperand())->getZExtValue(), 2u);
+  EXPECT_EQ(DDirZdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DDirZdY->getIndexOperand())->getZExtValue(), 2u);
+  EXPECT_EQ(SampleCmp->getArgOperand(17)->getName(), "dref");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
