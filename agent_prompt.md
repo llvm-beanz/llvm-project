@@ -42,17 +42,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L66(f) or other prerequisites blocking the L-series milestones?
+Can you work on L66(g) or other prerequisites blocking the L-series milestones?
 
-> **`Plain1D`/`Array1D` `Dref`+`Grad` shadow sampling**
-> (`sampler1d{,array}shadow_fragment` under
-> `texturegrad`/`texturegradoffset`/`texturegradclamp`) -- roadmap L66(c)
-> deliberately scoped its own `DrefHasGrad` support to `Plain2D` only; extending
-> it to these two 1D-coordinate shapes needs its own real IR reduction (to
-> confirm the exact `dPdx`/`dPdy` derivative width `hasOnlySupportedImageUses`
-> should validate -- likely a single scalar, mirroring `GradDerivativeWidth`'s
-> own existing `Plain1D`/`Array1D` precedent for a non-`Dref` `Grad` sample,
-> roadmap L64) and a widened `createSampleCmp1D`/`createSampleCmpArray1D` plus
-> matching `femeCpuImageSampleCmp1DV4F32`/`femeCpuImageSampleCmpArray1DV4F32`
-> runtime entry points threading a real derivative pair through to
-> `femeRTPlanImplicitLod1D` (today always called with zero derivatives).
+> **`Array2D` `Dref`+`Grad` shadow sampling** (`sampler2darrayshadow_fragment`
+> under `texturegrad`/`texturegradoffset`) -- the arrayed counterpart of
+> L66(c)'s own `Plain2D` fix, needing a real IR reduction to confirm the
+> coordinate/array-layer extraction shape for a `Dref`+`Grad` sample against
+> this shape (mirroring L64's own arrayed-`Grad` precedent for a non-`Dref`
+> sample), plus a widened `createSampleCmpArray2D` and matching
+> `femeCpuImageSampleCmpArray2DV4F32` runtime entry point.
