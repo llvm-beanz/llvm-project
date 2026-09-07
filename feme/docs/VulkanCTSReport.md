@@ -30534,3 +30534,63 @@ own flip/measure/revert chain (L61/L63/L65/L66(j)) has swept.
 as every other shape's own `ConstOffset` support (mirroring L67(c)'s own
 identical finding), and `shaderResourceMinLod`'s own advertised value is
 unchanged by this session.
+
+## Session: roadmap L66 -- final `shaderResourceMinLod` flip, closing the chain
+
+Concluding entry for the `shaderResourceMinLod` flip/measure/revert chain
+this project's own L60/L61/L63/L65/L66(j)/L66(k) rows have run
+repeatedly: with roadmap L66(k) now closing the sole remaining gap
+L66(j)'s own prior re-run surfaced (a real, nonzero `ConstOffset` against
+`Plain1D`/`Array1D` depth-comparison sampling), this session re-ran the
+experiment one final time to determine whether the feature bit can now
+be safely, permanently advertised.
+
+### Methodology
+
+Flipped `Info.Features.shaderResourceMinLod` to `VK_TRUE`, rebuilt
+`feme_vulkan`, and re-measured all four gated CTS groups directly:
+
+- `textureclamp`: 18/50 Pass, 14 Fail, 18 NotSupported
+- `texturegradclamp`: 19/52 Pass, 14 Fail, 19 NotSupported
+- `textureoffsetclamp`: 65/180 Pass, 50 Fail, 65 NotSupported
+- `texturegradoffsetclamp`: 70/190 Pass, 50 Fail, 70 NotSupported
+
+All four match L66(j)/L66(k)'s own prior measurements exactly. Every
+remaining `Fail` in every group was confirmed (by name, not just count)
+to be the pre-existing, by-design `isampler*`/`usampler*`
+filtered-integer-sampling exclusion -- zero non-integer-sampler fails
+anywhere.
+
+To rule out any regression outside these four groups, ran a full
+`dEQP-VK.glsl.texture_functions.*` sweep (7,945 cases, every
+texture-function group in the CTS) twice: once with the bit forced
+`VK_TRUE` (775 Pass / 2,875 Fail / 4,295 NotSupported) and once with it
+reverted to `VK_FALSE` against the identical, otherwise-unchanged tree
+(603 Pass / 2,747 Fail / 4,595 NotSupported -- itself up from L66(h)'s
+own recorded 539/2,811/4,595 baseline, reflecting every fix landed since
+then that doesn't depend on this bit at all). Diffed the two runs
+case-by-case by test name (not just aggregate counts): **exactly the 300
+cases that reported `NotSupported` with the bit off changed status**,
+splitting into 172 newly-`Pass` and 128 newly-`Fail` -- and every one of
+those 128 was confirmed, by name, to match the `isampler*`/`usampler*`
+pattern (zero exceptions). Every other case (7,645 of 7,945) reported
+the identical status in both runs -- no case that used to `Pass` or
+`Fail` changed to anything else. No crash anywhere in either sweep.
+
+### Conclusion
+
+This is about as conclusive a result as this methodology can produce:
+flipping `shaderResourceMinLod` is a pure, regression-free addition of
+172 genuinely-newly-passing CTS cases, with the only newly-visible
+`Fail`s being an already-well-understood, permanent, by-design
+exclusion unrelated to `MinLod` itself. `Info.Features.shaderResourceMinLod`
+is therefore now set `VK_TRUE` permanently in the committed tree.
+`PhysicalDeviceInfoTest.cpp`'s own feature-advertisement test
+(`OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`)
+was updated to expect this. `check-feme`: 2693/2752 pass, 0 fail, 59
+unsupported (unchanged -- this is a pure runtime feature flip, not new
+lowering logic). `Vulkan14FeatureInventory.md` updated:
+`shaderResourceMinLod` now `yes`. This closes out roadmap L66 (and, by
+extension, the entire `shaderResourceMinLod` flip/measure/revert
+investigation chain spanning L60/L61/L63/L65/L66(c)/L66(f)-(k)) as
+fully complete.
