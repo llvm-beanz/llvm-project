@@ -479,14 +479,18 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // vector (dir_x, dir_y, dir_z), mirroring SampleCube's own
     // relationship to Sample2D (roadmap L48); no offset (SPIR-V forbids
     // `ConstOffset` against `Dim::Cube`), but `min_lod_clamp` (roadmap
-    // L52(c)) is still legal.
+    // L52(c)) is still legal. Roadmap L66(h) adds a real
+    // ddir_x_dx/ddir_x_dy/ddir_y_dx/ddir_y_dy/ddir_z_dx/ddir_z_dy
+    // direction-vector derivative sextuple between dir_z and lod,
+    // mirroring SampleCube's own identically-placed derivative operands.
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
-    //  image_index, sampler_index, dir_x, dir_y, dir_z, lod,
+    //  image_index, sampler_index, dir_x, dir_y, dir_z, ddir_x_dx,
+    //  ddir_x_dy, ddir_y_dx, ddir_y_dy, ddir_z_dx, ddir_z_dy, lod,
     //  use_explicit_lod, dref, bias, min_lod_clamp, mask) -> float
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, F32Ty,
-                             I1Ty},
+                             F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+                             F32Ty, F32Ty, I1Ty,  F32Ty, F32Ty, F32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCmpCubeArray:
@@ -953,16 +957,34 @@ CallInst *feme::cpu::createSampleCmpArray2D(
 
 CallInst *feme::cpu::createSampleCmpCube(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
-    Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ, Value *Lod,
-    Value *UseExplicitLod, Value *Dref, Value *Bias, Value *MinLodClamp,
-    Value *Mask, const Twine &Name) {
+    Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ, Value *DDirXdX,
+    Value *DDirXdY, Value *DDirYdX, Value *DDirYdY, Value *DDirZdX,
+    Value *DDirZdY, Value *Lod, Value *UseExplicitLod, Value *Dref, Value *Bias,
+    Value *MinLodClamp, Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpCube);
   return Builder.CreateCall(F,
-                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
-                             Env.SamplerHeapCount, ImageIndex, SamplerIndex,
-                             DirX, DirY, DirZ, Lod, UseExplicitLod, Dref, Bias,
-                             MinLodClamp, Mask},
+                            {Env.ImageHeap,
+                             Env.ImageHeapCount,
+                             Env.SamplerHeap,
+                             Env.SamplerHeapCount,
+                             ImageIndex,
+                             SamplerIndex,
+                             DirX,
+                             DirY,
+                             DirZ,
+                             DDirXdX,
+                             DDirXdY,
+                             DDirYdX,
+                             DDirYdY,
+                             DDirZdX,
+                             DDirZdY,
+                             Lod,
+                             UseExplicitLod,
+                             Dref,
+                             Bias,
+                             MinLodClamp,
+                             Mask},
                             Name);
 }
 
@@ -1779,7 +1801,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(20);
     break;
   case ImageCallKind::SampleCmpCube:
-    if (CI.arg_size() != 15)
+    if (CI.arg_size() != 21)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1790,12 +1812,18 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.U = CI.getArgOperand(6);
     Result.V = CI.getArgOperand(7);
     Result.W = CI.getArgOperand(8);
-    Result.Lod = CI.getArgOperand(9);
-    Result.UseExplicitLod = CI.getArgOperand(10);
-    Result.Dref = CI.getArgOperand(11);
-    Result.Bias = CI.getArgOperand(12);
-    Result.MinLodClamp = CI.getArgOperand(13);
-    Result.Mask = CI.getArgOperand(14);
+    Result.DDirXdX = CI.getArgOperand(9);
+    Result.DDirXdY = CI.getArgOperand(10);
+    Result.DDirYdX = CI.getArgOperand(11);
+    Result.DDirYdY = CI.getArgOperand(12);
+    Result.DDirZdX = CI.getArgOperand(13);
+    Result.DDirZdY = CI.getArgOperand(14);
+    Result.Lod = CI.getArgOperand(15);
+    Result.UseExplicitLod = CI.getArgOperand(16);
+    Result.Dref = CI.getArgOperand(17);
+    Result.Bias = CI.getArgOperand(18);
+    Result.MinLodClamp = CI.getArgOperand(19);
+    Result.Mask = CI.getArgOperand(20);
     break;
   case ImageCallKind::SampleCmpCubeArray:
     if (CI.arg_size() != 16)

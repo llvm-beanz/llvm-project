@@ -897,14 +897,21 @@ llvm::CallInst *createSampleCmpArray2D(
 /// `MinLod` image operand is legal against any dimensionality, unlike
 /// `ConstOffset`, which `Dim::Cube` forbids). \p Bias (roadmap L52(b))
 /// mirrors `createSampleCmp2D`'s own new `Bias` parameter, equally legal
-/// against `Dim::Cube` for the same reason.
+/// against `Dim::Cube` for the same reason. \p DDirXdX/\p DDirXdY/\p
+/// DDirYdX/\p DDirYdY/\p DDirZdX/\p DDirZdY (roadmap L66(h)) mirror
+/// `createSampleCube`'s own identically-named screen-space
+/// direction-vector derivative operands, consulted only for an
+/// implicit-LOD `Grad` sample (see `femeRTComputeCubeClampedLod`'s own
+/// doc in `FeMeRuntimeCPU.c`) -- pass six zero constants for a caller with
+/// none to give.
 llvm::CallInst *createSampleCmpCube(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
-    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *Lod,
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *DDirXdX,
+    llvm::Value *DDirXdY, llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+    llvm::Value *DDirZdX, llvm::Value *DDirZdY, llvm::Value *Lod,
     llvm::Value *UseExplicitLod, llvm::Value *Dref, llvm::Value *Bias,
-    llvm::Value *MinLodClamp, llvm::Value *Mask,
-    const llvm::Twine &Name = "");
+    llvm::Value *MinLodClamp, llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.cubearray.f32` call (roadmap L48),
 /// the `TextureCubeArray` counterpart of `createSampleCmp2D`. \p
