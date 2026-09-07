@@ -67834,3 +67834,168 @@ Of these two, L66(e) is probably the better next target: it's a crash
 missing-capability gap, and its scope (a lowering-pass bug, not new
 intrinsic/runtime infrastructure) is more self-contained and likely
 smaller than L66(c)'s cross-cutting `IntrinsicsSPIRV.td` addition.
+
+# Session: roadmap L66(e) -- `SPIRVResourceLoweringPass` cross-handle use-after-free
+
+## Starting point
+
+Picked up from the prior session's forward-looking recommendation to
+tackle L66(e) next: a `SPIRVResourceLoweringPass` crash discovered as an
+aside during roadmap L65, never root-caused across several subsequent
+sessions. The prior session's own reasoning for prioritizing this over
+L66(c) (the `Dref`+`Grad` shadow-sampling intrinsic gap) was sound: a crash
+is unconditionally wrong regardless of feature-bit state, and its likely
+scope (a lowering-pass bug) seemed smaller and more self-contained than
+L66(c)'s cross-cutting `IntrinsicsSPIRV.td` addition. That held up --
+this session closed L66(e) in a single, fairly compact investigation.
+
+## Root-causing the crash
+
+Started by re-reading the original crash description carefully: "two
+functions in one module each declare a resource handle at an identical
+binding number for two different image shapes" causing "a real
+use-after-free (`Instruction::eraseFromParent` deletes a `%samp` handle
+while a still-live sample call in the *other* function still references
+it)". Traced through `SPIRVResourceLoweringPass::run`'s module-level
+structure: it collects every function's handles first, builds a shared
+`Ranges` map keyed by `(set, binding, class)`, marks an entry
+`Conflicting` if two handles at the same identity disagree on shape/kind/
+stride/etc, then does a second per-function pass that skips any handle
+whose `Ranges` entry is `Conflicting`.
+
+The key realization: `RangeKey` already includes `BoundResourceClass`
+specifically to avoid an image and its own paired sampler (split from one
+combined `handlefrombinding` call) from colliding at the same `(set,
+binding)` -- so an image-shape conflict and a sampler conflict are always
+tracked as two entirely independent identities, even when the image and
+sampler are used together in one sample call. This means a real,
+plausible scenario exists: two entry points each sample a *different-
+shaped* image at the same binding (image identity conflicts, both image
+handles get excluded from lowering) while both consistently use the exact
+same sampler binding (sampler identity does *not* conflict, gets accepted
+into lowering on its own).
+
+Then found the actual bug by reading `lowerImageAccesses` closely: a
+sample call is only ever rewritten from its *image* handle's own side
+(the sampler side deliberately `continue`s past it, to avoid double-
+processing the same call). If the image handle was excluded from
+`HeapIndices` (conflicting), the sample call is never touched at all when
+reached from the sampler side either -- it stays completely unrewritten,
+still referencing both its original image and sampler operands. But the
+function's own trailing cleanup loop unconditionally erased *every*
+handle present in `HeapIndices` -- including that still-referenced
+sampler handle. `Instruction::eraseFromParent` doesn't check for
+remaining uses; in an assertions build, `Value`'s own destructor asserts
+instead.
+
+## Confirming the fix with a minimal repro, before touching any code
+
+Before writing the fix, built a minimal standalone `.ll` repro (two
+functions, an image handle at `(0,0)` with shape `Plain2D` in one, shape
+`Plain3D` in the other, and an identical, non-conflicting sampler
+binding at `(0,1)` shared by both) and ran it through `feme-opt` on the
+*unfixed* tree first, to verify the crash reproduces exactly as
+predicted rather than guessing:
+
+```
+Uses remain when a value is destroyed!
+UNREACHABLE executed at .../llvm/lib/IR/Value.cpp:99!
+  ...
+ #11 lowerImageAccesses(...)
+ #12 SPIRVResourceLoweringPass::run(...)
+```
+
+This confirmed the root cause precisely (frame #11 is exactly the
+function suspected) before spending any effort on the fix itself --
+much cheaper than debugging a fix that might not address the real
+problem.
+
+## The fix
+
+A single-line change: guard the final erase loop with
+`if (Handle->use_empty())` before calling `Handle->eraseFromParent()`.
+This leaves any handle that still has real users (because its own
+paired handle was excluded elsewhere due to a conflict) alone, exactly
+matching how a conflicting *buffer* handle is already left un-rewritten
+today (`lowerAccesses`'s own per-BH skip in `run`) for
+`feme::cpu::checkSupportedRaisedOps` to reject downstream. Updated both
+this function's own header comment (which had claimed "no partially-
+rewritten state to worry about: either the whole function was accepted,
+or none of it was" -- true for a single handle's own uses, but not
+across a sample call's *two* handles) and added an inline comment at the
+fix site itself documenting the exact failure mode.
+
+Re-ran the exact same repro after the fix: no crash, and the emitted IR
+is well-formed -- both functions still call the original (unrewritten)
+`llvm.spv.resource.sample`/`handlefrombinding` intrinsics, and both still
+get real `!feme.cpu.bound_resources` metadata (since their own sampler
+handle *was* accepted).
+
+## Test coverage
+
+Added a new positive-shaped unit test,
+`LeavesConflictingImageShapeWithSharedSamplerBindingAlone`, mirroring the
+structure of the pre-existing `LeavesConflictingRangeSizeUnchanged` (the
+buffer-conflict precedent) but for this image/sampler-pairing shape
+specifically -- the test's main assertion is simply that `runPass`
+completes without crashing (an assertions-enabled build would otherwise
+abort the whole test binary), with secondary assertions confirming the
+sample calls stay unlowered while each function's own sampler-only
+metadata still attaches (a real, observable difference from the fully-
+conflicting buffer case, where *neither* handle in either function is
+ever accepted). Added a mirrored lit test,
+`spirv-resource-lowering-conflicting-image-shape.ll`, extending the
+existing `spirv-resource-lowering-conflicting.ll`'s buffer-conflict
+precedent to this new shape.
+
+## Validation
+
+`check-feme`: 2664/2723 pass, 0 fail, 59 unsupported (+2 net new tests,
+0 regressions). Real CTS: no direct real CTS case was found that
+exercises this exact cross-handle scenario -- a single SPIR-V module
+with two entry points, one shared sampler binding, and two conflicting
+image bindings of different shapes is an unusual authoring pattern this
+session's own sweeps did not surface (a `textureoffset.*.sampler1d*`
+re-run, a `texture.*` sweep, and a full 49,229-case `dEQP-VK.image.*`
+sweep all completed cleanly with no crashes and identical Pass/Fail/
+NotSupported counts to before this fix). This is therefore a defensive
+robustness fix for a real, confirmed-reproducible crash (via the
+standalone repro above) rather than one directly observed unblocking a
+specific failing CTS case today -- but a real crash in an assertions-
+enabled build is unconditionally worth fixing regardless of whether a
+current CTS case reaches it, since any future shader (from CTS or
+elsewhere) authored this way would have hit it.
+
+## Forward-looking notes for the next session
+
+With L66(e) now closed, roadmap L66's own only remaining open sub-item
+is **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap. No
+`llvm.spv.resource.samplecmpgrad`-shaped intrinsic exists in
+`IntrinsicsSPIRV.td` today (unlike `Grad`'s own non-comparison
+intrinsics, which roadmap L59 already consumes) -- this needs:
+
+1. A new SPIR-V-to-LLVM raising pattern recognizing `OpImageSampleDrefExplicitLod`/
+   `OpImageSampleDrefImplicitLod` with a `Grad` image operand (today's
+   `Dref`-raising code presumably only recognizes `Lod`/`Bias`/no-operand
+   variants -- needs checking).
+2. A new intrinsic declaration in `IntrinsicsSPIRV.td` (mirroring
+   `llvm.spv.resource.samplegrad`'s own non-`Dref` shape, but with an
+   added `Dref` operand, mirroring how the existing non-`Grad`
+   `llvm.spv.resource.samplecmp`/`.samplecmp.clamp` already add `Dref` to
+   the ordinary `sample`/`sample.clamp` shape).
+3. `isDrefSampleIntrinsic`/`hasOnlySupportedImageUses`'s own `Dref`
+   handling in `SPIRVResourceLowering.cpp` extended to recognize this new
+   intrinsic shape, plus real lowering to a runtime entry point (likely a
+   new `femeCpuImageSampleCmpGradXXX` family, one per already-supported
+   `Dref`-capable shape: `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Cube`/
+   `CubeArray`).
+4. This is a genuinely bigger, more cross-cutting scope than L66(d)/(e)
+   were -- likely deserves its own further breakdown into per-shape rows
+   (mirroring how L67 broke `Plain3D`'s own `Bias`/`Grad`/`ConstOffset`
+   into separate rows) rather than being attempted as one single change,
+   once someone begins investigating it in earnest.
+
+Once L66(c) is resolved (or confirmed out of scope), roadmap L66 will be
+fully complete, and the `shaderResourceMinLod` flip/measure/revert
+experiment (L65's own scope) can finally be re-run once more before
+actually enabling the bit for real.
