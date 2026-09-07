@@ -6115,21 +6115,29 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
 // mirroring `femeCpuImageSample2DArrayV4F32`'s own precedent). `OffsetX`/
 // `OffsetY` (roadmap L50d) mirror `femeCpuImageSampleCmp2DF32`'s own new
 // `ConstOffset` operand; `MinLodClamp` (roadmap L52(c)) mirrors its own
-// new `MinLod` clamp operand.
+// new `MinLod` clamp operand. `DUdX`/`DUdY`/`DVdX`/`DVdY` (roadmap
+// L66(g)) mirror `femeCpuImageSampleCmp2DF32`'s own identically-named
+// `Grad` operands, driving the same real `femeRTPlanImplicitLod`
+// derivative-based LOD calculation on the implicit-LOD path -- only
+// `U`/`V`, never `ArrayLayer`, is ever differentiated, matching
+// `femeCpuImageSample2DArrayV4F32`'s own identical precedent for an
+// ordinary sample.
 float femeCpuImageSampleCmpArray2DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float Lod, _Bool UseExplicitLod, float Dref, float Bias,
-    int32_t OffsetX, int32_t OffsetY, float MinLodClamp,
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY, float Lod,
+    _Bool UseExplicitLod, float Dref, float Bias, int32_t OffsetX,
+    int32_t OffsetY, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.samplecmp.2darray.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmpArray2DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float Lod, _Bool UseExplicitLod, float Dref, float Bias,
-    int32_t OffsetX, int32_t OffsetY, float MinLodClamp, _Bool Mask) {
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY, float Lod,
+    _Bool UseExplicitLod, float Dref, float Bias, int32_t OffsetX,
+    int32_t OffsetY, float MinLodClamp, _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -6138,9 +6146,18 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray2DF32(
     return 0.0f;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/MinLodClamp,
-                                            /*InstructionBias=*/Bias);
+  float ClampedLod;
+  if (UseExplicitLod) {
+    ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                         /*InstructionMinLod=*/MinLodClamp,
+                                         /*InstructionBias=*/Bias);
+  } else {
+    FemeRTImplicitLodPlan Plan =
+        femeRTPlanImplicitLod(&Img, &Samp, DUdX, DUdY, DVdX, DVdY,
+                              /*InstructionMinLod=*/MinLodClamp,
+                              /*InstructionBias=*/Bias);
+    ClampedLod = Plan.ClampedLod;
+  }
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
@@ -6155,7 +6172,6 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray2DF32(
                                       OffsetY);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
-
 
 // `feme.cpu.image.load.2darray.v4f32` (roadmap H7b-a): the
 // `Texture2DArray` counterpart of `feme.cpu.image.load.2d.v4f32` above --

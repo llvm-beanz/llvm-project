@@ -472,6 +472,57 @@ TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithRealGradDerivatives) {
   EXPECT_EQ(Matched->DUdY, DUdY);
 }
 
+// Roadmap L66(g): a real nonzero `DUdX`/`DUdY`/`DVdX`/`DVdY` set for
+// `Array2D` too -- only `U`/`V`, never `ArrayLayer`, is ever
+// differentiated, mirroring
+// `MatchesSampleCmpArray1DCallWithRealGradDerivatives` above's identical
+// `Array1D` precedent.
+TEST_F(ImageCallsTest, MatchesSampleCmpArray2DCallWithRealGradDerivatives) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *V = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  Value *ArrayLayer = ConstantFP::get(Builder.getFloatTy(), 2.0);
+  Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.125);
+  Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0625);
+  Value *DVdX = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *DVdY = ConstantFP::get(Builder.getFloatTy(), 0.375);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *OffsetX = Builder.getInt32(0);
+  Value *OffsetY = Builder.getInt32(0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(),
+                                       -std::numeric_limits<float>::infinity());
+  CallInst *CI = createSampleCmpArray2D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, V, ArrayLayer,
+      DUdX, DUdY, DVdX, DVdY, Lod, Builder.getInt1(false), Dref, Bias, OffsetX,
+      OffsetY, MinLodClamp, Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::SampleCmpArray2D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->V, V);
+  EXPECT_EQ(Matched->ArrayLayer, ArrayLayer);
+  EXPECT_EQ(Matched->DUdX, DUdX);
+  EXPECT_EQ(Matched->DUdY, DUdY);
+  EXPECT_EQ(Matched->DVdX, DVdX);
+  EXPECT_EQ(Matched->DVdY, DVdY);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Dref, Dref);
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->OffsetX, OffsetX);
+  EXPECT_EQ(Matched->OffsetY, OffsetY);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 // (Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by
 // roadmap L67(a) and a real `ConstOffset` triple by roadmap L67(c))
 // `createSample3D`'s own ordinary `Plain3D` sample: a real `(U, V, W)`

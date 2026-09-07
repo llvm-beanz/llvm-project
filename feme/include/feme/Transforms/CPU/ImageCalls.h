@@ -875,11 +875,17 @@ llvm::CallInst *createSampleCubeArray(
 /// OffsetY (roadmap L50d) mirror `createSampleCmp2D`'s own new
 /// `ConstOffset` parameters. \p MinLodClamp (roadmap L52(c)) mirrors
 /// `createSampleCmp2D`'s own new `MinLod` clamp parameter, and \p Bias
-/// (roadmap L52(b)) its own new `Bias` parameter.
+/// (roadmap L52(b)) its own new `Bias` parameter. \p DUdX/\p DUdY/\p
+/// DVdX/\p DVdY (roadmap L66(g)) mirror `createSampleCmp2D`'s own
+/// identically-named `Grad` operands -- only `U`/`V`, never `ArrayLayer`,
+/// are ever differentiated, matching `createSample2DArray`'s own
+/// identical precedent for an ordinary sample; pass zero constants for a
+/// caller with none to give.
 llvm::CallInst *createSampleCmpArray2D(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
-    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *Lod,
+    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *DUdX,
+    llvm::Value *DUdY, llvm::Value *DVdX, llvm::Value *DVdY, llvm::Value *Lod,
     llvm::Value *UseExplicitLod, llvm::Value *Dref, llvm::Value *Bias,
     llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *MinLodClamp,
     llvm::Value *Mask, const llvm::Twine &Name = "");
