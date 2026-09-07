@@ -68835,3 +68835,82 @@ fixed a real, previously-undiscovered bug (benefiting two CTS groups
 immediately) and converted what could have been an open-ended "something
 still blocks this" into a single, concretely-scoped, well-understood
 remaining prerequisite (L66(k)).
+
+# Session: roadmap L66(k)
+
+Picked L66(k), the last of the L66(j)-spawned follow-on rows: a real,
+nonzero `ConstOffset` against a `Plain1D`/`Array1D` depth-comparison
+(shadow) sample was rejected outright, even though the ordinary
+(non-`Dref`) sample path already supports the identical shape (L66(d)).
+
+## Root cause
+
+Did a real IR reduction (glslangValidator + spirv-dis of a compiled
+`sampler1dshadow`/`sampler1darrayshadow` case) to confirm the shape, same
+as every other roadmap row in this chain insists on. Confirmed the real
+`ConstOffset` at the intrinsic-call level is the same bare scalar `i32`
+L66(d) already established -- `SPIRVToLLVMPatterns.cpp` needed no
+change, since its own `Dref`-path patterns already thread a real
+`ConstOffset` operand through unmodified with whatever type SPIR-V
+supplies, only synthesizing a `Coordinate`-shaped zero-vector fallback
+when no real offset exists.
+
+The actual gap was narrower than it first looked: `SPIRVResourceLowering.
+cpp`'s `Dref`-path call to `isSupportedOffset` simply never passed
+`AllowPlain1DArray1D=true`. Flipping that on surfaced a second, latent
+bug before it shipped: `isSupportedOffset`'s `Is1D` branch used to accept
+*only* a scalar `i32`, which would have broken the pre-existing
+zero-offset fallback case (still deliberately a `<3 x i32>
+zeroinitializer` for these dref patterns, per L66(j)'s own design) the
+moment the flag turned on. Widened the check to accept either shape.
+This is the kind of thing that's easy to miss if you only reason about
+the "new" case you're trying to unblock and don't also re-verify every
+existing caller still works under the widened gate -- worth flagging as
+a general lesson for any future "flip a restrictive gate to true" change
+in this codebase.
+
+## A genuinely surprising detour: an LLVM intrinsic-mangling quirk
+
+While writing the new lit test for this fix, an initial combined
+single-file test (both `Plain1D` and `Array1D` shapes together, as would
+be the most natural single test file) failed to lower *at all*, despite
+the transform logic clearly being correct by inspection. Spent a good
+chunk of time isolating this via several `/tmp/test_*.ll` experiments run
+directly through `feme-opt`, eventually confirming it reproduces even
+with the pre-existing, already-working all-zero vector offset shape --
+i.e., it has nothing to do with this session's own change at all. The
+actual cause: combining two `Dim1D`-family image handle types (`Plain1D`
+non-arrayed vs `Array1D`) as overloads of the same
+`llvm.spv.resource.samplecmp` intrinsic *name* in one module causes
+neither call to resolve to its correct intrinsic ID after LLVM's own
+auto-mangling/auto-upgrade -- both get silently left unlowered, no error
+or warning. Confirmed this doesn't affect `samplecmpbias`/`samplecmpgrad`
+(those already successfully combine both shapes in one file today).
+
+This was a good reminder that "my new test doesn't pass" doesn't always
+mean "my new code is wrong" -- worth the extra half hour of isolation
+before assuming the fix itself was broken. Worked around it (rather than
+chasing the LLVM-internals root cause, which felt out of scope for this
+roadmap row) by splitting the new test into two sibling files, one per
+shape, mirroring the pattern the `.samplecmpbias`/`.samplecmp` tests
+already establish elsewhere in this test suite for exactly this reason.
+
+## A test-authoring bug caught before it shipped
+
+The new runtime tests initially had their texel values backwards: this
+codebase's depth-comparison semantics are `Dref <= Texel` (pass when
+true), the opposite of what I first assumed when writing the "fails"/
+"passes" cases. Caught only because I actually ran the new tests rather
+than trusting the design read-through -- another point in favor of this
+project's standing "always run what you write" discipline.
+
+## Outcome
+
+`check-feme`: 2693/2752 pass (up from L66(j)'s own 2685/2744), 0 fail.
+Real CTS re-measurement of the 20 named cases (with the standing
+flip/measure/revert methodology on `shaderResourceMinLod`): 20/20 Pass,
+up from 0/20, with a broader group sweep confirming +10/+10 new passes
+and no regressions. `shaderResourceMinLod` itself remains `VK_FALSE` in
+the committed tree, unchanged -- this row closes L66(j)'s own sole
+surfaced prerequisite gap, but doesn't by itself change whether that
+feature bit can be advertised.
