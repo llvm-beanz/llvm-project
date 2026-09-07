@@ -6989,21 +6989,36 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeF32(
 // above, adding `ArrayLayer` the same way `femeCpuImageSampleCubeArrayV4F32`
 // adds it to `femeCpuImageSampleCubeV4F32`. `MinLodClamp` (roadmap
 // L52(c)) mirrors `femeCpuImageSampleCmpCubeF32`'s own new `MinLod` clamp
-// operand.
+// operand. `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY`
+// (roadmap L66(i)) mirror `femeCpuImageSampleCmpCubeF32`'s own
+// identically-named screen-space direction-vector derivative operands
+// (roadmap L66(h)), fed through the same `femeRTComputeCubeClampedLod`
+// helper `femeCpuImageSampleCubeArrayV4F32` already uses for an ordinary
+// cube-array sample -- before this fix, an implicit-LOD `CubeArray`
+// depth-comparison sample always called `femeRTComputeClampedLod`
+// directly, the same always-level-0 bug `femeCpuImageSampleCmpCubeF32`'s
+// own doc describes for its pre-L66(h) state. A caller with no real
+// derivatives to give (a non-fragment stage, or an explicit-LOD sample)
+// passes six zero constants, which `femeRTComputeCubeClampedLod` provably
+// still resolves to `Lod=0` for the same reason a Cube all-zero `Grad`
+// degenerates to the same always-level-0 result.
 float femeCpuImageSampleCmpCubeArrayF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float ArrayLayer, float Lod, _Bool UseExplicitLod, float Dref,
-    float Bias, float MinLodClamp,
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
+    _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.samplecmp.cubearray.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmpCubeArrayF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float ArrayLayer, float Lod, _Bool UseExplicitLod, float Dref,
-    float Bias, float MinLodClamp, _Bool Mask) {
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
+    _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
+    _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -7014,14 +7029,14 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeArrayF32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
   Samp.AddressV = 2;
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/MinLodClamp,
-                                            /*InstructionBias=*/Bias);
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  float ClampedLod = femeRTComputeCubeClampedLod(
+      &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX, DDirYdY,
+      DDirZdX, DDirZdY, MinLodClamp, Bias);
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
-  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
   float Lo = femeRTSampleCmpCubeAtLevel(&Img, &Samp, CF.U, CF.V,
@@ -7034,4 +7049,3 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeArrayF32(
                                        MipPlan.Level1, Dref, UseLinear);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
-

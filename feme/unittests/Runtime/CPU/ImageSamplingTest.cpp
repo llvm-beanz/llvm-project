@@ -337,10 +337,15 @@ using SampleCmpCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
 /// The roadmap L48 `TextureCubeArray` counterpart of `SampleCmpCubeFn`,
 /// adding a float `ArrayLayer` coordinate before `Lod`. Also gains
 /// (roadmap L52(c)) its own trailing float `MinLodClamp`, mirroring
-/// `SampleCmpCubeFn`'s own new operand above.
+/// `SampleCmpCubeFn`'s own new operand above. Roadmap L66(i) widens it
+/// again with a real `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/
+/// `DDirZdY` sextuple (inserted after `DirZ`, before `ArrayLayer`),
+/// mirroring `SampleCmpCubeFn`'s own identical direction-vector
+/// derivative widening (roadmap L66(h)).
 using SampleCmpCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                       const FemeSamplerDescriptor *, uint32_t,
                                       uint32_t, uint32_t, float, float, float,
+                                      float, float, float, float, float, float,
                                       float, float, bool, float, float, float,
                                       bool, void *);
 
@@ -3785,7 +3790,91 @@ TEST_F(ImageSamplingTest, SampleCmpCubeGradSelectsCoarserMipLevel) {
   EXPECT_FLOAT_EQ(WithGrad, 1.0f);
 }
 
-// (`femeCpuImageQueryLod2DV2F32`) -- isolating its clamped-level/
+TEST_F(ImageSamplingTest, SampleCmpCubeArrayGradSelectsCoarserMipLevel) {
+  // Roadmap L66(i): the `CubeArray` counterpart of
+  // `SampleCmpCubeGradSelectsCoarserMipLevel` above -- the same real
+  // direction-vector derivative sextuple resolves through
+  // `femeRTComputeCubeClampedLod` (shared verbatim with `Cube`) to a
+  // real, non-level-0 implicit LOD, exercised here against cube element
+  // 1 (not element 0) to also confirm `ArrayLayer` selection and `Grad`
+  // derivative handling compose correctly rather than one silently
+  // overriding the other. Level 0 (2x2 per face) stores 0.2, level 1
+  // (1x1 per face) stores 0.8; a `LessEqual` compare against a reference
+  // of 0.5 fails at level 0 and passes at level 1.
+  float Level0[12][2][2][4];
+  float Level1[12][1][1][4];
+  for (unsigned Layer = 0; Layer < 12; ++Layer) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Layer][Y][X][C] = 0.2f;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Layer][0][0][C] = 0.8f;
+  }
+  struct {
+    float L0[12][2][2][4];
+    float L1[12][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(float), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(float), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 12;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED | FEME_IMAGE_DEPTH;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpCubeArrayFn Fn = resolve<SampleCmpCubeArrayFn>(addWrapper(
+      "samplecmp_cubearray_grad", "feme.cpu.image.samplecmp.cubearray.f32"));
+
+  // No derivatives: the base level's own 0.2 fails the 0.5 reference,
+  // proving zero derivatives still degenerate to level 0.
+  float NoGrad = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f,
+     /*ArrayLayer=*/1.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Dref=*/0.5f, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(),
+     true, &NoGrad);
+  EXPECT_FLOAT_EQ(NoGrad, 0.0f);
+
+  // The same `DDirYdX=4.0` sextuple `Cube`'s own identical test above
+  // confirms resolves face 0's own real minification well past the
+  // midpoint LOD, rounding the selected mip level up to level 1, whose
+  // own 0.8 passes the same reference -- still against cube element 1.
+  float WithGrad = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/4.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f,
+     /*ArrayLayer=*/1.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Dref=*/0.5f, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(),
+     true, &WithGrad);
+  EXPECT_FLOAT_EQ(WithGrad, 1.0f);
+}
+
 // unclamped-lod computation, independent of the already-tested ordinary
 // sampling math above. Every test below uses a single-layer, `Width ==
 // Height == 4` image so a `dU/dx == 1/Width` derivative of exactly `0.25`
@@ -4273,14 +4362,14 @@ TEST_F(ImageSamplingTest, SampleCmpCubeArraySelectsRequestedCubeElement) {
       "samplecmp_cubearray", "feme.cpu.image.samplecmp.cubearray.f32"));
   float Element0 = 0.0f, Element1 = 1.0f;
   // Element 0's own texel (0.1) passes a 0.5 reference (Dref >= Texel).
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
-     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/0.5f, /*Bias=*/0.0f,
-     -std::numeric_limits<float>::infinity(), true, &Element0);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/0.5f,
+     /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(), true, &Element0);
   EXPECT_FLOAT_EQ(Element0, 1.0f);
   // Element 1's own texel (0.9) fails the same reference.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
-     /*ArrayLayer=*/1.0f, 0.0f, true, /*Dref=*/0.5f, /*Bias=*/0.0f,
-     -std::numeric_limits<float>::infinity(), true, &Element1);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/1.0f, 0.0f, true, /*Dref=*/0.5f,
+     /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(), true, &Element1);
   EXPECT_FLOAT_EQ(Element1, 0.0f);
 }
 
@@ -4371,9 +4460,9 @@ TEST_F(ImageSamplingTest, SampleCmpCubeArrayClampsFixedPointDepthReference) {
       "samplecmp_cubearray", "feme.cpu.image.samplecmp.cubearray.f32"));
   float Result = 1.0f;
   // Face 0 (+X) of element 0, texel 0.0, compared Less against -0.5.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
-     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/-0.5f, /*Bias=*/0.0f,
-     -std::numeric_limits<float>::infinity(), true, &Result);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/-0.5f,
+     /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(), true, &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
 }
 
