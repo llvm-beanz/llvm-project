@@ -67724,3 +67724,113 @@ Once L66(c)/(d)/(e) are all resolved (or confirmed genuinely out of
 scope), the `shaderResourceMinLod` flip/measure/revert experiment should
 be re-run once more before actually enabling the bit for real, per
 roadmap L66's own still-open framing.
+
+# Session: roadmap L66(d) -- `Plain1D`/`Array1D` `ConstOffset` support
+
+## Starting point
+
+Picked up from a prior session's forward-looking note calling out L66(d)
+(the `isSupportedOffset` `Plain1D`/`Array1D` restriction) as the highest-
+value remaining L-series item, mirroring the just-closed L67(c) `Plain3D`
+work almost exactly -- except with a scalar rather than vector offset.
+
+This session itself picked up mid-flight from a prior compaction: the tree
+was left in a broken (non-compiling) state, with `ImageCalls.h`/
+`ImageCalls.cpp` already widened for a new `Offset` parameter on
+`createSample1D`/`createSample1DArray`, but `SPIRVResourceLowering.cpp`'s
+call sites not yet updated to match, and `isSupportedOffset` not yet
+updated at all. First order of business was simply getting back to a
+compiling, correct state before doing anything new.
+
+## Key discovery: scalar, not vector
+
+A real `deqp-vk` SPIR-V capture of `sampler1d`/`sampler1darray`'s own
+`textureOffset()` cases confirmed `ConstOffset` for these two shapes is a
+bare scalar `i32`, never a vector -- a materially different shape than
+every other sample-capable shape (`Plain2D`/`Array2D`/`Plain3D`, all
+vector-typed). This mirrors `GradDerivativeWidth`'s own "+1" carve-out:
+SPIR-V's `ConstOffset` dimensionality tracks the image's real dimension
+count, excluding any array layer -- so `Array1D`'s own 2-component
+`(U, ArrayLayer)` coordinate does not widen its offset into a 2-vector.
+
+`isSupportedOffset` needed a new `bool AllowPlain1DArray1D = false`
+parameter (mirroring the existing `AllowArray2D` pattern) to opt into this
+new scalar-acceptance branch.
+
+## A real bug found along the way: Dref shares the same function
+
+The first version of this change made the new scalar-only branch apply
+unconditionally whenever `Shape` was `Plain1D`/`Array1D` -- but this broke
+the depth-comparison (`Dref`) sample path too, which has its own, wider,
+vector-typed offset (`<3 x i32>`) for these two shapes, confirmed still
+correct via the existing (untouched) test suite. Since `isSupportedOffset`
+is a single shared function used by both the ordinary-sample and
+Dref-sample call sites, the fix needed the new `AllowPlain1DArray1D` flag
+passed `true` only from the ordinary-sample call site, leaving the Dref
+call site completely unchanged. This is exactly the kind of gap unit tests
+across every phase are meant to catch -- and did.
+
+After this fix, 8 more pre-existing tests surfaced needing an update: they
+had used `<1 x i32> zeroinitializer` for a *zero* offset against ordinary
+(non-Dref) `Plain1D`/`Array1D` samples, which is a real, no-longer-valid
+type mismatch now that the scalar branch requires an actual `i32`, not any
+vector shape that happens to be zero (this project's convention has
+generally been to require the exact real type an author-correct backend
+would emit, not merely "the zero case", to keep tests honest about the
+real ABI shape rather than accepting an equivalent-but-wrong stand-in).
+
+## A pre-existing lit test also needed correcting
+
+`check-feme` initially failed one lit test after this change:
+`spirv-resource-lowering-image-samplegrad-1d.ll`. This test (from the
+earlier L65 `Grad` session) had used the same `<1 x i32> zeroinitializer`
+vector shape for `Grad`'s own always-zero trailing offset operand, since
+`Grad`'s own `isSupportedOffset` check is the exact same shared function
+the ordinary-sample path uses (Grad is not a distinct code path here --
+just a different set of asserted operands upstream of the shared offset
+check). The newly scalar-only check correctly rejected this file's now-
+outdated vector shape, so it needed updating to `i32 0` to match reality.
+This was a pre-existing test artifact being corrected, not a functional
+regression -- the underlying Grad-sampling behavior this test exercises is
+otherwise completely unaffected.
+
+## Validation
+
+`check-feme`: 2662/2721 pass, 0 fail, 59 unsupported. Real CTS: a direct
+re-run of `textureoffset.*.sampler1d*`/`sampler1darray*` (120 non-integer
+cases, all 5 wrap modes) shows 60 Pass (up from 0 -- every ordinary
+`fixed`/`float` `_fragment`/`_vertex` case across all wrap modes, all of
+which previously failed `vkCreateGraphicsPipelines` outright), 30 Fail (the
+pre-existing, unrelated `Dref` shadow-sampling cases, correctly still
+rejected and unaffected by this fix's own scoping), 30 NotSupported (the
+pre-existing, unrelated `_compute`-stage `VK_KHR_compute_shader_derivatives`
+gap). A broader 1355-case sweep across every texture-function group
+against both shapes completes cleanly with no crashes, 160 Pass total --
+since this fix is purely additive (a previously-rejected case now lowers,
+nothing that used to work stops working), no regression is possible by
+construction.
+
+## Forward-looking notes for the next session
+
+With L66(d) now fully closed (both `Plain3D`'s share via the earlier
+L67(c) work, and this session's own final `Plain1D`/`Array1D` share),
+roadmap L66's own still-open sub-items are:
+
+- **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap -- no
+  `llvm.spv.resource.samplecmpgrad`-shaped intrinsic exists in
+  `IntrinsicsSPIRV.td` today, a genuinely bigger, cross-cutting scope
+  mirroring roadmap L52(b)'s own `Dref`+`Bias` gap. Untouched again this
+  session.
+- **L66(e)**: the `SPIRVResourceLoweringPass` crash when two functions in
+  one module each declare a resource handle at an identical binding
+  number for two different image shapes -- a real use-after-free, not yet
+  root-caused. Untouched again this session, and now the sole remaining
+  blocker (alongside L66(c)) before the `shaderResourceMinLod` flip
+  experiment can be safely re-run and (assuming success) the bit actually
+  enabled.
+
+Of these two, L66(e) is probably the better next target: it's a crash
+(unconditionally wrong regardless of feature-bit state) rather than a
+missing-capability gap, and its scope (a lowering-pass bug, not new
+intrinsic/runtime infrastructure) is more self-contained and likely
+smaller than L66(c)'s cross-cutting `IntrinsicsSPIRV.td` addition.
