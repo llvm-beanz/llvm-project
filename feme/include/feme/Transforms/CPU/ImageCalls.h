@@ -412,11 +412,13 @@ enum class ImageCallKind : uint8_t {
   /// unstarted follow-on work.
   QueryLod2D,
   /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a
-  /// real `Bias`/`MinLodClamp` pair by roadmap L67(a)): the volumetric
-  /// counterpart of `Sample2D`, a `Plain3D` ordinary sample -- a real
-  /// `(U, V, W)` coordinate, its own screen-space partial derivatives
-  /// (`DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`, consulted only for an
-  /// implicit-LOD sample, mirroring `Sample1D`'s own derivative pair) for
+  /// real `Bias`/`MinLodClamp` pair by roadmap L67(a) and real `Grad`
+  /// support by roadmap L67(b)): the volumetric counterpart of
+  /// `Sample2D`, a `Plain3D` ordinary sample -- a real `(U, V, W)`
+  /// coordinate, its own screen-space partial derivatives
+  /// (`DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`, either synthesized for an
+  /// implicit-LOD sample or the caller's own real `Grad` derivative
+  /// triple, mirroring `Sample1D`'s own derivative pair) for
   /// `Lod`/`UseExplicitLod`'s own implicit-vs-explicit split, and a real
   /// `Bias`/`MinLodClamp` pair (mirroring `Sample1D`'s own roadmap L61(c)
   /// extension). Still no `ConstOffset` operand -- that remains its own
@@ -965,11 +967,14 @@ llvm::CallInst *createQueryLod2D(llvm::IRBuilderBase &Builder,
 /// order (coordinate, then its own screen-space derivative pair(s), then
 /// `Lod`/`UseExplicitLod`/`Bias`/`MinLodClamp`/`Mask`), extended to a real
 /// `(U, V, W)` coordinate and its own
-/// `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` derivative triple. \p Bias/
-/// \p MinLodClamp mirror `createSample1D`'s own identically-named
-/// parameters -- a `Plain3D` sample can carry a real `Bias`/`MinLod` clamp
-/// too. Still no `ConstOffset` operand, per `ImageCallKind::Sample3D`'s
-/// own doc (roadmap L67(c)/L66(d)/L33's own still-open, unrelated scope).
+/// `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` derivative triple -- either
+/// synthesized for an implicit-LOD sample or the caller's own real `Grad`
+/// derivative (roadmap L67(b); this builder itself is agnostic to which,
+/// same as `createSample1D`'s own precedent). \p Bias/\p MinLodClamp
+/// mirror `createSample1D`'s own identically-named parameters -- a
+/// `Plain3D` sample can carry a real `Bias`/`MinLod` clamp too. Still no
+/// `ConstOffset` operand, per `ImageCallKind::Sample3D`'s own doc
+/// (roadmap L67(c)/L66(d)/L33's own still-open, unrelated scope).
 llvm::CallInst *createSample3D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env,
                                llvm::Value *ImageIndex,

@@ -1008,9 +1008,10 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
 /// coordinate, same width as `Array2D`'s own arrayed one -- its own
 /// `OpImageFetch` path is likewise not accepted yet (this row's own scope
 /// is ordinary sampling only, mirroring `Plain1D`/`Array1D`'s identical
-/// decision above), and `Grad` is not yet accepted either (its own
-/// follow-on roadmap L67(b) sub-item). Roadmap L67(a) adds real
-/// `Bias`/`MinLodClamp` support for `Plain3D` (see the checks below).
+/// decision above). Roadmap L67(a) adds real `Bias`/`MinLodClamp` support
+/// for `Plain3D`, and roadmap L67(b) adds real `Grad` support too (see the
+/// checks below) -- `ConstOffset` remains unsupported for this shape
+/// (roadmap L67(c)/L66(d)/L33's own still-open, unrelated scope).
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
@@ -1076,11 +1077,16 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // by roadmap L63 for synthesized implicit-LOD derivatives), so a
       // caller-supplied `Grad` reuses that same pair -- these two shapes
       // are not a materially bigger prerequisite the way `Plain3D`'s own
-      // still-nonexistent ordinary-sampling infrastructure is.
+      // still-nonexistent ordinary-sampling infrastructure is. Roadmap
+      // L67(b): `Plain3D`'s own `createSample3D` call already carries a
+      // real `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` derivative triple
+      // (added by roadmap L66(a) for synthesized implicit-LOD
+      // derivatives), so a caller-supplied `Grad` reuses that same triple
+      // the same way `Plain1D`/`Array1D` reuse their own pair above.
       if (HasGrad && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
           Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
-          Shape != ImageShape::Array1D)
+          Shape != ImageShape::Array1D && Shape != ImageShape::Plain3D)
         return false;
       unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
       // Roadmap L59/L64: `Grad`'s own `dPdx`/`dPdy` operands (indices 3,
@@ -2438,18 +2444,19 @@ void lowerImageAccesses(
           CI->eraseFromParent();
           continue;
         }
-        // Roadmap L66(a)/L67(a): `Plain3D` is handled separately too,
-        // alongside `Plain1D`/`Array1D` above -- it has no `Grad` support
-        // yet (`hasOnlySupportedImageUses` already guarantees `HasGrad`
-        // is false by the time a `Plain3D` sample reaches here; its own
-        // follow-on roadmap L67(b) sub-item), so this is deliberately
-        // simpler than the generic `C0`/`C1`-based switch below: a real
-        // 3-component `(U, V, W)` coordinate, its own per-axis synthesized
+        // Roadmap L66(a)/L67(a)/L67(b): `Plain3D` is handled separately
+        // too, alongside `Plain1D`/`Array1D` above: a real 3-component
+        // `(U, V, W)` coordinate, its own per-axis derivatives -- either
+        // the caller's own real `Grad` derivative triple (roadmap L67(b),
+        // extracted one component per axis from `GradDPdx`/`GradDPdy`,
+        // which `hasOnlySupportedImageUses`'s own `GradDerivativeWidth`
+        // check already guarantees is a real 3-wide vector for this
+        // non-arrayed shape) or, absent `Grad`, per-axis synthesized
         // screen-space derivatives (reusing
         // `getOrSynthesizeSample1DDerivatives` three times, once per
         // axis -- there is no dedicated 3D derivative synthesis helper,
         // since each axis differentiates independently the same way
-        // `Plain1D`'s own single axis does), a real `Bias`/`MinLodClamp`
+        // `Plain1D`'s own single axis does) -- a real `Bias`/`MinLodClamp`
         // pair (roadmap L67(a), mirroring `Plain1D`'s own extraction
         // immediately above), and a direct `createSample3D` call.
         if (Shape == ImageShape::Plain3D) {
@@ -2457,18 +2464,24 @@ void lowerImageAccesses(
           Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
           Value *W = Builder.CreateExtractElement(Coord, uint64_t{2});
           Value *ZeroF = ConstantFP::get(Builder.getFloatTy(), 0.0);
-          SampleDerivatives1D UD =
-              !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
-                                 Builder, *CI->getFunction(), U)
-                           : SampleDerivatives1D{ZeroF, ZeroF};
-          SampleDerivatives1D VD =
-              !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
-                                 Builder, *CI->getFunction(), V)
-                           : SampleDerivatives1D{ZeroF, ZeroF};
-          SampleDerivatives1D WD =
-              !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
-                                 Builder, *CI->getFunction(), W)
-                           : SampleDerivatives1D{ZeroF, ZeroF};
+          SampleDerivatives1D UD, VD, WD;
+          if (HasGrad) {
+            UD = {Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                  Builder.CreateExtractElement(GradDPdy, uint64_t{0})};
+            VD = {Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                  Builder.CreateExtractElement(GradDPdy, uint64_t{1})};
+            WD = {Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
+                  Builder.CreateExtractElement(GradDPdy, uint64_t{2})};
+          } else if (!ExplicitLod) {
+            UD = getOrSynthesizeSample1DDerivatives(Builder, *CI->getFunction(),
+                                                     U);
+            VD = getOrSynthesizeSample1DDerivatives(Builder, *CI->getFunction(),
+                                                     V);
+            WD = getOrSynthesizeSample1DDerivatives(Builder, *CI->getFunction(),
+                                                     W);
+          } else {
+            UD = VD = WD = SampleDerivatives1D{ZeroF, ZeroF};
+          }
           Value *MinLodClamp =
               HasMinLodClamp
                   ? CI->getArgOperand(
