@@ -68455,3 +68455,135 @@ since their own ordinary coordinate widths already sit at SPIR-V's
 the formula generalizes further. Once both land, L66(j) (re-running
 L65's own `shaderResourceMinLod` flip/measure/revert experiment)
 becomes ready.
+
+# Session: roadmap L66(h) -- `Cube` `Dref`+`Grad` shadow sampling
+
+Picked up L66(h) off the L66 follow-on list (c) filed for its own sibling
+shapes: extend `Dref`+`Grad` depth-comparison sampling, already closed
+for `Plain2D` (L66c), `Plain1D`/`Array1D` (L66f), and `Array2D` (L66g),
+to also cover `Cube`. The mechanical widening across all three phases
+(`ImageCalls.h/.cpp`'s `createSampleCmpCube`, `SPIRVResourceLowering.cpp`'s
+`DrefHasGrad` gate and derivative extraction, `FeMeRuntimeCPU.c`'s
+`femeCpuImageSampleCmpCubeF32`) went almost exactly like L66(g)'s own
+`Array2D` widening: no real surprises, every new unit test passed on the
+first try, `check-feme` came back fully clean. If this had been an L66(c)/
+(f)/(g)-style session I'd have called it done right there.
+
+It wasn't done. The real `deqp-vk` re-run -- which I run after *every*
+change per this project's own standing process, not just when something
+seems risky -- came back with a genuine "Image mismatch" on both
+`texturegrad.samplercubeshadow_fragment` and `_vertex`. This is exactly
+why that standing requirement exists: a synthetic unit test I write
+myself only ever tests what I already believe the correct behavior is: it
+cannot catch a case where my own mental model of "correct" is itself
+subtly wrong. Only a real, independently-authored oracle (VK-GL-CTS's own
+reference implementation) can catch that class of bug, and it did.
+
+## The investigation
+
+First move: narrow down *which* combination of factors was actually
+broken. I confirmed, one CTS group at a time, that ordinary (non-`Dref`)
+Cube/CubeArray `Grad` sampling passes cleanly (the shared derivative-to-
+mip math is fine in general), that non-`Grad` Cube `Dref` sampling passes
+cleanly (the depth-comparison logic is fine in general), and that every
+*other* shape's `Dref`+`Grad` combination (from L66(c)/(f)/(g)) still
+passes. That left a genuinely narrow, three-way interaction bug: only
+`Dref` + `Grad` + `Cube` together fail, every pairwise combination works.
+That's a strong, specific signal -- it usually means there's exactly one
+piece of code that's only reachable by all three conditions at once, and
+that's where the bug lives.
+
+Code review alone didn't find it -- I went through `hasOnlySupportedImageUses`,
+the SPIR-V-to-LLVM raising pattern, the resource-lowering switch arm, and
+every runtime helper, and every one of them looked structurally identical
+to some already-passing precedent. That's a real trap: "looks the same as
+code that works" is not the same as "is correct", especially for
+floating-point math where the *values* matter, not just the *shape* of
+the code.
+
+So I went empirical. I extracted the actual `Result`/`Reference` PNGs
+embedded in the failing test's own `.qpa` XML log (base64-decoded by
+hand) and diffed them pixel-by-pixel with `numpy` (had to `pip install
+--break-system-packages numpy` first -- not present by default in this
+environment). The diff was tiny (90 out of 16384 pixels, ~0.5%) but had a
+very specific *shape*: three perfectly straight diagonal lines, each at a
+constant `x + y`, spaced apart by a factor of exactly 2 (57, 114, 228).
+That's not what a rasterizer-edge or wrong-formula bug looks like -- it's
+the signature of a *rounding-boundary* disagreement that recurs once per
+octave, because `log2` doubles its input for every unit increase.
+
+That pointed straight at LOD *mip-level rounding*, not the sample or
+compare logic. Reading VK-GL-CTS's own reference oracle
+(`vktShaderRenderTextureFunctionTests.cpp`'s `computeLodFromGradCube`)
+directly (rather than assuming what a "standard" cube LOD formula should
+be) turned up the first real finding: CTS's own oracle deliberately
+*ignores* the derivative of the cube map's major-axis component, an
+approximation our own `femeRTComputeCubeUVDerivatives` did not make (it
+computed the exact quotient-rule derivative instead, which felt like the
+more "correct" choice when that function was first written). Fixing that
+felt like the answer -- except it wasn't. I rebuilt, reran the exact
+failing case, and the output was *bit-for-bit identical* to before the
+fix. That's an important lesson: a plausible-looking, well-reasoned fix
+that doesn't actually move the needle on the specific failing input is a
+sign to go back to the data, not to declare victory on "at least it's
+more theoretically correct now." I did the algebra by hand afterward and
+confirmed why: this test's own case-spec parameters always keep the
+major-axis derivative at exactly zero, so the term I "fixed" was already
+contributing nothing here. A real, general improvement (I kept it), but
+not this bug's actual cause.
+
+Back to the diagonal-line evidence: three lines, doubling in spacing per
+octave, is *exactly* what happens when a downstream `log2` approximation
+has enough error to cross a `0.5`-fraction rounding threshold near
+several different octaves within one image. I looked at `femeRTFastLog2`
+next -- a bit-trick-based "reinterpret the float as an int" fast
+approximation, explicitly documented as an approximation, used
+unmodified by every already-*passing* Grad/mipmap test elsewhere. A
+Python reimplementation of its own bit trick confirmed a real ~0.057
+log2-unit max error, comfortably large enough to explain the observed
+failure. The reason this only broke *this* test, despite the function
+being shared, general-purpose code that plenty of already-passing tests
+also use: this specific test's own derivative sweeps continuously across
+several octaves within a single 128x128 render, so it's the first case
+in this project's own CTS history to actually cross several rounding
+boundaries within one image; every sibling shadow-`Grad` test's own
+case-spec parameters happen to stay within a single octave the whole
+time, so the same imprecision was always there, just never exercised
+this way before.
+
+Fixed it with a degree-3 minimax polynomial correction of the mantissa's
+own fractional part (least-squares fitted in Python against a real log2
+table, then hand-translated to C) -- still no libm call (this file is
+freestanding), cutting the max error from ~0.057 to ~0.0013, over 40x
+tighter, while keeping the "exact at every power of two" property.
+Rebuilt, reran the exact failing case: **both `fragment` and `vertex`
+now Pass.** Ran the full `FeMeRuntimeCPUTests`/`FeMeTransformsCPUTests`/
+`check-feme` suites again (this is shared infrastructure, not
+Cube-specific, so a wider blast radius needed checking) -- all green,
+plus a broader `dEQP-VK.glsl.texture_functions.*` sweep (7,945 cases)
+came back with the exact expected `+18` improvement and zero regressions
+in either the Pass or NotSupported counts.
+
+## What I'd do differently next time
+
+The single biggest time cost this session was chasing a *plausible*
+theory (the quotient-rule correction term) that turned out to be a real
+but *irrelevant* improvement, before doing the bit-for-bit
+before/after comparison that would have told me immediately it wasn't
+the actual cause. The lesson: after any "fix," always verify the fix
+actually changes the *specific* failing output, numerically, before
+moving on to write it up as the root cause -- a fix that's independently
+justifiable on its own merits can still be a red herring for the bug at
+hand, and confirming that early would have saved real time. The image-
+diff-first approach (extracting real pixel data before theorizing about
+formulas) was the right instinct and should be the *first* move next
+time a "small percentage of pixels" CTS failure like this comes up,
+rather than a last resort after code review runs dry.
+
+Also worth remembering for L66(i) (`CubeArray`, this row's own remaining
+sibling): now that `femeRTFastLog2`'s precision has been improved
+project-wide, any future shape's own `Dref`+`Grad` widening is *less*
+likely to hit this exact same rounding-boundary class of bug -- but it's
+still worth re-checking the real CTS output pixel-for-pixel rather than
+assuming a clean unit-test pass is sufficient, since this session is
+concrete proof that it isn't always.
