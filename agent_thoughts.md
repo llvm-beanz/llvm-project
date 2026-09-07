@@ -67478,3 +67478,91 @@ L67(c) (`Plain3D` `ConstOffset`, blocked on the same restriction L33 just
 partially widened) and L66(c)/(e) (the `Dref`+`Grad` shadow-sampling
 intrinsic gap and the cross-function same-binding crash) all remain open
 and untouched this session.
+
+# Session: roadmap L68 -- `Lod|ConstOffset` legalization gap
+
+Picked up from the prior session's own final recommendation: roadmap L68,
+which its own text called "probably the single highest-value next target
+across the *entire* L-series" -- a cross-cutting gap in
+`SPIRVToLLVMPatterns.cpp`'s `ImageSampleExplicitLodPattern` that blocked
+every shape's own `_vertex`-stage `textureoffset*`/`textureoffsetclamp*`
+CTS group uniformly, discovered as a side effect of the prior session's own
+L33 CTS sweep reaching a `_vertex` case for the first time.
+
+**Confirmed the fix's own scope was narrow before writing any code**: read
+`ImageSampleImplicitLodPattern`'s own combinatorial `bitEnumContainsAll`
+style first (the pattern this row's own text said to mirror), then
+`getSampleOffsetIdx`/`isSupportedOffset` in `SPIRVResourceLowering.cpp` to
+confirm the CPU-lowering side *already* handled `ExplicitLod=true` fully
+generically (it does -- `getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad)`
+returns the right index for `ExplicitLod=true` regardless of shape, and
+`isSupportedOffset` doesn't care which SPIR-V op produced the offset
+value, only its own `Shape`/`AllowArray2D` inputs). This meant the entire
+fix was isolated to one pattern class in one file -- no runtime change, no
+intrinsic-signature change, nothing in `SPIRVResourceLowering.cpp` itself
+needed touching, which is unusually clean for a "genuinely cross-cutting"
+row as this one's own filing text described it.
+
+**The fix itself**: `ImageSampleExplicitLodPattern` previously required an
+*exact* `Lod`-only match (`hasExactImageOperands(..., Lod)` plus an exact
+1-operand-count check). Replaced this with the same
+`bitEnumContainsAny`/`bitEnumContainsAll(SupportedMask, Actual)` style
+`ImageSampleImplicitLodPattern` already uses, with `SupportedMask = Lod |
+ConstOffset` (`Lod` itself is mandatory -- not a combinatorial choice the
+way `Bias`/`MinLod` are for the implicit-LOD pattern -- so the check is
+"has `Lod`, and everything else present is `ConstOffset`" rather than "is a
+subset of an all-optional mask"). The offset operand, when present, sits
+immediately after `Lod` in `OperandArguments`, per the fixed SPIR-V Image
+Operands bit order (`Bias, Lod, Grad, ConstOffset, ...`) -- confirmed by
+reading `SPIRVBase.td`'s own `SPIRV_ImageOperandsAttr` bit list directly
+rather than assuming.
+
+**Test strategy**: this pattern class has no MLIR-dialect-conversion-layer
+unit tests of its own (`SPIRVToLLVMTest.cpp` only covers unrelated things
+like target-triple naming and stage-IO decorations) -- all of its existing
+coverage is lit tests in `spirv-to-llvm-sampling.mlir`, so two new
+`--split-input-file` cases were added there rather than inventing a new
+unit-test file: `sample_level_const_offset` (the core positive case) and
+`sample_level_const_offset_nontemporal` (confirming the discarded
+`Nontemporal` cache-hint bit still doesn't get rejected when combined with
+the new `ConstOffset` support, mirroring the existing
+`sample_level_nontemporal` case's own lone-`Lod` precedent). Since both
+live inside the same existing lit-test file, `check-feme`'s own aggregate
+test count stayed at 2715 (a `--split-input-file` case is not counted as
+its own separate "test" the way a new file would be) -- worth noting so a
+future session doesn't mistake an unchanged `check-feme` count for "nothing
+was actually tested."
+
+**Regression methodology worth recording**: rather than just trusting "no
+Fails outside the known pre-existing scope" from a single post-fix sweep,
+I rebuilt with `git stash` (reverting to the pre-fix tree) and re-ran the
+*identical* 36-case non-offset `_vertex` regression sweep to get a real
+before/after comparison, confirming the 3 `Fail`s I saw post-fix
+(`texturelod.sampler{1d,1darray,2d}shadow_vertex`) were byte-for-byte the
+same pre-fix -- these three route through the separate, untouched
+`ImageSampleDrefExplicitLodPattern`, not the pattern this row touched.
+This is a stronger confirmation than reasoning from code alone would have
+given, and cheap enough (one stash/rebuild/sweep/pop cycle) to be worth
+doing whenever a "these fails are pre-existing" claim can't otherwise be
+directly cross-checked against this session's own numbers.
+
+**Validation**: `check-feme` 2656/2715 pass, 0 fail, 59 unsupported
+(unchanged count, 0 regressions, per the lit-test-count note above). Real
+CTS: `textureoffset.*.sampler2darray_*` and `textureoffset.*.sampler2d_*`
+both 30/40 Pass (up from 20/40), 0 Fail. Broader 340-case sweep across
+every shape's own `textureoffset`/`textureoffsetclamp` groups: 120 Fails,
+all exclusively `sampler1d`/`sampler1darray`/`sampler1d{,array}shadow`/
+`sampler3d` (roadmap L67(c)/L66(d)'s own still-open scope), 0 Fails
+against any `sampler2d`/`sampler2darray`/shadow variant. 36-case
+non-offset `_vertex` regression sweep: 33 Pass, 3 Fail, confirmed
+pre-existing via the stash/rebuild comparison above.
+
+**Forward-looking notes for the next session**: roadmap L67(c) (`Plain3D`
+`ConstOffset`) and L66(d) (the same `isSupportedOffset` shape restriction,
+`Plain1D`/`Array1D`/`Plain3D` still unsupported, from the
+`shaderResourceMinLod` flip's own perspective) are now probably the
+highest-value next targets, since this session's own 340-case sweep
+freshly reconfirmed their exact scope (120 real failing cases, all
+attributable to this one restriction). L66(c) (the `Dref`+`Grad`
+shadow-sampling intrinsic gap) and L66(e) (the cross-function
+same-binding crash) remain open and untouched this session.
