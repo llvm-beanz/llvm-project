@@ -67566,3 +67566,161 @@ freshly reconfirmed their exact scope (120 real failing cases, all
 attributable to this one restriction). L66(c) (the `Dref`+`Grad`
 shadow-sampling intrinsic gap) and L66(e) (the cross-function
 same-binding crash) remain open and untouched this session.
+
+# Session: roadmap L67(c) -- `Plain3D` `ConstOffset` support
+
+## Starting point
+
+Picked up from the prior session's own forward-looking note: roadmap
+L67(c) (`Plain3D` `ConstOffset`) was flagged as the single highest-value
+next target, since it was confirmed to be exactly the same
+`isSupportedOffset` shape restriction (`Plain1D`/`Array1D`/`Plain3D`
+still unsupported) that roadmap L66(d) also names from the
+`shaderResourceMinLod` flip's own perspective, and the prior session's
+own 340-case sweep had already reconfirmed its exact scope (120 real
+failing cases, all attributable to this one restriction). Fixing L67(c)
+was therefore expected to simultaneously make progress on L66(d)'s own
+`Plain3D` share.
+
+## Investigation
+
+Traced the full pipeline `Plain3D` `ConstOffset` support needed, mirroring
+the exact same three-phase shape (compiler-side lowering, IR-builder, CPU
+runtime) every prior L60-L67 sub-item in this chain has used:
+
+1. `isSupportedOffset` (`SPIRVResourceLowering.cpp`) was the actual gate:
+   it special-cased `Plain2D` (unconditionally accepted) and `Array2D`
+   (behind an `AllowArray2D` flag), but had no branch for `Plain3D` at
+   all -- it fell through to the same rejection every other shape hits.
+   `hasOnlySupportedImageUses` already called this function generically
+   for the ordinary-sample path, so no change was needed there beyond a
+   doc-comment update.
+
+2. `lowerImageAccesses`'s `Plain3D` branch never extracted an offset
+   operand at all (unlike `Plain2D`/`Array2D`'s branches, which extract
+   `OffsetX`/`OffsetY` via `getSampleOffsetIdx` + `CreateExtractElement`).
+   This needed a genuine `<3 x i32>` extraction -- one extra component
+   compared to `Plain2D`/`Array2D`'s 2-wide offset, matching `Plain3D`'s
+   own 3-component `(U, V, W)` coordinate.
+
+3. `createSample3D`/`ImageCallKind::Sample3D` had no offset operand slot
+   at all. Added `OffsetX`/`OffsetY`/`OffsetZ` between `Bias` and
+   `MinLodClamp` (the same insertion point `createSample2D`'s own
+   `OffsetX`/`OffsetY` occupy relative to its own `Bias`/`MinLodClamp`),
+   widening the call's argument count from 20 (post-L67(b)) to 23.
+
+4. The runtime helper chain (`femeCpuImageSample3DV4F32` ->
+   `femeRTSampleFiltered3D` -> `femeRTSamplePoint3D`/
+   `femeRTSampleLinear3D`) needed the same 3 `int32_t` parameters threaded
+   all the way to the texel-address computation, mirroring the existing
+   2D offset-handling precedent (`femeRTSamplePoint2D`/
+   `femeRTSampleLinear2D`) exactly.
+
+## A caught mid-edit bug
+
+While updating the `Sample3D` case in `ImageCalls.cpp`'s call-parsing
+switch, inserting the 3 new offset operands ahead of the trailing
+`MinLodClamp`/`Mask` pair initially left `Result.Mask =
+CI.getArgOperand(19)` stale (correct for the old 20-arg layout, where
+`Mask` was the very last operand). This was caught by careful re-viewing
+before building and corrected to `CI.getArgOperand(22)` (the new last
+index for the 23-arg call), with `MinLodClamp` moved to 21. This is
+exactly the same class of "insert-in-the-middle, forget to re-verify
+every downstream index" bug this project's own history has hit before
+(explicitly called out in `Plain1D`/roadmap L63's own thoughts) -- always
+worth a full re-check of every index after inserting operands anywhere
+but the very end of an argument list.
+
+## Testing
+
+Added coverage across all three touched phases, following this project's
+own established per-phase convention:
+- `ImageCallsTest.cpp`: `MatchesSample3DCall`'s round-trip now asserts
+  real `OffsetX`/`OffsetY`/`OffsetZ` values survive `matchImageCall`.
+- `SPIRVResourceLoweringTest.cpp`: replaced the now-obsolete negative
+  `LeavesANonZeroTexelOffsetPlain3DSampleAlone` test (asserting a nonzero
+  `ConstOffset` against `Plain3D` must NOT lower -- no longer true) with a
+  new positive `LowersSampleConstOffsetToPlain3D` test, mirroring
+  `LowersNonZeroTexelOffsetArray2DSample`'s own `Array2D` precedent
+  exactly (including the operand-index assertions for the new
+  `OffsetX`/`OffsetY`/`OffsetZ` triple).
+- `ImageSamplingTest.cpp`: updated all 4 existing `Sample3DFn` call sites
+  for the new 23-argument signature, then added a new
+  `Sample3DHonorsNonZeroTexelOffset` test (mirroring
+  `Sample2DArrayHonorsNonZeroTexelOffset`'s own style) that actually
+  verifies a nonzero `(1, 1, 1)` offset shifts a point-sampled read from
+  one corner texel of a 2x2x2 volume to the opposite corner -- real
+  correctness coverage, not just a compile-fix.
+- A new lit-test case (`sample_3d_offset` in
+  `spirv-resource-lowering-image-sample-3d.ll`) confirms
+  `llvm.spv.resource.sample` with a real, nonzero `ConstOffset` against a
+  `Dim3D` handle now lowers to `feme.cpu.image.sample.3d.v4f32`.
+
+All new/updated tests pass; `check-feme` went from 2655/2714 to
+2657/2716 pass (+2 net new tests), 0 fail, 59 unsupported throughout --
+0 regressions.
+
+## Real CTS validation
+
+`textureoffset.*.sampler3d_*` (40 cases, all 5 wrap modes): **30/40 Pass,
+0 Fail** (10 `NotSupported`, the same pre-existing
+`VK_KHR_compute_shader_derivatives` gap other compute-stage sampling
+groups already hit -- unrelated to this fix).
+
+A broader `dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502
+cases) confirms **84 Pass total (up from 14), 190 Fail (down from 260,
+by exactly these 70 newly-passing cases spanning
+`textureoffset`/`textureoffsetclamp`/every other offset-shaped group this
+restriction used to gate), 228 NotSupported (unchanged)** -- 0
+regressions anywhere in this shape's own CTS footprint. The delta (70
+cases) is bigger than the 40-case `textureoffset`-only sweep alone
+because the same `isSupportedOffset` restriction also gated other
+offset-carrying groups (e.g. `textureoffsetclamp`, `texelFetchOffset`-
+shaped variants) against this one shape, all of which benefit from the
+same fix simultaneously.
+
+This also fully resolves roadmap L66(d)'s own `Plain3D` share of the
+`isSupportedOffset` restriction, exactly as the prior session's own
+forward-looking note predicted. L66(d)'s remaining `Plain1D`/`Array1D`
+share is untouched and remains its own separate, still-open gap.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `ConstOffset` is core SPIR-V, gated by no feature bit or
+extension, same as every other shape's own `ConstOffset` support.
+
+## Roadmap status
+
+With L67(a) (`Bias`/`MinLodClamp`) and L67(b) (`Grad`) already landed in
+prior sessions, and L67(c) (`ConstOffset`) now fixed this session, and
+L67(d) (integer-format filtered sampling) correctly out of scope by
+design (mirroring roadmap L66(b)'s own by-design rejection), **roadmap
+L67 is now fully complete**. Struck through (c) on the roadmap and noted
+the row's overall completion.
+
+## Forward-looking notes for the next session
+
+With L67 now fully closed, the L-series' own still-open items are:
+- **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap (no
+  `llvm.spv.resource.samplecmpgrad`-shaped intrinsic exists in
+  `IntrinsicsSPIRV.td` today) -- a genuinely bigger, cross-cutting scope
+  mirroring roadmap L52(b)'s own `Dref`+`Bias` gap, untouched again this
+  session.
+- **L66(d)**: `isSupportedOffset`'s remaining `Plain1D`/`Array1D`
+  restriction (now that `Plain3D`'s own share is fixed by this session's
+  L67(c) work) -- likely the next highest-value, lowest-risk target,
+  since it should be a small, mechanical repeat of this exact same
+  change against the two 1D shapes (both already have real sampled-image
+  infrastructure and a `createSample1D`/`createSample1DArray` builder
+  each; only the offset-width/operand-threading needs adding, mirroring
+  today's `Plain3D` work almost exactly, except with a 1-wide rather than
+  3-wide offset).
+- **L66(e)**: the newly-discovered `SPIRVResourceLoweringPass` crash when
+  two functions in one module each declare a resource handle at an
+  identical binding number for two different image shapes -- not yet
+  root-caused, needs its own investigation before it can be ruled in or
+  out as a real CTS-reachable multi-entry-point hazard.
+
+Once L66(c)/(d)/(e) are all resolved (or confirmed genuinely out of
+scope), the `shaderResourceMinLod` flip/measure/revert experiment should
+be re-run once more before actually enabling the bit for real, per
+roadmap L66's own still-open framing.
