@@ -46,29 +46,71 @@ Can you work on L67 or other prerequisites blocking the L-series milestones?
 
 The last session reported:
 
-> Roadmap L67(a) (`Bias`/`MinLodClamp`) looks like the natural next step,
-> since it directly unblocks re-measuring the `shaderResourceMinLod` flip
-> experiment's own `sampler3d_*` cases under `texturegradclamp`/
-> `textureoffsetclamp` (roadmap L66's own still-open scope) the same way
-> `Array2D`'s equivalent fix did earlier in this chain. L67(b) (`Grad`) is
-> independent and could be done in either order. L66(c)/(d)/(e) (the
-> `Dref`+`Grad` shadow-sampling intrinsic gap, the `isSupportedOffset`
-> `Plain2D`-only restriction, and the cross-function same-binding crash) all
-> remain open from the prior session and are still unrelated to anything this
-> session touched.
+> L67(b) (explicit `Grad` sampling for `Plain3D`) is the natural next small
+> step in this same chain — independent of (a), could be done in either
+> order per the prior session's own note, and now has a real negative test
+> (`LeavesAPlain3DSampleGradAlone`, added this session) that will need
+> converting to a positive test the same way `LeavesAPlain3DSampleBiasAlone`
+> was converted here, once that operand gets real support. L67(c) (blocked
+> on the pre-existing `isSupportedOffset` `Plain2D`-only restriction,
+> roadmap L33's own scope) and L67(d) (integer-format rejection, correct by
+> design) remain out of scope for any single-shape row. L66(c)/(d)/(e) — the
+> `Dref`+`Grad` shadow-sampling intrinsic gap, the same `isSupportedOffset`
+> restriction from the `shaderResourceMinLod` flip's own perspective, and the
+> cross-function same-binding crash — all remain open and untouched this
+> session.
 
 Which seems like the right place to start.
 
 > **L66(a)'s own `Plain3D` ordinary-sampling fix deliberately scoped out
 > `Bias`/`MinLodClamp`/`ConstOffset`/`Grad`, each filed here as its own
 > follow-on sub-item, mirroring `Sample1D`'s own incremental L52a-\>L61(c)-\>L65
-> history**: (a) **`Bias`/`MinLodClamp`** --
+> history**: ~~(a) **`Bias`/`MinLodClamp`** --
 > `createSample3D`/`femeCpuImageSample3DV4F32` need a real operand pair added
 > (mirroring `createSample1D`'s own roadmap L61(c) extension), confirmed still
 > failing this session (`texture.sampler3d_bias_{fixed,float}_fragment`, 2/2
 > Fail); also blocks `texturegradclamp`/`textureoffsetclamp`'s own `sampler3d_*`
 > cases until `shaderResourceMinLod` can be safely flipped (roadmap L66's own
-> still-open scope); (b) **explicit `Grad` sampling** -- no
+> still-open scope)~~ (fixed: `createSample3D`/`ImageCallKind::Sample3D` gained
+> a real `Bias`/`MinLodClamp` operand pair (widening its argument count from 18
+> to 20, inserted between `UseExplicitLod` and `Mask`, mirroring
+> `createSample1D`'s own roadmap L61(c) operand ordering exactly),
+> `hasOnlySupportedImageUses`'s `HasBias`/`HasMinLodClamp` shape checks now
+> accept `Plain3D`, `lowerImageAccesses`'s `Plain3D` branch threads a real
+> `MinLodClamp` value (reusing the already-in-scope shared `Bias` extraction)
+> via the same `getSampleClampIdx` shape-agnostic helper `Plain1D`/`Array1D`
+> already use, and `femeCpuImageSample3DV4F32`'s runtime entry point now takes
+> real `Bias`/`MinLodClamp` float parameters threaded into
+> `femeRTComputeClampedLod` in place of the previous hardcoded no-op constants.
+> New unit-test coverage across all three touched phases: `ImageCallsTest.cpp`'s
+> `MatchesSample3DCall` round-trip now asserts real `Bias`/`MinLodClamp` values;
+> `SPIRVResourceLoweringTest.cpp`'s now-obsolete `LeavesAPlain3DSampleBiasAlone`
+> negative test (asserting `Bias` against `Plain3D` must NOT lower, no longer
+> true) was replaced with a new positive
+> `LowersSampleBiasClampToPlain3DWithMinLodClamp` test mirroring
+> `LowersSampleBiasClampToArray1DWithMinLodClamp`'s own `Array1D` precedent,
+> plus a new `LeavesAPlain3DSampleGradAlone` negative test to preserve this
+> shape's own negative-test coverage (now naming `Grad`, still correctly
+> rejected, rather than `Bias`); `ImageSamplingTest.cpp`'s `Sample3DFn` typedef
+> and its 3 existing tests were updated for the new 22-argument runtime
+> signature, plus a new `Sample3DBiasSelectsCoarserMipLevel` test (mirroring
+> `Sample1DBiasSelectsCoarserMipLevel`) gives real correctness coverage of the
+> new operand pair, not just a compile-fix. A new lit-test case
+> (`sample_3d_bias_clamp` in `spirv-resource-lowering-image-sample-3d.ll`)
+> confirms `llvm.spv.resource.samplebias.clamp` against a `Dim3D` handle now
+> lowers successfully. `check-feme`: 2654/2713 pass, 0 fail, 59 unsupported (up
+> from 2652/2711, +2 net new tests, 0 regressions). Real CTS, direct re-run of
+> `texture.sampler3d_bias_{fixed,float}_fragment`: 2/2 Pass, up from 2/2 Fail. A
+> broader `dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502 cases)
+> confirms 10 Pass total (up from 8), 264 Fail (down from 266, by exactly these
+> 2 newly-passing cases), 228 NotSupported (unchanged) -- no regressions
+> anywhere in this shape's own CTS footprint.
+> `texturegradclamp`/`textureclamp`/`textureoffsetclamp`'s own `sampler3d_*`
+> cases remain confirmed `NotSupported` (`ShaderResourceMinLod feature not
+> supported`), unchanged, since `shaderResourceMinLod` itself remains `VK_FALSE`
+> (roadmap L66's own still-open scope) -- this row only unblocks *re-measuring*
+> that flip experiment once L66(c)/(d)/(e) are also resolved, it does not itself
+> flip the bit.); (b) **explicit `Grad` sampling** -- no
 > `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` operand is threaded from a
 > caller-supplied derivative yet (`lowerImageAccesses`'s new `Plain3D` branch
 > always synthesizes/zeroes each axis independently, mirroring `Plain1D`'s own
