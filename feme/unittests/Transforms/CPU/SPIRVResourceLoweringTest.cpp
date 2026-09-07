@@ -2834,22 +2834,25 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpToImageSampleCmp) {
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, v, lod, use_explicit_lod, dref, bias, offset_x, offset_y,
   //  min_lod_clamp, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 16u);
-  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(8))->isZero());
-  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(9))->isZero());
-  EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, dref, bias,
+  //  offset_x, offset_y, min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 20u);
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(12))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isZero());
+  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "dref");
   // No `Bias` operand on this plain `samplecmp` -- a zero constant (a
   // no-op LOD shift), matching `createSample2D`'s own fallback for an
   // ordinary sample with no `Bias` (roadmap L52(b)).
-  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(11))->isZero());
-  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(12))->isZero());
-  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(15))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(16))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(17))->isZero());
   // No `MinLod` clamp operand on this plain `samplecmp` -- negative
   // infinity (a no-op floor), matching `createSample2D`'s own fallback
   // for an ordinary sample with no `MinLod` clamp (roadmap L52(c)).
-  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(14))->isNegative());
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(18))->isNegative());
   EXPECT_TRUE(
-      cast<ConstantFP>(SampleCmp->getArgOperand(14))->getValue().isInfinity());
+      cast<ConstantFP>(SampleCmp->getArgOperand(18))->getValue().isInfinity());
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
@@ -2881,8 +2884,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
   ASSERT_TRUE(F);
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
-  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(8))->isZero());
-  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(9))->isOne());
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(12))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isOne());
 }
 
 TEST(SPIRVResourceLoweringTest,
@@ -2918,9 +2921,9 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(F);
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
-  ASSERT_EQ(SampleCmp->arg_size(), 16u);
-  EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
-  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "clamp");
+  ASSERT_EQ(SampleCmp->arg_size(), 20u);
+  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(18)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpBiasToImageSampleCmpWithBias) {
@@ -2958,13 +2961,13 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpBiasToImageSampleCmpWithBias) {
   ASSERT_TRUE(F);
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
-  ASSERT_EQ(SampleCmp->arg_size(), 16u);
-  EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
-  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "bias");
+  ASSERT_EQ(SampleCmp->arg_size(), 20u);
+  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(15)->getName(), "bias");
   // The offset still reads as the zero constant supplied above, from its
   // own bias-shifted index rather than the non-bias one.
-  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(12))->isZero());
-  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(16))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(17))->isZero());
 }
 
 TEST(SPIRVResourceLoweringTest,
@@ -3166,9 +3169,9 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(F);
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
-  ASSERT_EQ(SampleCmp->arg_size(), 16u);
-  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(12))->getSExtValue(), 1);
-  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(13))->getSExtValue(),
+  ASSERT_EQ(SampleCmp->arg_size(), 20u);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(16))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(17))->getSExtValue(),
             -1);
 }
 
@@ -3517,6 +3520,142 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpGradToImageSampleCmpWithGrad) {
+  // Roadmap L66(c): `spv_resource_samplecmpgrad` -- the depth-comparison
+  // counterpart of `spv_resource_samplegrad`, which
+  // `ImageSampleDrefGradPattern` now emits for an
+  // `OpImageSampleDrefExplicitLod` carrying a `Grad` image operand --
+  // lowers to `feme.cpu.image.samplecmp.2d.f32` with the real `dPdx`/
+  // `dPdy` derivative pair threaded through as `DUdX`/`DUdY`/`DVdX`/
+  // `DVdY`, in place of the zero constants every other intrinsic form
+  // still gets. `DUdX`/`DVdX` come from `dPdx`, `DUdY`/`DVdY` come from
+  // `dPdy` (each pair's own two lanes), matching
+  // `SPIRVResourceLowering.cpp`'s own extraction order.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord, float %dref,
+                       <2 x float> %dpdx, <2 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmpgrad(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <2 x float> %dpdx, <2 x float> %dpdy,
+          <2 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
+  ASSERT_TRUE(SampleCmp);
+  ASSERT_EQ(SampleCmp->arg_size(), 20u);
+  auto *DUdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(8));
+  auto *DUdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(9));
+  auto *DVdX = cast<ExtractElementInst>(SampleCmp->getArgOperand(10));
+  auto *DVdY = cast<ExtractElementInst>(SampleCmp->getArgOperand(11));
+  EXPECT_EQ(DUdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DUdX->getIndexOperand())->getZExtValue(), 0u);
+  EXPECT_EQ(DUdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DUdY->getIndexOperand())->getZExtValue(), 0u);
+  EXPECT_EQ(DVdX->getVectorOperand()->getName(), "dpdx");
+  EXPECT_EQ(cast<ConstantInt>(DVdX->getIndexOperand())->getZExtValue(), 1u);
+  EXPECT_EQ(DVdY->getVectorOperand()->getName(), "dpdy");
+  EXPECT_EQ(cast<ConstantInt>(DVdY->getIndexOperand())->getZExtValue(), 1u);
+  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "dref");
+  // No `Bias` operand on this `samplecmpgrad` -- a zero constant, matching
+  // `createSampleCmp2D`'s own fallback for a caller with no `Bias`.
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(15))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(16))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(17))->isZero());
+  // No `MinLod` clamp operand on this `samplecmpgrad` -- negative infinity
+  // (a no-op floor), matching the non-`.clamp` fallback above.
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(18))->isNegative());
+  EXPECT_TRUE(
+      cast<ConstantFP>(SampleCmp->getArgOperand(18))->getValue().isInfinity());
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpGradClampToImageSampleCmpWithGradAndMinLodClamp) {
+  // Roadmap L66(c): `spv_resource_samplecmpgrad_clamp` additionally
+  // threads a real trailing `MinLod` clamp value through, mirroring
+  // `samplecmpbias_clamp`'s own identical precedent.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord, float %dref,
+                       <2 x float> %dpdx, <2 x float> %dpdy, float %clamp) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmpgrad.clamp(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <2 x float> %dpdx, <2 x float> %dpdy,
+          <2 x i32> zeroinitializer, float %clamp)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
+  ASSERT_TRUE(SampleCmp);
+  ASSERT_EQ(SampleCmp->arg_size(), 20u);
+  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(18)->getName(), "clamp");
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesASampleCmpGradAgainstCubeAlone) {
+  // Roadmap L66(c) deliberately scopes `Grad` support to `Plain2D` only
+  // -- a `samplecmpgrad` against `Cube` is left entirely unrewritten,
+  // mirroring this project's own "extend one shape at a time" precedent
+  // (e.g. roadmap L46's initial `Plain2D`-only depth-comparison-sample
+  // scope, later widened by L48).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref,
+                       <2 x float> %dpdx, <2 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmpgrad(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <2 x float> %dpdx, <2 x float> %dpdy,
+          <4 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 

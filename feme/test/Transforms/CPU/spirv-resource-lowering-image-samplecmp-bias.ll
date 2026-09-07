@@ -44,7 +44,7 @@ define float @samplecmp_bias(<3 x float> %coord, float %dref, float %bias) {
       @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float %bias, i32 0, i32 0, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, float %dref, float %bias, i32 0, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpbias(
       target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -61,7 +61,7 @@ define float @samplecmp_bias_offset(<3 x float> %coord, float %dref, float %bias
       @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, float %bias, i32 1, i32 -1, float -inf, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, float %dref, float %bias, i32 1, i32 -1, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmpbias(
       target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,

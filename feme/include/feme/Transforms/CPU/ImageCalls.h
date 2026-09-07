@@ -657,13 +657,21 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
 /// (`spv_resource_samplecmpbias`/`.samplecmpbias.clamp`'s own bias
 /// operand, which GLSL's `texture(sampler2DShadow, coord, bias)` emits
 /// and HLSL has no spelling for) -- pass a zero constant (a no-op LOD
-/// shift) for a caller with none to give.
+/// shift) for a caller with none to give. \p DUdX/\p DUdY/\p DVdX/\p DVdY
+/// (roadmap L66(c)) are the same `Grad` image operand pair
+/// `createSample2D` documents (`spv_resource_samplecmpgrad`/
+/// `.samplecmpgrad.clamp`'s own `dPdx`/`dPdy` pair) -- pass zero
+/// constants for a caller with none to give, which
+/// `femeCpuImageSampleCmp2DF32` provably degenerates to the exact same
+/// level-0 implicit-LOD result its own narrower pre-L66(c) implementation
+/// always computed.
 llvm::CallInst *
 createSampleCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                   llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
-                  llvm::Value *U, llvm::Value *V, llvm::Value *Lod,
-                  llvm::Value *UseExplicitLod, llvm::Value *Dref,
-                  llvm::Value *Bias, llvm::Value *OffsetX,
+                  llvm::Value *U, llvm::Value *V, llvm::Value *DUdX,
+                  llvm::Value *DUdY, llvm::Value *DVdX, llvm::Value *DVdY,
+                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                  llvm::Value *Dref, llvm::Value *Bias, llvm::Value *OffsetX,
                   llvm::Value *OffsetY, llvm::Value *MinLodClamp,
                   llvm::Value *Mask, const llvm::Twine &Name = "");
 
