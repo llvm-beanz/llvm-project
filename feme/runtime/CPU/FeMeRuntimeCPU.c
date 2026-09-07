@@ -5720,25 +5720,27 @@ femeRTRoundClampLayer(uint32_t Count, float Value) {
 // operands, unlike this function's own pre-L60(a) `femeRTComputeClampedLod`-
 // only, always-single-tap implementation), plus `ArrayLayer` (SPIR-V's own
 // arrayed-sample coordinate convention: a float, rounded to nearest and
-// clamped to a valid layer by `femeRTRoundClampLayer` above). Unlike
-// `femeCpuImageSample2DV4F32`, there is no `ConstOffset` operand here (an
-// ordinary Array2D sample's own offset lowering remains future work,
-// roadmap L33) -- every tap always reads at a zero texel offset.
+// clamped to a valid layer by `femeRTRoundClampLayer` above). Roadmap L33:
+// `OffsetX`/`OffsetY` are the same `ConstOffset` image operand
+// `femeCpuImageSample2DV4F32` documents -- an ordinary Array2D sample can
+// carry a real, possibly-nonzero one too now, applied to every tap
+// uniformly the same way `femeCpuImageSample2DV4F32`'s own multi-tap
+// anisotropic loop already does.
 FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY,
-    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
-    _Bool Mask) asm("feme.cpu.image.sample.2darray.v4f32");
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY, float Lod,
+    _Bool UseExplicitLod, float Bias, int32_t OffsetX, int32_t OffsetY,
+    float MinLodClamp, _Bool Mask) asm("feme.cpu.image.sample.2darray.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY,
-    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
-    _Bool Mask) {
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY, float Lod,
+    _Bool UseExplicitLod, float Bias, int32_t OffsetX, int32_t OffsetY,
+    float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -5756,15 +5758,15 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     // whenever `UseExplicitLod` is set.
     float ClampedLod = femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1,
                                                &Samp, MinLodClamp, Bias);
-    return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, ClampedLod,
-                                  /*OffsetX=*/0, /*OffsetY=*/0);
+    return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, ClampedLod, OffsetX,
+                                  OffsetY);
   }
 
   FemeRTImplicitLodPlan Plan = femeRTPlanImplicitLod(
       &Img, &Samp, DUdX, DUdY, DVdX, DVdY, MinLodClamp, Bias);
   if (Plan.TapCount <= 1)
     return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, Plan.ClampedLod,
-                                  /*OffsetX=*/0, /*OffsetY=*/0);
+                                  OffsetX, OffsetY);
 
   // Anisotropic footprint: mirrors `femeCpuImageSample2DV4F32`'s own
   // multi-tap loop, but reading the same array `Layer` for every tap.
@@ -5775,8 +5777,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     float TapU = U + Offset * Plan.StepU;
     float TapV = V + Offset * Plan.StepV;
     Sum += femeRTSampleFiltered2D(&Img, &Samp, TapU, TapV, Layer,
-                                  Plan.ClampedLod, /*OffsetX=*/0,
-                                  /*OffsetY=*/0);
+                                  Plan.ClampedLod, OffsetX, OffsetY);
   }
   return Sum * (1.0f / (float)Plan.TapCount);
 }

@@ -944,25 +944,28 @@ bool isZeroOffset(const Value *Offset) {
 /// design doc's own "the backend itself folds away an all-zero
 /// `ConstOffset`" note -- a real, nonzero offset is now threaded through
 /// rather than rejecting the whole handle outright. \p AllowArray2D
-/// (roadmap L50d) additionally accepts the same real, nonzero offset for
-/// `Array2D` too -- but only for a depth-comparison sample's own caller
-/// below, since an *ordinary* (non-comparison) `Array2D` sample's own
-/// offset lowering remains future work (roadmap L33) and must keep
-/// rejecting a nonzero offset outright. Every other shape still requires
-/// the trivial always-zero case regardless: `Cube`/`CubeArray` can never
-/// carry a real one at all (SPIR-V disallows `ConstOffset` against a cube
-/// image).
+/// (roadmap L50d/L33) additionally accepts the same real, nonzero offset
+/// for `Array2D` too, for both a depth-comparison sample's own caller
+/// (roadmap L50d) and an ordinary (non-comparison) sample's own caller
+/// (roadmap L33) below. Every other shape still requires the trivial
+/// always-zero case regardless: `Cube`/`CubeArray` can never carry a real
+/// one at all (SPIR-V disallows `ConstOffset` against a cube image), and
+/// `Plain1D`/`Array1D`/`Plain3D` remain unsupported (roadmap L67(c)/
+/// L66(d), no real CTS case has yet motivated extending this any further
+/// than `Array2D`).
 ///
 /// Only the offset's first two components (X/Y) are ever read (see
 /// `lowerImageAccesses`'s own `CreateExtractElement(Offset, 0/1)` below),
 /// so this deliberately does not require an exact vector width: an
 /// ordinary sample's own `Offset` operand is always 2-wide (its
 /// `ImageSampleImplicitLodPattern`-emitted type mirrors its 2-wide
-/// `Plain2D` coordinate), but a depth-comparison sample's own `Offset`
-/// operand mirrors its own *Dref*-widened coordinate instead
-/// (`ImageSampleDrefImplicitLodPattern`'s `OffsetType` -- 3-wide for
-/// `Plain2D`, 4-wide for `Array2D`), so a single fixed width would reject
-/// one of the two callers.
+/// `Plain2D` coordinate) even for `Array2D` (whose own 3-wide `(U, V,
+/// Layer)` coordinate does not widen its `Offset` operand the way a
+/// depth-comparison sample's own `Dref`-widened coordinate does below),
+/// but a depth-comparison sample's own `Offset` operand mirrors its own
+/// *Dref*-widened coordinate instead (`ImageSampleDrefImplicitLodPattern`'s
+/// `OffsetType` -- 3-wide for `Plain2D`, 4-wide for `Array2D`), so a
+/// single fixed width would reject one of the two callers.
 bool isSupportedOffset(const Value *Offset, ImageShape Shape,
                        bool AllowArray2D = false) {
   if (Shape != ImageShape::Plain2D &&
@@ -1111,8 +1114,16 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                       !isCoordN(CI->getArgOperand(4), GradDerivativeWidth,
                                 /*Float=*/true)))
         return false;
+      // Roadmap L33: an ordinary (non-comparison) sample's own
+      // `ConstOffset` is now also accepted against `Array2D`, mirroring
+      // the depth-comparison path's own pre-existing `AllowArray2D`
+      // acceptance immediately below (roadmap L50d) -- SPIR-V's own
+      // `ConstOffset` image operand is equally legal against an arrayed
+      // `OpImageSampleImplicitLod`/`OpImageSampleExplicitLod` as it is
+      // against a plain one.
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
-          !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape) ||
+          !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape,
+                             /*AllowArray2D=*/true) ||
           !isV4F32(CI->getType()))
         return false;
       continue;
@@ -2564,10 +2575,10 @@ void lowerImageAccesses(
           // face-local coordinate is differentiated identically to a
           // non-arrayed one -- the array layer itself is never
           // differentiated, mirroring CubeArray's own layer-agnostic
-          // derivative handling). Unlike Plain2D, there is no real
-          // `ConstOffset` operand to extract yet (an ordinary Array2D
-          // sample's own offset lowering remains future work, roadmap
-          // L33).
+          // derivative handling). Roadmap L33: same `ConstOffset`
+          // extraction as `Plain2D`'s own below now too (an ordinary
+          // Array2D sample's own offset lowering is no longer future
+          // work).
           SampleDerivatives D =
               HasGrad
                   ? SampleDerivatives{Builder.CreateExtractElement(GradDPdx,
@@ -2585,15 +2596,19 @@ void lowerImageAccesses(
                                    ConstantFP::get(Builder.getFloatTy(), 0.0),
                                    ConstantFP::get(Builder.getFloatTy(), 0.0),
                                    ConstantFP::get(Builder.getFloatTy(), 0.0)};
+          Value *Offset = CI->getArgOperand(
+              getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+          Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+          Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
           Value *MinLodClamp =
               HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
                                    ExplicitLod, HasBias, HasGrad))
                              : ConstantFP::getInfinity(Builder.getFloatTy(),
                                                        /*Negative=*/true);
-          NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex,
-                                        C0, C1, ArrayLayer, D.DUdX, D.DUdY,
-                                        D.DVdX, D.DVdY, Lod, ExplicitLodFlag,
-                                        Bias, MinLodClamp, Mask, CI->getName());
+          NewCall = createSample2DArray(
+              Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
+              D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod, ExplicitLodFlag, Bias,
+              OffsetX, OffsetY, MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::Cube: {

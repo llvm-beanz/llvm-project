@@ -518,18 +518,19 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
                                                        0.0),
                                       ConstantFP::get(Builder.getFloatTy(),
                                                        0.0)};
-      // DXIL's own `Texture2DArray::SampleBias`/clamp overloads are not
-      // threaded through this pass yet (roadmap L60(a) is SPIR-V-only so
-      // far) -- pass a zero `Bias` constant and a negative-infinity
-      // (no-op) `MinLodClamp` constant, mirroring Plain2D's own no-op
-      // constants above.
+      // DXIL's own `Texture2DArray::SampleBias`/clamp/offset overloads are
+      // not threaded through this pass yet (roadmap L60(a)/L33 are
+      // SPIR-V-only so far) -- pass a zero `Bias` constant, zero
+      // `Offset` constants, and a negative-infinity (no-op) `MinLodClamp`
+      // constant, mirroring Plain2D's own no-op constants above.
+      Value *ZeroOffset = Builder.getInt32(0);
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
       Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex, U,
-                                    V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY,
-                                    Lod, UseExplicitLod, ZeroBias,
-                                    NoMinLodClamp, Mask, CI->getName());
+      NewCall = createSample2DArray(
+          Builder, Env, ImageIndex, SamplerIndex, U, V, Layer, D.DUdX, D.DUdY,
+          D.DVdX, D.DVdY, Lod, UseExplicitLod, ZeroBias, ZeroOffset, ZeroOffset,
+          NoMinLodClamp, Mask, CI->getName());
       break;
     }
     case ImageShape::Cube: {

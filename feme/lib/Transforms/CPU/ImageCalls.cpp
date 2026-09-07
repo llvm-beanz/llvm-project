@@ -198,18 +198,20 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     break;
   case ImageCallKind::Sample2DArray:
     // Same as Sample2D, plus a float array_layer operand before the
-    // derivatives, but with no offset_x/offset_y operand of its own (an
-    // ordinary Array2D sample's own ConstOffset lowering remains future
-    // work, roadmap L33). Roadmap L60(a): gains its own dudx/dudy/dvdx/
-    // dvdy, bias, and min_lod_clamp operands, mirroring Sample2D's own.
+    // derivatives. Roadmap L60(a): gains its own dudx/dudy/dvdx/dvdy,
+    // bias, and min_lod_clamp operands, mirroring Sample2D's own. Roadmap
+    // L33: gains its own offset_x/offset_y operand pair too, mirroring
+    // Sample2D's own identically-named operands (an ordinary Array2D
+    // sample's own ConstOffset lowering was deferred past L26/L60(a), but
+    // is no longer future work).
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, u, v, array_layer, dudx, dudy, dvdx,
-    //  dvdy, lod, use_explicit_lod, bias, min_lod_clamp, mask) ->
-    //  <4 x float>
+    //  dvdy, lod, use_explicit_lod, bias, offset_x, offset_y,
+    //  min_lod_clamp, mask) -> <4 x float>
     FTy = FunctionType::get(V4F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
                              F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
-                             I1Ty, F32Ty, F32Ty, I1Ty},
+                             I1Ty,  F32Ty, I32Ty, I32Ty, F32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::Load2DArray:
@@ -786,15 +788,32 @@ CallInst *feme::cpu::createSample2DArray(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
     Value *SamplerIndex, Value *U, Value *V, Value *ArrayLayer, Value *DUdX,
     Value *DUdY, Value *DVdX, Value *DVdY, Value *Lod, Value *UseExplicitLod,
-    Value *Bias, Value *MinLodClamp, Value *Mask, const Twine &Name) {
+    Value *Bias, Value *OffsetX, Value *OffsetY, Value *MinLodClamp,
+    Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample2DArray);
-  return Builder.CreateCall(
-      F,
-      {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
-       Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, ArrayLayer, DUdX,
-       DUdY, DVdX, DVdY, Lod, UseExplicitLod, Bias, MinLodClamp, Mask},
-      Name);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap,
+                             Env.ImageHeapCount,
+                             Env.SamplerHeap,
+                             Env.SamplerHeapCount,
+                             ImageIndex,
+                             SamplerIndex,
+                             U,
+                             V,
+                             ArrayLayer,
+                             DUdX,
+                             DUdY,
+                             DVdX,
+                             DVdY,
+                             Lod,
+                             UseExplicitLod,
+                             Bias,
+                             OffsetX,
+                             OffsetY,
+                             MinLodClamp,
+                             Mask},
+                            Name);
 }
 
 CallInst *feme::cpu::createLoad2DArray(IRBuilderBase &Builder,
@@ -1393,7 +1412,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(7);
     break;
   case ImageCallKind::Sample2DArray:
-    if (CI.arg_size() != 18)
+    if (CI.arg_size() != 20)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1411,8 +1430,10 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Lod = CI.getArgOperand(13);
     Result.UseExplicitLod = CI.getArgOperand(14);
     Result.Bias = CI.getArgOperand(15);
-    Result.MinLodClamp = CI.getArgOperand(16);
-    Result.Mask = CI.getArgOperand(17);
+    Result.OffsetX = CI.getArgOperand(16);
+    Result.OffsetY = CI.getArgOperand(17);
+    Result.MinLodClamp = CI.getArgOperand(18);
+    Result.Mask = CI.getArgOperand(19);
     break;
   case ImageCallKind::Load2DArray:
     if (CI.arg_size() != 9)

@@ -544,12 +544,13 @@ struct MatchedImageCall {
   /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
   /// depth-comparison reference value.
   llvm::Value *Dref = nullptr;
-  /// `Sample2D`/`SampleCmp2D`/`SampleCmpArray2D` only (roadmap L26/L50d):
-  /// the integer `<ConstOffset>` texel offset's X/Y components (see
-  /// `createSample2D`'s doc); null for every other kind, including every
-  /// non-`Plain2D`/`Array2D` sampled kind (SPIR-V forbids a real
-  /// `ConstOffset` against any of those shapes -- see
-  /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
+  /// `Sample2D`/`Sample2DArray` (roadmap L26/L33), `SampleCmp2D`/
+  /// `SampleCmpArray2D` (roadmap L50d) only: the integer `<ConstOffset>`
+  /// texel offset's X/Y components (see `createSample2D`'s doc); null for
+  /// every other kind, including every non-`Plain2D`/`Array2D` sampled
+  /// kind (SPIR-V forbids a real `ConstOffset` against any of those
+  /// shapes -- see `isSupportedOffset`'s comment in
+  /// `SPIRVResourceLowering.cpp`).
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
   /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray`/
@@ -762,18 +763,22 @@ llvm::CallInst *createStore2DArrayMSI32(llvm::IRBuilderBase &Builder,
 /// sample). \p Bias/\p MinLodClamp (roadmap L60(a)) mirror
 /// `createSample2D`'s own `Bias`/`MinLodClamp` parameters -- pass a zero
 /// constant/negative infinity, respectively, for a caller with neither to
-/// give. Unlike `createSample2D`, there is no `ConstOffset` operand here --
-/// an ordinary (non-comparison) `Array2D` sample's own offset lowering
-/// remains future work (roadmap L33).
-llvm::CallInst *
-createSample2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
-                    llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
-                    llvm::Value *U, llvm::Value *V, llvm::Value *ArrayLayer,
-                    llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *DVdX,
-                    llvm::Value *DVdY, llvm::Value *Lod,
-                    llvm::Value *UseExplicitLod, llvm::Value *Bias,
-                    llvm::Value *MinLodClamp, llvm::Value *Mask,
-                    const llvm::Twine &Name = "");
+/// give. \p OffsetX/\p OffsetY (roadmap L33) are the same `ConstOffset`
+/// image operand `createSample2D` documents -- an ordinary (non-comparison)
+/// `Array2D` sample can carry a real, possibly-nonzero one too (SPIR-V's
+/// `ConstOffset` image operand is equally legal against an arrayed
+/// `OpImageSampleImplicitLod`/`OpImageSampleExplicitLod`, the same way it
+/// already is against `Array2D`'s own depth-comparison sample, see
+/// `createSampleCmpArray2D`'s doc) -- pass zero constants for a caller with
+/// none to give.
+llvm::CallInst *createSample2DArray(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *DUdX,
+    llvm::Value *DUdY, llvm::Value *DVdX, llvm::Value *DVdY, llvm::Value *Lod,
+    llvm::Value *UseExplicitLod, llvm::Value *Bias, llvm::Value *OffsetX,
+    llvm::Value *OffsetY, llvm::Value *MinLodClamp, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2darray.v4f32` call (roadmap H7b-a). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.
