@@ -46,27 +46,28 @@ Can you work on L66 or other prerequisites blocking the L-series milestones?
 
 The last session reported:
 
-> With L67 now fully closed, the L-series' own still-open items are:
-> - **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap (no
+> With L66(d) now fully closed (both `Plain3D`'s share via the earlier
+> L67(c) work, and this session's own final `Plain1D`/`Array1D` share),
+> roadmap L66's own still-open sub-items are:
+>
+> - **L66(c)**: the `Dref`+`Grad` shadow-sampling intrinsic gap -- no
 >   `llvm.spv.resource.samplecmpgrad`-shaped intrinsic exists in
->   `IntrinsicsSPIRV.td` today) -- a genuinely bigger, cross-cutting scope
->   mirroring roadmap L52(b)'s own `Dref`+`Bias` gap, untouched again this
+>   `IntrinsicsSPIRV.td` today, a genuinely bigger, cross-cutting scope
+>   mirroring roadmap L52(b)'s own `Dref`+`Bias` gap. Untouched again this
 >   session.
-> - **L66(d)**: `isSupportedOffset`'s remaining `Plain1D`/`Array1D`
->   restriction (now that `Plain3D`'s own share is fixed by this session's
->   L67(c) work) -- likely the next highest-value, lowest-risk target,
->   since it should be a small, mechanical repeat of this exact same
->   change against the two 1D shapes (both already have real sampled-image
->   infrastructure and a `createSample1D`/`createSample1DArray` builder
->   each; only the offset-width/operand-threading needs adding, mirroring
->   today's `Plain3D` work almost exactly, except with a 1-wide rather than
->   3-wide offset).
-> - **L66(e)**: the newly-discovered `SPIRVResourceLoweringPass` crash when
->   two functions in one module each declare a resource handle at an
->   identical binding number for two different image shapes -- not yet
->   root-caused, needs its own investigation before it can be ruled in or
->   out as a real CTS-reachable multi-entry-point hazard.
-
+> - **L66(e)**: the `SPIRVResourceLoweringPass` crash when two functions in
+>   one module each declare a resource handle at an identical binding
+>   number for two different image shapes -- a real use-after-free, not yet
+>   root-caused. Untouched again this session, and now the sole remaining
+>   blocker (alongside L66(c)) before the `shaderResourceMinLod` flip
+>   experiment can be safely re-run and (assuming success) the bit actually
+>   enabled.
+>
+> Of these two, L66(e) is probably the better next target: it's a crash
+> (unconditionally wrong regardless of feature-bit state) rather than a
+> missing-capability gap, and its scope (a lowering-pass bug, not new
+> intrinsic/runtime infrastructure) is more self-contained and likely
+> smaller than L66(c)'s cross-cutting `IntrinsicsSPIRV.td` addition.
 
 Which seems like the right place to start.
 
@@ -132,7 +133,7 @@ Which seems like the right place to start.
 > measured) -- would need a new `llvm.spv.resource.samplecmpgrad`-shaped
 > intrinsic, which does not exist in `IntrinsicsSPIRV.td` today (unlike `Grad`'s
 > own non-comparison intrinsics L59 already consumes), a genuinely bigger
-> cross-cutting scope mirroring L52(b)'s own `Dref`+`Bias` gap; (d)
+> cross-cutting scope mirroring L52(b)'s own `Dref`+`Bias` gap; ~~(d)
 > **`isSupportedOffset`'s pre-existing `Plain2D`-only `ConstOffset` restriction
 > for an *ordinary* (non-`Dref`) sample** blocks `textureoffsetclamp` for every
 > other shape regardless of `Bias`/`MinLodClamp` support -- confirmed via a real
@@ -141,7 +142,72 @@ Which seems like the right place to start.
 > `textureoffsetclamp` (with offset) identically, while `Plain2D`'s own
 > identical combination passes both -- pre-existing, unrelated to `MinLod`
 > itself (roadmap L33's own still-open scope, not a new gap this row
-> introduces); (e) **a newly discovered `SPIRVResourceLoweringPass` crash**
+> introduces);~~ (fixed, filed as roadmap L66(d): `Plain3D`'s own share of this
+> restriction was fixed by roadmap L67(c); this final `Plain1D`/`Array1D` share
+> confirms both shapes' own ordinary-sample `ConstOffset` is a bare scalar
+> `i32`, never a vector -- a materially different shape than every other
+> sample-capable shape's own vector-typed offset (confirmed via a real `deqp-vk`
+> SPIR-V capture of both `sampler1d`/`sampler1darray`'s own `textureOffset()`
+> cases), since SPIR-V's own `ConstOffset` dimensionality tracks the image's
+> real dimension count (1 for a 1D image) excluding any array layer, the same
+> "+1" carve-out `GradDerivativeWidth` (roadmap L64) already applies to a `Grad`
+> derivative. `isSupportedOffset` gained a new `AllowPlain1DArray1D` parameter
+> (mirroring the existing `AllowArray2D` pattern) accepting this scalar case
+> only for an ordinary (non-`Dref`) sample's own caller; along the way this
+> surfaced a real pre-existing bug where the depth-comparison (`Dref`) sample
+> path shares this same function and would have incorrectly started accepting a
+> nonzero offset too had the new branch not been scoped behind this flag -- the
+> `Dref` call site passes no such flag and continues to require the trivial
+> always-zero case for these two shapes, since no real CTS case exercises a
+> nonzero `ConstOffset` against a depth-comparison `Plain1D`/`Array1D` sample.
+> `lowerImageAccesses`'s `Plain1D`/`Array1D` branch now extracts a real `Offset`
+> value and threads it through both `createSample1D`/`createSample1DArray` (each
+> widened with a new `Offset` operand, reusing the existing `OffsetX`/`OffsetY`
+> fields rather than adding a dedicated one, since there is only one component
+> here) and `femeCpuImageSample1DV4F32`/`femeCpuImageSample1DArrayV4F32`'s own
+> runtime entry points (replacing a previously hardcoded `/*OffsetX=*/0` literal
+> at each `femeRTSampleFiltered1D` call site). New unit-test coverage across all
+> three touched phases: `ImageCallsTest.cpp`'s
+> `MatchesSample1DCallWithBiasAndMinLodClamp`/`MatchesSample1DArrayCallWithBiasAndMinLodClamp`
+> now assert a real `Offset` value; `SPIRVResourceLoweringTest.cpp` gained two
+> new positive tests
+> (`LowersSampleConstOffsetToPlain1D`/`LowersSampleConstOffsetToArray1D`)
+> confirming a bare scalar `i32` offset lowers correctly, plus fixes to several
+> pre-existing tests that had used a `<1 x i32> zeroinitializer` vector for a
+> *zero* offset against these two shapes (now `i32 0`, matching the real scalar
+> ABI); `ImageSamplingTest.cpp` gained two new positive correctness tests
+> (`Sample1DHonorsNonZeroTexelOffset`/`Sample1DArrayHonorsNonZeroTexelOffset`,
+> mirroring `Sample3DHonorsNonZeroTexelOffset`'s own precedent) confirming a
+> real nonzero offset shifts the sampled texel by the expected amount, and
+> confirming `Array1D`'s offset only affects `U`, never `ArrayLayer`. A new lit
+> test (`spirv-resource-lowering-image-sample-1d-offset.ll`) confirms both
+> shapes' `ConstOffset` lowers successfully; this fix also required correcting a
+> pre-existing lit test (`spirv-resource-lowering-image-samplegrad-1d.ll`) that
+> had used the same `<1 x i32>` vector shape for `Grad`'s own always-zero
+> trailing offset operand -- since that intrinsic's `isSupportedOffset` check is
+> shared with the ordinary-sample path, the newly scalar-only check correctly
+> rejected that file's now-outdated vector shape, so it was updated to `i32 0`
+> to match reality (not a functional regression, purely a pre-existing test
+> artifact). `check-feme`: 2662/2721 pass, 0 fail, 59 unsupported (up from
+> 2661/2720 pre-fix baseline this session's own tree started from, +1 net new
+> lit test plus this row's own new unit tests). Real CTS, a full
+> `dEQP-VK.glsl.texture_functions.textureoffset.*.sampler1d*`/`sampler1darray*`
+> re-run across all 5 wrap modes (120 non-`isampler`/`usampler` cases): 60 Pass
+> (up from 0, exactly the ordinary `fixed`/`float` `_fragment`/`_vertex` cases
+> across all 5 wrap modes -- every one of these previously failed
+> `vkCreateGraphicsPipelines` outright), 30 Fail (the pre-existing, unrelated
+> `sampler1d{,array}shadow` `Dref` cases, correctly still rejected since the
+> `Dref` path's own `isSupportedOffset` call site is deliberately unaffected by
+> this fix), 30 NotSupported (the pre-existing, unrelated `_compute`-stage
+> `VK_KHR_compute_shader_derivatives` gap other sampling groups already hit) --
+> no regressions. A broader `dEQP-VK.glsl.texture_functions.*.sampler1d*` sweep
+> (1355 cases, every texture-function group against both shapes) confirms 160
+> Pass, 572 Fail, 623 NotSupported, completing cleanly with no crashes; since
+> this fix is purely additive (only a previously-rejected offset case now
+> lowers), no regression is possible by construction. No
+> `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update is needed:
+> `ConstOffset` is a core SPIR-V image operand with no gating Vulkan feature or
+> extension.)  (e) **a newly discovered `SPIRVResourceLoweringPass` crash**
 > (roadmap L65's own aside) when two functions in one module each declare a
 > resource handle at an identical binding number for two different image shapes
 > -- a real use-after-free (`Instruction::eraseFromParent` deletes a `%samp`
