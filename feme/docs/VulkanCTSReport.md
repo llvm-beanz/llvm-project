@@ -30594,3 +30594,83 @@ lowering logic). `Vulkan14FeatureInventory.md` updated:
 extension, the entire `shaderResourceMinLod` flip/measure/revert
 investigation chain spanning L60/L61/L63/L65/L66(c)/L66(f)-(k)) as
 fully complete.
+
+## Session: closing out roadmap L60 and L61
+
+Following L66/L67's own closeout (prior session), this session re-measured
+every remaining sub-item on roadmap L60 and L61 against the now-permanently-
+enabled `shaderResourceMinLod` feature bit, to determine whether either row
+could finally be closed.
+
+### L61: fully closed
+
+L61's own text named four prerequisites (a)-(d) blocking a safe
+`shaderResourceMinLod` flip. Re-checked each:
+
+- (a) integer-channel filtered sampling: confirmed still correctly out of
+  scope by design (not a real gap).
+- (b) `Plain3D` ordinary sampling: implemented by roadmap L66(a) in a
+  later session.
+- (c) `Dref`+`Bias` legalization: fixed by a later session (documented
+  inline in L52's own row, previously not cross-referenced from L61). Real
+  CTS re-run this session (`dEQP-VK.glsl.texture_functions.texture.*shadow*bias*`,
+  6 cases): 4/4 non-sparse fragment cases now Pass, 2 `NotSupported`
+  (`sparse_sampler2dshadow_bias_fragment`/`sparse_samplercubeshadow_bias_fragment`,
+  the unrelated, pre-existing sparse-residency gap, roadmap H27).
+- (d) the `VulkanBuffer`-misattributed resource-handle gap: root-caused and
+  fixed by roadmap L64 (never actually a `VulkanBuffer` defect).
+
+All four resolved; combined with roadmap L66's own concluding
+flip/measure/revert re-run (prior session), `shaderResourceMinLod` is
+confirmed safe to advertise and now is. **Roadmap L61 marked complete.**
+
+### L60: five of six sub-items closed, one filed as a new tracking row
+
+Re-measured every sub-item now that `shaderResourceMinLod` is permanently
+`VK_TRUE`:
+
+- **(d) `Grad`+`MinLod` clamp**: direct re-run of `texturegradclamp` (52
+  cases): 19 Pass, 19 NotSupported, 14 Fail -- confirmed by name that all 14
+  fails are the `isampler*`/`usampler*` filtered-integer-sampling exclusion,
+  none newly broken. **Confirmed fixed.**
+- **(e) `Dref`+`Grad` depth-comparison sampling**: direct re-run of
+  `texturegrad.*shadow*` (24 cases): 10 Pass, 9 NotSupported, 5 Fail, all 5
+  confirmed by name to be `_compute`-stage cases. A broader
+  `texturegradoffset.*shadow*` sweep (90 cases, every wrap mode): 40 Pass,
+  30 NotSupported, 20 Fail, all 20 again exclusively `_compute`-stage.
+  **Confirmed fixed for fragment/vertex** (closed piecemeal by roadmap
+  L66(c)/L66(f)-(i) across prior sessions); the `_compute`-stage fails are
+  the same gap as sub-item (c) below, not a new one.
+- **(f) sparse-residency `Grad` sampling**: investigated for the first
+  time. A full sweep of every `texturegrad{,offset}*.sparse_*` case (76
+  cases total) reports 76/76 `NotSupported` ("Format not supported"),
+  confirmed the same pre-existing sparse-residency infrastructure gap
+  roadmap H27 already scopes (`sparseResidencyImage2D`,
+  `shaderResourceResidency`, and related feature bits remain
+  unadvertised) -- not a `Grad`-specific gap, out of this row's own scope.
+- **(c) `compute`-stage `Grad` sampling**: confirmed still blocked, but by
+  a distinct, genuinely bigger, cross-cutting gap -- every `_compute`-stage
+  failure found across (d)/(e)'s own re-runs above (and by many prior
+  sessions' own probes of other compute-stage sampling groups) traces to
+  the same missing `VK_KHR_compute_shader_derivatives` extension. This has
+  been named piecemeal by well over a dozen prior rows without ever
+  getting its own tracking line -- filed now as **roadmap L69**, breaking
+  the remaining work down into four phases (extension/feature
+  advertisement, SPIR-V execution-mode recognition, a real compute-stage
+  quad-grouped invocation-scheduling design, and threading a genuine
+  derivative into the existing implicit-LOD/`Grad` runtime machinery) per
+  this project's own established splitting precedent. Not yet started.
+
+With (a)/(b)/(d)/(e)/(f) all resolved or confirmed correctly out of scope,
+L60's own row remains open (not struck through) with sub-item (c) --
+tracked by the new roadmap L69 -- as the sole remaining item. No code
+changes were needed this session for L60/L61 themselves: this was a
+pure re-measurement and documentation session confirming prior fixes
+actually closed what they claimed to, plus filing the one genuinely
+new, previously-untracked gap this re-measurement surfaced.
+
+`check-feme`: 2693/2752 pass, 0 fail, 59 unsupported (unchanged -- no code
+touched this session). `Vulkan14FeatureInventory.md`: no change (already
+updated last session). `VulkanExtensionInventory.md`: updated
+`VK_KHR_compute_shader_derivatives`'s own row with a roadmap L69
+cross-reference.
