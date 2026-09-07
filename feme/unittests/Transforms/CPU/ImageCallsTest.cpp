@@ -397,10 +397,11 @@ TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithBiasAndMinLodClamp) {
 }
 
 // (Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by
-// roadmap L67(a)) `createSample3D`'s own ordinary `Plain3D` sample: a
-// real `(U, V, W)` coordinate plus its own screen-space derivative triple
-// and a real `Bias`/`MinLodClamp` pair, still no `ConstOffset` operand
-// (see `ImageCallKind::Sample3D`'s own doc).
+// roadmap L67(a) and a real `ConstOffset` triple by roadmap L67(c))
+// `createSample3D`'s own ordinary `Plain3D` sample: a real `(U, V, W)`
+// coordinate plus its own screen-space derivative triple, a real
+// `Bias`/`MinLodClamp` pair, and a real `OffsetX`/`OffsetY`/`OffsetZ`
+// triple (see `ImageCallKind::Sample3D`'s own doc).
 TEST_F(ImageCallsTest, MatchesSample3DCall) {
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
@@ -415,11 +416,14 @@ TEST_F(ImageCallsTest, MatchesSample3DCall) {
   Value *DWdY = ConstantFP::get(Builder.getFloatTy(), 0.6);
   Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
   Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *OffsetX = Builder.getInt32(-1);
+  Value *OffsetY = Builder.getInt32(2);
+  Value *OffsetZ = Builder.getInt32(-3);
   Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
-  CallInst *CI = createSample3D(Builder, Env, Builder.getInt32(2),
-                                Builder.getInt32(1), U, V, W, DUdX, DUdY, DVdX,
-                                DVdY, DWdX, DWdY, Lod, Builder.getInt1(false),
-                                Bias, MinLodClamp, Builder.getInt1(true));
+  CallInst *CI = createSample3D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, V, W, DUdX,
+      DUdY, DVdX, DVdY, DWdX, DWdY, Lod, Builder.getInt1(false), Bias,
+      OffsetX, OffsetY, OffsetZ, MinLodClamp, Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -440,6 +444,9 @@ TEST_F(ImageCallsTest, MatchesSample3DCall) {
   EXPECT_EQ(Matched->Lod, Lod);
   EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
   EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->OffsetX, OffsetX);
+  EXPECT_EQ(Matched->OffsetY, OffsetY);
+  EXPECT_EQ(Matched->OffsetZ, OffsetZ);
   EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }

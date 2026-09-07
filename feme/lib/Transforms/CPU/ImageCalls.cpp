@@ -562,15 +562,20 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // mirroring `Sample1D`'s own `du_dx`/`du_dy` pair). Roadmap L67(a)
     // adds a real `bias`/`min_lod_clamp` pair, mirroring `Sample1D`'s own
     // operand order (lod, use_explicit_lod, bias, min_lod_clamp, mask).
-    // No `offset` operand yet -- see `ImageCallKind::Sample3D`'s own doc.
+    // Roadmap L67(c) adds a real `offset_x`/`offset_y`/`offset_z` triple
+    // between `bias` and `min_lod_clamp`, mirroring `Sample2D`'s own
+    // `offset_x`/`offset_y` placement, widened to a real third, depth-axis
+    // component (`Plain3D`'s own `ConstOffset` is a genuine `<3 x i32>`,
+    // matching its own 3-component coordinate width).
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, u, v, w, du_dx, du_dy, dv_dx, dv_dy,
-    //  dw_dx, dw_dy, lod, use_explicit_lod, bias, min_lod_clamp, mask) ->
-    //  <4 x float>
+    //  dw_dx, dw_dy, lod, use_explicit_lod, bias, offset_x, offset_y,
+    //  offset_z, min_lod_clamp, mask) -> <4 x float>
     FTy = FunctionType::get(
         V4F32Ty,
         {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
-         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, I1Ty},
+         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I32Ty, I32Ty,
+         I32Ty, F32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
   }
@@ -1006,22 +1011,20 @@ CallInst *feme::cpu::createQueryLod2D(IRBuilderBase &Builder,
       Name);
 }
 
-CallInst *feme::cpu::createSample3D(IRBuilderBase &Builder,
-                                    const ImageCallEnv &Env, Value *ImageIndex,
-                                    Value *SamplerIndex, Value *U, Value *V,
-                                    Value *W, Value *DUdX, Value *DUdY,
-                                    Value *DVdX, Value *DVdY, Value *DWdX,
-                                    Value *DWdY, Value *Lod,
-                                    Value *UseExplicitLod, Value *Bias,
-                                    Value *MinLodClamp, Value *Mask,
-                                    const Twine &Name) {
+CallInst *feme::cpu::createSample3D(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *U, Value *V, Value *W, Value *DUdX,
+    Value *DUdY, Value *DVdX, Value *DVdY, Value *DWdX, Value *DWdY,
+    Value *Lod, Value *UseExplicitLod, Value *Bias, Value *OffsetX,
+    Value *OffsetY, Value *OffsetZ, Value *MinLodClamp, Value *Mask,
+    const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample3D);
   return Builder.CreateCall(
       F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
           Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, W, DUdX, DUdY,
-          DVdX, DVdY, DWdX, DWdY, Lod, UseExplicitLod, Bias, MinLodClamp,
-          Mask},
+          DVdX, DVdY, DWdX, DWdY, Lod, UseExplicitLod, Bias, OffsetX, OffsetY,
+          OffsetZ, MinLodClamp, Mask},
       Name);
 }
 
@@ -1847,7 +1850,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(10);
     break;
   case ImageCallKind::Sample3D:
-    if (CI.arg_size() != 20)
+    if (CI.arg_size() != 23)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1867,8 +1870,11 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Lod = CI.getArgOperand(15);
     Result.UseExplicitLod = CI.getArgOperand(16);
     Result.Bias = CI.getArgOperand(17);
-    Result.MinLodClamp = CI.getArgOperand(18);
-    Result.Mask = CI.getArgOperand(19);
+    Result.OffsetX = CI.getArgOperand(18);
+    Result.OffsetY = CI.getArgOperand(19);
+    Result.OffsetZ = CI.getArgOperand(20);
+    Result.MinLodClamp = CI.getArgOperand(21);
+    Result.Mask = CI.getArgOperand(22);
     break;
   }
   return Result;

@@ -947,17 +947,22 @@ bool isZeroOffset(const Value *Offset) {
 /// (roadmap L50d/L33) additionally accepts the same real, nonzero offset
 /// for `Array2D` too, for both a depth-comparison sample's own caller
 /// (roadmap L50d) and an ordinary (non-comparison) sample's own caller
-/// (roadmap L33) below. Every other shape still requires the trivial
-/// always-zero case regardless: `Cube`/`CubeArray` can never carry a real
-/// one at all (SPIR-V disallows `ConstOffset` against a cube image), and
-/// `Plain1D`/`Array1D`/`Plain3D` remain unsupported (roadmap L67(c)/
-/// L66(d), no real CTS case has yet motivated extending this any further
-/// than `Array2D`).
+/// (roadmap L33) below. `Plain3D` (roadmap L67(c)) unconditionally
+/// accepts a real, nonzero offset too -- unlike `Array2D`, which is only
+/// widened for an ordinary/depth-comparison sample's own caller
+/// specifically (there being no depth-comparison `Plain3D` sample for
+/// `AllowArray2D`'s own distinction to matter for). Every other shape
+/// still requires the trivial always-zero case regardless: `Cube`/
+/// `CubeArray` can never carry a real one at all (SPIR-V disallows
+/// `ConstOffset` against a cube image), and `Plain1D`/`Array1D` remain
+/// unsupported (roadmap L66(d), no real CTS case has yet motivated
+/// extending this any further than `Array2D`/`Plain3D`).
 ///
-/// Only the offset's first two components (X/Y) are ever read (see
-/// `lowerImageAccesses`'s own `CreateExtractElement(Offset, 0/1)` below),
-/// so this deliberately does not require an exact vector width: an
-/// ordinary sample's own `Offset` operand is always 2-wide (its
+/// For `Plain2D`/`Array2D`, only the offset's first two components (X/Y)
+/// are ever read (see `lowerImageAccesses`'s own
+/// `CreateExtractElement(Offset, 0/1)` below), so this deliberately does
+/// not require an exact vector width there: an ordinary sample's own
+/// `Offset` operand is always 2-wide (its
 /// `ImageSampleImplicitLodPattern`-emitted type mirrors its 2-wide
 /// `Plain2D` coordinate) even for `Array2D` (whose own 3-wide `(U, V,
 /// Layer)` coordinate does not widen its `Offset` operand the way a
@@ -965,16 +970,24 @@ bool isZeroOffset(const Value *Offset) {
 /// but a depth-comparison sample's own `Offset` operand mirrors its own
 /// *Dref*-widened coordinate instead (`ImageSampleDrefImplicitLodPattern`'s
 /// `OffsetType` -- 3-wide for `Plain2D`, 4-wide for `Array2D`), so a
-/// single fixed width would reject one of the two callers.
+/// single fixed width would reject one of the two callers. `Plain3D`'s
+/// own `Offset` operand mirrors its own real 3-component `(U, V, W)`
+/// coordinate (glslang always emits a genuine `<3 x i32>` `ConstOffset`
+/// against a 3D sampler -- confirmed via a real `deqp-vk` SPIR-V capture,
+/// roadmap L67(c)), so a minimum width of 3 (rather than 2) is required
+/// there, with the third (Z) component read by `lowerImageAccesses`'s own
+/// `Plain3D` branch alongside X/Y.
 bool isSupportedOffset(const Value *Offset, ImageShape Shape,
                        bool AllowArray2D = false) {
-  if (Shape != ImageShape::Plain2D &&
+  bool IsPlain3D = Shape == ImageShape::Plain3D;
+  if (Shape != ImageShape::Plain2D && !IsPlain3D &&
       !(AllowArray2D && Shape == ImageShape::Array2D))
     return isZeroOffset(Offset);
   if (!isa<Constant>(Offset))
     return false;
   const auto *VecTy = dyn_cast<FixedVectorType>(Offset->getType());
-  return VecTy && VecTy->getNumElements() >= 2 &&
+  unsigned MinWidth = IsPlain3D ? 3 : 2;
+  return VecTy && VecTy->getNumElements() >= MinWidth &&
          VecTy->getElementType()->isIntegerTy(32);
 }
 
@@ -1013,8 +1026,8 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
 /// is ordinary sampling only, mirroring `Plain1D`/`Array1D`'s identical
 /// decision above). Roadmap L67(a) adds real `Bias`/`MinLodClamp` support
 /// for `Plain3D`, and roadmap L67(b) adds real `Grad` support too (see the
-/// checks below) -- `ConstOffset` remains unsupported for this shape
-/// (roadmap L67(c)/L66(d)/L33's own still-open, unrelated scope).
+/// checks below) -- roadmap L67(c) adds real `ConstOffset` support for
+/// this shape too (see `isSupportedOffset`'s own updated doc).
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
@@ -2455,21 +2468,26 @@ void lowerImageAccesses(
           CI->eraseFromParent();
           continue;
         }
-        // Roadmap L66(a)/L67(a)/L67(b): `Plain3D` is handled separately
-        // too, alongside `Plain1D`/`Array1D` above: a real 3-component
-        // `(U, V, W)` coordinate, its own per-axis derivatives -- either
-        // the caller's own real `Grad` derivative triple (roadmap L67(b),
-        // extracted one component per axis from `GradDPdx`/`GradDPdy`,
-        // which `hasOnlySupportedImageUses`'s own `GradDerivativeWidth`
-        // check already guarantees is a real 3-wide vector for this
-        // non-arrayed shape) or, absent `Grad`, per-axis synthesized
-        // screen-space derivatives (reusing
+        // Roadmap L66(a)/L67(a)/L67(b)/L67(c): `Plain3D` is handled
+        // separately too, alongside `Plain1D`/`Array1D` above: a real
+        // 3-component `(U, V, W)` coordinate, its own per-axis
+        // derivatives -- either the caller's own real `Grad` derivative
+        // triple (roadmap L67(b), extracted one component per axis from
+        // `GradDPdx`/`GradDPdy`, which `hasOnlySupportedImageUses`'s own
+        // `GradDerivativeWidth` check already guarantees is a real
+        // 3-wide vector for this non-arrayed shape) or, absent `Grad`,
+        // per-axis synthesized screen-space derivatives (reusing
         // `getOrSynthesizeSample1DDerivatives` three times, once per
         // axis -- there is no dedicated 3D derivative synthesis helper,
         // since each axis differentiates independently the same way
         // `Plain1D`'s own single axis does) -- a real `Bias`/`MinLodClamp`
         // pair (roadmap L67(a), mirroring `Plain1D`'s own extraction
-        // immediately above), and a direct `createSample3D` call.
+        // immediately above), a real `ConstOffset` triple (roadmap
+        // L67(c), split into its own X/Y/Z components the same way
+        // `Plain2D`'s own `OffsetX`/`OffsetY` are, see
+        // `isSupportedOffset`'s own updated doc for why a 3-wide vector
+        // is now required here rather than the 2-wide one `Plain2D`/
+        // `Array2D` share), and a direct `createSample3D` call.
         if (Shape == ImageShape::Plain3D) {
           Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
           Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
@@ -2493,6 +2511,11 @@ void lowerImageAccesses(
           } else {
             UD = VD = WD = SampleDerivatives1D{ZeroF, ZeroF};
           }
+          Value *Offset = CI->getArgOperand(
+              getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+          Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+          Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+          Value *OffsetZ = Builder.CreateExtractElement(Offset, uint64_t{2});
           Value *MinLodClamp =
               HasMinLodClamp
                   ? CI->getArgOperand(
@@ -2502,7 +2525,8 @@ void lowerImageAccesses(
           CallInst *NewSample3DCall = createSample3D(
               Builder, Env, ImageIndex, SamplerIndex, U, V, W, UD.DUdX,
               UD.DUdY, VD.DUdX, VD.DUdY, WD.DUdX, WD.DUdY, Lod,
-              ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
+              ExplicitLodFlag, Bias, OffsetX, OffsetY, OffsetZ, MinLodClamp,
+              Mask, CI->getName());
           CI->replaceAllUsesWith(NewSample3DCall);
           CI->eraseFromParent();
           continue;

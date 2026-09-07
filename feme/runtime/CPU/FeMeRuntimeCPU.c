@@ -4384,16 +4384,20 @@ femeRTSampleFiltered1D(const FemeRTImageDescriptor *Img,
 // per-mip depth-extent formula (`Img->Depth`, never an array layer --
 // SPIR-V forbids an arrayed `Dim::3D` image, see `femeRTFetchTexel3D`'s
 // own comment) in place of `femeRTFetchTexel2D`'s array-layer parameter.
+// `OffsetX`/`OffsetY`/`OffsetZ` (roadmap L67(c)) mirror
+// `femeRTSamplePoint2D`'s own `OffsetX`/`OffsetY`, widened to a real
+// third, depth-axis component.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSamplePoint3D(const FemeRTImageDescriptor *Img,
                     const FemeRTSamplerDescriptor *Samp, float U, float V,
-                    float W, uint32_t Level) {
+                    float W, uint32_t Level, int32_t OffsetX, int32_t OffsetY,
+                    int32_t OffsetZ) {
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
   uint32_t LevelDepth = femeRTMipExtent(Img->Depth, Level);
-  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
-  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
-  int32_t Z = (int32_t)__builtin_floorf(W * (float)LevelDepth);
+  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + OffsetX;
+  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight) + OffsetY;
+  int32_t Z = (int32_t)__builtin_floorf(W * (float)LevelDepth) + OffsetZ;
   _Bool BorderX = 0, BorderY = 0, BorderZ = 0;
   int32_t AddrX =
       femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp->AddressU, &BorderX);
@@ -4410,11 +4414,15 @@ femeRTSamplePoint3D(const FemeRTImageDescriptor *Img,
 // four-corner formula generalizes to once a third, depth axis is added --
 // each pair of adjacent depth-slice corners first blended exactly like
 // `femeRTSampleLinear2D`'s own 2D bilinear result, then those two
-// intermediate results blended a final time along `W`.
+// intermediate results blended a final time along `W`. `OffsetX`/
+// `OffsetY`/`OffsetZ` (roadmap L67(c)) mirror `femeRTSampleLinear2D`'s
+// own `OffsetX`/`OffsetY`, widened the same way `femeRTSamplePoint3D`'s
+// own are above.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleLinear3D(const FemeRTImageDescriptor *Img,
                      const FemeRTSamplerDescriptor *Samp, float U, float V,
-                     float W, uint32_t Level) {
+                     float W, uint32_t Level, int32_t OffsetX,
+                     int32_t OffsetY, int32_t OffsetZ) {
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
   uint32_t LevelDepth = femeRTMipExtent(Img->Depth, Level);
@@ -4425,18 +4433,21 @@ femeRTSampleLinear3D(const FemeRTImageDescriptor *Img,
   float FloorV = __builtin_floorf(TexelV);
   float FloorW = __builtin_floorf(TexelW);
   float Wx = TexelU - FloorU, Wy = TexelV - FloorV, Wz = TexelW - FloorW;
+  int32_t BaseX = (int32_t)FloorU + OffsetX;
+  int32_t BaseY = (int32_t)FloorV + OffsetY;
+  int32_t BaseZ = (int32_t)FloorW + OffsetZ;
   _Bool BX0 = 0, BX1 = 0, BY0 = 0, BY1 = 0, BZ0 = 0, BZ1 = 0;
-  int32_t X0 = femeRTApplyAddressMode((int32_t)FloorU, (int32_t)LevelWidth,
+  int32_t X0 = femeRTApplyAddressMode(BaseX, (int32_t)LevelWidth,
                                       Samp->AddressU, &BX0);
-  int32_t X1 = femeRTApplyAddressMode((int32_t)FloorU + 1, (int32_t)LevelWidth,
+  int32_t X1 = femeRTApplyAddressMode(BaseX + 1, (int32_t)LevelWidth,
                                       Samp->AddressU, &BX1);
-  int32_t Y0 = femeRTApplyAddressMode((int32_t)FloorV, (int32_t)LevelHeight,
+  int32_t Y0 = femeRTApplyAddressMode(BaseY, (int32_t)LevelHeight,
                                       Samp->AddressV, &BY0);
-  int32_t Y1 = femeRTApplyAddressMode((int32_t)FloorV + 1, (int32_t)LevelHeight,
+  int32_t Y1 = femeRTApplyAddressMode(BaseY + 1, (int32_t)LevelHeight,
                                       Samp->AddressV, &BY1);
-  int32_t Z0 = femeRTApplyAddressMode((int32_t)FloorW, (int32_t)LevelDepth,
+  int32_t Z0 = femeRTApplyAddressMode(BaseZ, (int32_t)LevelDepth,
                                       Samp->AddressW, &BZ0);
-  int32_t Z1 = femeRTApplyAddressMode((int32_t)FloorW + 1, (int32_t)LevelDepth,
+  int32_t Z1 = femeRTApplyAddressMode(BaseZ + 1, (int32_t)LevelDepth,
                                       Samp->AddressW, &BZ1);
   FemeRTv4f32 T000 = femeRTFetchTexel3D(Img, Level, X0, Y0, Z0,
                                         BX0 || BY0 || BZ0, Samp->BorderColor);
@@ -4467,29 +4478,35 @@ femeRTSampleLinear3D(const FemeRTImageDescriptor *Img,
 // `(U, V, W)`, given an already biased-and-clamped level-of-detail value
 // `ClampedLod` -- the volumetric counterpart of `femeRTSampleFiltered2D`
 // above, making the same mag/min-filter (`femeRTUseLinearFilter`) and
-// trilinear-mip-blend (`femeRTSelectMipLevels`) decisions; no `OffsetX`/
-// `OffsetY` parameter, mirroring `createSample3D`'s own scope decision
-// (see `ImageCalls.h`'s `Sample3D` doc) -- no real CTS case exercises a
-// `ConstOffset` against a 3D sampler yet. `Bias`/`MinLodClamp` (roadmap
-// L67(a)) are applied by the caller before `ClampedLod` is even computed
-// (mirroring `femeRTSampleFiltered1D`'s own identical division of labor),
-// so this function itself needs no operand of its own for either.
+// trilinear-mip-blend (`femeRTSelectMipLevels`) decisions; `OffsetX`/
+// `OffsetY`/`OffsetZ` (roadmap L67(c)) mirror `femeRTSampleFiltered2D`'s
+// own `OffsetX`/`OffsetY`, widened to a real third, depth-axis component
+// (see `femeRTSamplePoint3D`'s own updated doc). `Bias`/`MinLodClamp`
+// (roadmap L67(a)) are applied by the caller before `ClampedLod` is even
+// computed (mirroring `femeRTSampleFiltered1D`'s own identical division
+// of labor), so this function itself needs no operand of its own for
+// either.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleFiltered3D(const FemeRTImageDescriptor *Img,
                        const FemeRTSamplerDescriptor *Samp, float U, float V,
-                       float W, float ClampedLod) {
+                       float W, float ClampedLod, int32_t OffsetX,
+                       int32_t OffsetY, int32_t OffsetZ) {
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(Img, ClampedLod);
   _Bool Trilinear = Samp->MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
   FemeRTv4f32 Lo =
-      UseLinear ? femeRTSampleLinear3D(Img, Samp, U, V, W, Level0)
-               : femeRTSamplePoint3D(Img, Samp, U, V, W, Level0);
+      UseLinear ? femeRTSampleLinear3D(Img, Samp, U, V, W, Level0, OffsetX,
+                                       OffsetY, OffsetZ)
+               : femeRTSamplePoint3D(Img, Samp, U, V, W, Level0, OffsetX,
+                                     OffsetY, OffsetZ);
   if (!Trilinear)
     return Lo;
   FemeRTv4f32 Hi =
-      UseLinear ? femeRTSampleLinear3D(Img, Samp, U, V, W, MipPlan.Level1)
-               : femeRTSamplePoint3D(Img, Samp, U, V, W, MipPlan.Level1);
+      UseLinear ? femeRTSampleLinear3D(Img, Samp, U, V, W, MipPlan.Level1,
+                                       OffsetX, OffsetY, OffsetZ)
+               : femeRTSamplePoint3D(Img, Samp, U, V, W, MipPlan.Level1,
+                                     OffsetX, OffsetY, OffsetZ);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -4518,24 +4535,31 @@ femeRTPlanImplicitLod3D(const FemeRTImageDescriptor *Img, float DUdX,
 }
 
 // `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a real
-// `Bias`/`MinLodClamp` pair by roadmap L67(a)): samples a `Plain3D`
-// sampled image at normalized coordinates `(U, V, W)`, the volumetric
-// counterpart of `feme.cpu.image.sample.2d.v4f32` above -- same mag/min
-// and mip filter-selection logic (`femeRTSampleFiltered3D`), same
+// `Bias`/`MinLodClamp` pair by roadmap L67(a) and a real `ConstOffset`
+// triple by roadmap L67(c)): samples a `Plain3D` sampled image at
+// normalized coordinates `(U, V, W)`, the volumetric counterpart of
+// `feme.cpu.image.sample.2d.v4f32` above -- same mag/min and mip
+// filter-selection logic (`femeRTSampleFiltered3D`), same
 // implicit-vs-explicit LOD split (`femeRTPlanImplicitLod3D` in place of
 // `femeRTPlanImplicitLod`/`femeRTPlanImplicitLod1D`, since no real CTS
 // case exercises anisotropic filtering against this shape -- see its own
 // doc), and the same `Bias`/`MinLodClamp` pair `femeCpuImageSample1DV4F32`
 // carries (roadmap L61(c)), threaded through to `femeRTComputeClampedLod`
-// in place of the previous hardcoded `0.0f`/`-inf` no-op values. Still no
-// `ConstOffset`/`Grad` operand -- each its own follow-on roadmap L67(c)/
-// L67(b) sub-item.
+// in place of the previous hardcoded `0.0f`/`-inf` no-op values.
+// `OffsetX`/`OffsetY`/`OffsetZ` (roadmap L67(c)) mirror
+// `femeCpuImageSample2DV4F32`'s own `OffsetX`/`OffsetY`, widened to a real
+// third, depth-axis component (see `femeRTSamplePoint3D`'s own updated
+// doc) -- threaded straight through to `femeRTSampleFiltered3D`, unlike
+// `Bias`/`MinLodClamp` above, which are consumed by this function itself
+// before `femeRTSampleFiltered3D` is even called. Still no `Grad`
+// operand -- its own follow-on roadmap L67(b) sub-item.
 FemeRTv4f32 femeCpuImageSample3DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
     float DUdX, float DUdY, float DVdX, float DVdY, float DWdX, float DWdY,
-    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t OffsetX,
+    int32_t OffsetY, int32_t OffsetZ, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.3d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample3DV4F32(
@@ -4543,8 +4567,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample3DV4F32(
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
     float DUdX, float DUdY, float DVdX, float DVdY, float DWdX, float DWdY,
-    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
-    _Bool Mask) {
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t OffsetX,
+    int32_t OffsetY, int32_t OffsetZ, float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -4565,7 +4589,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample3DV4F32(
                                             &Samp, /*InstructionMinLod=*/
                                             MinLodClamp,
                                             /*InstructionBias=*/Bias);
-  return femeRTSampleFiltered3D(&Img, &Samp, U, V, W, ClampedLod);
+  return femeRTSampleFiltered3D(&Img, &Samp, U, V, W, ClampedLod, OffsetX,
+                                OffsetY, OffsetZ);
 }
 
 // (Roadmap L55) Depth-comparison sampling against a normalized

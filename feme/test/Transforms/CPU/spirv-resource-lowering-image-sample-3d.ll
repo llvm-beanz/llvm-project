@@ -66,6 +66,27 @@ define <4 x float> @sample_3d_grad(<3 x float> %coord, <3 x float> %dpdx,
   ret <4 x float> %r
 }
 
+; Roadmap L67(c): a real, nonzero `ConstOffset` against `Plain3D`.
+; `isSupportedOffset` used to reject `Plain3D` outright (only `Plain2D`
+; unconditionally, `Array2D` behind a flag); it now accepts `Plain3D` too,
+; requiring a 3-wide (not 2-wide) offset to match this shape's own
+; 3-component coordinate, and `lowerImageAccesses`'s `Plain3D` branch
+; extracts a real `(OffsetX, OffsetY, OffsetZ)` triple instead of always
+; assuming zero.
+; CHECK-LABEL: define <4 x float> @sample_3d_offset(
+; CHECK: call <4 x float> @feme.cpu.image.sample.3d.v4f32(
+define <4 x float> @sample_3d_offset(<3 x float> %coord) {
+  %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg3d(i32 3, i32 0, i32 1, i32 0, ptr null)
+  %samp = call target("spirv.Sampler")
+      @llvm.spv.resource.handlefrombinding.tsamp(i32 3, i32 1, i32 1, i32 0, ptr null)
+  %r = call <4 x float> @llvm.spv.resource.sample.v4f32.timg3d(
+      target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
+      target("spirv.Sampler") %samp, <3 x float> %coord,
+      <3 x i32> <i32 1, i32 2, i32 3>)
+  ret <4 x float> %r
+}
+
 declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg3d(i32, i32, i32, i32, ptr)
 declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)

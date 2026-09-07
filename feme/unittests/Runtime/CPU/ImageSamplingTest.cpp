@@ -185,16 +185,18 @@ using Sample1DArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  float, float, bool, float, float, bool,
                                  void *);
 /// Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by
-/// roadmap L67(a): the `Texture3D` counterpart of `Sample1DFn` -- a real
-/// `(U, V, W)` coordinate plus its own screen-space derivative triple
-/// (`DUdX`/`DUdY`, `DVdX`/`DVdY`, `DWdX`/`DWdY`) and a real `Bias`/
-/// `MinLodClamp` pair, still no `ConstOffset` operand (see
-/// `ImageCallKind::Sample3D`'s own doc for why).
+/// roadmap L67(a) and a real `ConstOffset` triple by roadmap L67(c): the
+/// `Texture3D` counterpart of `Sample1DFn` -- a real `(U, V, W)`
+/// coordinate plus its own screen-space derivative triple (`DUdX`/`DUdY`,
+/// `DVdX`/`DVdY`, `DWdX`/`DWdY`), a real `Bias`/`MinLodClamp` pair, and a
+/// real `OffsetX`/`OffsetY`/`OffsetZ` triple (see `ImageCallKind::
+/// Sample3D`'s own doc for why it is 3-wide, unlike `SampleFn`'s own
+/// 2-wide `OffsetX`/`OffsetY`).
 using Sample3DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
                             uint32_t, float, float, float, float, float, float,
-                            float, float, float, float, bool, float, float,
-                            bool, void *);
+                            float, float, float, float, bool, float, int32_t,
+                            int32_t, int32_t, float, bool, void *);
 /// Roadmap L54: the depth-comparison counterpart of `Sample1DFn`,
 /// mirroring `SampleCmpFn`'s relationship to `SampleFn` -- a single `U`
 /// coordinate, and no `ConstOffset` (see `ImageCallKind::SampleCmp1D`'s
@@ -3012,6 +3014,7 @@ TEST_F(ImageSamplingTest, Sample3DPointSampleReadsExactTexel) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.75f, 0.75f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
      /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, /*OffsetZ=*/0,
      -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
   EXPECT_FLOAT_EQ(Out[1], 9.0f);
@@ -3043,6 +3046,7 @@ TEST_F(ImageSamplingTest, Sample3DLinearBlendsEightTexels) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
      /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, /*OffsetZ=*/0,
      -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
   // Average of 0,2,4,6,8,10,12,14 is 7.
   EXPECT_FLOAT_EQ(Out[0], 7.0f);
@@ -3066,6 +3070,7 @@ TEST_F(ImageSamplingTest, Sample3DInactiveLaneReadsZero) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
      /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, /*OffsetZ=*/0,
      -std::numeric_limits<float>::infinity(), /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
@@ -3124,6 +3129,38 @@ TEST_F(ImageSamplingTest, Sample3DBiasSelectsCoarserMipLevel) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
      /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, /*OffsetZ=*/0,
+     -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample3DHonorsNonZeroTexelOffset) {
+  // Roadmap L67(c): a real, nonzero `(OffsetX, OffsetY, OffsetZ)` shifts
+  // every tap's own integer address by that amount before the sampler's
+  // addressing mode is applied, mirroring
+  // `Sample2DArrayHonorsNonZeroTexelOffset`'s own `Array2D` coverage,
+  // extended to a third, depth axis. Point-sampling texel (0, 0, 0) of a
+  // 2x2x2 volume with an offset of (1, 1, 1) must instead read the
+  // opposite corner texel (1, 1, 1).
+  float Storage[2][2][2][4] = {
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {0, 0, 0, 0}}},
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {9, 9, 9, 9}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 2, 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample3DFn Fn = resolve<Sample3DFn>(
+      addWrapper("sample_3d", "feme.cpu.image.sample.3d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.25f, 0.25f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*OffsetX=*/1, /*OffsetY=*/1, /*OffsetZ=*/1,
      -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }

@@ -2453,8 +2453,9 @@ TEST(SPIRVResourceLoweringTest, LowersPlain3DSampledImageToImageSample3D) {
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, v, w, du_dx, du_dy, dv_dx, dv_dy, dw_dx, dw_dy, lod,
-  //  use_explicit_lod, bias, min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 20u);
+  //  use_explicit_lod, bias, offset_x, offset_y, offset_z, min_lod_clamp,
+  //  mask).
+  EXPECT_EQ(Sample->arg_size(), 23u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToPlain3DWithMinLodClamp) {
@@ -2490,9 +2491,9 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToPlain3DWithMinLodClamp) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 20u);
+  ASSERT_EQ(Sample->arg_size(), 23u);
   EXPECT_EQ(Sample->getArgOperand(17)->getName(), "bias");
-  EXPECT_EQ(Sample->getArgOperand(18)->getName(), "clamp");
+  EXPECT_EQ(Sample->getArgOperand(21)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain3D) {
@@ -2529,24 +2530,25 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain3D) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 20u);
+  ASSERT_EQ(Sample->arg_size(), 23u);
   // (..., u, v, w, dudx, dudy, dvdx, dvdy, dwdx, dwdy, lod,
-  //  use_explicit_lod, bias, min_lod_clamp, mask) -- operands 9-14 are the
-  // per-axis derivative components extracted from the real %dpdx/%dpdy.
+  //  use_explicit_lod, bias, offset_x, offset_y, offset_z, min_lod_clamp,
+  //  mask) -- operands 9-14 are the per-axis derivative components
+  // extracted from the real %dpdx/%dpdy.
   for (unsigned ArgNo : {9, 10, 11, 12, 13, 14})
     EXPECT_TRUE(isa<ExtractElementInst>(Sample->getArgOperand(ArgNo)));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetPlain3DSampleAlone) {
-  // Roadmap L67(c): `Plain3D`'s own `ConstOffset` support remains
-  // unstarted, blocked on the same pre-existing `isSupportedOffset`
-  // `Plain2D`/`Array2D`-only restriction roadmap L66(d) already scopes
-  // (roadmap L33 extended this from `Plain2D`-only to also include
-  // `Array2D`, but `Plain3D` remains unsupported) -- a nonzero offset
-  // against this shape must still leave the whole handle unlowered,
-  // mirroring `LowersNonZeroTexelOffsetArray2DSample`'s own now-supported
-  // `Array2D` case just above (this shape is the negative-test
-  // counterpart, not (yet) a positive one).
+TEST(SPIRVResourceLoweringTest, LowersSampleConstOffsetToPlain3D) {
+  // Roadmap L67(c): an ordinary `Plain3D` sample's real, nonzero constant
+  // `ConstOffset` is now threaded through too, mirroring
+  // `LowersNonZeroTexelOffsetArray2DSample`'s own `Array2D` precedent --
+  // `isSupportedOffset` now unconditionally accepts `Plain3D` (a genuine
+  // `<3 x i32>` offset, matching this shape's own 3-component coordinate
+  // width, unlike `Plain2D`/`Array2D`'s 2-component one) -- previously
+  // left unlowered (see the now-obsolete
+  // `LeavesANonZeroTexelOffsetPlain3DSampleAlone` test this one
+  // replaces).
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x float> %coord) {
@@ -2556,7 +2558,7 @@ TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetPlain3DSampleAlone) {
           @llvm.spv.resource.handlefrombinding.tsamp3d(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call <4 x float> @llvm.spv.resource.sample(
           target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <3 x float> %coord, <3 x i32> <i32 1, i32 0, i32 0>)
+          target("spirv.Sampler") %samp, <3 x float> %coord, <3 x i32> <i32 1, i32 -1, i32 2>)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
@@ -2569,8 +2571,16 @@ TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetPlain3DSampleAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, w, du_dx, du_dy, dv_dx, dv_dy, dw_dx, dw_dy, lod,
+  //  use_explicit_lod, bias, offset_x, offset_y, offset_z, min_lod_clamp,
+  //  mask).
+  ASSERT_EQ(Sample->arg_size(), 23u);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(18))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(19))->getSExtValue(), -1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(20))->getSExtValue(), 2);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {
