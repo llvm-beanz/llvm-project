@@ -30219,3 +30219,78 @@ more before actually enabling the bit.
 update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
 gated on no Vulkan feature or extension bit of its own, matching L66(c)/
 (f)/(g)'s own identical finding.
+
+## Session: roadmap L66(i) -- `Dref`+`Grad` shadow-sampling for `CubeArray`
+
+Roadmap L66(i) extends `Dref`+`Grad` depth-comparison sampling -- already
+closed for `Plain2D` (L66c), `Plain1D`/`Array1D` (L66f), `Array2D`
+(L66g), and `Cube` (L66h) -- to also cover `CubeArray`
+(`samplercubearrayshadow_fragment` under `texturegrad`). The mechanical
+widening across all three phases (`ImageCalls.h`/`.cpp`'s
+`createSampleCmpCubeArray`, `SPIRVResourceLowering.cpp`'s `DrefHasGrad`
+gate and derivative extraction, `FeMeRuntimeCPU.c`'s
+`femeCpuImageSampleCmpCubeArrayF32`) mirrored L66(h)'s own `Cube` fix
+almost exactly, reusing the same shared `femeRTComputeCubeClampedLod`
+helper. Unlike L66(h), no new numerical corrections were needed here:
+both bugs L66(h) found (`femeRTComputeCubeUVDerivatives`'s quotient-rule
+term, `femeRTFastLog2`'s precision) live inside that shared helper, so
+they were already fixed project-wide before this session started.
+
+```
+cd /tmp/cts_l66i
+ln -sfn <VK-GL-CTS>/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-runmode=txt-caselist
+grep -i cubearrayshadow dEQP-VK-cases.txt
+```
+
+This grep is the headline finding of this session: **this exact
+VK-GL-CTS checkout (`vulkan-cts-1.4.6.2-452-gcf7edb26d3be2d8763595ed08fdc41f3c1b1966f`)
+has zero `texturegrad`/`texturegradoffset`/`texturegradclamp` cases for
+`samplercubearrayshadow` at all.** The only `samplercubearrayshadow_*`
+cases that exist are under `texture.*` (ordinary `Dref`, already covered
+by L53/L55/L60(a)) and the unrelated `query.*` groups
+(`texturequerylevels`/`texturequerylod`/`texturesize`). A direct
+`*cubearray*shadow*` sweep across every `texture_functions` group (13
+cases) confirms `texture.samplercubearrayshadow_fragment` still **Pass**
+(no regression to the pre-existing `Dref`-only path this row's own
+`DrefHasGrad` gate widening runs alongside), `texture.
+samplercubearrayshadow_compute` still `NotSupported`
+(`VK_KHR_compute_shader_derivatives`, the same pre-existing gap every
+other compute-stage derivative-consuming group hits), and the same 11
+pre-existing, unrelated `texturequerylod`/`unhandled opcode 103` `Fail`s
+L66(g) already attributed to a separate gap having nothing to do with
+`Dref`+`Grad` sampling.
+
+A full `dEQP-VK.glsl.texture_functions.*` regression sweep (7,945 cases)
+reproduces L66(h)'s own exact baseline verbatim: **539 Pass, 2,811 Fail,
+4,595 NotSupported**, identical Pass/Fail/NotSupported counts before and
+after this fix. This is the expected outcome given the coverage-gap
+finding above, not a sign the fix did nothing: the fix is still real and
+correct (proven by the new `SampleCmpCubeArrayGradSelectsCoarserMipLevel`
+unit test, which exercises `ArrayLayer` selection and a real, nonzero
+`Grad` derivative together against cube element 1 specifically, and by
+direct inspection of the already-CTS-validated `femeRTComputeCubeClampedLod`
+helper it now reuses verbatim) -- this exact CTS version simply never
+exercises this precise shape/stage/function combination end-to-end, so
+there is no case for the fix to move from `Fail` to `Pass` today. Any
+future VK-GL-CTS version that adds `texturegrad.samplercubearrayshadow_*`
+coverage (or any real application/conformance suite exercising this
+exact GLSL/SPIR-V combination against this ICD) will now be served
+correctly rather than rejected at `vkCreateGraphicsPipelines` or,
+worse, silently degenerating to an always-level-0 LOD.
+
+This closes roadmap L66(i), and with it, roadmap L66's own `Cube`/
+`CubeArray` follow-on pair (L66(h)-(i)) in full. `check-feme`:
+2685/2744 pass, 0 fail, 59 unsupported (up from 2682/2682 pre-session
+baseline). Roadmap L65's own `shaderResourceMinLod` flip/measure/revert
+experiment (roadmap L66(j)) is now ready to re-run, since every shape's
+own `Dref`+`Grad` support is landed -- though, per this session's own
+coverage-gap finding, its measured impact may still be limited by which
+`MinLodClamp`-bearing shadow-sampling cases this exact CTS version
+actually exercises per shape.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+update needed -- `Dref`+`Grad` sampling is core SPIR-V/GLSL functionality
+gated on no Vulkan feature or extension bit of its own, matching L66(c)/
+(f)/(g)/(h)'s own identical finding.
