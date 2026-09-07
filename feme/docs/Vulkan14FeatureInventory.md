@@ -365,7 +365,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `shaderInt64` | no |  |
 | feature | VK_VERSION_1_0 | `shaderInt16` | no |  |
 | feature | VK_VERSION_1_0 | `shaderResourceResidency` | no |  |
-| feature | VK_VERSION_1_0 | `shaderResourceMinLod` | no |  |
+| feature | VK_VERSION_1_0 | `shaderResourceMinLod` | yes | roadmap L66: a real, regression-free flip/measure/revert re-run across all four `shaderResourceMinLod`-gated CTS groups (`textureclamp`/`texturegradclamp`/`textureoffsetclamp`/`texturegradoffsetclamp`, plus a full 7,945-case `dEQP-VK.glsl.texture_functions.*` before/after diff) confirms every one of the 300 previously-`NotSupported` cases now reports either `Pass` (172 cases) or `Fail` (128 cases, all the same pre-existing, by-design `isampler*`/`usampler*` filtered-integer-sampling exclusion every other shape already has) -- zero cases that previously reported `Pass`/`Fail` changed status |
 | feature | VK_VERSION_1_0 | `sparseBinding` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
 | feature | VK_VERSION_1_0 | `sparseResidencyBuffer` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
 | feature | VK_VERSION_1_0 | `sparseResidencyImage2D` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
