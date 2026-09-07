@@ -68108,3 +68108,154 @@ L65's own `shaderResourceMinLod` flip/measure/revert experiment once all
 four land -- since a `MinLodClamp`-bearing shadow-sampling CTS case,
 across every shape, still needs all of them before that feature bit can
 be safely advertised end-to-end.
+
+# Session: roadmap L66(f) -- `Dref`+`Grad` shadow-sampling for `Plain1D`/`Array1D`
+
+## Starting point
+
+The previous session's own summary handed off roadmap L66(f) as the
+suggested next step, extending L66(c)'s own `Plain2D`-only `Dref`+`Grad`
+depth-comparison sampling to also cover `Plain1D`/`Array1D`. The prompt's
+own text guessed at a `femeCpuImageSampleCmp1DV4F32`/
+`femeCpuImageSampleCmpArray1DV4F32` runtime entry-point naming, which
+turned out to be wrong -- the real functions are
+`femeCpuImageSampleCmp1DF32`/`femeCpuImageSampleCmpArray1DF32` (a bare
+scalar `float` return, not a vector, since a depth-comparison sample
+always produces a single pass/fail-derived value, never a `vec4`).
+
+## Investigation
+
+Before writing any code I confirmed the derivative width via the same
+technique L64/L66(c) both already established: `GradDerivativeWidth`'s
+own existing formula for a non-`Dref` `Grad` sample
+(`isArrayedShape(Shape) ? SampleCoordWidth - 1 : SampleCoordWidth`) already
+handles `Plain1D`/`Array1D` correctly for the *ordinary* sample path (both
+give a 1-wide derivative), so the natural hypothesis was that the
+`Dref`-sample path's own hardcoded `SampleCoordWidth`-only check
+(originally written only for `Plain2D`, where it happened to coincide with
+`GradDerivativeWidth`) just needed the same generalization, rather than
+needing its own separate derivation. Re-reading `DrefCoordWidth`'s own
+existing comment (the "`Plain1D`'s own Dref coordinate is a fixed 3-wide
+`vec3(u, <unused>, compare)`" quirk, unlike the generic `+1` rule) confirmed
+this is a genuinely separate concept from the derivative width -- the
+*coordinate* width and the *derivative* width don't have to track each
+other, and indeed don't for `Plain1D` (coordinate 3-wide, derivative
+1-wide). Also reviewed `isSupportedOffset`/`isZeroOffset` to confirm the
+`Dref`+`Grad` path's own `ConstOffset` handling is unaffected by this row
+(still requires a literal-zero offset for these two shapes regardless of
+vector width, per L66(d)'s own explicit carve-out).
+
+Decided *not* to add new MLIR-level lit tests for the raising pattern
+(`ImageSampleDrefGradPattern` in `SPIRVToLLVMPatterns.cpp`): re-reading it
+confirmed it forwards whatever values the adaptor provides without ever
+inspecting vector width, so it is already fully shape-agnostic -- adding a
+`Plain1D`-shaped MLIR test there would just re-exercise the exact same code
+path the existing `Plain2D` test already covers. Only its doc comment
+needed updating to reflect the newly-widened set of shapes now reachable
+through it. This kept new test-writing effort focused on the two phases
+that actually changed: the CPU-lowering pass and the CPU runtime.
+
+## Implementation
+
+Widened `hasOnlySupportedImageUses`'s `DrefHasGrad` shape gate to accept
+`Plain1D`/`Array1D` alongside `Plain2D`, and generalized its `dPdx`/`dPdy`
+width-validation check from the old hardcoded `SampleCoordWidth` to the
+same `isArrayedShape(Shape) ? SampleCoordWidth - 1 : SampleCoordWidth`
+formula. Restructured `lowerImageAccesses`'s Dref-branch derivative
+extraction to be shape-conditional: introduced `Grad1DDUdX`/`Grad1DDUdY`
+scalar variables (zero-initialized, matching every other zero-derivative
+default in this function), only doing `CreateExtractElement` for
+`Plain2D`, and directly assigning the scalar `GradDPdx`/`GradDPdy` values
+otherwise. Widened `createSampleCmp1D`/`createSampleCmpArray1D` in
+`ImageCalls.h`/`.cpp` with new `DUdX`/`DUdY` parameters (after `U`/before
+`Lod` for `Plain1D`; after `ArrayLayer`/before `Lod` for `Array1D`),
+threading through the `FunctionType` construction, the definitions, and
+the `MatchedImageCall` decode helper (arg-count checks and shifted operand
+indices for every downstream field). Widened the CPU runtime entry points
+in `FeMeRuntimeCPU.c` with the same new parameters, each now calling
+`femeRTPlanImplicitLod1D(&Img, DUdX, DUdY)` on the implicit-LOD path
+(the explicit-LOD path is entirely unchanged, since it never needs an
+implicit LOD in the first place).
+
+## A build bug and a lit-test bug, both caught before committing
+
+While widening `ImageSamplingTest.cpp`'s `SampleCmp1DFn`/
+`SampleCmpArray1DFn` typedefs, my first edit accidentally dropped the
+`Lod` parameter entirely, causing 9 "too many arguments" compile errors
+across every existing call site (each still passed `Lod` as an argument,
+but the typedef no longer expected it). Fixed by re-adding `Lod` in the
+correct position in both typedefs.
+
+A second, more interesting bug surfaced only once I tried to run the new
+lit-test cases I'd added to `spirv-resource-lowering-image-
+samplecmpgrad.ll`: reusing the same `(set=0, binding=0)`/`(set=0,
+binding=1)` image/sampler bindings the file's pre-existing `Plain2D`
+functions already used, for my new `Plain1D`/`Array1D` declarations too.
+This is *exactly* the roadmap L66(e) cross-handle-shape conflict scenario
+from two sessions ago -- the same `(set, binding)` pair identifying two
+different image shapes anywhere in one module trips the pass's own
+conflict guard, which then leaves *every* handle at that binding
+unrewritten, including the pre-existing, previously-passing `Plain2D`
+cases. The failure mode was confusing at first (the whole file's checks
+failed, not just my new ones), until I isolated it with a minimal
+single-function repro of the pre-existing `samplecmp_grad` test outside
+the full file (which passed standalone), then diffed against the full
+file to spot the reused bindings. Fixed by giving the new declarations
+their own distinct bindings (6/7 for `Plain1D`, 8/9 for `Array1D`,
+continuing the file's existing `Cube` precedent of using 4/5 for its own
+distinct bindings), and updating the CHECK lines' expected heap indices
+to match the real per-resource-heap-slot numbering the pass then assigns.
+This was a useful reminder that L66(e)'s fix, while correct, makes this
+kind of binding reuse across image shapes in one module a real trap for
+future lit-test authoring -- worth keeping in mind for L66(g)/(h)/(i).
+
+## Validation
+
+`FeMeTransformsCPUTests`: 368/368 pass. `FeMeRuntimeCPUTests`
+(`*SampleCmp*` filter): 15/15 pass. The new
+`spirv-resource-lowering-image-samplecmpgrad.ll` lit test passes. Full
+`ninja -C build2 check-feme`: 2676/2735 pass, 0 fail, 59 unsupported (up
+from 2664/2723 baseline, +12 net new tests, 0 regressions) -- confirming
+the target's own test dependencies are correctly wired (this target
+rebuilds `feme-opt`/`feme-translate`/the CPU runtime bitcode and every
+unit-test binary before running the lit suite).
+
+Real CTS, `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly set to this
+build's own `feme_icd.json` (never trusting the container's default
+Mesa lavapipe path): `texturegrad.sampler1dshadow_{fragment,vertex}` and
+`texturegrad.sampler1darrayshadow_{fragment,vertex}` (4 cases) all now
+Pass, up from an outright `vkCreateGraphicsPipelines`-stage rejection
+before this fix. `texturegradoffset.*.sampler1d{,array}shadow_*` across
+all 5 wrap modes (30 cases): 20 Pass, 0 Fail, 10 NotSupported (the
+pre-existing, unrelated `_compute`-stage gap).
+`texturegradclamp.sampler1d{,array}shadow_fragment` (2 cases, the only
+stage/shape combination this group exercises for these shapes): both
+Pass. Two broader regression sweeps --
+`dEQP-VK.glsl.texture_functions.*.sampler1d*shadow*` (351 cases) and
+`dEQP-VK.glsl.texture_functions.texturegrad*.sampler*shadow*` (160 cases)
+-- both complete with 0 Fail, confirming no regression anywhere.
+
+## Documentation and roadmap updates
+
+Struck through roadmap L66(f) with a "fixed" note summarizing the change
+and its test/CTS evidence, updated roadmap L66's own shared trailing note
+(now only `Array2D`/`Cube`/`CubeArray`, L66(g)-(i), remain open) and
+L66(j)'s own dependency list to match, and appended a new
+`VulkanCTSReport.md` session section. Reviewed
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed, matching L66(c)'s own identical reasoning -- `Dref`+`Grad`
+sampling is core SPIR-V/GLSL functionality with no gating Vulkan feature
+or extension bit of its own.
+
+## What's left
+
+Roadmap L66 now has three open sub-items: L66(g) (`Array2D`), L66(h)
+(`Cube`), and L66(i) (`CubeArray`) `Dref`+`Grad` shadow sampling, each
+still needing its own real IR reduction and per-shape argument-count/
+derivative-width investigation. `Cube`/`CubeArray` in particular may not
+follow the same simple "arrayed shapes drop one component" derivative-
+width pattern this row and L66(c) both confirmed, since their own ordinary
+coordinate widths already sit at SPIR-V's 4-component ceiling -- that
+needs its own real capture before assuming the formula generalizes
+further. Once all three land, L66(j) (re-running L65's own
+`shaderResourceMinLod` flip/measure/revert experiment) becomes ready.
