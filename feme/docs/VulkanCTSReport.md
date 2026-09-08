@@ -32281,3 +32281,74 @@ change needed -- this is a pure CPU-side reflection/merge fix (a new
 `TessellationState::HasDomainShape` flag plus a fallback in
 `GraphicsPipeline.cpp`'s own merge step), touching no new Vulkan feature
 or extension surface.
+
+## L78: `HullWrapperPass` masked-input-load clobber of a materialized control-point read by an inactive SIMD lane
+
+`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test` (L77's own
+two named repros, both now clearing pipeline creation and command
+submission but failing their own `SystemValues` result check): real
+runtime `printf` instrumentation injected directly into the JIT-compiled
+IR (declaring `@printf` and a format-string global at IR-build time
+inside `HullWrapper.cpp`'s `lowerHullOutputStore`/`lowerHullInputLoad`,
+then running the real lit test's own compiled `.o` files directly through
+`offloader --api=vk <pipeline.yaml> <shaders...>`) found the hull stage's
+own output `position` computing as exactly `0.0` for every lane, while a
+separate self-index-smuggling element correctly showed distinct per-lane
+values -- proving the self-index/masking machinery itself worked, but the
+literal-constant-control-point materializing read's *value* was being
+clobbered before it ever reached the output store. Root cause: the
+materializing store (a per-(component, control-point) literal-constant
+`feme.stage.input.load`, written into a local, lane-independent
+array/`alloca` -- see L37's own design note) gets widened by
+`SIMDizePass` into a sequential per-lane scatter-store loop, every lane
+writing to the *same* shared address; `HullSystemValues.test`'s own real
+shape has 3 output control points against this build's wave size of 4, so
+the trailing (padding, inactive) lane's `Active`-masked-to-zero write
+runs last in that loop and overwrites every earlier, active lane's real
+write to that same address.
+
+### Fix
+
+Narrowed `lowerHullInputLoad`'s inactive-lane null-masking to the
+self-index branch only (where an inactive lane's own flat invocation
+index can genuinely be out-of-range); the literal-constant-control-point
+branch now always returns the real loaded value, for every lane
+regardless of active/inactive state, since a literal control-point index
+is always in-bounds for the one patch in scope. Confirmed via the same
+runtime-`printf` instrumentation: hull-stage output `position` is now
+correctly non-zero, matching real forwarded vertex data, for both named
+repros.
+
+### Real CTS re-run
+
+Re-ran the identical `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist used for L37/L77's own CTS re-runs: unchanged -- still
+13/28 cases reach a result before the group's own already-documented,
+pre-existing segfault, and all 13 still fail on the same two
+already-tracked, unrelated gaps (`feme-cpu-wrap-patch-constant`'s
+masked-output-store gap and `feme-cpu-simdize`'s divergent-aggregate-
+decomposition restriction) as before this fix -- confirming no
+regression, though (as for L37/L77) this CTS group still cannot directly
+exercise this row's own fix either before or after; the real confirmation
+is the offloader-based, runtime-instrumented before/after comparison
+above.
+
+### Remaining gap (filed as L79)
+
+Both named repros still fail end-to-end after this fix. Further
+investigation (domain-stage output position's `x`/`y` now plausible but
+`z`/`w` still wrong) traced a second, entirely separate, pre-existing bug:
+vertex-attribute fetch does not cap decoded components by the *bound
+attribute format's* own channel count, so a shader declaring a wider
+input (`float4 position`) than its bound attribute supplies
+(`Format: Float32, Channels: 2`) reads past the attribute's real data
+into the next vertex's bytes. Confirmed via a scratch (non-production)
+YAML providing full float4/16-byte-stride vertex data in place of the
+real float2/8-byte-stride: the render target changes from entirely blank
+to fully rendered with no other change -- isolating this as the sole
+remaining blocker. See roadmap L79.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-side `HullWrapperPass`
+addressing/masking fix, touching no new Vulkan feature or extension
+surface.
