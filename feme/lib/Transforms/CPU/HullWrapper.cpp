@@ -378,8 +378,33 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
                                              HEnv.Inputs, Elt.ElementID, Elt,
                                              Row, Component, InvocationIndex);
     Value *LaneResult = Builder.CreateLoad(ScalarTy, Addr);
-    LaneResult = Builder.CreateSelect(Active, LaneResult,
-                                      Constant::getNullValue(ScalarTy));
+    // (roadmap L78) Only null out an inactive (padding) lane's result when
+    // this is a self-index read: `InvocationIndex` there is *this* lane's
+    // own flat index, which is only guaranteed in-bounds for an active
+    // lane, so an inactive lane's own attribute is unsafe/meaningless to
+    // return unmasked. A literal-constant control point's `InvocationIndex`
+    // is a fixed, always-in-bounds constant that every lane -- active or
+    // not -- reads identically; masking it to zero here is not just
+    // unnecessary, it is actively wrong whenever a real DXC-compiled
+    // `InputPatch<T, N>` self-index read has been unrolled by SPIR-V
+    // import/legalization into exactly this literal-constant-per-(row,
+    // component, control-point) materializing shape (see this function's
+    // own file comment on the "materialize-then-select" pattern): the
+    // scalar shader source stores each such literal-constant read into a
+    // single local array slot shared by every lane (the address does not
+    // depend on which lane computes it), so `SIMDizePass` widens that
+    // single store into a sequential per-lane scatter to the *same*
+    // address. Zeroing an inactive lane's value here made its scatter
+    // iteration the last to run and clobber every active lane's real data
+    // with zero, since the destination address is identical across lanes
+    // -- discovered via a real `dEQP`-shaped hull/domain pair
+    // (`HullSystemValues.test`/`DomainSystemValues.test`) whose control
+    // points' own `position` attribute came back entirely zero despite a
+    // correctly-populated `Inputs` block and a correctly self-indexed
+    // gather reading it back.
+    if (SelfReference)
+      LaneResult = Builder.CreateSelect(Active, LaneResult,
+                                        Constant::getNullValue(ScalarTy));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }

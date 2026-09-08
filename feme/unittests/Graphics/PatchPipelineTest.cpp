@@ -118,6 +118,42 @@ constexpr char DomainShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="domain" }
 )";
 
+// (roadmap L78) The real DXC-compiled-then-SPIR-V-imported shape of a
+// dynamically self-indexed `InputPatch<T,3>` read: earlier legalization
+// passes materialize every control point's own attribute up front via a
+// literal-constant `feme.stage.input.load` into a local array, then this
+// invocation's own `OutputControlPointID` dynamically re-indexes that array
+// -- distinct from `HullShaderIR`'s "read directly by self-index" shape
+// above, which never exercises `SIMDizePass`'s scatter-store widening of
+// the materializing stores into a shared, lane-independent alloca address.
+// Uses 3 control points against this test harness's fixed `WaveSize=4` (see
+// `compileGraphicsStage`), so lane 3 of the SIMDized wave is genuinely
+// inactive/padding for every one of these stores -- exactly the shape that
+// clobbered every materialized slot to zero before this fix.
+constexpr char MaterializedSelfIndexHullShaderIR[] = R"(
+  define void @hs_materialize_main() #0 {
+    %arr = alloca [3 x float]
+    %cp0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %slot0 = getelementptr [3 x float], ptr %arr, i32 0, i32 0
+    store float %cp0, ptr %slot0
+    %cp1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+    %slot1 = getelementptr [3 x float], ptr %arr, i32 0, i32 1
+    store float %cp1, ptr %slot1
+    %cp2 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 2)
+    %slot2 = getelementptr [3 x float], ptr %arr, i32 0, i32 2
+    store float %cp2, ptr %slot2
+    %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %slot = getelementptr [3 x float], ptr %arr, i32 0, i32 %id
+    %v = load float, ptr %slot
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
 SignatureElement makeFloatInput(uint32_t ElementID,
                                 std::optional<uint32_t> Location = 0) {
   SignatureElement Elt;
@@ -321,6 +357,66 @@ TEST(PatchPipelineTest, ChainsHullPatchConstantTessellatorAndDomain) {
     float Want = (2.0f + (6.0f - 2.0f) * U) * 3.0f;
     EXPECT_NEAR(Result->DomainOutputs.readFloat(2, 0, I), Want, 1e-4f);
   }
+}
+
+// (roadmap L78) Regression test for `HullWrapper.cpp`'s `lowerHullInputLoad`
+// fix: a materialize-then-self-index `InputPatch` read (see
+// `MaterializedSelfIndexHullShaderIR`'s own comment) with 3 output control
+// points against this harness's fixed `WaveSize=4` -- one genuinely
+// inactive/padding SIMD lane -- must not have its materialized values
+// clobbered to zero by that padding lane's masked scatter-store. Before the
+// fix, every one of `Result->OutputPatch`'s 3 control points below read
+// back as 0.0f regardless of the real vertex data; after the fix, each
+// reads back its own real (non-doubled, since this shader passes the
+// materialized value straight through) input value.
+TEST(PatchPipelineTest, MaterializedInputPatchSelfIndexSurvivesPaddingLane) {
+  Context Ctx;
+
+  EntrySignature VertexSig = makeVertexOutputSignature();
+  Expected<std::unique_ptr<CompiledStage>> Vertex = compileGraphicsStage(
+      Ctx, VertexShaderIR, "vs_main", VertexSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(Vertex, Succeeded());
+
+  Expected<std::unique_ptr<CompiledStage>> Hull =
+      compileGraphicsStage(Ctx, MaterializedSelfIndexHullShaderIR,
+                           "hs_materialize_main", makeHullSignature(),
+                           ShaderStage::Hull);
+  ASSERT_THAT_EXPECTED(Hull, Succeeded());
+  Expected<std::unique_ptr<CompiledStage>> PatchConstant =
+      compileGraphicsStage(Ctx, PatchConstantShaderIR, "pc_main",
+                           makePatchConstantSignature(), ShaderStage::Hull);
+  ASSERT_THAT_EXPECTED(PatchConstant, Succeeded());
+  Expected<std::unique_ptr<CompiledStage>> Domain =
+      compileGraphicsStage(Ctx, DomainShaderIR, "ds_main",
+                           makeDomainSignature(), ShaderStage::Domain);
+  ASSERT_THAT_EXPECTED(Domain, Succeeded());
+
+  PatchPipelineStages Stages{**Hull, **PatchConstant, **Domain};
+  Expected<PatchPipelineLinkage> Link = linkPatchPipeline(VertexSig, Stages);
+  ASSERT_THAT_EXPECTED(Link, Succeeded());
+
+  // Three real, distinct, non-zero control points -- 0.5/1.5/2.5 -- feeding
+  // 3 output control points, so each of `arr`'s 3 materialized slots holds
+  // a genuinely different, checkable value.
+  Expected<StageStorage> VertexOutputs =
+      runVertexStage(**Vertex, VertexSig, {0.5f, 1.5f, 2.5f});
+  ASSERT_THAT_EXPECTED(VertexOutputs, Succeeded());
+
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Isoline;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::Line;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+
+  std::vector<uint32_t> ControlPointInvocations = {0, 1, 2};
+  Expected<PatchPipelineResult> Result = runPatchPipeline(
+      Stages, *Link, Tess, *VertexOutputs, ControlPointInvocations);
+  ASSERT_THAT_EXPECTED(Result, Succeeded());
+
+  EXPECT_FLOAT_EQ(Result->OutputPatch.readFloat(1, 0, 0), 0.5f);
+  EXPECT_FLOAT_EQ(Result->OutputPatch.readFloat(1, 0, 1), 1.5f);
+  EXPECT_FLOAT_EQ(Result->OutputPatch.readFloat(1, 0, 2), 2.5f);
 }
 
 TEST(PatchPipelineTest, RejectsAnUnlinkableStageInterface) {
