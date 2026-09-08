@@ -71865,3 +71865,95 @@ end-to-end due to a newly-discovered, separate gap). Added new row **L79**
 for the vertex-attribute component-padding gap, "Not yet started", nested at
 zero levels (a flat sibling row, not nested under L78), per the
 one-lowercase-letter-max nesting rule.
+
+# L79 session: vertex-attribute fetch capped by format channel count
+
+Picked up roadmap L79, filed at the end of the L78 session: `Executor.cpp`'s
+`attributeFetchLayout()` never tracked a vertex-attribute format's own real
+channel count (e.g. `R32G32_FLOAT` has 2 channels), so the fetch loop capped
+decoded components only by the shader's declared component count and the
+remaining buffer bytes. A shader declaring `float4 position` against a
+2-channel bound attribute read 4 floats unconditionally, spilling into the
+*next* vertex's own bytes instead of defaulting the missing components per
+the standard HLSL/Vulkan convention (0 for X/Y/Z, 1 for W).
+
+## Design
+
+Added a `ChannelCount` field to `AttributeFetchLayout`. This is deliberately
+distinct from the pre-existing `ComponentsPerFetch`: the latter is an atomic
+fetch *granularity* (relevant for packed formats like `R10G10B10A2_UNORM`,
+where one indivisible fetch produces all 4 components at once), while
+`ChannelCount` is the format's real logical *width*. Previously-merged
+format-group cases in the big switch statement (`R32_FLOAT`/`R32G32_FLOAT`/
+`R32G32B32_FLOAT`/`R32G32B32A32_FLOAT`, and similarly for the 8-bit/16-bit
+families) had to be split into individual cases, each now returning its own
+correct channel count.
+
+In the fetch loop, `FormatComponents = min(Elt.ComponentCount, ChannelCount)`
+bounds real memory decode by the format's own structural width, computed
+*before* (and layered underneath) the pre-existing `AvailableFetches`
+buffer-bounds cap. This preserves two genuinely distinct default-fill
+behaviors that must not be conflated: the format-channel-count gap (this
+fix; a static, pipeline-creation-time-known property, defaulting to the
+HLSL/Vulkan convention 0/0/0/1) versus the pre-existing buffer-bounds
+robustness zero-fill (roadmap F10; a dynamic, runtime buffer-length
+condition, always defaulting to all-zero). The W-component default only
+fires when the *format itself* structurally lacks a fourth channel, never
+when the buffer merely runs out of bytes for an otherwise-4-channel format.
+
+Wrote two new regression tests using a specific technique to make a
+regression unmistakable: rather than reusing the existing helper (which uses
+identical color bytes per vertex, making a read-through-into-the-next-vertex
+bug undetectable), the new tests give each vertex distinct, nonzero,
+non-default position values, tightly packed with no padding gap. An
+unfixed implementation reads the next vertex's own position floats as the
+"missing" color components, producing a texel value that cannot coincidentally
+match the correct default-filled result. Verified both tests fail against
+the pre-fix code and pass against the fixed code via a stash-based
+before/after comparison (`git stash push -- feme/lib/Graphics/Executor.cpp`,
+rebuild, run, `git stash pop`, rebuild, run again).
+
+Ran into a `clang-format -i`-on-the-whole-file trap here again (same lesson
+as prior sessions): the repo's effective `.clang-format` interpretation
+reformatted ~100 unrelated lines when applied file-wide. Reverted via
+`git checkout --` and instead used `git-clang-format --diff` (which only
+flagged 2 lines actually needing adjustment) to keep the diff to exactly the
+intended 76 lines.
+
+## Verification
+
+- `ninja FeMeGraphics`/`FeMeGraphicsTests`: clean build, both new tests pass.
+- `ninja check-feme`: 2770/2829 Passed, 59 Unsupported, 0 Failed -- no
+  regressions (up by exactly 2 from the new tests).
+- Re-ran L78's own two named repros directly via `offloader` (with
+  `VK_ICD_FILENAMES` pointed at the real `build2` `feme_icd.json`, not
+  lavapipe) after restoring the fix:
+  - `HullSystemValues.test`: `ResultBuffer` is no longer all-zero --
+    `SV_PrimitiveID`/`SV_OutputControlPointID`/`SV_TessFactor`/
+    `SV_InsideTessFactor` all round-trip correctly now -- but the smuggled
+    position data (buffer elements 0/1/7/8) still mismatches
+    (`(-0.9,-0.9)`/`(0.1,0.1)` observed vs. `(0,0)`/`(1,1)` expected). Real
+    progress, but not full closure: a further, distinct bug remains. Filed
+    as roadmap **L80**.
+  - `DomainSystemValues.test`: now reaches `vk.queueSubmit`, a stage never
+    reached before this fix, but that submit fails with `VkResult = -3` --
+    a brand-new failure mode. Filed as roadmap **L81**.
+- Real Vulkan CTS: re-ran the identical `dEQP-VK.tessellation.shader_input_
+  output.*` (28-case) caselist used throughout the L37/L77/L78 chain:
+  unchanged, still 13/28 cases reach a result before the group's
+  already-documented pre-existing segfault, all 13 failing on the same two
+  already-tracked unrelated gaps -- confirming no regression, though this
+  CTS group still cannot directly exercise this fix either before or after.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no
+  change needed (a pure CPU-side vertex-attribute-fetch decode-width fix,
+  no new Vulkan feature/extension surface).
+
+## Roadmap
+
+Struck through **L79** (fully resolved as scoped: the format-channel-count
+over-read is fixed and verified). Filed two new flat, non-nested follow-on
+rows for the newly-surfaced, distinct gaps found while re-verifying L78's
+own named repros: **L80** (`HullSystemValues.test`'s smuggled position data
+still wrong) and **L81** (`DomainSystemValues.test`'s new `vkQueueSubmit`
+failure). Both are direct siblings of L79, not nested under it, per the
+one-lowercase-letter-max nesting convention.
