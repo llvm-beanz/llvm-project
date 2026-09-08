@@ -70958,3 +70958,79 @@ Fail**, confirming no regression.
 
 No scratch artifacts needed cleanup beyond the usual `/tmp/` CTS log
 files from this session's re-runs.
+
+# L35: `Bias`+`Offset`+`MinLodClamp` combined-modifier sample gap
+
+Requested: close out roadmap L35 (or other prerequisites blocking the
+L-series milestones). L35's own filed text named a specific real
+repro -- `Vk.SampledTexture2D.SampleBias.test.yaml`'s case 4 (`r3`),
+`SampledTex0.SampleBias(sample_uv, -0.1, int2(0, 0), 0.1)`, combining
+`Bias`, a texel `Offset`, and a `MinLodClamp` on the *same* call --
+still failing `vkCreateGraphicsPipelines` on the same "register-bound
+resource handle" rejection L26 had already fixed for simpler shapes.
+The row's own text also flagged that its suggested real-IR-reduction
+technique (`feme-translate --import-spirv`) crashes outright on any
+`ConstOffset`/`MinLod`-bearing SPIR-V, via an upstream MLIR
+`ImageOps.cpp` `verifyImageOperands` assert -- a real but separate
+tooling gap, not hit by the real Vulkan runtime path.
+
+Before attempting that awkward tooling workaround, I re-ran the real
+named repro directly against a freshly rebuilt `feme` ICD
+(`VK_ICD_FILENAMES` pointed at the real `feme_icd.json`,
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` to surface any diagnostic). It
+passed cleanly -- pipeline creation succeeded and the test's own
+`BufferFloatULP` buffer comparison passed -- confirmed reproducible
+across 3 consecutive runs, with zero diagnostics emitted.
+
+Reading `SPIRVResourceLowering.cpp`'s `isSampleIntrinsic`/
+`hasOnlySupportedImageUses` directly explained why: roadmap L58 (filed
+and closed in a later session, adding ordinary non-comparison `Bias`
+operand recognition entirely independently of L35) introduced
+`spv_resource_samplebias_clamp`, an intrinsic form that always carries
+both its own offset operand (at the same index-shifted position
+`samplebias` uses) *and* its own trailing clamp operand together --
+`getSampleOffsetIdx`/`getSampleClampIdx` derive both purely from the
+shared `ExplicitLod`/`HasBias`/`HasGrad` triple, never treating
+`HasBias` and `HasMinLodClamp` as mutually exclusive. L58's own later
+follow-ons (L60(a)/L61(c)/L67(a)) generalized this same combined
+support to `CubeArray`/`Array2D`/`Plain1D`/`Array1D`/`Plain3D` as well,
+again without ever citing L35 by number. L35 was simply never marked
+closed once L58's own broader fix subsumed its exact scope as a
+byproduct -- the same "closed via a later, differently-motivated row"
+pattern this arc has now hit repeatedly (L34/via-L56, and now
+L35/via-L58).
+
+Ran a supplementary `dEQP-VK.glsl.texture_functions.texture.*bias*`
+sweep (50 cases, every `Bias`-using sampler shape/format combination)
+directly against the real feme ICD as a regression check: 18 Pass, 14
+Fail (every failure is an integer-format `isampler*`/`usampler*`/
+`sparse_i`/`usampler*` shape -- `hasOnlySupportedImageUses`'s own
+pre-existing `IsInteger` check already explicitly rejects any filtered
+sample over an integer-channel image, an unrelated, already-documented
+scope boundary, not a regression), 18 NotSupported
+(`VK_KHR_maintenance8`, unrelated) -- numbers consistent with L58's own
+previously-reported sweep, confirming no regression.
+
+No source code changes were needed. Struck through L35 with a
+done-note on `Roadmap.md`, and filed its own separate `feme-translate
+--import-spirv` tooling gap (the `ConstOffset`/`MinLod` verifier assert
+crash) as a new, still-open `L35(a)` row, since that gap was never
+actually needed to re-verify this row's own real repro (the real
+Vulkan runtime path reproduces -- and now passes -- directly, without
+ever touching `feme-translate`). Kept `L35(a)`'s own nesting at exactly
+one lowercase letter, per this session's own standing instruction.
+
+## Commits this session
+
+1. `Roadmap.md`/`VulkanCTSReport.md`: closing L35 with a done-note
+   explaining the duplicate-scope discovery (subsumed by L58), plus a
+   new `L35(a)` row for the still-open `feme-translate --import-spirv`
+   tooling gap, plus the re-verification CTS numbers above. No
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+   needed (already recorded by L58's own prior session).
+2. This `agent_thoughts.md` entry (committed separately, last).
+
+No scratch artifacts needed cleanup beyond the usual `/tmp/` CTS log
+files from this session's own re-runs (`/tmp/l35_cts`,
+`/tmp/l35_bias*.qpa`, `/tmp/l35_bias_caselist.txt`, `/tmp/l35_list.xml`),
+all removed at the end of the session.
