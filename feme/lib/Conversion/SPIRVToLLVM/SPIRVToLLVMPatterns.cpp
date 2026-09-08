@@ -3603,9 +3603,16 @@ public:
   }
 };
 
-/// Converts a `spirv.ImageFetch` with the `Lod` image operand (optionally
-/// combined with the discarded `Nontemporal` bit, see `hasImageOperands`
-/// above) into the `llvm.spv.resource.load.level` intrinsic call, mirroring
+/// Converts a `spirv.ImageFetch` with the `Lod` image operand, optionally
+/// combined with a real `ConstOffset` (roadmap L72(b): GLSL's
+/// `texelFetchOffset()`, confirmed via a real `deqp-vk` CTS shader capture
+/// against `dEQP-VK.glsl.texture_functions.texelfetchoffset.*_compute` to
+/// emit exactly this `Lod|ConstOffset` combination -- unlike the
+/// `ImageSampleDrefExplicitLod` half of the same roadmap row, whose real gap
+/// turned out to be an unrelated literal-zero-Lod restriction, this
+/// `ImageFetch` pattern's own restriction genuinely was "no `ConstOffset`
+/// support at all", exactly as the roadmap row originally described) into
+/// the `llvm.spv.resource.load.level` intrinsic call, mirroring
 /// `ImageFetchPattern`'s unmodified case above but threading the explicit
 /// mip level through instead of rejecting it -- see
 /// `llvm/test/CodeGen/SPIRV/hlsl-resources/LoadLevel.ll` for the backend
@@ -3623,11 +3630,24 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageFetchOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (!hasExactImageOperands(Op.getImageOperands(),
-                               mlir::spirv::ImageOperands::Lod) ||
-        Adaptor.getOperandArguments().size() != 1)
-      return Rewriter.notifyMatchFailure(
-          Op, "only a lone Lod image operand is supported");
+    std::optional<mlir::spirv::ImageOperands> ImageOperandsAttr =
+        Op.getImageOperands();
+    mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
+    if (ImageOperandsAttr)
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+
+    if (!mlir::spirv::bitEnumContainsAny(Actual,
+                                         mlir::spirv::ImageOperands::Lod))
+      return Rewriter.notifyMatchFailure(Op, "Lod image operand is required");
+
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::Lod |
+        mlir::spirv::ImageOperands::ConstOffset;
+    if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -3635,16 +3655,27 @@ public:
 
     mlir::Location Loc = Op.getLoc();
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    mlir::Value Lod = Adaptor.getOperandArguments()[0];
 
-    // `llvm.spv.resource.load.level` always takes a texel offset, unlike
-    // `spirv.ImageFetch`, which has none here (the `Lod`-only match above
-    // already ruled out a `ConstOffset`/`Offset` modifier); pass zero.
+    // Positional order follows the fixed SPIR-V Image Operands bit order
+    // (`Bias, Lod, Grad, ConstOffset, ...`, see `SPIRV_BitEnumAttr<
+    // "ImageOperands", ...>`): `Lod` first (always present, matched above),
+    // then `ConstOffset` if present.
+    mlir::ValueRange OperandArguments = Adaptor.getOperandArguments();
+    size_t Index = 0;
+    mlir::Value Lod = OperandArguments[Index++];
+    mlir::Value Offset =
+        HasConstOffset ? OperandArguments[Index++] : mlir::Value();
+    if (Index != OperandArguments.size())
+      return Rewriter.notifyMatchFailure(Op, "unexpected operand count");
+
+    // `llvm.spv.resource.load.level` always takes a texel offset; use the
+    // real `ConstOffset` value if the op had one, otherwise zero.
     auto ImageTy = mlir::cast<mlir::spirv::ImageType>(Op.getImage().getType());
     mlir::Type OffsetType =
         getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
-    mlir::Value Offset = mlir::LLVM::ConstantOp::create(
-        Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
 
     Rewriter.replaceOp(
         Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.load.level",

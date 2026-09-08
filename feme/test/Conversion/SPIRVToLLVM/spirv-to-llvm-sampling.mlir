@@ -224,6 +224,29 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader], []> {
 
 // -----
 
+// Roadmap L72(b): `spirv.ImageFetch` with `Lod` combined with a real
+// `ConstOffset` image operand -- GLSL's `texelFetchOffset()`, confirmed via
+// a real `deqp-vk` SPIR-V capture of
+// `dEQP-VK.glsl.texture_functions.texelfetchoffset.*_compute` to emit
+// exactly this combination -- converts to the same
+// `llvm.spv.resource.load.level` intrinsic as the lone-`Lod` case above,
+// threading the real offset operand through instead of hardcoding zero.
+
+// CHECK-LABEL: llvm.func @fetch_level_const_offset
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.load.level"(%[[HANDLE]], %{{.*}}, %{{.*}}, %{{.*}})
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @tex bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.func @fetch_level_const_offset(%coord : vector<2xsi32>, %lod : si32, %offset : vector<2xsi32>) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @tex : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.ImageFetch %1, %coord ["Lod|ConstOffset"], %lod, %offset : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, vector<2xsi32>, si32, vector<2xsi32> -> vector<4xf32>
+    spirv.ReturnValue %2 : vector<4xf32>
+  }
+}
+
+// -----
+
 // Roadmap L22: `spirv.ImageSampleImplicitLod` with a lone `ConstOffset`
 // image operand -- what `dxc` emits for `Texture2D<T>::Sample(sampler,
 // coord, offset)` -- converts to the same `llvm.spv.resource.sample`

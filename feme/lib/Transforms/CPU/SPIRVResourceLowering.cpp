@@ -1066,16 +1066,14 @@ bool isZeroOffset(const Value *Offset) {
 /// `ImageFetchLodPattern` (this one) are two distinct raised forms of the
 /// same GLSL builtin, chosen by whether the SPIR-V source supplied a
 /// literal `Lod` image operand at all. \p Offset (the intrinsic's fourth
-/// operand) is required to be a compile-time zero: `ImageFetchLodPattern`
-/// only ever emits a zero offset today (it rejects any real `ConstOffset`
-/// combined with `Lod` outright, matching-failing that combination back
-/// to the dialect-conversion legalizer instead), so a real, nonzero
-/// offset here remains unstarted follow-on work, mirroring the same
-/// `texelFetchOffset()` gap `ImageFetchLodPattern`'s own doc comment
-/// already calls out.
+/// operand) is no longer required to be zero (roadmap L72(b)):
+/// `ImageFetchLodPattern` now threads a real `ConstOffset` through rather
+/// than always synthesizing zero, so `hasOnlySupportedImageUses`/its own
+/// lowering below validate/apply the real value themselves via
+/// `isSupportedOffset`, mirroring every other offset-carrying intrinsic
+/// this pass already accepts.
 bool isFetchLevelIntrinsic(const CallInst &CI) {
-  return getIntrinsicID(&CI) == Intrinsic::spv_resource_load_level &&
-         isZeroOffset(CI.getArgOperand(3));
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_load_level;
 }
 
 /// Whether \p Offset is an acceptable texel offset for a sample against
@@ -1573,6 +1571,13 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // raised form of `OpImageFetch`, alongside the zero-mip
     // `getpointer`-based one just below. Scoped identically to that path
     // (`Plain2D`/`Array2D` only, per the very next check's own comment).
+    // Roadmap L72(b): the intrinsic's fourth operand (`Offset`) is now
+    // allowed to be a real, nonzero `ConstOffset` too (GLSL's
+    // `texelFetchOffset()`), validated the same way an ordinary sample's
+    // own `ConstOffset` is (`AllowArray2D=true`, since `texelFetchOffset()`
+    // against `Array2D` carries the identical 2-wide `(X, Y)` offset an
+    // ordinary `Array2D` sample's own `ConstOffset` does -- confirmed via
+    // a real `deqp-vk` SPIR-V capture).
     if (isFetchLevelIntrinsic(*CI)) {
       if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
         return false;
@@ -1581,6 +1586,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
       if (!isCoordN(CI->getArgOperand(1), FetchCoordWidth, /*Float=*/false) ||
           !CI->getArgOperand(2)->getType()->isIntegerTy(32) ||
+          !isSupportedOffset(CI->getArgOperand(3), Shape,
+                             /*AllowArray2D=*/true) ||
           !(IsInteger ? isV4I32(CI->getType()) : isV4F32(CI->getType())))
         return false;
       continue;
@@ -3581,22 +3588,33 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L72: an explicit-mip `texelFetch()`
-      // (`llvm.spv.resource.load.level`, see `isFetchLevelIntrinsic`'s own
-      // doc) -- unlike the zero-mip `getpointer`-based fetch handled
-      // below (whose call itself is only a pointer, addressed by a
-      // separate `LoadInst` user), this intrinsic's own result *is* the
-      // fetched texel, and its own third operand is a real, non-zero mip
-      // level -- so both the coordinate extraction and the runtime call
-      // happen right here, rather than falling through to that shared
-      // `LoadInst`-dispatch switch below. `hasOnlySupportedImageUses`
-      // already restricted this branch to `Plain2D`/`Array2D`.
+      // Roadmap L72/L72(b): an explicit-mip `texelFetch()`/
+      // `texelFetchOffset()` (`llvm.spv.resource.load.level`, see
+      // `isFetchLevelIntrinsic`'s own doc) -- unlike the zero-mip
+      // `getpointer`-based fetch handled below (whose call itself is only
+      // a pointer, addressed by a separate `LoadInst` user), this
+      // intrinsic's own result *is* the fetched texel, and its own third
+      // operand is a real, non-zero mip level -- so both the coordinate
+      // extraction and the runtime call happen right here, rather than
+      // falling through to that shared `LoadInst`-dispatch switch below.
+      // `hasOnlySupportedImageUses` already restricted this branch to
+      // `Plain2D`/`Array2D`. Neither `createLoad2D`/`createLoad2DI32` nor
+      // their `Array2D` counterparts take an offset operand of their own
+      // (unlike the sampling helpers' `OffsetX`/`OffsetY`), so a real
+      // `ConstOffset` (`hasOnlySupportedImageUses` already validated it
+      // via `isSupportedOffset`) is folded into `X`/`Y` themselves here
+      // instead, before the runtime call.
       if (isFetchLevelIntrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         Value *Coord = CI->getArgOperand(1);
         Value *Lod = CI->getArgOperand(2);
+        Value *Offset = CI->getArgOperand(3);
         Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
         Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+        X = Builder.CreateAdd(X, OffsetX);
+        Y = Builder.CreateAdd(Y, OffsetY);
         bool IsInteger = isV4I32(CI->getType());
         CallInst *Fetched;
         if (Shape == ImageShape::Array2D) {

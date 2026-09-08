@@ -1400,14 +1400,16 @@ TEST(SPIRVResourceLoweringTest, LowersImageArrayFetchLevelToImageLoadArray) {
   EXPECT_EQ(Load->getArgOperand(6)->getName(), "lod");
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAFetchLevelWithNonzeroOffsetAlone) {
-  // Roadmap L72: `isFetchLevelIntrinsic` only accepts a compile-time-zero
-  // offset -- the only value `ImageFetchLodPattern` emits today (it
-  // rejects any real, nonzero `ConstOffset` combined with `Lod` outright
-  // during legalization instead, a separate, still-unstarted follow-on
-  // gap covering `texelFetchOffset()`) -- so a handle whose sole use
-  // carries one is left entirely unlowered, matching this pass's own
-  // established all-or-nothing precedent for any other unrecognized use.
+TEST(SPIRVResourceLoweringTest, LowersAFetchLevelWithNonzeroOffsetToImageLoad) {
+  // Roadmap L72(b): GLSL's `texelFetchOffset(sampler2D, coord, lod,
+  // offset)` -- confirmed via a real `deqp-vk` SPIR-V capture to raise to
+  // `llvm.spv.resource.load.level` with a real, nonzero `ConstOffset` as
+  // its fourth operand (`feme::spirv::ImageFetchLodPattern` used to reject
+  // this combination outright during legalization instead). Neither
+  // `createLoad2D` nor its `v4i32` counterpart takes an offset operand of
+  // its own, so the real offset is folded into the coordinate itself
+  // before the runtime call, rather than threaded through as a separate
+  // argument the way an ordinary sample's own `OffsetX`/`OffsetY` are.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<2 x i32> %coord, i32 %lod) {
@@ -1415,7 +1417,7 @@ TEST(SPIRVResourceLoweringTest, LeavesAFetchLevelWithNonzeroOffsetAlone) {
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %v = call <4 x float> @llvm.spv.resource.load.level.timg(
           target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, <2 x i32> %coord,
-          i32 %lod, <2 x i32> <i32 1, i32 0>)
+          i32 %lod, <2 x i32> <i32 1, i32 -2>)
       ret <4 x float> %v
     }
     declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
@@ -1428,18 +1430,18 @@ TEST(SPIRVResourceLoweringTest, LeavesAFetchLevelWithNonzeroOffsetAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.2d.v4f32"));
-  // The original intrinsic call survives untouched -- parsing/printing may
-  // rename its declaration to LLVM's own canonical mangled name for a real
-  // (non-`feme.cpu.*`) intrinsic, so check by intrinsic ID rather than by
-  // name.
-  bool FoundOriginalCall = false;
-  for (Instruction &I : instructions(*F))
-    if (auto *CI = dyn_cast<CallInst>(&I))
-      if (Function *Callee = CI->getCalledFunction())
-        if (Callee->getIntrinsicID() == Intrinsic::spv_resource_load_level)
-          FoundOriginalCall = true;
-  EXPECT_TRUE(FoundOriginalCall);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.2d.v4f32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(5)->getName(), "lod");
+  // The X/Y coordinate operands are each an `add` of the original
+  // coordinate lane with the matching offset constant, not the bare
+  // coordinate lane itself.
+  auto *X = dyn_cast<BinaryOperator>(Load->getArgOperand(3));
+  ASSERT_TRUE(X);
+  EXPECT_EQ(X->getOpcode(), Instruction::Add);
+  auto *Y = dyn_cast<BinaryOperator>(Load->getArgOperand(4));
+  ASSERT_TRUE(Y);
+  EXPECT_EQ(Y->getOpcode(), Instruction::Add);
 }
 
 TEST(SPIRVResourceLoweringTest, ClampsAnArrayedImageBindingIndex) {
