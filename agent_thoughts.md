@@ -69855,3 +69855,140 @@ lowering capability, not an extension or feature bit) — didn't touch
 `FeMeCPUDesign.md` either, since nothing here deviates from documented
 design at that level of detail. Cleaned up `/tmp/l72/` and `/tmp/l72run/`
 scratch artifacts at the end of the session.
+
+# Session: closing out roadmap L72(a) (unhandled Proj/query opcodes)
+
+## The ask
+
+L72(a) was filed by the prior session's own L72 close-out: 340
+`dEQP-VK.glsl.texture_functions.*_compute` CTS cases failing SPIR-V
+import with `"unhandled opcode <N>"` for five opcodes MLIR's own SPIR-V
+dialect has zero enum/Op-class coverage for at all --
+`OpImageSampleProjExplicitLod` (92), `OpImageSampleProjDrefExplicitLod`
+(94), `OpImageQuerySizeLod` (103), `OpImageQueryLevels` (106), and
+`OpImageQuerySamples` (107). The filing explicitly deferred a scoping
+decision -- upstream MLIR contribution vs. feme-local pre-import SPIR-V
+rewrite -- to whoever picked this row up.
+
+## Scoping investigation
+
+First confirmed the premise against ground truth rather than trusting the
+filing's own numbers blindly: loaded the real SPIR-V grammar JSON
+(`spirv.core.grammar.json` from the VK-GL-CTS spirv-headers checkout) and
+cross-checked each opcode number against MLIR's `SPIRVBase.td`. Confirmed
+92/94/103/106/107 truly have no enum case (as opposed to merely
+unimplemented deserialization for an opcode MLIR does define) -- but also
+noticed MLIR *does* already define opcode 93
+(`OpImageSampleProjDrefImplicitLod`) and 104 (`OpImageQuerySize`), which
+the original filing hadn't mentioned. Grepped feme's own legalization
+code for any handling of "Proj" sampling at all and found none -- meaning
+even opcode 93, syntactically importable today, isn't actually usable
+downstream. This ruled out "just add the missing MLIR enum cases and
+feme's existing patterns will pick it up" as a viable minimal fix for any
+of the five opcodes.
+
+Split the five opcodes into two very different problems:
+
+1. **92/94 ("Proj" sampling)**: these differ from an already-legalized
+   non-Proj opcode (88/90) *only* in how the Coordinate/Dref operand is
+   interpreted (spec-defined perspective divide by a trailing "q"
+   component). That's a pure syntactic transformation performable before
+   MLIR ever parses the module -- a strong candidate for a feme-local
+   rewrite, avoiding any upstream dependency.
+2. **103/106/107 (image queries)**: these query information (mip-level
+   count, sample count, size-at-an-explicit-LOD) that no other
+   already-supported opcode's result can substitute for. No amount of
+   pre-import rewriting turns "how many mip levels does this image have"
+   into an already-supported operation -- this needs real new runtime
+   capability, not a rewrite. Concluded these belong in their own,
+   separately-scoped row rather than blocking the Proj-opcode fix, and
+   would need their own design investigation before implementation
+   (does feme's resource-heap machinery already track this data
+   anywhere?).
+
+This is exactly the kind of split the project's own established
+precedent (H6/H8/H9/L-series "one bug report can hide several distinct
+gaps, split before implementing blind") calls for, so decided against a
+combined attempt.
+
+## Implementing the Proj-opcode rewrite
+
+Chose the pre-import-rewrite approach for 92/94 specifically because
+feme already has a working precedent for this shape of fix
+(`stripNonSemanticExtInst` rewrites the raw word stream before MLIR's
+deserializer ever runs) and because an upstream MLIR TableGen
+contribution is a materially larger, slower, and riskier undertaking that
+the original filing itself flagged as disproportionate for this project's
+own scope.
+
+Two design decisions took real thought:
+
+**Allowlist vs. denylist for type resolution.** To synthesize the divide
+instructions I need to know the exact type of the Coordinate/Dref operand
+(is it a vec2, vec3, scalar float? what's the divide count?). SPIR-V's
+physical layout means almost every "value-producing" opcode has its
+Result Type as the operand immediately before Result <id> -- but a
+handful of opcodes (type declarations themselves, `OpLabel`,
+`OpExtInstImport`, etc.) don't follow that shape at all. Building a
+complete denylist of every such opcode felt fragile (get it wrong once
+and you misread garbage as a bogus type id, silently corrupting the
+rewrite). Instead built a small, deliberately conservative *allowlist* of
+~23 opcodes real GLSL/HLSL-compiled coordinate expressions plausibly use
+(`OpLoad`, `OpCompositeConstruct/Extract/Insert`, `OpFAdd/Sub/Mul/Div`,
+`OpConvertSToF`, etc.). Anything outside the allowlist means the pass
+just leaves that occurrence alone -- still an "unhandled opcode" failure,
+exactly as before this fix existed, with zero risk of an incorrect divide
+silently miscompiling a shader. Coverage cost, but no correctness cost.
+
+**Narrow the coordinate, don't leave it wide.** The SPIR-V spec actually
+permits a sampling instruction's Coordinate to be *wider* than the image
+needs (trailing components simply ignored) -- so my first instinct was
+"just divide in place and leave the vector at its original (wider, by
+one) size; MLIR/feme will ignore the extra component same as spec
+allows." Reading feme's actual `ImageSampleExplicitLodPattern`/
+`ImageSampleDrefExplicitLodPattern` (`SPIRVToLLVMPatterns.cpp`) disproved
+this: those patterns select a runtime call keyed on the Coordinate's
+*exact* width, with no "ignore trailing components" logic at all. Had to
+narrow for real -- extract only the needed components via
+`OpCompositeExtract`, then `OpCompositeConstruct` them back into a
+possibly-new, possibly-not-yet-declared `OpTypeVector` (memoized so
+repeated occurrences of the same width don't emit duplicate type
+declarations, which SPIR-V's own logical layout forbids).
+
+## Verification
+
+- 3 new unit tests via the existing `RawSPIRVModuleBuilder` hand-assembler
+  pattern (the only way to author these opcodes, since MLIR's `spirv`
+  dialect has no syntax for them at all): two correctness cases (2D
+  plain sample, 2D shadow/Dref sample) and one negative case (an
+  intentionally-unrecognized `OpIAdd` Coordinate producer, confirming the
+  safe-fallback path leaves the occurrence untouched).
+- `check-feme`: 2723/2782 pass, 0 fail, 59 unsupported (+3 tests, no
+  regressions vs. the prior L72 session's 2720/2779 baseline).
+- Rebuilt `feme_vulkan`, regenerated the real 1,375-case
+  `texture_functions_compute` caselist (discovered the prior session's own
+  scratch caselist file had silently gone stale/wrong -- it was actually
+  a `transform_feedback`-only list with zero real `texture_functions`
+  entries -- regenerated fresh from the mustpass source tree and
+  confirmed the exact case count before trusting any run against it).
+- Real CTS re-run: 245 Pass (up from 161), 798 Fail (down from 882), 332
+  Not Supported (unchanged) -- confirmed via log grep that zero
+  "unhandled opcode 92/94" failures remain anywhere in the caselist.
+- Characterized every remaining `textureproj*_compute` failure to rule
+  out any overlap/regression: 130 need `SPV_KHR_compute_shader_derivatives`
+  (unrelated, roadmap L7), 12 hit roadmap L72(b)'s own already-filed
+  `ConstOffset`+`Lod` legalization gap for arrayed (3-component
+  coordinate) Dref sampling -- confirmed these were never "Proj" to begin
+  with, so this fix correctly leaves them alone. The residual
+  "unhandled opcode" count (76: 34+34+8, exactly matching 103/106/107's
+  original per-opcode breakdown) confirmed L72(d)'s scope precisely.
+
+## Docs
+
+Updated `Roadmap.md` (struck through L72(a)'s Proj-opcode portion, filed
+L72(d) as a sibling of L72(a) rather than a further-nested
+`L72(a)(a)`-style row, respecting the one-lowercase-letter nesting rule)
+and `VulkanCTSReport.md` (new section with the full investigation, fix,
+and real CTS numbers). Confirmed `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no changes -- this fix is a SPIR-V
+import-time opcode rewrite, not a new extension or 1.4 core feature bit.
