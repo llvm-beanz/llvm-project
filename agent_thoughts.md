@@ -70751,3 +70751,120 @@ extension.
 
 Cleaned up scratch CTS artifacts under `/tmp/l72b/` at the end of the
 session.
+
+# L72(c): widening `texelFetch()`'s explicit-Lod shape gate
+
+## Request
+
+Close out roadmap L72(c) or other prerequisites blocking the L-series
+milestones: the remaining 140 `dEQP-VK.glsl.texture_functions.
+texelfetch.*` CTS cases against a `Plain1D`/`Array1D`/`Plain3D` sampled
+image, still failing with `"cannot normalize into a heap access"` after
+L72's own fix scoped its new `llvm.spv.resource.load.level` recognition
+to `Plain2D`/`Array2D` only.
+
+## Investigation
+
+Read `hasOnlySupportedImageUses`'s `isFetchLevelIntrinsic` branch and
+`lowerImageAccesses`'s matching lowering branch in
+`SPIRVResourceLowering.cpp` directly. Confirmed the codebase already has
+a **shared** per-handle dispatch loop used by both sampled-image and
+storage-image intrinsics, and that the storage-image path's own zero-mip
+`getpointer`-based `LoadInst` dispatch switch (further down in the same
+function) *already* supports every shape this row needed
+(`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D` via
+`createLoad1D`/`createLoad1DArray`/`createLoad2D`/`createLoad2DArray`/
+`createLoad3D` and their `I32` counterparts) -- but only for a storage
+image handle, since the *sampled*-image zero-mip `getpointer` path's own
+validation still rejects `Plain1D`/`Array1D`/`Plain3D` today (a separate,
+still-open gap, out of scope for L72(c) since the roadmap text
+specifically calls out the fetch-*level* intrinsic).
+
+Found both shared helpers this fix needed were already fully generalized
+by earlier rows: `isSupportedOffset` (from L66(d)/L66(k)/L67(c)) already
+handles `Plain1D`/`Array1D` (scalar offset, `AllowPlain1DArray1D` gate)
+and `Plain3D` (3-wide vector, unconditionally accepted); `SampleCoordWidth`
+(computed once at the top of `hasOnlySupportedImageUses`) already gives
+the correct fetch-coordinate width for every shape this row needed, since
+`texelFetch()`'s integer coordinate has the same dimensionality as an
+ordinary sample's coordinate (no `Dref`-style widening applies to a
+fetch). This meant the fix needed zero changes to either helper -- just
+threading the right gate flag through at one call site, and reusing
+`SampleCoordWidth` in place of the old two-way `FetchCoordWidth` ternary.
+
+Confirmed via `getDefaultZeroOffsetType` (`SPIRVToLLVMPatterns.cpp`, read
+but not modified) that `ImageFetchLodPattern` already emits the exact
+offset shapes the lowering-side per-shape folding logic assumes: a bare
+scalar `i32` for any `Dim1D` image, a vector matching the coordinate's
+own shape otherwise -- no risk of a shape mismatch between what the
+pattern produces and what the new lowering code expects.
+
+## The fix
+
+Widened `hasOnlySupportedImageUses`'s `isFetchLevelIntrinsic` validation
+branch from a `Plain2D`/`Array2D` allow-list to a `Cube`/`CubeArray`/
+`Plain2DMS`/`Array2DMS` reject-list, and widened `lowerImageAccesses`'s
+matching lowering branch from a 2-way `Array2D`-vs-`Plain2D` `if`/`else`
+to a full per-shape `switch` covering all 5 now-supported shapes, each
+folding any real `ConstOffset` into its own coordinate components
+(mirroring L72(b)'s established `CreateAdd`-based offset-folding
+technique, generalized per-shape) before dispatching to the matching
+`createLoad1D`/`createLoad1DArray`/`createLoad3D` (and `I32`
+counterparts) runtime entry point with the real `Lod` threaded through.
+A `default: llvm_unreachable` closes the switch, which deliberately does
+not cover the full `ImageShape` enum -- consistent with
+`feme/.instructions.md`'s "no default labels in fully covered switches"
+rule, since the validation gate above already excludes every other shape
+before this code is ever reached.
+
+## Testing
+
+Added 5 new unit tests to `SPIRVResourceLoweringTest.cpp` covering
+`Plain1D`/`Array1D`/`Plain3D` (including an integer-channel variant and
+two nonzero-offset variants exercising the new per-shape offset-folding
+logic). `FeMeTransformsCPUTests`: 424/424 pass (up from 419, no
+regressions).
+
+Widened `spirv-resource-lowering-image-fetch-lod.ll` with new
+`Plain1D`/`Array1D`/`Plain3D`/offset cases. While doing so, discovered
+this lit test had a **pre-existing, unrelated latent bug**: its
+`FileCheck` variable bindings pointed at the bare `extractelement`
+result rather than the always-emitted offset-fold `add` that follows it
+even for a compile-time-zero offset -- confirmed via `git stash` that
+this exact test already failed against the pre-L72(c) code (i.e. it had
+never actually passed since being authored in an earlier session,
+apparently never re-run after being added). Fixed the bindings to point
+at the `add` result throughout, and updated the stale header comment
+that still claimed the fetch-level intrinsic's offset "must be a
+compile-time zero" (true before L72(b), no longer true after it).
+
+`check-feme`: 2762/2821 pass, 0 fail, 59 unsupported (no regressions, up
+from 2757/2816 by exactly this row's own 5 new unit tests).
+
+## CTS re-run
+
+Rebuilt `libfeme_vulkan.so` and re-ran `dEQP-VK.glsl.texture_functions.
+texelfetch*_compute` (192 cases): 120 Pass, 0 Fail, 72 Not-supported
+(sparse-image formats, unrelated). Narrower `*1d*` slice: 48/48 Pass, 0
+Fail. `*3d*` slice: 24/24 Pass among supported formats, 0 Fail. A
+broader `texture_functions_compute` re-run (1,375 cases) confirms 0
+remaining `texelfetch`-named failures anywhere in the sweep -- this
+row's own 140-case target is fully closed. The sweep's other 580
+failures are all pre-existing `"unknown extension:
+SPV_KHR_compute_shader_derivatives"` pipeline-creation errors (roadmap
+L7, entirely unrelated), not a regression.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed -- core SPIR-V image-operand functionality, no gating Vulkan
+feature or extension.
+
+## Commits this session
+
+1. `SPIRVResourceLowering.cpp` (validation + lowering widening)/
+   `SPIRVResourceLoweringTest.cpp` (5 new unit tests)/
+   `spirv-resource-lowering-image-fetch-lod.ll` (new cases + the
+   pre-existing latent-bug fix): the full L72(c) fix.
+2. `Roadmap.md`/`VulkanCTSReport.md`: closing L72(c), CTS numbers.
+3. This `agent_thoughts.md` entry (committed separately, last).
+
+Cleaned up scratch CTS artifacts under `/tmp/` at the end of the session.
