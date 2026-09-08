@@ -42,28 +42,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L75 from the roadmap or other prerequisites blocking the
+Can you close out L72(b) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **The `OpImageQuerySizeLod` half of roadmap L74's original per-shape scope,
-> deliberately left untouched by L74's own fix**: every shape but `Plain2D`
-> (`Array2D`, `Plain1D`, `Array1D`, `Plain3D`, `Cube`, `CubeArray`) still needs
-> its own new `ImageCalls` builder before `SPIRVResourceLowering.cpp`'s
-> `isQuerySizeLodCall` shape gate can be widened, since (unlike
-> `OpImageQueryLevels`, which L74 confirmed is shape-independent and needed zero
-> builder changes) `OpImageQuerySizeLod`'s result genuinely varies in component
-> count by shape per GLSL's own `textureSize(sampler, lod)` overload spec:
-> scalar `i32` for `Plain1D`; `v2i32` for `Array1D`/`Plain2D`/`Cube`; `v3i32`
-> for `Array2D`/`Plain3D`/`CubeArray`. A real CTS re-run of L74's own 68-case
-> caselist found 24 `query.texturesize.*_compute` cases remain in this bucket
-> (`isampler1d(array)?`/`isampler3d`/`isamplercube(array)?`/`isamplercubeshadow`/`sampler1d(array)?(shadow)?(_fixed\|_float)?`/`sampler2darray(shadow)?(_fixed\|_float)?`/`sampler3d(_fixed\|_float)?`/`samplercube(array)?(shadow)?(_fixed\|_float)?`/`usampler1d(array)?`/`usampler2darray`/`usampler3d`/`usamplercube(array)?`,
-> mirrored across signed/unsigned/float sampler variants). Not yet started;
-> needs its own per-shape result-width design work (likely one new `ImageCalls`
-> builder variant per distinct result width -- `v2i32` for `Array1D`/`Cube`,
-> `v3i32` for `Array2D`/`Plain3D`/`CubeArray`, scalar for `Plain1D` -- grouping
-> shapes that already share an identical result shape rather than one builder
-> per individual shape) before implementation can begin. Also still needs its
-> own confirmation of how `ArrayLayers` is populated for a `CubeArray` view
-> specifically (whether it already stores the real face-count-inclusive layer
-> count or an already-divided-by-6 array-slice count) before a
-> `CubeArray`-shaped builder can be implemented correctly.
+> **118 `dEQP-VK.glsl.texture_functions.*_compute` CTS cases (the
+> `*Offset`-suffixed GLSL builtins, e.g. `texelFetchOffset`/a depth-comparison
+> explicit-LOD sample with an offset) fail SPIR-V-to-LLVM legalization
+> outright** with `"failed to legalize operation 'spirv.ImageFetch'"` (100
+> cases) or `"...'spirv.ImageSampleDrefExplicitLod'"` (18 cases) -- confirmed
+> via roadmap L72's own real IR reduction: `ImageFetchLodPattern`/its `Dref`
+> counterpart (`SPIRVToLLVMPatterns.cpp`) both explicitly match only a *lone*
+> `Lod` image operand (`hasExactImageOperands(..., Lod)`), rejecting any real
+> `ConstOffset` combined with `Lod` outright rather than matching-failing it
+> through to `llvm.spv.resource.load.level`/its `Dref` counterpart, which (per
+> roadmap L72's own fix) already accepts a texel-offset operand today --
+> currently always a hardcoded zero, since no caller threads a real one through
+> yet. Fixing this needs widening both patterns' own match conditions to accept
+> `Lod | ConstOffset`, threading the real (non-zero) offset into the intrinsic
+> instead of a synthesized zero, then widening `isFetchLevelIntrinsic`/its
+> rewrite branch (`SPIRVResourceLowering.cpp`) to accept a real offset value
+> instead of requiring `isZeroOffset`, applying it to `lowerImageAccesses`'s
+> existing `X`/`Y`/`Layer` coordinate computation the same way
+> `isSupportedOffset` already does for the ordinary-sampling paths. Not yet
+> started.
