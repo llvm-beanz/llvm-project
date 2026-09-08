@@ -45,20 +45,17 @@ if it already exists, and commit it in its own commit when you're done.
 Can you close out L35(a) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`feme-translate --import-spirv` crashes outright on any SPIR-V binary using
-> the `ConstOffset`/`Offset`/`ConstOffsets`/`MinLod`/etc. image operands**, via
-> an upstream MLIR SPIR-V dialect op verifier assert in
-> `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s `verifyImageOperands` (a literal
-> `// TODO: Add the validation rules for the following Image Operands` followed
-> by an unconditional `assert(!bitEnumContainsAny(...))` rejecting these operand
-> bits outright) -- confirmed by L35's own original investigation against
-> `Feature/Textures/Sample.test`'s own already-fixed, already-passing `.o`,
-> which uses the same operands. Not blocking any real pipeline (the real Vulkan
-> runtime path, `feme::SPIRVImporter`/`Pipeline.cpp`, uses
-> `mlir::spirv::deserialize` directly without invoking full op verification, so
-> it never hits this assert), but it is a real, narrow, pre-existing gap in this
-> project's own standard real-IR-reduction tooling for any future row whose
-> repro uses these operands -- needs either loosening/removing the specific
-> assert (if MLIR upstream agrees the TODO can be resolved by accepting these
-> operands without full validation today) or a new `feme-translate` flag to skip
-> strict op verification on import. Not yet started
+> **`Texture2DArray` implicit-LOD sampling also does not select the correct mip
+> from screen-space derivatives in every case**, mirroring L34's own
+> `TextureCube` finding: a real re-run of
+> `Feature/Textures/Array.Sample.test`/`Array.SampleBias.test` (neither of which
+> uses a nonzero texel offset or clamp at all, ruling out L26/L33's own scope
+> entirely) now clears pipeline creation and submission cleanly after L26's fix,
+> but produces 3 wrong-mip output mismatches (elements 5/13/14) -- a
+> pre-existing, unrelated implicit-LOD-selection gap uncovered only because
+> these cases could not reach this far before L26's fix. Needs its own real IR
+> reduction (once L35's own `feme-translate` tooling blocker is worked around,
+> or via a reduced case avoiding `ConstOffset`/`MinLod` entirely) to confirm
+> whether `femeCpuImageSample2DArrayV4F32`'s own derivative/LOD-planning path
+> (mirroring `femeRTPlanImplicitLod`) has a real bug, or whether (like L34) it
+> never computes one at all for the array shape
