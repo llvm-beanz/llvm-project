@@ -42,49 +42,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L69 from the roadmap or other prerequisites blocking the
+Can you close out L69(a) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`_compute`-stage sampling with any screen-space-derivative-dependent operand
-> (`Grad`, or an ordinary implicit-LOD `texture()` call computing its own LOD
-> from `dFdx`/`dFdy`) fails outright at `vkCreateComputePipelines` itself**,
-> confirmed by roadmap L60's own final closing re-run (this session) to be the
-> sole remaining reason every `_compute`-stage variant of
-> `texturegrad`/`texturegradoffset`'s own shadow-sampling sweep still fails, and
-> named piecemeal as an already-known, unrelated gap by well over a dozen prior
-> rows (L59/L60/L63/L65/L66(h)/L66(i)/L66(j)/L66(k) among others) without ever
-> getting its own tracking line. Root cause: real per-invocation screen-space
-> derivatives (`dFdx`/`dFdy`) are only meaningful for an execution model with
-> adjacent invocations grouped into 2x2 quads (a fragment shader's own
-> guaranteed helper-invocation-padded quad layout) -- a compute shader's own
-> invocation grouping (`gl_WorkGroupSize`) has no such guarantee at all, so
-> Vulkan gates any derivative-dependent compute-shader operation behind the
-> separate `VK_KHR_compute_shader_derivatives` extension (confirmed "Not
-> implemented" in `VulkanExtensionInventory.md`), which lets a shader opt in to
-> one of two explicit derivative-group layouts
-> (`DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR`) that a real
-> implementation must then honor when grouping invocations for a derivative
-> computation. Breaking down the remaining work rather than attempting it in one
-> pass, per this project's own established splitting precedent: implementing
-> this needs (1) advertising the `VK_KHR_compute_shader_derivatives`
-> extension/feature struct itself (`PhysicalDeviceInfo.cpp`, mirroring how every
-> other extension this target already implements is advertised); (2) recognizing
-> the new `DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR` SPIR-V execution
-> modes on a compute entry point (likely `EntryPoints.cpp`, alongside
-> `LocalSize`'s own existing execution-mode handling); (3) a real design
-> investigation into how this target's own compute-stage invocation scheduling
-> could be made to actually group invocations into the declared derivative
-> layout (today's compute-stage lane-widening/scheduling has no quad-awareness
-> at all, unlike the fragment stage's own guaranteed-quad dispatch, so this is
-> likely the largest single piece of work here); and (4) threading a genuine,
-> non-zero derivative into `femeRTPlanImplicitLod`'s existing
-> implicit-LOD/`Grad` machinery for a compute-stage caller, which today always
-> receives a zeroed derivative pair for this stage (confirmed via
-> `FEME_VULKAN_LOG_CREATION_ERRORS=1`: every compute-stage sampling case fails
-> `vkCreateComputePipelines` itself, before any of this target's own
-> SPIR-V-to-LLVM legalization or CPU lowering ever runs, so the actual blocker
-> is upstream of any code this project's own sampling work has touched so far).
-> Not yet started; each of (1)-(4) should be scoped and fixed as its own small,
-> independently-committed, independently-CTS-measured row rather than attempted
-> together, mirroring every other large cross-cutting gap this project's own
-> history has split up.
+> **`DerivativeGroupQuadsKHR` (the 2x2-spatial-tile compute derivative-group
+> layout) is deliberately rejected outright at `vkCreateComputePipelines`, split
+> out of roadmap L69's own scope** -- unlike `DerivativeGroupLinearKHR` (L69,
+> now implemented: feme's flat/linear compute-stage lane assignment already
+> matches that mode's own spec-defined grouping of 4 consecutive
+> `LocalInvocationIndex` values with no further change), `Quads` mode needs
+> adjacent invocations grouped into real 2x2 spatial tiles, which this target's
+> compute-stage lane-widening/scheduling has no concept of at all today -- a
+> genuine lane-assignment redesign, not a small follow-on fix, so
+> `Pipeline.cpp`'s `compileComputePipeline` returns a clear, named error for
+> this mode rather than silently miscompiling it. Not yet started; needs its own
+> design investigation into how a quad-grouped compute dispatch could coexist
+> with this target's existing flat lane assignment before any implementation
+> work can begin.
