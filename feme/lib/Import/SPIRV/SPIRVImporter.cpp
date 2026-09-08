@@ -17,6 +17,7 @@
 #include "mlir/Target/SPIRV/Deserialization.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Endian.h"
@@ -179,6 +180,81 @@ bool isKnownResultTypeProducer(uint32_t Opcode) {
   }
 }
 
+/// Whether \p Words (the module's word stream, following the 5-word
+/// header) contains at least one instruction whose opcode is in \p
+/// Opcodes -- a cheap presence-only pre-check letting
+/// `lowerProjectiveImageSamples`/`lowerImageQueryOpcodes` skip their own
+/// more expensive `scanModuleTypes` call plus rewrite pass entirely for
+/// the common case of a module using none of either rewrite's own
+/// opcodes at all.
+bool containsOpcode(llvm::ArrayRef<uint32_t> Words,
+                    llvm::ArrayRef<uint32_t> Opcodes) {
+  for (size_t I = kSPIRVHeaderWords; I < Words.size();) {
+    uint32_t WordCount = Words[I] >> 16;
+    uint32_t Opcode = Words[I] & 0xffff;
+    if (WordCount == 0 || I + WordCount > Words.size())
+      break;
+    if (llvm::is_contained(Opcodes, Opcode))
+      return true;
+    I += WordCount;
+  }
+  return false;
+}
+
+/// The per-<id> type/vector-shape information both
+/// `lowerProjectiveImageSamples` and `lowerImageQueryOpcodes` need to
+/// resolve an operand's exact SPIR-V type from its defining instruction
+/// (see `isKnownResultTypeProducer`'s own doc for why only a bounded
+/// allowlist of producer opcodes is recognized), plus the module's first
+/// `OpFunction` boundary either rewrite's own new type/synthetic-function
+/// declarations must be inserted before.
+struct TypeResolutionInfo {
+  /// Every recognized value-producing instruction's Result <id> -> its
+  /// Result-Type <id>.
+  llvm::DenseMap<uint32_t, uint32_t> ValueType;
+  /// Every `OpTypeVector`'s own Result <id> -> its (component-type <id>,
+  /// component-count).
+  llvm::DenseMap<uint32_t, std::pair<uint32_t, uint32_t>> VectorInfoByType;
+  /// The inverse of `VectorInfoByType`: (component-type <id>,
+  /// component-count) -> the `OpTypeVector` <id> already declaring that
+  /// shape, if any.
+  llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t> VectorTypeByComponent;
+  /// Every `OpTypeFloat`'s own Result <id>.
+  llvm::DenseSet<uint32_t> FloatTypeIds;
+  /// The word index of the module's first `OpFunction` -- SPIR-V's own
+  /// logical layout requires every type/global declaration to precede
+  /// every function, so this is where a rewrite must insert any new one
+  /// -- or `Words.size()` if the module has no function at all.
+  size_t FuncStart;
+};
+
+/// Scans the whole module (not just one function -- an operand's defining
+/// instruction and the instruction using it may be far apart, e.g. across
+/// an inlined helper), building the type-resolution tables
+/// `TypeResolutionInfo` documents.
+TypeResolutionInfo scanModuleTypes(llvm::ArrayRef<uint32_t> Words) {
+  TypeResolutionInfo Info;
+  Info.FuncStart = Words.size();
+  for (size_t I = kSPIRVHeaderWords; I < Words.size();) {
+    uint32_t WordCount = Words[I] >> 16;
+    uint32_t Opcode = Words[I] & 0xffff;
+    if (WordCount == 0 || I + WordCount > Words.size())
+      break;
+    if (Opcode == kOpFunction && Info.FuncStart == Words.size())
+      Info.FuncStart = I;
+    if (Opcode == kOpTypeFloat && WordCount >= 2)
+      Info.FloatTypeIds.insert(Words[I + 1]);
+    if (Opcode == kOpTypeVector && WordCount >= 4) {
+      Info.VectorInfoByType[Words[I + 1]] = {Words[I + 2], Words[I + 3]};
+      Info.VectorTypeByComponent[{Words[I + 2], Words[I + 3]}] = Words[I + 1];
+    }
+    if (isKnownResultTypeProducer(Opcode) && WordCount >= 3)
+      Info.ValueType[Words[I + 2]] = Words[I + 1];
+    I += WordCount;
+  }
+  return Info;
+}
+
 /// Lowers SPIR-V's two "explicit-LOD projective" image-sampling opcodes --
 /// `OpImageSampleProjExplicitLod` (92) and `OpImageSampleProjDrefExplicitLod`
 /// (94) -- into the semantically equivalent non-projective opcodes MLIR's
@@ -219,49 +295,20 @@ bool isKnownResultTypeProducer(uint32_t Opcode) {
 /// emitting an incorrect divide.
 llvm::SmallVector<uint32_t>
 lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
-  if (Words.size() <= kSPIRVHeaderWords)
+  if (Words.size() <= kSPIRVHeaderWords ||
+      !containsOpcode(Words, {kOpImageSampleProjExplicitLod,
+                              kOpImageSampleProjDrefExplicitLod}))
     return llvm::SmallVector<uint32_t>(Words);
 
-  // First pass: scan the whole module (not just one function -- a
-  // Coordinate/Dref's defining instruction and the projective sample using
-  // it may be far apart, e.g. across an inlined helper) recording, for
-  // every recognized value-producing instruction, its Result <id> -> its
-  // Result-Type <id>; every `OpTypeFloat`'s own Result <id>; and every
-  // `OpTypeVector`'s (component-type <id>, component-count) -> its own
-  // Result <id>. Also locates the first `OpFunction`, the boundary before
-  // which any new `OpTypeVector` this pass must synthesize has to be
-  // inserted (SPIR-V's own logical layout requires all types to precede
-  // all functions), and whether either "Proj" opcode is present at all
-  // (letting every module without one skip the rest of this pass, the
-  // common case).
-  llvm::DenseMap<uint32_t, uint32_t> ValueType;
-  llvm::DenseMap<uint32_t, std::pair<uint32_t, uint32_t>> VectorInfoByType;
-  llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t> VectorTypeByComponent;
-  llvm::DenseSet<uint32_t> FloatTypeIds;
-  bool HasProjSample = false;
-  size_t FuncStart = Words.size();
-  for (size_t I = kSPIRVHeaderWords; I < Words.size();) {
-    uint32_t WordCount = Words[I] >> 16;
-    uint32_t Opcode = Words[I] & 0xffff;
-    if (WordCount == 0 || I + WordCount > Words.size())
-      break;
-    if (Opcode == kOpFunction && FuncStart == Words.size())
-      FuncStart = I;
-    if (Opcode == kOpImageSampleProjExplicitLod ||
-        Opcode == kOpImageSampleProjDrefExplicitLod)
-      HasProjSample = true;
-    if (Opcode == kOpTypeFloat && WordCount >= 2)
-      FloatTypeIds.insert(Words[I + 1]);
-    if (Opcode == kOpTypeVector && WordCount >= 4) {
-      VectorInfoByType[Words[I + 1]] = {Words[I + 2], Words[I + 3]};
-      VectorTypeByComponent[{Words[I + 2], Words[I + 3]}] = Words[I + 1];
-    }
-    if (isKnownResultTypeProducer(Opcode) && WordCount >= 3)
-      ValueType[Words[I + 2]] = Words[I + 1];
-    I += WordCount;
-  }
-
-  if (!HasProjSample || FuncStart == Words.size())
+  TypeResolutionInfo Info = scanModuleTypes(Words);
+  llvm::DenseMap<uint32_t, uint32_t> &ValueType = Info.ValueType;
+  llvm::DenseMap<uint32_t, std::pair<uint32_t, uint32_t>> &VectorInfoByType =
+      Info.VectorInfoByType;
+  llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t>
+      &VectorTypeByComponent = Info.VectorTypeByComponent;
+  llvm::DenseSet<uint32_t> &FloatTypeIds = Info.FloatTypeIds;
+  size_t FuncStart = Info.FuncStart;
+  if (FuncStart == Words.size())
     return llvm::SmallVector<uint32_t>(Words);
 
   uint32_t Bound = Words[3];
