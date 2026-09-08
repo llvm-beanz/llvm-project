@@ -174,10 +174,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
-// (roadmap L69) `VK_KHR_compute_shader_derivatives`'s two execution modes;
-// `DerivativeGroupLinearNV`/`QuadsNV` are this dialect's own (pre-`KHR`
-// promotion) spelling of the identical SPIR-V enumerants (see
+// (roadmap L69/L69(a)) `VK_KHR_compute_shader_derivatives`'s two execution
+// modes; `DerivativeGroupLinearNV`/`QuadsNV` are this dialect's own (pre-
+// `KHR` promotion) spelling of the identical SPIR-V enumerants (see
 // `resolveComputeDerivativeGroupMode`'s own comment).
+///
+/// A local size (`2x2x1`) with even X and Y dimensions, this mode's own
+/// spec precondition (roadmap L69(a)).
 const char *kDerivativeGroupQuadsComputeShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ComputeDerivativeGroupQuadsNV], [SPV_NV_compute_shader_derivatives]> {
   spirv.func @main() -> () "None" {
@@ -185,6 +188,18 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ComputeDerivativ
   }
   spirv.EntryPoint "GLCompute" @main
   spirv.ExecutionMode @main "LocalSize", 2, 2, 1
+  spirv.ExecutionMode @main "DerivativeGroupQuadsNV"
+}
+)mlir";
+
+/// The converse: a local size (`3x2x1`) whose X dimension is odd.
+const char *kDerivativeGroupQuadsOddXComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ComputeDerivativeGroupQuadsNV], [SPV_NV_compute_shader_derivatives]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionMode @main "LocalSize", 3, 2, 1
   spirv.ExecutionMode @main "DerivativeGroupQuadsNV"
 }
 )mlir";
@@ -525,14 +540,39 @@ TEST_F(PipelineTest,
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
-/// (roadmap L69) `DerivativeGroupQuadsKHR` is rejected outright at pipeline
-/// creation: this CPU target's compute-stage lane assignment has no notion
-/// of a 2x2 spatial tile (see `resolveComputeDerivativeGroupMode`'s own
-/// `ComputeDerivativeGroupMode::Quads` comment), so accepting it would
-/// silently compute wrong derivatives rather than reject cleanly.
-TEST_F(PipelineTest, RejectsDerivativeGroupQuads) {
+/// (roadmap L69(a)) `DerivativeGroupQuadsKHR` gets real support: this CPU
+/// target's compute-stage lane assignment now reinterprets its physical
+/// per-lane index into real 2x2 spatial tiles (see `WaveLowering.cpp`'s
+/// `decomposeQuadTiledComponent`), so a shader declaring it with even
+/// group-size X and Y dimensions compiles successfully.
+TEST_F(PipelineTest, AcceptsDerivativeGroupQuadsWithEvenXAndYDimensions) {
   VkShaderModule Module =
       createShaderModule(kDerivativeGroupQuadsComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// `DerivativeGroupQuadsKHR`'s own spec precondition requires the group
+/// size's X and Y dimensions to both be even (so every 2x2 tile is wholly
+/// contained in one workgroup); pipeline creation must reject a shader
+/// that violates it rather than silently forming a partial tile.
+TEST_F(PipelineTest, RejectsDerivativeGroupQuadsWithOddXDimension) {
+  VkShaderModule Module =
+      createShaderModule(kDerivativeGroupQuadsOddXComputeShader);
   ASSERT_NE(Module, VK_NULL_HANDLE);
 
   VkComputePipelineCreateInfo CreateInfo{};

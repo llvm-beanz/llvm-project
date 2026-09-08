@@ -91,13 +91,20 @@ enum class ComputeDerivativeGroupMode {
   /// `DerivativeGroupQuadsKHR`: derivatives are computed across a 2x2 tile
   /// of invocations grouped by their `LocalInvocationId.xy`'s low bit in
   /// each of X and Y (`(2m+{0,1}, 2n+{0,1})`) -- the spatial analogue of a
-  /// fragment shader's own guaranteed 2x2 helper-invocation quad. This CPU
-  /// target's compute-stage lane assignment (`feme::cpu::SIMDizePass`) is a
-  /// flat `LocalInvocationIndex`-ordered widening with no notion of a
-  /// spatial X/Y tile at all, so this mode is not yet supported (see
-  /// roadmap L69(a)); `resolveComputeDerivativeGroupMode`'s caller rejects
-  /// pipeline creation with a clear diagnostic rather than silently
-  /// computing a wrong derivative.
+  /// fragment shader's own guaranteed 2x2 helper-invocation quad. Support
+  /// (roadmap L69(a)): `feme::vulkan::compileComputePipeline` requires the
+  /// entry point's resolved group size X/Y dimensions to both be even (this
+  /// mode's own spec precondition), then stamps a
+  /// `"feme.compute.derivative.group"="quads"` function attribute onto the
+  /// entry point that `feme::cpu::SIMDizePass`
+  /// (`functionUsesQuadTiledComputeDerivatives`) reads to reinterpret its
+  /// otherwise-flat `LocalInvocationIndex`-ordered lane assignment into real
+  /// 2x2 spatial tiles (`WaveLowering.cpp`'s `decomposeQuadTiledComponent`/
+  /// `buildQuadTiledFlattenedThreadIdInGroup`), so that `lowerDerivative`'s
+  /// existing fragment-quad shuffle math -- unchanged, since it already
+  /// assumes every 4 consecutive (now quad-tiled) physical lanes are one
+  /// 2x2 tile's four corners -- computes the spec-correct answer for this
+  /// mode too.
   Quads,
   /// `DerivativeGroupLinearKHR`: derivatives are computed across any 4
   /// consecutive `LocalInvocationIndex` values (`4m+{0,1,2,3}`), each

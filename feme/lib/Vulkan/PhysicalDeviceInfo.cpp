@@ -1321,16 +1321,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // so it must be listed here too.
       {VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME,
        VK_EXT_GRAPHICS_PIPELINE_LIBRARY_SPEC_VERSION},
-      // (roadmap L69) `compileComputePipeline` (Pipeline.cpp) now resolves
-      // and validates a `DerivativeGroupLinearKHR`/`QuadsKHR` execution
-      // mode via `resolveComputeDerivativeGroupMode` (GroupSize.cpp), and
-      // `computeDerivativeGroupLinear` is genuinely advertised true
+      // (roadmap L69/L69(a)) `compileComputePipeline` (Pipeline.cpp) now
+      // resolves and validates a `DerivativeGroupLinearKHR`/`QuadsKHR`
+      // execution mode via `resolveComputeDerivativeGroupMode`
+      // (GroupSize.cpp); both `computeDerivativeGroupLinear` and
+      // `computeDerivativeGroupQuads` are genuinely advertised true
       // (`EntryPoints.cpp`) -- this CPU target's compute-stage lane
-      // assignment is already `LocalInvocationIndex`-ordered, matching
-      // `DerivativeGroupLinearKHR`'s own spec-defined grouping exactly.
-      // `computeDerivativeGroupQuads` stays false and is rejected outright
-      // at pipeline-creation time (roadmap L69(a) tracks the real
-      // invocation-scheduling redesign a genuinely correct answer needs).
+      // assignment either already matches (`Linear`) or is reinterpreted
+      // into real 2x2 spatial tiles to match (`Quads`, see
+      // `WaveLowering.cpp`'s `decomposeQuadTiledComponent`) each mode's
+      // own spec-defined grouping.
       {VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME,
        VK_KHR_COMPUTE_SHADER_DERIVATIVES_SPEC_VERSION},
   };

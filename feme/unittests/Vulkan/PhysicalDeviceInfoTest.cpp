@@ -1920,17 +1920,17 @@ TEST_F(PhysicalDeviceProperties2Test,
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
-       ComputeShaderDerivativesLinearModeIsImplementedAndAdvertised) {
-  // Roadmap L69: `compileComputePipeline` (Pipeline.cpp) now resolves and
-  // validates a `DerivativeGroupLinearKHR`/`QuadsKHR` execution mode via
-  // `resolveComputeDerivativeGroupMode` (GroupSize.cpp); this CPU target's
-  // compute-stage lane assignment is already `LocalInvocationIndex`-
-  // ordered, matching `DerivativeGroupLinearKHR`'s own spec-defined
-  // grouping exactly (see `WaveLowering.cpp`'s `lowerDerivative`), so
-  // `computeDerivativeGroupLinear` is genuinely advertised true.
-  // `computeDerivativeGroupQuads` stays false and is rejected outright at
-  // pipeline-creation time -- see `PipelineTest.cpp`'s own
-  // `RejectsDerivativeGroupQuads`/`AcceptsDerivativeGroupLinear*` tests
+       ComputeShaderDerivativesBothModesAreImplementedAndAdvertised) {
+  // Roadmap L69/L69(a): `compileComputePipeline` (Pipeline.cpp) resolves
+  // and validates a `DerivativeGroupLinearKHR`/`QuadsKHR` execution mode
+  // via `resolveComputeDerivativeGroupMode` (GroupSize.cpp); this CPU
+  // target's compute-stage lane assignment either already matches
+  // (`Linear`, see `WaveLowering.cpp`'s `lowerDerivative`) or is
+  // reinterpreted into real 2x2 spatial tiles to match (`Quads`, see
+  // `decomposeQuadTiledComponent`) each mode's own spec-defined grouping,
+  // so both `computeDerivativeGroupLinear` and `computeDerivativeGroupQuads`
+  // are genuinely advertised true -- see `PipelineTest.cpp`'s own
+  // `AcceptsDerivativeGroupQuads*`/`AcceptsDerivativeGroupLinear*` tests
   // for the real pipeline-creation coverage.
   VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR DerivFeatures{};
   DerivFeatures.sType =
@@ -1940,7 +1940,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features2.pNext = &DerivFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
-  EXPECT_EQ(DerivFeatures.computeDerivativeGroupQuads, VK_FALSE);
+  EXPECT_EQ(DerivFeatures.computeDerivativeGroupQuads, VK_TRUE);
   EXPECT_EQ(DerivFeatures.computeDerivativeGroupLinear, VK_TRUE);
 
   // `meshAndTaskShaderDerivatives` stays false: this fix was scoped to the

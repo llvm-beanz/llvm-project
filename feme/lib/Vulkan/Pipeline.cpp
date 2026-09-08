@@ -519,8 +519,8 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
                              "resolved group size exceeds "
                              "maxComputeWorkGroupSize/Invocations");
 
-  // (roadmap L69) `VK_KHR_compute_shader_derivatives`: an entry point that
-  // declares `DerivativeGroupLinearKHR` gets real support (see
+  // (roadmap L69/L69(a)) `VK_KHR_compute_shader_derivatives`: an entry point
+  // that declares `DerivativeGroupLinearKHR` gets real support (see
   // `WaveLowering.cpp`'s `lowerDerivative`, whose existing fragment-quad
   // shuffle math already computes this mode's own spec-defined answer
   // unchanged, since this CPU target's compute-stage lane assignment is
@@ -528,23 +528,25 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   // itself uses), gated only by the same "total invocation count is a
   // multiple of 4" requirement the Vulkan specification itself imposes on
   // this mode (every 4-lane group this mode forms must be wholly contained
-  // in one workgroup). `DerivativeGroupQuadsKHR` is rejected outright:
-  // giving it a genuinely correct answer needs this CPU target's own
-  // compute-stage invocation scheduling to actually group lanes into 2x2
-  // spatial tiles, which no code here does yet (roadmap L69(a) tracks that
-  // real invocation-scheduling redesign as its own follow-on row) --
-  // rejecting pipeline creation here is deliberately preferred over
-  // silently compiling a shader whose derivatives would compute the wrong
-  // values.
+  // in one workgroup). `DerivativeGroupQuadsKHR` also gets real support (see
+  // `WaveLowering.cpp`'s `decomposeQuadTiledComponent`/
+  // `buildQuadTiledFlattenedThreadIdInGroup`, which reinterpret the physical
+  // per-lane index into real 2x2 spatial tiles so the same fragment-quad
+  // shuffle math applies here too), gated by this mode's own spec
+  // precondition that the group size's X and Y dimensions are both even
+  // (which also implies `Invocations % 4 == 0`, so no separate check of that
+  // is needed for this mode).
   Expected<ComputeDerivativeGroupMode> DerivativeGroupMode =
       resolveComputeDerivativeGroupMode(Module->words(), EntryPoint);
   if (!DerivativeGroupMode)
     return DerivativeGroupMode.takeError();
-  if (*DerivativeGroupMode == ComputeDerivativeGroupMode::Quads)
+  if (*DerivativeGroupMode == ComputeDerivativeGroupMode::Quads &&
+      ((*GroupSize)[0] % 2 != 0 || (*GroupSize)[1] % 2 != 0))
     return createStringError(
         inconvertibleErrorCode(),
-        "DerivativeGroupQuadsKHR is not yet supported (roadmap L69(a)); "
-        "only DerivativeGroupLinearKHR is implemented");
+        "DerivativeGroupQuadsKHR requires the entry point's group size X "
+        "(%u) and Y (%u) dimensions to both be even",
+        (*GroupSize)[0], (*GroupSize)[1]);
   if (*DerivativeGroupMode == ComputeDerivativeGroupMode::Linear &&
       Invocations % 4 != 0)
     return createStringError(
@@ -580,6 +582,12 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
          Twine(GroupSize->at(2)))
             .str();
     EntryFn->addFnAttr("hlsl.numthreads", NumThreads);
+    // (roadmap L69(a)) Read by `SIMDize.cpp`'s
+    // `functionUsesQuadTiledComputeDerivatives`, which threads it through to
+    // `WaveLowering.cpp`'s quad-tiled lane decomposition for this entry
+    // point's identity builtins.
+    if (*DerivativeGroupMode == ComputeDerivativeGroupMode::Quads)
+      EntryFn->addFnAttr("feme.compute.derivative.group", "quads");
   }
 
   feme::cpu::JITOptions Opts;
