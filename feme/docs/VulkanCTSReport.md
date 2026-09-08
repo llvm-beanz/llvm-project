@@ -32244,3 +32244,40 @@ change needed -- this is a pure CPU-lowering addressing-scheme fix
 inside `feme-cpu-wrap-hull`, touching no new Vulkan feature or extension
 surface (confirmed: neither file mentions L37/L77 today, and none
 should).
+
+## L77: tessellation domain-shape execution mode merge across hull/domain entries
+
+`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test` (this row's
+own two named repros, both surfaced by L37's fix): a real
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` before/after comparison via
+`offloader -debug-layer` (rebuilt ICD, `git stash`/`git stash pop`
+between attempts) confirms the fix: without it,
+`vkCreateGraphicsPipelines` fails on exactly this row's own diagnostic
+("the tessellation-evaluation stage declares no tessellation domain
+execution mode"); with it, `offloader`'s own log shows
+`"Graphics Pipeline created."` for both, and command submission
+completes with no further pipeline-creation-time error. Both repros
+still separately fail their own `SystemValues` result check afterward
+(the real ICD's `ResultBuffer` comes back all-zero) -- a new, distinct,
+further-downstream gap, filed as roadmap L78, out of this row's own
+scope.
+
+### Real CTS re-run
+
+Re-ran the identical `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist used for L37's own CTS re-run: unchanged --
+still 13/28 cases reach a result before the group's own already-
+documented, pre-existing segfault, and every one of those 13 still fails
+on the same two already-tracked, unrelated gaps
+(`feme-cpu-wrap-patch-constant`'s masked-output-store gap and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction) as
+before this fix -- confirming no regression, though (as for L37) this
+particular CTS group still cannot directly exercise this row's own
+diagnostic either before or after the fix; the real confirmation is the
+offloader-based before/after comparison above.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-side reflection/merge fix (a new
+`TessellationState::HasDomainShape` flag plus a fallback in
+`GraphicsPipeline.cpp`'s own merge step), touching no new Vulkan feature
+or extension surface.
