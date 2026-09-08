@@ -71579,3 +71579,152 @@ clean before each commit; no stray debug changes (no temporary print
 statements were left anywhere -- `FEME_VULKAN_LOG_CREATION_ERRORS` was
 sufficient for the whole investigation, so a debug-print approach was
 never actually needed).
+
+# L77 session: merging a tessellation pair's domain-shape execution modes across two entries
+
+## Starting point
+
+L77 was filed by the immediately preceding (L37) session: once L37's fix
+let `Feature/Semantics/{HullSystemValues,DomainSystemValues}.test` clear
+`HullWrapperPass` for the first time, both hit a new, previously-hidden
+diagnostic further along in `vkCreateGraphicsPipelines`: "the
+tessellation-evaluation stage declares no tessellation domain execution
+mode (Triangles/Quads/Isolines)". The filed root cause was solid (a real
+`spirv-dis` finding from the prior session), but the fix itself was
+explicitly left unconfirmed in shape.
+
+## Confirming the real DXC output shape myself
+
+Rather than trust the prior session's `spirv-dis` finding secondhand, I
+recompiled the exact `hull.hlsl`/`domain.hlsl` pair from
+`HullSystemValues.test` fresh with `dxc -spirv` and ran `spirv-dis` on
+both outputs myself. Confirmed exactly as filed: the hull
+(`TessellationControl`) entry declares `Triangles`/`SpacingEqual`/
+`VertexOrderCw`/`OutputVertices` all together; the domain
+(`TessellationEvaluation`) entry declares only `Triangles`. This
+"redundant re-verification instead of trusting a filed claim" habit has
+paid off before in this project's own history and did again here --
+it's cheap insurance against a stale or slightly-off root-cause note.
+
+## Choosing where the fix belongs
+
+The roadmap's own filed text speculated the fix might belong in
+`ConvertSPIRVToLLVMPass.cpp`, "merging both entry points' tessellation
+execution-mode fields before applying attributes". I considered this
+but rejected it once I looked at how that pass actually runs: it
+processes one SPIR-V module (one entry point, in this case, since hull
+and domain are compiled to entirely separate `.o` files/modules) at a
+time, with no visibility into a sibling module's own execution modes at
+all. There is no "both entry points" available to merge at that layer
+for this real input shape -- the hull and domain SPIR-V binaries are
+two independently-converted modules by the time either one reaches this
+pass.
+
+The one place that genuinely *does* have both halves in hand is
+`GraphicsPipeline.cpp`'s own `compileTessellationPipeline`-shaped code,
+since a hull/domain pair is always compiled and merged there for a
+single pipeline. So the fix is a two-part change:
+1. `Tessellation.cpp`/`PatchPipeline.h`: add a `HasDomainShape` bool to
+   `TessellationState`, set whenever `getTessellationState` actually
+   found a real domain-shape attribute group on *whichever* entry point
+   it was asked about -- not assuming it's always the domain entry.
+2. `GraphicsPipeline.cpp`: when merging, prefer the domain entry's own
+   domain shape if `HasDomainShape` is set there (preserving the
+   original, still-valid Khronos-spec-implied split for any module that
+   really does declare it that way), falling back to the hull entry's
+   `ControlPointState` if the domain entry's own is absent. Only reject
+   the pipeline if *neither* half has one.
+
+This is a genuinely narrow, surgical fix -- no change to
+`ConvertSPIRVToLLVMPass.cpp`'s own per-entry-point attribute logic at
+all, which stays exactly what it was (a pure function of one entry
+point's own execution modes), with the "which real declaration wins"
+policy question kept entirely in the one place, `GraphicsPipeline.cpp`,
+that has the full picture.
+
+## Tests
+
+Added `TessellationTest.RoundTripsDomainShapeOnControlPointEntry`: a
+hull-shaped function carrying both `OutputControlPointCount` and the
+full domain-shape group, confirming both round-trip together and
+`HasDomainShape` is set. At the `GraphicsPipelineTest` level, added two
+new hand-written SPIR-V-dialect fixtures modeled directly on my own
+`spirv-dis` findings (`TessControlWithDomainShapeSource`, with the full
+group plus `OutputVertices`; `TessEvalTrianglesOnlySource`, with only
+`Triangles`) and two tests:
+`AcceptsTessellationDomainShapeDeclaredOnControlEntry` (the real DXC
+shape now succeeds, and the merged state correctly reflects the control
+entry's own domain shape) and
+`RejectsTessellationPipelineWithNoDomainShapeAnywhere` (pairing
+`TessControlSource`, which only ever declared `OutputVertices` with no
+domain shape at all, against `TessEvalTrianglesOnlySource` -- confirming
+a genuinely malformed pair, missing the domain shape from both halves,
+is still correctly rejected, not silently accepted by the new fallback).
+All pass; full `ninja check-feme`: 2767/2826 Passed (up by exactly 3),
+59 Unsupported, 0 Failed.
+
+## Real-ICD before/after confirmation, and discovering L78
+
+Rebuilt `feme_vulkan` and re-ran both of L77's own named repros through
+`offloader -debug-layer` with `FEME_VULKAN_LOG_CREATION_ERRORS=1`. A
+`git stash`/rebuild/re-run/`git stash pop`/rebuild/re-run comparison
+confirmed: without the fix, `vkCreateGraphicsPipelines` fails with
+exactly this row's own diagnostic (`VkResult = -3`); with the fix, the
+log shows "Graphics Pipeline created." for both, with no further
+pipeline-creation-time error -- real, concrete progress.
+
+Both repros still separately fail, though: the offloader's own built-in
+`SystemValues` comparison reports the real `ResultBuffer` comes back
+entirely zero against a non-zero expected buffer. This is a genuinely
+new, different, further-downstream gap -- pipeline creation and command
+submission both now succeed cleanly, so whatever is going wrong is
+somewhere in the tessellator's real per-patch execution, the hull/
+domain/patch-constant stage-wrapping chain's real storage addressing,
+or the pixel shader's own read-back, none of which could be reached at
+all before this fix. I made one quick attempt to narrow this down
+further by patching a scratch copy of the test's own `pipeline.yaml` to
+also compare the raw `RenderTarget` buffer against an expected
+all-red fill (to check whether rasterization produced any fragments at
+all) -- this hit an unrelated `offloader` YAML-schema restriction
+(`OutputProps`-tagged buffer resources don't accept a `Data:` key at
+all, presumably since they're modeled as write-only render targets) and
+I did not pursue a workaround, since a real reduction of this new gap
+is its own significant undertaking, matching this project's own
+"needs its own real IR reduction" pattern for newly-surfaced gaps rather
+than something to squeeze into this row's own session. Filed as roadmap
+L78, kept as a separate top-level row (not nested under L77) since it's
+a genuinely distinct issue and, per this project's own now-established
+convention, milestone nesting should stay at most one lowercase letter
+deep.
+
+## Docs and CTS
+
+Updated `FeMeGraphicsDesign.md`'s existing L37/L77 status note (left
+over from the prior session, describing L77 as "still open" with an
+unconfirmed fix shape) to describe the actual, now-landed fix and why it
+lives in `GraphicsPipeline.cpp` rather than the import pass. Re-ran the
+identical `dEQP-VK.tessellation.shader_input_output.*` (28-case)
+caselist L37's own session used: unchanged, 13/28 reaching a result
+before the group's own already-documented pre-existing segfault, all 13
+still failing on the same two already-tracked, unrelated gaps as before
+-- confirming no regression, though (like L37) this particular CTS group
+still can't directly exercise this row's own diagnostic; the real
+confirmation is the offloader-based before/after comparison above.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+by direct inspection, no change needed (a pure CPU-side reflection/merge
+fix, no new Vulkan feature or extension surface).
+
+## Wrap-up
+
+Final `ninja check-feme`: 2767/2826 Passed, 59 Unsupported, 0 Failed.
+Committed in five small, separate commits: (1) the `TessellationState`/
+`getTessellationState` `HasDomainShape` addition plus its unit test, (2)
+the `GraphicsPipeline.cpp` merge fix plus its two new
+`GraphicsPipelineTest` cases, (3) the `FeMeGraphicsDesign.md` status-note
+update, (4) the `Roadmap.md` L77 strikethrough + L78 filing, and (5)
+`VulkanCTSReport.md`'s L77 section, followed by this `agent_thoughts.md`
+entry, last, on its own. `git status` clean before each commit; no
+stray debug changes or scratch files left behind (the temporary
+`/tmp/l77`/`/tmp/l77diag` scratch directories used for the fresh `dxc`
+recompile and the unsuccessful `RenderTarget`-comparison probe were both
+cleaned up once no longer needed).
