@@ -5407,7 +5407,211 @@ TEST(SPIRVResourceLoweringTest, LeavesArray2DQuerySizeLodHandleAlone) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-// Roadmap L73: `OpImageQuerySamples` (imported as a call against the SPIR-V
+// Roadmap L74: unlike `OpImageQuerySizeLod` (whose `Plain2D`-only builder
+// result shape `LeavesArray2DQuerySizeLodHandleAlone` above confirms is
+// still not widened), `OpImageQueryLevels`'s own scalar `i32` result never
+// varies by shape, so its own shape gate is widened to every classifiable
+// non-multisampled shape with no builder change at all. One test per
+// shape below confirms each is now accepted, alongside a negative test
+// confirming `Plain2DMS` is still correctly rejected (no
+// `textureQueryLevels()` GLSL overload exists for a multisampled
+// sampler).
+TEST(SPIRVResourceLoweringTest, LowersArray2DQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 1, 0, 1, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersPlain1DQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 0, 0, 0, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersArray1DQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 0, 0, 1, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersPlain3DQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 2, 0, 0, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersCubeQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 3, 0, 0, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersCubeArrayQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 3, 0, 1, 0, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 3, 0, 1, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+// Roadmap L74: the identical widening for a *storage* image handle
+// (`hasOnlySupportedStorageImageUses`'s own mirror of the sampled-image
+// check above) -- an `Array2D` storage image's own `OpImageQueryLevels`
+// use is now accepted too.
+TEST(SPIRVResourceLoweringTest, LowersArray2DStorageQueryLevels) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 1, 0, 1, 0, 2, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 1, 0, 1, 0, 2, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+}
+
+// Negative regression: `Plain2DMS` (a multisampled sampled image) must
+// still be rejected for `OpImageQueryLevels` -- GLSL has no
+// `textureQueryLevels()` overload for a multisampled sampler, so no real
+// CTS case exercises this combination, and this project's own convention
+// (see roadmap L73's own `LeavesPlain2DMSSampleHandleAlone` precedent) is
+// to keep an unverified widening explicitly rejected rather than silently
+// accepted.
+TEST(SPIRVResourceLoweringTest, LeavesPlain2DMSQueryLevelsHandleAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %levels = call i32 @"feme.query.levels.0"(
+          target("spirv.Image", float, 1, 0, 0, 1, 1, 0) %img)
+      ret i32 %levels
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.levels.0"(
+        target("spirv.Image", float, 1, 0, 0, 1, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 // importer's own synthesized `feme.query.samples.*` function, see
 // `SPIRVImporter.cpp`'s own `lowerImageQueryOpcodes`) lowers to
 // `feme.cpu.image.querysamples.i32` for a `Plain2DMS` sampled image --
