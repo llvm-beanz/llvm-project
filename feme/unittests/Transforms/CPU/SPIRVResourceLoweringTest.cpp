@@ -1444,6 +1444,176 @@ TEST(SPIRVResourceLoweringTest, LowersAFetchLevelWithNonzeroOffsetToImageLoad) {
   EXPECT_EQ(Y->getOpcode(), Instruction::Add);
 }
 
+TEST(SPIRVResourceLoweringTest, LowersPlain1DFetchLevelToImageLoad) {
+  // Roadmap L72(c): `Plain1D`'s own counterpart to
+  // `LowersImageFetchLevelToImageLoad` -- widening `isFetchLevelIntrinsic`'s
+  // shape gate beyond `Plain2D`/`Array2D`, confirmed via a real re-run of
+  // roadmap L72's own 1,375-case caselist to have every remaining "cannot
+  // normalize" failure be exactly a `texelfetch.*1d*`/`texelfetch.*3d*`
+  // variant. `Plain1D`'s own coordinate is a bare scalar `i32`, not a
+  // 1-element vector (see `isCoordN`'s own comment), so no
+  // `CreateExtractElement` is needed before threading it (and the real
+  // `Lod`) through to `createLoad1D`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(i32 %coord, i32 %lod) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %v = call <4 x float> @llvm.spv.resource.load.level.timg(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img, i32 %coord,
+          i32 %lod, i32 0)
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <4 x float> @llvm.spv.resource.load.level.timg(
+        target("spirv.Image", float, 0, 0, 0, 0, 1, 0), i32, i32, i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.1d.v4f32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(4)->getName(), "lod");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersAPlain1DFetchLevelWithNonzeroOffsetToImageLoad) {
+  // Roadmap L72(c): `Plain1D`'s own counterpart to
+  // `LowersAFetchLevelWithNonzeroOffsetToImageLoad` -- `Plain1D`'s own
+  // `ConstOffset` is a bare scalar `i32` (mirroring `isSupportedOffset`'s
+  // own `Is1D` acceptance), folded directly into the lone `X` coordinate
+  // via a plain `add` rather than an `extractelement`-then-`add` pair.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(i32 %coord, i32 %lod) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %v = call <4 x float> @llvm.spv.resource.load.level.timg(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img, i32 %coord,
+          i32 %lod, i32 3)
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <4 x float> @llvm.spv.resource.load.level.timg(
+        target("spirv.Image", float, 0, 0, 0, 0, 1, 0), i32, i32, i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.1d.v4f32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(4)->getName(), "lod");
+  auto *X = dyn_cast<BinaryOperator>(Load->getArgOperand(3));
+  ASSERT_TRUE(X);
+  EXPECT_EQ(X->getOpcode(), Instruction::Add);
+}
+
+TEST(SPIRVResourceLoweringTest, LowersArray1DFetchLevelToImageLoadArray) {
+  // Roadmap L72(c): `Array1D`'s own counterpart to
+  // `LowersImageArrayFetchLevelToImageLoadArray` -- the 2-wide coordinate's
+  // 2nd component is the array layer, threaded through as
+  // `Load1DArray`'s own `Layer` operand untouched by any real offset,
+  // alongside the real `Mip`, mirroring `Array2D`'s identical precedent.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %coord, i32 %lod) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %v = call <4 x float> @llvm.spv.resource.load.level.timg(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img, <2 x i32> %coord,
+          i32 %lod, i32 0)
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <4 x float> @llvm.spv.resource.load.level.timg(
+        target("spirv.Image", float, 0, 0, 1, 0, 1, 0), <2 x i32>, i32, i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.1darray.v4f32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(5)->getName(), "lod");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerPlain1DFetchLevelToImageLoadV4I32) {
+  // Roadmap L72(c): mirrors `LowersIntegerImageFetchLevelToImageLoadV4I32`'s
+  // own integer-channel distinction for `Plain1D`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(i32 %coord, i32 %lod) {
+      %img = call target("spirv.Image", i32, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %v = call <4 x i32> @llvm.spv.resource.load.level.timg(
+          target("spirv.Image", i32, 0, 0, 0, 0, 1, 0) %img, i32 %coord,
+          i32 %lod, i32 0)
+      ret <4 x i32> %v
+    }
+    declare target("spirv.Image", i32, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <4 x i32> @llvm.spv.resource.load.level.timg(
+        target("spirv.Image", i32, 0, 0, 0, 0, 1, 0), i32, i32, i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.1d.v4i32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(4)->getName(), "lod");
+}
+
+TEST(SPIRVResourceLoweringTest, LowersPlain3DFetchLevelToImageLoad) {
+  // Roadmap L72(c): `Plain3D`'s own counterpart to
+  // `LowersImageFetchLevelToImageLoad` -- the 3-wide coordinate's own
+  // `X`/`Y`/`Z` components each fold in the matching component of a real
+  // `ConstOffset` (mirroring `Array2D`'s own 2-component fold, extended to
+  // a 3rd), threaded through to `createLoad3D` alongside the real `Lod`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x i32> %coord, i32 %lod) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %v = call <4 x float> @llvm.spv.resource.load.level.timg(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img, <3 x i32> %coord,
+          i32 %lod, <3 x i32> <i32 1, i32 -2, i32 3>)
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <4 x float> @llvm.spv.resource.load.level.timg(
+        target("spirv.Image", float, 2, 0, 0, 0, 1, 0), <3 x i32>, i32, <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.3d.v4f32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(6)->getName(), "lod");
+  auto *X = dyn_cast<BinaryOperator>(Load->getArgOperand(3));
+  ASSERT_TRUE(X);
+  EXPECT_EQ(X->getOpcode(), Instruction::Add);
+  auto *Y = dyn_cast<BinaryOperator>(Load->getArgOperand(4));
+  ASSERT_TRUE(Y);
+  EXPECT_EQ(Y->getOpcode(), Instruction::Add);
+  auto *Z = dyn_cast<BinaryOperator>(Load->getArgOperand(5));
+  ASSERT_TRUE(Z);
+  EXPECT_EQ(Z->getOpcode(), Instruction::Add);
+}
+
 TEST(SPIRVResourceLoweringTest, ClampsAnArrayedImageBindingIndex) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

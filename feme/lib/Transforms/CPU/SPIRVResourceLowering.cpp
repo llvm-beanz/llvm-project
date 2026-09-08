@@ -1565,29 +1565,43 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L72: an explicit-mip `texelFetch()` (`llvm.spv.resource.
-    // load.level`, see `isFetchLevelIntrinsic`'s own doc) against a
-    // sampled `Plain2D`/`Array2D` handle -- the second, `Lod`-carrying
-    // raised form of `OpImageFetch`, alongside the zero-mip
-    // `getpointer`-based one just below. Scoped identically to that path
-    // (`Plain2D`/`Array2D` only, per the very next check's own comment).
-    // Roadmap L72(b): the intrinsic's fourth operand (`Offset`) is now
-    // allowed to be a real, nonzero `ConstOffset` too (GLSL's
-    // `texelFetchOffset()`), validated the same way an ordinary sample's
-    // own `ConstOffset` is (`AllowArray2D=true`, since `texelFetchOffset()`
-    // against `Array2D` carries the identical 2-wide `(X, Y)` offset an
-    // ordinary `Array2D` sample's own `ConstOffset` does -- confirmed via
-    // a real `deqp-vk` SPIR-V capture).
+    // Roadmap L72/L72(b)/L72(c): an explicit-mip `texelFetch()`
+    // (`llvm.spv.resource.load.level`, see `isFetchLevelIntrinsic`'s own
+    // doc) against a sampled handle -- the second, `Lod`-carrying raised
+    // form of `OpImageFetch`, alongside the zero-mip `getpointer`-based
+    // one just below. `Plain2D`/`Array2D` were this intrinsic's original
+    // scope (roadmap L72); `Plain1D`/`Array1D`/`Plain3D` (roadmap L72(c))
+    // widen it to every shape the zero-mip `getpointer` fetch path below
+    // already supports for a *storage* image, since `texelFetch()` always
+    // supplies an explicit LOD for every shape GLSL defines it for, not
+    // just `Plain2D`/`Array2D` -- confirmed via a real re-run of roadmap
+    // L72's own 1,375-case caselist, whose every remaining "cannot
+    // normalize" failure was exactly a `texelfetch.*1d*`/`texelfetch.*3d*`
+    // variant. `Cube`/`CubeArray`/`Plain2DMS`/`Array2DMS` remain excluded,
+    // mirroring the same restrictions the zero-mip path documents just
+    // below. `SampleCoordWidth` (computed once above) already gives the
+    // right fetch coordinate width for every shape accepted here --
+    // `texelFetch()`'s own integer coordinate has the identical
+    // dimensionality an ordinary sample's own coordinate does, just with
+    // no `Dref`-style widening to account for (fetch has no depth
+    // comparison). Roadmap L72(b): the intrinsic's fourth operand
+    // (`Offset`) is now allowed to be a real, nonzero `ConstOffset` too
+    // (GLSL's `texelFetchOffset()`), validated the same way an ordinary
+    // sample's own `ConstOffset` is (`AllowArray2D=true`/
+    // `AllowPlain1DArray1D=true`, mirroring the identical acceptance
+    // `isSupportedOffset` already grants an ordinary sample against these
+    // same shapes -- confirmed via a real `deqp-vk` SPIR-V capture).
     if (isFetchLevelIntrinsic(*CI)) {
-      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
+      if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
+          Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
-      if (!isCoordN(CI->getArgOperand(1), FetchCoordWidth, /*Float=*/false) ||
+      if (!isCoordN(CI->getArgOperand(1), SampleCoordWidth, /*Float=*/false) ||
           !CI->getArgOperand(2)->getType()->isIntegerTy(32) ||
           !isSupportedOffset(CI->getArgOperand(3), Shape,
-                             /*AllowArray2D=*/true) ||
+                             /*AllowArray2D=*/true,
+                             /*AllowPlain1DArray1D=*/true) ||
           !(IsInteger ? isV4I32(CI->getType()) : isV4F32(CI->getType())))
         return false;
       continue;
@@ -3588,7 +3602,7 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L72/L72(b): an explicit-mip `texelFetch()`/
+      // Roadmap L72/L72(b)/L72(c): an explicit-mip `texelFetch()`/
       // `texelFetchOffset()` (`llvm.spv.resource.load.level`, see
       // `isFetchLevelIntrinsic`'s own doc) -- unlike the zero-mip
       // `getpointer`-based fetch handled below (whose call itself is only
@@ -3598,26 +3612,73 @@ void lowerImageAccesses(
       // extraction and the runtime call happen right here, rather than
       // falling through to that shared `LoadInst`-dispatch switch below.
       // `hasOnlySupportedImageUses` already restricted this branch to
-      // `Plain2D`/`Array2D`. Neither `createLoad2D`/`createLoad2DI32` nor
-      // their `Array2D` counterparts take an offset operand of their own
-      // (unlike the sampling helpers' `OffsetX`/`OffsetY`), so a real
-      // `ConstOffset` (`hasOnlySupportedImageUses` already validated it
-      // via `isSupportedOffset`) is folded into `X`/`Y` themselves here
-      // instead, before the runtime call.
+      // `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D`. None of
+      // `createLoad1D`/`createLoad1DArray`/`createLoad2D`/
+      // `createLoad2DArray`/`createLoad3D` (nor their `I32` counterparts)
+      // take an offset operand of their own (unlike the sampling helpers'
+      // `OffsetX`/`OffsetY`), so a real `ConstOffset`
+      // (`hasOnlySupportedImageUses` already validated it via
+      // `isSupportedOffset`) is folded into the coordinate components
+      // themselves here instead, before the runtime call. `Plain1D`'s own
+      // `ConstOffset` is a bare scalar `i32` (mirroring
+      // `isSupportedOffset`'s own `Is1D` acceptance), so only its lone `X`
+      // component ever needs folding; `Array1D`'s own 2-wide `(x, layer)`
+      // coordinate shares that same scalar-offset convention -- only `X`
+      // folds in a real offset, `Layer` is untouched, since SPIR-V's own
+      // `ConstOffset` dimensionality tracks the image's real dimension
+      // count, excluding any array layer (see `isSupportedOffset`'s own
+      // comment).
       if (isFetchLevelIntrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         Value *Coord = CI->getArgOperand(1);
         Value *Lod = CI->getArgOperand(2);
         Value *Offset = CI->getArgOperand(3);
-        Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
-        Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
-        Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
-        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-        X = Builder.CreateAdd(X, OffsetX);
-        Y = Builder.CreateAdd(Y, OffsetY);
         bool IsInteger = isV4I32(CI->getType());
         CallInst *Fetched;
-        if (Shape == ImageShape::Array2D) {
+        switch (Shape) {
+        case ImageShape::Plain1D: {
+          Value *X = Builder.CreateAdd(Coord, Offset);
+          Fetched = IsInteger ? createLoad1DI32(Builder, Env, ImageIndex, X,
+                                                Lod, Mask, CI->getName())
+                              : createLoad1D(Builder, Env, ImageIndex, X, Lod,
+                                             Builder.getInt32(0), Mask,
+                                             CI->getName());
+          break;
+        }
+        case ImageShape::Array1D: {
+          Value *X = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{0}), Offset);
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
+          Fetched =
+              IsInteger
+                  ? createLoad1DArrayI32(Builder, Env, ImageIndex, X, Layer,
+                                         Lod, Mask, CI->getName())
+                  : createLoad1DArray(Builder, Env, ImageIndex, X, Layer, Lod,
+                                      Builder.getInt32(0), Mask, CI->getName());
+          break;
+        }
+        case ImageShape::Plain2D: {
+          Value *X = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{0}),
+              Builder.CreateExtractElement(Offset, uint64_t{0}));
+          Value *Y = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{1}),
+              Builder.CreateExtractElement(Offset, uint64_t{1}));
+          Fetched =
+              IsInteger
+                  ? createLoad2DI32(Builder, Env, ImageIndex, X, Y, Lod,
+                                    Builder.getInt32(0), Mask, CI->getName())
+                  : createLoad2D(Builder, Env, ImageIndex, X, Y, Lod,
+                                 Builder.getInt32(0), Mask, CI->getName());
+          break;
+        }
+        case ImageShape::Array2D: {
+          Value *X = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{0}),
+              Builder.CreateExtractElement(Offset, uint64_t{0}));
+          Value *Y = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{1}),
+              Builder.CreateExtractElement(Offset, uint64_t{1}));
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
           Fetched = IsInteger
                         ? createLoad2DArrayI32(Builder, Env, ImageIndex, X, Y,
@@ -3626,13 +3687,28 @@ void lowerImageAccesses(
                         : createLoad2DArray(Builder, Env, ImageIndex, X, Y,
                                             Layer, Lod, Builder.getInt32(0),
                                             Mask, CI->getName());
-        } else {
-          Fetched =
-              IsInteger
-                  ? createLoad2DI32(Builder, Env, ImageIndex, X, Y, Lod,
-                                    Builder.getInt32(0), Mask, CI->getName())
-                  : createLoad2D(Builder, Env, ImageIndex, X, Y, Lod,
-                                 Builder.getInt32(0), Mask, CI->getName());
+          break;
+        }
+        case ImageShape::Plain3D: {
+          Value *X = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{0}),
+              Builder.CreateExtractElement(Offset, uint64_t{0}));
+          Value *Y = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{1}),
+              Builder.CreateExtractElement(Offset, uint64_t{1}));
+          Value *Z = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{2}),
+              Builder.CreateExtractElement(Offset, uint64_t{2}));
+          Fetched = IsInteger ? createLoad3DI32(Builder, Env, ImageIndex, X, Y,
+                                                Z, Lod, Mask, CI->getName())
+                              : createLoad3D(Builder, Env, ImageIndex, X, Y, Z,
+                                             Lod, Builder.getInt32(0), Mask,
+                                             CI->getName());
+          break;
+        }
+        default:
+          llvm_unreachable("hasOnlySupportedImageUses should have rejected "
+                           "every other shape for isFetchLevelIntrinsic");
         }
         CI->replaceAllUsesWith(Fetched);
         CI->eraseFromParent();
