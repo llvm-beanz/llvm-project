@@ -169,6 +169,22 @@ std::array<uint32_t, 3> getThreadGroupSize(const Function &F) {
   return Result;
 }
 
+/// (roadmap L69(a)) Whether \p F is a compute entry point whose SPIR-V
+/// module declared `DerivativeGroupQuadsKHR` -- stamped as the
+/// `feme.compute.derivative.group`=`"quads"` function attribute by
+/// `feme::vulkan::compileComputePipeline` once it has validated that
+/// entry point's thread-group X/Y dimensions are both even (this mode's
+/// own spec precondition; see `feme/lib/Vulkan/Pipeline.cpp`). When set,
+/// every per-invocation identity builtin this function reads gets widened
+/// with `createBuiltinCall`'s `QuadTiled` flag, so `feme::cpu::
+/// WaveLoweringPass` decomposes it through the quad-tiled mapping
+/// (`WaveLowering.cpp`'s file comment) instead of the plain row-major one.
+bool functionUsesQuadTiledComputeDerivatives(const Function &F) {
+  return F.hasFnAttribute("feme.compute.derivative.group") &&
+         F.getFnAttribute("feme.compute.derivative.group").getValueAsString() ==
+             "quads";
+}
+
 /// The wave size `SIMDizePass` should widen \p F to: the pass's own
 /// constructor option if given, else \p F's `feme.cpu.wavesize` attribute
 /// (see feme::Driver, "Wave Size Selection"), else `feme::cpu::MinWaveSize`.
@@ -642,6 +658,10 @@ class FunctionWidener {
   Function *NewF = nullptr;
   WaveBodyEnv Env;
   std::array<uint32_t, 3> NumThreads;
+  /// (roadmap L69(a)) See `functionUsesQuadTiledComputeDerivatives`'s
+  /// comment; threaded into every per-invocation identity builtin this
+  /// function widens.
+  bool QuadTiledCompute;
 
   /// Divergent value (in the *old* function) -> its `<W x T>` replacement
   /// (in the new one).
@@ -679,7 +699,8 @@ class FunctionWidener {
 public:
   FunctionWidener(Function &OldF, unsigned WaveSize, UniformityInfo &UI)
       : OldF(&OldF), Ctx(OldF.getContext()), WaveSize(WaveSize), UI(UI),
-        NumThreads(getThreadGroupSize(OldF)) {}
+        NumThreads(getThreadGroupSize(OldF)),
+        QuadTiledCompute(functionUsesQuadTiledComputeDerivatives(OldF)) {}
 
   /// Returns the widened function, or nullptr if \p OldF has a divergent
   /// branch left unhandled by `feme::cpu::LinearizePass` (a diagnostic is
@@ -1484,9 +1505,9 @@ void FunctionWidener::widenBuiltin(CallInst &CI, BuiltinCallKind Kind,
     Component = static_cast<unsigned>(
         cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue());
 
-  CallInst *NewCall =
-      createBuiltinCall(Builder, Kind, BEnv, WaveSize, NumThreads[0],
-                        NumThreads[1], NumThreads[2], Component, CI.getName());
+  CallInst *NewCall = createBuiltinCall(
+      Builder, Kind, BEnv, WaveSize, NumThreads[0], NumThreads[1],
+      NumThreads[2], Component, QuadTiledCompute, CI.getName());
   Widened[&CI] = NewCall;
   ToErase.push_back(&CI);
 }

@@ -83,4 +83,41 @@ TEST(BuiltinCallsTest, DoesNotMatchUnrelatedCall) {
   EXPECT_FALSE(matchBuiltinCall(*CI));
 }
 
+/// (roadmap L69(a)) `QuadTiled` round-trips through the same trailing `i1`
+/// operand encoding every other flag on this call uses, and defaults to
+/// `false` for a caller (like every existing one before this row) that
+/// never mentions it.
+TEST(BuiltinCallsTest, RoundTripsQuadTiledFlattenedThreadIdInGroup) {
+  LLVMContext Ctx;
+  Module M("M", Ctx);
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(Ctx), false);
+  Function *F = Function::Create(FTy, GlobalValue::ExternalLinkage, "f", M);
+  BasicBlock *BB = BasicBlock::Create(Ctx, "entry", F);
+  IRBuilder<> Builder(BB);
+
+  BuiltinCallEnv Env;
+  Env.WaveIndex = Builder.getInt32(0);
+
+  CallInst *CI = createBuiltinCall(
+      Builder, BuiltinCallKind::FlattenedThreadIdInGroup, Env, /*WaveSize=*/8,
+      /*NumThreadsX=*/4, /*NumThreadsY=*/4, /*NumThreadsZ=*/1,
+      /*Component=*/0, /*QuadTiled=*/true);
+  ASSERT_TRUE(CI);
+
+  std::optional<MatchedBuiltinCall> Matched = matchBuiltinCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, BuiltinCallKind::FlattenedThreadIdInGroup);
+  EXPECT_TRUE(Matched->QuadTiled);
+
+  CallInst *DefaultCI = createBuiltinCall(
+      Builder, BuiltinCallKind::FlattenedThreadIdInGroup, Env, /*WaveSize=*/8,
+      /*NumThreadsX=*/4, /*NumThreadsY=*/4, /*NumThreadsZ=*/1,
+      /*Component=*/0);
+  ASSERT_TRUE(DefaultCI);
+  std::optional<MatchedBuiltinCall> DefaultMatched =
+      matchBuiltinCall(*DefaultCI);
+  ASSERT_TRUE(DefaultMatched);
+  EXPECT_FALSE(DefaultMatched->QuadTiled);
+}
+
 } // namespace

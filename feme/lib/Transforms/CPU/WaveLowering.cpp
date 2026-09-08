@@ -26,6 +26,36 @@
 //
 //   thread_id[c] = group_id[c] * NumThreads[c] + thread_id_in_group[c]
 //
+// Roadmap L69(a)'s "quad-tiled" decomposition: a `feme::cpu::
+// MatchedBuiltinCall` with `QuadTiled` set (an entry point that declared
+// `DerivativeGroupQuadsKHR`, see `feme::vulkan::ComputeDerivativeGroupMode::
+// Quads`'s own comment) decomposes the *same* physical `flat` value above
+// through a different formula, so that every 4 consecutive *physical*
+// lanes -- the exact grouping `lowerDerivative`'s quad-shuffle math already
+// assumes, unchanged since it predates this mode entirely -- land on one
+// real 2x2-spatially-adjacent tile's four corners, in the same (0,0),
+// (1,0), (0,1), (1,1) per-lane order a fragment quad already uses:
+//
+//   GxGy = Gx * Gy
+//   z = flat / GxGy                          (unchanged: quads never span z)
+//   r = flat % GxGy                          (position within the z-slice)
+//   tile = r / 4                             (which 2x2 tile, row-major)
+//   corner = r % 4                           (0/1/2/3 within that tile)
+//   tilesPerRow = Gx / 2
+//   x = (tile % tilesPerRow) * 2 + (corner & 1)
+//   y = (tile / tilesPerRow) * 2 + (corner >> 1)
+//
+// `feme::vulkan::compileComputePipeline` only accepts this mode once it has
+// confirmed `Gx`/`Gy` are both even (this mode's own spec precondition, and
+// exactly what makes `tilesPerRow`'s division above exact), so no fixup for
+// an odd dimension is needed here. `FlattenedThreadIdInGroup` recombines
+// these three quad-tiled components back into one true flat index --
+// `z*GxGy + y*Gx + x` -- rather than returning the physical `flat` value
+// directly the way the non-tiled case does, since a quad-tiled entry
+// point's own `LocalInvocationIndex` must still equal that spec-defined
+// formula over its *real* x/y/z identity, even though the physical lane
+// that identity now runs on is reordered.
+//
 // Roadmap milestone 8's "wave op half": every `feme.cpu.wave.*` call (see
 // feme::cpu::WaveCalls) `feme::cpu::SIMDizePass` canonicalized lowers per
 // "Phase 5"'s table in feme/docs/FeMeCPUDesign.md, `M` being the call's wide
@@ -143,6 +173,64 @@ Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat, unsigned Component,
   }
 }
 
+/// (roadmap L69(a)) Decomposes \p Flat -- the same physical per-lane index
+/// `buildFlattenedThreadIdInGroup` builds -- into thread group dimension
+/// \p Component's (0/1/2 for x/y/z) *quad-tiled* thread-in-group id, per
+/// the file comment above's formula: every 4 consecutive physical lanes
+/// are one 2x2 spatial tile's four corners, in (0,0)/(1,0)/(0,1)/(1,1)
+/// order. `NumThreadsX` must be even (`feme::vulkan::compileComputePipeline`
+/// validates this before ever stamping the `feme.compute.derivative.group`
+/// attribute this decomposition is gated on), so `tilesPerRow`'s division
+/// is always exact.
+Value *decomposeQuadTiledComponent(IRBuilder<> &Builder, Value *Flat,
+                                   unsigned Component, uint32_t NumThreadsX,
+                                   uint32_t NumThreadsY) {
+  unsigned W = cast<FixedVectorType>(Flat->getType())->getNumElements();
+  auto Splat = [&](uint32_t V) {
+    return Builder.CreateVectorSplat(W, Builder.getInt32(V));
+  };
+  uint32_t GxGy = NumThreadsX * NumThreadsY;
+  Value *R = Builder.CreateURem(Flat, Splat(GxGy));
+  if (Component == 2)
+    return Builder.CreateUDiv(Flat, Splat(GxGy));
+
+  Value *Tile = Builder.CreateUDiv(R, Splat(4));
+  Value *Corner = Builder.CreateURem(R, Splat(4));
+  uint32_t TilesPerRow = NumThreadsX / 2;
+  if (Component == 0) {
+    Value *TileX = Builder.CreateURem(Tile, Splat(TilesPerRow));
+    Value *CornerX = Builder.CreateAnd(Corner, Splat(1));
+    return Builder.CreateAdd(Builder.CreateMul(TileX, Splat(2)), CornerX);
+  }
+  Value *TileY = Builder.CreateUDiv(Tile, Splat(TilesPerRow));
+  Value *CornerY = Builder.CreateLShr(Corner, Splat(1));
+  return Builder.CreateAdd(Builder.CreateMul(TileY, Splat(2)), CornerY);
+}
+
+/// (roadmap L69(a)) Recombines \p Flat's quad-tiled x/y/z components (see
+/// `decomposeQuadTiledComponent`) back into one true flat index -- the
+/// spec-defined `z*Gx*Gy + y*Gx + x` `feme::cpu::BuiltinCallKind::
+/// FlattenedThreadIdInGroup`/`LocalInvocationIndex` must still report for a
+/// quad-tiled entry point, even though \p Flat itself is the *physical*
+/// per-lane index, not this value.
+Value *buildQuadTiledFlattenedThreadIdInGroup(IRBuilder<> &Builder, Value *Flat,
+                                              uint32_t NumThreadsX,
+                                              uint32_t NumThreadsY) {
+  unsigned W = cast<FixedVectorType>(Flat->getType())->getNumElements();
+  Value *X =
+      decomposeQuadTiledComponent(Builder, Flat, 0, NumThreadsX, NumThreadsY);
+  Value *Y =
+      decomposeQuadTiledComponent(Builder, Flat, 1, NumThreadsX, NumThreadsY);
+  Value *Z =
+      decomposeQuadTiledComponent(Builder, Flat, 2, NumThreadsX, NumThreadsY);
+  Value *YGx = Builder.CreateMul(
+      Y, Builder.CreateVectorSplat(W, Builder.getInt32(NumThreadsX)));
+  Value *ZGxGy =
+      Builder.CreateMul(Z, Builder.CreateVectorSplat(
+                               W, Builder.getInt32(NumThreadsX * NumThreadsY)));
+  return Builder.CreateAdd(Builder.CreateAdd(X, YGx), ZGxGy);
+}
+
 /// Lowers one matched `feme.cpu.builtin.*` call into the arithmetic the file
 /// comment above describes, and replaces/erases the call.
 void lowerBuiltinCall(const MatchedBuiltinCall &Matched) {
@@ -155,22 +243,36 @@ void lowerBuiltinCall(const MatchedBuiltinCall &Matched) {
   case BuiltinCallKind::LaneIndex:
     Result = getLaneIota(Builder.getContext(), W);
     break;
-  case BuiltinCallKind::FlattenedThreadIdInGroup:
-    Result = buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
+  case BuiltinCallKind::FlattenedThreadIdInGroup: {
+    Value *Flat =
+        buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
+    Result = Matched.QuadTiled
+                 ? buildQuadTiledFlattenedThreadIdInGroup(
+                       Builder, Flat, Matched.NumThreadsX, Matched.NumThreadsY)
+                 : Flat;
     break;
+  }
   case BuiltinCallKind::ThreadIdInGroup: {
     Value *Flat =
         buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
-    Result = decomposeComponent(Builder, Flat, Matched.Component,
-                                Matched.NumThreadsX, Matched.NumThreadsY);
+    Result = Matched.QuadTiled
+                 ? decomposeQuadTiledComponent(Builder, Flat, Matched.Component,
+                                               Matched.NumThreadsX,
+                                               Matched.NumThreadsY)
+                 : decomposeComponent(Builder, Flat, Matched.Component,
+                                      Matched.NumThreadsX, Matched.NumThreadsY);
     break;
   }
   case BuiltinCallKind::ThreadId: {
     Value *Flat =
         buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
     Value *InGroup =
-        decomposeComponent(Builder, Flat, Matched.Component,
-                           Matched.NumThreadsX, Matched.NumThreadsY);
+        Matched.QuadTiled
+            ? decomposeQuadTiledComponent(Builder, Flat, Matched.Component,
+                                          Matched.NumThreadsX,
+                                          Matched.NumThreadsY)
+            : decomposeComponent(Builder, Flat, Matched.Component,
+                                 Matched.NumThreadsX, Matched.NumThreadsY);
     Value *GroupIDComponent = Matched.Component == 0   ? Matched.Env.GroupIDX
                               : Matched.Component == 1 ? Matched.Env.GroupIDY
                                                        : Matched.Env.GroupIDZ;

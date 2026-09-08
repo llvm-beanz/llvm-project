@@ -89,17 +89,35 @@ struct MatchedBuiltinCall {
   /// The requested component (0/1/2 for x/y/z), for `ThreadId`/
   /// `ThreadIdInGroup`; unused for the other two kinds.
   unsigned Component = 0;
+  /// (roadmap L69(a)) Whether this entry point declared
+  /// `DerivativeGroupQuadsKHR`, for `ThreadId`/`ThreadIdInGroup`/
+  /// `FlattenedThreadIdInGroup` -- unused for `LaneIndex` (a genuinely
+  /// different, hardware-lane-relative concept, not a per-invocation
+  /// identity). When set, `feme::cpu::WaveLoweringPass` decomposes the
+  /// physical per-lane flat index into x/y/z through the quad-tiled
+  /// mapping `WaveLowering.cpp`'s file comment describes (every 4
+  /// consecutive *physical* lanes form one 2x2 spatial tile's four
+  /// corners) instead of the plain row-major identity every other entry
+  /// point uses -- see `feme::vulkan::ComputeDerivativeGroupMode::Quads`'s
+  /// own comment for why this reordering is what makes
+  /// `lowerDerivative`'s existing fragment-quad shuffle math correct for
+  /// this mode too.
+  bool QuadTiled = false;
 };
 
 /// Builds a `feme.cpu.builtin.*` call of \p Kind, widened to \p WaveSize,
 /// for thread group dimensions \p NumThreadsX/Y/Z (from `hlsl.numthreads`).
 /// \p Component is the requested component (0/1/2), meaningful only for
-/// `ThreadId`/`ThreadIdInGroup`. Returns a `<WaveSize x i32>`-typed call.
+/// `ThreadId`/`ThreadIdInGroup`. \p QuadTiled requests the
+/// `DerivativeGroupQuadsKHR` lane-to-identity remapping (see
+/// `MatchedBuiltinCall::QuadTiled`'s own comment); meaningless for
+/// `LaneIndex`. Returns a `<WaveSize x i32>`-typed call.
 llvm::CallInst *createBuiltinCall(llvm::IRBuilderBase &Builder,
                                   BuiltinCallKind Kind,
                                   const BuiltinCallEnv &Env, unsigned WaveSize,
                                   uint32_t NumThreadsX, uint32_t NumThreadsY,
                                   uint32_t NumThreadsZ, unsigned Component = 0,
+                                  bool QuadTiled = false,
                                   const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.builtin.*` calls,

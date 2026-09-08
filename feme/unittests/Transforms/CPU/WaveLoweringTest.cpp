@@ -14,7 +14,9 @@
 #include "feme/Transforms/CPU/WaveCalls.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -416,6 +418,112 @@ TEST(WaveLoweringTest, LowersDerivativesAndQuadRead) {
                     Kind == feme::StageOpKind::QuadRead));
     }
   EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// (roadmap L69(a)) `DerivativeGroupQuadsKHR`'s own quad-tiled lane
+/// assignment: for a 4x4x1 thread group at wave size 8 (two physical
+/// quads per wave), physical lanes 0-3 and 4-7 must land on two distinct
+/// real 2x2 spatial tiles -- (0,0)/(1,0)/(0,1)/(1,1) then (2,0)/(3,0)/
+/// (2,1)/(3,1) -- rather than the plain row-major `x = flat % Gx` identity
+/// every non-quad-tiled entry point still uses (confirmed different by
+/// `LowersThreadIdAndRemovesBuiltinCalls`'s own row-major expectations).
+/// Builds the `ThreadIdInGroup` calls directly with `QuadTiled=true` and a
+/// literal constant `WaveIndex` (bypassing `SIMDizePass` entirely, so the
+/// whole computation constant-folds down to one exact, checkable vector
+/// per component), storing each result to a distinct global so it survives
+/// `WaveLoweringPass`'s in-place RAUW/erase of the originating call.
+TEST(WaveLoweringTest, LowersQuadTiledThreadIdInGroupToSpatialTiles) {
+  LLVMContext Ctx;
+  Module M("M", Ctx);
+  auto *VecTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 8);
+  auto *GX = new GlobalVariable(M, VecTy, /*isConstant=*/false,
+                                GlobalValue::ExternalLinkage,
+                                Constant::getNullValue(VecTy), "gx");
+  auto *GY = new GlobalVariable(M, VecTy, /*isConstant=*/false,
+                                GlobalValue::ExternalLinkage,
+                                Constant::getNullValue(VecTy), "gy");
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(Ctx), false);
+  Function *F = Function::Create(FTy, GlobalValue::ExternalLinkage, "main", M);
+  BasicBlock *BB = BasicBlock::Create(Ctx, "entry", F);
+  IRBuilder<> Builder(BB);
+
+  BuiltinCallEnv Env;
+  Env.WaveIndex = Builder.getInt32(0);
+
+  CallInst *XCall = createBuiltinCall(Builder, BuiltinCallKind::ThreadIdInGroup,
+                                      Env, /*WaveSize=*/8, /*NumThreadsX=*/4,
+                                      /*NumThreadsY=*/4, /*NumThreadsZ=*/1,
+                                      /*Component=*/0, /*QuadTiled=*/true);
+  CallInst *YCall = createBuiltinCall(Builder, BuiltinCallKind::ThreadIdInGroup,
+                                      Env, /*WaveSize=*/8, /*NumThreadsX=*/4,
+                                      /*NumThreadsY=*/4, /*NumThreadsZ=*/1,
+                                      /*Component=*/1, /*QuadTiled=*/true);
+  Builder.CreateStore(XCall, GX);
+  Builder.CreateStore(YCall, GY);
+  Builder.CreateRetVoid();
+
+  ModuleAnalysisManager MAM;
+  WaveLoweringPass().run(M, MAM);
+
+  auto GetLane = [](GlobalVariable *G, unsigned Lane) -> uint32_t {
+    auto *CV =
+        cast<Constant>(cast<StoreInst>(*G->user_begin())->getValueOperand());
+    return static_cast<uint32_t>(
+        cast<ConstantInt>(CV->getAggregateElement(Lane))->getZExtValue());
+  };
+
+  const uint32_t ExpectedX[8] = {0, 1, 0, 1, 2, 3, 2, 3};
+  const uint32_t ExpectedY[8] = {0, 0, 1, 1, 0, 0, 1, 1};
+  for (unsigned Lane = 0; Lane != 8; ++Lane) {
+    EXPECT_EQ(GetLane(GX, Lane), ExpectedX[Lane]) << "lane " << Lane;
+    EXPECT_EQ(GetLane(GY, Lane), ExpectedY[Lane]) << "lane " << Lane;
+  }
+  EXPECT_FALSE(verifyModule(M, &errs()));
+}
+
+/// (roadmap L69(a)) The recombined `FlattenedThreadIdInGroup` for a
+/// quad-tiled entry point must still equal the spec-defined
+/// `z*Gx*Gy + y*Gx + x` over the *real* (quad-tiled) x/y/z identity, not
+/// the physical per-lane index the non-tiled case returns directly --
+/// i.e. `LocalInvocationIndex` is unaffected by which physical lane a
+/// given (x, y, z) invocation happens to run on.
+TEST(WaveLoweringTest, LowersQuadTiledFlattenedThreadIdInGroupToRealIndex) {
+  LLVMContext Ctx;
+  Module M("M", Ctx);
+  auto *VecTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 8);
+  auto *GFlat = new GlobalVariable(M, VecTy, /*isConstant=*/false,
+                                   GlobalValue::ExternalLinkage,
+                                   Constant::getNullValue(VecTy), "gflat");
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(Ctx), false);
+  Function *F = Function::Create(FTy, GlobalValue::ExternalLinkage, "main", M);
+  BasicBlock *BB = BasicBlock::Create(Ctx, "entry", F);
+  IRBuilder<> Builder(BB);
+
+  BuiltinCallEnv Env;
+  Env.WaveIndex = Builder.getInt32(0);
+
+  CallInst *FlatCall = createBuiltinCall(
+      Builder, BuiltinCallKind::FlattenedThreadIdInGroup, Env,
+      /*WaveSize=*/8, /*NumThreadsX=*/4, /*NumThreadsY=*/4, /*NumThreadsZ=*/1,
+      /*Component=*/0, /*QuadTiled=*/true);
+  Builder.CreateStore(FlatCall, GFlat);
+  Builder.CreateRetVoid();
+
+  ModuleAnalysisManager MAM;
+  WaveLoweringPass().run(M, MAM);
+
+  auto *CV =
+      cast<Constant>(cast<StoreInst>(*GFlat->user_begin())->getValueOperand());
+  // Real (x, y) per physical lane: (0,0) (1,0) (0,1) (1,1) (2,0) (3,0)
+  // (2,1) (3,1); LocalInvocationIndex = y*4 + x.
+  const uint32_t ExpectedFlat[8] = {0, 1, 4, 5, 2, 3, 6, 7};
+  for (unsigned Lane = 0; Lane != 8; ++Lane)
+    EXPECT_EQ(
+        static_cast<uint32_t>(
+            cast<ConstantInt>(CV->getAggregateElement(Lane))->getZExtValue()),
+        ExpectedFlat[Lane])
+        << "lane " << Lane;
+  EXPECT_FALSE(verifyModule(M, &errs()));
 }
 
 } // namespace

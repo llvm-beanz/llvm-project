@@ -54,19 +54,31 @@ std::optional<BuiltinCallKind> parseKindName(StringRef Name) {
 /// Each kind's operand list, before the `.vW` mangled suffix: see the
 /// header comment's table -- `ThreadId` needs the group id and thread group
 /// dimensions to compute a dispatch-wide index; `ThreadIdInGroup` needs only
-/// the dimensions; the other two need neither.
+/// the dimensions; the other two need neither, except that
+/// `FlattenedThreadIdInGroup` now also needs the dimensions to recombine a
+/// quad-tiled x/y/z back into one flat index (roadmap L69(a); see
+/// `MatchedBuiltinCall::QuadTiled`'s comment) -- unused, and simply
+/// ignored, whenever `QuadTiled` is false.
 bool needsGroupID(BuiltinCallKind Kind) {
   return Kind == BuiltinCallKind::ThreadId;
 }
 bool needsNumThreads(BuiltinCallKind Kind) {
   return Kind == BuiltinCallKind::ThreadId ||
-         Kind == BuiltinCallKind::ThreadIdInGroup;
+         Kind == BuiltinCallKind::ThreadIdInGroup ||
+         Kind == BuiltinCallKind::FlattenedThreadIdInGroup;
 }
 bool needsComponent(BuiltinCallKind Kind) {
   return Kind == BuiltinCallKind::ThreadId ||
          Kind == BuiltinCallKind::ThreadIdInGroup;
 }
 bool needsWaveIndex(BuiltinCallKind Kind) {
+  return Kind != BuiltinCallKind::LaneIndex;
+}
+/// (roadmap L69(a)) Whether \p Kind's per-invocation identity is subject to
+/// the `DerivativeGroupQuadsKHR` lane-tiling remap at all -- `LaneIndex` is
+/// a genuinely different, hardware-lane-relative concept (not a
+/// per-invocation identity), so it never carries this operand.
+bool needsQuadTiled(BuiltinCallKind Kind) {
   return Kind != BuiltinCallKind::LaneIndex;
 }
 
@@ -78,10 +90,11 @@ CallInst *createBuiltinCall(IRBuilderBase &Builder, BuiltinCallKind Kind,
                             const BuiltinCallEnv &Env, unsigned WaveSize,
                             uint32_t NumThreadsX, uint32_t NumThreadsY,
                             uint32_t NumThreadsZ, unsigned Component,
-                            const Twine &Name) {
+                            bool QuadTiled, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   LLVMContext &Ctx = M->getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
+  Type *I1Ty = Type::getInt1Ty(Ctx);
   Type *ResultTy = FixedVectorType::get(I32Ty, WaveSize);
 
   SmallVector<Type *, 8> ParamTypes;
@@ -102,6 +115,10 @@ CallInst *createBuiltinCall(IRBuilderBase &Builder, BuiltinCallKind Kind,
   if (needsComponent(Kind)) {
     ParamTypes.push_back(I32Ty);
     Args.push_back(Builder.getInt32(Component));
+  }
+  if (needsQuadTiled(Kind)) {
+    ParamTypes.push_back(I1Ty);
+    Args.push_back(ConstantInt::getBool(Ctx, QuadTiled));
   }
 
   SmallString<48> MangledName;
@@ -159,6 +176,10 @@ std::optional<MatchedBuiltinCall> matchBuiltinCall(const CallInst &CI) {
   if (needsComponent(*Kind)) {
     auto *C = dyn_cast<ConstantInt>(CI.getArgOperand(OperandIdx++));
     Result.Component = C ? static_cast<unsigned>(C->getZExtValue()) : 0;
+  }
+  if (needsQuadTiled(*Kind)) {
+    auto *C = dyn_cast<ConstantInt>(CI.getArgOperand(OperandIdx++));
+    Result.QuadTiled = C && !C->isZero();
   }
   return Result;
 }
