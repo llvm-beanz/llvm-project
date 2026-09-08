@@ -32523,3 +32523,91 @@ offloader-based, before/after comparison above.
 change needed -- this is a pure CPU-side system-value-lowering and
 signature-serialization fix, touching no new Vulkan feature or
 extension surface.
+
+## L81: Domain-stage `SV_PrimitiveID` misclassified as patch-constant-forwarded input
+
+### Symptom
+
+`DomainSystemValues.test` (L77/L78/L79's own named repro) reached
+`vk.queueSubmit` after L79's vertex-attribute-fetch fix, but that submit
+failed with `VkResult = -3` -- a new failure mode not previously reached
+(before L79's fix, this repro failed earlier, during
+`vkCreateGraphicsPipelines`/pipeline validation, per L78's own filing).
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` revealed the real underlying
+diagnostic: `patch-constant output -> domain stage patch input: element 2
+has no matching producer element`.
+
+### Root cause
+
+`CanonicalizeStage.cpp`'s `classifySPIRVElement` (Domain-stage branch)
+only special-cased `SignatureSystemValue::DomainLocation`/`PatchVertices`
+as genuinely-synthesized (non-forwarded) inputs. A real `dxc -spirv`
+compile decorates a domain-stage `SV_PrimitiveID` read `Patch` (uniform
+across the whole patch) -- the exact same decoration a genuine
+patch-constant-forwarded tessellation factor (`SV_TessFactor`/
+`SV_InsideTessFactor`) carries -- so it fell through to
+`isPatchOutputDecoration(D)`'s check and was wrongly classified
+`SignatureDirection::PatchInput`, which `PatchPipeline.cpp`'s
+`linkStageElements` then rejected: no patch-constant-stage *output* ever
+produces this value, since it is a plain, pipeline-supplied per-patch
+scalar (this patch's own index within the draw), never data the
+patch-constant function computes and forwards. This is the exact same
+bug category as roadmap **L80**'s already-fixed Hull-stage mistake, just
+manifesting in the Domain stage's classification/lowering instead of the
+Hull stage's.
+
+### Fix
+
+Recognized `SV_PrimitiveID` alongside `DomainLocation`/`PatchVertices` in
+`CanonicalizeStage.cpp`'s Domain-stage classification as a synthesized,
+`Direction::Input`/`Frequency::PerPatch` element. Since Domain-stage
+system values are already delivered per-invocation through the existing
+`FemeDomainInvocation` record array (unlike Hull's single scalar
+argument), threaded a new `PrimitiveID` field through that record
+end-to-end: `RuntimeABI.h` (repurposing one `Reserved[5]` slot, now
+`Reserved[4]`, keeping the struct's size unchanged), `StageArgsLayout.h`
+(`DomainInvocationFieldPrimitiveID`, `getDomainInvocationType`),
+`DomainInvocations.h`/`.cpp` (`buildDomainInvocations` now takes and
+broadcasts a `PrimitiveID` parameter), `PatchPipeline.cpp` (passing the
+already-in-scope `PrimitiveID` parameter through), and `DomainWrapper.cpp`
+(a new `lowerDomainPrimitiveID`, dispatched from `lowerDomainInputLoad`).
+
+New unit tests:
+`CanonicalizeStageTest.DomainStageMapsPrimitiveIDAsSynthesizedInput`,
+`DomainWrapperTest.LowersPrimitiveIDInput`, and
+`DomainInvocationsTest.{DefaultsPrimitiveIDToZero,BroadcastsPrimitiveIDToEveryPoint}`.
+`check-feme`: 2777/2836 Passed, 59 Unsupported, 0 Failed -- no
+regressions (up by 4 from the new tests).
+
+### Real-ICD before/after comparison (this row's own named repro)
+
+Re-ran `DomainSystemValues.test` directly via `offloader` after this fix
+(manual reproduction, per the established L77-L80 methodology): the
+`vk.queueSubmit` failure (`VkResult = -3`) is gone; the pipeline now runs
+to completion and produces a `ResultBuffer` result. That result still
+does not exactly match `ResultBuffer_Expected` -- a handful of
+interpolated position/`uv` values are off by exactly 1 ULP (e.g.
+`0x3e800000` expected vs. `0x3e7fffff` observed, `0x3f400000` vs.
+`0x3f400001`) -- but every `SV_PrimitiveID`-forwarded value in the buffer
+now matches exactly, confirming this fix is correct and complete for its
+own scope. The residual 1-ULP mismatch is a distinct, further-downstream
+floating-point-rounding gap, unrelated to this fix's own
+system-value-classification scope; filed separately as roadmap **L82**.
+
+### Real CTS re-run
+
+Re-ran the identical `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist used for L37/L77/L78/L79/L80's own CTS re-runs:
+unchanged -- still 13/28 cases reach a result before the group's own
+already-documented, pre-existing segfault, and all 13 still fail on the
+same two already-tracked, unrelated gaps
+(`feme-cpu-wrap-patch-constant`'s masked-output-store gap and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction) as
+before this fix -- confirming no regression, though (as for
+L37/L77/L78/L79/L80) this CTS group still cannot directly exercise this
+row's own fix either before or after; the real confirmation is the
+offloader-based, before/after comparison above.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-side system-value-lowering fix,
+touching no new Vulkan feature or extension surface.

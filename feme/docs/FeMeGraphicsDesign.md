@@ -1001,6 +1001,47 @@ exactly matches `ResultBuffer_Expected`. `DomainSystemValues.test`'s
 own separate `vk.queueSubmit` failure (roadmap L81) is unaffected,
 confirmed pre-existing via `git stash` before/after.
 
+#### Status (roadmap L81): Domain-stage `SV_PrimitiveID` misclassified as patch-constant-forwarded input
+
+L80's own investigation left `DomainSystemValues.test` (L77/L78/L79/L80's
+own named repro) failing at `vk.queueSubmit` with `VkResult = -3` once
+L79's fix let it reach real execution for the first time.
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` revealed the real diagnostic:
+`patch-constant output -> domain stage patch input: element 2 has no
+matching producer element`. `CanonicalizeStage.cpp`'s
+`classifySPIRVElement` (Domain-stage branch) only special-cased
+`SignatureSystemValue::DomainLocation`/`PatchVertices` as
+genuinely-synthesized (non-forwarded) inputs; any other `Patch`-decorated
+input -- including a domain-stage `SV_PrimitiveID` read, which a real
+`dxc -spirv` compile decorates `Patch` (uniform per patch) exactly like a
+genuine patch-constant-forwarded tessellation factor -- fell through to
+`isPatchOutputDecoration(D)`'s check and was wrongly classified
+`SignatureDirection::PatchInput`, which `PatchPipeline.cpp`'s
+`linkStageElements` then rejected since no patch-constant-stage output
+ever actually produces this pipeline-supplied value. The exact same bug
+category as roadmap L80's Hull-stage mistake, just manifesting in the
+Domain stage's classification/lowering instead.
+
+Fixed by recognizing `SV_PrimitiveID` alongside `DomainLocation`/
+`PatchVertices` in the Domain-stage classification as a synthesized,
+`Direction::Input`/`Frequency::PerPatch` element. Since Domain-stage
+system values are already delivered per-invocation through the existing
+`FemeDomainInvocation` record array (unlike Hull's single scalar
+argument), threaded a new `PrimitiveID` field through that record
+end-to-end (`RuntimeABI.h`, repurposing one `Reserved[5]` slot;
+`StageArgsLayout.h`'s `DomainInvocationFieldPrimitiveID`/
+`getDomainInvocationType`; `DomainInvocations.h`/`.cpp`'s
+`buildDomainInvocations`; `PatchPipeline.cpp`'s call site; and a new
+`lowerDomainPrimitiveID` in `DomainWrapper.cpp`).
+
+Confirmed via a real `offloader` re-run of `DomainSystemValues.test`
+that the `vk.queueSubmit` failure is gone and the pipeline now runs to
+completion, with every `SV_PrimitiveID`-forwarded value in the result
+buffer now matching exactly. A residual, distinct 1-ULP
+floating-point-rounding mismatch in the interpolated position/`uv` data
+was found downstream of this fix -- out of scope for it -- and filed
+separately as roadmap L82.
+
 ### Builtins and system values
 
 System values use the same signature model when they are stage inputs or
