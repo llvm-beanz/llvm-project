@@ -42,25 +42,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L80 from the roadmap or other prerequisites blocking the
+Can you close out L81 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`HullSystemValues.test` (L77/L78/L79's own named repro) still fails its
-> `SystemValues` result check even after L79's vertex-attribute-fetch fix**: the
-> `ResultBuffer` is no longer all-zero -- `SV_PrimitiveID`,
-> `SV_OutputControlPointID`, and `SV_TessFactor`/`SV_InsideTessFactor` all now
-> round-trip correctly -- but the smuggled per-control-point `position` data
-> (buffer elements 0/1 and 7/8, one pair per patch) still mismatches: expected
-> `(0, 0)`/`(1, 1)` but observed `(-0.9, -0.9)`/`(0.1, 0.1)` (confirmed via a
-> real `offloader` re-run of this exact repro after L79's fix). Unrelated to
-> L79's own vertex-attribute-format-channel-count scope (that fix is confirmed
-> correct via its own passing unit tests and this row's own now-different
-> symptom); a further, distinct gap somewhere in the hull-stage
-> output-forwarding, domain-stage input-forwarding, or pixel-stage
-> attribute-linking chain for this specific user-data field. Needs its own real
-> IR reduction (the same technique this project's
-> H6-series/H8-series/H9-series/L-series chains have used throughout), likely
-> starting with a runtime-`printf`-instrumented JIT re-run of the hull and
-> domain stage wrappers (mirroring L78's own successful technique) to isolate
-> which stage's real output for this specific field is going unwritten or
-> overwritten. Not yet started.
+> **`DomainSystemValues.test` (L77/L78/L79's own named repro) now reaches
+> `vk.queueSubmit` after L79's vertex-attribute-fetch fix, but that submit fails
+> with `VkResult = -3`**, a new failure mode not previously reached (before
+> L79's fix, this repro failed earlier, during
+> `vkCreateGraphicsPipelines`/pipeline validation, per L78's own filing).
+> Confirmed via a real `offloader` re-run of this exact repro after L79's fix:
+> `"Graphics Pipeline created."` now logs successfully, but `"Failed to submit
+> to queue. (VkResult = -3)"` follows immediately, with no further diagnostic
+> text captured yet. Unrelated to L79's own
+> vertex-attribute-format-channel-count scope (that fix only changes which real
+> data reaches this stage, not the pipeline/command-buffer validation path that
+> now fails). Needs its own investigation to capture the real underlying
+> validation error (likely via `FEME_VULKAN_LOG_CREATION_ERRORS=1` or an
+> equivalent verbose-diagnostic path, not yet attempted for a `vkQueueSubmit`
+> failure specifically) before a real IR reduction can even be scoped. Not yet
+> started.
