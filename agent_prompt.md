@@ -42,26 +42,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L73 from the roadmap or other prerequisites blocking the
+Can you close out L74 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`OpImageQuerySamples` (SPIR-V opcode 107, 8 of L72(d)'s original 76 cases;
-> GLSL's `textureSamples(sampler)`, a multisampled sampled image's own sample
-> count) needs the same synthetic-`OpFunctionCall` import-time encoding roadmap
-> L72(d) already built for opcodes 103/106, but has its own separate
-> prerequisite gap blocking it even after that encoding is wired up**:
-> `classifySampledImage2DHandle` in `SPIRVResourceLowering.cpp` rejects every
-> multisampled (`Plain2DMS`) *sampled* image handle outright today -- unlike a
-> *storage* image, where `Plain2DMS` is already a fully-supported shape (roadmap
-> history's own existing `LeavesAMultisampledCubeStorageImageHandleAlone`-style
-> precedent notwithstanding, that test is about `Cube`, not `Plain2DMS`, and
-> storage-image `Plain2DMS` read/write already works) -- so no handle this
-> opcode could ever apply to (a multisampled sampled image, since
-> `OpImageQuerySamples` is spec-legal only against a multisampled image) can
-> reach this query's own dispatch code at all, regardless of how the opcode
-> itself gets lowered. Not yet started; needs its own design investigation into
-> whether widening `classifySampledImage2DHandle` to accept `Plain2DMS` is safe
-> in isolation (i.e. whether every other sampled-image call site in this file
-> already correctly rejects a `Plain2DMS` handle for operations that don't make
-> sense against it, such as ordinary filtered sampling) before
-> `OpImageQuerySamples` support itself can be added.
+> **The remaining 66 of roadmap L72(d)'s original 76
+> `OpImageQuerySizeLod`/`OpImageQueryLevels` cases -- every shape but `Plain2D`
+> (`Array2D`, `Plain1D`, `Array1D`, `Plain3D`, `Cube`, `CubeArray`)** --
+> L72(d)'s own fix deliberately scoped its `ImageCalls` builders
+> (`createQuerySizeLod2D`/`createQueryLevels`) to emit only a `Plain2D`-shaped
+> `v2i32`/`i32` result, so widening `SPIRVResourceLowering.cpp`'s shape gate to
+> any other shape without first widening those builders' own result type would
+> reproduce the exact `replaceAllUses of value with new value of different
+> type!` crash L72(d)'s own fix found and fixed for `Array2D` specifically
+> (`textureSize()` against an arrayed shape returns an extra layer-count
+> component, e.g. `ivec3` rather than `ivec2`; `Cube`/`CubeArray` likely have
+> their own distinct result-shape considerations still needing their own real IR
+> reduction to confirm). Not yet started; needs its own per-shape result-type
+> design work (likely one new `ImageCalls` builder variant per distinct result
+> shape, mirroring L66(f)-L66(j)'s own established per-shape-follow-on precedent
+> for `Dref`+`Grad` shadow sampling) before implementation can begin, and should
+> probably be split further into its own per-shape rows once that design work
+> identifies which shapes share an identical result shape and which need their
+> own distinct handling.
