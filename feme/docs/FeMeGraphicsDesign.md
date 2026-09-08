@@ -949,6 +949,58 @@ both succeed. Both repros still separately fail their own output-buffer
 comparison after that point -- a new, distinct, further-downstream gap,
 filed as roadmap L78, out of scope for this fix.
 
+#### Status (roadmap L80): `SV_PrimitiveID`/`gl_PrimitiveID` needs its own non-storage-backed lowering, in both hull-stage phases
+
+L79's own investigation left `HullSystemValues.test` (L77/L78/L79's own
+named repro) failing its `SystemValues` result check with the shader's
+own forwarding of `SV_PrimitiveID` (`PCPrimID`/`HSMainPrimID`) reading
+back a leaked `POSITION`-attribute bit pattern rather than the real
+patch index. `SignatureSystemValue::PrimitiveID` (a per-patch, uniform
+value with no vertex-stage-forwarded storage of its own) had no
+dedicated case in either `HullWrapperPass`'s control-point-phase
+input-load dispatch or `PatchConstantWrapperPass`'s patch-constant-phase
+system-value dispatch, so it fell into the generic storage-addressed
+path, whose layout-table entry for it was never populated by
+`feme::graphics::buildStageStorage` -- leaving `DataOffset=0`, aliasing
+whatever real element occupies byte offset 0 of `Inputs` (`POSITION`,
+in this test). A real `hull.hlsl` reads `SV_PrimitiveID` as a parameter
+of *both* the control-point-phase `main()` and the separate
+`PatchConstants()` function independently, so both wrappers needed
+their own fix, not just one.
+
+Fixed by threading a new, plain scalar `PrimitiveID` end-to-end through
+the CPU-target ABI (reusing each `Feme*Args` struct's existing
+`Reserved32` padding field, renamed rather than resized):
+`Executor.cpp`'s per-patch dispatch loop supplies the patch's own index,
+forwarded through `PatchResources`/`PatchConstantResources` and
+`PreparedPatchBatch`/`PreparedPatchConstantBatch` into
+`FemePatchArgs::PrimitiveID`/`FemePatchConstantArgs::PrimitiveID`. Both
+wrapper passes gained a new `stage_primitive_id` parameter and a
+dedicated lowering case that simply broadcasts this scalar, mirroring
+the existing `PatchVertices`/`OutputControlPointID` special cases --
+this system value has exactly the same "no real per-control-point
+storage to address" shape those two already handle, just not
+previously recognized as such.
+
+Writing a unit test for H4c's own captured-cross-barrier-value
+read-back addressing fix (`SignatureElement::CapturedSelfIndex`,
+implemented in an earlier session but never covered) surfaced a second,
+independent, latent bug in the same area: that flag was never threaded
+through `feme::serializeSignature`/`parseSignature`, so it silently
+reset to `false` every time a signature round-tripped through a
+function's `!feme.signature` metadata (which every wrapper pass does),
+defeating the addressing fix entirely at runtime despite the in-memory
+struct field and `CanonicalizeStage.cpp`'s own code setting it both
+being correct. Fixed by bumping `SignatureAbiVersion` to 6 and adding
+`CapturedSelfIndex` as the signature's 23rd fixed per-element field.
+
+Confirmed via a real `offloader` re-run of `HullSystemValues.test`
+(reproducing its own `RUN:` lines manually, since no offload-test-suite
+build directory exists in this checkout) that `ResultBuffer` now
+exactly matches `ResultBuffer_Expected`. `DomainSystemValues.test`'s
+own separate `vk.queueSubmit` failure (roadmap L81) is unaffected,
+confirmed pre-existing via `git stash` before/after.
+
 ### Builtins and system values
 
 System values use the same signature model when they are stage inputs or

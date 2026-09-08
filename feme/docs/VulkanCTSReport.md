@@ -32422,3 +32422,104 @@ offloader-based, before/after comparison above.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 change needed -- this is a pure CPU-side vertex-attribute-fetch
 decode-width fix, touching no new Vulkan feature or extension surface.
+
+## L80: Hull-stage `SV_PrimitiveID` input aliasing `POSITION`'s storage, plus a latent `SignatureElement::CapturedSelfIndex` serialization gap
+
+### Symptom
+
+L79's own investigation left `HullSystemValues.test` failing its
+`SystemValues` result check with the smuggled per-control-point
+`position` data (buffer elements 0/1/7/8) mismatching, even though
+`SV_PrimitiveID`/`SV_OutputControlPointID`/`SV_TessFactor`/
+`SV_InsideTessFactor` all round-tripped correctly. A closer look showed
+the *opposite* framing was also true depending on which repro's own
+result-buffer layout was inspected: this row's real named symptom
+(`PCPrimID`/`HSMainPrimID`, the shader's own forwarding of
+`SV_PrimitiveID`) came back holding a leaked `POSITION`-attribute bit
+pattern (`0xBF666666`) rather than the real patch index.
+
+### Root cause
+
+`SignatureSystemValue::PrimitiveID` (a per-patch, uniform,
+non-storage-backed system value) had no dedicated lowering case in
+either `HullWrapper.cpp`'s control-point-phase input-load dispatch or
+`PatchConstantWrapper.cpp`'s patch-constant-phase system-value
+dispatch. It fell into the generic storage-addressed path, whose
+layout-table entry for `PrimitiveID` was never populated by
+`feme::graphics::buildStageStorage` (there is no vertex-stage-forwarded
+storage for it), leaving `DataOffset=0` -- aliasing whatever real
+element occupies byte offset 0 of `Inputs` (`POSITION`, in this test).
+Both the control-point-phase `main()` and the separate `PatchConstants()`
+function in the real `hull.hlsl` read `SV_PrimitiveID` independently, so
+both wrapper passes needed their own fix.
+
+While writing a unit test for the previously-implemented (in an earlier
+session, never committed until now) `SignatureElement::CapturedSelfIndex`
+addressing fix, found a second, independent, latent bug: that flag was
+never threaded through `serializeSignature`/`parseSignature`, the
+byte-level (de)serialization every wrapper pass uses to round-trip a
+signature through `!feme.signature` function metadata -- so
+`CapturedSelfIndex` silently reset to `false` for every real invocation
+of the mechanism it exists to enable, even though the in-memory struct
+field itself, and `CanonicalizeStage.cpp`'s code setting it, were both
+already correct.
+
+### Fix
+
+Threaded a new `PrimitiveID` scalar end-to-end through the ABI, reusing
+each `Feme*Args` struct's existing `Reserved32` padding field (renamed,
+not resized): `Executor.cpp`'s per-patch dispatch loop supplies the
+patch's own index into `runPatchPipeline`, forwarded through
+`PatchResources`/`PatchConstantResources` and
+`PreparedPatchBatch`/`PreparedPatchConstantBatch` into
+`FemePatchArgs::PrimitiveID`/`FemePatchConstantArgs::PrimitiveID`. Both
+`HullWrapper.cpp` and `PatchConstantWrapper.cpp` gained a new
+`stage_primitive_id` wrapper parameter and a dedicated lowering case
+that broadcasts this scalar, mirroring the existing
+`PatchVertices`/`OutputControlPointID` special cases.
+
+Separately, bumped `SignatureAbiVersion` to 6 and appended
+`CapturedSelfIndex` as the signature's 23rd fixed per-element field in
+`serializeSignature`/`parseSignature`, regenerating the handful of
+existing tests with hardcoded, version-5 raw byte literals for their
+embedded `!feme.signature` metadata so they still parse.
+
+New tests: `HullWrapperTest.LowersPrimitiveIDInput`,
+`PatchConstantWrapperTest.LowersPrimitiveIDInput`,
+`PatchConstantWrapperTest.LowersCapturedSelfIndexElement`, and
+`SignatureTest.SerializeParseRoundTrips`'s extended coverage of
+`CapturedSelfIndex`. `check-feme`: 2773/2832 Passed, 59 Unsupported, 0
+Failed -- no regressions (up by 3 from the new tests; the 7
+regenerated-byte-literal tests continue passing under the new ABI
+version).
+
+### Real-ICD before/after comparison (this row's own named repro)
+
+Re-ran `HullSystemValues.test` directly via `offloader` after this fix
+(no offload-test-suite build directory exists in this checkout, so
+reproduced its own `RUN:` lines manually with real `dxc -spirv`
+compiles against the rebuilt `libfeme_vulkan.so`): `ResultBuffer` now
+exactly matches `ResultBuffer_Expected`, exit code 0, no `Test failed`
+message. `DomainSystemValues.test`'s own separate, unrelated
+`vk.queueSubmit` failure (`VkResult = -3`, filed as roadmap **L81**)
+was re-confirmed via `git stash` before/after to pre-exist this
+session's changes -- not a regression, out of this row's scope.
+
+### Real CTS re-run
+
+Re-ran the identical `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist used for L37/L77/L78/L79's own CTS re-runs:
+unchanged -- still 13/28 cases reach a result before the group's own
+already-documented, pre-existing segfault, and all 13 still fail on the
+same two already-tracked, unrelated gaps
+(`feme-cpu-wrap-patch-constant`'s masked-output-store gap and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction) as
+before this fix -- confirming no regression, though (as for
+L37/L77/L78/L79) this CTS group still cannot directly exercise this
+row's own fix either before or after; the real confirmation is the
+offloader-based, before/after comparison above.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-side system-value-lowering and
+signature-serialization fix, touching no new Vulkan feature or
+extension surface.
