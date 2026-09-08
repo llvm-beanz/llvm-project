@@ -42,30 +42,32 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L76(a) from the roadmap or other prerequisites blocking the
+Can you close out L76(b) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`RWTexture2DArray` (an arrayed *storage* image, as opposed to L76's own
-> *sampled*-image scope) is entirely rejected by pipeline creation**, discovered
-> by roadmap L76's own real `Array.*` texture test sweep:
-> `Feature/Textures/Array.UnalignedRowPitch.test` (a `[[vk::binding(0,0)]]
-> RWTexture2DArray<float> Out : register(u0);` compute shader doing a plain
-> `Out[TID] = ...;` store, no unusual operand at all) fails
-> `vkCreateComputePipelines` with `"unsupported raised operation:
-> 'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_2_1_0_2_3t' is a
-> register-bound resource handle the FeMe CPU target cannot normalize into a
-> heap access..."` -- the same generic `hasOnlySupportedImageUses`-family
-> rejection diagnostic prior rows (e.g. L26) have hit for other unsupported
-> image shapes/operand combinations, here for a `Dim=2D, Arrayed=1, Sampled=2`
-> (storage, non-sampled) image type. No non-array `RWTexture2D` counterpart to
-> compare against was needed to confirm this is `Array2D`-specific, since the
-> diagnostic itself already names the arrayed image type directly. Not yet
-> started; needs its own investigation of whichever `SPIRVResourceLowering.cpp`
-> code path currently normalizes a plain (non-arrayed) storage-image handle
-> (`isStorageImageIntrinsic`-shaped dispatch, unconfirmed exact name) to
-> determine whether it already has *any* `Array2D`-shaped storage-image case at
-> all, or whether (like roadmap L74/L75's own `OpImageQuerySizeLod`/similar
-> per-shape gaps) it needs a new arrayed-storage-image `ImageCalls` builder
-> variant threading a real `Layer` coordinate component through
-> `femeRTStore2D`-family runtime calls the same way
-> `femeCpuImageSample2DArrayV4F32` already does for the sampled-image side.
+> **Every `_compute`-stage case of
+> `dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*`
+> fails with a near-total image mismatch ("got 352 invalid pixels")**,
+> discovered by roadmap L76's own real CTS sweep of that group's `_fragment`
+> variants (16/16 Pass, confirming L76's own implicit-LOD closure) run alongside
+> its `_compute` variants (16/16 Fail). Distinct from roadmap L69's own
+> `_compute`-stage derivative-group scope: each failing case's own GLSL shader
+> computes `textureGrad(u_sampler, texCoord, dPdx.xy, dPdy.xy)` from a
+> manually-reconstructed screen-space finite-difference
+> (`interpolate(vec2(coord) + vec2(1.0, 0.0), size) - interpolate(vec2(coord),
+> size)`), not a hardware `dFdx`/`dFdy` intrinsic, so it needs no
+> `DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR` execution mode and is not
+> gated by `computeDerivativeGroupQuads`/`Linear` support at all -- this is a
+> plain explicit-`Grad` `Array2D` sample with a real, nonzero,
+> per-invocation-varying `(dPdx, dPdy)` pair, executed from a compute entry
+> point. Not yet started; needs its own real IR reduction of one of these 16
+> cases (or a similarly-shaped offloader repro built directly, since
+> `Feature/Textures/Array.SampleGrad.test` -- confirmed Pass earlier in this
+> same L76 sweep -- is apparently only exercised from a fragment-stage entry
+> point, not a compute one) to isolate whether the bug is in
+> `femeCpuImageSample2DArrayV4F32`'s own explicit-`Grad` footprint math itself,
+> in how the compute-stage entry point's own per-invocation resource/descriptor
+> plumbing differs from the fragment-stage path this same runtime function
+> already passes for, or in the CTS shader's own `interpolate()` helper's
+> barycentric coordinate reconstruction interacting badly with this target's own
+> workgroup/invocation-ID layout.
