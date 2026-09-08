@@ -69501,3 +69501,189 @@ session. Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 needed no changes — this fix is a CPU-target resource-lowering capability,
 not an extension or 1.4 core feature bit, so neither inventory references
 it.
+
+# Session: Closing out roadmap L71 (divergent early-return linearizer gap)
+
+## Task
+
+Close out roadmap L71 or other prerequisites blocking the L-series
+milestones. L71's own description: a compute-stage entry point using the
+common GLSL/HLSL early-return bounds-check idiom (`if (gid.x >= size.x ||
+gid.y >= size.y) return;`) fails outright at pipeline creation with
+`feme-cpu-linearize: function '<name>': divergent branch in '<bb>' has no
+reconvergence point`. Filed as a large, genuinely-unstarted
+linearizer/control-flow feature by the prior session (L70), needing "its
+own real design investigation into how a divergent early return could be
+lowered to a masked/predicated form compatible with this target's
+existing structured-control-flow linearizer."
+
+## Investigation
+
+Started by re-reading `VerifyStructured.cpp`'s
+`checkDivergentBranchesReconverge` (the postcondition check that flags
+this shape) and `Linearize.cpp` itself (which performs the same check
+before lowering). Both agree: a divergent conditional branch's immediate
+post-dominator must exist in the function's `PostDominatorTree`. An early
+`return` inside a divergent `if` violates this directly — the branch arm
+that returns simply exits the function, so there's no common point for
+the two arms to reconverge at.
+
+The originally-filed framing (teach the *linearizer* to handle this
+shape via masking/predication) would have meant real new lowering logic:
+detecting the pattern, synthesizing a "lane still alive" predicate,
+threading it through the rest of the function's control flow, and making
+every subsequent memory/side-effecting op respect it. That's a
+substantial, genuinely novel linearizer feature — plausible, but a much
+bigger lift than this session's scope should attempt in one pass, and (per
+the standing instruction to avoid over-nesting milestones and prefer
+small increments) worth first double-checking there isn't a smaller fix
+available upstream of the linearizer.
+
+Recalled that AMDGPU's backend solves an *identical*-shaped problem for
+an identical reason: `StructurizeCFG` (the same in-tree,
+target-independent pass this project's own `Prepare.cpp` already runs)
+cannot represent a branch to a `ret` block as an ordinary reconverging
+arm at all — full stop, independent of any masking/predication question
+downstream. Grepped for and found `AMDGPUUnifyDivergentExitNodes.cpp` in
+`llvm/lib/Target/AMDGPU/`, and confirmed via `AMDGPUTargetMachine.cpp`
+that AMDGPU always runs this pass **immediately before**
+`FixIrreducible`/`UnifyLoopExits`/`StructurizeCFG` in its own pipeline —
+never after, never optionally skipped. This is a strong, direct,
+in-tree precedent: the "big design problem" the L71 filing anticipated
+(how does the linearizer handle a divergent early return) turns out to
+already have a well-known, much smaller answer one phase earlier: don't
+let the early return survive as a distinct exit block by the time
+`StructurizeCFG` (or the linearizer) ever sees the function.
+
+## Design decision: simplify vs. port AMDGPU's version directly
+
+Read through `AMDGPUUnifyDivergentExitNodes.cpp` in full. It's more
+complex than what's needed here for two AMDGPU-specific reasons this
+project doesn't share:
+
+1. It depends on `llvm::UniformityInfo`/`TargetTransformInfo` to decide
+   *which* exit blocks are actually reached divergently
+   (`isUniformlyReached`), only unifying those, to avoid pessimizing
+   provably-uniform control flow.
+2. It emits an AMDGPU-specific `llvm.amdgcn.unreachable` intrinsic for a
+   legacy-pass-manager edge case not relevant here.
+
+Neither applies to feme: `feme::cpu::WaveTTIImpl::hasBranchDivergence()`
+unconditionally returns `true` — this project's own SPMD execution model
+treats *every* branch as potentially divergent by design (every raised
+shader lane runs through the same control flow with per-lane masking).
+Given that, AMDGPU's own uniformity-gated "only unify what's actually
+divergent" logic would *never* actually decide to skip unifying anything
+for feme — it would just add a `UniformityInfo`/`PostDominatorTree`
+computation for a check that always comes back "yes, unify this." So the
+feme version drops that analysis entirely and just unconditionally
+unifies every `ret` block whenever a function has more than one. This
+keeps `unifyDivergentExitNodes` a small, self-contained,
+dependency-free function: no legacy-pass-manager registration, no
+`UniformityInfo`, nothing beyond a scan for `ReturnInst` terminators and
+a `PHINode` merge.
+
+## Implementation
+
+New `feme::cpu::unifyDivergentExitNodes(Function &F) -> bool`:
+1. Collect every basic block ending in a `ReturnInst`.
+2. If ≤ 1, no-op, return `false`.
+3. Otherwise, create one new shared `BasicBlock`, with a `PHINode`
+   merging the return values if the function's return type isn't `void`.
+4. For each original return block, replace its `ret` with an
+   unconditional branch to the shared block (`UncondBrInst::Create` —
+   this checkout has renamed/split `BranchInst` into `UncondBrInst`/
+   `CondBrInst`, a naming gotcha I hit and fixed by grepping how
+   `Linearize.cpp`/`VerifyStructured.cpp` already spell it).
+5. Return `true`.
+
+Wired into `Prepare.cpp`'s `prepareFunction`, matching AMDGPU's own
+established ordering exactly: split the previously-single
+`FunctionPassManager` into `EarlyFPM` (SROA, mem2reg, LowerSwitch) and
+`LateFPM` (FixIrreducible, UnifyLoopExits, StructurizeCFG,
+BreakCriticalEdges), calling `unifyDivergentExitNodes(F)` directly
+between them. Since this is a raw function call rather than a registered
+pass, it doesn't participate in the `PassManager`'s own
+`PreservedAnalyses` tracking, so any function analysis cached before the
+call (e.g. `DominatorTree`, needed by `FixIrreducible`/`StructurizeCFG`)
+could be stale afterwards if the CFG actually changed — added an
+explicit `FAM.invalidate(F, PreservedAnalyses::none())`, guarded on the
+call's own return value, to cover this. This "plain testable function,
+called directly outside any `PassManager`" pattern already existed in
+this codebase (`verifyStructured` is called the same way, at the very
+end of `PreparePass::run`), so this isn't a new convention, just a
+second user of an existing one.
+
+## Testing
+
+- 4 new unit tests (`UnifyDivergentExitNodesTest`): a single-return
+  no-op, a classic two-arm early return, a three-arm/switch-shaped case
+  (proving it generalizes beyond exactly two exits), and a non-`void`
+  return type case (proving the `phi`-merge is correct).
+- New `prepare-early-return.ll` lit test running the *full*
+  `feme-cpu-prepare` pass (not just the isolated function) on the
+  early-return idiom, asserting via `CHECK-NOT`/`CHECK`/`CHECK-NOT` that
+  exactly one `ret void` survives.
+- Manually verified via `feme-opt --llvm -passes=feme-cpu-prepare -S` on
+  a hand-written early-return snippet that `StructurizeCFG` now produces
+  a normal single-exit structured CFG (a `Flow`/
+  `Flow.feme.unified.return_crit_edge` reconvergence block), and that
+  chaining `-passes=feme-cpu-linearize` afterwards produces **zero**
+  divergent-branch errors — full linearization succeeds with the
+  expected masked/predicated (`live.merge`/`sideeffect.merge`) output.
+- `FeMeTransformsCPUTests`: 386/386 pass (up from 382, reflecting the 4
+  new tests).
+- Full `check-feme`: 2715/2774 pass, 0 fail, 59 unsupported — no
+  regressions (up from 2710/2769 the prior session, reflecting the new
+  unit + lit tests).
+
+## Real CTS findings
+
+- The exact originally-cited failing case,
+  `dEQP-VK.glsl.texture_functions.texturelod.sampler2d_float_compute`,
+  now **passes** outright end to end (image comparison matches
+  reference) — not just "no longer errors at pipeline creation."
+- Measured real payoff at scale: generated a 1,375-case caselist for
+  every `*_compute`-suffixed case in `dEQP-VK.glsl.texture_functions.*`
+  (via `deqp-vk --deqp-case='...' --deqp-runmode=txt-caselist`, a much
+  easier way to get a flat case list than the default `xml-caselist`
+  mode, which surprisingly enumerates a totally different root package
+  — `dEQP-VK-experimental`, not `dEQP-VK` — in this environment unless
+  scoped with `--deqp-case=` first). Result: **153 Pass / 890 Fail / 332
+  NotSupported** — the first real, substantial Pass-count movement any
+  of this project's own compute-stage sampling/derivative work (L60
+  through L70) has produced; every prior session's own recorded number
+  for this shader family was 0 Pass.
+- Grepped the full 890-case Fail bucket's own error text and confirmed
+  **zero** remaining occurrences of either this row's own diagnostic
+  ("divergent branch"/"reconvergence point") or L70's
+  ("cannot normalize into a heap access") — both root causes are
+  completely and verifiably gone from this caselist, not just
+  "improved."
+- Categorized the residual 890 Fail cases by distinct error text: 284
+  "unknown extension: SPV_KHR_compute_shader_derivatives" (already
+  tracked as roadmap L7), 100 `spirv.ImageFetch` legalization failures,
+  18 `spirv.ImageSampleDrefExplicitLod` legalization failures, and 340
+  split across four distinct "unhandled opcode" numbers (92, 94, 103,
+  106/107) not yet mapped to the SPIR-V spec's own opcode table or
+  reduced to real IR. Filed all of this as a new roadmap row, L72,
+  explicitly *not started* — per this project's own established
+  precedent, each of these four buckets needs its own real IR reduction
+  before it can be responsibly scoped as a fix, and this session was
+  already scoped specifically to L71.
+
+## Documentation and cleanup
+
+Updated `FeMeCPUDesign.md`'s "Phase 1: Preparation" section with a new
+bullet describing `unifyDivergentExitNodes`, its unconditional-unify
+rationale, and the AMDGPU precedent. Struck through L71 on the roadmap
+with the full fix writeup and added L72 for the residual, untriaged CTS
+failure buckets — keeping nesting to zero extra letters (a plain new
+top-level `L72` row, not a sub-letter of L71 or L70, per the standing
+instruction to avoid the H6-style nesting mess). Updated
+`VulkanCTSReport.md` with a new top-level section mirroring the L70
+section's own structure and style. Confirmed
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+changes — this is a CPU-target control-flow-restructuring capability,
+not an extension or 1.4 core feature bit. Cleaned up `/tmp/l71/` and
+`/tmp/early-return*.ll` scratch artifacts at the end of the session.
