@@ -32702,3 +32702,107 @@ offloader-based, before/after comparison above.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 change needed -- this is a pure CPU-side tessellator interior-lattice
 fix, touching no new Vulkan feature or extension surface.
+
+## Roadmap L76(a): storage-image narrow-Texel-width support (all shapes)
+
+### Symptom
+
+`vkCreateComputePipelines` rejects any `RWTexture*<T>` storage-image
+Load/Store whose HLSL element type `T` is narrower than a full 4-channel
+vector -- a bare scalar (`RWTexture2D<float>`, `RWTexture2DArray<float>`)
+or a 2-/3-component vector (`RWTexture2D<float2>`) -- with the generic
+`"...is a register-bound resource handle the FeMe CPU target cannot
+normalize into a heap access..."` diagnostic, meaning the handle was
+never even accepted for normalization. The roadmap's own L76(a) text
+named this as an `RWTexture2DArray`-specific ("arrayed storage image")
+gap, discovered via `Feature/Textures/Array.UnalignedRowPitch.test`.
+
+### Root cause (broader than filed)
+
+Investigation (manual `split-file`/`dxc -spirv`/`offloader` repros in
+`/tmp/l76a*`, no offload-test-suite build directory in this checkout)
+found the real bug is **channel-width-agnostic, not array-specific**:
+`classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`'s own
+`Array2D`-shape and 3-component-coordinate handling were already
+completely correct. The actual bug was that both the acceptance check and
+the Store/Load lowering code in `SPIRVResourceLowering.cpp` hardcoded the
+Texel *value*'s own type to always be exactly `<4 x float>`/`<4 x i32>`,
+regardless of the shader's own declared element width. Reproduced
+identically for a **plain, non-arrayed** `RWTexture2D<float>` and for a
+**2-component** `RWTexture2D<float2>`, proving the gap is neither
+`Array2D`-specific nor scalar-only. Root asymmetry, confirmed via real
+`dxc -spirv` compiles: a sampled image's `OpImageRead`/`OpImageFetch`
+always returns a full `<4 x T>` regardless of format (why the existing
+sampled-image Load code never needed width-awareness), but a storage
+image's `OpImageWrite` Texel operand -- and, per this fix, its own
+`Load`-via-`getpointer` result -- is emitted by `dxc` at *exactly* the
+shader's declared `RWTexture*<T>` width (1-4 components). This is a real
+gap only for HLSL-sourced shaders: GLSL's `imageStore`/`imageLoad`
+built-ins always operate on a full `vec4` regardless of the bound
+format's real channel count, so no `dEQP-VK.image.load_store.*` CTS case
+(all GLSL-sourced) ever exercises this narrow-Texel path either way.
+
+### Fix
+
+`SPIRVResourceLowering.cpp` gained 4 new helpers: `storageImageTexelWidth`
+(the real 1-4 component count for a scalar/vector Texel type, replacing
+the old `isV4I32`/`isV4F32`-only checks in `hasOnlySupportedStorageImageUses`),
+`isIntegerStorageTexelType` (integer-vs-float classification independent
+of width), `widenStorageImageTexel` (Store side: zero-pads a
+narrower-than-4 Texel up to the runtime's fixed 4-wide calling convention
+via `InsertElement`, a no-op when already 4-wide), and
+`narrowStorageImageTexel` (Load side: `ShuffleVector`/`ExtractElement`s
+the runtime's always-4-wide result back down to the real declared width,
+also a no-op when already 4-wide). Both widen/narrow calls wrap the
+otherwise-unchanged per-`ImageShape` `createStoreXX`/`createLoadXX`
+runtime-call dispatch. No runtime (`FeMeRuntimeCPU.c`) change was needed:
+`femeRTPackImageTexel`/`femeRTStoreTexel2D` already only read/write the
+bound image's own real channel count from the always-4-wide argument,
+confirmed via direct inspection before scoping the fix. 4 new unit tests
+added to `SPIRVResourceLoweringTest.cpp` covering a scalar Store/Load (for
+both `Plain2D` and the exact `Array2D` repro shape) and a 2-component
+Store.
+
+### Real-ICD before/after
+
+Re-ran all three of this row's own manual repros against the rebuilt ICD:
+
+- **Plain scalar** (`RWTexture2D<float>`, `/tmp/l76a_2d/`): pipeline
+  creation now succeeds (previously rejected); output data
+  `[0,1,2,3,4,10,11,12,13,14,20,21,22,23,24]` for a 5x3 dispatch of
+  `TID.y*10+TID.x` is byte-exact.
+- **Plain 2-component** (`RWTexture2D<float2>`, `/tmp/l76a_vec2/`):
+  pipeline creation now succeeds; output `(x, y)` pairs for a 5x3
+  dispatch of `float2(TID.x, TID.y)` are byte-exact.
+- **The exact named repro** (`RWTexture2DArray<float>`,
+  `Feature/Textures/Array.UnalignedRowPitch.test`, `/tmp/l76a/t/`):
+  pipeline creation now succeeds (previously the filed
+  `vkCreateComputePipelines` rejection); `Out` matches `Expected`
+  **bit-for-bit exactly** across all 30 texels (2 array slices x 3x5).
+
+### Real CTS re-run
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.image.load_store.with_format.2d*.r32*sfloat*,dEQP-VK.image.load_store.without_format.2d*.r32*sfloat*" \
+  --deqp-log-filename=l76a_narrow_storage_image.qpa
+```
+
+**30/30 Pass, 0 Fail** for the closest real analogue (single/dual/4-channel
+`R32_SFLOAT`/`R32G32_SFLOAT`/`R32G32B32A32_SFLOAT`, `with_format`/
+`without_format`, `2d`/`2d_array`) -- as expected this doesn't directly
+exercise the narrow-Texel-width fix (GLSL-sourced), so this is a
+regression check, not new-fix evidence; the real fix evidence is the
+offloader-based before/after above.
+
+Full `load-store.txt` mustpass regression caselist (3446 cases) re-run:
+**2346/3446 Pass, 0 Fail, 1100 NotSupported.** 0 Fail confirms no
+regressions from the generalized width-check logic.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- pure CPU-side IR-lowering fix, no new Vulkan
+feature/extension surface touched.
+
+Full `check-feme` (ccache + assertions, `build2`): **2782/2841 Passed, 59
+Unsupported, 0 Failed** -- no regressions.

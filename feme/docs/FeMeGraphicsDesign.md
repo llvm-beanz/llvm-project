@@ -2950,6 +2950,56 @@ to the `Plain2D` shape only -- an arrayed, 1D/3D, cube/cube-array, or
 non-mandatory-format/format-agnostic/multisampled storage image is still
 unimplemented, tracked as roadmap H19b/H19c/H19d.
 
+**Update (roadmap L76(a), closed):** a storage image's own
+`OpImageWrite`/`OpImageRead`-via-`getpointer` Texel operand can now be
+*any* width from 1 to 4 components, not only the full `<4 x float>`/
+`<4 x i32>` every shape above assumed. The roadmap's own framing of this
+row as an `Array2D`-specific ("`RWTexture2DArray` is entirely rejected")
+gap turned out to be too narrow: real `dxc -spirv` compiles confirmed the
+same rejection for a *plain, non-arrayed* `RWTexture2D<float>` and for a
+2-component `RWTexture2D<float2>` too -- `classifyStorageImage2DHandle`'s
+`Array2D`-shape/coordinate-width handling was already entirely correct
+and needed no change at all; the real bug was `hasOnlySupportedStorageImageUses`
+and the Store/Load lowering sites both hardcoding the Texel *value*'s own
+width to exactly 4, orthogonal to the `ImageShape` coordinate enum. This
+asymmetry -- unlike a sampled image's `OpImageRead`/`OpImageFetch`, which
+`dxc` always emits at the full 4-wide return width regardless of the
+underlying format, `OpImageWrite`'s own Texel operand (and, per this fix,
+a storage image's own `Load`) is emitted by `dxc` at *exactly* the
+shader's declared `RWTexture*<T>` element width -- is the crux of the
+bug, and is real only for HLSL-sourced shaders: GLSL's `imageStore`/
+`imageLoad` built-ins always operate on a full `vec4` regardless of the
+bound format, which is why no existing `dEQP-VK.image.load_store.*` CTS
+case (all GLSL-sourced) had ever exercised this path, and why this fix
+required its own new HLSL-shaped manual repros rather than a CTS-driven
+discovery. `storageImageTexelWidth`/`isIntegerStorageTexelType` (new,
+`SPIRVResourceLowering.cpp`) generalize the old `isV4I32`/`isV4F32`-only
+width check to accept a scalar or 2/3/4-wide vector of the right element
+type; `widenStorageImageTexel` (Store side) zero-pads a narrower Texel up
+to the runtime's fixed 4-wide calling convention via `InsertElement`
+before the unchanged per-shape `createStoreXX` dispatch, and
+`narrowStorageImageTexel` (Load side) shuffles/extracts the runtime's
+always-4-wide result back down to the shader's own declared width after
+the unchanged per-shape `createLoadXX` dispatch -- both are no-ops when
+the Texel is already exactly 4-wide, so every prior full-4-wide test case
+is unaffected. No runtime (`FeMeRuntimeCPU.c`) change was needed:
+`femeRTPackImageTexel`/`femeRTStoreTexel2D` already only read/write the
+bound image's own real channel count, silently ignoring unused padding
+lanes in the always-4-wide argument -- confirmed via direct inspection
+before this fix was scoped, keeping the whole change confined to the
+IR-lowering layer. Verified against all three of this row's own real
+repro shapes (a plain scalar `RWTexture2D<float>`, a plain 2-component
+`RWTexture2D<float2>`, and the exact named `RWTexture2DArray<float>`
+repro `Feature/Textures/Array.UnalignedRowPitch.test`): all three now
+clear pipeline creation and produce byte-exact expected output. A real
+CTS re-run of the closest analogous group,
+`dEQP-VK.image.load_store.{with,without}_format.2d*.r32*sfloat*` (the
+mandatory-format single/dual-channel formats), is unaffected as expected
+(GLSL-sourced, doesn't exercise the narrow-Texel path either way) but
+confirms **30/30 Pass, 0 Fail**, and the full `load-store.txt` mustpass
+regression caselist (3446 cases) confirms **2346/3446 Pass, 0 Fail** --
+no regressions.
+
 ### Texture layout and formats
 
 The API-neutral image descriptor supports linear and FeMe-private tiled
