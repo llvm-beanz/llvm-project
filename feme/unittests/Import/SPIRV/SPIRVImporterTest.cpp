@@ -447,4 +447,230 @@ TEST(SPIRVImporterTest,
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 
+/// A minimal compute-shader-shaped module querying a plain 2D storage
+/// image's size at an explicit mip level via `OpImageQuerySizeLod` (103)
+/// -- the opcode `lowerImageQueryOpcodes` (see `SPIRVImporter.cpp`) must
+/// rewrite into an `OpFunctionCall` before MLIR's deserializer, which has
+/// no enum case for 103 at all (roadmap L72(d)), ever sees it.
+std::vector<uint32_t> buildImageQuerySizeLodModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t Int = B.nextId();
+  uint32_t IVec2 = B.nextId();
+  uint32_t ImageTy = B.nextId();
+  uint32_t PtrImage = B.nextId();
+  uint32_t Variable = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t Lod = B.nextId();
+  uint32_t ImageVal = B.nextId();
+  uint32_t Result = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*GLCompute=*/5, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  B.emit(/*OpExecutionMode=*/16, {Main, /*LocalSize=*/17, 1, 1, 1});
+  B.emit(/*OpDecorate=*/71, {Variable, /*DescriptorSet=*/34, 0});
+  B.emit(/*OpDecorate=*/71, {Variable, /*Binding=*/33, 0});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeInt=*/21, {Int, 32, /*Signed=*/1});
+  B.emit(/*OpTypeVector=*/23, {IVec2, Int, 2});
+  B.emit(/*OpTypeImage=*/25, {ImageTy, Int, /*Dim2D=*/1, /*Depth=*/0,
+                              /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/2,
+                              /*Rgba32i=*/24});
+  B.emit(/*OpTypePointer=*/32, {PtrImage, /*UniformConstant=*/0, ImageTy});
+  B.emit(/*OpVariable=*/59, {PtrImage, Variable, /*UniformConstant=*/0});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpConstant=*/43, {Int, Lod, 0});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpLoad=*/61, {ImageTy, ImageVal, Variable});
+  // `%Result = OpImageQuerySizeLod %IVec2 %ImageVal %Lod`.
+  B.emit(/*OpImageQuerySizeLod=*/103, {IVec2, Result, ImageVal, Lod});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
+/// As `buildImageQuerySizeLodModule`, but queries the image's own
+/// mip-level count via `OpImageQueryLevels` (106) instead, and the Image
+/// operand is extracted from a combined sampled image via `OpImage` --
+/// the shape a `sampler2D`-typed GLSL query builtin actually produces --
+/// exercising `isKnownResultTypeProducer`'s `OpImage` case.
+std::vector<uint32_t> buildImageQueryLevelsModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t Int = B.nextId();
+  uint32_t Float = B.nextId();
+  uint32_t ImageTy = B.nextId();
+  uint32_t SampledImageTy = B.nextId();
+  uint32_t PtrSampledImage = B.nextId();
+  uint32_t Variable = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t SampledImageVal = B.nextId();
+  uint32_t ImageVal = B.nextId();
+  uint32_t Result = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*Fragment=*/4, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  B.emit(/*OpExecutionMode=*/16, {Main, /*OriginUpperLeft=*/7});
+  B.emit(/*OpDecorate=*/71, {Variable, /*DescriptorSet=*/34, 0});
+  B.emit(/*OpDecorate=*/71, {Variable, /*Binding=*/33, 0});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeInt=*/21, {Int, 32, /*Signed=*/1});
+  B.emit(/*OpTypeFloat=*/22, {Float, 32});
+  B.emit(/*OpTypeImage=*/25, {ImageTy, Float, /*Dim2D=*/1, /*Depth=*/0,
+                              /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/1,
+                              /*Unknown=*/0});
+  B.emit(/*OpTypeSampledImage=*/27, {SampledImageTy, ImageTy});
+  B.emit(/*OpTypePointer=*/32,
+         {PtrSampledImage, /*UniformConstant=*/0, SampledImageTy});
+  B.emit(/*OpVariable=*/59, {PtrSampledImage, Variable, /*UniformConstant=*/0});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpLoad=*/61, {SampledImageTy, SampledImageVal, Variable});
+  B.emit(/*OpImage=*/100, {ImageTy, ImageVal, SampledImageVal});
+  // `%Result = OpImageQueryLevels %Int %ImageVal`.
+  B.emit(/*OpImageQueryLevels=*/106, {Int, Result, ImageVal});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
+/// As `buildImageQuerySizeLodModule`, but the Lod operand is instead
+/// produced by `OpIAdd` -- an opcode `isKnownResultTypeProducer`
+/// deliberately does not recognize -- so this exercises
+/// `lowerImageQueryOpcodes`'s "leave the instruction alone rather than
+/// risk an incorrectly-typed call" fallback.
+std::vector<uint32_t> buildImageQuerySizeLodWithUnresolvableLodModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t Int = B.nextId();
+  uint32_t IVec2 = B.nextId();
+  uint32_t ImageTy = B.nextId();
+  uint32_t PtrImage = B.nextId();
+  uint32_t Variable = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t A = B.nextId();
+  uint32_t C = B.nextId();
+  uint32_t Lod = B.nextId();
+  uint32_t ImageVal = B.nextId();
+  uint32_t Result = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*GLCompute=*/5, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  B.emit(/*OpExecutionMode=*/16, {Main, /*LocalSize=*/17, 1, 1, 1});
+  B.emit(/*OpDecorate=*/71, {Variable, /*DescriptorSet=*/34, 0});
+  B.emit(/*OpDecorate=*/71, {Variable, /*Binding=*/33, 0});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeInt=*/21, {Int, 32, /*Signed=*/1});
+  B.emit(/*OpTypeVector=*/23, {IVec2, Int, 2});
+  B.emit(/*OpTypeImage=*/25, {ImageTy, Int, /*Dim2D=*/1, /*Depth=*/0,
+                              /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/2,
+                              /*Rgba32i=*/24});
+  B.emit(/*OpTypePointer=*/32, {PtrImage, /*UniformConstant=*/0, ImageTy});
+  B.emit(/*OpVariable=*/59, {PtrImage, Variable, /*UniformConstant=*/0});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpConstant=*/43, {Int, A, 1});
+  B.emit(/*OpConstant=*/43, {Int, C, 2});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpLoad=*/61, {ImageTy, ImageVal, Variable});
+  B.emit(/*OpIAdd=*/128, {Int, Lod, A, C});
+  B.emit(/*OpImageQuerySizeLod=*/103, {IVec2, Result, ImageVal, Lod});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
+TEST(SPIRVImporterTest, LowersImageQuerySizeLod) {
+  Context Ctx;
+  std::vector<uint32_t> Words = buildImageQuerySizeLodModule();
+  llvm::Expected<Module> Result = importModule(Ctx, Words);
+  // Without `lowerImageQueryOpcodes`, this fails: MLIR's deserializer has
+  // no enum case for `OpImageQuerySizeLod` (103) at all (see roadmap
+  // L72(d)).
+  ASSERT_THAT_EXPECTED(Result, llvm::Succeeded());
+
+  unsigned CallCount = 0;
+  Result->getMLIROperation()->walk([&](mlir::spirv::FunctionCallOp Op) {
+    ++CallCount;
+    EXPECT_TRUE(llvm::StringRef(Op.getCallee()).starts_with(
+        "feme.query.size_lod."));
+    ASSERT_EQ(Op.getArguments().size(), 2u);
+    // Result type is the queried vec2<i32> size; the two arguments are the
+    // plain image handle and the explicit Level-of-Detail.
+    EXPECT_TRUE(llvm::isa<mlir::VectorType>(Op.getType(0)));
+  });
+  EXPECT_EQ(CallCount, 1u);
+
+  // The synthesized callee itself must be an external (no-body), `Import`
+  // linkage function declaration -- otherwise MLIR's own module verifier
+  // would have rejected the module outright.
+  unsigned ExternalFuncCount = 0;
+  Result->getMLIROperation()->walk([&](mlir::spirv::FuncOp Op) {
+    if (llvm::StringRef(Op.getName()).starts_with("feme.query.size_lod.")) {
+      ++ExternalFuncCount;
+      EXPECT_TRUE(Op.isExternal());
+    }
+  });
+  EXPECT_EQ(ExternalFuncCount, 1u);
+}
+
+TEST(SPIRVImporterTest, LowersImageQueryLevels) {
+  Context Ctx;
+  std::vector<uint32_t> Words = buildImageQueryLevelsModule();
+  llvm::Expected<Module> Result = importModule(Ctx, Words);
+  // Without `lowerImageQueryOpcodes`, this fails: MLIR's deserializer has
+  // no enum case for `OpImageQueryLevels` (106) at all (see roadmap
+  // L72(d)).
+  ASSERT_THAT_EXPECTED(Result, llvm::Succeeded());
+
+  unsigned CallCount = 0;
+  Result->getMLIROperation()->walk([&](mlir::spirv::FunctionCallOp Op) {
+    ++CallCount;
+    EXPECT_TRUE(
+        llvm::StringRef(Op.getCallee()).starts_with("feme.query.levels."));
+    // A single argument: the plain image handle (`OpImageQueryLevels` has
+    // no Level-of-Detail operand of its own -- it queries the image's own
+    // total mip-level count).
+    ASSERT_EQ(Op.getArguments().size(), 1u);
+    EXPECT_TRUE(llvm::isa<mlir::IntegerType>(Op.getType(0)));
+  });
+  EXPECT_EQ(CallCount, 1u);
+}
+
+TEST(SPIRVImporterTest, LeavesImageQuerySizeLodWithUnresolvableLodAlone) {
+  Context Ctx;
+  std::vector<uint32_t> Words =
+      buildImageQuerySizeLodWithUnresolvableLodModule();
+  llvm::Expected<Module> Result = importModule(Ctx, Words);
+  // `lowerImageQueryOpcodes` cannot resolve an `OpIAdd`-produced Lod
+  // operand's type (deliberately not in `isKnownResultTypeProducer`'s own
+  // allowlist) and must leave the instruction untouched rather than risk
+  // an incorrectly-typed call -- so this fails exactly as it did before
+  // that pass existed (MLIR still has no enum case for opcode 103).
+  EXPECT_THAT_EXPECTED(Result, llvm::Failed());
+}
+
 } // namespace

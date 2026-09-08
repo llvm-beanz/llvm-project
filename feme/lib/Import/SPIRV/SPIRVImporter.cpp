@@ -36,14 +36,27 @@ constexpr uint32_t kOpExtInstImport = 11;
 constexpr uint32_t kOpExtInst = 12;
 constexpr uint32_t kOpTypeFloat = 22;
 constexpr uint32_t kOpTypeVector = 23;
+constexpr uint32_t kOpTypeFunction = 33;
 constexpr uint32_t kOpFunction = 54;
+constexpr uint32_t kOpFunctionParameter = 55;
+constexpr uint32_t kOpFunctionEnd = 56;
+constexpr uint32_t kOpFunctionCall = 57;
 constexpr uint32_t kOpCompositeConstruct = 80;
 constexpr uint32_t kOpCompositeExtract = 81;
 constexpr uint32_t kOpImageSampleExplicitLod = 88;
 constexpr uint32_t kOpImageSampleDrefExplicitLod = 90;
 constexpr uint32_t kOpImageSampleProjExplicitLod = 92;
 constexpr uint32_t kOpImageSampleProjDrefExplicitLod = 94;
+constexpr uint32_t kOpImage = 100;
+constexpr uint32_t kOpImageQuerySizeLod = 103;
+constexpr uint32_t kOpImageQueryLevels = 106;
 constexpr uint32_t kOpFDiv = 136;
+constexpr uint32_t kOpCapability = 17;
+constexpr uint32_t kOpName = 5;
+constexpr uint32_t kOpDecorate = 71;
+constexpr uint32_t kCapabilityLinkage = 5;
+constexpr uint32_t kDecorationLinkageAttributes = 41;
+constexpr uint32_t kLinkageTypeImport = 1;
 constexpr uint32_t kSPIRVHeaderWords = 5;
 
 /// Decodes a null-terminated SPIR-V "Literal String" starting at
@@ -66,6 +79,23 @@ std::string decodeLiteralString(llvm::ArrayRef<uint32_t> Words,
     }
   }
   return Result;
+}
+
+/// Appends \p Str to \p Words, encoded per the SPIR-V specification's own
+/// "Literal String" rule -- a NUL-terminated UTF-8 byte sequence packed
+/// four bytes per word, little-endian within each word, then padded with
+/// zero bytes out to a whole word -- mirroring `decodeLiteralString`'s own
+/// byte order exactly. Returns the number of words appended.
+unsigned appendLiteralString(llvm::SmallVectorImpl<uint32_t> &Words,
+                             llvm::StringRef Str) {
+  size_t Start = Words.size();
+  unsigned WordCount = static_cast<unsigned>(Str.size() / 4) + 1;
+  Words.resize(Words.size() + WordCount, 0);
+  for (size_t I = 0; I < Str.size(); ++I)
+    Words[Start + I / 4] |= static_cast<uint32_t>(
+                                static_cast<unsigned char>(Str[I]))
+                            << ((I % 4) * 8);
+  return WordCount;
 }
 
 /// `VK_KHR_shader_non_semantic_info` (roadmap E19): the SPIR-V
@@ -143,11 +173,12 @@ stripNonSemanticExtInst(llvm::ArrayRef<uint32_t> Words) {
 /// "Instruction Physical Layout" section requires for every "value"
 /// instruction) -- a small, deliberately conservative allowlist of the
 /// producer opcodes real GLSL/HLSL-compiled shaders actually use to build
-/// a sampling Coordinate/Dref operand, rather than every opcode the
-/// specification permits: an unrecognized producer simply means
-/// `lowerProjectiveImageSamples` cannot resolve that operand's exact
-/// vector shape and leaves the projective sample instruction alone (see
-/// that function's own comment), so under-approximating this set only
+/// a sampling Coordinate/Dref operand or a plain-image query's own Image/
+/// Level-of-Detail operand, rather than every opcode the specification
+/// permits: an unrecognized producer simply means the rewrite calling
+/// this (`lowerProjectiveImageSamples`/`lowerImageQueryOpcodes`) cannot
+/// resolve that operand's exact type and leaves the instruction alone
+/// (see each rewrite's own comment), so under-approximating this set only
 /// costs coverage, never correctness.
 bool isKnownResultTypeProducer(uint32_t Opcode) {
   switch (Opcode) {
@@ -162,6 +193,9 @@ bool isKnownResultTypeProducer(uint32_t Opcode) {
   case 80:  // OpCompositeConstruct
   case 81:  // OpCompositeExtract
   case 82:  // OpCompositeInsert
+  case kOpImage: // OpImage: extracts a plain image out of a combined
+                 // sampled image -- the shape a `sampler2D`-typed GLSL
+                 // query builtin's own Image operand always takes.
   case 111: // OpConvertSToF
   case 112: // OpConvertUToF
   case 124: // OpBitcast
@@ -473,6 +507,243 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
   return FinalWords;
 }
 
+/// Lowers SPIR-V's `OpImageQuerySizeLod` (103) and `OpImageQueryLevels`
+/// (106) -- two opcodes MLIR's own SPIR-V dialect has zero enum/Op-class
+/// coverage for at all (roadmap L72(d), split out of L72(a) once that
+/// row's own rewrite closed out `OpImageSampleProjExplicitLod`/
+/// `OpImageSampleProjDrefExplicitLod`, the other two "unhandled opcode"
+/// opcodes) -- into an ordinary `OpFunctionCall` against a synthesized,
+/// `Import`-linkage (i.e. declared-only, no body) external function.
+///
+/// Unlike `lowerProjectiveImageSamples`'s own rewrite, neither opcode here
+/// has a semantically equivalent *already-supported* SPIR-V opcode to
+/// relabel into: each queries information (an image's own mip-level
+/// count, or its size at an explicit, possibly non-zero mip level) no
+/// other already-supported opcode's result can substitute for. Instead,
+/// this rewrite gives MLIR something it already knows how to parse
+/// end-to-end without any new opcode support at all: an `OpFunctionCall`
+/// against a function declared with `Decoration LinkageAttributes ...
+/// Import` (see mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp's
+/// own `hasImportLinkage` handling, which erases such a function's body
+/// requirement entirely) survives deserialization as an ordinary
+/// `spirv.func`, and MLIR's own generic `FunctionCallPattern`/
+/// `FuncConversionPattern` (mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp)
+/// already lower both the call and the external declaration to a plain
+/// `llvm.call` against an external `llvm.func`, named after this
+/// function's own synthesized `OpName` (the deserializer's
+/// `getFunctionSymbol` looks up a function's `OpName` first, falling back
+/// to an auto-generated `spirv_fn_<id>` only if none was given) --
+/// `SPIRVResourceLowering.cpp` then recognizes a call to one of this
+/// rewrite's own magic-named functions (`isQuerySizeLodCall`/
+/// `isQueryLevelsCall`) the same way it already recognizes an
+/// `llvm.spv.resource.*` intrinsic call, and lowers it to a real runtime
+/// query.
+///
+/// This rewrite itself does not need to know an occurrence's eventual
+/// image *shape* at all -- it only needs the Image (and, for
+/// `OpImageQuerySizeLod`, Level-of-Detail) operand's own SPIR-V type,
+/// resolved via `isKnownResultTypeProducer`'s bounded allowlist, exactly
+/// as `lowerProjectiveImageSamples` resolves a Coordinate/Dref's -- so
+/// every shape's occurrence is rewritten uniformly here.
+/// `SPIRVResourceLowering.cpp`'s own `hasOnlySupportedImageUses` is what
+/// actually scopes which shapes' synthesized calls survive:
+/// `Plain2D`/`Array2D` only for now, mirroring this project's own
+/// established shape-scoping precedent (`GetDimensions2D`, roadmap L70) --
+/// `Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D` occurrences are
+/// rewritten here the same as any other shape, but still fail later, at
+/// that same shape check, exactly as they did before this rewrite
+/// existed.
+///
+/// Deliberately conservative, mirroring `lowerProjectiveImageSamples`: an
+/// occurrence whose Image (or Level-of-Detail) operand cannot be resolved
+/// to a concrete type via `isKnownResultTypeProducer`'s own bounded
+/// allowlist is left completely untouched -- it simply remains an
+/// "unhandled opcode" import failure exactly as before this rewrite
+/// existed.
+llvm::SmallVector<uint32_t>
+lowerImageQueryOpcodes(llvm::ArrayRef<uint32_t> Words) {
+  if (Words.size() <= kSPIRVHeaderWords ||
+      !containsOpcode(Words, {kOpImageQuerySizeLod, kOpImageQueryLevels}))
+    return llvm::SmallVector<uint32_t>(Words);
+
+  TypeResolutionInfo Info = scanModuleTypes(Words);
+  if (Info.FuncStart == Words.size())
+    return llvm::SmallVector<uint32_t>(Words);
+
+  uint32_t Bound = Words[3];
+  auto AllocId = [&Bound]() { return Bound++; };
+
+  // Everything before the first `OpFunction` is copied verbatim (the
+  // 5-word header included), plus a one-time `OpCapability Linkage`
+  // inserted right after the header (required by every synthesized
+  // function's own `LinkageAttributes` decoration below -- see the SPIR-V
+  // specification's own `Decoration LinkageAttributes` entry, which lists
+  // `Linkage` as its sole required capability) and, per distinct (Opcode,
+  // Image-type, Result-type[, Lod-type]) shape encountered below, one
+  // synthesized external function declaration.
+  llvm::SmallVector<uint32_t> Preamble(Words.begin(),
+                                       Words.begin() + Info.FuncStart);
+  Preamble.insert(Preamble.begin() + kSPIRVHeaderWords,
+                  {(2u << 16) | kOpCapability, kCapabilityLinkage});
+
+  // Memoizes one synthesized function per distinct (Opcode, Image-type
+  // <id>, Result-type <id>, Lod-type <id> or 0) shape -- reusing the same
+  // declaration for every occurrence with an identical shape, mirroring
+  // `lowerProjectiveImageSamples`'s own `GetOrCreateVectorType`
+  // memoization, rather than emitting a fresh (functionally harmless, but
+  // redundant) declaration per occurrence.
+  llvm::DenseMap<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint32_t>
+      SyntheticFunctions;
+  uint32_t NextShapeIndex = 0;
+
+  auto GetOrCreateSyntheticFunction = [&](uint32_t Opcode, uint32_t ImageType,
+                                          uint32_t ResultType,
+                                          uint32_t LodType,
+                                          llvm::StringRef BaseName) {
+    auto Key = std::make_tuple(Opcode, ImageType, ResultType, LodType);
+    auto It = SyntheticFunctions.find(Key);
+    if (It != SyntheticFunctions.end())
+      return It->second;
+
+    uint32_t FnTypeId = AllocId();
+    uint32_t FnId = AllocId();
+    uint32_t ImageParamId = AllocId();
+    uint32_t LodParamId = LodType ? AllocId() : 0;
+
+    // A distinct, human-readable name per synthesized shape both keeps
+    // LLVM's own eventual function symbols apart (two distinct SPIR-V
+    // types could otherwise convert to the same LLVM type and collide
+    // under one shared name) and gives `SPIRVResourceLowering.cpp`'s own
+    // recognition logic a stable prefix to match against.
+    std::string Name = (BaseName + "." + llvm::Twine(NextShapeIndex++)).str();
+
+    // `OpName %Fn "<Name>"`.
+    size_t NameOpStart = Preamble.size();
+    Preamble.push_back(0); // Opcode/word-count patched in below.
+    Preamble.push_back(FnId);
+    unsigned NameWords = appendLiteralString(Preamble, Name);
+    Preamble[NameOpStart] =
+        ((static_cast<uint32_t>(2 + NameWords)) << 16) | kOpName;
+
+    // `OpDecorate %Fn LinkageAttributes "<Name>" Import`: the same string,
+    // encoded a second time (`LinkageAttributes` carries its own copy of
+    // the linkage name, distinct from any `OpName`) -- gives the
+    // synthesized function `Import` linkage, so MLIR's own deserializer
+    // treats it as an external declaration (no body) instead of requiring
+    // one.
+    size_t DecorateOpStart = Preamble.size();
+    Preamble.push_back(0); // Opcode/word-count patched in below.
+    Preamble.push_back(FnId);
+    Preamble.push_back(kDecorationLinkageAttributes);
+    unsigned DecorateNameWords = appendLiteralString(Preamble, Name);
+    Preamble.push_back(kLinkageTypeImport);
+    Preamble[DecorateOpStart] =
+        ((static_cast<uint32_t>(3 + DecorateNameWords + 1)) << 16) |
+        kOpDecorate;
+
+    // `OpTypeFunction %FnTypeId %ResultType %ImageType [%LodType]`.
+    llvm::SmallVector<uint32_t, 2> ParamTypes{ImageType};
+    if (LodType)
+      ParamTypes.push_back(LodType);
+    Preamble.push_back(
+        ((static_cast<uint32_t>(3 + ParamTypes.size())) << 16) |
+        kOpTypeFunction);
+    Preamble.push_back(FnTypeId);
+    Preamble.push_back(ResultType);
+    Preamble.append(ParamTypes.begin(), ParamTypes.end());
+
+    // `OpFunction %ResultType %Fn None %FnTypeId`, immediately followed by
+    // its parameter(s) and `OpFunctionEnd` -- no basic block/body at all,
+    // valid only because of the `Import` linkage decorated above.
+    Preamble.push_back((5u << 16) | kOpFunction);
+    Preamble.push_back(ResultType);
+    Preamble.push_back(FnId);
+    Preamble.push_back(0); // FunctionControl::None.
+    Preamble.push_back(FnTypeId);
+    Preamble.push_back((3u << 16) | kOpFunctionParameter);
+    Preamble.push_back(ImageType);
+    Preamble.push_back(ImageParamId);
+    if (LodType) {
+      Preamble.push_back((3u << 16) | kOpFunctionParameter);
+      Preamble.push_back(LodType);
+      Preamble.push_back(LodParamId);
+    }
+    Preamble.push_back((1u << 16) | kOpFunctionEnd);
+
+    SyntheticFunctions[Key] = FnId;
+    return FnId;
+  };
+
+  // Second pass: copy every function-body instruction, rewriting each
+  // occurrence of either opcode this pass can resolve into an
+  // `OpFunctionCall` against the (possibly newly-synthesized) external
+  // function for its exact shape.
+  llvm::SmallVector<uint32_t> Body;
+  Body.reserve(Words.size() - Info.FuncStart);
+  for (size_t I = Info.FuncStart; I < Words.size();) {
+    uint32_t WordCount = Words[I] >> 16;
+    uint32_t Opcode = Words[I] & 0xffff;
+    if (WordCount == 0 || I + WordCount > Words.size()) {
+      Body.append(Words.begin() + I, Words.end());
+      break;
+    }
+
+    bool IsSizeLod = Opcode == kOpImageQuerySizeLod;
+    if (!IsSizeLod && Opcode != kOpImageQueryLevels) {
+      Body.append(Words.begin() + I, Words.begin() + I + WordCount);
+      I += WordCount;
+      continue;
+    }
+
+    uint32_t ResultType = Words[I + 1];
+    uint32_t Result = Words[I + 2];
+    uint32_t Image = Words[I + 3];
+    uint32_t Lod = IsSizeLod ? Words[I + 4] : 0;
+
+    auto LeaveUnrewritten = [&]() {
+      Body.append(Words.begin() + I, Words.begin() + I + WordCount);
+      I += WordCount;
+    };
+
+    auto ImageTypeIt = Info.ValueType.find(Image);
+    if (ImageTypeIt == Info.ValueType.end()) {
+      LeaveUnrewritten();
+      continue;
+    }
+    uint32_t LodType = 0;
+    if (IsSizeLod) {
+      auto LodTypeIt = Info.ValueType.find(Lod);
+      if (LodTypeIt == Info.ValueType.end()) {
+        LeaveUnrewritten();
+        continue;
+      }
+      LodType = LodTypeIt->second;
+    }
+
+    uint32_t FnId = GetOrCreateSyntheticFunction(
+        Opcode, ImageTypeIt->second, ResultType, LodType,
+        IsSizeLod ? "feme.query.size_lod" : "feme.query.levels");
+
+    unsigned NumArgs = IsSizeLod ? 2 : 1;
+    Body.push_back(((4u + NumArgs) << 16) | kOpFunctionCall);
+    Body.push_back(ResultType);
+    Body.push_back(Result);
+    Body.push_back(FnId);
+    Body.push_back(Image);
+    if (IsSizeLod)
+      Body.push_back(Lod);
+
+    I += WordCount;
+  }
+
+  llvm::SmallVector<uint32_t> FinalWords;
+  FinalWords.reserve(Preamble.size() + Body.size());
+  FinalWords.append(Preamble.begin(), Preamble.end());
+  FinalWords.append(Body.begin(), Body.end());
+  FinalWords[3] = Bound;
+  return FinalWords;
+}
+
 } // namespace
 
 llvm::Expected<Module> SPIRVImporter::import(llvm::MemoryBufferRef Buffer,
@@ -511,6 +782,7 @@ llvm::Expected<Module> SPIRVImporter::import(llvm::MemoryBufferRef Buffer,
         Data + I * sizeof(uint32_t)));
   llvm::SmallVector<uint32_t> Filtered = stripNonSemanticExtInst(RawWords);
   Filtered = lowerProjectiveImageSamples(Filtered);
+  Filtered = lowerImageQueryOpcodes(Filtered);
   llvm::ArrayRef<uint32_t> Binary = Filtered;
 
   mlir::spirv::DeserializationOptions DeserOpts;
