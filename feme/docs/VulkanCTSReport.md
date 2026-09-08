@@ -31254,3 +31254,104 @@ needed (a SPIR-V-import-time rewrite of two sampling opcodes into their
 already-supported equivalents, not a new extension or 1.4 core feature
 bit). Temporary artifacts under `/tmp/l72a/` cleaned up at the end of the
 session.
+
+## L72(d): lowering `OpImageQuerySizeLod`/`OpImageQueryLevels` (`Plain2D`, this session)
+
+Closed out roadmap L72(d)'s `Plain2D` portion (10 of the row's original 76
+cases): `OpImageQuerySizeLod` (SPIR-V opcode 103, GLSL's
+`textureSize(sampler, lod)`) and `OpImageQueryLevels` (opcode 106, GLSL's
+`textureQueryLevels(sampler)`) neither have a real MLIR/LLVM intrinsic of
+their own (MLIR's SPIR-V dialect has zero enum/Op-class coverage for
+either), so `SPIRVImporter.cpp` gained a new `lowerImageQueryOpcodes` pass
+that rewrites each occurrence, before MLIR ever sees the original opcode,
+into an ordinary `OpFunctionCall` against a synthesized, magic-named
+external (`Import`-linkage) function -- one per unique
+`(Opcode, ImageType, ResultType, LodType)` shape. This requires **zero
+changes to MLIR itself**: SPIR-V's own deserializer already fully supports
+declaring a body-less function via `OpFunction`/`OpFunctionParameter`(s)/
+`OpFunctionEnd` decorated `OpDecorate %fn LinkageAttributes "name" Import`
+(needs only `OpCapability Linkage`), the same mechanism a real linked
+SPIR-V module would use to declare an external symbol.
+
+This was scoped as a feme-local design choice, deliberately over an
+upstream MLIR TableGen contribution for these two opcodes (the other
+option this row's own filed text raised) -- confirmed working end-to-end
+via new `SPIRVImporterTest.cpp` tests verifying the rewritten module
+deserializes, a `spirv.FunctionCall` with the expected callee-name prefix
+exists, and its callee is a real external `spirv.FuncOp`.
+
+Investigating whether this needed genuine new runtime capability (as the
+row's own filed text worried) found it did not: `FemeRTImageDescriptor`
+already tracks `MipLevels`/`Width`/`Height` (needed for
+`vkCreateImageView`'s own validation), so this was purely a wiring gap.
+Two new runtime entry points were added:
+`femeCpuImageGetDimensionsLod2DV2I32` (clamps `Lod` into
+`[0, MipLevels - 1]`, then halves `Width`/`Height` that many times,
+flooring to 1, mirroring `Image.cpp`'s own `computeSubresourceLayouts`
+math) and `femeCpuImageQueryLevelsI32` (returns `Img.MipLevels` directly,
+needing no `Mask` parameter at all -- this query has no per-invocation
+side effect to guard against, unlike every other `feme.cpu.image.*`
+call).
+
+`SPIRVResourceLowering.cpp` recognizes the importer's synthesized calls by
+callee-name prefix (`isSyntheticQueryCall`) rather than by LLVM intrinsic
+ID -- these calls have no real intrinsic, unlike every other
+call-recognizer in this file -- and dispatches to two new `ImageCalls`
+builders (`createQuerySizeLod2D`/`createQueryLevels`).
+
+**A real CTS re-run of this row's own 1,375-case caselist crashed the
+whole run** the first time through: `hasOnlySupportedImageUses`/
+`hasOnlySupportedStorageImageUses` initially accepted both `Plain2D` and
+`Array2D`, but the builders only ever emit a `Plain2D`-shaped `v2i32`/`i32`
+result -- `Array2D`'s own `textureSize()` returns an extra layer-count
+component (e.g. `ivec3`), so `replaceAllUsesWith` aborted with
+`replaceAllUses of value with new value of different type!` on
+`dEQP-VK.glsl.texture_functions.query.texturesize.isampler2darray_compute`.
+Fixed by narrowing the shape gate to `Plain2D` only, matching what the
+builders actually implement, and added a negative
+`LeavesArray2DQuerySizeLodHandleAlone` regression test (plus a positive
+`LowersPlain2DQuerySizeLodAndQueryLevels` test) that would have caught
+this before it ever reached a real CTS run.
+
+Also discovered, while designing this fix, that opcode 107
+(`OpImageQuerySamples`) has its own separate prerequisite gap:
+`classifySampledImage2DHandle` rejects every multisampled sampled image
+handle outright today, so no handle this opcode could ever apply to can
+reach its own dispatch code regardless of how the opcode itself gets
+lowered -- deferred as its own follow-on row, filed as roadmap L73. The
+remaining 66 non-`Plain2D` cases of opcodes 103/106 (`Array2D`, `Plain1D`,
+`Array1D`, `Plain3D`, `Cube`, `CubeArray`) need their own per-shape
+result-type widening in the `ImageCalls` builders before their own shape
+gates can be safely widened -- filed as roadmap L74.
+
+New test coverage across both touched phases: `SPIRVImporterTest.cpp`
+gained `LowersImageQuerySizeLod`/`LowersImageQueryLevels`/
+`LeavesImageQuerySizeLodWithUnresolvableLodAlone`; `ImageCallsTest.cpp`
+gained `MatchesQuerySizeLod2DCall`/`MatchesQueryLevelsCall`;
+`SPIRVResourceLoweringTest.cpp` gained
+`LowersPlain2DQuerySizeLodAndQueryLevels`/
+`LeavesArray2DQuerySizeLodHandleAlone`; a new
+`spirv-resource-lowering-image-query.ll` lit test (pairing the two new
+calls with the already-proven `llvm.spv.resource.getdimensions.xy`
+intrinsic as a second, ordinary use on the same handle). `check-feme`:
+2731/2790 pass, 0 fail, 59 unsupported (no regressions).
+
+Re-ran the identical 1,375-case caselist against the rebuilt
+`feme_icd.json`:
+
+- **Totals**: 255/1375 Pass (18.5%, up from 245), 788 Fail (down from
+  798), 332 Not Supported (unchanged).
+- All 10 `Plain2D` `texturesize`/`texturequerylevels` cases this fix
+  targeted (`sampler2d`/`isampler2d`/`usampler2d`/`sampler2dshadow`, both
+  `query.texturesize.*` and `query.texturequerylevels.*` groups) now Pass,
+  up from an outright `"unhandled opcode 103/106"` SPIR-V-import failure
+  before this fix.
+- The remaining 58 of the original 68 `query.texturesize.*`/
+  `query.texturequerylevels.*` cases still Fail: all are non-`Plain2D`
+  shapes (`Array2D`, `Plain1D`, `Array1D`, `Plain3D`, `Cube`,
+  `CubeArray`), exactly the follow-on scope filed as roadmap L74.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is core SPIR-V image-operand functionality with no gating
+Vulkan feature or extension. Temporary artifacts under `/tmp/l72d_*`
+cleaned up at the end of the session.
