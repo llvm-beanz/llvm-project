@@ -31821,3 +31821,75 @@ already-tracked, entirely unrelated gap (roadmap L7), not a regression.
 needed -- core SPIR-V image-operand functionality with no gating Vulkan
 feature or extension. Temporary artifacts under `/tmp/` cleaned up at
 the end of the session.
+
+## L34: `TextureCube` implicit-LOD derivative gap -- already closed via L56 (this session)
+
+### Investigation
+
+Roadmap L34 named a specific bug: `femeCpuImageSampleCubeV4F32` never
+computed a real implicit LOD from screen-space derivatives, always
+defaulting to mip 0 regardless of real minification, discovered by
+L26's own real `offload-test-suite` `Sample.test` repro (a single
+remaining output mismatch at index 29, a "Cube +X minified -> mip 1"
+case). Before writing any new code, read `femeCpuImageSampleCubeV4F32`
+and its `ClampedLod` computation directly (`feme/runtime/CPU/
+FeMeRuntimeCPU.c`) to confirm the bug still existed.
+
+It did not. The function now calls `femeRTComputeCubeClampedLod`, which
+for an implicit-LOD sample computes real face-local UV derivatives via
+`femeRTComputeCubeUVDerivatives` from the caller's own raw
+direction-vector screen-space derivatives, then feeds those into the
+same `femeRTPlanImplicitLod` a `Plain2D` implicit sample already uses.
+This is precisely the fix roadmap L34's own text asked for. Checking
+`Roadmap.md`'s own L56 entry confirmed why: L56 (filed and closed in an
+earlier session, discovered independently via a real CTS
+`cube.combinations.linear_mipmap_linear` mipmap-filtering sweep rather
+than L34's own offloader repro) root-caused and fixed the *identical*
+underlying defect -- `femeCpuImageSampleCubeV4F32`/`CubeArrayV4F32`
+always hardcoding `Lod=0` for an implicit-LOD sample -- without either
+session's own filing ever cross-referencing the other. L34 was simply
+never marked closed once L56 subsumed it.
+
+### Disposition
+
+No new source code changes were needed this session -- the fix already
+exists, already has its own unit test coverage
+(`SampleCubeImplicitLodSelectsCoarserMipFromDerivatives` and siblings in
+`ImageSamplingTest.cpp`, added by L56), and already has its own CTS
+verification (L56's own 25/25 and 200/200 Pass sweeps). This session's
+job was to verify the historical record against the real, current
+codebase rather than trust the roadmap's own stale "not yet started"
+framing, then re-confirm directly rather than reason from memory alone.
+
+### Build/test verification
+
+`check-feme` was not re-run for a code change (none was made), since no
+source file changed. `ninja -C build2 FeMeTransformsCPUTests
+FeMeRuntimeCPUTests` was not re-triggered for this row specifically, but
+the prior L56 session's own `check-feme` run (2658/2658 discovered, 59
+`Unsupported`, 0 `Failed`) already covers this exact code path with
+assertions-enabled, ccache builds.
+
+Rebuilt `check-hlsl-feme-vk` fresh this session (the `offload-test-suite`
+checkout's own local `feme` branch had reverted to stale `main` content
+again, a recurring issue across several prior sessions -- fixed via
+`git fetch beanz feme && git reset --hard beanz/feme`, then a `cmake .`
+re-configure in `build2` to regenerate the `check-hlsl-feme-vk`/
+`check-hlsl-clang-feme-vk` targets) and re-ran this row's own two named
+real-repro cases directly against the rebuilt `feme` ICD:
+`Feature/Textures/Sample.test`/`Feature/Textures/SampleBias.test`, both
+**2/2 Pass** (both previously blocked by this row's own exact named
+mismatch per L26/L34's own history).
+
+### Real CTS re-run
+
+Re-ran `dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.
+linear.*.*.seamless` (L56's own motivating group, exercising the exact
+LOD-selection code path this row's own fix would have touched): **25/25
+Pass, 0 Fail**, confirming continued correctness and no regression.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this fix (and its feature/extension-inventory disposition) was
+already recorded as closed by L56's own prior session; nothing new to
+record here. Temporary artifacts under `/tmp/` cleaned up at the end of
+the session.
