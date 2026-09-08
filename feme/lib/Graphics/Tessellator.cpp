@@ -301,10 +301,34 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
       computeSegmentCount(Factors.Edges[1], Partitioning, MaxTessFactor);
   uint32_t Ev1 =
       computeSegmentCount(Factors.Edges[3], Partitioning, MaxTessFactor);
-  uint32_t Nu =
-      computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
-  uint32_t Nv =
-      computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor);
+  // (Roadmap L82.) `computeSegmentCount` returns the number of segments
+  // spanning the *whole* `[0, 1]` axis (matching its use for edges, above,
+  // where the boundary ring legitimately needs a point at every one of
+  // those segment endpoints, including `0`/`1` themselves). The interior
+  // core lattice built below is different: it is always inset strictly
+  // *within* the boundary (see the `Margin` comment below) and never
+  // touches it, so its own division count is the number of strictly
+  // *interior* grid lines the inside tessellation factor implies -- one
+  // fewer than the whole-axis segment count (an inside factor of `N`
+  // divides the axis into `N` segments, leaving `N - 1` interior lattice
+  // lines, exactly as for the boundary edges' own segment endpoints).
+  // Using the whole-axis segment count directly here (the pre-fix
+  // behavior) generated a spurious *extra* interior ring: for the common
+  // `Inside == Edges == 2` case this produced core lattice points at
+  // `U/V == 1/6, 1/2, 5/6` instead of the correct `U/V == 0.25, 0.75`,
+  // introducing a non-dyadic (`1/6`) fraction that cannot be represented
+  // exactly in `float32` -- an unrecoverable 1-ULP error, no matter how
+  // precisely the rest of the pipeline computes with it. Clamping to a
+  // minimum of `1` preserves the existing degenerate single-ring behavior
+  // when the inside factor is already at its own minimum of `1`.
+  uint32_t Nu = std::max(
+      1u,
+      computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor) -
+          1);
+  uint32_t Nv = std::max(
+      1u,
+      computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor) -
+          1);
 
   TessellatedPatch Patch;
   RingEdges OuterRing = appendQuadBoundaryRing(Patch, Ev0, Eu1, Ev1, Eu0);

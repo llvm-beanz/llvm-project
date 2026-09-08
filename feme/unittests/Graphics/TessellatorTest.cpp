@@ -207,10 +207,14 @@ TEST(TessellatorTest, QuadDomainGeneratesTheAnalyticGridSize) {
       tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
                  TessOutputPrimitive::TriangleCcw, Factors);
   // Uniform unit edge factors give a 4-vertex outer boundary ring (one
-  // vertex per edge); the inset core is a 2x3 grid (Inside factors), whose
-  // own ring has `2 * (2 + 3)` vertices -- see Tessellator.cpp's
+  // vertex per edge); the inset core lattice's own division count is one
+  // less than each Inside factor's whole-axis segment count (roadmap
+  // L82: an inside factor of `N` implies `N - 1` strictly-interior
+  // lattice lines, since the core is always inset strictly within the
+  // boundary and never touches it) -- a 1x2 grid here, whose own ring has
+  // `2 * (1 + 2)` vertices -- see Tessellator.cpp's
   // `appendQuadBoundaryRing`/`bridgeRingsByEdge`.
-  const uint32_t Nu = 2, Nv = 3;
+  const uint32_t Nu = 1, Nv = 2;
   const uint32_t OuterRingSize = 4;
   const uint32_t CoreRingSize = 2 * (Nu + Nv);
   EXPECT_EQ(Patch.Points.size(), OuterRingSize + (Nu + 1) * (Nv + 1));
@@ -224,6 +228,35 @@ TEST(TessellatorTest, QuadDomainGeneratesTheAnalyticGridSize) {
     EXPECT_GE(P.V, 0.0f);
     EXPECT_LE(P.V, 1.0f);
   }
+}
+
+TEST(TessellatorTest, QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords) {
+  // Roadmap L82 regression: when the inside factors exactly match the
+  // (uniform) edge factors -- the common `DomainSystemValues.test`/
+  // `QuadDomainTessellation.test` shape, all factors == 2 -- the interior
+  // core lattice must land on exactly-representable dyadic fractions
+  // (0.25/0.75), not a spurious extra interior ring landing on
+  // non-dyadic fractions like 1/6 that cannot be represented exactly in
+  // `float32` (see Tessellator.cpp's `tessellateQuad` for the full
+  // rationale). Every core (non-boundary) point's U and V must be one of
+  // exactly {0.25, 0.75} bit-for-bit.
+  TessFactors Factors;
+  Factors.Inside = {2.0f, 2.0f};
+  Factors.Edges = {2.0f, 2.0f, 2.0f, 2.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  bool FoundInterior = false;
+  for (const DomainPoint &P : Patch.Points) {
+    // Boundary-ring points sit at U/V == 0, 0.5, or 1; only inspect the
+    // strictly-interior core points this regression cares about.
+    if (P.U == 0.0f || P.U == 1.0f || P.V == 0.0f || P.V == 1.0f)
+      continue;
+    FoundInterior = true;
+    EXPECT_TRUE(P.U == 0.25f || P.U == 0.75f) << "U = " << P.U;
+    EXPECT_TRUE(P.V == 0.25f || P.V == 0.75f) << "V = " << P.V;
+  }
+  EXPECT_TRUE(FoundInterior);
 }
 
 TEST(TessellatorTest, QuadWindingIsConsistentAcrossEveryTriangle) {
