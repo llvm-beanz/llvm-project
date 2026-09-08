@@ -71728,3 +71728,140 @@ stray debug changes or scratch files left behind (the temporary
 `/tmp/l77`/`/tmp/l77diag` scratch directories used for the fresh `dxc`
 recompile and the unsuccessful `RenderTarget`-comparison probe were both
 cleaned up once no longer needed).
+
+# L78: HullWrapperPass masked-input-load clobber by an inactive SIMD lane
+
+## Task
+
+Close out roadmap L78 or other prerequisites blocking the L-series
+milestones. L78's own filed text: both of L77's named repros
+(`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test`) now clear
+`vkCreateGraphicsPipelines`/submission cleanly but fail their own
+`SystemValues` result check with an all-zero `ResultBuffer`.
+
+## Investigation
+
+Set up a standalone repro by running the real lit test's own already-compiled
+`.o` files directly through `offloader --api=vk <pipeline.yaml> <shaders...>`
+(no need to hand-build a scratch repro; discovered the exact positional-arg
+invocation this session: one shader binary per `Shaders:` entry, in order).
+Confirmed the render target itself is entirely blank -- no fragments
+rasterized at all.
+
+Ruled out, via careful static reading, in order: the tessellator (produces a
+valid, correctly-wound tessellation), domain shader output position
+(all-zero, downstream of hull), hull shader's own output position (all-zero,
+while its *input* position was legitimate non-zero data -- narrowing the bug
+to the hull stage's compiled code path for storing `position`), the
+self-index substitution mechanism (statically confirmed correct), the
+`FemePatchArgs` struct layout/ABI (confirmed correct), `PreparedPatchBatch`
+marshaling in `ResourceHeap.cpp` (confirmed correct), `HullWrapperPass`'s
+wave-count computation (confirmed correct in both source and dumped IR), and
+the wave-loop's call to `@main` (confirmed all arguments correctly
+threaded).
+
+None of these static checks found the bug. Pivoted to **direct runtime
+instrumentation**: declared `@printf` and a format-string global at IR-build
+time inside `HullWrapper.cpp`'s `lowerHullOutputStore`/`lowerHullInputLoad`,
+emitting `Builder.CreateCall` to print values as the JIT-compiled shader
+actually executes. This immediately found the smoking gun: the position
+element's stored value printed as `0.0` for every lane, while a separate
+self-index-smuggling element correctly printed distinct per-lane values --
+proving the self-index/masking machinery itself worked, but the *value* fed
+into the position store was genuinely zero at runtime, and the position
+*input* load (feeding the local materializing array) genuinely returned
+correct non-zero data.
+
+Root-caused by reasoning carefully about the *write* pattern: the
+materializing store (one literal-constant `feme.stage.input.load` per
+control point, written into a small local array/`alloca` that is **not**
+per-lane-duplicated -- its address is identical across all SIMD lanes) gets
+widened by `SIMDizePass` into a **sequential per-lane scatter-store loop**,
+every lane writing to the *same* shared address. `HullSystemValues.test`'s
+real shape has 3 output control points against this build's wave size of 4,
+so the trailing (padding, inactive) lane's iteration runs *last* in that
+loop. `lowerHullInputLoad`'s `Active`-based null-masking
+(`LaneResult = Active ? LaneResult : 0`) forced that inactive lane's result
+to zero -- correct and necessary for a *self-indexed* read (an inactive
+lane's own flat index could be out-of-bounds), but wrong for the
+literal-constant-control-point branch, whose materializing store is always
+in-bounds regardless of which lane computes it. The last (padding) lane's
+forced zero clobbered every earlier, active lane's real write to the same
+shared address.
+
+## Fix
+
+`feme/lib/Transforms/CPU/HullWrapper.cpp`'s `lowerHullInputLoad`: narrowed
+the `Active`-based null-masking to the self-index branch only; the
+literal-constant branch now always returns the real loaded value
+unconditionally. Verified via the same runtime-`printf` technique: hull
+output position is now correct (non-zero, matching real forwarded vertex
+data) for both named repros.
+
+Added a design note in `FeMeGraphicsDesign.md`'s "Patch and geometry
+wrappers" section (following L77's own precedent of documenting
+`HullWrapperPass` design there rather than in `FeMeCPUDesign.md`), and a new
+regression test `PatchPipelineTest.MaterializedInputPatchSelfIndexSurvivesPaddingLane`
+that reproduces the exact materialize-then-scatter-store shape (3 output
+control points against this harness's fixed wave size of 4) -- confirmed it
+fails with all-zero `OutputPatch` reads before the fix (via `git stash`) and
+passes after.
+
+## A second, separate, still-open bug found along the way
+
+After the fix, both named repros still fail end-to-end. Domain-stage output
+position's `x`/`y` components looked plausible but `z`/`w` did not.
+Investigating further (comparing hull-out control-point position values
+against the real vertex shader/attribute source) found: the vertex shader
+declares `float4 position : POSITION` as its input, but the bound
+`VertexData` attribute only supplies 2 floats (`Format: Float32,
+Channels: 2, Stride: 8`) -- and the observed hull-out cp[0] position value
+exactly matched `[CP0.x, CP0.y, CP1.x, CP1.y]`, i.e. the vertex-attribute
+fetch was reading 4 floats unconditionally from a buffer that only has 2
+floats per vertex, spilling into the *next* vertex's data, instead of
+defaulting the missing components per standard HLSL/Vulkan convention (0 for
+missing X/Y/Z, 1 for missing W).
+
+Traced this to `Executor.cpp`'s `attributeFetchLayout()`, which maps every
+float format variant (`R32_FLOAT` through `R32G32B32A32_FLOAT`) to the same
+`{FetchByteSize=4, ComponentsPerFetch=1}` -- the format's own real channel
+count is never tracked, so the fetch loop's `InBoundsComponents` is capped
+only by the shader's declared component count and the entire remaining
+buffer's byte length, never by the bound attribute's own declared width.
+Confirmed empirically via a scratch (non-production) YAML providing full
+float4/16-byte-stride vertex data instead of the real float2/8-byte-stride:
+the render target changed from entirely blank to fully rendered with no
+other change, conclusively isolating this as the sole remaining blocker.
+
+Given the size of this second bug (needs real channel-count tracking added
+to `attributeFetchLayout`/`cpu::ResourceFormat`, correct default-padding
+semantics for float vs. integer component types, and its own unit tests),
+decided **not** to fix it in this session -- filed it as a new roadmap row,
+**L79**, following the project's established chained-discovery pattern
+(H9a->H9c, L26->L34/L35, L37->L77, L77->L78, now L78->L79).
+
+## Validation
+
+- `ninja check-feme`: 2768/2827 Passed (up by exactly 1, the new regression
+  test), 59 Unsupported, 0 Failed -- no regressions.
+- Re-ran both real named lit-test repros directly via `offloader`: both
+  still fail end-to-end (as expected, due to L79's separate gap), but the
+  hull-stage output-forwarding symptom this row's own fix targeted is
+  confirmed fixed via runtime instrumentation.
+- Real Vulkan CTS: re-ran the identical
+  `dEQP-VK.tessellation.shader_input_output.*` (28-case) caselist used for
+  L37/L77's own CTS re-runs -- unchanged, still 13/28 reach a result before
+  the group's own pre-existing segfault, all 13 failing on the same two
+  already-tracked, unrelated gaps. No regression.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no
+  change needed (pure CPU-side `HullWrapperPass` fix, no new feature or
+  extension surface).
+
+## Roadmap
+
+L78 struck through with a "Partially done" note (the diagnosed masked-store
+symptom is fixed and verified, but the two named repros still fail
+end-to-end due to a newly-discovered, separate gap). Added new row **L79**
+for the vertex-attribute component-padding gap, "Not yet started", nested at
+zero levels (a flat sibling row, not nested under L78), per the
+one-lowercase-letter-max nesting rule.
