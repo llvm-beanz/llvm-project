@@ -30881,3 +30881,84 @@ cross-reference. `Vulkan14FeatureInventory.md`: no change (this feature
 lives behind an extension struct, not a core 1.4 feature). Temporary
 artifacts (CTS caselists/qpa logs under `/tmp`) cleaned up at the end of
 the session.
+
+## L70: `imageSize()`/`GetDimensions` resource-normalization gap (this session)
+
+### Root cause and fix
+
+A real IR reduction of `dEQP-VK.glsl.texture_functions.texturelod.
+sampler2d_float_compute` (SPIR-V extracted standalone via
+`--deqp-log-shader-sources=enable`'s embedded `<SpirVAssemblySource>`,
+assembled with `spirv-as`, imported with `feme-translate
+--import-spirv --spirv-to-llvmir`, then run through the exact
+`Normalize` pass prefix `Target/CPU/Pipeline.cpp`'s `runPipeline` uses
+before `checkSupportedRaisedOps`, standalone via `feme-opt`) confirmed
+the generic `"...cannot normalize into a heap access..."` diagnostic's
+own "may be an unrelated bystander" caveat was correct here: the
+flagged handle (the compute shader's own storage-image output,
+binding 4) was innocent. The true offending use was this same handle's
+`imageSize(destImage)` call (`llvm.spv.resource.getdimensions.xy`),
+which `SPIRVResourceLowering.cpp`'s `hasOnlySupportedStorageImageUses`
+had no recognition path for at all -- `collectHandles` bails to
+`std::nullopt` for an entire function the instant any single handle's
+use-shape is unrecognized, so this one unhandled `getdimensions` call
+silently rejected every handle in the function, the innocent input
+sampler included.
+
+Confirmed via grep this is a general, stage-agnostic gap (no
+`GetDimensions`/`imageSize`/`textureSize` handling exists anywhere in
+`SPIRVResourceLowering.cpp`, `ResourceLowering.cpp` (DXIL CPU path),
+`BoundResourceNormalization.cpp`, or `ResourceCalls.cpp`), not a
+compute-stage-specific bug as roadmap L70's original filing assumed --
+it just happened to first surface via this compute CTS case, since
+`imageSize()`'s bounds-check idiom is common in compute shaders and
+rarer in fragment/vertex ones.
+
+Fixed by recognizing `llvm.spv.resource.getdimensions.xy` for
+`Plain2D` sampled and storage images only (an early-accept branch in
+both `hasOnlySupportedImageUses`/`hasOnlySupportedStorageImageUses`,
+scoped narrowly per this project's own incremental-shape precedent),
+rewriting it to a new canonical `ImageCallKind::GetDimensions2D`
+(`feme.cpu.image.getdimensions.2d.v2i32`), backed by a new runtime
+function (`femeCpuImageGetDimensions2DV2I32`) that reads the
+already-existing `Width`/`Height` fields off `FemeImageDescriptor` --
+no new ABI/plumbing was needed.
+
+### Build/test verification
+
+New `ImageCallsTest.MatchesGetDimensions2DCall` unit test and a new
+`spirv-resource-lowering-image-getdimensions.ll` lit test (covering
+both the sampled-image and storage-image-plus-store shapes) added.
+`FeMeTransformsCPUTests`: 382/382 pass. Full `check-feme`: 2710/2769
+pass, 0 fail, 59 unsupported, no regressions.
+
+### Real CTS re-run
+
+Re-ran the exact original failing case
+(`dEQP-VK.glsl.texture_functions.texturelod.sampler2d_float_compute`)
+against this session's rebuilt `feme_icd.json`: the prior
+`"...cannot normalize into a heap access..."` diagnostic is completely
+gone, confirming this row's own root cause is genuinely fixed. The
+pipeline now fails at a new, later, distinct stage instead:
+`feme-cpu-linearize: function 'main': divergent branch in '' has no
+reconvergence point` -- a real, unrelated, unstarted gap in the
+linearizer's handling of a compute shader's divergent early-return
+bounds-check idiom, split out as its own new roadmap row, L71. A
+handful of other compute-stage sampling cases
+(`texture.sampler2d_float_compute`) were spot-checked and confirmed to
+fail identically at the same new linearizer diagnostic, not a
+regression of this row's own fix -- this is now the sole blocker for
+essentially every compute-stage sampling CTS case this project's own
+history has already unblocked for (L60/L63/L65/L66(h)/L66(i)/L66(j)/
+L66(k)/L69/L69(a) among others), and is the natural next thing to
+close out.
+
+Only `Plain2D` is covered by this row's own fix; other shapes' own
+`GetDimensions`/`imageSize`/`textureSize` support remains unstarted,
+to be scoped by real CTS demand exactly as this project's other
+per-shape rows have been.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (this fix is a CPU-target resource-lowering capability, not an
+extension or 1.4 core feature bit). Temporary artifacts under
+`/tmp/l70/` cleaned up at the end of the session.
