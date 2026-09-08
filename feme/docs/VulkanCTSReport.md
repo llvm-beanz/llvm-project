@@ -31355,3 +31355,99 @@ Re-ran the identical 1,375-case caselist against the rebuilt
 needed -- this is core SPIR-V image-operand functionality with no gating
 Vulkan feature or extension. Temporary artifacts under `/tmp/l72d_*`
 cleaned up at the end of the session.
+
+## L73: `OpImageQuerySamples` for a multisampled sampled image (this session)
+
+Roadmap L73: closes the follow-on prerequisite gap L72(d) itself deferred
+-- `OpImageQuerySamples` (opcode 107, GLSL's `textureSamples(sampler2DMS)`)
+needed the same synthetic-`OpFunctionCall` import-time encoding L72(d)
+already built for opcodes 103/106, but `classifySampledImage2DHandle` in
+`SPIRVResourceLowering.cpp` rejected every multisampled sampled image
+handle outright, so no handle this opcode could ever apply to could reach
+its own dispatch code regardless of how the opcode itself got lowered.
+
+**Import (`SPIRVImporter.cpp`)**: added `kOpImageQuerySamples = 107` and a
+third `IsSamples` branch to `lowerImageQueryOpcodes`'s rewrite loop,
+reusing `OpImageQueryLevels`'s identical 1-arg `OpFunctionCall` shape --
+both opcodes take only `(Result Type, Result, Image)`, no `Lod` operand,
+confirmed via a real SPIR-V operand-shape comparison. New
+`buildImageQuerySamplesModule` test builder and `LowersImageQuerySamples`
+test (`SPIRVImporterTest.cpp`, 11/11 pass).
+
+**Resource lowering (`SPIRVResourceLowering.cpp`)**: this row's own filed
+text called for a design investigation into whether widening
+`classifySampledImage2DHandle` to accept a multisampled (`Plain2DMS`) 2D
+sampled image is safe in isolation, i.e. whether every other sampled-image
+call site in this file already correctly rejects that shape for an
+operation that doesn't make sense against it. The audit found this was
+*not* automatically true, confirming the row's own caution:
+
+- `isGetDimensionsIntrinsic`, `isQuerySizeLodCall`/`isQueryLevelsCall`, and
+  `isQueryLodIntrinsic` already have explicit shape allowlists that
+  correctly reject `Plain2DMS`/`Array2DMS` with no further change.
+- `isSampleIntrinsic` and `isDrefSampleIntrinsic` had **no shape check at
+  all** -- every previously-classifiable sampled-image shape was legal to
+  filter-sample, so until now nothing needed one. Both would have silently
+  accepted an illegal ordinary/depth-comparison sample against a
+  multisampled sampled image using the wrong (too-narrow) coordinate
+  width. Fixed with an explicit `Plain2DMS`/`Array2DMS` rejection in each
+  branch.
+- The zero-mip `getpointer`-based fetch fallback's reject list
+  (`Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D`) predates
+  `Plain2DMS`/`Array2DMS` even being possible *sampled*-image shapes (they
+  were previously storage-image-only), so it would have silently accepted
+  a `texelFetch()` against a multisampled sampled image with the wrong
+  coordinate width too. Fixed by adding both shapes to the reject list.
+
+With those three gaps closed, `classifySampledImage2DHandle` now allows
+`MS == 1` only when `Dim == SPIRVDim2D` (SPIR-V's own spec restriction),
+producing `ImageShape::Plain2DMS`/`ImageShape::Array2DMS` -- reusing the
+same two enum values `classifyStorageImage2DHandle` already returns for a
+multisampled *storage* image, since the coordinate-width semantics are
+shape-appropriate regardless of storage vs. sampled. A new
+`isQuerySamplesCall` recognizer (mirroring `isQuerySizeLodCall`/
+`isQueryLevelsCall`) and its own acceptance branch in
+`hasOnlySupportedImageUses` are scoped to `Plain2DMS`/`Array2DMS`
+only -- the *inverse* of `isQuerySizeLodCall`/`isQueryLevelsCall`'s
+`Plain2D`-only scope, since `OpImageQuerySamples` is spec-legal only
+against a multisampled image.
+
+**`ImageCalls`/runtime**: new `ImageCallKind::QuerySamples`
+(`feme.cpu.image.querysamples.i32`), structurally identical to
+`QueryLevels` (no `Mask`, no coordinate/mip-level operand -- just
+`ImageIndex`). New `femeCpuImageQuerySamplesI32` runtime entry point,
+returning `FemeRTImageDescriptor::SampleCount` directly, mirroring
+`femeCpuImageQueryLevelsI32`'s exact style (0 for an unbound handle).
+
+New test coverage: `ImageCallsTest.cpp` gained `MatchesQuerySamplesCall`;
+`SPIRVResourceLoweringTest.cpp` gained `LowersPlain2DMSQuerySamples`,
+`LowersArray2DMSQuerySamples` (positive), and
+`LeavesPlain2DMSSampleHandleAlone` (negative regression, confirming the
+`isSampleIntrinsic` fix -- this exact case would have been silently
+mis-accepted before this session's fix); a new
+`spirv-resource-lowering-image-querysamples.ll` lit test. `check-feme`:
+2737/2796 pass, 0 fail, 59 unsupported (no regressions, up from
+2731/2790).
+
+Real CTS re-run of this row's own full 24-case `texturesamples` caselist
+(all three stages -- `_compute`/`_fragment`/`_vertex` -- not just the 8
+`_compute` cases L72(d)'s own text had originally scoped this row to):
+
+- **Totals: 24/24 Pass (100%), 0 Fail.**
+- Confirms both this row's own multisample-classifier widening and
+  L72(d)'s prerequisite `Plain2D` `OpImageQuerySizeLod`/`OpImageQueryLevels`
+  fix generalize correctly to a `Plain2DMS`/`Array2DMS` shape neither row
+  had directly exercised via `texturesamples` before.
+
+A broader re-run of the full 1,375-case `texture_functions_compute`
+caselist confirms zero regressions: 263 Pass (up from 255), 780 Fail (down
+from 788), 332 Not Supported (unchanged).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is core SPIR-V image-operand functionality with no gating
+Vulkan feature or extension. `texelFetch()`/ordinary filtered sampling
+against a multisampled sampled image (`sampler2DMS`) remains unstarted
+follow-on work -- no `runtime/CPU` helper exists for either operation yet,
+and none is added by this row; `OpImageQuerySamples` is the sole operation
+this shape supports today. Temporary artifacts under `/tmp/cts_l73*`
+cleaned up at the end of the session.
