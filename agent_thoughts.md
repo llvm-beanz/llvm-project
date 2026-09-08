@@ -70454,3 +70454,149 @@ builder can be implemented correctly.
 
 Cleaned up scratch CTS artifacts under `/tmp/l74_*` at the end of the
 session.
+
+# Session: Closing roadmap L75 (`OpImageQuerySizeLod` per-shape widening)
+
+## Request
+
+Close out L75 or other prerequisites blocking the L-series milestones. L75
+was itself filed at the end of the prior L74 session, as the
+`OpImageQuerySizeLod` half of L74's original per-shape scope, deliberately
+left untouched by L74's own fix (`OpImageQueryLevels`'s shape-independent
+result let L74 close with zero builder changes; `OpImageQuerySizeLod`'s
+result genuinely varies in component count by shape per GLSL's own
+`textureSize(sampler, lod)` overload spec, so needed its own real builder
+work first).
+
+## Investigation and design
+
+Confirmed via `SPIRVImporter.cpp`'s `lowerImageQueryOpcodes` that the
+synthesized `feme.query.size_lod.*` call's declared result type is taken
+directly from the real original SPIR-V instruction -- whatever shape/width
+it produces -- so `SPIRVResourceLowering.cpp`'s job is purely to accept a
+shape and dispatch to a builder whose emitted result type structurally
+matches. A mismatch reproduces the exact `replaceAllUses of value with new
+value of different type!` crash L72(d)'s original discovery hit.
+
+Confirmed `classifySampledImage2DHandle` already classifies sampled images
+as `Plain1D`/`Array1D`/`Plain3D`/`Cube`/`CubeArray`/`Array2D` (not just
+`Plain2D`), matching this row's own cited CTS case shapes
+(`isampler1d`/`sampler3d`/`samplercubearray`/etc.). Confirmed
+`classifyStorageImage2DHandle` always folds a storage cube/cube-array
+handle into `ImageShape::Array2D` (a storage image addresses texels via an
+ordinary coordinate triple, not a direction vector), so the storage-image
+path never needs `Cube`/`CubeArray`-specific builders.
+
+Resolved this row's own flagged open question -- how `ArrayLayers` is
+populated for a `CubeArray` view -- via `CommandBuffer.cpp`'s
+`materializeImageDescriptor`: `Dst.ArrayLayers = LayerCount` is populated
+identically for `TextureCube`/`TextureCubeArray` as for `Texture2DArray`
+(the code's own comment: a cube/cube-array view is "purely a view-level
+convention over consecutive array layers") -- the raw, face-inclusive
+count, **not** already divided by 6. So a `CubeArray`'s real
+`textureSize()` third component must be computed as `ArrayLayers / 6` at
+the point of use.
+
+Design: grouped the 6 remaining shapes by result-width/formula rather than
+one builder per individual shape:
+- `Cube` reuses the **existing** `QuerySizeLod2D` builder/runtime
+  unchanged -- identical `v2i32`/`(max(1,W>>lod), max(1,H>>lod))` formula
+  to `Plain2D` -- a "free" shape-gate widening, no new code needed.
+- `Plain1D` -> new `QuerySizeLod1D` (scalar `i32`).
+- `Array1D` -> new `QuerySizeLod1DArray` (`v2i32`, second lane
+  `ArrayLayers` unscaled by Lod).
+- `Array2D` -> new `QuerySizeLod2DArray` (`v3i32`, third lane
+  `ArrayLayers` unscaled).
+- `Plain3D` -> new `QuerySizeLod3D` (`v3i32`, all three lanes scale with
+  Lod -- a volume texture's depth genuinely shrinks with mip level, unlike
+  an array's layer count).
+- `CubeArray` -> new `QuerySizeLodCubeArray` (`v3i32`, third lane
+  `ArrayLayers / 6`).
+
+## Implementation
+
+Three separately-committed pieces, matching this project's own granular-
+commit precedent:
+1. `ImageCalls.h`/`ImageCalls.cpp`/`ImageCallsTest.cpp`: 5 new
+   `ImageCallKind` enum values, 5 new builder declarations/
+   implementations, wired into `getImageCallName`/`getOrInsertImageCall`/
+   `matchImageCall` (both its `AllKinds` array and operand-extraction
+   switch -- a prior-session-discovered footgun (roadmap H19l) is
+   forgetting one of these two, which silently makes the other dead code
+   with no compiler warning), plus 5 new matcher unit tests.
+2. `FeMeRuntimeCPU.c`: a new shared `femeRTClampQuerySizeLodMip` static
+   helper (factored out of the existing `femeCpuImageGetDimensionsLod2DV2I32`
+   duplicated clamp logic) plus the 5 new runtime entry points.
+3. `SPIRVResourceLowering.cpp`/`SPIRVResourceLoweringTest.cpp`/
+   `spirv-resource-lowering-image-query.ll`: widened `isQuerySizeLodCall`'s
+   shape gate (both sampled- and storage-image paths) to accept every
+   classifiable non-multisampled shape; widened `lowerImageAccesses`'s own
+   dispatch to select the correct builder per handle `Shape` (a `switch`
+   over `ImageShape`, falling through `Plain2D`/`Cube`/`default` to the
+   existing `createQuerySizeLod2D`). Replaced the now-inaccurate
+   `LeavesArray2DQuerySizeLodHandleAlone` negative test (Array2D is no
+   longer rejected) with 6 new positive lowering tests, one per newly-
+   accepted shape, plus a renamed `LeavesPlain2DMSQuerySizeLodHandleAlone`
+   negative test confirming multisampled shapes are still correctly
+   rejected.
+
+Hit one real bug during verification, not in the pass logic itself but in
+my own testing process: after wiring up `SPIRVResourceLowering.cpp`, a
+standalone `feme-opt` CLI run of a hand-written `Array2D` reduction still
+showed the call unlowered, even though the exact same IR passed through
+the `SPIRVResourceLoweringTest.cpp` unit-test harness (`parseIR`+
+`SPIRVResourceLoweringPass().run(...)` directly) lowered correctly. Added
+temporary `llvm::errs()` debug tracing to `collectHandles`/
+`hasOnlySupportedImageUses`'s call sites, which showed classification and
+gate-acceptance succeeding correctly even on the "broken" CLI run --
+meaning the actual pass logic was never broken. The real cause: I had only
+rebuilt the `FeMeTransformsCPUTests` unit-test binary after editing
+`SPIRVResourceLowering.cpp`, not the separate `feme-opt` tool binary
+(which links the same library but as its own executable target) -- so my
+CLI probing was running a stale `feme-opt` built before my dispatch-code
+changes even existed. Rebuilding `feme-opt` fixed it immediately, and the
+debug prints were removed once confirmed. Lesson: when a pass's own unit
+tests and its CLI tool disagree, suspect a stale CLI binary before
+suspecting the pass logic itself, especially after only rebuilding one
+downstream target that both happen to statically link.
+
+`FeMeTransformsCPUTests`: 411/411 -> 417/417 pass, zero regressions.
+`check-feme`: 2756/2756 supported tests pass (0 fail, 59 unsupported).
+
+## CTS results
+
+Real re-run of the full 34-case `query.texturesize.*_compute` caselist:
+**34/34 Pass (100%)** -- this row's own filed text estimated only 24
+remaining failing cases, but the real group (all `query.texturesize.*`
+cases, not just the previously-failing subset) is 34; all pass now.
+
+Broader re-run of the full 1,375-case `texture_functions_compute`
+caselist, confirming zero regressions and further real movement: **321
+Pass (up from 292), 722 Fail (down from 751), 332 Not Supported
+(unchanged)**.
+
+## Roadmap/report updates
+
+Struck through L75 with a done-note describing the per-shape design,
+the `ArrayLayers`/`CubeArray` resolution, and the CTS numbers above.
+This closes out the entire `OpImageQuerySizeLod`/`OpImageQueryLevels`
+per-shape-widening arc that started at L72(d) and ran through L73/L74/L75
+-- no further follow-on row filed for this specific opcode pair.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no
+change needed, same rationale as every prior row in this arc (core
+SPIR-V image-operand functionality, no gating Vulkan feature/extension).
+
+## Commits this session
+
+1. `ImageCalls.h`/`ImageCalls.cpp`/`ImageCallsTest.cpp`: the 5 new
+   builders/enum values/matcher plumbing/tests.
+2. `FeMeRuntimeCPU.c`: the 5 new runtime entry points plus the shared
+   clamp helper.
+3. `SPIRVResourceLowering.cpp`/`SPIRVResourceLoweringTest.cpp`/
+   `spirv-resource-lowering-image-query.ll`: the shape-gate/dispatch
+   widening and its tests.
+4. `Roadmap.md`/`VulkanCTSReport.md`: closing L75, CTS numbers.
+5. This `agent_thoughts.md` entry (committed separately, last).
+
+Cleaned up scratch CTS artifacts under `/tmp/l75_*` at the end of the
+session.
