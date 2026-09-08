@@ -71436,3 +71436,146 @@ last, per the standing instruction. No temporary scratch files needed
 cleanup this session (only the already-built `deqp-vk` binary and the
 already-rebuilt `offloader` binary from the prior session's own work were
 reused, no new artifacts created outside `/tmp` that needed removing).
+
+# L37 session: cross-control-point input reads in the hull control-point phase
+
+## Starting point
+
+Picked up from a prior compacted session where the root cause and fix
+design for L37 were already fully understood but zero code had been
+written: `feme-cpu-wrap-hull`'s `lowerHullInputLoad` rejected any input
+control-point read whose control-point-index operand was not the
+self-index (or a literal `0`), even though a literal, non-self index
+(e.g. control point 0's phase reading control point 1's position) is
+architecturally always safe. The restriction existed for the *output*
+side (where writing another control point's output data genuinely is
+unsafe/undefined without cross-invocation synchronization the CPU target
+doesn't have), but had been mistakenly copied onto the *input* side too,
+which has no such hazard.
+
+## Why a literal index is safe here
+
+The key fact, easy to miss without reading `PatchPipeline.cpp` closely:
+the CPU target's execution model is strictly *per-patch*, not
+per-invocation. `CompiledStage::invokePatch` runs the entire
+control-point-phase function once per patch, with `Inputs`/`Outputs`
+storage already scoped to that one patch's control points. That means
+`computeStageStorageAddress`'s `InvocationIndex` argument is a pure
+addressing index (multiplied by a stride, added to a base offset) -- not
+"the identity of the currently-executing lane". A literal constant
+control-point index can be fed into it directly, with no per-patch
+offset math needed at all. This is *simpler* than what the original
+roadmap L37 text speculated (an `InputPatchControlPointCount`-based
+offset formula) -- turns out no formula is needed, just "use the literal
+directly instead of the self-index". `PatchConstantWrapper.cpp`'s own
+`lowerPatchConstantInputLoad` already does exactly this (no self-index
+restriction at all), which made a nice sanity-check precedent once I
+found it.
+
+## The vector-splat gotcha
+
+First build attempt after widening the acceptance check to "any literal
+constant" failed, because after `SIMDizePass` runs (which happens before
+`HullWrapperPass` in the pipeline order), what used to be a scalar
+`ConstantInt` control-point-index operand can become a splatted constant
+vector instead (`<4 x i32> splat (i32 1)`, `<4 x i32> zeroinitializer`,
+etc.). `Constant::getSplatValue()` is the right tool to pull the scalar
+back out, but it asserts vector type -- can't call it unconditionally on
+whatever `Constant` you get. Had to branch on
+`ControlPointCst->getType()->isVectorTy()` and only call
+`getSplatValue()` in the vector case, extracting the plain
+`ConstantInt` in the scalar case. A small thing, but the kind of
+SIMDizePass-interaction gotcha that's bitten this project's own
+`HullWrapper`/`PatchConstantWrapper` work before and will again.
+
+## Tests
+
+Repurposed the existing `DiagnosesCrossControlPointInputLoad` test into a
+new positive test, `LowersLiteralConstantControlPointInputLoad` (it used
+exactly the shape -- literal control-point index `1` -- that should now
+be legitimately accepted, so flipping its expectation was the right
+move rather than deleting it and writing something from scratch). Added
+a new negative test, `DiagnosesDynamicNonSelfControlPointInputLoad`,
+using a genuinely dynamic (non-constant) control-point index derived
+from a `PatchVertices` system-value read, to confirm the diagnostic
+still correctly fires when the index really is dynamic and non-self.
+All 7 `HullWrapperTest` tests pass; full `ninja check-feme` shows
+2764/2823 Passed (up by exactly 1 from the new test), 59 Unsupported,
+0 Failed -- no regressions.
+
+## Real-ICD before/after comparison, and discovering L77
+
+Wanted to confirm the fix against the two named repros
+(`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test`) for
+real, not just via unit tests. Both had been failing
+`vkCreateGraphicsPipelines` with `VkResult = -3` and, frustratingly, no
+diagnostic text printed anywhere -- feme's Vulkan runtime silently
+swallows `llvm::Error` messages by default (a deliberate "don't print
+from reusable library code" policy). Found the escape hatch:
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (see `feme/lib/Vulkan/Diagnostics.h`)
+opts into printing the real underlying error. With that set, a
+`git stash`/rebuild/re-run/`git stash pop`/rebuild/re-run comparison
+confirmed cleanly: without the fix, the exact roadmap-cited
+`feme-cpu-wrap-hull` diagnostic fires; with the fix, that diagnostic is
+gone, replaced by a brand-new, previously-hidden one: "the
+tessellation-evaluation stage declares no tessellation domain execution
+mode (Triangles/Quads/Isolines)".
+
+Chased this down via `spirv-dis` on the real compiled `hull.o`/`domain.o`
+SPIR-V, and found a genuine, distinct root cause: real DXC output puts
+*all* tessellation execution modes (`Triangles`, `SpacingEqual`,
+`VertexOrderCw`, `OutputVertices`) on the **hull**
+(`TessellationControl`) entry point, only duplicating `Triangles` onto
+the **domain** (`TessellationEvaluation`) entry. `ConvertSPIRVToLLVMPass.cpp`
+assumes (and `FeMeGraphicsDesign.md` used to state) that evaluation-only
+and control-only fields never co-occur on the same entry -- wrong, at
+least for this real DXC output shape. Filed as new roadmap row L77
+(kept as a separate top-level row, not nested under L37, since it's a
+genuinely distinct issue and nesting more than one lowercase letter deep
+is exactly what this project's own conventions now say to avoid).
+
+## Docs
+
+Design-doc updates went into `FeMeGraphicsDesign.md`, not
+`FeMeCPUDesign.md` as the letter of the standing instruction might
+suggest by default -- `FeMeCPUDesign.md` explicitly defers all
+graphics-stage detail (including everything about `HullWrapper`) to
+`FeMeGraphicsDesign.md` and has zero prior mentions of it, so extending
+the doc that actually owns this material was the right call. Recorded
+this deviation explicitly in the L37 roadmap done-note, per the standing
+"update the design document" instruction's own spirit.
+
+## Real CTS re-run
+
+Ran `dEQP-VK.tessellation.shader_input_output.*` (28 cases) against the
+rebuilt ICD as this row's closest real CTS-level analogue. Result: no
+case in this group ever reaches `feme-cpu-wrap-hull`'s own diagnostic,
+before or after the fix -- every completed case instead fails on one of
+two already-tracked, unrelated pre-existing gaps
+(`feme-cpu-wrap-patch-constant`'s masked-output-store gap, and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction), and
+the run itself stops at 14/28 cases on an already-documented,
+pre-existing `shader_input_output` group segfault (this exact crash is
+already referenced multiple times elsewhere in
+`VulkanCTSReport.md`, e.g. the H4c/H4d and H10h-era entries -- not new,
+not something to chase down as part of this row). So: no regression, but
+also this particular CTS group can't directly demonstrate this row's own
+fix -- the real confirmation for that came from the offloader-based
+before/after diagnostic comparison above.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed by
+direct grep that neither file mentions L37 or L77 -- correctly so, since
+this is a pure CPU-lowering addressing fix touching no new Vulkan
+feature/extension surface.
+
+## Wrap-up
+
+Final `ninja check-feme`: 2764/2823 Passed, 59 Unsupported, 0 Failed.
+Committed in five small, separate commits: (1) the `HullWrapper.cpp` fix
++ its test changes, (2) the `FeMeGraphicsDesign.md` design-doc notes,
+(3) the `Roadmap.md` L37 strikethrough + L77 filing, (4)
+`VulkanCTSReport.md`'s L37 section, and (5) this `agent_thoughts.md`
+entry, last, on its own, per the standing instruction. `git status`
+clean before each commit; no stray debug changes (no temporary print
+statements were left anywhere -- `FEME_VULKAN_LOG_CREATION_ERRORS` was
+sufficient for the whole investigation, so a debug-print approach was
+never actually needed).
