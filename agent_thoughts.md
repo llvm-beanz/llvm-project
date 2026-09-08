@@ -72113,3 +72113,137 @@ cleaner split wasn't practical without excessive hunk-surgery; grouping by
 "self-contained serialization fix" vs. "the actual L80 system-value fix
 plus its test coverage" was the most useful boundary available. A third
 commit covers the roadmap/CTS-report/design-doc updates.
+
+# Session: L81 - Domain-stage SV_PrimitiveID misclassified as patch-constant-forwarded input
+
+## Starting point
+
+The request was to close roadmap L81: `DomainSystemValues.test`
+(L77/L78/L79's own named repro) reaches `vk.queueSubmit` after L79's
+vertex-attribute-fetch fix, but that submit fails with `VkResult = -3`, a
+new failure mode not previously reached.
+
+## Investigation
+
+Reproduced the repro manually (no offload-test-suite build directory
+exists in this checkout, same methodology as L77-L80): `split-file` +
+real `dxc -spirv -fspv-target-env=vulkan1.3` compiles + `offloader`
+directly against a freshly-built `libfeme_vulkan.so`. Confirmed the
+opaque `VkResult = -3` failure, then re-ran with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` -- this env var turned out to also
+surface `vkQueueSubmit`-time diagnostics, not just pipeline-creation-time
+ones (worth remembering for future sessions), revealing the real error:
+`"patch-constant output -> domain stage patch input: element 2 has no
+matching producer element"`.
+
+Added temporary `errs()`-based debug instrumentation directly in
+`PatchPipeline.cpp` at the link call site to dump both signatures'
+element IDs/directions/system-values, confirming: the domain signature's
+element 2 was `SV_PrimitiveID`, misclassified `SignatureDirection::
+PatchInput` (expecting a patch-constant-phase producer), when the real
+`hull.hlsl`'s `PatchConstants()` function's own `patchID : SV_PrimitiveID`
+parameter goes unused and is DCE'd by DXC, so no such producer element
+ever exists in the patch-constant signature. Removed the debug
+instrumentation once root-caused (no residue left in the tree).
+
+## Root cause
+
+Exactly the same bug category as roadmap L80's already-fixed Hull-stage
+mistake, just manifesting in the Domain stage instead:
+`CanonicalizeStage.cpp`'s `classifySPIRVElement` (Domain-stage branch)
+only special-cased `DomainLocation`/`PatchVertices` as genuinely
+synthesized, non-forwarded inputs. A real `dxc -spirv` compile decorates
+a domain-stage `SV_PrimitiveID` read `Patch` (uniform per patch) -- the
+exact same SPIR-V decoration a genuine patch-constant-forwarded
+tessellation factor carries -- so `SV_PrimitiveID` fell through to
+`isPatchOutputDecoration(D)`'s check and was wrongly classified
+`PatchInput`, even though it is a plain, pipeline-supplied per-patch
+scalar (this patch's own index within the draw) with no patch-constant
+producer to ever link against.
+
+## Fix
+
+Recognized `SV_PrimitiveID` alongside `DomainLocation`/`PatchVertices` in
+the Domain-stage classification as a synthesized `Direction::Input`,
+`Frequency::PerPatch` element. Unlike Hull's `SV_PrimitiveID` (a single
+top-level scalar argument, per L80's fix), Domain-stage system values are
+already delivered per-invocation through the existing
+`FemeDomainInvocation` record array, so the natural fix was adding a new
+field to that record rather than a new top-level scalar argument -- kept
+the struct's total size unchanged by repurposing one `Reserved[5]` slot
+(now `Reserved[4]`), mirroring L80's own "rename, don't resize" reserved-
+padding convention. Threaded end-to-end: `RuntimeABI.h` (the struct
+field), `StageArgsLayout.h` (`DomainInvocationFieldPrimitiveID` enum
+value, `getDomainInvocationType`'s matching LLVM struct shape),
+`DomainInvocations.h`/`.cpp` (`buildDomainInvocations` now takes and
+broadcasts a `PrimitiveID` parameter to every invocation in a patch),
+`PatchPipeline.cpp` (passing the already-in-scope `PrimitiveID` function
+parameter -- itself added by L80's own ABI threading -- through to the
+call site), and `DomainWrapper.cpp` (a new `lowerDomainPrimitiveID`,
+mirroring `lowerDomainLocation`'s GEP-based read pattern but for a plain
+scalar field, dispatched from `lowerDomainInputLoad`'s switch).
+
+One process note: my own in-progress code comments (written before this
+session's compaction) preemptively cited "roadmap L83" for this fix,
+following a precedent set by L80's session which cited "roadmap L82" for
+its own hull-stage work even though L82 was never actually formalized as
+its own roadmap row. Since this fix is squarely L81's own actual root
+cause and closes L81 directly (not a separate future milestone), I
+corrected all of this session's own new doc comments to say "roadmap
+L81" instead, to avoid layering confusing not-yet-real milestone numbers
+on top of the one actually being closed.
+
+## Verification
+
+Built `libfeme_vulkan.so`/`offloader` cleanly. New unit tests added and
+passing: `CanonicalizeStageTest.DomainStageMapsPrimitiveIDAsSynthesizedInput`
+(confirms the classification fix directly, using a hand-written SPIR-V-
+dialect fixture with `BuiltIn PrimitiveId` decorated `Patch`),
+`DomainWrapperTest.LowersPrimitiveIDInput` (confirms the new lowering
+case builds a valid wrapper with no diagnostic), and
+`DomainInvocationsTest.{DefaultsPrimitiveIDToZero,
+BroadcastsPrimitiveIDToEveryPoint}` (confirms the host-side marshaling).
+Full `check-feme`: 2777/2836 Passed, 59 Unsupported, 0 Failed -- no
+regressions (up by exactly 4 from the new tests).
+
+Re-ran the manual `DomainSystemValues.test` repro against the rebuilt
+ICD: the `vk.queueSubmit` failure is completely gone, and the pipeline
+now runs to full completion. Every `SV_PrimitiveID`-forwarded value in
+the result buffer now matches the expected buffer exactly, confirming
+this fix is correct and complete for its own scope. However, the overall
+`SystemValues` comparison still fails: a handful of interpolated
+position/`uv` values are off by exactly 1 ULP from their expected values
+(e.g. `0.25` vs. `0.24999997`). This is a genuinely new, distinct,
+further-downstream floating-point-rounding gap in the domain shader's own
+bilinear interpolation or the tessellator's domain-coordinate generation
+-- unrelated to `SV_PrimitiveID` classification/lowering (which is now
+provably correct) -- so I did not attempt to fix it as part of this row.
+Filed it as a new roadmap entry, **L82**, with what's been confirmed so
+far (no logic/addressing bug, a narrow rounding discrepancy) and what a
+future session would need to do (a real IR reduction to isolate whether
+the tessellator's own coordinate generation or the compiled shader's
+`lerp`-to-IR lowering, e.g. FMA-contraction differences, is the actual
+source of the drift).
+
+Ran the real Vulkan CTS `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist, the same one used for L37/L77-L80's own re-runs:
+unchanged, still 13/28 cases reach a result before the group's own
+already-documented pre-existing segfault, and all 13 still fail on the
+same two already-tracked, unrelated gaps -- confirming no regression.
+This CTS group still cannot directly exercise this fix either before or
+after; the real confirmation is the offloader-based before/after
+comparison. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no update needed, this is a pure CPU-side system-value-
+lowering fix touching no new Vulkan feature/extension surface.
+
+## Commits
+
+1. The fix itself (`CanonicalizeStage.cpp`, `RuntimeABI.h`,
+   `StageArgsLayout.h`, `DomainInvocations.h`/`.cpp`, `PatchPipeline.cpp`,
+   `DomainWrapper.cpp`) plus its new unit tests, all together since they
+   form one indivisible change (the header/`.cpp`/call-site/lowering
+   pieces don't build independently of each other).
+2. Doc updates: `VulkanCTSReport.md`'s new L81 section,
+   `FeMeGraphicsDesign.md`'s new status subsection, `Roadmap.md`'s L81
+   strikethrough and new L82 entry.
+3. This `agent_thoughts.md` append, on its own.
