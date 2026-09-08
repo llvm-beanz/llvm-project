@@ -70162,3 +70162,163 @@ widening). Updated `VulkanCTSReport.md` with a new session section.
 Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 need no changes -- this is core SPIR-V image-operand functionality with
 no gating Vulkan feature or extension.
+
+# Session: L73 -- `OpImageQuerySamples` for a multisampled sampled image
+
+## Request
+
+Close out roadmap L73 (`OpImageQuerySamples`, SPIR-V opcode 107, GLSL's
+`textureSamples(sampler2DMS)`) or other prerequisites blocking the
+L-series milestones. L72(d)'s own filed text had already deferred this
+opcode as its own follow-on row, since it has a separate prerequisite gap
+from opcodes 103/106: `classifySampledImage2DHandle` rejects every
+multisampled sampled image handle outright, so no handle this opcode
+could ever apply to could reach its own dispatch code.
+
+## Investigation
+
+Read `classifySampledImage2DHandle`'s full doc/implementation and the
+`ImageShape` enum -- confirmed `Plain2DMS`/`Array2DMS` already exist as
+enum values, currently documented (and used) as storage-image-only. This
+meant the fix could reuse these same two values for a *sampled*-image
+classification too, needing no new enum cases and no changes to any
+`ImageShape` switch elsewhere in the file (every switch is already
+exhaustive per this project's coding-standards convention).
+
+The row's own filed text explicitly called for a safety audit before
+widening the classifier: confirming every other sampled-image call site
+in `hasOnlySupportedImageUses` already correctly rejects a `Plain2DMS`
+handle for an operation that doesn't make sense against it. Read the full
+function line-by-line and found this was *not* automatically true --
+three real gaps:
+
+1. `isGetDimensionsIntrinsic`, `isQuerySizeLodCall`/`isQueryLevelsCall`,
+   and `isQueryLodIntrinsic` all have explicit shape allowlists that
+   already correctly reject `Plain2DMS`/`Array2DMS` -- no change needed.
+2. `isSampleIntrinsic`/`isDrefSampleIntrinsic` had **no shape check at
+   all** -- every previously-classifiable shape was legal to filter-sample
+   (or depth-compare-sample), so nothing needed one until now. Widening
+   the classifier without also patching these two branches would have
+   silently accepted an illegal ordinary/depth-comparison sample against
+   a multisampled sampled image, using the wrong (too-narrow) coordinate
+   width -- a real, silent correctness bug, not just a missing feature.
+3. The zero-mip `getpointer`-based fetch fallback's reject list
+   (`Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D`) predates
+   `Plain2DMS`/`Array2DMS` even being possible *sampled*-image shapes (they
+   were previously only reachable via the storage-image path), so it too
+   would have silently accepted a `texelFetch()` against a multisampled
+   sampled image with the wrong coordinate width.
+
+This 3-gap finding directly validates the row's own stated caution --
+"needs its own design investigation into whether widening
+`classifySampledImage2DHandle` to accept `Plain2DMS` is safe in
+isolation" was not a formality; it caught real, otherwise-silent
+mis-accepts before they ever reached a real CTS run, mirroring this
+project's own repeated `LeavesArray2DQuerySizeLodHandleAlone`-style
+precedent (L72(d)) of finding exactly this kind of gap via careful audit
+rather than trial-and-error against CTS.
+
+Confirmed via grep of `SPIRVToLLVMPatterns.cpp` that no multisampled
+*sampled*-image support exists anywhere yet (`isMultisampled2DImage` and
+the `Sample` image-operand threading are both storage-image-only),
+confirming `OpImageQuerySamples` is genuinely the only operation this new
+shape pair should support in this row -- ordinary MSAA sampled-image
+sampling/`texelFetch()` remains unstarted, out of scope.
+
+Queried the real CTS caselist for `texturesamples` and found 24 total
+cases (8 sampler-type/shape combinations x 3 stages), confirming L72(d)'s
+"8 cases" figure was `_compute`-only; planned a broader 24-case re-run
+covering all three stages for this session's own validation, since this
+codebase's `_compute`-stage sampling tends to hit unrelated,
+already-tracked gaps that don't affect fragment/vertex.
+
+Confirmed `OpImageQuerySamples`'s SPIR-V operand shape (`Result Type,
+Result, Image` -- no `Lod`) is identical to `OpImageQueryLevels`'s,
+letting the importer reuse the exact same 1-arg `OpFunctionCall`-synthesis
+code path with just a new `BaseName` branch.
+
+## Implementation
+
+1. **`SPIRVImporter.cpp`**: added `kOpImageQuerySamples = 107`; restructured
+   `lowerImageQueryOpcodes`'s two-way `IsSizeLod`/else-must-be-Levels
+   dispatch into an explicit three-way `IsSizeLod`/`IsLevels`/`IsSamples`
+   branch (opcode 107 shares opcode 106's exact `NumArgs=1` shape). New
+   `LowersImageQuerySamples` test. Committed separately first (11/11
+   `FeMeImportSPIRVTests` pass).
+2. **`ImageCalls.h`/`.cpp`**: new `ImageCallKind::QuerySamples`
+   (`feme.cpu.image.querysamples.i32`), structurally identical to
+   `QueryLevels` (same 3-operand `(heap, heap_count, image_index) -> i32`
+   shape) -- name-list entry, function-type-switch case, `createQuerySamples`
+   builder, `AllKinds` entry, `matchImageCall` case. Also fixed two stale
+   doc comments on `QuerySizeLod2D`/`QueryLevels` that still said
+   "`Plain2D`/`Array2D` only for now" when the actual L72(d) implementation
+   is `Plain2D` only (a `Plain2D`/`Array2D`-covering fix is L74, still
+   unstarted) -- these comments predated L72(d)'s own narrowing fix and
+   were never updated, a small but real doc-accuracy gap worth fixing
+   while touching this same enum. New `MatchesQuerySamplesCall` test.
+   Committed as its own commit (24/24 `ImageCallsTest` pass after adding
+   the new one).
+3. **`SPIRVResourceLowering.cpp`** (core fix): widened
+   `classifySampledImage2DHandle` to allow `MS == 1` only when
+   `Dim == SPIRVDim2D`, producing `Plain2DMS`/`Array2DMS`. Added
+   `isQuerySamplesCall` and its acceptance branch in
+   `hasOnlySupportedImageUses` (scoped to `Plain2DMS`/`Array2DMS` only --
+   the inverse of `isQuerySizeLodCall`/`isQueryLevelsCall`'s `Plain2D`-only
+   scope). Applied all three defensive fixes from the audit above. Updated
+   the stale `llvm_unreachable` comment in the ordinary-sample-dispatch
+   switch's `Plain2DMS`/`Array2DMS` cases (previously claimed
+   `classifySampledImage2DHandle` "never produces" these shapes for a
+   sampled image -- no longer true, but still unreachable *there* because
+   `isSampleIntrinsic`'s new rejection means no such call ever reaches that
+   switch). Added the `lowerImageAccesses` dispatch case for
+   `isQuerySamplesCall`.
+4. **`FeMeRuntimeCPU.c`**: new `femeCpuImageQuerySamplesI32`, returning
+   `FemeRTImageDescriptor::SampleCount` directly -- confirmed this field
+   already exists (tracked for `vkCreateImageView`'s own MSAA validation),
+   so this was pure wiring, not new runtime capability, mirroring L72(d)'s
+   own identical finding for `MipLevels`.
+5. New tests in `SPIRVResourceLoweringTest.cpp`: `LowersPlain2DMSQuerySamples`,
+   `LowersArray2DMSQuerySamples` (positive), and
+   `LeavesPlain2DMSSampleHandleAlone` (negative -- confirms the
+   `isSampleIntrinsic` defensive fix actually rejects the case it was added
+   for, rather than merely compiling). New
+   `spirv-resource-lowering-image-querysamples.ll` lit test, mirroring
+   L72(d)'s own `spirv-resource-lowering-image-query.ll` precedent.
+6. Ran `git-clang-format` against every touched file -- zero diffs (all
+   new code was already correctly formatted).
+7. Committed as two commits: the `ImageCalls` plumbing first, then the
+   `SPIRVResourceLowering.cpp`/runtime/test-suite change as one logical
+   unit (mirroring L72(d)'s own precedent of committing resource-lowering
+   + runtime + lit-test together after the `ImageCalls` plumbing lands
+   first).
+
+## Verification
+
+- `FeMeTransformsCPUTests`: 398/398 pass (up from 395), 0 regressions.
+- `check-feme`: 2737/2796 pass, 0 fail, 59 unsupported (up from
+  2731/2790), 0 regressions.
+- Real CTS re-run of this row's own full 24-case `texturesamples` caselist
+  (all three stages, not just the 8 `_compute` cases L72(d)'s text had
+  originally scoped this row to): **24/24 Pass, 0 Fail (100%)**.
+- A broader re-run of the full 1,375-case `texture_functions_compute`
+  caselist: 263 Pass (up from 255), 780 Fail (down from 788), 332
+  NotSupported (unchanged) -- confirms zero regressions elsewhere in the
+  caselist from the classifier-widening/defensive-fix changes.
+
+## Roadmap/docs updates
+
+Struck through L73 with a full "done" note describing the fix, the
+3-gap audit finding, and both CTS re-run results. Updated
+`VulkanCTSReport.md` with a new session section. Confirmed
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+changes -- core SPIR-V image-operand functionality, no gating Vulkan
+feature or extension (grepped both files for any L72(d)/L73-related
+mention -- none found, consistent with this being purely an internal
+resource-lowering wiring fix). No further L-series follow-on row filed by
+this session: L73's own scope (opcode 107 against `Plain2DMS`/`Array2DMS`)
+is now fully closed; the only remaining sampled-image MSAA gap
+(`texelFetch()`/ordinary filtered sampling against `sampler2DMS`) was
+already known to be unstarted, out-of-scope work with no CTS case driving
+it yet, so it is left unfiled until a real failing case identifies it as
+worth prioritizing, mirroring this project's own "don't file speculative
+rows with no real CTS evidence" convention.
