@@ -42,25 +42,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L74 from the roadmap or other prerequisites blocking the
+Can you close out L75 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **The remaining 66 of roadmap L72(d)'s original 76
-> `OpImageQuerySizeLod`/`OpImageQueryLevels` cases -- every shape but `Plain2D`
-> (`Array2D`, `Plain1D`, `Array1D`, `Plain3D`, `Cube`, `CubeArray`)** --
-> L72(d)'s own fix deliberately scoped its `ImageCalls` builders
-> (`createQuerySizeLod2D`/`createQueryLevels`) to emit only a `Plain2D`-shaped
-> `v2i32`/`i32` result, so widening `SPIRVResourceLowering.cpp`'s shape gate to
-> any other shape without first widening those builders' own result type would
-> reproduce the exact `replaceAllUses of value with new value of different
-> type!` crash L72(d)'s own fix found and fixed for `Array2D` specifically
-> (`textureSize()` against an arrayed shape returns an extra layer-count
-> component, e.g. `ivec3` rather than `ivec2`; `Cube`/`CubeArray` likely have
-> their own distinct result-shape considerations still needing their own real IR
-> reduction to confirm). Not yet started; needs its own per-shape result-type
-> design work (likely one new `ImageCalls` builder variant per distinct result
-> shape, mirroring L66(f)-L66(j)'s own established per-shape-follow-on precedent
-> for `Dref`+`Grad` shadow sampling) before implementation can begin, and should
-> probably be split further into its own per-shape rows once that design work
-> identifies which shapes share an identical result shape and which need their
-> own distinct handling.
+> **The `OpImageQuerySizeLod` half of roadmap L74's original per-shape scope,
+> deliberately left untouched by L74's own fix**: every shape but `Plain2D`
+> (`Array2D`, `Plain1D`, `Array1D`, `Plain3D`, `Cube`, `CubeArray`) still needs
+> its own new `ImageCalls` builder before `SPIRVResourceLowering.cpp`'s
+> `isQuerySizeLodCall` shape gate can be widened, since (unlike
+> `OpImageQueryLevels`, which L74 confirmed is shape-independent and needed zero
+> builder changes) `OpImageQuerySizeLod`'s result genuinely varies in component
+> count by shape per GLSL's own `textureSize(sampler, lod)` overload spec:
+> scalar `i32` for `Plain1D`; `v2i32` for `Array1D`/`Plain2D`/`Cube`; `v3i32`
+> for `Array2D`/`Plain3D`/`CubeArray`. A real CTS re-run of L74's own 68-case
+> caselist found 24 `query.texturesize.*_compute` cases remain in this bucket
+> (`isampler1d(array)?`/`isampler3d`/`isamplercube(array)?`/`isamplercubeshadow`/`sampler1d(array)?(shadow)?(_fixed\|_float)?`/`sampler2darray(shadow)?(_fixed\|_float)?`/`sampler3d(_fixed\|_float)?`/`samplercube(array)?(shadow)?(_fixed\|_float)?`/`usampler1d(array)?`/`usampler2darray`/`usampler3d`/`usamplercube(array)?`,
+> mirrored across signed/unsigned/float sampler variants). Not yet started;
+> needs its own per-shape result-width design work (likely one new `ImageCalls`
+> builder variant per distinct result width -- `v2i32` for `Array1D`/`Cube`,
+> `v3i32` for `Array2D`/`Plain3D`/`CubeArray`, scalar for `Plain1D` -- grouping
+> shapes that already share an identical result shape rather than one builder
+> per individual shape) before implementation can begin. Also still needs its
+> own confirmation of how `ArrayLayers` is populated for a `CubeArray` view
+> specifically (whether it already stores the real face-count-inclusive layer
+> count or an already-divided-by-6 array-slice count) before a
+> `CubeArray`-shaped builder can be implemented correctly.
