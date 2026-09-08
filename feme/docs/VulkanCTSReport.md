@@ -31516,3 +31516,93 @@ distinct-result-width `ImageCalls` builders, since this opcode's result
 genuinely varies in component count by shape unlike `OpImageQueryLevels`)
 is filed as its own new top-level follow-on row, L75. Temporary
 artifacts under `/tmp/l74_*` cleaned up at the end of the session.
+
+## L75: `OpImageQuerySizeLod` per-shape widening (this session)
+
+Closes out roadmap L75, the `OpImageQuerySizeLod` half of L74's original
+per-shape scope L74 itself deliberately left untouched (`OpImageQueryLevels`'s
+shape-independent result let L74 close that half with zero builder changes;
+`OpImageQuerySizeLod`'s result genuinely varies in component count by shape
+per GLSL's own `textureSize(sampler, lod)` overload spec, so this row needed
+real per-shape builder/runtime work first).
+
+Design: grouped the 6 remaining shapes (`Array2D`, `Plain1D`, `Array1D`,
+`Plain3D`, `Cube`, `CubeArray`) by result-width/formula rather than one
+builder per shape:
+- `Cube` reuses the **existing** `QuerySizeLod2D` builder/runtime
+  unchanged -- a cube face's own mip-level extent shrinks by the identical
+  `(max(1,W>>lod), max(1,H>>lod))` formula a `Plain2D` mip level does, so
+  this is a "free" shape-gate widening with no new builder at all.
+- `Plain1D`: new `QuerySizeLod1D` (scalar `i32`, `max(1,W>>lod)`).
+- `Array1D`: new `QuerySizeLod1DArray` (`v2i32`,
+  `(max(1,W>>lod), ArrayLayers)` -- the second lane is the real,
+  unscaled array-layer count).
+- `Array2D`: new `QuerySizeLod2DArray` (`v3i32`,
+  `(max(1,W>>lod), max(1,H>>lod), ArrayLayers)`).
+- `Plain3D`: new `QuerySizeLod3D` (`v3i32`, all three lanes
+  `max(1, Dim>>lod)` -- a volume texture's own depth genuinely shrinks
+  with mip level, unlike an array's layer count).
+- `CubeArray`: new `QuerySizeLodCubeArray` (`v3i32`,
+  `(max(1,W>>lod), max(1,H>>lod), ArrayLayers/6)`).
+
+Resolved this row's own flagged open question -- how `ArrayLayers` is
+populated for a `CubeArray` view -- via `CommandBuffer.cpp`'s
+`materializeImageDescriptor`: a cube(array) view's own `ArrayLayers`
+descriptor field is the raw, face-inclusive layer count, populated by the
+identical code path a plain `Texture2DArray` uses (a cube/cube-array view
+is "purely a view-level convention over consecutive array layers," per the
+code's own comment) -- **not** already divided by 6. So
+`femeCpuImageGetDimensionsLodCubeArrayV3I32` divides by 6 at the point of
+use to compute the real cube-array element count.
+
+Implementation:
+- `ImageCalls.h`/`ImageCalls.cpp`: 5 new `ImageCallKind` enum values, 5 new
+  builder declarations/implementations, wired into `getImageCallName`/
+  `getOrInsertImageCall`/`matchImageCall` (its own `AllKinds` array and
+  operand-extraction switch, mirroring `QuerySizeLod2D`'s identical
+  5-argument operand layout for all 5 new kinds).
+- `FeMeRuntimeCPU.c`: added `femeRTClampQuerySizeLodMip`, a shared static
+  helper factored out of the existing `femeCpuImageGetDimensionsLod2DV2I32`
+  logic, plus 5 new runtime entry points
+  (`femeCpuImageGetDimensionsLod1DI32`/`1DArrayV2I32`/`2DArrayV3I32`/
+  `3DV3I32`/`CubeArrayV3I32`).
+- `SPIRVResourceLowering.cpp`: `isQuerySizeLodCall`'s shape gate (both the
+  sampled-image `hasOnlySupportedImageUses` and storage-image
+  `hasOnlySupportedStorageImageUses` paths) now accepts every classifiable
+  non-multisampled shape (previously `Plain2D` only); `Plain2DMS`/
+  `Array2DMS` remain rejected -- no real CTS case has driven that
+  combination's own scoping yet. `lowerImageAccesses`'s own dispatch now
+  selects the correct builder per handle `Shape` instead of unconditionally
+  calling `createQuerySizeLod2D`.
+- Tests: 5 new `ImageCallsTest.cpp` matcher tests (one per new builder); 6
+  new `SPIRVResourceLoweringTest.cpp` positive lowering tests
+  (`LowersArray2DQuerySizeLod`/`LowersPlain1DQuerySizeLod`/
+  `LowersArray1DQuerySizeLod`/`LowersPlain3DQuerySizeLod`/
+  `LowersCubeQuerySizeLod`/`LowersCubeArrayQuerySizeLod`), replacing the
+  now-inaccurate `LeavesArray2DQuerySizeLodHandleAlone` negative test with
+  a renamed `LeavesPlain2DMSQuerySizeLodHandleAlone` (still correctly
+  rejected); extended `spirv-resource-lowering-image-query.ll` with an
+  end-to-end `Array2D` case. `FeMeTransformsCPUTests`: 411/411 -> 417/417
+  pass, zero regressions. `check-feme`: 2756/2756 supported tests pass, 0
+  fail, 59 unsupported (unchanged count of unsupported tests).
+
+A real CTS re-run of the full 34-case `query.texturesize.*_compute`
+caselist (not 24 as this row's own filed text estimated -- the real group
+includes every already-`Plain2D`-passing case too, not just the
+previously-failing subset):
+
+- **Totals: 34/34 Pass (100%, up from the small `Plain2D`-only subset
+  L72(d) already closed).**
+
+A broader re-run of the full 1,375-case `texture_functions_compute`
+caselist confirms zero regressions and further real movement: **321 Pass
+(up from 292), 722 Fail (down from 751), 332 Not Supported (unchanged)**.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- same rationale as L72(d)/L73/L74, core SPIR-V image-operand
+functionality with no gating Vulkan feature or extension.
+
+This closes out the entire `OpImageQuerySizeLod`/`OpImageQueryLevels`
+per-shape widening arc started at L72(d) (L72(d) -> L73 -> L74 -> L75).
+Temporary artifacts under `/tmp/l75_*` cleaned up at the end of the
+session.
