@@ -889,7 +889,7 @@ and `BuiltIn` `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/
 literal enumerator aliases, matching SPIR-V's spelling to the existing
 D3D-derived system values one-for-one rather than adding parallel ones).
 
-#### Status (roadmap L37/L77): this section's own "never co-occur" premise is wrong for real DXC output
+#### Status (roadmap L37/L77): this section's own "never co-occur" premise is wrong for real DXC output; fixed by a merge, not an import-time change
 
 Roadmap L37 closed `HullWrapperPass`'s own masked-input-read gap (see
 `HullWrapper.cpp`'s file comment) and, in doing so, let a real
@@ -915,13 +915,39 @@ domain entry -- which only ever carries `Triangles`, never
 `SpacingEqual`/`VertexOrderCw` -- fails that check outright
 (`"the tessellation-evaluation stage declares no tessellation domain
 execution mode"`), even though the *pair's* combined attributes are
-completely valid and complete. Filed as roadmap L77 (still open): the fix
-belongs in `ConvertSPIRVToLLVMPass.cpp`/`GraphicsPipeline.cpp`'s merge
-step, most likely reading `TessDomain`/`TessPartitioning`/
-`TessOutputPrimitive` from *either* compiled entry point rather than
-requiring the domain entry alone to carry the full set, since a hull/domain
-pair is always compiled and linked together and a real DXC output
-genuinely spreads this state across both.
+completely valid and complete.
+
+**Fixed for L77** without touching `ConvertSPIRVToLLVMPass.cpp`'s
+per-entry-point attribute logic at all: that pass has no way to
+correlate a hull entry with its domain sibling (they are independently
+converted SPIR-V modules, with no cross-module linkage information
+available at that stage), so merging the two *there* is not viable.
+Instead, `feme::graphics::TessellationState` grew a `HasDomainShape` flag
+(`PatchPipeline.h`), set by `getTessellationState` (`Tessellation.cpp`)
+whenever a function's own domain-shape attribute group (`Triangles`/
+`Quads`/`Isolines` + spacing + vertex-order/point-mode) is present --
+which, given the real DXC shape above, now correctly fires for the
+**hull** entry too, not just a domain entry. `GraphicsPipeline.cpp`'s
+merge step (the block right after compiling both halves) prefers the
+domain entry's own domain shape when it has one (the original
+Khronos-spec-implied split this section described, still valid for any
+module that really does declare it there), falling back to the hull
+entry's `ControlPointState` when it doesn't, and only rejects the
+pipeline when *neither* half declares a domain shape at all. This keeps
+`getTessellationState`'s own per-function contract simple (still a pure,
+independent function of one entry point's own attributes) while letting
+the one place that actually has both halves in hand -- `GraphicsPipeline
+.cpp`, since a hull/domain pair is always compiled and linked together --
+do the real merging.
+
+Confirmed via a real before/after `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+comparison against both of L77's own named repros
+(`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test`): without
+the fix, `vkCreateGraphicsPipelines` fails with exactly this section's
+own diagnostic; with the fix, pipeline creation and command submission
+both succeed. Both repros still separately fail their own output-buffer
+comparison after that point -- a new, distinct, further-downstream gap,
+filed as roadmap L78, out of scope for this fix.
 
 ### Builtins and system values
 
