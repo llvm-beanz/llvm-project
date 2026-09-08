@@ -806,4 +806,23 @@ TEST_F(ImageCallsTest, MatchesQueryLevelsCall) {
   EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
 }
 
+// `createQuerySamples`'s own `feme.cpu.image.querysamples.i32` call
+// (roadmap L73): a multisampled image's own sample count -- see
+// `ImageCallKind::QuerySamples`'s own doc. Same operand list as
+// `QueryLevels`.
+TEST_F(ImageCallsTest, MatchesQuerySamplesCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createQuerySamples(Builder, Env, Builder.getInt32(3));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySamples);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+}
+
 } // namespace

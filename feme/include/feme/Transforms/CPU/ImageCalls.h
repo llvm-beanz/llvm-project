@@ -460,9 +460,10 @@ enum class ImageCallKind : uint8_t {
   /// `GetDimensions2D` (`ImageIndex`/`Mask`) plus one more: the explicit
   /// mip level itself (`Lod` in `MatchedImageCall`, reusing that same
   /// field other sampling kinds already use for an explicit-LOD operand).
-  /// Scoped to `Plain2D`/`Array2D` only for now, mirroring
-  /// `GetDimensions2D`'s own precedent -- every other `ImageShape`'s own
-  /// counterpart remains unstarted follow-on work.
+  /// Scoped to `Plain2D` only for now (this builder only ever emits a
+  /// `v2i32` result, which does not match `Array2D`'s own extra
+  /// layer-count component) -- every other `ImageShape`'s own counterpart
+  /// remains unstarted follow-on work (roadmap L74).
   QuerySizeLod2D,
   /// `feme.cpu.image.querylevels.i32` (roadmap L72(d)): an image's own
   /// total mip-level count (`OpImageQueryLevels` -- GLSL's
@@ -472,9 +473,21 @@ enum class ImageCallKind : uint8_t {
   /// this needs neither a `Mask` (this query has no per-invocation side
   /// effect to guard) nor an explicit mip level of its own -- only
   /// `ImageIndex` -- so its own operand list is the smallest of any kind
-  /// above. Scoped to `Plain2D`/`Array2D` only for now, mirroring
-  /// `QuerySizeLod2D`'s own identical scoping decision.
+  /// above. Scoped to `Plain2D` only for now, mirroring `QuerySizeLod2D`'s
+  /// own identical scoping decision (roadmap L74 is the follow-on for
+  /// every other shape).
   QueryLevels,
+  /// `feme.cpu.image.querysamples.i32` (roadmap L73): a multisampled
+  /// image's own sample count (`OpImageQuerySamples` -- GLSL's
+  /// `textureSamples(sampler2DMS)`), returning the scalar
+  /// `FemeImageDescriptor::SampleCount` already tracks for its bound
+  /// subresource, or `0` for an unbound handle. Structurally identical to
+  /// `QueryLevels` above (same operand list -- no `Mask`, no explicit mip
+  /// level -- just a different runtime field read), but scoped to
+  /// `Plain2DMS`/`Array2DMS` only: `OpImageQuerySamples` is spec-legal
+  /// only against a multisampled image, the one shape pair
+  /// `QuerySizeLod2D`/`QueryLevels` above deliberately do not cover.
+  QuerySamples,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -1147,6 +1160,16 @@ llvm::CallInst *createQueryLevels(llvm::IRBuilderBase &Builder,
                                   const ImageCallEnv &Env,
                                   llvm::Value *ImageIndex,
                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.querysamples.i32` call (roadmap L73): see
+/// `ImageCallKind::QuerySamples`'s own doc for its scalar `i32` result.
+/// Same operand list as `createQueryLevels` -- only \p ImageIndex from
+/// \p Env's image heap, no `Mask`/sampler heap/coordinate operand of any
+/// kind.
+llvm::CallInst *createQuerySamples(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex,
+                                   const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.

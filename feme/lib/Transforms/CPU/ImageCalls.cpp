@@ -126,6 +126,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.getdimensions.lod.2d.v2i32";
   case ImageCallKind::QueryLevels:
     return "feme.cpu.image.querylevels.i32";
+  case ImageCallKind::QuerySamples:
+    return "feme.cpu.image.querysamples.i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -641,6 +643,12 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // -- no `Mask` (no per-invocation side effect to guard against) and
     // no coordinate/mip-level operand at all -- see
     // `ImageCallKind::QueryLevels`'s own doc.
+    FTy = FunctionType::get(I32Ty, {PtrTy, I32Ty, I32Ty}, /*isVarArg=*/false);
+    break;
+  case ImageCallKind::QuerySamples:
+    // (image_heap, image_heap_count, image_index) -> i32 (roadmap L73):
+    // identical operand list/shape to `QueryLevels` above -- see
+    // `ImageCallKind::QuerySamples`'s own doc.
     FTy = FunctionType::get(I32Ty, {PtrTy, I32Ty, I32Ty}, /*isVarArg=*/false);
     break;
   }
@@ -1189,6 +1197,15 @@ CallInst *feme::cpu::createQueryLevels(IRBuilderBase &Builder,
                             Name);
 }
 
+CallInst *feme::cpu::createQuerySamples(IRBuilderBase &Builder,
+                                        const ImageCallEnv &Env,
+                                        Value *ImageIndex, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySamples);
+  return Builder.CreateCall(F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex},
+                            Name);
+}
+
 CallInst *feme::cpu::createLoad1D(IRBuilderBase &Builder,
                                   const ImageCallEnv &Env, Value *ImageIndex,
                                   Value *X, Value *Mip, Value *Sample,
@@ -1516,7 +1533,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Sample3D,
       ImageCallKind::GetDimensions2D,
       ImageCallKind::QuerySizeLod2D,
-      ImageCallKind::QueryLevels};
+      ImageCallKind::QueryLevels,
+      ImageCallKind::QuerySamples};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2110,6 +2128,13 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(4);
     break;
   case ImageCallKind::QueryLevels:
+    if (CI.arg_size() != 3)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    break;
+  case ImageCallKind::QuerySamples:
     if (CI.arg_size() != 3)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
