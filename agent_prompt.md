@@ -42,39 +42,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L79 from the roadmap or other prerequisites blocking the
+Can you close out L80 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Vertex-attribute fetch reads past a bound attribute format's own declared
-> channel count when a shader declares a wider input type**, discovered by L78's
-> own investigation once its fix let real, non-zero forwarded vertex position
-> data reach a hull/domain-stage test for the first time:
-> `HullSystemValues.test`'s real vertex shader declares `float4 position :
-> POSITION` as its input even though the bound `VertexData` attribute only
-> supplies 2 floats (`Format: Float32, Channels: 2, Stride: 8`); the observed
-> hull-stage-forwarded position value (`(-0.9, -0.9, -0.1, -0.9)`) exactly
-> matches `[CP0.x, CP0.y, CP1.x, CP1.y]` -- i.e. the fetch reads 4 floats
-> unconditionally from a buffer that only has 2 floats per vertex, spilling into
-> the *next* vertex's data, rather than defaulting the missing components per
-> the standard HLSL/Vulkan convention (0 for missing X/Y/Z, 1 for a missing W).
-> Root cause: `Executor.cpp`'s `attributeFetchLayout(cpu::ResourceFormat)` maps
-> `R32_FLOAT`/`R32G32_FLOAT`/`R32G32B32_FLOAT`/`R32G32B32A32_FLOAT` all to the
-> identical `{FetchByteSize=4, ComponentsPerFetch=1}` -- the format's own real
-> channel count (e.g. 2 for `R32G32_FLOAT`) is never tracked or used to cap how
-> many components get decoded; the fetch loop's `InBoundsComponents =
-> min(Elt.ComponentCount, AvailableFetches * ComponentsPerFetch)` is capped only
-> by (a) the *shader's* own declared component count and (b) how many
-> format-sized fetches fit in the *entire remaining buffer* (spanning subsequent
-> vertices), never by the bound attribute's own declared width. Confirmed
-> empirically via a scratch (non-production) YAML providing full
-> float4/16-byte-stride vertex data in place of the real float2/8-byte-stride:
-> the render target changes from entirely blank to fully rendered with no other
-> change, isolating this as the sole remaining blocker for L78's own two named
-> repros. Needs a real fix threading the bound attribute format's own channel
-> count through `attributeFetchLayout`/the fetch loop, capping
-> `InBoundsComponents` by it in addition to the existing checks, and defaulting
-> any shader-declared components beyond it to 0 (X/Y/Z) or 1 (W) per standard
-> convention -- with care for both float and integer component types -- plus its
-> own new unit tests covering a shader declaring more components than its bound
-> attribute format supplies, in each of the "missing W only" and "missing
-> multiple trailing components" shapes. Not yet started.
+> **`HullSystemValues.test` (L77/L78/L79's own named repro) still fails its
+> `SystemValues` result check even after L79's vertex-attribute-fetch fix**: the
+> `ResultBuffer` is no longer all-zero -- `SV_PrimitiveID`,
+> `SV_OutputControlPointID`, and `SV_TessFactor`/`SV_InsideTessFactor` all now
+> round-trip correctly -- but the smuggled per-control-point `position` data
+> (buffer elements 0/1 and 7/8, one pair per patch) still mismatches: expected
+> `(0, 0)`/`(1, 1)` but observed `(-0.9, -0.9)`/`(0.1, 0.1)` (confirmed via a
+> real `offloader` re-run of this exact repro after L79's fix). Unrelated to
+> L79's own vertex-attribute-format-channel-count scope (that fix is confirmed
+> correct via its own passing unit tests and this row's own now-different
+> symptom); a further, distinct gap somewhere in the hull-stage
+> output-forwarding, domain-stage input-forwarding, or pixel-stage
+> attribute-linking chain for this specific user-data field. Needs its own real
+> IR reduction (the same technique this project's
+> H6-series/H8-series/H9-series/L-series chains have used throughout), likely
+> starting with a runtime-`printf`-instrumented JIT re-run of the hull and
+> domain stage wrappers (mirroring L78's own successful technique) to isolate
+> which stage's real output for this specific field is going unwritten or
+> overwritten. Not yet started.
