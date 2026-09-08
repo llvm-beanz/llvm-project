@@ -71034,3 +71034,171 @@ No scratch artifacts needed cleanup beyond the usual `/tmp/` CTS log
 files from this session's own re-runs (`/tmp/l35_cts`,
 `/tmp/l35_bias*.qpa`, `/tmp/l35_bias_caselist.txt`, `/tmp/l35_list.xml`),
 all removed at the end of the session.
+
+# L35(a) session: feme-translate --import-spirv verify-assert workaround
+
+## Starting point
+
+L35(a) was filed by the immediately preceding session (which closed L35
+itself as moot) as a still-open, narrow, non-blocking tooling gap:
+`feme-translate --import-spirv` crashes outright on any SPIR-V binary
+using `ConstOffset`/`Offset`/`ConstOffsets`/`MinLod`/etc. image operands,
+via an upstream MLIR SPIR-V dialect op verifier assert in
+`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s `verifyImageOperands` -- a
+literal `// TODO: Add the validation rules for the following Image
+Operands` comment followed by an unconditional
+`assert(!bitEnumContainsAny(...))`. The filed text offered two possible
+fixes: loosen/remove the upstream assert, or add a new `feme-translate`
+flag to skip strict verification on import.
+
+## Root-causing precisely before picking a fix
+
+Before choosing between the two options, I wanted to understand exactly
+*where* verification was being invoked, since "just don't verify" sounded
+simple but I wanted to confirm there wasn't a second call site hiding
+somewhere. Reading `mlir/lib/Tools/mlir-translate/Translation.cpp` showed
+`mlir::TranslateToMLIRRegistration`'s own wrapper
+(`registerTranslateToMLIRFunction`) unconditionally calls `mlir::verify()`
+on the imported module before ever handing it back to the tool's own
+output logic -- and `feme::registerSPIRVImportTranslation` used exactly
+this registration form. That's the first, obvious call site.
+
+I initially assumed switching to the lower-level `mlir::TranslateRegistration`
+(which hands raw control back to feme's own function, bypassing the
+wrapper's forced verify) would be the whole fix. It compiled and appeared
+to work in a first quick smoke test... but crashed identically as soon as
+I tried to actually print the imported IR to stdout. Digging into
+`mlir::Operation::print`'s implementation showed a second, less obvious
+call site: its `AsmState` constructor independently calls
+`verifyOpAndAdjustFlags` (`mlir/lib/IR/AsmPrinter.cpp`), which re-runs
+`mlir::verify()` on the whole module *again*, this time to decide whether
+custom or generic op-printing form applies. This was not mentioned
+anywhere in the roadmap filing and I only found it through direct
+experimentation -- a good reminder that "the verify call" in code like
+this is often plural, not singular, and printing/serialization paths can
+silently re-trigger the same validation a caller thinks it already
+bypassed. The fix needed `OpPrintingFlags().assumeVerified()` passed to
+`print()` as well, once the skip-verify flag is set.
+
+## Choosing the flag over the upstream patch
+
+With both call sites understood, I decided against touching
+`ImageOps.cpp`'s assert directly, for three reasons: (1) it's shared
+upstream MLIR code, and loosening it affects every other MLIR consumer in
+this tree, which is a much bigger blast radius than this project needs to
+accept for a narrow tooling-only gap; (2) properly resolving the TODO --
+i.e. actually implementing real validation rules for these image operand
+bits -- is a genuinely separate, larger scope than "let feme-translate not
+crash," and doing it halfway (just deleting the assert without adding real
+validation) wouldn't even work: the operand-parsing code never increments
+its own `index` counter for these bits, so removing the assert would just
+convert the crash into a different, still-failing "too many image operand
+arguments" error a few lines later, buying nothing; (3) a scoped, opt-in,
+default-off flag fully contained in feme's own
+`TranslateRegistration.cpp` is the minimal, safest change that actually
+unblocks future real-IR-reduction work using these operands, matching this
+project's general preference (seen in prior sessions too) for solving
+problems in feme's own code rather than reaching into shared upstream
+infrastructure whenever a narrower fix is available.
+
+## Building a real repro was harder than expected
+
+I wanted to actually prove the fix works against a real SPIR-V binary
+carrying one of the blocked operand combinations, not just trust the code
+reading. My first instinct was to hand-write a `.mlir` file with the
+`spirv` dialect's own textual syntax (e.g. `["Bias|ConstOffset"]` on an
+`spirv.ImageSampleImplicitLod`) and round-trip it through
+`--serialize-spirv` to get a binary, then `--import-spirv` it back. This
+failed identically: MLIR's own textual `spirv` dialect parser
+(`parseSourceFileForTool`, used by every `TranslateFromMLIRRegistration`-based
+tool including `--serialize-spirv`) *also* unconditionally calls
+`mlir::verify()` on parse, hitting the exact same assert before I ever got
+to the export step. So there was no way to synthesize a repro purely
+through MLIR's own tooling in either direction.
+
+The workaround was to sidestep MLIR's parser entirely: the environment has
+`spirv-as`/`spirv-dis` (SPIRV-Tools) available at `/usr/bin/`, so I
+hand-assembled a minimal fragment shader directly in real SPIR-V textual
+assembly syntax (`OpTypeImage`/`OpTypeSampledImage`/`OpVariable`/
+`OpImageSampleImplicitLod ... Bias|ConstOffset ...`) and used `spirv-as` to
+produce a real `.spv` binary. This is a genuinely different, lower-level
+syntax than MLIR's own `spirv` dialect printer/parser (SPIR-V assembly's
+own bit-enum syntax combines multiple operand bits with `|` inside one
+quoted operand list entry, not as separate list entries), and took a
+couple of iterations to get right (the assembler initially rejected an
+`OpConstantComposite` referencing a scalar constant that hadn't been
+declared yet in the module -- SPIR-V requires constants declared in
+definition order, not just any order, unlike some other IRs).
+
+Once I had that binary, the before/after comparison was exactly what I
+wanted: `feme-translate --import-spirv` crashes on the known assert
+without the new flag, and cleanly imports/prints the real
+`spirv.ImageSampleImplicitLod ... ["Bias|ConstOffset"] ...` IR with
+`--import-spirv --import-spirv-skip-verify`.
+
+## Test infrastructure adventures: `not --crash` needs a PATH
+
+Wanting to pin the "still crashes on the default path" behavior in a lit
+test (so a future upstream MLIR fix to the TODO would be noticed rather
+than silently making the test's own `RUN: not --crash` line start failing
+for the wrong reason), I wrote `RUN: not --crash feme-translate
+--import-spirv %t.spv | FileCheck --check-prefix=CRASH`. This failed with
+`'not': command not found` -- surprising, since plenty of other feme lit
+tests already use plain `RUN: not <cmd>` successfully. Reading
+`llvm/utils/lit/lit/TestRunner.py` clarified why: lit's own internal shell
+interpreter handles plain `not <cmd>` entirely in-process (it just inverts
+the exit code, no external binary needed at all), but `not --crash`
+specifically is explicitly *not* reimplemented internally -- the comment
+in TestRunner.py says as much ("We don't want to reimplement 'not' and its
+'--crash' here, so just push all 'not' commands back to be called as
+external commands") -- so it always shells out to a real `not` executable,
+which needs to be resolvable via `PATH`. None of feme's existing lit tests
+had ever exercised this particular code path before, so this gap had gone
+unnoticed. Fixed with an `llvm_config.with_environment("PATH",
+config.llvm_tools_dir, append_path=True)` addition to `feme/test/lit.cfg.py`,
+mirroring the identical pattern already used by `llvm/test/lit.cfg.py`
+itself.
+
+For the `spirv-as` dependency itself, I followed the project's own
+existing `system-dxc`/`%dxc` convention in `lit.cfg.py` verbatim (a
+`shutil.which(...)` check registering an `available_features` entry plus a
+substitution), added as `system-spirv-as`/`%spirv-as`, and gated the new
+test on `REQUIRES: system-spirv-as` so it degrades gracefully (skips
+rather than fails) on any environment without the external assembler
+installed. The test's own fixture is a checked-in `.spvasm` *text* file,
+assembled to a binary at test run time, per this project's established
+"avoid checking in binary test fixtures" convention documented elsewhere
+in `feme/docs/Design.md`.
+
+## Verification and wrap-up
+
+`ninja check-feme` (ccache + assertions, `build2`): 2763/2822 discovered
+(up by exactly 1, this row's own new test), 59 pre-existing `Unsupported`,
+0 `Failed` -- no regressions. `git-clang-format --diff HEAD` reported no
+formatting issues on the changed C++ file. As a final sanity check that
+this row's change (which never touches the runtime ICD) has zero effect
+on the real Vulkan CTS, re-ran roadmap L35's own real
+`Vk.SampledTexture2D.SampleBias.test.yaml` repro against a freshly rebuilt
+`feme_icd.json`: still 1/1 Pass, confirmed reproducible, and
+`ninja feme_vulkan` correctly reported "no work to do" (this row's change
+lives entirely in `feme-translate`'s own library, not linked into
+`feme_vulkan.so`).
+
+Updated `feme/docs/Design.md`'s "Testing Tools" section to document why
+`--import-spirv` alone (unlike every other translation registration
+described in that section) uses the raw `mlir::TranslateRegistration` form
+instead of `mlir::TranslateToMLIRRegistration`, and what
+`--import-spirv-skip-verify` is for -- this is itself a deviation from
+that section's own prior description of a uniform registration pattern
+across all these tools, so per this session's own standing instructions,
+the design doc needed updating rather than just the roadmap.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
+changes (a testing-tool-only fix, no runtime feature/extension surface
+touched).
+
+Struck through L35(a) on the roadmap with a done-note summarizing all of
+the above. Committed in three small, separate commits: (1) the code fix
+plus new test/test-infra, (2) the docs updates (Design.md/Roadmap.md/
+VulkanCTSReport.md), (3) this agent_thoughts.md entry, last, on its own.
+Temporary scratch files under `/tmp/` (`l35a_repro.spvasm`,
+`l35a_repro.spv`, `out_noflag.txt`) removed at the end of the session.
