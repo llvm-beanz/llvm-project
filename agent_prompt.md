@@ -42,22 +42,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L81 from the roadmap or other prerequisites blocking the
+Can you close out L82 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`DomainSystemValues.test` (L77/L78/L79's own named repro) now reaches
-> `vk.queueSubmit` after L79's vertex-attribute-fetch fix, but that submit fails
-> with `VkResult = -3`**, a new failure mode not previously reached (before
-> L79's fix, this repro failed earlier, during
-> `vkCreateGraphicsPipelines`/pipeline validation, per L78's own filing).
-> Confirmed via a real `offloader` re-run of this exact repro after L79's fix:
-> `"Graphics Pipeline created."` now logs successfully, but `"Failed to submit
-> to queue. (VkResult = -3)"` follows immediately, with no further diagnostic
-> text captured yet. Unrelated to L79's own
-> vertex-attribute-format-channel-count scope (that fix only changes which real
-> data reaches this stage, not the pipeline/command-buffer validation path that
-> now fails). Needs its own investigation to capture the real underlying
-> validation error (likely via `FEME_VULKAN_LOG_CREATION_ERRORS=1` or an
-> equivalent verbose-diagnostic path, not yet attempted for a `vkQueueSubmit`
-> failure specifically) before a real IR reduction can even be scoped. Not yet
-> started.
+> **A real `offloader` re-run of `DomainSystemValues.test` after roadmap L81's
+> fix now runs the pipeline to completion (no `VkResult` failure, no
+> `vkCreateGraphicsPipelines` failure), but the result buffer still fails an
+> exact-match comparison against `ResultBuffer_Expected` by exactly 1 ULP on a
+> handful of interpolated position/`uv` elements** (e.g. `0x3e800000` expected
+> vs. `0x3e7fffff` observed -- `0.25` vs. `0.24999997`; `0x3f400000` vs.
+> `0x3f400001` -- `0.75` vs. `0.75000006`), confirmed via a real `offloader`
+> re-run of this exact repro after L81's fix. Entirely unrelated to L81's own
+> `SV_PrimitiveID`-classification scope: every `SV_PrimitiveID`-forwarded value
+> in the same buffer now matches exactly, isolating the remaining mismatch to
+> the domain shader's own bilinear bounding-quad interpolation
+> (`lerp(patch[0].position, patch[1].position, uv.x)` etc. in this repro's real
+> `domain.hlsl`) or the tessellator's own domain-coordinate generation feeding
+> it -- a genuine, if narrow, floating-point-rounding discrepancy against the
+> reference values, not a logic/addressing bug like L77-L81's chain. Needs its
+> own real IR reduction (the same technique this project's
+> H6-series/H8-series/H9-series/L-series chains have used throughout) to isolate
+> whether `feme::graphics::tessellate`'s own domain-coordinate generation
+> (`Tessellator.cpp`) or the compiled domain shader's own `lerp`-to-IR lowering
+> (e.g. fused-multiply-add contraction differing from the reference
+> implementation's own arithmetic order) is the source of the 1-ULP drift,
+> before a real fix can be scoped. Not yet started.
