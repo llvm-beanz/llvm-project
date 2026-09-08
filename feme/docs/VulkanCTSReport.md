@@ -30674,3 +30674,111 @@ touched this session). `Vulkan14FeatureInventory.md`: no change (already
 updated last session). `VulkanExtensionInventory.md`: updated
 `VK_KHR_compute_shader_derivatives`'s own row with a roadmap L69
 cross-reference.
+
+## Session: roadmap L69 -- compute-stage derivative sampling, and a new blocking bug found (L70)
+
+Closing out roadmap L69 (`_compute`-stage screen-space-derivative-dependent
+sampling fails outright at `vkCreateComputePipelines`). Root-cause
+investigation found the real gap was two distinct, much narrower bugs than
+the prior session's initial 4-phase filing assumed, not a single large
+"compute-stage quad-grouped invocation scheduling" design problem:
+
+1. **`CanonicalizeStage.cpp`'s own internal per-function stage-filter list
+   excluded `ShaderStage::Compute`**, so a raw SPIR-V `llvm.spv.ddx`/`.ddy`
+   call in a compute entry point was never rewritten into feme's own
+   `feme.stage.derivative.*` form at all. Fixed by adding `Compute` to that
+   list; new lit test (`spirv-canonicalize-stage-raised-compute.ll`) and
+   gtest (`RewritesSPIRVDerivativesInComputeStage`).
+2. **`Target/CPU/Pipeline.cpp`'s own pipeline driver never even invoked
+   `CanonicalizeStagePass`/`ValidateStagePass` for the compute stage at
+   all**, gated behind a stale `Opts.Stage != ShaderStage::Compute` check
+   predating this row's own derivative-rewriting need. This made fix (1)
+   dead code for every real compute pipeline -- only reachable by a test
+   calling the pass directly. Fixed by removing the gate (`ValidateStagePass`
+   already self-filters to `Vertex`/`Fragment`/`Mesh`, so it remains a safe
+   no-op for `Compute` either way); new gtest
+   (`CanonicalizesRawComputeDerivativeBeforeWidening`) mirroring the existing
+   `CanonicalizesRawSPIRVStageIOBeforeWidening` fragment-stage precedent.
+
+`DerivativeGroupLinearKHR` needed no lane-assignment change at all: feme's
+compute-stage lane assignment is already flat/linear (`x = flat % Gx`), and
+`WaveLowering.cpp`'s existing fragment-quad derivative-shuffle math is
+stage-agnostic and already bit-for-bit matches this mode's own spec-defined
+grouping (4 consecutive `LocalInvocationIndex` values). `DerivativeGroupQuadsKHR`
+genuinely needs a real 2x2-spatial-tile lane-assignment redesign this target
+does not have, so it is deliberately rejected with a named error at pipeline
+creation (split out as **roadmap L69(a)**, not attempted this session).
+
+Also landed: `VK_KHR_compute_shader_derivatives` extension advertisement
+(`PhysicalDeviceInfo.cpp`), its `computeDerivativeGroupLinear=VK_TRUE`/
+`computeDerivativeGroupQuads=VK_FALSE` feature struct and
+`meshAndTaskShaderDerivatives=VK_FALSE` properties struct
+(`EntryPoints.cpp`), `resolveComputeDerivativeGroupMode` recognizing the
+`DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR` SPIR-V execution modes
+(`GroupSize.cpp`), and `compileComputePipeline`'s own validation of the
+resolved mode (`Pipeline.cpp`).
+
+`FeMeVulkanTests`: 659/659 pass. `FeMeTargetCPUTests`: 96/96 pass. Full
+`check-feme`: 2704/2763 pass, 0 fail, 59 unsupported (no regressions).
+
+### Real CTS re-measurement (flip/measure/revert against a `git worktree` baseline)
+
+Built a 295-case caselist (242 `texturegrad{,offset}*_compute` +
+53 implicit-LOD `texture.*_compute`) via `deqp-vk
+--deqp-runmode=stdout-caselist`. Compared against a true "before" baseline
+built from a `git worktree` checked out at the pre-L69 commit, sharing
+ccache:
+
+- **Before** (baseline): 0/295 Pass, 153 Fail, 142 NotSupported.
+- **After** (all L69 fixes): 0/295 Pass, 153 Fail, 142 NotSupported --
+  identical totals.
+
+A per-case diff of the two `.qpa` logs' reason strings found the fix chain
+*is* genuinely wired up and executing correctly, even though it moved no
+case's outward Pass/Fail status: exactly 53 cases (the implicit-LOD subset)
+changed reason text from `"VK_KHR_compute_shader_derivatives is not
+supported"` (before) to `"computeDerivativeGroupQuads feature is not
+supported"` (after) -- the expected, correct direction for a shader
+requesting `DerivativeGroupQuadsKHR`, which this row deliberately still
+rejects.
+
+**Why 0 cases pass at all**: every one of the 153 `Fail` cases, with or
+without this row's own fix, hits an entirely separate, pre-existing,
+much broader bug: `FEME_VULKAN_LOG_CREATION_ERRORS=1` shows the same
+generic `UnsupportedOps.cpp` diagnostic every time -- `"...is a
+register-bound resource handle the FeMe CPU target cannot normalize into
+a heap access..."`. Confirmed this is unrelated to derivatives at all: a
+trivial `dEQP-VK.glsl.texture_functions.texturelod.sampler2d_float_compute`
+case (explicit-LOD, needs no derivative-group mode whatsoever) fails
+identically. **All compute-stage image sampling is broken in feme today,
+regardless of L69's own scope.**
+
+A real SPIR-V disassembly of this exact failing case
+(`--deqp-log-decompiled-spirv=enable`) shows the flagged handle
+(`target("spirv.Image", f32, 1, 0, 0, 0, 2, 4)` -- `Dim2D`, non-arrayed,
+non-multisampled, `Sampled=WithoutSampler`, `Format=Rgba8`) is the compute
+shader's own *output* storage image (binding 4) -- unlike a fragment
+shader, a compute shader has no color-attachment framebuffer to write its
+result into, so this CTS group always binds a plain storage image for that
+purpose. But the diagnostic's own caveat ("this handle may be an unrelated
+bystander") holds here too: `classifyStorageImage2DHandle` in
+`SPIRVResourceLowering.cpp` already accepts this exact shape with no
+image-format-based rejection, so the flagged handle is very unlikely to be
+the real failing operation. A grep of
+`SPIRVResourceLowering.cpp`/`BoundResourceNormalization.cpp`/
+`ResourceInfo.cpp` found no stage-based branching at all, so the bug is not
+a simple compute-stage exclusion in the resource-lowering passes
+themselves.
+
+Filed as its own new, unstarted row, **roadmap L70**, rather than attempted
+this session -- it is unrelated to L69's own derivative-specific scope and
+is a materially bigger, cross-cutting gap that currently masks the
+CTS-visible payoff of every compute-stage sampling fix this project's own
+history has already landed.
+
+`VulkanExtensionInventory.md`: `VK_KHR_compute_shader_derivatives` updated
+to "Implemented (`DerivativeGroupLinearKHR` only)" with a roadmap
+L69/L69(a)/L70 cross-reference. `Vulkan14FeatureInventory.md`: no change
+(this feature lives behind an extension struct, not a core 1.4 feature).
+Temporary artifacts (`git worktree`, CTS caselists/qpa logs) cleaned up at
+the end of the session.
