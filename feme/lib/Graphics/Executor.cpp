@@ -384,9 +384,20 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
 /// `R10G10B10A2_UNORM` (roadmap H8h) is the first format where a single
 /// fetch instead produces every component together, since it is one packed
 /// 32-bit word rather than one memory span per component.
+///
+/// \p ChannelCount (roadmap L79) is the format's own real, fixed channel
+/// count -- e.g. 2 for `R32G32_FLOAT` -- distinct from `ComponentsPerFetch`
+/// (an atomic fetch *granularity*, not a component-count limit: it stays 4
+/// for `R10G10B10A2_UNORM`, which has both `ChannelCount ==
+/// ComponentsPerFetch == 4`, but is 1 for every other format here even
+/// though, say, `R32G32B32A32_FLOAT`'s own `ChannelCount` is 4). A shader
+/// input declaring more components than this must have the rest defaulted
+/// rather than decoded from adjacent memory -- see the vertex-attribute
+/// fetch loop below, which is the only reader of this field.
 struct AttributeFetchLayout {
   uint32_t FetchByteSize;
   uint32_t ComponentsPerFetch;
+  uint32_t ChannelCount;
 };
 
 /// Distinct from ImageFixture.cpp's texel-encoding table: this one
@@ -394,31 +405,36 @@ struct AttributeFetchLayout {
 /// texel.
 Expected<AttributeFetchLayout>
 attributeFetchLayout(cpu::ResourceFormat Format) {
-  auto PerComponent = [](uint32_t ByteSize) {
-    return AttributeFetchLayout{ByteSize, 1};
+  auto PerComponent = [](uint32_t ByteSize, uint32_t Channels) {
+    return AttributeFetchLayout{ByteSize, 1, Channels};
   };
   switch (Format) {
   case cpu::ResourceFormat::R32_FLOAT:
-  case cpu::ResourceFormat::R32G32_FLOAT:
-  case cpu::ResourceFormat::R32G32B32_FLOAT:
-  case cpu::ResourceFormat::R32G32B32A32_FLOAT:
   case cpu::ResourceFormat::R32_UINT:
-  case cpu::ResourceFormat::R32G32_UINT:
-  case cpu::ResourceFormat::R32G32B32_UINT:
-  case cpu::ResourceFormat::R32G32B32A32_UINT:
   case cpu::ResourceFormat::R32_SINT:
+    return PerComponent(4, 1);
+  case cpu::ResourceFormat::R32G32_FLOAT:
+  case cpu::ResourceFormat::R32G32_UINT:
   case cpu::ResourceFormat::R32G32_SINT:
+    return PerComponent(4, 2);
+  case cpu::ResourceFormat::R32G32B32_FLOAT:
+  case cpu::ResourceFormat::R32G32B32_UINT:
   case cpu::ResourceFormat::R32G32B32_SINT:
+    return PerComponent(4, 3);
+  case cpu::ResourceFormat::R32G32B32A32_FLOAT:
+  case cpu::ResourceFormat::R32G32B32A32_UINT:
   case cpu::ResourceFormat::R32G32B32A32_SINT:
-    return PerComponent(4);
+    return PerComponent(4, 4);
   case cpu::ResourceFormat::R8_UNORM:
   case cpu::ResourceFormat::R8_SNORM:
   case cpu::ResourceFormat::R8_UINT:
   case cpu::ResourceFormat::R8_SINT:
+    return PerComponent(1, 1);
   case cpu::ResourceFormat::R8G8_UNORM:
   case cpu::ResourceFormat::R8G8_SNORM:
   case cpu::ResourceFormat::R8G8_UINT:
   case cpu::ResourceFormat::R8G8_SINT:
+    return PerComponent(1, 2);
   case cpu::ResourceFormat::R8G8B8A8_UNORM:
   case cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
   case cpu::ResourceFormat::R8G8B8A8_SNORM:
@@ -427,29 +443,31 @@ attributeFetchLayout(cpu::ResourceFormat Format) {
   // (Roadmap H8t) `B8G8R8A8_UNORM`: same 1-byte-per-component layout as
   // `R8G8B8A8_UNORM` above, just reordered in memory.
   case cpu::ResourceFormat::B8G8R8A8_UNORM:
-    return PerComponent(1);
+    return PerComponent(1, 4);
   // (Roadmap H8b) The 16-bit-per-component families.
   case cpu::ResourceFormat::R16_UNORM:
   case cpu::ResourceFormat::R16_SNORM:
   case cpu::ResourceFormat::R16_UINT:
   case cpu::ResourceFormat::R16_SINT:
   case cpu::ResourceFormat::R16_FLOAT:
+    return PerComponent(2, 1);
   case cpu::ResourceFormat::R16G16_UNORM:
   case cpu::ResourceFormat::R16G16_SNORM:
   case cpu::ResourceFormat::R16G16_UINT:
   case cpu::ResourceFormat::R16G16_SINT:
   case cpu::ResourceFormat::R16G16_FLOAT:
+    return PerComponent(2, 2);
   case cpu::ResourceFormat::R16G16B16A16_UNORM:
   case cpu::ResourceFormat::R16G16B16A16_SNORM:
   case cpu::ResourceFormat::R16G16B16A16_UINT:
   case cpu::ResourceFormat::R16G16B16A16_SINT:
   case cpu::ResourceFormat::R16G16B16A16_FLOAT:
-    return PerComponent(2);
+    return PerComponent(2, 4);
   // (Roadmap H8h) `R10G10B10A2_UNORM`: one 4-byte fetch produces all 4
   // components at once (available in full or not at all), unlike every
   // `PerComponent` case above.
   case cpu::ResourceFormat::R10G10B10A2_UNORM:
-    return AttributeFetchLayout{4, 4};
+    return AttributeFetchLayout{4, 4, 4};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "vertex attribute format is not yet supported "
@@ -3951,11 +3969,30 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // one-fetch-per-component arithmetic, since `ComponentsPerFetch == 1`
         // there makes `AvailableFetches * ComponentsPerFetch` identical to
         // the old `AvailableBytes / CompByteSize` formula).
+        //
+        // (roadmap L79) `FormatComponents` additionally caps how many
+        // components are ever decoded *from memory* by the bound attribute
+        // format's own real channel count, distinct from the buffer-bounds
+        // cap below: a shader declaring more components than the format
+        // itself supplies (e.g. `float4 position` bound to an
+        // `R32G32_FLOAT` attribute) must not read the next fetch's worth of
+        // bytes as if they belonged to this component -- that would read
+        // into the *next* vertex's own data whenever the format's real
+        // width is narrower than the shader's declared width, which was
+        // this row's own reported bug. Any shader-declared component
+        // beyond `FormatComponents` is defaulted below instead, per the
+        // standard HLSL/Vulkan convention (0 for a missing X/Y/Z, 1 for a
+        // missing W) -- distinct from, and applied after, the
+        // buffer-bounds robustness zero-fill above, which still applies
+        // unchanged to any component within the format's own channel count
+        // that the actual bound buffer's real length happens to cut short.
+        uint32_t FormatComponents =
+            std::min(Elt.ComponentCount, FetchLayout->ChannelCount);
         uint64_t AvailableBytes =
             SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
         uint64_t AvailableFetches = AvailableBytes / FetchLayout->FetchByteSize;
         uint32_t InBoundsComponents = static_cast<uint32_t>(std::min<uint64_t>(
-            Elt.ComponentCount,
+            FormatComponents,
             AvailableFetches * FetchLayout->ComponentsPerFetch));
         std::array<uint32_t, 4> Bits{};
         if (InBoundsComponents != 0) {
@@ -3963,6 +4000,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   decodeAttribute(Attr->Format, Binding->Data.data() + SrcOff,
                                   InBoundsComponents, Elt.ComponentType, Bits))
             return E;
+        }
+        // A component the bound format never supplies at all (as opposed
+        // to one merely truncated by the robustness check above, which
+        // correctly stays zero) defaults per the standard convention: 0 for
+        // a missing X/Y/Z (already zero-initialized above, nothing to do)
+        // and 1 for a missing W.
+        if (FormatComponents < 4 && Elt.ComponentCount == 4) {
+          if (Elt.ComponentType == SignatureComponentType::Float) {
+            float One = 1.0f;
+            memcpy(&Bits[3], &One, sizeof(float));
+          } else {
+            Bits[3] = 1u;
+          }
         }
         for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
           VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,

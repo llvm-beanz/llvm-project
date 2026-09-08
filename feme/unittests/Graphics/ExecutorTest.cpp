@@ -630,6 +630,144 @@ TEST(ExecutorTest, VertexAttributeDecodesR10G10B10A2UnormColor) {
       cpu::ResourceFormat::R10G10B10A2_UNORM, ColorBytes, {255, 0, 0, 255});
 }
 
+/// (roadmap L79) A `float4` shader input bound to a narrower vertex
+/// attribute format must have its missing trailing components (here, both
+/// B and A -- `R32G32_FLOAT` supplies only R/G) default per the standard
+/// HLSL/Vulkan convention (0 for a missing X/Y/Z, 1 for a missing W),
+/// rather than reading the *next* vertex's own attribute data as if it
+/// belonged to this one -- the exact bug this row's own roadmap text
+/// names. Each vertex's position+color record is tightly packed with no
+/// padding gap, so an un-fixed `attributeFetchLayout` (which never capped
+/// decoding by the format's own channel count, only by the shader's
+/// declared component count and the whole remaining buffer) would read
+/// straight into the next vertex's own (deliberately distinct, nonzero,
+/// non-identity-default) position floats for the missing B/A components
+/// instead of defaulting them -- producing a visibly wrong, easily
+/// distinguished pixel rather than an accidental pass.
+TEST(ExecutorTest, VertexAttributeDefaultsComponentsBeyondFormatChannelCount) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  struct Vertex {
+    float Pos[3];
+    float ColorRG[2];
+  };
+  // A triangle covering the whole [-1, 1] NDC square (and more), CCW-
+  // wound; every vertex's own color data is (R=1, G=1), but each vertex's
+  // *position* is different and deliberately neither 0 nor 1, so a
+  // regression reading through into the next vertex's position as this
+  // vertex's missing B/A produces a clearly wrong pixel.
+  std::array<Vertex, 3> Vertices = {{
+      {{-1.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+      {{3.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+      {{-1.0f, 3.0f, 0.0f}, {1.0f, 1.0f}},
+  }};
+
+  std::array<VertexAttribute, 2> Attributes = {
+      VertexAttribute{0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{1, cpu::ResourceFormat::R32G32_FLOAT,
+                      sizeof(Vertex::Pos)}};
+  std::array<uint8_t, 64> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                       4, 4};
+  std::array<AttachmentView, 1> Attachments = {Color};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, sizeof(Vertex),
+      ArrayRef(reinterpret_cast<const uint8_t *>(Vertices.data()),
+               sizeof(Vertices)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Solid yellow (R=1, G=1, B=0, A=1 -> 255, 255, 0, 255): B/A default
+  // rather than reading the next vertex's own nonzero position floats.
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 255) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
+/// (roadmap L79) Like
+/// `VertexAttributeDefaultsComponentsBeyondFormatChannelCount` above, but
+/// only the trailing W/alpha component is missing (`R32G32B32_FLOAT`
+/// supplies R/G/B; the shader's own `float4` color input still declares a
+/// 4th, A, component) -- the "missing W only" shape, distinct from that
+/// test's "missing multiple trailing components" shape, confirming the
+/// defaulting logic's `Elt.ComponentCount == 4` branch is reached the same
+/// way regardless of how many trailing components the bound format
+/// actually omits.
+TEST(ExecutorTest, VertexAttributeDefaultsOnlyMissingAlphaComponent) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  struct Vertex {
+    float Pos[3];
+    float ColorRGB[3];
+  };
+  // Solid red (R=1, G=0, B=0) color data on every vertex; each vertex's
+  // own position is distinct and neither 0 nor 1, so a regression reading
+  // through into the next vertex's position.x as this vertex's missing A
+  // produces a clearly wrong (non-1.0) alpha.
+  std::array<Vertex, 3> Vertices = {{
+      {{-1.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+      {{3.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+      {{-1.0f, 3.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+  }};
+
+  std::array<VertexAttribute, 2> Attributes = {
+      VertexAttribute{0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{1, cpu::ResourceFormat::R32G32B32_FLOAT,
+                      sizeof(Vertex::Pos)}};
+  std::array<uint8_t, 64> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                       4, 4};
+  std::array<AttachmentView, 1> Attachments = {Color};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, sizeof(Vertex),
+      ArrayRef(reinterpret_cast<const uint8_t *>(Vertices.data()),
+               sizeof(Vertices)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 255) << "texel " << I;
+    EXPECT_EQ(Texel[1], 0) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
 /// (roadmap H7t) The same fully-covered, solid-color triangle as
 /// `FillsFullyCoveredTriangleWithSolidColor`, but the fragment stage's own
 /// `SV_Target0` output is a 3-component `vec3` (`Vec3FragmentShaderIR`,
