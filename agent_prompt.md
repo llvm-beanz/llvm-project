@@ -42,50 +42,36 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L70 from the roadmap or other prerequisites blocking the
+Can you close out L71 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **All compute-stage image sampling fails outright at
-> `vkCreateComputePipelines`, entirely independent of screen-space derivatives**
-> -- discovered by roadmap L69's own real CTS re-run, which found its 295-case
-> caselist's 153 `Fail` cases were unaffected in aggregate by either of L69's
-> own two sub-bug fixes; confirmed unrelated to derivatives specifically because
-> a trivial `dEQP-VK.glsl.texture_functions.texturelod.sampler2d_float_compute`
-> case (explicit-LOD, needs no derivative-group mode at all) fails identically,
-> with `FEME_VULKAN_LOG_CREATION_ERRORS=1` reporting the same generic
-> `UnsupportedOps.cpp` diagnostic every other compute-stage sampling failure
-> already shows: `"...is a register-bound resource handle the FeMe CPU target
-> cannot normalize into a heap access..."`. A real SPIR-V disassembly of this
-> exact failing case (`--deqp-log-decompiled-spirv=enable`) shows the flagged
-> handle (`target("spirv.Image", f32, 1, 0, 0, 0, 2, 4)`, i.e. a plain 2D,
-> `Rgba8`-format storage image at binding 4) is the compute shader's own output
-> image -- unlike a fragment shader, a compute shader has no color-attachment
-> framebuffer to write its result into, so this CTS group always binds a plain
-> storage image for that purpose instead -- but the diagnostic's own caveat
-> ("this handle may be an unrelated bystander") is confirmed live here too:
-> `classifyStorageImage2DHandle` in `SPIRVResourceLowering.cpp` already accepts
-> this exact shape (`Dim2D`, non-arrayed, non-multisampled,
-> `SPIRVSampledWithoutSampler`, float channel type) with no image-format-based
-> rejection at all, so the flagged handle is very unlikely to be the real
-> failing operation -- some *other* resource use in the same entry function
-> (most plausibly the function's own *input* sampled image, at binding 0, or an
-> as-yet-unidentified operation specific to how a compute-stage entry point's
-> resources get imported/lowered) is the true cause, per this project's own
-> established "an unsupported use of any other resource in the same function
-> prevents every handle in that function from being normalized" precedent. Not
-> yet root-caused; needs its own real IR reduction of this exact failing case
-> (mirroring this project's own H6-series/H8-series/H9-series/L-series reduction
-> precedent) to isolate the true failing operation before any fix can be scoped,
-> since grepping
-> `SPIRVResourceLowering.cpp`/`BoundResourceNormalization.cpp`/`ResourceInfo.cpp`
-> for stage-based branching found none, so the bug is not a simple compute-stage
-> exclusion anywhere in the resource-lowering passes themselves -- it must be
-> either in how the SPIR-V-to-LLVM import path threads a compute entry point's
-> resource/binding metadata differently than a graphics one, or in an
-> image-sampling-shaped operation this pass's existing pattern set does not yet
-> recognize for a compute-stage caller specifically. This is a large,
-> cross-cutting, and currently the sole blocker of any CTS-visible payoff for
-> every compute-stage sampling fix this project's own history has already landed
-> (L69 included) -- likely needs breaking down further once root-caused, per
-> this project's own established splitting precedent, rather than attempted in
-> one pass.
+> **Every compute-stage entry point using the common GLSL/HLSL early-return
+> bounds-check idiom (`if (gid.x >= size.x \|\| gid.y >= size.y) return;`) fails
+> outright at pipeline creation** with `feme-cpu-linearize: function '<name>':
+> divergent branch in '<bb>' has no reconvergence point`, discovered by roadmap
+> L70's own closing re-run once its resource-normalization fix let real
+> compute-stage sampling shaders reach the linearizer for the first time. Root
+> cause (per `VerifyStructured.cpp`'s `checkDivergentBranchesReconverge`, also
+> checked by `Linearize.cpp` itself): a non-uniform (divergent, i.e.
+> per-invocation-varying) conditional branch's immediate post-dominator does not
+> exist in the function's `PostDominatorTree` -- the classic shape of "one arm
+> of the branch never returns to a common point" that an early `return` inside a
+> divergent `if` produces, since control flow from that arm simply exits the
+> function instead of rejoining the other arm anywhere. Unlike a fragment shader
+> (where feme's own `SIMDize`/`Linearize` machinery already has an established
+> masked/helper-invocation lane model for exactly this kind of partial-lane
+> exit), a compute shader's divergent early return currently has no equivalent
+> handling anywhere in the linearizer at all -- confirmed via grep, no branch or
+> comment in `Linearize.cpp` mentions early-return masking for any stage. This
+> is a large, genuinely unstarted linearizer/control-flow feature (mapping a
+> divergent early return onto a masked/predicated continuation instead of
+> rejecting the branch outright), not a small follow-on fix, and is very likely
+> the single highest-value remaining blocker for turning any of this project's
+> already-landed compute-stage sampling/derivative fixes
+> (L60/L63/L65/L66(h)/L66(i)/L66(j)/L66(k)/L69/L69(a)/L70) into real CTS
+> Pass-count movement, since this exact idiom is pervasive in real compute
+> shaders. Not yet started; needs its own real design investigation into how a
+> divergent early return could be lowered to a masked/predicated form compatible
+> with this target's existing structured-control-flow linearizer, likely
+> followed by its own further breakdown into smaller rows once a design is
+> chosen, per this project's own established splitting precedent for large gaps.
