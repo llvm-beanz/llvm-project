@@ -184,6 +184,56 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
 }
 )mlir";
 
+/// (Roadmap L77) `TessControlSource`'s sibling, declaring the full
+/// domain-shape execution-mode group (`Triangles`/`SpacingEqual`/
+/// `VertexOrderCw`) alongside its own `OutputVertices` -- the real DXC
+/// output shape, which declares this whole group on the tessellation-
+/// control entry rather than splitting it across both halves the way
+/// `TessControlSource`/`TessEvalSource` above do.
+constexpr llvm::StringLiteral TessControlWithDomainShapeSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @patch_out {location = 0 : i32, patch} : !spirv.ptr<f32, Output>
+  spirv.func @main() -> () "None" {
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.ControlBarrier <Workgroup>, <Workgroup>, <AcquireRelease|WorkgroupMemory>
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outp = spirv.mlir.addressof @patch_out : !spirv.ptr<f32, Output>
+    spirv.Store "Output" %outp, %f : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_pos, @patch_out
+  spirv.ExecutionMode @main "OutputVertices", 3
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "SpacingEqual"
+  spirv.ExecutionMode @main "VertexOrderCw"
+}
+)mlir";
+
+/// (Roadmap L77) `TessEvalSource`'s sibling, declaring only `Triangles`
+/// (no spacing or vertex-order mode) -- the real DXC output shape for a
+/// tessellation-evaluation entry point paired with a tessellation-control
+/// entry that already declared the full domain-shape group itself (see
+/// `TessControlWithDomainShapeSource` above).
+constexpr llvm::StringLiteral TessEvalTrianglesOnlySource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @patch_in {location = 0 : i32, patch} : !spirv.ptr<f32, Input>
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %inp = spirv.mlir.addressof @patch_in : !spirv.ptr<f32, Input>
+    %f = spirv.Load "Input" %inp : f32
+    %v = spirv.CompositeConstruct %f, %f, %f, %f : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %v : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationEvaluation" @main, @patch_in, @out_pos
+  spirv.ExecutionMode @main "Triangles"
+}
+)mlir";
+
 /// (Roadmap H4d) A tessellation-control entry point writing more than one
 /// element of a *bare* (non-block) array-typed `BuiltIn` output --
 /// `gl_TessLevelOuter`'s own `[4 x f32]` shape, exactly what every real
@@ -2581,6 +2631,71 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationStages) {
             feme::graphics::TessOutputPrimitive::TriangleCcw);
 
   vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap L77: a tessellation-control entry point that declares the full
+/// domain-shape execution-mode group itself (`TessControlWithDomainShape
+/// Source`), paired with a tessellation-evaluation entry that only
+/// duplicates `Triangles` (`TessEvalTrianglesOnlySource`) -- the real DXC
+/// output shape this row's own named repros hit -- still merges a
+/// complete `TessellationState`, falling back to the control entry's own
+/// domain shape since the evaluation entry's is incomplete.
+TEST_F(GraphicsPipelineTest, AcceptsTessellationDomainShapeDeclaredOnControlEntry) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlWithDomainShapeSource);
+  VkShaderModule TessEval = createModule(TessEvalTrianglesOnlySource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasTessellationStages());
+  EXPECT_EQ(Executor.getTessellationState().OutputControlPointCount, 3u);
+  EXPECT_EQ(Executor.getTessellationState().Domain,
+            feme::graphics::TessellatorDomain::Triangle);
+  EXPECT_EQ(Executor.getTessellationState().Partitioning,
+            feme::graphics::TessPartitioning::Integer);
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::TriangleCw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap L77: when *neither* half of a tessellation-control/evaluation
+/// pair declares a domain-shape execution mode at all (here, both use
+/// `TessEvalTrianglesOnlySource`'s body but the control entry, unlike
+/// `TessControlWithDomainShapeSource`, only declares `OutputVertices`,
+/// mirroring `TessControlSource`), pipeline creation is still correctly
+/// rejected -- the merge introduced for this row's real DXC shape must
+/// not silently accept a genuinely malformed module missing tessellation
+/// state entirely.
+TEST_F(GraphicsPipelineTest, RejectsTessellationPipelineWithNoDomainShapeAnywhere) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalTrianglesOnlySource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Handle, VK_NULL_HANDLE);
+
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, TessEval, nullptr);
   vkDestroyShaderModule(Device, TessControl, nullptr);

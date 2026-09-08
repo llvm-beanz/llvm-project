@@ -2051,16 +2051,35 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
           "the tessellation-control stage's entry point '%s' declares no "
           "OutputVertices execution mode",
           ControlEntry.c_str());
-    if (!DomainState)
+    // (roadmap L77) The domain-shape execution modes (Triangles/Quads/
+    // Isolines + spacing + vertex-order/point-mode) are not reliably on
+    // the tessellation-evaluation entry point alone: real DXC output
+    // declares the full group on the tessellation-control entry point
+    // instead, only duplicating `Triangles` onto the tessellation-
+    // evaluation one, so `DomainState` alone is incomplete for that real
+    // shape even though its own entry point is not malformed. Prefer
+    // `DomainState`'s own domain shape when it has one (the
+    // Khronos-spec-implied split this code originally assumed, still
+    // valid for a module that really does declare it there), falling
+    // back to `ControlPointState`'s when it doesn't; only reject the
+    // pipeline if neither half declares a domain shape at all.
+    const feme::graphics::TessellationState *DomainShape = nullptr;
+    if (DomainState && DomainState->HasDomainShape)
+      DomainShape = &*DomainState;
+    else if (ControlPointState->HasDomainShape)
+      DomainShape = &*ControlPointState;
+    if (!DomainShape)
       return createStringError(
           inconvertibleErrorCode(),
-          "the tessellation-evaluation stage declares no tessellation "
-          "domain execution mode (Triangles/Quads/Isolines)");
+          "neither the tessellation-control stage's entry point '%s' nor "
+          "the tessellation-evaluation stage declares a tessellation "
+          "domain execution mode (Triangles/Quads/Isolines)",
+          ControlEntry.c_str());
     Tessellation.OutputControlPointCount =
         ControlPointState->OutputControlPointCount;
-    Tessellation.Domain = DomainState->Domain;
-    Tessellation.Partitioning = DomainState->Partitioning;
-    Tessellation.OutputPrimitive = DomainState->OutputPrimitive;
+    Tessellation.Domain = DomainShape->Domain;
+    Tessellation.Partitioning = DomainShape->Partitioning;
+    Tessellation.OutputPrimitive = DomainShape->OutputPrimitive;
 
     std::string ValidationError;
     llvm::raw_string_ostream ErrOS(ValidationError);
