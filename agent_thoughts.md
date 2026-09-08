@@ -70868,3 +70868,93 @@ feature or extension.
 3. This `agent_thoughts.md` entry (committed separately, last).
 
 Cleaned up scratch CTS artifacts under `/tmp/` at the end of the session.
+
+# L34: already fixed by L56, a duplicate-scope discovery
+
+## Request
+
+Close out roadmap L34 or other prerequisites blocking the L-series
+milestones: `TextureCube` sampling never computing a real implicit LOD
+from screen-space derivatives, always defaulting to mip 0 regardless of
+real minification, per L26's own real `Sample.test` repro (index 29,
+"Cube +X minified -> mip 1").
+
+## Investigation
+
+Before writing any code, read `femeCpuImageSampleCubeV4F32` and its
+`ClampedLod` computation directly in `feme/runtime/CPU/FeMeRuntimeCPU.c`
+to confirm the bug L34's own text described still existed, rather than
+assuming a roadmap row filed as open is still actually unfixed.
+
+It wasn't. `femeCpuImageSampleCubeV4F32` already calls
+`femeRTComputeCubeClampedLod`, which for an implicit-LOD sample computes
+real face-local UV derivatives via `femeRTComputeCubeUVDerivatives` from
+the caller's own raw direction-vector screen-space derivatives
+(`DDirXdX`/`DDirXdY`/etc.), then feeds those into the same
+`femeRTPlanImplicitLod` a `Plain2D` implicit sample already uses. This is
+exactly the fix L34's own text asked for -- "a real derivative-based
+LOD-selection path for the Cube shape, likely reusing
+`femeRTPlanImplicitLod`'s own math against a cube direction vector's own
+screen-space partial derivatives".
+
+Checking `Roadmap.md`'s own L56 entry explained why: L56, filed and
+closed in an earlier session, root-caused and fixed the *identical*
+underlying defect -- discovered independently, via a real CTS
+`dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear`
+mipmap-filtering sweep, rather than L34's own offloader-based repro.
+Neither session's own filing ever cross-referenced the other, so L34
+was simply left open on the roadmap even though its own named bug had
+already been fixed as a side effect of a differently-scoped row. This is
+the inverse of the usual "fix one bug, uncover the next" pattern this
+series has repeatedly documented -- here, two independently-filed rows
+turned out to name the *same* bug, one of which happened to get fixed
+first without anyone noticing the other was thereby also closed.
+
+## Disposition
+
+No new source code changes were needed. The fix already has its own
+unit test coverage (`SampleCubeImplicitLodSelectsCoarserMipFromDerivatives`
+and its siblings in `ImageSamplingTest.cpp`, added by L56) and its own
+CTS verification (L56's own 25/25 and 200/200 Pass sweeps, from the
+prior session). This session's actual work was verification, not
+implementation: confirm the current code against L34's own claim,
+re-run the exact real-repro cases L34's own history named, and re-run a
+real CTS sweep of the shared underlying code path -- then update the
+roadmap/CTS-report docs to reflect that L34 is, and has been, closed.
+
+## Environment note (recurring)
+
+`/home/dev/dev/offload-test-suite`'s local `feme` branch had reverted to
+stale `main` content again -- the third or fourth session this exact
+issue has recurred, per this file's own prior entries. Fixed the same
+way each time: `git fetch beanz feme && git reset --hard beanz/feme`,
+then a `cmake .` re-configure in `build2` to regenerate the
+`check-hlsl-feme-vk`/`check-hlsl-clang-feme-vk` targets. Worth
+considering, in a future session, whether this checkout should be
+pinned some more durable way (e.g. a local tag, or a note in the design
+doc reminding a fresh session to check this first) rather than
+continuing to rediscover it by surprise each time.
+
+## Verification
+
+Rebuilt `check-hlsl-feme-vk` and re-ran this row's own two named
+real-repro cases directly against the real `feme` ICD:
+`Feature/Textures/Sample.test`/`Feature/Textures/SampleBias.test`, both
+**2/2 Pass** (both previously blocked by this row's own exact named
+mismatch, per L26/L34's own history). A real Vulkan CTS re-run of
+`dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.linear.
+*.*.seamless` (L56's own motivating group, exercising the exact
+LOD-selection code path this row's own fix touches): **25/25 Pass, 0
+Fail**, confirming no regression.
+
+## Commits this session
+
+1. `Roadmap.md`/`VulkanCTSReport.md`: closing L34 with a done-note
+   explaining the duplicate-scope discovery, plus the re-verification
+   CTS numbers above. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` changes needed (already recorded by
+   L56's own prior session).
+2. This `agent_thoughts.md` entry (committed separately, last).
+
+No scratch artifacts needed cleanup beyond the usual `/tmp/` CTS log
+files from this session's re-runs.
