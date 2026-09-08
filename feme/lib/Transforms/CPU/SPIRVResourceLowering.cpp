@@ -908,6 +908,17 @@ bool isQueryLodIntrinsic(const CallInst &CI, bool &Unclamped) {
   return false;
 }
 
+/// Whether \p CI is `llvm.spv.resource.getdimensions.xy` (roadmap L70): a
+/// plain 2D image's mip-0 `(Width, Height)` extent query -- GLSL's own
+/// `imageSize()`/`textureSize()` against a `sampler2D`/`image2D` with no
+/// explicit LOD argument (SPIR-V `OpImageQuerySize`). Scoped to this one
+/// variant only -- `.x`/`.xyz`/the mip-count-returning `.levels.*`/the
+/// multisample-count-returning `.ms.*` variants (every other `ImageShape`'s
+/// own `GetDimensions` counterpart) remain unstarted follow-on work.
+bool isGetDimensionsIntrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_xy;
+}
+
 /// Whether \p Ty is `<N x ElemTy>`.
 bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
   const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
@@ -1099,6 +1110,17 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI)
       return false;
+
+    // Roadmap L70: a plain 2D sampled image's own `imageSize()`/
+    // `textureSize()` query (`OpImageQuerySize`, no explicit LOD operand)
+    // needs no further validation beyond its shape -- see
+    // `isGetDimensionsIntrinsic`'s own doc for why this is scoped to
+    // `Plain2D` only.
+    if (isGetDimensionsIntrinsic(*CI)) {
+      if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
 
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
@@ -1408,7 +1430,19 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
           : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
-    if (!CI || getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
+    if (!CI)
+      return false;
+
+    // Roadmap L70: a plain 2D storage image's own `imageSize()` query
+    // (`OpImageQuerySize`) -- see `hasOnlySupportedImageUses`'s own
+    // identical check for why this is scoped to `Plain2D` only.
+    if (isGetDimensionsIntrinsic(*CI)) {
+      if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
+
+    if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
     if (!isCoordN(CI->getArgOperand(1), CoordWidth, /*Float=*/false))
       return false;
@@ -3200,6 +3234,22 @@ void lowerImageAccesses(
         continue;
       }
 
+      // Roadmap L70: `OpImageQuerySize` (`isGetDimensionsIntrinsic`,
+      // `llvm.spv.resource.getdimensions.xy`) against a plain 2D image --
+      // unlike every sample/fetch/query-lod call above, this call's sole
+      // operand *is* the handle itself (no separate `(image, ...)`
+      // leading operand pair the way `isSampleIntrinsic`/
+      // `isQueryLodIntrinsic` calls have), so there is no
+      // `CI->getArgOperand(0) != Handle` guard to apply here.
+      if (isGetDimensionsIntrinsic(*CI)) {
+        IRBuilder<> Builder(CI);
+        CallInst *NewCall = createGetDimensions2D(Builder, Env, ImageIndex,
+                                                  Mask, "getdimensions2d");
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
       // result is loaded from and/or (roadmap H19a, `StorageImage2D` only)
       // stored to. `hasOnlySupportedImageUses` already rejected this
       // branch for `Cube`/`CubeArray` (no fetch shape exists for either),
@@ -3744,7 +3794,8 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     if (ID == Intrinsic::spv_resource_handlefrombinding ||
         ID == Intrinsic::spv_resource_sample ||
         ID == Intrinsic::spv_resource_samplelevel ||
-        ID == Intrinsic::spv_resource_getpointer)
+        ID == Intrinsic::spv_resource_getpointer ||
+        ID == Intrinsic::spv_resource_getdimensions_xy)
       F.eraseFromParent();
   }
 
