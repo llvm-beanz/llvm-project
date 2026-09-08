@@ -889,6 +889,40 @@ and `BuiltIn` `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/
 literal enumerator aliases, matching SPIR-V's spelling to the existing
 D3D-derived system values one-for-one rather than adding parallel ones).
 
+#### Status (roadmap L37/L77): this section's own "never co-occur" premise is wrong for real DXC output
+
+Roadmap L37 closed `HullWrapperPass`'s own masked-input-read gap (see
+`HullWrapper.cpp`'s file comment) and, in doing so, let a real
+`dxc -spirv`-compiled hull/domain pair reach this section's own
+attribute-merging code (`GraphicsPipeline.cpp`'s tessellation-state
+assembly) for the first time -- exposing that this paragraph's own stated
+assumption above ("the evaluation-only fields ... and the control-only
+field ... never co-occur on the same SPIR-V entry point") does not hold
+for a real DXC compile: `spirv-dis` on a real hull/domain `.o` pair shows
+DXC puts *every* tessellation execution mode (`Triangles`/`SpacingEqual`/
+`VertexOrderCw`/`OutputVertices`) on the **hull** (`TessellationControl`)
+entry point -- the one whose HLSL source actually wrote
+`[domain(...)] [partitioning(...)] [outputtopology(...)]
+[outputcontrolpoints(...)]` -- duplicating only `Triangles` onto the
+**domain** (`TessellationEvaluation`) entry, not splitting evaluation-only
+fields onto the domain entry and the control-only field onto the hull
+entry as this section assumed. Since `feme::graphics::getTessellationState`
+is queried once per compiled entry point independently, and
+`GraphicsPipeline.cpp`'s merge step requires the domain entry's own
+`TessellationState` to already have `Domain`/`Partitioning`/
+`OutputPrimitive` populated before accepting it, this real DXC shape's
+domain entry -- which only ever carries `Triangles`, never
+`SpacingEqual`/`VertexOrderCw` -- fails that check outright
+(`"the tessellation-evaluation stage declares no tessellation domain
+execution mode"`), even though the *pair's* combined attributes are
+completely valid and complete. Filed as roadmap L77 (still open): the fix
+belongs in `ConvertSPIRVToLLVMPass.cpp`/`GraphicsPipeline.cpp`'s merge
+step, most likely reading `TessDomain`/`TessPartitioning`/
+`TessOutputPrimitive` from *either* compiled entry point rather than
+requiring the domain entry alone to carry the full set, since a hull/domain
+pair is always compiled and linked together and a real DXC output
+genuinely spreads this state across both.
+
 ### Builtins and system values
 
 System values use the same signature model when they are stage inputs or
@@ -1826,6 +1860,57 @@ hull shader whose control points cooperate through groupshared memory
 barrier, which needs `feme::cpu::EntryWrapperPass`'s barrier-region-splitting
 machinery generalized to this batch ABI, not yet done (diagnosed rather than
 silently mishandled, see HullWrapper.cpp).
+
+#### Status (roadmap L37): a literal-constant input control point is addressed directly, not just the invocation's own
+
+`lowerHullInputLoad` (HullWrapper.cpp) originally required an input
+`feme.stage.input.load`'s control-point-index operand to be either the
+invocation's own lowered `OutputControlPointID` read or (only when the
+shader never reads that system value at all) the literal constant `0` --
+rejecting any other literal control-point index outright, on the
+assumption that a control point reading a *different* control point's
+input needed the same kind of cross-lane addressing model this milestone
+never built for *output* writes (see HullWrapper.cpp's file comment).
+That assumption does not actually hold for an **input** read: every input
+control point's attributes are fully materialized up front, before this
+phase runs at all, for every invocation simultaneously, so reading a
+fixed, compile-time-known control point's own input needs no cross-lane
+communication at all -- just addressing storage at that literal control
+point's own fixed offset instead of the invoking lane's own flat index.
+This is exactly the "materialize-then-select" pattern a real
+dynamically-indexed `InputPatch<T, N>` read lowers to once SPIR-V
+import/legalization has unrolled it into one constant-indexed load per
+(component, control-point) pair, which the shader's own code then selects
+among *after* loading using the real dynamic index -- `HullSystemValues.test`
+(roadmap L27) is exactly this shape, and was rejected by the old, stricter
+check even though every literal load it produces genuinely resolves to an
+in-bounds control point of the current patch.
+
+The fix generalizes `lowerHullInputLoad`'s acceptance check to accept
+*any* literal constant (a scalar `ConstantInt`, or a uniform splatted
+`<W x i32>` constant vector once `SIMDizePass` has run, recovered via
+`Constant::getSplatValue`), and, when the operand is such a literal
+rather than a self-index match, addresses storage directly at that
+literal value -- the same value for every active lane -- instead of
+`getFlatInvocationIndex`. This is sound because `HullWrapperPass`'s whole
+execution model already scopes exactly one patch's `Inputs`/`Outputs`
+storage per compiled-function invocation (`feme::cpu::CompiledStage::
+invokePatch`, `PatchPipeline.cpp`'s `runPatchPipeline`), so there is only
+ever one patch's storage in scope regardless of which literal control
+point within it a load addresses -- no patch-relative or cross-patch
+offset math is ever needed, unlike what this row's own roadmap filing
+originally speculated (an `HEnv.InputPatchControlPointCount`-based
+offset). It also mirrors `PatchConstantWrapper.cpp`'s
+`lowerPatchConstantInputLoad`, which already has no self-indexing
+restriction at all, for the identical underlying reason (that phase's own
+`InvocationIndex` is simply the load's own control-point operand, with no
+substitution). The restriction on an **output** write remains unchanged
+and correct: one invocation genuinely cannot see another's
+not-yet-computed output, so `lowerHullOutputStore` still requires an
+output's control-point-index operand to be the invocation's own. What
+remains genuinely out of scope, and is still diagnosed, is a *dynamic*
+(non-constant, non-self) control-point index on an input read, which would
+need a real runtime cross-lane gather this milestone does not build.
 
 Landed for the patch-constant phase, added after R34's initial landing
 (`feme::cpu::PatchConstantWrapperPass`, PatchConstantWrapper.h/.cpp): a
