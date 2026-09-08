@@ -69043,3 +69043,136 @@ row. No code changes were needed this session -- purely a re-measurement
 and documentation session, but one that closes a real row and prevents a
 long-standing gap from continuing to be silently re-discovered by every
 future session that happens to run into it.
+
+# Session: closing out roadmap L69 (compute-stage derivative sampling)
+
+The user asked me to work on H9c or other prerequisites blocking the
+H-series milestones, then in follow-up turns asked about a long chain of
+L-series milestones (L66(g) through L66(k), L66/L67, L60/L61, and finally
+L69). This entry covers the L69 work specifically, since that's what
+compaction left me mid-way through.
+
+## Starting assumption vs. reality
+
+L69 was filed by a prior session with an assumed 4-phase breakdown: (1)
+advertise the extension, (2) recognize the SPIR-V execution modes, (3) a
+"real design investigation" into compute-stage quad-grouped invocation
+scheduling (flagged as likely the biggest piece), and (4) thread a real
+derivative into the implicit-LOD machinery. I started by actually tracing
+feme's compute dispatch code before writing anything, and found the
+architecture was already much closer to done than the filing assumed:
+
+- feme's compute-stage lane assignment is flat/linear (`x = flat % Gx`).
+- `WaveLowering.cpp`'s existing fragment-quad derivative-shuffle math is
+  stage-agnostic, and turns out to already be bit-for-bit correct for
+  SPIR-V's `DerivativeGroupLinearKHR` mode (4 consecutive
+  `LocalInvocationIndex` values) -- no redesign needed for that mode at
+  all. `DerivativeGroupQuadsKHR` (2x2 spatial tiles) is the one that
+  actually needs a lane-assignment redesign; I split that out as its own
+  new row (L69(a)) rather than attempt it, since it's genuinely a much
+  bigger, separate piece of work.
+- The *actual* reason no compute-stage derivative worked at all wasn't
+  "no scheduling design exists" -- it was two much narrower, mechanical
+  bugs: `CanonicalizeStage.cpp`'s stage-filter list simply excluded
+  `Compute` (one line to fix), and separately, the real pipeline driver
+  (`Target/CPU/Pipeline.cpp`) never even *called* `CanonicalizeStagePass`
+  for the compute stage at all, based on a stale comment that predated
+  this row's own need. That second bug was sneaky: it meant my first fix
+  compiled and passed its own direct-pass-level unit test, but was
+  completely unreachable from any real compute pipeline until I found and
+  fixed the driver-level gate too. This is a good example of why "does the
+  pass do the right thing in isolation" and "does a real pipeline actually
+  reach that pass" are two different questions that both need checking --
+  I almost declared victory after the first fix based on green unit tests
+  alone.
+
+## The clang-format trap (twice)
+
+Running `clang-format -i` on a whole file I'd only partially edited
+silently reformatted unrelated pre-existing lines elsewhere in the file --
+this bit me twice, once in `Pipeline.cpp` and once in `EntryPoints.cpp`.
+Both times I caught it only because I made a habit of running `git diff
+<file> | grep "^-" | grep -v "^---"` after formatting, which shows any
+*removed* line -- a sign clang-format touched something I didn't
+intentionally change. Both times I reverted and hand-applied just the new
+code with matching style instead. I'm noting this prominently because it's
+exactly the kind of mistake that's easy to make silently and hard to
+notice in a large diff otherwise, and the project's own standing
+instructions explicitly warn about this same pitfall.
+
+## CTS measurement methodology
+
+For a fix like this, "did check-feme pass" tells you nothing about whether
+the fix has any real-world effect, since check-feme doesn't include the
+Vulkan CTS. I used a flip/measure/revert methodology: build a caselist
+targeting exactly this gap's own scope (295 cases combining
+`texturegrad{,offset}*_compute` and implicit-LOD `texture.*_compute`), then
+compare a true "before" build (a `git worktree` checked out at the
+pre-work commit, sharing ccache with the main build for speed) against the
+"after" build with all my fixes applied.
+
+The headline number was disappointing at first glance -- 0 Pass both
+before and after, no change at all -- but I didn't stop there. I diffed
+the actual `.qpa` log reason strings per case (not just the aggregate
+Pass/Fail/NotSupported totals) and found that 53 cases' own reason text
+had genuinely changed in the expected direction (from "extension not
+supported" to "computeDerivativeGroupQuads feature is not supported" --
+i.e., the code now gets far enough to check the *specific* derivative-group
+mode, which it couldn't do at all before). This is the real signal that
+the fix chain is correctly wired up end-to-end, even though it doesn't
+move the outward Pass count yet. I think this distinction -- "the fix is
+correct and reachable, but something else downstream still blocks the
+final payoff" -- is important to capture accurately rather than either (a)
+declaring the fix a failure because Pass count didn't move, or (b)
+overclaiming success because unit tests were green.
+
+## Finding L70
+
+Chasing down why 0 cases pass at all, I found every single failing case
+hits the same generic "cannot normalize resource handle" diagnostic from
+`UnsupportedOps.cpp`. The critical test was checking whether a *completely
+unrelated* compute-stage sampling case -- `texturelod`, explicit LOD, no
+derivative concept involved whatsoever -- fails the same way. It does.
+That confirms this is a distinct, pre-existing, much larger bug: all
+compute-stage image sampling is broken in feme today, independent of
+anything L69 touches.
+
+I did a real IR reduction of this exact case (dumped the actual SPIR-V via
+`--deqp-log-decompiled-spirv=enable`, matching this project's own
+established reduction methodology) to get real signal rather than
+guessing. The flagged resource handle in the diagnostic turned out to be
+the compute shader's own *output* storage image (a plain `Rgba8`-format
+2D image at binding 4 -- makes sense, since a compute shader has no
+framebuffer to write into, so CTS uses a bound storage image instead for
+this test group). But I verified `classifyStorageImage2DHandle` already
+accepts this exact shape with no format-based rejection at all, so per
+this project's own documented diagnostic caveat ("this handle may be an
+unrelated bystander"), I'm confident the *flagged* handle is not the real
+culprit -- something else in the same function (most likely the *input*
+sampled image, or a compute-stage-specific gap in how resource/binding
+metadata gets threaded through import) is the actual cause. I did not
+have time to find that real cause this session (grepping the resource-
+lowering passes for stage-based branching found none, which itself is
+useful negative information -- it's not a simple "if compute, reject"
+somewhere), so I filed it as roadmap L70 with everything I've confirmed
+so far, rather than guess at a fix or leave a vague note.
+
+## Decision to stop and file rather than push further
+
+Given the size of what L70 turned out to be (all compute-stage image
+sampling, not a narrow follow-on), and given this project's own repeated
+precedent of explicitly not attempting large cross-cutting gaps in the
+same pass they're discovered in, I stopped here rather than trying to
+root-cause and fix L70 in the same session. I think this was the right
+call: L69 itself is a clean, complete, well-tested piece of work on its
+own terms (two real bugs found and fixed, a third-party design assumption
+disproven with real evidence, real CTS methodology showing the fix is
+correctly wired up), and bolting an open-ended investigation of a
+much bigger, unrelated bug onto the end of it would have risked leaving
+both in a half-finished state instead.
+
+## Housekeeping
+
+Cleaned up the `git worktree` and its build directory used for the
+before/after baseline comparison, plus the various `/tmp/l69_*` caselist
+and `.qpa` scratch files, before finishing.
