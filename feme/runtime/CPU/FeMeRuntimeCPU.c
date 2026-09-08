@@ -4929,6 +4929,19 @@ __attribute__((always_inline)) FemeRTv2i32 femeCpuImageGetDimensions2DV2I32(
 // subresource extent. An inactive lane or an unbound (`!Img.Data`) handle
 // reads as `{0, 0}`, mirroring `femeCpuImageGetDimensions2DV2I32`'s own
 // identical convention.
+//
+// (Roadmap L75) `femeRTClampQuerySizeLodMip` below factors this same
+// `Lod`-clamping step out for every other-shape
+// `femeCpuImageGetDimensionsLod*` sibling this function's own doc
+// introduces, so it is not repeated five more times.
+__attribute__((always_inline)) static uint32_t
+femeRTClampQuerySizeLodMip(const FemeRTImageDescriptor *Img, int32_t Lod) {
+  uint32_t ClampedLod = Lod < 0 ? 0 : (uint32_t)Lod;
+  if (ClampedLod > Img->MipLevels - 1)
+    ClampedLod = Img->MipLevels - 1;
+  return ClampedLod;
+}
+
 FemeRTv2i32 femeCpuImageGetDimensionsLod2DV2I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     uint32_t ImageIndex, int32_t Lod,
@@ -4944,13 +4957,179 @@ __attribute__((always_inline)) FemeRTv2i32 femeCpuImageGetDimensionsLod2DV2I32(
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   if (!Img.Data || Img.MipLevels == 0)
     return Zero;
-  uint32_t ClampedLod = Lod < 0 ? 0 : (uint32_t)Lod;
-  if (ClampedLod > Img.MipLevels - 1)
-    ClampedLod = Img.MipLevels - 1;
+  uint32_t ClampedLod = femeRTClampQuerySizeLodMip(&Img, Lod);
   uint32_t Width = Img.Width >> ClampedLod;
   uint32_t Height = Img.Height >> ClampedLod;
   return (FemeRTv2i32){(int32_t)(Width ? Width : 1),
                        (int32_t)(Height ? Height : 1)};
+}
+
+// `feme.cpu.image.getdimensions.lod.1d.i32` (roadmap L75): a plain 1D
+// image's own `Width` extent at an explicit mip level -- GLSL's
+// `textureSize(sampler1D, lod)`, which returns a bare scalar `int` rather
+// than any vector width, unlike every other shape
+// `femeCpuImageGetDimensionsLod2DV2I32` above's own doc introduces. Same
+// `max(1, Width >> ClampedLod)` formula as that function's own `Width`
+// lane, just with no `Height` companion (a 1D image has no second
+// spatial axis). An inactive lane or an unbound handle reads as `0`,
+// mirroring `femeCpuImageGetDimensionsLod2DV2I32`'s own all-zero
+// convention.
+int32_t femeCpuImageGetDimensionsLod1DI32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.lod.1d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageGetDimensionsLod1DI32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || Img.MipLevels == 0)
+    return 0;
+  uint32_t ClampedLod = femeRTClampQuerySizeLodMip(&Img, Lod);
+  uint32_t Width = Img.Width >> ClampedLod;
+  return (int32_t)(Width ? Width : 1);
+}
+
+// `feme.cpu.image.getdimensions.lod.1darray.v2i32` (roadmap L75): an
+// arrayed 1D image's own `(Width, ArrayLayers)` extent at an explicit mip
+// level -- GLSL's `textureSize(sampler1DArray, lod)`, returning
+// `ivec2(width, layers)`. Unlike
+// `femeCpuImageGetDimensionsLod2DV2I32`'s own second (`Height`) lane, a
+// layer count never shrinks with mip level (only the physical per-layer
+// extent does), so `ArrayLayers` is read unclamped/unshifted here. An
+// inactive lane or an unbound handle reads as `{0, 0}`, mirroring
+// `femeCpuImageGetDimensionsLod2DV2I32`'s own identical convention.
+FemeRTv2i32 femeCpuImageGetDimensionsLod1DArrayV2I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.lod.1darray.v2i32");
+
+__attribute__((always_inline)) FemeRTv2i32
+femeCpuImageGetDimensionsLod1DArrayV2I32(const FemeRTImageDescriptor *ImageHeap,
+                                         uint32_t ImageHeapCount,
+                                         uint32_t ImageIndex, int32_t Lod,
+                                         _Bool Mask) {
+  FemeRTv2i32 Zero = {0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || Img.MipLevels == 0)
+    return Zero;
+  uint32_t ClampedLod = femeRTClampQuerySizeLodMip(&Img, Lod);
+  uint32_t Width = Img.Width >> ClampedLod;
+  return (FemeRTv2i32){(int32_t)(Width ? Width : 1), (int32_t)Img.ArrayLayers};
+}
+
+// `feme.cpu.image.getdimensions.lod.2darray.v3i32` (roadmap L75): an
+// arrayed 2D image's own `(Width, Height, ArrayLayers)` extent at an
+// explicit mip level -- GLSL's `textureSize(sampler2DArray, lod)`,
+// returning `ivec3(width, height, layers)`. Like
+// `femeCpuImageGetDimensionsLod1DArrayV2I32` above, only the first two
+// lanes shrink with `Lod`; the third (`ArrayLayers`) does not. An
+// inactive lane or an unbound handle reads as `{0, 0, 0}`, mirroring
+// `femeCpuImageGetDimensionsLod2DV2I32`'s own identical convention.
+FemeRTv3i32 femeCpuImageGetDimensionsLod2DArrayV3I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.lod.2darray.v3i32");
+
+__attribute__((always_inline)) FemeRTv3i32
+femeCpuImageGetDimensionsLod2DArrayV3I32(const FemeRTImageDescriptor *ImageHeap,
+                                         uint32_t ImageHeapCount,
+                                         uint32_t ImageIndex, int32_t Lod,
+                                         _Bool Mask) {
+  FemeRTv3i32 Zero = {0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || Img.MipLevels == 0)
+    return Zero;
+  uint32_t ClampedLod = femeRTClampQuerySizeLodMip(&Img, Lod);
+  uint32_t Width = Img.Width >> ClampedLod;
+  uint32_t Height = Img.Height >> ClampedLod;
+  return (FemeRTv3i32){(int32_t)(Width ? Width : 1),
+                       (int32_t)(Height ? Height : 1),
+                       (int32_t)Img.ArrayLayers};
+}
+
+// `feme.cpu.image.getdimensions.lod.3d.v3i32` (roadmap L75): a plain 3D
+// (volume) image's own `(Width, Height, Depth)` extent at an explicit mip
+// level -- GLSL's `textureSize(sampler3D, lod)`, returning `ivec3(width,
+// height, depth)`. Unlike `femeCpuImageGetDimensionsLod2DArrayV3I32`'s own
+// third (`ArrayLayers`) lane, a volume texture's `Depth` genuinely is a
+// mip-chain dimension in its own right (SPIR-V/Vulkan halve a 3D image's
+// depth alongside its width/height at each mip level, unlike an array's
+// layer count, which never changes), so all three lanes shrink with
+// `Lod` here. An inactive lane or an unbound handle reads as
+// `{0, 0, 0}`, mirroring `femeCpuImageGetDimensionsLod2DV2I32`'s own
+// identical convention.
+FemeRTv3i32 femeCpuImageGetDimensionsLod3DV3I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.lod.3d.v3i32");
+
+__attribute__((always_inline)) FemeRTv3i32 femeCpuImageGetDimensionsLod3DV3I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod, _Bool Mask) {
+  FemeRTv3i32 Zero = {0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || Img.MipLevels == 0)
+    return Zero;
+  uint32_t ClampedLod = femeRTClampQuerySizeLodMip(&Img, Lod);
+  uint32_t Width = Img.Width >> ClampedLod;
+  uint32_t Height = Img.Height >> ClampedLod;
+  uint32_t Depth = Img.Depth >> ClampedLod;
+  return (FemeRTv3i32){(int32_t)(Width ? Width : 1),
+                       (int32_t)(Height ? Height : 1),
+                       (int32_t)(Depth ? Depth : 1)};
+}
+
+// `feme.cpu.image.getdimensions.lod.cubearray.v3i32` (roadmap L75): a
+// cube-array image's own `(Width, Height, NumCubeArrayElements)` extent
+// at an explicit mip level -- GLSL's `textureSize(samplerCubeArray,
+// lod)`, returning `ivec3(width, height, numCubeArrayElements)`, where
+// the third component is the *element* count, i.e. `ArrayLayers / 6`,
+// not the raw face-inclusive layer count
+// `FemeRTImageDescriptor::ArrayLayers` itself tracks
+// (`CommandBuffer.cpp`'s own `materializeImageDescriptor` treats a
+// cube(array) view as a plain view-level convention over consecutive
+// array layers, so `ArrayLayers` here is always a multiple of 6 -- one
+// set of 6 consecutive faces per cube-array element). Otherwise
+// identical in shape/formula to
+// `femeCpuImageGetDimensionsLod2DArrayV3I32` (first two lanes shrink with
+// `Lod`, third does not). An inactive lane or an unbound handle reads as
+// `{0, 0, 0}`, mirroring `femeCpuImageGetDimensionsLod2DV2I32`'s own
+// identical convention.
+FemeRTv3i32 femeCpuImageGetDimensionsLodCubeArrayV3I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.lod.cubearray.v3i32");
+
+__attribute__((always_inline)) FemeRTv3i32
+femeCpuImageGetDimensionsLodCubeArrayV3I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod, _Bool Mask) {
+  FemeRTv3i32 Zero = {0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || Img.MipLevels == 0)
+    return Zero;
+  uint32_t ClampedLod = femeRTClampQuerySizeLodMip(&Img, Lod);
+  uint32_t Width = Img.Width >> ClampedLod;
+  uint32_t Height = Img.Height >> ClampedLod;
+  return (FemeRTv3i32){(int32_t)(Width ? Width : 1),
+                       (int32_t)(Height ? Height : 1),
+                       (int32_t)(Img.ArrayLayers / 6)};
 }
 
 // `feme.cpu.image.querylevels.i32` (roadmap L72(d)): an image's own total
