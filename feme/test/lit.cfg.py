@@ -32,6 +32,12 @@ for arch in config.targets_to_build.split():
 
 llvm_config.use_default_substitutions()
 
+# Tweak the PATH to include the tools dir, mirroring llvm/test/lit.cfg.py --
+# needed so `RUN: not --crash ...` (unlike plain `RUN: not ...`, which lit's
+# own internal shell inverts in-process without ever needing a real `not`
+# binary) can find a real `not` executable to shell out to.
+llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
+
 # The host's own default target triple, for tests exercising `feme
 # --target=<host-triple>` (the FeMe CPU target, see
 # feme/docs/FeMeCPUDesign.md) without hard-coding an architecture.
@@ -142,6 +148,24 @@ _dxc = shutil.which("dxc")
 if _dxc:
     config.available_features.add("system-dxc")
     config.substitutions.append(("%dxc", _dxc))
+
+# `spirv-as` (SPIRV-Tools' own textual-SPIR-V assembler) is another external
+# tool this tree does not build, gated the same way `system-dxc` is above --
+# it is the only way this tree can produce a real SPIR-V *binary* carrying an
+# image-operand combination (e.g. `Bias|ConstOffset`, roadmap L35(a)) that
+# MLIR's own `spirv` dialect textual parser can't round-trip at all today
+# (any `--serialize-spirv`/`--import-spirv` path that goes through
+# `parseSourceFileForTool`'s own unconditional `mlir::verify()` call aborts
+# via `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s own `verifyImageOperands`
+# assert in an assertions-enabled build -- see
+# feme/test/Import/SPIRV/spirv-import-skip-verify.test's own header
+# comment). Tests needing a real binary bearing one of these operands use
+# `REQUIRES: system-spirv-as` and `%spirv-as` so they skip cleanly wherever
+# `spirv-as` is not installed.
+_spirv_as = shutil.which("spirv-as")
+if _spirv_as:
+    config.available_features.add("system-spirv-as")
+    config.substitutions.append(("%spirv-as", _spirv_as))
 
 # "V0: Loader-visible skeleton" (feme/docs/FeMeVulkanDesign.md): only
 # available when configured with Vulkan-Headers and a real Vulkan loader to

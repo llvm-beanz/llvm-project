@@ -1,0 +1,40 @@
+; Roadmap L35(a): a minimal fragment shader combining `Bias` and
+; `ConstOffset` on the same `OpImageSampleImplicitLod` -- one of the exact
+; image-operand bits `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s
+; `verifyImageOperands` unconditionally rejects via an `assert` today (see
+; ../spirv-import-skip-verify.test's own header comment). Real SPIR-V
+; assembly text, assembled to a binary at test time by `spirv-as` (no
+; binary fixture checked in, per "Avoiding binary test fixtures" in
+; feme/docs/Design.md).
+OpCapability Shader
+%glsl = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"
+OpExecutionMode %main OriginUpperLeft
+OpSource GLSL 450
+OpName %main "main"
+
+%void = OpTypeVoid
+%fnty = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v2float = OpTypeVector %float 2
+%v4float = OpTypeVector %float 4
+%int = OpTypeInt 32 1
+%v2int = OpTypeVector %int 2
+%image = OpTypeImage %float 2D 0 0 0 1 Unknown
+%sampled_image = OpTypeSampledImage %image
+%ptr_uc_sampled_image = OpTypePointer UniformConstant %sampled_image
+%tex = OpVariable %ptr_uc_sampled_image UniformConstant
+
+%float_0 = OpConstant %float 0
+%coord_const = OpConstantComposite %v2float %float_0 %float_0
+%bias_const = OpConstant %float 0.5
+%offset_const_0 = OpConstant %int 1
+%offset_const = OpConstantComposite %v2int %offset_const_0 %offset_const_0
+
+%main = OpFunction %void None %fnty
+%entry = OpLabel
+%si = OpLoad %sampled_image %tex
+%result = OpImageSampleImplicitLod %v4float %si %coord_const Bias|ConstOffset %bias_const %offset_const
+OpReturn
+OpFunctionEnd

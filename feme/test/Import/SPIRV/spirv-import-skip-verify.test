@@ -1,0 +1,38 @@
+// REQUIRES: system-spirv-as
+//
+// RUN: %spirv-as --target-env vulkan1.0 %S/Inputs/const-offset-bias-sample.spvasm -o %t.spv
+//
+// Roadmap L35(a): `--import-spirv` (this project's own standard
+// real-IR-reduction tool, see feme/docs/Design.md's "Testing Tools"
+// section) crashes on any real SPIR-V binary using the `ConstOffset`/
+// `Offset`/`ConstOffsets`/`MinLod`/etc. image operands, via an upstream
+// MLIR SPIR-V dialect op verifier assert in mlir/lib/Dialect/SPIRV/IR/
+// ImageOps.cpp's verifyImageOperands (a literal "TODO: Add the validation
+// rules for the following Image Operands" comment followed by an
+// unconditional `assert(!bitEnumContainsAny(...))`), hit whenever
+// `mlir::verify()` runs against a module using one of these operands in an
+// assertions-enabled build (this project's own standard build
+// configuration). `--import-spirv-skip-verify` (added by this row) skips
+// that verification (and prints the module with `OpPrintingFlags`'s own
+// `assumeVerified()`, since `Operation::print` would otherwise
+// independently re-trigger the identical assert while deciding whether to
+// fall back to generic op form) so a real repro using these operands can
+// still be reduced through this tool.
+//
+// This input can't be produced by round-tripping MLIR's own `spirv`
+// dialect textual syntax through `feme-translate` (e.g.
+// `--serialize-spirv`) -- parsing that text hits the exact same
+// unconditional `mlir::verify()` call via `parseSourceFileForTool`,
+// independent of any import/export path -- so it is assembled directly
+// from real SPIR-V assembly via `spirv-as` instead. No binary fixture is
+// checked in, per "Avoiding binary test fixtures" in feme/docs/Design.md.
+
+// The known upstream gap still crashes the default (verifying) path --
+// pinned here so a future upstream fix resolving ImageOps.cpp's own TODO
+// is noticed (this RUN line would then fail with "expected crash but did
+// not").
+// RUN: not --crash feme-translate --import-spirv %t.spv 2>&1 | FileCheck %s --check-prefix=CRASH
+// CRASH: unimplemented operands of Image Operands
+
+// RUN: feme-translate --import-spirv --import-spirv-skip-verify %t.spv | FileCheck %s
+// CHECK: spirv.ImageSampleImplicitLod {{.*}} ["Bias|ConstOffset"]
