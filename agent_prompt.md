@@ -42,25 +42,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L72(c) from the roadmap or other prerequisites blocking the
+Can you close out L34 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **140 `dEQP-VK.glsl.texture_functions.texelfetch.*` CTS cases against a
-> `Plain1D`/`Array1D`/`Plain3D` sampled image still fail with `"...cannot
-> normalize into a heap access..."`** -- roadmap L72's own fix deliberately
-> scoped its new `llvm.spv.resource.load.level` recognition to
-> `Plain2D`/`Array2D` only, mirroring the pre-existing zero-mip
-> `getpointer`-based fetch path's own identical, already-documented restriction
-> (`hasOnlySupportedImageUses`'s header comment: "this session's own real
-> CTS-driven scope is ordinary sampling only... a future row can lift this
-> restriction"); a real re-run of roadmap L72's own 1,375-case caselist confirms
-> every remaining "cannot normalize" case is exactly a
-> `texelfetch.*1d*`/`texelfetch.*3d*` variant. Fixing this needs widening
-> `isFetchLevelIntrinsic`'s shape check and `lowerImageAccesses`'s new rewrite
-> branch to also dispatch to
-> `createLoad1D`/`createLoad1DI32`/`createLoad1DArray`/`createLoad1DArrayI32`/`createLoad3D`/`createLoad3DI32`
-> (mirroring the identical dispatch the storage-image fetch path --
-> `lowerImageAccesses`'s own `switch (Shape)` a few hundred lines below --
-> already has for these same shapes), threading the real `Lod` operand through
-> the same way roadmap L72 already does for `Plain2D`/`Array2D`. Not yet
-> started.
+> **`TextureCube` sampling never computes a real implicit LOD from screen-space
+> derivatives, unlike `Texture2D`**: found by L26's own real `Sample.test`
+> repro, whose single remaining output mismatch (index 29, the "Cube +X minified
+> -> mip 1" case) is unrelated to L26's own offset/clamp scope.
+> `femeRTComputeClampedLod`'s `float L = UseExplicitLod ? Lod : 0.0f;` means any
+> implicit-LOD sample defaults to mip 0 unless the caller has already derived a
+> real LOD from screen-space derivatives and re-invoked with
+> `UseExplicitLod=true` -- exactly what `femeCpuImageSample2DV4F32` does via
+> `femeRTPlanImplicitLod`, but `femeCpuImageSampleCubeV4F32` never does, always
+> sampling mip 0 regardless of real minification. Needs a real derivative-based
+> LOD-selection path for the Cube shape, likely reusing
+> `femeRTPlanImplicitLod`'s own math against a cube direction vector's own
+> screen-space partial derivatives rather than a 2D `(U, V)` pair's
