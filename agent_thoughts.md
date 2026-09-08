@@ -69176,3 +69176,191 @@ both in a half-finished state instead.
 Cleaned up the `git worktree` and its build directory used for the
 before/after baseline comparison, plus the various `/tmp/l69_*` caselist
 and `.qpa` scratch files, before finishing.
+
+# Session: Closing out L69(a) (`DerivativeGroupQuadsKHR` compute-derivative lane tiling)
+
+## Starting point
+
+L69's prior session had implemented `DerivativeGroupLinearKHR` support and
+deliberately rejected `DerivativeGroupQuadsKHR` outright, filing the gap as
+L69(a) with a fairly pessimistic framing: "a genuine lane-assignment
+redesign, not a small follow-on fix... needs its own design investigation."
+My first job was to actually do that investigation rather than take the
+pessimistic framing at face value.
+
+## The investigation
+
+I traced feme's compute dispatch architecture end to end: `runDispatch` ->
+`CompiledStage::invokeGroup` (one call per *workgroup*, not per invocation)
+-> `EntryWrapper.cpp`'s wave loop -> `SIMDize.cpp`'s widening -> `WaveLowering.cpp`'s
+builtin lowering. The key realization came from reading `WaveLowering.cpp`'s
+own file header comment closely: it documents a "physical" flat lane index
+`flat = WaveIndex * W + lane`, decomposed row-major into x/y/z, and this
+*same* physical/logical identity is used both for internal SIMD bookkeeping
+and as the literal shader-visible `LocalInvocationIndex`/x/y/z values. There
+is no distinction between "which physical SIMD lane runs this invocation"
+and "what invocation identity does this lane report" -- they're the same
+number today.
+
+Once I saw that, the fix stopped looking like a scheduling redesign and
+started looking like a pure reindexing problem: `lowerDerivative`'s existing
+quad-shuffle math doesn't care *which* invocation identity ends up on which
+physical lane, only that every 4 consecutive physical lanes are one 2x2
+tile's corners in a fixed order. `DerivativeGroupLinearKHR` already
+satisfies that trivially (no spatial meaning required). `DerivativeGroupQuadsKHR`
+needs real spatial `(x,y)` adjacency, which the *existing* row-major formula
+only accidentally provides when `Gx == 2`. So: keep the shuffle math exactly
+as-is, and instead change how x/y/z/`LocalInvocationIndex` are decomposed
+from the physical lane position, for entry points that need it. Since
+groupshared/resource addressing always goes through the decomposed value
+rather than the raw physical lane, any consistent bijective remapping is
+safe -- this is what made it a self-contained, surgical fix rather than a
+broader redesign.
+
+I derived the formula by hand (reversing the row-major decomposition, but
+inserting a "tile" level between "z-slice" and "corner-within-tile"), then
+manually verified it numerically on paper for a concrete example
+(`Gx=4,Gy=4,Gz=1,W=8`) before writing a single line of code, specifically
+to catch an off-by-one or transposed-axis mistake before it got baked into
+a large diff. That numeric example became the basis for the actual unit
+tests later, so this paid for itself directly.
+
+## A pleasant surprise from the design document
+
+While updating docs at the end, I reread `FeMeCPUDesign.md`'s own "Lane
+linearization" section (which I hadn't looked at closely before starting
+the code changes) and found it *already* specifies almost exactly the
+formula I'd independently derived -- as the *default*, always-on lane
+numbering scheme for every compute dispatch, not something specific to
+derivatives. The original v1 design intentionally chose quad-consistent
+numbering from day one specifically so that "quad ops and derivatives
+[could] be added later without renumbering lanes." The as-implemented
+`WaveLowering.cpp`, though, uses plain row-major numbering unconditionally
+and never implements this. That's a real, pre-existing deviation from the
+design doc that predates this session entirely -- I didn't introduce it,
+but I also didn't fully resolve it: I implemented quad-tiling as an
+explicit per-shader opt-in (gated on a new function attribute) rather than
+making it the universal default the design called for, specifically to
+avoid changing every existing compute shader's observed lane-to-invocation
+mapping (and every existing test hard-coding the row-major formula) as an
+unplanned side effect of a fix scoped to `DerivativeGroupQuadsKHR` alone.
+I documented both the original deviation and my own narrower resolution of
+it as a new Deviation note in the design doc, rather than silently leaving
+the discrepancy unrecorded a second time.
+
+## Implementation shape
+
+Plumbing choice: rather than threading the derivative-group mode through
+pass constructors, I stamped it as a plain LLVM function attribute
+(`"feme.compute.derivative.group"="quads"`) on the entry function during
+`Pipeline.cpp`'s existing pipeline-compilation flow, mirroring the existing
+`"hlsl.numthreads"` attribute-stamping convention at the very same call
+site. `SIMDize.cpp` reads that attribute once per function and threads a
+`bool` through to every builtin call it synthesizes, encoded as a new
+trailing `i1` operand on the `feme.cpu.builtin.*` call (matching the
+existing `Component` operand pattern already used there). This keeps
+`WaveLoweringPass` itself free of any attribute-lookup responsibility --
+consistent with the codebase's existing separation between
+canonicalization-time attribute reads and call-encoded-operand-only
+lowering.
+
+I built the actual arithmetic (`decomposeQuadTiledComponent`/
+`buildQuadTiledFlattenedThreadIdInGroup`) as two small, separate helper
+functions right next to the existing row-major `decomposeComponent`, rather
+than merging the two into one branchy function, so the new formula reads
+as a self-contained unit next to its existing counterpart -- easy to
+compare side by side, easy to unit-test in isolation.
+
+## Testing
+
+The numeric unit tests were the part I was most careful about, since a
+sign error or transposed x/y axis would be easy to miss by eye in generated
+IR. I hand-built the mangled builtin calls directly with an explicit
+constant `WaveIndex` (bypassing `SIMDizePass` entirely) so that
+`WaveLoweringPass`'s own `UDiv`/`URem`/`Mul`/`Add` chain constant-folds
+straight down to a concrete `ConstantDataVector`, then asserted the exact
+expected 8-element vectors from my hand-derived worked example. This is
+strictly stronger evidence than a shape-based test (e.g. "the result is
+some vector of the right type") -- it directly checks the numbers, so if
+I'd transposed x and y or gotten the tile-vs-corner split backwards, these
+tests would have failed outright rather than passing vacuously.
+
+Running the existing full `WaveLoweringTest`/`BuiltinCallsTest`/`SIMDizeTest`
+suites *before* committing anything (once the code compiled) confirmed zero
+regressions to the non-quad-tiled path, which matters a lot here since that
+path is the one every existing compute/fragment shader still goes through.
+
+`check-feme`'s one real failure (`simdize-thread-id.ll`) was exactly the
+kind of thing I expected from adding a new call operand: a `CHECK-SAME`
+line asserting the call's exact full operand list, which now has one more
+trailing `i1 false`. Fixing it was mechanical once located, but I made sure
+to actually grep for every other `.ll` test referencing these builtin calls
+first, in case more than one needed the same fix (only this one did, since
+the others only check the call's name prefix, not its exact operand count).
+
+## The Vulkan-layer half
+
+The second commit (`Pipeline.cpp`/`GroupSize.h`/`EntryPoints.cpp`/
+`PhysicalDeviceInfo.cpp`) was comparatively mechanical once the compiler
+building blocks existed: replace the outright rejection with the mode's own
+real spec precondition (group size X/Y both even), stamp the new attribute,
+and flip the advertised feature bit from `VK_FALSE` to `VK_TRUE`. I noticed
+the *existing* `kDerivativeGroupQuadsComputeShader` test shader already used
+a `2x2x1` local size -- i.e. it already satisfied the new precondition --
+so the old `RejectsDerivativeGroupQuads` test needed to become an
+*acceptance* test using that same shader, plus a genuinely new shader (odd
+X dimension) for the rejection case. I made sure to actually re-derive this
+rather than just deleting the old test, since reusing the existing shader
+constant for the *opposite* assertion is exactly the kind of thing that's
+easy to get backwards.
+
+## Real CTS re-measurement
+
+I reused the prior L69 session's exact 295-case caselist (242
+`texturegrad{,offset}*_compute` + 53 implicit-LOD `texture.*_compute`)
+against the current build, rather than generating a new one, specifically
+so the "before"/"after" comparison is apples-to-apples with the numbers
+already recorded in `VulkanCTSReport.md`. (I did hit a caselist-file-format
+snag along the way -- `--deqp-caselist-file` expects deqp's own trie
+syntax, not one-name-per-line `TEST:` text, despite `dEQP-VK-cases.txt`
+itself being formatted that way; `--deqp-case=<comma-joined list>` turned
+out to be the simplest working substitute for a flat list of exact case
+names.)
+
+The result was genuinely informative and not the "still 0 payoff" outcome
+I expected going in: totals moved from 153 Fail/142 NotSupported to 187
+Fail/108 NotSupported -- 34 cases shifted buckets. Rather than stopping at
+the aggregate numbers, I used `FEME_VULKAN_LOG_CREATION_ERRORS=1` on
+targeted single-case reruns to confirm *why*: the old rejection text
+("DerivativeGroupQuadsKHR is not yet supported"/"computeDerivativeGroupQuads
+feature is not supported") is now completely gone from the entire caselist
+-- direct proof the fix is wired up and actually executing -- but the 34
+newly-`Fail` cases (a subset of the 53 implicit-LOD cases, the ones that
+actually resolve to `Quads` mode for this CTS group) now hit a *different*,
+pre-existing, already-tracked gap one layer further downstream: an
+"unknown extension: SPV_KHR_compute_shader_derivatives" SPIR-V-import
+failure that roadmap L7 already named explicitly (in that row's own
+original triage, well before this session, so it's not something I
+introduced or need to re-file). The remaining 153 `texturegrad*_compute`
+cases are completely unaffected (confirmed via a direct single-case
+diagnostic showing them hitting the same L70 resource-normalization message
+as before), since they supply gradients explicitly and never declare the
+extension or resolve to any derivative-group mode at all.
+
+This is exactly the kind of thing the "always run the real CTS after each
+change" instruction is meant to catch: without it, I would have shipped a
+correct-looking compiler fix with no way to know whether it was actually
+reachable in practice, or whether it exposed a *new* previously-hidden gap
+that needed its own investigation and possibly its own new roadmap row. In
+this case the investigation confirmed both downstream gaps are already
+tracked (L7, L70) and unrelated to this row's own scope, so no new roadmap
+row was needed -- but I only know that because I checked, rather than
+assumed.
+
+## Housekeeping
+
+Cleaned up all `/tmp/l69a_*` caselist/qpa scratch files at the end of the
+session. No `git worktree` was needed this time (unlike L69's own
+before/after comparison), since I compared against the prior session's
+already-recorded numbers in `VulkanCTSReport.md` rather than rebuilding a
+baseline commit from scratch.
