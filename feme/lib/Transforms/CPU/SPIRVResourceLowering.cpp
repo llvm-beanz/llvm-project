@@ -1207,20 +1207,23 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L72(d): `OpImageQuerySizeLod` -- unlike
+    // Roadmap L72(d)/L75: `OpImageQuerySizeLod` -- unlike
     // `isGetDimensionsIntrinsic`'s own call (whose sole operand already
     // *is* the handle), this synthesized call's own Image operand is its
     // first argument, mirroring `isSampleIntrinsic`'s own
-    // `CI->getArgOperand(0) != &Handle` convention. Scoped to `Plain2D`
-    // only for now (the builder below only emits a v2i32 result, which
-    // does not match `Array2D`'s own extra layer-count component, nor
-    // `Plain1D`'s narrower scalar one) -- every other shape's own
-    // distinct result width is left for a follow-on row, see
-    // `ImageCallKind::QuerySizeLod2D`'s own doc.
+    // `CI->getArgOperand(0) != &Handle` convention. Every classifiable
+    // non-multisampled shape now has its own correctly-widthed builder
+    // (`QuerySizeLod2D` for `Plain2D`/`Cube`, whose formula is identical;
+    // `QuerySizeLod1D`/`QuerySizeLod1DArray`/`QuerySizeLod2DArray`/
+    // `QuerySizeLod3D`/`QuerySizeLodCubeArray` for every other shape, see
+    // each one's own doc for its distinct result width/formula) --
+    // `Plain2DMS`/`Array2DMS` remain unsupported: `OpImageQuerySizeLod`
+    // is spec-legal against a multisampled image, but no real CTS case
+    // has driven that combination's own scoping yet.
     if (isQuerySizeLodCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (Shape != ImageShape::Plain2D)
+      if (Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       continue;
     }
@@ -1619,13 +1622,16 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L72(d): `OpImageQuerySizeLod` against a storage image --
+    // Roadmap L72(d)/L75: `OpImageQuerySizeLod` against a storage image --
     // see `hasOnlySupportedImageUses`'s own identical check for this
-    // opcode's shape scoping and operand convention.
+    // opcode's shape scoping and operand convention (a storage handle
+    // never classifies as `Cube`/`CubeArray` -- `classifyStorageImage2DHandle`
+    // folds those into `Array2D` -- so only `Plain2DMS`/`Array2DMS`
+    // need excluding here, never `Cube`/`CubeArray` specifically).
     if (isQuerySizeLodCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (Shape != ImageShape::Plain2D)
+      if (Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       continue;
     }
@@ -3457,20 +3463,51 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L72(d): `OpImageQuerySizeLod` (`isQuerySizeLodCall`) --
+      // Roadmap L72(d)/L75: `OpImageQuerySizeLod` (`isQuerySizeLodCall`) --
       // an explicit, possibly non-zero mip-level extent query, unlike
       // `GetDimensions2D`'s own always-mip-0 query above. Its own Image
       // operand is `getArgOperand(0)` (mirroring `isSampleIntrinsic`'s
       // own convention, unlike `isGetDimensionsIntrinsic`'s bare-handle
       // call), so the `CI->getArgOperand(0) != Handle` guard does apply
-      // here.
+      // here. Dispatches to the builder matching this handle's own
+      // classified `Shape` -- `Cube` reuses `QuerySizeLod2D` unchanged
+      // (identical `v2i32` result/formula to `Plain2D`), every other
+      // shape uses its own dedicated builder (see each one's own doc for
+      // its distinct result width/formula).
       if (isQuerySizeLodCall(*CI)) {
         if (CI->getArgOperand(0) != Handle)
           continue;
         IRBuilder<> Builder(CI);
         Value *Lod = CI->getArgOperand(1);
-        CallInst *NewCall = createQuerySizeLod2D(Builder, Env, ImageIndex, Lod,
-                                                 Mask, "querysizelod2d");
+        CallInst *NewCall;
+        switch (Shape) {
+        case ImageShape::Plain1D:
+          NewCall = createQuerySizeLod1D(Builder, Env, ImageIndex, Lod, Mask,
+                                         "querysizelod1d");
+          break;
+        case ImageShape::Array1D:
+          NewCall = createQuerySizeLod1DArray(Builder, Env, ImageIndex, Lod,
+                                              Mask, "querysizelod1darray");
+          break;
+        case ImageShape::Array2D:
+          NewCall = createQuerySizeLod2DArray(Builder, Env, ImageIndex, Lod,
+                                              Mask, "querysizelod2darray");
+          break;
+        case ImageShape::Plain3D:
+          NewCall = createQuerySizeLod3D(Builder, Env, ImageIndex, Lod, Mask,
+                                         "querysizelod3d");
+          break;
+        case ImageShape::CubeArray:
+          NewCall = createQuerySizeLodCubeArray(Builder, Env, ImageIndex, Lod,
+                                                Mask, "querysizelodcubearray");
+          break;
+        case ImageShape::Plain2D:
+        case ImageShape::Cube:
+        default:
+          NewCall = createQuerySizeLod2D(Builder, Env, ImageIndex, Lod, Mask,
+                                         "querysizelod2d");
+          break;
+        }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;

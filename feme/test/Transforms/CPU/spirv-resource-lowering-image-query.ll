@@ -58,3 +58,23 @@ declare i32 @"feme.query.levels.0"(
     target("spirv.Image", float, 1, 0, 0, 0, 1, 0))
 declare <2 x i32> @llvm.spv.resource.getdimensions.xy.timg2(
     target("spirv.Image", float, 1, 0, 0, 0, 1, 0))
+
+; Roadmap L75: an `Array2D` sampled image's own `textureSize(sampler, lod)`
+; query -- widened past L72(d)'s original `Plain2D`-only scope, dispatching
+; to the dedicated `QuerySizeLod2DArray` builder (v3i32 result: the extra
+; third lane is the real, unscaled array-layer count).
+
+; CHECK-LABEL: define <3 x i32> @sampled_array2d_image_size_lod(
+define <3 x i32> @sampled_array2d_image_size_lod(i32 %lod) {
+  %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg3(i32 0, i32 2, i32 1, i32 0, ptr null)
+  ; CHECK: call <3 x i32> @feme.cpu.image.getdimensions.lod.2darray.v3i32(ptr %image_heap, i32 %image_heap_count, i32 {{[0-9]+}}, i32 %lod, i1 true)
+  %dims = call <3 x i32> @"feme.query.size_lod.1"(
+      target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img, i32 %lod)
+  ret <3 x i32> %dims
+}
+
+declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+    @llvm.spv.resource.handlefrombinding.timg3(i32, i32, i32, i32, ptr)
+declare <3 x i32> @"feme.query.size_lod.1"(
+    target("spirv.Image", float, 1, 0, 1, 0, 1, 0), i32)

@@ -5373,17 +5373,18 @@ TEST(SPIRVResourceLoweringTest, LowersPlain2DQuerySizeLodAndQueryLevels) {
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.2d.v2i32"));
 }
 
-// Roadmap L72(d) deliberately scopes `OpImageQuerySizeLod`/
-// `OpImageQueryLevels` support to `Plain2D` only -- the builders
-// (`createQuerySizeLod2D`/`createQueryLevels`) only ever emit a v2i32/i32
-// result, which does not match `Array2D`'s own extra layer-count
-// component, so an `Array2D` handle's use of either call is left entirely
-// unlowered, the same honest all-or-nothing contract every other
-// unsupported shape gets. Before this test was added, accepting `Array2D`
-// here crashed with `replaceAllUses of value with new value of different
-// type!` once a real CTS re-run exercised
-// `dEQP-VK.glsl.texture_functions.query.texturesize.*2darray_compute`.
-TEST(SPIRVResourceLoweringTest, LeavesArray2DQuerySizeLodHandleAlone) {
+// Roadmap L75: `OpImageQuerySizeLod`'s shape gate is now widened past
+// `Plain2D` to every classifiable non-multisampled shape, dispatching to
+// a distinct builder per result width/formula (see each `ImageCallKind`'s
+// own doc). One positive lowering test per newly-accepted shape follows,
+// mirroring L74's own per-shape `OpImageQueryLevels` test pattern; a
+// `Plain2DMS`/`Array2DMS` negative test (still correctly rejected) closes
+// out the group. `Array2D` here (below) previously crashed with
+// `replaceAllUses of value with new value of different type!` before this
+// row's own dedicated `QuerySizeLod2DArray` (v3i32) builder existed --
+// see `LeavesArray2DQuerySizeLodHandleAlone`'s own now-removed history in
+// roadmap L72(d).
+TEST(SPIRVResourceLoweringTest, LowersArray2DQuerySizeLod) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <3 x i32> @main(i32 %lod) {
@@ -5397,6 +5398,155 @@ TEST(SPIRVResourceLoweringTest, LeavesArray2DQuerySizeLodHandleAlone) {
         @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
     declare <3 x i32> @"feme.query.size_lod.0"(
         target("spirv.Image", float, 1, 0, 1, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.2darray.v3i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersPlain1DQuerySizeLod) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call i32 @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img, i32 %lod)
+      ret i32 %dims
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 0, 0, 0, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.1d.i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersArray1DQuerySizeLod) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img, i32 %lod)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 0, 0, 1, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.1darray.v2i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersPlain3DQuerySizeLod) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img, i32 %lod)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 2, 0, 0, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.3d.v3i32"));
+}
+
+// Roadmap L75: `Cube` reuses the existing `QuerySizeLod2D` builder
+// unchanged -- a cube face's own mip-level extent shrinks by exactly the
+// same `(max(1,W>>lod), max(1,H>>lod))` formula a `Plain2D` mip level
+// does, so this is a "free" shape-gate widening with no new builder.
+TEST(SPIRVResourceLoweringTest, LowersCubeQuerySizeLod) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img, i32 %lod)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 3, 0, 0, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.2d.v2i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersCubeArrayQuerySizeLod) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 3, 0, 1, 0, 1, 0) %img, i32 %lod)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 3, 0, 1, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.cubearray.v3i32"));
+}
+
+// `Plain2DMS`/`Array2DMS` remain unsupported: `OpImageQuerySizeLod` is
+// spec-legal against a multisampled image, but no real CTS case has
+// driven that combination's own scoping yet (see the shape gate's own
+// comment in `hasOnlySupportedImageUses`).
+TEST(SPIRVResourceLoweringTest, LeavesPlain2DMSQuerySizeLodHandleAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 1, 0, 0, 1, 1, 0) %img, i32 %lod)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 1, 0, 0, 1, 1, 0), i32)
   )");
   ASSERT_TRUE(M);
   runPass(*M);
