@@ -673,4 +673,79 @@ TEST(SPIRVImporterTest, LeavesImageQuerySizeLodWithUnresolvableLodAlone) {
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 
+/// As `buildImageQueryLevelsModule`, but queries a multisampled sampled
+/// image's own sample count via `OpImageQuerySamples` (107) instead
+/// (roadmap L73, GLSL's `textureSamples(sampler2DMS)`) -- the image type
+/// itself is declared `MS=1` (multisampled), the shape a real
+/// `sampler2DMS` produces.
+std::vector<uint32_t> buildImageQuerySamplesModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t Int = B.nextId();
+  uint32_t Float = B.nextId();
+  uint32_t ImageTy = B.nextId();
+  uint32_t SampledImageTy = B.nextId();
+  uint32_t PtrSampledImage = B.nextId();
+  uint32_t Variable = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t SampledImageVal = B.nextId();
+  uint32_t ImageVal = B.nextId();
+  uint32_t Result = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*Fragment=*/4, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  B.emit(/*OpExecutionMode=*/16, {Main, /*OriginUpperLeft=*/7});
+  B.emit(/*OpDecorate=*/71, {Variable, /*DescriptorSet=*/34, 0});
+  B.emit(/*OpDecorate=*/71, {Variable, /*Binding=*/33, 0});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeInt=*/21, {Int, 32, /*Signed=*/1});
+  B.emit(/*OpTypeFloat=*/22, {Float, 32});
+  B.emit(/*OpTypeImage=*/25, {ImageTy, Float, /*Dim2D=*/1, /*Depth=*/0,
+                              /*Arrayed=*/0, /*MS=*/1, /*Sampled=*/1,
+                              /*Unknown=*/0});
+  B.emit(/*OpTypeSampledImage=*/27, {SampledImageTy, ImageTy});
+  B.emit(/*OpTypePointer=*/32,
+         {PtrSampledImage, /*UniformConstant=*/0, SampledImageTy});
+  B.emit(/*OpVariable=*/59, {PtrSampledImage, Variable, /*UniformConstant=*/0});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpLoad=*/61, {SampledImageTy, SampledImageVal, Variable});
+  B.emit(/*OpImage=*/100, {ImageTy, ImageVal, SampledImageVal});
+  // `%Result = OpImageQuerySamples %Int %ImageVal`.
+  B.emit(/*OpImageQuerySamples=*/107, {Int, Result, ImageVal});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
+TEST(SPIRVImporterTest, LowersImageQuerySamples) {
+  Context Ctx;
+  std::vector<uint32_t> Words = buildImageQuerySamplesModule();
+  llvm::Expected<Module> Result = importModule(Ctx, Words);
+  // Without `lowerImageQueryOpcodes`, this fails: MLIR's deserializer has
+  // no enum case for `OpImageQuerySamples` (107) at all (see roadmap L73).
+  ASSERT_THAT_EXPECTED(Result, llvm::Succeeded());
+
+  unsigned CallCount = 0;
+  Result->getMLIROperation()->walk([&](mlir::spirv::FunctionCallOp Op) {
+    ++CallCount;
+    EXPECT_TRUE(
+        llvm::StringRef(Op.getCallee()).starts_with("feme.query.samples."));
+    // A single argument: the plain image handle (`OpImageQuerySamples` has
+    // no Level-of-Detail operand of its own -- it queries the image's own
+    // multisample sample count).
+    ASSERT_EQ(Op.getArguments().size(), 1u);
+    EXPECT_TRUE(llvm::isa<mlir::IntegerType>(Op.getType(0)));
+  });
+  EXPECT_EQ(CallCount, 1u);
+}
+
 } // namespace

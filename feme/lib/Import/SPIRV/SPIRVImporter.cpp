@@ -50,6 +50,7 @@ constexpr uint32_t kOpImageSampleProjDrefExplicitLod = 94;
 constexpr uint32_t kOpImage = 100;
 constexpr uint32_t kOpImageQuerySizeLod = 103;
 constexpr uint32_t kOpImageQueryLevels = 106;
+constexpr uint32_t kOpImageQuerySamples = 107;
 constexpr uint32_t kOpFDiv = 136;
 constexpr uint32_t kOpCapability = 17;
 constexpr uint32_t kOpName = 5;
@@ -507,19 +508,26 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
   return FinalWords;
 }
 
-/// Lowers SPIR-V's `OpImageQuerySizeLod` (103) and `OpImageQueryLevels`
-/// (106) -- two opcodes MLIR's own SPIR-V dialect has zero enum/Op-class
-/// coverage for at all (roadmap L72(d), split out of L72(a) once that
-/// row's own rewrite closed out `OpImageSampleProjExplicitLod`/
-/// `OpImageSampleProjDrefExplicitLod`, the other two "unhandled opcode"
-/// opcodes) -- into an ordinary `OpFunctionCall` against a synthesized,
-/// `Import`-linkage (i.e. declared-only, no body) external function.
+/// Lowers SPIR-V's `OpImageQuerySizeLod` (103), `OpImageQueryLevels`
+/// (106), and `OpImageQuerySamples` (107) -- three opcodes MLIR's own
+/// SPIR-V dialect has zero enum/Op-class coverage for at all (roadmap
+/// L72(d), split out of L72(a) once that row's own rewrite closed out
+/// `OpImageSampleProjExplicitLod`/`OpImageSampleProjDrefExplicitLod`, the
+/// other two "unhandled opcode" opcodes; `OpImageQuerySamples` itself was
+/// deferred out of L72(d) into its own follow-on row, L73, since it has a
+/// separate prerequisite gap -- `SPIRVResourceLowering.cpp`'s own
+/// `classifySampledImage2DHandle` rejecting every multisampled sampled
+/// image handle outright -- blocking it even once this same import-time
+/// encoding is in place) -- into an ordinary `OpFunctionCall` against a
+/// synthesized, `Import`-linkage (i.e. declared-only, no body) external
+/// function.
 ///
-/// Unlike `lowerProjectiveImageSamples`'s own rewrite, neither opcode here
-/// has a semantically equivalent *already-supported* SPIR-V opcode to
-/// relabel into: each queries information (an image's own mip-level
-/// count, or its size at an explicit, possibly non-zero mip level) no
-/// other already-supported opcode's result can substitute for. Instead,
+/// Unlike `lowerProjectiveImageSamples`'s own rewrite, none of these three
+/// opcodes has a semantically equivalent *already-supported* SPIR-V
+/// opcode to relabel into: each queries information (an image's own
+/// mip-level count, its size at an explicit, possibly non-zero mip level,
+/// or its own multisample sample count) no other already-supported
+/// opcode's result can substitute for. Instead,
 /// this rewrite gives MLIR something it already knows how to parse
 /// end-to-end without any new opcode support at all: an `OpFunctionCall`
 /// against a function declared with `Decoration LinkageAttributes ...
@@ -535,9 +543,9 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
 /// to an auto-generated `spirv_fn_<id>` only if none was given) --
 /// `SPIRVResourceLowering.cpp` then recognizes a call to one of this
 /// rewrite's own magic-named functions (`isQuerySizeLodCall`/
-/// `isQueryLevelsCall`) the same way it already recognizes an
-/// `llvm.spv.resource.*` intrinsic call, and lowers it to a real runtime
-/// query.
+/// `isQueryLevelsCall`/`isQuerySamplesCall`) the same way it already
+/// recognizes an `llvm.spv.resource.*` intrinsic call, and lowers it to a
+/// real runtime query.
 ///
 /// This rewrite itself does not need to know an occurrence's eventual
 /// image *shape* at all -- it only needs the Image (and, for
@@ -547,12 +555,13 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
 /// every shape's occurrence is rewritten uniformly here.
 /// `SPIRVResourceLowering.cpp`'s own `hasOnlySupportedImageUses` is what
 /// actually scopes which shapes' synthesized calls survive:
-/// `Plain2D`/`Array2D` only for now, mirroring this project's own
-/// established shape-scoping precedent (`GetDimensions2D`, roadmap L70) --
-/// `Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D` occurrences are
-/// rewritten here the same as any other shape, but still fail later, at
-/// that same shape check, exactly as they did before this rewrite
-/// existed.
+/// `Plain2D`/`Array2D` for `OpImageQuerySizeLod`/`OpImageQueryLevels`
+/// (roadmap L70's own `GetDimensions2D` shape-scoping precedent), and
+/// `Plain2DMS`/`Array2DMS` for `OpImageQuerySamples` (roadmap L73, the
+/// only shapes a multisampled sampled image can classify as) --
+/// every other shape's occurrence is rewritten here the same as any
+/// other, but still fails later, at that same shape check, exactly as it
+/// did before this rewrite existed.
 ///
 /// Deliberately conservative, mirroring `lowerProjectiveImageSamples`: an
 /// occurrence whose Image (or Level-of-Detail) operand cannot be resolved
@@ -563,7 +572,8 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
 llvm::SmallVector<uint32_t>
 lowerImageQueryOpcodes(llvm::ArrayRef<uint32_t> Words) {
   if (Words.size() <= kSPIRVHeaderWords ||
-      !containsOpcode(Words, {kOpImageQuerySizeLod, kOpImageQueryLevels}))
+      !containsOpcode(Words, {kOpImageQuerySizeLod, kOpImageQueryLevels,
+                              kOpImageQuerySamples}))
     return llvm::SmallVector<uint32_t>(Words);
 
   TypeResolutionInfo Info = scanModuleTypes(Words);
@@ -687,7 +697,9 @@ lowerImageQueryOpcodes(llvm::ArrayRef<uint32_t> Words) {
     }
 
     bool IsSizeLod = Opcode == kOpImageQuerySizeLod;
-    if (!IsSizeLod && Opcode != kOpImageQueryLevels) {
+    bool IsLevels = Opcode == kOpImageQueryLevels;
+    bool IsSamples = Opcode == kOpImageQuerySamples;
+    if (!IsSizeLod && !IsLevels && !IsSamples) {
       Body.append(Words.begin() + I, Words.begin() + I + WordCount);
       I += WordCount;
       continue;
@@ -720,7 +732,9 @@ lowerImageQueryOpcodes(llvm::ArrayRef<uint32_t> Words) {
 
     uint32_t FnId = GetOrCreateSyntheticFunction(
         Opcode, ImageTypeIt->second, ResultType, LodType,
-        IsSizeLod ? "feme.query.size_lod" : "feme.query.levels");
+        IsSizeLod  ? "feme.query.size_lod"
+        : IsLevels ? "feme.query.levels"
+                   : "feme.query.samples");
 
     unsigned NumArgs = IsSizeLod ? 2 : 1;
     Body.push_back(((4u + NumArgs) << 16) | kOpFunctionCall);
