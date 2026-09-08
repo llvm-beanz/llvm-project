@@ -72380,3 +72380,157 @@ L82 is closed. Both of its chain's named repros (`HullSystemValues.test`,
 discovered downstream this session -- the L77-L82 chain appears to be
 fully resolved for now. No further roadmap breakdown entries were added,
 since the milestone was completed rather than partially addressed.
+
+# Session: Roadmap L76(a) -- storage-image narrow-Texel-width support
+
+## Task
+
+Close out roadmap L76(a): `RWTexture2DArray` (an arrayed *storage* image)
+entirely rejected by pipeline creation, per the roadmap's own filed text.
+
+## Investigation
+
+Started from the filed repro, `Feature/Textures/Array.UnalignedRowPitch.test`
+(`RWTexture2DArray<float> Out; Out[TID] = ...;`). Traced
+`SPIRVResourceLowering.cpp`'s classification chain first, expecting to
+find a gap in `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`'s
+own `Array2D`-shape handling, per the roadmap's own hypothesis text. Both
+turned out to already be entirely correct for the `Array2D` shape's
+3-component coordinate. Reproduced the failure manually (no
+offload-test-suite build directory exists in this checkout for the usual
+`check-hlsl-feme-vk` path, so I used the established `split-file` ->
+`dxc -spirv` -> `offloader` manual pipeline in `/tmp/l76a/`) and dumped
+the compiled SPIR-V with `spirv-dis`. The real diagnostic named a
+register-bound-handle normalization failure, meaning
+`hasOnlySupportedStorageImageUses` was returning `false` -- and the
+SPIR-V dump showed why: `OpImageWrite`'s own Texel operand was a bare
+scalar `float`, not `<4 x float>`, because `RWTexture2DArray<float>` is a
+single-channel format and `dxc`'s `OpImageWrite` Texel operand always
+matches the shader's own declared element width.
+
+The important finding: this is **not** an `Array2D`-specific bug at all.
+I proved this by reproducing the identical failure for a hand-written,
+plain (non-arrayed) `RWTexture2D<float>` compute shader
+(`/tmp/l76a_2d/`), and further confirmed the gap extends beyond scalars
+by compiling a `RWTexture2D<float2>` shader (`/tmp/l76a_vec2/`) and
+observing a genuine `<2 x float>` `OpImageWrite` Texel from `dxc`. So the
+roadmap's own "arrayed storage image" framing for L76(a) was too narrow
+a description of the real bug: any storage image (arrayed or not) whose
+HLSL element type is narrower than a full 4-component vector triggers
+this same code path. This is worth remembering for future sessions:
+**a roadmap row's own filed symptom/hypothesis is a starting point, not
+ground truth -- always verify the actual root cause independently,
+especially when the initial hypothesis (here: "must be array-specific
+since the diagnostic names an arrayed image type") doesn't hold up once
+you reproduce a narrower counterexample.**
+
+I also confirmed, before writing any fix, that the runtime side
+(`FeMeRuntimeCPU.c`'s `femeRTStoreTexel2D`/`femeRTPackImageTexel`) already
+handles narrow formats correctly: it always takes/returns a full
+`FemeRTv4f32`/`FemeRTv4i32` calling-convention value, but internally only
+reads/writes the image's own real channel count (`Img->Format`-driven),
+silently ignoring the rest. This meant the fix could be scoped entirely
+to the LLVM-IR lowering layer in `SPIRVResourceLowering.cpp` -- widening
+a narrower Store Texel up to 4-wide before the runtime call, and
+narrowing the runtime's always-4-wide Load result back down after it --
+without touching the runtime C code, `ImageCalls.h`/`.cpp`'s call-builder
+signatures, or the classification/coordinate-shape logic at all. A much
+smaller, more surgical fix than the roadmap's own filed hypothesis
+suggested (which speculated a whole new `ImageCalls` builder variant
+might be needed).
+
+One more interesting asymmetry, confirmed via real `dxc -spirv` compiles:
+a *sampled* image's `OpImageRead`/`OpImageFetch` always returns a full
+`<4 x T>` regardless of the underlying format's real channel count (this
+is why the existing sampled-image Load code never needed any
+width-awareness) -- but a *storage* image's `OpImageWrite` Texel operand,
+and (per this fix) its own `Load`-via-`getpointer` result, is emitted by
+`dxc` at *exactly* the shader's declared `RWTexture*<T>` element width.
+This asymmetry between sampled- and storage-image Load semantics is the
+actual crux of the bug, and also explains why real Vulkan CTS (which is
+GLSL-sourced for every `dEQP-VK.image.load_store.*` case, and GLSL's
+`imageStore`/`imageLoad` built-ins always operate on a full `vec4`
+regardless of format) never surfaced this gap on its own: it's a real
+gap only reachable from HLSL-sourced shaders declaring a narrower
+`RWTexture*<T>` element type, which is exactly why this row's own real
+CTS re-run (done for regression-check purposes, not fix-confirmation)
+shows unchanged pass/fail counts before and after the fix -- the genuine
+confirming evidence had to come from new, hand-written HLSL manual
+repros instead.
+
+## Fix
+
+Added 4 new helper functions to `SPIRVResourceLowering.cpp`:
+`storageImageTexelWidth` (real 1-4 component count for a scalar/vector
+type), `isIntegerStorageTexelType` (integer-vs-float classification
+independent of width), `widenStorageImageTexel` (Store side: zero-pads a
+narrower Texel up to `<4 x float>`/`<4 x i32>` via `InsertElement`, a
+no-op when already 4-wide -- I initially missed this no-op fast path and
+it broke one pre-existing lit test, `spirv-resource-lowering-image-
+getdimensions.ll`, whose FileCheck expected an already-4-wide Texel to
+pass through completely unmodified rather than being rebuilt via an
+identical-looking `InsertElement` chain; adding an early-return fixed it
+and matches `narrowStorageImageTexel`'s own existing no-op fast path),
+and `narrowStorageImageTexel` (Load side: `ShuffleVector`/
+`ExtractElement`s the runtime's always-4-wide result back down to the
+real declared width). Updated `hasOnlySupportedStorageImageUses` and both
+the Store- and Load-lowering call sites to use these instead of the old
+hardcoded `isV4I32`/`isV4F32`-only checks.
+
+## Testing
+
+Added 4 new unit tests to `SPIRVResourceLoweringTest.cpp`: a scalar Store
+(plain `Plain2D`), the exact `Array2D` repro shape (scalar,
+`RWTexture2DArray<float>`-equivalent), a scalar Load, and a 2-component
+Store -- confirming the width generalization at each of the shapes this
+fix's own doc comments claim to support. All 433 `FeMeTransformsCPUTests`
+pass (up from 429 pre-fix), and the full `check-feme` target (2782/2841
+Passed, 59 Unsupported, 0 Failed) shows no regressions.
+
+Rebuilt `libfeme_vulkan.so`/`offloader` and re-ran all three manual
+repros end-to-end: the plain scalar case, the plain 2-component case, and
+the exact named `RWTexture2DArray<float>` repro all now clear pipeline
+creation and produce byte-exact expected output (the array repro's own
+`Out`/`Expected` buffers match bit-for-bit across all 30 texels).
+
+Attempted to also run this row's own test via the `feme-vk` `OffloadTest`
+lit-test infrastructure discovered in `build2/tools/OffloadTest/test/
+feme-vk/` (which does exist in this checkout, unlike what an earlier
+session's notes assumed) -- but every test in that suite fails with
+`"Failed to create Vulkan instance (VkResult = -9)"` because its
+`RUN:` lines hardcode `offloader -debug-layer`, and this container has no
+Vulkan validation layers installed. Confirmed this is a pre-existing,
+environment-wide limitation unrelated to this fix by re-running an
+unrelated, definitely-otherwise-passing test
+(`Feature/Textures/Array.Sample.test`) and observing the identical
+failure. The manual `offloader` invocation without `-debug-layer` (the
+methodology prior sessions already established) remains the correct way
+to verify a real repro in this environment.
+
+Real Vulkan CTS: `dEQP-VK.image.load_store.{with,without}_format.
+2d*.r32*sfloat*` (30 cases, the closest real analogue): 30/30 Pass, 0
+Fail (unaffected either way, as expected, since GLSL CTS shaders don't
+exercise this narrow-Texel path). Full `load-store.txt` mustpass
+regression caselist (3446 cases): 2346/3446 Pass, 0 Fail -- 0 Fail
+confirms no regressions from the generalized width-check logic.
+
+## Docs updated
+
+- `FeMeGraphicsDesign.md`: appended an "Update (roadmap L76(a), closed)"
+  note to the existing H19a storage-image section, describing the
+  broader-than-filed root cause, the fix, and verification results.
+- `VulkanCTSReport.md`: new "Roadmap L76(a)" section with the full
+  Symptom/Root cause/Fix/Real-ICD-before-after/Real-CTS-re-run writeup.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed,
+  no change needed -- this fix touches no new Vulkan feature/extension
+  surface (all affected formats were already marked supported from
+  earlier H19-series work; this fix is purely about HLSL element-type
+  width, not pixel format support).
+- `Roadmap.md`: struck through L76(a) with a closing summary covering the
+  broader-than-filed root cause and full verification results.
+
+## Commits
+
+Broken into three separate commits: (1) the `SPIRVResourceLowering.cpp`
+fix plus new unit tests, (2) the doc updates (design doc, CTS report,
+roadmap), (3) this `agent_thoughts.md` append, on its own, last.
