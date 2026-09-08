@@ -32205,3 +32205,42 @@ needed. Roadmap.md's L76 done-note updated with a cross-reference back to
 L36 noting L36 is the row's real original ID and L76 the accidental
 duplicate, so a future reader following either row lands on the complete
 picture.
+
+## L37: `feme-cpu-wrap-hull` literal-constant cross-control-point input load
+
+`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test` (the two
+named repros): both cleared the `feme-cpu-wrap-hull: control-point phase
+only supports a control point reading its own input control point's
+attributes` diagnostic after the fix, confirmed via a real
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` before/after comparison against the
+rebuilt `feme_vulkan` ICD (stash/pop of the fix, re-running both cases
+each time). Post-fix, both now hit a different, previously-hidden,
+unrelated diagnostic instead (tessellation execution modes co-occurring
+on one SPIR-V entry point, contradicting `ConvertSPIRVToLLVMPass.cpp`'s
+assumption) -- filed as new roadmap row L77, not part of this row's own
+scope.
+
+### Real CTS re-run
+
+Ran `dEQP-VK.tessellation.shader_input_output.*` (28 cases, the closest
+real CTS group exercising control-point-phase input/output addressing)
+against the rebuilt ICD. Result: identical to the pre-fix baseline --
+zero cases reach `feme-cpu-wrap-hull` at all; every case that completes
+fails earlier, on one of two already-tracked, unrelated pre-existing
+gaps (`feme-cpu-wrap-patch-constant: masked output store references an
+unknown patch-output signature element`, and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction on
+`main.patchconstant`), and the run stops after 14/28 cases on the
+already-documented `shader_input_output` group segfault (see this
+file's existing references to this same crash, e.g. the H4c/H4d and
+H10h-era entries above) -- a known, pre-existing, unrelated crash, not
+newly introduced by this fix. No regression: this group could not
+exercise this row's own diagnostic before or after the fix, confirming
+the fix is CPU-lowering-internal and does not change this caselist's
+own Pass/Fail shape.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-lowering addressing-scheme fix
+inside `feme-cpu-wrap-hull`, touching no new Vulkan feature or extension
+surface (confirmed: neither file mentions L37/L77 today, and none
+should).
