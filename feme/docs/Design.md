@@ -2400,6 +2400,32 @@ ever testing through the full `feme` driver end to end:
   writes the `Backend`'s binary output), letting the SPIR-V "null pipeline"
   be composed and `lit`-tested one stage at a time instead of via `gtest`
   (see the deviation note under Testing Strategy below).
+  Roadmap L35(a): `--import-spirv` is registered via the lower-level,
+  raw file-to-file `mlir::TranslateRegistration` rather than
+  `mlir::TranslateToMLIRRegistration` (every other translation above still
+  uses the latter), specifically so it can expose
+  `--import-spirv-skip-verify` -- an opt-in flag (default off, preserving
+  every other caller's exact existing behavior) that skips `mlir::verify()`
+  on the imported module (and prints it with `OpPrintingFlags`'s own
+  `assumeVerified()`, since `Operation::print` would otherwise
+  independently re-run verification anyway while deciding whether to
+  fall back to generic op form). This works around a real, narrow, purely
+  upstream-tooling gap: `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s
+  `verifyImageOperands` has a literal "TODO: Add the validation rules for
+  the following Image Operands" comment followed by an unconditional
+  `assert(!bitEnumContainsAny(...))` that rejects a real `ConstOffset`/
+  `Offset`/`ConstOffsets`/`MinLod`/etc. image operand outright in any
+  assertions-enabled build (this project's own standard build
+  configuration), crashing `--import-spirv` on any real repro using one of
+  these operands even though the real Vulkan runtime import path
+  (`feme::SPIRVImporter`'s own callers in `Pipeline.cpp`) never invokes
+  full op verification at all and imports/lowers these exact operands
+  correctly end-to-end. `--import-spirv-skip-verify` is a workaround for
+  this project's own real-IR-reduction tooling, not a fix to the
+  underlying upstream gap itself; a user should only pass it once a real
+  repro is confirmed to hit exactly this known, narrow gap, since skipping
+  verification can also mask a genuine structural bug in an otherwise
+  unrelated reduction.
 - **`feme-render`**: the graphics counterpart of `feme-run`. It renders a
   *textual scene description* — render targets, pipeline state, vertex and
   index data, resources, and one or more draws — through FeMe's software
