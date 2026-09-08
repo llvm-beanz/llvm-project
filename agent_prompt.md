@@ -42,20 +42,50 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L69(a) from the roadmap or other prerequisites blocking the
+Can you close out L70 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`DerivativeGroupQuadsKHR` (the 2x2-spatial-tile compute derivative-group
-> layout) is deliberately rejected outright at `vkCreateComputePipelines`, split
-> out of roadmap L69's own scope** -- unlike `DerivativeGroupLinearKHR` (L69,
-> now implemented: feme's flat/linear compute-stage lane assignment already
-> matches that mode's own spec-defined grouping of 4 consecutive
-> `LocalInvocationIndex` values with no further change), `Quads` mode needs
-> adjacent invocations grouped into real 2x2 spatial tiles, which this target's
-> compute-stage lane-widening/scheduling has no concept of at all today -- a
-> genuine lane-assignment redesign, not a small follow-on fix, so
-> `Pipeline.cpp`'s `compileComputePipeline` returns a clear, named error for
-> this mode rather than silently miscompiling it. Not yet started; needs its own
-> design investigation into how a quad-grouped compute dispatch could coexist
-> with this target's existing flat lane assignment before any implementation
-> work can begin.
+> **All compute-stage image sampling fails outright at
+> `vkCreateComputePipelines`, entirely independent of screen-space derivatives**
+> -- discovered by roadmap L69's own real CTS re-run, which found its 295-case
+> caselist's 153 `Fail` cases were unaffected in aggregate by either of L69's
+> own two sub-bug fixes; confirmed unrelated to derivatives specifically because
+> a trivial `dEQP-VK.glsl.texture_functions.texturelod.sampler2d_float_compute`
+> case (explicit-LOD, needs no derivative-group mode at all) fails identically,
+> with `FEME_VULKAN_LOG_CREATION_ERRORS=1` reporting the same generic
+> `UnsupportedOps.cpp` diagnostic every other compute-stage sampling failure
+> already shows: `"...is a register-bound resource handle the FeMe CPU target
+> cannot normalize into a heap access..."`. A real SPIR-V disassembly of this
+> exact failing case (`--deqp-log-decompiled-spirv=enable`) shows the flagged
+> handle (`target("spirv.Image", f32, 1, 0, 0, 0, 2, 4)`, i.e. a plain 2D,
+> `Rgba8`-format storage image at binding 4) is the compute shader's own output
+> image -- unlike a fragment shader, a compute shader has no color-attachment
+> framebuffer to write its result into, so this CTS group always binds a plain
+> storage image for that purpose instead -- but the diagnostic's own caveat
+> ("this handle may be an unrelated bystander") is confirmed live here too:
+> `classifyStorageImage2DHandle` in `SPIRVResourceLowering.cpp` already accepts
+> this exact shape (`Dim2D`, non-arrayed, non-multisampled,
+> `SPIRVSampledWithoutSampler`, float channel type) with no image-format-based
+> rejection at all, so the flagged handle is very unlikely to be the real
+> failing operation -- some *other* resource use in the same entry function
+> (most plausibly the function's own *input* sampled image, at binding 0, or an
+> as-yet-unidentified operation specific to how a compute-stage entry point's
+> resources get imported/lowered) is the true cause, per this project's own
+> established "an unsupported use of any other resource in the same function
+> prevents every handle in that function from being normalized" precedent. Not
+> yet root-caused; needs its own real IR reduction of this exact failing case
+> (mirroring this project's own H6-series/H8-series/H9-series/L-series reduction
+> precedent) to isolate the true failing operation before any fix can be scoped,
+> since grepping
+> `SPIRVResourceLowering.cpp`/`BoundResourceNormalization.cpp`/`ResourceInfo.cpp`
+> for stage-based branching found none, so the bug is not a simple compute-stage
+> exclusion anywhere in the resource-lowering passes themselves -- it must be
+> either in how the SPIR-V-to-LLVM import path threads a compute entry point's
+> resource/binding metadata differently than a graphics one, or in an
+> image-sampling-shaped operation this pass's existing pattern set does not yet
+> recognize for a compute-stage caller specifically. This is a large,
+> cross-cutting, and currently the sole blocker of any CTS-visible payoff for
+> every compute-stage sampling fix this project's own history has already landed
+> (L69 included) -- likely needs breaking down further once root-caused, per
+> this project's own established splitting precedent, rather than attempted in
+> one pass.
