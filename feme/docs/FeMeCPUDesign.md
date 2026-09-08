@@ -1177,6 +1177,28 @@ almost nothing (see "Decisions made now to keep it cheap later") and is
 what lets quad ops and derivatives be added later without renumbering
 lanes underneath shaders that already observe `WaveGetLaneIndex()`.
 
+Deviation (roadmap L69(a)): the as-implemented `WaveLowering.cpp` does
+*not* apply this quad-tiled numbering unconditionally the way this section
+originally specified. It uses the plain row-major `flat = w * W + i`,
+`x = flat % X`, ... numbering for every entry point by default, and only
+reinterprets the physical lane index through the quad-tiled formula above
+for a compute entry point that declares `DerivativeGroupQuadsKHR` (a new
+`"feme.compute.derivative.group"="quads"` function attribute,
+`Vulkan/Pipeline.cpp`, read by `SIMDize.cpp` and threaded to
+`WaveLoweringPass` as a per-call operand rather than applied globally).
+This narrows the original "quads always, whenever `X`/`Y` are even" intent
+to "quads only when a shader actually asked for them," to avoid changing
+every existing (non-derivative) compute shader's observed lane-to-
+invocation mapping -- and by extension every existing lit/unit test that
+hard-codes the row-major formula's expected output -- as a side effect of
+a fix scoped only to `DerivativeGroupQuadsKHR` support. `WaveGetLaneIndex`/
+`SV_GroupIndex` therefore still observe plain row-major order for every
+shader that does not opt into this mode, not the quad-tiled order this
+section describes as the default; `DerivativeGroupLinearKHR` (roadmap
+L69) needs no such reinterpretation at all, since its own spec-defined
+grouping (any 4 consecutive `LocalInvocationIndex` values) already matches
+row-major order unconditionally.
+
 **Partial waves.** `GroupSize` need not be a multiple of `W`. The final wave
 of a group runs with an entry mask that has the out-of-range lanes off,
 rather than the kernel being specialized per group. When

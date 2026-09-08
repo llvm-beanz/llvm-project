@@ -30782,3 +30782,102 @@ L69/L69(a)/L70 cross-reference. `Vulkan14FeatureInventory.md`: no change
 (this feature lives behind an extension struct, not a core 1.4 feature).
 Temporary artifacts (`git worktree`, CTS caselists/qpa logs) cleaned up at
 the end of the session.
+
+## Roadmap L69(a): `DerivativeGroupQuadsKHR` compute-derivative lane tiling
+
+Implemented the 2x2-spatial-tile lane-assignment redesign roadmap L69(a)
+deferred: feme's CPU target computes a "physical" per-invocation flat lane
+index (`flat = WaveIndex * W + lane`, `WaveLowering.cpp`) that is also used
+directly as the shader-visible `x`/`y`/`z`/`LocalInvocationIndex` identity.
+`lowerDerivative`'s existing fragment-quad shuffle math already assumes
+every 4 consecutive *physical* lanes form one 2x2 tile's corners in
+`(0,0),(1,0),(0,1),(1,1)` order -- true automatically for
+`DerivativeGroupLinearKHR` (any 4 consecutive `LocalInvocationIndex` values
+qualify), but only accidentally true for `DerivativeGroupQuadsKHR` (which
+needs *real* spatial `(x,y)` adjacency) when the group size's X dimension
+happens to be 2.
+
+Fix: a "quad-tiled" reinterpretation of the physical flat index into real
+`(x, y, z)` coordinates -- `decomposeQuadTiledComponent`/
+`buildQuadTiledFlattenedThreadIdInGroup` (`WaveLowering.cpp`) -- applied
+only for entry points whose group size resolves to this mode (a new
+`"feme.compute.derivative.group"="quads"` function attribute, stamped by
+`Pipeline.cpp`'s `compileComputePipeline` and read by `SIMDize.cpp`'s
+`functionUsesQuadTiledComputeDerivatives`, threaded through as a new
+trailing `i1` operand on the synthetic `feme.cpu.builtin.*` calls,
+`BuiltinCalls.h`/`.cpp`). This makes every 4 consecutive physical lanes a
+real 2x2 spatial tile, so `lowerDerivative`'s existing shuffle math needs
+*no* change at all -- confirmed by hand-derivation and two new numeric
+`WaveLoweringTest` cases (`LowersQuadTiledThreadIdInGroupToSpatialTiles`/
+`LowersQuadTiledFlattenedThreadIdInGroupToRealIndex`) asserting the exact
+expected lane-to-`(x,y)` and recombined `LocalInvocationIndex` vectors for
+a 4x4x1 thread group at wave size 8. `Pipeline.cpp`'s outright rejection of
+`Quads` mode is replaced with validating this mode's own spec precondition
+(group size X and Y both even -- which also implies invocation count % 4
+== 0, so `Linear`'s own separate check is not needed here). Groupshared/
+resource addressing is unaffected: both always index via the *decomposed*
+x/y/z/flat value, never the raw physical lane, so this bijective remapping
+is safe everywhere it's applied. `computeDerivativeGroupQuads` is now
+genuinely advertised `VK_TRUE` (`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp`).
+
+New/updated tests: `WaveLoweringTest` (2 new numeric cases),
+`BuiltinCallsTest` (1 new round-trip case for the `QuadTiled` operand),
+`PipelineTest.cpp` (`RejectsDerivativeGroupQuads` replaced with
+`AcceptsDerivativeGroupQuadsWithEvenXAndYDimensions` using the existing
+2x2x1 shader, which already satisfies the new precondition, plus a new
+`RejectsDerivativeGroupQuadsWithOddXDimension` case for a 3x2x1 shader),
+`PhysicalDeviceInfoTest.cpp` (updated to expect both derivative-group
+feature bits true). One pre-existing lit test
+(`simdize-thread-id.ll`) needed its `CHECK-SAME` line updated for the new
+trailing `i1 false` operand every non-quad-tiled identity builtin call now
+also carries. `FeMeVulkanTests`: 660/660 pass. Full `check-feme`:
+2708/2767 pass, 0 fail, 59 unsupported (no regressions from the 2704/2763
+baseline the prior L69 session recorded -- Discovered/Unsupported grew
+slightly from new test cases added this session).
+
+### Real CTS re-measurement
+
+Reused the prior L69 session's own 295-case caselist (242
+`texturegrad{,offset}*_compute` + 53 implicit-LOD `texture.*_compute`,
+`dEQP-VK-cases.txt`-derived, run via `--deqp-case=<comma-joined list>`
+against the current (this session's) build, `VK_DRIVER_FILES` pointed at
+`build2/tools/feme/tools/feme-vulkan/feme_icd.json`):
+
+- **Totals**: 0/295 Pass, 187 Fail, 108 NotSupported -- compared to the
+  prior L69 session's own recorded "after" totals (0/295 Pass, 153 Fail,
+  142 NotSupported), 34 cases moved from `NotSupported` to `Fail`.
+- Per-case diagnostics (`FEME_VULKAN_LOG_CREATION_ERRORS=1`) confirm this
+  fix is genuinely wired up end to end: no case anywhere in this caselist
+  still reports the old `"DerivativeGroupQuadsKHR is not yet supported"`/
+  `"computeDerivativeGroupQuads feature is not supported"` rejection text
+  this row previously emitted -- every one of the 34 newly-`Fail` cases
+  (a subset of the 53 implicit-LOD cases, which are exactly the ones that
+  actually resolve to `DerivativeGroupQuadsKHR` for this CTS group) now
+  proceeds past `compileComputePipeline`'s validation entirely and instead
+  fails at SPIR-V import with `"unknown extension:
+  SPV_KHR_compute_shader_derivatives"` -- an already-known, pre-existing,
+  unrelated gap this project's own roadmap L7 already tracks (first named
+  in that row's own original triage, well before this session). The
+  remaining 153 `Fail` cases (the explicit-`Grad` `texturegrad*_compute`
+  subset, confirmed via a direct single-case repro with the same env var)
+  are unaffected and continue to hit the separate, already-tracked roadmap
+  L70 resource-handle-normalization bug exactly as before this session's
+  own fix (that subset never resolves to `DerivativeGroupQuadsKHR`/
+  declares the extension at all, since it supplies its gradients
+  explicitly rather than needing an implicit-derivative execution mode).
+- **Why 0 cases pass**: this row's own fix is confirmed correct and fully
+  wired up (it genuinely removes the prior rejection and reaches
+  downstream code for the first time), but its real CTS-visible payoff
+  remains entirely masked by these two separate, pre-existing,
+  already-tracked gaps (L7's unknown-extension SPIR-V-import limitation
+  for the implicit-LOD/`Quads` subset, L70's resource-handle-normalization
+  bug for the explicit-`Grad` subset) -- neither is new, and neither is in
+  this row's own scope to fix.
+
+`VulkanExtensionInventory.md`: `VK_KHR_compute_shader_derivatives` updated
+to "Implemented (both `DerivativeGroupLinearKHR` and
+`DerivativeGroupQuadsKHR`)" with an updated L69/L69(a)/L70/L7
+cross-reference. `Vulkan14FeatureInventory.md`: no change (this feature
+lives behind an extension struct, not a core 1.4 feature). Temporary
+artifacts (CTS caselists/qpa logs under `/tmp`) cleaned up at the end of
+the session.
