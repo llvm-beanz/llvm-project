@@ -167,8 +167,8 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
 /// count, interpolation, frequency, stream, from-input-patch flag,
 /// row-count-is-vertex-array flag, has-transform-feedback-buffer flag,
 /// transform-feedback buffer, transform-feedback offset, transform-feedback
-/// stride.
-constexpr size_t NumFixedFieldsPerElement = 22;
+/// stride, captured-self-index flag (roadmap L82).
+constexpr size_t NumFixedFieldsPerElement = 23;
 
 std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
   size_t TotalSemanticBytes = 0;
@@ -215,6 +215,7 @@ std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
     WriteNext(Elt.XfbBuffer.value_or(0u));
     WriteNext(Elt.XfbOffset);
     WriteNext(Elt.XfbStride);
+    WriteNext(Elt.CapturedSelfIndex ? 1u : 0u);
   }
   assert(P == Bytes.data() + Bytes.size() &&
          "computed size did not match bytes actually written");
@@ -410,6 +411,12 @@ Expected<EntrySignature> feme::parseSignature(ArrayRef<uint8_t> Bytes) {
     if (!XfbStride)
       return XfbStride.takeError();
     Elt.XfbStride = *XfbStride;
+
+    Expected<uint32_t> CapturedSelfIndex =
+        ReadField("captured-self-index flag");
+    if (!CapturedSelfIndex)
+      return CapturedSelfIndex.takeError();
+    Elt.CapturedSelfIndex = *CapturedSelfIndex != 0;
 
     Sig.Elements.push_back(std::move(Elt));
   }

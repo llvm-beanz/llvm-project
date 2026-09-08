@@ -275,6 +275,41 @@ struct SignatureElement {
   /// since they have only one input source to begin with.
   bool FromInputPatch = false;
 
+  /// (Roadmap L82) True for an `Input`-direction element of a hull
+  /// shader's patch-constant phase (see
+  /// `feme::cpu::PatchConstantWrapperPass::lowerPatchConstantInputLoad`)
+  /// that reads back one of `feme::CanonicalizeStagePass`'s own
+  /// synthetic `<entry>.patchconst.capture.N` globals -- the mechanism
+  /// (roadmap H4c) that threads a value the patch-constant region reads
+  /// but that was computed before the one barrier the control-point
+  /// phase splits at back across the two now-separate LLVM functions.
+  /// Unlike an ordinary patch-constant `Input` read (which may
+  /// legitimately address any control point via its own dynamic/constant
+  /// `ControlPoint` operand -- that is the whole point of a patch-
+  /// constant function reading `OutputPatch`/`InputPatch` data), a
+  /// captured cross-barrier value was, in the original unsplit shader,
+  /// simply a bare SSA re-use of a value *this exact invocation* itself
+  /// already computed pre-barrier -- there is no real "which control
+  /// point" question to ask at all, since the answer is always "this
+  /// one". The capture's own store side (an ordinary
+  /// `feme.stage.output.store` in the control-point phase, lowered by
+  /// `feme::cpu::HullWrapperPass::lowerHullOutputStore`) already writes
+  /// to *this* invocation's own storage slot unconditionally (an output
+  /// store never addresses any other invocation's slot to begin with);
+  /// but because the capture global itself is a plain scalar (no
+  /// `AccessChain`/GEP survives its unindexed load/store pair --
+  /// `CanonicalizeStage.cpp`'s own capture-creation code never
+  /// synthesizes one), `resolveStageIOAccess` finds no dynamic-or-
+  /// constant vertex index to carry on the read side either, and
+  /// defaults its `ControlPoint` operand to a literal `0` -- silently
+  /// making *every* invocation re-read invocation 0's own captured
+  /// value instead of its own. This flag lets
+  /// `lowerPatchConstantInputLoad` recognize that shape and substitute
+  /// this lane's own flat invocation index in the read's `ControlPoint`
+  /// operand's place, exactly mirroring the store side's own
+  /// unconditional self-addressing.
+  bool CapturedSelfIndex = false;
+
   /// (Roadmap H21a) The `VK_EXT_transform_feedback` buffer index this
   /// `Output`-direction element captures to (SPIR-V's `XfbBuffer`
   /// decoration), or `std::nullopt` if the element is not captured at all
@@ -335,7 +370,8 @@ bool verifySignature(const EntrySignature &Sig,
 /// `SignatureElement::Index`. Version 4 appends
 /// `SignatureElement::RowCountIsVertexArray`. Version 5 appends
 /// `SignatureElement::XfbBuffer`/`XfbOffset`/`XfbStride` (roadmap H21a).
-constexpr uint32_t SignatureAbiVersion = 5;
+/// Version 6 appends `SignatureElement::CapturedSelfIndex` (roadmap L82).
+constexpr uint32_t SignatureAbiVersion = 6;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each

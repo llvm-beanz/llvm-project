@@ -301,6 +301,13 @@ EntrySignature makeRichSignature() {
   InputPatch.FromInputPatch = true;
   Sig.Elements.push_back(InputPatch);
 
+  // (Roadmap L82) Exercises `CapturedSelfIndex`'s round trip: a
+  // cross-barrier-capture global input read back with "this lane's own"
+  // addressing rather than control-point 0's.
+  SignatureElement Captured = validInputElement(6);
+  Captured.CapturedSelfIndex = true;
+  Sig.Elements.push_back(Captured);
+
   // (Roadmap H21a) Exercises `XfbBuffer`/`XfbOffset`/`XfbStride`'s round
   // trip: an ordinary vertex-shader output captured to transform-feedback
   // buffer 1 at byte offset 16, in a buffer whose vertices are 32 bytes
@@ -349,6 +356,7 @@ TEST(SignatureTest, SerializeParseRoundTrips) {
     EXPECT_EQ(Got.XfbBuffer, Want.XfbBuffer);
     EXPECT_EQ(Got.XfbOffset, Want.XfbOffset);
     EXPECT_EQ(Got.XfbStride, Want.XfbStride);
+    EXPECT_EQ(Got.CapturedSelfIndex, Want.CapturedSelfIndex);
   }
 }
 
