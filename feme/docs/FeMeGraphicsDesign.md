@@ -3828,6 +3828,24 @@ still needs the host-side glue "What's still open" in agent_thoughts.md's
 most recent R34 session describes: wiring the compiled hull/domain/geometry
 stages into `executeDraws`/`feme-render`).
 
+Status (roadmap L82): `Tessellator.cpp`'s `tessellateQuad` interior core
+lattice division count (`Nu`/`Nv`) is now `max(1, computeSegmentCount(Inside)
+- 1)`, not `computeSegmentCount(Inside)` directly. The core lattice is
+always inset strictly *within* the boundary ring (never touching it, per
+this section's own "strictly inset from the boundary" language above), so
+its own division count is the number of strictly *interior* lattice lines
+an inside factor of `N` implies -- one fewer than the whole-axis segment
+count used for the boundary ring's own per-edge vertices. The pre-fix
+formula generated a spurious extra interior ring for the common
+`Inside == Edges` case, landing core lattice points on non-dyadic domain
+fractions (e.g. `1/6` for `Inside == 2`) that cannot be represented
+exactly in `float32`, producing an unrecoverable 1-ULP error once fed
+through a domain shader's own interpolation (see `VulkanCTSReport.md`'s
+L82 entry for the full real-ICD repro/root-cause narrative). See
+`unittests/Graphics/TessellatorTest.cpp`'s
+`QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords` for the regression
+coverage.
+
 ### G6: Amplification and mesh shading
 
 - Import and canonicalize DXIL amplification/mesh and SPIR-V task/mesh stages.

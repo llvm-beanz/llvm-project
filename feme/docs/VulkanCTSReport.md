@@ -32611,3 +32611,94 @@ offloader-based, before/after comparison above.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 change needed -- this is a pure CPU-side system-value-lowering fix,
 touching no new Vulkan feature or extension surface.
+
+## L82: Quad-domain interior core lattice off-by-one division count
+
+### Symptom
+
+A real `offloader` re-run of `DomainSystemValues.test` after L81's fix
+runs the pipeline to completion (no `VkResult` failure, no
+`vkCreateGraphicsPipelines` failure), but `ResultBuffer` still failed its
+exact-match comparison against `ResultBuffer_Expected` by exactly 1 ULP
+on 3 of 8 records' `SV_DomainLocation`-forwarded `uv.x` ("DomU") values
+(e.g. `0x3e800000` expected vs. `0x3e7fffff` observed -- `0.25` vs.
+`0.24999997`). `DomV`, all four `Pos*` components, and `PrimID` matched
+exactly in every record.
+
+### Root cause
+
+Confirmed via debug instrumentation directly in `Executor.cpp`'s
+barycentric-weight and varying-interpolation code (temporary, since
+removed): the covering triangle for one of the failing pixels had a real
+vertex `SV_DomainLocation.x` value of `0.166666672` (~1/6) -- not one of
+the "nice" `0.25`/`0.75` fractions the test's own doc comment assumes.
+Tracing into `Tessellator.cpp`'s `tessellateQuad`: the interior core
+lattice's own division count (`Nu`/`Nv`) was set directly to
+`computeSegmentCount(Inside)` -- the same whole-axis segment count used
+for the *boundary* edges, where a point is legitimately needed at every
+segment endpoint including `0`/`1`. But the core lattice is always inset
+strictly *within* the boundary (via a `Margin` blend) and never touches
+it, so its own division count should be the number of strictly
+*interior* lattice lines the inside factor implies -- one fewer than the
+whole-axis segment count (an inside factor of `N` divides the axis into
+`N` segments, leaving `N - 1` interior lines). For the common
+`Inside == Edges == 2` case (this test's exact shape), the off-by-one
+generated a spurious *extra* interior ring whose own margin-inset formula
+produced a genuinely non-dyadic `1/6` domain coordinate -- unrepresentable
+exactly in `float32` -- rather than the correct, exactly-representable
+`0.25`/`0.75`. That already-rounded `1/6` vertex value then fed the
+domain shader's own bilinear interpolation, producing an unrecoverable
+1-ULP error at readback, no matter how precisely the rest of the pipeline
+(rasterizer barycentric weights, etc.) computed with it.
+
+A first hypothesis (that the rasterizer's `float`-precision barycentric
+weight computation was insufficiently precise, mirroring the existing
+`edgeFnD`/roadmap-H4j precedent) was implemented, built, and tested, and
+produced a **bit-for-bit-identical, unchanged** result -- conclusively
+disproving that hypothesis before the real root cause (above) was found;
+that speculative change was reverted, not committed.
+
+### Fix
+
+`Tessellator.cpp`'s `tessellateQuad`: `Nu`/`Nv` are now
+`max(1, computeSegmentCount(Inside) - 1)`, matching the "N segments
+implies N - 1 interior points" convention already implicit in the
+boundary ring's own construction. The `max(1, ...)` clamp preserves the
+existing degenerate single-ring behavior when the inside factor is
+already at its own minimum of `1`. Added
+`QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords`, a new regression
+test confirming the core lattice lands on exact dyadic fractions for the
+`Inside == Edges == 2` shape, and updated
+`QuadDomainGeneratesTheAnalyticGridSize`'s now-corrected expected grid
+dimensions (`Inside = {2, 3}` now correctly yields a `1x2` core grid, not
+`2x3`).
+
+### Real-ICD before/after
+
+Re-ran the same manual `DomainSystemValues.test` reproduction used for
+L77-L81 (no offload-test-suite build directory exists in this checkout,
+so the test's own `RUN:` lines are reproduced by hand: `split-file`,
+`dxc -spirv`, then `offloader` directly). Before this fix: `ResultBuffer`
+mismatched `ResultBuffer_Expected` by exactly 1 ULP on 3 of 8 records'
+`DomU` field, as filed. After this fix: `ResultBuffer` matches
+`ResultBuffer_Expected` **bit-for-bit exactly**, confirmed
+programmatically (not just visually) by comparing every hex word of both
+buffers. `DomainSystemValues.test`'s own repro is now fully passing.
+
+### Real CTS re-run
+
+Re-ran the identical `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist used for L37/L77-L81's own CTS re-runs: unchanged --
+still 13/28 cases reach a result before the group's own already-
+documented, pre-existing segfault (14th case), and all 13 still fail on
+the same two already-tracked, unrelated gaps
+(`feme-cpu-wrap-patch-constant`'s masked-output-store gap and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction) as
+before this fix -- confirming no regression, though (as for
+L37/L77-L81) this CTS group still cannot directly exercise this row's
+own fix either before or after; the real confirmation is the
+offloader-based, before/after comparison above.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-side tessellator interior-lattice
+fix, touching no new Vulkan feature or extension surface.
