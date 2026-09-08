@@ -1186,12 +1186,14 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // already *is* the handle), these synthesized calls' own Image
     // operand is their first argument, mirroring `isSampleIntrinsic`'s
     // own `CI->getArgOperand(0) != &Handle` convention. Scoped to
-    // `Plain2D`/`Array2D` only for now, mirroring `GetDimensions2D`'s own
-    // precedent (see `ImageCallKind::QuerySizeLod2D`'s own doc).
+    // `Plain2D` only for now (the builders below only emit a v2i32
+    // result, which does not match `Array2D`'s own extra layer-count
+    // component) -- `Array2D` support is left for a follow-on row, see
+    // `ImageCallKind::QuerySizeLod2D`'s own doc.
     if (isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
+      if (Shape != ImageShape::Plain2D)
         return false;
       continue;
     }
@@ -1541,7 +1543,7 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     if (isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
+      if (Shape != ImageShape::Plain2D)
         return false;
       continue;
     }
