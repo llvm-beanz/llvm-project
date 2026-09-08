@@ -12,7 +12,7 @@
 ; CHECK-SAME: <4 x i1> %wave_sideeffect_mask, ptr %wave_groupshared
 ; CHECK: call <4 x i32> @feme.cpu.builtin.thread_id.v4(
 ; CHECK-SAME: i32 %wave_group_id_x, i32 %wave_group_id_y, i32 %wave_group_id_z,
-; CHECK-SAME: i32 %wave_index, i32 4, i32 1, i32 1, i32 0)
+; CHECK-SAME: i32 %wave_index, i32 4, i32 1, i32 1, i32 0, i1 false)
 ; CHECK: mul <4 x i32> %{{.*}}, splat (i32 2)
 define void @main() #0 {
   %tid = call i32 @llvm.dx.thread.id(i32 0)
