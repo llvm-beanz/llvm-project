@@ -4917,6 +4917,64 @@ __attribute__((always_inline)) FemeRTv2i32 femeCpuImageGetDimensions2DV2I32(
   return (FemeRTv2i32){(int32_t)Img.Width, (int32_t)Img.Height};
 }
 
+// `feme.cpu.image.getdimensions.lod.2d.v2i32` (roadmap L72(d)): a plain 2D
+// image's own `(Width, Height)` extent at an explicit, possibly non-zero
+// mip level -- GLSL's `textureSize(sampler, lod)` (SPIR-V
+// `OpImageQuerySizeLod`), unlike `femeCpuImageGetDimensions2DV2I32`'s own
+// always-mip-0 query. `Lod` is clamped into `[0, MipLevels - 1]`
+// defensively (mirroring `femeRTSelectMipLevels`'s own clamping of a real
+// sampled LOD) before halving `Width`/`Height` that many times, the same
+// `max(1, Dim >> Level)` math `Image.cpp`'s own
+// `computeSubresourceLayouts` already uses to compute a real mip level's
+// subresource extent. An inactive lane or an unbound (`!Img.Data`) handle
+// reads as `{0, 0}`, mirroring `femeCpuImageGetDimensions2DV2I32`'s own
+// identical convention.
+FemeRTv2i32 femeCpuImageGetDimensionsLod2DV2I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.lod.2d.v2i32");
+
+__attribute__((always_inline)) FemeRTv2i32 femeCpuImageGetDimensionsLod2DV2I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t Lod, _Bool Mask) {
+  FemeRTv2i32 Zero = {0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || Img.MipLevels == 0)
+    return Zero;
+  uint32_t ClampedLod = Lod < 0 ? 0 : (uint32_t)Lod;
+  if (ClampedLod > Img.MipLevels - 1)
+    ClampedLod = Img.MipLevels - 1;
+  uint32_t Width = Img.Width >> ClampedLod;
+  uint32_t Height = Img.Height >> ClampedLod;
+  return (FemeRTv2i32){(int32_t)(Width ? Width : 1),
+                       (int32_t)(Height ? Height : 1)};
+}
+
+// `feme.cpu.image.querylevels.i32` (roadmap L72(d)): an image's own total
+// mip-level count -- GLSL's `textureQueryLevels(sampler)` (SPIR-V
+// `OpImageQueryLevels`). Unlike every other `feme.cpu.image.*` call above
+// this needs neither a `Mask` (no per-invocation side effect to guard
+// against) nor an explicit mip level/coordinate of its own -- only the
+// bound image's own identity. An unbound (`!Img.Data`) handle reads as
+// `0`, mirroring `femeCpuImageGetDimensions2DV2I32`'s own all-zero
+// convention for the same condition.
+int32_t femeCpuImageQueryLevelsI32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex) asm("feme.cpu.image.querylevels.i32");
+
+__attribute__((always_inline)) int32_t
+femeCpuImageQueryLevelsI32(const FemeRTImageDescriptor *ImageHeap,
+                           uint32_t ImageHeapCount, uint32_t ImageIndex) {
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return 0;
+  return (int32_t)Img.MipLevels;
+}
+
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
 // image, comparing `Dref` against each fetched texel's first (depth)
 // component via `Samp->CompareFunc`, then filters the per-texel 0/1

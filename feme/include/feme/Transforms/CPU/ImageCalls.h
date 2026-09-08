@@ -449,6 +449,32 @@ enum class ImageCallKind : uint8_t {
   /// both accept this same call shape) -- every other `ImageShape`'s own
   /// `GetDimensions` counterpart remains unstarted follow-on work.
   GetDimensions2D,
+  /// `feme.cpu.image.getdimensions.lod.2d.v2i32` (roadmap L72(d)): a plain
+  /// 2D image's own extent at an explicit, possibly non-zero mip level
+  /// (`OpImageQuerySizeLod` -- GLSL's `textureSize(sampler, lod)` against
+  /// a `sampler2D`, unlike `GetDimensions2D`'s own always-mip-0
+  /// `imageSize()`/no-argument `textureSize()`), returning the
+  /// `(max(1, Width >> Lod), max(1, Height >> Lod))` pair, clamped the
+  /// same way `Image.cpp`'s own `computeSubresourceLayouts` already
+  /// computes a mip level's real extent. Takes the same operands as
+  /// `GetDimensions2D` (`ImageIndex`/`Mask`) plus one more: the explicit
+  /// mip level itself (`Lod` in `MatchedImageCall`, reusing that same
+  /// field other sampling kinds already use for an explicit-LOD operand).
+  /// Scoped to `Plain2D`/`Array2D` only for now, mirroring
+  /// `GetDimensions2D`'s own precedent -- every other `ImageShape`'s own
+  /// counterpart remains unstarted follow-on work.
+  QuerySizeLod2D,
+  /// `feme.cpu.image.querylevels.i32` (roadmap L72(d)): an image's own
+  /// total mip-level count (`OpImageQueryLevels` -- GLSL's
+  /// `textureQueryLevels(sampler)`), returning the scalar
+  /// `FemeImageDescriptor::MipLevels` already tracks for its bound
+  /// subresource, or `0` for an unbound handle. Unlike `QuerySizeLod2D`
+  /// this needs neither a `Mask` (this query has no per-invocation side
+  /// effect to guard) nor an explicit mip level of its own -- only
+  /// `ImageIndex` -- so its own operand list is the smallest of any kind
+  /// above. Scoped to `Plain2D`/`Array2D` only for now, mirroring
+  /// `QuerySizeLod2D`'s own identical scoping decision.
+  QueryLevels,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -1101,6 +1127,26 @@ llvm::CallInst *createGetDimensions2D(llvm::IRBuilderBase &Builder,
                                       llvm::Value *ImageIndex,
                                       llvm::Value *Mask,
                                       const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.lod.2d.v2i32` call (roadmap
+/// L72(d)): see `ImageCallKind::QuerySizeLod2D`'s own doc for its
+/// `<2 x i32>` result shape. Same operand list as `createGetDimensions2D`
+/// plus \p Lod, the explicit mip level to query.
+llvm::CallInst *createQuerySizeLod2D(llvm::IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     llvm::Value *ImageIndex, llvm::Value *Lod,
+                                     llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.querylevels.i32` call (roadmap L72(d)): see
+/// `ImageCallKind::QueryLevels`'s own doc for its scalar `i32` result.
+/// Takes only \p ImageIndex from \p Env's image heap -- no `Mask`, no
+/// sampler heap, and no coordinate/mip-level operand of any kind, the
+/// smallest operand list of any `feme.cpu.image.*` builder.
+llvm::CallInst *createQueryLevels(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex,
+                                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.

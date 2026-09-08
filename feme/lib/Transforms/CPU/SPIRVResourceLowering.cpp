@@ -919,6 +919,39 @@ bool isGetDimensionsIntrinsic(const CallInst &CI) {
   return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_xy;
 }
 
+/// Whether \p CI's callee is a `SPIRVImporter.cpp`-synthesized magic-named
+/// external function whose own name begins with \p Prefix -- the
+/// recognition mechanism roadmap L72(d)'s own `lowerImageQueryOpcodes`
+/// import-time rewrite relies on: unlike `isGetDimensionsIntrinsic`'s own
+/// real `llvm.spv.resource.*` intrinsic, `OpImageQuerySizeLod`/
+/// `OpImageQueryLevels` have no real MLIR/LLVM intrinsic of their own at
+/// all (MLIR's SPIR-V dialect has zero enum coverage for either opcode),
+/// so that rewrite instead declares an ordinary external function with a
+/// distinct, stable name prefix per opcode/shape and this pass simply
+/// matches against that prefix by name.
+bool isSyntheticQueryCall(const CallInst &CI, StringRef Prefix) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName().starts_with(Prefix);
+}
+
+/// Whether \p CI is one of `SPIRVImporter.cpp`'s synthesized
+/// `feme.query.size_lod.*` calls (roadmap L72(d)): `OpImageQuerySizeLod`,
+/// a plain 2D image's own extent at an explicit, possibly non-zero mip
+/// level -- GLSL's `textureSize(sampler, lod)`. See
+/// `isSyntheticQueryCall`'s own doc for why this is a name-based, rather
+/// than intrinsic-ID-based, recognizer.
+bool isQuerySizeLodCall(const CallInst &CI) {
+  return isSyntheticQueryCall(CI, "feme.query.size_lod.");
+}
+
+/// Whether \p CI is one of `SPIRVImporter.cpp`'s synthesized
+/// `feme.query.levels.*` calls (roadmap L72(d)): `OpImageQueryLevels`, an
+/// image's own total mip-level count -- GLSL's
+/// `textureQueryLevels(sampler)`. See `isSyntheticQueryCall`'s own doc.
+bool isQueryLevelsCall(const CallInst &CI) {
+  return isSyntheticQueryCall(CI, "feme.query.levels.");
+}
+
 /// Whether \p Ty is `<N x ElemTy>`.
 bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
   const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
@@ -1144,6 +1177,21 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // `Plain2D` only.
     if (isGetDimensionsIntrinsic(*CI)) {
       if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
+
+    // Roadmap L72(d): `OpImageQuerySizeLod`/`OpImageQueryLevels` --
+    // unlike `isGetDimensionsIntrinsic`'s own call (whose sole operand
+    // already *is* the handle), these synthesized calls' own Image
+    // operand is their first argument, mirroring `isSampleIntrinsic`'s
+    // own `CI->getArgOperand(0) != &Handle` convention. Scoped to
+    // `Plain2D`/`Array2D` only for now, mirroring `GetDimensions2D`'s own
+    // precedent (see `ImageCallKind::QuerySizeLod2D`'s own doc).
+    if (isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
         return false;
       continue;
     }
@@ -1483,6 +1531,17 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     // identical check for why this is scoped to `Plain2D` only.
     if (isGetDimensionsIntrinsic(*CI)) {
       if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
+
+    // Roadmap L72(d): `OpImageQuerySizeLod`/`OpImageQueryLevels` against a
+    // storage image -- see `hasOnlySupportedImageUses`'s own identical
+    // check for this pair's shared shape scoping and operand convention.
+    if (isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
         return false;
       continue;
     }
@@ -3290,6 +3349,40 @@ void lowerImageAccesses(
         IRBuilder<> Builder(CI);
         CallInst *NewCall = createGetDimensions2D(Builder, Env, ImageIndex,
                                                   Mask, "getdimensions2d");
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L72(d): `OpImageQuerySizeLod` (`isQuerySizeLodCall`) --
+      // an explicit, possibly non-zero mip-level extent query, unlike
+      // `GetDimensions2D`'s own always-mip-0 query above. Its own Image
+      // operand is `getArgOperand(0)` (mirroring `isSampleIntrinsic`'s
+      // own convention, unlike `isGetDimensionsIntrinsic`'s bare-handle
+      // call), so the `CI->getArgOperand(0) != Handle` guard does apply
+      // here.
+      if (isQuerySizeLodCall(*CI)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        Value *Lod = CI->getArgOperand(1);
+        CallInst *NewCall = createQuerySizeLod2D(Builder, Env, ImageIndex, Lod,
+                                                 Mask, "querysizelod2d");
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L72(d): `OpImageQueryLevels` (`isQueryLevelsCall`) -- an
+      // image's own total mip-level count, needing neither a `Mask` (no
+      // per-invocation side effect to guard) nor an explicit mip level of
+      // its own.
+      if (isQueryLevelsCall(*CI)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        CallInst *NewCall =
+            createQueryLevels(Builder, Env, ImageIndex, "querylevels");
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;

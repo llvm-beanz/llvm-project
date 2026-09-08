@@ -122,6 +122,10 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.sample.3d.v4f32";
   case ImageCallKind::GetDimensions2D:
     return "feme.cpu.image.getdimensions.2d.v2i32";
+  case ImageCallKind::QuerySizeLod2D:
+    return "feme.cpu.image.getdimensions.lod.2d.v2i32";
+  case ImageCallKind::QueryLevels:
+    return "feme.cpu.image.querylevels.i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -621,6 +625,24 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                             /*isVarArg=*/false);
     break;
   }
+  case ImageCallKind::QuerySizeLod2D: {
+    // (image_heap, image_heap_count, image_index, lod, mask) -> <2 x i32>
+    // (roadmap L72(d)): same shape as `GetDimensions2D` plus one more
+    // operand, the explicit mip level to query -- see
+    // `ImageCallKind::QuerySizeLod2D`'s own doc.
+    Type *V2I32Ty = FixedVectorType::get(I32Ty, 2);
+    FTy = FunctionType::get(V2I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  }
+  case ImageCallKind::QueryLevels:
+    // (image_heap, image_heap_count, image_index) -> i32 (roadmap
+    // L72(d)): the smallest operand list of any `feme.cpu.image.*` call
+    // -- no `Mask` (no per-invocation side effect to guard against) and
+    // no coordinate/mip-level operand at all -- see
+    // `ImageCallKind::QueryLevels`'s own doc.
+    FTy = FunctionType::get(I32Ty, {PtrTy, I32Ty, I32Ty}, /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -1148,6 +1170,25 @@ CallInst *feme::cpu::createGetDimensions2D(IRBuilderBase &Builder,
       F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Mask}, Name);
 }
 
+CallInst *feme::cpu::createQuerySizeLod2D(IRBuilderBase &Builder,
+                                          const ImageCallEnv &Env,
+                                          Value *ImageIndex, Value *Lod,
+                                          Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySizeLod2D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
+}
+
+CallInst *feme::cpu::createQueryLevels(IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       Value *ImageIndex, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QueryLevels);
+  return Builder.CreateCall(F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex},
+                            Name);
+}
+
 CallInst *feme::cpu::createLoad1D(IRBuilderBase &Builder,
                                   const ImageCallEnv &Env, Value *ImageIndex,
                                   Value *X, Value *Mip, Value *Sample,
@@ -1473,7 +1514,9 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::SampleCmpArray1D,
       ImageCallKind::QueryLod2D,
       ImageCallKind::Sample3D,
-      ImageCallKind::GetDimensions2D};
+      ImageCallKind::GetDimensions2D,
+      ImageCallKind::QuerySizeLod2D,
+      ImageCallKind::QueryLevels};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2056,6 +2099,22 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
     Result.ImageIndex = CI.getArgOperand(2);
     Result.Mask = CI.getArgOperand(3);
+    break;
+  case ImageCallKind::QuerySizeLod2D:
+    if (CI.arg_size() != 5)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.Lod = CI.getArgOperand(3);
+    Result.Mask = CI.getArgOperand(4);
+    break;
+  case ImageCallKind::QueryLevels:
+    if (CI.arg_size() != 3)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
     break;
   }
   return Result;

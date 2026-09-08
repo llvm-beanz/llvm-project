@@ -615,8 +615,8 @@ TEST(SPIRVImporterTest, LowersImageQuerySizeLod) {
   unsigned CallCount = 0;
   Result->getMLIROperation()->walk([&](mlir::spirv::FunctionCallOp Op) {
     ++CallCount;
-    EXPECT_TRUE(llvm::StringRef(Op.getCallee()).starts_with(
-        "feme.query.size_lod."));
+    EXPECT_TRUE(
+        llvm::StringRef(Op.getCallee()).starts_with("feme.query.size_lod."));
     ASSERT_EQ(Op.getArguments().size(), 2u);
     // Result type is the queried vec2<i32> size; the two arguments are the
     // plain image handle and the explicit Level-of-Detail.

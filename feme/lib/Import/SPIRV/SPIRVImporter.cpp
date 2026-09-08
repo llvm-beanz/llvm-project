@@ -92,9 +92,9 @@ unsigned appendLiteralString(llvm::SmallVectorImpl<uint32_t> &Words,
   unsigned WordCount = static_cast<unsigned>(Str.size() / 4) + 1;
   Words.resize(Words.size() + WordCount, 0);
   for (size_t I = 0; I < Str.size(); ++I)
-    Words[Start + I / 4] |= static_cast<uint32_t>(
-                                static_cast<unsigned char>(Str[I]))
-                            << ((I % 4) * 8);
+    Words[Start + I / 4] |=
+        static_cast<uint32_t>(static_cast<unsigned char>(Str[I]))
+        << ((I % 4) * 8);
   return WordCount;
 }
 
@@ -597,8 +597,7 @@ lowerImageQueryOpcodes(llvm::ArrayRef<uint32_t> Words) {
   uint32_t NextShapeIndex = 0;
 
   auto GetOrCreateSyntheticFunction = [&](uint32_t Opcode, uint32_t ImageType,
-                                          uint32_t ResultType,
-                                          uint32_t LodType,
+                                          uint32_t ResultType, uint32_t LodType,
                                           llvm::StringRef BaseName) {
     auto Key = std::make_tuple(Opcode, ImageType, ResultType, LodType);
     auto It = SyntheticFunctions.find(Key);
@@ -645,9 +644,8 @@ lowerImageQueryOpcodes(llvm::ArrayRef<uint32_t> Words) {
     llvm::SmallVector<uint32_t, 2> ParamTypes{ImageType};
     if (LodType)
       ParamTypes.push_back(LodType);
-    Preamble.push_back(
-        ((static_cast<uint32_t>(3 + ParamTypes.size())) << 16) |
-        kOpTypeFunction);
+    Preamble.push_back(((static_cast<uint32_t>(3 + ParamTypes.size())) << 16) |
+                       kOpTypeFunction);
     Preamble.push_back(FnTypeId);
     Preamble.push_back(ResultType);
     Preamble.append(ParamTypes.begin(), ParamTypes.end());

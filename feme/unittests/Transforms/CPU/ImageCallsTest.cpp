@@ -764,4 +764,46 @@ TEST_F(ImageCallsTest, MatchesGetDimensions2DCall) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// `createQuerySizeLod2D`'s own `feme.cpu.image.getdimensions.lod.2d.v2i32`
+// call (roadmap L72(d)): a plain 2D image's own extent at an explicit mip
+// level -- see `ImageCallKind::QuerySizeLod2D`'s own doc. Same shape as
+// `GetDimensions2D` plus the explicit mip level itself.
+TEST_F(ImageCallsTest, MatchesQuerySizeLod2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createQuerySizeLod2D(Builder, Env, Builder.getInt32(3),
+                           Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySizeLod2D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// `createQueryLevels`'s own `feme.cpu.image.querylevels.i32` call (roadmap
+// L72(d)): an image's own total mip-level count -- see
+// `ImageCallKind::QueryLevels`'s own doc. The smallest operand list of any
+// `feme.cpu.image.*` call: just an image index, no mask or mip level.
+TEST_F(ImageCallsTest, MatchesQueryLevelsCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createQueryLevels(Builder, Env, Builder.getInt32(3));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QueryLevels);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+}
+
 } // namespace
