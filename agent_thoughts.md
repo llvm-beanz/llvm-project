@@ -69992,3 +69992,173 @@ and `VulkanCTSReport.md` (new section with the full investigation, fix,
 and real CTS numbers). Confirmed `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no changes -- this fix is a SPIR-V
 import-time opcode rewrite, not a new extension or 1.4 core feature bit.
+
+# Session: L72(d) -- lowering `OpImageQuerySizeLod`/`OpImageQueryLevels`
+
+## Request
+
+Close out roadmap L72(d): the 76-case "unhandled opcode" bucket
+(`OpImageQuerySizeLod`=103/34 cases, `OpImageQueryLevels`=106/34 cases,
+`OpImageQuerySamples`=107/8 cases), split out of L72(a) once that row's
+own fix for opcodes 92/94 landed. The row's own filed text flagged this
+as needing "genuine new runtime capability" plus a scoping decision
+between an upstream MLIR TableGen contribution and a feme-local
+synthetic-opcode encoding.
+
+## Investigation and design decisions
+
+First checked whether the "genuine new runtime capability" framing was
+accurate by reading `FemeRTImageDescriptor` in `FeMeRuntimeCPU.c` --
+found it already tracks `MipLevels`/`SampleCount`/`Width`/`Height`/
+`Depth`, needed for `vkCreateImageView`'s own validation. This meant the
+real gap was purely a *wiring* problem (no runtime call yet threads these
+existing fields to a shader), not new runtime capability at all -- a
+much smaller scope than the row's own text implied.
+
+Next, the scoping decision between an upstream MLIR contribution and a
+feme-local encoding. Rejected the upstream path immediately: adding real
+TableGen op definitions plus serialization/deserialization/verifier
+support for these opcodes in MLIR's own SPIR-V dialect is a
+materially larger, cross-repository, riskier undertaking than anything
+else in this project's history, and the row's own text already
+correctly identified this risk.
+
+For the feme-local path, I first considered reusing real upstream LLVM
+SPIR-V intrinsic names (something like
+`llvm.spv.resource.getdimensions.levels.*`/`.ms.*`) but rejected this: it
+would require these exact names to already exist upstream with a
+matching signature, which I could not confirm, and getting it wrong
+would be a silent, hard-to-diagnose fragility risk. Instead I designed
+and validated (by reading SPIR-V's own binary spec sections on
+`OpFunction`/`OpDecorate`/`LinkageAttributes`) a synthetic
+external-function encoding: declare a body-less function via
+`OpFunction`/`OpFunctionParameter`(s)/`OpFunctionEnd`, decorated
+`OpDecorate %fn LinkageAttributes "name" Import` (requiring only
+`OpCapability Linkage`), then rewrite each `OpImageQuerySizeLod`/
+`OpImageQueryLevels` into an ordinary `OpFunctionCall` against it. This
+needs **zero MLIR changes** -- SPIR-V's own deserializer already fully
+supports this shape, since it's exactly how a real linked module would
+declare an external symbol. I validated this design end-to-end with new
+unit tests before writing any of the downstream (resource-lowering,
+runtime) code, confirming the approach was sound before investing
+further.
+
+While designing the fix, I discovered opcode 107 (`OpImageQuerySamples`)
+has its own separate, independent prerequisite gap:
+`classifySampledImage2DHandle` rejects every multisampled sampled image
+handle outright today, so no handle this opcode could ever apply to can
+reach its own dispatch code regardless of how the opcode itself gets
+lowered. Rather than let this stall the whole row, I deferred it as its
+own follow-on row (L73) and scoped this session's implementation to
+opcodes 103+106, `Plain2D` shape only (further narrowed after the crash
+below).
+
+## Implementation
+
+1. A small NFC refactor in `SPIRVImporter.cpp` (`containsOpcode`/
+   `TypeResolutionInfo`/`scanModuleTypes`) to share type-resolution
+   scanning logic between the existing `lowerProjectiveImageSamples` pass
+   and the new one -- built and tested in isolation (all 7 pre-existing
+   tests still passed) before adding any new behavior, confirming zero
+   behavior change from the refactor itself.
+2. New opcode constants and an `appendLiteralString` helper (mirroring
+   the existing `decodeLiteralString`'s byte order) in `SPIRVImporter.cpp`.
+3. The full `lowerImageQueryOpcodes` pass, synthesizing one
+   `Import`-linkage function per unique
+   `(Opcode, ImageType, ResultType, LodType)` shape and rewriting each
+   opcode occurrence into a call against it, with a bounded
+   producer-opcode allowlist fallback (leaving unresolvable occurrences
+   untouched, mirroring `lowerProjectiveImageSamples`'s own precedent).
+4. **Bug found and fixed during this step**: my first draft built the
+   rewritten module's `Preamble` starting *after* the 5-word SPIR-V
+   header (skipping it), while separately prepending the new
+   `OpCapability Linkage` pair as the very first two words -- this
+   discarded the real magic number/version/generator/bound/schema
+   header, causing "incorrect magic number" test failures. Fixed by
+   copying the full header into `Preamble` first (matching
+   `lowerProjectiveImageSamples`'s own established pattern exactly), then
+   inserting the new `OpCapability` pair right after it via
+   `Preamble.insert`. Lesson for future work in this file: always copy
+   the full header when reusing this pattern.
+5. Wired the pass into `SPIRVImporter::import()`, added 3 new unit tests
+   (two positive, one negative/fallback), ran `git-clang-format`, and
+   committed the importer-side change standalone.
+6. Extended `ImageCalls.h`/`.cpp` with two new synthetic call kinds
+   (`QuerySizeLod2D`/`QueryLevels`), mirroring the existing
+   `GetDimensions2D` call's exact plumbing pattern (name list,
+   function-type switch, builder, `AllKinds` entry, `matchImageCall`
+   case). Hit an odd tool-call gotcha here: the `edit` tool's `old_str`
+   match unexpectedly failed once against text a `python3` byte-compare
+   confirmed was identical to the file's actual content -- worked around
+   with a direct Python `.replace()` script. Root cause never diagnosed;
+   noting it here in case it recurs.
+7. Extended `SPIRVResourceLowering.cpp` with `isSyntheticQueryCall`
+   (name-prefix-based recognition, since these calls have no real LLVM
+   intrinsic ID -- a fundamentally different recognition mechanism than
+   every other call-recognizer in this file) and dispatch/acceptance
+   logic in both the sampled-image and storage-image paths.
+8. Added the two new runtime entry points to `FeMeRuntimeCPU.c`
+   (`femeCpuImageGetDimensionsLod2DV2I32`/`femeCpuImageQueryLevelsI32`),
+   confirming both are backed entirely by pre-existing
+   `FemeRTImageDescriptor` fields as investigated above.
+9. Wrote a new lit test (`spirv-resource-lowering-image-query.ll`),
+   deliberately avoiding unverified intrinsic signatures in favor of
+   pairing the new calls with the already-proven
+   `llvm.spv.resource.getdimensions.xy` intrinsic as a second use on the
+   same handle (my first draft speculatively used unverified
+   `llvm.spv.resource.createsampledimage`/`.sample` names; caught and
+   corrected before committing).
+
+## A real CTS run found a real bug before it reached users
+
+After building `feme_vulkan` and running the row's own 1,375-case
+`texture_functions_compute` caselist, the whole run **crashed** on
+`dEQP-VK.glsl.texture_functions.query.texturesize.isampler2darray_compute`
+with an assertions-build abort: `replaceAllUses of value with new value
+of different type!`. Root cause: `hasOnlySupportedImageUses`/
+`hasOnlySupportedStorageImageUses` had accepted both `Plain2D` and
+`Array2D` for the new query calls (my own doc comments even said
+"Plain2D/Array2D shapes only"), but the `ImageCalls` builders only ever
+emit a `Plain2D`-shaped `v2i32`/`i32` result -- `Array2D`'s own
+`textureSize()` returns an extra layer-count component (e.g. `ivec3`),
+so the replace-all-uses call aborted on the type mismatch rather than
+silently misbehaving.
+
+This is exactly the kind of gap a real CTS run is supposed to catch that
+unit tests alone did not: none of my own new unit tests exercised an
+`Array2D` handle at all. Fixed by narrowing the shape gate to `Plain2D`
+only (matching what's actually implemented), and -- importantly -- added
+two new regression tests directly in `SPIRVResourceLoweringTest.cpp`
+that had been entirely missing before this bug: a positive
+`LowersPlain2DQuerySizeLodAndQueryLevels` test and a negative
+`LeavesArray2DQuerySizeLodHandleAlone` test that reproduces the exact
+crash shape and confirms it's now correctly rejected instead. Filed the
+remaining 66 non-`Plain2D` cases (every shape but `Plain2D`, both
+opcodes) as their own follow-on row, L74, since each needs its own
+per-shape result-type widening in the builders before its own shape gate
+can be safely widened.
+
+## Verification
+
+- `FeMeImportSPIRVTests`: 10/10 pass.
+- `FeMeTransformsCPUTests`: 394/394 pass (includes both new
+  `ImageCallsTest.cpp` tests and both new
+  `SPIRVResourceLoweringTest.cpp` tests).
+- `check-feme`: 2731/2790 pass, 0 fail, 59 unsupported, 0 regressions.
+- Real CTS re-run of the row's own 1,375-case caselist: 255 Pass (up from
+  245), 788 Fail (down from 798), 332 NotSupported (unchanged) -- exactly
+  the 10 newly-passing `Plain2D` `texturesize`/`texturequerylevels` cases
+  this fix targeted, 0 regressions anywhere in the caselist.
+
+## Roadmap/docs updates
+
+Struck through the `Plain2D` portion of L72(d) with a full "done" note.
+Filed two new top-level follow-on rows (respecting the one-lowercase-
+letter nesting rule, not nested further under L72(d)): L73 (opcode 107
+`OpImageQuerySamples`, blocked on `classifySampledImage2DHandle`'s own
+multisampled-sampled-image rejection) and L74 (the remaining 66
+non-`Plain2D` cases of opcodes 103/106, needing per-shape result-type
+widening). Updated `VulkanCTSReport.md` with a new session section.
+Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+need no changes -- this is core SPIR-V image-operand functionality with
+no gating Vulkan feature or extension.
