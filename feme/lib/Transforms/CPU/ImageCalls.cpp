@@ -120,6 +120,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.querylod.2d.v2f32";
   case ImageCallKind::Sample3D:
     return "feme.cpu.image.sample.3d.v4f32";
+  case ImageCallKind::GetDimensions2D:
+    return "feme.cpu.image.getdimensions.2d.v2i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -609,6 +611,16 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
          I32Ty, F32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
+  case ImageCallKind::GetDimensions2D: {
+    // (image_heap, image_heap_count, image_index, mask) -> <2 x i32>
+    // (roadmap L70): lane 0 the mip-0 width, lane 1 the mip-0 height --
+    // see `ImageCallKind::GetDimensions2D`'s own doc. No sampler heap and
+    // no coordinate operand at all, unlike every sample/fetch call above.
+    Type *V2I32Ty = FixedVectorType::get(I32Ty, 2);
+    FTy = FunctionType::get(V2I32Ty, {PtrTy, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  }
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -1126,6 +1138,16 @@ CallInst *feme::cpu::createSample3D(
       Name);
 }
 
+CallInst *feme::cpu::createGetDimensions2D(IRBuilderBase &Builder,
+                                           const ImageCallEnv &Env,
+                                           Value *ImageIndex, Value *Mask,
+                                           const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::GetDimensions2D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Mask}, Name);
+}
+
 CallInst *feme::cpu::createLoad1D(IRBuilderBase &Builder,
                                   const ImageCallEnv &Env, Value *ImageIndex,
                                   Value *X, Value *Mip, Value *Sample,
@@ -1402,31 +1424,56 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
   // sync). Keep new ImageCallKind values added here whenever they are added
   // to the enum and to the switch below.
   static constexpr ImageCallKind AllKinds[] = {
-      ImageCallKind::Sample2D,      ImageCallKind::SampleCmp2D,
-      ImageCallKind::Load2D,        ImageCallKind::Load2DI32,
-      ImageCallKind::Sample2DArray, ImageCallKind::Load2DArray,
-      ImageCallKind::Load2DArrayI32, ImageCallKind::SampleCube,
-      ImageCallKind::SampleCubeArray, ImageCallKind::Store2D,
-      ImageCallKind::Store2DI32, ImageCallKind::Store2DArray,
-      ImageCallKind::Store2DArrayI32, ImageCallKind::Load1D,
-      ImageCallKind::Load1DI32, ImageCallKind::Store1D,
-      ImageCallKind::Store1DI32, ImageCallKind::Load3D,
-      ImageCallKind::Load3DI32, ImageCallKind::Store3D,
-      ImageCallKind::Store3DI32, ImageCallKind::Load1DArray,
-      ImageCallKind::Load1DArrayI32, ImageCallKind::Store1DArray,
-      ImageCallKind::Store1DArrayI32, ImageCallKind::Store2DMS,
-      ImageCallKind::Store2DMSI32, ImageCallKind::Store2DArrayMS,
-      ImageCallKind::Store2DArrayMSI32, ImageCallKind::AtomicAdd2D,
-      ImageCallKind::AtomicSub2D, ImageCallKind::AtomicAnd2D,
-      ImageCallKind::AtomicOr2D, ImageCallKind::AtomicXor2D,
-      ImageCallKind::AtomicSMax2D, ImageCallKind::AtomicSMin2D,
-      ImageCallKind::AtomicUMax2D, ImageCallKind::AtomicUMin2D,
-      ImageCallKind::AtomicExchange2D, ImageCallKind::AtomicCompareExchange2D,
-      ImageCallKind::SampleCmpArray2D, ImageCallKind::SampleCmpCube,
-      ImageCallKind::SampleCmpCubeArray, ImageCallKind::Sample1D,
-      ImageCallKind::Sample1DArray, ImageCallKind::SampleCmp1D,
-      ImageCallKind::SampleCmpArray1D, ImageCallKind::QueryLod2D,
-      ImageCallKind::Sample3D};
+      ImageCallKind::Sample2D,
+      ImageCallKind::SampleCmp2D,
+      ImageCallKind::Load2D,
+      ImageCallKind::Load2DI32,
+      ImageCallKind::Sample2DArray,
+      ImageCallKind::Load2DArray,
+      ImageCallKind::Load2DArrayI32,
+      ImageCallKind::SampleCube,
+      ImageCallKind::SampleCubeArray,
+      ImageCallKind::Store2D,
+      ImageCallKind::Store2DI32,
+      ImageCallKind::Store2DArray,
+      ImageCallKind::Store2DArrayI32,
+      ImageCallKind::Load1D,
+      ImageCallKind::Load1DI32,
+      ImageCallKind::Store1D,
+      ImageCallKind::Store1DI32,
+      ImageCallKind::Load3D,
+      ImageCallKind::Load3DI32,
+      ImageCallKind::Store3D,
+      ImageCallKind::Store3DI32,
+      ImageCallKind::Load1DArray,
+      ImageCallKind::Load1DArrayI32,
+      ImageCallKind::Store1DArray,
+      ImageCallKind::Store1DArrayI32,
+      ImageCallKind::Store2DMS,
+      ImageCallKind::Store2DMSI32,
+      ImageCallKind::Store2DArrayMS,
+      ImageCallKind::Store2DArrayMSI32,
+      ImageCallKind::AtomicAdd2D,
+      ImageCallKind::AtomicSub2D,
+      ImageCallKind::AtomicAnd2D,
+      ImageCallKind::AtomicOr2D,
+      ImageCallKind::AtomicXor2D,
+      ImageCallKind::AtomicSMax2D,
+      ImageCallKind::AtomicSMin2D,
+      ImageCallKind::AtomicUMax2D,
+      ImageCallKind::AtomicUMin2D,
+      ImageCallKind::AtomicExchange2D,
+      ImageCallKind::AtomicCompareExchange2D,
+      ImageCallKind::SampleCmpArray2D,
+      ImageCallKind::SampleCmpCube,
+      ImageCallKind::SampleCmpCubeArray,
+      ImageCallKind::Sample1D,
+      ImageCallKind::Sample1DArray,
+      ImageCallKind::SampleCmp1D,
+      ImageCallKind::SampleCmpArray1D,
+      ImageCallKind::QueryLod2D,
+      ImageCallKind::Sample3D,
+      ImageCallKind::GetDimensions2D};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2001,6 +2048,14 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.OffsetZ = CI.getArgOperand(20);
     Result.MinLodClamp = CI.getArgOperand(21);
     Result.Mask = CI.getArgOperand(22);
+    break;
+  case ImageCallKind::GetDimensions2D:
+    if (CI.arg_size() != 4)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.Mask = CI.getArgOperand(3);
     break;
   }
   return Result;

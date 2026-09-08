@@ -433,6 +433,22 @@ enum class ImageCallKind : uint8_t {
   /// pre-existing `Plain2D`-only `isSupportedOffset` restriction roadmap
   /// L33 already scopes.
   Sample3D,
+  /// `feme.cpu.image.getdimensions.2d.v2i32` (roadmap L70): a plain 2D
+  /// image's mip-0 extent (`OpImageQuerySize` against a non-arrayed,
+  /// non-multisampled `Dim2D` image, `llvm.spv.resource.getdimensions.xy`
+  /// -- GLSL's `imageSize()`/`textureSize()` against a `sampler2D`/
+  /// `image2D` with no explicit LOD argument), returning the `(Width,
+  /// Height)` pair `FemeImageDescriptor` already carries for its bound
+  /// mip-0 subresource, or `(0, 0)` for an unbound handle or a masked-off
+  /// invocation. Unlike every other kind above this needs neither a
+  /// sampler heap (a plain size query, not a filtered access) nor a
+  /// coordinate of its own -- only the bound image's own identity, hence
+  /// the smaller operand list `createGetDimensions2D` documents. Scoped to
+  /// `Plain2D` only, whether the underlying handle is a sampled or storage
+  /// image (`hasOnlySupportedImageUses`/`hasOnlySupportedStorageImageUses`
+  /// both accept this same call shape) -- every other `ImageShape`'s own
+  /// `GetDimensions` counterpart remains unstarted follow-on work.
+  GetDimensions2D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -1073,6 +1089,18 @@ llvm::CallInst *createSample3D(
     llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *OffsetZ,
     llvm::Value *MinLodClamp, llvm::Value *Mask,
     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.2d.v2i32` call (roadmap L70):
+/// see `ImageCallKind::GetDimensions2D`'s own doc for its `<2 x i32>`
+/// result shape (lane 0 width, lane 1 height). Takes only \p ImageIndex
+/// and \p Mask from \p Env's image heap -- no sampler heap, and no
+/// coordinate operand of any kind, unlike every sample/fetch builder
+/// above.
+llvm::CallInst *createGetDimensions2D(llvm::IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      llvm::Value *ImageIndex,
+                                      llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.

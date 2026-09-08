@@ -743,4 +743,25 @@ TEST_F(ImageCallsTest, MatchesSample3DCall) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// `createGetDimensions2D`'s own `feme.cpu.image.getdimensions.2d.v2i32` call
+// (roadmap L70): a plain 2D image's mip-0 `(Width, Height)` extent query --
+// see `ImageCallKind::GetDimensions2D`'s own doc. Takes only an image index
+// and a mask, unlike every sample/fetch call's own larger operand list.
+TEST_F(ImageCallsTest, MatchesGetDimensions2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGetDimensions2D(Builder, Env, Builder.getInt32(3),
+                                       Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GetDimensions2D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 } // namespace
