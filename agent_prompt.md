@@ -42,26 +42,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L72(b) from the roadmap or other prerequisites blocking the
+Can you close out L72(c) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **118 `dEQP-VK.glsl.texture_functions.*_compute` CTS cases (the
-> `*Offset`-suffixed GLSL builtins, e.g. `texelFetchOffset`/a depth-comparison
-> explicit-LOD sample with an offset) fail SPIR-V-to-LLVM legalization
-> outright** with `"failed to legalize operation 'spirv.ImageFetch'"` (100
-> cases) or `"...'spirv.ImageSampleDrefExplicitLod'"` (18 cases) -- confirmed
-> via roadmap L72's own real IR reduction: `ImageFetchLodPattern`/its `Dref`
-> counterpart (`SPIRVToLLVMPatterns.cpp`) both explicitly match only a *lone*
-> `Lod` image operand (`hasExactImageOperands(..., Lod)`), rejecting any real
-> `ConstOffset` combined with `Lod` outright rather than matching-failing it
-> through to `llvm.spv.resource.load.level`/its `Dref` counterpart, which (per
-> roadmap L72's own fix) already accepts a texel-offset operand today --
-> currently always a hardcoded zero, since no caller threads a real one through
-> yet. Fixing this needs widening both patterns' own match conditions to accept
-> `Lod | ConstOffset`, threading the real (non-zero) offset into the intrinsic
-> instead of a synthesized zero, then widening `isFetchLevelIntrinsic`/its
-> rewrite branch (`SPIRVResourceLowering.cpp`) to accept a real offset value
-> instead of requiring `isZeroOffset`, applying it to `lowerImageAccesses`'s
-> existing `X`/`Y`/`Layer` coordinate computation the same way
-> `isSupportedOffset` already does for the ordinary-sampling paths. Not yet
+> **140 `dEQP-VK.glsl.texture_functions.texelfetch.*` CTS cases against a
+> `Plain1D`/`Array1D`/`Plain3D` sampled image still fail with `"...cannot
+> normalize into a heap access..."`** -- roadmap L72's own fix deliberately
+> scoped its new `llvm.spv.resource.load.level` recognition to
+> `Plain2D`/`Array2D` only, mirroring the pre-existing zero-mip
+> `getpointer`-based fetch path's own identical, already-documented restriction
+> (`hasOnlySupportedImageUses`'s header comment: "this session's own real
+> CTS-driven scope is ordinary sampling only... a future row can lift this
+> restriction"); a real re-run of roadmap L72's own 1,375-case caselist confirms
+> every remaining "cannot normalize" case is exactly a
+> `texelfetch.*1d*`/`texelfetch.*3d*` variant. Fixing this needs widening
+> `isFetchLevelIntrinsic`'s shape check and `lowerImageAccesses`'s new rewrite
+> branch to also dispatch to
+> `createLoad1D`/`createLoad1DI32`/`createLoad1DArray`/`createLoad1DArrayI32`/`createLoad3D`/`createLoad3DI32`
+> (mirroring the identical dispatch the storage-image fetch path --
+> `lowerImageAccesses`'s own `switch (Shape)` a few hundred lines below --
+> already has for these same shapes), threading the real `Lod` operand through
+> the same way roadmap L72 already does for `Plain2D`/`Array2D`. Not yet
 > started.
