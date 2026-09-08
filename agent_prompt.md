@@ -42,28 +42,30 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L82 from the roadmap or other prerequisites blocking the
+Can you close out L76(a) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A real `offloader` re-run of `DomainSystemValues.test` after roadmap L81's
-> fix now runs the pipeline to completion (no `VkResult` failure, no
-> `vkCreateGraphicsPipelines` failure), but the result buffer still fails an
-> exact-match comparison against `ResultBuffer_Expected` by exactly 1 ULP on a
-> handful of interpolated position/`uv` elements** (e.g. `0x3e800000` expected
-> vs. `0x3e7fffff` observed -- `0.25` vs. `0.24999997`; `0x3f400000` vs.
-> `0x3f400001` -- `0.75` vs. `0.75000006`), confirmed via a real `offloader`
-> re-run of this exact repro after L81's fix. Entirely unrelated to L81's own
-> `SV_PrimitiveID`-classification scope: every `SV_PrimitiveID`-forwarded value
-> in the same buffer now matches exactly, isolating the remaining mismatch to
-> the domain shader's own bilinear bounding-quad interpolation
-> (`lerp(patch[0].position, patch[1].position, uv.x)` etc. in this repro's real
-> `domain.hlsl`) or the tessellator's own domain-coordinate generation feeding
-> it -- a genuine, if narrow, floating-point-rounding discrepancy against the
-> reference values, not a logic/addressing bug like L77-L81's chain. Needs its
-> own real IR reduction (the same technique this project's
-> H6-series/H8-series/H9-series/L-series chains have used throughout) to isolate
-> whether `feme::graphics::tessellate`'s own domain-coordinate generation
-> (`Tessellator.cpp`) or the compiled domain shader's own `lerp`-to-IR lowering
-> (e.g. fused-multiply-add contraction differing from the reference
-> implementation's own arithmetic order) is the source of the 1-ULP drift,
-> before a real fix can be scoped. Not yet started.
+> **`RWTexture2DArray` (an arrayed *storage* image, as opposed to L76's own
+> *sampled*-image scope) is entirely rejected by pipeline creation**, discovered
+> by roadmap L76's own real `Array.*` texture test sweep:
+> `Feature/Textures/Array.UnalignedRowPitch.test` (a `[[vk::binding(0,0)]]
+> RWTexture2DArray<float> Out : register(u0);` compute shader doing a plain
+> `Out[TID] = ...;` store, no unusual operand at all) fails
+> `vkCreateComputePipelines` with `"unsupported raised operation:
+> 'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_2_1_0_2_3t' is a
+> register-bound resource handle the FeMe CPU target cannot normalize into a
+> heap access..."` -- the same generic `hasOnlySupportedImageUses`-family
+> rejection diagnostic prior rows (e.g. L26) have hit for other unsupported
+> image shapes/operand combinations, here for a `Dim=2D, Arrayed=1, Sampled=2`
+> (storage, non-sampled) image type. No non-array `RWTexture2D` counterpart to
+> compare against was needed to confirm this is `Array2D`-specific, since the
+> diagnostic itself already names the arrayed image type directly. Not yet
+> started; needs its own investigation of whichever `SPIRVResourceLowering.cpp`
+> code path currently normalizes a plain (non-arrayed) storage-image handle
+> (`isStorageImageIntrinsic`-shaped dispatch, unconfirmed exact name) to
+> determine whether it already has *any* `Array2D`-shaped storage-image case at
+> all, or whether (like roadmap L74/L75's own `OpImageQuerySizeLod`/similar
+> per-shape gaps) it needs a new arrayed-storage-image `ImageCalls` builder
+> variant threading a real `Layer` coordinate component through
+> `femeRTStore2D`-family runtime calls the same way
+> `femeCpuImageSample2DArrayV4F32` already does for the sampled-image side.
