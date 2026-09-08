@@ -31710,3 +31710,114 @@ fix.
 needed -- core SPIR-V image-operand functionality with no gating Vulkan
 feature or extension. Temporary artifacts under `/tmp/l72b/` cleaned up at
 the end of the session.
+
+## L72(c): widening `texelFetch()`'s explicit-Lod shape gate to `Plain1D`/`Array1D`/`Plain3D` (this session)
+
+### Investigation
+
+Roadmap L72(c) targeted the remaining 140 `dEQP-VK.glsl.texture_functions.
+texelfetch.*` CTS cases still failing with `"cannot normalize into a heap
+access"` after L72's own fix scoped its new `isFetchLevelIntrinsic`
+recognition (the `llvm.spv.resource.load.level` intrinsic
+`ImageFetchLodPattern` raises for every explicit-LOD `texelFetch()` call)
+to `Plain2D`/`Array2D` only. Confirmed this row's exact scope by reading
+`hasOnlySupportedImageUses`'s `isFetchLevelIntrinsic` branch directly:
+the shape check was a plain `Shape != Plain2D && Shape != Array2D`
+rejection, and `lowerImageAccesses`'s matching lowering branch dispatched
+via a 2-way `Array2D`-vs-`Plain2D` `if`/`else`, with no `Plain1D`/
+`Array1D`/`Plain3D` case at all.
+
+Found that both shared helpers this fix needed to reuse were **already
+fully generalized** by earlier rows: `isSupportedOffset` (L66(d)/L66(k)/
+L67(c)) already handles a bare scalar `i32` offset for `Plain1D`/
+`Array1D` (behind an `AllowPlain1DArray1D` gate) and an unconditionally-
+accepted 3-wide vector offset for `Plain3D`; `SampleCoordWidth` (computed
+once at the top of `hasOnlySupportedImageUses`) already gives the correct
+fetch-coordinate width for every non-Cube/CubeArray/multisample shape,
+since `texelFetch()`'s integer coordinate has the same dimensionality as
+an ordinary sample's coordinate. This meant the fix needed zero changes
+to either helper -- only threading `AllowPlain1DArray1D=true` through at
+this one call site and swapping the old `FetchCoordWidth` two-way ternary
+for the already-computed `SampleCoordWidth`.
+
+Also confirmed (by reading `getDefaultZeroOffsetType` in
+`SPIRVToLLVMPatterns.cpp`, not modified this session) that
+`ImageFetchLodPattern` already emits the exact offset shapes this fix's
+lowering-side per-shape folding assumes: a bare scalar `i32` for any
+`Dim1D` image (`Plain1D`/`Array1D`), a 3-wide vector for `Plain3D` --
+guaranteeing no mismatch between what the pattern produces and what the
+lowering side expects.
+
+### The fix
+
+- `SPIRVResourceLowering.cpp`, `hasOnlySupportedImageUses`'s
+  `isFetchLevelIntrinsic` validation branch: replaced the
+  `Plain2D`/`Array2D` allow-list with a `Cube`/`CubeArray`/`Plain2DMS`/
+  `Array2DMS` reject-list, reused `SampleCoordWidth` in place of the old
+  `FetchCoordWidth` ternary, and added `AllowPlain1DArray1D=true` to the
+  `isSupportedOffset` call (alongside the existing `AllowArray2D=true`).
+- `SPIRVResourceLowering.cpp`, `lowerImageAccesses`'s `isFetchLevelIntrinsic`
+  lowering branch: replaced the `Array2D`-vs-else `if`/`else` with a full
+  `switch (Shape)` covering `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/
+  `Plain3D`, each folding any real `ConstOffset` into the coordinate
+  components before dispatching to the shape-appropriate
+  `createLoad1D`/`createLoad1DI32`/`createLoad1DArray`/
+  `createLoad1DArrayI32`/`createLoad2D`/`createLoad2DI32`/
+  `createLoad2DArray`/`createLoad2DArrayI32`/`createLoad3D`/
+  `createLoad3DI32` runtime entry point with the real `Lod` threaded
+  through (mirroring L72(b)'s `CreateAdd`-based offset-folding technique,
+  generalized per-shape): `Plain1D`'s lone `X` gets a bare scalar `add`;
+  `Array1D`'s `X` folds an offset while its `Layer` (the coordinate's 2nd
+  component) is untouched; `Plain3D`'s `X`/`Y`/`Z` each fold the matching
+  offset component. A `default: llvm_unreachable` case closes the switch
+  (deliberately not fully covering `ImageShape`, since the validation gate
+  above already excludes every other shape -- consistent with
+  `feme/.instructions.md`'s "no default labels in fully covered switches"
+  rule, which does not apply here).
+
+### Build/test verification
+
+Added 5 new unit tests to `SPIRVResourceLoweringTest.cpp`:
+`LowersPlain1DFetchLevelToImageLoad`,
+`LowersAPlain1DFetchLevelWithNonzeroOffsetToImageLoad`,
+`LowersArray1DFetchLevelToImageLoadArray`,
+`LowersIntegerPlain1DFetchLevelToImageLoadV4I32`,
+`LowersPlain3DFetchLevelToImageLoad` (the last two exercising the new
+per-shape offset-folding logic with a real nonzero offset).
+`FeMeTransformsCPUTests`: 424/424 pass (up from 419, no regressions).
+
+Widened `spirv-resource-lowering-image-fetch-lod.ll` with new
+`fetch_level_offset`/`fetch_level_1d`/`fetch_level_1d_array`/
+`fetch_level_3d` cases. While doing so, discovered and fixed a
+pre-existing, unrelated latent bug in this lit test predating this
+session: its `FileCheck` variable bindings (`[[X]]`/`[[Y]]`/`[[L]]`) were
+bound to the bare `extractelement` result rather than the
+always-emitted offset-fold `add` that follows it (confirmed via `git
+stash` that this test already failed against the pre-L72(c) code, i.e.
+it had never actually been run successfully since being authored in an
+earlier session) -- corrected the bindings to point at the `add`
+result throughout.
+
+`check-feme`: 2762/2821 pass, 0 fail, 59 unsupported (no regressions,
+up from 2757/2816 by exactly this row's own 5 new unit tests).
+
+### Real CTS re-run
+
+Rebuilt `libfeme_vulkan.so` and re-ran `dEQP-VK.glsl.texture_functions.
+texelfetch*_compute` (192 cases, spanning `texelfetch`/
+`texelfetchoffset`/`texelfetchoffset_pcoffset`): **120 Pass, 0 Fail, 72
+Not-supported** (sparse-image formats, unrelated to this fix). A
+narrower re-run isolating the `*1d*` slice: **48/48 Pass, 0 Fail**. The
+`*3d*` slice: **24/24 Pass** among supported formats, **0 Fail** (24
+Not-supported for sparse formats). A broader re-run of the full
+`texture_functions_compute` caselist (1,375 cases) confirms **0**
+remaining `texelfetch`-named failures anywhere in the sweep (down from
+140 before this fix) -- the row's own 140-case target is fully closed.
+The sweep's other 580 failures are all `"unknown extension:
+SPV_KHR_compute_shader_derivatives"` pipeline-creation errors, an
+already-tracked, entirely unrelated gap (roadmap L7), not a regression.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- core SPIR-V image-operand functionality with no gating Vulkan
+feature or extension. Temporary artifacts under `/tmp/` cleaned up at
+the end of the session.
