@@ -4889,6 +4889,34 @@ __attribute__((always_inline)) FemeRTv2f32 femeCpuImageQueryLod2DV2F32(
   return (FemeRTv2f32){ClampedLevel, UnclampedLod};
 }
 
+// `feme.cpu.image.getdimensions.2d.v2i32` (roadmap L70): a plain 2D
+// image's mip-0 `(Width, Height)` extent -- GLSL's own `imageSize()`/
+// `textureSize()` against a `sampler2D`/`image2D` with no explicit LOD
+// argument (SPIR-V `OpImageQuerySize`, `llvm.spv.resource.getdimensions.xy`).
+// Unlike every sample/fetch call above, this needs neither a sampler heap
+// (a plain size query, not a filtered access) nor a coordinate of its own
+// -- only the bound image's own identity. An inactive lane or an unbound
+// (`!Img.Data`) handle reads as `{0, 0}`, mirroring
+// `femeCpuImageQueryLod2DV2F32`'s own all-zero `Zero` case for the same
+// two conditions.
+FemeRTv2i32 femeCpuImageGetDimensions2DV2I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex,
+    _Bool Mask) asm("feme.cpu.image.getdimensions.2d.v2i32");
+
+__attribute__((always_inline)) FemeRTv2i32 femeCpuImageGetDimensions2DV2I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, _Bool Mask) {
+  FemeRTv2i32 Zero = {0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  return (FemeRTv2i32){(int32_t)Img.Width, (int32_t)Img.Height};
+}
+
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
 // image, comparing `Dref` against each fetched texel's first (depth)
 // component via `Samp->CompareFunc`, then filters the per-texel 0/1
