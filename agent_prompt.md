@@ -42,41 +42,45 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L37 from the roadmap or other prerequisites blocking the
+Can you close out L77 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`Feature/Semantics/{DomainSystemValues,HullSystemValues}.test` (L27's own
-> two cases) now clear the `feme-cpu-simdize` divergent-vector-decomposition gap
-> entirely but both still fail `vkCreateGraphicsPipelines`, `VkResult = -3`, on
-> the *same* `feme-cpu-wrap-hull: control-point phase only supports a control
-> point reading its own input control point's attributes` diagnostic text as the
-> already-closed `H29g` -- but a real, distinct root cause this time, confirmed
-> via a temporary pre-`HullWrapperPass` IR dump: `HullSystemValues.test`'s
-> `patch[i].position` (a genuine self-indexed `InputPatch` read, `i` being
-> `SV_OutputControlPointID`) does not lower to a single `feme.stage.input.load`
-> call carrying the dynamic self-index as its control-point-index operand at all
-> -- by the time `SIMDizePass` (which runs *before* `HullWrapperPass`, see
-> `runPipeline`'s "widening" then "wrapping" order) has finished, the earlier
-> SPIR-V-import/legalization passes have already fully unrolled the
-> `InputPatch<HSInput,3>` read into 12 separate, purely-*constant*-indexed
-> `feme.stage.input.load` calls (one per (component, control-point) pair,
-> control-point index literals `0`/`1`/`2`), which the shader's own code then
-> selects among *after* loading using the dynamic self-index -- a valid
-> "materialize-then-select" lowering of a dynamic `InputPatch` index that
-> `lowerHullInputLoad`'s self-index-or-zero check was never designed to
-> recognize, since its check inspects each individual call's own (now
-> always-constant, never-`0` for control points 1/2) control-point-index operand
-> directly, rejecting the literal `1`/`2` cases outright even though
-> `computeStageStorageAddress` never actually *uses* that operand's value at all
-> (it always addresses storage via *this* invocation's own flat index,
-> discarding the checked operand entirely once validated) -- meaning a
-> literal-constant *other*-control-point **input** read (always legal and always
-> available up-front, unlike a same-restriction on **output** data, which
-> genuinely has a same-invocation-only correctness reason) needs its own new
-> addressing path (deriving the target flat invocation index from the literal
-> control-point-within-patch offset plus `HEnv.InputPatchControlPointCount`,
-> rather than reusing "this invocation's own" unconditionally) before this
-> diagnostic can stop over-rejecting a case its own `computeStageStorageAddress`
-> machinery could handle correctly today. Needs its own design note in
-> `FeMeCPUDesign.md` once scoped (a genuine addressing-scheme extension, not a
-> one-line fix)
+> **The tessellation-evaluation (domain) shader stage of a real DXC-compiled
+> hull/domain pair declares no tessellation domain execution mode**, discovered
+> by this session's (L37's) own real
+> `Feature/Semantics/{DomainSystemValues,HullSystemValues}.test` re-run once
+> L37's fix let both cases clear `HullWrapperPass` for the first time and reach
+> `vkCreateGraphicsPipelines`'s later tessellation-state-merging check for the
+> first time too: `GraphicsPipeline.cpp` rejects with `"the
+> tessellation-evaluation stage declares no tessellation domain execution mode
+> (Triangles/Quads/Isolines)"` even though the domain shader's own compiled
+> SPIR-V genuinely has `OpExecutionMode %main Triangles` (confirmed via
+> `spirv-dis` on the real `.o` this test compiles) -- the domain entry is
+> missing only `SpacingEqual`/`VertexOrderCw`/etc, not `Triangles` itself. Root
+> cause (confirmed via `spirv-dis` on both this test's real hull and domain
+> SPIR-V binaries): a real `dxc -spirv` compile of an HLSL hull/domain pair puts
+> *every* tessellation execution mode
+> (`Triangles`/`SpacingEqual`/`VertexOrderCw`/`OutputVertices`) on the **hull
+> (`TessellationControl`)** entry point (the one whose HLSL source actually
+> wrote `[domain("tri")] [partitioning("integer")]
+> [outputtopology("triangle_cw")]`), duplicating only `Triangles` onto the
+> **domain (`TessellationEvaluation`)** entry -- not the Khronos-spec-implied
+> split (domain-shape/spacing/vertex-order modes on the tessellation-evaluation
+> entry, output control point count on the tessellation-control entry)
+> `ConvertSPIRVToLLVMPass.cpp`'s importer assumed. That importer's per-function
+> `Info.TessDomain`/`Info.TessPartitioning`/`Info.TessOutputPrimitive`
+> bookkeeping is keyed strictly per entry point, and the code that finally sets
+> the `feme.tessellation.domain` function attribute (around line 574) requires
+> *both* `TessDomain` *and* `TessPartitioning` to be present on the *same* entry
+> before setting it -- so the domain entry, which only ever sees `Triangles` and
+> never `SpacingEqual`/`VertexOrderCw` from this real DXC output shape, never
+> gets the attribute at all, and `GraphicsPipeline.cpp`'s `DomainState` stays
+> unset. Needs its own fix in `ConvertSPIRVToLLVMPass.cpp` (unconfirmed exact
+> shape: possibly merging both entry points' tessellation execution-mode fields
+> before applying attributes, since a hull/domain pair is always compiled and
+> linked together and the full tessellation state is genuinely spread across
+> both entries in this real DXC output, not just one) -- and, since a genuinely
+> malformed input (a domain shader truly missing *all* tessellation state, from
+> either entry) should still be rejected, needs its own new unit test confirming
+> that diagnostic still fires correctly once the fix lets the real, valid,
+> split-across-both-entries shape through. Not yet started.
