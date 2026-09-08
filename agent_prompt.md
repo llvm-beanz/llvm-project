@@ -42,35 +42,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L35 from the roadmap or other prerequisites blocking the
+Can you close out L35(a) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A real `Vk.SampledTexture2D.SampleBias.test.yaml` case (combining `Bias`, a
-> nonzero texel `Offset`, and a `MinLodClamp` on the *same* `SampleBias` call)
-> still fails `vkCreateGraphicsPipelines`, `VkResult = -3`**, on the same
-> `"unsupported raised operation: ...handlefrombinding... is a register-bound
-> resource handle..."` diagnostic L26 closed for the simpler (`Sample`-only, or
-> one-modifier-at-a-time) shapes -- confirmed distinct from L26's own now-fixed
-> scope by re-running the real case after L26's fix landed. Reduction is
-> unusually hard: `feme-translate --import-spirv` (this project's own standard
-> real-IR-reduction tool for cases like this) crashes outright on *any* SPIR-V
-> binary using the `ConstOffset`/`MinLod` image operands at all -- confirmed
-> identically against `Feature/Textures/Sample.test`'s own already-fixed,
-> already-passing `.o`, which uses the same operands -- via
-> `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s `verifyImageOperands`, an upstream
-> MLIR SPIR-V dialect op verifier with a literal `// TODO: Add the validation
-> rules for the following Image Operands` followed by an
-> `assert(!bitEnumContainsAny(...))` unconditionally rejecting
-> `ConstOffset`/`Offset`/`ConstOffsets`/`MinLod`/etc. The real Vulkan runtime
-> path (`feme::SPIRVImporter`, `Pipeline.cpp`) never hits this assert at all
-> (confirmed: it built and ran L26's own already-fixed cases just fine), meaning
-> the runtime's own `mlir::spirv::deserialize` call path does not invoke full op
-> verification the way `feme-translate`'s own translate-registration does -- so
-> this is a real, narrow, pre-existing *tooling* gap in `feme-translate
-> --import-spirv` itself (not a new regression, and not blocking any real
-> pipeline), but it means this row's own real reduction needs a different
-> technique (e.g. temporarily disabling/loosening this specific assert for
-> investigation purposes only, or adding a `feme-translate` flag to skip strict
-> op verification on import) before the *actual* live gap -- some deeper
-> interaction between combining three image-operand bits on one call and the CPU
-> target's handle-normalization pass -- can be isolated and fixed
+> **`feme-translate --import-spirv` crashes outright on any SPIR-V binary using
+> the `ConstOffset`/`Offset`/`ConstOffsets`/`MinLod`/etc. image operands**, via
+> an upstream MLIR SPIR-V dialect op verifier assert in
+> `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s `verifyImageOperands` (a literal
+> `// TODO: Add the validation rules for the following Image Operands` followed
+> by an unconditional `assert(!bitEnumContainsAny(...))` rejecting these operand
+> bits outright) -- confirmed by L35's own original investigation against
+> `Feature/Textures/Sample.test`'s own already-fixed, already-passing `.o`,
+> which uses the same operands. Not blocking any real pipeline (the real Vulkan
+> runtime path, `feme::SPIRVImporter`/`Pipeline.cpp`, uses
+> `mlir::spirv::deserialize` directly without invoking full op verification, so
+> it never hits this assert), but it is a real, narrow, pre-existing gap in this
+> project's own standard real-IR-reduction tooling for any future row whose
+> repro uses these operands -- needs either loosening/removing the specific
+> assert (if MLIR upstream agrees the TODO can be resolved by accepting these
+> operands without full validation today) or a new `feme-translate` flag to skip
+> strict op verification on import. Not yet started
