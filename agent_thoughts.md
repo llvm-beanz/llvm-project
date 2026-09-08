@@ -69364,3 +69364,140 @@ session. No `git worktree` was needed this time (unlike L69's own
 before/after comparison), since I compared against the prior session's
 already-recorded numbers in `VulkanCTSReport.md` rather than rebuilding a
 baseline commit from scratch.
+
+# L70: `imageSize()`/`GetDimensions` resource-normalization gap
+
+## Starting point
+
+Roadmap L70 was filed with a fairly pessimistic framing: "all compute-stage
+image sampling fails outright at `vkCreateComputePipelines`", with the
+generic `UnsupportedOps.cpp` diagnostic's flagged handle (a storage image)
+suspected but not confirmed to be an "unrelated bystander" — the filing
+explicitly called for a real IR reduction before any fix could even be
+scoped, since a prior grep for compute-stage branching in the resource-
+lowering passes had found none, ruling out the simplest possible
+explanation.
+
+## Reduction technique refinement
+
+I found a faster way to extract the real failing SPIR-V than the prior
+session's `glslangValidator -V` + `spirv-dis` two-step: running the exact
+failing `deqp-vk` case with `--deqp-log-shader-sources=enable` embeds
+glslang's own compiled SPIR-V disassembly directly in the `.qpa` log as
+`<SpirVAssemblySource>`, emitted at shader-compile/link time — which
+happens *before* `vkCreateComputePipelines` is ever called, so it's present
+even for a pipeline that fails creation. One `sed`/`python3 html.unescape`
+pipeline later I had a real `.spvasm` file, assembled with `spirv-as` and
+imported with `feme-translate --import-spirv --spirv-to-llvmir` into
+standalone LLVM IR. I'll reach for this technique first next time instead
+of the glslangValidator route.
+
+## Reproducing the exact real pipeline prefix standalone
+
+The other piece that made this tractable: rather than guessing at which
+passes might be responsible, I traced `CompiledStage::createStage`'s real
+(non-`Reference`) path into `Target/CPU/Pipeline.cpp`'s `runPipeline` and
+extracted the *exact* pass-name list of the `Normalize` `ModulePassManager`
+that runs before `checkSupportedRaisedOps` — then replayed that exact
+sequence standalone via `feme-opt -passes=<the same list>` against the
+reduced IR. This let me confirm, before writing a single line of fix code,
+that *zero* handles were being normalized (every `handlefrombinding` call
+remained raw) — a genuine root-cause confirmation, not a guess. After the
+fix, replaying the same sequence confirmed *zero* raw resource intrinsics
+remained. This "reproduce the exact real pass sequence standalone, verify
+before and after" pattern is now the third or fourth time it's paid off in
+this project's history (H6/H8/H9/L-series precedent) and I'd recommend
+future sessions reach for it immediately rather than treating each
+reduction as a one-off.
+
+## The actual root cause, and why it reframes L70
+
+The compute shader's storage-image handle (its own output image, binding
+4) had two users: an `imageStore()`-driven `getpointer` call (already
+supported) and an `imageSize(destImage)`-driven
+`llvm.spv.resource.getdimensions.xy` call (GLSL's bounds-check idiom,
+extremely common in compute shaders). `hasOnlySupportedStorageImageUses`
+had *zero* handling for the latter at all — and since `collectHandles`
+bails to `std::nullopt` for an entire function the instant it hits one
+unrecognized handle use, this single unhandled call silently rejected
+*every* handle in the function, including the completely innocent input
+sampler. This is exactly the "unrelated bystander" shape the diagnostic's
+own caveat warns about, and confirms it live for the first time (previous
+sessions had suspected this shape but not needed to actually chase it down
+to a concrete example).
+
+Grepping the CPU target's resource-lowering passes (SPIR-V and DXIL both)
+turned up *no* `GetDimensions`/`imageSize`/`textureSize` handling anywhere
+at all — this is a general, stage-agnostic gap, not a compute-stage-
+specific one as L70's original filing assumed. It just happened to surface
+first via a compute CTS case because `imageSize()`'s bounds-check idiom is
+far more common in compute shaders (which have no built-in bounds
+enforcement the way a fragment shader's framebuffer does) than in
+fragment/vertex shaders. I corrected the roadmap's own description of L70
+to reflect this rather than leaving the (now-inaccurate) original framing
+in place.
+
+## Scoping the fix narrowly
+
+`FemeImageDescriptor` already stores `Width`/`Height`/`Depth`/`MipLevels`/
+`ArrayLayers` per bound image, so the fix needed no new ABI/plumbing at
+all — just (a) recognize the intrinsic, (b) rewrite it to a new canonical
+`feme.cpu.image.*` call, (c) implement a tiny runtime function reading
+already-existing fields. Scoped strictly to `Plain2D` only, matching this
+project's own established precedent for incremental per-shape support
+(mirroring L66's own per-shape rows) rather than attempting every image
+shape/dimensionality at once. Other shapes (1D, 3D, arrays, cube,
+multisample, and DXIL's own `GetDimensions` intrinsics) remain unstarted,
+to be scoped by real CTS demand exactly as this project's other per-shape
+rows have been.
+
+## A bracing quirk that cost real time
+
+`ImageCalls.cpp`'s two big switch statements (`getOrInsertImageCall`'s
+`FunctionType` switch, `matchImageCall`'s operand-extraction switch) both
+have an unusual bracing pattern: most `case` arms wrap their body in `{ }`,
+but the *last* arm in each switch (`Sample3D`) does not, and the switch's
+own closing `}` appears immediately after that arm's `break;` with no
+separating blank line or comment. Naively copying a `{ }`-wrapped case
+pattern and inserting it after `Sample3D` (the natural place to add a new
+case, since it's physically the last one) produces a brace mismatch that
+closes the switch or the enclosing function early instead of the new
+case's own block. Took two iterations on each switch to get right. Worth
+flagging for a future session (or maybe worth a small follow-up patch
+normalizing the bracing style throughout both switches, purely for
+maintainability — not attempted this session since it's out of scope and
+would be a purely-cosmetic diff unrelated to this row).
+
+## Real CTS re-run: fix confirmed, but a new gap surfaces
+
+Re-running the exact original failing case against the rebuilt ICD
+confirmed the original `"...cannot normalize into a heap access..."`
+diagnostic is completely gone — real, positive evidence the fix works.
+But the pipeline now fails later, at `feme-cpu-linearize`, with
+`"divergent branch ... has no reconvergence point"` — this compute
+shader's own `if (gid.x >= size.x || gid.y >= size.y) return;` bounds
+check is a divergent branch whose one arm (the early return) never
+reconverges with the other, and the linearizer has no handling at all for
+this extremely common idiom. This is a real, substantial, unrelated,
+unstarted gap — not a regression or incompleteness of this row's own fix
+— so I split it out as a new roadmap row, L71, rather than trying to
+absorb it into this session's own scope (following this project's own
+established precedent for not letting one row's scope balloon to absorb
+every downstream gap it happens to reveal).
+
+A quick spot-check of a couple of other compute-stage sampling cases
+(`texture.sampler2d_float_compute`) confirmed they hit the exact same new
+L71 diagnostic, not some other regression — reassuring that this really is
+now the single common blocker for essentially all of this project's
+already-landed compute-stage work (L60/L63/L65/L66(h)/L66(i)/L66(j)/
+L66(k)/L69/L69(a)/L70), and a strong candidate for the next session's
+focus.
+
+## Housekeeping
+
+Cleaned up `/tmp/l70/` scratch artifacts (extracted `.spvasm`/`.spv`/`.ll`,
+`feme-opt` before/after outputs, and CTS `.qpa` logs) at the end of the
+session. Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+needed no changes — this fix is a CPU-target resource-lowering capability,
+not an extension or 1.4 core feature bit, so neither inventory references
+it.
