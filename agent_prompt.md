@@ -42,29 +42,39 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L78 from the roadmap or other prerequisites blocking the
+Can you close out L79 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Both of L77's own named repros
-> (`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test`) now clear
-> `vkCreateGraphicsPipelines` and command submission cleanly, but still fail
-> their own `SystemValues` result check**: the real ICD's `ResultBuffer` comes
-> back entirely zero (`[0x0, 0x0, 0x0, 0x0, ...]`) against a non-zero expected
-> buffer (`[0x0, 0x0, 0x0, 0x1, 0x2, 0x3F800000, 0x3F800000, ...]`), confirmed
-> via a real `offloader -debug-layer` re-run of both repros (`"Graphics Pipeline
-> created."` with no further error, then a clean `Test failed: SystemValues` /
-> `BufferExact` mismatch, not a crash or a `VkResult` failure) once L77's fix
-> let both cases reach real execution for the first time. Entirely unrelated to
-> L77's own execution-mode-merging scope -- a distinct, further-downstream gap
-> in either the tessellator's real per-patch execution, the
-> hull/domain/patch-constant stage-wrapping chain's real storage addressing, or
-> the pixel shader's own read-back of the forwarded per-vertex/per-patch
-> attributes, now reachable for the first time. Needs its own real IR reduction
-> of one of these exact cases (the same technique this project's
-> H6-series/H8-series/H9-series/L-series chains have used throughout) to isolate
-> which stage's real output is actually going unwritten -- e.g. a temporary
-> pre-rasterization buffer dump (mirroring this row's own quick unsuccessful
-> `RenderTarget`-comparison probe, which hit an unrelated `Data:`-key
-> YAML-schema restriction on an `OutputProps`-tagged buffer resource and was not
-> pursued further) to confirm whether the tessellator ever emits primitives at
-> all for these two real cases, before narrowing further. Not yet started.
+> **Vertex-attribute fetch reads past a bound attribute format's own declared
+> channel count when a shader declares a wider input type**, discovered by L78's
+> own investigation once its fix let real, non-zero forwarded vertex position
+> data reach a hull/domain-stage test for the first time:
+> `HullSystemValues.test`'s real vertex shader declares `float4 position :
+> POSITION` as its input even though the bound `VertexData` attribute only
+> supplies 2 floats (`Format: Float32, Channels: 2, Stride: 8`); the observed
+> hull-stage-forwarded position value (`(-0.9, -0.9, -0.1, -0.9)`) exactly
+> matches `[CP0.x, CP0.y, CP1.x, CP1.y]` -- i.e. the fetch reads 4 floats
+> unconditionally from a buffer that only has 2 floats per vertex, spilling into
+> the *next* vertex's data, rather than defaulting the missing components per
+> the standard HLSL/Vulkan convention (0 for missing X/Y/Z, 1 for a missing W).
+> Root cause: `Executor.cpp`'s `attributeFetchLayout(cpu::ResourceFormat)` maps
+> `R32_FLOAT`/`R32G32_FLOAT`/`R32G32B32_FLOAT`/`R32G32B32A32_FLOAT` all to the
+> identical `{FetchByteSize=4, ComponentsPerFetch=1}` -- the format's own real
+> channel count (e.g. 2 for `R32G32_FLOAT`) is never tracked or used to cap how
+> many components get decoded; the fetch loop's `InBoundsComponents =
+> min(Elt.ComponentCount, AvailableFetches * ComponentsPerFetch)` is capped only
+> by (a) the *shader's* own declared component count and (b) how many
+> format-sized fetches fit in the *entire remaining buffer* (spanning subsequent
+> vertices), never by the bound attribute's own declared width. Confirmed
+> empirically via a scratch (non-production) YAML providing full
+> float4/16-byte-stride vertex data in place of the real float2/8-byte-stride:
+> the render target changes from entirely blank to fully rendered with no other
+> change, isolating this as the sole remaining blocker for L78's own two named
+> repros. Needs a real fix threading the bound attribute format's own channel
+> count through `attributeFetchLayout`/the fetch loop, capping
+> `InBoundsComponents` by it in addition to the existing checks, and defaulting
+> any shader-declared components beyond it to 0 (X/Y/Z) or 1 (W) per standard
+> convention -- with care for both float and integer component types -- plus its
+> own new unit tests covering a shader declaring more components than its bound
+> attribute format supplies, in each of the "missing W only" and "missing
+> multiple trailing components" shapes. Not yet started.
