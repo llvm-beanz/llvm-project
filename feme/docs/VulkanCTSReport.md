@@ -32352,3 +32352,73 @@ remaining blocker. See roadmap L79.
 change needed -- this is a pure CPU-side `HullWrapperPass`
 addressing/masking fix, touching no new Vulkan feature or extension
 surface.
+
+## L79: vertex-attribute fetch capped by the bound format's own channel count
+
+### Symptom
+
+L78's own investigation found domain-stage output `position`'s `x`/`y`
+plausible but `z`/`w` wrong for both of L77/L78's named repros
+(`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test`), traced
+to `Executor.cpp`'s vertex-attribute fetch reading past the bound
+attribute format's own real channel count -- a shader declaring
+`float4 position` against a bound `Format: Float32, Channels: 2`
+attribute read 4 floats unconditionally, spilling into the next
+vertex's bytes, rather than defaulting the missing components per the
+standard HLSL/Vulkan convention (0 for missing X/Y/Z, 1 for missing W).
+
+### Fix
+
+Added a `ChannelCount` field to `AttributeFetchLayout`, split previously
+merged per-component-count format cases in `attributeFetchLayout()` so
+each reports its own real channel count, and capped decoded components
+by it (`FormatComponents = min(Elt.ComponentCount, ChannelCount)`)
+before the pre-existing buffer-bounds cap. Explicitly defaults the W
+component to 1.0/1 (float or integer bit pattern, matching the
+element's `SignatureComponentType`) when the format structurally lacks
+a fourth channel; missing X/Y/Z already default to 0 via
+zero-initialization. New regression tests:
+`VertexAttributeDefaultsComponentsBeyondFormatChannelCount`/
+`VertexAttributeDefaultsOnlyMissingAlphaComponent`
+(`unittests/Graphics/ExecutorTest.cpp`), both confirmed to fail before
+this fix (reading garbage from the next vertex's position data) and
+pass after (verified via a stash-based before/after comparison).
+`check-feme`: 2770/2829 Passed, 59 Unsupported, 0 Failed -- no
+regressions (up by exactly 2 from the two new tests).
+
+### Real-ICD before/after comparison (L78's named repros)
+
+Re-ran both of L78's own named repros directly via `offloader` after
+this fix:
+
+- `HullSystemValues.test`: no longer all-zero -- the `ResultBuffer` now
+  shows genuine forwarded data for most elements (`SV_PrimitiveID`,
+  `SV_OutputControlPointID`, `SV_TessFactor`/`SV_InsideTessFactor` all
+  round-trip correctly), but elements 0/1/7/8 (the smuggled position
+  data) still mismatch (`-0.9,-0.9` and `0.1,0.1` where `0,0` and
+  `1,1` are expected) -- real progress (this fix's own scope, the
+  read-through-into-next-vertex bug, is gone), but a further, distinct
+  bug remains. Filed separately as roadmap **L80**.
+- `DomainSystemValues.test`: still fails, but with a *different*
+  symptom than before this fix -- `vkCreateGraphicsPipelines`/command
+  submission now succeed, but `vk.queueSubmit` fails
+  (`VkResult = -3`), a new failure mode not previously reached. Filed
+  separately as roadmap **L81**.
+
+### Real CTS re-run
+
+Re-ran the identical `dEQP-VK.tessellation.shader_input_output.*`
+(28-case) caselist used for L37/L77/L78's own CTS re-runs: unchanged --
+still 13/28 cases reach a result before the group's own
+already-documented, pre-existing segfault, and all 13 still fail on the
+same two already-tracked, unrelated gaps
+(`feme-cpu-wrap-patch-constant`'s masked-output-store gap and
+`feme-cpu-simdize`'s divergent-aggregate-decomposition restriction) as
+before this fix -- confirming no regression, though (as for
+L37/L77/L78) this CTS group still cannot directly exercise this row's
+own fix either before or after; the real confirmation is the
+offloader-based, before/after comparison above.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- this is a pure CPU-side vertex-attribute-fetch
+decode-width fix, touching no new Vulkan feature or extension surface.
