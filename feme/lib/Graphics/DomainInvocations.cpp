@@ -13,7 +13,8 @@
 using namespace feme::graphics;
 
 std::vector<feme::cpu::FemeDomainInvocation>
-feme::graphics::buildDomainInvocations(const TessellatedPatch &Patch) {
+feme::graphics::buildDomainInvocations(const TessellatedPatch &Patch,
+                                       uint32_t PrimitiveID) {
   std::vector<cpu::FemeDomainInvocation> Invocations;
   Invocations.reserve(Patch.Points.size());
   for (const DomainPoint &Point : Patch.Points) {
@@ -21,6 +22,7 @@ feme::graphics::buildDomainInvocations(const TessellatedPatch &Patch) {
     Invocation.DomainLocation[0] = Point.U;
     Invocation.DomainLocation[1] = Point.V;
     Invocation.DomainLocation[2] = Point.W;
+    Invocation.PrimitiveID = PrimitiveID;
     Invocations.push_back(Invocation);
   }
   return Invocations;

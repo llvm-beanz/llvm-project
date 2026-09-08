@@ -343,7 +343,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
   }
 
   std::vector<cpu::FemeDomainInvocation> Invocations =
-      buildDomainInvocations(Result.Tessellated);
+      buildDomainInvocations(Result.Tessellated, PrimitiveID);
   {
     cpu::FemeStageLayout InLayout = DomainInput->layout();
     cpu::FemeStageLayout PatchLayout = DomainPatchConstants.layout();

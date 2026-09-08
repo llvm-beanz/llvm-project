@@ -145,7 +145,8 @@ enum PatchConstantArgsField : unsigned {
 
 enum DomainInvocationField : unsigned {
   DomainInvocationFieldDomainLocation = 0,
-  DomainInvocationFieldReserved = 1,
+  DomainInvocationFieldPrimitiveID = 1,
+  DomainInvocationFieldReserved = 2,
 };
 
 enum DomainArgsField : unsigned {
@@ -282,7 +283,8 @@ inline llvm::StructType *getDomainInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *F32Ty = llvm::Type::getFloatTy(Ctx);
   return llvm::StructType::get(
-      Ctx, {llvm::ArrayType::get(F32Ty, 3), llvm::ArrayType::get(I32Ty, 5)});
+      Ctx, {llvm::ArrayType::get(F32Ty, 3), I32Ty,
+           llvm::ArrayType::get(I32Ty, 4)});
 }
 
 /// Mirrors `FemeDomainArgs`: a vertex-shaped per-invocation batch whose

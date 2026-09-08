@@ -1994,6 +1994,50 @@ TEST(CanonicalizeStageTest, DomainStageMapsTessCoordAndPatchInput) {
   EXPECT_EQ(TessLevelOuter.Frequency, SignatureFrequency::PerPatch);
 }
 
+/// (Roadmap L81) A domain stage's own `BuiltIn PrimitiveId` (code 7,
+/// `gl_PrimitiveID`) read is a genuine, pipeline-supplied system value --
+/// never patch-constant-forwarded data -- even though a real DXC/SPIR-V
+/// compile decorates it `Patch` (decoration code 15, uniform across the
+/// whole patch) the same way a true patch-constant-forwarded tessellation
+/// factor is decorated. Before this fix, `isPatchOutputDecoration` alone
+/// decided this classification, wrongly routing `gl_PrimitiveID` into
+/// `SignatureDirection::PatchInput` (expecting a patch-constant-phase
+/// `PatchOutput` producer that never exists for it) -- the domain-stage
+/// analog of roadmap L80's identical hull-stage mistake. It must instead be
+/// recognized alongside `DomainLocation`/`PatchVertices` as a genuinely
+/// synthesized, non-forwarded `SignatureDirection::Input`.
+TEST(CanonicalizeStageTest, DomainStageMapsPrimitiveIDAsSynthesizedInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PrimitiveID = external addrspace(7) constant i32, !spirv.Decorations !0
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %pid = load i32, ptr addrspace(7) @gl_PrimitiveID
+      %pidf = uitofp i32 %pid to float
+      %v = insertelement <4 x float> poison, float %pidf, i32 0
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="domain" }
+    !0 = !{!2, !3}
+    !1 = !{!4}
+    !2 = !{i32 11, i32 7}
+    !3 = !{i32 15}
+    !4 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &PrimitiveID = Sig->Elements[0];
+  EXPECT_EQ(PrimitiveID.Direction, SignatureDirection::Input);
+  EXPECT_EQ(PrimitiveID.SystemValue, SignatureSystemValue::PrimitiveID);
+  EXPECT_EQ(PrimitiveID.Frequency, SignatureFrequency::PerPatch);
+}
+
 /// (Roadmap H5c) A geometry entry point's `BuiltIn PrimitiveId` (code 7,
 /// `gl_PrimitiveIDIn` as an `Input`), `InvocationId` (code 8,
 /// `gl_InvocationID`), `Layer`/`ViewportIndex` (codes 9/10,

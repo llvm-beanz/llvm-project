@@ -41,9 +41,12 @@ namespace feme::graphics {
 /// Converts \p Patch's generated domain coordinates into one
 /// `feme::cpu::FemeDomainInvocation` per point, in the same order, for use
 /// as a `feme::cpu::FemeDomainArgs::Invocations` array. Every invocation's
-/// `Reserved` field is zeroed.
+/// `PrimitiveID` field is set to \p PrimitiveID (roadmap L81: this patch's
+/// own `SV_PrimitiveID`, uniform across every point generated for it) and
+/// its `Reserved` field is zeroed.
 std::vector<cpu::FemeDomainInvocation>
-buildDomainInvocations(const TessellatedPatch &Patch);
+buildDomainInvocations(const TessellatedPatch &Patch,
+                       uint32_t PrimitiveID = 0);
 
 } // namespace feme::graphics
 

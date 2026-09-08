@@ -58,4 +58,31 @@ TEST(DomainInvocationsTest, ReservedFieldIsZeroed) {
     EXPECT_EQ(Reserved, 0u);
 }
 
+TEST(DomainInvocationsTest, DefaultsPrimitiveIDToZero) {
+  TessellatedPatch Patch;
+  Patch.Points = {{0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}};
+
+  std::vector<FemeDomainInvocation> Invocations = buildDomainInvocations(Patch);
+
+  ASSERT_EQ(Invocations.size(), 2u);
+  EXPECT_EQ(Invocations[0].PrimitiveID, 0u);
+  EXPECT_EQ(Invocations[1].PrimitiveID, 0u);
+}
+
+TEST(DomainInvocationsTest, BroadcastsPrimitiveIDToEveryPoint) {
+  // (Roadmap L81) `SV_PrimitiveID` is uniform across an entire patch, so
+  // every domain point generated for one patch must carry the same
+  // `PrimitiveID`, matching how `PatchPipeline.cpp` calls this function once
+  // per patch with that patch's own index.
+  TessellatedPatch Patch;
+  Patch.Points = {{0.0f, 0.0f, 0.0f}, {0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}};
+
+  std::vector<FemeDomainInvocation> Invocations =
+      buildDomainInvocations(Patch, /*PrimitiveID=*/7);
+
+  ASSERT_EQ(Invocations.size(), 3u);
+  for (const FemeDomainInvocation &Invocation : Invocations)
+    EXPECT_EQ(Invocation.PrimitiveID, 7u);
+}
+
 } // namespace

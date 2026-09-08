@@ -71,6 +71,22 @@ SignatureElement makePatchVerticesInput(uint32_t ElementID) {
   return Elt;
 }
 
+/// (Roadmap L81) This patch's own `SV_PrimitiveID`: a genuine,
+/// pipeline-supplied per-patch scalar, classified `SignatureDirection::
+/// Input`/`SignatureFrequency::PerPatch` by `classifySPIRVElement` even
+/// though a real DXC/SPIR-V compile decorates it `Patch` (uniform per
+/// patch) -- the same decoration a genuine patch-constant-forwarded
+/// tessellation factor carries.
+SignatureElement makePrimitiveIDInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::PrimitiveID;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.Frequency = SignatureFrequency::PerPatch;
+  return Elt;
+}
+
 TEST(DomainWrapperTest, LowersAllThreeInputSourcesAndBuildsWrapper) {
   LLVMContext Ctx;
   // The canonical evaluation shape: blend two control points of the
@@ -241,6 +257,49 @@ TEST(DomainWrapperTest, LowersPositionInputSystemValue) {
 
   EntrySignature Sig;
   Sig.Elements = {Position, makeFloatElement(1, SignatureDirection::Output)};
+  dxil::setEntrySignature(*M->getFunction("ds_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  DomainWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_ds_main"));
+  for (const Instruction &I : instructions(*M->getFunction("ds_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// (Roadmap L81) A domain stage reading its own `SV_PrimitiveID` lowers
+/// without diagnosing (no patch-constant producer required) and the
+/// wrapper is still built. Before this fix, `classifySPIRVElement`
+/// misclassified this element `SignatureDirection::PatchInput` (mistaking
+/// its real `Patch` SPIR-V decoration for patch-constant-forwarded data),
+/// which `PatchPipeline.cpp`'s `linkStageElements` then rejected at
+/// pipeline-link time with "patch-constant output -> domain stage patch
+/// input: element N has no matching producer element" since no
+/// patch-constant-stage output ever produces this pipeline-supplied value.
+TEST(DomainWrapperTest, LowersPrimitiveIDInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ds_main() #0 {
+      %pid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %pidf = uitofp i32 %pid to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %pidf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {makePrimitiveIDInput(0),
+                  makeFloatElement(1, SignatureDirection::Output)};
   dxil::setEntrySignature(*M->getFunction("ds_main"), Sig);
 
   ModuleAnalysisManager MAM;

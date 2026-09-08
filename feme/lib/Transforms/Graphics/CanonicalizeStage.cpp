@@ -1588,9 +1588,23 @@ SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
       return Info;
     }
     if (Sys == SignatureSystemValue::DomainLocation ||
-        Sys == SignatureSystemValue::PatchVertices) {
+        Sys == SignatureSystemValue::PatchVertices ||
+        // (Roadmap L81) `SV_PrimitiveID`/`gl_PrimitiveID` is a genuine,
+        // pipeline-supplied system value -- this patch's own index within
+        // the draw -- never data the patch-constant function computed and
+        // forwarded. A real DXC/SPIR-V compile decorates it `Patch`
+        // (uniform across the whole patch, like a true patch-constant
+        // output), which would otherwise satisfy `isPatchOutputDecoration`
+        // below and wrongly demand a `PatchOutput`-direction producer from
+        // the patch-constant phase that never exists for it (mirroring
+        // roadmap L80's identical Hull-stage-input mistake). Recognized
+        // here, alongside `DomainLocation`/`PatchVertices`, the two other
+        // domain-stage inputs this pass already knows are synthesized
+        // rather than forwarded.
+        Sys == SignatureSystemValue::PrimitiveID) {
       Info.Direction = SignatureDirection::Input;
-      if (Sys == SignatureSystemValue::PatchVertices)
+      if (Sys == SignatureSystemValue::PatchVertices ||
+          Sys == SignatureSystemValue::PrimitiveID)
         Info.Frequency = SignatureFrequency::PerPatch;
       return Info;
     }

@@ -1200,9 +1200,21 @@ struct FemeDomainInvocation {
   /// and leaves the third zero; a triangle domain uses all three as a
   /// barycentric coordinate.
   float DomainLocation[3];
-  /// ABI headroom for later domain-stage invocation metadata (a primitive
-  /// ID, for instance).
-  uint32_t Reserved[5];
+  /// (Roadmap L81) This patch's `SV_PrimitiveID`/`gl_PrimitiveID`: the
+  /// index of the patch this domain point belongs to within the draw,
+  /// uniform across every point `feme::graphics::tessellate` generates for
+  /// one patch. Mirrors `FemePatchArgs::PrimitiveID`'s own reasoning: a
+  /// real DXC/SPIR-V compile decorates a domain-stage `SV_PrimitiveID`
+  /// read `Patch` (uniform per patch), which `feme::classifySPIRVElement`
+  /// would otherwise mistake for patch-constant-forwarded data (the same
+  /// mistake roadmap L80 fixed for the hull stage's own `SV_PrimitiveID`
+  /// read) -- it is instead a plain, pipeline-supplied scalar with no
+  /// producer to link against, carried here alongside `DomainLocation`
+  /// since both are per-invocation record fields this stage's compiled
+  /// wrapper already reads directly, with no stage-storage indirection.
+  uint32_t PrimitiveID;
+  /// ABI headroom for later domain-stage invocation metadata.
+  uint32_t Reserved[4];
 };
 
 /// The single argument a compiled domain/evaluation entry point takes:
