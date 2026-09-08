@@ -42,36 +42,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L71 from the roadmap or other prerequisites blocking the
+Can you close out L72 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Every compute-stage entry point using the common GLSL/HLSL early-return
-> bounds-check idiom (`if (gid.x >= size.x \|\| gid.y >= size.y) return;`) fails
-> outright at pipeline creation** with `feme-cpu-linearize: function '<name>':
-> divergent branch in '<bb>' has no reconvergence point`, discovered by roadmap
-> L70's own closing re-run once its resource-normalization fix let real
-> compute-stage sampling shaders reach the linearizer for the first time. Root
-> cause (per `VerifyStructured.cpp`'s `checkDivergentBranchesReconverge`, also
-> checked by `Linearize.cpp` itself): a non-uniform (divergent, i.e.
-> per-invocation-varying) conditional branch's immediate post-dominator does not
-> exist in the function's `PostDominatorTree` -- the classic shape of "one arm
-> of the branch never returns to a common point" that an early `return` inside a
-> divergent `if` produces, since control flow from that arm simply exits the
-> function instead of rejoining the other arm anywhere. Unlike a fragment shader
-> (where feme's own `SIMDize`/`Linearize` machinery already has an established
-> masked/helper-invocation lane model for exactly this kind of partial-lane
-> exit), a compute shader's divergent early return currently has no equivalent
-> handling anywhere in the linearizer at all -- confirmed via grep, no branch or
-> comment in `Linearize.cpp` mentions early-return masking for any stage. This
-> is a large, genuinely unstarted linearizer/control-flow feature (mapping a
-> divergent early return onto a masked/predicated continuation instead of
-> rejecting the branch outright), not a small follow-on fix, and is very likely
-> the single highest-value remaining blocker for turning any of this project's
-> already-landed compute-stage sampling/derivative fixes
-> (L60/L63/L65/L66(h)/L66(i)/L66(j)/L66(k)/L69/L69(a)/L70) into real CTS
-> Pass-count movement, since this exact idiom is pervasive in real compute
-> shaders. Not yet started; needs its own real design investigation into how a
-> divergent early return could be lowered to a masked/predicated form compatible
-> with this target's existing structured-control-flow linearizer, likely
-> followed by its own further breakdown into smaller rows once a design is
-> chosen, per this project's own established splitting precedent for large gaps.
+> **A real, broad compute-stage `texture_functions` CTS re-run (1,375 cases,
+> every `*_compute` case in that group) now shows genuine, substantial
+> Pass-count movement for the first time (153 Pass, up from 0) following roadmap
+> L70/L71's own fixes**, but the remaining 890 `Fail` cases break down into
+> several distinct, already-partially-known, unstarted-here gaps rather than one
+> single cause: (1) 284 cases still need `SPV_KHR_compute_shader_derivatives`
+> SPIR-V-import support -- already tracked as roadmap L7, unaffected by this
+> row; (2) 100 cases fail SPIR-V-to-LLVM legalization of `spirv.ImageFetch`; (3)
+> 18 cases fail legalization of `spirv.ImageSampleDrefExplicitLod`; and (4) 340
+> cases (split across four distinct "unhandled opcode" numbers -- 92, 94, 103,
+> and 106/107 -- reported by the SPIR-V importer) remain entirely untriaged --
+> not yet identified against the SPIR-V spec's own opcode table, let alone
+> reduced to real IR. None of these four buckets have had their own real IR
+> reduction yet; per this project's own established precedent, each should get
+> one before being scoped as its own row (or rows), rather than attempting a fix
+> blind. Not yet started.
