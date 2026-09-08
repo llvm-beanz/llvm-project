@@ -31163,3 +31163,94 @@ Re-ran the identical 1,375-case caselist against the rebuilt
 needed (this fix is a CPU-target resource-lowering capability, not an
 extension or 1.4 core feature bit). Temporary artifacts under `/tmp/l72/`
 and `/tmp/l72run/` cleaned up at the end of the session.
+
+## L72(a): lowering projective explicit-LOD image samples (`OpImageSampleProjExplicitLod`/`OpImageSampleProjDrefExplicitLod`)
+
+Closed out the largest sub-bucket roadmap L72 filed as L72(a): 264 of its
+340 "unhandled opcode" CTS cases were `OpImageSampleProjExplicitLod` (92,
+240 cases) and `OpImageSampleProjDrefExplicitLod` (94, 24 cases), both
+opcodes MLIR's own SPIR-V dialect has zero enum/Op-class coverage for at
+all.
+
+Scoped as a **feme-local pre-import SPIR-V binary rewrite** rather than an
+upstream MLIR contribution, per L72(a)'s own filed scoping question --
+avoids the cross-repository risk an upstream TableGen change would carry.
+Both "Proj" opcodes differ from an already-supported non-Proj counterpart
+(`OpImageSampleExplicitLod`/`OpImageSampleDrefExplicitLod`, 88/90) only in
+how their Coordinate (and Dref) operand is interpreted: one extra
+trailing "divisor" component, with the real coordinate/Dref used for the
+lookup being every other component divided by it (confirmed against the
+SPIR-V specification's own projective-sampling semantics). Added
+`lowerProjectiveImageSamples` to `SPIRVImporter.cpp`, mirroring the
+existing `stripNonSemanticExtInst` rewrite-before-MLIR-ever-sees-it
+precedent:
+
+- Two passes over the raw SPIR-V word stream: the first builds an
+  <id>-to-Result-Type map (restricted to a bounded, deliberately
+  conservative allowlist of value-producing opcodes actually seen in
+  real GLSL/HLSL-compiled shaders -- `OpLoad`, `OpCompositeConstruct`,
+  `OpConstantComposite`, `OpFDiv`, etc. -- rather than every opcode the
+  specification permits, since misclassifying an opcode without a
+  `Result Type` operand as one with one would corrupt the map), an
+  `OpTypeVector` (component-type, count) <-> type-id map, and the
+  module's own fresh-<id> bound; the second rewrites each "Proj"
+  occurrence it can resolve, leaving anything it can't resolve
+  completely untouched (still an "unhandled opcode" failure, exactly as
+  before this pass existed, rather than risk an incorrect divide).
+- For each occurrence: emits `OpCompositeExtract`/`OpFDiv` instructions to
+  compute the divided components, narrows the Coordinate down to exactly
+  the width the image's dimensionality needs (synthesizing a new
+  `OpTypeVector` via `OpCompositeConstruct` if none already declares that
+  width), divides Dref too for the "Dref" form, and relabels the
+  instruction's own opcode to its non-Proj equivalent.
+- The narrowing (rather than the spec-legal option of leaving the
+  Coordinate at its original, wider width with the extra component simply
+  divided-and-ignored) is required because feme's own SPIR-V-to-LLVM
+  legalization patterns for `ImageSampleExplicitLod`/
+  `ImageSampleDrefExplicitLod` already assume an exactly-sized Coordinate
+  operand when selecting a runtime call.
+
+Added 3 new unit tests in `SPIRVImporterTest.cpp` using the existing
+`RawSPIRVModuleBuilder` hand-assembler (the same technique the pre-
+existing `NonSemantic.*` test uses, since neither "Proj" opcode has any
+`spirv` dialect op to author it with for a `feme-translate` round trip):
+`LowersImageSampleProjExplicitLod` and
+`LowersImageSampleProjDrefExplicitLod` (both walk the resulting MLIR
+module confirming the rewritten sample's Coordinate is narrowed to the
+expected width and the expected number of `FDivOp`/`CompositeConstructOp`
+instructions appear), and
+`LeavesImageSampleProjExplicitLodWithUnresolvableCoordinateAlone` (a
+negative test: a Coordinate produced by `OpIAdd`, deliberately not in the
+producer allowlist, confirms the pass leaves the occurrence untouched and
+import still fails). `check-feme`: 2723/2782 pass, 0 fail, 59 unsupported
+(+3 tests, no regressions).
+
+Re-ran the identical 1,375-case caselist against the rebuilt
+`feme_icd.json`:
+
+- **Totals**: 245/1375 Pass (17.8%, up from 161), 798 Fail (down from
+  882), 332 Not Supported (unchanged).
+- Zero remaining "unhandled opcode 92"/"unhandled opcode 94" failures in
+  the re-run's own log -- confirming the rewrite is complete for both
+  opcodes across every case in this caselist.
+- The remaining `textureproj*_compute` failures (142 cases) are both
+  pre-existing, unrelated buckets, confirming no overlap: 130 cases need
+  `SPV_KHR_compute_shader_derivatives` (roadmap L7, since
+  `textureProj`/`textureProjOffset` without an explicit LOD go through
+  the implicit-LOD/derivative path even in this rewrite), and 12 cases
+  hit roadmap L72(b)'s own already-filed `ConstOffset`+`Lod` legalization
+  gap for *arrayed* (`vector<3xf32>`-coordinate) `ImageSampleDrefExplicitLod`
+  -- a shape this row's rewrite never touches, since those instructions
+  were never "Proj" to begin with.
+- The residual "unhandled opcode" count (76 cases: 34 `OpImageQuerySizeLod`
+  (103), 34 `OpImageQueryLevels` (106), 8 `OpImageQuerySamples` (107))
+  matches L72(a)'s own pre-fix accounting exactly. Filed as roadmap
+  L72(d), since none of these three opcodes can be rewritten into an
+  already-supported equivalent purely at the SPIR-V binary level (each
+  queries information no other opcode's return value substitutes for).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (a SPIR-V-import-time rewrite of two sampling opcodes into their
+already-supported equivalents, not a new extension or 1.4 core feature
+bit). Temporary artifacts under `/tmp/l72a/` cleaned up at the end of the
+session.
