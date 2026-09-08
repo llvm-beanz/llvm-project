@@ -71354,3 +71354,85 @@ incomplete `beanz/feme` branch, since a future session re-running
 `check-hlsl-feme-vk` needs the array-texture executor support to keep
 working; this is a local-checkout-only change, nothing was pushed to any
 remote.
+
+# L36 session: recognizing a duplicate roadmap filing
+
+## The request was a verbatim repeat, but of an older, still-open row
+
+This session's request text was, word-for-word, identical to what I
+investigated and closed as roadmap L76 in the immediately preceding
+session. Checking the roadmap this time around showed why: L36 itself
+was a genuine, still-open, never-closed row with this exact text -- the
+prior session's mistake wasn't that L36 didn't exist, it was that I
+assumed (incorrectly, without actually checking) that "L35(a)" in that
+session's own request must have been a typo for some other row, and
+picked a fresh unused ID (L76) rather than checking whether the *content*
+itself matched an existing, older, open row by a completely different
+number. Grepping for the row's own distinctive fixed phrases (`3 wrong-
+mip output mismatches (elements 5/13/14)`) against the roadmap up front
+this time immediately surfaced L36 as the real original filing.
+
+This is a useful lesson for future sessions: when a request's quoted
+issue text doesn't match the roadmap ID given (as happened both times --
+first "L35(a)" didn't match its own quoted text, this time the ID "L36"
+in this session's own header did match, but only because I'm now
+checking properly), search the roadmap by the *content* of the quote,
+not just the ID in the header, before deciding whether a fresh ID is
+needed. A quoted issue's own literal, unusual phrases (test names, exact
+error strings, specific numbers like "elements 5/13/14") make a much more
+reliable existing-row search key than trusting the request's own header
+number, since -- as this exact pair of sessions demonstrates -- the
+header number can't always be trusted to be either correct or novel.
+
+## Closing by cross-reference rather than repeating the investigation
+
+Since L76's own investigation from the immediately preceding session
+covers this row's content exactly (identical repro tests, identical root
+cause already fixed by L60(a), identical CTS group), I didn't repeat any
+of the actual investigative work -- rebuilding `offloader`, cherry-
+picking `offload-test-suite`, sweeping every `Array.*` test, diagnosing
+the two newly-found L76(a)/L76(b) gaps. All of that already happened and
+is already recorded. Instead, I closed L36 with a done-note that directly
+cross-references L76's own already-complete investigation, and updated
+L76's own done-note with a matching back-reference clarifying which row
+is the "real" original (L36, since its own filed text is presumably the
+one some upstream/earlier tracking system generated first) and which is
+the accidental duplicate (L76). This keeps both rows individually
+readable and correct without duplicating multiple paragraphs of already-
+recorded reasoning a second time.
+
+I still re-verified the two named real repros and the CTS group directly
+rather than purely trusting the historical record, per this project's own
+recurring "verify directly, don't just trust the log" practice -- and hit
+a minor false alarm doing so: my first re-verification attempt used a
+*relative* `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` path (`tools/feme/...`
+instead of the absolute `/home/dev/dev/llvm-project/build2/tools/feme/...`),
+which made both tests spuriously fail with `"Failed to create Vulkan
+instance (VkResult = -9)"` under `llvm-lit` specifically (though the
+identical relative path worked fine when invoking `offloader` directly
+from the same shell) -- because `lit` executes each test's own `RUN:`
+lines from that test's own per-test output directory, not the invoking
+shell's current directory, so a relative env-var path silently resolved
+to the wrong location once `lit` changed directories. Re-running with
+absolute paths confirmed both tests genuinely still pass (2/2), and the
+CTS group still 16/16 Pass -- a real confirmation, not a regression this
+time, just my own shell-invocation mistake. Worth remembering: always use
+absolute paths for `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` when invoking
+`llvm-lit` directly (outside the `ninja check-hlsl-feme-vk` target, which
+already gets this right via its own CMake-generated absolute-path
+`cmake -E env` invocation).
+
+## Wrap-up
+
+No feme code changed this session (nothing to change -- the underlying
+fix was already landed via L60(a), and L76's own investigation already
+covers everything this row needed). `ninja check-feme`: 2763/2822 Passed,
+59 Unsupported, 0 Failed, unaffected and unchanged from the prior
+session's own numbers. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed. Committed the
+Roadmap.md/VulkanCTSReport.md docs update as a single commit (no code to
+split out), followed by this agent_thoughts.md entry in its own commit,
+last, per the standing instruction. No temporary scratch files needed
+cleanup this session (only the already-built `deqp-vk` binary and the
+already-rebuilt `offloader` binary from the prior session's own work were
+reused, no new artifacts created outside `/tmp` that needed removing).
