@@ -518,13 +518,27 @@ constexpr unsigned SPIRVDimCube = 3;
 /// also cover `Texture2DArray`/`TextureCube`/`TextureCubeArray`, and
 /// roadmap L52a further widened it to cover
 /// `Texture1D`/`Texture1DArray`, recorded in the returned classification's
-/// own `Shape`). Every other dimension, a multisampled image, and a
-/// storage image (`Sampled == 2`, handled instead by
-/// `classifyStorageImage2DHandle` below, roadmap H19a) return
-/// `std::nullopt`. An integer-channel handle is classified the same as a
-/// float one here -- `hasOnlySupportedImageUses` (roadmap E26) is what
-/// narrows its *uses* to fetch only, since SPIR-V never legalizes a
-/// filtered sample against an integer-sampled image.
+/// own `Shape`). Every other dimension and a storage image (`Sampled ==
+/// 2`, handled instead by `classifyStorageImage2DHandle` below, roadmap
+/// H19a) return `std::nullopt`. An integer-channel handle is classified
+/// the same as a float one here -- `hasOnlySupportedImageUses` (roadmap
+/// E26) is what narrows its *uses* to fetch only, since SPIR-V never
+/// legalizes a filtered sample against an integer-sampled image.
+///
+/// Roadmap L73: a multisampled (`MS == 1`) 2D sampled image (`Dim ==
+/// SPIRVDim2D` only -- SPIR-V disallows multisampling for any other
+/// `Dim`) classifies as `ImageShape::Plain2DMS`/`ImageShape::Array2DMS`,
+/// reusing the same two shape values `classifyStorageImage2DHandle`
+/// already returns for a multisampled *storage* image, since the
+/// coordinate-width semantics (`Plain2DMS`: 3-wide `(x, y, sample)`;
+/// `Array2DMS`: 4-wide `(x, y, layer, sample)`) are shape-appropriate
+/// regardless of whether the underlying handle is a storage or sampled
+/// image. Unlike a single-sampled handle, no `runtime/CPU` sampling/fetch
+/// helper exists for a multisampled *sampled* image yet -- `textureSamples()`
+/// (`OpImageQuerySamples`, `isQuerySamplesCall`) is the sole operation
+/// `hasOnlySupportedImageUses` accepts against this shape; a filtered
+/// sample or `texelFetch()` against a `sampler2DMS` is still unstarted
+/// follow-on work and must keep being explicitly rejected there.
 std::optional<HandleClassification>
 classifySampledImage2DHandle(const CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
@@ -538,13 +552,14 @@ classifySampledImage2DHandle(const CallInst &Handle) {
   if (Dim != SPIRVDim1D && Dim != SPIRVDim2D && Dim != SPIRVDim3D &&
       Dim != SPIRVDimCube)
     return std::nullopt;
-  // [Dim, Depth, Arrayed, MS, Sampled, Format]: a multisampled image needs
-  // a per-sample coordinate the runtime's sampling/fetch helpers do not
-  // take (no `feme.cpu.image.*` entry point for MSAA sampling exists).
   bool Arrayed = HandleTy->getIntParameter(2) != 0;
   if (Dim == SPIRVDim3D && Arrayed)
     return std::nullopt; // Arrayed 3D is illegal in SPIR-V.
-  if (HandleTy->getIntParameter(3) != 0)
+  bool Multisampled = HandleTy->getIntParameter(3) != 0;
+  // Roadmap L73: multisampling is only legal against a 2D sampled image
+  // (SPIR-V's own spec restriction) -- every other dimension keeps the
+  // unconditional multisample rejection this classifier has always had.
+  if (Multisampled && Dim != SPIRVDim2D)
     return std::nullopt;
   if (HandleTy->getIntParameter(4) != SPIRVSampledWithSampler)
     return std::nullopt;
@@ -553,7 +568,10 @@ classifySampledImage2DHandle(const CallInst &Handle) {
   if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
     return std::nullopt; // No other channel shape is decodable today.
   ImageShape Shape;
-  if (Dim == SPIRVDim1D)
+  if (Multisampled)
+    // Roadmap L73: `Dim == SPIRVDim2D` already confirmed above.
+    Shape = Arrayed ? ImageShape::Array2DMS : ImageShape::Plain2DMS;
+  else if (Dim == SPIRVDim1D)
     Shape = Arrayed ? ImageShape::Array1D : ImageShape::Plain1D;
   else if (Dim == SPIRVDim2D)
     Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
@@ -952,6 +970,14 @@ bool isQueryLevelsCall(const CallInst &CI) {
   return isSyntheticQueryCall(CI, "feme.query.levels.");
 }
 
+/// Whether \p CI is one of `SPIRVImporter.cpp`'s synthesized
+/// `feme.query.samples.*` calls (roadmap L73): `OpImageQuerySamples`, a
+/// multisampled image's own sample count -- GLSL's
+/// `textureSamples(sampler2DMS)`. See `isSyntheticQueryCall`'s own doc.
+bool isQuerySamplesCall(const CallInst &CI) {
+  return isSyntheticQueryCall(CI, "feme.query.samples.");
+}
+
 /// Whether \p Ty is `<N x ElemTy>`.
 bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
   const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
@@ -1198,6 +1224,20 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
+    // Roadmap L73: `OpImageQuerySamples`, a multisampled image's own
+    // sample count -- unlike `isQuerySizeLodCall`/`isQueryLevelsCall`
+    // immediately above, this is spec-legal *only* against a multisampled
+    // image (`Plain2DMS`/`Array2DMS`, the one shape pair those two calls
+    // deliberately do not accept), so its own shape check is the inverse
+    // of theirs rather than an overlapping widening.
+    if (isQuerySamplesCall(*CI)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (Shape != ImageShape::Plain2DMS && Shape != ImageShape::Array2DMS)
+        return false;
+      continue;
+    }
+
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
     bool HasBias = false;
@@ -1206,6 +1246,15 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       if (IsInteger)
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
+        return false;
+      // Roadmap L73: `Plain2DMS`/`Array2DMS` (a multisampled sampled
+      // image) has no ordinary filtered-sample counterpart -- no
+      // `runtime/CPU` helper exists to sample a multisampled image, and
+      // SPIR-V itself never legalizes `OpImageSampleImplicitLod`/
+      // `OpImageSampleExplicitLod` against one -- so this must be
+      // explicitly rejected now that `classifySampledImage2DHandle`
+      // produces this shape for `OpImageQuerySamples`'s own sole use.
+      if (Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       // Roadmap L26/L60(a)/L61(c)/L67(a): `lowerImageAccesses` threads a
       // `MinLod` clamp through `Plain2D`'s/`Cube`'s/`CubeArray`'s/
@@ -1332,6 +1381,11 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       if (IsInteger)
         return false; // No filtered/dref sample over an integer format.
       if (CI->getArgOperand(0) != &Handle)
+        return false;
+      // Roadmap L73: same rejection as the ordinary-sample branch above
+      // -- no depth-comparison sample against a multisampled sampled
+      // image is legal either.
+      if (Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       // Roadmap L66(c) scoped a depth-comparison `Grad` sample to
       // `Plain2D` only; roadmap L66(f) widened this to also accept
@@ -1478,11 +1532,17 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
         Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D ||
-        Shape == ImageShape::Plain3D)
+        Shape == ImageShape::Plain3D || Shape == ImageShape::Plain2DMS ||
+        Shape == ImageShape::Array2DMS)
       return false; // No fetch shape exists for Cube/CubeArray/Plain1D/
                     // Array1D yet (roadmap L52a: ordinary sampling only),
                     // nor for a sampled `Plain3D` handle's own `OpImageFetch`
-                    // (roadmap L66(a): ordinary *sample* only this row).
+                    // (roadmap L66(a): ordinary *sample* only this row), nor
+                    // for a multisampled sampled image's own `texelFetch()`
+                    // (roadmap L73: `OpImageQuerySamples` is the sole
+                    // operation this shape supports -- already dispatched
+                    // and `continue`d above -- no `runtime/CPU` helper
+                    // exists to fetch a multisampled sampled image's texel).
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
     unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
@@ -3025,10 +3085,17 @@ void lowerImageAccesses(
           llvm_unreachable("Plain3D handled before this switch");
         case ImageShape::Plain2DMS:
         case ImageShape::Array2DMS:
-          // Neither of these shapes is ever reached here:
-          // `classifySampledImage2DHandle` never produces a
-          // `Plain2DMS`/`Array2DMS` shape for a *sampled* image handle --
-          // only a storage-image handle can be multisampled today.
+          // Unreachable here even though `classifySampledImage2DHandle`
+          // does now produce these two shapes for a multisampled sampled
+          // image handle (roadmap L73): `hasOnlySupportedImageUses`'s own
+          // `isSampleIntrinsic`/`isDrefSampleIntrinsic` branches explicitly
+          // reject an ordinary/depth-comparison filtered sample against
+          // either shape (no `runtime/CPU` sampling helper exists for a
+          // multisampled sampled image), so a call reaching this ordinary
+          // sample-dispatch switch can never actually carry this shape --
+          // `OpImageQuerySamples`, the sole operation this shape supports,
+          // is dispatched separately by `isQuerySamplesCall` below, not
+          // through this switch at all.
           llvm_unreachable(
               "no sampled-image shape produces Plain2DMS/Array2DMS");
         }
@@ -3385,6 +3452,23 @@ void lowerImageAccesses(
         IRBuilder<> Builder(CI);
         CallInst *NewCall =
             createQueryLevels(Builder, Env, ImageIndex, "querylevels");
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L73: `OpImageQuerySamples` (`isQuerySamplesCall`) -- a
+      // multisampled image's own sample count. Structurally identical to
+      // `QueryLevels` immediately above (no `Mask`, no explicit mip
+      // level), just a different runtime field read --
+      // `hasOnlySupportedImageUses` already restricted this branch to
+      // `Plain2DMS`/`Array2DMS`.
+      if (isQuerySamplesCall(*CI)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        CallInst *NewCall =
+            createQuerySamples(Builder, Env, ImageIndex, "querysamples");
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;

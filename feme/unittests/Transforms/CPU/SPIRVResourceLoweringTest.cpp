@@ -5406,3 +5406,96 @@ TEST(SPIRVResourceLoweringTest, LeavesArray2DQuerySizeLodHandleAlone) {
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.2d.v2i32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
+
+// Roadmap L73: `OpImageQuerySamples` (imported as a call against the SPIR-V
+// importer's own synthesized `feme.query.samples.*` function, see
+// `SPIRVImporter.cpp`'s own `lowerImageQueryOpcodes`) lowers to
+// `feme.cpu.image.querysamples.i32` for a `Plain2DMS` sampled image --
+// `classifySampledImage2DHandle` now produces this shape for a
+// multisampled (`MS == 1`), non-arrayed 2D sampled image, unlike every
+// other shape's own unconditional multisample rejection.
+TEST(SPIRVResourceLoweringTest, LowersPlain2DMSQuerySamples) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samples = call i32 @"feme.query.samples.0"(
+          target("spirv.Image", float, 1, 0, 0, 1, 1, 0) %img)
+      ret i32 %samples
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.samples.0"(
+        target("spirv.Image", float, 1, 0, 0, 1, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querysamples.i32"));
+}
+
+// Same as `LowersPlain2DMSQuerySamples` above, but for an arrayed
+// multisampled sampled image (`Array2DMS`) -- confirms the `Arrayed`
+// operand is still correctly threaded through `classifySampledImage2DHandle`'s
+// new multisample-widening path.
+TEST(SPIRVResourceLoweringTest, LowersArray2DMSQuerySamples) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samples = call i32 @"feme.query.samples.0"(
+          target("spirv.Image", float, 1, 0, 1, 1, 1, 0) %img)
+      ret i32 %samples
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @"feme.query.samples.0"(
+        target("spirv.Image", float, 1, 0, 1, 1, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querysamples.i32"));
+}
+
+// Roadmap L73's own widening of `classifySampledImage2DHandle` to accept
+// `Plain2DMS` must not silently accept an ordinary filtered sample against
+// that same shape -- no `runtime/CPU` helper exists to sample a
+// multisampled sampled image, and SPIR-V itself never legalizes
+// `OpImageSampleImplicitLod` against one. Before this test (and the
+// `isSampleIntrinsic`-branch shape check it exercises) were added, this
+// exact case would have been silently accepted with the wrong (too
+// narrow, 2-wide rather than 3-wide) coordinate width, since
+// `isSampleIntrinsic`'s own branch had no shape check at all.
+TEST(SPIRVResourceLoweringTest, LeavesPlain2DMSSampleHandleAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 1, 0, 0, 1, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}

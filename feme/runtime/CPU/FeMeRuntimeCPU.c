@@ -4975,6 +4975,27 @@ femeCpuImageQueryLevelsI32(const FemeRTImageDescriptor *ImageHeap,
   return (int32_t)Img.MipLevels;
 }
 
+// `feme.cpu.image.querysamples.i32` (roadmap L73): a multisampled image's
+// own sample count -- GLSL's `textureSamples(sampler2DMS)` (SPIR-V
+// `OpImageQuerySamples`). Structurally identical to
+// `femeCpuImageQueryLevelsI32` immediately above (no `Mask`, no explicit
+// mip level/coordinate), just reading `SampleCount` instead of
+// `MipLevels`. An unbound (`!Img.Data`) handle reads as `0`, mirroring
+// `femeCpuImageQueryLevelsI32`'s own identical convention.
+int32_t femeCpuImageQuerySamplesI32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex) asm("feme.cpu.image.querysamples.i32");
+
+__attribute__((always_inline)) int32_t
+femeCpuImageQuerySamplesI32(const FemeRTImageDescriptor *ImageHeap,
+                            uint32_t ImageHeapCount, uint32_t ImageIndex) {
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return 0;
+  return (int32_t)Img.SampleCount;
+}
+
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
 // image, comparing `Dref` against each fetched texel's first (depth)
 // component via `Samp->CompareFunc`, then filters the per-texel 0/1
