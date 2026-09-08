@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/Prepare.h"
 
 #include "feme/Core/ShaderStage.h"
+#include "feme/Transforms/CPU/UnifyDivergentExitNodes.h"
 #include "feme/Transforms/CPU/VerifyStructured.h"
 
 #include "llvm/ADT/SetVector.h"
@@ -50,27 +51,41 @@ namespace {
 /// blocks as possible -- `SROAPass` already promotes most of what it
 /// splits on its own, but a residual whole-value `alloca` `SROA` did not
 /// need to split still needs this pass), then `LowerSwitch` (the linearizer
-/// only understands two-way branches), then `FixIrreducible` +
-/// `UnifyLoopExits` + `StructurizeCFG` -- in that order, matching
-/// `StructurizeCFG`'s own documented precondition that irreducible control
-/// flow and multi-exit loops are already gone -- and finally
-/// `BreakCriticalEdges`: `StructurizeCFG`'s own "Flow" blocks (built to
-/// merge a divergent branch's two arms back together, see its
-/// documentation) can themselves leave a critical edge behind (a branch
-/// with more than one successor into a block with more than one
-/// predecessor), which the linearizer's mask-merging at a branch's targets
-/// cannot be built on top of -- see `feme::cpu::verifyStructured`'s "no
-/// critical edges" postcondition.
+/// only understands two-way branches), then `feme::cpu::
+/// unifyDivergentExitNodes` (roadmap L71: merges every `ret` block into
+/// one shared one -- see its own doc comment for why this must run before
+/// `StructurizeCFG`, which cannot represent a branch to a `ret` block as
+/// an ordinary reconverging arm, the shape a GLSL/HLSL early-return bounds
+/// check produces), then `FixIrreducible` + `UnifyLoopExits` +
+/// `StructurizeCFG` -- in that order, matching `StructurizeCFG`'s own
+/// documented precondition that irreducible control flow and multi-exit
+/// loops are already gone -- and finally `BreakCriticalEdges`:
+/// `StructurizeCFG`'s own "Flow" blocks (built to merge a divergent
+/// branch's two arms back together, see its documentation) can themselves
+/// leave a critical edge behind (a branch with more than one successor
+/// into a block with more than one predecessor), which the linearizer's
+/// mask-merging at a branch's targets cannot be built on top of -- see
+/// `feme::cpu::verifyStructured`'s "no critical edges" postcondition.
 void prepareFunction(Function &F, FunctionAnalysisManager &FAM) {
-  FunctionPassManager FPM;
-  FPM.addPass(SROAPass(SROAOptions()));
-  FPM.addPass(PromotePass());
-  FPM.addPass(LowerSwitchPass());
-  FPM.addPass(FixIrreduciblePass());
-  FPM.addPass(UnifyLoopExitsPass());
-  FPM.addPass(StructurizeCFGPass());
-  FPM.addPass(BreakCriticalEdgesPass());
-  FPM.run(F, FAM);
+  FunctionPassManager EarlyFPM;
+  EarlyFPM.addPass(SROAPass(SROAOptions()));
+  EarlyFPM.addPass(PromotePass());
+  EarlyFPM.addPass(LowerSwitchPass());
+  EarlyFPM.run(F, FAM);
+
+  // Not a `FunctionPassManager` pass: this mutates the CFG directly rather
+  // than reporting `PreservedAnalyses`, so any analysis `FixIrreducible`/
+  // `StructurizeCFG` below might otherwise reuse from before this change
+  // (e.g. a cached `DominatorTree`) needs invalidating explicitly.
+  if (unifyDivergentExitNodes(F))
+    FAM.invalidate(F, PreservedAnalyses::none());
+
+  FunctionPassManager LateFPM;
+  LateFPM.addPass(FixIrreduciblePass());
+  LateFPM.addPass(UnifyLoopExitsPass());
+  LateFPM.addPass(StructurizeCFGPass());
+  LateFPM.addPass(BreakCriticalEdgesPass());
+  LateFPM.run(F, FAM);
 }
 
 /// Selects the single \p Stage entry point Phase 1 keeps: \p EntryPoint by
