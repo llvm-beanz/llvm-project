@@ -1386,6 +1386,22 @@ Gets the raised module into the shape the later phases assume:
 
 - **`feme::dxil::IntrinsicExpansionPass`** (already exists) for the DXIL-only
   intrinsics with no direct CPU equivalent.
+- **Unify divergent exit nodes** (`feme::cpu::unifyDivergentExitNodes`,
+  roadmap L71): merges every `ret` block in the function into one shared
+  one *before* structurizing, converting a GLSL/HLSL early-return bounds
+  check (`if (cond) return;`, very common in a compute shader with no
+  other bounds enforcement) into an ordinary reconverging `if` --
+  `StructurizeCFG` cannot represent a branch to a `ret` block as a normal
+  reconverging arm at all, so without this step such a function reaches
+  `feme::cpu::verifyStructured`'s "every divergent branch has a
+  reconvergence point" postcondition already violated. Always unifies
+  unconditionally rather than only when a branch is actually reached
+  divergently (a `UniformityInfo` analysis this step deliberately skips):
+  this project's own SPMD execution model (`feme::cpu::WaveTTIImpl`)
+  treats every branch as potentially divergent, so the analysis would
+  never actually save unifying anything in practice. Mirrors AMDGPU's own
+  `AMDGPUUnifyDivergentExitNodes`, an in-tree precedent for exactly this
+  `StructurizeCFG` limitation.
 - **Structurize control flow**: `FixIrreducible` then `StructurizeCFG` (both
   in-tree, both target-independent). SPIR-V input already went through
   MLIR's structurizer during import; DXIL input has not and can be
