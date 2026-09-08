@@ -1018,6 +1018,94 @@ bool isV4I32(const Type *Ty) {
          VecTy->getElementType()->isIntegerTy(32);
 }
 
+/// Roadmap L76(a): a storage-image (`HandleKind::StorageImage2D`) Load's
+/// result or Store's Texel operand takes exactly the shader's declared
+/// `RWTexture*<T>` element width -- a bare scalar (e.g.
+/// `RWTexture2D<float>`), or a fixed vector of width 2, 3, or 4 (e.g.
+/// `RWTexture2D<float2>`/`<float3>`/`<float4>`) -- confirmed via a real
+/// `dxc -spirv` compile of each width. This is unlike a texel *buffer*'s
+/// own `RWBuffer<T>` (`isSupportedTexelElementType`'s doc, scoped to a
+/// bare scalar or a full 4-wide vector only, since neither `dxc` nor
+/// glslang ever emits anything narrower for that handle kind): a storage
+/// *image*'s own `OpImageWrite`/its `getpointer` result's `Load`/`Store`
+/// genuinely does take a narrower vector for a 2- or 3-channel format.
+/// Returns the real component count (1-4) if \p Ty is one of these shapes
+/// with an element type matching \p IsInteger (`i32` vs `float`), or 0 if
+/// it is neither.
+unsigned storageImageTexelWidth(Type *Ty, bool IsInteger) {
+  unsigned Width = 1;
+  Type *ElemTy = Ty;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    Width = VecTy->getNumElements();
+    if (Width < 2 || Width > 4)
+      return 0;
+    ElemTy = VecTy->getElementType();
+  }
+  if (IsInteger ? !ElemTy->isIntegerTy(32) : !ElemTy->isFloatTy())
+    return 0;
+  return Width;
+}
+
+/// Whether \p Ty's own element type (a bare scalar, or the element type of
+/// a fixed vector of any width) is a 32-bit integer -- classifies a
+/// storage-image Load's result type or a Store's Texel operand type
+/// before `storageImageTexelWidth` has validated its exact width, mirroring
+/// `isV4I32`'s own element-type check but for any width 1-4, not just 4.
+bool isIntegerStorageTexelType(const Type *Ty) {
+  if (const auto *VecTy = dyn_cast<FixedVectorType>(Ty))
+    Ty = VecTy->getElementType();
+  return Ty->isIntegerTy(32);
+}
+
+/// Widens \p Texel -- a bare scalar or a narrower-than-4 vector,
+/// `storageImageTexelWidth` already validated it as one of the shapes this
+/// function accepts -- up to a full `<4 x float>`/`<4 x i32>`, the fixed
+/// width every `feme.cpu.image.store.*` runtime entry point's own Texel
+/// parameter takes (see ImageCalls.cpp's `getOrInsertImageCall`). The
+/// padding lanes' own value is never observed: `femeRTPackImageTexel`/
+/// `femeRTPackImageTexelI32` (`FeMeRuntimeCPU.c`) only ever read back the
+/// bound image's own real channel count, silently discarding the rest --
+/// but a zero constant is used for them anyway (rather than `poison`),
+/// so this can never itself introduce undefined behavior if some future
+/// change ever taught the runtime to read a padding lane.
+Value *widenStorageImageTexel(IRBuilderBase &Builder, Value *Texel,
+                              bool IsInteger) {
+  Type *ElemTy = IsInteger ? Builder.getInt32Ty() : Builder.getFloatTy();
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Texel->getType());
+      VecTy && VecTy->getNumElements() == 4 && VecTy->getElementType() == ElemTy)
+    return Texel;
+  Constant *ZeroLane = IsInteger
+                           ? cast<Constant>(Builder.getInt32(0))
+                           : cast<Constant>(ConstantFP::get(ElemTy, 0.0));
+  Value *Result = ConstantVector::getSplat(ElementCount::getFixed(4), ZeroLane);
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Texel->getType())) {
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+      Result = Builder.CreateInsertElement(
+          Result, Builder.CreateExtractElement(Texel, I), I);
+    return Result;
+  }
+  return Builder.CreateInsertElement(Result, Texel, uint64_t{0});
+}
+
+/// Narrows \p V4 -- a full `<4 x float>`/`<4 x i32>`, every
+/// `feme.cpu.image.load.*` runtime entry point's own fixed return width --
+/// down to \p WantTy (a bare scalar or a narrower-than-4 vector,
+/// `storageImageTexelWidth` already validated the `LoadInst`'s own result
+/// type as one of these): the read-side mirror of `widenStorageImageTexel`
+/// above.
+Value *narrowStorageImageTexel(IRBuilderBase &Builder, Value *V4,
+                               Type *WantTy) {
+  if (V4->getType() == WantTy)
+    return V4;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(WantTy)) {
+    SmallVector<int, 4> ShuffleMask;
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+      ShuffleMask.push_back(I);
+    return Builder.CreateShuffleVector(V4, ShuffleMask);
+  }
+  return Builder.CreateExtractElement(V4, uint64_t{0});
+}
+
 /// Whether \p Coord is an \p N-component coordinate of the right element
 /// type for \p Float (normalized `<N x float>` for a sample, integer
 /// `<N x i32>` for a fetch) -- `Plain2D`'s 2-component `(u, v)`/`(x, y)`,
@@ -1706,15 +1794,23 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       return false;
     for (const User *PU : CI->users()) {
       if (const auto *LI = dyn_cast<LoadInst>(PU)) {
-        if (IsInteger ? !isV4I32(LI->getType()) : !isV4F32(LI->getType()))
+        // Roadmap L76(a): a Load's own result may be any width
+        // `storageImageTexelWidth` accepts (1-4), not only the full
+        // 4-wide vector -- `lowerImageAccesses` below narrows the fetch's
+        // always-4-wide runtime result down to this real width.
+        if (!storageImageTexelWidth(LI->getType(), IsInteger))
           return false;
         continue;
       }
       if (const auto *SI = dyn_cast<StoreInst>(PU)) {
         if (SI->getPointerOperand() != CI)
           return false;
-        Type *ValTy = SI->getValueOperand()->getType();
-        if (IsInteger ? !isV4I32(ValTy) : !isV4F32(ValTy))
+        // Roadmap L76(a): same width widening as the Load case above,
+        // but in reverse -- `lowerImageAccesses` widens this narrower
+        // Texel operand up to the full 4-wide vector the runtime store
+        // entry point requires.
+        if (!storageImageTexelWidth(SI->getValueOperand()->getType(),
+                                    IsInteger))
           return false;
         continue;
       }
@@ -3773,7 +3869,13 @@ void lowerImageAccesses(
         if (auto *SI = dyn_cast<StoreInst>(PU)) {
           IRBuilder<> StoreBuilder(SI);
           Value *Texel = SI->getValueOperand();
-          bool IsInteger = isV4I32(Texel->getType());
+          bool IsInteger = isIntegerStorageTexelType(Texel->getType());
+          // Roadmap L76(a): a narrower-than-4-wide Texel (e.g. a bare
+          // scalar for `RWTexture2D<float>`, or a 2/3-wide vector for a
+          // 2/3-channel format) needs widening up to the fixed 4-wide
+          // width every `feme.cpu.image.store.*` runtime entry point
+          // below requires -- see `widenStorageImageTexel`'s own doc.
+          Texel = widenStorageImageTexel(StoreBuilder, Texel, IsInteger);
           switch (Shape) {
           case ImageShape::Plain1D:
             if (IsInteger)
@@ -3932,11 +4034,14 @@ void lowerImageAccesses(
         // an ordinary (non-subpass) `OpImageFetch`, which `ImageLoadPattern`
         // likewise never threads a `Sample` image operand through for --
         // only `SubpassLoadPattern`'s `Dim::SubpassData` case does (roadmap
-        // F8c). The loaded type -- `<4 x i32>` or `<4 x float>`,
-        // `hasOnlySupportedImageUses`'s own per-handle check already
-        // guaranteed one or the other -- selects the integer (roadmap E26)
-        // or float `feme.cpu.image.load.*` entry point.
-        bool IsInteger = isV4I32(LI->getType());
+        // F8c). The loaded type -- an integer or float scalar/vector of
+        // any width `storageImageTexelWidth` accepts (roadmap L76(a)),
+        // `hasOnlySupportedStorageImageUses`'s own per-handle check
+        // already guaranteed one or the other -- selects the integer
+        // (roadmap E26) or float `feme.cpu.image.load.*` entry point;
+        // its own always-4-wide result is narrowed to this real width
+        // below.
+        bool IsInteger = isIntegerStorageTexelType(LI->getType());
         CallInst *Loaded;
         switch (Shape) {
         case ImageShape::Plain1D:
@@ -4022,7 +4127,13 @@ void lowerImageAccesses(
         case ImageShape::CubeArray:
           llvm_unreachable("no storage-image fetch shape for Cube/CubeArray");
         }
-        LI->replaceAllUsesWith(Loaded);
+        // Roadmap L76(a): narrow the runtime call's always-4-wide result
+        // down to `LI`'s own real result width (a bare scalar or a
+        // narrower vector) before replacing its uses -- see
+        // `narrowStorageImageTexel`'s own doc.
+        Value *Result =
+            narrowStorageImageTexel(LoadBuilder, Loaded, LI->getType());
+        LI->replaceAllUsesWith(Result);
         LI->eraseFromParent();
       }
       CI->eraseFromParent();

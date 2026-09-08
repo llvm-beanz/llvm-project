@@ -5982,6 +5982,142 @@ TEST(SPIRVResourceLoweringTest, LowersArray2DStorageQueryLevels) {
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylevels.i32"));
 }
 
+// Roadmap L76(a): a storage image's own `OpImageWrite`/`OpImageRead`
+// Texel operand takes exactly the shader's declared `RWTexture*<T>`
+// element width -- a bare scalar for a single-channel format (e.g.
+// `RWTexture2D<float>`/`RWTexture2DArray<float>`), not only the full
+// 4-wide vector every prior test above covers. `hasOnlySupportedStorageImageUses`
+// now accepts this width via `storageImageTexelWidth`, and
+// `widenStorageImageTexel`/`narrowStorageImageTexel` convert to/from the
+// runtime's own fixed 4-wide calling convention.
+TEST(SPIRVResourceLoweringTest,
+     LowersScalarStorageImageWriteToWidenedImageStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<2 x i32> %coord, float %texel) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 0, 2, 0) %img, <2 x i32> %coord)
+      store float %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 0, 2, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Store = findImageCall(*F, "feme.cpu.image.store.2d.v4f32");
+  ASSERT_TRUE(Store);
+  // The runtime call's own Texel argument (index 5: image_heap,
+  // image_heap_count, image_index, x, y, [texel], mask) is always the
+  // fixed `<4 x float>` width, regardless of the shader's own narrower
+  // declared type.
+  EXPECT_TRUE(isa<FixedVectorType>(Store->getArgOperand(5)->getType()));
+  EXPECT_EQ(cast<FixedVectorType>(Store->getArgOperand(5)->getType())
+                ->getNumElements(),
+            4u);
+}
+
+// The exact roadmap L76(a) repro shape: `RWTexture2DArray<float>` (an
+// arrayed *storage* image with a scalar single-channel element type) --
+// previously rejected outright by `hasOnlySupportedStorageImageUses`'s
+// hardcoded `<4 x float>`-only check, now widened the same way the plain,
+// non-arrayed case above is.
+TEST(SPIRVResourceLoweringTest,
+     LowersScalarArrayedStorageImageWriteToWidenedImageStoreArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord, float %texel) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 1, 0, 2, 0) %img, <3 x i32> %coord)
+      store float %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 1, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+// The read-side mirror: a scalar `LoadInst` against a storage image's own
+// `getpointer` result narrows the runtime call's fixed 4-wide result back
+// down to the shader's own scalar type.
+TEST(SPIRVResourceLoweringTest, LowersScalarStorageImageReadFromNarrowedImageLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<2 x i32> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 0, 2, 0) %img, <2 x i32> %coord)
+      %v = load float, ptr %p
+      ret float %v
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 0, 2, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.2d.v4f32"));
+  // The function's own terminator now returns a scalar `float` narrowed
+  // from the runtime call's `<4 x float>` result, not the vector itself.
+  auto *Ret = cast<ReturnInst>(F->back().getTerminator());
+  EXPECT_TRUE(Ret->getReturnValue()->getType()->isFloatTy());
+}
+
+// A narrower-than-scalar-or-4-wide vector (2 components, e.g.
+// `RWTexture2D<float2>`) is also a real, `dxc`-emitted shape for a
+// 2-channel storage-image format -- not just the scalar (1-channel) case
+// above -- and widens/narrows the identical way.
+TEST(SPIRVResourceLoweringTest,
+     LowersTwoComponentStorageImageWriteToWidenedImageStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<2 x i32> %coord, <2 x float> %texel) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 0, 2, 0) %img, <2 x i32> %coord)
+      store <2 x float> %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 0, 2, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Store = findImageCall(*F, "feme.cpu.image.store.2d.v4f32");
+  ASSERT_TRUE(Store);
+  EXPECT_EQ(cast<FixedVectorType>(Store->getArgOperand(5)->getType())
+                ->getNumElements(),
+            4u);
+}
+
 // Negative regression: `Plain2DMS` (a multisampled sampled image) must
 // still be rejected for `OpImageQueryLevels` -- GLSL has no
 // `textureQueryLevels()` overload for a multisampled sampler, so no real
