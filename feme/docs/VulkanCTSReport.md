@@ -30962,3 +30962,93 @@ per-shape rows have been.
 needed (this fix is a CPU-target resource-lowering capability, not an
 extension or 1.4 core feature bit). Temporary artifacts under
 `/tmp/l70/` cleaned up at the end of the session.
+
+## L71: divergent early-return has no reconvergence point (this session)
+
+### Root cause and fix
+
+Roadmap L70's own closing re-run found that once real compute-stage
+sampling shaders reach the linearizer for the first time, a new, distinct
+failure appears: `feme-cpu-linearize: function 'main': divergent branch
+in '' has no reconvergence point`, for functions using the common
+GLSL/HLSL early-return bounds-check idiom (`if (gid.x >= size.x) return;`).
+`VerifyStructured.cpp`'s `checkDivergentBranchesReconverge` (and
+`Linearize.cpp`'s own copy of the same check) rejects this shape because
+a divergent branch whose one arm returns immediately has no immediate
+post-dominator at all.
+
+Rather than teaching the linearizer to map a divergent early return onto
+a masked/predicated continuation directly (a large, real design
+investigation the row was originally filed expecting), a much smaller fix
+addresses the actual root of the problem: `StructurizeCFG` (which runs
+in Phase 1, well before the linearizer ever sees the function) simply
+cannot represent a branch to a `ret` block as an ordinary reconverging
+arm at all. The fix is to never let it see that shape: a new Phase 1
+step, `feme::cpu::unifyDivergentExitNodes`, merges every `ret` block into
+one shared block before `FixIrreducible`/`StructurizeCFG` run, turning
+the early-return idiom into an ordinary reconverging `if` -- which the
+linearizer's existing masked-lane model (already used for every other
+divergent `if`) already handles correctly with no further code change.
+
+This mirrors AMDGPU's own in-tree `AMDGPUUnifyDivergentExitNodes` pass, a
+proven precedent for exactly this same `StructurizeCFG` limitation.
+Unlike AMDGPU's version, this one always unifies every `ret` block
+unconditionally rather than only those reached divergently (an analysis
+this project's own SPMD execution model -- every branch is treated as
+potentially divergent, see `feme::cpu::WaveTTIImpl` -- would never
+actually let it skip anyway), keeping the implementation small and
+dependency-free (no `UniformityInfo`/`PostDominatorTree` computation
+needed at all).
+
+### Build/test verification
+
+New `UnifyDivergentExitNodesTest` unit tests (a no-op single-return case,
+a two-arm early-return case, a three-arm/switch-shaped case, and a
+non-`void`-return case verifying the merged `phi`) and a new
+`prepare-early-return.ll` lit test (exercising the early-return idiom
+through the full `feme-cpu-prepare` pass) added. `FeMeTransformsCPUTests`:
+386/386 pass. Full `check-feme`: 2715/2774 pass, 0 fail, 59 unsupported,
+no regressions.
+
+### Real CTS re-run
+
+Re-ran the exact original failing case
+(`dEQP-VK.glsl.texture_functions.texturelod.sampler2d_float_compute`):
+it now **passes** outright (image comparison matches reference) --
+confirming both roadmap L70 and L71 are genuinely fixed end to end, not
+just no-longer-erroring.
+
+A much broader re-run followed to measure real payoff: every
+`*_compute`-suffixed case in `dEQP-VK.glsl.texture_functions.*` (1,375
+cases total, gathered via `deqp-vk --deqp-case='dEQP-VK.glsl.
+texture_functions.*_compute' --deqp-runmode=txt-caselist`) against this
+session's rebuilt `feme_icd.json`:
+
+- **Totals**: 153/1375 Pass (11.1%), 890 Fail (64.7%), 332 Not Supported
+  (24.1%) -- up from 0 Pass in every prior session's own recorded
+  compute-stage sampling numbers (L69/L69(a)/L70 all recorded 0/295 or
+  fewer Pass). This is the first real, substantial CTS-visible Pass-count
+  movement any of this project's compute-stage sampling/derivative work
+  (going back to L60) has produced.
+- Grepping every remaining `Fail` case's own creation-error diagnostic
+  confirms **zero** cases still hit either of this row's own or roadmap
+  L70's fixed diagnostics (`"divergent branch"`/`"reconvergence point"`/
+  `"cannot normalize into a heap access"` all have zero matches across
+  the entire 1,375-case run) -- every failure is a different, already
+  distinct gap:
+  - 284 cases: `"unknown extension: SPV_KHR_compute_shader_derivatives"`
+    -- already tracked, roadmap L7, unrelated to this row.
+  - 100 cases: `spirv.ImageFetch` legalization failure.
+  - 18 cases: `spirv.ImageSampleDrefExplicitLod` legalization failure.
+  - 340 cases: four distinct "unhandled opcode" (92/94/103/106/107)
+    SPIR-V-import failures, not yet triaged against the SPIR-V spec's own
+    opcode table.
+  These four buckets are filed as roadmap L72 (not attempted this
+  session -- each needs its own real IR reduction before it can be
+  scoped, per this project's own established precedent, and this session
+  was already scoped to L71 specifically).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (this fix is a CPU-target control-flow-restructuring capability,
+not an extension or 1.4 core feature bit). Temporary artifacts under
+`/tmp/l71/` cleaned up at the end of the session.
