@@ -1938,6 +1938,67 @@ remains genuinely out of scope, and is still diagnosed, is a *dynamic*
 (non-constant, non-self) control-point index on an input read, which would
 need a real runtime cross-lane gather this milestone does not build.
 
+#### Status (roadmap L78): a literal-constant input read must not be masked by an inactive SIMD lane
+
+L37's fix (above) made `lowerHullInputLoad` address a literal-constant
+control-point input read directly, using that literal value for *every*
+active lane rather than each lane's own flat invocation index -- correct
+for computing *where* to read, but incomplete for *what value to return*.
+The generated per-lane loop still unconditionally applied `SIMDizePass`'s
+usual inactive-lane masking (`Active ? LaneResult : 0`) to whatever the
+underlying `feme.stage.input.load` returned, regardless of which of
+`lowerHullInputLoad`'s two branches (self-index vs. literal-constant)
+produced it. That masking is necessary for a *self-indexed* read: an
+inactive (padding) lane's own flat invocation index can genuinely be
+out-of-range, so its load result is meaningless and must not leak into
+real output. It is actively harmful for the materialize-then-select
+pattern L37 targets, though, once `SIMDizePass` is considered together
+with *where* that pattern's materializing stores write to: each literal
+control point's attribute is first loaded, once per (component,
+control-point) pair, into a small local array/`alloca` that is *not*
+per-lane-duplicated (its address is identical, lane-independent), before
+the shader's own code dynamically re-indexes that array by the real
+per-invocation `OutputControlPointID`. `SIMDizePass` widens that single
+materializing store into a sequential per-lane scatter-store loop, every
+lane writing to the *same* shared address -- so whichever lane's iteration
+happens to run last in that loop wins, unconditionally overwriting every
+earlier lane's write to that address. When the real output control point
+count does not evenly divide `WaveSize` (e.g. 3 output control points
+against a wave size of 4, `HullSystemValues.test`'s own real shape), the
+trailing lane(s) are inactive padding, and -- critically -- an inactive
+lane's iteration still runs, and still runs last, in this scatter-store
+loop; the old unconditional masking forced its "loaded" value to zero, so
+that zero silently clobbered the real, already-correctly-written data from
+every earlier, active lane at that same shared address. This is exactly
+why `Feature/Semantics/{HullSystemValues,DomainSystemValues}.test` (L27's
+own cases, whose fix chain runs L27 -> L37 -> L77 -> here) still read back
+an entirely-zero hull-stage output `position` even after L37's and L77's
+fixes let both cases reach real per-patch execution for the first time:
+every one of the materializing stores for *every* control point's
+position, not just one, was clobbered the same way, since each one
+follows this same lane-loop shape regardless of which literal
+control-point offset it targets.
+
+The fix narrows `lowerHullInputLoad`'s inactive-lane masking to the
+self-index branch only; the literal-constant branch now always returns
+the real loaded value unconditionally, for every lane, active or not. This
+is sound for the same reason L37's own addressing fix was sound: a
+literal control-point index is always in range for the one patch in
+scope, so there is no out-of-bounds read for *any* lane, active or
+padding, to guard against in the first place -- the masking was never
+actually protecting anything on this branch, only actively destroying
+real data once the underlying store this load's result eventually feeds
+happens to be lane-shared rather than lane-private. Confirmed via direct
+runtime `printf` instrumentation injected into the JIT-compiled IR itself
+(the same technique used throughout this project's H6/H8/H9/L-series
+"real IR reduction" investigations, but pushed one step further here from
+static IR reading to live runtime tracing, since the self-index
+substitution, `FemePatchArgs` ABI, wave-count computation, and wrapper
+call marshaling were all painstakingly confirmed correct by static
+reading alone and were not the bug) that, before this fix, every
+materialized control point's position value printed as `0.0` for every
+lane; after the fix, each printed its own correct, non-zero, real value.
+
 Landed for the patch-constant phase, added after R34's initial landing
 (`feme::cpu::PatchConstantWrapperPass`, PatchConstantWrapper.h/.cpp): a
 single, non-batched invocation per patch that reads any (not just "its own")
