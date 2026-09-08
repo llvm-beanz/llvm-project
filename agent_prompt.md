@@ -42,7 +42,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L35(a) from the roadmap or other prerequisites blocking the
+Can you close out L36 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
 > **`Texture2DArray` implicit-LOD sampling also does not select the correct mip
