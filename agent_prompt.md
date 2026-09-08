@@ -42,19 +42,35 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L34 from the roadmap or other prerequisites blocking the
+Can you close out L35 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`TextureCube` sampling never computes a real implicit LOD from screen-space
-> derivatives, unlike `Texture2D`**: found by L26's own real `Sample.test`
-> repro, whose single remaining output mismatch (index 29, the "Cube +X minified
-> -> mip 1" case) is unrelated to L26's own offset/clamp scope.
-> `femeRTComputeClampedLod`'s `float L = UseExplicitLod ? Lod : 0.0f;` means any
-> implicit-LOD sample defaults to mip 0 unless the caller has already derived a
-> real LOD from screen-space derivatives and re-invoked with
-> `UseExplicitLod=true` -- exactly what `femeCpuImageSample2DV4F32` does via
-> `femeRTPlanImplicitLod`, but `femeCpuImageSampleCubeV4F32` never does, always
-> sampling mip 0 regardless of real minification. Needs a real derivative-based
-> LOD-selection path for the Cube shape, likely reusing
-> `femeRTPlanImplicitLod`'s own math against a cube direction vector's own
-> screen-space partial derivatives rather than a 2D `(U, V)` pair's
+> **A real `Vk.SampledTexture2D.SampleBias.test.yaml` case (combining `Bias`, a
+> nonzero texel `Offset`, and a `MinLodClamp` on the *same* `SampleBias` call)
+> still fails `vkCreateGraphicsPipelines`, `VkResult = -3`**, on the same
+> `"unsupported raised operation: ...handlefrombinding... is a register-bound
+> resource handle..."` diagnostic L26 closed for the simpler (`Sample`-only, or
+> one-modifier-at-a-time) shapes -- confirmed distinct from L26's own now-fixed
+> scope by re-running the real case after L26's fix landed. Reduction is
+> unusually hard: `feme-translate --import-spirv` (this project's own standard
+> real-IR-reduction tool for cases like this) crashes outright on *any* SPIR-V
+> binary using the `ConstOffset`/`MinLod` image operands at all -- confirmed
+> identically against `Feature/Textures/Sample.test`'s own already-fixed,
+> already-passing `.o`, which uses the same operands -- via
+> `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s `verifyImageOperands`, an upstream
+> MLIR SPIR-V dialect op verifier with a literal `// TODO: Add the validation
+> rules for the following Image Operands` followed by an
+> `assert(!bitEnumContainsAny(...))` unconditionally rejecting
+> `ConstOffset`/`Offset`/`ConstOffsets`/`MinLod`/etc. The real Vulkan runtime
+> path (`feme::SPIRVImporter`, `Pipeline.cpp`) never hits this assert at all
+> (confirmed: it built and ran L26's own already-fixed cases just fine), meaning
+> the runtime's own `mlir::spirv::deserialize` call path does not invoke full op
+> verification the way `feme-translate`'s own translate-registration does -- so
+> this is a real, narrow, pre-existing *tooling* gap in `feme-translate
+> --import-spirv` itself (not a new regression, and not blocking any real
+> pipeline), but it means this row's own real reduction needs a different
+> technique (e.g. temporarily disabling/loosening this specific assert for
+> investigation purposes only, or adding a `feme-translate` flag to skip strict
+> op verification on import) before the *actual* live gap -- some deeper
+> interaction between combining three image-operand bits on one call and the CPU
+> target's handle-normalization pass -- can be isolated and fixed
