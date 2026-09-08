@@ -70,10 +70,14 @@ std::optional<TessellationState> getTessellationState(const Function &F) {
 
   TessellationState State;
 
-  // The tessellation-evaluation-only fields (SPIR-V's `Triangles`/`Quads`/
-  // `Isolines`, spacing and vertex-order/point-mode execution modes) always
-  // arrive together -- see ConvertSPIRVToLLVMPass.cpp's
-  // applyEntryPointAttributes -- so \p F either carries all three or none.
+  // The domain-shape fields (SPIR-V's `Triangles`/`Quads`/`Isolines`,
+  // spacing and vertex-order/point-mode execution modes) always arrive
+  // together -- see ConvertSPIRVToLLVMPass.cpp's applyEntryPointAttributes
+  // -- so \p F either carries all three or none. Despite the name, this
+  // group is not exclusive to a tessellation-evaluation entry point: real
+  // DXC output declares it in full on the tessellation-control entry point
+  // instead, only duplicating `Triangles` onto the tessellation-evaluation
+  // one (roadmap L77), so either half's own entry point may carry it.
   if (HasDomain) {
     auto Domain = parseDomainAttr(
         F.getFnAttribute(getTessellationDomainAttrName()).getValueAsString());
@@ -88,6 +92,7 @@ std::optional<TessellationState> getTessellationState(const Function &F) {
     State.Domain = *Domain;
     State.Partitioning = *Partitioning;
     State.OutputPrimitive = *OutputPrimitive;
+    State.HasDomainShape = true;
   }
 
   // The tessellation-control-only output control point count (SPIR-V's

@@ -51,6 +51,7 @@ TEST(TessellationTest, RoundTripsDomainEvaluationAttributes) {
   EXPECT_EQ(State->Domain, TessellatorDomain::Triangle);
   EXPECT_EQ(State->Partitioning, TessPartitioning::FractionalOdd);
   EXPECT_EQ(State->OutputPrimitive, TessOutputPrimitive::TriangleCcw);
+  EXPECT_TRUE(State->HasDomainShape);
   EXPECT_EQ(State->OutputControlPointCount,
             TessellationState().OutputControlPointCount);
 }
@@ -68,6 +69,32 @@ TEST(TessellationTest, RoundTripsControlPointCountAttribute) {
   ASSERT_TRUE(State.has_value());
   EXPECT_EQ(State->OutputControlPointCount, 4u);
   EXPECT_EQ(State->Domain, TessellationState().Domain);
+  EXPECT_FALSE(State->HasDomainShape);
+}
+
+/// (Roadmap L77) A tessellation-control entry point that carries the full
+/// domain-shape execution-mode group in addition to `OutputControlPointCount`
+/// -- the real DXC output shape, which declares the whole group on the
+/// tessellation-control entry rather than splitting it across both halves --
+/// round-trips both, with `HasDomainShape` set so a caller merging this
+/// state with a tessellation-evaluation entry's own (possibly incomplete)
+/// state can tell this is a real declaration.
+TEST(TessellationTest, RoundTripsDomainShapeOnControlPointEntry) {
+  LLVMContext Ctx;
+  Module M("m", Ctx);
+  Function *F = makeFunction(M, "tesc_with_domain_shape");
+  F->addFnAttr(getTessellationDomainAttrName(), "triangle");
+  F->addFnAttr(getTessellationPartitioningAttrName(), "integer");
+  F->addFnAttr(getTessellationOutputPrimitiveAttrName(), "triangle_cw");
+  F->addFnAttr(getTessellationOutputControlPointCountAttrName(), "3");
+
+  std::optional<TessellationState> State = getTessellationState(*F);
+  ASSERT_TRUE(State.has_value());
+  EXPECT_EQ(State->Domain, TessellatorDomain::Triangle);
+  EXPECT_EQ(State->Partitioning, TessPartitioning::Integer);
+  EXPECT_EQ(State->OutputPrimitive, TessOutputPrimitive::TriangleCw);
+  EXPECT_TRUE(State->HasDomainShape);
+  EXPECT_EQ(State->OutputControlPointCount, 3u);
 }
 
 /// Every `TessellatorDomain`/`TessPartitioning`/`TessOutputPrimitive`

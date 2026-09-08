@@ -74,6 +74,17 @@ struct TessellationState {
   TessellatorDomain Domain = TessellatorDomain::Quad;
   TessPartitioning Partitioning = TessPartitioning::Integer;
   TessOutputPrimitive OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  /// Whether \p Domain/\p Partitioning/\p OutputPrimitive above were
+  /// actually populated from a real `Triangles`/`Quads`/`Isolines` (+
+  /// spacing + vertex-order/point-mode) execution-mode group on some
+  /// entry point, rather than left at their above defaults. A hull/domain
+  /// entry-point pair's domain shape may be declared on either half's own
+  /// entry point (roadmap L77: real DXC output declares it in full on the
+  /// tessellation-control entry, only duplicating `Triangles` onto the
+  /// tessellation-evaluation entry), so callers merging a `HullSig`'s and
+  /// a `DomainSig`'s own `TessellationState` need this flag to tell a
+  /// real declaration apart from an unset default.
+  bool HasDomainShape = false;
   /// Control points per input patch, i.e. how many vertex-stage outputs one
   /// patch consumes (`VkPipelineTessellationStateCreateInfo::
   /// patchControlPoints`).
