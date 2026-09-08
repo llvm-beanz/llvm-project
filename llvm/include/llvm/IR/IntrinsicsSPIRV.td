@@ -326,6 +326,22 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
                                llvm_float_ty, llvm_any_ty],
                               [IntrReadMem]>;
 
+  // Roadmap L72(b): an OpImageSampleDrefExplicitLod carrying a real
+  // (possibly non-constant, possibly non-zero) Lod image operand, which
+  // int_spv_resource_samplecmplevelzero has no way to represent (it has
+  // no Lod operand of its own at all -- it always implicitly samples mip
+  // level zero). The dref operand keeps int_spv_resource_samplecmp's own
+  // position, and the Lod operand follows it, ahead of the offset,
+  // sharing int_spv_resource_samplecmpbias's own operand slot (SPIR-V's
+  // own fixed Image Operands bit order puts Bias and Lod at the same
+  // conceptual position -- mutually exclusive on the same instruction, so
+  // no combined form is needed).
+  def int_spv_resource_samplecmplevel
+      : DefaultAttrsIntrinsic<[llvm_any_ty],
+                              [llvm_any_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_float_ty, llvm_float_ty, llvm_any_ty],
+                              [IntrReadMem]>;
+
   // The depth-comparison counterparts of int_spv_resource_samplegrad and
   // int_spv_resource_samplegrad_clamp: an OpImageSampleDrefExplicitLod
   // carrying a Grad image operand, which int_spv_resource_samplecmp has no

@@ -3031,6 +3031,85 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
 }
 
 TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpLevelToImageSampleCmpWithRealLod) {
+  // Roadmap L72(b): unlike `samplecmplevelzero` above, `spv_resource_
+  // samplecmplevel` carries a real (non-constant, possibly nonzero) `Lod`
+  // operand of its own -- confirmed necessary by a real `deqp-vk` SPIR-V
+  // capture of GLSL's own `textureLodOffset(sampler2DShadow, ...)`, which
+  // computes its own explicit Lod at runtime rather than baking in a
+  // literal zero. This still lowers to the same
+  // `feme.cpu.image.samplecmp.2d.f32` runtime entry point, with
+  // `use_explicit_lod = true` (mirroring `samplecmplevelzero` above), but
+  // threading the real `%lod` value through instead of a synthesized zero
+  // constant.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord, float %dref, float %lod) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmplevel(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, float %lod, <3 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
+  ASSERT_TRUE(SampleCmp);
+  EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "lod");
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isOne());
+  EXPECT_EQ(SampleCmp->getArgOperand(14)->getName(), "dref");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpLevelWithNonzeroOffsetToImageSampleCmp) {
+  // Roadmap L72(b): `spv_resource_samplecmplevel`'s own `ConstOffset`
+  // operand threads through the same way `samplecmp`'s own does (roadmap
+  // L50d), now alongside a real `Lod` rather than an implicit one.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord, float %dref, float %lod) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmplevel(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, float %lod, <3 x i32> <i32 1, i32 -8, i32 0>)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
+  ASSERT_TRUE(SampleCmp);
+  EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "lod");
+  EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(13))->isOne());
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(16))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(17))->getSExtValue(),
+            -8);
+}
+
+TEST(SPIRVResourceLoweringTest,
      LowersSampleCmpClampToImageSampleCmpWithMinLodClamp) {
   // Roadmap L52(c): `spv_resource_samplecmp_clamp`'s own trailing `clamp`
   // operand is now recognized by `isDrefSampleIntrinsic`, mirroring

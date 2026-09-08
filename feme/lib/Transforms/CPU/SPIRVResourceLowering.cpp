@@ -803,35 +803,42 @@ unsigned getSampleClampIdx(bool ExplicitLod, bool HasBias, bool HasGrad) {
   return getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad) + 1;
 }
 
-/// Whether \p CI is one of the five SPIR-V depth-comparison sample
-/// intrinsics this pass lowers today (roadmap L46/L52(b)/L52(c)/L66(c)),
-/// setting \p ExplicitLod for `samplecmplevelzero` (always forces mip
-/// level 0 -- this intrinsic has no LOD operand of its own at all, unlike
-/// `samplelevel`) and leaving it false for
+/// Whether \p CI is one of the six SPIR-V depth-comparison sample
+/// intrinsics this pass lowers today (roadmap L46/L52(b)/L52(c)/L66(c)/
+/// L72(b)), setting \p ExplicitLod for `samplecmplevelzero`/
+/// `samplecmplevel` (a real, possibly-nonzero `Lod` for the latter,
+/// roadmap L72(b); `samplecmplevelzero` still always forces mip level 0 --
+/// it has no Lod operand of its own at all, unlike `samplelevel`) and
+/// leaving it false for
 /// `samplecmp`/`samplecmp_clamp`/`samplecmpbias{,_clamp}`/
 /// `samplecmpgrad{,_clamp}` (implicit LOD unless a real derivative is
 /// given; `femeCpuImageSampleCmp2DF32` degenerates to level 0 when \p
 /// HasGrad is false and no explicit derivatives are threaded through,
 /// exactly mirroring `Sample2D`'s own implicit-LOD path once \p HasGrad is
-/// true), and setting \p HasClamp for the two `.clamp` forms' own
+/// true), setting \p HasClamp for the two `.clamp` forms' own
 /// trailing `MinLod` clamp operand (roadmap L52(c); legalized upstream by
 /// `ImageSampleDrefImplicitLodPattern`/`ImageSampleDrefGradPattern`
 /// alongside `ConstOffset` today, mirroring `isSampleIntrinsic`'s own
-/// `HasMinLodClamp` output for an ordinary sample). \p HasBias and \p
-/// HasGrad are mutually exclusive (SPIR-V forbids combining `Bias` and
-/// `Grad` on the same instruction). All five share the same base `(image,
-/// sampler, coord, dref, offset)` operand order (see
-/// `llvm/test/CodeGen/SPIRV/hlsl-resources/SampleCmp{,LevelZero}.ll`),
-/// with the `samplecmpbias`/`samplecmpgrad` forms inserting their own
-/// extra operand(s) between `dref` and `offset`, and each `.clamp` form
-/// appending one more scalar (the clamp) after `offset`.
+/// `HasMinLodClamp` output for an ordinary sample), and setting \p
+/// HasLevel for `samplecmplevel` alone (roadmap L72(b): a real `Lod`
+/// operand, at the same position `samplecmpbias`'s own `Bias` occupies --
+/// mutually exclusive with \p HasBias/\p HasGrad, SPIR-V forbidding
+/// `Bias`/`Lod`/`Grad` from combining on the same instruction). All six
+/// share the same base `(image, sampler, coord, dref, offset)` operand
+/// order (see `llvm/test/CodeGen/SPIRV/hlsl-resources/
+/// SampleCmp{,LevelZero}.ll`), with the `samplecmpbias`/`samplecmplevel`/
+/// `samplecmpgrad` forms inserting their own extra operand(s) between
+/// `dref` and `offset`, and each `.clamp` form appending one more scalar
+/// (the clamp) after `offset`.
 bool isDrefSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
-                           bool &HasClamp, bool &HasBias, bool &HasGrad) {
+                           bool &HasClamp, bool &HasBias, bool &HasGrad,
+                           bool &HasLevel) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   ExplicitLod = false;
   HasClamp = false;
   HasBias = false;
   HasGrad = false;
+  HasLevel = false;
   switch (ID) {
   case Intrinsic::spv_resource_samplecmp:
     return true;
@@ -854,6 +861,10 @@ bool isDrefSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
     return true;
   case Intrinsic::spv_resource_samplecmplevelzero:
     ExplicitLod = true;
+    return true;
+  case Intrinsic::spv_resource_samplecmplevel:
+    ExplicitLod = true;
+    HasLevel = true;
     return true;
   default:
     return false;
@@ -885,22 +896,32 @@ constexpr unsigned DrefSampleGradDPdxIdx = DrefSampleDrefIdx + 1;
 /// own `dPdy` operand, immediately after `dPdx`.
 constexpr unsigned DrefSampleGradDPdyIdx = DrefSampleGradDPdxIdx + 1;
 
+/// The operand index of a `spv_resource_samplecmplevel` call's own real
+/// `Lod` operand, immediately after its dref operand (roadmap L72(b)) --
+/// `Lod` is mutually exclusive with both `Bias` and `Grad` on the same
+/// instruction, so this shares `DrefSampleBiasIdx`'s own position too,
+/// rather than needing a distinct constant.
+constexpr unsigned DrefSampleLevelIdx = DrefSampleDrefIdx + 1;
+
 /// The operand index of a dref sample call's own `ConstOffset` operand,
-/// immediately after its dref operand -- or after its bias operand, for
-/// the `samplecmpbias` forms, or after its `dPdx`/`dPdy` pair, for the
-/// `samplecmpgrad` forms (per SPIR-V's own fixed Image Operands bit
-/// order, `Bias`/`Grad` before `ConstOffset`; `Bias` and `Grad` are
-/// mutually exclusive, so no combined case is needed).
-constexpr unsigned getDrefSampleOffsetIdx(bool HasBias, bool HasGrad = false) {
-  return DrefSampleDrefIdx + (HasGrad ? 3 : (HasBias ? 2 : 1));
+/// immediately after its dref operand -- or after its bias/level operand,
+/// for the `samplecmpbias`/`samplecmplevel` forms, or after its
+/// `dPdx`/`dPdy` pair, for the `samplecmpgrad` forms (per SPIR-V's own
+/// fixed Image Operands bit order, `Bias`/`Lod`/`Grad` before
+/// `ConstOffset`; `Bias`, `Lod`, and `Grad` are pairwise mutually
+/// exclusive, so no combined case is needed).
+constexpr unsigned getDrefSampleOffsetIdx(bool HasBias, bool HasGrad = false,
+                                          bool HasLevel = false) {
+  return DrefSampleDrefIdx + (HasGrad ? 3 : ((HasBias || HasLevel) ? 2 : 1));
 }
 
 /// The operand index of a dref sample call's own trailing `MinLod` clamp
 /// operand, immediately after its offset operand (roadmap L52(c));
 /// meaningless (never read) for the non-`.clamp` forms, none of which has
 /// such an operand.
-constexpr unsigned getDrefSampleClampIdx(bool HasBias, bool HasGrad = false) {
-  return getDrefSampleOffsetIdx(HasBias, HasGrad) + 1;
+constexpr unsigned getDrefSampleClampIdx(bool HasBias, bool HasGrad = false,
+                                         bool HasLevel = false) {
+  return getDrefSampleOffsetIdx(HasBias, HasGrad, HasLevel) + 1;
 }
 
 /// Whether \p CI is one of the two SPIR-V LOD-query intrinsics
@@ -1401,8 +1422,9 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     bool DrefHasClamp = false;
     bool DrefHasBias = false;
     bool DrefHasGrad = false;
+    bool DrefHasLevel = false;
     if (isDrefSampleIntrinsic(*CI, DrefExplicitLod, DrefHasClamp, DrefHasBias,
-                              DrefHasGrad)) {
+                              DrefHasGrad, DrefHasLevel)) {
       if (IsInteger)
         return false; // No filtered/dref sample over an integer format.
       if (CI->getArgOperand(0) != &Handle)
@@ -1473,12 +1495,20 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           // (non-comparison) sample path's own identical
           // `AllowPlain1DArray1D` acceptance above.
           !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(
-                                 DrefHasBias, DrefHasGrad)),
+                                 DrefHasBias, DrefHasGrad, DrefHasLevel)),
                              Shape,
                              /*AllowArray2D=*/true,
                              /*AllowPlain1DArray1D=*/true) ||
           (DrefHasBias &&
            !CI->getArgOperand(DrefSampleBiasIdx)->getType()->isFloatTy()) ||
+          // Roadmap L72(b): `samplecmplevel`'s own real `Lod` operand is
+          // validated the same way `DrefHasBias`'s own `Bias` operand is
+          // just above -- a plain scalar float, mirroring
+          // `isSampleIntrinsic`'s own `ExplicitLod` operand (never
+          // shape-restricted beyond the general dref-sample rejections
+          // already applied above).
+          (DrefHasLevel &&
+           !CI->getArgOperand(DrefSampleLevelIdx)->getType()->isFloatTy()) ||
           // Roadmap L66(c)/L66(f)/L66(g)/L66(h): `Grad`'s own `dPdx`/`dPdy`
           // pair is validated against the same derivative width an
           // ordinary sample's own `Grad` operand uses (`GradDerivativeWidth`,
@@ -1507,7 +1537,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                             : SampleCoordWidth,
                       /*Float=*/true))) ||
           (DrefHasClamp &&
-           !CI->getArgOperand(getDrefSampleClampIdx(DrefHasBias, DrefHasGrad))
+           !CI->getArgOperand(
+                  getDrefSampleClampIdx(DrefHasBias, DrefHasGrad, DrefHasLevel))
                 ->getType()
                 ->isFloatTy()) ||
           !CI->getType()->isFloatTy())
@@ -1737,11 +1768,12 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
     bool HasGrad = false;
     bool HasClamp = false;
     bool DrefHasGrad = false;
+    bool DrefHasLevel = false;
     bool Unclamped = false;
     if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias,
                                    HasGrad) ||
                  isDrefSampleIntrinsic(*CI, ExplicitLod, HasClamp, HasBias,
-                                       DrefHasGrad) ||
+                                       DrefHasGrad, DrefHasLevel) ||
                  isQueryLodIntrinsic(*CI, Unclamped)))
       return false;
     if (CI->getArgOperand(1) != &Handle)
@@ -3148,25 +3180,28 @@ void lowerImageAccesses(
       // (`spv_resource_samplecmp`/`samplecmplevelzero`/`samplecmp_clamp`),
       // extended from `Plain2D`-only (roadmap L46) to also cover
       // `Array2D`/`Cube`/`CubeArray`, mirroring the ordinary-sample
-      // `switch (Shape)` just above. Every non-`Grad` shape shares
-      // `createSampleCmp2D`'s own `Lod` parameter passed as a constant
-      // zero: `samplecmplevelzero` always forces mip level 0 (no LOD
-      // operand of its own to read), and `samplecmp`/`samplecmp_clamp`'s
-      // implicit LOD already degenerates to the same level 0 today --
-      // only `UseExplicitLod` itself differs between them. Roadmap
-      // L66(c) adds a real, derivative-driven implicit LOD for `Plain2D`
-      // alone, via `samplecmpgrad{,_clamp}`'s own `dPdx`/`dPdy` pair
-      // (`femeCpuImageSampleCmp2DF32` itself now branches on whether
-      // `UseExplicitLod` is set the same way it always has, but computes
-      // a real implicit LOD from these derivatives when it is not, in
-      // place of the always-level-0 result every other intrinsic form
-      // still gets).
+      // `switch (Shape)` just above. Every non-`Grad`, non-`samplecmplevel`
+      // shape shares `createSampleCmp2D`'s own `Lod` parameter passed as
+      // a constant zero: `samplecmplevelzero` always forces mip level 0
+      // (no LOD operand of its own to read), and
+      // `samplecmp`/`samplecmp_clamp`'s implicit LOD already degenerates
+      // to the same level 0 today -- only `UseExplicitLod` itself differs
+      // between them. Roadmap L66(c) adds a real, derivative-driven
+      // implicit LOD for `Plain2D` alone, via `samplecmpgrad{,_clamp}`'s
+      // own `dPdx`/`dPdy` pair (`femeCpuImageSampleCmp2DF32` itself now
+      // branches on whether `UseExplicitLod` is set the same way it
+      // always has, but computes a real implicit LOD from these
+      // derivatives when it is not, in place of the always-level-0 result
+      // every other intrinsic form still gets). Roadmap L72(b) adds
+      // `samplecmplevel`'s own real (non-zero) `Lod` operand, read from
+      // `DrefSampleLevelIdx` instead of synthesizing a constant zero.
       bool DrefExplicitLod = false;
       bool DrefHasClamp = false;
       bool DrefHasBias = false;
       bool DrefHasGrad = false;
+      bool DrefHasLevel = false;
       if (isDrefSampleIntrinsic(*CI, DrefExplicitLod, DrefHasClamp, DrefHasBias,
-                                DrefHasGrad)) {
+                                DrefHasGrad, DrefHasLevel)) {
         if (CI->getArgOperand(0) != Handle)
           continue;
         IRBuilder<> Builder(CI);
@@ -3176,7 +3211,8 @@ void lowerImageAccesses(
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
         Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
-        Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *Lod = DrefHasLevel ? CI->getArgOperand(DrefSampleLevelIdx)
+                                  : ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *ExplicitLodFlag = Builder.getInt1(DrefExplicitLod);
         // Roadmap L52(c): SPIR-V's own `MinLod` image operand
         // (`spv_resource_samplecmp_clamp`'s trailing `clamp` operand,
@@ -3185,11 +3221,11 @@ void lowerImageAccesses(
         // no-op floor) for `samplecmp`/`samplecmplevelzero`, which have no
         // such operand of their own, mirroring the ordinary-sample
         // `MinLodClamp` fallback above.
-        Value *MinLodClamp =
-            DrefHasClamp ? CI->getArgOperand(
-                               getDrefSampleClampIdx(DrefHasBias, DrefHasGrad))
-                         : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                                   /*Negative=*/true);
+        Value *MinLodClamp = DrefHasClamp
+                                 ? CI->getArgOperand(getDrefSampleClampIdx(
+                                       DrefHasBias, DrefHasGrad, DrefHasLevel))
+                                 : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                           /*Negative=*/true);
         // Roadmap L52(b): SPIR-V's own `Bias` image operand
         // (`spv_resource_samplecmpbias{,_clamp}`'s bias operand, which
         // `hasOnlySupportedImageUses` already restricted to the same four
@@ -3283,8 +3319,8 @@ void lowerImageAccesses(
         // `Array2D`/`Cube`/`CubeArray`'s own arms below), so the two
         // representations must be told apart dynamically here rather
         // than dispatched on `Shape` alone.
-        Value *Offset =
-            CI->getArgOperand(getDrefSampleOffsetIdx(DrefHasBias, DrefHasGrad));
+        Value *Offset = CI->getArgOperand(
+            getDrefSampleOffsetIdx(DrefHasBias, DrefHasGrad, DrefHasLevel));
         Value *OffsetX = nullptr;
         Value *OffsetY = nullptr;
         Value *Offset1D = nullptr;

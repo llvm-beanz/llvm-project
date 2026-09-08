@@ -4434,19 +4434,30 @@ public:
   }
 };
 
-/// Converts a `spirv.ImageSampleDrefExplicitLod` with a literal `Lod = 0.0`
-/// image operand (optionally combined with `ConstOffset`; a `Grad` operand,
-/// or any other `Lod` value, has no supported mapping and is rejected) into
-/// the `llvm.spv.resource.samplecmplevelzero` intrinsic call LLVM's SPIRV
-/// backend selects `OpSampledImage`+`OpImageSampleDrefExplicitLod` from --
-/// this intrinsic has no LOD operand at all (unlike
-/// `ImageSampleExplicitLodPattern`'s own `samplelevel`, which threads an
-/// arbitrary explicit LOD through): it always implicitly samples mip level
-/// zero, so only a literal-zero `Lod` operand has a supported mapping. This
-/// is the exact shape HLSL's `Texture*::SampleCmpLevelZero` always compiles
-/// down to (roadmap L25; see `llvm/test/CodeGen/SPIRV/hlsl-resources/
-/// SampleCmpLevelZero.ll`'s own operand order, image, sampler, coord, dref,
-/// offset).
+/// Converts a `spirv.ImageSampleDrefExplicitLod` (optionally combined with
+/// `ConstOffset`; a `Grad` operand has no supported mapping here and is
+/// rejected, see `ImageSampleDrefGradPattern` instead) into either
+/// `llvm.spv.resource.samplecmplevelzero` (when the pre-conversion `Lod`
+/// operand is a literal-zero `spirv.ConstantOp`) or
+/// `llvm.spv.resource.samplecmplevel` (roadmap L72(b): any other `Lod`
+/// value, real or computed) -- a real `deqp-vk` SPIR-V capture of GLSL's
+/// own `textureLodOffset(sampler2DShadow, ...)` (`dEQP-VK.glsl.
+/// texture_functions.texturelodoffset.repeat.sampler2dshadow_compute`)
+/// confirms a shadow sampler's own explicit Lod is not always a literal
+/// zero -- it can be an arbitrary runtime-computed value (a varying
+/// interpolated per-invocation across the CTS test's own coordinate
+/// sweep), which `samplecmplevelzero` has no way to represent (it has no
+/// Lod operand at all -- it always implicitly samples mip level zero).
+/// `samplecmplevelzero` remains the preferred, narrower mapping for a
+/// literal-zero `Lod` (the exact shape HLSL's own `Texture*::
+/// SampleCmpLevelZero` always compiles down to, roadmap L25; see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/SampleCmpLevelZero.ll`'s own
+/// operand order, image, sampler, coord, dref, offset), since it is
+/// already a fully exercised, narrower-surface-area path; `
+/// samplecmplevel` (mirroring `ImageSampleExplicitLodPattern`'s own
+/// `samplelevel`, which likewise threads an arbitrary explicit LOD
+/// through for an ordinary, non-comparison sample) covers every other
+/// `Lod` value instead.
 class ImageSampleDrefExplicitLodPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::ImageSampleDrefExplicitLodOp> {
@@ -4478,13 +4489,18 @@ public:
     // `Adaptor`'s, which may already have been converted to an
     // `llvm.mlir.constant`) is checked for a literal zero, mirroring
     // `getConstantMemberIndex`'s own pre-conversion constant check above.
-    mlir::Value Lod = Op.getOperandArguments()[0];
-    auto LodConstant = Lod.getDefiningOp<mlir::spirv::ConstantOp>();
-    if (!LodConstant)
-      return Rewriter.notifyMatchFailure(Op, "Lod is not a constant");
-    auto LodFloat = mlir::dyn_cast<mlir::FloatAttr>(LodConstant.getValue());
-    if (!LodFloat || !LodFloat.getValue().isZero())
-      return Rewriter.notifyMatchFailure(Op, "Lod is not a literal zero");
+    // Roadmap L72(b): a literal-zero `Lod` still prefers the narrower
+    // `samplecmplevelzero` mapping below; any other `Lod` (non-constant,
+    // or a constant that isn't exactly zero) instead falls through to
+    // `samplecmplevel`, threading the real (post-conversion) `Lod` value
+    // through instead of rejecting the match outright.
+    mlir::Value PreConversionLod = Op.getOperandArguments()[0];
+    bool IsLiteralZeroLod = false;
+    if (auto LodConstant =
+            PreConversionLod.getDefiningOp<mlir::spirv::ConstantOp>()) {
+      auto LodFloat = mlir::dyn_cast<mlir::FloatAttr>(LodConstant.getValue());
+      IsLiteralZeroLod = LodFloat && LodFloat.getValue().isZero();
+    }
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -4520,11 +4536,23 @@ public:
       Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
                                               Rewriter.getZeroAttr(OffsetType));
 
+    if (IsLiteralZeroLod) {
+      Rewriter.replaceOp(
+          Op, createIntrinsicCall(
+                  Rewriter, Loc, "llvm.spv.resource.samplecmplevelzero",
+                  ResultType, {Image, Sampler, Coordinate, Dref, Offset}));
+      return mlir::success();
+    }
+
+    // Roadmap L72(b): the real (post-conversion) `Lod`, threaded through
+    // in the same operand slot `samplecmpbias` gives its own `Bias`
+    // (mutually exclusive with it -- SPIR-V forbids combining `Bias` and
+    // `Lod` on the same instruction).
+    mlir::Value Lod = Adaptor.getOperandArguments()[0];
     Rewriter.replaceOp(
-        Op, createIntrinsicCall(Rewriter, Loc,
-                                "llvm.spv.resource.samplecmplevelzero",
-                                ResultType,
-                                {Image, Sampler, Coordinate, Dref, Offset}));
+        Op, createIntrinsicCall(
+                Rewriter, Loc, "llvm.spv.resource.samplecmplevel", ResultType,
+                {Image, Sampler, Coordinate, Dref, Lod, Offset}));
     return mlir::success();
   }
 };
