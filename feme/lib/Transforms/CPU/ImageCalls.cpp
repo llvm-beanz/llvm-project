@@ -124,6 +124,16 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.getdimensions.2d.v2i32";
   case ImageCallKind::QuerySizeLod2D:
     return "feme.cpu.image.getdimensions.lod.2d.v2i32";
+  case ImageCallKind::QuerySizeLod1D:
+    return "feme.cpu.image.getdimensions.lod.1d.i32";
+  case ImageCallKind::QuerySizeLod1DArray:
+    return "feme.cpu.image.getdimensions.lod.1darray.v2i32";
+  case ImageCallKind::QuerySizeLod2DArray:
+    return "feme.cpu.image.getdimensions.lod.2darray.v3i32";
+  case ImageCallKind::QuerySizeLod3D:
+    return "feme.cpu.image.getdimensions.lod.3d.v3i32";
+  case ImageCallKind::QuerySizeLodCubeArray:
+    return "feme.cpu.image.getdimensions.lod.cubearray.v3i32";
   case ImageCallKind::QueryLevels:
     return "feme.cpu.image.querylevels.i32";
   case ImageCallKind::QuerySamples:
@@ -634,6 +644,48 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // `ImageCallKind::QuerySizeLod2D`'s own doc.
     Type *V2I32Ty = FixedVectorType::get(I32Ty, 2);
     FTy = FunctionType::get(V2I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  }
+  case ImageCallKind::QuerySizeLod1D:
+    // (image_heap, image_heap_count, image_index, lod, mask) -> i32
+    // (roadmap L75): same operand list as `QuerySizeLod2D` above, but a
+    // bare scalar result -- see `ImageCallKind::QuerySizeLod1D`'s own doc.
+    FTy = FunctionType::get(I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::QuerySizeLod1DArray: {
+    // (image_heap, image_heap_count, image_index, lod, mask) -> <2 x i32>
+    // (roadmap L75): same operand list/result width as `QuerySizeLod2D`,
+    // but a different per-lane formula -- see
+    // `ImageCallKind::QuerySizeLod1DArray`'s own doc.
+    Type *V2I32Ty = FixedVectorType::get(I32Ty, 2);
+    FTy = FunctionType::get(V2I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  }
+  case ImageCallKind::QuerySizeLod2DArray: {
+    // (image_heap, image_heap_count, image_index, lod, mask) -> <3 x i32>
+    // (roadmap L75): see `ImageCallKind::QuerySizeLod2DArray`'s own doc.
+    Type *V3I32Ty = FixedVectorType::get(I32Ty, 3);
+    FTy = FunctionType::get(V3I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  }
+  case ImageCallKind::QuerySizeLod3D: {
+    // (image_heap, image_heap_count, image_index, lod, mask) -> <3 x i32>
+    // (roadmap L75): see `ImageCallKind::QuerySizeLod3D`'s own doc.
+    Type *V3I32Ty = FixedVectorType::get(I32Ty, 3);
+    FTy = FunctionType::get(V3I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  }
+  case ImageCallKind::QuerySizeLodCubeArray: {
+    // (image_heap, image_heap_count, image_index, lod, mask) -> <3 x i32>
+    // (roadmap L75): see `ImageCallKind::QuerySizeLodCubeArray`'s own
+    // doc.
+    Type *V3I32Ty = FixedVectorType::get(I32Ty, 3);
+    FTy = FunctionType::get(V3I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   }
@@ -1188,6 +1240,57 @@ CallInst *feme::cpu::createQuerySizeLod2D(IRBuilderBase &Builder,
       F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
 }
 
+CallInst *feme::cpu::createQuerySizeLod1D(IRBuilderBase &Builder,
+                                          const ImageCallEnv &Env,
+                                          Value *ImageIndex, Value *Lod,
+                                          Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySizeLod1D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
+}
+
+CallInst *feme::cpu::createQuerySizeLod1DArray(IRBuilderBase &Builder,
+                                               const ImageCallEnv &Env,
+                                               Value *ImageIndex, Value *Lod,
+                                               Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySizeLod1DArray);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
+}
+
+CallInst *feme::cpu::createQuerySizeLod2DArray(IRBuilderBase &Builder,
+                                               const ImageCallEnv &Env,
+                                               Value *ImageIndex, Value *Lod,
+                                               Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySizeLod2DArray);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
+}
+
+CallInst *feme::cpu::createQuerySizeLod3D(IRBuilderBase &Builder,
+                                          const ImageCallEnv &Env,
+                                          Value *ImageIndex, Value *Lod,
+                                          Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySizeLod3D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
+}
+
+CallInst *feme::cpu::createQuerySizeLodCubeArray(IRBuilderBase &Builder,
+                                                 const ImageCallEnv &Env,
+                                                 Value *ImageIndex, Value *Lod,
+                                                 Value *Mask,
+                                                 const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QuerySizeLodCubeArray);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, Lod, Mask}, Name);
+}
+
 CallInst *feme::cpu::createQueryLevels(IRBuilderBase &Builder,
                                        const ImageCallEnv &Env,
                                        Value *ImageIndex, const Twine &Name) {
@@ -1533,6 +1636,11 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Sample3D,
       ImageCallKind::GetDimensions2D,
       ImageCallKind::QuerySizeLod2D,
+      ImageCallKind::QuerySizeLod1D,
+      ImageCallKind::QuerySizeLod1DArray,
+      ImageCallKind::QuerySizeLod2DArray,
+      ImageCallKind::QuerySizeLod3D,
+      ImageCallKind::QuerySizeLodCubeArray,
       ImageCallKind::QueryLevels,
       ImageCallKind::QuerySamples};
 
@@ -2119,6 +2227,23 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(3);
     break;
   case ImageCallKind::QuerySizeLod2D:
+    if (CI.arg_size() != 5)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.Lod = CI.getArgOperand(3);
+    Result.Mask = CI.getArgOperand(4);
+    break;
+  case ImageCallKind::QuerySizeLod1D:
+  case ImageCallKind::QuerySizeLod1DArray:
+  case ImageCallKind::QuerySizeLod2DArray:
+  case ImageCallKind::QuerySizeLod3D:
+  case ImageCallKind::QuerySizeLodCubeArray:
+    // Roadmap L75: every other-shape `QuerySizeLod*` builder shares
+    // `QuerySizeLod2D`'s own identical operand list above -- only the
+    // result type (encoded in the callee's own declared return type, not
+    // in `MatchedImageCall`) differs per shape.
     if (CI.arg_size() != 5)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);

@@ -460,11 +460,68 @@ enum class ImageCallKind : uint8_t {
   /// `GetDimensions2D` (`ImageIndex`/`Mask`) plus one more: the explicit
   /// mip level itself (`Lod` in `MatchedImageCall`, reusing that same
   /// field other sampling kinds already use for an explicit-LOD operand).
-  /// Scoped to `Plain2D` only for now (this builder only ever emits a
-  /// `v2i32` result, which does not match `Array2D`'s own extra
-  /// layer-count component) -- every other `ImageShape`'s own counterpart
-  /// remains unstarted follow-on work (roadmap L74).
+  /// Scoped to `Plain2D`/`Cube` (roadmap L75 widened this to also accept
+  /// `Cube`: a cube face's own extent query uses the identical
+  /// `(max(1, Width >> Lod), max(1, Height >> Lod))` formula, since a
+  /// cube face is exactly as square as a `Plain2D` mip level, needing no
+  /// new builder or runtime function at all) -- every other
+  /// `ImageShape`'s own distinct result width still needs its own builder
+  /// (`QuerySizeLod1D`/`QuerySizeLod1DArray`/`QuerySizeLod2DArray`/
+  /// `QuerySizeLod3D`/`QuerySizeLodCubeArray` below, roadmap L75).
   QuerySizeLod2D,
+  /// `feme.cpu.image.getdimensions.lod.1d.i32` (roadmap L75): a plain 1D
+  /// image's own extent at an explicit, possibly non-zero mip level
+  /// (`OpImageQuerySizeLod` against a `sampler1D` -- GLSL's
+  /// `textureSize(sampler1D, lod)`, which returns a bare scalar `int`,
+  /// unlike every wider shape above/below). Returns
+  /// `max(1, Width >> Lod)`, the same clamped-halving formula
+  /// `QuerySizeLod2D` already uses for its own `Width` component, just
+  /// without a `Height` companion (a 1D image has no second spatial
+  /// axis). Same operand list as `QuerySizeLod2D` (`ImageIndex`/`Lod`/
+  /// `Mask`), only the result type differs.
+  QuerySizeLod1D,
+  /// `feme.cpu.image.getdimensions.lod.1darray.v2i32` (roadmap L75): an
+  /// arrayed 1D image's own extent at an explicit mip level (`sampler1DArray`
+  /// -- GLSL's `textureSize(sampler1DArray, lod)`, returning `ivec2(width,
+  /// layers)`). Unlike `QuerySizeLod2D`'s own `v2i32` result (whose second
+  /// lane is a `Height` that *does* shrink with `Lod`, the same as its
+  /// first lane), this shape's second lane is `ArrayLayers` -- a layer
+  /// count never shrinks with mip level, only the physical per-layer
+  /// extent does -- so this needs its own distinct builder rather than
+  /// reusing `QuerySizeLod2D`'s. Same operand list as `QuerySizeLod2D`.
+  QuerySizeLod1DArray,
+  /// `feme.cpu.image.getdimensions.lod.2darray.v3i32` (roadmap L75): an
+  /// arrayed 2D image's own extent at an explicit mip level
+  /// (`sampler2DArray` -- GLSL's `textureSize(sampler2DArray, lod)`,
+  /// returning `ivec3(width, height, layers)`). Like
+  /// `QuerySizeLod1DArray` immediately above, only the first two lanes
+  /// (`Width`/`Height`) shrink with `Lod`; the third (`ArrayLayers`) does
+  /// not. Same operand list as `QuerySizeLod2D`.
+  QuerySizeLod2DArray,
+  /// `feme.cpu.image.getdimensions.lod.3d.v3i32` (roadmap L75): a plain 3D
+  /// (volume) image's own extent at an explicit mip level (`sampler3D` --
+  /// GLSL's `textureSize(sampler3D, lod)`, returning `ivec3(width, height,
+  /// depth)`). Unlike `QuerySizeLod2DArray`'s own third lane, a volume
+  /// texture's `Depth` genuinely is a mip-chain dimension in its own
+  /// right (SPIR-V/Vulkan halve a 3D image's depth alongside its width/
+  /// height at each mip level, unlike an array's layer count, which never
+  /// changes), so all three lanes shrink with `Lod` here. Same operand
+  /// list as `QuerySizeLod2D`.
+  QuerySizeLod3D,
+  /// `feme.cpu.image.getdimensions.lod.cubearray.v3i32` (roadmap L75): a
+  /// cube-array image's own extent at an explicit mip level
+  /// (`samplerCubeArray` -- GLSL's `textureSize(samplerCubeArray, lod)`,
+  /// returning `ivec3(width, height, numCubeArrayElements)`, where the
+  /// third component is the *element* count, i.e. `ArrayLayers / 6`, not
+  /// the raw face-inclusive layer count `FemeImageDescriptor::ArrayLayers`
+  /// itself tracks (`CommandBuffer.cpp`'s own `materializeImageDescriptor`
+  /// treats a cube(array) view as a plain view-level convention over
+  /// consecutive array layers, so `ArrayLayers` here is always a multiple
+  /// of 6 -- one set of 6 consecutive faces per cube-array element).
+  /// Otherwise identical in shape/formula to `QuerySizeLod2DArray` (first
+  /// two lanes shrink with `Lod`, third does not). Same operand list as
+  /// `QuerySizeLod2D`.
+  QuerySizeLodCubeArray,
   /// `feme.cpu.image.querylevels.i32` (roadmap L72(d)/L74): an image's own
   /// total mip-level count (`OpImageQueryLevels` -- GLSL's
   /// `textureQueryLevels(sampler)`), returning the scalar
@@ -1156,6 +1213,57 @@ llvm::CallInst *createQuerySizeLod2D(llvm::IRBuilderBase &Builder,
                                      llvm::Value *ImageIndex, llvm::Value *Lod,
                                      llvm::Value *Mask,
                                      const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.lod.1d.i32` call (roadmap L75):
+/// see `ImageCallKind::QuerySizeLod1D`'s own doc for its scalar `i32`
+/// result. Same operand list as `createQuerySizeLod2D`.
+llvm::CallInst *createQuerySizeLod1D(llvm::IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     llvm::Value *ImageIndex, llvm::Value *Lod,
+                                     llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.lod.1darray.v2i32` call
+/// (roadmap L75): see `ImageCallKind::QuerySizeLod1DArray`'s own doc for
+/// its `<2 x i32>` result shape (lane 0 width, lane 1 array-layer count).
+/// Same operand list as `createQuerySizeLod2D`.
+llvm::CallInst *createQuerySizeLod1DArray(llvm::IRBuilderBase &Builder,
+                                          const ImageCallEnv &Env,
+                                          llvm::Value *ImageIndex,
+                                          llvm::Value *Lod, llvm::Value *Mask,
+                                          const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.lod.2darray.v3i32` call
+/// (roadmap L75): see `ImageCallKind::QuerySizeLod2DArray`'s own doc for
+/// its `<3 x i32>` result shape (lane 0 width, lane 1 height, lane 2
+/// array-layer count). Same operand list as `createQuerySizeLod2D`.
+llvm::CallInst *createQuerySizeLod2DArray(llvm::IRBuilderBase &Builder,
+                                          const ImageCallEnv &Env,
+                                          llvm::Value *ImageIndex,
+                                          llvm::Value *Lod, llvm::Value *Mask,
+                                          const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.lod.3d.v3i32` call (roadmap
+/// L75): see `ImageCallKind::QuerySizeLod3D`'s own doc for its
+/// `<3 x i32>` result shape (lane 0 width, lane 1 height, lane 2 depth,
+/// all three shrinking with \p Lod). Same operand list as
+/// `createQuerySizeLod2D`.
+llvm::CallInst *createQuerySizeLod3D(llvm::IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     llvm::Value *ImageIndex, llvm::Value *Lod,
+                                     llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.getdimensions.lod.cubearray.v3i32` call
+/// (roadmap L75): see `ImageCallKind::QuerySizeLodCubeArray`'s own doc
+/// for its `<3 x i32>` result shape (lane 0 width, lane 1 height, lane 2
+/// cube-array *element* count, i.e. `ArrayLayers / 6`). Same operand list
+/// as `createQuerySizeLod2D`.
+llvm::CallInst *createQuerySizeLodCubeArray(llvm::IRBuilderBase &Builder,
+                                            const ImageCallEnv &Env,
+                                            llvm::Value *ImageIndex,
+                                            llvm::Value *Lod, llvm::Value *Mask,
+                                            const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.querylevels.i32` call (roadmap L72(d)): see
 /// `ImageCallKind::QueryLevels`'s own doc for its scalar `i32` result.

@@ -787,6 +787,120 @@ TEST_F(ImageCallsTest, MatchesQuerySizeLod2DCall) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// `createQuerySizeLod1D`'s own `feme.cpu.image.getdimensions.lod.1d.i32`
+// call (roadmap L75): a plain 1D image's own extent at an explicit mip
+// level -- see `ImageCallKind::QuerySizeLod1D`'s own doc. Same operand
+// list as `QuerySizeLod2D`, just a scalar result.
+TEST_F(ImageCallsTest, MatchesQuerySizeLod1DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createQuerySizeLod1D(Builder, Env, Builder.getInt32(3),
+                           Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySizeLod1D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// `createQuerySizeLod1DArray`'s own
+// `feme.cpu.image.getdimensions.lod.1darray.v2i32` call (roadmap L75): an
+// arrayed 1D image's own extent at an explicit mip level -- see
+// `ImageCallKind::QuerySizeLod1DArray`'s own doc.
+TEST_F(ImageCallsTest, MatchesQuerySizeLod1DArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createQuerySizeLod1DArray(Builder, Env, Builder.getInt32(3),
+                                Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySizeLod1DArray);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// `createQuerySizeLod2DArray`'s own
+// `feme.cpu.image.getdimensions.lod.2darray.v3i32` call (roadmap L75): an
+// arrayed 2D image's own extent at an explicit mip level -- see
+// `ImageCallKind::QuerySizeLod2DArray`'s own doc.
+TEST_F(ImageCallsTest, MatchesQuerySizeLod2DArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createQuerySizeLod2DArray(Builder, Env, Builder.getInt32(3),
+                                Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySizeLod2DArray);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// `createQuerySizeLod3D`'s own `feme.cpu.image.getdimensions.lod.3d.v3i32`
+// call (roadmap L75): a plain 3D (volume) image's own extent at an
+// explicit mip level -- see `ImageCallKind::QuerySizeLod3D`'s own doc.
+TEST_F(ImageCallsTest, MatchesQuerySizeLod3DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createQuerySizeLod3D(Builder, Env, Builder.getInt32(3),
+                           Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySizeLod3D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// `createQuerySizeLodCubeArray`'s own
+// `feme.cpu.image.getdimensions.lod.cubearray.v3i32` call (roadmap L75): a
+// cube-array image's own extent at an explicit mip level -- see
+// `ImageCallKind::QuerySizeLodCubeArray`'s own doc.
+TEST_F(ImageCallsTest, MatchesQuerySizeLodCubeArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createQuerySizeLodCubeArray(Builder, Env, Builder.getInt32(3),
+                                  Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::QuerySizeLodCubeArray);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 // `createQueryLevels`'s own `feme.cpu.image.querylevels.i32` call (roadmap
 // L72(d)): an image's own total mip-level count -- see
 // `ImageCallKind::QueryLevels`'s own doc. The smallest operand list of any
