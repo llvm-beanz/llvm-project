@@ -121,6 +121,7 @@ constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InputPatchControlPointCountParamName =
     "stage_input_patch_control_point_count";
+constexpr StringLiteral PrimitiveIDParamName = "stage_primitive_id";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -139,6 +140,7 @@ struct PatchConstantStageEnv {
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
   Value *InputPatchControlPointCount = nullptr;
+  Value *PrimitiveID = nullptr;
 };
 
 std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
@@ -159,6 +161,8 @@ std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
       Env.Outputs = &Arg, Found = true;
     else if (Arg.getName() == InputPatchControlPointCountParamName)
       Env.InputPatchControlPointCount = &Arg, Found = true;
+    else if (Arg.getName() == PrimitiveIDParamName)
+      Env.PrimitiveID = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -170,7 +174,7 @@ Function *appendPatchConstantStageParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -197,6 +201,7 @@ Function *appendPatchConstantStageParams(Function &F) {
   (&*ArgIt++)->setName(OutputLayoutParamName);
   (&*ArgIt++)->setName(OutputsParamName);
   (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
+  (&*ArgIt++)->setName(PrimitiveIDParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -208,6 +213,21 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
   if (isa<FixedVectorType>(V->getType()))
     return Builder.CreateExtractElement(V, Builder.getInt32(Lane));
   return V;
+}
+
+/// Mirrors `feme::cpu::HullWrapperPass`'s own (identically-named, file-local)
+/// helper: this lane's flat invocation index within the whole dispatch,
+/// derived purely from the wave's own index and this lane's position within
+/// it -- never from any call operand. `lowerPatchConstantInputLoad` (roadmap
+/// L82) needs this to address a `SignatureElement::CapturedSelfIndex`
+/// element by *this* invocation's own storage slot, exactly like
+/// `HullWrapper.cpp`'s `lowerHullOutputStore` already addresses that same
+/// slot on the write side.
+Value *getFlatInvocationIndex(IRBuilder<> &Builder, const WaveBodyEnv &WEnv,
+                              unsigned WaveSize, unsigned Lane) {
+  Value *Base = Builder.CreateMul(WEnv.WaveIndex, Builder.getInt32(WaveSize),
+                                  "flat.base");
+  return Builder.CreateAdd(Base, Builder.getInt32(Lane), "flat.index");
 }
 
 Value *loadLayoutField(IRBuilder<> &Builder, Value *LayoutArg,
@@ -281,8 +301,18 @@ Value *lowerPatchConstantInputLoad(CallInst &CI, const SignatureElement &Elt,
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+    // (Roadmap L82) A captured cross-barrier value (see
+    // `SignatureElement::CapturedSelfIndex`'s own comment) has no real
+    // "which control point" to address other than this lane's own -- the
+    // call's own `ControlPoint` operand is only ever a constant `0`
+    // (`resolveStageIOAccess` has no dynamic-or-constant vertex index to
+    // recover from the capture global's unindexed load/store pair), which
+    // would otherwise make every invocation re-read invocation 0's own
+    // captured value instead of its own.
     Value *ControlPoint =
-        extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+        Elt.CapturedSelfIndex
+            ? getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane)
+            : extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
     Value *Addr = computeStageStorageAddress(Builder, LayoutArg, StorageArg,
                                              Elt.ElementID, Elt, Row, Component,
                                              ControlPoint);
@@ -305,6 +335,18 @@ Value *lowerPatchConstantSystemValue(CallInst &CI, const SignatureElement &Elt,
                   : Elt.SystemValue == SignatureSystemValue::PatchVertices &&
                           Elt.FromInputPatch
                       ? PEnv.InputPatchControlPointCount
+                  // (Roadmap L82) A patch-constant function's own
+                  // `SV_PrimitiveID` parameter, independent of any
+                  // control-point-phase read of the same builtin (which a
+                  // barrier-based split's cross-barrier capture forwards on
+                  // its own via `SignatureElement::CapturedSelfIndex`): not
+                  // storage-backed, so it must come from `PEnv.PrimitiveID`
+                  // rather than falling into `lowerPatchConstantInputLoad`'s
+                  // generic storage-address computation (see
+                  // `HullWrapper.cpp`'s `lowerHullPrimitiveID`, the same
+                  // mistake this mirrors on the control-point side).
+                  : Elt.SystemValue == SignatureSystemValue::PrimitiveID
+                      ? PEnv.PrimitiveID
                       : nullptr;
   if (!Scalar)
     return nullptr;
@@ -444,15 +486,19 @@ bool lowerPatchConstantStageOps(Function &F) {
       // builtins have no `Location` of their own -- see
       // `FragmentWrapper.cpp`'s analogous roadmap H7x fix), only
       // `OutputControlPointID` (the current invocation's own index, never
-      // addressable to a *different* control point) and `PatchVertices`
-      // (a true per-patch scalar count) are the genuinely non-addressable
-      // system values `lowerPatchConstantSystemValue` below handles -- any
-      // other system value here (or none at all) is an ordinary array
-      // element read the same `InputPatch`-addressed way as any other
-      // linked input, keyed by `Elt.ElementID` the same way.
+      // addressable to a *different* control point), `PatchVertices`
+      // (a true per-patch scalar count), and `PrimitiveID` (roadmap L82:
+      // this patch's own index, uniform for the whole invocation, with no
+      // per-control-point storage at all -- see `lowerPatchConstantSystemValue`'s
+      // own comment) are the genuinely non-addressable system values
+      // `lowerPatchConstantSystemValue` below handles -- any other system
+      // value here (or none at all) is an ordinary array element read the
+      // same `InputPatch`-addressed way as any other linked input, keyed by
+      // `Elt.ElementID` the same way.
       bool IsScalarSystemValue =
           Elt->SystemValue == SignatureSystemValue::OutputControlPointID ||
-          Elt->SystemValue == SignatureSystemValue::PatchVertices;
+          Elt->SystemValue == SignatureSystemValue::PatchVertices ||
+          Elt->SystemValue == SignatureSystemValue::PrimitiveID;
       Value *Lowered = IsScalarSystemValue
                            ? lowerPatchConstantSystemValue(*CI, *Elt, *WEnv,
                                                            *PEnv)
@@ -508,6 +554,7 @@ struct WrapperEnv {
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
   Value *InputPatchControlPointCount = nullptr;
+  Value *PrimitiveID = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -531,6 +578,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
   Env.InputPatchControlPointCount =
       loadStructField(Builder, ArgsTy, Args,
                       PatchConstantArgsFieldInputPatchControlPointCount, I32Ty);
+  Env.PrimitiveID = loadStructField(
+      Builder, ArgsTy, Args, PatchConstantArgsFieldPrimitiveID, I32Ty);
 
   Value *ResourcesRaw = loadStructField(Builder, ArgsTy, Args,
                                         PatchConstantArgsFieldResources, PtrTy);
@@ -645,6 +694,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.Outputs);
     else if (Arg.getName() == InputPatchControlPointCountParamName)
       CallArgs.push_back(Env.InputPatchControlPointCount);
+    else if (Arg.getName() == PrimitiveIDParamName)
+      CallArgs.push_back(Env.PrimitiveID);
     else
       llvm_unreachable("unexpected parameter for PatchConstantWrapperPass");
   }

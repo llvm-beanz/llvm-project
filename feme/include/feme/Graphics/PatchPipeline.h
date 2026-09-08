@@ -175,6 +175,14 @@ struct PatchPipelineResult {
 /// \p Resources is the descriptor/root-constant environment all three
 /// stages share, or null for a patch pipeline that binds none.
 ///
+/// \p PrimitiveID (roadmap L82) is this patch's own `SV_PrimitiveID`/
+/// `gl_PrimitiveID` -- the index of this patch within the draw call, passed
+/// straight through to both `Stages.Hull.invokePatch`'s control-point phase
+/// and `Stages.PatchConstant.invokePatchConstant`'s patch-constant phase
+/// (see `FemePatchArgs::PrimitiveID`/`FemePatchConstantArgs::PrimitiveID`'s
+/// own comments for why this is not just another `VertexOutputs`-linked
+/// element).
+///
 /// Returns an `Error` if \p Tess's control-point counts violate
 /// `feme::graphics::validatePatchControlPointCounts`,
 /// \p ControlPointInvocations does not have exactly
@@ -184,7 +192,8 @@ llvm::Expected<PatchPipelineResult> runPatchPipeline(
     const PatchPipelineStages &Stages, const PatchPipelineLinkage &Link,
     const TessellationState &Tess, const StageStorage &VertexOutputs,
     llvm::ArrayRef<uint32_t> ControlPointInvocations,
-    const cpu::DispatchResources *Resources = nullptr);
+    const cpu::DispatchResources *Resources = nullptr,
+    uint32_t PrimitiveID = 0);
 
 } // namespace feme::graphics
 

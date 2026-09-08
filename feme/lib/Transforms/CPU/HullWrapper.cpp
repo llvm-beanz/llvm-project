@@ -126,6 +126,7 @@ constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InputPatchControlPointCountParamName =
     "stage_input_patch_control_point_count";
+constexpr StringLiteral PrimitiveIDParamName = "stage_primitive_id";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -142,6 +143,7 @@ struct HullStageEnv {
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
   Value *InputPatchControlPointCount = nullptr;
+  Value *PrimitiveID = nullptr;
 };
 
 std::optional<HullStageEnv> getHullStageEnv(Function &F) {
@@ -158,6 +160,8 @@ std::optional<HullStageEnv> getHullStageEnv(Function &F) {
       Env.Outputs = &Arg, Found = true;
     else if (Arg.getName() == InputPatchControlPointCountParamName)
       Env.InputPatchControlPointCount = &Arg, Found = true;
+    else if (Arg.getName() == PrimitiveIDParamName)
+      Env.PrimitiveID = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -169,7 +173,7 @@ Function *appendHullStageParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -194,6 +198,7 @@ Function *appendHullStageParams(Function &F) {
   (&*ArgIt++)->setName(OutputLayoutParamName);
   (&*ArgIt++)->setName(OutputsParamName);
   (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
+  (&*ArgIt++)->setName(PrimitiveIDParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -294,6 +299,40 @@ Value *lowerPatchVerticesIn(CallInst &CI, const WaveBodyEnv &WEnv,
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *LaneResult = Builder.CreateSelect(
         Active, HEnv.InputPatchControlPointCount, Builder.getInt32(0));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
+/// (Roadmap L82) Lowers a `feme.stage.input.load` of the `PrimitiveID`
+/// system value to this patch's own `SV_PrimitiveID`/`gl_PrimitiveID`,
+/// uniform across every lane, read straight from `HEnv.PrimitiveID` rather
+/// than from any per-control-point storage. Before this fix, a control-point
+/// phase's own `PrimitiveID` read fell through to the generic
+/// `lowerHullInputLoad` default case below (documented there as intended
+/// only for genuine per-control-point attributes the vertex stage actually
+/// forwards) -- but `feme::graphics::buildStageStorage` never allocates a
+/// storage slot for this element at all (it is not one of those attributes),
+/// leaving its layout-table entry all-zero, which `computeStageStorageAddress`
+/// then silently resolved to byte offset 0 of `Inputs` -- coincidentally
+/// aliasing whatever real element happens to occupy that offset (this
+/// milestone's own repro: `POSITION`, the first real per-control-point
+/// input), rather than diagnosing the mistake. A real IR reduction of
+/// `HullSystemValues.test`/`DomainSystemValues.test` (roadmap L77-L81's own
+/// chain) found this: `HSPRIMID`/`PCPRIMID` (this shader's own forwarding of
+/// `SV_PrimitiveID`) came back holding `POSITION`'s own first control
+/// point's first component instead of the patch's real index.
+Value *lowerHullPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
+                            const HullStageEnv &HEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, HEnv.PrimitiveID, Builder.getInt32(0));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }
@@ -551,6 +590,13 @@ bool lowerHullStageOps(Function &F) {
       case SignatureSystemValue::PatchVertices:
         Lowered = lowerPatchVerticesIn(*CI, *WEnv, *HEnv);
         break;
+      case SignatureSystemValue::PrimitiveID:
+        // (roadmap L82) See `lowerHullPrimitiveID`'s own comment: this is
+        // not a per-control-point attribute at all (it has no vertex-stage
+        // storage to read from), so it needs its own case here rather than
+        // falling into the generic default below.
+        Lowered = lowerHullPrimitiveID(*CI, *WEnv, *HEnv);
+        break;
       default:
         // (roadmap H29e) Every other input system value a control-point
         // phase's own `feme.stage.input.load` can reach here with -- `None`
@@ -607,6 +653,7 @@ struct WrapperEnv {
   Value *Outputs = nullptr;
   Value *OutputControlPointCount = nullptr;
   Value *InputPatchControlPointCount = nullptr;
+  Value *PrimitiveID = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -619,6 +666,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
       Builder, ArgsTy, Args, PatchArgsFieldOutputControlPointCount, I32Ty);
   Env.InputPatchControlPointCount = loadStructField(
       Builder, ArgsTy, Args, PatchArgsFieldInputPatchControlPointCount, I32Ty);
+  Env.PrimitiveID = loadStructField(Builder, ArgsTy, Args,
+                                    PatchArgsFieldPrimitiveID, I32Ty);
   Env.InputLayout =
       loadStructField(Builder, ArgsTy, Args, PatchArgsFieldInputLayout, PtrTy);
   Env.Inputs =
@@ -755,6 +804,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.Outputs);
     else if (Arg.getName() == InputPatchControlPointCountParamName)
       CallArgs.push_back(Env.InputPatchControlPointCount);
+    else if (Arg.getName() == PrimitiveIDParamName)
+      CallArgs.push_back(Env.PrimitiveID);
     else
       llvm_unreachable("unexpected parameter for HullWrapperPass");
   }

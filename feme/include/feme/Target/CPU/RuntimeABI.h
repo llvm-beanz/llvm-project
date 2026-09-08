@@ -1081,9 +1081,14 @@ struct FemePatchArgs {
   /// Number of input control points in the original patch. This may differ
   /// from `OutputControlPointCount`.
   uint32_t InputPatchControlPointCount;
-  /// Reserved 32-bit field to keep pointer fields naturally aligned and leave
-  /// room for later scalar metadata.
-  uint32_t Reserved32;
+  /// (Roadmap L82) This patch's `SV_PrimitiveID`/`gl_PrimitiveID`: the index
+  /// of this patch within the draw call, uniform across every control point
+  /// in the batch. Unlike a per-control-point attribute, this is not
+  /// storage-backed at all -- `feme::graphics::buildStageStorage` never
+  /// allocates a slot for a `SignatureSystemValue::PrimitiveID` input (it has
+  /// no vertex-stage-forwarded data to occupy), so the control-point phase's
+  /// wrapper must read it from here rather than from `Inputs`.
+  uint32_t PrimitiveID;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.
@@ -1149,9 +1154,14 @@ struct FemePatchConstantArgs {
   /// use. Zero if the patch-constant function declares no `InputPatch`
   /// parameter.
   uint32_t InputPatchControlPointCount;
-  /// Reserved 32-bit field to keep pointer fields naturally aligned and
-  /// leave room for later scalar metadata.
-  uint32_t Reserved32;
+  /// (Roadmap L82) This patch's `SV_PrimitiveID`/`gl_PrimitiveID`, mirroring
+  /// `FemePatchArgs::PrimitiveID`'s own comment: a patch-constant function
+  /// declaring its own `SV_PrimitiveID` parameter (independent of any
+  /// control-point-phase read of the same builtin, which a barrier-based
+  /// split's cross-barrier capture already forwards on its own -- see
+  /// `SignatureElement::CapturedSelfIndex`) reads it from here rather than
+  /// from `Inputs`.
+  uint32_t PrimitiveID;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.

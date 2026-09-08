@@ -4106,9 +4106,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           for (uint32_t C = 0; C != Tess.InputControlPointCount; ++C)
             ControlPointInvocations.push_back(
                 Inst * PerInstance + P * Tess.InputControlPointCount + C);
+          // (Roadmap L82) `P` is this patch's own index within the
+          // instance -- its `SV_PrimitiveID`/`gl_PrimitiveID` -- passed
+          // through so the hull/patch-constant phases can source that
+          // system value from the invocation record rather than from
+          // (nonexistent) per-control-point storage.
           Expected<PatchPipelineResult> Patch =
               runPatchPipeline(Stages, *TessLink, Tess, *VSOutput,
-                               ControlPointInvocations, &Draw.Resources);
+                               ControlPointInvocations, &Draw.Resources, P);
           if (!Patch)
             return Patch.takeError();
           PatchBases.push_back(TotalPoints);

@@ -1949,6 +1949,14 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
           /*InsertBefore=*/nullptr, GlobalValue::NotThreadLocal,
           /*AddressSpace=*/8);
       GV->setMetadata("spirv.Decorations", Decoration);
+      // (Roadmap L82) Marks this global as one `lowerPatchConstantInputLoad`
+      // must address by this lane's own flat invocation index rather than
+      // by whatever `ControlPoint` operand `resolveStageIOAccess` resolves
+      // for its (unindexed, GEP-less) read -- see `SignatureElement::
+      // CapturedSelfIndex`'s own comment for the full addressing bug this
+      // fixes.
+      GV->setMetadata("feme.captured.self.index",
+                      MDNode::get(F.getContext(), {}));
 
       std::optional<BasicBlock::iterator> InsertPt =
           V->getInsertionPointAfterDef();
@@ -2356,6 +2364,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Elt.Interpolation = getInterpolationMode(D);
       Elt.Frequency = Info.Frequency;
       Elt.FromInputPatch = Info.FromInputPatch;
+      Elt.CapturedSelfIndex =
+          GV->getMetadata("feme.captured.self.index") != nullptr;
 
       Sig.Elements.push_back(Elt);
       ElementIDs[GV].push_back(NextID);

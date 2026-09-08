@@ -346,6 +346,133 @@ TEST(PatchConstantWrapperTest, LowersInputPatchVerticesCount) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+/// (Roadmap L82) A patch-constant function's own `SV_PrimitiveID` parameter
+/// (independent of any control-point-phase read of the same builtin, which
+/// a barrier-based split's cross-barrier capture forwards on its own --
+/// see the `LowersCapturedSelfIndexElement` test below): not
+/// storage-backed, so `lowerPatchConstantSystemValue` must report
+/// `PatchConstantStageEnv::PrimitiveID` rather than falling into
+/// `lowerPatchConstantInputLoad`'s generic storage-address computation.
+/// Mirrors `HullWrapperTest.LowersPrimitiveIDInput`'s own control-point-side
+/// fix.
+TEST(PatchConstantWrapperTest, LowersPrimitiveIDInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @pc_main() #0 {
+      %pid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %pidf = uitofp i32 %pid to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %pidf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement PrimitiveID;
+  PrimitiveID.ElementID = 0;
+  PrimitiveID.Direction = SignatureDirection::Input;
+  PrimitiveID.SystemValue = SignatureSystemValue::PrimitiveID;
+  PrimitiveID.ComponentType = SignatureComponentType::UInt;
+  PrimitiveID.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::PatchOutput;
+  Out.Frequency = SignatureFrequency::PerPatch;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {PrimitiveID, Out};
+  dxil::setEntrySignature(*M->getFunction("pc_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  PatchConstantWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_pc_main"));
+  for (const Instruction &I : instructions(*M->getFunction("pc_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// (Roadmap L82) A `SignatureElement::CapturedSelfIndex` element (the H4c
+/// cross-barrier-capture mechanism's synthetic global, always addressed via
+/// a flat, unindexed load/store pair -- see `CanonicalizeStage.cpp`'s
+/// `splitTessellationControlEntry`) must address storage by *this lane's
+/// own* flat invocation index, never by the call's own (always-constant-0,
+/// since a capture's load/store has no real GEP to recover a dynamic index
+/// from) `ControlPoint` operand -- otherwise every lane would incorrectly
+/// re-read control point 0's own captured value. A real IR reduction of
+/// `HullSystemValues.test` found this addressing mistake (though it turned
+/// out not to be that test's own named symptom -- see `LowersPrimitiveIDInput`
+/// above and `HullWrapperTest.LowersPrimitiveIDInput` for the fix that was).
+/// `lowerPatchConstantInputLoad` now substitutes `getFlatInvocationIndex`
+/// (recognizable by its own `"flat.base"`/`"flat.index"` value names) for
+/// the `ControlPoint` operand whenever this flag is set.
+TEST(PatchConstantWrapperTest, LowersCapturedSelfIndexElement) {
+  LLVMContext Ctx;
+  // Value names must survive into the lowered IR for this test's own
+  // `"flat.index"` check below -- `LLVMContext` discards them by default.
+  Ctx.setDiscardValueNames(false);
+  // The capture global's own load/store pattern: always a constant-0
+  // `ControlPoint` operand, since `resolveStageIOAccess` can recover no
+  // dynamic vertex index from a flat, unindexed access.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @pc_main() #0 {
+      %v = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %vf = uitofp i32 %v to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %vf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement Captured;
+  Captured.ElementID = 0;
+  Captured.Direction = SignatureDirection::Input;
+  Captured.ComponentType = SignatureComponentType::UInt;
+  Captured.CapturedSelfIndex = true;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::PatchOutput;
+  Out.Frequency = SignatureFrequency::PerPatch;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {Captured, Out};
+  dxil::setEntrySignature(*M->getFunction("pc_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  PatchConstantWrapperPass().run(*M, MAM);
+
+  Function *Lowered = M->getFunction("pc_main");
+  EXPECT_TRUE(Lowered);
+  for (const Instruction &I : instructions(*Lowered))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  // Confirm the self-index path (not the call's own constant-0 operand) was
+  // actually used to address storage: `getFlatInvocationIndex` names its
+  // two intermediate values `"flat.base"`/`"flat.index"`, which only appear
+  // on this (`CapturedSelfIndex`) path.
+  bool FoundFlatIndex = false;
+  for (const Instruction &I : instructions(*Lowered))
+    if (I.getName() == "flat.index")
+      FoundFlatIndex = true;
+  EXPECT_TRUE(FoundFlatIndex);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST(PatchConstantWrapperTest, HullWrapperSkipsPatchConstantPhase) {
   LLVMContext Ctx;
   // A `PatchOutput`-bearing function is the patch-constant phase, not the

@@ -201,7 +201,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
     const PatchPipelineStages &Stages, const PatchPipelineLinkage &Link,
     const TessellationState &Tess, const StageStorage &VertexOutputs,
     ArrayRef<uint32_t> ControlPointInvocations,
-    const cpu::DispatchResources *Resources) {
+    const cpu::DispatchResources *Resources, uint32_t PrimitiveID) {
   std::string ValidationErr;
   {
     raw_string_ostream OS(ValidationErr);
@@ -245,6 +245,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
     Res.Outputs = Result.OutputPatch.Data.data();
     Res.OutputControlPointCount = Tess.OutputControlPointCount;
     Res.InputPatchControlPointCount = Tess.InputControlPointCount;
+    Res.PrimitiveID = PrimitiveID;
     cpu::PreparedPatchBatch Prepared =
         cpu::PreparedPatchBatch::create(Stages.Hull.getResourceInfo(), Res);
     if (Error E = Stages.Hull.invokePatch(Prepared))
@@ -294,6 +295,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
     Res.OutputLayout = &OutLayout;
     Res.Outputs = Result.PatchConstants.Data.data();
     Res.OutputControlPointCount = Tess.OutputControlPointCount;
+    Res.PrimitiveID = PrimitiveID;
     cpu::PreparedPatchConstantBatch Prepared =
         cpu::PreparedPatchConstantBatch::create(
             Stages.PatchConstant.getResourceInfo(), Res);
