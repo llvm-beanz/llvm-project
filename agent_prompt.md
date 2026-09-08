@@ -42,45 +42,29 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L77 from the roadmap or other prerequisites blocking the
+Can you close out L78 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **The tessellation-evaluation (domain) shader stage of a real DXC-compiled
-> hull/domain pair declares no tessellation domain execution mode**, discovered
-> by this session's (L37's) own real
-> `Feature/Semantics/{DomainSystemValues,HullSystemValues}.test` re-run once
-> L37's fix let both cases clear `HullWrapperPass` for the first time and reach
-> `vkCreateGraphicsPipelines`'s later tessellation-state-merging check for the
-> first time too: `GraphicsPipeline.cpp` rejects with `"the
-> tessellation-evaluation stage declares no tessellation domain execution mode
-> (Triangles/Quads/Isolines)"` even though the domain shader's own compiled
-> SPIR-V genuinely has `OpExecutionMode %main Triangles` (confirmed via
-> `spirv-dis` on the real `.o` this test compiles) -- the domain entry is
-> missing only `SpacingEqual`/`VertexOrderCw`/etc, not `Triangles` itself. Root
-> cause (confirmed via `spirv-dis` on both this test's real hull and domain
-> SPIR-V binaries): a real `dxc -spirv` compile of an HLSL hull/domain pair puts
-> *every* tessellation execution mode
-> (`Triangles`/`SpacingEqual`/`VertexOrderCw`/`OutputVertices`) on the **hull
-> (`TessellationControl`)** entry point (the one whose HLSL source actually
-> wrote `[domain("tri")] [partitioning("integer")]
-> [outputtopology("triangle_cw")]`), duplicating only `Triangles` onto the
-> **domain (`TessellationEvaluation`)** entry -- not the Khronos-spec-implied
-> split (domain-shape/spacing/vertex-order modes on the tessellation-evaluation
-> entry, output control point count on the tessellation-control entry)
-> `ConvertSPIRVToLLVMPass.cpp`'s importer assumed. That importer's per-function
-> `Info.TessDomain`/`Info.TessPartitioning`/`Info.TessOutputPrimitive`
-> bookkeeping is keyed strictly per entry point, and the code that finally sets
-> the `feme.tessellation.domain` function attribute (around line 574) requires
-> *both* `TessDomain` *and* `TessPartitioning` to be present on the *same* entry
-> before setting it -- so the domain entry, which only ever sees `Triangles` and
-> never `SpacingEqual`/`VertexOrderCw` from this real DXC output shape, never
-> gets the attribute at all, and `GraphicsPipeline.cpp`'s `DomainState` stays
-> unset. Needs its own fix in `ConvertSPIRVToLLVMPass.cpp` (unconfirmed exact
-> shape: possibly merging both entry points' tessellation execution-mode fields
-> before applying attributes, since a hull/domain pair is always compiled and
-> linked together and the full tessellation state is genuinely spread across
-> both entries in this real DXC output, not just one) -- and, since a genuinely
-> malformed input (a domain shader truly missing *all* tessellation state, from
-> either entry) should still be rejected, needs its own new unit test confirming
-> that diagnostic still fires correctly once the fix lets the real, valid,
-> split-across-both-entries shape through. Not yet started.
+> **Both of L77's own named repros
+> (`Feature/Semantics/{HullSystemValues,DomainSystemValues}.test`) now clear
+> `vkCreateGraphicsPipelines` and command submission cleanly, but still fail
+> their own `SystemValues` result check**: the real ICD's `ResultBuffer` comes
+> back entirely zero (`[0x0, 0x0, 0x0, 0x0, ...]`) against a non-zero expected
+> buffer (`[0x0, 0x0, 0x0, 0x1, 0x2, 0x3F800000, 0x3F800000, ...]`), confirmed
+> via a real `offloader -debug-layer` re-run of both repros (`"Graphics Pipeline
+> created."` with no further error, then a clean `Test failed: SystemValues` /
+> `BufferExact` mismatch, not a crash or a `VkResult` failure) once L77's fix
+> let both cases reach real execution for the first time. Entirely unrelated to
+> L77's own execution-mode-merging scope -- a distinct, further-downstream gap
+> in either the tessellator's real per-patch execution, the
+> hull/domain/patch-constant stage-wrapping chain's real storage addressing, or
+> the pixel shader's own read-back of the forwarded per-vertex/per-patch
+> attributes, now reachable for the first time. Needs its own real IR reduction
+> of one of these exact cases (the same technique this project's
+> H6-series/H8-series/H9-series/L-series chains have used throughout) to isolate
+> which stage's real output is actually going unwritten -- e.g. a temporary
+> pre-rasterization buffer dump (mirroring this row's own quick unsuccessful
+> `RenderTarget`-comparison probe, which hit an unrelated `Data:`-key
+> YAML-schema restriction on an `OutputProps`-tagged buffer resource and was not
+> pursued further) to confirm whether the tessellator ever emits primitives at
+> all for these two real cases, before narrowing further. Not yet started.
