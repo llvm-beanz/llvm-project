@@ -31606,3 +31606,107 @@ This closes out the entire `OpImageQuerySizeLod`/`OpImageQueryLevels`
 per-shape widening arc started at L72(d) (L72(d) -> L73 -> L74 -> L75).
 Temporary artifacts under `/tmp/l75_*` cleaned up at the end of the
 session.
+
+## L72(b): `ConstOffset`/non-literal-`Lod` gaps in `ImageFetch`/`ImageSampleDrefExplicitLod` (this session)
+
+### Investigation
+
+Roadmap L72(b) targeted 118 `dEQP-VK.glsl.texture_functions.*_compute` CTS
+cases (the `*Offset`-suffixed GLSL builtins) failing SPIR-V-to-LLVM
+legalization: 100 cases with `"failed to legalize operation
+'spirv.ImageFetch'"`, 18 with `"...'spirv.ImageSampleDrefExplicitLod'"`.
+The row's own filed text claimed both patterns rejected any `ConstOffset`
+combined with `Lod` outright. Reading `ImageSampleDrefExplicitLodPattern`
+showed this was **not accurate for the Dref half**: it already accepted
+`Lod|ConstOffset` via a `SupportedMask` bitmask check. A real `deqp-vk`
+CTS shader capture (`deqp-vk -n
+dEQP-VK.glsl.texture_functions.texturelodoffset.repeat.sampler2dshadow_compute
+--deqp-log-decompiled-spirv=enable --deqp-log-shader-sources=enable`)
+against the actual failing case confirmed the shader's `Lod` operand
+(`%220 = OpLoad %19 %171`) is a genuine runtime-computed value, not a
+literal -- the pattern's real restriction was requiring the pre-conversion
+`Lod` to be a literal-zero `spirv.ConstantOp`, unrelated to `ConstOffset`.
+The `ImageFetch` half's own row text held up: `ImageFetchLodPattern`
+genuinely only matched a lone `Lod` image operand via
+`hasExactImageOperands`, with no `ConstOffset` acceptance path at all.
+
+An MLIR verifier-assertion crash was investigated when reproducing via
+`feme-translate --import-spirv` against a synthetic `ConstOffset`-bearing
+repro; traced to a blanket, still-unimplemented upstream MLIR TODO
+(`verifyImageOperands`'s `noSupportOperands` mask in
+`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`) that only fires because
+`feme-translate`'s own `TranslateToMLIRRegistration` infra calls
+`mlir::verify()` after parsing -- the real ICD runtime path
+(`feme::SPIRVImporter`, used directly by `feme/lib/Vulkan/Pipeline.cpp`)
+never calls `verify()`, so this is irrelevant to feme's actual runtime
+correctness and needs no upstream MLIR fix (unlike L72(a)'s precedent).
+
+### The fix
+
+- `llvm/include/llvm/IR/IntrinsicsSPIRV.td`: added a new
+  `int_spv_resource_samplecmplevel` intrinsic (image, sampler, coord,
+  dref, lod, offset), alongside the existing `samplecmplevelzero`.
+- `SPIRVToLLVMPatterns.cpp`: rewrote `ImageSampleDrefExplicitLodPattern` to
+  dispatch to the new `samplecmplevel` intrinsic whenever the
+  pre-conversion `Lod` isn't a literal zero, threading the real
+  post-conversion `Lod` value through instead of a synthesized zero
+  (falling back to the existing `samplecmplevelzero` path for a genuine
+  literal-zero `Lod`, unchanged). Widened `ImageFetchLodPattern` to accept
+  `Lod|ConstOffset` (mirroring `ImageSampleExplicitLodPattern`'s own
+  combinatorial operand handling), threading the real offset into
+  `llvm.spv.resource.load.level` instead of a synthesized zero.
+- `SPIRVResourceLowering.cpp`: `isDrefSampleIntrinsic` gained a `HasLevel`
+  out-param and a new `spv_resource_samplecmplevel` case; a new
+  `DrefSampleLevelIdx` constant (same slot as `DrefSampleBiasIdx`/
+  `DrefSampleGradDPdxIdx`, mutually exclusive per the SPIR-V spec);
+  `getDrefSampleOffsetIdx`/`getDrefSampleClampIdx` widened for the new
+  slot; all 3 call sites updated to thread `DrefHasLevel` through,
+  reading the real `Lod` operand during lowering. `isFetchLevelIntrinsic`
+  no longer requires a compile-time-zero offset (validated instead via
+  the existing `isSupportedOffset` helper, `AllowArray2D=true`); the real
+  offset is folded into the `X`/`Y` coordinate (via `CreateAdd`) before
+  the `createLoad2D`/`createLoad2DI32`/`createLoad2DArray`/
+  `createLoad2DArrayI32` runtime call, since those entry points take no
+  offset operand of their own.
+- `femeCpuImageSampleCmp2DF32` (`FeMeRuntimeCPU.c`) already fully
+  supported an arbitrary explicit `Lod` via its `UseExplicitLod`/`Lod`
+  parameters (calling `femeRTComputeClampedLod` when set) -- no runtime
+  changes were needed.
+
+### Build/test verification
+
+Deleted `spirv-to-llvm-sample-dref-invalid.mlir` entirely (both of its
+"invalid" cases -- non-constant `Lod`, literal-nonzero-constant `Lod` --
+are now legal conversions). Added `samplecmplevel_nonconstant`/
+`samplecmplevel_nonzero_const_offset` to
+`spirv-to-llvm-sample-dref-and-query-lod.mlir` and
+`fetch_level_const_offset` to `spirv-to-llvm-sampling.mlir`. Replaced the
+now-obsolete `LeavesAFetchLevelWithNonzeroOffsetAlone` unit test with
+`LowersAFetchLevelWithNonzeroOffsetToImageLoad`; added
+`LowersSampleCmpLevelToImageSampleCmpWithRealLod`/
+`LowersSampleCmpLevelWithNonzeroOffsetToImageSampleCmp`.
+`FeMeConversionSPIRVToLLVMTests`: 15/15 pass. `FeMeTransformsCPUTests`:
+419/419 pass. All 61 `feme/test/Conversion/SPIRVToLLVM/` lit tests pass.
+`check-feme`: 2757/2816 pass, 0 fail, 59 unsupported (no regressions).
+
+### Real CTS re-run
+
+Re-ran the specific previously-failing case,
+`dEQP-VK.glsl.texture_functions.texturelodoffset.repeat.sampler2dshadow_compute`:
+**1/1 Pass** (was failing pipeline creation). A broader re-run of the full
+`*offset*_compute` caselist (1,050 cases, a superset of this row's own
+118-case target) shows **0 remaining** `"failed to legalize operation
+'spirv.ImageFetch'"`/`"...'spirv.ImageSampleDrefExplicitLod'"` errors
+anywhere in the sweep (down from 100/18 respectively before this fix). A
+direct re-run of this row's own original target (`texelfetchoffset`/
+`*lodoffset*shadow*`, 190 cases matched by a slightly looser grep than the
+original 118): every `Plain2D`/`Array2D` case now passes; the only
+remaining 60 fails are pre-existing `Plain1D`/`Array1D`/`Plain3D`
+`texelFetchOffset` cases -- an already-tracked, out-of-scope shape gap
+(roadmap L52a/L72(c)'s own precedent), not a regression from this row's
+fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- core SPIR-V image-operand functionality with no gating Vulkan
+feature or extension. Temporary artifacts under `/tmp/l72b/` cleaned up at
+the end of the session.
