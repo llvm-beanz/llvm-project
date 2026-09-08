@@ -31451,3 +31451,68 @@ follow-on work -- no `runtime/CPU` helper exists for either operation yet,
 and none is added by this row; `OpImageQuerySamples` is the sole operation
 this shape supports today. Temporary artifacts under `/tmp/cts_l73*`
 cleaned up at the end of the session.
+
+## Roadmap L74: `OpImageQueryLevels` shape widening (every shape but `Plain2DMS`/`Array2DMS`)
+
+L72(d) deliberately scoped its `OpImageQuerySizeLod`/`OpImageQueryLevels`
+fix to `Plain2D` only, filing every other shape (`Array2D`/`Plain1D`/
+`Array1D`/`Plain3D`/`Cube`/`CubeArray`) as this row. A real design
+investigation found `OpImageQueryLevels`'s result
+(`FemeRTImageDescriptor::MipLevels`) is **shape-independent** -- a
+mip-level count doesn't vary by dimensionality/arrayed-ness/cube-ness,
+unlike `OpImageQuerySizeLod`'s result (whose component count genuinely
+varies by shape per GLSL's own `textureSize(sampler, lod)` overload
+spec). This meant the existing `createQueryLevels` builder and
+`femeCpuImageQueryLevelsI32` runtime helper already worked correctly for
+every non-multisampled shape with **zero builder/runtime changes** --
+only `SPIRVResourceLowering.cpp`'s shape gate needed widening.
+
+**`SPIRVResourceLowering.cpp`**: split the previously-combined
+`isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)` branch in both
+`hasOnlySupportedImageUses` (sampled-image path) and
+`hasOnlySupportedStorageImageUses` (storage-image path) into two
+separate branches. `isQuerySizeLodCall` keeps its existing `Plain2D`-only
+gate untouched (per-shape widening deferred to L75). `isQueryLevelsCall`
+now only rejects `Plain2DMS`/`Array2DMS` (no GLSL
+`textureQueryLevels()` overload exists for a multisampled sampler, so no
+real CTS case would ever exercise that combination) and accepts every
+other classifiable shape (`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/
+`Plain3D`/`Cube`/`CubeArray`).
+
+New test coverage in `SPIRVResourceLoweringTest.cpp`:
+`LowersArray2DQueryLevels`/`LowersPlain1DQueryLevels`/
+`LowersArray1DQueryLevels`/`LowersPlain3DQueryLevels`/
+`LowersCubeQueryLevels`/`LowersCubeArrayQueryLevels` (sampled-image
+path, one per newly-accepted shape), `LowersArray2DStorageQueryLevels`
+(storage-image path), and `LeavesPlain2DMSQueryLevelsHandleAlone`
+(negative regression, mirroring L73's own
+`LeavesPlain2DMSSampleHandleAlone` precedent). `check-feme`: 2745/2804
+pass, 0 fail, 59 unsupported (no regressions, up from 2731/2790).
+
+Real CTS re-run of this row's own 68-case
+`query.texturesize`/`query.texturequerylevels` `_compute` caselist (a
+real re-run found the actual current failing count was 58, not the
+row's own filed "66" -- an accepted fictional-narrative discrepancy,
+real caselist data used as ground truth):
+
+- **All 34 `query.texturequerylevels.*_compute` cases now Pass** (up
+  from the 5 `Plain2D`-shaped cases L72(d) already closed).
+- The 5 already-passing `Plain2D` `query.texturesize.*_compute` cases
+  remain unaffected (this row deliberately does not touch
+  `OpImageQuerySizeLod`).
+- **Totals: 39/68 Pass (57.4%, up from 10/68), 29/68 Fail (down from
+  58/68).**
+
+A broader re-run of the full 1,375-case `texture_functions_compute`
+caselist confirms zero regressions: **292 Pass (up from 263), 751 Fail
+(down from 780), 332 Not Supported (unchanged)**.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- same rationale as L72(d)/L73, core SPIR-V image-operand
+functionality with no gating Vulkan feature or extension.
+
+The remaining `OpImageQuerySizeLod` per-shape widening (needing new
+distinct-result-width `ImageCalls` builders, since this opcode's result
+genuinely varies in component count by shape unlike `OpImageQueryLevels`)
+is filed as its own new top-level follow-on row, L75. Temporary
+artifacts under `/tmp/l74_*` cleaned up at the end of the session.
