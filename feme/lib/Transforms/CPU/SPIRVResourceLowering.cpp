@@ -1207,19 +1207,41 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L72(d): `OpImageQuerySizeLod`/`OpImageQueryLevels` --
-    // unlike `isGetDimensionsIntrinsic`'s own call (whose sole operand
-    // already *is* the handle), these synthesized calls' own Image
-    // operand is their first argument, mirroring `isSampleIntrinsic`'s
-    // own `CI->getArgOperand(0) != &Handle` convention. Scoped to
-    // `Plain2D` only for now (the builders below only emit a v2i32
-    // result, which does not match `Array2D`'s own extra layer-count
-    // component) -- `Array2D` support is left for a follow-on row, see
+    // Roadmap L72(d): `OpImageQuerySizeLod` -- unlike
+    // `isGetDimensionsIntrinsic`'s own call (whose sole operand already
+    // *is* the handle), this synthesized call's own Image operand is its
+    // first argument, mirroring `isSampleIntrinsic`'s own
+    // `CI->getArgOperand(0) != &Handle` convention. Scoped to `Plain2D`
+    // only for now (the builder below only emits a v2i32 result, which
+    // does not match `Array2D`'s own extra layer-count component, nor
+    // `Plain1D`'s narrower scalar one) -- every other shape's own
+    // distinct result width is left for a follow-on row, see
     // `ImageCallKind::QuerySizeLod2D`'s own doc.
-    if (isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)) {
+    if (isQuerySizeLodCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
       if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
+
+    // Roadmap L74: `OpImageQueryLevels` -- an image's own total mip-level
+    // count. Unlike `OpImageQuerySizeLod` immediately above,
+    // `createQueryLevels`'s own scalar `i32` result never varies by
+    // shape (`FemeRTImageDescriptor::MipLevels` is tracked identically
+    // regardless of dimensionality/arrayed-ness), so this needs no new
+    // per-shape builder at all -- every classifiable *non-multisampled*
+    // shape is accepted (`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/
+    // `Plain3D`/`Cube`/`CubeArray`). `Plain2DMS`/`Array2DMS` are still
+    // rejected: GLSL has no `textureQueryLevels()` overload for a
+    // multisampled sampler in the first place (a multisampled image
+    // always has exactly one mip level), so no real CTS case ever
+    // exercises this combination, and accepting it would be an
+    // unverified, untested widening for no real benefit.
+    if (isQueryLevelsCall(*CI)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       continue;
     }
@@ -1597,13 +1619,25 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L72(d): `OpImageQuerySizeLod`/`OpImageQueryLevels` against a
-    // storage image -- see `hasOnlySupportedImageUses`'s own identical
-    // check for this pair's shared shape scoping and operand convention.
-    if (isQuerySizeLodCall(*CI) || isQueryLevelsCall(*CI)) {
+    // Roadmap L72(d): `OpImageQuerySizeLod` against a storage image --
+    // see `hasOnlySupportedImageUses`'s own identical check for this
+    // opcode's shape scoping and operand convention.
+    if (isQuerySizeLodCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
       if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
+
+    // Roadmap L74: `OpImageQueryLevels` against a storage image -- see
+    // `hasOnlySupportedImageUses`'s own identical check for why this
+    // needs no per-shape builder and is widened to every non-multisampled
+    // shape.
+    if (isQueryLevelsCall(*CI)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
         return false;
       continue;
     }

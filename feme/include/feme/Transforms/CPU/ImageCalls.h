@@ -465,7 +465,7 @@ enum class ImageCallKind : uint8_t {
   /// layer-count component) -- every other `ImageShape`'s own counterpart
   /// remains unstarted follow-on work (roadmap L74).
   QuerySizeLod2D,
-  /// `feme.cpu.image.querylevels.i32` (roadmap L72(d)): an image's own
+  /// `feme.cpu.image.querylevels.i32` (roadmap L72(d)/L74): an image's own
   /// total mip-level count (`OpImageQueryLevels` -- GLSL's
   /// `textureQueryLevels(sampler)`), returning the scalar
   /// `FemeImageDescriptor::MipLevels` already tracks for its bound
@@ -473,9 +473,15 @@ enum class ImageCallKind : uint8_t {
   /// this needs neither a `Mask` (this query has no per-invocation side
   /// effect to guard) nor an explicit mip level of its own -- only
   /// `ImageIndex` -- so its own operand list is the smallest of any kind
-  /// above. Scoped to `Plain2D` only for now, mirroring `QuerySizeLod2D`'s
-  /// own identical scoping decision (roadmap L74 is the follow-on for
-  /// every other shape).
+  /// above. Unlike `QuerySizeLod2D`'s own `Plain2D`-only scope, this
+  /// result never varies by shape (`MipLevels` is tracked identically
+  /// regardless of dimensionality/arrayed-ness), so roadmap L74 widened
+  /// `SPIRVResourceLowering.cpp`'s own shape gate to accept every
+  /// classifiable non-multisampled shape (`Plain1D`/`Array1D`/`Plain2D`/
+  /// `Array2D`/`Plain3D`/`Cube`/`CubeArray`) with no change needed to this
+  /// builder itself -- `Plain2DMS`/`Array2DMS` are still rejected, since
+  /// GLSL has no `textureQueryLevels()` overload for a multisampled
+  /// sampler in the first place.
   QueryLevels,
   /// `feme.cpu.image.querysamples.i32` (roadmap L73): a multisampled
   /// image's own sample count (`OpImageQuerySamples` -- GLSL's
