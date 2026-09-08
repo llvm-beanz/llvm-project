@@ -147,15 +147,22 @@ TEST(HullWrapperTest, LowersRepeatedOutputControlPointIDReads) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST(HullWrapperTest, DiagnosesCrossControlPointInputLoad) {
+/// (roadmap L37) Reads control point 1's input unconditionally, by a
+/// literal constant rather than this invocation's own
+/// `OutputControlPointID` -- always legal for an **input** read (see
+/// `lowerHullInputLoad`'s own comment), and exactly the shape a real
+/// dynamically-indexed `InputPatch<T, N>` read unrolls into once SPIR-V
+/// import/legalization has "materialized" every constant-indexed
+/// possibility up front for the shader's own code to `select` among after
+/// loading.
+TEST(HullWrapperTest, LowersLiteralConstantControlPointInputLoad) {
   LLVMContext Ctx;
-  // Reads control point 1's input unconditionally -- not this invocation's
-  // own control point -- which HullWrapperPass does not yet support (see
-  // its file comment).
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @hs_main() #0 {
-      %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
-      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %in, i32 0)
+      %cp0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %cp1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+      %sum = fadd float %cp0, %cp1
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %sum, i32 0)
       ret void
     }
     declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
@@ -173,6 +180,58 @@ TEST(HullWrapperTest, DiagnosesCrossControlPointInputLoad) {
   Out.ElementID = 1;
   Out.Direction = SignatureDirection::Output;
   Sig.Elements = {In, Out};
+  dxil::setEntrySignature(*M->getFunction("hs_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  HullWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_hs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("hs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// A genuinely dynamic, non-self, non-constant control-point index (here,
+/// `gl_PatchVerticesIn`'s own runtime value, not `OutputControlPointID`)
+/// still needs a real cross-lane gather this milestone does not build --
+/// distinct from the literal-constant case
+/// `LowersLiteralConstantControlPointInputLoad` above now supports.
+TEST(HullWrapperTest, DiagnosesDynamicNonSelfControlPointInputLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @hs_main() #0 {
+      %pv = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %in = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %pv)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %in, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement PatchVertices;
+  PatchVertices.ElementID = 0;
+  PatchVertices.Direction = SignatureDirection::Input;
+  PatchVertices.SystemValue = SignatureSystemValue::PatchVertices;
+  PatchVertices.ComponentType = SignatureComponentType::UInt;
+  PatchVertices.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement In;
+  In.ElementID = 1;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  SignatureElement Out = In;
+  Out.ElementID = 2;
+  Out.Direction = SignatureDirection::Output;
+  Sig.Elements = {PatchVertices, In, Out};
   dxil::setEntrySignature(*M->getFunction("hs_main"), Sig);
 
   ModuleAnalysisManager MAM;
