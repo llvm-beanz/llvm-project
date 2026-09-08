@@ -72247,3 +72247,136 @@ lowering fix touching no new Vulkan feature/extension surface.
    `FeMeGraphicsDesign.md`'s new status subsection, `Roadmap.md`'s L81
    strikethrough and new L82 entry.
 3. This `agent_thoughts.md` append, on its own.
+
+# Session: Closing out roadmap L82 (quad-domain interior lattice off-by-one)
+
+## Request
+
+Close out roadmap L82 or other prerequisites blocking the L-series
+milestones. L82 was filed by the prior (L81) session: a real `offloader`
+re-run of `DomainSystemValues.test` after L81's fix runs the pipeline to
+completion, but the result buffer fails an exact-match comparison by
+exactly 1 ULP on a handful of interpolated `SV_DomainLocation`-forwarded
+`uv.x` ("DomU") values -- expected `0.25`/`0.75` (clean dyadic fractions),
+observed `0.24999997`/`0.75000006` etc.
+
+## Investigation
+
+Reproduced the test manually (no offload-test-suite build directory
+exists in this checkout, so I hand-reproduced its `RUN:` lines: `split-file`
+extracted the embedded HLSL/YAML, real `dxc -spirv -fspv-target-env=vulkan1.3`
+compiled each stage, and `offloader` ran directly against the compiled
+`.o` files with `VK_ICD_FILENAMES` pointed at the built ICD). Confirmed
+the exact symptom: `DomU` off by 1 ULP on 3 of 8 records, everything else
+(PrimID, DomV, Pos*) exact.
+
+**First hypothesis (disproven): rasterizer barycentric-weight precision.**
+Since the tessellator's own "nice" interior-lattice math seemed like it
+should produce exact `0.25`/`0.75` values, I initially assumed the error
+must come from the rasterizer's `float`-precision `edgeFn`-based
+barycentric weight computation (mirroring the existing `edgeFnD`/roadmap
+H4j double-precision-coverage-test precedent -- a `float` edge function's
+subtraction-then-multiply isn't guaranteed bit-exact for a sample landing
+exactly on a vertex/edge). I added temporary debug instrumentation
+(`fprintf` dumps filtered to the exact failing pixel) directly in
+`Executor.cpp`, rebuilt, and re-ran. This revealed the *actual* covering
+triangle's vertex values include `0.166666672` (~1/6) -- not a "nice"
+fraction at all, meaning my mental model of the tessellated mesh (a
+simple 2x2 grid of subquads) was wrong; the real mesh includes
+boundary-ring/bridging triangles with non-trivial domain coordinates. I
+implemented the double-precision-barycentric fix anyway (changing `Area`
+and `Bary0/1/2` from `float edgeFn` to `double edgeFnD`), built, and
+re-ran the repro: **the result was bit-for-bit identical to before the
+fix** -- conclusively disproving the hypothesis. I reverted this change
+entirely (never committed) rather than keep it as unproven scope creep.
+
+A second round of debug instrumentation (at the actual per-fragment
+varying-interpolation site) confirmed the real covering triangle's
+vertices have raw `uv.x` values `V0 = V2 = 0.166666672` (~1/6), `V1 = 0.5`,
+with weights `B1 ≈ 0.25`, `B2 ≈ 0.75`. Manually verified `0.75 * (1/6) +
+0.25 * 0.5 = 0.25` exactly in real-number arithmetic -- but `1/6` is not
+exactly representable in `float32`, so even mathematically-exact-weight
+interpolation of an already-rounded `1/6` input can't recover exactly
+`0.25`. This pointed away from the rasterizer entirely and squarely at
+*why the tessellator ever generates a `1/6` vertex* for a `tessFactor = 2`
+edge in the first place.
+
+**Real root cause: `Tessellator.cpp`'s `tessellateQuad` interior core
+lattice off-by-one.** Traced `computeSegmentCount`/`tessellateQuad`: the
+interior core lattice's own division count (`Nu`/`Nv`) was set directly
+to `computeSegmentCount(Inside)` -- the *same* whole-axis segment count
+used for the boundary ring's own edge vertices (where a point is
+legitimately needed at every segment endpoint, including `0`/`1`). But
+the core lattice is a *different* construct: it's always inset strictly
+*within* the boundary via a margin blend, and bridged to the boundary
+ring by separate triangles -- so its own division count should be the
+number of strictly *interior* lattice lines the inside factor implies,
+one *fewer* than the whole-axis segment count (an inside factor of `N`
+divides the axis into `N` segments, leaving `N - 1` interior lines, just
+like the boundary edges' own interior segment endpoints exclude `0`/`1`).
+For the common `Inside == Edges == 2` case (this test's exact shape), the
+off-by-one generates a spurious *extra* interior ring whose margin-inset
+formula (`Margin = 0.5 / (Nu + 1)`) produces a genuinely non-dyadic `1/6`
+value with `Nu = 2`, instead of the correct, exactly-representable `0.25`
+with `Nu = 1`.
+
+I found this project's *own* unit test (`QuadDomainGeneratesTheAnalyticGridSize`)
+had explicitly encoded and asserted the buggy `Nu == Inside` formula --
+a useful reminder that a passing, well-documented unit test can still
+enshrine a genuine bug if its own premise was never cross-checked against
+an independent ground truth (here, the `DomainSystemValues.test`/
+`QuadDomainTessellation.test` doc comments' own explicit "2x2 grid of
+sub-quads" / "(u,v) = (0.25, 0.75)" language, which only holds if `Nu = 1`
+for `Inside = 2`).
+
+## Fix
+
+Changed `Nu`/`Nv` in `tessellateQuad` to `max(1, computeSegmentCount(Inside)
+- 1)`, with a `max(1, ...)` clamp preserving the existing degenerate
+single-ring behavior when the inside factor is already at its own minimum
+of `1`. Added a new regression test,
+`QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords`, asserting every
+strictly-interior core point lands on exactly `0.25`/`0.75` (bit-for-bit,
+not approximately) for the `Inside == Edges == 2` shape. Updated the
+pre-existing `QuadDomainGeneratesTheAnalyticGridSize` test's now-corrected
+expected grid dimensions (`Inside = {2, 3}` now correctly yields a `1x2`
+core grid, not the old, buggy `2x3`).
+
+## Validation
+
+- `FeMeGraphicsTests` (`TessellatorTest.*`): all 20 tests pass, including
+  both new/updated cases.
+- `check-feme` (full target, dependencies verified): 2778/2837 Passed, 59
+  Unsupported, 0 Failed -- no regressions.
+- Real-ICD before/after (manual repro, both named tests): both
+  `HullSystemValues.test` and `DomainSystemValues.test`'s `ResultBuffer`
+  now match `ResultBuffer_Expected` **bit-for-bit exactly** (confirmed
+  programmatically, comparing every hex word of both buffers, not just
+  visually) -- fully closing out the entire L77-L82 investigation chain
+  for both of its named repros.
+- Real Vulkan CTS re-run: `dEQP-VK.tessellation.shader_input_output.*`
+  (28 cases), identical to L37/L77-L81's own re-runs -- 13/28 reach a
+  result before the group's own pre-existing segfault, all 13 failing on
+  the same two already-tracked, unrelated gaps. No regression; this CTS
+  group still can't directly exercise this fix either before or after
+  (the real confirmation is the offloader-based comparison above).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed,
+  no change needed (pure CPU-side tessellator fix, no new Vulkan feature/
+  extension surface).
+
+## Commits
+
+1. The real fix (`Tessellator.cpp`) plus its new/updated unit tests
+   (`TessellatorTest.cpp`).
+2. Doc updates: `VulkanCTSReport.md`'s new L82 section,
+   `FeMeGraphicsDesign.md`'s new status subsection, `Roadmap.md`'s L82
+   strikethrough with its resolution summary.
+3. This `agent_thoughts.md` append, on its own.
+
+## Outcome
+
+L82 is closed. Both of its chain's named repros (`HullSystemValues.test`,
+`DomainSystemValues.test`) now pass fully. No new L83+ blocker was
+discovered downstream this session -- the L77-L82 chain appears to be
+fully resolved for now. No further roadmap breakdown entries were added,
+since the milestone was completed rather than partially addressed.
