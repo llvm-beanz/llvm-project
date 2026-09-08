@@ -70600,3 +70600,154 @@ SPIR-V image-operand functionality, no gating Vulkan feature/extension).
 
 Cleaned up scratch CTS artifacts under `/tmp/l75_*` at the end of the
 session.
+
+# Session: closing out L72(b) (ImageFetch/ImageSampleDrefExplicitLod ConstOffset/Lod gaps)
+
+## Starting point
+
+Roadmap L72(b) (filed by the L72 investigation) targeted 118
+`dEQP-VK.glsl.texture_functions.*_compute` CTS cases (the `*Offset`-suffixed
+GLSL builtins): 100 failing SPIR-V-to-LLVM legalization of
+`spirv.ImageFetch`, 18 of `spirv.ImageSampleDrefExplicitLod`. The row's own
+filed text claimed both patterns rejected any `ConstOffset` combined with
+`Lod` outright, needing the same fix applied to both.
+
+## The twist: the roadmap's own framing was wrong for the Dref half
+
+Reading `ImageSampleDrefExplicitLodPattern` before touching anything showed
+it already accepted `Lod|ConstOffset` at the match-condition level via a
+`SupportedMask` bitmask -- directly contradicting the row's own text. This
+was the first real signal that "close out L72(b)" needed its own fresh
+investigation rather than blindly implementing the row's own prescribed fix.
+
+Used the CTS-log-capture technique (new to me this session, worth
+remembering): `deqp-vk -n <casename> --deqp-log-decompiled-spirv=enable
+--deqp-log-shader-sources=enable --deqp-log-filename=<path>.qpa` writes
+both the GLSL source and the full disassembled SPIR-V into the QPA log
+file even when pipeline creation itself fails downstream. This is a much
+more reliable ground-truth source than reconstructing a synthetic repro
+via `glslangValidator` by hand -- I first tried a synthetic literal-zero-Lod
+repro and it did *not* reproduce the real bug (it hit a completely
+different, unrelated MLIR verifier assertion instead -- see below). The
+real capture against
+`dEQP-VK.glsl.texture_functions.texturelodoffset.repeat.sampler2dshadow_compute`
+showed the shader's `Lod` operand is a genuine runtime-computed value
+(`%220 = OpLoad %19 %171` feeding it directly), not a literal at all. That
+reframed the actual gap as "no way to represent a non-literal-zero `Lod`
+against this op" rather than "ConstOffset is rejected."
+
+## A red herring: the MLIR verifier assertion
+
+While chasing the synthetic repro down, I hit an assertion crash inside
+`feme-translate --import-spirv` on any `ConstOffset`-bearing image op.
+Traced it to `verifyImageOperands` in
+`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`, which has a blanket, long-standing
+upstream MLIR TODO bitmask (`ConstOffset | Offset | ConstOffsets | MinLod |
+...`) it doesn't support in *any* SPIR-V image op verifier. Spent real time
+confirming this was irrelevant before writing off this thread: the assert
+only fires because `feme-translate`'s own `TranslateToMLIRRegistration`
+infra explicitly calls `mlir::verify()` after parsing
+(`mlir/lib/Tools/mlir-translate/Translation.cpp`), but the actual ICD
+runtime path (`feme::SPIRVImporter`, used directly by
+`feme/lib/Vulkan/Pipeline.cpp`) never calls `verify()` at all. So this is a
+real upstream MLIR gap, but it only blocks `feme-translate` as a debugging
+tool for `ConstOffset`-bearing SPIR-V -- not feme's actual runtime
+correctness, and needs no fix for this row (unlike L72(a)'s genuine
+upstream-blocked precedent).
+
+## The fix
+
+Two independent fixes landed as two separate commits, since they turned out
+to be almost entirely unrelated once the real root causes were known:
+
+1. **Dref bucket**: added a new `int_spv_resource_samplecmplevel`
+   intrinsic (mirroring `samplecmplevelzero`'s shape but with a real `lod`
+   operand instead of an implied zero), and rewrote
+   `ImageSampleDrefExplicitLodPattern` to dispatch to it whenever the
+   pre-conversion `Lod` isn't a literal zero. Confirmed
+   `femeCpuImageSampleCmp2DF32` already fully supports an arbitrary
+   explicit `Lod` via its existing `UseExplicitLod`/`Lod` parameters -- zero
+   runtime changes needed, only the MLIR-pattern/LLVM-resource-lowering
+   plumbing to actually thread a real value through instead of a
+   synthesized zero. Deleted `spirv-to-llvm-sample-dref-invalid.mlir`
+   entirely, since both of its "invalid" cases are legal conversions now.
+
+2. **ImageFetch bucket**: this row's own text held up unmodified here --
+   `ImageFetchLodPattern` genuinely only matched a lone `Lod` image
+   operand. Widened it to accept `Lod|ConstOffset` (directly mirroring
+   `ImageSampleExplicitLodPattern`'s own combinatorial operand-extraction
+   pattern -- a clean, already-established precedent to copy rather than
+   invent something new), then widened `isFetchLevelIntrinsic`/its
+   lowering dispatch in `SPIRVResourceLowering.cpp` to validate the real
+   offset via the existing `isSupportedOffset` helper and fold it into the
+   `X`/`Y` coordinate (`CreateAdd`) before the runtime `createLoad2D`/
+   `createLoad2DArray` call -- these runtime entry points take no offset
+   operand of their own, unlike the sampling helpers' `OffsetX`/`OffsetY`,
+   so the offset has to be baked into the coordinate itself here instead of
+   threaded as a separate argument.
+
+Also discovered and replaced a now-obsolete unit test
+(`LeavesAFetchLevelWithNonzeroOffsetAlone`) that specifically asserted the
+*old* rejection behavior -- a good reminder that widening a rejection-based
+gate always leaves a stale "this used to be rejected" test behind that
+needs to flip to a positive test, not just get deleted.
+
+## Build/test verification
+
+`FeMeConversionSPIRVToLLVMTests`: 15/15 pass. `FeMeTransformsCPUTests`:
+419/419 pass (including the flipped fetch-offset test and two new Dref
+tests). All 61 `feme/test/Conversion/SPIRVToLLVM/` lit tests pass.
+`check-feme`: 2757/2816 pass, 0 fail, 59 unsupported (no regressions).
+`git-clang-format --diff HEAD` reported no formatting issues on either
+commit.
+
+Rediscovered the same build gotcha from a prior session: rebuilding just
+the unit-test binaries does *not* relink `feme-opt` or `libfeme_vulkan.so`
+(both separate ninja targets statically linking the same libraries) --
+had to explicitly `ninja -C build2 feme-opt` and, later,
+`ninja -C build2 feme_vulkan` before the real CTS re-run actually exercised
+the new code (my first post-fix CTS re-run silently ran against a stale
+`libfeme_vulkan.so` and showed zero movement, which is what caught this
+before it became a false "the fix didn't work" conclusion).
+
+## Real CTS re-run
+
+The specific originally-failing case now passes:
+`dEQP-VK.glsl.texture_functions.texturelodoffset.repeat.sampler2dshadow_compute`
+-- 1/1 Pass. A broader re-run of the full `*offset*_compute` caselist
+(1,050 cases) shows 0 remaining `"failed to legalize operation
+'spirv.ImageFetch'"`/`"...'spirv.ImageSampleDrefExplicitLod'"` errors
+anywhere (down from 100/18). A direct re-run of this row's own original
+target (a slightly looser grep matched 190 cases rather than exactly 118)
+shows every `Plain2D`/`Array2D` case passing -- the only remaining 60 fails
+are pre-existing, already-tracked `Plain1D`/`Array1D`/`Plain3D`
+`texelFetchOffset` cases (roadmap L52a/L72(c)'s own precedent), not a
+regression.
+
+## Roadmap/report updates
+
+Struck through L72(b) with a done-note that explicitly corrects the row's
+own original framing for the Dref bucket (literal-zero-Lod, not
+ConstOffset rejection) while confirming the ImageFetch bucket's framing was
+accurate as filed. Appended a new `VulkanCTSReport.md` section covering the
+investigation (including the red-herring MLIR-verifier-assertion thread),
+the fix, and the CTS numbers above. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed
+-- core SPIR-V image-operand functionality, no gating Vulkan feature or
+extension.
+
+## Commits this session
+
+1. `IntrinsicsSPIRV.td`/`SPIRVToLLVMPatterns.cpp` (Dref pattern)/
+   `SPIRVResourceLowering.cpp` (Dref slots)/the Dref lit+unit tests/the
+   deleted invalid-cases test file: the `samplecmplevel` intrinsic and its
+   full pipeline.
+2. `SPIRVToLLVMPatterns.cpp` (ImageFetch pattern)/`SPIRVResourceLowering.cpp`
+   (fetch-level offset threading)/the ImageFetch lit+unit tests: the
+   `ConstOffset` widening for `texelFetchOffset()`.
+3. `Roadmap.md`/`VulkanCTSReport.md`: closing L72(b), CTS numbers, the
+   corrected root-cause note.
+4. This `agent_thoughts.md` entry (committed separately, last).
+
+Cleaned up scratch CTS artifacts under `/tmp/l72b/` at the end of the
+session.
