@@ -32182,3 +32182,26 @@ normalization, not yet started) and L76(b) (`_compute`-stage explicit-
 genuinely new gaps this session's investigation surfaced, per this
 project's own established precedent (roadmap L74/L75) of tracking newly-
 found per-shape gaps explicitly rather than as an undocumented side note.
+
+## L36: `Texture2DArray` implicit-LOD mip selection (duplicate of L76, this session)
+
+This session's request was, word-for-word, roadmap L36's own original
+filed text -- but L36 had never actually been closed; an immediately
+preceding session mistakenly filed the identical content as a brand-new
+row, L76 (under the belief L36 itself had already been used), and fully
+investigated and closed it there (see this file's own L76 section above
+for the full investigation, repro verification, and CTS re-run details).
+
+No new investigation was needed this session: L36 is closed by direct
+cross-reference to L76's already-complete work, which applies verbatim
+(same named repros, same root cause, same fix already landed via L60(a)).
+Re-confirmed the two repro tests once more as a final sanity check:
+`Feature/Textures/Array.Sample.test`/`Array.SampleBias.test` still 2/2
+Pass; `dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.
+linear.*_fragment` still 16/16 Pass. No feme code changed, `check-feme`
+unaffected: 2763/2822 Passed, 59 Unsupported, 0 Failed.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed. Roadmap.md's L76 done-note updated with a cross-reference back to
+L36 noting L36 is the row's real original ID and L76 the accidental
+duplicate, so a future reader following either row lands on the complete
+picture.
