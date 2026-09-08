@@ -32101,3 +32101,84 @@ graceful "too many image operand arguments" verification error instead,
 still failing `--import-spirv`'s default path, just without aborting.
 Temporary artifacts under `/tmp/l35a_repro.spvasm`, `/tmp/l35a_repro.spv`,
 `/tmp/out_noflag.txt` cleaned up at the end of the session.
+
+## L76: `Texture2DArray` implicit-LOD mip selection (this session)
+
+### Investigation
+
+This session's own filed row (re-using the "L35(a)" header from a prior,
+already-closed session by mistake) described a `Texture2DArray` implicit-
+LOD mip-selection gap mirroring roadmap L34's own `TextureCube` finding.
+Since L35(a) itself was already closed in an immediately preceding
+session, this content was instead tracked as new roadmap row L76.
+
+The named real repros (`Feature/Textures/Array.Sample.test`/
+`Array.SampleBias.test`) did not exist in the `offload-test-suite`
+checkout's local `feme` branch as previously synced -- that branch's own
+single commit is based on a `main` revision predating upstream PR #1468
+("Add support for array textures, starting with Texture2DArray and
+RWTexture2DArray"), which added both these test files and the executor-
+side array-texture support the `offloader` binary needs to even attempt
+running them. Advanced the local checkout by cherry-picking the `feme`
+branch's own single "[Vulkan][FeMe] Add FeMe test targets" commit onto a
+fresh `origin/main` checkout (a clean cherry-pick, no conflicts), then a
+`cmake .`/`ninja offloader` rebuild in `build2`.
+
+### Disposition
+
+Mirroring roadmap L34's own precedent exactly: re-confirmed moot. Roadmap
+L60(a)'s later, broader fix (which added `femeCpuImageSample2DV4F32`'s own
+screen-space-derivative/anisotropic-footprint math via
+`femeRTPlanImplicitLod` to `femeCpuImageSample2DArrayV4F32` too, not just
+`Plain2D`) already gave the `Array2D` shape a real derivative-based LOD-
+selection path as a byproduct, without ever citing this row by number.
+Confirmed via direct inspection of `FeMeRuntimeCPU.c`: no hardcoded
+`Lod=0` remains in `femeCpuImageSample2DArrayV4F32`'s implicit-LOD branch.
+
+### Build/test verification
+
+`ninja check-feme` (ccache + assertions, `build2`, unaffected since no
+feme C++ code changed this session): 2763/2822 Passed, 59 Unsupported, 0
+Failed -- no regressions.
+
+`check-hlsl-feme-vk`: 210/664 Pass (up from 187/612 before the
+`offload-test-suite` rebase, consistent with the net-new `Array.*`/
+`RWTexture2D.*` tests PR #1468 added -- more newly passing than newly
+failing). `Feature/Textures/Array.Sample.test`/`Array.SampleBias.test`:
+**2/2 Pass** directly against the real `feme_vulkan` ICD, confirmed
+reproducible. A broader sweep of all 17 `Array.*`-prefixed texture tests
+found 11 Pass (including `Array.SampleGrad.test`/`Array.Sampler.address
+.test`/`Array.Sampler.filter.test`/`Array.Sampler.mips.test`, all
+exercising the same derivative/mip-selection code path) and 6 Fail;
+5 of those 6 (`Array.Gather`/`Array.GatherCmp`/
+`Array.CalculateLevelOfDetail`/`Array.GetDimensions`/`Array.SampleCmp`)
+were confirmed to already fail identically with no `Array` prefix at all
+today -- pre-existing, unrelated, broader gaps, not filed as new work
+here. The sixth, `Array.UnalignedRowPitch.test` (an `RWTexture2DArray`
+*storage*-image test, a structurally distinct code path), is a real,
+`Array2D`-specific gap with no non-array counterpart to compare against
+-- split out as new row L76(a).
+
+### Real CTS re-run
+
+`dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.
+linear.*` (this row's own closest CTS-level analogue of roadmap L56's
+cube-filtering group): **16/16 Pass for every `_fragment` variant**,
+confirming the fix at CTS scale, not just via the two named offloader
+repros. The same sweep's 16 `_compute` variants all **Fail** ("got 352
+invalid pixels" each) -- a separate, real, pre-existing gap this row's own
+CTS sweep happened to surface (an explicit, manually-finite-differenced
+`textureGrad()` call from a compute entry point, not gated by
+`computeDerivativeGroupQuads`/`Linear` support the way roadmap L69's own
+hardware-derivative scope is) -- split out as new row L76(b).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed, consistent with L34's own review (no new feature/extension
+surface touched by this row's closure).
+
+New roadmap rows L76(a) (`RWTexture2DArray` storage-image handle
+normalization, not yet started) and L76(b) (`_compute`-stage explicit-
+`Grad` `Array2D` sampling, not yet started) filed to track the two
+genuinely new gaps this session's investigation surfaced, per this
+project's own established precedent (roadmap L74/L75) of tracking newly-
+found per-shape gaps explicitly rather than as an undocumented side note.
