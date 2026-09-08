@@ -3262,6 +3262,29 @@ meshlets join the same clipping, rasterization, and fragment path. This shared
 primitive-stream boundary is the reason neither path needs a second
 rasterizer.
 
+Status (roadmap L79): "fetch/convert attributes" above caps each decoded
+vertex-attribute component by the *bound attribute format's own* real
+channel count, not only by the shader's declared component count and the
+remaining buffer bytes. `Executor.cpp`'s `attributeFetchLayout` reports a
+`ChannelCount` per `cpu::ResourceFormat` (e.g. 2 for `R32G32_FLOAT`, 4 for
+`R32G32B32A32_FLOAT`), and the fetch loop computes `FormatComponents =
+min(Elt.ComponentCount, ChannelCount)` before the pre-existing
+buffer-bounds cap -- so a shader declaring a wider input (e.g. `float4`)
+than its bound attribute supplies (e.g. `Float32x2`) no longer reads past
+the attribute's own real data into the next vertex's bytes. Any
+shader-declared component beyond the format's own channel count defaults
+per the standard HLSL/Vulkan convention: 0 for a missing X/Y/Z, 1 for a
+missing W (as a float or integer bit pattern, matching the element's own
+`SignatureComponentType`). This is distinct from, and layered underneath,
+the pre-existing buffer-bounds robustness zero-fill (roadmap F10): that
+one remains all-zero and applies only when the *actual bound buffer*
+runs out of bytes mid-fetch, a genuinely dynamic condition, whereas this
+fix's defaulting applies whenever the *format itself* structurally lacks
+a channel, a static, pipeline-creation-time-known property. See
+`unittests/Graphics/ExecutorTest.cpp`'s
+`VertexAttributeDefaultsComponentsBeyondFormatChannelCount`/
+`VertexAttributeDefaultsOnlyMissingAlphaComponent` for coverage.
+
 ### Acceleration structures and ray execution
 
 The ray-tracing library defines a canonical CPU acceleration structure with
