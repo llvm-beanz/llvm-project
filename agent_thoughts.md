@@ -71202,3 +71202,155 @@ plus new test/test-infra, (2) the docs updates (Design.md/Roadmap.md/
 VulkanCTSReport.md), (3) this agent_thoughts.md entry, last, on its own.
 Temporary scratch files under `/tmp/` (`l35a_repro.spvasm`,
 `l35a_repro.spv`, `out_noflag.txt`) removed at the end of the session.
+
+# L76 session: Texture2DArray implicit-LOD mip selection (misfiled as "L35(a)")
+
+## Recognizing the mislabeled request
+
+This session's request header said "close out L35(a) from the roadmap,"
+but L35(a) had already been closed in the immediately preceding session
+(the `feme-translate --import-spirv-skip-verify` tooling fix). The
+quoted issue body was also entirely different content: a `Texture2DArray`
+implicit-LOD mip-selection bug mirroring roadmap L34's `TextureCube`
+finding, not anything about SPIR-V import tooling. Rather than force this
+new content into an already-closed roadmap ID (which would corrupt the
+roadmap's own history), I treated this as a fresh row and filed it under
+the next unused L-series ID, L76, per the standing "strike through if
+complete, or break down if not" instruction -- the actual content just
+happened to be pasted under a stale header.
+
+## Recognizing the L34 pattern before doing any real reduction work
+
+The filed text asked for "its own real IR reduction... once L35's own
+feme-translate tooling blocker is worked around." Before diving into IR
+reduction, I first checked whether the described symptom was still real
+at all, since L34 (the row this one explicitly says it mirrors) turned
+out to already be fixed by an unrelated later row (L56) before ever
+needing its own reduction. Reading `FeMeRuntimeCPU.c` directly showed
+`femeCpuImageSample2DArrayV4F32` already calls `femeRTPlanImplicitLod`
+with the sample's own real `DUdX`/`DUdY`/`DVdX`/`DVdY` derivatives (not a
+hardcoded `Lod=0`), with an inline comment crediting roadmap L60(a) for
+adding this. This was a strong signal the bug was already fixed as a
+byproduct of L60(a)'s broader `Plain2D`+`Array2D` derivative-plumbing
+work, exactly like L34/L56. Worth remembering for future sessions: when a
+row explicitly says "mirrors row X's finding," checking whether row X's
+own later fix (or a fix citing it) already covers the mirrored case is
+worth doing before assuming a fresh investigation is needed.
+
+## The real repro didn't exist in the local checkout at all
+
+Wanting to confirm this via the row's own two named real repros
+(`Feature/Textures/Array.Sample.test`/`Array.SampleBias.test`) rather
+than just trust the code reading, I discovered neither file existed in
+the local `offload-test-suite` checkout's `feme` branch at all -- not "the
+test exists but is disabled," genuinely absent. Checking upstream showed
+why: these files were added by PR #1468 ("Add support for array textures,
+starting with Texture2DArray and RWTexture2DArray") on `main`, but the
+`feme` branch's own single commit (which adds the `check-hlsl-feme-vk`
+CMake target machinery) is based on an older `main` revision that
+predates that PR. So this wasn't a "feme branch has drifted stale and
+needs a straight reset" situation (the pattern several earlier sessions
+in this project's history have hit and fixed via `git reset --hard
+beanz/feme`) -- this time the feme branch itself is what's behind, and a
+plain reset to it would never pick up the new tests no matter how many
+times it's re-fetched.
+
+The fix: cherry-pick the `feme` branch's own single commit onto a fresh
+`origin/main` checkout instead of resetting to `beanz/feme` directly.
+This worked cleanly with no conflicts (the feme commit only touches
+`CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`, files PR #1468
+didn't touch), and correctly combined both: PR #1468's new array-texture
+test files and executor support, plus the feme branch's own test-target
+generation. This is worth remembering as a variant of the "offload-test-
+suite feme branch needs re-syncing" maintenance task future sessions may
+hit again: check which side (feme branch vs. main) has actually drifted
+ahead before assuming a reset is sufficient, since a stale *feme* branch
+needs cherry-picking onto a fresh main, not just re-fetching.
+
+Also had to rebuild the `offloader` binary itself (`ninja offloader`) --
+merely re-syncing the source tree's test files without rebuilding meant
+the actual C++ executor logic PR #1468 added (real support for
+`ArraySlices`/`Depth` in `OutputProps`, array-aware buffer sizing, etc.)
+wasn't in the binary yet, so both tests initially failed with a YAML
+parse error ("unknown key 'ArraySlices'") that had nothing to do with the
+row's own actual scope at all -- a reminder that syncing an external test
+suite's source needs a matching rebuild of whatever binary consumes that
+source's own newer schema, not just a `cmake .` re-configure for new test
+discovery.
+
+## Confirming the fix and finding two genuinely new gaps
+
+With the tooling in place, both named repros passed cleanly (2/2). I then
+swept every other `Array.*`-prefixed texture test (17 total) as a
+broader sanity check, finding 11 Pass / 6 Fail. Rather than assume all 6
+failures were new material for this row, I checked each failing test's
+own non-array `Plain2D` counterpart directly: 5 of the 6
+(`Gather`/`GatherCmp`/`CalculateLevelOfDetail`/`GetDimensions`/
+`SampleCmp`) already fail *identically* with no `Array` prefix at all,
+confirming these are pre-existing, unrelated, broader gaps (entirely
+unimplemented features, or a separate already-broader depth-comparison-
+sample gap) that this row's sweep just happened to newly notice, not
+something introduced or scoped by this row's own mip-selection work. I
+did not file new roadmap work for these, since they're not new
+discoveries this row's own investigation is responsible for surfacing --
+they'd have failed identically whether or not this row was ever
+investigated.
+
+The sixth failure, `Array.UnalignedRowPitch.test`, is different: it
+exercises `RWTexture2DArray`, a *storage*-image type with no non-array
+`RWTexture2D` counterpart test to compare against in this same sweep, and
+fails with the standard "register-bound resource handle... cannot
+normalize" diagnostic naming the exact arrayed storage-image SPIR-V type
+directly. This is a real, `Array2D`-specific gap in a structurally
+different code path (storage vs. sampled images) from this row's own
+scope. Filed as L76(a) rather than silently dropped, following this
+project's own L74/L75 precedent of tracking newly-found per-shape gaps
+explicitly.
+
+A real Vulkan CTS sweep of `dEQP-VK.texture.filtering.2d_array.
+combinations.linear_mipmap_linear.linear.*` gave a second real, useful
+data point: all 16 `_fragment` variants pass (confirming the fix at CTS
+scale, beyond just the two named offloader repros), but all 16
+`_compute` variants fail with a near-total image mismatch ("got 352
+invalid pixels" each, not a handful of wrong-mip texels). I checked
+whether this was roadmap L69's own already-known `_compute`-stage
+derivative-group gap by reading each failing case's own GLSL shader
+source embedded in the `.qpa` log: it uses `textureGrad()` with a
+manually-reconstructed, finite-differenced `(dPdx, dPdy)` pair (not a
+hardware `dFdx`/`dFdy` intrinsic), so it needs no
+`DerivativeGroupQuadsKHR`/`LinearKHR` execution mode and isn't gated by
+`computeDerivativeGroupQuads`/`Linear` support at all -- a genuinely
+distinct, real, not-yet-diagnosed bug. Filed as L76(b) for the same
+reason as L76(a): real, newly-surfaced, and worth tracking rather than
+leaving as an unexplained aside in a closed row's own done-note.
+
+## Verification and wrap-up
+
+No feme C++ code changed this session (the fix was already landed by
+L60(a); this session's own work was verification, test-infrastructure
+sync, and roadmap bookkeeping), so `check-feme` was unaffected: 2763/2822
+Passed, 59 Unsupported, 0 Failed, matching the prior session's own
+numbers exactly. `check-hlsl-feme-vk` grew from 612 to 664 discovered
+tests (the net-new `Array.*`/`RWTexture2D.*` material from PR #1468),
+with 210 now passing (up from 187) and no regressions in any test that
+was passing before the `offload-test-suite` rebase.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
+changes -- consistent with L34's own review, no new feature/extension
+surface touched by confirming an already-landed fix. Struck through L76
+on the roadmap with a done-note; filed L76(a)/L76(b) as new, not-yet-
+started rows for the two genuinely new gaps this session's own
+investigation surfaced, each just one lowercase letter deep per this
+session's own standing nesting-depth instruction. Committed the roadmap/
+VulkanCTSReport.md docs update as a single commit (no code changed this
+session to split out separately), followed by this agent_thoughts.md
+entry in its own commit, last. No temporary scratch files needed cleanup
+beyond the usual `/tmp/` CTS caselist/log files from this session's own
+re-runs (`/tmp/allcases*.txt`, `/tmp/arr_filter_*.txt`, `/tmp/*_run*.log`),
+all removed at the end of the session. The local `offload-test-suite`
+checkout was left on its new `feme-rebased` branch (origin/main +
+cherry-picked feme commit) rather than reverted back to the old, test-
+incomplete `beanz/feme` branch, since a future session re-running
+`check-hlsl-feme-vk` needs the array-texture executor support to keep
+working; this is a local-checkout-only change, nothing was pushed to any
+remote.
