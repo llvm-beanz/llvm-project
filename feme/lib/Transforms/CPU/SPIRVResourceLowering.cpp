@@ -972,6 +972,32 @@ bool isZeroOffset(const Value *Offset) {
   return C && C->isNullValue();
 }
 
+/// Whether \p CI is `llvm.spv.resource.load.level` (roadmap L72): an
+/// explicit-mip texel fetch (SPIR-V `OpImageFetch` with a `Lod` image
+/// operand -- see `feme::spirv::ImageFetchLodPattern` in
+/// SPIRVToLLVMPatterns.cpp) against a sampled (combined sampler+image)
+/// handle. GLSL's `texelFetch()` always supplies an explicit LOD, so
+/// without recognizing this shape here `collectHandles` rejected every
+/// real `texelFetch()` call against a sampled image outright (confirmed
+/// via a real CTS `dEQP-VK.glsl.texture_functions.texelfetch.*` capture),
+/// unlike the pre-existing `llvm.spv.resource.getpointer` texel-fetch path
+/// this pass already accepted (see `hasOnlySupportedImageUses`'s own
+/// header comment) -- `ImageFetchPattern` (no explicit `Lod`) and
+/// `ImageFetchLodPattern` (this one) are two distinct raised forms of the
+/// same GLSL builtin, chosen by whether the SPIR-V source supplied a
+/// literal `Lod` image operand at all. \p Offset (the intrinsic's fourth
+/// operand) is required to be a compile-time zero: `ImageFetchLodPattern`
+/// only ever emits a zero offset today (it rejects any real `ConstOffset`
+/// combined with `Lod` outright, matching-failing that combination back
+/// to the dialect-conversion legalizer instead), so a real, nonzero
+/// offset here remains unstarted follow-on work, mirroring the same
+/// `texelFetchOffset()` gap `ImageFetchLodPattern`'s own doc comment
+/// already calls out.
+bool isFetchLevelIntrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_load_level &&
+         isZeroOffset(CI.getArgOperand(3));
+}
+
 /// Whether \p Offset is an acceptable texel offset for a sample against
 /// \p Shape. `Plain2D` (roadmap L26) accepts any compile-time-constant
 /// integer vector -- SPIR-V's own `ConstOffset` image operand, which
@@ -1377,6 +1403,25 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false;
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !CI->getType()->isFloatTy())
+        return false;
+      continue;
+    }
+
+    // Roadmap L72: an explicit-mip `texelFetch()` (`llvm.spv.resource.
+    // load.level`, see `isFetchLevelIntrinsic`'s own doc) against a
+    // sampled `Plain2D`/`Array2D` handle -- the second, `Lod`-carrying
+    // raised form of `OpImageFetch`, alongside the zero-mip
+    // `getpointer`-based one just below. Scoped identically to that path
+    // (`Plain2D`/`Array2D` only, per the very next check's own comment).
+    if (isFetchLevelIntrinsic(*CI)) {
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D)
+        return false;
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
+      if (!isCoordN(CI->getArgOperand(1), FetchCoordWidth, /*Float=*/false) ||
+          !CI->getArgOperand(2)->getType()->isIntegerTy(32) ||
+          !(IsInteger ? isV4I32(CI->getType()) : isV4F32(CI->getType())))
         return false;
       continue;
     }
@@ -3246,6 +3291,46 @@ void lowerImageAccesses(
         CallInst *NewCall = createGetDimensions2D(Builder, Env, ImageIndex,
                                                   Mask, "getdimensions2d");
         CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L72: an explicit-mip `texelFetch()`
+      // (`llvm.spv.resource.load.level`, see `isFetchLevelIntrinsic`'s own
+      // doc) -- unlike the zero-mip `getpointer`-based fetch handled
+      // below (whose call itself is only a pointer, addressed by a
+      // separate `LoadInst` user), this intrinsic's own result *is* the
+      // fetched texel, and its own third operand is a real, non-zero mip
+      // level -- so both the coordinate extraction and the runtime call
+      // happen right here, rather than falling through to that shared
+      // `LoadInst`-dispatch switch below. `hasOnlySupportedImageUses`
+      // already restricted this branch to `Plain2D`/`Array2D`.
+      if (isFetchLevelIntrinsic(*CI)) {
+        IRBuilder<> Builder(CI);
+        Value *Coord = CI->getArgOperand(1);
+        Value *Lod = CI->getArgOperand(2);
+        Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+        bool IsInteger = isV4I32(CI->getType());
+        CallInst *Fetched;
+        if (Shape == ImageShape::Array2D) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          Fetched = IsInteger
+                        ? createLoad2DArrayI32(Builder, Env, ImageIndex, X, Y,
+                                               Layer, Lod, Builder.getInt32(0),
+                                               Mask, CI->getName())
+                        : createLoad2DArray(Builder, Env, ImageIndex, X, Y,
+                                            Layer, Lod, Builder.getInt32(0),
+                                            Mask, CI->getName());
+        } else {
+          Fetched =
+              IsInteger
+                  ? createLoad2DI32(Builder, Env, ImageIndex, X, Y, Lod,
+                                    Builder.getInt32(0), Mask, CI->getName())
+                  : createLoad2D(Builder, Env, ImageIndex, X, Y, Lod,
+                                 Builder.getInt32(0), Mask, CI->getName());
+        }
+        CI->replaceAllUsesWith(Fetched);
         CI->eraseFromParent();
         continue;
       }
