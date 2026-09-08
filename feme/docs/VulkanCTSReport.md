@@ -31893,3 +31893,100 @@ needed -- this fix (and its feature/extension-inventory disposition) was
 already recorded as closed by L56's own prior session; nothing new to
 record here. Temporary artifacts under `/tmp/` cleaned up at the end of
 the session.
+
+## L35: `Bias`+`Offset`+`MinLodClamp` combined-modifier sample gap -- already closed via L58 (this session)
+
+### Investigation
+
+Roadmap L35 named a specific case: `Vk.SampledTexture2D.SampleBias.
+test.yaml`'s own case 4 (`r3`, `SampledTex0.SampleBias(sample_uv, -0.1,
+int2(0, 0), 0.1)` -- `Bias`, a texel `Offset`, and a `MinLodClamp`
+combined on the *same* `SampleBias` call) failing `vkCreateGraphics
+Pipelines` with the same "register-bound resource handle" rejection
+L26 had already fixed for simpler, one-modifier-at-a-time shapes.
+Before attempting L35's own suggested (and admittedly awkward)
+`feme-translate --import-spirv` tooling workaround, the real repro was
+re-run directly against a freshly rebuilt `feme` ICD to confirm the bug
+still existed.
+
+It did not. `Vk.SampledTexture2D.SampleBias.test.yaml` passes cleanly
+end-to-end today (pipeline creation succeeds, and the `SampleBiasTest`
+result's own `BufferFloatULP` buffer comparison against `Expected`
+passes), confirmed reproducible across 3 consecutive runs. Reading
+`SPIRVResourceLowering.cpp`'s `isSampleIntrinsic`/
+`hasOnlySupportedImageUses` directly confirmed why: roadmap L58 (filed
+and closed in a later session, adding ordinary, non-comparison `Bias`
+operand recognition) never scoped its own `HasBias` support to exclude
+an already-present `HasMinLodClamp`/offset on the same call -- the
+`spv_resource_samplebias_clamp` intrinsic L58 introduced always carries
+its own offset operand (at the same index-shifted position
+`spv_resource_samplebias` uses) *and* its own trailing clamp operand
+together, and `getSampleOffsetIdx`/`getSampleClampIdx` derive both from
+the same `ExplicitLod`/`HasBias`/`HasGrad` triple without ever treating
+`HasBias` and `HasMinLodClamp` as mutually exclusive. L58's own later
+follow-ons (L60(a)/L61(c)/L67(a), widening `Bias`+`MinLodClamp`
+together to `CubeArray`/`Array2D`/`Plain1D`/`Array1D`/`Plain3D`) further
+generalized this same combined support without ever citing L35 by
+number. L35 was simply never marked closed once L58 subsumed its exact
+scope as a byproduct.
+
+### Disposition
+
+No new source code changes were needed this session -- the fix already
+exists in `SPIRVResourceLowering.cpp` (`isSampleIntrinsic`'s `HasBias`/
+`HasMinLodClamp` out-parameters, `getSampleOffsetIdx`/
+`getSampleClampIdx`'s shared index derivation, and `lowerImageAccesses`'
+threading of both operands together into `createSample2D`/
+`createSampleCube`/etc.), already has its own unit test coverage from
+L58 (`LowersSampleBiasToPlain2DBias`/`LowersSampleBiasToCubeBias` and
+siblings in `SPIRVResourceLoweringTest.cpp`), and already has its own
+CTS verification from L58's own session. This session's job was to
+verify the historical record against the real, current codebase, then
+re-confirm directly against the exact named repro rather than trust the
+roadmap's own stale "not yet started"/"unconfirmed" framing.
+
+L35's own filed text also flagged a separate, narrow tooling gap:
+`feme-translate --import-spirv` crashes outright on any SPIR-V using
+`ConstOffset`/`MinLod` image operands, via an upstream MLIR SPIR-V
+dialect op verifier assert (`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s
+`verifyImageOperands`). Since the real repro reproduced (and now
+passes) directly through the real Vulkan runtime path without ever
+needing this tooling, this gap was left as its own still-open row,
+`L35(a)`, on `Roadmap.md` rather than fixed as part of this closure.
+
+### Build/test verification
+
+`check-feme` was not re-run for a code change (none was made), since no
+source file changed; the prior L58 session's own `check-feme` run
+(2612/2671 discovered, 59 pre-existing `Unsupported`, 0 `Failed`)
+already covers this exact code path with assertions-enabled, ccache
+builds. `git status --short` confirmed a clean tree before and after
+this session's own investigation (docs-only changes).
+
+Re-ran `Vk.SampledTexture2D.SampleBias.test.yaml` directly against a
+freshly rebuilt `feme` ICD (`VK_ICD_FILENAMES` pointed at
+`build2/tools/feme/tools/feme-vulkan/feme_icd.json`, with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`): **1/1 Pass**, confirmed
+reproducible across 3 consecutive runs, with no diagnostic emitted at
+all (consistent with clean pipeline creation).
+
+### Real CTS re-run
+
+Ran a supplementary `dEQP-VK.glsl.texture_functions.texture.*bias*`
+sweep (50 cases, covering every `Bias`-using sampler shape/format
+combination) directly against the real feme ICD: **18 Pass**, 14 Fail
+(every failure is an integer-format `isampler*`/`usampler*`/
+`sparse_isampler*`/`sparse_usampler*` shape -- `hasOnlySupportedImageUses`
+already explicitly rejects any filtered sample, `Bias` included, over an
+integer-channel image via its own pre-existing `IsInteger` check, an
+unrelated, already-documented scope boundary, not a regression), 18
+NotSupported (`VK_KHR_maintenance8`, unrelated). These numbers are
+consistent with L58's own previously-reported sweep, confirming no
+regression.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this fix (and its feature/extension-inventory disposition) was
+already recorded as closed by L58's own prior session; nothing new to
+record here. Temporary artifacts under `/tmp/l35_cts`,
+`/tmp/l35_bias*.qpa`, `/tmp/l35_bias_caselist.txt` cleaned up at the end
+of the session.
