@@ -71957,3 +71957,159 @@ own named repros: **L80** (`HullSystemValues.test`'s smuggled position data
 still wrong) and **L81** (`DomainSystemValues.test`'s new `vkQueueSubmit`
 failure). Both are direct siblings of L79, not nested under it, per the
 one-lowercase-letter-max nesting convention.
+
+# L80: Hull-stage SV_PrimitiveID input aliasing POSITION's storage
+
+## Starting point
+
+Picked up roadmap L80, the next open item in the L-series chain:
+`HullSystemValues.test` still failed its `SystemValues` result check even
+after L79's vertex-attribute-fetch fix, with the smuggled per-control-point
+`position` data (buffer elements 0/1/7/8) mismatching, while
+`SV_PrimitiveID`/`SV_OutputControlPointID`/`SV_TessFactor`/
+`SV_InsideTessFactor` all round-tripped correctly per the roadmap's own
+filing text.
+
+## Re-diagnosis: the roadmap's own framing was half right, half stale
+
+Re-running the exact repro against the current tree showed the position
+data mismatch was real, but closer inspection (via HLSL source + domain
+SPIR-V disassembly, then a runtime hex-dump of the compiled wrapper's own
+IR) found the *actual* symptom worth chasing was different: `PCPrimID`/
+`HSMainPrimID` (the shader's own forwarding of `SV_PrimitiveID` into the
+result buffer, which the roadmap's own filing had reported as already
+correct) came back holding a leaked `POSITION`-attribute bit pattern
+(`0xBF666666`), uniformly across all three lanes of a patch. That is a much
+more specific and root-cause-able symptom than "smuggled position data is
+wrong" -- it points at `SV_PrimitiveID`'s own lowering, not some general
+storage-addressing confusion.
+
+An earlier side-quest in this same investigation (carried over from a
+compacted prior turn) had already found and fixed a *different*, real bug:
+`SignatureElement::CapturedSelfIndex`, an H4c cross-barrier-capture
+addressing fix where captured values were always read back from control
+point 0's storage slot instead of the current lane's own. That fix was
+confirmed correct for `gl_InvocationID` via a runtime dump, but did **not**
+resolve this row's actual `PCPrimID`/`HSMainPrimID` symptom -- a useful
+reminder that two real, independent bugs can plausibly present through
+overlapping code paths, and that fixing one doesn't mean the investigation
+is over just because *a* number changed in the observed output.
+
+## Root cause: PrimitiveID has no dedicated lowering, in either hull-stage phase
+
+Searching `HullWrapper.cpp`'s Hull-stage input-load dispatch switch found
+`SignatureSystemValue::PrimitiveID` has **no dedicated case** -- it falls
+into the generic `default:` branch (`lowerHullInputLoad`), which assumes
+any input system value reaching there is a genuine storage-backed
+per-control-point attribute forwarded from the vertex stage.
+`feme::graphics::buildStageStorage` correctly never allocates a storage
+slot for `PrimitiveID` (there is no vertex-stage-forwarded data for a
+per-patch, uniform value), so that element's layout-table entry stays
+all-zero (`DataOffset=0`). `computeStageStorageAddress` then silently
+resolves this to byte offset 0 of `Inputs` -- which happens to alias
+`POSITION` (element ID 0, the first genuinely-allocated element in this
+test). That's the exact bit pattern observed.
+
+The real `hull.hlsl` test source reads `SV_PrimitiveID` as a parameter of
+**both** the control-point-phase `main()` and the separate `PatchConstants()`
+function independently -- so both `HullWrapper.cpp` and
+`PatchConstantWrapper.cpp` needed their own dedicated fix, not just one.
+This is a good example of why tracing the *real* HLSL source (not just the
+compiled SPIR-V/IR) mattered: it made obvious that two independent reads of
+the same builtin existed, rather than assuming a single shared lowering
+site would cover both.
+
+## Fix: thread a real PrimitiveID scalar through the ABI
+
+Reused each `Feme*Args` struct's existing `Reserved32` padding field
+(renamed, not resized, to avoid an ABI layout change) to carry a new
+`PrimitiveID` scalar end-to-end: `Executor.cpp`'s per-patch dispatch loop
+already has the patch's own index in scope (`P`, from the existing
+`PatchesPerInstance` loop), so threading it through
+`runPatchPipeline` -> `PatchResources`/`PatchConstantResources` ->
+`PreparedPatchBatch`/`PreparedPatchConstantBatch` -> the compiled wrapper's
+new `stage_primitive_id` i32 parameter required no new storage allocation
+or addressing scheme at all -- just plumbing. Both wrapper passes gained a
+dedicated lowering case that broadcasts this scalar, mirroring the existing
+`PatchVertices`/`OutputControlPointID` special cases already present in
+both files.
+
+## A second, independent bug found while writing the test
+
+Writing a unit test for the (already-implemented, never-committed)
+`CapturedSelfIndex` fix exposed a second, real, previously-undetected bug:
+the flag was never threaded through `serializeSignature`/`parseSignature`,
+the byte-level (de)serialization every wrapper pass uses to round-trip an
+`EntrySignature` through a function's `!feme.signature` metadata. Since
+every wrapper pass reads the signature back via a metadata round trip
+(not from the in-memory struct the earlier session built and passed to
+`setEntrySignature`), `CapturedSelfIndex` silently reset to `false` on
+every real invocation -- meaning the H4c addressing fix from the prior
+session, despite being correct in isolation, was never actually *active*
+in the real pipeline. This was only caught because a temporary
+`Ctx.setDiscardValueNames(false)`-plus-`M->print` debugging session (meant
+to diagnose a seemingly unrelated "names aren't preserved" test failure)
+led to inspecting the lowered IR closely enough to notice the address
+computation's third multiply used a literal `0` where a real, non-constant
+`WaveIndex`-derived value was expected -- the smoking gun that the
+`CapturedSelfIndex` branch was never actually being taken at all, despite
+being set on the in-memory `SignatureElement`.
+
+This is a good illustration of why "add a real test for a fix you believe
+already works" is worth doing even when a manual runtime verification
+already passed once: the earlier verification exercised a real pipeline
+run end-to-end and happened to not hit a code path where this
+serialization gap mattered as visibly (or the specific value it corrupted
+wasn't checked), while a targeted unit test isolated the exact mechanism
+and caught a bug a passing integration-style check had missed.
+
+Fixed by bumping `SignatureAbiVersion` to 6 and appending
+`CapturedSelfIndex` as the signature's 23rd fixed per-element field in
+both `serializeSignature` and `parseSignature`. This broke 7 existing
+tests with hardcoded, version-5 raw byte literals for embedded
+`!feme.signature` metadata (`check-feme` initially reported these as new
+failures) -- fixed by writing a small one-off Python script to parse each
+hardcoded byte blob using the exact field layout `serializeSignature`
+writes, and re-emit it with the new field appended and the version bumped,
+rather than hand-editing each byte literal.
+
+## Verification
+
+No offload-test-suite build directory exists in this checkout, so verified
+by reproducing `HullSystemValues.test`'s own `RUN:` lines manually (real
+`dxc -spirv -fspv-target-env=vulkan1.3` compiles, then a direct `offloader`
+run against the rebuilt `libfeme_vulkan.so`): `ResultBuffer` now exactly
+matches `ResultBuffer_Expected`, exit code 0. `check-feme`: 2773/2832
+Passed, 59 Unsupported, 0 Failed (up from 2770 before this session, +3 new
+tests, 0 regressions once the 7 hardcoded-byte-literal tests were
+regenerated). Real Vulkan CTS (`dEQP-VK.tessellation.shader_input_output.*`,
+28 cases): unchanged, 13/28 reach a result before the group's own
+already-documented pre-existing segfault, all 13 still failing the same two
+already-tracked, unrelated gaps -- no regression, matching the exact
+baseline L37/L77/L78/L79 established.
+
+## Roadmap / docs
+
+Struck through L80 in `Roadmap.md`. Added a new `VulkanCTSReport.md` L80
+section and a `FeMeGraphicsDesign.md` "Status (roadmap L80)" subsection
+next to the existing H4c/L37/L77 tessellation-wrapper narrative.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed (pure CPU-side fix, no new Vulkan feature/extension
+surface).
+
+## Commits
+
+Split into two commits: (1) the `SignatureElement::CapturedSelfIndex`
+serialization fix (Signature.h/.cpp, `SignatureTest.cpp`'s extended
+round-trip coverage, and the 7 regenerated hardcoded-byte-literal test
+files) as a self-contained, standalone bug fix; (2) the L80 fix proper
+(`PrimitiveID` ABI threading across `RuntimeABI.h`, `StageArgsLayout.h`,
+`ResourceHeap.h`/`.cpp`, `PatchPipeline.h`/`.cpp`, `Executor.cpp`,
+`HullWrapper.cpp`, `PatchConstantWrapper.cpp`, `CanonicalizeStage.cpp`) plus
+its three new unit tests. These two fixes are real code interleaved in the
+same functions in `PatchConstantWrapper.cpp` (both use "roadmap L82" in
+their own doc comments, since they were investigated together), so a
+cleaner split wasn't practical without excessive hunk-surgery; grouping by
+"self-contained serialization fix" vs. "the actual L80 system-value fix
+plus its test coverage" was the most useful boundary available. A third
+commit covers the roadmap/CTS-report/design-doc updates.
