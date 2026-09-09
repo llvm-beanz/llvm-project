@@ -233,7 +233,29 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxComputeWorkGroupInvocations = 1024;
   Limits.maxComputeWorkGroupSize[0] = 1024;
   Limits.maxComputeWorkGroupSize[1] = 1024;
-  Limits.maxComputeWorkGroupSize[2] = 64;
+  // (roadmap L7q) Must be at least `feme::cpu::MaxWaveSize` (128): a
+  // `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`-forced compute
+  // pipeline is validly created with any local size up to
+  // `maxComputeWorkGroupSize` in *any* single dimension (this CPU target's
+  // own dispatch treats every dimension identically -- see
+  // `EntryWrapper.cpp`/`SIMDize.cpp`'s own flat `NumThreads[0] *
+  // NumThreads[1] * NumThreads[2]` invocation-count math, which has no
+  // per-dimension special case at all), and real `dEQP-VK.subgroups.*`
+  // cases (`vktSubgroupsTestsUtils.cpp`'s own
+  // `makeComputeOrMeshTestRequiredSubgroupSize`) deliberately exercise a
+  // local size of `{1, 1, requiredSubgroupSize}` to confirm exactly that.
+  // Previously pinned at the bare Vulkan-mandated minimum for this
+  // dimension (64) rather than raised alongside X/Y's own 1024 when
+  // roadmap L2 first widened those two -- an oversight, not a deliberate
+  // choice, since nothing about this CPU target's dispatch treats the Z
+  // dimension differently from X/Y. A required-subgroup-size compute
+  // pipeline at the maximum wave size (128) with an all-Z local size
+  // therefore used to be rejected outright by this device's own advertised
+  // limits despite the CPU runtime being fully capable of dispatching it
+  // (roadmap L7q). Matches X/Y exactly, for the same reason those two are
+  // both 1024 rather than two different values: no dimension is
+  // meaningfully harder for this target to dispatch than another.
+  Limits.maxComputeWorkGroupSize[2] = 1024;
   // (roadmap E7) The worst case for `maxComputeWorkgroupSubgroups`: every
   // subgroup launched at the smallest allowed size still fits within one
   // workgroup's invocation limit.
