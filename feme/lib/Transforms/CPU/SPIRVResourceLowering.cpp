@@ -938,6 +938,26 @@ constexpr unsigned getDrefSampleClampIdx(bool HasBias, bool HasGrad = false,
   return getDrefSampleOffsetIdx(HasBias, HasGrad, HasLevel) + 1;
 }
 
+/// Whether \p CI is the `spv_resource_gather_cmp` intrinsic
+/// (`ImageDrefGatherPattern`, `SPIRVToLLVMPatterns.cpp`, legalizing
+/// `spirv.ImageDrefGather`, roadmap L7d). Its own fixed `(image, sampler,
+/// coord, dref, offset)` operand shape is identical to a plain
+/// `spv_resource_samplecmp` call's (`DrefSampleDrefIdx`/
+/// `getDrefSampleOffsetIdx(false)` both apply unchanged, since
+/// `spirv.ImageDrefGather` has no `Bias`/`Lod`/`Grad` image operand of its
+/// own at all -- a gather instruction always operates at mip level 0 per
+/// the SPIR-V spec, with no way to request otherwise), but this is
+/// intentionally *not* folded into `isDrefSampleIntrinsic`'s own family:
+/// gather always returns a full `<4 x float>` (one comparison result per
+/// one of the four texels its fixed footprint samples), never a single
+/// filtered scalar the way every `isDrefSampleIntrinsic` case's own result
+/// is, so it needs its own, separate `hasOnlySupportedImageUses`
+/// acceptance branch and its own separate `lowerImageAccesses` codegen
+/// dispatch below.
+bool isGatherCmpIntrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_gather_cmp;
+}
+
 /// Whether \p CI is one of the two SPIR-V LOD-query intrinsics
 /// `ImageQueryLodPattern` (`SPIRVToLLVMPatterns.cpp`) legalizes an
 /// `OpImageQueryLod` into (roadmap L52e), setting \p Unclamped to
@@ -1676,6 +1696,36 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
+    // Roadmap L7d: `spirv.ImageDrefGather` (HLSL's `Texture2D::GatherCmp()`),
+    // scoped to `Plain2D` only for now, mirroring `isQueryLodIntrinsic`'s
+    // own identical `Plain2D`-only initial scope just below (`Cube`/
+    // `CubeArray`/`Array2D` counterparts -- all legal per the op's own
+    // SPIR-V type constraints -- remain unstarted follow-on work, no real
+    // repro having reached them yet). Its own fixed `(image, sampler,
+    // coord, dref, offset)` operand shape lets it reuse `DrefSampleDrefIdx`/
+    // `getDrefSampleOffsetIdx(false)` from the plain `spv_resource_samplecmp`
+    // family above, but its result is always a full `<4 x float>` (roadmap
+    // L7d's own filing text), never a scalar the way every
+    // `isDrefSampleIntrinsic` case's own result is, so it cannot share
+    // that branch's own `!CI->getType()->isFloatTy()` rejection, and needs
+    // `isV4F32` instead.
+    if (isGatherCmpIntrinsic(*CI)) {
+      if (IsInteger || Shape != ImageShape::Plain2D)
+        return false; // No filtered/dref/gather sample over an integer
+                       // format; Cube/CubeArray/Array2D remain unstarted
+                       // follow-on work (roadmap L7d).
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
+          !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
+          !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
+                             Shape, /*AllowArray2D=*/false,
+                             /*AllowPlain1DArray1D=*/false) ||
+          !isV4F32(CI->getType()))
+        return false;
+      continue;
+    }
+
     // Roadmap L52e: `OpImageQueryLod`'s own two intrinsic halves
     // (`calculate.lod`/`calculate.lod.unclamped`), scoped to `Plain2D`
     // only for now -- `Array2D`/`Cube`/`CubeArray`/`Plain1D`/`Array1D`/
@@ -1916,10 +1966,11 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
 
 /// Checks that every use of a sampler handle is the sampler operand of a
 /// sample intrinsic (`isSampleIntrinsic`), a depth-comparison sample
-/// intrinsic (`isDrefSampleIntrinsic`, roadmap L46/L66(c)), or a LOD-query
-/// intrinsic (`isQueryLodIntrinsic`, roadmap L52e). A sampler has no
-/// accesses of its own -- it only ever pairs with an image -- so there is
-/// nothing else it can legitimately be.
+/// intrinsic (`isDrefSampleIntrinsic`, roadmap L46/L66(c)), a LOD-query
+/// intrinsic (`isQueryLodIntrinsic`, roadmap L52e), or a depth-comparison
+/// gather intrinsic (`isGatherCmpIntrinsic`, roadmap L7d). A sampler has
+/// no accesses of its own -- it only ever pairs with an image -- so there
+/// is nothing else it can legitimately be.
 bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
@@ -1935,7 +1986,8 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
                                    HasGrad) ||
                  isDrefSampleIntrinsic(*CI, ExplicitLod, HasClamp, HasBias,
                                        DrefHasGrad, DrefHasLevel) ||
-                 isQueryLodIntrinsic(*CI, Unclamped)))
+                 isQueryLodIntrinsic(*CI, Unclamped) ||
+                 isGatherCmpIntrinsic(*CI)))
       return false;
     if (CI->getArgOperand(1) != &Handle)
       return false;
@@ -3591,6 +3643,42 @@ void lowerImageAccesses(
               "hasOnlySupportedImageUses should have rejected a dref "
               "sample against this shape");
         }
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L7d: `spirv.ImageDrefGather` (HLSL's
+      // `Texture2D::GatherCmp()`), `hasOnlySupportedImageUses` already
+      // restricting this to `Plain2D`, non-integer. Reuses
+      // `femeRTComputeBilinearSupport` -- the exact four address-mode-
+      // resolved texel corners an ordinary bilinear *sample* would blend
+      // between are, by construction, the same four texels a gather at
+      // the identical coordinate must return one component from each of
+      // (SPIR-V/Vulkan's own fixed gather footprint), just without
+      // actually blending them -- so `createGatherCmp2D` below threads
+      // `U`/`V`/`OffsetX`/`OffsetY` straight through to
+      // `femeCpuImageGatherCmp2DV4F32`, which itself calls that same
+      // runtime helper internally. Unlike every `isDrefSampleIntrinsic`
+      // case above, there is no `Lod`/`Bias`/`Grad`/`MinLod` operand to
+      // extract at all -- a gather instruction always operates at mip
+      // level 0 per the SPIR-V spec, with no way to request otherwise.
+      if (isGatherCmpIntrinsic(*CI)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        Value *Coord = CI->getArgOperand(2);
+        Value *Dref = CI->getArgOperand(DrefSampleDrefIdx);
+        Value *SamplerIndex =
+            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
+        Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+        CallInst *NewCall =
+            createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                              Dref, OffsetX, OffsetY, Mask, CI->getName());
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
