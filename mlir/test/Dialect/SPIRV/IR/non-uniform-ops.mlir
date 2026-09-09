@@ -85,6 +85,62 @@ func.func @group_non_uniform_ballot_find_msb(%value : vector<4xi32>) -> si32 {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.GroupNonUniformInverseBallot
+//===----------------------------------------------------------------------===//
+
+func.func @group_non_uniform_inverse_ballot(%value : vector<4xi32>) -> i1 {
+  // CHECK: %{{.*}} = spirv.GroupNonUniformInverseBallot <Subgroup> %{{.*}} : vector<4xi32>
+  %0 = spirv.GroupNonUniformInverseBallot <Subgroup> %value : vector<4xi32>
+  return %0: i1
+}
+
+// -----
+
+func.func @group_non_uniform_inverse_ballot(%value : vector<4xi32>) -> i1 {
+  // expected-error @+1 {{execution_scope must be 'Subgroup'}}
+  %0 = spirv.GroupNonUniformInverseBallot <Workgroup> %value : vector<4xi32>
+  return %0: i1
+}
+
+// -----
+
+func.func @group_non_uniform_inverse_ballot(%value : vector<4xsi32>) -> i1 {
+  // expected-error @+1 {{op operand #0 must be vector of 8/16/32/64-bit signless/unsigned integer values of length 4 of ranks 1, but got 'vector<4xsi32>'}}
+  %0 = spirv.GroupNonUniformInverseBallot <Subgroup> %value : vector<4xsi32>
+  return %0: i1
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GroupNonUniformBallotBitExtract
+//===----------------------------------------------------------------------===//
+
+func.func @group_non_uniform_ballot_bit_extract(%value : vector<4xi32>, %index : i32) -> i1 {
+  // CHECK: %{{.*}} = spirv.GroupNonUniformBallotBitExtract <Subgroup> %{{.*}}, %{{.*}} : vector<4xi32>, i32
+  %0 = spirv.GroupNonUniformBallotBitExtract <Subgroup> %value, %index : vector<4xi32>, i32
+  return %0: i1
+}
+
+// -----
+
+func.func @group_non_uniform_ballot_bit_extract(%value : vector<4xi32>, %index : i32) -> i1 {
+  // expected-error @+1 {{execution_scope must be 'Subgroup'}}
+  %0 = spirv.GroupNonUniformBallotBitExtract <Workgroup> %value, %index : vector<4xi32>, i32
+  return %0: i1
+}
+
+// -----
+
+func.func @group_non_uniform_ballot_bit_extract(%value : vector<4xsi32>, %index : i32) -> i1 {
+  // expected-error @+1 {{op operand #0 must be vector of 8/16/32/64-bit signless/unsigned integer values of length 4 of ranks 1, but got 'vector<4xsi32>'}}
+  %0 = spirv.GroupNonUniformBallotBitExtract <Subgroup> %value, %index : vector<4xsi32>, i32
+  return %0: i1
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.NonUniformGroupBroadcast
 //===----------------------------------------------------------------------===//
 

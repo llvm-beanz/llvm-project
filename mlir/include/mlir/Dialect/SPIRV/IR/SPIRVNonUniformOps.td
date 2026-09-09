@@ -217,6 +217,118 @@ def SPIRV_GroupNonUniformBallotFindMSBOp : SPIRV_Op<"GroupNonUniformBallotFindMS
 
 // -----
 
+def SPIRV_GroupNonUniformInverseBallotOp : SPIRV_Op<"GroupNonUniformInverseBallot", [
+  SPIRV_ExecutionScopeAttrIs<"execution_scope", ["Subgroup"]>]> {
+
+  let summary = [{
+    Result is true if the current invocation's bit is set to 1 in Value,
+    otherwise the result is false.
+  }];
+
+  let description = [{
+    Result Type must be a Boolean type.
+
+    Execution must be Subgroup Scope.
+
+    Value must be a vector of four components of integer type scalar, whose
+    Width operand is 32 and whose Signedness operand is 0.
+
+    Value is a set of bitfields where the first invocation is represented in
+    the lowest bit of the first vector component and the last (up to the
+    size of the group) is the higher bit number of the last bitmask needed
+    to represent all bits of the group invocations.
+
+    #### Example:
+
+    ```mlir
+    %vector = ... : vector<4xi32>
+    %0 = spirv.GroupNonUniformInverseBallot <Subgroup> %vector : vector<4xi32>
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_3>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[]>,
+    Capability<[SPIRV_C_GroupNonUniformBallot]>
+  ];
+
+  let arguments = (ins
+    SPIRV_ScopeAttr:$execution_scope,
+    SPIRV_IOrUIVec4:$value
+  );
+
+  let results = (outs
+    SPIRV_Bool:$result
+  );
+
+  let assemblyFormat = [{
+    $execution_scope $value attr-dict `:` type($value)
+  }];
+
+  let hasVerifier = 0;
+}
+
+// -----
+
+def SPIRV_GroupNonUniformBallotBitExtractOp : SPIRV_Op<"GroupNonUniformBallotBitExtract", [
+  SPIRV_ExecutionScopeAttrIs<"execution_scope", ["Subgroup"]>]> {
+
+  let summary = [{
+    Result is true if the bit numbered Index in Value is set to 1,
+    otherwise the result is false.
+  }];
+
+  let description = [{
+    Result Type must be a Boolean type.
+
+    Execution must be Subgroup Scope.
+
+    Value must be a vector of four components of integer type scalar, whose
+    Width operand is 32 and whose Signedness operand is 0.
+
+    Value is a set of bitfields where the first invocation is represented in
+    the lowest bit of the first vector component and the last (up to the
+    size of the group) is the higher bit number of the last bitmask needed
+    to represent all bits of the group invocations.
+
+    Index must be a scalar of integer type, whose Signedness operand is 0.
+
+    #### Example:
+
+    ```mlir
+    %vector = ... : vector<4xi32>
+    %index = ... : i32
+    %0 = spirv.GroupNonUniformBallotBitExtract <Subgroup> %vector, %index : vector<4xi32>, i32
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_3>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[]>,
+    Capability<[SPIRV_C_GroupNonUniformBallot]>
+  ];
+
+  let arguments = (ins
+    SPIRV_ScopeAttr:$execution_scope,
+    SPIRV_IOrUIVec4:$value,
+    SPIRV_Integer:$index
+  );
+
+  let results = (outs
+    SPIRV_Bool:$result
+  );
+
+  let assemblyFormat = [{
+    $execution_scope $value `,` $index attr-dict `:` type($value) `,` type($index)
+  }];
+
+  let hasVerifier = 0;
+}
+
+// -----
+
 def SPIRV_GroupNonUniformBroadcastOp : SPIRV_Op<"GroupNonUniformBroadcast", [
   Pure, AllTypesMatch<["value", "result"]>,
   SPIRV_ExecutionScopeAttrIs<"execution_scope", ["Workgroup", "Subgroup"]>]> {

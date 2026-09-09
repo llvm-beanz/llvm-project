@@ -13,6 +13,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, Linkage, GroupNo
     spirv.ReturnValue %0: vector<4xi32>
   }
 
+  // CHECK-LABEL: @group_non_uniform_inverse_ballot
+  spirv.func @group_non_uniform_inverse_ballot(%value: vector<4xi32>) -> i1 "None" {
+    // CHECK: %{{.*}} = spirv.GroupNonUniformInverseBallot <Subgroup> %{{.*}} : vector<4xi32>
+    %0 = spirv.GroupNonUniformInverseBallot <Subgroup> %value : vector<4xi32>
+    spirv.ReturnValue %0: i1
+  }
+
+  // CHECK-LABEL: @group_non_uniform_ballot_bit_extract
+  spirv.func @group_non_uniform_ballot_bit_extract(%value: vector<4xi32>, %index: i32) -> i1 "None" {
+    // CHECK: %{{.*}} = spirv.GroupNonUniformBallotBitExtract <Subgroup> %{{.*}}, %{{.*}} : vector<4xi32>, i32
+    %0 = spirv.GroupNonUniformBallotBitExtract <Subgroup> %value, %index : vector<4xi32>, i32
+    spirv.ReturnValue %0: i1
+  }
+
   // CHECK-LABEL: @group_non_uniform_broadcast
   spirv.func @group_non_uniform_broadcast(%value: f32) -> f32 "None" {
     %one = spirv.Constant 1 : i32
