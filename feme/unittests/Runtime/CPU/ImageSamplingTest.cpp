@@ -172,6 +172,20 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              uint32_t, float, float, float, float, float, float,
                              float, bool, float, float, int32_t, int32_t, float,
                              bool, void *);
+/// `feme.cpu.image.gathercmp.2d.v4f32`'s own operand shape: mirroring
+/// `SampleCmpFn`'s `(image_heap..v)` prefix, but with none of `SampleFn`/
+/// `SampleCmpFn`'s own `DUdX`/`DUdY`/`DVdX`/`DVdY`/`Lod`/`UseExplicitLod`/
+/// `Bias`/`MinLodClamp` operands at all -- `OpImageDrefGather` has no
+/// `Lod`/`Bias`/`Grad`/`MinLod` image operand in the SPIR-V spec (a
+/// gather always operates at mip level 0), so this shape's own operand
+/// list (roadmap L7d) is `(U, V, Dref, OffsetX, OffsetY, Mask, out)`, a
+/// `<4 x float>` result (one comparison result per gathered texel)
+/// written through the trailing `out` pointer rather than `SampleCmpFn`'s
+/// own single `float`.
+using GatherCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
+                             uint32_t, float, float, float, int32_t, int32_t,
+                             bool, void *);
 /// Roadmap L52a: the ordinary (non-comparison) `Texture1D` counterpart of
 /// `SampleFn` -- a single `U` coordinate, no `ConstOffset` (mirroring
 /// `SampleArrayFn`'s own simpler scope, see `ImageCallKind::Sample1D`'s
@@ -1652,6 +1666,78 @@ TEST_F(ImageSamplingTest, ComparisonSamplingNonzeroOffsetShiftsFetchedTexel) {
      0.0f, true, 0.5f, /*Bias=*/0.0f, 1, 0,
      -std::numeric_limits<float>::infinity(), true, &OffsetResult);
   EXPECT_FLOAT_EQ(OffsetResult, 1.0f);
+}
+
+TEST_F(ImageSamplingTest, GatherCmpReturnsFourTexelsInDrefGatherOrder) {
+  // Roadmap L7d: `feme.cpu.image.gathercmp.2d.v4f32` returns one
+  // comparison result per corner of the bilinear-filter footprint at the
+  // sampled coordinate, packed in the real SPIR-V/HLSL
+  // `OpImageDrefGather` component order derived from `dxc`'s own real
+  // repro: `[C(X0,Y1), C(X1,Y1), C(X1,Y0), C(X0,Y0)]` -- reusing the same
+  // 2x2-image, shared-corner coordinate setup
+  // `LinearSampleBlendsFourTexels` uses, but with a distinct depth value
+  // in every one of the four texels so a wrong ordering shows up as a
+  // wrong result rather than a coincidentally-correct one.
+  float Storage[2][2][4] = {{{0.4f, 0, 0, 0}, {0.6f, 0, 0, 0}},
+                            {{0.3f, 0, 0, 0}, {0.7f, 0, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCmpFn Fn = resolve<GatherCmpFn>(
+      addWrapper("gathercmp", "feme.cpu.image.gathercmp.2d.v4f32"));
+  float Out[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  // Ref (0.5) <= Texel: T(X0,Y0)=0.4 fails, T(X1,Y0)=0.6 passes,
+  // T(X0,Y1)=0.3 fails, T(X1,Y1)=0.7 passes.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f); // C(X0,Y1)
+  EXPECT_FLOAT_EQ(Out[1], 1.0f); // C(X1,Y1)
+  EXPECT_FLOAT_EQ(Out[2], 1.0f); // C(X1,Y0)
+  EXPECT_FLOAT_EQ(Out[3], 0.0f); // C(X0,Y0)
+}
+
+TEST_F(ImageSamplingTest, GatherCmpNonzeroOffsetShiftsFetchedFootprint) {
+  // Roadmap L7d: mirroring
+  // `ComparisonSamplingNonzeroOffsetShiftsFetchedTexel`'s own identical
+  // proof technique for the depth-comparison *sample* sibling, a real,
+  // nonzero `(OffsetX, OffsetY)` must shift which four texels a gather's
+  // own footprint is computed around.
+  float Storage[1][3][4] = {
+      {{0.4f, 0, 0, 0}, {0.6f, 0, 0, 0}, {0.9f, 0, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), /*Width=*/3, /*Height=*/1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCmpFn Fn = resolve<GatherCmpFn>(
+      addWrapper("gathercmp", "feme.cpu.image.gathercmp.2d.v4f32"));
+  // No offset: (1/3, 0.5) sits at the shared corner of texel 0 (0.4) and
+  // texel 1 (0.6). Ref (0.5) <= 0.4: fail; Ref (0.5) <= 0.6: pass.
+  float NoOffset[4] = {-1, -1, -1, -1};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f / 3.0f, 0.5f, 0.5f, 0, 0, true,
+     NoOffset);
+  EXPECT_FLOAT_EQ(NoOffset[2], 1.0f); // C(X1,Y0) == texel 1 (0.6): pass.
+  EXPECT_FLOAT_EQ(NoOffset[3], 0.0f); // C(X0,Y0) == texel 0 (0.4): fail.
+  // A `(+1, 0)` offset shifts the same coordinate's own footprint one
+  // texel over, to texel 1 (0.6) / texel 2 (0.9): both now pass.
+  float Offset[4] = {-1, -1, -1, -1};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f / 3.0f, 0.5f, 0.5f, 1, 0, true,
+     Offset);
+  EXPECT_FLOAT_EQ(Offset[2], 1.0f); // C(X1,Y0) == texel 2 (0.9): pass.
+  EXPECT_FLOAT_EQ(Offset[3], 1.0f); // C(X0,Y0) == texel 1 (0.6): pass.
 }
 
 TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
