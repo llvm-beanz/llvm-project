@@ -1,6 +1,66 @@
 // RUN: mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
 //===----------------------------------------------------------------------===//
+// spirv.ImageGather
+//===----------------------------------------------------------------------===//
+
+func.func @image_gather(%arg0 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // CHECK: spirv.ImageGather {{.*}}, {{.*}}, {{.*}} : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_gather_with_single_imageoperands(%arg0 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // CHECK: spirv.ImageGather {{.*}}, {{.*}}, {{.*}} ["NonPrivateTexel"] : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2 ["NonPrivateTexel"] : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_gather_with_mismatch_imageoperands(%arg0 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{the Image Operands should encode what operands follow, as per Image Operands}}
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2, %arg2, %arg2 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32, i32, i32 -> vector<4xi32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_gather_error_result_type(%arg0 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{op result #0 must be vector of 8/16/32/64-bit integer values of length 4 of ranks 1 or vector of 16/32/64-bit float values of length 4 of ranks 1, but got 'vector<3xi32>'}}
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<3xi32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_gather_error_same_type(%arg0 : !spirv.sampled_image<!spirv.image<i32, Rect, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{the result component type must match the image sampled type}}
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2 : !spirv.sampled_image<!spirv.image<i32, Rect, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xf32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_gather_error_dim(%arg0 : !spirv.sampled_image<!spirv.image<i32, Dim1D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{the Dim operand of the underlying image must be Dim2D or Cube or Rect}}
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2 : !spirv.sampled_image<!spirv.image<i32, Dim1D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_gather_error_ms(%arg0 : !spirv.sampled_image<!spirv.image<i32, Cube, NoDepth, NonArrayed, MultiSampled, NoSampler, Unknown>>, %arg1 : vector<4xf32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{the MS operand of the underlying image type must be SingleSampled}}
+  %0 = spirv.ImageGather %arg0, %arg1, %arg2 : !spirv.sampled_image<!spirv.image<i32, Cube, NoDepth, NonArrayed, MultiSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+  spirv.Return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.ImageDrefGather
 //===----------------------------------------------------------------------===//
 

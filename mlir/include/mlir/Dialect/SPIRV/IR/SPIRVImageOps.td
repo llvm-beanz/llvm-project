@@ -113,6 +113,71 @@ def SPIRV_SampledImageOp : SPIRV_Op<"SampledImage",
 
 // -----
 
+def SPIRV_ImageGatherOp : SPIRV_Op<"ImageGather",
+    [Pure,
+     SPIRV_DimIs<"sampled_image", ["Dim2D", "Cube", "Rect"], SPIRV_SampledImageTransform.result>,
+     SPIRV_MSOperandIs<"sampled_image", ["SingleSampled"], SPIRV_SampledImageTransform.result>,
+     SPIRV_NoneOrElementMatchImage<"result", "sampled_image", SPIRV_SampledImageTransform.result>]>{
+  let summary = "Gathers the requested component from four texels.";
+
+  let description = [{
+    Result Type must be a vector of four components of floating-point type
+    or integer type. Its components must be the same as Sampled Type of the
+    underlying OpTypeImage (unless that underlying Sampled Type is
+    OpTypeVoid). It has one component per gathered texel.
+
+    Sampled Image must be an object whose type is OpTypeSampledImage. Its
+    OpTypeImage must have a Dim of 2D, Cube, or Rect. The MS operand of the
+    underlying OpTypeImage must be 0.
+
+    Coordinate must be a scalar or vector of floating-point type. It
+    contains (u[, v] ... [, array layer]) as needed by the definition of
+    Sampled Image.
+
+    Component is the component number that determines which component to
+    gather in from each of the four texels. It must be a 32-bit integer
+    type scalar. Behavior is undefined if the value is not 0, 1, 2, or 3.
+
+    Image Operands encodes what operands follow, as per Image Operands.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.ImageGather %1, %2, %3 : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+    %0 = spirv.ImageGather %1, %2, %3 ["NonPrivateTexel"] : !spirv.sampled_image<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, vector<4xf32>, i32 -> vector<4xi32>
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_0>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[]>,
+    Capability<[SPIRV_C_Shader]>
+  ];
+
+  let arguments = (ins
+    SPIRV_AnySampledImage:$sampled_image,
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$coordinate,
+    SPIRV_Integer:$component,
+    OptionalAttr<SPIRV_ImageOperandsAttr>:$image_operands,
+    Variadic<SPIRV_Type>:$operand_arguments
+  );
+
+  let results = (outs
+    AnyTypeOf<[SPIRV_Vec4<SPIRV_Integer>, SPIRV_Vec4<SPIRV_Float>]>:$result
+  );
+
+
+  let assemblyFormat = [{
+    $sampled_image `,` $coordinate `,` $component custom<ImageOperands>($image_operands) ( `,` $operand_arguments^ )? attr-dict
+    `:` type($sampled_image) `,` type($coordinate) `,` type($component) ( `,` type($operand_arguments)^ )?
+    `->` type($result)
+  }];
+
+}
+
+// -----
+
 def SPIRV_ImageDrefGatherOp : SPIRV_Op<"ImageDrefGather", 
     [Pure,
      SPIRV_DimIs<"sampled_image", ["Dim2D", "Cube", "Rect"], SPIRV_SampledImageTransform.result>,

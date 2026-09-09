@@ -229,6 +229,15 @@ static LogicalResult verifyImageOperands(Operation *imageOp,
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.ImageGather
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::ImageGatherOp::verify() {
+  return verifyImageOperands(getOperation(), getImageOperandsAttr(),
+                             getOperandArguments());
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.ImageDrefGather
 //===----------------------------------------------------------------------===//
 
