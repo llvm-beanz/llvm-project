@@ -74777,3 +74777,101 @@ intrinsic-based barrier-lowering design `ControlBarrierConversionPattern` alread
 Commits, in order: (1) the new `SPIRVToLLVMPatterns.cpp` pattern plus its new lit-test file, (2)
 `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this `agent_thoughts.md` entry,
 on its own, last.
+
+# L7o: groupshared uniform-address broadcast + second-level GEP scatter shape
+
+## Starting point
+
+This session's request was L7o, filed by the prior L7l session: `dEQP-VK.subgroups.basic.compute.subgroupelect`/
+`_requiredsubgroupsize` now reach `GroupShared.cpp`'s `rewriteGroupSharedGlobals` validation for the first
+time (L7l's own `spirv.MemoryBarrier` fix let their module past pipeline-creation legalization), and are
+declined by the "feeds a nested getelementptr or another unsupported user" diagnostic -- the same family
+roadmap L10/L11 already narrowed the scope of for two `offload-test-suite` repros, but a genuinely new
+occurrence against a real CTS shader's own indexing shape.
+
+## Reduction
+
+`FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`, the env var cited in the L7o filing text (from a prior L45 session),
+turned out not to actually exist in the tree -- it was a temporary debug aid added-then-reverted in that
+earlier session, not a persistent mechanism. I substituted my own equivalent temporary hook at the exact
+same pipeline point (`FEME_DEBUG_DUMP_PRE_GROUPSHARED_IR`, an env-var-gated `NewF->print(llvm::errs())`
+immediately before the `rewriteGroupSharedGlobals` call in `FunctionWidener::widen`), used it to capture
+the real pre-validation IR for `subgroupelect`, then reverted it before implementing any real fix -- same
+convention L45's own session established.
+
+The captured IR showed a shape I hadn't seen described anywhere in this project yet: `subgroupElect()`-gated
+GLSL code (`superSecretComputeShaderHelper[gl_SubgroupID] = uvec4(0);`) writes a whole vector-typed
+groupshared row through an index (`gl_SubgroupID`) that's uniform -- the same on every lane of this test's
+single-subgroup wave -- but not a compile-time constant. Because the index is uniform,
+`feme::cpu::computeWaveUniformity` doesn't widen the row's own `getelementptr` into a real vector-of-pointers;
+it stays scalar. But the *store* itself is still masked (gated by the genuinely divergent `subgroupElect()`
+result), so `widenMaskedStore`'s existing vector-typed-value case (added for roadmap L15's own divergent-row
+precedent) broadcasts that scalar address into a `<4 x ptr>` via the ordinary `insertelement`/`shufflevector`
+splat idiom, then indexes *that broadcast* with a second-level per-component `getelementptr`, one per
+`llvm.masked.scatter`.
+
+This combination -- a *broadcast* (not a naturally divergent GEP) feeding a *second-level* GEP (not a direct
+leaf) -- fell squarely between `GroupShared.cpp`'s two existing "supported" branches: L10's broadcast
+recognition only accepted a broadcast feeding leaves directly, and L11's second-level-GEP exception only
+fired when the GEP being indexed was itself genuinely divergent (`GEP->getType()->isVectorTy()`), which a
+broadcast of a uniform scalar GEP is not.
+
+## The fix
+
+Two small changes in `GroupShared.cpp`, both structural generalizations rather than new special-casing:
+
+1. Extracted the "leaf, or second-level per-component GEP feeding only leaves" check L11 had written inline
+   for a genuinely divergent GEP into a new shared predicate, `isSupportedGroupSharedRowUser`, and had
+   `hasOnlySupportedBroadcasts` use it instead of requiring a direct leaf. Since a broadcast's own final
+   value is unconditionally vector-typed by construction, the same `isVectorTy()` gate the predicate
+   already needed for the genuinely-divergent case is trivially satisfied here too -- no separate broadcast-
+   specific condition was needed.
+
+2. `retargetGroupSharedProducer`'s own broadcast-retargeting loop previously assumed a broadcast's final
+   value always fed a gather/scatter call directly (`cast<CallInst>(...)`, which would have asserted on our
+   new shape's per-component GEP users). I simplified it to recurse into `retargetGroupSharedProducer`
+   itself for the broadcast's own final value -- exactly what it already does for a first-level GEP's own
+   leaf/nested-GEP uses. This didn't require writing any new retargeting logic at all: the existing
+   nested-GEP branch already rebuilds a second-level GEP against the new flat pointer and recurses for its
+   own leaf uses correctly, once it's reachable from this call site too. It's satisfying when a fix reduces
+   code (replacing an 6-line inline loop with a single recursive call) rather than adding a new special case
+   -- exactly the kind of unification worth looking for before reaching for a bespoke branch.
+
+## Verification discipline
+
+I wanted to be sure the "before" failure really was the exact diagnostic from the filing text, not something
+I was assuming based on the prior session's own description. Rather than trusting the historical summary, I
+`git stash`ed the `GroupShared.cpp` fix out, rebuilt `feme_vulkan`, and re-ran `subgroupelect` directly --
+reproducing `vk.createComputePipelines(...): VK_ERROR_INITIALIZATION_FAILED` with the exact diagnostic text
+verbatim. Then restored the stash, rebuilt again, and confirmed the same case now reaches real execution.
+This before/after pair, done in the same session against the same build, is a much stronger confirmation
+than comparing against a different session's own historical numbers would have been.
+
+The real `deqp-vk` result after the fix is honest but a little deflating: `subgroupelect` still doesn't
+*pass* -- it now fails "0 / 7 values passed" instead, the same runtime-value-verification gap roadmap L7n
+already tracks. A fresh full `dEQP-VK.subgroups.*.compute.*` sweep confirms the raw Pass/Fail/unmeasured
+tally is completely unchanged from L7l's own recorded baseline: `subgroupelect`'s own failure was already
+counted as `Fail` either way, just under a different failure mode (pipeline-creation legalization error vs.
+runtime-value mismatch). This is now the fourth session in this L7-series chain (after L7j, L7k, L7l) where
+a real, definitively-fixed legalization gap produces a lateral move for the raw CTS tally rather than a
+visible pass-count improvement, because this subsystem has several more layers of gap (L7m's crash, L7n's
+runtime-value-verification gap, L7p's SIGBUS) stacked on top of each other, each blocking the others from
+ever being individually measurable by pass count alone. I re-confirmed via `gdb -batch -ex run -ex bt` that
+the two `subgroupmemorybarriershared*` crashes are still the exact same L7p `SIGBUS`/`0xdca345eadca345ea`
+signature from the prior session, not a new regression -- worth double-checking any time a "crash" shows up
+in a sweep, since a superficially identical crash message could in principle mask a distinct new bug.
+
+## Documentation and commits
+
+Struck through L7o on `Roadmap.md` with the real fix and full findings recorded, and updated L7's own
+umbrella-row bookkeeping text to note L7o's closure. Appended a new `VulkanCTSReport.md` section covering
+the reduction, the fix, the stash-based before/after verification, and the fresh sweep numbers. Updated
+`Vulkan14FeatureInventory.md`'s existing subgroup-capability audit note to narrow its pending-flip blocker
+list from L7m/L7n/L7o/L7p to L7m/L7n/L7p. `VulkanExtensionInventory.md`: reviewed, no changes needed (an
+internal legalization-pass completeness fix, no new extension advertised). `Design.md`/`FeMeCPUDesign.md`/
+`FeMeVulkanDesign.md`: reviewed, no changes needed (no new design decision -- this fix follows the same
+`matchPointerBroadcasts`/`rewriteGroupSharedGlobals` design roadmap L10/L11 already established).
+
+Commits, in order: (1) the `GroupShared.cpp` fix plus its new lit-test file, (2) `Roadmap.md`/
+`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this `agent_thoughts.md` entry, on its own,
+last.
