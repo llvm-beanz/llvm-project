@@ -42,14 +42,27 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7f from the roadmap or other prerequisites blocking the
+Can you work on L7g from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **An `unhandled Decoration : 'NonUniform'` MLIR SPIR-V deserialization
-> error**, split out of L7's own original filing text -- not yet reduced to a
-> concrete failing case this session; needs a real IR reduction of whichever
-> HLSL shape emits a `NonUniform` decoration (likely a
-> `[[vk::ext_decorate]]`-annotated or `NonUniformResourceIndex()`-wrapped
-> dynamic resource-array index) to confirm whether this is an MLIR deserializer
-> gap (mirroring roadmap L60's own upstream-fix precedent) or a `feme`-side
-> legalization gap, before scoping a fix
+> **A couple of raw `unhandled opcode`/`unhandled deserializations ... from
+> extension set GLSL.std.450` errors**, the leftover tail of L7's own original
+> filing text not otherwise claimed by L7a-L7f above. UPDATE (L7b's own closing
+> investigation this session): a real, concrete repro for the `unhandled opcode`
+> half is now confirmed -- offload-test-suite's own
+> `Vk.SampledTexture2D.Gather.test.yaml` (a real dxc-compiled HLSL
+> `Texture2D::Gather()` call, confirmed via a real `check-hlsl-feme-vk` re-run)
+> fails with exactly `unhandled opcode 96`. SPIR-V opcode 96 is `OpImageGather`
+> (the non-depth-comparison gather variant), confirmed via direct inspection to
+> have **zero support anywhere in upstream MLIR's SPIRV dialect** --
+> `SPIRVBase.td` jumps directly from opcode 95 (`OpImageFetch`) to opcode 97
+> (`OpImageDrefGather`), skipping 96 entirely (no enum case, no op definition,
+> no deserialization case). A materially larger gap than an ordinary `feme`-side
+> legalization-pattern gap (c.f. L7d's own `spirv.ImageDrefGather` case, whose
+> op already exists upstream): needs new upstream-style MLIR dialect work (a new
+> `spirv.ImageGather` op definition, deserialization case, verifier, and
+> printer/parser, mirroring the existing `spirv.ImageDrefGather`'s own shape)
+> before any feme-side legalization pattern can even be written against it. This
+> row now stays open scoped specifically to this one confirmed opcode-96 case
+> plus whatever remains of the original "GLSL.std.450" deserialization half
+> (still unconfirmed)
