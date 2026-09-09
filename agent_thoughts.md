@@ -82,8 +82,8 @@ switch changes:
 - `check-llvm`: two filesystem-sensitive failures
   (`ThinLTO/X86/cache.ll` left an extra cache entry and
   `strip-preserve-atime.test` observed a current timestamp).
-- `check-clang`: two module-cache pruning unit tests failed due to filesystem
-  timestamp/pruning behavior.
+- `check-clang`: the module-cache pruning lit test and two related unit tests
+  failed due to filesystem timestamp/pruning behavior.
 - `check-hlsl-vk`: eight floating-point edge-case runtime failures. This suite
   invokes the external DXC compiler, and the mismatches concern NaNs, signed
   zero, infinities, and ULP tolerances.
@@ -92,3 +92,32 @@ switch changes:
 
 The failures do not exercise switch statements. Focused Clang IR and SPIR-V
 tests for this change pass.
+
+## SPIR-V CFG Structurizer Follow-up
+
+The frontend tests established that `-fno-switch` emits conditional branch
+chains, but the backend had no IR-level coverage for the distinct fallthrough,
+break-only, and mixed shapes. Testing those shapes with `spirv-val` found that
+fallthrough and mixed control flow were accepted, while three break-only cases
+produced invalid structured SPIR-V.
+
+The failure came from using `PartialOrderingVisitor::partialOrderVisit` to
+collect construct blocks. Returning `false` at one merge boundary truncates the
+entire partial-order traversal at that rank; it does not merely stop following
+that CFG path. The incomplete block set caused an outer selection merge to
+route control into a nested selection's merge block.
+
+The structurizer now uses the existing path-sensitive CFG visitor for both loop
+and selection construct collection. Encountering a merge or outside block
+prunes only that path, so all other dominated construct blocks remain visible
+to exit-edge analysis. This also removes unnecessary proxy selections from two
+existing short-circuit loop tests.
+
+The new IR regression test models all three `-fno-switch` shapes, checks their
+selection merges, rejects any generated `OpSwitch`, and validates the binary
+with `spirv-val`. The full `llvm/test/CodeGen/SPIRV` suite passes.
+
+The aggregate targets were rerun after configuring with
+`cmake -C /opt/llvm-tooling/Config.cmake`. They retained the unrelated
+filesystem-sensitive and floating-point failures listed above; no failure
+exercises switch lowering or SPIR-V CFG structurization.
