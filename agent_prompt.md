@@ -42,8 +42,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L24(a) from the roadmap or other prerequisites blocking the
+Can you close out L24(b) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> `Feature/Semantics/ArraySemantics.test` still fails, unrelated to L24's own
+> `Graphics/IsolineDomainTessellation.test` still fails, unrelated to L24's own
 > viewport-Y/winding scope -- pre-existing, not yet reduced
