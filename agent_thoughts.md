@@ -74875,3 +74875,80 @@ internal legalization-pass completeness fix, no new extension advertised). `Desi
 Commits, in order: (1) the `GroupShared.cpp` fix plus its new lit-test file, (2) `Roadmap.md`/
 `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this `agent_thoughts.md` entry, on its own,
 last.
+
+# L7p: subgroupmemorybarriershared SIGBUS — root cause and fix
+
+This session's request was L7p: root-cause and fix a real `SIGBUS` crash newly reached by
+`dEQP-VK.subgroups.basic.compute.subgroupmemorybarriershared`/`_requiredsubgroupsize`, split out of L7l's
+own closing session. The filing's own hypothesis (a corrupted/never-initialized function pointer, possibly
+related to the shader's `tempImage` binding) turned out to be a plausible-sounding but wrong lead — the
+real story was more interesting and, once found, satisfyingly mechanical.
+
+The first real clue came from `gdb`'s own register dump, not the filing text: x19-x25 and the link register
+x30 all held the *exact same* poisoned value as the crashing PC. That's not what a "call through a garbage
+function pointer" usually looks like on its own — it's what a corrupted stack frame's own epilogue looks
+like, restoring callee-saved registers from memory that something else already smashed, then `ret`-jumping
+through the now-garbage return address. That reframed the whole investigation: this wasn't about a
+function-pointer value being wrong: it was about *something writing past the end of a buffer* on the stack,
+and the crash was just the eventual, delayed symptom.
+
+Disproving the filing's own "image binding" hypothesis was quick and satisfying: fetching the real GLSL
+source for every case in the `subgroupmemorybarrier*` family (via a `--deqp-log-flush=enable` XML log) and
+diffing them showed *all four* declare the same unused `tempImage` binding — including the two that don't
+crash at all. The real differentiator, once actually compared side by side rather than assumed from the
+name, was obvious: only `subgroupmemorybarriershared`'s shader body reads/writes its own groupshared array.
+This is a good reminder that a plausible-sounding hypothesis in a filing is a starting point, not a
+conclusion — the actual comparison took five minutes and immediately falsified it.
+
+The smoking gun came from the same debug-hook technique this project has now used three sessions running
+(L45, L7o, now L7p): a temporary, env-var-gated `Module::print` right before JIT compilation, reverted
+before any real commit. The dumped IR showed `alloca [4 x i8]` — room for exactly one element — being
+indexed by a wave loop running up to ~27 iterations, with the real invocation count baked into the same IR
+as `splat (i32 105)`. A ~25x overrun of a tiny stack allocation is about as clean an explanation for
+"corrupts everything nearby, including the return address" as a bug gets.
+
+From there, tracing *why* the array was sized wrong led straight back to this project's own roadmap L7k —
+the deserializer fix that taught MLIR's SPIR-V importer to resolve an `OpTypeArray` length from a
+specialization constant instead of rejecting the module outright. That fix's own doc comment already said,
+plainly, that it resolves the length using the constant's *compile-time default* — which is the only thing
+available at plain deserialization time, since there's no concept of "the real pipeline's override" yet at
+that point in the pipeline. What L7k's own session apparently didn't (and, honestly, probably couldn't have
+without hitting this exact case) anticipate is that a real CTS dispatch specializes a *much larger*
+workgroup size than the shader's own default declares, so the folded length silently becomes drastically
+too small rather than erroring out loudly. This is the same "closing one gap reveals the next layer"
+pattern this whole L7-series chain keeps hitting, and it's worth naming honestly: L7k's own fix was
+correct and necessary (rejecting the module outright was strictly worse), but it moved the failure mode
+from "loud rejection" to "silent, exploitable-looking memory corruption" for this one shape. That's a
+trade worth making to unblock a whole class of previously-unreachable tests, but it's also exactly the
+kind of thing that's worth calling out plainly in the write-up rather than quietly patching around.
+
+The fix itself turned out to have a clean, already-established precedent to lean on:
+`feme/lib/Vulkan/GroupSize.h`'s own scanner already resolves the *real*, specialization-overridden group
+size directly from raw SPIR-V words, specifically because MLIR's structured deserialization APIs can't
+represent what's needed (that file's own header comment is refreshingly candid about this being a
+deliberate, narrow exception to the project's own "don't patch binary words" rule). Rather than trying to
+somehow plumb a real override *into* the deserializer's own structured constant-folding logic after the
+fact — which doesn't really have anywhere for such a value to live once a scalar spec constant has already
+been folded into an MLIR attribute — the simpler and more honest fix is to apply the real override to the
+raw SPIR-V bytes *before* deserialization even starts, so the deserializer's own existing default-value
+fold just does the right thing automatically, no deserializer change needed. This also has a nice property
+the array-length case alone wouldn't have motivated on its own: it fixes *any* spec-constant-dependent
+value the deserializer resolves at import time, not just this one shape, for free.
+
+One thing this session tried to do differently from some prior L7-series write-ups: rather than declaring
+victory the moment the SIGBUS itself was gone, a real, un-rushed re-run of the whole
+`subgroupmemorybarrier*` family (all 8 cases) was used to see what the fix actually unmasked, not just
+whether the originally-cited crash disappeared. That surfaced two more real, distinct gaps immediately —
+`subgroupmemorybarrierimage`'s own runtime-value mismatch, and every `_requiredsubgroupsize` twin's own
+new group-size-limit rejection — both split out honestly as new rows (L7r, L7q) rather than glossed over
+or folded silently into this row's own "done" claim. The temptation with a fix this satisfying is to stop
+looking as soon as the original crash is gone; the family-wide re-run is what caught that these two
+siblings still don't actually pass, for reasons this session's own fix didn't create and isn't positioned
+to fix.
+
+A small process note for future sessions: this is now the third L7-series session in a row to use the
+"temporary env-var-gated IR dump, reverted before commit" technique (L45, L7o, this one), and each time it
+has been the single fastest way to get from "a confusing runtime symptom" to "the exact IR shape causing
+it." It's worth treating this as this project's own established, load-bearing debugging tool rather than
+a one-off trick — the discipline of reverting it before any real commit (so it never accidentally ships as
+dead, confusing code) seems to be holding up fine across three separate sessions now.
