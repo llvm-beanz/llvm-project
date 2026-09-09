@@ -33814,3 +33814,105 @@ bit touched. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no 
 the existing mentions of `SampleCmp`/`Dref`/`ImageDrefGather` are historical narrative describing
 the initial SPIR-V-op/pattern gaps this project closed over time (roadmap L25/L31/L46 etc.), not
 living documentation of the coordinate-width acceptance behavior this row corrects.
+
+## L7d: `spirv.ImageDrefGather` has no conversion pattern
+
+**Fix**: implemented the full new codegen surface `spirv.ImageDrefGather` (HLSL's
+`Texture2D::GatherCmp()`) needs, end to end:
+
+- `ImageDrefGatherPattern` (`SPIRVToLLVMPatterns.cpp`) converts `spirv.ImageDrefGather` (both the
+  `None` and `ConstOffset` image-operand shapes -- confirmed via real `dxc` capture that this op's
+  own `Coordinate` is never dref-padded, unlike `ImageSampleDrefImplicitLodOp`'s) into
+  `llvm.spv.resource.gather.cmp`. This intrinsic turned out to **already exist upstream**
+  (`llvm/include/llvm/IR/IntrinsicsSPIRV.td`'s `int_spv_resource_gather_cmp`) and is already fully
+  wired up in LLVM's own SPIR-V backend (`SPIRVInstructionSelector.cpp`'s `selectGatherIntrinsic`,
+  real GPU codegen support that was simply unreachable from MLIR's SPIR-V dialect before this row)
+  -- no new TableGen intrinsic needed.
+- `SPIRVResourceLowering.cpp` gained `isGatherCmpIntrinsic` recognition plus a new acceptance
+  branch in `hasOnlySupportedImageUses` (scoped to `Plain2D`, non-integer format only; `Cube`/
+  `CubeArray`/`Array2D` explicitly rejected, filed as roadmap L7h) and a new codegen branch in
+  `lowerImageAccesses` dispatching to a new `createGatherCmp2D` call.
+- **A real bug found and fixed along the way**: `hasOnlySupportedSamplerUses` (the *sampler*-
+  handle-side acceptance check, a function entirely separate from `hasOnlySupportedImageUses`)
+  had no `isGatherCmpIntrinsic` case at all, so every gather call's *sampler* handle was silently
+  rejected even once the *image*-handle-side branch above was added and otherwise correct --
+  `collectHandles` bails the whole function unmodified the moment either handle rejects any of its
+  own uses, so the new lowering never even attempted the rewrite until this second, easy-to-miss
+  integration point (mirroring the "every kind must be listed or it's silently skipped" trap
+  `matchImageCall`'s own `AllKinds` array already warns about) was found and fixed.
+- `ImageCalls.h`/`.cpp` gained a new `GatherCmp2D` `ImageCallKind` (a narrower operand list than
+  `SampleCmp2D` -- no `Lod`/`Bias`/`Grad`/`MinLod`, since `OpImageDrefGather` has no such image
+  operand at all per the SPIR-V spec: a gather always operates at mip level 0), including the
+  `matchImageCall` `AllKinds`/switch integration `SIMDize.cpp` depends on.
+- A new `femeCpuImageGatherCmp2DV4F32` CPU runtime helper (`FeMeRuntimeCPU.c`) reuses the existing
+  `femeRTComputeBilinearSupport` footprint helper (the four texels a gather returns one comparison
+  result each from are, by construction, exactly the same four texels an ordinary bilinear-
+  filtered sample at the identical coordinate would blend between) plus `femeRTFetchTexel2D`/
+  `femeRTApplyCompare`, packing results in the real dxc-confirmed component order
+  `[C(X0,Y1), C(X1,Y1), C(X1,Y0), C(X0,Y0)]`.
+
+**Unit tests covering each phase**:
+
+- MLIR conversion: new `spirv-to-llvm-image-dref-gather.mlir` lit test (both `None`/`ConstOffset`
+  shapes).
+- CPU resource lowering: new `spirv-resource-lowering-image-gathercmp-dxc-unpadded.ll` lit test
+  (mirroring `spirv-resource-lowering-image-samplecmp-dxc-unpadded.ll`'s own style), plus 3 new
+  `SPIRVResourceLoweringTest.cpp` gtest cases -- `LowersGatherCmpToImageGatherCmp` (zero offset),
+  `LowersGatherCmpConstOffsetToImageGatherCmpWithOffset` (nonzero offset), and
+  `LeavesAGatherCmpAgainstCubeUnchanged` (confirms the `Plain2D`-only scoping actually rejects,
+  rather than silently mishandling, an unsupported shape).
+- CPU runtime: 2 new `ImageSamplingTest.cpp` gtest cases --
+  `GatherCmpReturnsFourTexelsInDrefGatherOrder` (proves the four-texel component ordering against a
+  2x2 image with a distinct depth value in every corner, so a wrong ordering shows up as a wrong
+  result) and `GatherCmpNonzeroOffsetShiftsFetchedFootprint` (mirroring
+  `ComparisonSamplingNonzeroOffsetShiftsFetchedTexel`'s own proof technique for the depth-
+  comparison *sample* sibling).
+
+**Build/test results** (ccache + assertions `build2`, all target dependencies auto-built):
+
+- `ninja -C build2 feme-opt feme-translate feme_vulkan offloader FeMeUnitTests`: clean build, no
+  errors.
+- `ninja -C build2 check-feme`: **2871 discovered, 2812 Passed, 59 pre-existing `Unsupported`, 0
+  Failed** (up by the 2 new lit tests above; the `SPIRVResourceLoweringTest`/`ImageSamplingTest`
+  gtest binaries are exercised as part of the same target and also pass in full).
+- `FeMeTransformsCPUTests` (444 tests) and `FeMeRuntimeCPUTests` (251 tests): full suites re-run
+  directly, **100% passing, 0 regressions**.
+
+**Real end-to-end verification**: manually reproduced offload-test-suite's own, real, unmodified
+`Vk.SampledTexture2D.GatherCmp.test.yaml` via the established `split-file` -> `dxc -spirv
+-fspv-target-env=vulkan1.3` -> `offloader` pipeline (no offload-test-suite build directory exists
+in this checkout for the usual `check-hlsl-feme-vk` path). Before this fix, `dxc` itself compiles
+successfully but `feme_vulkan`'s pipeline creation fails to legalize `spirv.ImageDrefGather`
+outright. After this fix, the real `offloader` run against the actual `feme_vulkan` ICD produces a
+byte-exact `BufferExact` match against `Expected` for **all 8 sub-cases** in this test: `Less`/
+`Greater` comparison ops, `Clamp`/`Repeat` addressing modes (including a real wraparound case),
+and 3 distinct nonzero `ConstOffset` variants (`(0,-1)`, `(1,0)`, `(-1,-1)`).
+
+A real `dEQP-VK` sweep was attempted for this row but came back with no directly-applicable case
+group: the checked-in `dEQP-VK-cases.txt` snapshot turned out to be another stale, incomplete
+partial export (confirmed alphabetically truncated at the `glsl` group, missing `image`/
+`pipeline`/`spirv_assembly`/`texture`/`ycbcr` entirely -- the same failure mode L84's own closing
+session already found and worked around for its own snapshot), and regenerating it via `deqp-vk
+--deqp-runmode={txt,xml}-caselist` in this environment only ever captures the `dEQP-VK-experimental`
+package, never the main `dEQP-VK` one (an environment-specific limitation of this harness, not a
+`feme` bug). Direct, unfiltered `--deqp-case` sweeps of `dEQP-VK.pipeline.*`/
+`dEQP-VK.spirv_assembly.instruction.*` confirmed no leaf test group under either path exercises
+`OpImageDrefGather`/a depth-comparison gather shader op in this checkout (the `gather_*` groups
+that do exist under `pipeline.*` are unrelated border-color/sampler-mapping feature tests, not
+shader-level gather-instruction tests) -- mirroring L7b's own precedent where offload-test-suite,
+not `deqp-vk`, was the authoritative regression evidence for this exact dxc-specific gap family.
+
+**Roadmap**: L7d struck through as done, with the fix/verification summary above replacing the
+original filing text; L7's own umbrella row updated to note L7d joins L7a/L7b/L7c as closed; a new
+L7h row filed for the `Cube`/`CubeArray`/`Array2D` gather shapes this row deliberately left out of
+scope (confirmed rejected, not silently mishandled, by the new `LeavesAGatherCmpAgainstCubeUnchanged`
+test).
+
+`Design.md`: the "Sampling variants" bullet (originally filed this exact `OpImageDrefGather` gap)
+updated in place to note L7d's own closure, mirroring how it already tracked L31's prior closure
+of the sibling depth-comparison *sample* variants. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: reviewed -- no bit flips needed; `shaderImageGatherExtended`
+(non-standard per-component gather offsets/gather with a component-select operand) is an unrelated,
+still-unimplemented feature this row does not touch (`GatherCmp` uses only the always-available,
+single, uniform `ConstOffset` this row already handles). `FeMeCPUDesign.md`/`FeMeVulkanDesign.md`:
+reviewed, no update needed.
