@@ -245,7 +245,23 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   advertises `VK_SUBGROUP_FEATURE_BASIC_BIT`, declining 1,676/1,804 of
   those cases `NotSupported` purely on this capability gate rather than
   exercising the new patterns at all -- see roadmap L7i (split out of
-  L7e's own closing session) for this specific follow-on.
+  L7e's own closing session) for this specific follow-on. UPDATE (roadmap
+  L7i, later session): `AllOp`/`AnyOp`/`ShuffleXorOp` also now convert
+  (`VoteConversionPattern`/`ShuffleXorConversionPattern`), and
+  `AllEqualConversionPattern` now accepts a vector operand too (AND-reduced
+  to the scalar result `spirv.GroupNonUniformAllEqualOp` always produces)
+  -- completing every op the `GroupNonUniformVote`/`GroupNonUniformShuffle`
+  capabilities themselves require (`ShuffleRelative`'s own `ShuffleUp`/
+  `ShuffleDown` still have no pattern and remain out of scope). That same
+  session's real `deqp-vk` attempt to verify a `VOTE_BIT`/`SHUFFLE_BIT`
+  flip found every compute-stage case failing on a wholly separate,
+  pre-existing gap instead (`spirv.SpecConstantComposite` has no
+  legalization pattern -- see roadmap L7j), so `supportedOperations` still
+  advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT` today: the real op
+  coverage now exists, but confirming it against `dEQP-VK.subgroups.*`
+  remains blocked on an unrelated `gl_WorkGroupSize`-specialization-constant
+  gap that affects every compute-stage subgroup case in that CTS group,
+  not anything specific to `Vote`/`Shuffle`.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
