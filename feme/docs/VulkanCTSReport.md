@@ -33467,3 +33467,116 @@ closed** this session for `Atan2`/`Step`/`SmoothStep`; remains open for `Length`
 `Normalize`/`UnpackHalf2x16`. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed: no change needed (an internal SPIR-V-to-LLVM legalization completeness fix, no
 feature/extension bit touched).
+
+## Roadmap L7a: closed (`isSupportedTexelElementType`'s wrong "never narrower than 4" assumption fixed for width 2; the row's own originally-filed matrix legalization gap found to have no live repro)
+
+**Request**: work on roadmap L7a ("Matrix `spirv.CompositeConstruct`/`spirv.AccessChain`/
+`spirv.Transpose` legalization gaps") or other prerequisites blocking the L-series milestones.
+
+**Investigation**: following this project's own established "reduce first" methodology, ran the
+real `Basic/Matrix/*.test` family via `offload-test-suite`/`llvm-lit` against a correctly-selected
+`feme` ICD (`VK_ICD_FILENAMES` pointed at `build2/tools/feme/tools/feme-vulkan/feme_icd.json`,
+confirmed via `vulkaninfo --summary` showing `FeMe CPU Vulkan Device` -- a forgotten override
+silently falls back to Mesa's `lavapipe` and produces a "plausible-looking but entirely wrong"
+result, per `feme/.instructions.md`'s own documented gotcha). Real result: **16 Passed, 3 XFAIL,
+8 Failed**.
+
+Reduced `matrix_m-based_getter.test` (one of the 8 failures) directly: extracted its SPIR-V via
+`spirv-dis`, ran it through `feme-translate --import-spirv` (clean) and
+`feme-opt --feme-convert-spirv-to-llvm` (clean, **zero errors**) -- proving L7a's own filed root
+cause (a `CompositeConstruct`/`AccessChain`/`Transpose` legalization gap) is **not actually
+present** in this case. Continued the reduction through `feme-translate --llvmdialect-to-llvmir`
+(working around a `module{}`-wrapper-stripping quirk that otherwise silently translates only the
+outer, near-empty wrapper module) and a manually-reconstructed CPU-target LLVM-IR normalization
+pass sequence (`feme-opt --llvm -passes=feme-cpu-fold-spirv-builtins,feme-cpu-prepare,feme-cpu-normalize-bound-resources,feme-cpu-lower-root-constants,feme-cpu-lower-spirv-resources,feme-cpu-lower-spirv-push-constants`
+-- `feme-opt` does not register `feme-cpu-inline-helper-functions`/`feme-cpu-lower-spirv-subpass`
+at all, and `feme-cpu-prepare` needs `-feme-cpu-entry-point=`/`-feme-cpu-stage=` flags set). Found
+every `llvm.spv.resource.handlefrombinding` call left completely un-normalized. Root cause:
+`feme::cpu::SPIRVResourceLoweringPass::isSupportedTexelElementType` (`SPIRVResourceLowering.cpp`)
+explicitly rejected any 2- or 3-component vector texel-buffer element type, on the (wrong) claim
+that "neither `dxc` nor glslang ever emits one" -- disproved directly by this case's own
+`RWBuffer<float2> OutVec2` write, which `dxc` lowers to a genuine `OpImageWrite` with a bare
+`<2 x float>` Texel operand. (The pass's own "one unsupported handle blocks normalization of
+every handle in the function" behavior meant this single rejection was also reported against the
+function's *other*, unrelated resource handles -- a red herring a full IR reduction, not just the
+top-level diagnostic, was needed to see past.)
+
+Re-ran all 8 originally-failing `Basic/Matrix` cases with `FEME_VULKAN_LOG_CREATION_ERRORS=1`:
+a clean 4/8 split. `matrix_m-based_getter`, `matrix_m-based_swizzle_getter`,
+`matrix_one-based_getter`, `matrix_one-based_swizzle_getter` fail at pipeline-creation time
+(`VkResult=-3`) from exactly this gap; `matrix_groupthread_swizzle_one_based`,
+`matrix_groupthread_swizzle_zero_based`, `matrix_m-based_setter`, `matrix_one-based_setter`
+instead reach pipeline creation successfully but fail a real numeric `BufferExact` mismatch --
+a **separate, unrelated bug**, deliberately left out of scope and filed as new roadmap row L83.
+
+**Fix**: widened `isSupportedTexelElementType`'s accepted vector width from `{4}` to `{2, 4}`
+(width 3 remains rejected -- no 3-channel mandatory SPIR-V texel-buffer format exists), with an
+extensively rewritten doc comment. `feme::cpu::mangleResourceCallName`/`createTypedLoad`/
+`createTypedStore` (`ResourceCalls.cpp`) needed **no change** -- already mangle any vector width
+generically from the value's real LLVM type. Added four new runtime entry points
+(`femeCpuResourceLoadTypedV2F32`/`StoreTypedV2F32`/`LoadTypedV2I32`/`StoreTypedV2I32`,
+`FeMeRuntimeCPU.c`), reusing the existing `femeRTUnpackImageTexel`/`femeRTPackImageTexel`(`I32`)
+per-format tables (already correctly handling `R32G32_{FLOAT,UINT,SINT}`) and the existing
+`FemeRTv2f32`/`FemeRTv2i32` typedefs.
+
+**Tests added**:
+- `SPIRVResourceLoweringTest.cpp`: updated `LeavesUnsupportedTexelElementVectorWidthUnchanged`
+  to use the still-genuinely-unsupported `<3 x i32>` (was `<2 x i32>`, now supported); added
+  `LowersV2I32TexelBufferToV2TypedCalls`/`LowersV2F32TexelBufferToV2TypedCalls`.
+- `RuntimeCPUTest.cpp`: 8 new tests -- `TypedLoadV2F32IdentityFormat`,
+  `TypedLoadV2F32InactiveMaskReadsZero`, `TypedStoreV2F32RoundTrips`,
+  `TypedStoreV2F32DroppedWithoutUavFlag`, `TypedLoadV2I32IdentityFormat`,
+  `TypedStoreV2I32RoundTrips`, `TypedStoreV2I32DroppedWithoutUavFlag` (mirroring the existing
+  scalar-I32/F32 and V4I32 test groups' coverage pattern).
+- New lit regression `feme/test/Transforms/CPU/spirv-resource-lowering-texel-buffer-v2.ll`,
+  covering the `.v2f32`/`.v2i32`-mangled shape directly at the
+  `feme-opt --llvm -passes=feme-cpu-lower-spirv-resources` level, mirroring the existing
+  scalar/V4 lit-test precedent.
+
+**Verification**:
+- `ninja -C build2 check-feme` (ccache + assertions build, all target dependencies auto-built):
+  **2858 discovered, 2799 Passed, 59 Unsupported (pre-existing), 0 Failed.**
+- `FeMeRuntimeCPUTests --gtest_filter='*V2*'`: 9/9 passed (8 new + 1 pre-existing raw-load/store
+  V2 test already present). `FeMeTransformsCPUTests --gtest_filter='*V2*:*Unsupported*'`: 25/25
+  passed (2 new + updated `LeavesUnsupportedTexelElementVectorWidthUnchanged` + 22 pre-existing).
+- Real `Basic/Matrix` re-run (correctly-selected `feme` ICD): **16 -> 20 Passed** (+4, exactly
+  the 4 pipeline-creation-time failures this fix targets), 3 XFAIL unchanged, **8 -> 4 Failed**.
+- Real A/B `git stash` full `feme-vk`/`offload-test-suite` comparison (rebuilt
+  `FeMeRuntimeCPU`/`feme-opt`/`feme_vulkan`/`offloader` both times): **231 -> 235 Passed**,
+  **146 -> 142 Failed**, exactly +4/-4, zero regressions elsewhere.
+- Real `deqp-vk` re-run targeting the exact CTS group exercising this shape
+  (`dEQP-VK.image.load_store.{with,without}_format.buffer.r32g32_*`, 36 cases, all four
+  `_uint`/`_sint`/`_sfloat` variants times alignment/uniform/linear sub-variants):
+
+  ```
+  deqp-vk --deqp-case="dEQP-VK.image.load_store.with_format.buffer.r32g32_*,dEQP-VK.image.load_store.without_format.buffer.r32g32_*"
+  ```
+
+  **36/36 Pass, both before and after this fix** (a direct `git stash`-based A/B rebuild-and-rerun
+  confirms byte-for-byte identical results). This row's own real `deqp-vk` payoff is genuinely
+  zero: `deqp-vk` compiles every case via `glslang` from GLSL, and GLSL's own `imageStore()`
+  intrinsic always takes a full `vec4` regardless of the underlying image format's channel count
+  -- `glslang` never emits the narrower-than-`<4 x T>` Texel operand shape this fix adds support
+  for at all. Only `dxc`-compiled HLSL's `RWBuffer<T2>` reaches it, confirmed instead by the
+  `offload-test-suite`/`feme-vk` A/B comparison above. This confirms the *other* half of the old,
+  now-corrected doc comment's claim was actually right about `glslang`; it was wrong only about
+  `dxc`.
+- A broader `dEQP-VK.image.load_store.{with,without}_format.buffer.r32g32*` sweep (84 cases,
+  including the already-passing `r32g32b32a32` 4-channel formats) shows 72 Pass, 0 Fail, 12
+  NotSupported both before and after -- no regressions anywhere in this format family's own CTS
+  footprint.
+
+**Roadmap**: L7a struck through as closed. The 4 remaining `Basic/Matrix` failures (a distinct,
+unrelated numeric `BufferExact`-mismatch bug, not a legalization/resource-lowering gap) filed as
+new row **L83**. L7a's own originally-filed gap (matrix `CompositeConstruct`/`AccessChain`/
+`Transpose` legalization) has **no live repro found anywhere in this session's own
+investigation** -- the row is closed on that basis, since re-opening it would need a genuinely
+new failing case to reduce, not a re-attempt of this same investigation.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no change needed -- a pure
+internal resource-lowering completeness fix, no feature or extension bit touched.
+`FeMeVulkanDesign.md`'s "V4: Typed buffers and broader compute" section updated with this fix's
+own entry, alongside the pre-existing L9 (scalar) entry, and a stale "R32G32_UINT ... still
+rejected at `vkCreateBufferView`" claim corrected (an earlier, unrelated H8s/H19n
+format-properties pass had already accepted these formats at that layer; this row's own gap was
+purely the resource-lowering pass's width gate).

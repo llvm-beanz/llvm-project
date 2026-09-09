@@ -3040,12 +3040,39 @@ Deviations from this section's sketch:
   `StoreTypedI32`) also exists, reusing the image-sampling path's own
   `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel(I32)` tables,
   for any future caller that needs a scalar (rather than `<4 x T>`)
-  load/store ABI directly. Every other format `feme::cpu::ResourceFormat`
-  lists -- the narrower-than-32-bit-per-component and multi-channel
-  narrower-than-`<4 x T>` formats (`R32G32_UINT`, ...), the
-  16-bit-per-component packed formats (`R16G16B16A16_*`), and the
-  `R11G11B10_FLOAT`/`R10G10B10A2_*` formats -- is still rejected at
-  `vkCreateBufferView` rather than misconverted.
+  load/store ABI directly. ~~Roadmap L7a~~ (done): the two-channel
+  32-bit-identity formats (`R32G32_FLOAT`/`_UINT`/`_SINT` -- the
+  `RWBuffer<float2>`/`RWBuffer<int2>` shape) are now supported at the
+  `SPIRVResourceLoweringPass` layer too:
+  `isSupportedTexelElementType` now accepts a genuine `<2 x float>`/
+  `<2 x i32>` element type alongside the pre-existing scalar and `<4 x T>`
+  shapes, matching the narrower `OpImageWrite` Texel operand `dxc` emits
+  for a 2-channel `RWBuffer<T2>` (found via a real IR reduction of
+  `Basic/Matrix/matrix_m-based_getter.test`'s own `RWBuffer<float2>
+  OutVec2` write -- see roadmap L7a's own closure text). `<3 x T>` remains
+  rejected (no 3-channel mandatory SPIR-V texel-buffer format exists).
+  `vkCreateBufferView`'s own `isTexelBufferFormatSupported`/
+  `isStorageTexelBufferFormatSupported` (Format.cpp) already accepted
+  `R32G32_{FLOAT,UINT,SINT}` before this fix (added by an earlier,
+  unrelated H8s/H19n format-properties pass) -- this fix's own gap was
+  purely the resource-lowering pass's own width gate, not format
+  validation; `femeCpuResourceLoadTypedV2F32`/`StoreTypedV2F32`/
+  `LoadTypedV2I32`/`StoreTypedV2I32` (FeMeRuntimeCPU.c) are the new
+  runtime entry points this shape needed, reusing the existing
+  `femeRTUnpackImageTexel`/`PackImageTexel`(`I32`) per-format tables the
+  image-sampling and V4 typed-buffer paths already shared. A real
+  `deqp-vk` re-run (`dEQP-VK.image.load_store.{with,without}_format.
+  buffer.r32g32_*`, 36 cases) shows 36/36 Pass both before and after this
+  fix -- `deqp-vk` compiles every case via `glslang`, whose own
+  `imageStore()` GLSL intrinsic always takes a full `vec4` regardless of
+  format channel count, so it never reaches this narrower-than-`<4 x T>`
+  shape at all; only `dxc`-compiled HLSL's `RWBuffer<T2>` does, confirmed
+  instead via a real `offload-test-suite`/`feme-vk` A/B comparison
+  (231 -> 235 Passed, exactly +4, zero regressions). Every other format
+  `feme::cpu::ResourceFormat` lists -- the narrower-than-32-bit-per-
+  component formats, the 16-bit-per-component packed formats
+  (`R16G16B16A16_*`), and the `R11G11B10_FLOAT`/`R10G10B10A2_*` formats --
+  remains rejected at `vkCreateBufferView` rather than misconverted.
 - **The persistent pipeline cache blob carries no object code.** Per this
   section's own original sketch: "Persistent cache support therefore
   depends on a FeMe API that emits relocatable object code plus complete
