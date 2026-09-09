@@ -42,24 +42,29 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7l from the roadmap or other prerequisites blocking the
+Can you work on L7o from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A missing `spirv.MemoryBarrier` legalization pattern**, split out of L7k's
-> own closing session:
-> `dEQP-VK.subgroups.basic.compute.subgroupmemorybarrier*`'s own 10 cases
-> (`subgroupmemorybarrier`/`subgroupmemorybarrierbuffer`/`subgroupmemorybarrierimage`/`subgroupmemorybarriershared`,
-> each with a `_requiredsubgroupsize` twin) now reach real pipeline creation for
-> the first time (per L7k's own array-deserialization fix unmasking them), but
-> all fail identically with `failed to legalize operation 'spirv.MemoryBarrier'`
-> (confirmed via a direct re-run of
-> `dEQP-VK.subgroups.basic.compute.subgroupelect`, which shares the same GLSL
-> test harness's own generic `subgroupMemoryBarrier()`-family call). This is a
-> distinct SPIR-V op from `spirv.ControlBarrier` (already legalized, per the
-> `subgroupBarrier()` cases in the same test group passing this
-> deserializer/legalization stage without issue) and needs its own new pattern
-> converting it to whatever this project's CPU runtime already uses for
-> cross-invocation memory ordering (likely a fence/barrier intrinsic call
-> mirroring `ControlBarrierConversionPattern`'s own shape, scoped per
-> `memory_scope`/`memory_semantics` operand combination the CTS group actually
-> exercises)
+> **A `feme-cpu-simdize` "groupshared global ... feeds a nested getelementptr or
+> another unsupported user" diagnostic newly reached by
+> `dEQP-VK.subgroups.basic.compute.subgroupelect`/`_requiredsubgroupsize`**,
+> split out of L7l's own closing session: now that L7l's own
+> `spirv.MemoryBarrier` legalization fix lets this shader's module past
+> pipeline-creation legalization for the first time, it reaches
+> `GroupShared.cpp`'s `rewriteGroupSharedGlobals` validation for the first time
+> too, and is declined by the same "only a first-level getelementptr feeding a
+> direct load/store/atomicrmw/masked gather-scatter, or a vector-row-load's
+> second-level per-component getelementptr, is supported" check roadmap L10/L11
+> already narrowed the scope of (`feme/docs/Roadmap.md`'s own L10/L11 rows) --
+> but this is a new, real, previously-unseen occurrence of that same diagnostic
+> family, not a regression in L7l's own fix (`subgroupelect`'s shader accesses
+> its own `tempShared`/`tempBuffer` groupshared array via
+> `subgroupElect()`-gated indexing, a shape distinct from either of L10/L11's
+> own already-fixed offload-test-suite repros). Needs: (1) a real IR reduction
+> of `subgroupelect`'s own lowered LLVM IR (the same
+> `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`-gated technique L45's own closing session
+> used) to see the exact GEP-nesting shape this shader's indexing produces, and
+> (2) a scoping decision on whether it's a third distinct shape needing its own
+> `rewriteGroupSharedGlobals`/`widenGroupSharedLoad` extension (mirroring L11's
+> own vector-row-load precedent), or reachable via some non-`GroupShared.cpp`
+> restructuring upstream of it instead
