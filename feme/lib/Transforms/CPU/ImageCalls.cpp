@@ -138,6 +138,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.querylevels.i32";
   case ImageCallKind::QuerySamples:
     return "feme.cpu.image.querysamples.i32";
+  case ImageCallKind::GatherCmp2D:
+    return "feme.cpu.image.gathercmp.2d.v4f32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -703,6 +705,19 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // `ImageCallKind::QuerySamples`'s own doc.
     FTy = FunctionType::get(I32Ty, {PtrTy, I32Ty, I32Ty}, /*isVarArg=*/false);
     break;
+  case ImageCallKind::GatherCmp2D:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, dref, offset_x, offset_y, mask)
+    //  -> <4 x float> (roadmap L7d): see `ImageCallKind::GatherCmp2D`'s
+    // own doc -- no `lod`/`use_explicit_lod`/`bias`/`dudx`/`dudy`/`dvdx`/
+    // `dvdy`/`min_lod_clamp` operand at all, unlike `SampleCmp2D`, since
+    // a gather instruction always operates at mip level 0 per the SPIR-V
+    // spec, with no way to request otherwise.
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -797,6 +812,30 @@ CallInst *feme::cpu::createSampleCmp2D(
                              OffsetX,
                              OffsetY,
                              MinLodClamp,
+                             Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createGatherCmp2D(IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       Value *ImageIndex, Value *SamplerIndex,
+                                       Value *U, Value *V, Value *Dref,
+                                       Value *OffsetX, Value *OffsetY,
+                                       Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::GatherCmp2D);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap,
+                             Env.ImageHeapCount,
+                             Env.SamplerHeap,
+                             Env.SamplerHeapCount,
+                             ImageIndex,
+                             SamplerIndex,
+                             U,
+                             V,
+                             Dref,
+                             OffsetX,
+                             OffsetY,
                              Mask},
                             Name);
 }
@@ -1642,7 +1681,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::QuerySizeLod3D,
       ImageCallKind::QuerySizeLodCubeArray,
       ImageCallKind::QueryLevels,
-      ImageCallKind::QuerySamples};
+      ImageCallKind::QuerySamples,
+      ImageCallKind::GatherCmp2D};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2265,6 +2305,22 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
     Result.ImageIndex = CI.getArgOperand(2);
+    break;
+  case ImageCallKind::GatherCmp2D:
+    if (CI.arg_size() != 12)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.Dref = CI.getArgOperand(8);
+    Result.OffsetX = CI.getArgOperand(9);
+    Result.OffsetY = CI.getArgOperand(10);
+    Result.Mask = CI.getArgOperand(11);
     break;
   }
   return Result;

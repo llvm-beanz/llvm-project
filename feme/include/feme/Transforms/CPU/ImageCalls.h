@@ -551,6 +551,18 @@ enum class ImageCallKind : uint8_t {
   /// only against a multisampled image, the one shape pair
   /// `QuerySizeLod2D`/`QueryLevels` above deliberately do not cover.
   QuerySamples,
+  /// `feme.cpu.image.gathercmp.2d.v4f32` (roadmap L7d): `Plain2D`
+  /// depth-comparison gather (SPIR-V `OpImageDrefGather` -- HLSL's
+  /// `Texture2D::GatherCmp()`). Unlike `SampleCmp2D`'s own single
+  /// filtered depth-comparison result, this returns a full `<4 x float>`:
+  /// one 0/1 comparison result per one of the four texels the same
+  /// bilinear "footprint" `SampleCmp2D` blends between would use (SPIR-V/
+  /// Vulkan's own fixed gather-footprint-and-ordering convention), never
+  /// blended together. Takes no `Lod`/`Bias`/`Grad`/`MinLod` operand at
+  /// all -- a gather instruction always operates at mip level 0 per the
+  /// SPIR-V spec, with no way to request otherwise -- so this kind's own
+  /// operand list is narrower than `SampleCmp2D`'s.
+  GatherCmp2D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -804,6 +816,22 @@ createSampleCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                   llvm::Value *Lod, llvm::Value *UseExplicitLod,
                   llvm::Value *Dref, llvm::Value *Bias, llvm::Value *OffsetX,
                   llvm::Value *OffsetY, llvm::Value *MinLodClamp,
+                  llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gathercmp.2d.v4f32` call (roadmap L7d):
+/// `Plain2D` depth-comparison gather. \p OffsetX/\p OffsetY are the same
+/// `ConstOffset` image operand `createSample2D`/`createSampleCmp2D`
+/// document -- pass zero constants for a caller with none to give (the
+/// no-offset `GatherCmp()` overload). Unlike `createSampleCmp2D`, there is
+/// no `Lod`/`UseExplicitLod`/`Bias`/`DUdX`/`DUdY`/`DVdX`/`DVdY`/
+/// `MinLodClamp` parameter at all: a gather instruction always operates
+/// at mip level 0 per the SPIR-V spec, with no way to request otherwise,
+/// so none of those concepts apply here.
+llvm::CallInst *
+createGatherCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                  llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                  llvm::Value *U, llvm::Value *V, llvm::Value *Dref,
+                  llvm::Value *OffsetX, llvm::Value *OffsetY,
                   llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
