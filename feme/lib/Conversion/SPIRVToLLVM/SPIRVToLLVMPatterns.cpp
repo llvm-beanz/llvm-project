@@ -628,7 +628,7 @@ public:
 };
 
 /// Converts `spirv.GroupNonUniformElect` (roadmap L7e) directly to
-/// `llvm.spv.wave.is_first_lane`: both are defined identically ("true only
+/// `llvm.spv.wave.is.first.lane`: both are defined identically ("true only
 /// in the invocation with the lowest id active in the group"), and this
 /// project's DXIL-origin frontend already lowers HLSL's `WaveIsFirstLane()`
 /// to exactly this same intrinsic (`feme/lib/Transforms/DXIL/OpRaising.cpp`),
@@ -658,7 +658,7 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
     Rewriter.replaceOp(
         Op, createIntrinsicCall(Rewriter, Op.getLoc(),
-                                "llvm.spv.wave.is_first_lane", ResultType,
+                                "llvm.spv.wave.is.first.lane", ResultType,
                                 {}));
     return mlir::success();
   }
@@ -716,11 +716,11 @@ public:
 };
 
 /// Converts `spirv.GroupNonUniformAllEqual` (roadmap L7e/L7i) directly to
-/// `llvm.spv.wave.all_equal`: both take the identical operand ("true if
+/// `llvm.spv.wave.all.equal`: both take the identical operand ("true if
 /// Value is equal for all active invocations"), and
 /// `spirv.GroupNonUniformAllEqualOp` is already constrained to `Subgroup`
 /// scope by its own `SPIRV_ExecutionScopeAttrIs` (see
-/// `SPIRVNonUniformOps.td`), matching `llvm.spv.wave.all_equal`'s own only
+/// `SPIRVNonUniformOps.td`), matching `llvm.spv.wave.all.equal`'s own only
 /// supported scope, so unlike `ElectConversionPattern`/
 /// `RotateConversionPattern` above there is no narrower scope to check here.
 /// HLSL's `WaveActiveAllEqual` already lowers to this same intrinsic from
@@ -728,7 +728,7 @@ public:
 /// which `feme::cpu::WaveUniformity`/`SIMDizePass` already fully support.
 ///
 /// A *vector* `Value` operand needs one extra step beyond a straight
-/// forward: unlike `llvm.spv.wave.all_equal`'s own vector shape (a
+/// forward: unlike `llvm.spv.wave.all.equal`'s own vector shape (a
 /// per-component `<W x i1>` result, matching HLSL's own `WaveActiveAllEqual
 /// (bool2/bool3/bool4)` semantics, which the DXIL-origin frontend already
 /// relies on -- see `OpRaising.cpp`'s own "overloaded on the operand, not
@@ -740,7 +740,7 @@ public:
 /// own wording ("the result is true if Value is equal for all ... "), a
 /// vector `Value` is compared as a whole -- equivalent to *every* component
 /// being equal across every active invocation, i.e. exactly the AND of
-/// `llvm.spv.wave.all_equal`'s own per-component result -- so this pattern
+/// `llvm.spv.wave.all.equal`'s own per-component result -- so this pattern
 /// calls the intrinsic to get that per-component `<W x i1>` first, then
 /// folds it down with `llvm.vector.reduce.and` to produce the single
 /// scalar `i1` this op's result type actually requires. (roadmap L7i,
@@ -771,7 +771,7 @@ public:
       mlir::Type ComponentResultType =
           mlir::VectorType::get(VecTy.getShape(), Rewriter.getI1Type());
       mlir::Value ComponentEqual = createIntrinsicCall(
-          Rewriter, Loc, "llvm.spv.wave.all_equal", ComponentResultType,
+          Rewriter, Loc, "llvm.spv.wave.all.equal", ComponentResultType,
           {Operand});
       Rewriter.replaceOpWithNewOp<mlir::LLVM::vector_reduce_and>(
           Op, ResultType, ComponentEqual);
@@ -779,7 +779,7 @@ public:
     }
 
     Rewriter.replaceOp(
-        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.all_equal",
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.all.equal",
                                 ResultType, {Operand}));
     return mlir::success();
   }

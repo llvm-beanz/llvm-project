@@ -1,11 +1,11 @@
 // RUN: feme-opt --feme-convert-spirv-to-llvm --split-input-file %s | FileCheck %s
 
 // Checks that `spirv.GroupNonUniformElect` (roadmap L7e) converts directly
-// to `llvm.spv.wave.is_first_lane`, the same intrinsic this project's
+// to `llvm.spv.wave.is.first.lane`, the same intrinsic this project's
 // DXIL-origin frontend already produces for HLSL's `WaveIsFirstLane()`.
 
 // CHECK-LABEL: llvm.func @elect
-// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.is_first_lane"() : () -> i1
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.is.first.lane"() : () -> i1
 // CHECK: llvm.return %[[RESULT]] : i1
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform], []> {
   spirv.func @elect() -> i1 "None" {
@@ -17,10 +17,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform]
 // -----
 
 // Checks the scalar variant of `spirv.GroupNonUniformAllEqual` (roadmap
-// L7e), converting directly to `llvm.spv.wave.all_equal`.
+// L7e), converting directly to `llvm.spv.wave.all.equal`.
 
 // CHECK-LABEL: llvm.func @all_equal_scalar
-// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.all_equal"(%arg0) : (i32) -> i1
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.all.equal"(%arg0) : (i32) -> i1
 // CHECK: llvm.return %[[RESULT]] : i1
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformVote], []> {
   spirv.func @all_equal_scalar(%value : i32) -> i1 "None" {
@@ -77,12 +77,12 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
 
 // Checks the *vector*-operand variant of `spirv.GroupNonUniformAllEqual`
 // (roadmap L7i): the intrinsic call itself yields a per-component
-// `vector<2xi1>` (matching `llvm.spv.wave.all_equal`'s own
+// `vector<2xi1>` (matching `llvm.spv.wave.all.equal`'s own
 // `LLVMScalarOrSameVectorWidth<0, i1>` shape), which then gets AND-reduced
 // down to the single scalar `i1` this op's result type actually requires.
 
 // CHECK-LABEL: llvm.func @all_equal_vector
-// CHECK: %[[COMPONENTS:.*]] = llvm.call_intrinsic "llvm.spv.wave.all_equal"(%arg0) : (vector<2xi32>) -> vector<2xi1>
+// CHECK: %[[COMPONENTS:.*]] = llvm.call_intrinsic "llvm.spv.wave.all.equal"(%arg0) : (vector<2xi32>) -> vector<2xi1>
 // CHECK: %[[RESULT:.*]] = "llvm.intr.vector.reduce.and"(%[[COMPONENTS]]) : (vector<2xi1>) -> i1
 // CHECK: llvm.return %[[RESULT]] : i1
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformVote], []> {
