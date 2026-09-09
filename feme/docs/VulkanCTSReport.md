@@ -33758,3 +33758,59 @@ touched. `FeMeCPUDesign.md`: updated -- the "Phase 4: Widening" construct-mappin
 `alloca T` row previously documented an aspirational, unimplemented design; it now describes the
 real, narrowly-scoped implementation this fix adds (only for a masked-load/masked-store-touched
 alloca, not universally for every alloca in every function).
+
+## L7b: dxc's unpadded SampleCmp coordinate width
+
+**Real, confirmed gap found via a genuine runtime re-run** (not CTS this time, but the same
+reduce-first methodology) of offload-test-suite's own pre-existing `Vk.SampledTexture2D` suite
+(13 real dxc-compiled HLSL cases) against the real `feme-vk` ICD, correctly `VK_ICD_FILENAMES`-
+selected: 10/13 passed outright before this fix, confirming this row's own original filing
+hypothesis (a plain combined-image-sampler binding shape being broken) was **wrong** -- that
+shape already worked. The 3 real failures found instead: `SampleCmp.test.yaml` (root-caused and
+fixed by this row), and `Gather.test.yaml`/`GatherCmp.test.yaml` (unrelated, separately-scoped
+gaps, split out to roadmap rows L7g/L7d).
+
+**Fix**: `SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses` widened its depth-comparison
+(`Dref`) Coordinate-operand width check to accept *either* glslang's own redundantly-padded width
+(`SampleCoordWidth + 1`, the only width ever tested before this session, exclusively against
+`dEQP-VK.glsl.texture_functions.*` glslang/GLSL-originated SPIR-V) *or* dxc's own real, unpadded
+`SampleCoordWidth` -- for every shape but `Plain1D` (excluded: its own unconditional, not-
+shape-gated `C0`/`C1` extraction in `lowerImageAccesses` cannot consume a bare-scalar coordinate,
+and no real dxc `Texture1D::SampleCmp` case is confirmed to exist).
+
+- Real offload-test-suite before/after (`Vk.SampledTexture2D` group, correctly-selected `feme`
+  ICD): **10/13 -> 11/13 Passed** -- `SampleCmp.test.yaml` now Passes; `Gather.test.yaml`/
+  `GatherCmp.test.yaml` remain the 2 still-failing, separately-tracked gaps.
+- `ninja -C build2 check-feme` (ccache + assertions build, all target dependencies auto-built):
+  **2864 discovered, 2805 Passed, 59 pre-existing `Unsupported`, 0 `Failed`** (up by exactly 3 new
+  unit tests -- `LowersASampleCmpWithDxcsUnpaddedCoordWidth`, a corrected
+  `LeavesASampleCmpWithNonSpecCoordWidthAlone`, `LeavesAPlain1DSampleCmpWithUnpaddedCoordWidthAlone`
+  -- and 1 new lit test, `spirv-resource-lowering-image-samplecmp-dxc-unpadded.ll`).
+- Real `deqp-vk` regression sweep of the CTS group most directly exercising the pre-existing,
+  still-accepted glslang-padded-width path this fix must not disturb --
+  `dEQP-VK.glsl.texture_functions.texture.*sampler2dshadow*` (8 cases): **4/8 Passed, 4/8
+  NotSupported (`sparse_*`, pre-existing, unrelated "Format not supported" gap), 0 Failed** --
+  identical to this exact group's own already-established baseline (confirmed by code inspection:
+  the fix only ever *adds* a new alternative acceptance branch, the pre-existing glslang-padded-
+  width branch and every downstream lowering step for it are completely untouched).
+- A broader real `deqp-vk` sanity sweep, `dEQP-VK.glsl.texture_functions.*shadow*` (878 cases,
+  every shadow-sampling variant/wrap-mode/stage combination in this CTS suite): **394/878 Passed
+  (44.9%), 61/878 Failed (6.9%, all pre-existing, unrelated gaps -- e.g. `VK_KHR_maintenance8`/
+  sparse-format `NotSupported` cases mixed in with a handful of already-tracked, unrelated
+  legalization gaps), 423/878 NotSupported (48.2%)** -- no case in this entire 878-case sweep
+  reaches a *new* failure mode this fix could plausibly cause, confirming no regression at scale.
+
+**Roadmap**: L7b struck through as done, with the corrected root-cause writeup (the row's own
+original combined-image-sampler-binding hypothesis was wrong; the real gap was a dxc-vs-glslang
+depth-comparison coordinate-width mismatch) replacing the original filing text. L7d (`spirv.
+ImageDrefGather` has no conversion pattern) and L7g (the `unhandled opcode`/GLSL.std.450
+catch-all) both updated in place with this session's own newly-confirmed, concrete repros
+(`GatherCmp.test.yaml` and `Gather.test.yaml`'s `unhandled opcode 96` respectively) rather than
+filed as brand-new rows, since both already existed as the correct home for this exact gap.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no change needed -- a pure
+internal CPU resource-lowering coordinate-width-acceptance fix, no Vulkan feature or extension
+bit touched. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update needed --
+the existing mentions of `SampleCmp`/`Dref`/`ImageDrefGather` are historical narrative describing
+the initial SPIR-V-op/pattern gaps this project closed over time (roadmap L25/L31/L46 etc.), not
+living documentation of the coordinate-width acceptance behavior this row corrects.
