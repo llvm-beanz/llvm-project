@@ -74952,3 +74952,53 @@ has been the single fastest way to get from "a confusing runtime symptom" to "th
 it." It's worth treating this as this project's own established, load-bearing debugging tool rather than
 a one-off trick — the discipline of reverting it before any real commit (so it never accidentally ships as
 dead, confusing code) seems to be holding up fine across three separate sessions now.
+
+# L7q: `maxComputeWorkGroupSize[2]` vs. `maxSubgroupSize` limits inconsistency
+
+This session was a nice change of pace from most of the recent L7-series work: no IR reduction, no `gdb`
+walk, no reduced repro shader at all. The whole root cause fell out of a pure CTS-source read once
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` pointed at the exact failing validation check by name
+("maxComputeWorkGroupSize/Invocations"). Reading `vktSubgroupsTestsUtils.cpp`'s own
+`makeComputeOrMeshTestRequiredSubgroupSize` made the shape of the problem obvious almost immediately: it
+loops over every power-of-two subgroup size the device advertises and, for each one, tries all three
+single-dimension local-size shapes (`{size,1,1}`, `{1,size,1}`, `{1,1,size}`) in turn. That's not an
+accident or an unusual test author's choice — it's the CTS deliberately confirming a device's own
+advertised `maxComputeWorkGroupSize` limits are internally consistent with its own advertised
+`maxSubgroupSize`, in every dimension, not just the "obvious" first one. This device's own limits weren't:
+`maxComputeWorkGroupSize[2]` had been left at the bare Vulkan spec floor (64) since long before
+`maxSubgroupSize` was ever raised to 128, and X/Y's own limits had already been widened to 1024 by roadmap
+L2 without anyone revisiting Z at the same time. It's the kind of bug that's invisible by construction
+until a test happens to specifically probe the dimension nobody thought to double-check — which is exactly
+what this CTS test family does, deliberately and systematically.
+
+The nicest part of this session was how directly the fix could be validated for correctness rather than
+just "did the crash/error go away." A `git stash`/rebuild/re-run/`git stash pop`/rebuild round-trip made it
+possible to prove, not just assert, that this one-line limits change was the entire cause of every behavior
+difference observed — both the intended fix (all 4 `subgroupmemorybarrier*_requiredsubgroupsize` cases) and
+the unexpected bonus one (all 8 `builtin_var` cases, closing L7n). Without that before/after isolation it
+would have been easy to over-claim credit for the `builtin_var` non-`_requiredsubgroupsize` case too, which
+turned out to already be passing independently, fixed by some earlier, never individually verified session
+along the way. The lesson worth keeping for future sessions: when a fix's aggregate CTS numbers move by more
+than the count of cases it was aimed at, don't just take the win — isolate exactly which specific cases
+moved and why, because it's easy to accidentally attribute an already-existing fix to whatever change
+happens to be sitting in the working tree at the time you finally get around to re-checking a stale roadmap
+row.
+
+This also reinforces something the L7-series has been demonstrating repeatedly by now: a real aggregate
+sweep against the actual CTS mustpass case list, with careful before/after arithmetic reconciliation against
+the previous session's own recorded baseline, is worth doing even when a change feels "obviously safe" (a
+pure limits increase, in this case). It cost relatively little time and turned "I fixed the 4 cases I was
+asked about" into "I fixed those 4, plus 8 more nobody had connected to this row, with zero regressions
+anywhere else in 9,158 real cases" — a substantially stronger and more honest claim, backed by real numbers
+rather than an assumption that a limits-only change couldn't possibly affect anything else.
+
+Filing-hygiene note for whoever reads the roadmap next: L7n and L7q were filed independently, in different
+sessions, months apart in roadmap-numbering terms, and nothing about either row's own text would have led a
+reader to suspect they shared a root cause — one was framed as a "runtime value verification" gap, the
+other as a "pipeline creation limits" gap, and they don't share any file, function, or CTS test-group name
+in their own descriptions. The only way this connection surfaced at all was doing the git-stash-based
+isolation out of general diligence, not because anything about L7n's own filing hinted at this. Worth
+keeping in mind for future sessions closing out L-series/H-series rows: a "distinct, unrelated-sounding"
+open row elsewhere in the roadmap may still turn out to share a root cause with whatever's currently being
+fixed, and it's worth at least a quick aggregate-sweep glance at nearby open rows before declaring a fix
+fully scoped and done.
