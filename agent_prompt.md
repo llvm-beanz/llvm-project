@@ -42,31 +42,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7d from the roadmap or other prerequisites blocking the
+Can you work on L7e from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`spirv.ImageDrefGather` has no conversion pattern**, split out of L7's own
-> original filing text (this op is a distinct SPIR-V core opcode, not a
-> GLSL.std.450 extended-instruction-set builtin, so is tracked separately from
-> L7c's own cluster despite being adjacent in L7's original prose). UPDATE
-> (L7b's own closing investigation this session): a real, concrete repro is now
-> confirmed -- offload-test-suite's own
-> `Vk.SampledTexture2D.GatherCmp.test.yaml` (a real dxc-compiled HLSL
-> `Texture2D::GatherCmp()` call, confirmed via a real `check-hlsl-feme-vk`
-> re-run) fails with exactly `failed to legalize operation
-> 'spirv.ImageDrefGather'`, confirming this row's own original filing (the op
-> itself already exists in upstream MLIR -- confirmed present in
-> `SPIRVBase.td`/`ImageOps.cpp` -- but
-> `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` has no legalization
-> pattern for it at all, no `ImageDrefGatherPattern` class, unlike the extensive
-> family of `ImageSample*Pattern`/`ImageSampleDref*Pattern` classes that do
-> exist). Needs its own scoping pass: likely a new `ImageDrefGatherPattern`
-> (mirroring `ImageSampleDrefImplicitLodPattern`'s own shape) converting to a
-> new `llvm.spv.resource.gathercmp`-style intrinsic, plus a corresponding new
-> `hasOnlySupportedImageUses`/`lowerImageAccesses` case in
-> `SPIRVResourceLowering.cpp` and a new `feme.cpu.image.gathercmp.*` CPU runtime
-> helper (`ImageCalls.h`) -- a real new codegen surface this project has never
-> needed before (gather returns 4 texels' worth of one component each, a
-> different intrinsic shape than an ordinary filtered sample). Note this is
-> distinct from `spirv.ImageSampleDrefImplicitLodOp`/`ImageSampleDrefGradOp` et
-> al., which this file already has patterns for
+> **Several `spirv.GroupNonUniform*` wave-op variants have no legalization
+> pattern**: `IMul`/`IAdd`/`AllEqual`/`Shuffle`/`Elect`, across multiple int
+> widths, split out of L7's own original filing text. The
+> `BitwiseAnd`/`BitwiseOr` pair already has a narrower, tracked
+> `feme-cpu-simdize`-side gap at H6g-b-a-i-a-i-b's own citation, but the
+> *legalization* gap for these other variants is new and untracked anywhere
+> else; `IntegerGroupNonUniformReducePattern` (`SPIRVToLLVMPatterns.cpp`)
+> already covers
+> `IAdd`/`IMul`/`SMin`/`UMin`/`SMax`/`UMax`/`BitwiseAnd`/`BitwiseOr`/`BitwiseXor`'s
+> own *reduce* form -- this row's own remaining scope is specifically
+> `AllEqual`/`Shuffle`/`Elect` (no reduce-shaped pattern exists for any of these
+> three at all, of any operand width) plus confirming whether `IMul`/`IAdd`'s
+> own *non-reduce* forms (e.g. `GroupNonUniformBallot`-adjacent
+> broadcast/quad-swap variants) are also unhandled, not yet individually reduced
+> this session
