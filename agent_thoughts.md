@@ -73534,3 +73534,109 @@ turn up in some future session, it'll need its own fresh filing with its own rea
 a continuation of this investigation. This mirrors an established project precedent (e.g. roadmap
 L64's own "VulkanBuffer framing was a misattribution" note): a milestone's own filed guess about
 root cause is not authoritative, and a real reduction can -- and should -- override it.
+
+# L83 session: RowMajor RWStructuredBuffer<matrix> storage-layout fix
+
+## Starting point
+
+L83, as filed by the prior session, bundled 4 failing `Basic/Matrix` cases under one guessed root
+cause ("matrix setter/groupshared-swizzle storage-order or indexing bug"), explicitly flagged as
+unreduced. Per this project's own established methodology, the first step was a real reduction,
+not trusting that guess.
+
+## Reduction
+
+Used `dxc -fvk-use-dx-layout -spirv` on a minimal repro isolating `matrix_m-based_setter.test`'s
+own shape (a `float3x4` built via scalar-setter swizzles from a flat `RWBuffer<float>`, stored to
+a `RWStructuredBuffer<float3x4>`), then `spirv-dis` to read the emitted SPIR-V by hand. Found the
+sole wrapper-struct member decorated `RowMajor` with `MatrixStride=12` -- a real, representable
+physical layout. Cross-checked against `feme-translate --import-spirv` and
+`feme-opt --feme-convert-spirv-to-llvm`'s own output: the conversion silently used the natural
+column-major layout instead, never consulting the `RowMajor`/`MatrixStride` decorations at all.
+
+Checked `isMatrixMemberLayoutRepresentable` (the existing safety net that *does* handle
+`RowMajor` for a different shape) and found it only runs against a *direct* struct member access
+chain (the `cbuffer`/`ConstantBuffer<T>` shape) -- never against the one-level-of-`RuntimeArrayType`
+-wrapped shape `RWStructuredBuffer<matrix>` actually produces. That gap is why this fell through
+silently instead of hitting the existing (reject-only) diagnostic.
+
+## Fix
+
+Two new patterns, `RowMajorMatrixStorePattern`/`RowMajorMatrixLoadPattern`, registered at
+`FeMeBenefit` so they override upstream's own generic `spirv.Store`/`spirv.Load` patterns for
+just this one access shape (detected by a new `getRowMajorMatrixAccess` helper, generalizing
+`isMatrixMemberLayoutRepresentable`'s own decoration check). Design choice: keep the matrix's
+"logical" (natural, column-major, vector-based) representation everywhere else in the IR
+unchanged, and transpose only at the exact point a value crosses into/out of real memory -- this
+keeps every other existing pattern (arithmetic, `CompositeConstruct`/`Extract`, etc.) working
+unmodified, rather than threading a "this matrix is physically row-major" flag through the whole
+conversion.
+
+## A real pitfall found during the first test run
+
+The first implementation used `vector<NumColumns x T>` as the physical row type, reusing the
+existing `transposeMatrixValue` helper (refactored out of `TransposePattern` for this purpose).
+Running the real `check-hlsl-vk-basic-matrix` target showed the transpose *ordering* was now
+right, but each group of 3 real elements had a spurious trailing 0, and the matrix's last row was
+missing entirely from the buffer. Root cause: this target's data layout pads a non-power-of-two-
+width vector's own in-memory (store/alloc) size up to the next power of two --
+`vector<3xf32>` occupies 16 bytes, not 12 -- so an array of these vectors has the wrong stride
+entirely. Switched the physical type to a flat, packed `!llvm.array<NumColumns x T>` of scalars
+instead (no such padding for array element layout), and rewrote the store/load patterns to
+build/consume it directly via nested `extractelement`/`insertvalue` and `extractvalue`/
+`insertelement` loops rather than reusing the vector-based helper. This fixed it cleanly.
+
+## Verification
+
+- New lit test (`spirv-to-llvm-matrix-rowmajor-buffer-block.mlir`) covering the round-trip at the
+  `feme-opt` level, iterated once on FileCheck captures (an early attempt to name the physical/
+  logical SSA values directly broke because the same array type appears earlier in the IR from an
+  intermediate `insertvalue`; loosened those captures and matched the actual `llvm.store`/
+  `llvm.load`/`llvm.return` lines instead).
+- `ninja -C build2 check-feme` (ccache, assertions build, all target deps correctly building
+  before the tests run): 2800/2800 Passed, 59 pre-existing Unsupported, 0 Failed.
+- Real `check-hlsl-vk-basic-matrix` (offload-test-suite, real feme ICD, rebuilt `feme_vulkan`/
+  `feme-opt`/`feme-translate` first since none of these targets pull that dependency in
+  automatically): both setter cases now Pass. The other 2 originally-filed L83 cases
+  (`matrix_groupthread_swizzle_{one,zero}_based`) still fail.
+- Real A/B `git stash` comparison of the full `check-hlsl-vk` suite (rebuilding the ICD both
+  times): 235->237 Passed, 142->140 Failed -- exactly +2/-2, no regressions anywhere else in 664
+  discovered real cases.
+- Real `deqp-vk` sweep targeting `dEQP-VK.ssbo.layout.single_basic_array.*row_major*` (108 cases,
+  the closest real CTS analog: a single, dynamically-indexed array of row-major matrices in an
+  SSBO) -- had to first dump the full `dEQP-VK.ssbo.layout.*` group caselist and grep for real
+  leaf names, since `--deqp-case="*matrix*row_major*"` matches nothing (leaf names use
+  `mat2`/`mat3x2`/etc., never the literal substring "matrix"). Result: 0 Pass/72 Fail/36 Not
+  Supported, byte-for-byte identical before and after the fix (confirmed via another `git stash`
+  A/B). Zero real CTS payoff for this fix, for the same reason a prior L7a session already
+  documented for a different fix: `deqp-vk` compiles every case from GLSL via `glslang`, which
+  evidently doesn't emit the exact `dxc`-specific SPIR-V shape this fix's patterns match. Did not
+  chase the 72 pre-existing failures further -- a distinct, unexamined gap, out of this row's own
+  scope.
+
+## The other 2 originally-filed L83 cases are a distinct bug
+
+Reduced `matrix_groupthread_swizzle_{one,zero}_based.test` the same way (dxc -> spirv-dis /
+feme-translate --import-spirv). No `RWStructuredBuffer`/storage decoration is involved at all --
+these use plain `Function`-storage local `int4x4` matrices. `dxc` itself SSA-promotes/scalarizes
+each local matrix into a 5-way-phi'd `vector<4xsi32>` through nested `spirv.Switch` dispatch on a
+value loaded from the `LocalInvocationIndex` builtin (`GI`). The observed real failure -- every
+lane's output reads back as the very first thread's own value (`In[0]=1`) instead of varying per
+thread -- is the textbook signature of a value being wrongly classified as *uniform* somewhere in
+feme's own divergence/uniformity analysis, broadcasting lane 0's result to every lane instead of
+correctly widening per-lane. This is a categorically different kind of bug from L83's own storage-
+layout root cause (SIMDize/uniformity vs. SPIR-V-to-LLVM memory-layout conversion), so rather than
+force a second, unrelated fix into the same commit/session, filed it as a new roadmap row, L84,
+with the concrete next step already scoped (a `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR` capture of the
+pre-SIMDize IR to confirm exactly which value/branch condition is misclassified, most likely
+requiring a fix in `WaveUniformity.cpp` rather than anywhere in the SPIR-V-to-LLVM conversion
+code this session actually touched).
+
+## Documentation decisions
+
+`FeMeVulkanDesign.md` was checked for any existing "RowMajor"/"MatrixStride" text this fix might
+contradict or need to correct -- none exists, so this was a straightforward gap-fill, not a
+design deviation requiring a design-doc correction. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` are both generated feature/extension-surface trackers; this fix
+touches neither (a pure internal conversion-correctness fix), so both were left untouched, with
+that reasoning recorded explicitly in the `VulkanCTSReport.md` entry rather than left implicit.
