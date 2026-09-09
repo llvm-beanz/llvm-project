@@ -45,3 +45,68 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
     spirv.ReturnValue %0 : f32
   }
 }
+
+// -----
+
+// Checks that `spirv.GroupNonUniformAll`/`Any` (roadmap L7i) convert
+// directly to `llvm.spv.wave.all`/`any`.
+
+// CHECK-LABEL: llvm.func @vote_all
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.all"(%arg0) : (i1) -> i1
+// CHECK: llvm.return %[[RESULT]] : i1
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformVote], []> {
+  spirv.func @vote_all(%predicate : i1) -> i1 "None" {
+    %0 = spirv.GroupNonUniformAll <Subgroup> %predicate : i1
+    spirv.ReturnValue %0 : i1
+  }
+}
+
+// -----
+
+// CHECK-LABEL: llvm.func @vote_any
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.any"(%arg0) : (i1) -> i1
+// CHECK: llvm.return %[[RESULT]] : i1
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformVote], []> {
+  spirv.func @vote_any(%predicate : i1) -> i1 "None" {
+    %0 = spirv.GroupNonUniformAny <Subgroup> %predicate : i1
+    spirv.ReturnValue %0 : i1
+  }
+}
+
+// -----
+
+// Checks the *vector*-operand variant of `spirv.GroupNonUniformAllEqual`
+// (roadmap L7i): the intrinsic call itself yields a per-component
+// `vector<2xi1>` (matching `llvm.spv.wave.all_equal`'s own
+// `LLVMScalarOrSameVectorWidth<0, i1>` shape), which then gets AND-reduced
+// down to the single scalar `i1` this op's result type actually requires.
+
+// CHECK-LABEL: llvm.func @all_equal_vector
+// CHECK: %[[COMPONENTS:.*]] = llvm.call_intrinsic "llvm.spv.wave.all_equal"(%arg0) : (vector<2xi32>) -> vector<2xi1>
+// CHECK: %[[RESULT:.*]] = "llvm.intr.vector.reduce.and"(%[[COMPONENTS]]) : (vector<2xi1>) -> i1
+// CHECK: llvm.return %[[RESULT]] : i1
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformVote], []> {
+  spirv.func @all_equal_vector(%value : vector<2xi32>) -> i1 "None" {
+    %0 = spirv.GroupNonUniformAllEqual <Subgroup> %value : vector<2xi32>, i1
+    spirv.ReturnValue %0 : i1
+  }
+}
+
+// -----
+
+// Checks that `spirv.GroupNonUniformShuffleXor` (roadmap L7i) converts to
+// an `llvm.spv.subgroup.local.invocation.id`-derived xor'ed id fed into
+// `llvm.spv.wave.readlane`, the same "compute an id, then shuffle" shape
+// `RotateConversionPattern` (roadmap F2) already established.
+
+// CHECK-LABEL: llvm.func @shuffle_xor
+// CHECK: %[[ID:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.local.invocation.id"() : () -> i32
+// CHECK: %[[TARGET:.*]] = llvm.xor %[[ID]], %arg1 : i32
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.readlane"(%arg0, %[[TARGET]]) : (f32, i32) -> f32
+// CHECK: llvm.return %[[RESULT]] : f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformShuffle], []> {
+  spirv.func @shuffle_xor(%value : f32, %mask : i32) -> f32 "None" {
+    %0 = spirv.GroupNonUniformShuffleXor <Subgroup> %value, %mask : f32, i32
+    spirv.ReturnValue %0 : f32
+  }
+}

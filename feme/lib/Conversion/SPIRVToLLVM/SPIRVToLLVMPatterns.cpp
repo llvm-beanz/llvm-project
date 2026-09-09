@@ -664,20 +664,71 @@ public:
   }
 };
 
-/// Converts `spirv.GroupNonUniformAllEqual` (roadmap L7e) directly to
-/// `llvm.spv.wave.all_equal` for a *scalar* operand: both produce an
-/// identical `i1` result ("true if Value is equal for all active
-/// invocations"), and `spirv.GroupNonUniformAllEqualOp` is already
-/// constrained to `Subgroup` scope by its own `SPIRV_ExecutionScopeAttrIs`
-/// (see `SPIRVNonUniformOps.td`), matching `llvm.spv.wave.all_equal`'s own
-/// only supported scope, so unlike `ElectConversionPattern`/
+/// Converts `spirv.GroupNonUniformAll`/`GroupNonUniformAny` (roadmap L7i,
+/// split out of L7e's own closing session) directly to
+/// `llvm.spv.wave.all`/`llvm.spv.wave.any`: both pairs are defined
+/// identically ("true if Predicate is true for all/any active
+/// invocations"), operating on a plain scalar `i1` (per the dialect's own
+/// `SPIRV_Bool:$predicate`/`SPIRV_Bool:$result` -- unlike
+/// `GroupNonUniformAllEqualOp`, neither op has a vector-operand shape to
+/// worry about at all), and `spirv.GroupNonUniformAll`/`AnyOp` are already
+/// constrained to `Subgroup` scope by their own `SPIRV_ExecutionScopeAttrIs`
+/// (see `SPIRVNonUniformOps.td`), matching `llvm.spv.wave.all`/`any`'s own
+/// only supported scope, so no scope check is needed here (mirroring
+/// `AllEqualConversionPattern` below's own reasoning for the same dialect
+/// constraint). HLSL's `WaveActiveAllTrue`/`AnyTrue` already lower to these
+/// same intrinsics from the DXIL-origin frontend
+/// (`feme/lib/Transforms/DXIL/OpRaising.cpp`), which
+/// `feme::cpu::WaveUniformity`/`SIMDizePass` already fully support -- like
+/// `Elect`/`AllEqual`/`Shuffle` before it, this needed no new CPU-side
+/// codegen surface at all.
+template <typename GroupOp>
+constexpr llvm::StringLiteral getVoteIntrinsicName();
+template <>
+constexpr llvm::StringLiteral
+getVoteIntrinsicName<mlir::spirv::GroupNonUniformAllOp>() {
+  return "llvm.spv.wave.all";
+}
+template <>
+constexpr llvm::StringLiteral
+getVoteIntrinsicName<mlir::spirv::GroupNonUniformAnyOp>() {
+  return "llvm.spv.wave.any";
+}
+
+template <typename GroupOp>
+class VoteConversionPattern : public mlir::SPIRVToLLVMConversion<GroupOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<GroupOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(GroupOp Op, typename GroupOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Op.getLoc(),
+                                getVoteIntrinsicName<GroupOp>(), ResultType,
+                                {Adaptor.getPredicate()}));
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GroupNonUniformAllEqual` (roadmap L7e/L7i) directly to
+/// `llvm.spv.wave.all_equal`: both take the identical operand ("true if
+/// Value is equal for all active invocations"), and
+/// `spirv.GroupNonUniformAllEqualOp` is already constrained to `Subgroup`
+/// scope by its own `SPIRV_ExecutionScopeAttrIs` (see
+/// `SPIRVNonUniformOps.td`), matching `llvm.spv.wave.all_equal`'s own only
+/// supported scope, so unlike `ElectConversionPattern`/
 /// `RotateConversionPattern` above there is no narrower scope to check here.
 /// HLSL's `WaveActiveAllEqual` already lowers to this same intrinsic from
 /// the DXIL-origin frontend (`feme/lib/Transforms/DXIL/OpRaising.cpp`),
 /// which `feme::cpu::WaveUniformity`/`SIMDizePass` already fully support.
 ///
-/// A *vector* operand is deliberately declined rather than forwarded
-/// unchanged: unlike `llvm.spv.wave.all_equal`'s own vector shape (a
+/// A *vector* `Value` operand needs one extra step beyond a straight
+/// forward: unlike `llvm.spv.wave.all_equal`'s own vector shape (a
 /// per-component `<W x i1>` result, matching HLSL's own `WaveActiveAllEqual
 /// (bool2/bool3/bool4)` semantics, which the DXIL-origin frontend already
 /// relies on -- see `OpRaising.cpp`'s own "overloaded on the operand, not
@@ -685,14 +736,20 @@ public:
 /// always a single scalar `SPIRV_Bool` even when `Value` is a vector (per
 /// the SPIR-V spec's own "Result Type must be a Boolean type" text, mirrored
 /// verbatim by the dialect's `results = (outs SPIRV_Bool:$result)`),
-/// collapsing the whole vector into one true/false rather than comparing it
-/// component-wise -- a real semantic mismatch with `llvm.spv.wave.all_equal`
-/// this pattern must not paper over. No known HLSL/dxc-compiled shape in
-/// this ICD's frontend surface reaches this case today (dxc's own SPIR-V
-/// backend scalarizes a vector `WaveActiveAllEqual` into one
-/// `OpGroupNonUniformAllEqual` call per component, each with a scalar
-/// operand, rather than a single vector-operand call), so this is declined
-/// with a clear diagnostic instead of silently miscompiled.
+/// collapsing the whole vector into one true/false. Per the SPIR-V spec's
+/// own wording ("the result is true if Value is equal for all ... "), a
+/// vector `Value` is compared as a whole -- equivalent to *every* component
+/// being equal across every active invocation, i.e. exactly the AND of
+/// `llvm.spv.wave.all_equal`'s own per-component result -- so this pattern
+/// calls the intrinsic to get that per-component `<W x i1>` first, then
+/// folds it down with `llvm.vector.reduce.and` to produce the single
+/// scalar `i1` this op's result type actually requires. (roadmap L7i,
+/// closing the vector-operand gap `AllEqualConversionPattern` originally
+/// declined in L7e: no known dxc-compiled shape needs it -- dxc's own
+/// SPIR-V backend scalarizes a vector `WaveActiveAllEqual` into one call
+/// per component instead -- but `dEQP-VK.subgroups.vote.*`'s own
+/// `bvec2`-`bvec4`/`vec8` type matrix genuinely does, via glslang's
+/// `subgroupAllEqual`.)
 class AllEqualConversionPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::GroupNonUniformAllEqualOp> {
@@ -704,18 +761,26 @@ public:
   matchAndRewrite(mlir::spirv::GroupNonUniformAllEqualOp Op,
                   OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (mlir::isa<mlir::VectorType>(Adaptor.getValue().getType()))
-      return Rewriter.notifyMatchFailure(
-          Op, "a vector operand's own scalar-Boolean-result semantics do "
-              "not match llvm.spv.wave.all_equal's vector-result shape");
-
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Operand = Adaptor.getValue();
+    if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(Operand.getType())) {
+      mlir::Type ComponentResultType =
+          mlir::VectorType::get(VecTy.getShape(), Rewriter.getI1Type());
+      mlir::Value ComponentEqual = createIntrinsicCall(
+          Rewriter, Loc, "llvm.spv.wave.all_equal", ComponentResultType,
+          {Operand});
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::vector_reduce_and>(
+          Op, ResultType, ComponentEqual);
+      return mlir::success();
+    }
+
     Rewriter.replaceOp(
-        Op, createIntrinsicCall(Rewriter, Op.getLoc(),
-                                "llvm.spv.wave.all_equal", ResultType,
-                                {Adaptor.getValue()}));
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.all_equal",
+                                ResultType, {Operand}));
     return mlir::success();
   }
 };
@@ -757,6 +822,59 @@ public:
         Op, createIntrinsicCall(Rewriter, Op.getLoc(),
                                 "llvm.spv.wave.readlane", ResultType,
                                 {Adaptor.getValue(), Adaptor.getId()}));
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GroupNonUniformShuffleXor` (roadmap L7i, split out of
+/// L7e's own closing session) into the equivalent target-invocation-id
+/// arithmetic the SPIR-V spec itself defines for this op ("the current
+/// invocation's id within the group xor'ed with Mask") followed by an
+/// `llvm.spv.wave.readlane` shuffle to that invocation -- the identical
+/// "compute an id, then shuffle to it" shape `RotateConversionPattern`
+/// (roadmap F2) already established, just with XOR instead of that
+/// pattern's own masked rotate arithmetic. Unlike
+/// `GroupNonUniformShuffleUp`/`DownOp` (a separate,
+/// `GroupNonUniformShuffleRelative`-gated capability this pattern
+/// deliberately does not touch -- see this row's own roadmap text),
+/// `GroupNonUniformShuffleXorOp` shares `ShuffleOp`'s own
+/// `GroupNonUniformShuffle` capability, so closing it (alongside plain
+/// `Shuffle`) is what actually completes `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`'s
+/// own backing op set. Only `Subgroup` execution scope is implemented,
+/// mirroring `ShuffleConversionPattern`/`ElectConversionPattern` above.
+class ShuffleXorConversionPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::GroupNonUniformShuffleXorOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GroupNonUniformShuffleXorOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GroupNonUniformShuffleXorOp Op,
+                  OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getExecutionScope() != mlir::spirv::Scope::Subgroup)
+      return Rewriter.notifyMatchFailure(
+          Op, "workgroup-scope shuffle-xor is not supported");
+
+    mlir::Type I32 = Rewriter.getI32Type();
+    if (Adaptor.getMask().getType() != I32)
+      return Rewriter.notifyMatchFailure(
+          Op, "mask must be 32-bit (as every known producer of this op "
+              "emits)");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value LocalId = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.subgroup.local.invocation.id", I32, {});
+    mlir::Value TargetId =
+        mlir::LLVM::XOrOp::create(Rewriter, Loc, LocalId, Adaptor.getMask());
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.readlane",
+                                ResultType, {Adaptor.getValue(), TargetId}));
     return mlir::success();
   }
 };
@@ -7007,7 +7125,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ControlBarrierConversionPattern,
       DemoteToHelperInvocationConversionPattern, DotConversionPattern,
       ElectConversionPattern, AllEqualConversionPattern,
-      ShuffleConversionPattern,
+      VoteConversionPattern<mlir::spirv::GroupNonUniformAllOp>,
+      VoteConversionPattern<mlir::spirv::GroupNonUniformAnyOp>,
+      ShuffleConversionPattern, ShuffleXorConversionPattern,
       EmitVertexConversionPattern, EndPrimitiveConversionPattern,
       ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
       ImageDrefGatherPattern, ImageFetchPattern, ImageFetchLodPattern,

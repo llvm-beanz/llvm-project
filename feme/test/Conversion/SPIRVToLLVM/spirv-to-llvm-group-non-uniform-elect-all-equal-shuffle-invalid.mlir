@@ -29,17 +29,23 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
 
 // -----
 
-// `AllEqualConversionPattern` (roadmap L7e) declines a *vector* operand:
-// `spirv.GroupNonUniformAllEqualOp`'s result is always a single scalar
-// `SPIRV_Bool` even for a vector `Value` (collapsing the whole vector into
-// one true/false), a real semantic mismatch with `llvm.spv.wave.all_equal`'s
-// own per-component vector-result shape that this pattern must not paper
-// over -- see the pattern's own doc comment for the full reasoning.
+// `spirv.GroupNonUniformAllOp`/`AnyOp` (roadmap L7i) have no `Workgroup`
+// negative-scope test here: per `SPIRVNonUniformOps.td`'s own
+// `SPIRV_ExecutionScopeAttrIs<"execution_scope", ["Subgroup"]>` trait,
+// `Workgroup` scope is rejected by the dialect's own verifier before this
+// pattern ever runs, so `VoteConversionPattern` has no scope check of its
+// own to exercise (see its doc comment for the full reasoning).
 
-spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformVote], []> {
-  spirv.func @vector_all_equal(%value : vector<2xi32>) -> i1 "None" {
-    // expected-error@+1 {{failed to legalize operation 'spirv.GroupNonUniformAllEqual' that was explicitly marked illegal}}
-    %0 = spirv.GroupNonUniformAllEqual <Subgroup> %value : vector<2xi32>, i1
-    spirv.ReturnValue %0 : i1
+// -----
+
+// `ShuffleXorConversionPattern` (roadmap L7i) only implements `Subgroup`
+// execution scope, mirroring `ShuffleConversionPattern`/
+// `ElectConversionPattern`.
+
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformShuffle], []> {
+  spirv.func @workgroup_shuffle_xor(%value : f32, %mask : i32) -> f32 "None" {
+    // expected-error@+1 {{failed to legalize operation 'spirv.GroupNonUniformShuffleXor' that was explicitly marked illegal}}
+    %0 = spirv.GroupNonUniformShuffleXor <Workgroup> %value, %mask : f32, i32
+    spirv.ReturnValue %0 : f32
   }
 }
