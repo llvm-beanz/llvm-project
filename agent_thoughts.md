@@ -73119,3 +73119,115 @@ a matching `VulkanCTSReport.md` section, and added a design-doc status paragraph
 decoration handling and the isoline U/V convention.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed, a pure
 correctness fix with no new feature/extension surface.
+
+# L60: closing the compute-stage Grad/implicit-LOD CTS payoff via an upstream MLIR SPIR-V-import fix
+
+## Task
+
+Close out roadmap L60 (or other prerequisites blocking the L-series milestones). L60 had
+already been broken down into sub-items (a)-(f) across several prior sessions; by this
+session's start, (a)/(b)/(d)/(e)/(f) were all resolved or confirmed out of scope, leaving only
+(c) -- `compute`-stage `Grad` sampling -- open, tracked by roadmap L69 and its own follow-on
+chain (L69(a), L70, L71, L72, L72(c)).
+
+## Checking whether the blocking chain was actually done
+
+Grepped the roadmap for L69/L69(a)/L70/L71/L72/L72(c) and found every one of them already
+struck through (closed) by prior sessions. L69/L69(a)'s own closure text explicitly said their
+real CTS payoff was "masked by two unrelated, already-tracked gaps" -- L70 (resource-handle
+normalization) and L7 (an `unknown extension: SPV_KHR_compute_shader_derivatives` SPIR-V-import
+gap). L70/L71/L72/L72(c) were also all closed, resolving the resource-handle-normalization and
+divergent-branch and legalization-gap chain. That left exactly one open thread: L7's own
+`SPV_KHR_compute_shader_derivatives` import gap, still listed (unfixed) in L7's own text.
+
+## Investigating the import gap
+
+Grepped `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp` for the literal
+`"unknown extension: "` string and found it in `processExtension`, which calls
+`spirv::symbolizeExtension(extName)` and fails if that returns `std::nullopt`. Checked
+`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`'s `Extension` enum (the table
+`symbolizeExtension` is TableGen-generated from) and confirmed: it has
+`SPV_NV_compute_shader_derivatives` (the vendor precursor) and the numerically-identical
+`DerivativeGroupQuadsNV`/`DerivativeGroupLinearNV` execution-mode/capability enum cases, but no
+case at all for the later KHR-promoted extension's own string name,
+`SPV_KHR_compute_shader_derivatives`.
+
+This matters because `OpExtension` is deserialized by *string* (the extension's name is
+literally encoded as a string literal in the binary), unlike `OpCapability` and execution
+modes, which are encoded as plain numbers. The SPIR-V spec's own extension-promotion
+convention reuses the same numeric enum values when a vendor extension is promoted to KHR
+status, which is exactly why `feme/lib/Vulkan/GroupSize.cpp` -- feme's own raw-binary
+SPIR-V parser, used for group-size/derivative-mode resolution, which never goes through MLIR's
+deserializer at all -- already recognized both KHR execution modes by number for roadmap
+L69/L69(a) with no code of its own needing to change. But `feme-translate --import-spirv`
+(needed to bring the *rest* of a compute shader's body into MLIR IR for legalization) does go
+through MLIR's own deserializer, and that path had no way to resolve the KHR extension's own
+name string, failing the whole module's import outright before any of L69-L72's execution-side
+fixes could ever be reached.
+
+## Deciding whether to fix this upstream
+
+This is a change to `mlir/`, not `feme/`. Checked `feme/.instructions.md` (scoped to
+`feme/**/*`) and confirmed it doesn't forbid touching upstream code when a fix genuinely lives
+outside `feme/`'s own directory. Checked `git log` for precedent and found roadmap L38 already
+did exactly this: a small, surgical, roadmap-cited fix to `mlir/lib/Dialect/SPIRV/IR/...`
+(`extractCompositeElement` for matrix constants), landed with an upstream-style
+`[mlir][spirv]`-prefixed commit message rather than a `feme:`-prefixed one. Followed that same
+convention here.
+
+## The fix
+
+Added `SPV_KHR_compute_shader_derivatives` as a new `Extension` enum case (case 34, following
+the existing sequential-numbering convention for the `SPV_KHR_*` block, which uses small
+internal indices rather than the SPIR-V registry's own separate "extension number" scheme --
+confirmed by inspecting the existing 0-33 range). No companion capability or execution-mode
+change was needed: I verified this directly by assembling two synthetic SPIR-V modules with
+`spirv-as` (one declaring `ComputeDerivativeGroupLinearKHR`+`DerivativeGroupLinearKHR`, one
+declaring `ComputeDerivativeGroupQuadsKHR`+`DerivativeGroupQuadsKHR`, both under
+`OpExtension "SPV_KHR_compute_shader_derivatives"`) and running them through
+`feme-translate --import-spirv`. Before the fix this would have failed at `OpExtension`; I
+didn't bother re-confirming the pre-fix failure by reverting, since the "unknown extension"
+error text is unambiguous and already cited by three separate already-closed rows (L7, L69,
+L69(a)) as the exact blocker. After the fix, both modules imported successfully, with the
+capability/execution mode correctly resolving to the pre-existing `ComputeDerivativeGroupLinearNV`/
+`QuadsNV` and `DerivativeGroupLinearNV`/`QuadsNV`-named enum cases (same numeric values), exactly
+as expected.
+
+Added a new split-file test case to `mlir/test/Target/SPIRV/execution-mode.mlir` (which
+previously had only one module and no `-split-input-file` in its roundtrip `RUN` line -- widened
+that line to add it, needed to add a second module to the file at all) round-tripping a
+`DerivativeGroupLinearNV`-execution-mode module declared under the real
+`SPV_KHR_compute_shader_derivatives` extension name.
+
+## Verification
+
+- Manual `feme-translate --import-spirv` smoke tests on both synthetic modules: both import
+  successfully (confirmed above).
+- `MLIRSPIRVImportExportTests`: 28/28 pass (no regressions in either serialization or
+  deserialization negative-test coverage).
+- `mlir/test/Target/SPIRV/`: 58/58 pass (up from 57, the one new split-file case).
+- `mlir/test/Dialect/SPIRV/`: 75/75 pass.
+- Full `check-feme`: 2788/2847 pass, 0 fail, 59 unsupported -- unchanged from baseline.
+- Real CTS re-run: `dEQP-VK.glsl.texture_functions.texturegrad.*_compute` (52 cases) went from
+  0 Pass (every case failing at `vkCreateComputePipelines` with the "unknown extension" error,
+  confirmed identically before touching anything) to **19 Pass**, with the remaining 14 `Fail`
+  confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1` to be exactly the already-known, by-design
+  `isampler*`/`usampler*` filtered-integer-sampling exclusion (roadmap L60(b)) -- not a new gap.
+  A broader `texturegradoffset.*_compute` sweep (190 cases) showed the same pattern: 70 Pass (up
+  from 0), all 50 remaining `Fail`s confirmed to be `isampler*`/`usampler*` cases via a direct
+  grep of the sweep's own per-case names.
+
+## Docs
+
+Struck through L60 with a closure write-up (wrapping the entire existing cell -- including its
+several prior `UPDATE:` paragraphs from earlier sessions -- in one `~~...~~` pair and appending
+the final closure text at the end, matching the established convention for rows that
+accumulated multiple non-final "UPDATE:" notes before actually closing, e.g. roadmap L61).
+Updated L7's own text to mark its `unknown extension: SPV_KHR_compute_shader_derivatives` item
+fixed, with a cross-reference to L60's own closure rather than duplicating the explanation (L7
+itself remains open, tracking its own long tail of other, unrelated legalization gaps).
+Added a new `## Roadmap L60` section to `VulkanCTSReport.md` and updated
+`VulkanExtensionInventory.md`'s `VK_KHR_compute_shader_derivatives` entry.
+`Vulkan14FeatureInventory.md` reviewed: no change needed (this feature's bits are not part of
+the Vulkan 1.4 core floor tracked there). `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` reviewed:
+no stale text found referencing this gap.
