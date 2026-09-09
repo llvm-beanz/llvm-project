@@ -1177,6 +1177,21 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
             isSupportedVectorReduceIntrinsic(Callee->getIntrinsicID()) &&
             UserCI->getArgOperand(0) == &I)
           continue;
+        // (roadmap L7t) A `subgroupAllEqual`/`WaveActiveAllEqual` call's
+        // own vector-typed operand -- `widenWaveCall`'s own dedicated
+        // `WaveCallKind::AllEqual` vector-operand branch decomposes it
+        // into per-component `feme.cpu.wave.all_equal` reductions,
+        // reassembled into `UserCI`'s own matching `<N x i1>` result (see
+        // that function's comment; the immediately-following
+        // `llvm.vector.reduce.and` this always feeds is the reduce-call
+        // case just above), rather than needing a flat `getWidened`
+        // broadcast the way every other `WaveCallKind`'s always-scalar
+        // operand does.
+        if (Callee &&
+            classifyWaveCall(Callee->getIntrinsicID()) ==
+                WaveCallKind::AllEqual &&
+            UserCI->getArgOperand(0) == &I)
+          continue;
         // Roadmap H6g-b-a-i-a-i-b: an argument of a vector-typed,
         // homogeneous "trivially vectorizable" intrinsic call (see the
         // producer-side check above and `widenVectorElementwise`) -- `I`
@@ -1574,6 +1589,60 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   // kind.
   Value *WideMask =
       Kind == WaveCallKind::GetLaneCount ? nullptr : Env.EntryMask;
+
+  // (roadmap L7t) `subgroupAllEqual`/`WaveActiveAllEqual` is the one
+  // `WaveCallKind` whose own operand may itself be a vector (`bvec2`/
+  // `ivec3`/`vec4`/...), unlike every other kind's always-scalar operand
+  // (`GetLaneCount`/`IsFirstLane` have none at all; every other kind's
+  // `OverloadTy` is always a genuine scalar in both DXIL and SPIR-V).
+  // `getWidened` only ever builds a flat `<W x T>` for a scalar `T` -- a
+  // vector-typed operand needs `getVectorComponents`' own per-component
+  // decomposition instead (see that function's comment; `getWidened`
+  // itself asserts if handed a vector-typed value directly), one
+  // component-wise `feme.cpu.wave.all_equal` reduction per component,
+  // ANDed together into the single scalar `i1` result GLSL/HLSL's own
+  // `subgroupAllEqual`/`WaveActiveAllEqual` always returns regardless of
+  // its operand's own arity -- "equal" means every component matches,
+  // exactly like GLSL's `subgroupAllEqual` spec text ("value is equal for
+  // all active invocations in the group"), checked component-wise. Found
+  // reducing a real `dEQP-VK.subgroups.vote.compute.subgroupallequal_bvec2`
+  // failure (`subgroupAllEqual(bvec2(subgroupElect()))`, a genuinely
+  // per-lane-divergent vector operand) down to its exact IR shape.
+  //
+  // Unlike every other `WaveCallKind`, this one's own *result* type is not
+  // fixed either: `int_spv_wave_all_equal`/`int_dx_wave_all_equal`'s
+  // `LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>` definition means `CI`
+  // itself is `<N x i1>`-typed here (matching its own vector operand's `N`
+  // -- see `AllEqualConversionPattern`'s own comment in
+  // SPIRVToLLVMPatterns.cpp for why: `spirv.GroupNonUniformAllEqualOp`'s
+  // result is always a scalar `SPIRV_Bool` even for a vector `Value`, so
+  // that pattern calls this intrinsic to get the per-component `<N x i1>`
+  // first, then folds it down with a *separate* `llvm.vector.reduce.and`
+  // call it emits alongside -- a call this pass already widens correctly
+  // via `widenVectorReduce`, transparently over either a genuinely
+  // divergent or a uniform operand). So `CI`'s own replacement here must
+  // stay a genuine `<N x i1>` -- one scalar `i1` "all lanes agree on this
+  // component" result per component (each already collapsed the wave-lane
+  // axis via its own `createWaveCall`), reassembled via an ordinary
+  // `insertelement` chain, *not* ANDed together here: that AND is the
+  // separate `llvm.vector.reduce.and` call's own job, immediately
+  // downstream in the IR `AllEqualConversionPattern` always emits.
+  if (Kind == WaveCallKind::AllEqual && CI.getType()->isVectorTy()) {
+    SmallVector<Value *, 4> Components =
+        getVectorComponents(CI.getArgOperand(0), Builder);
+    Value *Result = PoisonValue::get(CI.getType());
+    for (auto [Idx, Component] : llvm::enumerate(Components)) {
+      CallInst *ComponentCall =
+          createWaveCall(Builder, Kind, WaveSize, WideMask, Component,
+                         /*WideLaneIndex=*/nullptr, CI.getName());
+      Result = Builder.CreateInsertElement(Result, ComponentCall,
+                                           Builder.getInt32(Idx));
+    }
+    Result->takeName(&CI);
+    CI.replaceAllUsesWith(Result);
+    ToErase.push_back(&CI);
+    return;
+  }
 
   Value *WideOperand = nullptr;
   if (Kind != WaveCallKind::GetLaneCount && Kind != WaveCallKind::IsFirstLane)
@@ -3081,7 +3150,28 @@ void FunctionWidener::widenVectorReduce(CallInst &CI, IRBuilder<> &Builder) {
     }
   }
   Acc->setName(CI.getName() + ".wide");
-  Widened[&CI] = Acc;
+  // (roadmap L7t) Unlike the `all`/`any`-over-a-divergent-comparison shape
+  // this function was originally written for (where `CI`'s own remaining
+  // uses are always another divergent instruction that resolves its
+  // operand explicitly via `getWidened`/`Widened`, never `CI`'s raw SSA
+  // use), the same reduce-intrinsic shape can also feed a genuinely
+  // *uniform* consumer -- e.g. `subgroupAllEqual`'s own
+  // `AllEqualConversionPattern`-emitted `llvm.vector.reduce.and` (see
+  // `widenWaveCall`'s own `WaveCallKind::AllEqual` comment), whose result
+  // stays wave-uniform regardless of its operand's divergence. A uniform
+  // consumer is left "exactly as it is" by `widenInstruction`'s generic
+  // fallback (see that function's own comment), meaning it never queries
+  // `Widened` at all and still needs `CI`'s *raw* SSA uses fixed up
+  // directly -- exactly the same `ReadLane` precedent immediately above
+  // (`widenWaveCall`) already established for a uniform result built from
+  // a genuinely wide value.
+  if (UI.isDivergentAtDef(&CI)) {
+    Widened[&CI] = Acc;
+  } else {
+    Value *Scalar = Builder.CreateExtractElement(Acc, uint64_t{0});
+    Scalar->takeName(&CI);
+    CI.replaceAllUsesWith(Scalar);
+  }
   ToErase.push_back(&CI);
 }
 

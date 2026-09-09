@@ -1835,6 +1835,80 @@ TEST(SIMDizeTest, WidensArithmeticConsumingSubgroupLocalInvocationId) {
   EXPECT_TRUE(FoundWideUrem);
 }
 
+TEST(SIMDizeTest, WidensVectorAllEqualFeedingUniformSelect) {
+  // Roadmap L7t: `subgroupAllEqual`/`WaveActiveAllEqual` over a genuinely
+  // per-lane-divergent vector operand (`bvec2`/`ivec3`/`vec4`/...) is the
+  // one `WaveCallKind` whose own result type mirrors its operand's arity
+  // (`int_spv_wave_all_equal`'s `LLVMScalarOrSameVectorWidth<0,
+  // llvm_i1_ty>` -- see `widenWaveCall`'s own comment): a vector operand
+  // yields a *vector* `<N x i1>` result, immediately folded down to a
+  // single scalar `i1` by a separate `llvm.vector.reduce.and` call (the
+  // shape `AllEqualConversionPattern` in SPIRVToLLVMPatterns.cpp always
+  // emits). `subgroupAllEqual`'s own result stays wave-uniform regardless
+  // of its operand's divergence (see `WaveUniformity.cpp`'s
+  // `AlwaysUniform` override for `spv_wave_all_equal`), so a real
+  // `tempRes |= subgroupAllEqual(valueEqual) ? 0x8 : 0x0`-shaped consumer
+  // (a `select` whose condition is this uniform reduce-and result, but
+  // whose true/false arms are both plain constants, so the whole `select`
+  // is itself uniform too) is left "exactly as it is" by
+  // `widenInstruction`'s generic uniform fallback -- meaning it never
+  // queries `Widened`, and needs the reduce-and's own *raw* SSA use fixed
+  // up directly, not merely recorded in the `Widened` map the way a
+  // divergent consumer resolves it. Reduced from a real
+  // `dEQP-VK.subgroups.vote.compute.subgroupallequal_bvec2` "0 / 7 values
+  // passed" runtime-verification failure (an earlier, now-corrected fix
+  // attempt crashed instead, on a `replaceAllUsesWith` of `CI`'s own
+  // `<2 x i1>` type with a scalar `i1`; see `agent_thoughts.md`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %lane0 = icmp eq i32 %tid, 0
+      %lane1 = icmp eq i32 %tid, 1
+      %v0 = insertelement <2 x i1> poison, i1 %lane0, i32 0
+      %valueEqual = insertelement <2 x i1> %v0, i1 %lane1, i32 1
+      %componentEqual = call <2 x i1> @llvm.spv.wave.all.equal.v2i1(<2 x i1> %valueEqual)
+      %allEqual = call i1 @llvm.vector.reduce.and.v2i1(<2 x i1> %componentEqual)
+      %sel = select i1 %allEqual, i32 8, i32 0
+      %res = or i32 %sel, 1
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare <2 x i1> @llvm.spv.wave.all.equal.v2i1(<2 x i1>)
+    declare i1 @llvm.vector.reduce.and.v2i1(<2 x i1>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Never build an illegal vector-of-vector type, and never leave a
+  // dangling `llvm.spv.wave.all.equal`/`llvm.vector.reduce.and` call
+  // behind (both must be fully lowered/widened away).
+  bool FoundSelect = false;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *RCI = dyn_cast<CallInst>(&I)) {
+      Function *Callee = RCI->getCalledFunction();
+      EXPECT_FALSE(Callee &&
+                   (Callee->getIntrinsicID() == Intrinsic::vector_reduce_and ||
+                    Callee->getIntrinsicID() == Intrinsic::spv_wave_all_equal));
+    }
+    // The `select`'s own condition must be a genuine, real boolean value
+    // -- never `poison` from a since-erased `llvm.vector.reduce.and` call
+    // whose only use (this `select`) was never fixed up.
+    if (auto *Sel = dyn_cast<SelectInst>(&I)) {
+      FoundSelect = true;
+      EXPECT_FALSE(isa<PoisonValue>(Sel->getCondition()));
+    }
+  }
+  EXPECT_TRUE(FoundSelect);
+}
+
 } // namespace
 
 
