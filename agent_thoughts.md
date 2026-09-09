@@ -75319,3 +75319,76 @@ Split out **L7t**: now that every blocker this document has tracked for the `sub
 real one needs its own broader verification (the actual `vote`/`shuffle` CTS test groups, not just the
 `basic.compute` group this session's fix was scoped to and verified against), so it's deliberately left as
 its own follow-up rather than done speculatively alongside this session's narrower fix.
+
+# L7t: `VOTE_BIT` flip -- a wrong mental model, corrected twice, before the real fix
+
+Asked to work L7t: flip `PhysicalDeviceInfo.cpp`'s `SubgroupSupportedOperations` to also advertise
+`VOTE_BIT`/`SHUFFLE_BIT`, since every previously-tracked L7-series blocker was resolved as of L7s's own
+closing session. The request text itself was honest that this wasn't actually verified yet ("not just a
+re-run of `basic.compute`") -- and that caution turned out to be entirely justified: a real, un-flipped
+baseline sweep showed correct gating everywhere, but the moment I actually flipped the bits (scratch,
+temporarily, to verify) two more gaps appeared, one of which took two separate wrong mental models before
+landing on the real fix.
+
+**First wrong model**: I assumed `subgroupAllEqual`'s call result was always scalar `i1`, and that the gap
+was purely "a divergent vector operand isn't an accepted consumer shape yet" in
+`checkVectorDecompositionSupported`. Implemented a `widenWaveCall` branch that decomposed the vector
+operand into per-component scalar `WaveCallKind::AllEqual` calls and ANDed them all together into one final
+scalar, then `replaceAllUsesWith`'d the original call with that scalar. Built clean, but crashed
+`deqp-vk` on the very first vector case (`subgroupallequal_bvec2`) with an LLVM core assertion:
+`Value.cpp:524`, `New->getType() == getType()`.
+
+That assertion is a gift, honestly -- it means *something* has the wrong type, and LLVM tells you exactly
+which invariant broke. Reading `AllEqualConversionPattern` (the pre-existing, already-correct SPIR-V-to-LLVM
+conversion for this op) instead of trusting my own assumption showed the real shape:
+`spirv.GroupNonUniformAllEqual`'s result is genuinely a scalar `SPIRV_Bool` at the *SPIR-V* level always,
+but the LLVM intrinsic it lowers a vector operand to (`llvm.spv.wave.all.equal`) returns a *vector*
+`<N x i1>` matching the operand's own arity (`int_spv_wave_all_equal`'s `LLVMScalarOrSameVectorWidth<0,
+llvm_i1_ty>` signature makes this explicit once you go looking), immediately folded back down to scalar by
+a *separate*, already-existing `llvm.vector.reduce.and` call the pattern also emits. My scalar
+`replaceAllUsesWith` was replacing a value whose *actual* IR type was `<N x i1>`, not `i1` -- hence the
+assertion. Lesson re-learned (I've hit variants of this before this session, apparently): when a "the
+result must obviously be type X" assumption isn't backed by actually reading the producing code, go read
+the producing code before writing the consuming code.
+
+**Second, more interesting model gap**: fixing the *first* bug (reassembling into a real `<N x i1>` via
+`insertelement` instead of ANDing to scalar) made the crash disappear -- but `subgroupallequal_bvec2` still
+failed CTS's own runtime verification ("0 / 7 values passed"), no crash this time, just silently wrong
+values. This is the more instructive failure mode: it means the fix was *type-correct* but still
+*semantically* incomplete somewhere downstream. Tracing where `<N x i1>` from my reassembled call actually
+flows led to the existing `llvm.vector.reduce.and` call immediately consuming it -- already widened by a
+pre-existing, previously-untested-for-this-exact-shape function, `widenVectorReduce`. That function only
+ever does `Widened[&CI] = Acc` (register the widened form in a lookup map), on the *implicit* assumption
+that whatever consumes the reduce result is itself a divergent instruction that will explicitly resolve its
+own operand via `getWidened` later. That assumption is true for `widenVectorReduce`'s *originally intended*
+use case (`all(vec4 comparison))` feeding a divergent branch), but `subgroupAllEqual`'s own result is
+*always* wave-uniform by definition (regardless of its operand's divergence -- confirmed via
+`WaveUniformity.cpp`'s explicit `AlwaysUniform` override for this intrinsic), so a real CTS shader's
+`tempRes |= subgroupAllEqual(...) ? 0x8 : 0x0` -- whose `select` has two *constant* arms, making the whole
+`select` uniform too -- gets left "exactly as it is" by the pass's generic uniform-instruction fallback,
+which never queries the `Widened` map at all. The reduce-and call's own remaining (unfixed) use then gets
+silently poisoned by the pass's own end-of-function safety-net cleanup.
+
+The fix ended up being small once understood: `widenVectorReduce` needed the exact same
+`UI.isDivergentAtDef`-gated dispatch the file's *own*, pre-existing `WaveCallKind::ReadLane` handling
+already used one function above it (a uniform result needs a real scalar extracted and RAUW'd directly;
+a divergent one can keep relying purely on the `Widened` map). I'd read that precedent earlier in the same
+file while investigating the first bug and hadn't connected it to my own problem until re-reading the
+"leave uniform instructions alone" fallback comment carefully enough to realize it means *literally* nothing
+happens to that instruction's raw operand references -- no implicit remapping at all, just a poison
+safety-net at the very end for anything that's still dangling by then. That single sentence in an existing
+comment ("leave it exactly as it is") turned out to be the entire key to both diagnosing and fixing this.
+
+Wrote a real regression test (`SIMDizeTest.WidensVectorAllEqualFeedingUniformSelect`) reducing the exact
+shape, and -- per this project's own established discipline -- actually verified it catches the bug by
+reverting just the `widenVectorReduce` half of the fix and re-running it before committing to the final
+version. It failed exactly as expected (`isa<PoisonValue>` true on the `select`'s condition), which was
+reassuring: the test isn't just checking "did this not crash," it's checking the actual value-correctness
+property that was silently wrong.
+
+With that fixed and a full, real `dEQP-VK.subgroups.vote.*` re-run showing 36/805 passed, 0/805 failed,
+`VOTE_BIT` is genuinely flipped this session. `SHUFFLE_BIT` is not: the real flag-flip run surfaced a much
+bigger, entirely separate gap first (every non-rotate CTS shuffle test's own verification harness depends on
+`subgroupBallot()`, a completely unimplemented `GroupNonUniformBallot` capability family) -- split out to a
+fresh top-level roadmap row, L85, rather than trying to squeeze it in as a deeply-nested L7t sub-item, per
+this session's own standing instruction to keep nesting to one lowercase letter.
