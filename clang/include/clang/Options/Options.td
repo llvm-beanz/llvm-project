@@ -2579,6 +2579,12 @@ defm jump_tables : BoolFOption<"jump-tables",
   NegFlag<SetTrue, [], [ClangOption, CC1Option], "Do not use">,
   PosFlag<SetFalse, [], [ClangOption], "Use">,
   BothFlags<[], [ClangOption], " jump tables for lowering switches">>;
+defm switch : BoolFOption<"switch",
+  CodeGenOpts<"NoUseSwitch">,
+  Default<"LangOpts->HLSL && T.isSPIRVLogical()">,
+  NegFlag<SetTrue, [], [ClangOption, CC1Option], "Do not emit">,
+  PosFlag<SetFalse, [], [ClangOption, CC1Option], "Emit">,
+  BothFlags<[], [ClangOption], " LLVM switch instructions">>;
 defm force_enable_int128 : BoolFOption<"force-enable-int128",
   TargetOpts<"ForceEnableInt128">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
