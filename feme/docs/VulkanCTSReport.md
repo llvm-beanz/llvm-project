@@ -33286,3 +33286,89 @@ comment updated to document the corrected convention.
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed -- a pure
 correctness fix to already-claimed tessellation support, no new feature or extension surface.
+
+## Roadmap L60: closed (`SPV_KHR_compute_shader_derivatives` MLIR SPIR-V-import gap fixed; compute-stage `Grad`/implicit-LOD sampling CTS payoff unblocked)
+
+### Background
+
+Roadmap L60 broke down the remaining work left after L59's own `Plain2D`/`Cube` explicit-`Grad`
+sampling fix into six sub-items (a)-(f). Across several prior sessions, (a) `Array2D`/`CubeArray`
+`Grad` support, (b) integer-channel sampling (confirmed not a real gap), (d) `Grad`+`MinLod`
+clamp, (e) `Dref`+`Grad` depth-comparison sampling, and (f) sparse-residency `Grad` sampling were
+all resolved or confirmed correctly out of scope. Only sub-item (c), `compute`-stage `Grad`
+sampling, remained open, tracked by roadmap L69 (compute-stage derivative-group execution
+infrastructure) and its own follow-on chain (L69(a) `DerivativeGroupQuadsKHR` lane tiling, L70
+resource-handle normalization, L71 divergent-branch reconvergence, L72/L72(c) broader compute
+`texture_functions` legalization gaps) -- all since closed.
+
+### Remaining gap
+
+With every execution-side piece of sub-item (c) fixed, a real CTS re-run still showed 0 Pass for
+every `_compute`-stage `texturegrad`/`texturegradoffset` case. The cause was a distinct, narrower
+*import*-side gap, not an execution-side one: `feme-translate --import-spirv`'s underlying MLIR
+SPIR-V deserializer (`mlir::spirv::Deserializer::processExtension`) rejects any module declaring
+`OpExtension "SPV_KHR_compute_shader_derivatives"` outright with `"unknown extension"`, failing
+the whole module's import before any of L69-L72's own fixes are ever reached.
+
+Root cause: `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`'s `Extension` enum (the table
+`spirv::symbolizeExtension` is generated from) had a case for this feature's precursor,
+`SPV_NV_compute_shader_derivatives`, and for the numerically-identical `DerivativeGroupQuadsNV`/
+`DerivativeGroupLinearNV` execution-mode/capability enum cases (the SPIR-V spec's own
+extension-promotion convention reuses the same enum values when a vendor extension is later
+promoted to KHR status) -- but no case at all for the KHR-promoted extension's own *string* name.
+Since `OpExtension` is deserialized by string, not by number (unlike `OpCapability`/execution
+modes, which are numeric and so already matched the existing NV-named enum cases regardless of
+which name a real KHR-only module uses), this was the one piece MLIR's deserializer could not
+resolve. This is exactly why feme's own raw-binary `GroupSize.cpp` parser -- which never goes
+through MLIR's deserializer at all -- already recognized both KHR execution modes by number for
+roadmap L69/L69(a); the gap was specific to the `feme-translate --import-spirv` path used to
+bring the rest of the shader body into MLIR IR for legalization.
+
+### Fix
+
+Added `SPV_KHR_compute_shader_derivatives` as a new `Extension` enum case (case 34, the next
+available slot after the existing `SPV_KHR_*` block) to
+`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`. No companion capability or execution-mode
+change was needed, since `ComputeDerivativeGroupQuadsKHR`/`LinearKHR` and
+`DerivativeGroupQuadsKHR`/`LinearKHR` already deserialize correctly under their pre-existing
+NV-named enum cases (same numeric values). This is a small, self-contained upstream MLIR change,
+following roadmap L38's own precedent for a surgical, roadmap-cited `[mlir][spirv]`-prefixed
+upstream fix when a gap genuinely lives outside `feme/`'s own directory.
+
+### Tests added
+
+- `mlir/test/Target/SPIRV/execution-mode.mlir`: added a new split-file case round-tripping a
+  synthetic `DerivativeGroupLinearNV`-execution-mode module declared under the real
+  `SPV_KHR_compute_shader_derivatives` extension name (confirmed failing to deserialize before
+  this fix, passing after). The file's own `RUN` line was widened to add `-split-input-file`,
+  needed to add a second module to the file at all.
+
+### Verification
+
+- Manual `feme-translate --import-spirv` smoke test: both a `DerivativeGroupLinearKHR`- and a
+  `DerivativeGroupQuadsKHR`-declaring synthetic SPIR-V module (assembled via `spirv-as`) now
+  import successfully, correctly resolving to the pre-existing `ComputeDerivativeGroupLinearNV`/
+  `QuadsNV`-named capability and `DerivativeGroupLinearNV`/`QuadsNV`-named execution mode (same
+  numeric values a real KHR module encodes).
+- `MLIRSPIRVImportExportTests`: **28/28 Pass**.
+- `mlir/test/Target/SPIRV/`: **58/58 Pass** (up from 57, the one new split-file case).
+- `mlir/test/Dialect/SPIRV/`: **75/75 Pass**, no regressions.
+- Full `check-feme`: **2788/2847 Passed, 59 Unsupported, 0 Failed**, unchanged from baseline.
+- Real CTS re-run: `dEQP-VK.glsl.texture_functions.texturegrad.*_compute` (52 cases) now shows
+  **19 Pass** (up from 0 before this fix), 14 `Fail` (every one confirmed via
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1` to be the already-known, by-design `isampler*`/`usampler*`
+  filtered-integer-sampling exclusion, roadmap L60(b) -- not a new gap), 19 `NotSupported`. A
+  broader `texturegradoffset.*_compute` sweep (190 cases) shows **70 Pass** (up from 0), with all
+  50 remaining `Fail`s confirmed to be exclusively `isampler*`/`usampler*` cases too -- zero
+  unexpected failures in either sweep.
+
+### Disposition
+
+Roadmap **L60 closed** (struck through) -- every sub-item (a)-(f) is now either fixed, confirmed
+already-correct-as-is, or resolved by an already-tracked, since-closed follow-on row (L69/L69(a)/
+L70/L71/L72/L72(c) for sub-item (c)'s own execution-side scope, this row's own fix for its
+final import-side blocker). `feme/docs/VulkanExtensionInventory.md`'s
+`VK_KHR_compute_shader_derivatives` entry updated to record the fix and new CTS numbers.
+`Vulkan14FeatureInventory.md` reviewed: no change needed (`computeDerivativeGroupQuads`/`Linear`
+are not part of the Vulkan 1.4 core feature-struct floor tracked there). `FeMeGraphicsDesign.md`/
+`FeMeCPUDesign.md` reviewed: no stale text referencing this gap found, no deviation to record.
