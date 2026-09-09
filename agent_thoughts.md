@@ -75449,3 +75449,71 @@ doesn't advertise the relevant descriptor-indexing feature bits at all. Worth re
 the CTS report rather than letting the "fixed a deserialization bug" framing imply more real-world
 impact than it currently has: this is genuine, tested progress, but a prerequisite of a
 prerequisite, not something that moves any CTS pass count yet.
+
+# L7g: `OpImageGather` deserialization/legalization/codegen gap
+
+The request asked me to work on roadmap row L7g: close the leftover tail of L7's original
+filing (`unhandled opcode`/`unhandled deserializations ... from extension set GLSL.std.450`
+errors), which L7b's own closing session had already narrowed down to a single confirmed
+repro -- SPIR-V opcode 96 (`OpImageGather`) via offload-test-suite's real
+`Vk.SampledTexture2D.Gather.test.yaml`.
+
+I confirmed via direct code inspection that `OpImageGather` had zero support anywhere in
+upstream MLIR's SPIR-V dialect -- not even an opcode enum case, let alone an op definition. This
+mirrored L7d's own `spirv.ImageDrefGather` precedent closely enough that I used L7d's own
+op/pattern/runtime-helper shape as a template throughout, substituting `Component` (an integer
+channel selector) everywhere L7d used `Dref` (a float depth-comparison reference).
+
+I expected this to be a single-layer fix (add the op, add a legalization pattern, done -- mirroring
+how L7d's own row eventually closed). It was not. Once the op and pattern were both in place and
+the real repro's own deserialization and legalization both succeeded, I ran the actual real-world
+verification target (`check-hlsl-vk-feature-vk.sampledtextures-vk.sampledtexture2d`) and it failed
+at real `vkCreateComputePipelines` time instead, with a generic "unsupported raised operation"
+message naming an apparently-unrelated resource handle. This message text itself explicitly warns
+that an unsupported use of *any other* resource in the same function poisons every handle's own
+normalization -- a deliberately unhelpful-sounding error by design, meant to push the reader toward
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` rather than trusting the named handle at face value. I used
+that env var, and the message was in fact still about the *unrelated* handle -- but grepping
+`SPIRVResourceLowering.cpp` for `resource.gather` confirmed the real cause immediately:
+`isGatherCmpIntrinsic` (L7d) had a whole acceptance/codegen path, but the plain (non-cmp)
+`spv_resource_gather` intrinsic my own new `ImageGatherPattern` was emitting had no recognition
+in this file at all. So the "bystander" warning in the error message was, in this case, being
+completely accurate: some *other* handle's use (the whole shader function containing the gather
+call) was unsupported, and that poisoned every handle in the same function, not just the image
+being gathered from.
+
+This third layer -- real CPU codegen, not just MLIR-level legalization -- was not something L7g's
+own filing text anticipated at all (it explicitly said "before any feme-side legalization pattern
+can even be written against it," implying the legalization pattern was the last remaining piece).
+I closed it anyway in the same session, since `femeCpuImageGatherCmp2DV4F32`'s own existing
+implementation made the delta small and mechanical: same bilinear-footprint reuse
+(`femeRTComputeBilinearSupport`), same fixed four-corner result ordering, just indexing into a
+sampled texel's own `Component` channel (clamped `[0,3]`) instead of running a depth comparison
+against `Dref`.
+
+One thing I want to flag for future sessions: when a real end-to-end verification target
+newly reaches production code that was previously unreachable (deserialization/legalization gaps
+blocking it before), don't assume the row's own filing text has already scoped the *complete*
+remaining depth of the problem -- reduce again at each new failure point rather than assuming the
+next failure is definitely out of scope. This is exactly the same lesson several sibling L7-series
+rows (L7d discovering the missing sampler-side `hasOnlySupportedSamplerUses` integration, L7f
+discovering L86's `OpCopyObject` gap one instruction further) have already independently
+demonstrated -- worth remembering as a standing pattern for this whole project, not a one-off.
+
+I also ran a real `deqp-vk` CTS group (`dEQP-VK.glsl.texture_gather.compute.basic.2d.rgba8.*`) as
+the standing per-session CTS-verification requirement asks. It reported 12/12 `NotSupported`
+because this ICD doesn't advertise `shaderImageGatherExtended` -- a real, pre-existing,
+already-documented gap (`Vulkan14FeatureInventory.md` already listed it as "no" before this
+session) entirely unrelated to this session's own fix. I didn't attempt to flip that bit this
+session (would need its own broader verification pass across every `Component`/`Offset` shape
+this device's runtime can support, mirroring L7t's own `VOTE_BIT`/`SHUFFLE_BIT` precedent), but
+I did use offload-test-suite's own real HLSL repro (which doesn't perform the same CTS-side
+device-feature gating deqp-vk does) as the actual end-to-end proof this fix works: 13/13 on
+`Vk.SampledTexture2D.Gather.test.yaml`, up from 12/13 with the row's own cited case failing
+pipeline creation outright.
+
+Split L7g's own leftover "GLSL.std.450" half (never confirmed to a concrete repro across any of
+L7a-L7g) out to a new row, L87, since every one of L7g's own sibling investigations this series
+(L7c/L7d/L7f/L7g) instead found and closed real `unhandled opcode`-shaped gaps, not a
+`GLSL.std.450`-shaped one -- it remains genuinely unconfirmed, unlike the rest of L7's own
+original filing text.
