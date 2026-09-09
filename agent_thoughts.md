@@ -75392,3 +75392,60 @@ bigger, entirely separate gap first (every non-rotate CTS shuffle test's own ver
 `subgroupBallot()`, a completely unimplemented `GroupNonUniformBallot` capability family) -- split out to a
 fresh top-level roadmap row, L85, rather than trying to squeeze it in as a deeply-nested L7t sub-item, per
 this session's own standing instruction to keep nesting to one lowercase letter.
+
+# L7f: NonUniform decoration deserialization gap
+
+Picked up L7f, an old unreduced roadmap filing: `unhandled Decoration : 'NonUniform'` during MLIR
+SPIR-V deserialization. Started with a real reduction rather than guessing at the fix -- wrote a
+minimal HLSL shader using `NonUniformResourceIndex()` on a `Texture2D` array index, compiled with
+dxc, and confirmed via `spirv-dis` that dxc's own codegen wraps the indexed value in a fresh
+`OpCopyObject` and decorates *that copy's* result with a bare `OpDecorate %N NonUniform`. Feeding
+this through `feme-translate --import-spirv` reproduced the exact filed error.
+
+Root cause turned out to be refreshingly simple once I actually looked: both
+`Deserializer.cpp`'s `processDecoration` and `Serializer.cpp`'s `processDecorationAttr` keep their
+own hand-maintained `switch` case lists of which `spirv::Decoration` values are "bare unit
+decorations" that just round-trip as a `UnitAttr`. `NonUniform` is structurally identical to a
+dozen other entries already in those lists (`NoContraction`, `Flat`, `Coherent`, etc.) -- it had
+just never been added to either one. Two-line symmetric fix, both files, done. This is exactly the
+same class of bug as the L60 precedent this row's own filing text already anticipated (an
+upstream MLIR table that's simply incomplete, not a real design gap).
+
+Added a round-trip lit test in MLIR core (`decorations.mlir`) and, since the request explicitly
+asks for coverage of *each phase of translation*, also checked whether `feme`'s own
+SPIR-V-to-LLVM conversion needed anything for this attribute. Grepping `feme/lib/` for
+`non_uniform`/`NonUniform` only turned up unrelated `GroupNonUniform*` wave-op pattern names (a
+naming coincidence -- SPIR-V's own "NonUniform" capability family covers both the decoration and
+the completely unrelated subgroup/wave ops), so I expected the decoration to just pass through
+inertly. Wrote a small `feme-opt --feme-convert-spirv-to-llvm` test to confirm this empirically
+rather than trusting the grep alone, and it does: the attribute survives as an ignored,
+discardable attribute on the resulting `llvm.add`. Makes sense -- `feme`'s own
+`WaveUniformity.cpp` does its own from-scratch divergence analysis and was never going to consult
+this hint anyway.
+
+Then tried to see if I could avoid the coupled `OpCopyObject` gap by finding a different HLSL
+shape that reaches `NonUniform` without it -- tried `[[vk::ext_decorate(5300)]]` directly on a
+local variable. No luck: the compiled SPIR-V had neither the decoration nor a copy at all, most
+likely dxc's optimizer eliminated the trivial local-copy before anything could attach to it. Not
+worth chasing further -- in every *real* HLSL shape I can find, `NonUniformResourceIndex()` is the
+only path to this decoration, and dxc's own codegen convention always routes it through
+`OpCopyObject`. So the two gaps are practically (if not architecturally) coupled.
+
+Confirmed via `grep -rln "CopyObject"` across all of `mlir/include/mlir/Dialect/SPIRV/`,
+`mlir/lib/Dialect/SPIRV/`, and `mlir/lib/Target/SPIRV/` that `OpCopyObject` has *zero* upstream
+support of any kind -- no op definition, not just a missing deserialization case. That's a
+qualitatively bigger job (new ODS op, verifier, printer/parser, both serialization directions)
+mirroring the L7g/`OpImageGather` precedent already on this roadmap, not something to squeeze into
+the same session as a two-line decoration fix. Closed L7f narrowly (the decoration gap itself,
+which is real, fixed, and tested on its own merits) and split the `OpCopyObject` gap out to a new
+top-level row, L86 -- next free top-level L-number, confirmed by scanning the roadmap for the
+highest existing `| L<N> |` row before assigning it, per the "avoid deep nesting" instruction.
+
+Ran `ninja check-feme`: 2,887 discovered / 2,828 passed / 59 pre-existing unsupported / 0 failed --
+clean. Ran the real `dEQP-VK.descriptor_indexing.*` CTS group (115 cases, the group most likely to
+actually exercise `NonUniformResourceIndex()`-shaped shaders) against the `feme` ICD to see if this
+fix unblocks anything for real: it doesn't, yet -- all 115 are `NotSupported` because this ICD
+doesn't advertise the relevant descriptor-indexing feature bits at all. Worth recording plainly in
+the CTS report rather than letting the "fixed a deserialization bug" framing imply more real-world
+impact than it currently has: this is genuine, tested progress, but a prerequisite of a
+prerequisite, not something that moves any CTS pass count yet.
