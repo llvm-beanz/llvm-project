@@ -365,6 +365,28 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   previously cross-referenced against this row). `supportedOperations`
   still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`: the
   `VOTE_BIT`/`SHUFFLE_BIT` flip now remains blocked on L7m/L7r only.
+- **L7r (the `subgroupmemorybarrierimage` runtime-value mismatch above) is
+  now closed**: `feme::cpu::LinearizePass`'s `applyStageMasks` rewrote a
+  `feme.cpu.resource.*` call's own mask operand with the real divergent-
+  branch predicate but had no equivalent case for `feme.cpu.image.*`
+  calls, so `subgroupElect()`-gated `imageStore`/atomic calls kept the
+  compile-time constant `true` mask every such call starts with, running
+  on every active lane in the wave instead of just the elected one --
+  idempotent-safe (and so invisible) for a uniform wave, but wrong once a
+  wave packs multiple subgroups together, each with its own coordinate.
+  Fixed by adding the missing `matchImageCall` case, mirroring the
+  existing `matchResourceCall` one exactly. A real `deqp-vk` re-run
+  confirms both `subgroupmemorybarrierimage` and its
+  `_requiredsubgroupsize` twin now pass, closing the whole
+  `subgroupmemorybarrier*` family (8/8 cases). A before/after regression
+  check found this fix's scope stayed exactly where intended: two other
+  pre-existing, unrelated gaps in the same `dEQP-VK.subgroups.basic.
+  compute.*` group (`subgroupbarrier`'s own `DeleteDeadBlocks` crash,
+  already tracked at L7m; `subgroupelect`'s own separate runtime-value
+  mismatch, newly split out to L7s) are both unaffected either way.
+  `supportedOperations` still advertises only
+  `VK_SUBGROUP_FEATURE_BASIC_BIT`: the `VOTE_BIT`/`SHUFFLE_BIT` flip now
+  remains blocked on L7m/L7s only.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

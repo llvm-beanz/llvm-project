@@ -34722,3 +34722,73 @@ narrowed from L7m/L7n/L7q/L7r to L7m/L7r only (L7n and L7q both now closed). `Vu
 reviewed: no change needed -- an internal limits correction, no new feature or extension bit advertised.
 `FeMeVulkanDesign.md` reviewed: no update needed (this is a plain numeric limits correction, not a design
 decision or deviation -- the design doc never pinned this value at 64 specifically).
+
+## L7r: `subgroupmemorybarrierimage` masked-image-store elect-predicate gap
+
+`dEQP-VK.subgroups.basic.compute.subgroupmemorybarrierimage` (and its `_requiredsubgroupsize` twin) reached
+real pipeline creation and execution once L7p's own `SpecializationPatch` fix landed, but both failed
+runtime output verification (`Fail (Failed!)`, real qpa log: "1 / 7 values passed" for the non-
+`_requiredsubgroupsize` case) -- the last two open cases in the `subgroupmemorybarrier*` family, split out
+of L7p's own closing session.
+
+A real IR reduction (the same `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`-gated technique this project's L45/L7o
+sessions established, added temporarily to `feme/lib/Vulkan/Pipeline.cpp`/`feme/lib/Target/CPU/Pipeline.cpp`
+and reverted before any commit) dumped both the pre-CPU-pipeline (straight-from-SPIR-V-import) and
+post-CPU-pipeline (fully SIMDized) IR for this shader's `if (subgroupElect()) { imageStore(...); }` region,
+for each of the 7 local-size configurations `makeComputeOrMeshTest` exercises. Comparing the shader's own
+already-passing buffer-store sibling (`subgroupmemorybarrierbuffer`) against this one found the real gap:
+the post-merge continuation block (running for every lane regardless of branch) correctly computed its
+buffer-store mask as `wave_sideeffect_mask AND select(elect, ..., ...)` -- a tautological-but-correct
+pattern reflecting the branch's own predicate -- but the `if`-true-branch block containing the *image*
+store used `wave_sideeffect_mask` directly, with no reference at all to the elect predicate computed
+earlier in the entry block. Every active lane in the wave performed the image store, not just the
+subgroup-elected one.
+
+Root-caused to `feme::cpu::LinearizePass`'s `applyStageMasks` (`Linearize.cpp`): it rewrites a
+`feme.cpu.resource.*` call's own trailing mask operand with the real live/side-effect predicate governing
+whichever divergent diamond arm or loop iteration it sits in (via `matchResourceCall`), but had no
+equivalent case for `feme.cpu.image.*` calls at all. Every `feme.cpu.image.*` call starts out with a
+compile-time constant `true` mask (`SPIRVResourceLoweringPass`'s `lowerImageAccesses`), exactly like the
+resource-call path -- but with no rewrite, `FunctionWidener::widenImageCall` had nothing but that constant
+to widen from, and fell back to the function's own unconditional `Env.SideEffectMask`/`Env.EntryMask`
+with no per-branch narrowing at all.
+
+This masking gap is idempotent-safe (and so produces no visible wrong output at all) whenever the stored
+coordinate and value are uniform across the whole wave -- true for the trivial `{1,1,1}` local-size
+configuration, the one iteration (of 7) that already passed. It becomes visibly wrong once a single wave
+packs multiple distinct subgroups together (this project's compute dispatch maps one wave to one subgroup
+1:1, so this only happens for local sizes larger than the wave width), each with its own
+`gl_SubgroupID`-derived image coordinate: every lane in the wave -- not just its own subgroup's elected
+lane -- performed a store using whichever subgroup's elect-branch happened to reach that lane's iteration
+of the (already-flattened) diamond, corrupting the coordinates belonging to every other subgroup sharing
+that wave.
+
+Fixed by adding the missing `matchImageCall`-based case to `applyStageMasks`, mirroring the existing
+`matchResourceCall` case exactly: `Masks.SideEffect` for a store or atomic (`Matched->Texel`/
+`Matched->AtomicValue` non-null, matching `widenImageCall`'s own `LaneMaskBase` choice), `Masks.Live` for a
+plain load. New unit test `LinearizeTest.cpp`'s `MasksImageStoreCallUnderDivergentBranch` confirms an image
+store call under a divergent branch no longer keeps the constant-`true` mask
+`SPIRVResourceLoweringPass` leaves it with.
+
+`ninja check-feme`: 2,884 tests discovered, 2,825 passed, 59 unsupported, 0 failed (up by exactly the 1 new
+unit test).
+
+Real `deqp-vk` re-verification: both `subgroupmemorybarrierimage` and its `_requiredsubgroupsize` twin now
+pass outright (`Pass (OK)`), closing the whole `subgroupmemorybarrier*` family -- all 8 cases now pass. A
+before/after comparison (temporarily reverting this fix and re-running) confirmed two other, pre-existing,
+unrelated issues in the same `dEQP-VK.subgroups.basic.compute.*` group are entirely unaffected by this fix
+either way: `subgroupbarrier`'s own `llvm::DeleteDeadBlocks` assertion crash (already tracked at L7m,
+unchanged) and `subgroupelect`'s own separate "0 / 7 values passed" runtime-value mismatch (previously
+untracked anywhere in this document -- newly filed as roadmap row **L7s**, since L7r's own scope stayed
+narrowly on the image-masking gap this session actually fixed).
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's pending-flip blocker list
+narrowed from L7m/L7r to L7m/L7s only (L7r now closed; L7s newly filed for the untracked `subgroupelect`
+gap this session's own regression check surfaced). `VulkanExtensionInventory.md` reviewed: no change
+needed -- an internal masking-correctness fix, no new feature or extension bit advertised.
+`FeMeCPUDesign.md` reviewed: no update needed (this closes a real bug in an already-documented mechanism --
+`Linearize.cpp`'s own divergent-region mask threading -- rather than deviating from or extending the
+design itself; the design's own "Shared middle-end phases" section already describes exactly this
+threading for "every ordinary masked memory access", which a resource/image call both are).
+
+Split out: **L7s** (the newly-filed, untracked `subgroupelect` runtime-value mismatch).
