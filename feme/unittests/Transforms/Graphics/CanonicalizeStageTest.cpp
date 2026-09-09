@@ -810,6 +810,14 @@ TEST(CanonicalizeStageTest, RewritesSPIRVMatrixInputLoadOneRowAtATime) {
 /// consumer must not confuse with a real matrix row count) is left to a
 /// later roadmap row, once H5c starts routing real geometry entries
 /// through this pass and a real consumer needs to tell the two apart.
+/// (Roadmap L24(a)) Uses a real `geometry`-stage function attribute
+/// (rather than the placeholder `vertex` this test originally used, back
+/// when no real per-vertex-arrayed-`Input` stage existed to test against
+/// yet): `isPerVertexArrayInputGlobal`'s constant-index counterpart is now
+/// scoped to `Hull`/`Domain`/`Geometry` only (see that function's own
+/// comment), and `Sig->Elements[0].RowCountIsVertexArray`'s own
+/// computation reuses it regardless of whether a given load's own index
+/// happened to be constant or dynamic.
 TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoInputLoad) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -819,7 +827,7 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoInputLoad) {
       %v = load <4 x float>, ptr addrspace(7) %p
       ret <4 x float> %v
     }
-    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #0 = { "feme.shader.stage"="geometry" }
     !0 = !{!1}
     !1 = !{i32 30, i32 0}
   )");
@@ -942,6 +950,14 @@ TEST(CanonicalizeStageTest,
 /// `Sig->Elements[0].RowCountIsVertexArray` (also asserted here) lets a
 /// consumer recognize this element's `RowCount` as the per-vertex array's
 /// own extent regardless of how the shader happens to index it.
+/// (Roadmap L24(a)) Uses a real `geometry`-stage function attribute for
+/// the same reason `ThreadsDynamicVertexIndexIntoInputLoad` now does --
+/// `isPerVertexArrayInputGlobal` is scoped to `Hull`/`Domain`/`Geometry`
+/// only, since every other stage's own array-typed `Input` global is an
+/// ordinary multi-element varying with no per-vertex/control-point
+/// dimension to fold a constant index into (roadmap L24(a)'s own
+/// `ArraySemantics.test` regression, a fragment stage's plain
+/// `float arr[4]` input).
 TEST(CanonicalizeStageTest, FoldsConstantVertexIndexIntoVertexOperand) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -951,7 +967,7 @@ TEST(CanonicalizeStageTest, FoldsConstantVertexIndexIntoVertexOperand) {
       %v = load <4 x float>, ptr addrspace(7) %p
       ret <4 x float> %v
     }
-    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #0 = { "feme.shader.stage"="geometry" }
     !0 = !{!1}
     !1 = !{i32 30, i32 0}
   )");
@@ -989,7 +1005,9 @@ TEST(CanonicalizeStageTest, FoldsConstantVertexIndexIntoVertexOperand) {
 /// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`: a builtin
 /// interface block's own per-vertex-arrayed access (`gl_in[k].
 /// gl_Position`) with a constant `k` folds into `Vertex` the same way the
-/// dynamic case does, not into an ordinary `Row`.
+/// dynamic case does, not into an ordinary `Row`. (Roadmap L24(a)) Uses a
+/// real `geometry`-stage function attribute, matching
+/// `FoldsConstantVertexIndexIntoVertexOperand`'s own reasoning.
 TEST(CanonicalizeStageTest,
      FoldsConstantVertexIndexIntoInterfaceBlockArrayMemberVertexOperand) {
   LLVMContext Ctx;
@@ -1000,7 +1018,7 @@ TEST(CanonicalizeStageTest,
       %v = load <4 x float>, ptr addrspace(7) %p
       ret <4 x float> %v
     }
-    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #0 = { "feme.shader.stage"="geometry" }
     !10 = !{!11, !12, !13, !14}
     !11 = !{i32 0, !15}
     !12 = !{i32 1, !16}
