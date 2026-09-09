@@ -73385,3 +73385,152 @@ methodology used here for L7c. L7c itself remains partially open too —
 patterns of their own (not attempted this session, left for a future L7c
 follow-on since they're less trivial than the three cross-lane-reduction-free
 ops closed here).
+
+# Session: L7a (matrix legalization gaps) closed -- real root cause was resource lowering, not legalization
+
+## Task
+
+Requested to work on roadmap L7a ("Matrix `spirv.CompositeConstruct`/`spirv.AccessChain`/
+`spirv.Transpose` legalization gaps") or other prerequisites blocking the L-series milestones.
+L7a's own filing text (from a prior session's L7 split) asked for a real IR reduction of one of
+`Basic/Matrix/*.test`'s own failing cases to pin down the exact unhandled shape, following this
+project's established reduce-first methodology.
+
+## Setting up the real test
+
+First confirmed the `offload-test-suite` `feme-rebased` branch checkout hadn't drifted, and that
+`build2/tools/OffloadTest/test/feme-vk` was correctly configured. Ran `Basic/Matrix` once WITHOUT
+`VK_ICD_FILENAMES` set -- a mistake I caught myself via `feme/.instructions.md`'s own documented
+gotcha: this container's default ICD selection silently falls back to Mesa's `lavapipe`, not
+`feme`, and produces a "plausible-looking but entirely wrong" pass/fail count (24/27 that time --
+suspiciously clean for a project mid-development). Re-ran with `VK_ICD_FILENAMES` correctly
+exported to `build2/tools/feme/tools/feme-vulkan/feme_icd.json`, confirmed via
+`vulkaninfo --summary | grep deviceName` showing `FeMe CPU Vulkan Device`. Real result: 16
+Passed, 3 XFAIL, 8 Failed -- a real, non-trivial failure set worth reducing.
+
+**Lesson reinforced for future sessions**: `VK_ICD_FILENAMES` does NOT persist across separate
+`bash` tool invocations (each is a fresh shell) -- it must be re-exported in every single command
+that touches the real ICD. Forgetting it doesn't error, it just silently measures the wrong
+driver. Always sanity-check with `vulkaninfo --summary` before trusting a result.
+
+## The reduction
+
+Picked `matrix_m-based_getter.test` (one of the 8 failures) and reduced it by hand:
+
+1. `spirv-dis` on its captured SPIR-V binary -- confirmed it's a simple compute shader with a
+   `RWStructuredBuffer` matrix input and (critically, in hindsight) a `RWBuffer<float2> OutVec2`
+   output.
+2. `feme-translate --import-spirv` -- clean, no errors.
+3. `feme-opt --feme-convert-spirv-to-llvm` -- **clean, zero errors**. This was the first real
+   signal that L7a's own filed root cause was wrong: this is exactly the pass where
+   `CompositeConstructPattern`/`StageIOArrayAccessChainPattern`/`TransposePattern`
+   (`SPIRVToLLVMPatterns.cpp`) live, and none of them raised any diagnostic on this case.
+
+Rather than give up because the "obvious" suspect turned out innocent, kept reducing further,
+down to raw LLVM IR and then through the real CPU-target normalization pass pipeline. This needed
+some real spelunking:
+
+- `feme-translate --llvmdialect-to-llvmir` has a silent failure mode: feeding it the direct
+  textual output of `feme-opt --feme-convert-spirv-to-llvm -o file.mlir` (which itself prints an
+  outer, generic `module { ... }` wrapper around the real, attributed
+  `module attributes {llvm.data_layout=...} { ... }` op) translates only the (essentially empty)
+  OUTER module, producing a nearly-empty 6-line `.ll` file with NO error message at all. Had to
+  manually strip the outer wrapper (matching braces) before feeding the file in. Worth
+  remembering for any future hand-reduction down to LLVM IR.
+- The real CPU-target normalization pipeline lives in `feme/lib/Target/CPU/Pipeline.cpp`'s
+  `Normalize` `ModulePassManager` (~line 270-330). Its registered CLI pass names (found via each
+  header's `static StringRef name()`) are `feme-cpu-inline-helper-functions`,
+  `feme-cpu-fold-spirv-builtins`, `feme-cpu-prepare`, `feme-cpu-normalize-bound-resources`,
+  `feme-cpu-lower-root-constants`, `feme-cpu-lower-spirv-resources`,
+  `feme-cpu-lower-spirv-push-constants`, `feme-cpu-lower-spirv-subpass`. But `feme-opt` (the CLI
+  tool) does NOT register `feme-cpu-inline-helper-functions` or `feme-cpu-lower-spirv-subpass` in
+  its own plugin pipeline-parsing callbacks at all (confirmed via grep in
+  `feme/tools/feme-opt/feme-opt.cpp`) -- a chained `-passes=` invocation naming either fails with
+  "unknown pass name". For a reduction of a simple, non-helper-function, non-subpass-input
+  compute shader, just omit them; both are no-ops for this shape anyway.
+- `feme-cpu-prepare` additionally needs the global CLI flags `-feme-cpu-entry-point=<name>` and
+  `-feme-cpu-stage=<stage>` (e.g. `compute`) set, or it fails with "no compute entry point named
+  '...' in this module".
+
+Running the reduced IR through this reconstructed pipeline showed every single
+`llvm.spv.resource.handlefrombinding` call left completely un-normalized. Traced this to
+`feme::cpu::SPIRVResourceLoweringPass::isSupportedTexelElementType`
+(`SPIRVResourceLowering.cpp`), which explicitly (and, per its own doc comment, deliberately)
+rejected any 2- or 3-component vector texel-buffer element type, on the claim "neither `dxc` nor
+glslang ever emits one for a texel-buffer access." The failing test's own `RWBuffer<float2>
+OutVec2` write directly disproves this for `dxc`: it emits a genuine `OpImageWrite` with a bare
+`<2 x float>` Texel operand, exactly mirroring the already-supported 4-wide and scalar shapes one
+width down.
+
+**A useful (if slightly annoying) gotcha this pass's own diagnostic text warns about**: an
+unsupported handle in a function blocks normalization of every OTHER handle in that same
+function too, not just the unsupported one. This meant the top-level diagnostic from this
+failing test initially looked like it implicated an unrelated resource (`In`, the matrix input),
+not the real culprit (`OutVec2`). Only the full IR reduction -- not just reading the
+top-level error text -- made the real cause visible. This mirrors a lesson this project's own
+past sessions have hit before (e.g. L64's "VulkanBuffer framing was a misattribution" note): don't
+trust a diagnostic's own named resource/op at face value when a pass has known "one bad apple
+spoils the barrel" behavior; reduce all the way down.
+
+## The fix
+
+Small and surgical: widen `isSupportedTexelElementType`'s accepted vector width from `{4}` to
+`{2, 4}` (width 3 stays rejected -- there is genuinely no 3-channel mandatory SPIR-V
+texel-buffer format). Confirmed via reading `ResourceCalls.cpp` that `mangleResourceCallName`/
+`createTypedLoad`/`createTypedStore` already build the mangled call name (e.g.
+`feme.cpu.resource.store.typed.v2f32`) generically from the value's real LLVM type -- so the ONLY
+C++ change needed in the pass itself was this one width-gate line. The gap was purely a missing
+runtime symbol: `feme.cpu.resource.{load,store}.typed.v2{f32,i32}` didn't exist yet in
+`FeMeRuntimeCPU.c`, an unresolved-symbol/link-time problem, not a mangling-scheme problem. Added
+four small wrapper functions reusing the existing `femeRTUnpackImageTexel`/`femeRTPackImageTexel`
+(and `I32`) per-format tables (which already correctly handled `R32G32_{FLOAT,UINT,SINT}` --
+these were built generically for the image-sampling path and needed zero changes) and the
+existing `FemeRTv2f32`/`FemeRTv2i32` typedefs.
+
+## Verification discipline
+
+Did a real A/B comparison via `git stash` rather than trusting the "should work" reasoning alone:
+stashed the fix, rebuilt `FeMeRuntimeCPU`/`feme-opt`/`feme_vulkan`/`offloader`, re-ran the full
+`feme-vk` suite (231 Passed/146 Failed), popped the stash, rebuilt again, re-ran (235
+Passed/142 Failed) -- exactly +4/-4, matching the 4 named cases precisely, zero regressions
+anywhere else in a 664-test suite.
+
+Also ran a real, targeted `deqp-vk` CTS sweep specifically for the CTS group that should exercise
+this exact shape: `dEQP-VK.image.load_store.{with,without}_format.buffer.r32g32_*` (36 cases). Did
+another A/B `git stash` comparison here too. Result: **36/36 Pass, identically, both before and
+after the fix** -- genuinely zero CTS payoff from this change. Figured out why rather than just
+shrugging: `deqp-vk` compiles every case via `glslang` from GLSL, and GLSL's own `imageStore()`
+intrinsic always takes a full `vec4` regardless of the underlying image format's real channel
+count -- so `glslang` structurally never emits the narrower-than-`<4 x T>` Texel operand shape
+this fix adds support for. Only `dxc`-compiled HLSL's `RWBuffer<T2>` reaches it, which only this
+project's own `offload-test-suite`/`feme-vk` corpus exercises, not the upstream Khronos CTS. This
+actually *confirms* the other half of the old (now-corrected) doc comment's claim was right about
+`glslang`; it was wrong only about `dxc`. Worth remembering: not every real, useful fix in this
+project shows up in a `deqp-vk` re-run, if its own reachable shape is HLSL/dxc-specific rather
+than GLSL/glslang-specific. Recorded this explicitly in the roadmap closure text and
+`VulkanCTSReport.md` rather than silently reporting "no CTS change" with no explanation.
+
+## Splitting out the unrelated bug
+
+Of the original 8 `Basic/Matrix` failures, this fix targeted exactly 4 (the ones failing at
+`vkCreateGraphicsPipelines` time with `VkResult=-3`, confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`). The other 4
+(`matrix_groupthread_swizzle_{one,zero}_based`, `matrix_{m,one}-based_setter`) reach pipeline
+creation and execution successfully, but fail a real numeric `BufferExact` mismatch -- clearly a
+different kind of bug (likely a matrix setter/groupshared-swizzle storage-order or indexing
+issue), not a legalization or resource-lowering gap at all. Deliberately left these out of scope
+and filed as new roadmap row L83, rather than attempting a second, unrelated fix in the same
+session/commit.
+
+## Roadmap closure decision
+
+L7a's own originally-filed gap -- matrix `CompositeConstruct`/`AccessChain`/`Transpose`
+legalization -- turned out to have **no live repro anywhere in this session's own investigation**.
+The one concrete case reduced legalized all three ops cleanly; every one of `Basic/Matrix`'s
+remaining failures traced to something else entirely (4 to the resource-lowering gap this session
+fixed, 4 to the new, unrelated L83 numeric bug). Closed L7a on this basis rather than leaving it
+open indefinitely waiting for a case that may not exist -- if a real matrix legalization gap does
+turn up in some future session, it'll need its own fresh filing with its own real reduction, not
+a continuation of this investigation. This mirrors an established project precedent (e.g. roadmap
+L64's own "VulkanBuffer framing was a misattribution" note): a milestone's own filed guess about
+root cause is not authoritative, and a real reduction can -- and should -- override it.
