@@ -17,6 +17,7 @@
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Target/SPIRV/Deserialization.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
@@ -220,6 +221,25 @@ private:
   /// null IntegerAttr if the given is not registered or does not correspond
   /// to an integer constant.
   IntegerAttr getConstantInt(uint32_t id);
+
+  /// Attempts to resolve <id> to a compile-time-constant integer value, for
+  /// use as an `OpTypeArray` length operand that (unlike the plain
+  /// `OpConstant` case `getConstant` already covers) instead names a
+  /// specialization constant, or an `OpSpecConstantOp` expression built up
+  /// from one -- a shape real shader compilers (e.g. glslang, compiling a
+  /// GLSL `shared T arr[gl_WorkGroupSize.x * gl_WorkGroupSize.y *
+  /// gl_WorkGroupSize.z];` declaration) are confirmed to emit. This
+  /// deserializer has no mechanism to supply a real specialization
+  /// override at deserialization time, so a specialization constant's own
+  /// declared default value is the only value this can ever resolve to.
+  /// Only the specific `OpSpecConstantOp` enclosed-opcode shapes such a
+  /// real array-length expression is confirmed to need
+  /// (`OpCompositeExtract` on a specialization-constant composite,
+  /// `OpIMul` combining two resolved operands) are folded; any other
+  /// enclosed opcode, or a multi-level `OpCompositeExtract` index, or a
+  /// composite constituent this deserializer cannot itself resolve to an
+  /// integer, declines (returns `std::nullopt`) rather than guessing.
+  std::optional<llvm::APInt> resolveConstantArrayLength(uint32_t id);
 
   /// Returns a symbol to be used for the function name with the given
   /// result <id>. This tries to use the function's OpName if

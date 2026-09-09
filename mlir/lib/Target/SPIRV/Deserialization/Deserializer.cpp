@@ -19,6 +19,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Target/SPIRV/SPIRVBinaryUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
@@ -1303,6 +1304,85 @@ spirv::Deserializer::processOpTypePointer(ArrayRef<uint32_t> operands) {
   return success();
 }
 
+std::optional<llvm::APInt>
+spirv::Deserializer::resolveConstantArrayLength(uint32_t id) {
+  if (std::optional<std::pair<Attribute, Type>> constInfo = getConstant(id)) {
+    if (auto intAttr = dyn_cast<IntegerAttr>(constInfo->first))
+      return intAttr.getValue();
+    return std::nullopt;
+  }
+
+  if (spirv::SpecConstantOp specConst = getSpecConstant(id)) {
+    if (auto intAttr = dyn_cast<IntegerAttr>(specConst.getDefaultValue()))
+      return intAttr.getValue();
+    return std::nullopt;
+  }
+
+  std::optional<SpecConstOperationMaterializationInfo> specOp =
+      getSpecConstantOperation(id);
+  if (!specOp)
+    return std::nullopt;
+
+  switch (specOp->enclodesOpcode) {
+  case spirv::Opcode::OpCompositeExtract: {
+    // Operand encoding: Composite <id>, followed by one or more literal
+    // indexes. Only a single-level index into a flat (e.g.
+    // `gl_WorkGroupSize`-style `vector<3xT>`) composite is resolved here;
+    // a multi-level index into a nested composite is declined.
+    if (specOp->enclosedOpOperands.size() != 2)
+      return std::nullopt;
+
+    spirv::SpecConstantCompositeOp composite =
+        getSpecConstantComposite(specOp->enclosedOpOperands[0]);
+    if (!composite)
+      return std::nullopt;
+
+    uint32_t index = specOp->enclosedOpOperands[1];
+    ArrayAttr constituents = composite.getConstituents();
+    if (index >= constituents.size())
+      return std::nullopt;
+
+    Attribute constituent = constituents[index];
+    if (auto symRef = dyn_cast<FlatSymbolRefAttr>(constituent)) {
+      // A constituent referencing another specialization constant by
+      // symbol (see processSpecConstantComposite): resolve through the
+      // partially-built module's own symbol table, valid here since
+      // SPIR-V requires a symbol's definition to already have been
+      // deserialized (and so already inserted into the module) before any
+      // reference to it.
+      auto specConstOp = dyn_cast_or_null<spirv::SpecConstantOp>(
+          SymbolTable::lookupSymbolIn(module.get(), symRef));
+      if (!specConstOp)
+        return std::nullopt;
+      if (auto intAttr = dyn_cast<IntegerAttr>(specConstOp.getDefaultValue()))
+        return intAttr.getValue();
+      return std::nullopt;
+    }
+
+    if (auto intAttr = dyn_cast<IntegerAttr>(constituent))
+      return intAttr.getValue();
+    return std::nullopt;
+  }
+  case spirv::Opcode::OpIMul: {
+    // Operand encoding: Operand 1 <id>, Operand 2 <id>.
+    if (specOp->enclosedOpOperands.size() != 2)
+      return std::nullopt;
+    std::optional<llvm::APInt> lhs =
+        resolveConstantArrayLength(specOp->enclosedOpOperands[0]);
+    std::optional<llvm::APInt> rhs =
+        resolveConstantArrayLength(specOp->enclosedOpOperands[1]);
+    if (!lhs || !rhs)
+      return std::nullopt;
+    return *lhs * *rhs;
+  }
+  default:
+    // Any other enclosed opcode is a real gap in this resolution, not a
+    // malformed module -- decline rather than guess, matching this
+    // function's own contract.
+    return std::nullopt;
+  }
+}
+
 LogicalResult
 spirv::Deserializer::processArrayType(ArrayRef<uint32_t> operands) {
   if (operands.size() != 3) {
@@ -1316,23 +1396,25 @@ spirv::Deserializer::processArrayType(ArrayRef<uint32_t> operands) {
            << operands[1];
   }
 
-  unsigned count = 0;
-  // TODO: The count can also come frome a specialization constant.
-  auto countInfo = getConstant(operands[2]);
-  if (!countInfo) {
+  // The count operand usually names a plain `OpConstant`, but may instead
+  // name a specialization constant (or an `OpSpecConstantOp` expression
+  // built from one, e.g. a GLSL `shared T arr[gl_WorkGroupSize.x *
+  // gl_WorkGroupSize.y * gl_WorkGroupSize.z];` declaration's own compiled
+  // shape) -- `spirv::ArrayType` itself has no way to represent a length
+  // that depends on a runtime specialization override, so (matching this
+  // deserializer's own inability to apply one anyway) the specialization
+  // constant's own compile-time-fixed default value is resolved and used
+  // as the array's own fixed length; see resolveConstantArrayLength's own
+  // comment for the exact scope of what is (and isn't) folded this way.
+  std::optional<llvm::APInt> count = resolveConstantArrayLength(operands[2]);
+  if (!count)
     return emitError(unknownLoc, "OpTypeArray count <id> ")
-           << operands[2] << "can only come from normal constant right now";
-  }
-
-  if (auto intVal = dyn_cast<IntegerAttr>(countInfo->first)) {
-    count = intVal.getValue().getZExtValue();
-  } else {
-    return emitError(unknownLoc, "OpTypeArray count must come from a "
-                                 "scalar integer constant instruction");
-  }
+           << operands[2]
+           << " must come from a constant, specialization constant, or "
+              "supported specialization constant operation";
 
   typeMap[operands[0]] = spirv::ArrayType::get(
-      elementTy, count, typeDecorations.lookup(operands[0]));
+      elementTy, count->getZExtValue(), typeDecorations.lookup(operands[0]));
   return success();
 }
 

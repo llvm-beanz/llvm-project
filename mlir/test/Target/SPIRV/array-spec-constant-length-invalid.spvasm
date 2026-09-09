@@ -1,0 +1,31 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | not mlir-translate --deserialize-spirv - -o - 2>&1 | FileCheck %s %}
+
+; COM: An `OpTypeArray` length operand naming an `OpSpecConstantOp` built from
+; COM: an enclosed opcode other than the two (`OpCompositeExtract`, `OpIMul`)
+; COM: a real `gl_WorkGroupSize`-derived array-length expression is confirmed
+; COM: to need (see array-spec-constant-composite-length.spvasm) is correctly
+; COM: declined rather than silently guessed at -- `OpUDiv` below stands in for
+; COM: any such unsupported shape.
+
+; CHECK: error: OpTypeArray count <id> {{[0-9]+}} must come from a constant, specialization constant, or supported specialization constant operation
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %sc_a SpecId 0
+               OpDecorate %sc_b SpecId 1
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+       %sc_a = OpSpecConstant %uint 16
+       %sc_b = OpSpecConstant %uint 4
+     %length = OpSpecConstantOp %uint UDiv %sc_a %sc_b
+      %arrty = OpTypeArray %uint %length
+     %arrptr = OpTypePointer Workgroup %arrty
+     %shared = OpVariable %arrptr Workgroup
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

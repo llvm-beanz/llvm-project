@@ -1,0 +1,48 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpTypeArray`'s own length operand may instead name an `OpSpecConstantOp`
+; COM: expression built from a specialization-constant composite -- exactly
+; COM: the shape glslang compiles a GLSL `shared T arr[gl_WorkGroupSize.x *
+; COM: gl_WorkGroupSize.y * gl_WorkGroupSize.z];` declaration down to
+; COM: (confirmed via a real `spirv-dis` disassembly of one of this exact
+; COM: shader's own real `deqp-vk` compute-stage subgroup test cases): three
+; COM: scalar spec constants combined into one `OpSpecConstantComposite`,
+; COM: extracted back out one component at a time via `OpCompositeExtract`,
+; COM: and multiplied together via `OpIMul`. Resolved by recursively folding
+; COM: each spec constant to its own declared default value (4 * 2 * 3 = 24
+; COM: below), the only value this deserializer could ever produce.
+
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(0) = 4 : i32
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(1) = 2 : i32
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(2) = 3 : i32
+; CHECK: spirv.SpecConstantComposite @{{.*}} ({{.*}}, {{.*}}, {{.*}}) : vector<3xi32>
+; CHECK: spirv.GlobalVariable @{{.*}} : !spirv.ptr<!spirv.array<24 x i32>, Workgroup>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 4 2 3
+               OpDecorate %sc_x SpecId 0
+               OpDecorate %sc_y SpecId 1
+               OpDecorate %sc_z SpecId 2
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+       %sc_x = OpSpecConstant %uint 4
+       %sc_y = OpSpecConstant %uint 2
+       %sc_z = OpSpecConstant %uint 3
+     %v3uint = OpTypeVector %uint 3
+     %wgsize = OpSpecConstantComposite %v3uint %sc_x %sc_y %sc_z
+       %ext0 = OpSpecConstantOp %uint CompositeExtract %wgsize 0
+       %ext1 = OpSpecConstantOp %uint CompositeExtract %wgsize 1
+       %mul0 = OpSpecConstantOp %uint IMul %ext0 %ext1
+       %ext2 = OpSpecConstantOp %uint CompositeExtract %wgsize 2
+     %length = OpSpecConstantOp %uint IMul %mul0 %ext2
+      %arrty = OpTypeArray %uint %length
+     %arrptr = OpTypePointer Workgroup %arrty
+     %shared = OpVariable %arrptr Workgroup
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

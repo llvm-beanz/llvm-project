@@ -1,0 +1,30 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpTypeArray`'s own length operand may name a plain `OpSpecConstant`
+; COM: directly (as opposed to only ever an `OpConstant`, which is all the
+; COM: deserializer used to accept) -- e.g. the shape a GLSL/HLSL shader's own
+; COM: `shared T arr[gl_WorkGroupSize.x];`-style declaration compiles down to
+; COM: when only a single dimension is used. Resolved to its own declared
+; COM: default value, the only value this deserializer could ever produce
+; COM: (there is no specialization-override mechanism here).
+
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(0) = 8 : i32
+; CHECK: spirv.GlobalVariable @{{.*}} : !spirv.ptr<!spirv.array<8 x i32>, Workgroup>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %sc_len SpecId 0
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+     %sc_len = OpSpecConstant %uint 8
+      %arrty = OpTypeArray %uint %sc_len
+     %arrptr = OpTypePointer Workgroup %arrty
+     %shared = OpVariable %arrptr Workgroup
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd
