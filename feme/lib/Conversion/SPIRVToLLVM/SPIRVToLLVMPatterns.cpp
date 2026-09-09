@@ -5656,6 +5656,129 @@ private:
   double Scale;
 };
 
+/// Converts `spirv.GL.Atan2` (roadmap L7c) directly to `llvm.intr.atan2`, a
+/// component-wise equivalent needing no arithmetic decomposition -- upstream
+/// `SPIRVToLLVM.cpp`'s own `DirectConversionPattern` template isn't usable
+/// from here (it's file-local to that translation unit), so this is a thin,
+/// one-off restatement of that same shape, mirroring upstream's own
+/// `DirectConversionPattern<spirv::CLAtan2Op, LLVM::ATan2Op>` for the
+/// OpenCL extended-instruction-set sibling of this same GLSL.std.450 op
+/// (both `lhs`/`rhs`-shaped binary ops forwarding their operands in the
+/// same order `llvm.intr.atan2(y, x)` expects).
+class GLAtan2Pattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLAtan2Op> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLAtan2Op>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLAtan2Op Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ATan2Op>(
+        Op, DstType, Adaptor.getLhs(), Adaptor.getRhs());
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Step` (roadmap L7c), whose GLSL.std.450 semantics
+/// (`0.0` if `x < edge`, else `1.0`, computed per component) have no direct
+/// single LLVM instruction/intrinsic equivalent, unlike e.g. `spirv.GL.
+/// FMax`/`FMin`'s direct `llvm.intr.maxnum`/`minnum` mapping. Lowered to an
+/// `llvm.fcmp olt` (ordered: per the GLSL.std.450 spec, `Step`'s own result
+/// is only defined for non-NaN operands, so an unordered predicate would
+/// just as validly satisfy the spec, but `olt` matches every sibling
+/// `spirv.GL.*` compare-based pattern already in this file, e.g.
+/// `SignPattern` above) followed by a scalar-or-vector-shaped
+/// `llvm.select` between the two compile-time constants, mirroring
+/// `SignPattern`'s own compare-then-select shape.
+class GLStepPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLStepOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLStepOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLStepOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Edge = Adaptor.getLhs();
+    mlir::Value X = Adaptor.getRhs();
+    mlir::Value IsLess =
+        mlir::LLVM::FCmpOp::create(Rewriter, Loc, getBoolTypeLike(DstType),
+                                   mlir::LLVM::FCmpPredicate::olt, X, Edge);
+    mlir::Value Zero = createSameShapeFPConstant(Rewriter, Loc, DstType, 0.0);
+    mlir::Value One = createSameShapeFPConstant(Rewriter, Loc, DstType, 1.0);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SelectOp>(Op, DstType, IsLess, Zero,
+                                                      One);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.SmoothStep` (roadmap L7c) into the GLSL.std.450 spec's
+/// own literal definition: `t = clamp((x - edge0) / (edge1 - edge0), 0, 1)`
+/// followed by `t * t * (3 - 2 * t)` (a cubic Hermite interpolant), using
+/// `llvm.intr.maxnum`/`llvm.intr.minnum` for the clamp -- the same pair
+/// upstream's own `spirv.GL.FMax`/`FMin` `DirectConversionPattern`s already
+/// map to -- rather than a compare-and-select chain, since `maxnum`/
+/// `minnum`'s own NaN-quieting behavior already matches `FClamp`'s spec'd
+/// per-component semantics with no extra pattern needed. Note
+/// `spirv.GL.SmoothStep`'s generic ternary `x`/`y`/`z` operand names (see
+/// `SPIRV_GLTernaryArithmeticOp` in SPIRVGLOps.td, shared with `spirv.GL.
+/// FClamp` et al.) map to this op's own `edge0`/`edge1`/`x` positions in
+/// that order, not `x`/`y`/`z`'s own literal meaning elsewhere.
+class GLSmoothStepPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLSmoothStepOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLSmoothStepOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLSmoothStepOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Edge0 = Adaptor.getX();
+    mlir::Value Edge1 = Adaptor.getY();
+    mlir::Value X = Adaptor.getZ();
+    mlir::Value Zero = createSameShapeFPConstant(Rewriter, Loc, DstType, 0.0);
+    mlir::Value One = createSameShapeFPConstant(Rewriter, Loc, DstType, 1.0);
+    mlir::Value Two = createSameShapeFPConstant(Rewriter, Loc, DstType, 2.0);
+    mlir::Value Three = createSameShapeFPConstant(Rewriter, Loc, DstType, 3.0);
+
+    mlir::Value Num =
+        mlir::LLVM::FSubOp::create(Rewriter, Loc, DstType, X, Edge0);
+    mlir::Value Den =
+        mlir::LLVM::FSubOp::create(Rewriter, Loc, DstType, Edge1, Edge0);
+    mlir::Value Ratio =
+        mlir::LLVM::FDivOp::create(Rewriter, Loc, DstType, Num, Den);
+    mlir::Value ClampedLow =
+        mlir::LLVM::MaxNumOp::create(Rewriter, Loc, DstType, Ratio, Zero);
+    mlir::Value T =
+        mlir::LLVM::MinNumOp::create(Rewriter, Loc, DstType, ClampedLow, One);
+
+    mlir::Value TwoT =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, DstType, Two, T);
+    mlir::Value ThreeMinusTwoT =
+        mlir::LLVM::FSubOp::create(Rewriter, Loc, DstType, Three, TwoT);
+    mlir::Value TSquared =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, DstType, T, T);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FMulOp>(Op, DstType, TSquared,
+                                                    ThreeMinusTwoT);
+    return mlir::success();
+  }
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -6523,5 +6646,12 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // 180 / pi
   Patterns.add<FlushedScalePattern<mlir::spirv::GLDegreesOp>>(
       57.29577951308232, Patterns.getContext(), TypeConverter, FeMeBenefit);
+  // Roadmap L7c: `spirv.GL.Atan2`/`Step`/`SmoothStep` had no conversion
+  // pattern at all before this fix (neither here nor in upstream's own
+  // `populateSPIRVToLLVMConversionPatterns`, confirmed by grepping both),
+  // failing every one of these HLSL-derived shapes' pipeline creation with
+  // "failed to legalize operation ... that was explicitly marked illegal".
+  Patterns.add<GLAtan2Pattern, GLStepPattern, GLSmoothStepPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
