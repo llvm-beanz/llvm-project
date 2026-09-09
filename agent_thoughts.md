@@ -73231,3 +73231,157 @@ Added a new `## Roadmap L60` section to `VulkanCTSReport.md` and updated
 `Vulkan14FeatureInventory.md` reviewed: no change needed (this feature's bits are not part of
 the Vulkan 1.4 core floor tracked there). `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` reviewed:
 no stale text found referencing this gap.
+
+# Session: Roadmap L7 (SPIR-V/MLIR legalization tail) — split and partial closure
+
+## Task
+
+Requested to work on roadmap L7 — a large, ungrouped tail of genuinely
+unimplemented SPIR-V/MLIR legalization patterns that no real `deqp-vk` case in
+this project's own recorded runs has ever reached (matrix ops, combined-image-
+sampler, several `spirv.GL.*` builtins, `ImageDrefGather`, several
+`GroupNonUniform*` variants, an unhandled `NonUniform` decoration, and a
+catch-all raw-opcode tail) — or other prerequisites blocking the L-series
+milestones.
+
+## Approach
+
+L7 as originally filed bundled together seven genuinely distinct, independently
+sized gaps with no shared root cause. Rather than attempt all of them together
+(or arbitrarily pick one without recording the others), followed this project's
+own established H7/H19 precedent: split a large multi-cluster row into lettered
+sub-rows (L7a-L7g), each scoped and closeable independently, leaving the parent
+row as bookkeeping that references the split.
+
+Investigated each of the seven named clusters by grepping both `feme`'s own
+`SPIRVToLLVMPatterns.cpp` and upstream MLIR's `SPIRVToLLVM.cpp`:
+
+- **L7a matrix ops** (`CompositeConstruct`/`AccessChain`/`Transpose`): patterns
+  already exist; some matrix-typed shape still fails but not yet reduced to a
+  concrete repro. Left open.
+- **L7b combined-image-sampler `spirv.Image`**: not yet reduced. Left open.
+- **L7c GL.\* builtins** (`SmoothStep`/`Length`/`Distance`/`Atan2`/`Step`/
+  `Normalize`/`UnpackHalf2x16`): confirmed via grep that none of these seven had
+  *any* conversion pattern registered anywhere (feme's own file or upstream's),
+  despite all seven existing as real ops in `SPIRVGLOps.td` — i.e. a pure
+  conversion-pattern gap, not a deserialization gap. This was the most
+  tractable cluster (three of the seven — `Atan2`/`Step`/`SmoothStep` — need no
+  cross-lane vector reduction, unlike a wave-op), so picked it as this
+  session's actual fix.
+- **L7d `ImageDrefGather`**: recognized as a distinct core SPIR-V opcode (not a
+  GLSL.std.450 builtin) rather than part of L7c; split into its own row. Left
+  open.
+- **L7e `GroupNonUniform*`** (`IMul`/`IAdd`/`AllEqual`/`Shuffle`/`Elect`/
+  `BitwiseAnd`/`BitwiseOr`): `IntegerGroupNonUniformReducePattern` already
+  covers the reduce forms of `IAdd`/`IMul`/etc.; `AllEqual`/`Shuffle`/`Elect`
+  remain fully unhandled (and `BitwiseAnd`/`BitwiseOr` already has a narrower
+  tracked gap cited at H6g-b-a-i-a-i-b). Left open, new gap for the other
+  variants noted as untracked before this split.
+- **L7f `unhandled Decoration : 'NonUniform'`**: traced to
+  `Deserializer.cpp`'s decoration-handling code; not yet reduced. Left open.
+- **L7g catch-all leftover raw-opcode/GLSL.std.450 tail**: left as a
+  placeholder bucket for whatever remains once a/b/d/e/f are each resolved.
+
+## The L7c fix
+
+Reproduced the `Atan2`/`Step`/`SmoothStep` gaps directly: hand-authored minimal
+`spirv.module`s for each and ran them through
+`feme-opt --feme-convert-spirv-to-llvm`, confirming identical "failed to
+legalize operation ... that was explicitly marked illegal" errors.
+
+Studied the existing pattern style in `SPIRVToLLVMPatterns.cpp`
+(`FlushedScalePattern`, `SignPattern`, `createSameShapeFPConstant`,
+`getBoolTypeLike`) and confirmed upstream's own equivalent helpers
+(`DirectConversionPattern`, `createFPConstant`, `broadcast`, etc.) are
+`static`/anonymous-namespace and not reusable from feme's translation unit —
+any new pattern needing them must reuse feme's own mirrors or write a thin
+one-off restatement.
+
+Checked `SPIRVGLOps.td` for exact operand semantics: `GLAtan2Op`/`GLStepOp` use
+generic `lhs`/`rhs` names from their binary-arithmetic base class;
+`GLSmoothStepOp` uses generic ternary `x`/`y`/`z` names that do *not* map to
+its own semantic `edge0`/`edge1`/`x` (`Adaptor.getX()` is really `edge0`,
+`getY()` is `edge1`, `getZ()` is the real `x`) — documented this in a comment
+on the new pattern to avoid future confusion.
+
+Implemented three new pattern classes:
+- `GLAtan2Pattern`: direct restatement of upstream's
+  `DirectConversionPattern<CLAtan2Op, LLVM::ATan2Op>` shape, forwarding
+  `lhs`/`rhs`.
+- `GLStepPattern`: `x < edge ? 0.0 : 1.0` via `llvm.fcmp olt` + `llvm.select`,
+  mirroring `SignPattern`'s compare-then-select shape.
+- `GLSmoothStepPattern`: GLSL.std.450's literal definition
+  (`t = clamp((x-edge0)/(edge1-edge0), 0, 1); return t*t*(3-2*t)`), using
+  `llvm.intr.maxnum`/`minnum` for the clamp.
+
+Registered all three at `FeMeBenefit` in `populateSPIRVToLLVMTargetPatterns`,
+right after the existing `FlushedScalePattern<GLDegreesOp>` registration, with
+a comment explaining the roadmap L7c motivation.
+
+## A clang-format gotcha (and how it was avoided)
+
+Running `clang-format -i` on the *entire* modified `SPIRVToLLVMPatterns.cpp`
+file (per the coding-standards instruction to conform to LLVM style) produced
+a ~568-line diff touching many unrelated pre-existing lines, despite the root
+`.clang-format` simply saying `BasedOnStyle: LLVM` — apparently a version/
+line-wrapping-heuristic mismatch between the installed `clang-format` and
+whatever originally formatted this heavily-hand-formatted file. Reverted via
+`git checkout` to avoid landing an enormous unrelated diff (this also
+reverted my own new pattern classes and their registration, needing a
+re-apply). The second time, used `clang-format -i --lines=START:END` scoped
+only to the exact line ranges touched (found via `git diff -U0 | grep '^@@'`),
+which produced a clean diff containing only the intended new lines.
+**Lesson for future sessions**: never run whole-file `clang-format -i` on this
+file (or likely anywhere in this hand-formatted `feme/` tree) — always scope
+it with `--lines=` to just the changed ranges.
+
+## Verification
+
+- Rebuilt `FeMeConversionSPIRVToLLVM`/`feme-opt`; re-ran the three manual
+  smoke-test snippets, confirming correct LLVM IR matching each spec formula.
+- Added a new lit test file,
+  `spirv-to-llvm-gl-atan2-step-smoothstep.mlir` (6 cases: scalar/vector ×
+  Atan2/Step/SmoothStep), following the
+  `spirv-to-llvm-transcendental-flush-to-zero.mlir` `--split-input-file`
+  convention. All pass via `llvm-lit -v`.
+- Full `ninja -C build2 check-feme`: 2789/2848 passed, 59 unsupported, 0
+  failed — up by exactly 1 (the new lit test) from the pre-change baseline,
+  zero regressions.
+- Grepped the full `dEQP-VK-cases.xml` case list for `atan2`/`smoothstep`/
+  `builtin_functions`: zero matches for all three, confirming (as L7's own
+  filing text already claimed) no real CTS case exercises any of these ops —
+  no CTS payoff possible in either direction from this fix.
+- Attempted a full `dEQP-VK.glsl.*` sweep as a broader regression check, but
+  it hit a pre-existing, unrelated fatal crash
+  (`LLVM ERROR: Cannot select: intrinsic %llvm.spv.demote.to.helper.invocation`)
+  partway through after 10+ minutes — not caused by this session's change, but
+  makes full `dEQP-VK.glsl.*` sweeps impractical for future sessions too. Used
+  the smaller, previously-measured `texturegrad.*_compute` sweep (52 cases)
+  instead as a regression sanity check, and got byte-for-byte identical
+  19 Pass/14 Fail/19 NotSupported totals to the prior L60-closing session's own
+  numbers, confirming zero regression from touching this shared
+  pattern-registration file.
+
+## Docs
+
+- `feme/docs/Roadmap.md`: replaced the single L7 row with an updated L7
+  (referencing the split and L7c's partial closure) plus seven new sub-rows
+  L7a-L7g as described above.
+- `feme/docs/VulkanCTSReport.md`: appended a new `## Roadmap L7` section
+  documenting the split, gap reproduction, fix, tests, and verification
+  numbers.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no
+  update needed (pure internal legalization completeness fix, no
+  feature/extension bit touched).
+- `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`/`Design.md`: reviewed for stale
+  references to these GL ops — none found, no design deviation to record.
+
+## Remaining work
+
+L7a/L7b/L7d/L7e/L7f/L7g remain open, each needing its own future session to
+reduce a concrete repro and implement a fix, following the same per-cluster
+methodology used here for L7c. L7c itself remains partially open too —
+`Length`/`Distance`/`Normalize`/`UnpackHalf2x16` still need conversion
+patterns of their own (not attempted this session, left for a future L7c
+follow-on since they're less trivial than the three cross-lane-reduction-free
+ops closed here).
