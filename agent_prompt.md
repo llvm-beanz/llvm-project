@@ -18,9 +18,5 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Can you confirm that the SPIRV backend's CFG structureizer handles control flow
-generated with -fno-switch in shapes with fallthrough, breaks, and combinations
-of both?
-
-Please make sure there are sufficient IR tests, and if there are missing tests
-or functionality please fill the gaps.
+Can you add tests and confirm that this solution works end-to-end with switch
+statements containing breaks and fallthrough embedded inside loops?
