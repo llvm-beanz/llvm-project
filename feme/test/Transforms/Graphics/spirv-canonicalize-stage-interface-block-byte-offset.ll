@@ -25,12 +25,12 @@ define void @main() #0 {
   ; CHECK: call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.000000e+00, i32 0)
   store float 1.0, ptr addrspace(8) @gl_PerVertex
 
-  ; `gl_Position.y` (member 0, component 1, byte offset 4): negated
-  ; (roadmap H2g, `negateSystemValuePositionY`) to normalize SPIR-V's
-  ; Y-down clip space into the Y-up convention the executor's own
-  ; viewport transform assumes (matching DXIL's `SV_Position`, the other
-  ; producer of a `SignatureSystemValue::Position` output).
-  ; CHECK: call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -2.000000e+00, i32 0)
+  ; `gl_Position.y` (member 0, component 1, byte offset 4): stored as-is,
+  ; with no compensating negation (roadmap L24) -- `feme::graphics::
+  ; Executor::executeDraws`'s own viewport transform (`projectVertex`)
+  ; already implements the Vulkan-spec NDC-to-window-space mapping
+  ; directly, so no producer's clip-space Y needs adjusting here.
+  ; CHECK: call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 2.000000e+00, i32 0)
   store float 2.0, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @gl_PerVertex, i64 4)
 
   ; `gl_PointSize` (member 1, whole value, byte offset 16).

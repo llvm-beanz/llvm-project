@@ -979,43 +979,6 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
     B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty, B));
 }
 
-/// (Roadmap H2g) SPIR-V's clip-space Y increases downward, matching
-/// Vulkan's own window-space convention exactly -- but
-/// `feme::graphics::Executor::executeDraws`'s viewport transform
-/// (`projectVertex`) assumes the opposite, Y-up convention (a real
-/// `dEQP-VK.multiview` run found it flips `NdcY` before scaling into
-/// window space), matching DXIL/HLSL's own clip space instead -- the only
-/// other producer of a `SignatureSystemValue::Position` *output* (a
-/// fragment stage's `Position` *input*, `gl_FragCoord`/`SV_Position`, is
-/// already a genuine window-space value in both APIs and must not be
-/// touched here, which is why this is only ever called from the store
-/// side). A SPIR-V vertex shader's `gl_Position` write is negated here
-/// first, so it reaches the shared executor already in the same Y-up
-/// convention DXIL's `SV_Position` output has, rather than the two
-/// producers disagreeing and only one of them (DXIL) coming out the
-/// executor's own flip the right way up. \p Component is the statically-
-/// known component this store addresses, or `nullptr` for a whole-vector
-/// store (`resolveStageIOAccess`'s own convention, shared with
-/// `storeStageIOValue`'s own recursion): a whole vector negates lane 1;
-/// a single scalar component only negates when it is component 1 (a
-/// dynamically-indexed `gl_Position[i]` write, `Component` not a constant,
-/// is left alone -- vanishingly rare for a system-value position write,
-/// and unsupported by this milestone).
-Value *negateSystemValuePositionY(IRBuilderBase &B, Value *Val,
-                                  Value *Component) {
-  if (!Component) {
-    auto *VecTy = dyn_cast<FixedVectorType>(Val->getType());
-    if (!VecTy || VecTy->getNumElements() <= 1)
-      return Val;
-    Value *NegY = B.CreateFNeg(B.CreateExtractElement(Val, 1));
-    return B.CreateInsertElement(Val, NegY, 1);
-  }
-  auto *CI = dyn_cast<ConstantInt>(Component);
-  if (CI && CI->getZExtValue() == 1)
-    return B.CreateFNeg(Val);
-  return Val;
-}
-
 /// (Roadmap H2d) The entry point into `loadStageIOValue`'s per-(struct
 /// member, row, component) recursion for one stage-IO global: \p MemberIDs
 /// holds one `ElementID` per struct member of a builtin interface block
@@ -2322,9 +2285,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
 
   DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
   // Hoisted out of the `if` below (rather than left a block-local, as
-  // every other `Sig` in this file is) so the store-rewriting loop further
-  // down can look an `ElementID` back up to its own `SystemValue` --
-  // needed for `negateSystemValuePositionY`'s own Position-specific check.
+  // every other `Sig` in this file is) so the element-building loop
+  // further down can append to it directly.
   EntrySignature Sig;
   if (!InputGlobals.empty() || !OutputGlobals.empty()) {
     Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
@@ -2645,18 +2607,21 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       }
       Value *Row = Access->Row ? Access->Row : Zero;
       Value *Component = Access->Component ? Access->Component : Zero;
-      // (Roadmap H2g) A single-element `gl_Position`/`gl_PerVertex.
-      // gl_Position` write needs its own Y component negated before it
-      // reaches the executor's own (oppositely-conventioned) viewport
-      // transform -- see `negateSystemValuePositionY`'s own comment. A
-      // whole-block store (`Access->ElementIDs.size() != 1`, e.g. copying
-      // an entire `gl_PerVertex` between array elements) is left alone:
-      // unreached by any stage this milestone implements.
-      if (Access->ElementIDs.size() == 1 &&
-          Access->ElementIDs[0] < Sig.Elements.size() &&
-          Sig.Elements[Access->ElementIDs[0]].SystemValue ==
-              SignatureSystemValue::Position)
-        Val = negateSystemValuePositionY(B, Val, Access->Component);
+      // (Roadmap L24) A `SignatureSystemValue::Position` output (`gl_
+      // Position`/`SV_POSITION`) is stored as-is here, with no compensating
+      // Y negation: `feme::graphics::Executor::executeDraws`'s viewport
+      // transform (`projectVertex`) already implements the Vulkan-spec
+      // NDC-to-window-space mapping directly (roadmap L24's own fix), so
+      // every producer's raw clip-space Y reaches it unmodified. This pass
+      // used to negate a single-element (but, inconsistently, not a
+      // whole-`gl_PerVertex`-block) Position store here to compensate for
+      // `projectVertex`'s own extra, erroneous flip -- a real `offloader`
+      // re-run of `Graphics/QuadDomainTessellation.test` (a genuine
+      // per-element domain-stage `SV_POSITION` store, unlike most simple
+      // vertex shaders' whole-`gl_PerVertex`-block `return o;` idiom, which
+      // this negation never actually reached) confirmed that compensating
+      // negation is itself now the bug, doubly wrong once `projectVertex`'s
+      // own flip is corrected.
       // Every store this pass resolves is to an `Output`-direction global
       // (an `Input` one is never written to in SPIR-V); also tracking it
       // through `ShadowValues` (roadmap H2e) lets a later read-back of the
