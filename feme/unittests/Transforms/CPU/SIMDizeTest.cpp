@@ -1785,6 +1785,56 @@ TEST(SIMDizeTest, WidensDynamicTaskPayloadLoadOffset) {
   EXPECT_TRUE(FoundWidenedLoad);
 }
 
+// Roadmap L7s: `llvm.spv.subgroup.local.invocation.id` (SPIR-V's own
+// per-lane subgroup-invocation-index builtin, `gl_SubgroupInvocationID`) is
+// `llvm.dx.wave.getlaneindex`'s exact twin -- both classify as
+// `BuiltinCallKind::LaneIndex` and are unconditionally widened into a
+// `feme.cpu.builtin.lane_index` call regardless of their own uniformity
+// classification. Before this fix, `feme::cpu::computeWaveUniformity`
+// (WaveUniformity.cpp) was missing a `NeverUniform` case for the SPIR-V
+// intrinsic (unlike its DXIL sibling, which was already present), so a
+// purely-arithmetic consumer of its scalar result -- e.g. `urem`, computing
+// `gl_SubgroupInvocationID % 32` the way a manual/"software" subgroup ballot
+// does (see `dEQP-VK.subgroups.basic.compute.subgroupelect`'s own
+// `sharedMemoryBallot` helper) -- was left classified uniform and so never
+// widened, even though the call it read from was unconditionally replaced
+// with a genuinely per-lane vector value: the leftover scalar `urem` ended
+// up reading a poisoned, since-erased operand, silently producing wrong
+// results (not a crash) rather than the correct widened computation.
+TEST(SIMDizeTest, WidensArithmeticConsumingSubgroupLocalInvocationId) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %id = call i32 @llvm.spv.subgroup.local.invocation.id()
+      %bit = urem i32 %id, 32
+      ret void
+    }
+    declare i32 @llvm.spv.subgroup.local.invocation.id()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideUrem = false;
+  for (Instruction &I : instructions(F)) {
+    auto *BO = dyn_cast<BinaryOperator>(&I);
+    if (!BO || BO->getOpcode() != Instruction::URem)
+      continue;
+    FoundWideUrem = true;
+    EXPECT_TRUE(BO->getType()->isVectorTy());
+    // Neither operand should be `poison`: both must have been widened
+    // together, the operand tracing all the way back to the (also-widened)
+    // lane-index builtin call rather than a dangling, since-erased scalar.
+    for (Value *Op : BO->operands())
+      EXPECT_FALSE(isa<PoisonValue>(Op));
+  }
+  EXPECT_TRUE(FoundWideUrem);
+}
+
 } // namespace
 
 

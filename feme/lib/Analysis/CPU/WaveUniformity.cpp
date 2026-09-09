@@ -139,6 +139,26 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::dx_flattened_thread_id_in_group:
   case Intrinsic::spv_flattened_thread_id_in_group:
   case Intrinsic::dx_wave_getlaneindex:
+  // (roadmap L7s) `llvm.spv.subgroup.local.invocation.id` is
+  // `dx_wave_getlaneindex`'s exact SPIR-V-sourced twin (both classify as
+  // `feme::cpu::BuiltinCallKind::LaneIndex` in `SIMDize.cpp`'s own
+  // `classifyBuiltin`, and both are unconditionally widened by
+  // `FunctionWidener::widenInstruction`'s call-shape dispatch regardless
+  // of this analysis's own verdict) -- but this case was missing here,
+  // even though its DXIL sibling has always been present. Left at the
+  // conservative `Default` classification, a purely-arithmetic consumer
+  // of this call's own scalar result (e.g. `gl_SubgroupInvocationID % 32`,
+  // computing which bit of a manual ballot to set) could still be judged
+  // uniform by the generic operand-based analysis below, since this
+  // intrinsic itself has no operands to propagate divergence from -- left
+  // unwidened as a result, even though `widenInstruction` had already
+  // unconditionally replaced the call it reads with a genuinely per-lane
+  // vector value, leaving it referencing a poisoned, since-erased operand
+  // once widening finished. A real `dEQP-VK.subgroups.basic.compute.
+  // subgroupelect` reduction found this producing entirely wrong runtime
+  // ballot/popcount results (not a crash: `urem`/`udiv`/`shl` are all
+  // well-defined over `poison`, so nothing failed loudly).
+  case Intrinsic::spv_subgroup_local_invocation_id:
   case Intrinsic::dx_wave_is_first_lane:
   case Intrinsic::spv_wave_is_first_lane:
   case Intrinsic::dx_wave_prefix_bit_count:
