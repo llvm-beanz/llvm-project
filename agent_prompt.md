@@ -42,27 +42,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7p from the roadmap or other prerequisites blocking the
+Can you work on L7q from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A real, previously-unreached `SIGBUS` crash (apparent jump through a
-> poisoned/corrupted function pointer) newly reached by
-> `dEQP-VK.subgroups.basic.compute.subgroupmemorybarriershared`/`_requiredsubgroupsize`**,
-> split out of L7l's own closing session: now that L7l's own
-> `spirv.MemoryBarrier` legalization fix lets this shader's module past
-> pipeline-creation legalization for the first time, `deqp-vk` crashes outright
-> with `SIGBUS` partway through execution -- a `gdb` backtrace shows the
-> crashing PC itself as `0xdca345eadca345ea`, a repeating-byte pattern
-> consistent with a poison/uninitialized-memory fill value rather than a real
-> code address, suggesting a call through a corrupted or never-initialized
-> function pointer somewhere in this shader's own JIT-compiled code or the CPU
-> runtime's own dispatch path, rather than an ordinary out-of-bounds memory
-> access. This shader is the one `subgroupmemorybarrier*` case that also
-> declares an `r32ui` image binding (`tempImage`) alongside the groupshared
-> array every sibling case in this family shares, a plausible (but not yet
-> confirmed) distinguishing factor. Needs its own careful, isolated reduction
-> (likely via a smaller standalone repro exercising the same
-> image-binding-plus-groupshared-array-plus-memory-barrier shape, plus a real
-> disassembly/`gdb` walk of the actual JIT-compiled function this corrupted
-> pointer was meant to call) to root-cause before attempting a fix, entirely
-> independent of L7l's own now-closed legalization scope
+> **`_requiredsubgroupsize` compute pipeline creation newly fails "resolved
+> group size exceeds maxComputeWorkGroupSize/Invocations" for every
+> `dEQP-VK.subgroups.basic.compute.*_requiredsubgroupsize` case in the
+> `subgroupmemorybarrier*` family**, split out of L7p's own closing session: now
+> that L7p's own specialization-constant patch resolves each case's real,
+> pipeline-specialized group size correctly for the first time (rather than
+> silently under-allocating), `compileComputePipeline`'s existing
+> `maxComputeWorkGroupSize`/`Invocations` validation (`Pipeline.cpp`) rejects
+> the resolved value outright for the `_requiredsubgroupsize` variant
+> specifically (its non-`_requiredsubgroupsize` twin passes cleanly with the
+> same shader source, differing only in the chained
+> `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`). Needs its own real
+> re-run with `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a dump of the actual
+> resolved group size and this device's own
+> `maxComputeWorkGroupSize`/`maxComputeWorkGroupInvocations` limits to determine
+> whether the real bug is in group-size resolution itself (e.g.
+> `resolveComputeGroupSize` picking up an override meant for a different
+> specialization constant once L7p's patch is applied), in
+> `PhysicalDeviceInfo.cpp`'s own advertised limits being too conservative for
+> what this device's CPU runtime can genuinely support, or a genuine CTS-side
+> requirement this ICD cannot meet at all for a required-subgroup-size compute
+> dispatch of this size
