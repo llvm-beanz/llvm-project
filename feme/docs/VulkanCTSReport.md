@@ -33042,3 +33042,98 @@ No feme production source was touched by this row at all.
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed (no
 feature/extension surface touched by a pure test-infrastructure/build-configuration fix).
+
+## L24: real, two-part `Executor.cpp`/`CanonicalizeStage.cpp` viewport-Y and position-negation fix, closing the wrong-rendered-result bucket
+
+Roadmap L24 named 11 `check-hlsl-feme-vk` cases that clear both pipeline creation and
+submission but produce a wrong rendered result: `Feature/Semantics/{ArraySemantics,
+ClipDistance,CullDistance,UserSemantics}.test`, `Graphics/{IsolineDomainTessellation,
+QuadDomainTessellation,discard}.test`, and `Graphics/gs_{passthrough,point_to_quad,
+selective_output,triangle_subdivision}.test`.
+
+### Investigation
+
+`gs_selective_output.test`'s own row-swapped rendered-color mismatch pointed at
+`Executor.cpp`'s `projectVertex`: its Y half of the viewport transform had an extra
+`1.0f - (NdcY*0.5f+0.5f)` flip absent from the X half. Real web research on the Vulkan
+spec's own "Coordinate Transformations" worked formula confirmed this flip does not belong
+-- Vulkan's own formula, expanded algebraically, is identical for X and Y, unlike D3D's
+opposite-signed NDC convention (which *does* need the flip). Removing the flip alone fixed
+`gs_selective_output.test` but broke `QuadDomainTessellation.test` (an exact regression from
+an earlier, incomplete pass at this same fix) -- a real per-vertex NDC/Clip-value dump
+(`FEME_DEBUG_VP`-gated debug instrumentation, since removed) isolated the second half of the
+bug: `CanonicalizeStage.cpp`'s `negateSystemValuePositionY` was separately negating a SPIR-V
+shader's `SV_POSITION`/`gl_Position`-store Y component to compensate for the very same
+erroneous flip, but only for a *single-element* position store (e.g. a domain shader's
+`o.position = lerp(...)`), not a whole-`gl_PerVertex`-block store (e.g. a plain vertex
+shader's `return o;`) -- an inherent inconsistency between the two store shapes that made
+exactly one of `gs_selective_output.test`/`QuadDomainTessellation.test` pass and the other
+fail, depending on which erroneous compensation happened to fire.
+
+An interim version of this fix additionally changed `IsCCW`'s own sign (and, later, added a
+viewport-`Height`-sign-dependent correction to it), based on a real but ultimately
+misdiagnosed `GraphicsSystemValues.test` regression (`SV_IsFrontFace` inverted for all 4
+records). A real `dEQP-VK.rasterization.culling.*` CTS re-run caught this as a serious
+regression before it could be committed: the CTS-baseline (pre-L24) run scores 42/43 Pass,
+but each interim `IsCCW`-sign variant scored only 6-10/43. The real, minimal fix needed no
+change to `IsCCW`'s formula (`SArea > 0.0f`, unchanged from before this row) at all --
+`GraphicsSystemValues.test`'s regression was entirely a byproduct of the *viewport-Y-formula*
+fix alone (changing `SArea`'s sign for the same NDC triangle, not `IsCCW`'s own logic), and
+resolved itself once the viewport-Y fix and the position-negation removal were both applied
+together, with `IsCCW` left alone.
+
+`CullsBackFacingTrianglesWhenConfigured` (an `ExecutorTest.cpp` unit test bypassing
+`CanonicalizeStage.cpp` entirely, constructing raster geometry directly in C++) had its own
+stale, hand-derived expectation: it had assumed the *old*, buggy viewport-Y formula's
+front/back classification for its own triangle, which flips under the corrected formula.
+Two `StencilTestRejectsMismatchedReference`/`StencilTestPassesAndReplacesReference` tests
+similarly needed their configured `Stencil.Front`/`Stencil.Back` face swapped, since
+`Executor.cpp`'s stencil-face selection (`FrontFacing ? Stencil.Front : Stencil.Back`) is
+`FrontFacing`-dependent and this triangle's classification also flipped.
+
+### Fix
+
+- `feme/lib/Graphics/Executor.cpp`: `projectVertex`'s Y formula corrected to match the
+  Vulkan spec exactly (no flip); `IsCCW`'s own comment updated for accuracy (no logic
+  change).
+- `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`: `negateSystemValuePositionY` removed
+  entirely (its sole call site and stale doc comment removed too).
+- `feme/unittests/Graphics/ExecutorTest.cpp`: all 18 Y-value-dependent tests re-derived for
+  the corrected formula; `CullsBackFacingTrianglesWhenConfigured`'s expectation corrected
+  (this triangle is actually front-facing, so `CullMode::Back` must not cull it);
+  `StencilTestRejectsMismatchedReference`/`StencilTestPassesAndReplacesReference` updated to
+  configure `Stencil.Back` (matching the triangle's real classification) instead of
+  `Stencil.Front`.
+- `feme/test/Transforms/Graphics/spirv-canonicalize-stage-interface-block-byte-offset.ll`:
+  updated its `CHECK` line and comment for the removed negation.
+- `feme/docs/FeMeGraphicsDesign.md`: new "Status (roadmap L24)" note under "Rasterization
+  correctness".
+
+### Verification
+
+- `FeMeGraphicsTests`: **284/284 Pass**.
+- `FeMeVulkanTests`: **662/662 Pass** (no changes needed to `DrawTest.cpp` at all).
+- Full `check-feme` (ccache + assertions, `build2`): **2786/2845 Passed, 59 Unsupported, 0
+  Failed**.
+- Real `feme-vk` sweep: **223/664 Pass** (up from 222 at L23's close), 260 `Unsupported`, 26
+  `Expectedly Failed`, 154 `Failed` (down from 155), 1 `Unexpectedly Passed`
+  (pre-existing/documented). A direct before/after fail-list diff (stripped of ordinal
+  numbers) confirms exactly one test's status changed: `gs_selective_output.test`,
+  `Failed -> Pass` -- zero other regressions across the whole 664-case suite.
+- 9 of this row's original 11 named cases now pass (`ClipDistance`, `CullDistance`,
+  `UserSemantics`, `QuadDomainTessellation`, `discard`, `gs_passthrough`, `gs_
+  selective_output`, `gs_point_to_quad`, `gs_triangle_subdivision`); the remaining 2
+  (`ArraySemantics.test`, `IsolineDomainTessellation.test`) still fail on their own,
+  separate, pre-existing, unrelated gaps -- broken out as roadmap L24(a)/L24(b).
+- Real `dEQP-VK.rasterization.culling.*` CTS re-run (43 cases, directly exercises this row's
+  own winding/front-facing scope): **42/43 Pass, 1 Fail** both before and after this fix,
+  confirmed via an exact per-case comparison that the single failure
+  (`dEQP-VK.rasterization.culling.primitive_id`) is the same pre-existing, unrelated
+  `gl_PrimitiveID` gap in both runs -- zero regression at real CTS scale. (An interim,
+  ultimately-discarded version of this fix that also changed `IsCCW`'s sign regressed this
+  same group to 6-10/43 Pass; catching that regression here, before committing, is what led
+  to the correct, minimal final fix described above.)
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed (a
+pure rendering-correctness fix to already-claimed rasterization support, no new feature or
+extension surface).

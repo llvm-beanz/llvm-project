@@ -3503,6 +3503,30 @@ The rasterizer needs focused tests for:
 API differences are explicit normalized state or frontend choices. They must
 not be hidden in conditionals on an API tag inside the rasterizer.
 
+Status (roadmap L24): `projectVertex`'s viewport transform (`Executor.cpp`)
+maps NDC to window coordinates with the Vulkan spec's own affine formula on
+both axes (`Viewport.{X,Y} + (Ndc*0.5+0.5)*Viewport.{Width,Height}`, no
+extra "1 - Ndc" flip) -- a previous version of the Y formula had one,
+erroneously matching D3D's opposite-signed NDC convention instead, visible
+as a top/bottom row swap for any content asymmetric enough to notice.
+`CanonicalizeStage.cpp` no longer negates a SPIR-V shader's `SV_POSITION`/
+`gl_Position`-store Y component either: a former `negateSystemValuePositionY`
+pass used to compensate for that same erroneous flip one level upstream, but
+only for single-element position stores (e.g. a domain shader's
+`o.position = lerp(...)`), not whole-`gl_PerVertex`-block stores (e.g. a
+plain vertex shader's `return o;`) -- an inherent inconsistency, now moot
+since nothing needs compensating once `projectVertex`'s own formula is
+correct. Front-facing classification (`IsCCW = SArea > 0.0f`, the directed-
+edge sign on window coordinates) needed no change: it already matches the
+Vulkan spec's own front-facing formula ("Basic Polygon Rasterization")
+exactly, confirmed via a real `dEQP-VK.rasterization.culling.*` CTS re-run
+(42/43 Pass, unchanged by this fix, the sole failure a pre-existing,
+unrelated `gl_PrimitiveID` gap) as well as this project's own
+`GraphicsSystemValues.test` (`SV_IsFrontFace`, a negative-`Height` viewport)
+and `gs_selective_output.test`/`QuadDomainTessellation.test` (positive-
+`Height` viewports) -- all three, plus every one of L24's other named
+`feme-vk` cases, pass together for the first time with this fix.
+
 ### Early and late tests
 
 `StageArtifactInfo` identifies whether the fragment stage discards, writes
