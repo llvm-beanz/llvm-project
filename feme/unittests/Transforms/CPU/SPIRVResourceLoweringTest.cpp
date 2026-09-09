@@ -4028,15 +4028,23 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
-  // Roadmap L46: per SPIR-V's own validation rules, a depth-comparison
-  // sample's Coordinate operand is always one component wider than its
-  // shape's ordinary addressing width (`<3 x float>` for `Plain2D`,
-  // packing the depth-reference value redundantly alongside the
-  // separate `Dref` operand -- see `isDrefSampleIntrinsic`'s comment). A
-  // plain `<2 x float>` coordinate, lacking that extra component, is not
-  // a real shape this pass ever sees from a spec-conformant producer, so
-  // it is left unlowered rather than assumed valid.
+TEST(SPIRVResourceLoweringTest, LowersASampleCmpWithDxcsUnpaddedCoordWidth) {
+  // Roadmap L7b: per SPIR-V's own validation rules, a depth-comparison
+  // sample's Coordinate operand *may* be one component wider than its
+  // shape's ordinary addressing width (`<3 x float>` for `Plain2D`),
+  // which is the convention glslang's own SPIR-V output uses --
+  // redundantly packing the depth-reference value alongside the
+  // separate `Dref` operand (see `isDrefSampleIntrinsic`'s comment).
+  // `dxc`'s own real SPIR-V output for HLSL's `SampleCmp` does *not*
+  // follow this convention at all: its own Coordinate operand stays
+  // exactly the shape's ordinary, unpadded `SampleCoordWidth` (a plain
+  // `<2 x float>` for `Plain2D`, identical to an ordinary,
+  // non-comparison sample's own Coordinate). Both widths are real,
+  // spec-conformant shapes a real producer may emit, so both must lower
+  // successfully -- this test (previously named
+  // `LeavesASampleCmpWithNonSpecCoordWidthAlone` under the incorrect
+  // assumption that only the glslang-padded width was ever valid) now
+  // covers dxc's own unpadded shape as a positive case.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<2 x float> %coord, float %dref) {
@@ -4060,7 +4068,80 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
+  // Roadmap L7b: a depth-comparison sample's Coordinate operand must be
+  // either the shape's ordinary unpadded `SampleCoordWidth` (dxc's own
+  // convention) or one component wider (glslang's own padded
+  // convention) -- any other width is not a real shape either producer
+  // emits, and is left unlowered rather than assumed valid. For
+  // `Plain2D` (`SampleCoordWidth` of 2), a 4-wide coordinate matches
+  // neither convention (2 nor 3).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <2 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesAPlain1DSampleCmpWithUnpaddedCoordWidthAlone) {
+  // Roadmap L7b: unlike every other shape, `Plain1D`'s own `C0`/`C1`
+  // extraction in `lowerImageAccesses` is unconditional (not gated by
+  // `Shape`), so a bare-scalar, dxc-style unpadded coordinate (this
+  // shape's own `SampleCoordWidth` of 1) is deliberately *not* accepted
+  // here even though every other shape now accepts its own unpadded
+  // width -- accepting a shape this pre-existing extraction code cannot
+  // actually consume would trade a crash-free rejection for a real
+  // `CreateExtractElement` crash. Only the glslang-padded width (3) is
+  // accepted for `Plain1D`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(float %coord, float %dref) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %coord,
+          float %dref, i32 0)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
@@ -6053,8 +6134,9 @@ TEST(SPIRVResourceLoweringTest, LowersArray2DStorageQueryLevels) {
 // Texel operand takes exactly the shader's declared `RWTexture*<T>`
 // element width -- a bare scalar for a single-channel format (e.g.
 // `RWTexture2D<float>`/`RWTexture2DArray<float>`), not only the full
-// 4-wide vector every prior test above covers. `hasOnlySupportedStorageImageUses`
-// now accepts this width via `storageImageTexelWidth`, and
+// 4-wide vector every prior test above covers.
+// `hasOnlySupportedStorageImageUses` now accepts this width via
+// `storageImageTexelWidth`, and
 // `widenStorageImageTexel`/`narrowStorageImageTexel` convert to/from the
 // runtime's own fixed 4-wide calling convention.
 TEST(SPIRVResourceLoweringTest,
@@ -6124,7 +6206,8 @@ TEST(SPIRVResourceLoweringTest,
 // The read-side mirror: a scalar `LoadInst` against a storage image's own
 // `getpointer` result narrows the runtime call's fixed 4-wide result back
 // down to the shader's own scalar type.
-TEST(SPIRVResourceLoweringTest, LowersScalarStorageImageReadFromNarrowedImageLoad) {
+TEST(SPIRVResourceLoweringTest,
+     LowersScalarStorageImageReadFromNarrowedImageLoad) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<2 x i32> %coord) {

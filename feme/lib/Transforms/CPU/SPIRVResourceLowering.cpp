@@ -1086,11 +1086,11 @@ Value *widenStorageImageTexel(IRBuilderBase &Builder, Value *Texel,
                               bool IsInteger) {
   Type *ElemTy = IsInteger ? Builder.getInt32Ty() : Builder.getFloatTy();
   if (auto *VecTy = dyn_cast<FixedVectorType>(Texel->getType());
-      VecTy && VecTy->getNumElements() == 4 && VecTy->getElementType() == ElemTy)
+      VecTy && VecTy->getNumElements() == 4 &&
+      VecTy->getElementType() == ElemTy)
     return Texel;
-  Constant *ZeroLane = IsInteger
-                           ? cast<Constant>(Builder.getInt32(0))
-                           : cast<Constant>(ConstantFP::get(ElemTy, 0.0));
+  Constant *ZeroLane = IsInteger ? cast<Constant>(Builder.getInt32(0))
+                                 : cast<Constant>(ConstantFP::get(ElemTy, 0.0));
   Value *Result = ConstantVector::getSplat(ElementCount::getFixed(4), ZeroLane);
   if (auto *VecTy = dyn_cast<FixedVectorType>(Texel->getType())) {
     for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
@@ -1584,11 +1584,41 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // capture technique against `sampler1darrayshadow_fragment`), but
       // that already matches the generic "+1" rule (`SampleCoordWidth`
       // 2 + 1), so only `Plain1D` needs an explicit override here.
+      // Roadmap L7b: `dxc`'s own real SPIR-V output for HLSL's
+      // `Texture*::SampleCmp`/`SampleCmpLevelZero` (confirmed via a real
+      // `vk::SampledTexture2D`+`SampleCmp` repro compiled with `dxc
+      // -fspv-target-env=vulkan1.3`) does *not* follow glslang's own
+      // redundant-padding convention above at all: its Coordinate operand
+      // stays exactly `SampleCoordWidth` wide (the shape's own ordinary
+      // addressing width, identical to an *ordinary*, non-comparison
+      // sample's Coordinate), with `Dref` arriving purely through its own
+      // separate operand and nothing echoed into the coordinate's own
+      // trailing component. Both widths are accepted here for every
+      // shape but `Plain1D` (`lowerImageAccesses` already only ever
+      // reads the shape's own ordinary `C0`/`C1`/... components by fixed
+      // index, so an unread, potentially-absent trailing padding
+      // component was never actually load-bearing there) rather than
+      // replacing the glslang-derived width outright, so real
+      // GLSL-originated modules already exercising the padded shape
+      // (roadmap L46/L48) keep working unchanged. `Plain1D` is excluded
+      // from this widening: unlike every other shape, its own `C0`/`C1`
+      // extraction just below is unconditional (not gated by `Shape`),
+      // and a bare-scalar dxc-style coordinate (this shape's own
+      // unpadded `SampleCoordWidth` of 1, per `isCoordN`'s own N==1
+      // special case) is not a vector `CreateExtractElement` can apply
+      // to at all -- no real HLSL/dxc `Texture1D::SampleCmp` case has
+      // been confirmed to even reach this path yet, so accepting a
+      // shape this pre-existing code cannot actually consume would only
+      // trade one crash-free rejection for a real crash.
       unsigned DrefCoordWidth =
           Shape == ImageShape::Plain1D
               ? 3
               : (SampleCoordWidth + 1 > 4 ? 4 : SampleCoordWidth + 1);
-      if (!isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
+      bool AcceptsUnpaddedDxcWidth = Shape != ImageShape::Plain1D;
+      if (!(isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
+            (AcceptsUnpaddedDxcWidth &&
+             isCoordN(CI->getArgOperand(2), SampleCoordWidth,
+                      /*Float=*/true))) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           // Roadmap L66(k): `AllowPlain1DArray1D` now also accepts a
           // real, nonzero `ConstOffset` here, mirroring the ordinary
@@ -3044,11 +3074,11 @@ void lowerImageAccesses(
                   Builder.CreateExtractElement(GradDPdy, uint64_t{2})};
           } else if (!ExplicitLod) {
             UD = getOrSynthesizeSample1DDerivatives(Builder, *CI->getFunction(),
-                                                     U);
+                                                    U);
             VD = getOrSynthesizeSample1DDerivatives(Builder, *CI->getFunction(),
-                                                     V);
+                                                    V);
             WD = getOrSynthesizeSample1DDerivatives(Builder, *CI->getFunction(),
-                                                     W);
+                                                    W);
           } else {
             UD = VD = WD = SampleDerivatives1D{ZeroF, ZeroF};
           }
@@ -3058,16 +3088,14 @@ void lowerImageAccesses(
           Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
           Value *OffsetZ = Builder.CreateExtractElement(Offset, uint64_t{2});
           Value *MinLodClamp =
-              HasMinLodClamp
-                  ? CI->getArgOperand(
-                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
-                  : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                            /*Negative=*/true);
+              HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
+                                   ExplicitLod, HasBias, HasGrad))
+                             : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                       /*Negative=*/true);
           CallInst *NewSample3DCall = createSample3D(
-              Builder, Env, ImageIndex, SamplerIndex, U, V, W, UD.DUdX,
-              UD.DUdY, VD.DUdX, VD.DUdY, WD.DUdX, WD.DUdY, Lod,
-              ExplicitLodFlag, Bias, OffsetX, OffsetY, OffsetZ, MinLodClamp,
-              Mask, CI->getName());
+              Builder, Env, ImageIndex, SamplerIndex, U, V, W, UD.DUdX, UD.DUdY,
+              VD.DUdX, VD.DUdY, WD.DUdX, WD.DUdY, Lod, ExplicitLodFlag, Bias,
+              OffsetX, OffsetY, OffsetZ, MinLodClamp, Mask, CI->getName());
           CI->replaceAllUsesWith(NewSample3DCall);
           CI->eraseFromParent();
           continue;
