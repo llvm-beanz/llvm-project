@@ -42,23 +42,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7s from the roadmap or other prerequisites blocking the
+Can you work on L7t from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`dEQP-VK.subgroups.basic.compute.subgroupelect` fails runtime output
-> verification ("0 / 7 values passed")**, split out of L7r's own closing
-> session: L7r's own before/after regression check (comparing
-> `subgroupelect`/`subgroupbarrier` with and without L7r's own `applyStageMasks`
-> image-mask fix) confirmed this failure is pre-existing and entirely unaffected
-> by that fix either way, but it is otherwise untracked anywhere in this
-> document -- distinct from L7m's own tracked `subgroupbarrier`
-> `DeleteDeadBlocks` assertion crash (a hard abort, not a runtime-value
-> mismatch) despite both sharing the same `dEQP-VK.subgroups.basic.compute.*`
-> group and both being newly reachable only once L7k's own array-deserialization
-> fix let their shaders past deserialization for the first time. Needs its own
-> real IR/output reduction (dumping the actual `tempResult`/`result[]` values
-> this ICD's CPU runtime produces for `subgroupElect()`'s own masked-store path
-> versus what the CTS verifier expects, mirroring the technique L7r's own
-> session just used for the sibling `subgroupmemorybarrierimage` case) to
-> isolate whether this is the same divergent-masking family of gap or something
-> new
+> **Flip `PhysicalDeviceInfo.cpp`'s hardcoded `SubgroupSupportedOperations =
+> VK_SUBGROUP_FEATURE_BASIC_BIT` to also advertise `VOTE_BIT`/`SHUFFLE_BIT`**,
+> unblocked by L7s's own closing session: every
+> `dEQP-VK.subgroups.basic.compute.*` blocker this document has tracked across
+> the L7-series (L7k/L7l/L7m/L7n/L7o/L7p/L7q/L7r/L7s) is now resolved, and
+> `Vulkan14FeatureInventory.md`'s subgroup-capability audit note's
+> pending-blocker list is now empty. Not yet done this session (out of L7s's own
+> narrower scope): a real feature-flag flip needs its own broader verification
+> pass first -- a full `dEQP-VK.subgroups.*` sweep (not just `basic.compute`,
+> but `vote`/`shuffle`-specific test groups and every other shader stage the CTS
+> exercises those operations from) to confirm this ICD's
+> `feme::cpu::SIMDizePass`/`WaveCalls.cpp` handling of the actual vote/shuffle
+> wave-op family (as opposed to the basic/barrier/ballot-adjacent operations
+> exercised so far) is itself complete and correct before advertising the
+> capability bit, plus a check of whether `VkPhysicalDeviceVulkan11Properties`'
+> other subgroup-related fields (`subgroupQuadOperationsInAllStages`, etc.) need
+> any accompanying update
