@@ -478,6 +478,68 @@ public:
   }
 };
 
+/// Converts `spirv.MemoryBarrier` (roadmap L7l) -- a real SPIR-V import's
+/// own `OpMemoryBarrier`, e.g. as glslang emits for a GLSL
+/// `subgroupMemoryBarrier()`-family call -- into one of the three plain
+/// (non-`_with_group_sync`) `llvm.spv.*_memory_barrier` intrinsics
+/// `feme::cpu::matchBarrierCall` already recognizes, mirroring
+/// `ControlBarrierConversionPattern` above but for the memory-only-fence
+/// shape rather than the group-sync-plus-fence one: unlike
+/// `spirv.ControlBarrier`, `spirv.MemoryBarrier` never implies any
+/// convergence requirement (no `execution_scope` operand exists at all),
+/// so this always picks a plain barrier intrinsic, never a `_with_group_
+/// sync` one.
+///
+/// Which of the three plain intrinsics is chosen is decided by
+/// `memory_scope` alone, mapping every one of the six SPIR-V scopes onto
+/// the three `feme::cpu::BarrierMemoryScope` granularities the CPU
+/// runtime's own barrier-region-splitting/fence lowering
+/// (`feme/lib/Transforms/CPU/EntryWrapper.cpp`) already implements (it
+/// already consumes all six raised intrinsics uniformly, regardless of
+/// whether a DXIL or SPIR-V frontend produced them, so no further CPU-
+/// runtime change is needed here): `Workgroup` maps to the narrowest,
+/// `group`; `Device` maps to `device`; every broader or narrower scope
+/// this milestone's whole-group barrier support doesn't distinguish
+/// further (`CrossDevice`, `QueueFamily`, and the sub-group-shaped
+/// `Subgroup`/`Invocation`) conservatively maps to the widest, `all`, a
+/// safe superset fence in every case -- mirroring
+/// `ControlBarrierConversionPattern`'s own conservative-superset
+/// convention for the scopes it doesn't distinguish further either.
+/// `memory_semantics`'s own individual ordering/memory-class bits are not
+/// parsed further, for the same reason `ControlBarrierConversionPattern`
+/// doesn't: this milestone's whole-group barrier support only
+/// distinguishes barriers by scope, not by which memory classes they
+/// order.
+class MemoryBarrierConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::MemoryBarrierOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::MemoryBarrierOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::MemoryBarrierOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    llvm::StringRef Intrinsic;
+    switch (Op.getMemoryScope()) {
+    case mlir::spirv::Scope::Workgroup:
+      Intrinsic = "llvm.spv.group.memory.barrier";
+      break;
+    case mlir::spirv::Scope::Device:
+      Intrinsic = "llvm.spv.device.memory.barrier";
+      break;
+    default:
+      Intrinsic = "llvm.spv.all.memory.barrier";
+      break;
+    }
+    mlir::LLVM::CallIntrinsicOp::create(
+        Rewriter, Op.getLoc(),
+        mlir::StringAttr::get(Rewriter.getContext(), Intrinsic),
+        mlir::ValueRange{});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.KHR.AssumeTrue` (roadmap F4, `VK_KHR_shader_expect_assume`
 /// / `shaderExpectAssume`) directly into the `llvm.assume` intrinsic: both
 /// take a single `i1` condition and produce no result, an exact match
@@ -7293,7 +7355,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
-      ControlBarrierConversionPattern,
+      ControlBarrierConversionPattern, MemoryBarrierConversionPattern,
       DemoteToHelperInvocationConversionPattern, DotConversionPattern,
       ElectConversionPattern, AllEqualConversionPattern,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAllOp>,
