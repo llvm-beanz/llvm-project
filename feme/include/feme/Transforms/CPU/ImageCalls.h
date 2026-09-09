@@ -563,6 +563,16 @@ enum class ImageCallKind : uint8_t {
   /// SPIR-V spec, with no way to request otherwise -- so this kind's own
   /// operand list is narrower than `SampleCmp2D`'s.
   GatherCmp2D,
+  /// `feme.cpu.image.gather.2d.v4f32` (roadmap L7g): `Plain2D`
+  /// non-depth-comparison gather (SPIR-V `OpImageGather` -- HLSL's
+  /// `Texture2D::Gather{,Red,Green,Blue,Alpha}()`). Structurally
+  /// identical to `GatherCmp2D` above (same fixed gather footprint and
+  /// result ordering, same mip-level-0-only restriction, no `Lod`/`Bias`/
+  /// `Grad`/`MinLod` operand), but selects one of the four sampled
+  /// *components* (`Component`, a 32-bit integer 0-3 selecting R/G/B/A)
+  /// from each of the four texels, rather than comparing each texel's
+  /// depth component against a `Dref` reference value.
+  Gather2D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -678,9 +688,12 @@ struct MatchedImageCall {
   /// doc); null for every other kind.
   llvm::Value *Bias = nullptr;
   /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`/
-  /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
-  /// depth-comparison reference value.
+  /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) and `GatherCmp2D`
+  /// (roadmap L7d) only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
+  /// `Gather2D` (roadmap L7g) only: the 32-bit integer 0-3 selecting
+  /// which of the four sampled texel components (R/G/B/A) to gather.
+  llvm::Value *Component = nullptr;
   /// `Sample2D`/`Sample2DArray` (roadmap L26/L33), `SampleCmp2D`/
   /// `SampleCmpArray2D` (roadmap L50d), and `Sample3D` (roadmap L67(c))
   /// only: the integer `<ConstOffset>` texel offset's X/Y components (see
@@ -833,6 +846,20 @@ createGatherCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                   llvm::Value *U, llvm::Value *V, llvm::Value *Dref,
                   llvm::Value *OffsetX, llvm::Value *OffsetY,
                   llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gather.2d.v4f32` call (roadmap L7g): `Plain2D`
+/// non-depth-comparison gather. Structurally identical to
+/// `createGatherCmp2D` above (same `OffsetX`/`OffsetY`, no `Lod`/
+/// `UseExplicitLod`/`Bias`/`DUdX`/`DUdY`/`DVdX`/`DVdY`/`MinLodClamp`
+/// parameter), but takes \p Component (a 32-bit integer 0-3 selecting
+/// which of the four sampled texel components -- R/G/B/A -- to gather)
+/// in place of \p Dref.
+llvm::CallInst *
+createGather2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+              llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+              llvm::Value *U, llvm::Value *V, llvm::Value *Component,
+              llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *Mask,
+              const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
 /// selects which sample of a multisampled image to read; pass a constant

@@ -5512,6 +5512,66 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmp2DV4F32(
   return Result;
 }
 
+// `feme.cpu.image.gather.2d.v4f32` (roadmap L7g): `Plain2D`
+// non-depth-comparison gather -- SPIR-V's `OpImageGather`, HLSL's
+// `Texture2D::Gather{,Red,Green,Blue,Alpha}()`. Structurally identical to
+// `femeCpuImageGatherCmp2DV4F32` above (same fixed bilinear "footprint"
+// via `femeRTComputeBilinearSupport`, same fixed result ordering
+// (`result[0]` is `(X0, Y1)`; `result[1]` is `(X1, Y1)`; `result[2]` is
+// `(X1, Y0)`; `result[3]` is `(X0, Y0)`), same mip-level-0-only
+// restriction), but each result component is one of the four sampled
+// texel's own `Component` channel (0=R, 1=G, 2=B, 3=A -- `Component` is
+// clamped into `[0, 3]` for an out-of-spec value, mirroring
+// `femeRTFetchTexel2D`'s own out-of-range-reads-as-border/zero philosophy
+// rather than reading undefined memory), never a depth comparison.
+FemeRTv4f32 femeCpuImageGather2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    int32_t Component, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) asm("feme.cpu.image.gather.2d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageGather2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    int32_t Component, int32_t OffsetX, int32_t OffsetY, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  FemeRTv4f32 T00 =
+      femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y0,
+                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
+                        Samp.BorderColor);
+  FemeRTv4f32 T10 =
+      femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y0,
+                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
+                        Samp.BorderColor);
+  FemeRTv4f32 T01 =
+      femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y1,
+                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
+                        Samp.BorderColor);
+  FemeRTv4f32 T11 =
+      femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y1,
+                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
+                        Samp.BorderColor);
+  FemeRTv4f32 Result;
+  Result[0] = T01[Chan];
+  Result[1] = T11[Chan];
+  Result[2] = T10[Chan];
+  Result[3] = T00[Chan];
+  return Result;
+}
+
 // `feme.cpu.image.load.2d.v4f32`: reads one texel of a 2D image (sampled or
 // storage) at integer coordinates `(X, Y)`, sample `Sample` (roadmap F8c;
 // always `0` for a single-sample image or a caller with no per-sample

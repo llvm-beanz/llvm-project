@@ -140,6 +140,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.querysamples.i32";
   case ImageCallKind::GatherCmp2D:
     return "feme.cpu.image.gathercmp.2d.v4f32";
+  case ImageCallKind::Gather2D:
+    return "feme.cpu.image.gather.2d.v4f32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -718,6 +720,18 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                              F32Ty, F32Ty, I32Ty, I32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
+  case ImageCallKind::Gather2D:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, component, offset_x, offset_y,
+    //  mask) -> <4 x float> (roadmap L7g): identical operand shape to
+    // `GatherCmp2D` above, except `component` (which of the four sampled
+    // texel components -- R/G/B/A -- to gather) is an `i32` selector
+    // rather than a `dref` (`f32`) comparison reference.
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -834,6 +848,30 @@ CallInst *feme::cpu::createGatherCmp2D(IRBuilderBase &Builder,
                              U,
                              V,
                              Dref,
+                             OffsetX,
+                             OffsetY,
+                             Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createGather2D(IRBuilderBase &Builder,
+                                    const ImageCallEnv &Env,
+                                    Value *ImageIndex, Value *SamplerIndex,
+                                    Value *U, Value *V, Value *Component,
+                                    Value *OffsetX, Value *OffsetY,
+                                    Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Gather2D);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap,
+                             Env.ImageHeapCount,
+                             Env.SamplerHeap,
+                             Env.SamplerHeapCount,
+                             ImageIndex,
+                             SamplerIndex,
+                             U,
+                             V,
+                             Component,
                              OffsetX,
                              OffsetY,
                              Mask},
@@ -1682,7 +1720,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::QuerySizeLodCubeArray,
       ImageCallKind::QueryLevels,
       ImageCallKind::QuerySamples,
-      ImageCallKind::GatherCmp2D};
+      ImageCallKind::GatherCmp2D,
+      ImageCallKind::Gather2D};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2318,6 +2357,22 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.U = CI.getArgOperand(6);
     Result.V = CI.getArgOperand(7);
     Result.Dref = CI.getArgOperand(8);
+    Result.OffsetX = CI.getArgOperand(9);
+    Result.OffsetY = CI.getArgOperand(10);
+    Result.Mask = CI.getArgOperand(11);
+    break;
+  case ImageCallKind::Gather2D:
+    if (CI.arg_size() != 12)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.Component = CI.getArgOperand(8);
     Result.OffsetX = CI.getArgOperand(9);
     Result.OffsetY = CI.getArgOperand(10);
     Result.Mask = CI.getArgOperand(11);

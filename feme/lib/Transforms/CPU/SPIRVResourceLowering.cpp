@@ -958,6 +958,21 @@ bool isGatherCmpIntrinsic(const CallInst &CI) {
   return getIntrinsicID(&CI) == Intrinsic::spv_resource_gather_cmp;
 }
 
+/// Whether \p CI is the `spv_resource_gather` intrinsic
+/// (`ImageGatherPattern`, `SPIRVToLLVMPatterns.cpp`, legalizing
+/// `spirv.ImageGather`, roadmap L7g). Its own fixed `(image, sampler,
+/// coord, component, offset)` operand shape is identical to
+/// `isGatherCmpIntrinsic`'s own `spv_resource_gather_cmp` shape (same
+/// `DrefSampleDrefIdx`/`getDrefSampleOffsetIdx(false)` indices apply
+/// unchanged), differing only in that the `Dref` position holds an
+/// integer *component selector* (0-3, selecting which of the four
+/// gathered texels' R/G/B/A channel to return) rather than a
+/// floating-point depth-comparison reference, and the result is never a
+/// comparison outcome the way `isGatherCmpIntrinsic`'s always is.
+bool isGatherIntrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_gather;
+}
+
 /// Whether \p CI is one of the two SPIR-V LOD-query intrinsics
 /// `ImageQueryLodPattern` (`SPIRVToLLVMPatterns.cpp`) legalizes an
 /// `OpImageQueryLod` into (roadmap L52e), setting \p Unclamped to
@@ -1726,6 +1741,35 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
+    // Roadmap L7g: `spirv.ImageGather` (HLSL's
+    // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`), scoped to `Plain2D`,
+    // non-integer only for now -- identical initial scope to
+    // `isGatherCmpIntrinsic`'s own `Plain2D`-only restriction just above
+    // (`Cube`/`CubeArray`/`Array2D` counterparts, and an integer-format
+    // image, all legal per the op's own SPIR-V type constraints, remain
+    // unstarted follow-on work, no real repro having reached them yet).
+    // Its own fixed `(image, sampler, coord, component, offset)` operand
+    // shape is identical to `isGatherCmpIntrinsic`'s own, except the
+    // `DrefSampleDrefIdx` position holds an integer component selector
+    // rather than a float `Dref`, so it needs its own
+    // `isCoordN(..., /*Float=*/false)`-style integer check there instead.
+    if (isGatherIntrinsic(*CI)) {
+      if (IsInteger || Shape != ImageShape::Plain2D)
+        return false; // No gather over an integer format; Cube/
+                       // CubeArray/Array2D remain unstarted follow-on
+                       // work (roadmap L7g).
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
+          !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isIntegerTy() ||
+          !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
+                             Shape, /*AllowArray2D=*/false,
+                             /*AllowPlain1DArray1D=*/false) ||
+          !isV4F32(CI->getType()))
+        return false;
+      continue;
+    }
+
     // Roadmap L52e: `OpImageQueryLod`'s own two intrinsic halves
     // (`calculate.lod`/`calculate.lod.unclamped`), scoped to `Plain2D`
     // only for now -- `Array2D`/`Cube`/`CubeArray`/`Plain1D`/`Array1D`/
@@ -1987,7 +2031,7 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
                  isDrefSampleIntrinsic(*CI, ExplicitLod, HasClamp, HasBias,
                                        DrefHasGrad, DrefHasLevel) ||
                  isQueryLodIntrinsic(*CI, Unclamped) ||
-                 isGatherCmpIntrinsic(*CI)))
+                 isGatherCmpIntrinsic(*CI) || isGatherIntrinsic(*CI)))
       return false;
     if (CI->getArgOperand(1) != &Handle)
       return false;
@@ -3679,6 +3723,35 @@ void lowerImageAccesses(
         CallInst *NewCall =
             createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
                               Dref, OffsetX, OffsetY, Mask, CI->getName());
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L7g: `spirv.ImageGather` (HLSL's
+      // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`), `hasOnlySupported
+      // ImageUses` already restricting this to `Plain2D`, non-integer.
+      // Structurally identical to the `isGatherCmpIntrinsic` case just
+      // above (same bilinear-footprint reuse, same lack of a `Lod`/
+      // `Bias`/`Grad`/`MinLod` operand), but threads the integer
+      // component selector through to `createGather2D`/
+      // `femeCpuImageGather2DV4F32` in place of a float `Dref`.
+      if (isGatherIntrinsic(*CI)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        Value *Coord = CI->getArgOperand(2);
+        Value *Component = CI->getArgOperand(DrefSampleDrefIdx);
+        Value *SamplerIndex =
+            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
+        Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+        CallInst *NewCall =
+            createGather2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                          Component, OffsetX, OffsetY, Mask, CI->getName());
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
