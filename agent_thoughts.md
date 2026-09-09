@@ -75237,3 +75237,85 @@ just as a final gate.
 No further roadmap rows were split out this session (unlike several recent L7-series sessions): L7m's own
 scope closes cleanly on this one fix, with no new, previously-unseen gap uncovered along the way. L7f/L7g/
 L7h/L7i/L7s remain the only open rows under the L7 umbrella.
+
+# L7s: `subgroupelect` "software ballot" divergence-classification gap
+
+## Task
+
+Requested: work L7s from the roadmap (or other prerequisites blocking the L-series), specifically
+`dEQP-VK.subgroups.basic.compute.subgroupelect`'s runtime output verification failure ("0 / 7 values
+passed"), split out of the prior L7r session's own before/after regression check. The prior L7m session
+(already fully committed before this one began) had separately fixed `subgroupbarrier`'s
+`llvm::DeleteDeadBlocks` crash and confirmed `subgroupelect`'s failure was pre-existing/unrelated, filing
+it as L7s for this session.
+
+## Investigation
+
+Reproduced the failure directly against the real ICD first (always start with a real repro, not a
+synthetic guess). The qpa log's captured GLSL source turned out to be meaningfully more complex than
+L7m's `subgroupbarrier` shader: a genuine separate helper function (`sharedMemoryBallot`), confirmed via
+the SPIR-V assembly to be a real `OpFunctionCall` requiring `InlineHelperFunctionsPass` to inline it first.
+Read the whole shader by hand before touching any tooling -- worth doing up front, since it immediately
+suggested the actual test intent ("software ballot": exactly one bit set per subgroup, at the elected
+lane's own index) and thus what "correct" output should look like even before finding the bug.
+
+Extended this project's established `getenv("FEME_DEBUG_DUMP_...")` single-point debug-dump convention
+into a new, reusable multi-point version, `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`, dumping the module after
+every one of the six main CPU-lowering stages (`Normalize`, `ResourceLoweringPass`, `LinearizePass`,
+`SIMDizePass`, `WaveLoweringPass`, the stage-specific wrapper) instead of just one hand-picked point. This
+was clearly worth the extra effort here: with two barriers, two `subgroupElect()`-gated diamonds, a
+`switch`, and 7 distinct local-size configurations all in play, a single dump point would have meant many
+more build-and-rerun round-trips to bisect which stage introduced the actual divergence between "looks
+right" and "produces wrong output." Six dump points let one single run capture the whole pipeline's
+before/after IR for every configuration at once, and the actual bug (a scalar `urem`/`udiv` consuming a
+correctly-widened intrinsic call's result) was visible by diffing exactly two adjacent stages by hand.
+
+The bug itself, once visible in the dump, pointed very precisely at a divergence-classification gap: the
+lane-index intrinsic's *call* was widened correctly, but its arithmetic *consumers* weren't, and the
+telltale sign was a bare `poison` operand (not a crash) -- `SIMDize.cpp`'s own commented convention of
+RAUW-to-poison on erased instructions' remaining uses turned what would otherwise have been a silent,
+hard-to-explain wrong-output bug into something with a clear, greppable signature once dumped. From there,
+tracing `UI.isDivergentAtDef`'s implementation (`computeWaveUniformity`'s intrinsic-classification switch
+in `WaveUniformity.cpp`) directly found the gap: `dx_wave_getlaneindex` (DXIL) was listed as `NeverUniform`,
+but its exact SPIR-V twin, `spv_subgroup_local_invocation_id`, simply wasn't in the switch at all -- an
+easy oversight, since `SIMDize.cpp`'s own `classifyBuiltin` *does* pair the two under one shared
+`BuiltinCallKind::LaneIndex`, which made it easy to assume (wrongly) that the uniformity classification
+would automatically follow the same pairing. It doesn't: two entirely separate files/mechanisms each
+needed their own case for this intrinsic, and only one of them had it.
+
+This is a good example of why the "unconditionally widen regardless of divergence classification" design
+choice for a handful of special builtin call shapes (`classifyBuiltin`/`classifyWaveCall`/
+`isSubgroupIdCall`/etc., all dispatched ahead of the generic `!UI.isDivergentAtDef -> leave alone` gate in
+`widenInstruction`) is subtle to keep correct: it's *necessary* for calls whose replacement value is
+already genuinely uniform (e.g. `WaveIndex`/lane count substitutions), where the uniformity classification
+genuinely doesn't matter. But for the one call in that same "always transform this shape" bucket whose
+result actually *is* per-lane-varying (`LaneIndex`), the surrounding uniformity classification silently
+does start to matter again -- for everything downstream of it, even though the call itself doesn't need
+it. A worthwhile follow-up thought (not acted on this session, to keep the fix minimal and precisely
+targeted): a comment cross-reference between `classifyBuiltin`'s `LaneIndex` case and
+`WaveUniformity.cpp`'s own `NeverUniform` switch, so a future intrinsic added to one is more likely to
+prompt a check of the other.
+
+## Verification discipline
+
+Used a `git stash push -- <single file>` scratch-revert-and-rerun (rather than a full `git revert`/backup
+copy) to confirm the new unit test genuinely catches the regression before the fix, then popped the stash
+back -- a lighter-weight version of the "confirm before/after" discipline this project's sessions have used
+throughout (L7l/L7m/L7r all did an equivalent before/after check with real `deqp-vk` runs; this one added
+the same rigor at the unit-test level too, which is cheaper and faster to iterate on than a full CTS
+re-run).
+
+Confirmed zero regressions via three separate checks, from narrowest to broadest: `check-feme` (2,827/2,886
+passing, up by exactly the 1 new test over the pre-session 2,826 baseline), the full
+`dEQP-VK.subgroups.basic.compute.*` group (12/12 passing -- notably, this is the *entire* group this
+project's L7-series has been chipping away at since L7k first let these shaders past deserialization), and
+the broader `dEQP-VK.subgroups.basic.*` sweep across all shader stages (12/70 passed, 58 not-supported, 0
+failed).
+
+## Follow-up filed
+
+Split out **L7t**: now that every blocker this document has tracked for the `subgroupSupportedOperations`
+`VOTE_BIT`/`SHUFFLE_BIT` feature-flag flip is resolved, that flip itself is a legitimate next step -- but a
+real one needs its own broader verification (the actual `vote`/`shuffle` CTS test groups, not just the
+`basic.compute` group this session's fix was scoped to and verified against), so it's deliberately left as
+its own follow-up rather than done speculatively alongside this session's narrower fix.
