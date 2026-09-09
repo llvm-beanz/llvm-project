@@ -1101,6 +1101,26 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// per-row matrix output to *except* mesh: see
 /// `isPerVertexArrayMeshOutputGlobal` below for the narrower, `Mesh`-only
 /// exception this row adds instead of loosening this check itself.
+///
+/// (Roadmap L24(b)) Excludes a `Patch`-decorated global -- above all
+/// `gl_TessLevelOuter`/`gl_TessLevelInner` (`BuiltIn TessLevelOuter`/
+/// `TessLevelInner`, always `Patch`, always declared `[4 x float]`/
+/// `[2 x float]` regardless of tess domain) read back as a Domain stage's
+/// own `Input` -- from this same per-vertex-array classification. Those
+/// two are not per-vertex-arrayed at all: every row is a genuine,
+/// independently meaningful whole-patch tess factor, the exact shape the
+/// `Output`-side `PerInvocationOutputArray` peeling in `addElements`
+/// already excludes them from (see that check's own `D.Patch` comment).
+/// Before this fix, a Domain stage's own `gl_TessLevelOuter`/
+/// `gl_TessLevelInner` `Input` element was wrongly flagged
+/// `RowCountIsVertexArray`, so `StageLink.cpp`'s `effectiveRowCount`
+/// folded its real `RowCount` (4/2) down to `1` when linking against the
+/// Hull stage's own (correctly unfolded, roadmap L24(b)) patch-constant
+/// producer element, a spurious `vkQueueSubmit`-time "disagree on
+/// component/row count or type" -- `Feature/Semantics/HullSystemValues.
+/// test`'s own regression while fixing that Hull-side bug, since before
+/// it, both sides happened to independently collapse to `RowCount == 1`
+/// and coincidentally agreed.
 bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
                                  unsigned &AddrSpace, ShaderStage Stage) {
   if (Stage != ShaderStage::Hull && Stage != ShaderStage::Domain &&
@@ -1108,7 +1128,11 @@ bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
     return false;
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
     return false;
-  return isa<ArrayType>(GV->getValueType());
+  if (!isa<ArrayType>(GV->getValueType()))
+    return false;
+  ParsedSPIRVDecorations D =
+      parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+  return !D.Patch;
 }
 
 /// (Roadmap H6k) Whether \p GV is a mesh entry's own per-vertex/
@@ -2456,9 +2480,29 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // control point count, not a matrix row count, and the domain
         // stage links against it by `Location` expecting the single
         // control point each of its own inputs describes.
+        //
+        // (Roadmap L24(b)) `D.Patch` excludes a genuinely patch-frequency
+        // output -- above all `gl_TessLevelOuter`/`gl_TessLevelInner`
+        // (`BuiltIn TessLevelOuter`/`TessLevelInner`, always `Patch`-
+        // decorated, always a `[4 x float]` global regardless of tess
+        // domain) -- from this same peeling. Those two are not shaped
+        // like a per-control-point array at all: every one of their (up
+        // to four) rows is a genuine, independently meaningful tess
+        // factor for the whole patch, and `extractTessFactors` reads them
+        // back by `Row` (`feme::graphics::TessFactors::Edges`/`Inside`).
+        // Before this fix, an isoline patch constant function's second
+        // `gl_TessLevelOuter[1]` store (`SV_TessFactor[1]`, the per-line
+        // detail/segment-count factor) was silently unreadable: this
+        // peeling collapsed the whole 4-element builtin down to
+        // `RowCount == 1`, so `extractTessFactors`'s `Row != Elt.RowCount`
+        // loop bound only ever visited `Row == 0`, leaving
+        // `TessFactors::Edges[1]` at its untouched default of `1.0`
+        // (one segment) instead of the real authored value -- exactly
+        // the "masked"-looking gap `Graphics/IsolineDomainTessellation.
+        // test` (Roadmap L24(b)) surfaced.
         bool PerInvocationOutputArray =
             (Stage == ShaderStage::Mesh || Stage == ShaderStage::Hull) &&
-            AddrSpace == 8;
+            AddrSpace == 8 && !D.Patch;
         if (PerInvocationOutputArray) {
           if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
             ValueTy = ArrTy->getElementType();

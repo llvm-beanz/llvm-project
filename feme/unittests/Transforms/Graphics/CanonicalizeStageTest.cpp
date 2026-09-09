@@ -2281,6 +2281,110 @@ TEST(CanonicalizeStageTest,
   EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
 }
 
+/// (Roadmap L24(b)) `gl_TessLevelOuter`/`gl_TessLevelInner` (`BuiltIn
+/// TessLevelOuter`/`TessLevelInner`, always `Patch`-decorated) are *not*
+/// shaped like the per-control-point output array
+/// `HullStagePeelsPerControlPointArrayFromOutputRowCount` above covers --
+/// every one of their (up to four) rows is a genuine, independently
+/// meaningful whole-patch tess factor, not one row per control point --
+/// so `PerInvocationOutputArray`'s peeling must not apply to them. Before
+/// this fix, this element's `RowCount` was wrongly collapsed to `1`
+/// (`std::ceil`/`computeSegmentCount`-fed `feme::graphics::TessFactors::
+/// Edges[1]` and beyond then silently stuck at its `1.0` default,
+/// undercounting real per-line tessellation-factor rows) purely because
+/// this global happens to share the same address space (8) and stage
+/// (`Hull`) `PerInvocationOutputArray` otherwise recognizes -- exactly the
+/// gap `Graphics/IsolineDomainTessellation.test` (roadmap L24(b)) hit.
+/// Mixes in a genuine per-control-point output write too (no barrier
+/// between them, the same barrierless-mixed-frequency shape
+/// `NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsSplitAndPruned`
+/// above already exercises) so `splitBarrierlessTessellationControlEntry`
+/// produces a real `main.patchconstant` sibling to read the `TessFactorEdge`
+/// element's `RowCount` off of.
+TEST(CanonicalizeStageTest,
+     HullStageDoesNotPeelPatchTessFactorOutputRowCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_cps = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !1
+    define void @main(i32 %i, <4 x float> %v) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_cps, i32 0, i32 %i
+      store <4 x float> %v, ptr addrspace(8) %p
+      %p0 = getelementptr inbounds [4 x float], ptr addrspace(8) @gl_TessLevelOuter, i32 0, i32 0
+      store float 1.0, ptr addrspace(8) %p0
+      %p1 = getelementptr inbounds [4 x float], ptr addrspace(8) @gl_TessLevelOuter, i32 0, i32 1
+      store float 4.0, ptr addrspace(8) %p1
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!3, !4}
+    !2 = !{i32 30, i32 0}
+    !3 = !{i32 11, i32 11}
+    !4 = !{i32 15}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(PatchConstant);
+  std::optional<EntrySignature> PCSig =
+      dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
+  EXPECT_EQ(PCSig->Elements[0].RowCount, 4u);
+  EXPECT_FALSE(PCSig->Elements[0].RowCountIsVertexArray);
+}
+
+/// (Roadmap L24(b)) The `Input`-side counterpart of the fix above: a
+/// Domain stage's own `gl_TessLevelOuter` read-back must not be flagged
+/// `RowCountIsVertexArray` either, even though it is an address-space-7
+/// (`Input`) array on a stage (`Domain`) `isPerVertexArrayInputGlobal`
+/// otherwise treats as per-vertex-arrayed (e.g. `gl_in[]`-shaped control
+/// points) -- it is `Patch`-decorated, the same whole-patch (not
+/// per-vertex) shape as the `Output`-side test above. Before this fix,
+/// `StageLink.cpp`'s `effectiveRowCount` folded this element's real
+/// `RowCount` (4) down to `1` when linking it against the Hull stage's own
+/// producer, a spurious `vkQueueSubmit`-time "disagree on component/row
+/// count or type" -- `Feature/Semantics/HullSystemValues.test`'s own
+/// regression while fixing the `Output`-side row above, since before it,
+/// both sides happened to independently (for different reasons)
+/// mis-collapse to `RowCount == 1` and coincidentally agree.
+TEST(CanonicalizeStageTest,
+     DomainStageDoesNotTreatPatchTessFactorInputAsPerVertexArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = external addrspace(7) constant [4 x float], !spirv.Decorations !0
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %tf = load [4 x float], ptr addrspace(7) @gl_TessLevelOuter
+      %tf0 = extractvalue [4 x float] %tf, 0
+      %v = insertelement <4 x float> poison, float %tf0, i32 0
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="domain" }
+    !0 = !{!2, !3}
+    !1 = !{!4}
+    !2 = !{i32 11, i32 11}
+    !3 = !{i32 15}
+    !4 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  std::optional<EntrySignature> Sig =
+      dxil::getEntrySignature(*M->getFunction("main"));
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  const SignatureElement &TessLevelOuter = Sig->Elements[0];
+  EXPECT_EQ(TessLevelOuter.SystemValue, SignatureSystemValue::TessFactorEdge);
+  EXPECT_EQ(TessLevelOuter.RowCount, 4u);
+  EXPECT_FALSE(TessLevelOuter.RowCountIsVertexArray);
+}
+
 /// (Roadmap H6k) A real `dEQP-VK.mesh_shader.ext.in_out.*` mesh entry's own
 /// per-vertex output store is not always dynamically indexed the way
 /// `MeshStageCanonicalizesOutputArrayStore` above models it -- glslang
