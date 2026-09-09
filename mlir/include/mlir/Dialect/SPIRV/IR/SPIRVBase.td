@@ -346,6 +346,7 @@ def SPV_KHR_terminate_invocation             : I32EnumAttrCase<"SPV_KHR_terminat
 def SPV_KHR_cooperative_matrix               : I32EnumAttrCase<"SPV_KHR_cooperative_matrix", 31>;
 def SPV_KHR_bfloat16                         : I32EnumAttrCase<"SPV_KHR_bfloat16", 32>;
 def SPV_KHR_float_controls2                  : I32EnumAttrCase<"SPV_KHR_float_controls2", 33>;
+def SPV_KHR_compute_shader_derivatives       : I32EnumAttrCase<"SPV_KHR_compute_shader_derivatives", 34>;
 
 def SPV_EXT_demote_to_helper_invocation  : I32EnumAttrCase<"SPV_EXT_demote_to_helper_invocation", 1000>;
 def SPV_EXT_descriptor_indexing          : I32EnumAttrCase<"SPV_EXT_descriptor_indexing", 1001>;
@@ -447,6 +448,7 @@ def SPIRV_ExtensionAttr :
       SPV_KHR_uniform_group_instructions, SPV_KHR_subgroup_rotate,
       SPV_KHR_non_semantic_info, SPV_KHR_terminate_invocation,
       SPV_KHR_cooperative_matrix, SPV_KHR_bfloat16, SPV_KHR_float_controls2,
+      SPV_KHR_compute_shader_derivatives,
       SPV_EXT_demote_to_helper_invocation, SPV_EXT_descriptor_indexing,
       SPV_EXT_fragment_fully_covered, SPV_EXT_fragment_invocation_density,
       SPV_EXT_fragment_shader_interlock, SPV_EXT_physical_storage_buffer,
