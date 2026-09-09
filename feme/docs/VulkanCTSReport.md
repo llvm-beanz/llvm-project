@@ -33580,3 +33580,82 @@ own entry, alongside the pre-existing L9 (scalar) entry, and a stale "R32G32_UIN
 rejected at `vkCreateBufferView`" claim corrected (an earlier, unrelated H8s/H19n
 format-properties pass had already accepted these formats at that layer; this row's own gap was
 purely the resource-lowering pass's width gate).
+
+## L83: `RowMajor`-decorated `RWStructuredBuffer<matrix>` storage/load silently used the wrong (natural, column-major) byte layout
+
+Real IR reduction (`dxc -fvk-use-dx-layout -spirv` + `spirv-dis` on a minimal repro isolating
+`matrix_m-based_setter.test`'s own shape: a `float3x4` built via scalar-setter swizzles from a
+flat `RWBuffer<float> In`, stored to a `RWStructuredBuffer<float3x4>` output) found the real root
+cause of 2 of L83's own originally-filed 4 cases: `dxc` declares this shape's sole wrapper-struct
+member `RowMajor`-decorated with a tightly-packed 12-byte `MatrixStride` (one HLSL row's worth) --
+a real, representable physical layout LLVM's own natural column-major
+`!llvm.array<NumColumns x vector<NumRows x T>>` conversion silently ignored whenever the matrix is
+reached through one level of `RuntimeArrayType` wrapping (the `RWStructuredBuffer<T>` shape)
+rather than being a *direct* struct member. `isMatrixMemberLayoutRepresentable`
+(`SPIRVToLLVMPatterns.cpp`) already declines this exact decoration combination with a clean
+legalization error -- but only for the direct-member shape; the array-wrapped shape fell through
+the ordinary `BlockAccessChainPattern` conversion entirely unnoticed, silently corrupting every
+store/load of such a matrix instead of failing loudly.
+
+**Fix**: two new `FeMeBenefit`-registered patterns, `RowMajorMatrixStorePattern`/
+`RowMajorMatrixLoadPattern`, override upstream's own generic `spirv.Store`/`spirv.Load` patterns
+only for this one shape (detected via a new `getRowMajorMatrixAccess` helper, generalizing
+`isMatrixMemberLayoutRepresentable`'s own decoration check to the array-wrapped case). The matrix
+value keeps its ordinary "logical" (natural, column-major) representation everywhere else in the
+IR (arithmetic, temporaries, `spirv.CompositeConstruct`/`Extract`) and is transposed into the
+"physical" (row-major) layout only at the exact point it crosses the memory boundary, immediately
+around the real `llvm.store`/`llvm.load`. The physical row type is a flat, packed
+`!llvm.array<NumRows x array<NumColumns x T>>` of *scalars*, deliberately not
+`vector<NumColumns x T>`: an early attempt using a vector row type produced a plausible-looking
+but subtly wrong result (`[1,5,9,0, 2,6,10,0, 3,7,11,0]` instead of
+`[1,5,9,2,6,10,3,7,11,4,8,12]`) because this target's own data layout pads a non-power-of-two-width
+vector's in-memory (store/alloc) size up to the next power of two (`vector<3xf32>` occupying 16
+bytes, not 12) -- a flat scalar array has no such padding.
+
+**Tests added**: `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-matrix-rowmajor-buffer-block.mlir`,
+covering a `RowMajor`+`MatrixStride`-decorated `RWStructuredBuffer<mat3v4float>` store/load
+round-trip at the `feme-opt --feme-convert-spirv-to-llvm` level, confirming both the physical
+(flat scalar array) store/load type and that the logical (column-major) value shape is preserved
+at the function boundary.
+
+**Verification**:
+- `ninja -C build2 check-feme` (ccache + assertions build, all target dependencies auto-built):
+  **2859 discovered, 2800 Passed, 59 Unsupported (pre-existing), 0 Failed** (up by exactly the 1
+  new lit test this row adds).
+- Real `Basic/Matrix` re-run (`ninja check-hlsl-vk-basic-matrix`, correctly-selected `feme` ICD):
+  `matrix_m-based_setter.test`/`matrix_one-based_setter.test` now both **Pass** (previously a real
+  `BufferExact` numeric mismatch, `[1,2,...,12]` actual vs. `[1,5,9,2,6,10,3,7,11,4,8,12]`
+  expected). `matrix_groupthread_swizzle_{one,zero}_based.test` still fail, confirmed via this
+  same reduction to be an unrelated bug (see roadmap **L84**).
+- Real A/B `git stash` full `check-hlsl-vk`/`offload-test-suite` comparison (rebuilt
+  `feme_vulkan`/`feme-opt`/`feme-translate` both times): **235 -> 237 Passed**,
+  **142 -> 140 Failed**, exactly +2/-2, zero regressions elsewhere.
+- Real `deqp-vk` re-run targeting the CTS group most structurally analogous to
+  `RWStructuredBuffer<matrix>` (a single, dynamically-indexed array of matrices):
+
+  ```
+  deqp-vk --deqp-caselist-file=<(grep row_major dEQP-VK-cases.txt for dEQP-VK.ssbo.layout.single_basic_array.*)
+  ```
+
+  108 cases (`dEQP-VK.ssbo.layout.single_basic_array.{scalar,std140,std430}.row_major_mat*`):
+  **0 Passed, 72 Failed, 36 Not Supported, identical both before and after this fix** (a direct
+  `git stash`-based A/B rebuild-and-rerun confirms byte-for-byte identical totals). This row's own
+  real `deqp-vk` payoff is genuinely zero, for the same reason L7a's own CTS section already
+  documented for a different fix: `deqp-vk` compiles every case via `glslang` from GLSL, whose own
+  SPIR-V codegen for a `row_major` SSBO matrix evidently does not (or not yet, pending its own
+  separate root-cause) reach the exact `RowMajorMatrixStorePattern`/`RowMajorMatrixLoadPattern`
+  shape this fix adds -- the pre-existing 72 failures in this group are a distinct, unexamined gap
+  outside this row's own scope (not filed as a new row this session, since this fix's own real
+  payoff was already confirmed via the `offload-test-suite`/`feme-vk` A/B comparison above, and a
+  deeper `glslang`-side investigation was not this session's own assigned scope).
+
+**Roadmap**: L83 struck through as done (2 of its own originally-filed 4 cases). The other 2
+(`matrix_groupthread_swizzle_{one,zero}_based.test`), confirmed via this session's own reduction to
+be a distinct, unrelated uniformity/divergence bug (not a storage-layout one), filed as new
+roadmap row **L84**.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no change needed -- a pure
+internal SPIR-V-to-LLVM conversion correctness fix, no Vulkan feature or extension bit touched.
+`FeMeVulkanDesign.md`: reviewed; no existing section documents a specific matrix storage-layout
+design decision this fix contradicts (the gap was simply an unimplemented shape, not a documented
+one), so no design-doc update was needed.
