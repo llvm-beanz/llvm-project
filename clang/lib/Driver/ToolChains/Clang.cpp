@@ -6074,7 +6074,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   Args.addOptOutFlag(CmdArgs, options::OPT_fjump_tables,
                      options::OPT_fno_jump_tables);
-  Args.addOptOutFlag(CmdArgs, options::OPT_fswitch, options::OPT_fno_switch);
+  Args.AddLastArg(CmdArgs, options::OPT_fswitch, options::OPT_fno_switch);
   Args.addOptInFlag(CmdArgs, options::OPT_fprofile_sample_accurate,
                     options::OPT_fno_profile_sample_accurate);
   Args.addOptOutFlag(CmdArgs, options::OPT_fpreserve_as_comments,

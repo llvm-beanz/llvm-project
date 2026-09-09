@@ -1869,6 +1869,26 @@ void CodeGenFunction::EmitCaseStmtRange(const CaseStmt &S,
 
 void CodeGenFunction::EmitCaseStmt(const CaseStmt &S,
                                    ArrayRef<const Attr *> Attrs) {
+  if (SwitchDispatchBlock && !S.getRHS()) {
+    llvm::APSInt CaseValue = S.getLHS()->EvaluateKnownConstInt(getContext());
+    const ConstantExpr *CE;
+    if (auto ICE = dyn_cast<ImplicitCastExpr>(S.getLHS()))
+      CE = dyn_cast<ConstantExpr>(ICE->getSubExpr());
+    else
+      CE = dyn_cast<ConstantExpr>(S.getLHS());
+    if (CE) {
+      if (auto DE = dyn_cast<DeclRefExpr>(CE->getSubExpr()))
+        if (CGDebugInfo *Dbg = getDebugInfo())
+          if (CGM.getCodeGenOpts().hasReducedDebugInfo())
+            Dbg->EmitGlobalVariable(DE->getDecl(), APValue(CaseValue));
+    }
+  }
+
+  if (SwitchDispatchBlock) {
+    EmitSwitchCaseStmtAsIf(S, Attrs);
+    return;
+  }
+
   // If there is no enclosing switch instance that we're aware of, then this
   // case statement and its block can be elided.  This situation only happens
   // when we've constant-folded the switch, are emitting the constant case,
@@ -1899,7 +1919,7 @@ void CodeGenFunction::EmitCaseStmt(const CaseStmt &S,
       if (CGDebugInfo *Dbg = getDebugInfo())
         if (CGM.getCodeGenOpts().hasReducedDebugInfo())
           Dbg->EmitGlobalVariable(DE->getDecl(),
-              APValue(llvm::APSInt(CaseVal->getValue())));
+                                  APValue(llvm::APSInt(CaseVal->getValue())));
   }
 
   if (SwitchLikelihood)
@@ -1984,6 +2004,11 @@ void CodeGenFunction::EmitCaseStmt(const CaseStmt &S,
 
 void CodeGenFunction::EmitDefaultStmt(const DefaultStmt &S,
                                       ArrayRef<const Attr *> Attrs) {
+  if (SwitchDispatchBlock) {
+    EmitSwitchCaseStmtAsIf(S, Attrs);
+    return;
+  }
+
   // If there is no enclosing switch instance that we're aware of, then this
   // default statement can be elided. This situation only happens when we've
   // constant-folded the switch.
@@ -2002,6 +2027,100 @@ void CodeGenFunction::EmitDefaultStmt(const DefaultStmt &S,
   EmitBlockWithFallThrough(DefaultBlock, &S);
 
   EmitStmt(S.getSubStmt());
+}
+
+llvm::Value *CodeGenFunction::EmitSwitchCaseMatch(const CaseStmt &S) {
+  llvm::APSInt LHS = S.getLHS()->EvaluateKnownConstInt(getContext());
+  if (!S.getRHS())
+    return Builder.CreateICmpEQ(SwitchCond, Builder.getInt(LHS));
+
+  llvm::APSInt RHS = S.getRHS()->EvaluateKnownConstInt(getContext());
+  if (LHS.isSigned() ? RHS.slt(LHS) : RHS.ult(LHS))
+    return Builder.getFalse();
+
+  llvm::Value *Diff = Builder.CreateSub(SwitchCond, Builder.getInt(LHS));
+  return Builder.CreateICmpULE(Diff, Builder.getInt(RHS - LHS));
+}
+
+void CodeGenFunction::EmitSwitchCaseStmtAsIf(const SwitchCase &S,
+                                             ArrayRef<const Attr *> Attrs) {
+  const SwitchCase *Current = &S;
+  while (true) {
+    llvm::BasicBlock *FallthroughBlock = Builder.GetInsertBlock();
+    llvm::BasicBlock *CaseBlock = createBasicBlock("sw.bb");
+    llvm::BasicBlock *NextBlock = createBasicBlock("sw.next");
+    bool InstrumentedFallthrough =
+        FallthroughBlock && CGM.getCodeGenOpts().hasProfileClangInstr();
+
+    if (FallthroughBlock && !InstrumentedFallthrough)
+      EmitBranch(SwitchDispatchBlock);
+    if (!SwitchDispatchBlock->getParent())
+      CurFn->insert(CurFn->end(), SwitchDispatchBlock);
+    Builder.SetInsertPoint(SwitchDispatchBlock);
+    ApplyDebugLocation DL(*this, Current->getBeginLoc());
+
+    llvm::PHINode *Fallthrough = nullptr;
+    if (FallthroughBlock && !InstrumentedFallthrough) {
+      Fallthrough = Builder.CreatePHI(Builder.getInt1Ty(), 2);
+      Fallthrough->addIncoming(Builder.getTrue(), FallthroughBlock);
+      Fallthrough->addIncoming(Builder.getFalse(), SwitchDispatchPredecessor);
+    }
+
+    llvm::Value *Matches;
+    if (const auto *CS = dyn_cast<CaseStmt>(Current)) {
+      Matches = EmitSwitchCaseMatch(*CS);
+    } else {
+      Matches = Builder.getTrue();
+      for (const SwitchCase *SC =
+               SwitchStmtForBranchLowering->getSwitchCaseList();
+           SC; SC = SC->getNextSwitchCase()) {
+        if (const auto *CS = dyn_cast<CaseStmt>(SC))
+          Matches = Builder.CreateAnd(
+              Matches, Builder.CreateNot(EmitSwitchCaseMatch(*CS)));
+      }
+    }
+
+    if (Fallthrough)
+      Matches = Builder.CreateOr(Fallthrough, Matches);
+
+    Stmt::Likelihood LH = Stmt::getLikelihood(Attrs);
+    Matches = emitCondLikelihoodViaExpectIntrinsic(Matches, LH);
+    auto *Branch = Builder.CreateCondBr(Matches, CaseBlock, NextBlock);
+    addInstToNewSourceAtom(Branch, Matches);
+
+    switch (HLSLControlFlowAttr) {
+    case HLSLControlFlowHintAttr::Microsoft_branch:
+    case HLSLControlFlowHintAttr::Microsoft_flatten: {
+      llvm::MDBuilder MDHelper(CGM.getLLVMContext());
+      unsigned Hint =
+          HLSLControlFlowAttr == HLSLControlFlowHintAttr::Microsoft_branch ? 1
+                                                                           : 2;
+      llvm::Metadata *Values[] = {
+          MDHelper.createString("hlsl.controlflow.hint"),
+          MDHelper.createConstant(Builder.getInt32(Hint))};
+      Branch->setMetadata("hlsl.controlflow.hint",
+                          llvm::MDNode::get(CGM.getLLVMContext(), Values));
+      break;
+    }
+    case HLSLControlFlowHintAttr::SpellingNotCalculated:
+      break;
+    }
+
+    SwitchDispatchPredecessor = SwitchDispatchBlock;
+    SwitchDispatchBlock = NextBlock;
+    Builder.ClearInsertionPoint();
+    if (InstrumentedFallthrough)
+      Builder.SetInsertPoint(FallthroughBlock);
+    EmitBlockWithFallThrough(CaseBlock, Current);
+
+    const SwitchCase *Next = dyn_cast<SwitchCase>(Current->getSubStmt());
+    if (!Next) {
+      EmitStmt(Current->getSubStmt());
+      return;
+    }
+    Current = Next;
+    Attrs = {};
+  }
 }
 
 namespace {
@@ -2379,6 +2498,11 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   SmallVector<uint64_t, 16> *SavedSwitchWeights = SwitchWeights;
   SmallVector<Stmt::Likelihood, 16> *SavedSwitchLikelihood = SwitchLikelihood;
   llvm::BasicBlock *SavedCRBlock = CaseRangeBlock;
+  llvm::Value *SavedSwitchCond = SwitchCond;
+  llvm::BasicBlock *SavedSwitchDispatchBlock = SwitchDispatchBlock;
+  llvm::BasicBlock *SavedSwitchDispatchPredecessor = SwitchDispatchPredecessor;
+  const SwitchStmt *SavedSwitchStmtForBranchLowering =
+      SwitchStmtForBranchLowering;
 
   // See if we can constant fold the condition of the switch and therefore only
   // emit the live case statement (if any) of the switch.
@@ -2404,6 +2528,8 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
       // we can temporarily enforce this to ensure that any embedded case
       // statements are not emitted.
       SwitchInsn = nullptr;
+      SwitchDispatchBlock = nullptr;
+      SwitchDispatchPredecessor = nullptr;
 
       // Okay, we can dead code eliminate everything except this case.  Emit the
       // specified series of statements and we're good.
@@ -2415,6 +2541,8 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
       // Now we want to restore the saved switch instance so that nested
       // switches continue to function properly
       SwitchInsn = SavedSwitchInsn;
+      SwitchDispatchBlock = SavedSwitchDispatchBlock;
+      SwitchDispatchPredecessor = SavedSwitchDispatchPredecessor;
 
       return;
     }
@@ -2436,6 +2564,54 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
     EmitDecl(*S.getConditionVariable());
   llvm::Value *CondV = EmitScalarExpr(S.getCond());
   MaybeEmitDeferredVarDeclInit(S.getConditionVariable());
+
+  if (CGM.getCodeGenOpts().NoUseSwitch) {
+    SwitchInsn = nullptr;
+    SwitchWeights = nullptr;
+    SwitchLikelihood = nullptr;
+    CaseRangeBlock = nullptr;
+    SwitchCond = CondV;
+    SwitchDispatchPredecessor = Builder.GetInsertBlock();
+    SwitchDispatchBlock = createBasicBlock("sw.dispatch");
+    EmitBranch(SwitchDispatchBlock);
+    SwitchStmtForBranchLowering = &S;
+
+    JumpDest OuterContinue;
+    if (!BreakContinueStack.empty())
+      OuterContinue = BreakContinueStack.back().ContinueBlock;
+    BreakContinueStack.push_back(BreakContinue(S, SwitchExit, OuterContinue));
+    EmitStmt(S.getBody());
+    BreakContinueStack.pop_back();
+
+    llvm::BasicBlock *CleanupBlock = createBasicBlock("sw.cleanup");
+    EmitBranch(CleanupBlock);
+    if (!SwitchDispatchBlock->getParent())
+      CurFn->insert(CurFn->end(), SwitchDispatchBlock);
+    Builder.SetInsertPoint(SwitchDispatchBlock);
+    if (hasSkipCounter(S.getCond()))
+      incrementProfileCounter(UseSkipPath, S.getCond());
+    EmitBranch(CleanupBlock);
+    EmitBlock(CleanupBlock);
+    ConditionScope.ForceCleanup();
+    EmitBranch(SwitchExit.getBlock());
+    EmitBlock(SwitchExit.getBlock(), true);
+    incrementProfileCounter(&S);
+
+    SwitchInsn = SavedSwitchInsn;
+    SwitchWeights = SavedSwitchWeights;
+    SwitchLikelihood = SavedSwitchLikelihood;
+    CaseRangeBlock = SavedCRBlock;
+    SwitchCond = SavedSwitchCond;
+    SwitchDispatchBlock = SavedSwitchDispatchBlock;
+    SwitchDispatchPredecessor = SavedSwitchDispatchPredecessor;
+    SwitchStmtForBranchLowering = SavedSwitchStmtForBranchLowering;
+    return;
+  }
+
+  SwitchCond = nullptr;
+  SwitchDispatchBlock = nullptr;
+  SwitchDispatchPredecessor = nullptr;
+  SwitchStmtForBranchLowering = nullptr;
 
   // Create basic block to hold stuff that comes after switch
   // statement. We also need to create a default block now so that
@@ -2571,6 +2747,10 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   SwitchWeights = SavedSwitchWeights;
   SwitchLikelihood = SavedSwitchLikelihood;
   CaseRangeBlock = SavedCRBlock;
+  SwitchCond = SavedSwitchCond;
+  SwitchDispatchBlock = SavedSwitchDispatchBlock;
+  SwitchDispatchPredecessor = SavedSwitchDispatchPredecessor;
+  SwitchStmtForBranchLowering = SavedSwitchStmtForBranchLowering;
 }
 
 std::pair<llvm::Value*, llvm::Type *> CodeGenFunction::EmitAsmInputLValue(
