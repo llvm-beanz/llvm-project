@@ -42,26 +42,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7r from the roadmap or other prerequisites blocking the
+Can you work on L7m from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`dEQP-VK.subgroups.basic.compute.subgroupmemorybarrierimage` reaches real
-> pipeline creation and execution but fails runtime output verification
-> ("Failed!")**, split out of L7p's own closing session: now that L7p's own
-> specialization-constant patch fixes the `SIGBUS` every case in the
-> `subgroupmemorybarrier*` family used to hit, this is the one case in the
-> family that still does not pass -- distinct from L7n's own tracked
-> `builtin_var` runtime-value gap
-> (`gl_SubgroupSize`/`gl_NumSubgroups`/`gl_SubgroupID`), since this shader
-> neither declares nor reads any of those builtins; its own distinguishing
-> feature within the family is the `r32ui` image (`tempImage`) it actually
-> reads/writes (unlike its siblings, which all declare the same binding but only
-> `subgroupmemorybarriershared` was previously confirmed to touch its own
-> groupshared array instead). Needs its own real output-value reduction (dumping
-> the actual image contents this ICD's CPU runtime produces versus what the CTS
-> verifier expects) to isolate whether the gap is in this project's own
-> image-atomic/coherent-image-access lowering, its
-> `spirv.MemoryBarrier`-to-CPU-runtime-barrier mapping's interaction with image
-> memory specifically (as opposed to buffer/shared memory, both already
-> confirmed working by this same family's other passing cases), or something
-> else entirely
+> **A real, pre-existing `llvm::DeleteDeadBlocks` assertion crash**
+> (`llvm/lib/Transforms/Utils/BasicBlockUtils.cpp:159`: `Assertion
+> `Dead.count(Pred) && "All predecessors must be dead!"' failed`), split out of
+> L7k's own closing session: newly reached during
+> `dEQP-VK.subgroups.basic.compute.subgroupbarrier` (and its
+> `_requiredsubgroupsize` twin) now that L7k's own array-deserialization fix
+> lets that shader's module past deserialization for the first time -- a crash
+> in LLVM core code, not SPIR-V/`feme`-specific code, that aborts the entire
+> `deqp-vk` process outright (losing all subsequent test results in that
+> invocation unless the sweep is chunked per subgroup-category group to route
+> around it, as this session's own re-verification had to do), consistent with
+> this project's own documented precedent for this failure class (roadmap
+> C2/H19p: "a crash silently truncates or corrupts a suite run"). Needs its own
+> real IR reduction of the `subgroupbarrier` shader's own lowered LLVM IR
+> (likely surfaced by whatever CFG-simplification pass this ICD's own lowering
+> pipeline runs over a control-barrier-containing compute shader with
+> divergent-looking control flow) to isolate the actual
+> dead-block/predecessor-tracking bug, entirely independent of L7k's own
+> array-deserialization scope
