@@ -75061,3 +75061,179 @@ scope creep) -- this is exactly the kind of "quick aggregate-sweep glance at nea
 session's own closing thoughts recommended, and it paid off again here, just in the other direction: instead
 of finding an *unexpected additional fix*, it found an *unexpected additional gap* that would otherwise have
 sat completely unrecorded (unlike the `subgroupbarrier` crash, which was already tracked).
+
+# L7m: `subgroupbarrier`'s `llvm::DeleteDeadBlocks` assertion crash
+
+## Starting point
+
+The request was to root-cause and fix a real, pre-existing `llvm::DeleteDeadBlocks` assertion crash
+(`Assertion 'Dead.count(Pred) && "All predecessors must be dead!"' failed`) newly reached during
+`dEQP-VK.subgroups.basic.compute.subgroupbarrier` (and its `_requiredsubgroupsize` twin), split out of L7k's
+own closing session. Confirmed clean git state first, then reproduced the crash directly against the real
+`feme_vulkan` ICD (correctly-selected `VK_ICD_FILENAMES`, the same environment-variable gotcha every prior
+L7-series session has had to remember explicitly).
+
+## Getting a backtrace, and a key early observation
+
+A `gdb -batch -ex run -ex bt` backtrace showed the crash happening inside `llvm::DeleteDeadBlocks` <-
+`llvm::removeUnreachableBlocks` <- `simplifyFunctionCFGImpl` <- `llvm::SimplifyCFGPass::run` <- the standard
+LLVM `PassBuilder`-built pipeline <- `feme::OptimizerPipeline::run` <- `createStage`
+(`feme/lib/Target/CPU/CompiledStage.cpp`). This was an important early branch point: is this a genuine LLVM
+core bug (unlikely, given how battle-tested `SimplifyCFG`/`DeleteDeadBlocks` are), or is `feme`'s own CPU
+lowering pipeline handing that entirely-generic, entirely-correct LLVM pass a malformed module it never
+should have produced in the first place? Given this project's own repeated precedent (every prior "crash
+inside seemingly-unrelated code" investigation this session's history could recall turned out to be the
+*victim* of an earlier pass's own bug, not the actual culprit), I treated the LLVM-core-crash location as a
+symptom, not the disease, from the very start -- and went looking for what `feme`'s own lowering pipeline
+does immediately *before* handing off to that optimizer pipeline.
+
+## A faster repro loop, and a genuinely useful negative result
+
+Added the same established `getenv("FEME_DEBUG_DUMP_...")`-gated temporary IR dump this project's prior
+sessions (L45, L7o, L7r) have all relied on, placed right before `OptimizerPipeline().run(...)` in
+`createStage`. This captured the exact, final, pre-optimizer-pipeline module for the crashing case.
+
+Rather than immediately trying to manually eyeball a ~500-line dumped module for a subtle CFG bug, I tried
+feeding it directly to `opt -passes='default<O2>'` -- the same standard pipeline `OptimizerPipeline::run`
+itself builds -- to get a much faster, harness-independent repro loop (skipping the whole Vulkan/`deqp-vk`
+round-trip, which takes real wall-clock time per iteration). This paid off immediately and unexpectedly: `opt`
+didn't even get as far as running any passes -- it failed at *parse time*, with `error: use of undefined
+value '%._crit_edge'`. That's about as strong a signal as it gets: a genuinely dangling, illegal branch
+target already baked into the module *before* the optimizer pipeline ever touches it, meaning the bug is
+entirely upstream, in `feme`'s own lowering, exactly as suspected. I'm noting this technique explicitly
+because it's new this session and clearly valuable: whenever a crash happens deep inside
+`OptimizerPipeline::run`, dumping the pre-optimizer IR and feeding it straight to `opt` with the same pass
+pipeline (or even just `-passes=verify`, though that wouldn't have caught *this* particular bug, since it's a
+parse-time-detectable dangling reference rather than a verifier-only structural issue) is a much cheaper first
+move than re-running the full harness after every hypothesis.
+
+## Manual root-causing: naming conventions as a map
+
+With a concrete, isolated `.ll` file and a concrete parse error naming the exact dangling label, the next
+step was figuring out *which* pass produced this. The dumped module had two functions, `main.region0` and
+`main` -- and this project's own file-naming conventions (`.region<N>` suffix for all-but-last region,
+original name kept for the last) uniquely identify `feme::cpu::splitAtGroupSyncBarriers`
+(`EntryWrapper.cpp`) as the responsible pass, immediately ruling out the sibling loop-shape (`.body`/
+`.prefix`/`.suffix`) and branch-shape (`.true.body`/`.false.body`) splitting paths without needing to read
+either of those first. This is a small thing but worth calling out: this project's own splitting-pass output
+naming has become, almost incidentally, a genuinely useful debugging aid in its own right -- every time a
+region-split module shows up in a crash, the function names alone narrow which of the three splitting
+functions to go read first.
+
+Cross-referencing the two functions' actual instruction contents against the real CTS shader source (pulled
+straight from the qpa log's own `<ShaderSource>` element -- another repeatedly-useful technique, since the
+qpa log captures the *exact* GLSL glslang compiled, with no guessing needed about what the test actually
+does) confirmed the dangling label (`%10` in `main.region0`'s own `br label %10`) was the true-arm block of
+the shader's `if (subgroupElect()) { tempBuffer[id] = value; }` diamond -- and that block had, bafflingly,
+ended up defined inside `main` instead of `main.region0`.
+
+## The actual bug, and a wrong first fix
+
+Tracing `isLinearChain`'s own doc comment (which explicitly cites its own "roadmap L45" origin) explained
+*why* this diamond survives as a real `CondBr` at all rather than being flattened into masked form earlier:
+a uniform two-way branch whose arms are each barrier-free and reconverge at one merge block is accepted as a
+"safe" shape for region-splitting purposes, since (the doc's own reasoning goes) such a diamond can never
+itself need a region split -- it can only ever land entirely inside whichever single region contains it.
+
+That's true in spirit, but `splitAtGroupSyncBarriers`'s actual region-bucketing code didn't honor it
+correctly: it decided which blocks go into which region by walking `WaveBody`'s own raw, physical
+(ilist) block-list order directly, not the already-computed, logically-correct `Order` vector `isLinearChain`
+itself produces (and which the very same function already uses correctly, just a few lines earlier, to build
+the barrier-liveness index map). For an ordinary straight-line function this distinction is invisible, since
+physical layout and logical/execution order coincide. But once a real, unflattened diamond survives, nothing
+guarantees its blocks are laid out in the ilist in execution order -- and in this exact case, the true-arm
+block happened to sit physically *after* the barrier's own `SplitBlock`-created boundary block, so the naive
+per-ilist-position bucketing put it in the wrong region.
+
+My first attempt at a fix was simply "walk `Order` instead of the raw ilist" for the bucketing loop, plus
+switching the region-splitting `splice` calls from an assumed-contiguous-range form to a per-block loop (since
+an `Order`-derived bucket isn't guaranteed to be ilist-contiguous either). This built cleanly and even passed
+a real `deqp-vk` re-run of the crashing case and a broader `dEQP-VK.subgroups.basic.compute.*` sweep (8/12
+passed, no crash) -- which, in retrospect, was a near-miss: I was about to declare victory on shallow evidence
+alone. Running the *existing* `EntryWrapperTest` unit test suite before committing anything caught the real
+problem immediately: 4 pre-existing tests started failing, including the very test
+(`SplitsAroundSafeDiamondAfterBarrier`) that specifically exercises the multi-region-split path this fix was
+supposed to preserve. On inspection, the bug in my own fix was structural: `Order` is computed *before* any
+`SplitBlock` calls run, so every barrier's own original parent block keeps its pre-split identity (and so
+still appears in `Order`), while `BoundaryBlocks` (the set the bucketing loop checks membership against)
+holds only the *new* "after" blocks `SplitBlock` just created -- which, by construction, can never appear in
+`Order` at all. Walking `Order` and checking `BoundaryBlocks` membership against its elements can therefore
+never trigger a new bucket, silently degenerating into "one giant region," which happened to still produce a
+valid module for the specific cases I'd re-run (apparently because no barrier's own synchronization semantics
+were being exercised strongly enough by that particular sweep to visibly break), but is obviously wrong.
+
+This is worth recording plainly: **the existing unit test suite caught a real regression my own "fix" would
+have shipped**, one that a `deqp-vk` sweep alone did not surface (at least not on the specific cases I'd
+picked to re-run). Running the project's own targeted unit tests before declaring a fix complete -- not just
+after, as a final checkbox -- would have caught this much earlier and cheaper. I'm noting this as a concrete
+process lesson for future sessions in this project: real-world CTS re-runs are the ultimate arbiter, but they
+are neither fast nor exhaustive, and existing unit tests covering the exact code path being touched are a much
+cheaper, much faster signal that should be consulted *during* fix iteration, not only at the end.
+
+## The actual, correct fix
+
+Once the real reason my first attempt failed was clear (`Order` and `BoundaryBlocks` structurally can never
+intersect), the fix became obvious by analogy: `splitAtGroupSyncBarriers`'s two sibling functions,
+`splitLoopBodyAtBarriers` and `splitArmAtBarriers`, already solve exactly this same "the order I need may
+have changed after `SplitBlock` ran" problem, by re-walking the CFG via successor edges *after* all the
+splitting is done, rather than trying to reuse or patch a pre-split order. `splitAtGroupSyncBarriers` can do
+the same thing even more directly: since `isLinearChain` is a pure, self-contained CFG-shape walk with no
+dependency on whether barriers are present (it just happens to reject blocks containing one, as part of its
+"barrier-free arm" check), and every barrier has already been erased by the time bucketing runs, simply
+calling `isLinearChain(*WaveBody, PostSplitOrder)` a second time, post-split, produces exactly the
+logically-correct order needed -- and this time, since it's walking the *current*, fully-split CFG, the
+"after" boundary blocks genuinely do appear in it, so `BoundaryBlocks` membership checks against it work
+correctly.
+
+Applied the identical hardening to `outlineChain` (the small helper both `splitLoopBodyAtBarriers` and
+`splitArmAtBarriers` call to actually carve out each chunk into its own function): its own `splice` call
+assumed the chunk's blocks formed a contiguous ilist range, sharing the exact same latent assumption class as
+the original bug, even though I have no concrete failing case for it today (both of its callers' own
+order-derivation techniques already re-walk via successor edges post-split, so their own chunks likely *are*
+ilist-contiguous in every case reachable today) -- fixing it preemptively felt right given it's a small,
+low-risk change to a shared helper, and per the standing instruction to fix bugs "directly caused by or
+tightly coupled to the code you're changing" when discovered along the way.
+
+Rebuilt and reran the full `EntryWrapperTest` suite: all 14 pre-existing tests passed. Added a new regression
+test, `SplitsSafeDiamondWithOutOfOrderTrueArmBeforeBarrier`, deliberately constructing the exact shape at the
+IR level (a safe diamond immediately before a single barrier, with the true-arm block placed textually --
+and so physically, in the parsed function's own ilist -- after both the merge block and the
+barrier-containing block). To make sure this test actually exercises the bug rather than just looking
+plausible, I did a real revert-and-rerun: `git stash push` on just the source file (keeping the new test),
+rebuild, rerun that one test in isolation -- it hung/crashed against the pre-fix code, then restored the fix
+and confirmed it passes cleanly. This is the same "prove the test would have caught the bug" discipline
+worth calling out explicitly, since it's easy to write a regression test that merely restates the fix's own
+logic without ever having genuinely exercised the failure it claims to guard against.
+
+## Verification
+
+`ninja check-feme`: 2885 discovered (+1 for the new test), 2826 Passed (+1), 59 Unsupported (pre-existing,
+unchanged), 0 Failed -- no regressions anywhere in the existing suite.
+
+Real `deqp-vk` re-run: `subgroupbarrier`/`_requiredsubgroupsize` no longer crash and now Pass outright. A
+`dEQP-VK.subgroups.basic.compute.*` sweep (12 cases) went from 8/12 to 10/12 Passed; the remaining 2
+(`subgroupelect`/`_requiredsubgroupsize`) fail identically before and after with the same "0 / 7 values
+passed" mismatch already tracked separately at roadmap L7s -- confirmed unrelated to this fix's own scope by
+reproducing the identical failure on `subgroupelect` in complete isolation (that shader has no barrier call
+at all, so it can't possibly be exercising anything this fix touches). A broader
+`dEQP-VK.subgroups.basic.*` sweep across all shader stages (70 cases) showed 10 Passed / 2 Failed (the same 2
+L7s cases) / 58 NotSupported (pre-existing, unrelated per-stage subgroup-support gaps), confirming zero
+regressions beyond the targeted group.
+
+## Closing thoughts
+
+This session's own arc is a good illustration of why this project's "reduce first, fix once root-caused"
+discipline matters: the crash's own surface location (deep inside genuinely-unrelated, extremely
+well-tested LLVM core code) would have been a very unproductive place to start debugging directly, and the
+`gdb` backtrace by itself only pointed at the *victim*, not the *culprit*. The faster `opt`-based repro loop
+discovered this session (dump pre-optimizer IR, feed it straight to `opt` with the same pipeline) is a
+genuinely reusable technique for any future crash reached via `OptimizerPipeline::run` specifically, and I'd
+recommend reaching for it early rather than only as an afterthought. Separately, this session is also a
+concrete reminder that "the fix builds and a couple of real CTS cases pass" is not sufficient evidence of
+correctness on its own -- the project's own existing, targeted unit test suite for the exact code path being
+changed is a cheap, fast, and in this case *decisive* signal that should be consulted during iteration, not
+just as a final gate.
+
+No further roadmap rows were split out this session (unlike several recent L7-series sessions): L7m's own
+scope closes cleanly on this one fix, with no new, previously-unseen gap uncovered along the way. L7f/L7g/
+L7h/L7i/L7s remain the only open rows under the L7 umbrella.
