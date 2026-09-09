@@ -121,3 +121,39 @@ The aggregate targets were rerun after configuring with
 `cmake -C /opt/llvm-tooling/Config.cmake`. They retained the unrelated
 filesystem-sensitive and floating-point failures listed above; no failure
 exercises switch lowering or SPIR-V CFG structurization.
+
+## Switches Nested in Loops
+
+Source-level coverage now exercises switches nested in both `for` and `while`
+loops. Each switch mixes fallthrough cases with `break` statements so the test
+checks both edge types while the enclosing loop continues. The Clang regression
+checks branch-based LLVM IR, verifies that final SPIR-V contains loop and
+selection merges without `OpSwitch`, and validates the binary with `spirv-val`.
+
+The configured offload test suite has a matching runtime regression. It executes
+the shader with both external DXC and the current Clang SPIR-V compiler and
+checks the exact result, `4242`. This confirms that fallthrough reaches the next
+case, `break` exits only the switch, and both enclosing loops execute all four
+iterations.
+
+The build was refreshed with:
+
+```text
+cmake -S llvm -B build-agent -G Ninja -C /opt/llvm-tooling/Config.cmake
+```
+
+The focused Clang regression and both runtime variants pass. The four requested
+aggregate targets were also run:
+
+- `check-llvm`: 2 unrelated filesystem-sensitive failures
+  (`ThinLTO/X86/cache.ll` and `strip-preserve-atime.test`).
+- `check-clang`: 4 unrelated module-cache pruning failures
+  (`ClangScanDeps/prune-scanning-modules.m`, `Modules/prune.m`, and two
+  `ModuleCachePruneTest` unit tests).
+- `check-hlsl-vk`: 8 unrelated HLSL library floating-point failures.
+- `check-hlsl-clang-vk`: the same 8 floating-point failures,
+  `mad.32.test`, and one unrelated unexpected pass in
+  `StructuredBuffer/inc_counter_array.test`.
+
+Neither the focused tests nor any aggregate failure indicate a problem with
+switches nested in loops.
