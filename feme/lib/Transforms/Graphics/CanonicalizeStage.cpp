@@ -1050,17 +1050,37 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// GLSL/SPIR-V always arrays *every* input of a geometry entry point at
 /// `VerticesPerPrimitive`-many elements for that stage): a stage-IO
 /// `Input`-storage-class (address space 7) global whose own declared type
-/// is directly an `ArrayType`. This is a purely structural check -- it
-/// cannot (and, matching `getDynamicVertexIndexedAccess`'s own precedent,
-/// does not try to) tell this shape apart from a real per-vertex matrix
-/// attribute of some other stage, which takes the exact same IR shape;
-/// `feme::graphics::ValidateStagePass`'s `validateVertex` is what actually
-/// diagnoses a non-Geometry stage's use of the resulting non-constant
-/// `Vertex` operand. Shared between `getDynamicVertexIndexedAccess`'s own
-/// non-constant-index recognition and `resolveStageIOAccess`'s ordinary
+/// is directly an `ArrayType`. Shared between `getDynamicVertexIndexedAccess`'s
+/// own non-constant-index recognition and `resolveStageIOAccess`'s ordinary
 /// constant-offset path, so a *constant* `gl_in[k]` index is folded into
 /// the same `Vertex` operand a non-constant one is (roadmap H5f), not
 /// into `Row`. Sets \p AddrSpace to \p GV's address space when true.
+///
+/// (Roadmap L24(a)) Restricted to \p Stage `== Hull || Domain ||
+/// Geometry`: a hull entry's own `InputPatch<T, N>` (each invocation
+/// legitimately reads any control point's own attribute -- see
+/// `HullWrapper.cpp`'s `lowerHullInputLoad`) and a domain entry's own
+/// `OutputPatch<T, N>` (`DomainWrapper.cpp`'s `lowerDomainControlPointLoad`)
+/// are addressed through this exact same shape, one array dimension
+/// wrapping the control-point count instead of geometry's own
+/// `VerticesPerPrimitive`, so both need the identical fold. But *every*
+/// other stage's own `Input`-storage array-typed global is a plain,
+/// ordinary multi-element varying with no such per-invocation-selectable
+/// vertex/control-point dimension at all (e.g. a fragment or vertex
+/// entry's own `float arr[4] : MY_ARRAY`) -- an earlier, unrestricted
+/// version of this check misrouted exactly that shape's own *constant*
+/// array index (e.g. `arr[1]`) into the `Vertex` operand instead of `Row`,
+/// which happened to still produce a constant value, so
+/// `feme::graphics::ValidateStagePass`'s `validateVertex` (whose own
+/// non-Geometry/Mesh restriction only fires for a *non*-constant vertex
+/// operand) never caught it -- it surfaced only much later, and
+/// confusingly, as `feme-cpu-wrap-fragment`'s own generic "synthetic
+/// fragment layouts only support vertex operand 0" diagnostic, for
+/// whichever array element's misfolded index happened to be nonzero
+/// (`ArraySemantics.test`'s own `arr[1]`/`arr[2]`/`arr[3]` reads). Fixing
+/// this check itself, rather than teaching `validateVertex` to also flag a
+/// wrong-but-constant operand, keeps the fold from happening at all for
+/// the stages that never legitimately need it.
 ///
 /// (Roadmap H6b) Deliberately kept `Input`-only (unlike
 /// `isDynamicIndexedArrayGlobal` below, which also accepts `Output`):
@@ -1082,7 +1102,10 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// `isPerVertexArrayMeshOutputGlobal` below for the narrower, `Mesh`-only
 /// exception this row adds instead of loosening this check itself.
 bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
-                                 unsigned &AddrSpace) {
+                                 unsigned &AddrSpace, ShaderStage Stage) {
+  if (Stage != ShaderStage::Hull && Stage != ShaderStage::Domain &&
+      Stage != ShaderStage::Geometry)
+    return false;
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
     return false;
   return isa<ArrayType>(GV->getValueType());
@@ -2223,7 +2246,7 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   // (\p ValueTy names the entire array, e.g. copying every vertex's value
   // at once), which has no single vertex to peel out.
   unsigned AddrSpace = 0;
-  if ((isPerVertexArrayInputGlobal(GV, AddrSpace) ||
+  if ((isPerVertexArrayInputGlobal(GV, AddrSpace, Stage) ||
        isPerVertexArrayMeshOutputGlobal(GV, AddrSpace, Stage)) &&
       ValueTy != GV->getValueType()) {
     auto *ArrTy = cast<ArrayType>(GV->getValueType());
@@ -2424,7 +2447,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
         Type *ValueTy = GV->getValueType();
         bool RowCountIsVertexArray =
-            isPerVertexArrayInputGlobal(GV, UnusedAddrSpace);
+            isPerVertexArrayInputGlobal(GV, UnusedAddrSpace, Stage);
         //
         // (Roadmap H29g) A hull entry's own plain per-control-point
         // `Output` global (e.g. `layout(location=0) out vec4 vtxColor[];`
