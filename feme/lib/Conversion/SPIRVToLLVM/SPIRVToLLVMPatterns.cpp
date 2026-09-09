@@ -4588,6 +4588,92 @@ public:
   }
 };
 
+/// Converts a `spirv.ImageDrefGather` with `None` or `ConstOffset` image
+/// operands into an `llvm.spv.resource.gather.cmp` intrinsic call (roadmap
+/// L7d, split out of L7's original filing text; confirmed via a real
+/// `vk::SampledTexture2D`+`GatherCmp` repro compiled with `dxc
+/// -fspv-target-env=vulkan1.3` -- `offload-test-suite`'s own
+/// `Vk.SampledTexture2D.GatherCmp.test.yaml`). Note
+/// `int_spv_resource_gather_cmp` is *not* a new intrinsic this row adds --
+/// it already exists upstream in `IntrinsicsSPIRV.td`, already fully wired
+/// up in `SPIRVInstructionSelector.cpp`'s own `selectGatherIntrinsic`
+/// (matching the exact `(image, sampler, coordinate, dref, offset)`
+/// operand shape this pattern emits below, `OffsetReg` always required,
+/// even when zero -- `selectGatherIntrinsic` has no "offset operand
+/// omitted" case the way some other selectors do, hence this pattern
+/// always synthesizes a zero offset itself rather than omitting it),
+/// simply never reached from MLIR's own SPIR-V dialect before this row
+/// added the one MLIR-side conversion pattern needed to reach it. Unlike
+/// `ImageSampleDrefImplicitLodPattern`'s own family, `spirv.ImageDrefGather`
+/// has no `Bias`/`Lod`/`Grad`/`MinLod` image operand of its own at all --
+/// per the SPIR-V spec, a gather instruction (`OpImage{,Dref}Gather`)
+/// always operates at mip level 0, with no way to request otherwise -- so
+/// `ConstOffset` is the only image operand this pattern needs to
+/// recognize. Also unlike `ImageSampleDrefImplicitLodPattern`'s own
+/// `Coordinate`, `spirv.ImageDrefGather`'s own `Coordinate` is never
+/// padded with a redundant extra component the way a depth-comparison
+/// *sample*'s is (confirmed via a real SPIR-V capture of the repro above:
+/// `dxc` emits a plain, unpadded 2-wide `vector<2xf32>` `Coordinate` for a
+/// `Plain2D` `GatherCmp`, identical to an ordinary sample's own
+/// `Coordinate` width) -- matching the SPIR-V spec's own description of
+/// this op's `Coordinate` ("contains (u[, v] ... [, array layer]) as
+/// needed", the same wording `spirv.ImageSampleImplicitLod`'s own
+/// ordinary, non-dref `Coordinate` uses, not `ImageSampleDrefImplicitLod`'s
+/// own "may be a vector larger than needed" caveat), so no
+/// `DrefCoordWidth`-style padding logic is needed here at all.
+class ImageDrefGatherPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageDrefGatherOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageDrefGatherOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageDrefGatherOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    std::optional<mlir::spirv::ImageOperands> ImageOperandsAttr =
+        Op.getImageOperands();
+    mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
+    if (ImageOperandsAttr)
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::ConstOffset;
+    if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+    mlir::Value Dref = Adaptor.getDref();
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+
+    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
+    mlir::Value Offset =
+        HasConstOffset ? Adaptor.getOperandArguments()[0] : mlir::Value();
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.gather.cmp",
+                                ResultType, {Image, Sampler, Coordinate, Dref,
+                                             Offset}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.ImageQueryLod` into two `llvm.spv.resource.calculate.
 /// lod`/`.calculate.lod.unclamped` intrinsic calls (LLVM's SPIRV backend's
 /// own `OpImageQueryLod` selection runs the reverse direction, building one
@@ -6788,8 +6874,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       DemoteToHelperInvocationConversionPattern, DotConversionPattern,
       EmitVertexConversionPattern, EndPrimitiveConversionPattern,
       ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
-      ImageFetchPattern, ImageFetchLodPattern, ImagePattern,
-      ImageQueryLodPattern, ImageSampleDrefExplicitLodPattern,
+      ImageDrefGatherPattern, ImageFetchPattern, ImageFetchLodPattern,
+      ImagePattern, ImageQueryLodPattern, ImageSampleDrefExplicitLodPattern,
       ImageSampleDrefGradPattern, ImageSampleDrefImplicitLodPattern,
       ImageSampleExplicitLodPattern, ImageSampleGradPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
