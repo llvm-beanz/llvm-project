@@ -42,28 +42,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7q from the roadmap or other prerequisites blocking the
+Can you work on L7r from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`_requiredsubgroupsize` compute pipeline creation newly fails "resolved
-> group size exceeds maxComputeWorkGroupSize/Invocations" for every
-> `dEQP-VK.subgroups.basic.compute.*_requiredsubgroupsize` case in the
-> `subgroupmemorybarrier*` family**, split out of L7p's own closing session: now
-> that L7p's own specialization-constant patch resolves each case's real,
-> pipeline-specialized group size correctly for the first time (rather than
-> silently under-allocating), `compileComputePipeline`'s existing
-> `maxComputeWorkGroupSize`/`Invocations` validation (`Pipeline.cpp`) rejects
-> the resolved value outright for the `_requiredsubgroupsize` variant
-> specifically (its non-`_requiredsubgroupsize` twin passes cleanly with the
-> same shader source, differing only in the chained
-> `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`). Needs its own real
-> re-run with `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a dump of the actual
-> resolved group size and this device's own
-> `maxComputeWorkGroupSize`/`maxComputeWorkGroupInvocations` limits to determine
-> whether the real bug is in group-size resolution itself (e.g.
-> `resolveComputeGroupSize` picking up an override meant for a different
-> specialization constant once L7p's patch is applied), in
-> `PhysicalDeviceInfo.cpp`'s own advertised limits being too conservative for
-> what this device's CPU runtime can genuinely support, or a genuine CTS-side
-> requirement this ICD cannot meet at all for a required-subgroup-size compute
-> dispatch of this size
+> **`dEQP-VK.subgroups.basic.compute.subgroupmemorybarrierimage` reaches real
+> pipeline creation and execution but fails runtime output verification
+> ("Failed!")**, split out of L7p's own closing session: now that L7p's own
+> specialization-constant patch fixes the `SIGBUS` every case in the
+> `subgroupmemorybarrier*` family used to hit, this is the one case in the
+> family that still does not pass -- distinct from L7n's own tracked
+> `builtin_var` runtime-value gap
+> (`gl_SubgroupSize`/`gl_NumSubgroups`/`gl_SubgroupID`), since this shader
+> neither declares nor reads any of those builtins; its own distinguishing
+> feature within the family is the `r32ui` image (`tempImage`) it actually
+> reads/writes (unlike its siblings, which all declare the same binding but only
+> `subgroupmemorybarriershared` was previously confirmed to touch its own
+> groupshared array instead). Needs its own real output-value reduction (dumping
+> the actual image contents this ICD's CPU runtime produces versus what the CTS
+> verifier expects) to isolate whether the gap is in this project's own
+> image-atomic/coherent-image-access lowering, its
+> `spirv.MemoryBarrier`-to-CPU-runtime-barrier mapping's interaction with image
+> memory specifically (as opposed to buffer/shared memory, both already
+> confirmed working by this same family's other passing cases), or something
+> else entirely
