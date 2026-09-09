@@ -42,25 +42,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7m from the roadmap or other prerequisites blocking the
+Can you work on L7s from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A real, pre-existing `llvm::DeleteDeadBlocks` assertion crash**
-> (`llvm/lib/Transforms/Utils/BasicBlockUtils.cpp:159`: `Assertion
-> `Dead.count(Pred) && "All predecessors must be dead!"' failed`), split out of
-> L7k's own closing session: newly reached during
-> `dEQP-VK.subgroups.basic.compute.subgroupbarrier` (and its
-> `_requiredsubgroupsize` twin) now that L7k's own array-deserialization fix
-> lets that shader's module past deserialization for the first time -- a crash
-> in LLVM core code, not SPIR-V/`feme`-specific code, that aborts the entire
-> `deqp-vk` process outright (losing all subsequent test results in that
-> invocation unless the sweep is chunked per subgroup-category group to route
-> around it, as this session's own re-verification had to do), consistent with
-> this project's own documented precedent for this failure class (roadmap
-> C2/H19p: "a crash silently truncates or corrupts a suite run"). Needs its own
-> real IR reduction of the `subgroupbarrier` shader's own lowered LLVM IR
-> (likely surfaced by whatever CFG-simplification pass this ICD's own lowering
-> pipeline runs over a control-barrier-containing compute shader with
-> divergent-looking control flow) to isolate the actual
-> dead-block/predecessor-tracking bug, entirely independent of L7k's own
-> array-deserialization scope
+> **`dEQP-VK.subgroups.basic.compute.subgroupelect` fails runtime output
+> verification ("0 / 7 values passed")**, split out of L7r's own closing
+> session: L7r's own before/after regression check (comparing
+> `subgroupelect`/`subgroupbarrier` with and without L7r's own `applyStageMasks`
+> image-mask fix) confirmed this failure is pre-existing and entirely unaffected
+> by that fix either way, but it is otherwise untracked anywhere in this
+> document -- distinct from L7m's own tracked `subgroupbarrier`
+> `DeleteDeadBlocks` assertion crash (a hard abort, not a runtime-value
+> mismatch) despite both sharing the same `dEQP-VK.subgroups.basic.compute.*`
+> group and both being newly reachable only once L7k's own array-deserialization
+> fix let their shaders past deserialization for the first time. Needs its own
+> real IR/output reduction (dumping the actual `tempResult`/`result[]` values
+> this ICD's CPU runtime produces for `subgroupElect()`'s own masked-store path
+> versus what the CTS verifier expects, mirroring the technique L7r's own
+> session just used for the sibling `subgroupmemorybarrierimage` case) to
+> isolate whether this is the same divergent-masking family of gap or something
+> new
