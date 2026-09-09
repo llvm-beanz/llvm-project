@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/Linearize.h"
 
+#include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "llvm/AsmParser/Parser.h"
@@ -147,6 +148,59 @@ TEST(LinearizeTest, MasksResourceCallUnderDivergentBranch) {
     EXPECT_FALSE(isa<Constant>(Matched->Mask))
         << "mask should have been rewritten away from the constant `true` "
            "feme::cpu::ResourceLoweringPass left it as";
+  }
+  EXPECT_TRUE(FoundMaskedCall);
+}
+
+TEST(LinearizeTest, MasksImageStoreCallUnderDivergentBranch) {
+  // L7r: `feme.cpu.image.*` calls need the exact same divergent-region mask
+  // threading `MasksResourceCallUnderDivergentBranch` above already
+  // confirms for `feme.cpu.resource.*` calls, but `applyStageMasks` only
+  // ever recognized the resource-call shape -- an image store or atomic
+  // left inside a divergent diamond's "true" arm kept the constant `true`
+  // mask `feme::cpu::SPIRVResourceLoweringPass` gives every such call,
+  // running unconditionally for the whole wave rather than just the lanes
+  // that actually reach that arm (confirmed by reducing a real failing
+  // `dEQP-VK.subgroups.basic.compute.subgroupmemorybarrierimage` case down
+  // to this exact shape: a `subgroupElect()`-gated `imageStore`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %image_heap, i32 %image_heap_count) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t, label %f
+    t:
+      call void @feme.cpu.image.store.2d.v4i32(
+          ptr %image_heap, i32 %image_heap_count, i32 0, i32 %tid, i32 %tid,
+          <4 x i32> zeroinitializer, i1 true)
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.image.store.2d.v4i32(ptr, i32, i32, i32, i32, <4 x i32>, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundMaskedCall = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+    if (!Matched)
+      continue;
+    FoundMaskedCall = true;
+    EXPECT_FALSE(isa<Constant>(Matched->Mask))
+        << "mask should have been rewritten away from the constant `true` "
+           "feme::cpu::SPIRVResourceLoweringPass left it as";
   }
   EXPECT_TRUE(FoundMaskedCall);
 }

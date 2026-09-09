@@ -49,6 +49,7 @@
 #include "feme/Analysis/CPU/WaveUniformity.h"
 #include "feme/Core/ShaderStage.h"
 #include "feme/Core/StageOps.h"
+#include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 
@@ -238,6 +239,25 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       if (std::optional<MatchedResourceCall> Matched =
               matchResourceCall(*Call)) {
         Value *Mask = isLoad(Matched->Kind) ? Masks.Live : Masks.SideEffect;
+        if (!isa<Constant>(Mask))
+          Call->setArgOperand(Call->arg_size() - 1, Mask);
+      }
+      // A `feme.cpu.image.*` call's own trailing mask operand needs the
+      // exact same divergent-region threading a `feme.cpu.resource.*`
+      // call's already gets immediately above -- both start out as the
+      // compile-time constant `true` `SPIRVResourceLoweringPass` gives
+      // every such call (see `lowerImageAccesses`), relying entirely on
+      // this pass to narrow it to the real per-branch/per-iteration
+      // predicate. Missing this case left an image store/atomic inside a
+      // divergent diamond's "true" arm running unconditionally for the
+      // whole wave -- not just the lanes that actually reach that arm --
+      // matching `FunctionWidener::widenImageCall`'s own `LaneMaskBase`
+      // choice (a store or atomic's real side effect needs
+      // `Masks.SideEffect`; a plain load only needs `Masks.Live`).
+      if (std::optional<MatchedImageCall> Matched = matchImageCall(*Call)) {
+        Value *Mask = (Matched->Texel || Matched->AtomicValue)
+                          ? Masks.SideEffect
+                          : Masks.Live;
         if (!isa<Constant>(Mask))
           Call->setArgOperand(Call->arg_size() - 1, Mask);
       }
