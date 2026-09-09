@@ -124,7 +124,22 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   }
 
   Info.SubgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
-  Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+  // (roadmap L7t) `VOTE_BIT` is safe to advertise: a full real
+  // `dEQP-VK.subgroups.vote.*` CTS re-run (805 cases) now shows 36 passing,
+  // 0 failing, 769 correctly `NotSupported` for other reasons (ray
+  // tracing/mesh shading/long-vector formats unrelated to this bit), once
+  // the `subgroupAllEqual`-over-a-divergent-vector-operand gap in
+  // `feme::cpu::SIMDizePass` (`SIMDize.cpp`'s `widenWaveCall`/
+  // `widenVectorReduce`) was fixed. `SHUFFLE_BIT` stays un-advertised: the
+  // real `dEQP-VK.subgroups.shuffle.*` CTS group's own verification
+  // harness (every non-rotate case) depends on `subgroupBallot()`/
+  // `subgroupBallotBitExtract()` (`OpGroupNonUniformBallotBitExtract`),
+  // which is entirely unimplemented here -- confirmed via a real flag-flip
+  // re-run showing 256/9562 failures, all `error: unhandled opcode 341`
+  // (`GroupNonUniformBallot`), a distinct, larger prerequisite tracked
+  // separately (see `Roadmap.md`'s new L-series row).
+  Info.SubgroupSupportedOperations =
+      VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT;
 
   // (roadmap E7) `subgroupSizeControl`'s own range: every power-of-two wave
   // size `feme::cpu::resolveWaveSize` itself accepts, reused rather than
