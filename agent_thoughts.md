@@ -74310,3 +74310,112 @@ own `Rotate` closure set the precedent of not needing a `Design.md` touch either
 Commits, in order: (1) the three new MLIR conversion patterns plus their two lit test files, (2)
 `Roadmap.md`/`Vulkan14FeatureInventory.md`/`VulkanCTSReport.md` together, (3) this
 `agent_thoughts.md` entry, on its own, last.
+
+# Session: L7i -- advertise VK_SUBGROUP_FEATURE_VOTE_BIT/SHUFFLE_BIT
+
+Picked up L7i from the roadmap: L7e's own closing session had already landed
+`ElectConversionPattern`/`AllEqualConversionPattern`/`ShuffleConversionPattern`, and split out the
+follow-on question of whether the `GroupNonUniformVote`/`GroupNonUniformShuffle` *capability bits*
+themselves could now be honestly advertised in `PhysicalDeviceInfo.cpp`.
+
+## Scoping the real remaining op-family gap
+
+Before touching `PhysicalDeviceInfo.cpp` at all, I first worked out exactly which SPIR-V ops each
+capability actually requires, since L7e only landed one op per capability:
+
+- `GroupNonUniformVote` needs `OpGroupNonUniformAll`/`Any`/`AllEqual` -- L7e only did `AllEqual`. Read
+  `SPIRVNonUniformOps.td` to confirm `All`/`Any` are always scalar-`i1`-only (no vector shape to worry
+  about, unlike `AllEqual`), and read the real CTS source (`vktSubgroupsVoteTests.cpp`) to confirm
+  `subgroupAll`/`subgroupAny` are *always* tested as scalar bools too -- meaning a scalar-only pattern for
+  these two is already full CTS-scope coverage, not a partial closure the way `AllEqual`'s own scalar-only
+  pattern was.
+- `AllEqualConversionPattern` itself still declined a vector operand (from L7e). Re-reading
+  `GroupNonUniformAllEqualOp`'s own definition confirmed its `Result` is *always* scalar even when `Value`
+  is a vector -- a whole-vector-equality collapse, not per-component -- which differs from
+  `llvm.spv.wave.all_equal`'s own per-component vector-of-`i1` result shape. The correct fix: call the
+  intrinsic with the vector operand as-is, then AND-reduce the per-component result down to the scalar
+  SPIR-V needs. Found `mlir::LLVM::vector_reduce_and` already exists and is already used for exactly this
+  shape by upstream's own (unrelated) `spirv::AllOp` conversion pattern, confirming both the API and the
+  approach.
+- `GroupNonUniformShuffle` (the capability, confusingly reused by `ShuffleXor` too, not just plain
+  `Shuffle`) needed a `ShuffleXorConversionPattern` -- `ShuffleUp`/`Down` need the separate
+  `GroupNonUniformShuffleRelative` capability and correctly stay out of scope per L7i's own filing text.
+
+## Implementing and testing
+
+Added `VoteConversionPattern<GroupNonUniformAllOp/AnyOp>` (a small template parameterized on which
+intrinsic name to call), extended `AllEqualConversionPattern` with the vector-operand AND-reduce path, and
+added `ShuffleXorConversionPattern` (computing `SubgroupInvocationID XOR Mask` the same way
+`RotateConversionPattern` already builds its own derived id). Wrote/extended MLIR conversion lit tests for
+all of it (including removing the now-stale "declined vector operand" negative test for `AllEqual`, since
+it's accepted now, and adding a `Workgroup`-scope decline test for `ShuffleXor`). `check-feme` (2,814
+tests) passed clean.
+
+## The intrinsic-name bug this session's own real verification uncovered
+
+Rather than stopping at "the MLIR lit tests pass," I ran a real end-to-end `check-hlsl-vk-feature-waveops`
+sweep against the actual feme ICD (`offloader` + `VK_ICD_FILENAMES` pointed at the built `feme_icd.json`)
+to verify the new patterns for real. This immediately surfaced a bug in the *existing*, previously-landed
+`ElectConversionPattern` (from L7e, untouched by this session's own diff): it was building the intrinsic
+call with the string `"llvm.spv.wave.is_first_lane"` (underscores), but the real LLVM intrinsic name
+TableGen actually generates is `"llvm.spv.wave.is.first.lane"` (dots) -- confirmed directly against
+`IntrinsicImpl.inc`'s own generated name table. `AllEqualConversionPattern` had the identical bug
+(`all_equal` vs. the real `all.equal`). Because L7e's own tests only ever checked the textual MLIR IR a
+pattern emits (never resolving that string against a real intrinsic table), this had shipped completely
+unnoticed -- and would have made `Elect`/`AllEqual` fail at real pipeline-creation time for every
+glslang/SPIR-V-origin shader, ever since L7e landed. (The DXIL-origin path for the same ops was unaffected,
+since it reaches the intrinsic via a real C++ `Intrinsic::spv_wave_*` enum ID, not a hand-written string.)
+Fixed both call sites (and the doc comments/lit test `CHECK` strings referencing the old names) in their
+own separate commit, since this is a real, independently-notable bug fix distinct from this session's own
+new-pattern work. Re-ran `check-feme` and the real `offloader` sweep again afterward: `WaveActiveAllTrue`/
+`AnyTrue`/`WaveActiveAllEqual.32` now produce byte-exact matches for real.
+
+This is a good reminder that "the MLIR-level lit test passes" is a necessary but not sufficient bar for a
+pattern that emits a `llvm.call_intrinsic` by hand-written string -- a real translation/execution pass is
+the only thing that actually validates the string resolves to something real, and I should keep doing this
+verification step even when a pattern *looks* obviously correct at the MLIR-dialect level.
+
+## The real `deqp-vk` bit-flip attempt and its honest negative result
+
+With the op-family legalization now (believed) complete for `Vote`/`Shuffle`, the actual question this row
+exists to answer is whether flipping `Info.SubgroupSupportedOperations` is honestly justified. I
+temporarily patched in `VK_SUBGROUP_FEATURE_VOTE_BIT`/`SHUFFLE_BIT`, rebuilt, and ran a real
+`dEQP-VK.subgroups.vote.*` sweep against the real feme ICD.
+
+Result: 0 pass, 36 fail, 769 not-supported (out of 805). Every one of the 36 failures -- all in the
+`compute`/`compute...requiredsubgroupsize` sub-groups, the only stage this ICD claims subgroup support for
+at all -- failed with `failed to legalize operation 'spirv.SpecConstantComposite'`, *before* even reaching
+any of this row's own new op patterns. This is a real, previously-undiscovered, and much more fundamental
+gap: every `dEQP-VK.subgroups.*` compute-stage shader spells its own `gl_WorkGroupSize` via a
+specialization-constant composite (three scalar `spirv.SpecConstant`s combined into a `vector<3xi32>`)
+that the shader body itself reads back via `spirv.mlir.referenceof` -- and neither op has a legalization
+pattern anywhere in this project or upstream MLIR. `SpecConstantErasurePattern` (roadmap E4) only handles
+the narrower case of a scalar spec constant referenced *solely* by an execution mode's own operands (which
+gets erased outright since nothing in the shader body ever reads it) -- its own doc comment already flags
+this composite-plus-real-read-reference case as a distinct, still-unimplemented feature, and this session's
+real CTS run is what actually surfaced a concrete case of it.
+
+Given this, I did **not** flip the capability bit: 0/805 confirmed passing is not an honest basis for
+advertising `VK_SUBGROUP_FEATURE_VOTE_BIT`/`SHUFFLE_BIT`, even though the actual op-family coverage this
+row exists to close is now real and separately verified via the `offload-test-suite`/`offloader` path
+above. I reverted the temporary capability-bit patch, confirmed `git status`/`git diff` show zero residual
+change to `PhysicalDeviceInfo.cpp`, and filed the `spirv.SpecConstantComposite`/`spirv.mlir.referenceof`
+gap as new roadmap row **L7j** -- the real, concrete next blocker not just for this row's own bit-flip
+decision, but for effectively all of `dEQP-VK.subgroups.*`'s compute-stage coverage against this ICD,
+regardless of which specific op family a given test happens to exercise.
+
+## Documentation and commits
+
+Updated `Roadmap.md` (L7i's own row rewritten to record what's actually done vs. still blocked, plus the
+new L7j row), `Vulkan14FeatureInventory.md`'s F2 audit note, and appended a new `VulkanCTSReport.md`
+section covering the fix, the new tests, the real `offload-test-suite` verification, and the real (then
+reverted) `deqp-vk` bit-flip attempt with its honest negative result. `VulkanExtensionInventory.md`: no
+changes needed (no extension bit is involved in any of this). `Design.md`/`FeMeCPUDesign.md`/
+`FeMeVulkanDesign.md`: reviewed, no changes needed (no new design decision beyond precedent already
+covered by the existing wave-op sections).
+
+Commits, in order: (1) the four new/changed `SPIRVToLLVMPatterns.cpp` conversion patterns plus their lit
+tests, (2) the standalone `llvm.spv.wave.is_first_lane`/`all_equal` intrinsic-name bug fix (a real,
+independently-notable fix distinct from this session's own new-pattern work), (3)
+`Roadmap.md`/`Vulkan14FeatureInventory.md`/`VulkanCTSReport.md` together, (4) this `agent_thoughts.md`
+entry, on its own, last.
