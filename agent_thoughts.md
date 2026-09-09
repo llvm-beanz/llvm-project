@@ -72828,3 +72828,91 @@ golden-image infrastructure.
 Three separate commits: (1) the `.instructions.md` documentation fix (no
 feme source changed), (2) the `Roadmap.md`/`VulkanCTSReport.md` closure
 writeup, (3) this `agent_thoughts.md` append, on its own, last.
+
+# Session: L24 -- real, two-part viewport-Y + position-negation fix
+
+Picked up mid-investigation (context restored via a compaction summary): a prior pass at
+this same roadmap row had "fixed" `Executor.cpp`'s `projectVertex` viewport-Y formula
+(removing a `1.0f - (...)` flip) and paired it with an `IsCCW` sign flip, verified against
+284/284 `FeMeGraphicsTests` and a clean `check-feme` -- but then found a fresh regression in
+`QuadDomainTessellation.test` that hadn't existed before that fix. That's exactly the kind
+of "looks done, actually isn't" trap this whole project's instructions warn about, so I
+didn't trust the "done" state and re-investigated from scratch rather than assume the
+earlier pass's diagnosis was complete.
+
+The key unlock was refusing to trust a design-doc-quality comment as ground truth just
+because it read confidently: `CanonicalizeStage.cpp`'s `negateSystemValuePositionY` had an
+elaborate doc comment claiming Vulkan needs the same Y-up-to-Y-down compensation D3D does.
+That's the kind of claim that *sounds* right and is easy to accept without checking. Real
+web research on the Vulkan spec's own worked "Coordinate Transformations" formula (not just
+prose descriptions of "NDC is Y-up") showed the opposite: Vulkan's own formula needs no
+extra flip at all, unlike D3D's. That meant the OLD viewport-Y bug was real, but so was a
+SEPARATE bug compensating for it elsewhere -- both had to go together, not one patched over
+the other. A direct per-vertex NDC-value dump (temporary `FEME_DEBUG_VP` instrumentation,
+removed before committing) confirmed the negation fired inconsistently for single-element
+vs. whole-block position stores, which is what made two different test categories trade off
+against each other instead of both passing.
+
+Fixing both halves together made every previously-conflicting test pass simultaneously for
+the first time (`gs_selective_output.test`, `QuadDomainTessellation.test`), and a background
+sub-agent re-derived the 18 `ExecutorTest.cpp` tests whose hand-computed expected values had
+been silently assuming the old, buggy formula.
+
+Then a genuinely new-looking failure showed up: `GraphicsSystemValues.test`, an
+`SV_IsFrontFace` inversion, not part of L24's original 11 named cases at all. My first
+instinct was to add a viewport-`Height`-sign-dependent correction to `IsCCW` to explain it
+(a real, if convoluted, derivation involving the sign relationship between screen-space area
+and viewport height). Before committing to that, I ran a *real* `dEQP-VK.rasterization.
+culling.*` CTS sweep as a sanity check against the pre-fix baseline -- and it was a disaster:
+the interim fix scored 6-10/43 Pass against a 42/43 baseline. That's the single most useful
+thing I did this session: a hand-derived, internally-consistent-looking formula (verified
+against exactly the two or three unit tests I had in front of me) turned out to be badly
+wrong at real-world scale, and I would never have caught it without going to the actual
+conformance suite instead of stopping at "my own tests pass now."
+
+Systematically toggling each of the three suspect axes (viewport-Y formula, position
+negation, `IsCCW` sign) against the real CTS group made the actual, minimal, correct
+combination obvious: `IsCCW`'s formula (`SArea > 0.0f`) needed *no change at all* -- it was
+already correct in the very first commit of this file, and had been correct the whole time.
+The `GraphicsSystemValues.test` regression was entirely explained by the viewport-Y fix
+alone (which changes `SArea`'s sign for a given NDC triangle, without touching `IsCCW`'s own
+logic), and resolved itself once the position-negation removal was ALSO applied -- I'd
+simply not yet tested that combination in isolation before jumping to "the flip formula must
+also need fixing."
+
+That still left two unit tests broken (`CullsBackFacingTrianglesWhenConfigured`, plus a
+stencil-face-selection test) -- both had hand-derived expectations that assumed the *old*,
+buggy formula's front/back classification, exactly the same category of staleness as the 18
+already-updated Y-value tests, just for a boolean classification instead of a float value.
+Fixed those the same way: derive the correct expectation from the corrected formula (cross-
+checked against the same CTS group), not by patching the production code to match a stale
+test.
+
+Lesson for future sessions in this project: when a fix "passes all my own tests" but touches
+foundational math (viewport transforms, winding, anything with a sign convention), run the
+real, independent CTS *before* committing, specifically looking for a regression, not just a
+"does it still mostly pass" check. A hand-derived formula that agrees with 2-3 unit tests
+can still be systematically wrong in a way that only shows up at the scale and diversity of
+a real conformance suite -- and the CTS group most directly relevant to the change (here,
+`dEQP-VK.rasterization.culling.*`) is a far stronger check than any number of additional
+hand-authored unit tests would have been.
+
+## Final state
+
+- `Executor.cpp`: `projectVertex`'s Y formula fixed (no flip); `IsCCW`'s formula unchanged,
+  comment corrected.
+- `CanonicalizeStage.cpp`: `negateSystemValuePositionY` removed entirely.
+- `ExecutorTest.cpp`: 18 Y-value tests re-derived (via a background sub-agent) +
+  `CullsBackFacingTrianglesWhenConfigured` + 2 stencil-face tests corrected for the new
+  front/back classification.
+- `spirv-canonicalize-stage-interface-block-byte-offset.ll`: updated for the removed
+  negation.
+- `FeMeGraphicsDesign.md`: new "Status (roadmap L24)" note.
+- `Roadmap.md`: L24 struck through; `ArraySemantics.test`/`IsolineDomainTessellation.test`
+  broken out as L24(a)/L24(b), their own separate, pre-existing, unrelated gaps.
+- `VulkanCTSReport.md`: new L24 section, including the CTS-regression-catch story above.
+
+Verification: `FeMeGraphicsTests` 284/284, `FeMeVulkanTests` 662/662, `check-feme` 2786/2845
+Passed/59 Unsupported/0 Failed, real `feme-vk` sweep 223/664 Pass (net +1, zero regressions
+via an exact fail-list diff), real `dEQP-VK.rasterization.culling.*` 42/43 Pass matching the
+pre-fix baseline exactly (same single pre-existing failure both before and after).
