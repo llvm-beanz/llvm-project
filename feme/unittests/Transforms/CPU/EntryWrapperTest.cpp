@@ -366,6 +366,89 @@ TEST(EntryWrapperTest, SplitsAroundSafeDiamondAfterBarrier) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap L7m: the same "safe diamond" shape as
+// `SplitsAroundSafeDiamondAfterBarrier` above, but with the single barrier
+// *after* the diamond instead of before it (so the diamond's blocks must
+// be spliced into the function's *first* region, not its last) -- and,
+// crucially, with the diamond's true-arm block placed *textually last* in
+// the source (so it is also last in the parsed function's *physical*
+// block-list order), after both the merge block and the block containing
+// the barrier. `splitAtGroupSyncBarriers`'s region-bucketing previously
+// walked the function's raw physical block-list order to decide which
+// blocks belong to which region, silently assuming that order always
+// matched the diamond's actual logical/execution order; here it does not,
+// and the true-arm block (physically last) used to get bucketed into the
+// *second* region (alongside the barrier's own boundary block) instead of
+// the first, leaving `main.region0`'s branch to the true arm dangling --
+// a real, previously-uncaught `llvm::DeleteDeadBlocks` assertion crash
+// once the standard LLVM optimizer pipeline ran over the resulting
+// module (see this row's own citation in feme/docs/Roadmap.md).
+TEST(EntryWrapperTest, SplitsSafeDiamondWithOutOfOrderTrueArmBeforeBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %cond = icmp eq i32 %gid, 0
+      br i1 %cond, label %a, label %exit
+    exit:
+      %val = phi i32 [ %vala, %a ], [ 0, %entry ]
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %doubled = mul i32 %val, 2
+      ret void
+    a:
+      %vala = add i32 %gid, 10
+      br label %exit
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Region0 = M->getFunction("main.region0");
+  ASSERT_TRUE(Region0);
+  Function *Region1 = M->getFunction("main");
+  ASSERT_TRUE(Region1);
+
+  // The diamond (condition, both arms, and the merge phi) must all have
+  // landed together in the *first* region, ahead of the barrier -- not
+  // split apart by a stale, physical-block-list-order assumption.
+  bool FoundCondBr = false, FoundPhi = false, FoundAdd = false;
+  for (Instruction &I : instructions(Region0)) {
+    if (isa<CondBrInst>(&I))
+      FoundCondBr = true;
+    if (isa<PHINode>(&I))
+      FoundPhi = true;
+    if (auto *BO = dyn_cast<BinaryOperator>(&I);
+        BO && BO->getOpcode() == Instruction::Add)
+      FoundAdd = true;
+  }
+  EXPECT_TRUE(FoundCondBr);
+  EXPECT_TRUE(FoundPhi);
+  EXPECT_TRUE(FoundAdd);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  unsigned NumWaveLoopHeaders = 0;
+  bool FoundFence = false;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName().starts_with("wave.loop.header"))
+      ++NumWaveLoopHeaders;
+    for (Instruction &I : BB)
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+  }
+  EXPECT_EQ(NumWaveLoopHeaders, 2u);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap L45: a genuinely unsafe diamond -- one whose arm itself
 // contains a `..._with_group_sync` barrier, *and* whose merge block has a
 // phi -- is still diagnosed: `matchBranchShape` declines it (a merge phi

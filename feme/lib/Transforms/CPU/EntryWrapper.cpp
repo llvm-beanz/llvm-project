@@ -904,11 +904,41 @@ splitAtGroupSyncBarriers(Function *&WaveBody,
   for (BarrierMemoryScope Scope : Scopes)
     Boundaries.push_back({Scope});
 
+  // `Order` (computed above, before any splitting) cannot be reused
+  // directly to bucket blocks into regions: every barrier's own original
+  // parent block keeps its identity as the "before" half of the split
+  // (and so still appears in `Order`), while `BoundaryBlocks` holds only
+  // the *new* "after" halves `SplitBlock` just created, which by
+  // construction cannot appear in `Order` at all. Re-derive the
+  // logically-correct order by re-running `isLinearChain` over the now-
+  // fully-split, now-barrier-free function instead -- exactly mirroring
+  // `splitLoopBodyAtBarriers`/`splitArmAtBarriers`'s own post-split
+  // successor-walk technique for their own (structurally simpler, no
+  // surviving-diamond) shapes. This also fixes a distinct, real bug
+  // (roadmap L7m): walking `WaveBody`'s raw physical block-list order
+  // (this function's previous approach) assumed that order always
+  // matched logical/CFG order, which does not hold once `isLinearChain`'s
+  // "uniform two-way branch" exception (roadmap L45) lets a genuine,
+  // unflattened diamond survive into this function -- nothing guarantees
+  // the SPIR-V import (or any earlier pass) laid such a diamond's blocks
+  // out in the function's ilist in the order they actually execute in,
+  // and a real case was found where the diamond's true-arm block
+  // physically sat after this function's one barrier's own boundary
+  // block, bucketing it into the wrong region and leaving a dangling
+  // branch to a block that no longer existed in its own function once the
+  // correct region's blocks were spliced elsewhere.
+  SmallVector<BasicBlock *, 8> PostSplitOrder;
+  bool StillLinear = isLinearChain(*WaveBody, PostSplitOrder);
+  (void)StillLinear;
+  assert(StillLinear &&
+        "splitting an already-validated linear chain at its own barriers "
+        "must not itself change its shape");
+
   SmallVector<SmallVector<BasicBlock *, 8>, 4> RegionBlocks(1);
-  for (BasicBlock &BB : *WaveBody) {
-    if (BoundaryBlocks.contains(&BB))
+  for (BasicBlock *BB : PostSplitOrder) {
+    if (BoundaryBlocks.contains(BB))
       RegionBlocks.emplace_back();
-    RegionBlocks.back().push_back(&BB);
+    RegionBlocks.back().push_back(BB);
   }
 
   SmallVector<Function *, 4> Regions;
@@ -923,8 +953,13 @@ splitAtGroupSyncBarriers(Function *&WaveBody,
     for (auto [OldArg, NewArg] : llvm::zip(WaveBody->args(), RegionFn->args()))
       NewArg.setName(OldArg.getName());
 
-    RegionFn->splice(RegionFn->begin(), WaveBody, Blocks.front()->getIterator(),
-                     std::next(Blocks.back()->getIterator()));
+    // `Blocks` is `PostSplitOrder`-derived and so is not guaranteed to be
+    // a contiguous run in `WaveBody`'s own ilist (see the comment above);
+    // move each block over individually, in `PostSplitOrder`'s sequence,
+    // rather than assuming a single contiguous-range splice would carry
+    // exactly (and only) this bucket's blocks.
+    for (BasicBlock *BB : Blocks)
+      RegionFn->splice(RegionFn->end(), WaveBody, BB->getIterator());
 
     // The region's last block still ends with the unconditional branch
     // `SplitBlock` created to the (now-elsewhere) next region's first
@@ -943,6 +978,19 @@ splitAtGroupSyncBarriers(Function *&WaveBody,
 
     Regions.push_back(RegionFn);
   }
+
+  // `WaveBody` itself keeps the final bucket -- every earlier bucket was
+  // just spliced out of it above, so only those blocks remain, but not
+  // necessarily in `PostSplitOrder`'s sequence (the same physical-vs-
+  // logical mismatch the comment above describes could equally scramble
+  // the final region's own block-list order). Normalize it the same way,
+  // via a same-function self-splice, purely for a sane, predictable entry
+  // block/layout order -- `WaveBody`'s CFG itself does not actually
+  // depend on ilist order for correctness, but a future pass or a human
+  // reading a debug dump both benefit from it matching `PostSplitOrder`.
+  for (BasicBlock *BB : RegionBlocks.back())
+    WaveBody->splice(WaveBody->end(), WaveBody, BB->getIterator());
+
   Regions.push_back(WaveBody);
   return Regions;
 }
@@ -1276,8 +1324,16 @@ Function *outlineChain(Function &WaveBody, ArrayRef<BasicBlock *> Chain,
   for (auto [OldArg, NewArg] : llvm::zip(WaveBody.args(), Fn->args()))
     NewArg.setName(OldArg.getName());
 
-  Fn->splice(Fn->begin(), &WaveBody, Chain.front()->getIterator(),
-             std::next(Chain.back()->getIterator()));
+  // Move each block over individually, in `Chain`'s own (logical) order,
+  // rather than as a single contiguous-range splice: nothing guarantees
+  // `Chain`'s blocks are ilist-adjacent in `WaveBody` (see the identical
+  // reasoning -- and the real bug this fixed -- in
+  // `splitAtGroupSyncBarriers`, roadmap L7m); a range splice there would
+  // silently carry along unrelated blocks physically in between, or (for
+  // a not-yet-observed `Chain` whose own blocks aren't ilist-contiguous)
+  // leave some of `Chain`'s own blocks behind instead.
+  for (BasicBlock *BB : Chain)
+    Fn->splice(Fn->end(), &WaveBody, BB->getIterator());
 
   if (!EndsInRet) {
     Instruction *Term = Fn->back().getTerminator();
