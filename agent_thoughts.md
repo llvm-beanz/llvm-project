@@ -73846,3 +73846,149 @@ regenerated via `deqp-vk --deqp-runmode=txt-caselist` before searching it).
 Commits, in order: (1) the core `SIMDize.cpp` fix plus its two new lit tests, (2) `Roadmap.md`,
 (3) `VulkanCTSReport.md`, (4) `FeMeCPUDesign.md`, (5) this `agent_thoughts.md` entry, on its own,
 last.
+
+# Session: L7b -- dxc's unpadded SampleCmp coordinate width (combined-image-sampler gap re-scoped)
+
+## Starting point
+
+Requested: work on roadmap L7b, "Combined-image-sampler `spirv.Image` legalization gap", split
+out of L7's own original filing text with no concrete repro yet -- the suggested next step was to
+try a `vk::SampledTexture2D`-style combined binding shape.
+
+## The original hypothesis was wrong
+
+Built a manual HLSL-\>SPIR-V-\>MLIR-\>LLVM-IR-\>CPU-lowering-passes reduction chain for a plain
+`vk::SampledTexture2D` + `SampleLevel` shape, and a second one using `tex.GetDimensions()`
+(exercising `spirv.Image` extraction out of a combined sampled-image, the literal op named in
+L7's own filing text). Both found **zero errors anywhere** through the full chain. Also read
+through the Vulkan-side `COMBINED_IMAGE_SAMPLER` descriptor-binding code (`Descriptor.cpp`/
+`CommandBuffer.cpp`) and confirmed it was already correct. The combined-image-sampler binding
+shape itself was never actually broken -- L7's own original filing text must have been describing
+something else, or a shape this session's repros didn't happen to hit.
+
+## Pivoting to real runtime testing
+
+Static/compile-time-only reduction wasn't finding anything, so pivoted to running a genuine
+end-to-end test against the real ICD instead of guessing at more repros. Found offload-test-suite
+already has an extensive, pre-existing `test/Feature/Vk.SampledTextures/Vk.SampledTexture2D/
+*.test.yaml` suite -- 13 real dxc-compiled HLSL tests exercising exactly the combined-image-
+sampler shape (`Sample`, `Gather`, `GatherCmp`, `SampleCmp`, `GetDimensions`, etc.). Ran it
+against the feme-vk ICD via `llvm-lit` (remembering the `VK_ICD_FILENAMES` gotcha from
+`.instructions.md`): **10/13 passed, 3 failed** -- `Gather.test.yaml`, `GatherCmp.test.yaml`,
+`SampleCmp.test.yaml`. This is the first real, confirmed L7b-adjacent finding: the combined-
+binding shape itself works; three narrower, unrelated gaps exist around it instead.
+
+This is a useful general lesson for this project going forward: a hypothesis with "not yet
+reduced to a concrete repro" in its own filing text is exactly the kind of thing a real runtime
+suite re-run can falsify quickly, before sinking more time into manual reductions guessing at
+shapes that might not even be broken.
+
+## Triaging the three real failures
+
+- `Gather.test.yaml`: "unhandled opcode 96". SPIR-V opcode 96 is `OpImageGather`. Confirmed via
+  direct inspection of `SPIRVBase.td`/`ImageOps.cpp` that this op has **zero support anywhere in
+  upstream MLIR's SPIRV dialect at all** -- it jumps straight from opcode 95 (`OpImageFetch`) to
+  opcode 97 (`OpImageDrefGather`), skipping 96 entirely. A materially bigger, upstream-MLIR-level
+  gap, not fixable purely within `feme/`. This is exactly the same underlying gap roadmap L7g's
+  own catch-all "a couple of raw `unhandled opcode`" text already anticipated, just newly given a
+  concrete repro -- updated L7g in place rather than filing a brand-new row.
+- `GatherCmp.test.yaml`: "failed to legalize operation 'spirv.ImageDrefGather'". This op *does*
+  already exist upstream, but `SPIRVToLLVMPatterns.cpp` has no legalization pattern for it at all
+  (no `ImageDrefGatherPattern` class, unlike the extensive `ImageSample*Pattern`/
+  `ImageSampleDref*Pattern` family). This is exactly roadmap L7d's own already-filed row
+  (`spirv.ImageDrefGather` has no conversion pattern) -- again, updated in place with the new
+  concrete repro rather than duplicated.
+- `SampleCmp.test.yaml`: `VkResult=-3` (pipeline creation failure). The one real, novel,
+  previously-completely-unknown gap this session found and fixed -- see below.
+
+## Root-causing SampleCmp
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` gave a generic "unsupported raised operation... cannot
+normalize" diagnostic against an `!llvm.target<"spirv.Image", ...>` handle, with its own explicit
+caveat that the reported handle "may be an unrelated bystander" (worth remembering: this
+diagnostic pass reports whichever `handlefrombinding` call it hits first once *any* handle in the
+function fails to normalize, so the reported one isn't necessarily the real culprit).
+
+Reducing the real `SampleCmp.test.yaml` pixel shader's own SPIR-V hit the already-documented,
+already-worked-around MLIR-verifier assertion landmine (`verifyImageOperands` in
+`ImageOps.cpp:221`, rejecting `ConstOffset` et al. outright in any assertions build) -- confirmed
+this is pre-existing and already has `--import-spirv-skip-verify` (`feme-translate`) and
+`--mlir-very-unsafe-disable-verifier-on-parsing` (`feme-opt`, which independently re-triggers the
+same assert via its own generic textual parser) as documented workarounds, with existing lit
+tests already using the same flags for the same reason. Not something to fix this session.
+
+With those flags, got through the reduction chain and found `SPIRVResourceLoweringPass` silently
+left the whole function's `handlefrombinding` calls unlowered, with no diagnostic emitted at that
+stage (the visible runtime diagnostic only comes from a separate, later catch-all pass not
+included in this manual pass list). Traced the roadmap's own L46-\>L48-\>L50-\>L52 history and
+found an important pattern: **every single one of these prior depth-comparison (`SampleCmp`)
+fixes was validated only against `dEQP-VK.glsl.texture_functions.*` (glslang/GLSL-originated
+SPIR-V), never once against a real dxc/HLSL `check-hlsl-feme-vk` test** -- L46's own closing text
+even explicitly flagged this as a known gap in its own verification ("were not re-run this
+session (offload-test-suite has no persisted build in this environment)"). This session is the
+first to actually exercise this code path against real dxc output, several roadmap rows later.
+
+The real bug: `hasOnlySupportedImageUses`'s Dref coordinate-width check hardcodes
+`DrefCoordWidth = SampleCoordWidth + 1` (capped at 4) -- a width assumption justified entirely by
+glslang's own convention of redundantly packing the depth-reference value into the coordinate
+vector (e.g. `vec3(u, v, compare)` for a 2D shadow sampler). Confirmed via direct inspection of
+the imported SPIR-V dialect MLIR that dxc's own real output for `Texture2D::SampleCmp` does *not*
+follow this convention at all -- its Coordinate operand stays exactly the shape's own ordinary,
+unpadded `SampleCoordWidth` (a plain `<2 x float>` for `Plain2D`), with `Dref` arriving purely
+through its own separate operand. Also confirmed `lowerImageAccesses` (the actual codegen half)
+already extracts coordinate components purely by fixed index (`C0`/`C1` at 0/1, etc.),
+transparently tolerating either width -- only the acceptance check itself was the blocker.
+
+## The fix
+
+Widened the check to accept *either* width via a new `AcceptsUnpaddedDxcWidth` guard, for every
+shape except `Plain1D`. `Plain1D` is deliberately excluded: unlike every other shape, its own
+`C0`/`C1` extraction in `lowerImageAccesses` happens unconditionally (not gated by `Shape`), and
+its own unpadded width is a bare scalar (1), not a vector -- `CreateExtractElement` cannot apply
+to that at all. Since no real HLSL/dxc `Texture1D::SampleCmp` case is confirmed to exist or reach
+this path, accepting a shape the pre-existing extraction code cannot actually consume would just
+trade a crash-free rejection for a real crash, so `Plain1D` stays excluded until a real case
+proves otherwise.
+
+## Verification
+
+- Rebuilt `feme-opt`/`feme-translate`/`feme_vulkan` (ccache + assertions `build2`).
+- Re-ran the real `Vk.SampledTexture2D` offload-test-suite group: `SampleCmp.test.yaml` now
+  Passes (11/13, up from 10/13); `Gather`/`GatherCmp` remain the 2 still-failing, separately-
+  tracked gaps, unchanged by this fix as expected.
+- Updated the pre-existing `LeavesASampleCmpWithNonSpecCoordWidthAlone` unit test, which had
+  directly encoded the *old, incorrect* assumption (asserting dxc's own real, valid 2-wide
+  `Plain2D` coordinate should be rejected) as a negative test -- repurposed it into a new positive
+  test (`LowersASampleCmpWithDxcsUnpaddedCoordWidth`) and wrote a fresh negative test under the
+  original name covering a genuinely-invalid width (4-wide, matching neither convention) instead.
+  Added `LeavesAPlain1DSampleCmpWithUnpaddedCoordWidthAlone` covering the deliberate `Plain1D`
+  exclusion. Added a new lit test,
+  `spirv-resource-lowering-image-samplecmp-dxc-unpadded.ll`, covering the exact shape end to end
+  through `feme-opt --llvm -passes=feme-cpu-lower-spirv-resources`.
+- `ninja -C build2 check-feme`: 2864 discovered, 2805 Passed, 59 pre-existing Unsupported, 0
+  Failed (up by exactly 3 new unit tests and 1 new lit test, 0 regressions).
+- Real `deqp-vk` regression check: `dEQP-VK.glsl.texture_functions.texture.*sampler2dshadow*`
+  (8 cases, the group most directly exercising the pre-existing glslang-padded-width path this
+  fix must not disturb): 4/8 Pass, 4/8 NotSupported (pre-existing, unrelated `sparse_*` gap), 0
+  Fail -- unchanged. A broader `*shadow*` sanity sweep (878 cases): 394 Pass / 61 Fail (all
+  pre-existing, unrelated gaps) / 423 NotSupported -- no new failure mode anywhere in the sweep.
+
+## Roadmap bookkeeping
+
+Struck through L7b with the corrected root-cause writeup. Updated L7d (`spirv.ImageDrefGather`)
+and L7g (the `unhandled opcode`/GLSL.std.450 catch-all) *in place* with this session's own newly-
+confirmed concrete repros, rather than filing brand-new rows -- both already existed as the
+correct home for these exact gaps (`GatherCmp.test.yaml` for L7d, `Gather.test.yaml`'s
+`unhandled opcode 96` for L7g). Also touched up L7's own umbrella row text, which still listed
+L7a and L7b as open remaining work even though both were already closed by prior sessions (L7a)
+and this one (L7b) -- a small bookkeeping correction, not new content.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no update needed (an
+internal CPU resource-lowering fix, no feature/extension bit touched). `Design.md`/
+`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed; existing `SampleCmp`/`Dref` mentions are
+historical narrative about the original SPIR-V-op/pattern gaps (roadmap L25/L31/L46), not living
+documentation of coordinate-width acceptance -- no deviation to record.
+
+Commits, in order: (1) the core `SPIRVResourceLowering.cpp` fix plus its unit tests and new lit
+test, (2) `Roadmap.md`, (3) `VulkanCTSReport.md`, (4) this `agent_thoughts.md` entry, on its own,
+last.
