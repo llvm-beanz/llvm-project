@@ -74558,3 +74558,124 @@ Commits, in order: (1) the new `SPIRVToLLVMPatterns.cpp`/`SPIRVToLLVM.h`/`Conver
 implementation plus its two new lit-test files, (2)
 `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this `agent_thoughts.md`
 entry, on its own, last.
+
+# Session: L7k -- `OpTypeArray` specialization-constant length deserialization fix
+
+## Starting point
+
+Picked up where L7j's own closing session left off: its real `deqp-vk` sweep of
+`dEQP-VK.subgroups.*.compute.*` had found the `spirv.SpecConstantComposite` legalization gap fixed and
+working, but surfaced a *deeper*, upstream gap blocking most of the remaining `Fail` cases -- a pre-existing
+MLIR SPIR-V deserializer limitation (`processArrayType`, `Deserializer.cpp`) rejecting an `OpTypeArray`
+whose length operand is a specialization constant rather than a plain `OpConstant`. Found 10 stale `l7j-*`
+todos still marked pending/in_progress from before the actual L7j work had finished (the SQL todo tracker
+had drifted out of sync with real progress during that session) -- cleaned those up first, then filed 9
+new `l7k-*` todos with dependency edges before starting any investigation.
+
+## Reduction
+
+Compiled a GLSL compute shader mirroring the real CTS shape directly from `vktSubgroupsBasicTests.cpp:1660`
+(`shared uint tempShared[gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z];`) via
+`glslangValidator`, then disassembled with `spirv-dis --raw-id` to see exactly what SPIR-V shape this
+compiles to. It's not a bare `OpSpecConstant` -- it's a whole `OpSpecConstantOp` expression tree:
+`OpCompositeExtract` (pulling X/Y/Z components out of an `OpSpecConstantComposite` built from three
+`OpSpecConstant`s) feeding two `OpIMul`s. This matters a lot for scoping the fix correctly: a naive fix
+that only handles a plain spec constant reference would still fail on the actual CTS shape.
+
+## Design decision: fold, don't try to preserve symbolically
+
+Before writing any code, I checked whether `mlir::spirv::ArrayType` could represent a symbolic/dynamic
+length at all -- it can't; it's `unsigned elementCount`, full stop (`SPIRVTypes.h`). Combined with the fact
+that this deserializer (and this whole ICD) has no runtime specialization-constant override mechanism
+today, there's really only one honest fix available: fold the length to its compile-time default value at
+deserialization time. I deliberately scoped the recursive expression evaluation to *only* the two enclosed
+opcodes the real CTS shape actually needs (`OpCompositeExtract` single-level, `OpIMul`), declining any
+other shape with a precise diagnostic rather than trying to build a general spec-constant-expression
+evaluator nobody has asked for yet. This mirrors the same "resolve to compile-time default" design roadmap
+L7j's own `prepareSpecConstants` already established at a different layer (the SPIRV-to-LLVM conversion
+pass, rather than the deserializer itself) -- consistent, not a new design decision.
+
+Implemented `Deserializer::resolveConstantArrayLength`, rewrote `processArrayType` to call it, wrote three
+new lit tests (positive scalar, positive composite-expression matching the real CTS shape, negative
+decline), and verified via `check-mlir` (3,827 passed) and `check-feme` (2,816 passed, matching L7j's own
+baseline exactly -- an internal deserializer fix has no `feme`-visible surface change of its own).
+Committed the implementation on its own.
+
+## Real CTS re-verification: the crash-chunking lesson
+
+This is where this session took the most care, and where I want to record the reasoning in detail for
+future sessions. A single-invocation full `deqp-vk --deqp-case="dEQP-VK.subgroups.*.compute.*"` run
+progressed well past where L7j's own sweep had stalled (past 3,860 of 9,160 case results, vs. L7j's own
+sweep which apparently completed all 9,160 without incident under the old, more restrictive deserializer)
+-- and then the whole process aborted outright on an assertion failure in `llvm::DeleteDeadBlocks`, deep
+in LLVM core code, during `dEQP-VK.subgroups.basic.compute.subgroupbarrier`. This is a real, previously-
+unreached crash: because L7k's own fix lets that shader's module *past* deserialization for the first
+time, it now reaches a stage of the compilation pipeline that was never exercised against this exact shape
+before. It's the project's own documented C2/H19p failure mode exactly: "a crash silently truncates or
+corrupts a suite run" -- if I'd taken the truncated single-run numbers at face value, I'd have badly
+undercounted how much L7k's fix actually helped (everything after the crash point would have looked like
+it was never even attempted, when in fact most of those later groups pass this stage cleanly).
+
+To get an honest, complete measurement despite the crash, I re-ran the sweep chunked per subgroup-category
+group (`arithmetic`, `ballot`, `ballot_broadcast`, `ballot_mask`, `ballot_other`, `basic`, `builtin_mask_var`,
+`builtin_var`, `clustered`, `partitioned`, `quad`, `shape`, `shuffle`, `size_control`, `vote`, taken from
+`vktSubgroupsTests.cpp`'s own registration list) as separate `deqp-vk` invocations, so a crash confined to
+one group's own run doesn't lose results for any other group. This took a couple of iterations to get the
+case-name globs right -- some groups (`ballot`, `ballot_broadcast`, `ballot_mask`, `vote`) turned out to have
+an extra nested `ext_shader_subgroup_*` sub-group I initially missed, undercounting those groups until I
+cross-checked my per-group totals against the tool's own `--deqp-runmode=xml-caselist` output and found the
+gap. Within the `basic` group itself, only 2 of its 12 cases (`subgroupbarrier`/its `_requiredsubgroupsize`
+twin) actually trigger the crash; I confirmed this by running the other 10 individually and they all fail
+cleanly (no crash) on a separate, unrelated gap (see below). The final reconciled total across all chunks
+plus the individually-run `basic` cases summed to exactly 9,160 -- matching the full case count reported by
+the tool's own caselist enumeration, giving me confidence the aggregate is complete and honest.
+
+## Real result and three new follow-on gaps
+
+**5 Pass / 146 Fail / 9,007 NotSupported / 2 unmeasured (crashed)**, up from L7j's own recorded baseline of
+4 Pass / 149 Fail / 9,007 NotSupported. The `NotSupported` count is bit-for-bit identical, which is a good
+sanity check that this fix genuinely doesn't touch capability gating either way -- it only affects cases
+that were already past the capability gate and failing during pipeline creation. The specific
+`OpTypeArray count <id> ... can only come from normal constant` diagnostic this row was filed against is
+gone from the fresh sweep entirely.
+
+But (as has now become a very consistent pattern across the whole L7-series) fixing this gap didn't unlock
+a flood of new passes -- it mostly just let more cases reach the *next* layer of gap, and this sweep found
+three of them, each clearly out of L7k's own scope and filed as its own row rather than silently expanded
+into:
+
+- **L7l**: a missing `spirv.MemoryBarrier` legalization pattern, blocking all 10 of
+  `dEQP-VK.subgroups.basic.compute.subgroupmemorybarrier*`'s own cases. Distinct from `spirv.ControlBarrier`
+  (already legalized) -- confirmed via a direct repro showing the exact `failed to legalize operation
+  'spirv.MemoryBarrier'` diagnostic.
+- **L7m**: the `llvm::DeleteDeadBlocks` crash itself. This is a real crash in LLVM core, not anything
+  SPIR-V/`feme`-specific, and I did not attempt to reduce or fix it this session -- that would be a whole
+  separate investigation (likely into whatever CFG-simplification pass runs over a control-barrier-
+  containing compute shader with divergent-looking control flow) and is squarely out of scope for a row
+  about array-length deserialization.
+- **L7n**: I went back and specifically re-checked whether the runtime-value-verification gap L7j's own
+  session first noticed (`subgroupsize_compute`, "2 / 7 values passed") was actually related to this row's
+  own array-deserialization scope, since L7j's own closing text had explicitly flagged it as an open
+  question. It isn't: that shader uses a plain `LocalSize 1 1 1` with no spec-constant-sized array or
+  `OpTypeArray` at all, so there's no way L7k's own fix could be responsible for it either way. I confirmed
+  it's still failing identically in the fresh sweep and filed it as its own row rather than leaving the
+  "is this related?" question open indefinitely.
+
+Given all three, I did **not** flip `VK_SUBGROUP_FEATURE_VOTE_BIT`/`SHUFFLE_BIT` this session (L7i's own
+still-pending decision): the real op-family coverage and both of L7j/L7k's own legalization gaps are now
+resolved, but the flip's own honest justification is still blocked -- just on a different, smaller set of
+gaps (L7l/L7m/L7n) than before.
+
+## Documentation and commits
+
+Struck through L7k on `Roadmap.md` with the real fix and full sweep numbers recorded, split out three new
+rows (L7l/L7m/L7n, each nested only one lowercase letter deep under L7, per this project's own nesting-depth
+convention), and updated L7's own umbrella-row bookkeeping text. Appended a new `VulkanCTSReport.md` section
+covering the fix, the crash-chunking methodology, and all three newly-discovered follow-on gaps. Updated
+`Vulkan14FeatureInventory.md`'s existing subgroup-capability audit note (previously "blocked on L7k") to
+point at L7l/L7m/L7n instead. `VulkanExtensionInventory.md`: reviewed, no changes needed.
+`Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no changes needed (no new design decision).
+
+Commits, in order: (1) the `Deserializer.h`/`Deserializer.cpp` implementation plus its three new lit-test
+files, (2) `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this
+`agent_thoughts.md` entry, on its own, last.
