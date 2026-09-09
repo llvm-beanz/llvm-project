@@ -32964,3 +32964,81 @@ Vulkan feature/extension surface.
 
 Full `check-feme` (ccache + assertions, `build2`): **2786/2845 Passed, 59
 Unsupported, 0 Failed** -- no regressions.
+
+## L23: 9 of 11 named `vkQueueSubmit`-failure cases already fixed as a side effect of L26/L28/L32; the remaining 2 were a `GOLDENIMAGE_DIR` test-config gap, not a real Vulkan failure
+
+Roadmap L23 named 11 `check-hlsl-feme-vk` cases (`Feature/Textures/Sampler.{address,filter}.test`
+and their `Vk.SampledTexture2D` YAML siblings, `Feature/Semantics/{GraphicsSystemValues,
+NestedStructSemantics,SemanticTypes,ShadowedSemantics}.test`, `Graphics/MeshShaders/{SimpleLines,
+SimpleTriangle}.test`, `Bugs/Texture-Row-Pitch-Readback.test`) that, at filing time, cleared
+pipeline creation but failed at `vkQueueSubmit` with `VkResult = -3`.
+
+### Investigation
+
+Re-ran all 11 cases fresh against a rebuilt `build2` before writing any new code, mirroring
+roadmap L28's own precedent of re-confirming a filed symptom still reproduces before
+investigating further. Result: **9 of the 11 already pass**, with no prior roadmap row's own
+closure text claiming credit for them by name -- these were fixed incidentally by L26's
+resource-handle-normalization fix, L28's `D32_FLOAT_S8X24_UINT` depth-format diagnosis, and L32's
+matching `Executor.cpp` fix (the real, shared root cause behind most of this whole L3-derived
+`vkQueueSubmit`/`VkResult = -3` failure shape, since `offload-test-suite`'s own `Device.cpp`
+unconditionally attaches this depth-stencil format to every raster pipeline it runs).
+
+The remaining 2 (`Graphics/MeshShaders/{SimpleLines,SimpleTriangle}.test`) turned out to never
+have been a `vkQueueSubmit`/`VkResult`-shaped failure at all. Both reach `"Cleanup complete."`
+with no error text of any kind logged by `offloader`, then fail at their own subsequent
+`imgdiff %t/Output.png %goldenimage_dir/... -rules %t/rules.yaml` golden-image-comparison `RUN`
+line instead, with `imgdiff: error: Failed reading PNG header from file`. Root cause: `build2`'s
+own CMake cache had never been configured with `GOLDENIMAGE_DIR` (the `offload-test-suite`-side
+variable pointing at the separate `offload-golden-images` checkout), so `config.goldenimage_dir`
+in the generated `lit.site.cfg.py` was silently an empty string, and every `%goldenimage_dir/...`
+substitution in every golden-image-comparison `feme-vk` case (not just these two) resolved to a
+nonexistent path -- a false `Failed` entirely unrelated to the ICD's own real rendering
+correctness. (Cases like `Sampler.address.test`, by contrast, compare a raw result buffer against
+`ResultBuffer_Expected` and so were never affected by this gap.)
+
+A second, unrelated issue compounded the investigation: the local `offload-test-suite` checkout's
+`feme-rebased` branch had been silently reset back to bare `origin/main` by some process external
+to this session (`git reflog` showed several `reset: moving to origin/main` entries after an
+earlier session's own cherry-pick of upstream `feme` branch's "Add FeMe test targets" commit),
+dropping the `feme-vk`/`clang-feme-vk` lit-suite definitions this whole roadmap chain's testing
+depends on from the checkout's tracked history. The already-built `build2` tree kept working from
+its stale generated files, but a fresh CMake reconfigure (needed to pick up `GOLDENIMAGE_DIR`)
+would have silently broken `feme-vk` test discovery entirely had this not been caught first.
+
+### Fix
+
+- Re-applied (`git cherry-pick`) the upstream `feme` branch's "Add FeMe test targets" commit onto
+  the current `feme-rebased` HEAD in the `offload-test-suite` checkout -- a clean, conflict-free
+  re-application, purely restoring test-suite wiring, no feme-side code involved.
+- Reconfigured `build2` with `cmake -S llvm -B build2 -DGOLDENIMAGE_DIR=/home/dev/dev/offload-golden-images`
+  (no full reconfigure/rebuild of LLVM itself needed -- confirmed via `grep goldenimage_dir
+  build2/tools/OffloadTest/test/feme-vk/lit.site.cfg.py` that the path is now correctly threaded
+  through).
+- Documented both gotchas in `feme/.instructions.md`'s existing "Running `feme-vk` /
+  offload-test-suite" section, alongside the pre-existing `VK_ICD_FILENAMES` note, so a future
+  session doesn't silently lose this wiring again.
+
+No feme production source was touched by this row at all.
+
+### Verification
+
+- All 11 of this row's own named cases: **11/11 Pass**.
+- Full `feme-vk` sweep: **222/664 Pass** (up from 210/664 recorded at the L76 close), 260
+  `Unsupported`, 26 `Expectedly Failed`, 155 `Failed` (pre-existing, unrelated, out of this row's
+  own scope), 1 `Unexpectedly Passed` (`Feature/PushConstant/array_of_matrices.test`, an
+  already-documented pre-existing upstream XFAIL-staleness artifact, unrelated to golden images).
+  The `Failed`/`Unsupported`/`Expectedly Failed` counts cannot have regressed from this fix: every
+  golden-image-comparison case was already unconditionally `Failed` before it (for a reason
+  unrelated to its own real rendering correctness), so a `Pass -> Fail` transition from this fix
+  alone is structurally impossible.
+- `ninja check-feme` (ccache + assertions, `build2`): **2786/2845 Passed, 59 Unsupported, 0
+  Failed** -- unaffected, as expected (no feme C++ source changed).
+- Real `deqp-vk` re-run of `dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*`
+  (this session's closest available representative CTS group, since this row's own scope is
+  entirely `offload-test-suite`/`offloader`-side): **32/50 Pass, 0 Fail, 18 NotSupported** --
+  reconfirms no regression at CTS scale, as expected, since `deqp-vk` never depends on
+  `offload-test-suite`'s own golden-image infrastructure at all.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed (no
+feature/extension surface touched by a pure test-infrastructure/build-configuration fix).
