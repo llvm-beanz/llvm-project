@@ -34792,3 +34792,78 @@ design itself; the design's own "Shared middle-end phases" section already descr
 threading for "every ordinary masked memory access", which a resource/image call both are).
 
 Split out: **L7s** (the newly-filed, untracked `subgroupelect` runtime-value mismatch).
+
+## L7m: `subgroupbarrier`'s `llvm::DeleteDeadBlocks` assertion crash, root cause and fix
+
+Reproduced the crash directly via a real `deqp-vk --deqp-case=dEQP-VK.subgroups.basic.compute.subgroupbarrier`
+run against the real, unmodified `feme_vulkan` ICD: `Assertion 'Dead.count(Pred) && "All predecessors must be
+dead!"' failed`, `llvm/lib/Transforms/Utils/BasicBlockUtils.cpp:159`. A `gdb` backtrace confirmed the crash
+happens inside `llvm::DeleteDeadBlocks` <- `llvm::removeUnreachableBlocks` <- `simplifyFunctionCFGImpl` <-
+`llvm::SimplifyCFGPass::run`, called from the standard LLVM `PassBuilder::buildPerModuleDefaultPipeline`
+this project's own `feme::OptimizerPipeline::run` runs -- i.e. genuinely unrelated LLVM core code, but only
+reached *after* every one of `feme`'s own CPU lowering passes had already run over the module.
+
+A temporary `getenv`-gated IR dump immediately before that optimizer pipeline runs (the same established
+`FEME_DEBUG_DUMP_...` convention this project's own prior sessions -- L45, L7o, L7r -- have repeatedly relied
+on, reverted before committing) captured the exact malformed module. A new, faster repro loop was discovered
+this session: once dumped to a standalone `.ll` file, `opt -passes='default<O2>'` reproduces the underlying
+issue directly, without the full Vulkan/`deqp-vk` harness round-trip -- and here it failed at *parse time*
+with `error: use of undefined value '%._crit_edge'`, a genuinely dangling, illegal cross-function branch
+target, not merely a printer artifact or a downstream analysis bug.
+
+Cross-referencing the dumped IR's two split functions (`main.region0`/`main`, the naming convention unique to
+`feme::cpu::splitAtGroupSyncBarriers`, `EntryWrapper.cpp`) against the real CTS shader source (an
+`if (subgroupElect()) { tempBuffer[id] = value; } subgroupBarrier(); tempResult = tempBuffer[id];` shape)
+found the true-arm block of the surviving `if (subgroupElect())` diamond -- kept as a real `CondBr` rather
+than flattened into masked form, since `isLinearChain`'s own "uniform two-way branch" exception (roadmap L45)
+accepts a barrier-free diamond reconverging before the wave-sync barrier -- had been spliced into the *wrong*
+region function (`main` instead of `main.region0`), leaving `main.region0`'s own branch to it dangling.
+
+Root cause: `splitAtGroupSyncBarriers`'s region-bucketing step (deciding which spliced-out blocks belong to
+which region function) walked `WaveBody`'s raw *physical* block-list (ilist) order directly, silently
+assuming that order always matches the diamond's *logical*/execution order. That assumption does not hold in
+general: nothing guarantees the SPIR-V import (or any earlier pass) laid a surviving diamond's blocks out in
+the function's ilist in the order they actually execute in, and this exact case has the true-arm block
+physically positioned *after* the barrier's own `SplitBlock`-created boundary block -- so the naive
+per-ilist-position bucketing put it in the second region instead of the first, where it logically belongs
+(it must execute before the barrier).
+
+Fixed by re-deriving the bucketing order from a fresh, post-split call to `isLinearChain` itself (mirroring
+the post-split successor-walk technique the sibling `splitLoopBodyAtBarriers`/`splitArmAtBarriers` functions
+already used for their own, simpler, no-surviving-diamond shapes), rather than either the raw ilist or the
+stale pre-split `Order` vector computed earlier in the same function (which cannot be reused directly either:
+a barrier's own post-split "after" block, by construction, never appears in it, since it did not exist yet
+when that `Order` was computed). `outlineChain` (the small shared per-chunk outlining helper both
+`splitLoopBodyAtBarriers` and `splitArmAtBarriers` call) was hardened the same way, replacing its own
+contiguous-ilist-range splice with a per-block splice in the chunk's own logical order, since it shared the
+identical latent assumption (never yet observed to break for either of those callers' own shapes, but the
+same bug class nonetheless).
+
+New regression test `EntryWrapperTest.SplitsSafeDiamondWithOutOfOrderTrueArmBeforeBarrier`
+(`feme/unittests/Transforms/CPU/EntryWrapperTest.cpp`) reproduces the exact shape directly at the IR level: a
+safe diamond immediately before a single barrier, with the diamond's true-arm block placed textually (and so
+physically, in the parsed function's own ilist) *after* both the merge block and the barrier-containing
+block. Confirmed, via a real revert-and-rerun of just this test against the pre-fix code, that it reliably
+hangs/crashes there -- a genuine, effective regression test for this exact bug.
+
+`ninja check-feme` (assertions-enabled, ccache build): 2885 discovered (+1 for the new test), 2826 Passed
+(+1), 59 Unsupported (pre-existing, unchanged), 0 Failed.
+
+Real `deqp-vk` re-verification: `dEQP-VK.subgroups.basic.compute.subgroupbarrier` and its
+`_requiredsubgroupsize` twin no longer crash and now **Pass** outright. A full
+`dEQP-VK.subgroups.basic.compute.*` re-run (12 cases) went from 8/12 to 10/12 Passed -- the remaining 2
+(`subgroupelect`/`_requiredsubgroupsize`) fail identically before and after this fix with the same "0 / 7
+values passed" mismatch, confirmed unrelated to this row's own crash scope by reproducing the identical
+failure directly on `subgroupelect` in isolation (that shader has no barrier at all); this is the
+already-separately-tracked, still-open roadmap row **L7s**. A broader `dEQP-VK.subgroups.basic.*` re-run (all
+shader stages, 70 cases) shows 10 Passed / 2 Failed (the same 2 L7s cases) / 58 NotSupported (pre-existing,
+unrelated per-stage subgroup-support gaps), confirming zero regressions anywhere else.
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's pending-flip blocker list
+narrowed from L7m/L7s to L7s only. `VulkanExtensionInventory.md` reviewed: no change needed -- a pure
+internal region-splitting correctness fix inside `feme`'s own CPU lowering pipeline, no feature/extension bit
+touched. `FeMeCPUDesign.md` reviewed: no update needed -- this closes a real bug in an already-documented
+mechanism (region splitting around wave-sync barriers) rather than deviating from or extending the design
+itself.
+
+No further roadmap rows split out this session: L7m's own scope closes cleanly on this fix alone.

@@ -386,7 +386,13 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   mismatch, newly split out to L7s) are both unaffected either way.
   `supportedOperations` still advertises only
   `VK_SUBGROUP_FEATURE_BASIC_BIT`: the `VOTE_BIT`/`SHUFFLE_BIT` flip now
-  remains blocked on L7m/L7s only.
+  remains blocked on L7m/L7s only. UPDATE (roadmap L7m, later session):
+  L7m's own `DeleteDeadBlocks` crash is now fixed (a real, `feme`-side
+  region-splitting bug in `splitAtGroupSyncBarriers`, not an LLVM core
+  bug -- see L7m's own closing text in `feme/docs/Roadmap.md`);
+  `subgroupbarrier`/`_requiredsubgroupsize` now pass outright. The
+  `VOTE_BIT`/`SHUFFLE_BIT` flip now remains blocked on L7s only
+  (`subgroupelect`'s own separate, still-open runtime-value mismatch).
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
