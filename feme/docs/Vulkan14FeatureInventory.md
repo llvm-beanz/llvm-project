@@ -232,8 +232,9 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `IntegerGroupNonUniformReducePattern`) and the vote/shuffle family
   (`Elect`/`AllEqual`/`Shuffle`, `ElectConversionPattern`/
   `AllEqualConversionPattern`/`ShuffleConversionPattern`) now also convert,
-  each of the latter three only for `Subgroup` scope and (for `AllEqual`)
-  only a scalar operand -- still none of them exercise an 8/16-bit or
+  each of the latter three only for `Subgroup` scope; `AllEqual`'s own
+  vector-operand `feme::cpu::SIMDizePass` widening gap (roadmap L7t, later
+  session) is now also fixed -- still none of them exercise an 8/16-bit or
   boolean-typed group operand for real (every one only has a 32-bit-class
   scalar HLSL source in this ICD's frontend surface today), so
   `shaderSubgroupExtendedTypes` remains just as unvalidated as this note
@@ -405,6 +406,25 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `dEQP-VK.subgroups.basic.compute.*` group is 12/12 passing. The
   `VOTE_BIT`/`SHUFFLE_BIT` flip's pending-blocker list is now empty --
   every previously-tracked blocker in this group is resolved.
+  UPDATE (roadmap L7t, later session): a real, un-flipped `dEQP-VK.
+  subgroups.vote.*`/`shuffle.*`/`ballot.*` baseline sweep confirmed both
+  `vote`/`ballot` are correctly gated today; a real flag-flip verification
+  run then found two genuine, real gaps standing between "the tracked
+  L7-series blocker list is empty" and "safe to actually flip": (1)
+  `subgroupAllEqual` over a per-lane-divergent vector operand crashed
+  `feme::cpu::SIMDizePass` outright (two real bugs in `SIMDize.cpp`'s
+  `widenWaveCall`/`widenVectorReduce`, now fixed -- see L7t's own closing
+  text in `Roadmap.md`), and (2) the entire `dEQP-VK.subgroups.shuffle.*`
+  CTS group's own verification harness depends on an entirely-unimplemented
+  `GroupNonUniformBallot` capability (split out to new roadmap row L85).
+  With (1) fixed and verified (`dEQP-VK.subgroups.vote.*`: 36/805 passed,
+  0/805 failed), `VOTE_BIT` is now genuinely advertised
+  (`Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
+  VK_SUBGROUP_FEATURE_VOTE_BIT`); `SHUFFLE_BIT` stays un-advertised,
+  blocked on L85. A full `dEQP-VK.subgroups.*` sweep with this final flag
+  state (48,705 cases) shows 66 passed/128 failed (the same pre-existing,
+  unrelated `subgroupclusteredrotate`/`subgrouprotate` 128, unchanged)/
+  48,511 not-supported -- zero regressions anywhere.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

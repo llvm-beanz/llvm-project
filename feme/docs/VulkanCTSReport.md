@@ -34945,3 +34945,109 @@ advertise `VOTE_BIT`/`SHUFFLE_BIT`, now that every blocker this document tracked
 -- deliberately left out of this session's own narrower scope, since it needs its own broader
 `vote`/`shuffle`-specific CTS verification pass first, not just a re-run of the `basic.compute` group this
 session's own fix was scoped to).
+
+## L7t: `VOTE_BIT` flip, `subgroupAllEqual` vector-operand widening fix, and the new L85 `GroupNonUniformBallot` split
+
+Request: flip `PhysicalDeviceInfo.cpp`'s hardcoded `SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT`
+to also advertise `VOTE_BIT`/`SHUFFLE_BIT`, now that L7s's own closing session found every previously-tracked
+L7-series blocker resolved -- but only after a real, broader `vote`/`shuffle`-specific CTS verification pass,
+not just the narrower `basic.compute` re-run L7s's own fix was scoped to.
+
+Baseline (un-flipped, `BASIC_BIT` only) `deqp-vk` sweeps confirmed correct gating: `dEQP-VK.subgroups.vote.*`
+(805 cases) all `NotSupported`; `dEQP-VK.subgroups.ballot.*` (23 cases) all `NotSupported`;
+`dEQP-VK.subgroups.shuffle.*` (9,562 cases) 128 `Fail`/rest `NotSupported` -- the 128 failures are all
+`subgroupclusteredrotate`/`subgrouprotate` cases, a separate, pre-existing, unrelated gap
+(`OpGroupNonUniformRotateKHR`/`VK_SUBGROUP_FEATURE_ROTATE_BIT`, a CTS test-grouping quirk placing this
+capability's own tests inside the `shuffle.*` namespace), confirmed unrelated to this session's own scope.
+
+A real, temporary flag-flip verification run (`VOTE_BIT | SHUFFLE_BIT`, scratch-only until justified) then
+found two distinct, real gaps:
+
+1. **`subgroupAllEqual`/`WaveActiveAllEqual` over a per-lane-divergent vector operand crashed
+   `feme::cpu::SIMDizePass` outright** -- `deqp-vk` hit `llvm::Value::replaceAllUsesWith`'s own
+   type-mismatch assertion on `subgroupallequal_bvec2`, right after the 2 scalar `subgroupallequal_bool`
+   cases passed. Root-caused by reading `AllEqualConversionPattern` (`SPIRVToLLVMPatterns.cpp`), the
+   pre-existing, already-correct SPIR-V-to-LLVM conversion for `spirv.GroupNonUniformAllEqual`: for a
+   vector operand, it does *not* emit a scalar-result call directly. It emits `llvm.spv.wave.all.equal`
+   with a result type matching the operand's own arity (`<N x i1>` for an `N`-component operand -- this
+   matches `int_spv_wave_all_equal`'s own `LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>` signature in
+   `IntrinsicsSPIRV.td`), then immediately folds that `<N x i1>` down to a single scalar `i1` via a
+   *separate* `llvm.vector.reduce.and` call. Two real bugs in `SIMDize.cpp` combined to break this shape
+   once it was first exercised for real:
+   - `widenWaveCall`'s own `WaveCallKind::AllEqual` branch (added this session, initially incorrectly)
+     built one scalar `feme.cpu.wave.all_equal` call per vector component, but then collapsed all of them
+     into one final scalar via `Builder.CreateAnd` instead of reassembling them into a real `<N x i1>`
+     vector via `insertelement` (matching the original, un-widened call's own true `<N x i1>` type) --
+     `CI.replaceAllUsesWith(ScalarResult)` on a `<N x i1>`-typed `CI` is exactly what tripped the assertion.
+   - `widenVectorReduce` (used by the immediately-following `llvm.vector.reduce.and` call) only ever
+     registered its widened result in the `Widened` map, on the assumption every real consumer would
+     always be a divergent instruction resolving its own operand explicitly via `getWidened` --  the shape
+     this function was originally written for (`all(vec4 comparison)` feeding a divergent branch/select).
+     But `subgroupAllEqual`'s own result stays wave-uniform regardless of its operand's divergence (an
+     explicit `AlwaysUniform` override in `WaveUniformity.cpp`'s intrinsic-classification switch, confirmed
+     for both `dx_wave_all_equal`/`spv_wave_all_equal`), so a genuinely uniform consumer -- e.g. the real
+     CTS shader's own `tempRes |= subgroupAllEqual(valueEqual) ? 0x8 : 0x0` (a `select` whose condition is
+     this uniform reduce-and result, but whose true/false arms are both plain constants, so the whole
+     `select` is itself classified uniform too) -- is left "exactly as it is" by `widenInstruction`'s
+     generic uniform fallback, which never queries `Widened` at all, and needs the reduce-and call's own
+     *raw* SSA use fixed up directly instead. Left un-fixed, the reduce-and call's remaining use is
+     poison-filled by `FunctionWidener::widen`'s own end-of-pass "sever every remaining use of a
+     to-be-erased instruction" cleanup -- a silent wrong-answer bug (observed as `deqp-vk`'s own
+     "0 / 7 values passed" runtime-verification failure, not a crash, once the first bug above was fixed
+     on its own).
+
+   Both fixed: `widenWaveCall`'s `AllEqual` branch now reassembles its per-component scalar results into a
+   real `<N x i1>` via `insertelement`, matching `CI`'s own true type; `widenVectorReduce` now mirrors the
+   existing `WaveCallKind::ReadLane` precedent immediately above it in the same file (`UI.isDivergentAtDef`
+   decides whether to register the widened form in `Widened`, for a divergent consumer, or extract a real
+   scalar via `Builder.CreateExtractElement` and `replaceAllUsesWith` it directly, for a uniform one).
+
+2. **The entire `dEQP-VK.subgroups.shuffle.*` CTS group's own test-verification harness depends on an
+   entirely-unimplemented capability**, unrelated to `SHUFFLE_BIT`/`VOTE_BIT` themselves: every non-rotate
+   CTS shuffle shader's own harness calls `subgroupBallot()`/`subgroupBallotBitExtract()`
+   (`OpGroupNonUniformBallotBitExtract`, SPIR-V opcode 341, confirmed via the SPIR-V header) to check
+   whether the lane it read from was active. `grep -rln "GroupNonUniformBallot" feme/lib/ feme/include/`
+   returns zero matches anywhere in this project -- confirmed via the real flag-flip run, which showed
+   256/9562 shuffle cases (every non-rotate shuffle/shufflexor compute case) newly failing with
+   `error: unhandled opcode 341` once `SHUFFLE_BIT` was speculatively advertised. This blocks `SHUFFLE_BIT`
+   from being safely advertised regardless of whether shuffle's own core legalization is itself correct
+   (it is presumably fine on its own, a distinct, already-implemented `WaveCallKind::ReadLane`-adjacent
+   pattern this row does not touch). Split out to new roadmap row **L85**, a materially larger prerequisite
+   (new SPIR-V legalization patterns + a new `WaveCallKind::Ballot`-family CPU-runtime intrinsic/lowering
+   path) out of scope for this session.
+
+New unit test `SIMDizeTest.WidensVectorAllEqualFeedingUniformSelect` reduces the exact shape above (a
+divergent `<2 x i1>` operand feeding `llvm.spv.wave.all.equal.v2i1`, then `llvm.vector.reduce.and.v2i1`,
+then a `select` with constant true/false arms) and asserts the `select`'s own condition is never `poison`
+after widening -- confirmed, via a scratch revert of just the `widenVectorReduce` half of the fix, to fail
+(`isa<PoisonValue>(Sel->getCondition())` true) without it, and pass with it.
+
+With gap 1 fixed and verified, `VOTE_BIT` is genuinely flipped this session
+(`Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT`);
+`SHUFFLE_BIT` stays un-advertised, blocked on L85. `PhysicalDeviceInfoTest.cpp`'s
+`SubgroupSizeIsAPowerOfTwoInRange` test updated to assert `VOTE_BIT` is now set and `SHUFFLE_BIT` is not.
+
+`ninja check-feme` (ccache + assertions build, all target dependencies auto-built): 2,887 discovered
+(+1 for the new unit test), 2,828 passed (+1), 59 unsupported (pre-existing, unchanged), 0 failed.
+
+Real `deqp-vk` re-verification with the final flag state: `dEQP-VK.subgroups.vote.*` (805 cases): 36
+passed, 0 failed, 769 `NotSupported` (ray tracing/mesh shading/long-vector formats, unrelated to this
+row) -- up from 12 passed/24 failed before this session's fix. `dEQP-VK.subgroups.shuffle.*` (9,562
+cases): unchanged at 0 passed/256 failed/9,306 `NotSupported` (the same pre-existing rotate-family 128
+plus the now-explicitly-tracked-as-L85 Ballot-family 128, confirmed unaffected either way by `VOTE_BIT`
+alone since `SHUFFLE_BIT` was never flipped for real). A full `dEQP-VK.subgroups.*` sweep across every
+group and shader stage (48,705 cases) shows 66 passed/128 failed (the same pre-existing, unrelated
+rotate-family 128, unchanged)/48,511 not-supported -- zero regressions anywhere from the `VOTE_BIT` flip.
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's own narrative now reflects the
+real `VOTE_BIT` flip and the new L85 split, correcting the prior session's "pending-blocker list is now
+empty" claim (empty for the *tracked* L7-series blockers, but not sufficient on its own for a safe flip
+without this session's own additional verification). `VulkanExtensionInventory.md` reviewed: no change
+needed, confirmed -- `VOTE_BIT`/`SHUFFLE_BIT` are `VkPhysicalDeviceSubgroupProperties` (core 1.1) fields,
+not a `VkExtension*` capability this file tracks. `FeMeCPUDesign.md` reviewed: no update needed (this
+closes real bugs in an already-documented mechanism -- "Phase 4: Widening"'s own wave-call/vector-reduce
+handling -- rather than deviating from or extending the design itself).
+
+Split out: **L85** (`GroupNonUniformBallot` support -- new legalization patterns, a new
+`WaveCallKind::Ballot`-family CPU-runtime path, and its own real CTS verification pass, needed before
+`SHUFFLE_BIT` can be safely advertised).
