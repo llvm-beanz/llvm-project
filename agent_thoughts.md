@@ -73640,3 +73640,209 @@ design deviation requiring a design-doc correction. `Vulkan14FeatureInventory.md
 `VulkanExtensionInventory.md` are both generated feature/extension-surface trackers; this fix
 touches neither (a pure internal conversion-correctness fix), so both were left untouched, with
 that reasoning recorded explicitly in the `VulkanCTSReport.md` entry rather than left implicit.
+
+# Session: L84 -- private-alloca SIMDize widening gap
+
+Picked up L84 (filed at the close of the previous L83 session): `Basic/Matrix`'s own
+`matrix_groupthread_swizzle_{one,zero}_based.test` cases still failing a real numeric
+`BufferExact` mismatch after L83's storage-layout fix. The roadmap row's own filed hypothesis
+pointed at `feme/lib/Analysis/CPU/WaveUniformity.cpp`'s `getValueUniformity`/`isDivergentAtDef`,
+following the L43 `AtomicRMWInst` precedent. That hypothesis turned out to be wrong about *where*
+the bug lived, though right that *something* gets wrongly classified uniform -- worth recording
+in detail since it's a useful lesson for future "which file does the fix belong in" triage.
+
+## Reduction methodology (new, reusable technique)
+
+No existing test or tool chains `feme-translate`/`feme-opt` together for the CPU-target pipeline
+starting from real SPIR-V, so I worked out a full manual path:
+
+1. `dxc -T cs_6_0 -spirv -fspv-target-env=vulkan1.3 -Fo repro.spv repro.hlsl` -- compile a trimmed
+   HLSL repro (copied out of `matrix_groupthread_swizzle_zero_based.test`'s own HLSL source) to
+   real SPIR-V.
+2. `feme-translate --import-spirv repro.spv -o repro.mlir` -- spirv-dialect MLIR text.
+3. `feme-opt --feme-convert-spirv-to-llvm repro.mlir -o repro-llvmdialect.mlir` -- llvm-dialect
+   MLIR text, but wrapped in an extra outer `module { ... }` that the next tool chokes on.
+4. Strip that outer wrapper by hand (drop the first line and the final closing brace) --
+   indentation doesn't matter to MLIR's parser, only the exact enclosing tokens.
+5. `feme-translate --llvmdialect-to-llvmir repro-llvmdialect-inner.mlir -o repro.ll` -- finally
+   real, textual LLVM IR.
+6. Chain the actual CPU pipeline passes via `feme-opt --llvm -passes='...' -feme-cpu-stage=compute
+   -feme-cpu-entry-point=main -feme-cpu-wave-size=4 -S in.ll -o out.ll`, in the same order
+   `Pipeline.cpp` uses, skipping `feme-cpu-inline-helper-functions` (registered in the pass header
+   but not in `feme-opt.cpp`'s `registerFeMePasses`, and a documented no-op for dxc-sourced input
+   anyway) and `feme-cpu-lower-spirv-subpass` (fragment-only, irrelevant for a compute repro, and
+   its function-pass/module-pass mixing in a single `-passes=` list produced an "unknown module
+   pass" error not worth debugging for this reduction).
+
+This let me inspect the IR after each individual pass (`feme-cpu-prepare`, `feme-cpu-linearize`,
+`feme-cpu-simdize`) in isolation, which is what actually found the real bug: `LinearizePass`'s own
+output was already completely correct (both the switch-case stores and the later load correctly
+masked into `feme.cpu.masked.store.*`/`feme.cpu.masked.load.*` calls) -- the corruption only
+appeared after `feme-cpu-simdize`, immediately ruling out `WaveUniformity.cpp`/`LinearizePass` as
+the fix's home and pointing straight at `SIMDize.cpp`'s widening logic instead. I also found an
+even more minimal repro along the way: a plain scalar `alloca i32` (no vector type, no GEP, no
+dynamic index at all) conditionally stored by a 2-way `if`/`else` and read back afterward
+reproduces the exact same "single shared address" bug through `feme-cpu-linearize,feme-cpu-simdize`
+alone, with no dxc/SPIR-V involved -- this became the first of the two new lit tests, and made the
+actual root cause much easier to see clearly (in the full repro's IR, the shared address is masked
+by a real `getelementptr` indexing into a `<4xi32>`; in the minimal one, it's just an
+`insertelement`/`shufflevector` broadcast of the alloca's own address).
+
+## Root cause
+
+`feme::cpu::LinearizePass` is not buggy: it correctly recognizes a divergently-executed store or
+load through a memory location and masks it into a `feme.cpu.masked.store.*`/`.load.*` call. The
+problem is one level later. A plain `Function`-storage local variable's `alloca` that only survives
+to this point because dxc/LLVM's own `mem2reg`/SROA couldn't promote it (here, because of a
+*dynamic*, runtime-loop-variable index into it) has a genuinely compile-time-*uniform* address --
+literally the same one scalar pointer value in every lane, since every lane's copy of the widened
+function shares the same original `AllocaInst`. But its *value* differs by lane, because different
+lanes took different divergent branches (or switch cases) and stored different things through that
+one shared address. A uniformity/divergence analysis has no way to see this: it tracks a load or
+store's *address* operand through ordinary SSA def-use and control-dependence edges, never through
+"this load's result depends on which of several conditionally-executed stores last wrote to this
+same address" (a store-to-load memory dependency, not a data or control dependency in the SSA
+sense). So both the alloca and everything reading/writing it get correctly-by-its-own-rules, but
+practically-wrong, classified uniform.
+
+Even so, this alone wouldn't matter if `SIMDize.cpp` had real widening logic for a private alloca
+that could kick in regardless of the (wrong) uniform classification -- but it didn't. Grepping the
+entire file found zero `AllocaInst`-specific handling anywhere. `FeMeCPUDesign.md`'s own "Phase 4:
+Widening" construct-mapping table already documented the *intended* design ("`alloca T` -> `alloca
+[W x T]`, indexed by lane") -- but this was aspirational text describing what should eventually
+exist, not a description of already-implemented behavior; nobody had built it yet. So the existing
+(and, on its own terms, entirely correct) `widenMaskedLoad`/`widenMaskedStore` -- which are
+dispatched *unconditionally*, bypassing the uniformity gate, specifically so a masked memory op
+still gets widened even when its operands look uniform -- fell through to `getWidened`'s generic
+fallback for a value that's never been given a real per-lane form: broadcast the single scalar
+address to every lane via `insertelement`/`shufflevector`. The result: every lane's masked
+store/load targets the exact same one memory cell, so each of the divergent stores overwrites the
+previous one in turn, and every lane's subsequent load reads back whichever value was left there
+last -- exactly the observed "every lane reads back thread 0's own value" symptom.
+
+## Fix
+
+Added, in `feme/lib/Transforms/CPU/SIMDize.cpp`:
+
+- `FunctionWidener::collectMaskedAllocas()`, a new pre-scan run once at the very start of
+  `widen()` (before `buildWidenedFunction()` splices the old function's blocks into the new one --
+  object identity survives that splice, so scanning the old function first and looking things up
+  by pointer later in the new one is safe). It walks every `feme.cpu.masked.load.*`/`.store.*`
+  call's pointer operand back through any chain of `getelementptr`s (`getUnderlyingAlloca`, a small
+  new free function) to find its root `AllocaInst`, if any, and records it in a new
+  `DenseSet<AllocaInst *> MaskedAllocas` member. This is deliberately narrow: only an alloca a
+  masked op's own pointer operand traces back to is "unsafe"; an ordinary alloca with no masked
+  access anywhere never enters this set and is left completely untouched by the new code, which
+  should keep the blast radius of this change to exactly the shape it's meant to fix.
+- Two new widening functions, dispatched from `widenInstruction` *ahead of* the existing
+  `!UI.isDivergentAtDef(&I) return true;` early-out (exactly like the existing
+  `AtomicRMWInst`/groupshared-GEP special cases already do, for the same reason: the ordinary
+  uniformity classification is known-wrong for these specific instructions and must not gate them):
+  - `widenMaskedAlloca` replaces the alloca with `alloca [WaveSize x T]`, then builds a real
+    `<WaveSize x ptr>` of the WaveSize distinct per-lane slot addresses (one
+    `getelementptr [WaveSize x T], NewAI, 0, lane` + `insertelement` per lane) and seeds this
+    directly into the `Widened` map keyed by the *old* alloca -- valid because `getWidened`'s
+    vector-type assert only checks the input Value's own static type (a plain `ptr`), not what's
+    stored in the map, so pre-populating a vector-of-pointers entry for a scalar-typed key is legal.
+  - `widenMaskedAllocaGEP` is the GEP-chain dual, for the dynamic-index case (the real HLSL repro's
+    own shape, not just the minimal scalar-alloca test): it looks up the already-widened
+    `<W x ptr>` base in `Widened`, then reapplies the GEP's own indices completely unchanged.
+    LLVM's `getelementptr` natively supports a vector-of-pointers base with scalar index operands,
+    implicitly broadcasting each scalar index across every lane of the base -- exactly the
+    building block needed here, and the same mechanism `widenGroupSharedGEP` already relies on for
+    the opposite direction (scalar base, vector index).
+  - Once both of these have run, the *existing* `widenMaskedLoad`/`widenMaskedStore` need zero
+    changes: they already call `getWidened(Matched.Ptr, Builder)` and lower to
+    `llvm.masked.gather`/`llvm.masked.scatter` over whatever pointer vector that returns. Before
+    this fix, that was always a splat; now, for anything in `MaskedAllocas`, it's a real per-lane
+    address vector, and the gather/scatter "just work" correctly with no further change.
+
+Two new lit tests, `feme/test/Transforms/CPU/simdize-masked-alloca-private.ll` (the direct-alloca,
+no-GEP, 2-way-if/else case -- the minimal repro found during reduction) and
+`simdize-masked-alloca-gep-private.ll` (a `<4xi32>`-typed alloca accessed through a
+uniformly-valued-but-dynamic GEP index, mirroring the real HLSL repro's shape), both run through
+`feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize -feme-cpu-wave-size=4` and
+`FileCheck`ed for a real per-lane `alloca [W x T]`, one distinct `getelementptr` per lane, and a
+genuinely non-splatted `<W x ptr>` feeding the masked gather/scatter.
+
+## An unrelated but blocking discovery: `offload-test-suite`'s checkout had regressed
+
+Mid-session, `ninja -C build2 check-hlsl-feme-vk-basic-matrix` (or any `check-hlsl-feme-vk*`
+target) turned out not to exist at all in `build2`'s ninja files, despite `build2`'s own output
+directories (`tools/OffloadTest/test/feme-vk/.../Output/`) clearly containing artifacts from past
+sessions' real runs. Digging in: `/home/dev/dev/offload-test-suite` was checked out on a local
+branch named `feme-rebased`, but that branch's tip was identical to `origin/main` -- the commit
+that actually adds the FeMe test targets (`b0ce3d8`/`c95974c`, "[Vulkan][FeMe] Add FeMe test
+targets", on the `beanz/feme` remote branch) was nowhere in its history. Some prior attempt to
+rebase `feme` onto a newer `main` must have gone sideways (aborted mid-rebase, or a plain
+`checkout main` mistaken for a rebase) and silently dropped the one commit that matters for this
+whole project's own test infrastructure. Since this wasn't safe to just leave broken (every
+future session's own "run `check-hlsl-feme-vk`" instruction depends on it), I fixed it in passing:
+checked out the `feme` branch directly (confirmed it still has the FeMe-adding commit and its
+own real tests, 612 discovered, an older snapshot), then re-did the rebase properly
+(`git checkout -b feme-rebased-fix feme && git rebase origin/main`, which applied cleanly with no
+conflicts) and moved the `feme-rebased` branch pointer to the result (664 discovered, matching
+prior sessions' own recorded baseline count and picking up every upstream test added since `feme`
+was last rebased). Re-running `cmake`'s reconfigure step (`ninja` auto-triggers this when it
+notices `CMakeLists.txt` changed) then correctly regenerated the `check-hlsl-feme-vk`/
+`check-hlsl-clang-feme-vk` targets. Filing this discovery here rather than as a new roadmap row,
+since it's test-infrastructure bookkeeping, not a `feme` compiler/runtime bug -- but future
+sessions should know to sanity-check `git log --oneline -1` against both `feme` and `feme-rebased`
+in that checkout if `check-hlsl-feme-vk*` targets ever go missing again.
+
+## Vulkan CTS verification
+
+Real `check-hlsl-feme-vk` full sweep (after the `offload-test-suite` checkout fix above): a clean
+`git stash`-based A/B comparison (stashing just the `SIMDize.cpp` change, rebuilding
+`libfeme_vulkan.so`, running, then popping the stash and rebuilding/running again) gives
+**237 -> 239 Passed / 140 -> 138 Failed**, 664 discovered both times, with a line-by-line diff of
+every single test's own result confirming the *only* two lines that differ anywhere in the entire
+664-test sweep are exactly the two named cases (`matrix_groupthread_swizzle_{one,zero}_based.test`)
+flipping from `FAIL` to `PASS` -- about as clean a "targeted fix, zero regressions" confirmation as
+this project's own methodology can produce.
+
+For real `deqp-vk`, I looked for the CTS group most structurally analogous to this bug's own shape
+(a per-invocation-divergent write to private/non-shared storage, then a later read-back) rather
+than reusing L83's own `RWStructuredBuffer` group (irrelevant here -- this bug has nothing to do
+with SSBO storage layout). Two candidates: `dEQP-VK.glsl.indexing.matrix_subscript.*dynamic*`
+(dynamically-indexed local matrix read/write, 36 relevant cases) and
+`dEQP-VK.reconvergence.workgroup_uniform_control_flow_ballot.compute.*` (explicitly about
+per-invocation control-flow divergence within a compute workgroup, sampled 100 of 2400 cases for
+time). Both came back with genuinely zero payoff, for two different, both-legitimate reasons: the
+first passes 36/36 identically before and after this fix (confirmed via the same stash-based A/B),
+because `glslang`'s own SPIR-V codegen for a GLSL dynamically-indexed matrix subscript never
+produces a divergent *branch* around the access at all (it reaches the dynamic index without any
+branching, unlike `dxc`'s `switch`-lowered HLSL shape) -- so `feme::cpu::LinearizePass` never masks
+anything for it, and this fix's own new code path is simply never reached. The second is entirely
+`NotSupported` in this ICD today (`VK_SUBGROUP_FEATURE_BALLOT_BIT not supported`), an unrelated,
+pre-existing feature gap, so it can't exercise this fix either. Recorded both honestly in
+`VulkanCTSReport.md` (matching L83's own precedent of reporting a genuine zero-payoff `deqp-vk`
+result rather than searching until something happens to pass differently) rather than searching
+further for a group that *would* show a real `deqp-vk` win, given the two most obviously relevant
+groups both came back clean explanations for zero payoff, and the CTS's own regenerated case list
+was itself a one-off fix needed this session (the checked-in `dEQP-VK-cases.txt` in the CTS build
+directory turned out to be a stale, incomplete partial export containing only the `ssbo` group;
+regenerated via `deqp-vk --deqp-runmode=txt-caselist` before searching it).
+
+## Documentation
+
+- `feme/docs/Roadmap.md`: L84 struck through, with the roadmap row's own text explicitly noting
+  where its original filed hypothesis was right (something is misclassified uniform) and where it
+  was wrong (the fix belongs in `SIMDize.cpp`'s widening logic, not `WaveUniformity.cpp`'s
+  classification logic) -- following L64/L45's own established precedent for correcting a prior
+  session's own mis-hypothesis in the text rather than silently replacing it.
+- `feme/docs/FeMeCPUDesign.md`: the "Phase 4: Widening" construct-mapping table's `alloca T` row
+  previously stated the intended design as if already built ("`alloca [W x T]`, indexed by lane;
+  SROA-able back into vectors when uniformly accessed"). Corrected to describe what's actually
+  implemented now: scoped narrowly to a masked-load/masked-store-touched alloca specifically, not
+  universally for every alloca in every function, and explicitly noting the SROA-back-into-vectors
+  half of the original text is still unimplemented.
+- `feme/docs/VulkanCTSReport.md`: new entry with the full root-cause writeup, fix description, and
+  all verification numbers above.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no change needed -- this is
+  a pure internal SPIR-V-to-LLVM-to-CPU codegen correctness fix touching no Vulkan feature or
+  extension bit.
+
+Commits, in order: (1) the core `SIMDize.cpp` fix plus its two new lit tests, (2) `Roadmap.md`,
+(3) `VulkanCTSReport.md`, (4) `FeMeCPUDesign.md`, (5) this `agent_thoughts.md` entry, on its own,
+last.
