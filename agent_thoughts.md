@@ -72963,3 +72963,159 @@ Failed, real `feme-vk` sweep 224/664 Pass (net +1, `ArraySemantics.test` the sol
 an exact fail-list diff), real `dEQP-VK.rasterization.culling.*` 42/43 Pass matching the L24
 baseline (a more directly relevant CTS sweep of tessellation/geometry-IO groups hit this
 environment's own pre-existing missing-test-data gap before reaching a relevant case).
+
+# L24(b): isoline domain-coordinate swap and Patch-decorated tess-factor RowCount collapse
+
+## Task
+
+Close out roadmap L24(b): `Graphics/IsolineDomainTessellation.test` still fails, unrelated to
+L24's own viewport-Y/winding scope -- pre-existing, not yet reduced.
+
+## Reproducing
+
+Ran the named test directly via `llvm-lit -v` against the rebuilt `feme_icd.json` (had to
+remember `VK_ICD_FILENAMES` must be set in the environment lit itself runs from, since the
+`feme-vk` lit config's Vulkan-feature detection at config-load time silently marks everything
+`UNSUPPORTED` without it -- reused the pre-built `build2/tools/OffloadTest/test/feme-vk`
+lit config from a prior session's `check-hlsl-feme-vk` setup rather than pointing lit at the
+raw `offload-test-suite` checkout). Confirmed a real failure with actual captured values
+`CapturedU=[0,0,0,0,0]`, `CapturedV=[0,0,0,0,1]` -- matching neither of the test's own two
+anticipated "tess-factor-order ambiguity" patterns, so this is a genuinely new, distinct bug.
+
+## First hypothesis: the U/V domain-coordinate swap
+
+A prior (now-superseded) session's notes pointed at `tessellateIsoline` in `Tessellator.cpp`
+writing `U`/`V` backwards from the real `SV_DomainLocation` convention. Fixed that (swapped
+which local variable feeds `DomainPoint::U` vs `V`), added doc comments, renamed/adjusted the
+corresponding `TessellatorTest.cpp` case. `FeMeGraphicsTests` passed 284/284 in isolation.
+
+But re-running the *real* end-to-end test after rebuilding `feme_vulkan`/`offloader` still
+failed -- now with `CapturedU=[0,0,0,0,1]`, `CapturedV=[0,0,0,0,0]`, the *other* anticipated
+pattern, not the expected `[0,.25,.5,.75,1]`. So the U/V swap was real but not sufficient; the
+test still wasn't hitting the actual expected shape at all (only 2 distinct domain points
+showed up, not 5), meaning something upstream of the tessellator's own U/V assignment was
+still wrong.
+
+## Digging deeper: direct offloader re-runs with debug instrumentation
+
+Since this is a CPU-emulated ICD, I could run the `offloader` binary directly against a
+`-debug-layer` pipeline YAML, bypassing `llvm-lit`/`FileCheck` entirely, to get the full raw
+result-buffer dump on stdout. Backed up `Tessellator.cpp` and `PatchPipeline.cpp` to
+`/tmp/*.bak` first, then added temporary `fprintf`/`#include <cstdio>` instrumentation to
+`tessellateIsoline` and `extractTessFactors`, rebuilding and re-running after each change.
+
+Found: `Factors.Edges[1]` (the "segments" tess factor, authored as `4.0` in the test's own
+HLSL) was reading back as its **default value `1.0`** -- so `Segments` computed to `1` instead
+of `4`, meaning only 2 domain points were ever generated instead of 5. That fully explains the
+endpoint-only output shape, regardless of which axis `U`/`V` end up on.
+
+Dumped `Sig.Elements` directly and found the patch-constant signature had only **one**
+`TessFactorEdge` element with `RowCount == 1`, not 2 -- so the second array-index write
+(`Edges[1] = 4.0`) was structurally invisible to `extractTessFactors`'s row-iterating loop, not
+just misread. Disassembled the real DXC-compiled SPIR-V for the hull shader with `spirv-dis`
+and confirmed `gl_TessLevelOuter` is legitimately declared `[4 x float]`, `Patch`-decorated,
+with two real constant-index stores (`[0]=1.0`, `[1]=4.0`) -- so the shader itself is correct;
+the bug is in how `CanonicalizeStage.cpp` builds the signature from it.
+
+Traced it to `addElements`'s `PerInvocationOutputArray` rule: `(Stage == Hull || Mesh) &&
+AddrSpace == 8`, originally added for roadmap H29g to recognize a genuine per-control-point
+hull output array (e.g. `out vec4 vtxColor[]`) and peel its `RowCount` down to 1 per
+invocation. It has no exclusion for `Patch`-decorated globals at all, so it also matched
+`gl_TessLevelOuter`/`Inner` (genuinely per-patch, never per-control-point) and collapsed
+*their* `RowCount` the same way. This is the real, dominant bug -- not the U/V swap, which is
+real but secondary (without this fix, the U/V swap fix alone still produces wrong output
+because `Segments` itself is wrong, not just which axis it's assigned to).
+
+Reverted all the debug instrumentation (restored from the `/tmp/*.bak` copies, confirmed via
+`git diff --stat` showing both files clean of any leftover `fprintf`/`#include <cstdio>`
+before re-applying only the real fix) and added `&& !D.Patch` to the
+`PerInvocationOutputArray` condition, with a detailed doc comment. Rebuilt and reran: the
+isoline test now produces the exact expected values and passes.
+
+## A regression, and a sibling bug
+
+Before declaring victory, ran the broader verification sweep this project always runs after a
+`CanonicalizeStage.cpp` change: `FeMeGraphicsTests` (284/284), `FeMeTransformsGraphicsTests`
+(68/68), full `check-feme` (2786/2845, 0 failed, matching baseline), and a full `feme-vk`
+sweep before/after diff via `git stash`. The diff showed *two* deltas, not one:
+`IsolineDomainTessellation.test` Fail->Pass (intended) but also
+`Feature/Semantics/HullSystemValues.test` Pass->Fail (a **new regression**).
+
+Used `FEME_VULKAN_LOG_CREATION_ERRORS=1` (a technique I found documented against roadmap L81
+in `Roadmap.md` and reused directly) to get a verbose diagnostic:
+`"patch-constant output -> domain stage patch input: element 0 and its producer element 2
+disagree on component/row count or type"`. Traced this into `StageLink.cpp`'s
+`linkStageElements`/`effectiveRowCount`, which uses `SignatureElement::RowCountIsVertexArray`
+to fold a linked element's `RowCount` down to 1 before comparing producer/consumer.
+
+Found `isPerVertexArrayInputGlobal` (the Domain-stage `Input`-side analog, used for reading
+`gl_TessLevelOuter`/`Inner` from the domain shader's own side) has the exact same class of
+bug, independently: it unconditionally treats any array-typed, address-space-7 `Input` global
+on Hull/Domain/Geometry as a "per-vertex array" (setting `RowCountIsVertexArray = true`), with
+no `Patch` exclusion either. Before the Hull-side fix, both sides of the Hull<->Domain link
+happened to independently (and for entirely unrelated reasons) collapse to `RowCount == 1`,
+and so "agreed" by coincidence -- `HullSystemValues.test` (which uses `Edges[3]`, i.e. 3 real
+rows, unlike the isoline test's 2) happened to pass before either fix. Fixing only the
+Hull-side broke that coincidental agreement (4 real rows vs. the Domain-side's still-collapsed
+1).
+
+Fixed `isPerVertexArrayInputGlobal` the same way: parse `spirv.Decorations` metadata directly
+within the function and return `false` for `Patch`-decorated globals, with a doc comment
+cross-referencing the Hull-side fix and `StageLink.cpp`. Rebuilt and reran both tests: both
+pass. Re-ran the full verification sweep again: `FeMeTransformsGraphicsTests` 68/68,
+`check-feme` unchanged from baseline, and a final `feme-vk` before/after diff confirming
+**exactly one** delta (`IsolineDomainTessellation.test` Fail->Pass) with zero other
+regressions -- the `HullSystemValues.test` regression is fully resolved.
+
+## Unit tests
+
+Added `IsolineGeneratesADetailByDensityGrid` (renamed/corrected from
+`IsolineGeneratesADensityByDetailGrid`) to `TessellatorTest.cpp`, straightforward.
+
+The two new `CanonicalizeStageTest.cpp` tests took several iterations to get right:
+- `DomainStageDoesNotTreatPatchTessFactorInputAsPerVertexArray` (Domain-side fix) passed on
+  the first real attempt.
+- `HullStageDoesNotPeelPatchTessFactorOutputRowCount` (Hull-side fix) needed several tries:
+  first two attempts left the module's signature entirely unset (`Sig.has_value()` false) due
+  to using unused function parameters / a shape the analysis didn't recognize as constant
+  writes at all. A whole-array `store [4 x float] [...]` got the signature set but only found
+  1 element instead of 2 elements' worth of row information. Adding a genuine per-control-point
+  output store alongside got `Sig.has_value()` working but the signature was still being read
+  from the wrong function -- discovered (via an existing analogous test,
+  `NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsSplitAndPruned`) that a
+  barrierless hull entry mixing per-control-point and per-patch (`Patch`-decorated) writes gets
+  split by `splitBarrierlessTessellationControlEntry` into `main` (control-point phase) and a
+  new `main.patchconstant` (patch-constant phase) -- so the test needs to look up
+  `main.patchconstant`'s own signature, not `main`'s. Even after fixing that, `RowCount` still
+  read as `1` instead of the expected `4`, because the test's synthetic `!spirv.Decorations`
+  metadata for `gl_TessLevelOuter` was missing the actual `Patch` decoration (SPIR-V code 15)
+  that the new `!D.Patch` guard depends on -- the test IR had only the `BuiltIn` decoration,
+  not both together like a real DXC-compiled shader always has (confirmed via `spirv-dis`
+  earlier). Adding `!4 = !{i32 15}` to the global's decoration list fixed it: all 3 new tests
+  pass, and the full `FeMeTransformsGraphicsTests` (70/70) and `check-feme` (2788/2847, 0
+  failed) suites remain clean.
+
+## CTS
+
+Ran a real `dEQP-VK.tessellation.*isoline*` sweep from `/home/dev/dev/VK-GL-CTS/`. Every
+remaining failure in that group turned out to be pre-existing and unrelated to this fix's
+scope -- confirmed directly by `git stash`-ing this session's changes, rebuilding, and
+re-running one representative case (`dEQP-VK.tessellation.tesscoord.isolines_equal_spacing`):
+identical `VK_ERROR_INITIALIZATION_FAILED` at `vkCreateGraphicsPipelines` both before and
+after the fix. These CTS cases use `glslang`-compiled SPIR-V (not DXC/HLSL), and this fix's own
+scope is specific to how `CanonicalizeStage.cpp` classifies `Patch`-decorated tess-factor
+builtins that DXC's own HLSL->SPIR-V lowering produces -- a real but distinct gap, not
+introduced or touched by this row. The broader `dEQP-VK.tessellation.*` group also still hits
+several distinct, pre-existing `deqp-vk`-process-aborting crashes documented since roadmap L27
+(this run additionally surfaced a `PromoteMemoryToRegister` non-promotable-alloca assertion in
+`dEQP-VK.tessellation.user_defined_io.per_patch.vertex_io_array_size_implicit.isolines`, a new
+member of that same pre-existing bucket rather than a regression).
+
+## Docs
+
+Struck through L24(b) in `Roadmap.md` with a closure write-up covering both root causes, added
+a matching `VulkanCTSReport.md` section, and added a design-doc status paragraph in
+`FeMeGraphicsDesign.md` alongside the existing L24(a) entry documenting the corrected `Patch`
+decoration handling and the isoline U/V convention.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed, a pure
+correctness fix with no new feature/extension surface.
