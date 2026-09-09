@@ -678,6 +678,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   llvm::SmallVector<SPIRVModuleInfo> Modules;
   feme::spirv::ResourceInfoMap Resources;
   feme::spirv::StageIOInfoMap StageIOVariables;
+  feme::spirv::SpecConstantValueMap SpecConstants;
   feme::spirv::FloatControlInfoMap RoundingModeRTZWidths;
   feme::spirv::FloatControlInfoMap DenormFlushToZeroWidths;
   feme::spirv::FastMathDefaultMap FastMathDefaults;
@@ -718,6 +719,15 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
       // feme::spirv::prepareStageIOVariables).
       for (auto &StageIOVar : feme::spirv::prepareStageIOVariables(SPIRVModule))
         StageIOVariables[StageIOVar.getKey()] = StageIOVar.getValue();
+      // Resolves every specialization constant to its own declared default
+      // value up front (this ICD has no runtime `VkSpecializationInfo`
+      // override mechanism, so that default is the only value it could
+      // ever actually take), before the conversion may have already
+      // dropped the `spirv.SpecConstant`/`spirv.SpecConstantComposite`
+      // declaration a `spirv.mlir.referenceof` use resolves against by the
+      // time that use is legalized (roadmap L7j).
+      for (auto &SpecConstant : feme::spirv::prepareSpecConstants(SPIRVModule))
+        SpecConstants[SpecConstant.getKey()] = SpecConstant.getValue();
     }
     ++Index;
   }
@@ -732,7 +742,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
   feme::spirv::populateSPIRVToLLVMTargetPatterns(
-      TypeConverter, Patterns, Resources, StageIOVariables,
+      TypeConverter, Patterns, Resources, StageIOVariables, SpecConstants,
       RoundingModeRTZWidths, DenormFlushToZeroWidths, FastMathDefaults);
 
   mlir::ConversionTarget Target(*Ctx);

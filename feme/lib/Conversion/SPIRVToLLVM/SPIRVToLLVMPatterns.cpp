@@ -6651,14 +6651,12 @@ public:
 /// supporting specialization constants (there is no other way to spell
 /// `LocalSizeId`'s three operands) would otherwise fail legalization even
 /// though nothing in the entry point's own body ever references them --
-/// `ExecutionModeIdPattern` above already erased their only reference.
-/// A specialization constant genuinely read by the shader body (via
-/// `spirv.mlir.referenceof`, not an execution mode) is a distinct,
-/// still-unimplemented feature: erasing its declaration here does not
-/// paper over that gap, since `spirv.mlir.referenceof` itself has no
-/// conversion pattern either and fails legalization on its own, now with
-/// a more precise "unresolved symbol" diagnostic instead of a spurious one
-/// pointing at the declaration.
+/// `ExecutionModeIdPattern` above already erased their only reference. A
+/// specialization constant genuinely read by the shader body (via
+/// `spirv.mlir.referenceof`) is resolved directly to its own compile-time
+/// value by `ReferenceOfConversionPattern` below (roadmap L7j) before this
+/// pattern's own erasure ever runs, so this pattern's job is unconditional
+/// declaration cleanup either way, not a "no real reference exists" bet.
 class SpecConstantErasurePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::SpecConstantOp> {
 public:
@@ -6671,6 +6669,118 @@ public:
     Rewriter.eraseOp(Op);
     return mlir::success();
   }
+};
+
+/// Drops `spirv.SpecConstantComposite` (roadmap L7j), mirroring
+/// `SpecConstantErasurePattern` above for the composite case: any real
+/// reference to it has already been resolved directly to a compile-time
+/// value by `ReferenceOfConversionPattern` below, via the same
+/// `feme::spirv::SpecConstantValueMap` `prepareSpecConstants` collected
+/// before this conversion ran (by the time this declaration's own use is
+/// legalized, the value it would resolve to has to already be in hand --
+/// see prepareSpecConstants's own comment for why), so this declaration's
+/// own removal is unconditional cleanup, never a silent gap.
+class SpecConstantCompositeErasurePattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::SpecConstantCompositeOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::SpecConstantCompositeOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::SpecConstantCompositeOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
+/// Returns \p Type's own element type if it (or, for a vector, its element
+/// type) is a *signed* or *unsigned* (not signless) `IntegerType` -- the
+/// same SPIR-V-vs-LLVM integer-signedness mismatch upstream's own
+/// `ConstantScalarAndVectorPattern` (`spirv.Constant`) already has to
+/// retype away, needed again here since a specialization constant's own
+/// declared value carries the identical mismatch. A null result means no
+/// such retyping is needed (a signless integer, a float, or a bool -- all
+/// already representable as-is).
+static mlir::IntegerType
+getSignedOrUnsignedIntElementType(mlir::Type Type) {
+  mlir::Type ElementType = Type;
+  if (auto VecType = mlir::dyn_cast<mlir::VectorType>(Type))
+    ElementType = VecType.getElementType();
+  auto IntType = mlir::dyn_cast<mlir::IntegerType>(ElementType);
+  if (IntType && !IntType.isSignless())
+    return IntType;
+  return {};
+}
+
+/// Converts `spirv.mlir.referenceof` (roadmap L7j) by materializing the
+/// specialization constant it names directly as an `llvm.mlir.constant` of
+/// its own resolved compile-time value (`feme::spirv::SpecConstantValueMap`,
+/// collected by `prepareSpecConstants` before this conversion ran): this
+/// ICD has no runtime `VkSpecializationInfo` override mechanism threaded
+/// through `Pipeline.cpp`'s own pipeline-creation path at all, so a spec
+/// constant's own declared default value is the only value it could ever
+/// actually take, making this fold always correct rather than merely an
+/// approximation. Declines (rather than approximates) any symbol
+/// `prepareSpecConstants` itself already declined to resolve -- a
+/// `struct`/nested-`array`-shaped `spirv.SpecConstantComposite`, unreached
+/// by any known real HLSL/CTS source today (see its own comment) -- with a
+/// precise diagnostic naming the actual gap, rather than the generic
+/// "unresolved symbol" one a bare `SymbolTable` lookup failure would give.
+class ReferenceOfConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ReferenceOfOp> {
+public:
+  ReferenceOfConversionPattern(
+      mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
+      mlir::PatternBenefit Benefit,
+      const feme::spirv::SpecConstantValueMap &SpecConstants)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::ReferenceOfOp>(
+            Context, TypeConverter, Benefit),
+        SpecConstants(SpecConstants) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ReferenceOfOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto It = SpecConstants.find(Op.getSpecConst());
+    if (It == SpecConstants.end())
+      return Rewriter.notifyMatchFailure(
+          Op, "referenced specialization constant has no resolvable "
+              "compile-time value (e.g. a struct/nested-array-shaped "
+              "composite)");
+
+    mlir::Type SrcType = It->second.getType();
+    mlir::Type DstType = getTypeConverter()->convertType(SrcType);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    if (mlir::IntegerType SrcIntType =
+            getSignedOrUnsignedIntElementType(SrcType)) {
+      mlir::IntegerType SignlessType =
+          Rewriter.getIntegerType(SrcIntType.getWidth());
+      if (mlir::isa<mlir::VectorType>(SrcType)) {
+        auto SrcElements = mlir::cast<mlir::DenseIntElementsAttr>(It->second);
+        Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(
+            Op, DstType,
+            SrcElements.mapValues(
+                SignlessType,
+                [](const llvm::APInt &Value) { return Value; }));
+        return mlir::success();
+      }
+      auto SrcAttr = mlir::cast<mlir::IntegerAttr>(It->second);
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(
+          Op, DstType,
+          Rewriter.getIntegerAttr(SignlessType, SrcAttr.getValue()));
+      return mlir::success();
+    }
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(Op, DstType,
+                                                        It->second);
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::SpecConstantValueMap &SpecConstants;
 };
 
 /// Converts a uniform buffer array's own content (see BlockElement's own
@@ -7095,10 +7205,71 @@ feme::spirv::prepareStageIOVariables(mlir::spirv::ModuleOp Module) {
   return StageIOVariables;
 }
 
+feme::spirv::SpecConstantValueMap
+feme::spirv::prepareSpecConstants(mlir::spirv::ModuleOp Module) {
+  SpecConstantValueMap Values;
+  for (mlir::Operation &Op : Module.getBody()->getOperations()) {
+    if (auto ScalarConst = mlir::dyn_cast<mlir::spirv::SpecConstantOp>(Op)) {
+      Values[ScalarConst.getSymName()] = ScalarConst.getDefaultValue();
+      continue;
+    }
+
+    auto CompositeConst =
+        mlir::dyn_cast<mlir::spirv::SpecConstantCompositeOp>(Op);
+    if (!CompositeConst)
+      continue;
+
+    // Only a vector-shaped composite (e.g. `gl_WorkGroupSize`'s own
+    // `vector<3xi32>` `LocalSizeId` composite, the shape any known real
+    // HLSL/CTS source this ICD's frontend surface reaches actually needs)
+    // is resolved here; a `spirv.struct`/nested-`spirv.array`-shaped
+    // composite is left unresolved (simply omitted from the map, rather
+    // than approximated) -- `ReferenceOfConversionPattern` below declines
+    // any reference this omission leaves unresolved, with its own precise
+    // diagnostic.
+    auto VecType = mlir::dyn_cast<mlir::VectorType>(CompositeConst.getType());
+    if (!VecType)
+      continue;
+
+    llvm::SmallVector<mlir::Attribute> Elements;
+    Elements.reserve(CompositeConst.getConstituents().size());
+    bool AllResolved = true;
+    for (mlir::Attribute Constituent : CompositeConst.getConstituents()) {
+      mlir::TypedAttr ElementAttr;
+      if (auto SymRef = mlir::dyn_cast<mlir::FlatSymbolRefAttr>(Constituent)) {
+        // A reference to another (already-declared, per SPIR-V's own
+        // declare-before-use symbol rule) specialization constant.
+        auto It = Values.find(SymRef.getValue());
+        if (It == Values.end()) {
+          AllResolved = false;
+          break;
+        }
+        ElementAttr = It->second;
+      } else {
+        // An inline (non-specialization) constant constituent.
+        ElementAttr = mlir::dyn_cast<mlir::TypedAttr>(Constituent);
+      }
+      if (!ElementAttr || ElementAttr.getType() != VecType.getElementType()) {
+        AllResolved = false;
+        break;
+      }
+      Elements.push_back(ElementAttr);
+    }
+    if (!AllResolved ||
+        static_cast<int64_t>(Elements.size()) != VecType.getNumElements())
+      continue;
+
+    Values[CompositeConst.getSymName()] = mlir::cast<mlir::TypedAttr>(
+        mlir::DenseElementsAttr::get(VecType, Elements));
+  }
+  return Values;
+}
+
 void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables,
+    const SpecConstantValueMap &SpecConstants,
     const FloatControlInfoMap &RoundingModeRTZWidths,
     const FloatControlInfoMap &DenormFlushToZeroWidths,
     const FastMathDefaultMap &FastMathDefaults) {
@@ -7158,7 +7329,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SUDotConversionPattern, SDotAccSatConversionPattern,
       UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
       SetMeshOutputsEXTConversionPattern, EmitMeshTasksEXTConversionPattern,
-      SpecConstantErasurePattern, StageIOGlobalVariablePattern,
+      SpecConstantErasurePattern, SpecConstantCompositeErasurePattern,
+      StageIOGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
@@ -7172,6 +7344,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                                    FeMeBenefit + 1);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit, StageIOVariables);
+  Patterns.add<ReferenceOfConversionPattern>(Patterns.getContext(),
+                                             TypeConverter, FeMeBenefit,
+                                             SpecConstants);
   Patterns.add<StageIOArrayAccessChainPattern>(Patterns.getContext(),
                                                TypeConverter, FeMeBenefit);
   Patterns.add<

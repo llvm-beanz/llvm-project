@@ -106,6 +106,36 @@ ResourceInfoMap prepareResourceVariables(mlir::spirv::ModuleOp Module);
 /// it.
 using StageIOInfoMap = llvm::StringMap<unsigned>;
 
+/// A specialization constant's (`spirv.SpecConstant`/`spirv.
+/// SpecConstantComposite`) resolved compile-time value, keyed by the symbol
+/// declaring it (roadmap L7j). This ICD has no runtime specialization-info
+/// override mechanism (Vulkan's `VkSpecializationInfo` is never threaded
+/// through `Pipeline.cpp`'s own pipeline-creation path), so a spec
+/// constant's own declared default value is the only value it could ever
+/// actually take -- this map is that value, already resolved to a real
+/// `mlir::TypedAttr` a `spirv.mlir.referenceof` of that symbol can be
+/// replaced with directly, recursively folding a composite's own
+/// constituents (each either another spec constant's own resolved value,
+/// looked up by symbol, or an inline non-specialization constant already
+/// given as a real attribute) into one aggregate attribute matching the
+/// composite's declared type.
+using SpecConstantValueMap = llvm::StringMap<mlir::TypedAttr>;
+
+/// Recovers every `spirv.SpecConstant`/`spirv.SpecConstantComposite`'s
+/// resolved compile-time value in \p Module (see SpecConstantValueMap),
+/// keyed by symbol name. A `spirv.SpecConstantComposite` whose declared
+/// type is not representable as a `mlir::DenseElementsAttr` (i.e. not a
+/// `vector`/`tensor`-shaped composite -- a SPIR-V `struct`/nested-`array`
+/// composite, unreached by any real HLSL/CTS source this ICD's frontend
+/// surface has confirmed so far) is omitted from the map rather than
+/// approximated, so `ReferenceOfConversionPattern` correctly declines it
+/// instead of silently miscompiling it. Must run before the conversion,
+/// the same way prepareResourceVariables/prepareStageIOVariables do: by
+/// the time a `spirv.mlir.referenceof` is legalized, the `spirv.
+/// SpecConstant`/`SpecConstantComposite` declaration(s) it names may
+/// already have been erased.
+SpecConstantValueMap prepareSpecConstants(mlir::spirv::ModuleOp Module);
+
 /// Recovers the address space of every non-builtin `Input`/`Output`
 /// variable \p Module declares. Must run before the conversion: unlike a
 /// resource or builtin variable, a stage-IO variable's declaration survives
@@ -170,11 +200,13 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// `mlir::populateSPIRVToLLVMConversionPatterns`.
 /// \p Resources must have been collected by prepareResourceVariables, and
 /// \p StageIOVariables by prepareStageIOVariables; both must outlive
-/// \p Patterns. \p RoundingModeRTZWidths and \p DenormFlushToZeroWidths,
-/// likewise outliving \p Patterns, are recovered by
-/// ConvertSPIRVToLLVMPass.cpp's collectEntryPoints -- FeMe's own pass, not
-/// this file, since they are read from `spirv.ExecutionMode`, an op outside
-/// a `spirv.func` body these per-op conversion patterns otherwise never see.
+/// \p Patterns. \p SpecConstants must have been collected by
+/// prepareSpecConstants, likewise outliving \p Patterns. \p
+/// RoundingModeRTZWidths and \p DenormFlushToZeroWidths, likewise outliving
+/// \p Patterns, are recovered by ConvertSPIRVToLLVMPass.cpp's
+/// collectEntryPoints -- FeMe's own pass, not this file, since they are read
+/// from `spirv.ExecutionMode`, an op outside a `spirv.func` body these
+/// per-op conversion patterns otherwise never see.
 /// \p FastMathDefaults, likewise recovered by collectEntryPoints (this time
 /// from `spirv.ExecutionModeId`), is `FPFastMathDefault`'s own per-type
 /// default (roadmap F15d).
@@ -182,6 +214,7 @@ void populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables,
+    const SpecConstantValueMap &SpecConstants,
     const FloatControlInfoMap &RoundingModeRTZWidths,
     const FloatControlInfoMap &DenormFlushToZeroWidths,
     const FastMathDefaultMap &FastMathDefaults);
