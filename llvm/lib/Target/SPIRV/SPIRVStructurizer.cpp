@@ -311,7 +311,7 @@ class SPIRVStructurizerImpl {
       const DomTreeBuilder::BBDomTree &DT = getDT();
       assert(DT.dominates(Header, Merge));
       std::vector<BasicBlock *> Output;
-      POV->partialOrderVisit(*Header, [&](BasicBlock *BB) {
+      visit(*Header, [&](BasicBlock *BB) {
         if (BB == Merge)
           return false;
         if (DT.dominates(Merge, BB) || !DT.dominates(Header, BB))
@@ -338,7 +338,7 @@ class SPIRVStructurizerImpl {
       }
 
       std::vector<BasicBlock *> Output;
-      POV->partialOrderVisit(*Node->Header, [&](BasicBlock *BB) {
+      visit(*Node->Header, [&](BasicBlock *BB) {
         if (OutsideBlocks.count(BB) != 0)
           return false;
         if (DT.dominates(Node->Merge, BB) || !DT.dominates(Node->Header, BB))
