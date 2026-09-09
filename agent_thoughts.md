@@ -72534,3 +72534,188 @@ confirms no regressions from the generalized width-check logic.
 Broken into three separate commits: (1) the `SPIRVResourceLowering.cpp`
 fix plus new unit tests, (2) the doc updates (design doc, CTS report,
 roadmap), (3) this `agent_thoughts.md` append, on its own, last.
+
+# Session: Roadmap L76(b) -- feme never inlined a GLSL-sourced helper function before widening it
+
+## Starting point
+
+Asked to close out roadmap L76(b) or other prerequisites blocking the
+L-series milestones. L76(b)'s own filed text described a narrow bug:
+every `_compute`-stage case of
+`dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*`
+failed with a near-total image mismatch, hypothesized as an `Array2D`-
+specific, explicit-`Grad`-specific compute-stage gap in
+`femeCpuImageSample2DArrayV4F32`'s own footprint math, or in how the
+compute-stage entry point's per-invocation resource plumbing differs
+from the fragment-stage path.
+
+## Investigation: the filed framing was too narrow (again)
+
+Reproduced the failure directly against the real CTS binary first:
+16/16 Fail as filed (9 unrelated `NotSupported` for
+`mirror_clamp_to_edge`). Then, before touching any code, tried to
+falsify the filed hypothesis the same way the immediately preceding
+L76(a) session's own precedent suggested I should:
+
+1. Ran the identical non-arrayed `Plain2D` analogue
+   (`dEQP-VK.texture.filtering.2d.combinations.linear_mipmap_linear.linear.*_compute`)
+   and got the **identical 16/16 Fail** pattern. This alone disproved
+   "Array2D-specific."
+2. Ran `dEQP-VK.glsl.texture_functions.texturegrad.sampler2d{,array}_{fixed,float}_compute`
+   and `texturelod.*_compute` -- all Pass. `textureGrad`/`textureLod`
+   from a compute shader work fine in isolation, disproving "explicit-
+   Grad-specific" and ruling out a `femeCpuImageSample2DArrayV4F32`
+   math bug entirely.
+3. Ran the simplest possible case in the whole `filtering.*_compute`
+   family -- `a1r5g5b5_unorm.{nearest,linear}_compute`, no mipmapping,
+   no derivatives, no Grad -- and it **also failed identically**. This
+   was the real turning point: the bug isn't in any sampling function
+   at all, it's in the shared `ComputeBackend`/`compShaderTemplate` test
+   harness shape itself, used by the entire
+   `dEQP-VK.texture.filtering.*_compute` family (thousands of cases).
+
+## Building a real standalone repro
+
+Rather than trying to reduce a failing CTS case through `feme-translate`
+(the tooling roadmap L35(a) already worked around, but still a heavier
+path than needed here), I hand-wrote a GLSL compute shader matching
+`vktTextureTestUtil.cpp`'s `compShaderTemplate` byte-for-byte: a `Block`
+UBO, combined `sampler2D`, `writeonly rgba32f image2D`, push constants,
+and a `readonly std430 Geometry` SSBO with the exact same
+`interpolate()` perspective-correct barycentric helper function CTS's
+own shader uses (four texCoords + four positions, homogeneous divide by
+`.w`, triangle-selecting branch). Compiled with `glslangValidator`
+(much faster than routing through `dxc`/HLSL for a GLSL-shaped repro),
+hand-wrote a matching `offload-test-suite` `pipeline.yaml`, and ran it
+directly through `offloader` against the real `feme_vulkan` ICD --
+bypassing CTS's own harness entirely. This reproduced the bug standalone:
+**all-`NaN`** output.
+
+This is the same "manual offloader repro, bypassing feme-translate/CTS
+harness overhead" methodology the L76(a)/L74/L75 sessions already
+established, applied here to a GLSL-shaped (not HLSL-shaped) repro for
+the first time -- `offload-test-suite`'s own YAML schema doesn't have a
+raw GLSL combined-sampler resource kind, but `Kind: SampledTexture2D`
+(designed around HLSL's `vk::SampledTexture2D`) turned out to describe
+the same SPIR-V binding shape `glslangValidator` emits for a plain GLSL
+`sampler2D` just fine, once I found (by re-reading
+`Vk.SampledTexture2D.SampleGrad.test.yaml`'s full `Samplers:` block, cut
+off in the prior session's partial view) that a `SampledTexture2D`
+resource still needs its own `Samplers:` entry alongside its
+`DescriptorSets:` one, contrary to what I'd assumed from the partial
+view.
+
+## Bisection: the real root cause was architectural, not numerical
+
+Removed one feature at a time from the standalone repro to isolate what
+actually causes the NaN:
+
+- Non-divergent workgroup size (matching dispatch exactly, no
+  early-return branch at all): still NaN. Not a divergence bug.
+- Removing the early-return bounds check entirely: still NaN. Not that
+  either.
+- Removing the barycentric triangle-selection branch (hardcoding one
+  path): still NaN. Not a control-flow bug at all.
+- Removing the perspective divide (`b_i / w_i`), keeping a plain affine
+  bilinear blend instead: **no more NaN.** The division was clearly
+  involved -- but dumping the raw `w0..w3` values read from the SSBO
+  showed they were all correctly `1.0`, so the SSBO reads themselves
+  weren't returning garbage. Dumping `tc.x`/`invW` directly (skipping
+  the subsequent `textureGrad` call) still showed NaN when computed
+  inside a separate `interpolate()` function, but showed the
+  mathematically-correct values when the *identical* arithmetic was
+  inlined directly into `main()` instead.
+- A minimal isolated repro (a helper function taking a `vec2` parameter
+  and returning a `vec2`, doing simple scalar arithmetic with no SSBO
+  access at all) didn't produce NaN, but did produce a different,
+  equally wrong symptom: the *same* result for every invocation,
+  regardless of each invocation's own distinct input coordinate -- i.e.
+  the function call was silently broadcasting one lane's argument value
+  to every invocation instead of passing each invocation's own value
+  through.
+- A helper function using only scalar float parameters (no vector types
+  at all) worked correctly.
+
+This pointed squarely at the function-call boundary itself, specifically
+for vector-typed arguments/return values, as the real defect -- and
+grepping the feme CPU pipeline confirmed it architecturally: every one
+of `SIMDize.cpp`, `Linearize.cpp`, `WaveLowering.cpp`,
+`ResourceLowering.cpp`, and every stage `*WrapperPass` walks
+`for (Function &F : M) if (!F.isDeclaration() &&
+feme::isShaderEntryPoint(F))` -- entry-point-only, unconditionally.
+There is no function-inlining pass anywhere in feme's CPU pipeline, no
+MLIR-level SPIR-V inliner run before `SPIRVToLLVMTranslator`, and no
+handling of `OpFunctionCall`/`spirv.FunctionCall` in
+`SPIRVToLLVMPatterns.cpp` at all. The only reason this had never
+surfaced before is that every HLSL/DXIL-sourced module already arrives
+fully inlined (`dxc` inlines every user function before ever emitting
+DXIL/SPIR-V), so a GLSL/glslang-compiled module -- which does *not*
+inline non-trivial functions by default -- is the only source of a
+multi-function module reaching this pipeline in the first place, and
+this project's test suite (dominated by HLSL/`dxc`-compiled repros)
+had essentially never exercised that path until this session's own
+CTS-sourced GLSL repro.
+
+## The fix
+
+Added `feme::cpu::InlineHelperFunctionsPass`
+(`feme/lib/Transforms/CPU/InlineHelperFunctions.{h,cpp}`): marks every
+non-entry-point, non-declaration function `alwaysinline`+`internal`,
+then runs `llvm::AlwaysInlinerPass` followed by `llvm::GlobalDCEPass` to
+clean up the now-callerless helper bodies. A no-op (skipped outright,
+`PreservedAnalyses::all()`) when no such helper function exists at all
+-- the common case for every HLSL/DXIL-sourced module. Wired in as the
+CPU pipeline's new first step, before even `SPIRVBuiltinFoldingPass`
+(`feme/lib/Target/CPU/Pipeline.cpp`), so every later pass sees exactly
+the single-function-per-stage shape it already assumed.
+
+Chose LLVM's own `AlwaysInlinerPass` + `GlobalDCEPass` rather than
+writing a bespoke inliner, since shader entry points are guaranteed
+acyclic (no recursion in SPIR-V/Vulkan) and `AlwaysInlinerPass` already
+handles nested/repeated call sites correctly and iteratively --
+confirmed by this session's own "nested helper calls" and "multiple call
+sites of the same helper" unit tests.
+
+The first unit-test attempt hit an assertion failure
+(`AnalysisPasses.count(PassT::ID()) && "This analysis pass was not
+registered..."`) because `AlwaysInlinerPass` needs the full
+Loop/Function/CGSCC/Module analysis-manager tier cross-registered via
+`PassBuilder`, not a bare `ModuleAnalysisManager` -- fixed by mirroring
+the exact analysis-manager setup `Pipeline.cpp`'s own top-level
+`CompiledStage::create` already uses.
+
+## Verification
+
+- Every manual GLSL repro built during bisection now produces correct,
+  per-invocation-varying, NaN-free output (re-ran all seven variants
+  after rebuilding).
+- Real CTS: this row's own named group, 16/16 Pass (up from 16/16 Fail).
+- Broader regression sweep (given how pervasive this bug turned out to
+  be): `2d.formats.*_compute` (48/120 Pass, 0 Fail),
+  `2d.combinations.*_compute` (192/675 Pass, 0 Fail),
+  `2d_array.combinations.*_compute` (192/300 Pass, 0 Fail) -- zero
+  `Fail` across all four sweeps; every remaining non-Pass case is
+  `NotSupported` for an unrelated missing feature/format. Also
+  double-checked `glsl.texture_functions.texturegrad.*_compute` for
+  regressions: 14 pre-existing `Fail`s remain, but all 14 are
+  `isampler`/`usampler` (integer-texture) shapes that were already
+  failing pipeline creation before this change (confirmed by exact
+  `CasePath`), not a regression.
+- `check-feme` (ccache + assertions, `build2`): 2786/2845 Passed, 59
+  Unsupported, 0 Failed -- no regressions.
+- 4 new unit tests, all passing.
+
+Given how broad the root cause turned out to be (any GLSL shader with a
+non-trivial helper function, in any shader stage -- vertex, fragment,
+compute, ... -- not just the `filtering.*_compute` family this row's own
+CTS sweep happened to surface it through), this fix likely quietly
+un-blocks other, not-yet-investigated CTS failures too; those weren't
+chased down this session since they're out of this row's own declared
+scope, but are worth keeping in mind for a future roadmap sweep.
+
+## Commits
+
+Broken into four separate commits: (1) `InlineHelperFunctionsPass`
+itself plus the pipeline wiring, (2) its new unit tests, (3) the doc
+updates (design doc, CTS report, roadmap), (4) this `agent_thoughts.md`
+append, on its own, last.
