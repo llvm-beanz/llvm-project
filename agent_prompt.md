@@ -42,18 +42,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7a from the roadmap or other prerequisites blocking the
+Can you work on L83 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Matrix `spirv.CompositeConstruct`/`spirv.AccessChain`/`spirv.Transpose`
-> legalization gaps**, split out of L7's own original filing text.
-> `CompositeConstructPattern`/`StageIOArrayAccessChainPattern` et al. already
-> exist in `SPIRVToLLVMPatterns.cpp` and handle several shapes (scalar/vector
-> composite construction, stage-IO array access chains, `TransposePattern` for
-> at least some matrix shapes) -- this row's own scope is specifically whichever
-> matrix-typed shape(s) of these three ops still fail today, not yet
-> individually reduced/confirmed this session. Needs a real IR reduction of one
-> of `Basic/Matrix/*.test`'s own cases (L6's own closing text already named this
-> family as the one whose remaining failures trace here) to pin down the *exact*
-> unhandled shape before scoping a fix, following this project's own established
-> reduce-first methodology
+> **`Basic/Matrix`'s own
+> `matrix_groupthread_swizzle_{one,zero}_based`/`matrix_{m,one}-based_setter`
+> cases fail a real numeric `BufferExact` mismatch check at execution time**,
+> split out of L7a's own closing investigation this session: unlike the 4 cases
+> L7a's own fix targeted, these 4 reach `vkCreateGraphicsPipelines`/pipeline
+> execution successfully (no resource-normalization diagnostic, no
+> `VkResult=-3`) but produce a wrong numeric result, strongly suggesting a
+> matrix setter/groupshared-swizzle storage-order or indexing bug rather than a
+> legalization/resource-lowering gap -- not yet reduced to a concrete IR-level
+> cause this session; needs its own real IR reduction (following this project's
+> own established reduce-first methodology, e.g. via `feme-translate
+> --import-spirv`/`feme-opt --feme-convert-spirv-to-llvm` on one of these 4
+> cases' own SPIR-V, then a runtime/CPU-value trace of the actual vs. expected
+> buffer contents) to pin down the exact faulty component before scoping a fix
