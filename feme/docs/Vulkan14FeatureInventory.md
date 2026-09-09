@@ -277,7 +277,25 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `VK_SUBGROUP_FEATURE_BASIC_BIT`: the real op coverage and the spec-
   constant-composite legalization gap are both now resolved, but
   confirming a `VOTE_BIT`/`SHUFFLE_BIT` flip against
-  `dEQP-VK.subgroups.*` remains blocked on L7k's own gap.
+  `dEQP-VK.subgroups.*` remains blocked on L7k's own gap. UPDATE
+  (roadmap L7k, later session): the `OpTypeArray`/specialization-constant
+  deserializer gap above is now fixed (`Deserializer::resolveConstantArrayLength`,
+  folding the array length to its compile-time value), confirmed via a real
+  `deqp-vk` re-run of `dEQP-VK.subgroups.*.compute.*` (9,160 cases, chunked
+  per subgroup-category group to route around an unrelated crash found
+  mid-sweep -- see roadmap L7m): 5 `Pass` / 146 `Fail` / 9,007 `NotSupported`
+  / 2 unmeasured (crashed), and the `OpTypeArray count <id> ... can only
+  come from normal constant` diagnostic no longer appears anywhere in the
+  sweep. `NotSupported` count is unchanged (9,007) from L7j's own baseline,
+  confirming this fix does not touch capability gating either way. The
+  now-reachable cases surface three further, distinct blockers unrelated to
+  this gap -- a missing `spirv.MemoryBarrier` legalization pattern (roadmap
+  L7l), a real pre-existing `llvm::DeleteDeadBlocks` crash (roadmap L7m),
+  and a confirmed, genuinely-unrelated runtime-value-verification gap for
+  `gl_SubgroupSize`/`gl_NumSubgroups`/`gl_SubgroupID` (roadmap L7n) -- so
+  `supportedOperations` still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`:
+  confirming a `VOTE_BIT`/`SHUFFLE_BIT` flip against `dEQP-VK.subgroups.*`
+  now remains blocked on L7l/L7m/L7n instead.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
