@@ -333,6 +333,22 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   this row's own scope. `supportedOperations` still advertises only
   `VK_SUBGROUP_FEATURE_BASIC_BIT`: the `VOTE_BIT`/`SHUFFLE_BIT` flip now
   remains blocked on L7m/L7n/L7p only.
+- **L7p (the `subgroupmemorybarriershared`/`_requiredsubgroupsize` `SIGBUS`
+  above) is now closed**: a new `feme::vulkan::patchSpecializationConstants`
+  pre-deserialization raw-word patch applies the real
+  `VkSpecializationInfo` overrides to a shader module's own `OpSpecConstant`
+  literal words before import, so L7k's own array-length-from-spec-constant
+  deserializer fix folds the *real*, pipeline-specialized array length
+  instead of the module's compile-time default -- the actual root cause of
+  the stack-buffer-overflow `SIGBUS` (a 4-byte `alloca` indexed up to ~27x
+  its own size). A real `gdb` re-run confirms the crash is gone entirely; a
+  focused re-run of the whole `subgroupmemorybarrier*` family (8 cases)
+  confirms 3/4 non-`_requiredsubgroupsize` cases now pass outright, with
+  the remaining 2 new gaps (`subgroupmemorybarrierimage`'s own runtime-value
+  mismatch, and every `_requiredsubgroupsize` twin's own group-size-limit
+  rejection) split out to new rows L7r/L7q respectively.
+  `supportedOperations` still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`:
+  the `VOTE_BIT`/`SHUFFLE_BIT` flip now remains blocked on L7m/L7n/L7q/L7r.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

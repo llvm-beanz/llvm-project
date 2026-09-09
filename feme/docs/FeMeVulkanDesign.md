@@ -708,11 +708,43 @@ Full validation and translation occur at compute pipeline creation, when the
 entrypoint, specialization constants, and pipeline layout are known.
 
 Specialization constants must be applied before FeMe lowers SPIR-V to LLVM IR.
-The implementation should use SPIR-V/MLIR structured APIs rather than patching
-binary words. The selected entrypoint and its execution modes determine the
-thread-group size, and both of the specification's mechanisms for a
-specializable group size must be handled before the CPU pipeline resolves group
-dimensions:
+In general the implementation should use SPIR-V/MLIR structured APIs rather
+than patching binary words, but two narrowly-scoped exceptions exist because
+`mlir::spirv::deserialize` itself has no notion of specialization at all --
+every specialization constant it encounters is folded to that constant's own
+module-declared *default* value, with no structured way to plug in the real
+override afterwards for anything the deserializer resolves at import time
+(roadmap L7p):
+
+- `feme::vulkan::patchSpecializationConstants` (`SpecializationPatch.h`/
+  `.cpp`) applies the real `VkSpecializationInfo` overrides directly to a
+  private copy of the shader module's own `OpSpecConstant` literal words,
+  before the module is handed to `SPIRVImporter`/`mlir::spirv::deserialize`
+  at all. This is what lets any specialization-constant-dependent value the
+  deserializer itself resolves at import time -- most notably an
+  `OpTypeArray` length derived from a spec-constant expression (roadmap
+  L7k's own `resolveConstantArrayLength`) -- see the real, pipeline-
+  specialized value rather than the module's compile-time default. Without
+  this, a groupshared array sized by e.g. `gl_WorkGroupSize.x *
+  gl_WorkGroupSize.y * gl_WorkGroupSize.z` is allocated using the default
+  workgroup size baked into the shader rather than the one the real
+  dispatch actually uses, which silently under-allocates whenever a real
+  `VkSpecializationInfo` requests a larger group size than the shader's own
+  default -- a real stack-buffer-overflow crash roadmap L7p's own session
+  root-caused and fixed this way.
+- `feme::vulkan::GroupSize.h`'s own scanner (`resolveComputeGroupSize`)
+  separately re-derives the resolved thread-group size directly from the
+  raw SPIR-V words after specialization, since `mlir::spirv::deserialize`
+  cannot preserve a `BuiltIn` decoration applied to an
+  `OpSpecConstantComposite` through deserialization at all (see that
+  header's own comment) -- no amount of pre-import word patching fixes
+  this second, independent limitation, since the composite's `BuiltIn`
+  decoration itself is simply dropped by the generic decoration-processing
+  path regardless of the constituent scalars' own values.
+
+The selected entrypoint and its execution modes determine the thread-group
+size, and both of the specification's mechanisms for a specializable group
+size must be handled before the CPU pipeline resolves group dimensions:
 
 - The `LocalSizeId` execution mode, whose operands are specialization constant
   ids.

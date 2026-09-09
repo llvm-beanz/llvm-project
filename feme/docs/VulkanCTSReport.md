@@ -34541,3 +34541,116 @@ narrowed from L7m/L7n/L7o/L7p to L7m/L7n/L7p, with this row's own real sweep num
 no new extension advertised. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update
 needed (this fix follows the same `matchPointerBroadcasts`/`rewriteGroupSharedGlobals` design roadmap
 L10/L11 already established; no new design decision introduced).
+
+## L7p: `subgroupmemorybarriershared` stack-buffer-overflow `SIGBUS`, root cause and fix
+
+**Request.** Root-cause and fix the real, previously-unreached `SIGBUS` crash newly reached by
+`dEQP-VK.subgroups.basic.compute.subgroupmemorybarriershared`/`_requiredsubgroupsize`, split out of L7l's
+own closing session. The original filing speculated an `r32ui` image binding (`tempImage`) alongside the
+groupshared array as a plausible distinguishing factor, and a call through a corrupted/never-initialized
+function pointer as the likely mechanism.
+
+**Reproduction and register-state analysis.** A direct `gdb -batch -ex run -ex "bt full" -ex "info
+registers" -ex "x/20i $pc-20"` re-run confirms the crash: `SIGBUS`, crashing PC `0xdca345eadca345ea`. A new
+finding beyond the original filing: registers x19-x25 and x30 (the link register) all hold the exact same
+poisoned value as the PC. This is consistent with a function epilogue restoring callee-saved registers
+from a stack region that was never correctly written (or was overwritten by something else), then `ret`
+jumping through the corrupted `x30` -- i.e. a stack-corruption bug, not a genuinely uninitialized/dangling
+function pointer as the filing speculated. The poison value's own byte pattern (`EA 45 A3 DC` repeating)
+was searched across the whole codebase and found nowhere as a real fill constant, confirming genuine memory
+corruption rather than a sanitizer artifact (no ASan/UBSan/MSan is enabled in this build).
+
+**Disproving the "image binding" hypothesis.** The actual GLSL shader source for
+`subgroupmemorybarriershared` (and every sibling case in the `subgroupmemorybarrier*` family) was fetched
+from a `deqp-vk --deqp-log-flush=enable` XML log and compared directly. Every case in the family --
+including `subgroupmemorybarrier`/`subgroupmemorybarrierbuffer`, neither of which crash -- declares the
+same unused `tempImage` (binding 3, `r32ui`) binding. The image binding itself is not the differentiator;
+the real distinguishing factor is that only `subgroupmemorybarriershared`'s shader body actually
+reads/writes its own groupshared array (`tempShared[localId]`), while the other variants declare the array
+but never touch it.
+
+**Root cause.** A temporary `FEME_DEBUG_DUMP_FINAL_IR`-gated dump was added to `CompiledStage.cpp` (right
+before the JIT step, after `verifyModule`; reverted before commit, mirroring L45/L7o's own established
+debug-hook convention) to capture the final pre-JIT LLVM IR for the crashing case. The dump found the
+smoking gun:
+
+```llvm
+%groupshared = alloca [4 x i8], align 4
+...
+wave.loop.body:
+  ...
+  %32 = getelementptr [4 x i8], ptr %groupshared, i64 %indvars.iv
+  ...
+  call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> %31, <4 x ptr> align 4 %.splat.splat24.i, ...)
+  fence acq_rel
+  ...
+  %exitcond.not = icmp eq i64 %indvars.iv.next, 27   ; loop runs 27 iterations x 4 lanes
+```
+
+The `alloca [4 x i8]` allocates room for exactly one `i32` element, but the wave loop indexes it up to
+`indvars.iv` = 26 (real total invocation count 105, confirmed via the same dump's own `splat (i32 105)`) --
+a stack buffer overflow of roughly 25x the allocation's own size, corrupting the calling frame's saved
+callee-saved registers and return address exactly as the `gdb` register dump showed.
+
+The array's declared length is `gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z`, an
+`OpTypeArray` whose length operand is an `OpSpecConstantOp` (a product of three `OpSpecConstant`s: the
+`LocalSizeId` spec constants). Roadmap L7k's own prior fix
+(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s `processArrayType`/`resolveConstantArrayLength`)
+resolves such a length using the spec constants' *module-declared default values*, since `spirv::ArrayType`
+needs a concrete size at deserialization time -- but the real `dEQP-VK.subgroups.*` dispatch specializes a
+different, much larger workgroup size via a real `VkSpecializationInfo` at pipeline-creation time. The
+folded array length ends up far smaller than the real one (almost certainly `1`, matching the observed
+4-byte `alloca`). This is a genuine correctness gap L7k's own availability fix introduced as the cost of
+closing the earlier "rejected outright" gap -- the same "closing one gap reveals the next layer" pattern
+this whole L7-series chain has repeatedly hit.
+
+**Fix.** Added `feme::vulkan::patchSpecializationConstants` (new `SpecializationPatch.h`/`.cpp` in
+`feme/lib/Vulkan`), mirroring `GroupSize.h`'s own established "narrowly-scoped exception to use SPIR-V/MLIR
+structured APIs rather than patching binary words" precedent and raw-word-scanning technique.
+`compileComputePipeline` (`Pipeline.cpp`) now applies the real `VkSpecializationInfo` overrides (already
+resolved via the existing `buildSpecializationOverrides`) directly to a private copy of the shader module's
+own `OpSpecConstant` literal words *before* handing them to `SPIRVImporter`/`mlir::spirv::deserialize` --
+so `resolveConstantArrayLength`'s existing default-value fold picks up the real, pipeline-specialized value
+automatically. No change to the deserializer itself was needed. A private copy of the words is used (never
+the immutable `ShaderModule`'s own storage), since a single shader module may be reused across multiple
+pipelines with different specialization overrides. This generalizes to any other spec-constant-dependent
+value a future SPIR-V shape might need resolved at import time, not merely this one array-length case.
+
+**Unit tests.** `SpecializationPatchTest.cpp` (6 new cases): a matching override overwrites the literal
+value word in place; an unmatched `SpecId` and an undecorated/plain-`OpConstant` constant are both left
+untouched; multiple independent overrides in one module are each patched correctly; and an empty override
+list is a no-op (fast path, no scan performed).
+
+**Build/test.** `ninja -C build2 FeMeVulkanTests feme_vulkan`: clean build. `ninja -C build2 check-feme`:
+2,883 tests discovered (2,824 passed, 59 unsupported, 0 failed) -- up by exactly the 6 new unit tests
+relative to L7o's own recorded 2,877/2,818 baseline.
+
+**Real `deqp-vk` verification.** `dEQP-VK.subgroups.basic.compute.subgroupmemorybarriershared` now passes
+outright (`Pass (OK)`), where it previously crashed. A direct `gdb -batch -ex run -ex bt` re-run of the same
+case exits normally with no crash and no stack trace at all. A focused re-run of the whole
+`dEQP-VK.subgroups.basic.compute.subgroupmemorybarrier*` family (8 cases) confirms the `SIGBUS` is gone
+everywhere in the family:
+
+- `subgroupmemorybarrier`, `subgroupmemorybarrierbuffer`, `subgroupmemorybarriershared`: now **Pass**.
+- `subgroupmemorybarrierimage`: fails runtime output verification ("Failed!") -- a distinct, pre-existing
+  gap unrelated to this fix (split out to new roadmap row L7r).
+- All 4 `_requiredsubgroupsize` twins: now fail cleanly at pipeline creation with "resolved group size
+  exceeds maxComputeWorkGroupSize/Invocations" (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`) -- a
+  real, distinct, non-crashing gap this fix newly unmasks now that group-size resolution is correct for the
+  first time (split out to new roadmap row L7q).
+
+A broader per-category `dEQP-VK.subgroups.*.compute.*` sweep (excluding the still-crashing L7m
+`subgroupbarrier*` cases in `basic`, same chunking methodology as prior sessions) confirms no new crashes
+anywhere and no regressions in any previously-passing case.
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's pending-flip blocker list
+narrowed from L7m/L7n/L7p to L7m/L7n/L7q/L7r, with this row's own verification recorded. `VulkanExtension
+Inventory.md` reviewed: no change needed -- an internal pipeline-creation-time correctness fix, no new
+feature or extension bit advertised. `FeMeVulkanDesign.md`'s "Input and specialization" section updated:
+this fix is a real, deliberate deviation from that section's own "use SPIR-V/MLIR structured APIs rather
+than patching binary words" guidance (a second, more general exception alongside `GroupSize.h`'s own
+existing one), so the section now documents both exceptions and why each is necessary.
+
+Split out: **L7q** (the newly-unmasked `_requiredsubgroupsize` group-size-limit rejection) and **L7r**
+(`subgroupmemorybarrierimage`'s own pre-existing runtime-value mismatch), both real, individually-scoped
+remaining gaps this session's own fix did not create and is not equipped to fix.
