@@ -42,32 +42,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L76(b) from the roadmap or other prerequisites blocking the
+Can you close out L23 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Every `_compute`-stage case of
-> `dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*`
-> fails with a near-total image mismatch ("got 352 invalid pixels")**,
-> discovered by roadmap L76's own real CTS sweep of that group's `_fragment`
-> variants (16/16 Pass, confirming L76's own implicit-LOD closure) run alongside
-> its `_compute` variants (16/16 Fail). Distinct from roadmap L69's own
-> `_compute`-stage derivative-group scope: each failing case's own GLSL shader
-> computes `textureGrad(u_sampler, texCoord, dPdx.xy, dPdy.xy)` from a
-> manually-reconstructed screen-space finite-difference
-> (`interpolate(vec2(coord) + vec2(1.0, 0.0), size) - interpolate(vec2(coord),
-> size)`), not a hardware `dFdx`/`dFdy` intrinsic, so it needs no
-> `DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR` execution mode and is not
-> gated by `computeDerivativeGroupQuads`/`Linear` support at all -- this is a
-> plain explicit-`Grad` `Array2D` sample with a real, nonzero,
-> per-invocation-varying `(dPdx, dPdy)` pair, executed from a compute entry
-> point. Not yet started; needs its own real IR reduction of one of these 16
-> cases (or a similarly-shaped offloader repro built directly, since
-> `Feature/Textures/Array.SampleGrad.test` -- confirmed Pass earlier in this
-> same L76 sweep -- is apparently only exercised from a fragment-stage entry
-> point, not a compute one) to isolate whether the bug is in
-> `femeCpuImageSample2DArrayV4F32`'s own explicit-`Grad` footprint math itself,
-> in how the compute-stage entry point's own per-invocation resource/descriptor
-> plumbing differs from the fragment-stage path this same runtime function
-> already passes for, or in the CTS shader's own `interpolate()` helper's
-> barycentric coordinate reconstruction interacting badly with this target's own
-> workgroup/invocation-ID layout.
+> **11 of L3's own 35 cases now clear pipeline creation but fail at
+> `vkQueueSubmit` with `VkResult = -3` (`VK_ERROR_INITIALIZATION_FAILED`)**:
+> `Feature/Textures/Sampler.{address,filter}.test` and their
+> `Vk.SampledTexture2D` YAML siblings (4 cases),
+> `Feature/Semantics/{GraphicsSystemValues,NestedStructSemantics,SemanticTypes,ShadowedSemantics}.test`,
+> `Graphics/MeshShaders/{SimpleLines,SimpleTriangle}.test`, and
+> `Bugs/Texture-Row-Pitch-Readback.test` -- not yet reduced at all; needs its
+> own real IR/log reduction of at least one representative case (most likely
+> `Feature/Textures/Sampler.address.test`, the smallest of this sub-bucket) to
+> determine whether this shares a root cause with L22's texture-sampling
+> sub-bucket (deferred to submission time rather than pipeline-creation time) or
+> is a distinct execution-time gap
