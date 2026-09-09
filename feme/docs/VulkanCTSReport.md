@@ -33372,3 +33372,98 @@ final import-side blocker). `feme/docs/VulkanExtensionInventory.md`'s
 `Vulkan14FeatureInventory.md` reviewed: no change needed (`computeDerivativeGroupQuads`/`Linear`
 are not part of the Vulkan 1.4 core feature-struct floor tracked there). `FeMeGraphicsDesign.md`/
 `FeMeCPUDesign.md` reviewed: no stale text referencing this gap found, no deviation to record.
+
+## Roadmap L7: split into per-cluster sub-rows; L7c closed for `Atan2`/`Step`/`SmoothStep`
+
+### Background
+
+Roadmap L7 filed a large, ungrouped tail of genuinely unimplemented SPIR-V/MLIR legalization
+patterns -- matrix ops, combined-image-samplers, several GLSL.std.450 `spirv.GL.*` builtins,
+`spirv.ImageDrefGather`, several `spirv.GroupNonUniform*` wave-op variants, an unhandled
+`NonUniform` decoration, and a couple of raw unhandled-opcode/deserialization errors -- none of
+which any recorded `deqp-vk` case has ever reached. The row's own text asked for it to be split
+per coherent cluster before any of it is fixed, following the established H7/H19 precedent.
+
+### This session's split
+
+Split L7 into L7a (matrix `spirv.CompositeConstruct`/`spirv.AccessChain`/`spirv.Transpose`),
+L7b (combined-image-sampler `spirv.Image`), L7c (`spirv.GL.*` GLSL.std.450 builtins:
+`SmoothStep`/`Length`/`Distance`/`Atan2`/`Step`/`Normalize`/`UnpackHalf2x16`), L7d
+(`spirv.ImageDrefGather`, a distinct core SPIR-V opcode rather than a GLSL.std.450 builtin,
+despite being adjacent in L7's original prose), L7e (`spirv.GroupNonUniform*` `AllEqual`/
+`Shuffle`/`Elect`, plus confirming `IMul`/`IAdd`'s own non-reduce forms), L7f (the unhandled
+`NonUniform` decoration), and L7g (the leftover raw opcode/deserialization-error tail, a
+deliberate catch-all placeholder pending its own future reduction). L7 itself stays open as
+pure bookkeeping (has every cluster been split out yet); the real remaining work now lives in
+L7a/L7b/L7d/L7e/L7f/L7g.
+
+### L7c: reproducing the gap
+
+Hand-authored a minimal `spirv.module` for each of the seven `spirv.GL.*` ops L7c names and ran
+each through `feme-opt --feme-convert-spirv-to-llvm`. All seven failed identically:
+
+```
+error: failed to legalize operation 'spirv.GL.Atan2' that was explicitly marked illegal: %0 = "spirv.GL.Atan2"(%arg0, %arg1) : (f32, f32) -> f32
+```
+
+Confirmed via `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` that none of the seven has a
+registered pattern in upstream MLIR's own `populateSPIRVToLLVMConversionPatterns` either (only
+the OpenCL extended-instruction-set sibling `spirv.CL.Atan2` has one, `DirectConversionPattern<
+spirv::CLAtan2Op, LLVM::ATan2Op>`) -- this is a genuine gap in both this project's own
+`SPIRVToLLVMPatterns.cpp` and upstream MLIR, not a `feme`-specific oversight of an
+otherwise-available upstream pattern.
+
+### Fix (partial: `Atan2`/`Step`/`SmoothStep`)
+
+Added three new patterns to `SPIRVToLLVMPatterns.cpp`, registered at `FeMeBenefit` in
+`populateSPIRVToLLVMTargetPatterns`:
+
+- `GLAtan2Pattern`: a thin, one-off restatement of upstream's own file-local (and so
+  unreachable from this file) `DirectConversionPattern` shape -- `llvm.intr.atan2` is already a
+  direct, component-wise equivalent for the GLSL.std.450 op, needing no arithmetic
+  decomposition.
+- `GLStepPattern`: lowers `Step(edge, x)` to the GLSL.std.450 spec's own literal definition,
+  `x < edge ? 0.0 : 1.0`, via an `llvm.fcmp olt` plus a two-constant `llvm.select`, mirroring
+  this file's own pre-existing `SignPattern`'s compare-then-select shape.
+- `GLSmoothStepPattern`: lowers `SmoothStep(edge0, edge1, x)` to `t = clamp((x - edge0) /
+  (edge1 - edge0), 0, 1)` (via `llvm.intr.maxnum`/`minnum`, the same pair `spirv.GL.FMax`/`FMin`
+  already map to) followed by `t * t * (3 - 2 * t)`.
+
+`Length`/`Distance`/`Normalize` (each needing a genuine cross-lane multiply-accumulate
+reduction across the input vector's own components -- distinct new infrastructure this session
+did not build) and `UnpackHalf2x16` (needing real bit-manipulation/half-float-conversion
+lowering, not arithmetic at all) remain unfixed; L7c stays open, now scoped to exactly those
+four ops.
+
+### Tests added
+
+New lit test `spirv-to-llvm-gl-atan2-step-smoothstep.mlir` covers all three fixed ops, both
+scalar (`f32`) and vector-typed (`vector<3xf32>`/`vector<2xf32>`/`vector<4xf32>`) -- six cases
+total, each confirmed failing before this session's fix and passing after.
+
+### Verification
+
+- Manual `feme-opt --feme-convert-spirv-to-llvm` smoke test on all three ops: each now
+  legalizes cleanly, producing the expected `llvm.intr.atan2`/`llvm.fcmp`+`llvm.select`/
+  `llvm.intr.maxnum`+`llvm.intr.minnum`+arithmetic IR shape.
+- `FeMeConversionSPIRVToLLVMTests` (gtest): 15/15 pass, unaffected (this suite covers
+  `SPIRVToLLVM.cpp`'s own non-pattern helper functions, not full-pipeline pattern conversion,
+  which this project tests via lit `FileCheck` instead, per the pre-existing
+  `spirv-to-llvm-transcendental-flush-to-zero.mlir` precedent this new test file follows).
+- Full `check-feme`: **2789/2848 passed, 59 unsupported, 0 failed** (up by exactly 1 from the
+  2788/2847 baseline, this row's own new lit test; zero regressions).
+- Per L7's own filing text, no `deqp-vk` case anywhere reaches any of these seven ops --
+  confirmed again this session by grepping the full `dEQP-VK-cases.xml` case list for
+  `atan2`/`smoothstep`/`builtin_functions`, all absent -- so this fix has no possible CTS payoff
+  in either direction. As a broad sanity check on this shared, every-shader-touching
+  pattern-registration file, re-ran `dEQP-VK.glsl.texture_functions.texturegrad.*_compute` (52
+  cases, the same sweep roadmap L60's closing session measured) and got byte-for-byte identical
+  totals (19 Pass/14 Fail/19 NotSupported), confirming zero regression from this change.
+
+### Disposition
+
+Roadmap **L7 split** into L7a-L7g (all newly filed, all open except L7c). **L7c partially
+closed** this session for `Atan2`/`Step`/`SmoothStep`; remains open for `Length`/`Distance`/
+`Normalize`/`UnpackHalf2x16`. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no change needed (an internal SPIR-V-to-LLVM legalization completeness fix, no
+feature/extension bit touched).
