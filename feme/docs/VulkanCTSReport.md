@@ -32806,3 +32806,161 @@ feature/extension surface touched.
 
 Full `check-feme` (ccache + assertions, `build2`): **2782/2841 Passed, 59
 Unsupported, 0 Failed** -- no regressions.
+
+## L76(b): `feme` never inlined a GLSL-sourced module's user-defined helper function before widening it (this session)
+
+### Investigation
+
+Roadmap L76(b)'s own filed framing described a narrow, `Array2D`-specific,
+explicit-`Grad` compute-stage bug: every `_compute`-stage case of
+`dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*`
+failed with a near-total image mismatch ("got 352 invalid pixels"),
+discovered by roadmap L76's own real CTS sweep of that group's
+`_fragment` variants.
+
+Reproduced the failure directly:
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*_compute" \
+  --deqp-log-filename=l76b_before.qpa
+```
+
+**16/16 Fail** (9 `NotSupported` for `mirror_clamp_to_edge`, unrelated).
+
+Broadened the investigation before attempting any fix, since this row's
+own filed hypothesis (`Array2D`-specific, explicit-`Grad`-specific) turned
+out, once tested, not to hold at all:
+
+1. The identical non-arrayed `Plain2D` analogue
+   (`dEQP-VK.texture.filtering.2d.combinations.linear_mipmap_linear.linear.*_compute`)
+   showed the **identical 16/16 Fail** pattern -- ruling out `Array2D`-
+   specificity entirely.
+2. `textureGrad`/`textureLod` sampling from a compute shader works
+   correctly in isolation:
+   `dEQP-VK.glsl.texture_functions.texturegrad.sampler2d{,array}_{fixed,float}_compute`
+   and `texturelod.*_compute` all **3/3 Pass** each -- ruling out a
+   `femeCpuImageSample2DArrayV4F32` Grad-math bug.
+3. Even the simplest case in this whole test family, with no mipmapping,
+   no derivatives, no Grad at all (a plain `texture()` call) --
+   `dEQP-VK.texture.filtering.2d.formats.a1r5g5b5_unorm.{nearest,linear}_compute`
+   -- **fails identically** ("got 4096 invalid pixels", the entire image
+   wrong). This proved the bug lives in the shared `ComputeBackend`
+   compute-shader test-harness shape itself
+   (`vktTextureTestUtil.cpp`'s `compShaderTemplate`: a combined-image-
+   sampler read, a `writeonly`-format-qualified storage-image write, push
+   constants, and a `readonly std430` SSBO manually interpolated in-shader
+   to reconstruct per-pixel texture coordinates and derivatives), used
+   across the entire `dEQP-VK.texture.filtering.*_compute` family
+   (thousands of cases spanning `.2d.formats.*`, `.2d.combinations.*`,
+   `.2d_array.combinations.*`), not anything specific to this row's own
+   named group.
+
+Built a real GLSL compute shader matching `compShaderTemplate`'s exact
+shape byte-for-byte (a `Block` UBO, a combined `sampler2D`, a `writeonly
+rgba32f image2D`, push constants, and a `readonly std430 Geometry` SSBO
+with the exact same `interpolate()` perspective-correct barycentric helper
+function CTS's own shader uses), compiled it with `glslangValidator`, and
+ran it directly through `offloader` against the real `feme_vulkan` ICD
+(bypassing CTS entirely, using a hand-written `pipeline.yaml`). This
+standalone repro reproduced the bug exactly: **all-`NaN` output**.
+
+Bisected feature-by-feature (removing the early-return divergence, the
+barycentric branch, the perspective divide, in turn, and inlining the
+`interpolate()` helper directly into `main` as a control) and isolated the
+true root cause: **`feme`'s CPU pipeline never inlines a GLSL-sourced
+module's user-defined helper function before running any later pass on
+it.** Every one of `feme::cpu::SIMDizePass`, `LinearizePass`,
+`WaveLoweringPass`, `ResourceLoweringPass`, and every stage `*WrapperPass`
+only ever walks the one `llvm::Function` `feme::isShaderEntryPoint`
+flags -- silently leaving any other, separately-compiled helper function's
+own body completely untransformed (still scalar, expecting a single
+uniform argument) while the call site inside the (SIMD-widened) entry
+function feeds it an argument only correct for one lane. Confirmed
+directly: with `interpolate()` fully inlined into `main`, the identical
+shader (same UBO/sampler/SSBO/push-constant shape, same math) produces
+correct, per-invocation-varying output; calling it as a separate function
+-- even a minimal one with no SSBO access at all -- silently broadcasts
+one lane's argument value to every invocation, and adding a bound-resource
+division inside the callee compounds this into outright `NaN`.
+
+An HLSL/DXIL-sourced module never exercises this gap because `dxc` always
+fully inlines every user-defined function into its entry point long before
+this pipeline ever sees it; only a GLSL/glslang-compiled module (where a
+non-trivial helper routinely survives as a real, separate
+`OpFunction`/`OpFunctionCall` pair) reaches this pipeline with more than
+one non-declaration function in the first place -- which is exactly why
+this bug affects the *entire* `ComputeBackend` harness (every case calls
+its own `interpolate()`-shaped helper) regardless of filter mode,
+mipmapping, or explicit-Grad-ness, matching every one of this session's
+own bisection results above.
+
+### Fix
+
+New `feme::cpu::InlineHelperFunctionsPass` (`InlineHelperFunctions.h`/
+`.cpp`, `feme/lib/Transforms/CPU/`): marks every non-entry-point,
+non-declaration function `alwaysinline` and `internal`, runs
+`llvm::AlwaysInlinerPass`, then `llvm::GlobalDCEPass` to remove the
+now-callerless helper bodies. A no-op (skipped outright, reporting
+`PreservedAnalyses::all()`) for the common case of a module with no such
+helper function -- every HLSL/DXIL-sourced module, and the majority of
+prior GLSL test coverage that happened not to exercise a non-trivial
+helper. Runs as the very first step of the CPU pipeline (before even
+`feme::cpu::SPIRVBuiltinFoldingPass`, see `feme/lib/Target/CPU/Pipeline.cpp`),
+restoring the "exactly one non-declaration function per shader stage"
+invariant every later pass already assumed.
+
+4 new unit tests (`InlineHelperFunctionsTest.cpp`): a single helper call,
+multiple call sites of the same helper, nested (two-level) helper calls,
+and the already-fully-inlined no-op case.
+
+### Verification (offloader repros)
+
+Re-ran every one of this session's own manual GLSL repros (the byte-for-
+byte `compShaderTemplate` match, plus every earlier bisection variant:
+no-divergence, no-early-return, no-branch, division-only,
+scalar-parameter-only) against the rebuilt ICD: **every one now produces
+correct, per-invocation-varying, `NaN`-free output**, matching the
+already-correct fully-inlined control in each case.
+
+### Real CTS re-run
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*_compute" \
+  --deqp-log-filename=l76b_after.qpa
+```
+
+**16/16 Pass** (up from 16/16 Fail; the same 9 `mirror_clamp_to_edge`
+`NotSupported` cases unchanged).
+
+Broader regression sweep, given how pervasive this bug was:
+
+| Group | Pass | Fail | NotSupported |
+| --- | --- | --- | --- |
+| `dEQP-VK.texture.filtering.2d.formats.*_compute` | 48/120 | **0** | 72 |
+| `dEQP-VK.texture.filtering.2d.combinations.*_compute` | 192/675 | **0** | 483 |
+| `dEQP-VK.texture.filtering.2d_array.combinations.*_compute` | 192/300 | **0** | 108 |
+
+Zero `Fail` across all four sweeps (this row's own named group plus the
+three above), all remaining non-Pass cases `NotSupported` for an
+unrelated missing feature/format (`VK_EXT_filter_cubic`,
+`VK_KHR_sampler_mirror_clamp_to_edge`, `VK_FORMAT_S8_UINT`, ...).
+
+Also spot-checked `dEQP-VK.glsl.texture_functions.texturegrad.*_compute`
+(the group this session's own earlier investigation used to rule out a
+Grad-math bug) for regressions from this fix: 14 pre-existing `Fail`s
+remain, but every one of them is an `isampler`/`usampler` (integer-
+texture) shape already failing `vkCreateComputePipelines` -- a separate,
+unrelated, pre-existing gap, not a regression, since this fix only changes
+the behavior of shaders that previously executed (if incorrectly), and
+these particular shapes never got that far to begin with.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed -- a compiler-pipeline correctness fix touching no new
+Vulkan feature/extension surface.
+
+Full `check-feme` (ccache + assertions, `build2`): **2786/2845 Passed, 59
+Unsupported, 0 Failed** -- no regressions.

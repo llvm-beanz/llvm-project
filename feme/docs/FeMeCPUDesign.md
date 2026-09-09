@@ -1199,6 +1199,46 @@ L69) needs no such reinterpretation at all, since its own spec-defined
 grouping (any 4 consecutive `LocalInvocationIndex` values) already matches
 row-major order unconditionally.
 
+Deviation (roadmap L76(b)): every CPU-pipeline pass this section (and the
+ones around it) describes -- `SIMDizePass`, `LinearizePass`,
+`WaveLoweringPass`, `ResourceLoweringPass`, every stage `*WrapperPass` --
+was, as originally implemented, silently scoped to walk only the one
+`llvm::Function` `feme::isShaderEntryPoint` flags, on the unstated
+assumption that a shader module always has exactly one non-declaration
+function to begin with. That assumption holds for every HLSL/DXIL-sourced
+module (`dxc` always fully inlines a user-defined helper function into its
+entry point before ever emitting DXIL/SPIR-V), but not for a GLSL/glslang-
+compiled one: a non-trivial GLSL helper function routinely survives as its
+own separate `OpFunction`/`OpFunctionCall` pair, reaching this pipeline as
+a genuinely separate, uninlined `llvm::Function` the entry-point-only walk
+in every pass above never even visits. The observed symptom was silent
+wrong-data corruption, not a diagnosed rejection: the *call site* inside
+the (SIMD-widened) entry function fed the untouched, still-scalar callee
+an argument only correct for one lane, so every invocation's own output
+silently became the one lane's value the callee's own body happened to
+read at whatever SIMD offset the vectorized IR left in that argument
+register (a uniform broadcast of one lane in the simplest case) --
+compounded into outright `NaN` once the callee's own body also divided by
+a bound-resource-loaded value that was, for the same reason, itself
+subtly wrong for every lane but one. `feme::cpu::InlineHelperFunctionsPass`
+closes this gap by restoring the "exactly one non-declaration function per
+shader stage" invariant explicitly, as this pipeline's own new first step
+(before even `SPIRVBuiltinFoldingPass`): it marks every function
+`feme::isShaderEntryPoint` does not flag `alwaysinline` and `internal`,
+runs `llvm::AlwaysInlinerPass`, then `llvm::GlobalDCEPass` to remove the
+resulting callerless helper bodies -- a no-op (skipped outright) for the
+common case of a module with no such helper function to begin with, which
+includes every HLSL/DXIL-sourced module and the majority of prior GLSL
+test coverage that happened not to exercise a non-trivial helper. See
+InlineHelperFunctions.h's file comment for the full analysis, and
+VulkanCTSReport.md's L76(b) entry for the real CTS-level repro
+(`dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.
+linear.*_compute`, a compute-shader test harness shared across thousands
+of other `dEQP-VK.texture.filtering.*_compute` cases that calls a helper
+function performing a perspective-correct barycentric interpolation to
+manually reconstruct per-invocation texture coordinates and derivatives)
+that led to this finding.
+
 **Partial waves.** `GroupSize` need not be a multiple of `W`. The final wave
 of a group runs with an entry mask that has the out-of-range lanes off,
 rather than the kernel being specialized per group. When
