@@ -42,31 +42,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7 from the roadmap or other prerequisites blocking the
+Can you work on L7a from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A long tail of genuinely unimplemented SPIR-V/MLIR legalization patterns
-> this suite's own HLSL-derived shapes reach that no `deqp-vk` case in this
-> project's own recorded runs has ever reached**: matrix
-> `spirv.CompositeConstruct`/`spirv.AccessChain`/`spirv.Transpose`,
-> combined-image-sampler `spirv.Image`, several `spirv.GL.*` builtins
-> (`SmoothStep`/`Length`/`Distance`/`Atan2`/`Step`/`Normalize`/`UnpackHalf2x16`/`ImageDrefGather`),
-> several `spirv.GroupNonUniform*` wave-op variants
-> (`IMul`/`IAdd`/`AllEqual`/`Shuffle`/`Elect`/`BitwiseAnd`/`BitwiseOr` across
-> multiple int widths -- the `BitwiseAnd`/`BitwiseOr` pair already has a
-> narrower, tracked `feme-cpu-simdize`-side gap at H6g-b-a-i-a-i-b's own
-> citation, but the *legalization* gap for the other variants is new and
-> untracked anywhere), an `unhandled Decoration : 'NonUniform'`, an ~~`unknown
-> extension: SPV_KHR_compute_shader_derivatives`~~ (fixed by roadmap L60's own
-> closing session: `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`'s
-> `Extension` enum had no case for this extension name at all, rejecting
-> deserialization of any module declaring it outright; added as case 34, needing
-> no companion capability/execution-mode change since the numerically-identical
-> NV-named enum cases already cover those. See roadmap L60's own closure text
-> for the full fix and CTS verification), and a couple of raw `unhandled
-> opcode`/`unhandled deserializations ... from extension set GLSL.std.450`
-> errors. None of this is mesh/ray-tracing/version-floor work already covered by
-> an H/J/K row above (confirmed by grepping this document for every one of these
-> names before adding this row); each needs its own scoping pass once assigned,
-> split per coherent cluster rather than landed as one row, following H7/H19's
-> own precedent
+> **Matrix `spirv.CompositeConstruct`/`spirv.AccessChain`/`spirv.Transpose`
+> legalization gaps**, split out of L7's own original filing text.
+> `CompositeConstructPattern`/`StageIOArrayAccessChainPattern` et al. already
+> exist in `SPIRVToLLVMPatterns.cpp` and handle several shapes (scalar/vector
+> composite construction, stage-IO array access chains, `TransposePattern` for
+> at least some matrix shapes) -- this row's own scope is specifically whichever
+> matrix-typed shape(s) of these three ops still fail today, not yet
+> individually reduced/confirmed this session. Needs a real IR reduction of one
+> of `Basic/Matrix/*.test`'s own cases (L6's own closing text already named this
+> family as the one whose remaining failures trace here) to pin down the *exact*
+> unhandled shape before scoping a fix, following this project's own established
+> reduce-first methodology
