@@ -393,6 +393,18 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `subgroupbarrier`/`_requiredsubgroupsize` now pass outright. The
   `VOTE_BIT`/`SHUFFLE_BIT` flip now remains blocked on L7s only
   (`subgroupelect`'s own separate, still-open runtime-value mismatch).
+  UPDATE (roadmap L7s, later session): L7s's own root cause is now fixed
+  (`feme::cpu::computeWaveUniformity` was missing a `NeverUniform` case
+  for `Intrinsic::spv_subgroup_local_invocation_id`, the SPIR-V twin of
+  `dx_wave_getlaneindex` which was already present -- a purely-arithmetic
+  consumer of `gl_SubgroupInvocationID`'s per-lane value was left
+  classified uniform and so never widened, even though the intrinsic call
+  itself was unconditionally widened, leaving a dangling `poison` operand
+  and a silently wrong "software ballot" result); `subgroupelect`/
+  `_requiredsubgroupsize` now both pass outright, and the whole
+  `dEQP-VK.subgroups.basic.compute.*` group is 12/12 passing. The
+  `VOTE_BIT`/`SHUFFLE_BIT` flip's pending-blocker list is now empty --
+  every previously-tracked blocker in this group is resolved.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

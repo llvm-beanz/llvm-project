@@ -34867,3 +34867,81 @@ mechanism (region splitting around wave-sync barriers) rather than deviating fro
 itself.
 
 No further roadmap rows split out this session: L7m's own scope closes cleanly on this fix alone.
+
+## L7s: `subgroupelect` "software ballot" divergence-classification gap, root cause and fix
+
+`dEQP-VK.subgroups.basic.compute.subgroupelect` reached real pipeline creation and execution (once L7k's own
+array-deserialization fix let it past deserialization for the first time) but failed runtime output
+verification (`Fail (Failed!)`, real qpa log: "0 / 7 values passed"). L7r's own before/after regression
+check confirmed this failure was pre-existing and entirely unaffected by L7r's own `applyStageMasks`
+image-mask fix either way, and filed it as this row, since it was otherwise untracked.
+
+The shader is a "software ballot" test, calling a separate GLSL helper function `sharedMemoryBallot(bool
+vote)` (a genuine SPIR-V `OpFunctionCall`, confirmed via the captured qpa log's own SPIR-V assembly, so
+`feme::cpu::InlineHelperFunctionsPass` must inline it before any later CPU-lowering pass runs). The helper
+uses a `shared uvec4` array indexed by `gl_SubgroupID`, gated by `subgroupElect()` to zero its own slot,
+then (after a memory-only `subgroupMemoryBarrierShared()`, which compiles to `OpMemoryBarrier` -- not
+`OpControlBarrier` -- and so becomes an in-place fence with no region split, ruling out a repeat of L7m's
+own region-bucketing bug class) computes `invocationId = gl_SubgroupInvocationID % 32` / `bitToSet = 1u <<
+invocationId`, then a `switch (gl_SubgroupInvocationID / 32)` selecting which `uvec4` component to
+`atomicOr` the bit into.
+
+A real IR reduction (a new, more general multi-point extension of this project's established
+`getenv("FEME_DEBUG_DUMP_...")`-gated dump convention, `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`, added
+temporarily to `feme/lib/Target/CPU/Pipeline.cpp` at 6 points -- after `Normalize.run`, and after each of
+`ResourceLoweringPass`/`LinearizePass`/`SIMDizePass`/`WaveLoweringPass`/the stage-specific wrapper pass --
+and reverted before any commit) confirmed the post-inlining, pre-widening IR was semantically correct (a
+single function, the expected two-diamond structure), and that no region split happened (consistent with
+both barriers being memory-only). The actual bug surfaced in the post-`SIMDizePass` ("after widening")
+dump: `%21 = call <4 x i32> @feme.cpu.builtin.lane_index.v4()` (the widened form of
+`llvm.spv.subgroup.local.invocation.id()`, i.e. `gl_SubgroupInvocationID`) was correctly widened, but its
+consuming `urem`/`udiv` instructions (computing `invocationId`/the switch selector) were left as *scalar*
+instructions, with their erased scalar operand replaced by a bare scalar `poison` (via `SIMDize.cpp`'s own
+end-of-pass "sever every remaining use of a to-be-erased instruction" cleanup) -- a silent wrong-answer
+bug, since `urem`/`udiv`/`shl` are all well-defined over `poison` operands rather than crashing outright.
+
+Root-caused to `feme::cpu::computeWaveUniformity` (`feme/lib/Analysis/CPU/WaveUniformity.cpp`): its
+intrinsic-classification `switch`, which decides which intrinsic calls are themselves divergence *sources*
+for `UniformityInfo::isDivergentAtDef`'s fixed-point propagation, lists `Intrinsic::dx_wave_getlaneindex`
+(the DXIL analog of SPIR-V's `SubgroupLocalInvocationId` builtin) as `NeverUniform`, but was **missing the
+equivalent case for `Intrinsic::spv_subgroup_local_invocation_id`** entirely -- even though `SIMDize.cpp`'s
+own `classifyBuiltin` already pairs the two intrinsics under one shared `BuiltinCallKind::LaneIndex`
+classification, and `FunctionWidener::widenInstruction`'s call-shape dispatch (in `SIMDize.cpp`)
+unconditionally widens either one, *regardless* of what `UniformityInfo` says, since it runs ahead of the
+generic `!UI.isDivergentAtDef(&I) -> leave alone` gate that governs every other, non-call-shape
+instruction. With the SPIR-V case missing, the generic operand-based analysis fell through to its
+conservative `Default` classification for the call itself (it has no operands to propagate divergence
+from), so any purely-arithmetic consumer of its result (`urem`/`udiv`/`shl`) was also classified uniform
+and left un-widened -- even though the call producing its operand had already been unconditionally replaced
+with a genuinely per-lane vector value by the very same pass.
+
+Fixed by adding `case Intrinsic::spv_subgroup_local_invocation_id:` alongside the existing
+`dx_wave_getlaneindex` case in `WaveUniformity.cpp`'s `NeverUniform` list. New unit test (`SIMDizeTest.cpp`'s
+`WidensArithmeticConsumingSubgroupLocalInvocationId`) reduces this exact shape (a `urem` consuming
+`llvm.spv.subgroup.local.invocation.id()`'s result) and confirms it widens correctly with no leftover
+`poison` operand; confirmed (via a scratch `git stash` of just the fix) to fail without it -- `isVectorTy()`
+false, `isa<PoisonValue>` true on the leftover scalar operand -- and pass with it.
+
+`ninja check-feme`: 2,886 tests discovered, 2,827 passed, 59 unsupported, 0 failed (up by exactly the 1 new
+unit test; matches the pre-session 2,826-passing baseline plus this session's own addition).
+
+Real `deqp-vk` re-verification: `subgroupelect` and its `_requiredsubgroupsize` twin both now pass outright
+(`Pass (OK)`). The full `dEQP-VK.subgroups.basic.compute.*` group (12 cases: `elect`/`barrier`/
+`memorybarrier`×4, each ×2 for `_requiredsubgroupsize`) is now **12/12 passing** -- every case this
+project's L7-series has tracked across L7k through L7s now passes. A broader
+`dEQP-VK.subgroups.basic.*` sweep (all shader stages) shows 12/70 passed, 58 not-supported (other stages
+genuinely unsupported by this device), 0 failed -- zero regressions.
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's pending-flip blocker list,
+previously `L7m` only (then narrowed to `L7s` only once L7m's own fix landed), is now **empty** -- every
+blocker this document has tracked in this group across the whole L7-series is resolved.
+`VulkanExtensionInventory.md` reviewed: no change needed -- an internal divergence-analysis-completeness
+fix, no new feature or extension bit advertised. `FeMeCPUDesign.md` reviewed: no update needed (this closes
+a real bug in an already-documented mechanism -- "Phase 2: Uniformity Analysis"'s own intrinsic
+classification -- rather than deviating from or extending the design itself).
+
+Split out: **L7t** (flipping `PhysicalDeviceInfo.cpp`'s hardcoded `VK_SUBGROUP_FEATURE_BASIC_BIT` to also
+advertise `VOTE_BIT`/`SHUFFLE_BIT`, now that every blocker this document tracked for that flip is resolved
+-- deliberately left out of this session's own narrower scope, since it needs its own broader
+`vote`/`shuffle`-specific CTS verification pass first, not just a re-run of the `basic.compute` group this
+session's own fix was scoped to).
