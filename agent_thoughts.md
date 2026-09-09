@@ -72719,3 +72719,112 @@ Broken into four separate commits: (1) `InlineHelperFunctionsPass`
 itself plus the pipeline wiring, (2) its new unit tests, (3) the doc
 updates (design doc, CTS report, roadmap), (4) this `agent_thoughts.md`
 append, on its own, last.
+
+# Session: Roadmap L23 -- 9 of 11 already fixed, the other 2 a `GOLDENIMAGE_DIR` false negative
+
+## Starting point
+
+Asked to close out roadmap L23 or other prerequisites blocking the L-series
+milestones. L23 named 11 `check-hlsl-feme-vk` cases (from L3's own original
+35-case bucket) that, at filing time, cleared pipeline creation but failed at
+`vkQueueSubmit` with `VkResult = -3` -- not yet reduced at all, filed as
+needing its own real IR/log reduction to determine whether it shares L22's
+root cause or is a distinct execution-time gap.
+
+## Investigation: re-confirm before reducing
+
+Given roadmap L28's own recent precedent (its own filed "interpolation-
+modifier execution bug" turned out to be a stale symptom of the same
+`D32_FLOAT_S8X24_UINT` depth-format gap L32 later fixed for unrelated
+reasons), I re-ran all 11 of this row's own named cases fresh against a
+freshly rebuilt `build2`, before writing any reduction tooling or touching
+any source at all. Result: **9 of the 11 already pass.** L26's
+resource-handle-normalization fix, L28's own diagnosis, and L32's matching
+`Executor.cpp` fix had already silently repaired them as a side effect, with
+none of those rows' own closure text claiming credit for these specific
+cases by name -- exactly the kind of quiet, uncredited collateral fix this
+whole L3-derived bucket seems prone to, given how central the shared
+depth-format gap turned out to be across L22/L23/L24's entire split.
+
+## The remaining 2: a test-configuration gap, not a Vulkan bug
+
+`Graphics/MeshShaders/{SimpleLines,SimpleTriangle}.test` were the two
+holdouts. Running them directly showed `offloader`'s own stdout reaching
+`"Cleanup complete."` with **no error text of any kind** -- not what a real
+`vkQueueSubmit`/`VkResult = -3` failure looks like at all (compare L28's own
+real diagnostic, `"vkQueueSubmit: depth attachment format is not yet
+supported"`, captured the same way). The actual failing `RUN` line was the
+*next* one, `imgdiff %t/Output.png %goldenimage_dir/... -rules
+%t/rules.yaml`, with `imgdiff: error: Failed reading PNG header from file`.
+
+Tracing `%goldenimage_dir`'s substitution back to
+`build2/tools/OffloadTest/test/feme-vk/lit.site.cfg.py` showed
+`config.goldenimage_dir = r""` -- empty. `offload-test-suite`'s own
+`test/CMakeLists.txt` only populates this from a `GOLDENIMAGE_DIR` CMake
+cache variable, which `build2`'s own cache had simply never been configured
+with (confirmed via `grep GOLDENIMAGE_DIR build2/CMakeCache.txt`, nothing).
+So every golden-image-comparison `feme-vk` case -- not just these two --
+was silently comparing against a nonexistent path and failing regardless of
+whether the ICD's own rendering was actually correct. Cases like
+`Sampler.address.test` compare a raw result buffer against
+`ResultBuffer_Expected` instead, so they were never affected by this gap at
+all, which is exactly why 9 of 11 could "already pass" while these 2 still
+failed.
+
+## A second, unrelated surprise: the offload-test-suite checkout had drifted
+
+Before fixing the CMake cache, I checked `git status`/`git log` in the
+`offload-test-suite` checkout to understand how the `feme-vk` suite gets
+wired in at all (expecting to find the `feme` branch's own "Add FeMe test
+targets" commit already applied, per every prior session's own precedent).
+It wasn't there -- `git reflog` revealed several `reset: moving to
+origin/main` entries *after* an earlier session's own cherry-pick of that
+exact commit, meaning something external to this session's own control had
+silently reset the checkout's `feme-rebased` branch back to bare
+`origin/main`, dropping the `feme-vk`/`clang-feme-vk` lit-suite definitions
+this whole roadmap chain's testing has depended on ever since roadmap L76
+(if I recall the compacted summary correctly). The already-built `build2`
+tree kept working from its own stale generated files (which is exactly why
+I could still run real, working `feme-vk` lit tests moments earlier in this
+same session, despite the source checkout no longer containing the
+commit that originally wired them in) -- but a fresh CMake reconfigure
+(which this row's own `GOLDENIMAGE_DIR` fix required) would have silently
+broken `feme-vk` test discovery entirely had I not caught this first and
+re-cherry-picked the commit back onto the current HEAD before
+reconfiguring.
+
+This is a good reminder that this project's test dependencies
+(`offload-test-suite`, `VK-GL-CTS`) live in separate checkouts outside this
+repo's own git history, and their state can drift or get reset by processes
+entirely outside a single session's control -- worth a quick sanity check
+(`git log <branch> --oneline | grep -i feme`, or just re-running a known
+`feme-vk` case) before trusting a stale mental model of "the test harness is
+already wired up" carried over from a prior session's own summary.
+
+## Fix and verification
+
+No feme production source was touched at all -- purely: (1) re-cherry-pick
+the "Add FeMe test targets" commit onto the current `offload-test-suite`
+`feme-rebased` HEAD (clean, no conflicts), (2) reconfigure `build2` with
+`-DGOLDENIMAGE_DIR=/home/dev/dev/offload-golden-images` (a quick
+`cmake -S llvm -B build2 -D...` re-run, no full LLVM rebuild needed), (3)
+document both gotchas in `feme/.instructions.md`'s existing "Running
+`feme-vk` / offload-test-suite" section.
+
+All 11 of this row's own named cases: 11/11 Pass. Full `feme-vk` sweep:
+222/664 Pass (up from 210/664 at the L76 baseline), 0 regressions --
+structurally impossible from this fix alone, since every golden-image case
+was already unconditionally `Failed` before it for a reason unrelated to its
+own real correctness, so there's no way for this fix to turn a real `Pass`
+into a `Fail`. `check-feme`: 2786/2845 Passed, 0 Failed, unaffected as
+expected. Real `deqp-vk` spot-check of
+`dEQP-VK.texture.filtering.2d_array.combinations.linear_mipmap_linear.linear.*`:
+32/50 Pass, 0 Fail, matching the pre-existing L76(b) baseline exactly, as
+expected since `deqp-vk` never touches `offload-test-suite`'s own
+golden-image infrastructure.
+
+## Commits
+
+Three separate commits: (1) the `.instructions.md` documentation fix (no
+feme source changed), (2) the `Roadmap.md`/`VulkanCTSReport.md` closure
+writeup, (3) this `agent_thoughts.md` append, on its own, last.
