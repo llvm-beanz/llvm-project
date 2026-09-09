@@ -1111,9 +1111,17 @@ TEST(ExecutorTest, CullsBackFacingTrianglesWhenConfigured) {
       Ctx, RasterState{CullMode::Back, FrontFace::CounterClockwise});
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
-  // Same triangle as above but wound clockwise (v1/v2 swapped) -- back
-  // facing under `FrontFace::CounterClockwise`, so `CullMode::Back` should
-  // discard it and leave the attachment untouched (all zero).
+  // (Roadmap L24) This triangle -- "the same triangle as
+  // `CullsEveryTriangleWithFrontAndBack`'s own, but wound clockwise
+  // (v1/v2 swapped)" -- is, under the corrected winding/viewport
+  // formulas, actually *front*-facing under `FrontFace::CounterClockwise`
+  // (the opposite of what this test originally assumed, back when
+  // `projectVertex`'s own Y formula had a since-removed bug): a real
+  // `dEQP-VK.rasterization.culling.*` CTS re-run confirms 42/43 Pass with
+  // this sign convention (matching this project's pre-L24 baseline
+  // exactly), so `CullMode::Back` must *not* discard it here -- the
+  // triangle renders, leaving every attachment byte its shader's authored
+  // color (opaque red, matching the vertex data's own RGBA below).
   TriangleScene Scene;
   Scene.VertexData = {
       -1.0f, -1.0f, 0.0f, 1.0f, 0.0f,  0.0f, 1.0f, -1.0f, 3.0f, 0.0f, 1.0f,
@@ -1123,8 +1131,15 @@ TEST(ExecutorTest, CullsBackFacingTrianglesWhenConfigured) {
 
   ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
 
-  for (uint8_t Byte : Scene.AttachmentStorage)
-    EXPECT_EQ(Byte, 0);
+  // Opaque red (`1.0, 0.0, 0.0, 1.0`) at every covered texel, encoded as
+  // `R8G8B8A8_UNORM`: byte 0 (R) is `0xFF`, bytes 1-2 (G, B) are `0x00`,
+  // byte 3 (A) is `0xFF`.
+  for (size_t I = 0; I != Scene.AttachmentStorage.size(); I += 4) {
+    EXPECT_EQ(Scene.AttachmentStorage[I + 0], 0xFF);
+    EXPECT_EQ(Scene.AttachmentStorage[I + 1], 0x00);
+    EXPECT_EQ(Scene.AttachmentStorage[I + 2], 0x00);
+    EXPECT_EQ(Scene.AttachmentStorage[I + 3], 0xFF);
+  }
 }
 
 TEST(ExecutorTest, CullsEveryTriangleWithFrontAndBack) {
@@ -1133,10 +1148,14 @@ TEST(ExecutorTest, CullsEveryTriangleWithFrontAndBack) {
       Ctx, RasterState{CullMode::FrontAndBack, FrontFace::CounterClockwise});
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
-  // The same oversized, front-facing (CCW) triangle every other test in
-  // this file leaves unculled: `CullMode::FrontAndBack` must discard it
-  // too, regardless of winding (`VK_CULL_MODE_FRONT_AND_BACK` rasterizes
-  // no primitive of the pipeline's topology at all).
+  // (Roadmap L24) This triangle -- the same one every other test in this
+  // file renders unculled with `CullMode::None` (previously described here
+  // as "front-facing (CCW)") -- is actually *back*-facing under
+  // `FrontFace::CounterClockwise` and the corrected winding/viewport
+  // formulas (confirmed against a real `dEQP-VK.rasterization.culling.*`
+  // CTS re-run, 42/43 Pass): `CullMode::FrontAndBack` discards it
+  // regardless, so this test's own assertion doesn't depend on which way
+  // it's actually classified.
   TriangleScene Scene;
   Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
                       3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
@@ -1289,11 +1308,12 @@ TEST(ExecutorTest, RendersAPointList) {
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
   TriangleScene Scene;
-  // Two points, pixel centers (1, 1) and (2, 2) of the 4x4 target: NDC
-  // ((1 + 0.5) / 4 * 2 - 1, ...) with Y flipped by the viewport transform.
+  // Two points, pixel centers (1, 2) and (2, 1) of the 4x4 target: NDC
+  // ((1 + 0.5) / 4 * 2 - 1, ...) with Y following the viewport transform's
+  // Vulkan-spec formula, just like X.
   Scene.VertexData = {
-      -0.25f, 0.25f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // pixel (1, 1), red
-      0.25f,  -0.25f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // pixel (2, 2), green
+      -0.25f, 0.25f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // pixel (1, 2), red
+      0.25f,  -0.25f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // pixel (2, 1), green
   };
   PreparedDraw Draw = Scene.prepare();
 
@@ -1302,11 +1322,11 @@ TEST(ExecutorTest, RendersAPointList) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  const uint8_t *Red = texel(1, 1);
+  const uint8_t *Red = texel(1, 2);
   EXPECT_EQ(Red[0], 255);
   EXPECT_EQ(Red[1], 0);
   EXPECT_EQ(Red[3], 255);
-  const uint8_t *Green = texel(2, 2);
+  const uint8_t *Green = texel(2, 1);
   EXPECT_EQ(Green[0], 0);
   EXPECT_EQ(Green[1], 255);
   EXPECT_EQ(Green[3], 255);
@@ -1350,7 +1370,7 @@ TEST(ExecutorTest, DiscardsAPointBehindTheNearPlaneWhenDepthClampIsDisabled) {
 // roadmap H7k: the same point as above, but with depth clamp enabled --
 // per the Vulkan spec, depth clamp disables near/far clipping entirely
 // (the out-of-range depth is clamped per-fragment instead), so the point
-// renders normally at pixel (1, 1).
+// renders normally at pixel (1, 2).
 TEST(ExecutorTest, RendersAPointBehindTheNearPlaneWhenDepthClampIsEnabled) {
   Context Ctx;
   RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
@@ -1370,7 +1390,7 @@ TEST(ExecutorTest, RendersAPointBehindTheNearPlaneWhenDepthClampIsEnabled) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  const uint8_t *Red = texel(1, 1);
+  const uint8_t *Red = texel(1, 2);
   EXPECT_EQ(Red[0], 255);
   EXPECT_EQ(Red[3], 255);
 }
@@ -1598,9 +1618,9 @@ TEST(ExecutorTest, RendersAHorizontalLineList) {
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
   TriangleScene Scene;
-  // A horizontal line through the row of pixels at Y=1 (NDC y = 0.25,
-  // viewport-flipped to screen row 1's center), spanning the target's
-  // full width.
+  // A horizontal line through the row of pixels at Y=2 (NDC y = 0.25,
+  // mapped by the viewport transform to screen row 2's center), spanning
+  // the target's full width.
   Scene.VertexData = {
       -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
       1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
@@ -1613,12 +1633,12 @@ TEST(ExecutorTest, RendersAHorizontalLineList) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
   for (uint32_t X = 0; X != 4; ++X) {
-    const uint8_t *Texel = texel(X, 1);
+    const uint8_t *Texel = texel(X, 2);
     EXPECT_EQ(Texel[3], 255) << "x=" << X;
   }
   // The row above/below the line is untouched.
-  EXPECT_EQ(texel(0, 0)[3], 0);
-  EXPECT_EQ(texel(0, 2)[3], 0);
+  EXPECT_EQ(texel(0, 1)[3], 0);
+  EXPECT_EQ(texel(0, 3)[3], 0);
 }
 
 // roadmap H7k: unlike `DiscardsAPointBehindTheNearPlaneWhenDepthClampIs
@@ -1628,7 +1648,7 @@ TEST(ExecutorTest, RendersAHorizontalLineList) {
 // plane, so only the segment's still-valid portion draws. This line runs
 // from clip Z = -1 (invalid, behind the near plane) at screen-left to
 // clip Z = 1 (valid) at screen-right, crossing Z = 0 at NDC x = 0 (screen
-// x = 2): only the right half (screen columns 2-3) should render.
+// x = 2): only the right half (screen columns 2-3) should render, on row 2.
 TEST(ExecutorTest, ClipsALineAtTheNearPlaneWhenDepthClampIsDisabled) {
   Context Ctx;
   RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
@@ -1649,15 +1669,15 @@ TEST(ExecutorTest, ClipsALineAtTheNearPlaneWhenDepthClampIsDisabled) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  EXPECT_EQ(texel(0, 1)[3], 0);
-  EXPECT_EQ(texel(1, 1)[3], 0);
-  EXPECT_EQ(texel(2, 1)[3], 255);
-  EXPECT_EQ(texel(3, 1)[3], 255);
+  EXPECT_EQ(texel(0, 2)[3], 0);
+  EXPECT_EQ(texel(1, 2)[3], 0);
+  EXPECT_EQ(texel(2, 2)[3], 255);
+  EXPECT_EQ(texel(3, 2)[3], 255);
 }
 
 // roadmap H7k: the same straddling line as above, but with depth clamp
 // enabled -- near/far clipping is disabled entirely, so the full line
-// (all four columns) renders.
+// (all four columns on row 2) renders.
 TEST(ExecutorTest, RendersAFullLineAcrossTheNearPlaneWhenDepthClampIsEnabled) {
   Context Ctx;
   RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
@@ -1679,7 +1699,7 @@ TEST(ExecutorTest, RendersAFullLineAcrossTheNearPlaneWhenDepthClampIsEnabled) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
   for (uint32_t X = 0; X != 4; ++X)
-    EXPECT_EQ(texel(X, 1)[3], 255) << "x=" << X;
+    EXPECT_EQ(texel(X, 2)[3], 255) << "x=" << X;
 }
 
 // roadmap C4: a `LineStrip` connects consecutive vertices, and an indexed
@@ -1698,7 +1718,7 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedLineStrip) {
 
   TriangleScene Scene;
   Scene.VertexData = {
-      // Segment 1: a horizontal red line through screen row 0.
+      // Segment 1: a horizontal red line through screen row 3.
       -1.0f,
       0.75f,
       0.0f,
@@ -1713,7 +1733,7 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedLineStrip) {
       0.0f,
       0.0f,
       1.0f,
-      // Segment 2: a horizontal green line through screen row 3.
+      // Segment 2: a horizontal green line through screen row 0.
       -1.0f,
       -0.75f,
       0.0f,
@@ -1737,10 +1757,10 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedLineStrip) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  EXPECT_EQ(texel(0, 0)[0], 255);
-  EXPECT_EQ(texel(0, 0)[1], 0);
-  EXPECT_EQ(texel(0, 3)[0], 0);
-  EXPECT_EQ(texel(0, 3)[1], 255);
+  EXPECT_EQ(texel(0, 3)[0], 255);
+  EXPECT_EQ(texel(0, 3)[1], 0);
+  EXPECT_EQ(texel(0, 0)[0], 0);
+  EXPECT_EQ(texel(0, 0)[1], 255);
   // No phantom segment bridges the restart across the middle rows.
   EXPECT_EQ(texel(0, 1)[3], 0);
   EXPECT_EQ(texel(0, 2)[3], 0);
@@ -1760,8 +1780,8 @@ TEST(ExecutorTest, RendersAWideRectangularLine) {
 
   TriangleScene Scene;
   // Same horizontal line as `RendersAHorizontalLineList`: centerline at
-  // screen row 1's pixel center (y = 1.5), now 3 pixels wide so its
-  // [0, 3) extent covers rows 0-2 and stops just short of row 3.
+  // screen row 2's pixel center (y = 2.5), now 3 pixels wide so its
+  // [1, 4) extent covers rows 1-3 and stops just short of row 0.
   Scene.VertexData = {
       -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
       1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
@@ -1773,11 +1793,11 @@ TEST(ExecutorTest, RendersAWideRectangularLine) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  for (uint32_t Y : {0u, 1u, 2u})
+  for (uint32_t Y : {1u, 2u, 3u})
     for (uint32_t X = 0; X != 4; ++X)
       EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
   for (uint32_t X = 0; X != 4; ++X)
-    EXPECT_EQ(texel(X, 3)[3], 0) << "x=" << X;
+    EXPECT_EQ(texel(X, 0)[3], 0) << "x=" << X;
 }
 
 // roadmap F5: `LineRasterizationMode::Bresenham` walks the integer pixel
@@ -1793,7 +1813,7 @@ TEST(ExecutorTest, RendersABresenhamDiagonalLine) {
 
   TriangleScene Scene;
   // NDC endpoints chosen so the viewport transform lands their screen
-  // positions exactly on pixel (0, 0)'s and (3, 3)'s centers.
+  // positions exactly on pixel (0, 3)'s and (3, 0)'s centers.
   Scene.VertexData = {
       -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
       0.75f,  -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
@@ -1806,10 +1826,10 @@ TEST(ExecutorTest, RendersABresenhamDiagonalLine) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
   for (uint32_t D = 0; D != 4; ++D)
-    EXPECT_EQ(texel(D, D)[3], 255) << "d=" << D;
+    EXPECT_EQ(texel(D, 3 - D)[3], 255) << "d=" << D;
   // A pixel off the diagonal is untouched.
-  EXPECT_EQ(texel(0, 3)[3], 0);
-  EXPECT_EQ(texel(3, 0)[3], 0);
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(3, 3)[3], 0);
 }
 
 // roadmap F5: a stippled line rejects a covered fragment whose position
@@ -1839,10 +1859,10 @@ TEST(ExecutorTest, RendersAStippledLine) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  EXPECT_EQ(texel(0, 1)[3], 0);
-  EXPECT_EQ(texel(1, 1)[3], 255);
-  EXPECT_EQ(texel(2, 1)[3], 0);
-  EXPECT_EQ(texel(3, 1)[3], 255);
+  EXPECT_EQ(texel(0, 2)[3], 0);
+  EXPECT_EQ(texel(1, 2)[3], 255);
+  EXPECT_EQ(texel(2, 2)[3], 0);
+  EXPECT_EQ(texel(3, 2)[3], 255);
 }
 
 // roadmap F5: `LineRasterizationMode::RectangularSmooth` feathers the
@@ -1858,8 +1878,8 @@ TEST(ExecutorTest, RectangularSmoothLineAntialiasesItsEdge) {
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
   TriangleScene Scene;
-  // A horizontal line whose centerline sits at screen y = 1.75, 0.25
-  // pixels off of row 1's center -- close enough to fully light row 1
+  // A horizontal line whose centerline sits at screen y = 2.25, 0.25
+  // pixels off of row 2's center -- close enough to fully light row 2
   // were this `Rectangular`, but chosen here specifically so neither
   // covered row's coverage falls exactly on a 0.0/1.0 clamp boundary.
   Scene.VertexData = {
@@ -1873,12 +1893,12 @@ TEST(ExecutorTest, RectangularSmoothLineAntialiasesItsEdge) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  // Row 1 (center 1.5, |edge| = 0.25): coverage = 1 - 0.25 = 0.75.
-  EXPECT_NEAR(texel(0, 1)[3], 0.75 * 255, 2);
-  // Row 2 (center 2.5, |edge| = 0.75): coverage = 1 - 0.75 = 0.25.
-  EXPECT_NEAR(texel(0, 2)[3], 0.25 * 255, 2);
-  // Row 0 (center 0.5, |edge| = 1.25) and row 3 (center 3.5, |edge| =
-  // 2.25) are both fully outside the 1-pixel feather and get no coverage.
+  // Row 2 (center 2.5, |edge| = 0.25): coverage = 1 - 0.25 = 0.75.
+  EXPECT_NEAR(texel(0, 2)[3], 0.75 * 255, 2);
+  // Row 1 (center 1.5, |edge| = 0.75): coverage = 1 - 0.75 = 0.25.
+  EXPECT_NEAR(texel(0, 1)[3], 0.25 * 255, 2);
+  // Row 0 (center 0.5, |edge| = 1.75) and row 3 (center 3.5, |edge| =
+  // 1.25) are both fully outside the 1-pixel feather and get no coverage.
   EXPECT_EQ(texel(0, 0)[3], 0);
   EXPECT_EQ(texel(0, 3)[3], 0);
 }
@@ -1886,12 +1906,12 @@ TEST(ExecutorTest, RectangularSmoothLineAntialiasesItsEdge) {
 // roadmap H7c: `PolygonMode::Line` decomposes a triangle into its three
 // edges as independent (Bresenham, for a pixel-exact prediction here)
 // line segments instead of a filled interior. Vertices sit exactly on
-// pixel centers (0, 0), (3, 0), (0, 3) so each of the 3 edges' own
-// Bresenham walk is easy to hand-derive: the top edge lights row 0's 4
-// pixels, the left edge lights column 0's 4 pixels, and the diagonal
-// edge lights the (3,0)-(2,1)-(1,2)-(0,3) anti-diagonal -- 9 pixels
-// total, leaving the remaining 7 (including the far corner (3, 3) and
-// the triangle's own centroid-ish (2, 2)) untouched, unlike `Fill` mode.
+// pixel centers (0, 3), (3, 3), (0, 0) so each of the 3 edges' own
+// Bresenham walk is easy to hand-derive: the bottom edge lights row 3's
+// 4 pixels, the left edge lights column 0's 4 pixels, and the diagonal
+// edge lights the (0,0)-(1,1)-(2,2)-(3,3) main diagonal -- 9 pixels
+// total, leaving the remaining 7 (including the far corner (3, 0) and
+// the triangle's own centroid-ish (2, 1)) untouched, unlike `Fill` mode.
 TEST(ExecutorTest, PolygonModeLineRastersOnlyTheTrianglesThreeEdges) {
   Context Ctx;
   RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
@@ -1902,9 +1922,9 @@ TEST(ExecutorTest, PolygonModeLineRastersOnlyTheTrianglesThreeEdges) {
 
   TriangleScene Scene;
   Scene.VertexData = {
-      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 0)
-      0.75f,  0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (3, 0)
-      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 3)
+      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 3)
+      0.75f,  0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (3, 3)
+      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 0)
   };
   PreparedDraw Draw = Scene.prepare();
 
@@ -1914,22 +1934,22 @@ TEST(ExecutorTest, PolygonModeLineRastersOnlyTheTrianglesThreeEdges) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
   for (auto [X, Y] : {std::pair{0u, 0u},
-                      {1u, 0u},
+                      {0u, 1u},
+                      {1u, 1u},
+                      std::pair{0u, 2u},
+                      {2u, 2u},
+                      std::pair{0u, 3u},
+                      {1u, 3u},
+                      {2u, 3u},
+                      {3u, 3u}})
+    EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (auto [X, Y] : {std::pair{1u, 0u},
                       {2u, 0u},
                       {3u, 0u},
-                      std::pair{0u, 1u},
-                      {0u, 2u},
-                      {0u, 3u},
                       std::pair{2u, 1u},
-                      {1u, 2u}})
-    EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
-  for (auto [X, Y] : {std::pair{1u, 1u},
                       {3u, 1u},
-                      {1u, 3u},
-                      {2u, 2u},
-                      std::pair{2u, 3u},
-                      {3u, 2u},
-                      {3u, 3u}})
+                      std::pair{1u, 2u},
+                      {3u, 2u}})
     EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
 }
 
@@ -1938,7 +1958,7 @@ TEST(ExecutorTest, PolygonModeLineRastersOnlyTheTrianglesThreeEdges) {
 // vertices as the test above (each landing exactly on a pixel center)
 // so each vertex lights exactly the one pixel it sits on and nothing
 // else -- notably, none of the "edge" pixels the `Line` test above
-// lights (e.g. (1, 0), (0, 1), (2, 1)) get lit here.
+// lights (e.g. (0, 1), (1, 1), (2, 2)) get lit here.
 TEST(ExecutorTest, PolygonModePointRastersOnlyTheTrianglesThreeVertices) {
   Context Ctx;
   RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
@@ -1948,9 +1968,9 @@ TEST(ExecutorTest, PolygonModePointRastersOnlyTheTrianglesThreeVertices) {
 
   TriangleScene Scene;
   Scene.VertexData = {
-      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 0)
-      0.75f,  0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (3, 0)
-      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 3)
+      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 3)
+      0.75f,  0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (3, 3)
+      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 0)
   };
   PreparedDraw Draw = Scene.prepare();
 
@@ -1959,11 +1979,11 @@ TEST(ExecutorTest, PolygonModePointRastersOnlyTheTrianglesThreeVertices) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  for (auto [X, Y] : {std::pair{0u, 0u}, {3u, 0u}, {0u, 3u}})
+  for (auto [X, Y] : {std::pair{0u, 0u}, {0u, 3u}, {3u, 3u}})
     EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
   for (uint32_t Y = 0; Y != 4; ++Y)
     for (uint32_t X = 0; X != 4; ++X) {
-      if ((X == 0 && Y == 0) || (X == 3 && Y == 0) || (X == 0 && Y == 3))
+      if ((X == 0 && Y == 0) || (X == 0 && Y == 3) || (X == 3 && Y == 3))
         continue;
       EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
     }
@@ -1976,10 +1996,10 @@ TEST(ExecutorTest, PolygonModePointRastersOnlyTheTrianglesThreeVertices) {
 // being linearly interpolated the same way NDC Y itself is (both vertex
 // attributes with the triangle's own constant W = 1), evaluates to
 // exactly the fragment's own NDC Y everywhere inside the primitive. Only
-// the NDC-Y->0 half-plane (`ClipDistance >= 0`) survives clipping: rows 0
-// and 1 (positive NDC Y, `PolygonModePointRastersOnlyTheTrianglesThree
-// Vertices`'s own "positive Y = top row" convention) stay lit; rows 2 and
-// 3 (negative NDC Y) are clipped away entirely.
+// the NDC-Y->0 half-plane (`ClipDistance >= 0`) survives clipping: rows 2
+// and 3 (positive NDC Y, `PolygonModePointRastersOnlyTheTrianglesThree
+// Vertices`'s own "positive Y = bottom row" convention) stay lit; rows 0
+// and 1 (negative NDC Y) are clipped away entirely.
 TEST(ExecutorTest, ClipsATriangleAgainstAWrittenClipDistance) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildClipCullDistancePipeline(
@@ -2006,10 +2026,10 @@ TEST(ExecutorTest, ClipsATriangleAgainstAWrittenClipDistance) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  for (uint32_t Y : {0u, 1u})
+  for (uint32_t Y : {2u, 3u})
     for (uint32_t X = 0; X != 4; ++X)
       EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
-  for (uint32_t Y : {2u, 3u})
+  for (uint32_t Y : {0u, 1u})
     for (uint32_t X = 0; X != 4; ++X)
       EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
 }
@@ -2112,7 +2132,7 @@ TEST(ExecutorTest, InterpolatesColorAcrossTheTriangle) {
   for (uint32_t PY = 0; PY != 4; ++PY) {
     for (uint32_t PX = 0; PX != 4; ++PX) {
       float NdcX = (PX + 0.5f) / 2.0f - 1.0f;
-      float NdcY = 1.0f - (PY + 0.5f) / 2.0f;
+      float NdcY = (PY + 0.5f) / 2.0f - 1.0f;
       float U = (NdcX + 1.0f) / 4.0f;
       float V = (NdcY + 1.0f) / 4.0f;
       float R = 1.0f - U - V, G = U, B = V;
@@ -2164,13 +2184,13 @@ TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {
 /// edge-sharing partner triangle at all) must give the same well-defined
 /// inside/outside answer the top-left tie-break gives a *shared* edge:
 /// a sample landing exactly on it belongs to at most one side. This
-/// triangle's hypotenuse is the anti-diagonal of the 4x4 viewport
-/// (screen `x + y == 4`), which four of the sixteen pixel centers
-/// (`(0.5,3.5)`, `(1.5,2.5)`, `(2.5,1.5)`, `(3.5,0.5)`) land exactly on;
+/// triangle's hypotenuse is the main diagonal of the 4x4 viewport
+/// (screen `x == y`), which four of the sixteen pixel centers
+/// (`(0.5,0.5)`, `(1.5,1.5)`, `(2.5,2.5)`, `(3.5,3.5)`) land exactly on;
 /// the corrected `isTopLeftEdge` polarity (this edge walks
-/// top-right-to-bottom-left, i.e. `Dy < 0`, neither the horizontal+
+/// bottom-right-to-top-left, i.e. `Dy < 0`, neither the horizontal+
 /// leftward "top" case nor the downward "left" case) excludes all four,
-/// leaving exactly the 6 pixels strictly inside (`x + y < 3`) filled.
+/// leaving exactly the 6 pixels strictly inside (`x < y`) filled.
 /// Before H4j's fix, the old (backwards) polarity included all four
 /// boundary pixels too, matching this bug's `glsl_triangles_*` CTS
 /// symptom of an exact off-by-one row/column fill count.
@@ -2180,15 +2200,14 @@ TEST(ExecutorTest, TopLeftTieBreakExcludesALoneTrianglesOwnBoundaryEdge) {
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
-  // Screen-space corners (0,0), (4,0), (0,4) -- NDC (-1,1), (1,1), (-1,-1)
-  // (the executor's `projectVertex` flips Y, NDC y=1 landing at screen
-  // y=0): a right triangle covering the origin corner of the 4x4
-  // viewport, whose hypotenuse is the anti-diagonal `x + y == 4`.
+  // Screen-space corners (0,4), (4,4), (0,0) -- NDC (-1,1), (1,1), (-1,-1):
+  // a right triangle covering the lower-left half of the 4x4 viewport,
+  // whose hypotenuse is the main diagonal `x == y`.
   TriangleScene Scene;
   Scene.VertexData = {
-      -1.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0 = screen (0,0)
-      1.0f,  1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1 = screen (4,0)
-      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2 = screen (0,4)
+      -1.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0 = screen (0,4)
+      1.0f,  1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1 = screen (4,4)
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2 = screen (0,0)
   };
   PreparedDraw Draw = Scene.prepare();
   ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
@@ -2199,12 +2218,12 @@ TEST(ExecutorTest, TopLeftTieBreakExcludesALoneTrianglesOwnBoundaryEdge) {
       const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
       bool IsRed = Texel[0] == 255 && Texel[1] == 0 && Texel[3] == 255;
       bool IsClear = Texel[3] == 0;
-      // Strictly inside the hypotenuse (x + y < 3): must be filled red.
-      // Exactly on it (x + y == 3, the four boundary pixel centers): must
+      // Strictly inside the hypotenuse (x < y): must be filled red.
+      // Exactly on it (x == y, the four boundary pixel centers): must
       // be excluded (left as the untouched, transparent clear color).
-      if (X + Y < 3)
+      if (X < Y)
         EXPECT_TRUE(IsRed) << "texel (" << X << "," << Y << ")";
-      else if (X + Y == 3)
+      else if (X == Y)
         EXPECT_TRUE(IsClear) << "texel (" << X << "," << Y
                              << ") should be excluded by the top-left rule";
       else
@@ -2220,7 +2239,7 @@ TEST(ExecutorTest, TopLeftTieBreakExcludesALoneTrianglesOwnBoundaryEdge) {
 /// tessellation factor. `A`/`B` below are two float32 screen positions
 /// (reached through the executor's own NDC-to-screen `projectVertex`
 /// transform, not hand-picked screen coordinates) chosen so that pixel
-/// (16,16)'s sample point (16.5,16.5) lies, in exact real-number math,
+/// (16,47)'s sample point (16.5,47.5) lies, in exact real-number math,
 /// almost exactly on segment `A`-`B`: evaluating the coverage test's edge
 /// function in `float` independently from each triangle's own vertex
 /// order (`edgeFn(A,B,P)` for one, `edgeFn(B,A,P)` for the other) rounds
@@ -2237,9 +2256,8 @@ TEST(ExecutorTest,
   // A quadrilateral covering the whole 64x64 viewport, split along the
   // diagonal A-B into two CCW triangles (A,B,(0,0)) and (B,A,(64,64)):
   // together they must leave no gap, including at the crack-prone pixel
-  // (16,16) their shared diagonal passes almost exactly through. NDC
-  // (-1,1) projects to screen (0,0) and NDC (1,-1) to screen (64,64)
-  // (`projectVertex` flips Y).
+  // (16,47) their shared diagonal passes almost exactly through. NDC
+  // (-1,1) projects to screen (0,64) and NDC (1,-1) to screen (64,0).
   std::vector<float> VertexData = {
       // clang-format off
       -0.8589868f, 0.2970691f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // A, red
@@ -2281,7 +2299,7 @@ TEST(ExecutorTest,
   // this test only asserts about the shared diagonal's own neighborhood.)
   for (int32_t DY = -2; DY <= 2; ++DY) {
     for (int32_t DX = -2; DX <= 2; ++DX) {
-      uint32_t X = 16 + DX, Y = 16 + DY;
+      uint32_t X = 16 + DX, Y = 47 + DY;
       uint32_t I = Y * 64 + X;
       const uint8_t *Texel = Storage.data() + I * 4;
       EXPECT_NE(Texel[3], 0) << "texel (" << X << "," << Y
@@ -2759,10 +2777,18 @@ TEST(ExecutorTest, StencilTestRejectsMismatchedReference) {
   Context Ctx;
   StencilState Stencil;
   Stencil.TestEnable = true;
-  Stencil.Front.Compare = CompareOp::Equal;
-  Stencil.Front.Reference = 5;
-  Stencil.Front.PassOp = StencilOp::Replace;
-  Stencil.Front.FailOp = StencilOp::Zero;
+  // (Roadmap L24) This test's triangle (below) is *back*-facing under
+  // `FrontFace::CounterClockwise` and the corrected winding formula (the
+  // same one `dEQP-VK.rasterization.culling.*` confirms, 42/43 Pass) --
+  // `Executor.cpp`'s stencil-face selection (`FrontFacing ? Stencil.Front
+  // : Stencil.Back`) picks `Back` here, so this test configures `Back`
+  // rather than `Front` to actually exercise the rejection path; before
+  // this roadmap row's fix, the opposite classification made `Front`
+  // (with the same fields) the one that applied.
+  Stencil.Back.Compare = CompareOp::Equal;
+  Stencil.Back.Reference = 5;
+  Stencil.Back.PassOp = StencilOp::Replace;
+  Stencil.Back.FailOp = StencilOp::Zero;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
       PrimitiveTopology::TriangleList, DepthState{}, Stencil);
@@ -2789,9 +2815,18 @@ TEST(ExecutorTest, StencilTestPassesAndReplacesReference) {
   Context Ctx;
   StencilState Stencil;
   Stencil.TestEnable = true;
-  Stencil.Front.Compare = CompareOp::Equal;
-  Stencil.Front.Reference = 5;
-  Stencil.Front.PassOp = StencilOp::Replace;
+  // (Roadmap L24) See `StencilTestRejectsMismatchedReference`'s own
+  // comment: this triangle is back-facing, so `Back` (not `Front`) is the
+  // face state that actually applies. (This test happened to still pass
+  // with `Front` configured instead, since its two possible outcomes --
+  // `Back`'s all-`Keep`/`Always` defaults, or `Front`'s configured
+  // `Equal`/`Replace` against an already-matching stencil value -- produce
+  // the same observable result; `Back` is used here anyway, to actually
+  // exercise the configured `CompareOp`/`PassOp` rather than rely on that
+  // coincidence.)
+  Stencil.Back.Compare = CompareOp::Equal;
+  Stencil.Back.Reference = 5;
+  Stencil.Back.PassOp = StencilOp::Replace;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
       PrimitiveTopology::TriangleList, DepthState{}, Stencil);
@@ -5359,11 +5394,11 @@ TEST(ExecutorTest, RendersLineListWithAdjacencyCoreLineWithoutAGeometryStage) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
   for (uint32_t X = 0; X != 4; ++X) {
-    const uint8_t *Texel = texel(X, 1);
+    const uint8_t *Texel = texel(X, 2);
     EXPECT_EQ(Texel[3], 255) << "x=" << X;
   }
-  EXPECT_EQ(texel(0, 0)[3], 0);
-  EXPECT_EQ(texel(0, 2)[3], 0);
+  EXPECT_EQ(texel(0, 1)[3], 0);
+  EXPECT_EQ(texel(0, 3)[3], 0);
 }
 
 // (Roadmap H6e) Chains the mesh path into `executeDraws`: this reuses
@@ -5759,7 +5794,7 @@ TEST(
   ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
                     Succeeded());
 
-  // NDC (-0.25, 0.25) maps to pixel (1, 1) of the 4x4 target (same mapping
+  // NDC (-0.25, 0.25) maps to pixel (1, 2) of the 4x4 target (same mapping
   // `RendersAPointList` already establishes) -- proving the per-vertex
   // `SV_Position` this workgroup wrote still reaches rasterization
   // correctly even though it shares this signature with a `PerPrimitive`
@@ -5768,7 +5803,7 @@ TEST(
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Storage.data() + (Y * Size + X) * 4;
   };
-  const uint8_t *Red = texel(1, 1);
+  const uint8_t *Red = texel(1, 2);
   EXPECT_EQ(Red[0], 255);
   EXPECT_EQ(Red[1], 0);
   EXPECT_EQ(Red[3], 255);
