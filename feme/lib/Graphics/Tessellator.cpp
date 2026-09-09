@@ -211,9 +211,14 @@ TessellatedPatch tessellateIsoline(const TessFactors &Factors,
   if (anyFactorCullsPatch(Factors.Edges.data(), 2))
     return {};
 
-  // The isoline's line count (`u` axis) always rounds up, matching both
-  // APIs' shared rule that only the per-line detail factor (`v` axis, below)
-  // honors `Partitioning`.
+  // (Roadmap L24(b)) The line count (`Edges[0]`, density) always rounds
+  // up, matching both APIs' shared rule that only the per-line detail
+  // factor (`Edges[1]`, segments) honors `Partitioning`. Line density
+  // becomes each generated point's own `V` coordinate below, and per-line
+  // detail becomes `U` -- the opposite of what their names ("line count"
+  // first, "segments" second) might suggest, but matching the real
+  // `SV_DomainLocation` convention `DomainPoint`'s own doc comment
+  // describes (`U` = along-line position, `V` = which line).
   uint32_t Lines = static_cast<uint32_t>(
       std::ceil(clampFactor(Factors.Edges[0], MaxTessFactor)));
   uint32_t Segments =
@@ -221,11 +226,18 @@ TessellatedPatch tessellateIsoline(const TessFactors &Factors,
 
   TessellatedPatch Patch;
   for (uint32_t I = 0; I < Lines; ++I) {
-    float U = Lines > 1 ? static_cast<float>(I) / Lines : 0.0f;
+    // (Roadmap L24(b)) Which line this row belongs to -- `DomainPoint::V`,
+    // not `U`; an earlier version of this function stored it as `U`
+    // instead, silently swapping the two coordinates' real meaning (see
+    // `DomainPoint`'s own doc comment) and producing an all-zero
+    // along-line coordinate for every point of a single-line patch, since
+    // `Lines == 1` always makes this a constant `0.0f`.
+    float LineIndex = Lines > 1 ? static_cast<float>(I) / Lines : 0.0f;
     uint32_t RowStart = static_cast<uint32_t>(Patch.Points.size());
     for (uint32_t J = 0; J <= Segments; ++J) {
-      float V = static_cast<float>(J) / Segments;
-      Patch.Points.push_back({U, V, 0.0f});
+      // (Roadmap L24(b)) The position along this one line -- `DomainPoint::U`.
+      float AlongLine = static_cast<float>(J) / Segments;
+      Patch.Points.push_back({AlongLine, LineIndex, 0.0f});
     }
     if (OutputPrimitive != TessOutputPrimitive::Line)
       continue;

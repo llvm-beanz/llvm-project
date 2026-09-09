@@ -112,7 +112,19 @@ struct TessFactors {
 };
 
 /// One generated domain coordinate: a triangle domain uses all three
-/// (barycentric, `U + V + W == 1`); isoline/quad use only `U`/`V`.
+/// (barycentric, `U + V + W == 1`); isoline/quad use only `U`/`V`. (Roadmap
+/// L24(b)) For `Isoline`, `U`/`V` are not an arbitrary internal ordering --
+/// they must match the real `SV_DomainLocation`/`gl_TessCoord` convention
+/// exactly, since `feme::graphics::buildDomainInvocations` copies them
+/// straight into the domain shader's own coordinate operand with no
+/// per-domain remapping: `U` is the position *along* one line (varies
+/// continuously across the line's own segments, `[0, 1]`), and `V` is
+/// *which* line out of a patch's own `Edges[0]`-many lines this point
+/// belongs to (a discrete value in `[0, 1)`) -- confirmed against the real
+/// D3D11 `SV_DomainLocation` documentation ("u ... varies along the length
+/// of a single line ... v ... selects which isoline"). See
+/// `tessellateIsoline`'s own comment for how the "density"/"detail" factor
+/// terminology maps onto this `U`/`V` split.
 struct DomainPoint {
   float U = 0.0f;
   float V = 0.0f;

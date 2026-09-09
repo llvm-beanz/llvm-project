@@ -67,7 +67,13 @@ TEST(TessellatorTest, NonPositiveFactorCullsThePatch) {
   EXPECT_TRUE(Patch.Indices.empty());
 }
 
-TEST(TessellatorTest, IsolineGeneratesADensityByDetailGrid) {
+/// (Roadmap L24(b)) Renamed from `IsolineGeneratesADensityByDetailGrid`:
+/// `DomainPoint::U`/`V` for an isoline domain are `U` = along-line
+/// (detail) position, `V` = which-line (density) index -- the opposite of
+/// what this test originally asserted, before that swap was found to
+/// disagree with the real `SV_DomainLocation` convention (see
+/// `DomainPoint`'s own doc comment and `tessellateIsoline`'s).
+TEST(TessellatorTest, IsolineGeneratesADetailByDensityGrid) {
   TessFactors Factors;
   Factors.Edges = {3.0f, 4.0f, 1.0f, 1.0f};
   TessellatedPatch Patch =
@@ -78,10 +84,12 @@ TEST(TessellatorTest, IsolineGeneratesADensityByDetailGrid) {
   // Each line contributes 4 line segments (2 indices each).
   EXPECT_EQ(Patch.Indices.size(), 3u * 4u * 2u);
   for (const DomainPoint &P : Patch.Points) {
+    // `U` (along-line/detail) spans the full, inclusive `[0, 1]` range.
     EXPECT_GE(P.U, 0.0f);
-    EXPECT_LT(P.U, 1.0f);
+    EXPECT_LE(P.U, 1.0f);
+    // `V` (which-line/density) is a discrete index in `[0, 1)`.
     EXPECT_GE(P.V, 0.0f);
-    EXPECT_LE(P.V, 1.0f);
+    EXPECT_LT(P.V, 1.0f);
   }
 }
 
