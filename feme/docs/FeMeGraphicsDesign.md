@@ -2278,6 +2278,26 @@ Vulkan-API surface (`vkCreateGraphicsPipelines` still rejects the geometry
 stage bit, roadmap H5e) and chaining the compiled stage into
 `Executor::executeDraws` (roadmap H5d).
 
+Status (roadmap L24(a)): `isPerVertexArrayInputGlobal`'s constant-index
+fold (the H5f paragraph above) had no restriction on which stage it
+applied to, matching *any* `Input`-storage-class array-typed global
+regardless of stage -- so a fragment (or vertex/compute) entry's own
+plain, ordinary array-typed varying (e.g. a `float arr[4] : MY_ARRAY`
+fragment input, no per-vertex/control-point dimension at all) took the
+exact same IR shape `gl_in[k]` does, and had its own constant array index
+wrongly folded into `Vertex` instead of `Row`. That still produced a
+constant value, so `ValidateStagePass`'s non-constant-only check never
+caught it; it surfaced only much later, as `feme-cpu-wrap-fragment`'s own
+generic "vertex operand 0" diagnostic, for whichever array element's
+misfolded index happened to be nonzero. Fixed by restricting the fold to
+`Stage == Hull || Domain || Geometry` -- the only stages with a genuine
+per-vertex/control-point-indexable `Input` (a hull entry's own
+`InputPatch<T,N>`, a domain entry's own `OutputPatch<T,N>`, and a
+geometry entry's own `gl_in[]`); every other stage's array-typed `Input`
+now resolves through the ordinary `Row`/`Component` byte-offset path
+instead, exactly like a real matrix's row index already does.
+
+
 ### Amplification and mesh wrappers
 
 These wrappers extend the compute group ABI with immutable payload input and a

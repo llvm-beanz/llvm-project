@@ -33137,3 +33137,62 @@ similarly needed their configured `Stencil.Front`/`Stencil.Back` face swapped, s
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed (a
 pure rendering-correctness fix to already-claimed rasterization support, no new feature or
 extension surface).
+
+## L24(a): scope `isPerVertexArrayInputGlobal`'s constant-index fold to Hull/Domain/Geometry, fixing a fragment array-input regression
+
+Roadmap L24(a) named `Feature/Semantics/ArraySemantics.test` (a plain `float arr[4] :
+MY_ARRAY` fragment-stage input) as still failing after L24's own viewport-Y/winding fix,
+apparently unrelated to that fix's own scope.
+
+### Investigation
+
+A direct `offloader` re-run reproduced `vkCreateGraphicsPipelines` failing outright with
+`"feme-cpu-wrap-fragment: synthetic fragment layouts only support vertex operand 0"`. Tracing
+the responsible `feme.stage.input.load` call back through `CanonicalizeStage.cpp` found
+`isPerVertexArrayInputGlobal`: a predicate meant to recognize a geometry entry's own
+`gl_in[]`-shaped per-vertex-arrayed `Input` global, so that a constant `gl_in[k]` index folds
+into `feme.stage.input.load`'s `Vertex` operand instead of an ordinary `Row` (roadmap H5f).
+Its own doc comment explicitly noted (and accepted) that it was a "purely structural check"
+with no way to tell a geometry entry's `gl_in[]` apart from any other stage's own plain,
+ordinary array-typed varying, deferring that distinction to `ValidateStagePass`'s
+`validateVertex` -- but `validateVertex` only ever flags a *non-constant* vertex operand
+outside Geometry/Mesh, so a wrongly-folded but still-constant operand (exactly what a
+constant array index like `arr[1]`/`arr[2]`/`arr[3]` produces) sails through undetected. It
+surfaces only much later and confusingly, as `feme-cpu-wrap-fragment`'s own generic "vertex
+operand 0" diagnostic, once the fragment-stage runtime lowering finally tries to interpret
+that misfolded value as a genuine vertex/control-point selector.
+
+### Fix
+
+`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`: `isPerVertexArrayInputGlobal` now takes
+a `ShaderStage` parameter and restricts its recognition to `Stage == Hull || Domain ||
+Geometry` -- the only stages with a genuine per-vertex/control-point-indexable `Input`: a
+hull entry's own `InputPatch<T,N>` (`HullWrapper.cpp`'s `lowerHullInputLoad`), a domain
+entry's own `OutputPatch<T,N>` (`DomainWrapper.cpp`'s `lowerDomainControlPointLoad`), and a
+geometry entry's own `gl_in[]`. Both call sites (the constant-offset resolution path and the
+per-element `RowCountIsVertexArray` computation) now thread `Stage` through. 3
+`CanonicalizeStageTest.cpp` unit tests that exercised this exact shape using a `vertex`-stage
+placeholder function attribute (predating any real per-vertex-arrayed-input stage to test
+against, per their own doc comments) are updated to a real `geometry` attribute instead,
+matching their own intent.
+
+### Verification
+
+- `FeMeGraphicsTests`: **284/284 Pass**.
+- Full `check-feme`: **2786/2845 Passed, 59 Unsupported, 0 Failed** (including the 3 updated
+  `CanonicalizeStageTest.cpp` cases).
+- Real `feme-vk` sweep: **224/664 Pass** (up from 223 at L24's close), 153 `Failed` (down from
+  154). An exact before/after fail-list diff (via `git stash`/rebuild/re-sweep) confirms
+  `ArraySemantics.test` is the *only* test whose status changed -- zero other regressions.
+- Real `dEQP-VK.rasterization.culling.*` CTS re-run: **42/43 Pass**, matching the L24 baseline
+  exactly (same pre-existing `primitive_id` gap), confirming no general regression from this
+  `CanonicalizeStage.cpp` change. A broader CTS sweep targeting stage-IO-array-heavy groups
+  more directly relevant to this fix's own scope (`dEQP-VK.tessellation.shader_input_output.*`,
+  `dEQP-VK.geometry.input.*`) hit this environment's own pre-existing missing-test-data-file
+  gap (`ResourceError: Failed to open file './vulkan/data/.../*.png'`, documented since L23)
+  before reaching any case this fix could affect, so `culling.*`'s clean re-run stands in as
+  the broadest currently-reachable regression check.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed, a pure
+correctness fix to already-claimed varying-array support, no new feature or extension
+surface.
