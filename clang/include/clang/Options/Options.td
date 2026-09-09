@@ -2584,7 +2584,7 @@ defm switch : BoolFOption<"switch",
   Default<"LangOpts->HLSL && T.isSPIRVLogical()">,
   NegFlag<SetTrue, [], [ClangOption, CC1Option], "Do not emit">,
   PosFlag<SetFalse, [], [ClangOption, CC1Option], "Emit">,
-  BothFlags<[], [ClangOption], " LLVM switch instructions">>;
+  BothFlags<[], [ClangOption], " switch statements as LLVM switch instructions">>;
 defm force_enable_int128 : BoolFOption<"force-enable-int128",
   TargetOpts<"ForceEnableInt128">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,

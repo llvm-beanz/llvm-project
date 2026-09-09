@@ -1783,6 +1783,12 @@ private:
   /// statement range in current switch instruction.
   llvm::BasicBlock *CaseRangeBlock = nullptr;
 
+  /// State used while lowering a switch to conditional branches.
+  llvm::Value *SwitchCond = nullptr;
+  llvm::BasicBlock *SwitchDispatchBlock = nullptr;
+  llvm::BasicBlock *SwitchDispatchPredecessor = nullptr;
+  const SwitchStmt *SwitchStmtForBranchLowering = nullptr;
+
   /// OpaqueLValues - Keeps track of the current set of opaque value
   /// expressions.
   llvm::DenseMap<const OpaqueValueExpr *, LValue> OpaqueLValues;
@@ -3692,6 +3698,9 @@ public:
   void EmitDefaultStmt(const DefaultStmt &S, ArrayRef<const Attr *> Attrs);
   void EmitCaseStmt(const CaseStmt &S, ArrayRef<const Attr *> Attrs);
   void EmitCaseStmtRange(const CaseStmt &S, ArrayRef<const Attr *> Attrs);
+  llvm::Value *EmitSwitchCaseMatch(const CaseStmt &S);
+  void EmitSwitchCaseStmtAsIf(const SwitchCase &S,
+                              ArrayRef<const Attr *> Attrs);
   void EmitDeferStmt(const DeferStmt &S);
   void EmitAsmStmt(const AsmStmt &S);
 
