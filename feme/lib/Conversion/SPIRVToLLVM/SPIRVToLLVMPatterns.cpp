@@ -5401,12 +5401,52 @@ public:
   }
 };
 
-/// Converts `spirv.Transpose` (roadmap H10f): builds each row `r` of the
-/// input matrix (element `r` of every column) into column `r` of the
-/// result, one `llvm.extractelement`/`llvm.insertelement` pair per
+/// Transposes \p Matrix -- an `!llvm.array<NumColumns x vector<NumRows x
+/// T>>` value, i.e. the "natural" (always column-major) representation
+/// MatrixType conversion always builds (see
+/// populateSPIRVToLLVMTargetTypeConversions) -- into an
+/// `!llvm.array<NumRows x ResultColumnTy>` value (`ResultColumnTy` must
+/// itself be a `vector<NumColumns x T>`): new column `r` (one per original
+/// row) is built from lane `r` of every one of the `NumColumns` original
+/// columns, one `llvm.extractelement`/`llvm.insertelement` pair per
 /// (row, column) cell -- there is no bulk "transpose" instruction to reach
 /// for, since the source and destination are both arrays of vectors, not
-/// a single flat buffer a shuffle could reinterpret.
+/// a single flat buffer a shuffle could reinterpret. Self-inverse: calling
+/// this again on the result with `NumColumns`/`NumRows` swapped (and a
+/// `ResultColumnTy` swapped back to the original column type) reproduces
+/// \p Matrix. Shared by `TransposePattern` (`spirv.Transpose`) and
+/// `RowMajorMatrixStorePattern`/`RowMajorMatrixLoadPattern` below, for whom
+/// a physical `RowMajor` storage layout is exactly this same transpose of
+/// the logical, always-column-major value MatrixType conversion builds --
+/// see the latter two patterns' own comments.
+static mlir::Value
+transposeMatrixValue(mlir::ConversionPatternRewriter &Rewriter,
+                     mlir::Location Loc, mlir::Value Matrix,
+                     int64_t NumColumns, int64_t NumRows,
+                     mlir::VectorType ResultColumnTy) {
+  auto ResultArrTy = mlir::LLVM::LLVMArrayType::get(ResultColumnTy, NumRows);
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultArrTy);
+  for (int64_t R = 0; R != NumRows; ++R) {
+    mlir::Value RowIndex =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), R);
+    mlir::Value NewColumn =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultColumnTy);
+    for (int64_t C = 0; C != NumColumns; ++C) {
+      mlir::Value Column = extractColumn(Rewriter, Loc, Matrix, C);
+      mlir::Value Elem = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, Column, RowIndex);
+      mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(), C);
+      NewColumn = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, NewColumn,
+                                                      Elem, DstIndex);
+    }
+    Result =
+        mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, NewColumn, R);
+  }
+  return Result;
+}
+
+/// Converts `spirv.Transpose` (roadmap H10f) via transposeMatrixValue.
 class TransposePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::TransposeOp> {
 public:
@@ -5426,30 +5466,213 @@ public:
     auto ResultColumnTy =
         mlir::cast<mlir::VectorType>(ResultArrTy.getElementType());
 
+    mlir::Value Result = transposeMatrixValue(
+        Rewriter, Op.getLoc(), Adaptor.getMatrix(), MatrixTy.getNumColumns(),
+        MatrixTy.getNumRows(), ResultColumnTy);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Returns \p Op's own matrix element type if it is a `spirv.AccessChain`
+/// selecting one whole element of a `RWStructuredBuffer<matCxR>`/
+/// `StructuredBuffer<matCxR>`-shaped block's own content array (dxc's own
+/// single-member wrapper shape -- see BlockElement's own comment; glslang's
+/// non-wrapper shape is not covered, since no case reaching it is known to
+/// exist), decorated `RowMajor` with a `MatrixStride` matching a tightly
+/// packed row of the matrix's own `NumColumns` elements -- the one shape
+/// RowMajorMatrixStorePattern/RowMajorMatrixLoadPattern below know how to
+/// reproduce as a real physical layout (roadmap L83's own real IR
+/// reduction found this gap: a `RWStructuredBuffer<float3x4>`'s own
+/// `RowMajor`+`MatrixStride`-decorated content is silently ignored by the
+/// ordinary `BlockAccessChainPattern`/`rewriteBlockAccess` path -- unlike
+/// `isMatrixMemberLayoutRepresentable`, which already rejects this exact
+/// decoration combination, but only ever runs for a matrix that is
+/// *directly* a named struct member, not one reached through the
+/// wrapper's own content array). Returns `std::nullopt` for every other
+/// case (not a block access, not a whole-element access, a natural
+/// (`ColMajor`) layout the ordinary conversion already handles correctly,
+/// or some other stride this conversion cannot reproduce).
+std::optional<mlir::spirv::MatrixType>
+getRowMajorMatrixAccess(mlir::spirv::AccessChainOp Op) {
+  auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
+      mlir::cast<mlir::spirv::PointerType>(Op.getComponentPtr().getType())
+          .getPointeeType());
+  if (!MatrixTy)
+    return std::nullopt;
+
+  auto PointerType =
+      mlir::dyn_cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
+  if (!PointerType)
+    return std::nullopt;
+  std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
+  if (!Element)
+    Element = getUniformBlockElement(PointerType);
+  // The wrapper shape's sole member is always index 0; a second index
+  // selects the specific array element (the runtime index into the
+  // `RWStructuredBuffer`) and nothing further, matching this pattern's own
+  // "whole matrix element" scope -- its own value does not matter here,
+  // since every element of the array shares the same layout.
+  if (!Element || !Element->HasWrapper || Op.getIndices().size() != 2 ||
+      !mlir::isa<mlir::spirv::RuntimeArrayType, mlir::spirv::ArrayType>(
+          Element->Content))
+    return std::nullopt;
+
+  auto Struct = mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+  llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
+      Decorations;
+  Struct.getMemberDecorations(0, Decorations);
+  bool IsRowMajor = false;
+  bool StrideMatches = false;
+  uint32_t RowStride = MatrixTy.getNumColumns() *
+                       (MatrixTy.getElementType().getIntOrFloatBitWidth() / 8);
+  for (const auto &Decoration : Decorations) {
+    if (Decoration.decoration == mlir::spirv::Decoration::RowMajor)
+      IsRowMajor = true;
+    else if (Decoration.decoration == mlir::spirv::Decoration::MatrixStride) {
+      auto StrideAttr =
+          mlir::dyn_cast<mlir::IntegerAttr>(Decoration.decorationValue);
+      StrideMatches =
+          StrideAttr && static_cast<uint64_t>(StrideAttr.getInt()) == RowStride;
+    }
+  }
+  if (!IsRowMajor || !StrideMatches)
+    return std::nullopt;
+  return MatrixTy;
+}
+
+/// Converts a `spirv.Store` of a whole `RowMajor`-decorated
+/// `RWStructuredBuffer<matCxR>` matrix element (roadmap L83) -- see
+/// getRowMajorMatrixAccess's own comment for the exact shape matched. The
+/// value to store is always modeled with the ordinary "logical" (natural,
+/// always column-major) MatrixType -> LLVM conversion throughout the rest
+/// of the IR (arithmetic, temporaries, `spirv.CompositeConstruct`/
+/// `Extract`, an `!llvm.array<NumColumns x vector<NumRows x T>>`); this
+/// pattern transposes it into the "physical" (row-major) layout only at
+/// the exact point it crosses the memory boundary, immediately before the
+/// real `llvm.store`. The physical row type is a flat, packed
+/// `!llvm.array<NumColumns x T>` of scalars -- deliberately *not* a
+/// `vector<NumColumns x T>`, since LLVM's own data layout pads a
+/// non-power-of-two-width vector's in-memory (store/alloc) size up to the
+/// next power of two on this target (e.g. `vector<3xf32>` occupies 16
+/// bytes, not 12), which would silently corrupt this exact stride whenever
+/// `NumColumns` (an HLSL row's own element count) isn't a power of two --
+/// an array's own per-element layout has no such padding. Registered at
+/// `FeMeBenefit`, above upstream's own generic `spirv.Store` pattern
+/// (registered at the default benefit by
+/// `populateSPIRVToLLVMConversionPatterns`), so it wins only for this one
+/// shape; every other store keeps using the upstream pattern unchanged.
+class RowMajorMatrixStorePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::StoreOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::StoreOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::StoreOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto AccessChain =
+        Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
+    if (!AccessChain)
+      return Rewriter.notifyMatchFailure(Op, "not an access chain store");
+    std::optional<mlir::spirv::MatrixType> MatrixTy =
+        getRowMajorMatrixAccess(AccessChain);
+    if (!MatrixTy)
+      return Rewriter.notifyMatchFailure(Op, "not a RowMajor matrix store");
+
     mlir::Location Loc = Op.getLoc();
-    int64_t NumColumns = MatrixTy.getNumColumns();
-    int64_t NumRows = MatrixTy.getNumRows();
-    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultArrTy);
+    int64_t NumColumns = MatrixTy->getNumColumns();
+    int64_t NumRows = MatrixTy->getNumRows();
+    mlir::Type ElemTy =
+        getTypeConverter()->convertType(MatrixTy->getElementType());
+    auto RowArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, NumColumns);
+    auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(RowArrTy, NumRows);
+
+    mlir::Value Physical =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, PhysicalArrTy);
     for (int64_t R = 0; R != NumRows; ++R) {
       mlir::Value RowIndex =
           mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), R);
-      mlir::Value NewColumn =
-          mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultColumnTy);
+      mlir::Value Row = mlir::LLVM::PoisonOp::create(Rewriter, Loc, RowArrTy);
       for (int64_t C = 0; C != NumColumns; ++C) {
         mlir::Value Column =
-            extractColumn(Rewriter, Loc, Adaptor.getMatrix(), C);
+            extractColumn(Rewriter, Loc, Adaptor.getValue(), C);
         mlir::Value Elem = mlir::LLVM::ExtractElementOp::create(
             Rewriter, Loc, Column, RowIndex);
+        Row = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Row, Elem, C);
+      }
+      Physical =
+          mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Physical, Row, R);
+    }
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Physical,
+                                                     Adaptor.getPtr());
+    return mlir::success();
+  }
+};
+
+/// Converts a `spirv.Load` of a whole `RowMajor`-decorated
+/// `RWStructuredBuffer<matCxR>` matrix element (roadmap L83) -- the exact
+/// inverse of RowMajorMatrixStorePattern above (see its own comment, and
+/// getRowMajorMatrixAccess's, for the shape matched and why the physical
+/// row is a flat scalar array rather than a vector): the real `llvm.load`
+/// reads the physical (row-major) bytes as an `!llvm.array<NumRows x
+/// !llvm.array<NumColumns x T>>`, which this pattern then transposes back
+/// into the ordinary logical (natural, column-major) MatrixType
+/// representation used everywhere else in the IR. Registered at
+/// `FeMeBenefit` for the same reason as RowMajorMatrixStorePattern.
+class RowMajorMatrixLoadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::LoadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::LoadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::LoadOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto AccessChain =
+        Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
+    if (!AccessChain)
+      return Rewriter.notifyMatchFailure(Op, "not an access chain load");
+    std::optional<mlir::spirv::MatrixType> MatrixTy =
+        getRowMajorMatrixAccess(AccessChain);
+    if (!MatrixTy)
+      return Rewriter.notifyMatchFailure(Op, "not a RowMajor matrix load");
+
+    mlir::Location Loc = Op.getLoc();
+    int64_t NumColumns = MatrixTy->getNumColumns();
+    int64_t NumRows = MatrixTy->getNumRows();
+    mlir::Type ElemTy =
+        getTypeConverter()->convertType(MatrixTy->getElementType());
+    auto RowArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, NumColumns);
+    auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(RowArrTy, NumRows);
+    mlir::Value Physical = mlir::LLVM::LoadOp::create(Rewriter, Loc,
+                                                      PhysicalArrTy,
+                                                      Adaptor.getPtr());
+
+    auto LogicalColumnTy = mlir::cast<mlir::VectorType>(
+        getTypeConverter()->convertType(MatrixTy->getColumnType()));
+    auto LogicalArrTy =
+        mlir::LLVM::LLVMArrayType::get(LogicalColumnTy, NumColumns);
+    mlir::Value Logical =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, LogicalArrTy);
+    for (int64_t C = 0; C != NumColumns; ++C) {
+      mlir::Value NewColumn =
+          mlir::LLVM::PoisonOp::create(Rewriter, Loc, LogicalColumnTy);
+      for (int64_t R = 0; R != NumRows; ++R) {
+        mlir::Value Row =
+            mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Physical, R);
+        mlir::Value Elem =
+            mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Row, C);
         mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
-            Rewriter, Loc, Rewriter.getI32Type(), C);
+            Rewriter, Loc, Rewriter.getI32Type(), R);
         NewColumn = mlir::LLVM::InsertElementOp::create(Rewriter, Loc,
                                                         NewColumn, Elem,
                                                         DstIndex);
       }
-      Result =
-          mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, NewColumn, R);
+      Logical = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Logical,
+                                                  NewColumn, C);
     }
-    Rewriter.replaceOp(Op, Result);
+    Rewriter.replaceOp(Op, Logical);
     return mlir::success();
   }
 };
@@ -6586,8 +6809,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
-      MatrixTimesScalarPattern, TransposePattern,
-      OffsetStructLeadingPadAccessChainPattern,
+      MatrixTimesScalarPattern, TransposePattern, RowMajorMatrixStorePattern,
+      RowMajorMatrixLoadPattern, OffsetStructLeadingPadAccessChainPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,
       SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
       SUDotConversionPattern, SDotAccSatConversionPattern,
