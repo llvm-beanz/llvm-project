@@ -34324,3 +34324,111 @@ new extension advertised. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: 
 needed (this fix follows the same already-documented "resolve to compile-time default, no runtime
 specialization override" design roadmap L7j's own closure already established; no new design decision
 introduced).
+
+## L7l: `spirv.MemoryBarrier` legalization pattern
+
+**Gap**: `spirv.MemoryBarrier` (a real SPIR-V import's own `OpMemoryBarrier`, e.g. as glslang emits for a
+GLSL `subgroupMemoryBarrier()`-family call) had no conversion pattern anywhere in this project, causing
+pipeline creation to fail outright:
+```
+error: failed to legalize operation 'spirv.MemoryBarrier' that was explicitly marked illegal:
+  "spirv.MemoryBarrier"() <{memory_scope = #spirv.scope<Subgroup>,
+    memory_semantics = #spirv.memory_semantics<AcquireRelease|WorkgroupMemory>}> : () -> ()
+vkCreateComputePipelines: failed to convert spirv dialect module to the llvm dialect
+```
+for every one of `dEQP-VK.subgroups.basic.compute.subgroupmemorybarrier*`'s own 10 cases
+(`subgroupmemorybarrier`/`subgroupmemorybarrierbuffer`/`subgroupmemorybarrierimage`/
+`subgroupmemorybarriershared`, each with a `_requiredsubgroupsize` twin), now that roadmap L7k's own
+array-deserialization fix lets those shaders' modules reach this legalization stage for the first time.
+Also confirmed via `dEQP-VK.subgroups.basic.compute.subgroupelect`/`_requiredsubgroupsize`, which share
+the same GLSL test harness's own generic `subgroupMemoryBarrier()`-family call despite their own test
+names suggesting an unrelated op.
+
+**Fix**: new `MemoryBarrierConversionPattern` (`SPIRVToLLVMPatterns.cpp`) converts `spirv.MemoryBarrier`
+directly to one of the three plain (non-`_with_group_sync`) `llvm.spv.*_memory_barrier` intrinsics
+`feme::cpu::matchBarrierCall` (`feme/lib/Transforms/CPU/BarrierCalls.cpp`) already recognizes -- these
+same six raised intrinsics (three plain, three `_with_group_sync`) are already produced by
+`feme::dxil::OpRaisingPass::raiseBarrierCall` for DXIL-origin `GroupMemoryBarrier`-family HLSL intrinsics,
+and the CPU runtime's own barrier-region-splitting/fence lowering (`feme/lib/Transforms/CPU/
+EntryWrapper.cpp`) already consumes all six uniformly regardless of which frontend produced them, so no
+CPU-runtime change was needed here at all -- purely a missing SPIR-V-to-LLVM legalization pattern.
+
+The new pattern mirrors `ControlBarrierConversionPattern`'s own shape, but always picks a plain barrier
+intrinsic rather than a `_with_group_sync` one, since `spirv.MemoryBarrier` has no `execution_scope`
+operand at all and so never implies any convergence requirement (unlike `spirv.ControlBarrier`, whose
+convergence requirement is unconditional per the SPIR-V spec). `memory_scope` maps onto the three
+`feme::cpu::BarrierMemoryScope` granularities: `Workgroup` -> `llvm.spv.group.memory.barrier`; `Device` ->
+`llvm.spv.device.memory.barrier`; every scope this milestone's whole-group barrier support doesn't
+distinguish further (`CrossDevice`/`QueueFamily`/`Subgroup`/`Invocation`) conservatively ->
+`llvm.spv.all.memory.barrier`, a safe superset fence in every case -- mirroring
+`ControlBarrierConversionPattern`'s own conservative-superset convention for the scopes it doesn't
+distinguish further either. `memory_semantics`'s own individual ordering/memory-class bits are not parsed
+further, for the same reason `ControlBarrierConversionPattern` doesn't.
+
+New lit test `spirv-to-llvm-memory-barrier.mlir` covers the `Workgroup`/`Device`/conservative-superset
+cases. `ninja check-feme`: 2,817 tests passed, 0 failed (up by exactly the new lit-test cases).
+
+**Real `deqp-vk` verification**:
+
+A real re-run confirms the specific `failed to legalize operation 'spirv.MemoryBarrier'` diagnostic no
+longer appears anywhere: all 8 non-crashing `subgroupmemorybarrier*`-family cases, plus `subgroupelect`/
+its `_requiredsubgroupsize` twin (10 cases total), now legalize successfully and reach real pipeline
+creation for the first time. None of them pass outright yet, though -- fixing this gap let each of them
+reach one layer further into the pipeline, surfacing three further, distinct, and unrelated blockers:
+
+1. **6 cases now fail the same runtime-value-verification gap as roadmap L7n**
+   (`subgroupmemorybarrier`/`subgroupmemorybarrierbuffer`/`subgroupmemorybarrierimage`, each with its
+   `_requiredsubgroupsize` twin): each reaches real execution but fails output verification, the same
+   symptom class L7n already tracks (a `gl_Subgroup*`-builtin-variable runtime-correctness gap). Not a new
+   bug; folded into L7n's own existing scope rather than filed separately.
+
+2. **`subgroupelect`/`_requiredsubgroupsize` now fail a distinct, previously-unreached `feme-cpu-simdize`
+   diagnostic**:
+   ```
+   error: feme-cpu-simdize: groupshared global 'spirv_var_38' feeds a nested getelementptr or another
+     unsupported user; only a first-level getelementptr feeding a direct load, store, atomicrmw, masked
+     gather/scatter, or (for a vector-typed row load) a second-level per-component getelementptr feeding
+     its own masked gather is supported (roadmap milestone 9 deviation)
+   ```
+   This is the same diagnostic family roadmap L10/L11 already narrowed the scope of for two
+   `offload-test-suite` repros, but this is a new, real, previously-unseen occurrence against a real CTS
+   shader's own groupshared-array indexing shape -- not a regression in this row's own fix. Filed as new
+   roadmap row **L7o**.
+
+3. **`subgroupmemorybarriershared`/`_requiredsubgroupsize` now crash with a real `SIGBUS`** rather than the
+   old legalization failure:
+   ```
+   Thread 1 "deqp-vk" received signal SIGBUS, Bus error.
+   0xdca345eadca345ea in ?? ()
+   #0  0xdca345eadca345ea in ?? ()
+   Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+   ```
+   confirmed via a direct `gdb -batch -ex run -ex bt` capture. The crashing PC itself
+   (`0xdca345eadca345ea`) is a repeating-byte pattern consistent with a poison/uninitialized-memory fill
+   value rather than a real code address, suggesting a call through a corrupted or never-initialized
+   function pointer somewhere in this shader's own JIT-compiled code or the CPU runtime's own dispatch
+   path. This shader is the one case in the family that also declares an `r32ui` image binding
+   (`tempImage`) alongside the groupshared array every sibling shares -- a plausible but not yet confirmed
+   distinguishing factor. Filed as new roadmap row **L7p**.
+
+**Aggregate result** (same per-subgroup-category chunking methodology as roadmap L7k's own sweep, to route
+around the pre-existing L7m crash): **5 Pass / 144 Fail / 9,007 NotSupported / 4 unmeasured (crashed) =
+9,160 total.** Compared to L7k's own recorded baseline (5 Pass / 146 Fail / 9,007 NotSupported / 2
+unmeasured), `Fail` is down by 2 and `unmeasured` is up by 2 -- exactly the 2 `subgroupmemorybarriershared*`
+cases moving from a legalization failure into the new L7p crash. `NotSupported` is unchanged, confirming
+this fix (like L7k's) touches only cases already past the capability gate. This is a lateral move for the
+raw tally, but the `spirv.MemoryBarrier` legalization gap this row was filed against is definitively and
+completely fixed -- confirmed both by the new lit test and by the diagnostic's complete disappearance from
+every real case that used to hit it.
+
+Given all of L7m (the pre-existing crash)/L7n (runtime-value-verification)/L7o (new simdize gap)/L7p (new
+SIGBUS crash) remaining open, `Info.SubgroupSupportedOperations`'s `VK_SUBGROUP_FEATURE_VOTE_BIT`/
+`SHUFFLE_BIT` flip (L7i's own pending decision) remains **not yet justified** and is **not** made this
+session. `PhysicalDeviceInfo.cpp` still advertises `VK_SUBGROUP_FEATURE_BASIC_BIT` only.
+
+`Vulkan14FeatureInventory.md` updated: the existing subgroup-capability audit note now records this row's
+own real sweep numbers and points the pending flip's remaining blockers at L7m/L7n/L7o/L7p.
+`VulkanExtensionInventory.md` reviewed: no change needed -- an internal legalization-pass completeness fix,
+no new extension advertised. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update
+needed (this fix follows the same intrinsic-based barrier-lowering design `ControlBarrierConversionPattern`
+already established; no new design decision introduced).

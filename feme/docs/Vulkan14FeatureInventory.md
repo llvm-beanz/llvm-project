@@ -295,7 +295,24 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `gl_SubgroupSize`/`gl_NumSubgroups`/`gl_SubgroupID` (roadmap L7n) -- so
   `supportedOperations` still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`:
   confirming a `VOTE_BIT`/`SHUFFLE_BIT` flip against `dEQP-VK.subgroups.*`
-  now remains blocked on L7l/L7m/L7n instead.
+  now remains blocked on L7l/L7m/L7n instead. UPDATE (roadmap L7l, later
+  session): the `spirv.MemoryBarrier` legalization gap above is now fixed
+  (new `MemoryBarrierConversionPattern`), confirmed via a real `deqp-vk`
+  re-run: the specific `failed to legalize operation 'spirv.MemoryBarrier'`
+  diagnostic no longer appears anywhere, and all 8 non-crashing
+  `subgroupmemorybarrier*`-family cases (plus `subgroupelect`/its twin, which
+  share the same generic `subgroupMemoryBarrier()`-family call) now reach
+  real pipeline creation successfully. None of them pass outright yet,
+  though: 6 now fail the same runtime-value-verification gap as L7n, 2 now
+  fail a distinct, previously-unreached `feme-cpu-simdize` groupshared-
+  access-shape gap (roadmap L7o), and the remaining 2 now crash with a real
+  `SIGBUS` (roadmap L7p) rather than the old legalization failure. Aggregate
+  sweep: 5 `Pass` / 144 `Fail` / 9,007 `NotSupported` / 4 unmeasured
+  (crashed) -- `NotSupported` still unchanged, confirming no capability-
+  gating effect either way -- so `supportedOperations` still advertises only
+  `VK_SUBGROUP_FEATURE_BASIC_BIT`: confirming the `VOTE_BIT`/`SHUFFLE_BIT`
+  flip against `dEQP-VK.subgroups.*` now remains blocked on L7m/L7n/L7o/L7p
+  instead.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
