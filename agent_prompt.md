@@ -42,27 +42,39 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7g from the roadmap or other prerequisites blocking the
+Can you work on L85 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A couple of raw `unhandled opcode`/`unhandled deserializations ... from
-> extension set GLSL.std.450` errors**, the leftover tail of L7's own original
-> filing text not otherwise claimed by L7a-L7f above. UPDATE (L7b's own closing
-> investigation this session): a real, concrete repro for the `unhandled opcode`
-> half is now confirmed -- offload-test-suite's own
-> `Vk.SampledTexture2D.Gather.test.yaml` (a real dxc-compiled HLSL
-> `Texture2D::Gather()` call, confirmed via a real `check-hlsl-feme-vk` re-run)
-> fails with exactly `unhandled opcode 96`. SPIR-V opcode 96 is `OpImageGather`
-> (the non-depth-comparison gather variant), confirmed via direct inspection to
-> have **zero support anywhere in upstream MLIR's SPIRV dialect** --
-> `SPIRVBase.td` jumps directly from opcode 95 (`OpImageFetch`) to opcode 97
-> (`OpImageDrefGather`), skipping 96 entirely (no enum case, no op definition,
-> no deserialization case). A materially larger gap than an ordinary `feme`-side
-> legalization-pattern gap (c.f. L7d's own `spirv.ImageDrefGather` case, whose
-> op already exists upstream): needs new upstream-style MLIR dialect work (a new
-> `spirv.ImageGather` op definition, deserialization case, verifier, and
-> printer/parser, mirroring the existing `spirv.ImageDrefGather`'s own shape)
-> before any feme-side legalization pattern can even be written against it. This
-> row now stays open scoped specifically to this one confirmed opcode-96 case
-> plus whatever remains of the original "GLSL.std.450" deserialization half
-> (still unconfirmed)
+> **`GroupNonUniformBallot`
+> (`OpGroupNonUniformBallot`/`OpGroupNonUniformBallotBitExtract`/etc., SPIR-V
+> opcode 341 for the `BitExtract` variant, `VK_SUBGROUP_FEATURE_BALLOT_BIT`) is
+> entirely unimplemented anywhere in this project**, split out of L7t's own
+> closing session: not a new regression -- confirmed via `grep -rln
+> "GroupNonUniformBallot" feme/lib/ feme/include/` returning zero matches,
+> entirely pre-existing and previously undiscovered by name (only implicitly,
+> indirectly surfaced before now as "why does `dEQP-VK.subgroups.ballot.*` show
+> `NotSupported`" rather than root-caused). Two real, distinct consequences
+> discovered this session: (1) the entire, direct `dEQP-VK.subgroups.ballot.*`
+> CTS group (correctly hidden today behind its own unadvertised `BALLOT_BIT`, so
+> currently harmless); and (2) surprisingly, essentially the **entire**
+> `dEQP-VK.subgroups.shuffle.*` CTS group too (a real flag-flip verification
+> run: 256/9562 cases newly failing with `error: unhandled opcode 341` once
+> `SHUFFLE_BIT` was speculatively advertised), because every non-rotate CTS
+> shuffle test shader's own verification harness (not the shuffle operation
+> itself) calls `subgroupBallot()`/`subgroupBallotBitExtract()` to check whether
+> the lane it read from was active -- meaning `SHUFFLE_BIT` cannot be safely
+> advertised until this gap closes, even though shuffle's own core
+> `OpGroupNonUniformShuffle`/`OpGroupNonUniformShuffleXor` legalization is
+> presumably already fine on its own (a distinct, already-implemented
+> `WaveCallKind::ReadLane`-adjacent pattern, not itself blocked by this row). A
+> materially larger prerequisite than a single-pattern fix: needs (1) new
+> SPIR-V-to-LLVM legalization pattern(s) for each `OpGroupNonUniformBallot*`
+> variant this ICD's own frontend reaches (mirroring
+> `AllEqualConversionPattern`/`ShuffleConversionPattern`'s own precedent in
+> `SPIRVToLLVMPatterns.cpp`), (2) a new `WaveCallKind::Ballot`-family
+> CPU-runtime intrinsic/lowering path (`WaveCalls.cpp`/`feme::cpu::SIMDizePass`)
+> producing the correct `<4 x uint32>`-shaped active-lane bitmask this ICD's own
+> wave width actually needs, and (3) its own real `deqp-vk` verification pass
+> across both the direct `ballot.*` group and a re-verification that flipping
+> `SHUFFLE_BIT` afterward introduces zero regressions, before either bit is
+> advertised in `PhysicalDeviceInfo.cpp`
