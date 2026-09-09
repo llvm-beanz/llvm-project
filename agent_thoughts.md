@@ -74419,3 +74419,142 @@ tests, (2) the standalone `llvm.spv.wave.is_first_lane`/`all_equal` intrinsic-na
 independently-notable fix distinct from this session's own new-pattern work), (3)
 `Roadmap.md`/`Vulkan14FeatureInventory.md`/`VulkanCTSReport.md` together, (4) this `agent_thoughts.md`
 entry, on its own, last.
+
+# Session: L7j -- `spirv.SpecConstantComposite`/`spirv.mlir.referenceof` legalization
+
+## Starting point
+
+The user's request pointed at L7i again, but `git log` confirmed L7i's own four commits (new op patterns,
+the `llvm.spv.wave.*` intrinsic-name bugfix, docs, and its own `agent_thoughts.md` entry) were already
+present at `HEAD` -- L7i is fully done. Per the "or other prerequisites blocking the L-series milestones"
+clause, I pivoted to **L7j**, the row L7i's own closing session split out: `spirv.SpecConstantComposite`
+(and its necessary companion `spirv.mlir.referenceof`) had no legalization pattern anywhere -- this
+project's own `SPIRVToLLVMPatterns.cpp`, nor upstream MLIR's `SPIRVToLLVM.cpp` -- meaning **zero**
+`dEQP-VK.subgroups.*` compute-stage CTS case could reach pipeline creation against this ICD at all, since
+every one of that group's shaders declares `gl_WorkGroupSize` via a `LocalSizeId`-style spec-constant
+composite the shader body itself reads back.
+
+## Investigation
+
+I first confirmed, by direct reading of `SPIRVStructureOps.td` and `SPIRVOps.cpp`'s `ReferenceOfOp::
+verify()`, that the dialect itself already supports a `spirv.mlir.referenceof` targeting either a scalar
+`spirv.SpecConstant` or a `spirv.SpecConstantComposite` -- the `.td` file's own TODO comment ("add support
+for composite specialization constants") is stale relative to the real verifier logic, which already
+handles both. This also surfaced a broader-than-filed gap: even the *scalar* spec-constant-read case had
+no legalization pattern at all, not just the composite one -- `SpecConstantErasurePattern`'s own doc
+comment flags this precisely, but nothing implements the fix.
+
+I checked whether this ICD has any runtime `VkSpecializationInfo` override mechanism (`Pipeline.cpp`'s own
+pipeline-creation path) and confirmed it does not -- meaning a spec constant's own declared default value
+is the *only* value it could ever actually take at this ICD's pipeline-creation time today. This is the
+key design decision: rather than trying to build any kind of "real" specialization mechanism (which this
+ICD doesn't have the surrounding infrastructure for yet, and no filed row asks for), I resolve every spec
+constant to its own default value *before* the SPIRV-to-LLVM conversion runs, mirroring the two existing
+precedents in this exact file (`prepareResourceVariables`, `prepareStageIOVariables`) for "the declaration
+this use resolves against may already be erased by the time the use itself is legalized, so collect first."
+
+## Implementation
+
+New `feme::spirv::SpecConstantValueMap` (a `StringMap<TypedAttr>`) and `prepareSpecConstants` (new,
+`SPIRVToLLVMPatterns.cpp`) walk a `spirv.module`'s body once: every `spirv.SpecConstant` maps directly to
+its own `default_value`; every `spirv.SpecConstantComposite` is folded into a `DenseElementsAttr` *only*
+if its own type is a `vector` (the `gl_WorkGroupSize`/`LocalSizeId` shape, and the only shape any known
+real HLSL/CTS source this ICD's frontend surface reaches needs) -- each constituent is either resolved by
+a `FlatSymbolRefAttr` lookup back into the same map (already built, since SPIR-V requires declare-before-
+use for symbol references) or used directly if it's already an inline (non-specialization) constant. A
+`struct`/nested-`array`-shaped composite is deliberately left unresolved (simply omitted from the map)
+rather than approximated, consistent with this project's "decline unreached shapes explicitly, don't
+silently miscompile" convention -- any `spirv.mlir.referenceof` targeting such a composite is declined by
+the new pattern with its own precise diagnostic, rather than crashing or producing a wrong value.
+
+New `ReferenceOfConversionPattern` legalizes `spirv.mlir.referenceof` itself: looks up the map, and builds
+an `llvm.mlir.constant` from the resolved attribute, reusing the same signed/unsigned -> signless integer
+retyping idiom upstream's own `ConstantScalarAndVectorPattern` already establishes for `spirv.Constant`
+(needed since a spec constant's own declared value carries the identical SPIR-V-vs-LLVM signedness
+mismatch). I deliberately didn't try to reuse `ConstantScalarAndVectorPattern` itself (it's `static` to
+upstream's own file and not exposed), so I wrote two small local equivalents
+(`getSignedOrUnsignedIntElementType` plus inline handling) rather than duplicating its full logic --
+enough to cover the scalar and vector-of-integer cases this row's own scope needs, not a general-purpose
+reimplementation.
+
+New `SpecConstantCompositeErasurePattern` mirrors the existing scalar `SpecConstantErasurePattern`:
+unconditional erase, safe because every real reference has already been resolved via the pre-built map
+independent of the declaration's own lifetime. I also updated `SpecConstantErasurePattern`'s own doc
+comment, since its "still-unimplemented feature" framing for `spirv.mlir.referenceof` is no longer
+accurate once this row's patterns land.
+
+Threaded the new `SpecConstantValueMap` through `populateSPIRVToLLVMTargetPatterns`'s signature (a new
+parameter, following the exact same shape `ResourceInfoMap`/`StageIOInfoMap` already use) and through
+`ConvertSPIRVToLLVMPass.cpp`'s `runOnOperation()`, adding a `prepareSpecConstants` call parallel to the
+existing `prepareResourceVariables`/`prepareStageIOVariables` calls, merged into a module-wide map the
+same way.
+
+## Testing
+
+New `spirv-to-llvm-spec-constants.mlir`: four positive cases (scalar signed, scalar unsigned, vector
+signed, vector unsigned -- the last exactly matching the `gl_WorkGroupSize` shape that motivated this row)
+plus a companion `spirv-to-llvm-spec-constants-invalid.mlir` (`--verify-diagnostics`) confirming a
+struct-shaped composite reference correctly remains illegal rather than silently miscompiling (following
+the existing `spirv-to-llvm-constants-invalid.mlir` file's own established two-file convention for
+positive vs. `--verify-diagnostics` negative cases in this test directory). I ran the new tests directly
+against `feme-opt` first to inspect the exact IR before wiring them through `llvm-lit`/`FileCheck`, then
+confirmed both pass via `llvm-lit -v`.
+
+`ninja -C build2 check-feme` (ccache, assertions-enabled build): **2,816 tests passed, 0 failed** -- up by
+exactly the new lit-test cases, no regressions.
+
+## Real `deqp-vk` verification
+
+```
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+deqp-vk --deqp-case="dEQP-VK.subgroups.*.compute.*"
+```
+
+**9,160 cases: 4 Pass, 149 Fail, 9,007 NotSupported.** This confirms the fix is real: previously zero
+`dEQP-VK.subgroups.*` compute-stage cases could reach pipeline creation at all (per L7i's own
+closing-session finding); now 4 pass outright, and the specific `failed to legalize operation
+'spirv.SpecConstantComposite'` diagnostic this row was filed against no longer reproduces anywhere in the
+sweep.
+
+I looked closely at the 149 `Fail` cases rather than declaring victory at "the target diagnostic is gone."
+Most fail with a *different* error, from a layer well below anything this row touches:
+
+```
+error: OpTypeArray count <id> 35 can only come from normal constant right now
+```
+
+This is upstream MLIR's own SPIR-V *deserializer* (`Deserializer.cpp`'s `processArrayType`), rejecting an
+`OpTypeArray` whose length operand is itself a specialization constant -- confirmed via `grep` that this is
+a real, pre-existing TODO already marked verbatim in that function ("The count can also come from a
+specialization constant"), not something introduced or touched by this row's own fix. Several
+`dEQP-VK.subgroups.basic.compute.*` (and other groups') shaders declare a workgroup-size-derived
+shared-memory array this way. This is a genuinely new, deeper, and separately-scoped gap -- I did not
+attempt to fix it this session (it would mean patching upstream MLIR's own deserializer, a bigger and more
+delicate change than this row's own scope), and instead filed it as new roadmap row **L7k**.
+
+A small remaining handful of cases (e.g. `dEQP-VK.subgroups.builtin_var.compute.subgroupsize_compute`) now
+get *past* pipeline creation and execution entirely, but fail output verification ("2 / 7 values passed")
+-- a distinct runtime-correctness gap, not a legalization one, and not yet reduced or scoped. I noted it in
+L7k's own row as an open follow-up question rather than guessing at a root cause without evidence.
+
+Given both remaining gaps, I did **not** flip `VK_SUBGROUP_FEATURE_VOTE_BIT`/`SHUFFLE_BIT` this session
+(L7i's own pending decision): the real pass rate is nowhere close to justifying it, and none of the
+remaining failures are specific to `Vote`/`Shuffle` themselves -- they're blocked on L7k's own gap or the
+runtime-verification one, both unrelated to what capability bit is advertised.
+
+## Documentation and commits
+
+Struck through L7j on `Roadmap.md` with the real fix and verification recorded, split out new row **L7k**
+for the deserializer gap, and updated L7's own umbrella-row bookkeeping text. Appended a new
+`VulkanCTSReport.md` section covering the fix, the real `deqp-vk` sweep, and both newly-discovered
+follow-on gaps. Updated `Vulkan14FeatureInventory.md`'s existing subgroup-capability audit note (the one
+L7i's own session had already written referencing "see roadmap L7j") with this session's findings.
+`VulkanExtensionInventory.md`: reviewed, no changes needed (no extension bit touched by any of this).
+`Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no changes needed (this fix follows the
+already-established "resolve to compile-time default, no runtime override" pattern this ICD's own
+pipeline-creation path establishes elsewhere; no new design decision).
+
+Commits, in order: (1) the new `SPIRVToLLVMPatterns.cpp`/`SPIRVToLLVM.h`/`ConvertSPIRVToLLVMPass.cpp`
+implementation plus its two new lit-test files, (2)
+`Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this `agent_thoughts.md`
+entry, on its own, last.
