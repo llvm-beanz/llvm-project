@@ -75002,3 +75002,62 @@ keeping in mind for future sessions closing out L-series/H-series rows: a "disti
 open row elsewhere in the roadmap may still turn out to share a root cause with whatever's currently being
 fixed, and it's worth at least a quick aggregate-sweep glance at nearby open rows before declaring a fix
 fully scoped and done.
+
+# L7r: subgroupmemorybarrierimage masked-image-store elect-predicate gap
+
+Picked up L7r, the last open case in the `subgroupmemorybarrier*` family after L7p/L7q's closing sessions:
+`dEQP-VK.subgroups.basic.compute.subgroupmemorybarrierimage` (and its `_requiredsubgroupsize` twin) reach
+real pipeline creation and execution but fail runtime output verification.
+
+Started with the usual reproduction/read-the-CTS-source pass, then reached for the established
+`FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`-gated debug-dump technique (this is now at least the fourth session --
+after L45, L7o, and implicitly others -- to lean on this exact convention; it's clearly earned its keep as
+a load-bearing debugging tool for this project specifically, and I'll keep reaching for it first rather
+than reinventing something bespoke each time). Dumped both the pre-CPU-pipeline and post-CPU-pipeline IR
+for the shader's `if (subgroupElect()) { imageStore(...); }` region and found a real, confirmed bug fairly
+quickly: the `if`-true-branch block's image store used the raw, unconditional `wave_sideeffect_mask`
+directly, never ANDing in the elect predicate the entry block had already computed -- unlike the
+already-passing buffer-store sibling test, whose equivalent store correctly threaded a
+`select(elect, ..., ...)`-shaped mask through.
+
+The harder part of this session wasn't finding that bug -- it was resisting the temptation to declare
+victory the moment I found *a* real bug that matched the general shape of "masked store doesn't respect a
+divergent branch's predicate", a pattern this project's H6/H8/H9/L-series sessions have hit and fixed
+repeatedly for other call kinds. I made myself work through whether this specific gap could actually
+produce *this specific test's* wrong output before touching any code, since the test's own `id`/`value`
+being uniform within a subgroup meant the "every lane stores redundantly" bug looked, on paper, idempotent
+and harmless. I got about halfway through convincing myself it *wasn't* the real root cause before deciding
+the fastest way to actually resolve the question was to just apply the fix and run the real test, rather
+than keep reasoning in the abstract about wave-packing and multi-subgroup coordinate collisions. That
+turned out to be the right call this time -- the fix made both cases pass outright on the first re-run --
+but the reasoning that led me to nearly conclude otherwise wasn't wrong on its own terms; I'd simply not yet
+worked through the multi-subgroups-per-wave case carefully enough to see where it broke down (a wave
+packing multiple subgroups together means one wave's single "elect" branch decision gets applied uniformly
+to lanes belonging to *different* subgroups, each of which should have had its *own* independent elect
+decision -- the bug isn't really about the stored value being non-uniform at all, it's about one shared
+elect-gated code path serving multiple logically-independent subgroups within the same physical wave).
+Lesson for next time: when a masking bug's "why would this actually matter" argument leans on "the values
+happen to be uniform anyway", explicitly check whether the *masking granularity itself* (subgroup vs. wave)
+could be coarser than the *value's own uniformity domain* before concluding it's a red herring -- that
+mismatch, not non-uniform data, was the actual mechanism here.
+
+Once root-caused, the actual fix was small and satisfying: `Linearize.cpp`'s `applyStageMasks` already had
+exactly the right shape of case for `feme.cpu.resource.*` calls (rewrite the trailing constant-`true` mask
+operand with the real per-branch predicate); it simply never grew an equivalent case for
+`feme.cpu.image.*` calls when image-call support was added to this project at some point after
+`applyStageMasks` was originally written for the resource-only shape. A three-line addition (plus a
+comment explaining why) closed the gap completely, mirroring the existing case almost verbatim.
+
+Ran the standard regression discipline before declaring this done: reverted the fix via a temporary
+`git checkout <prev-commit> -- Linearize.cpp` (rather than trusting my own mental model of "this couldn't
+possibly affect anything else") and re-ran both `subgroupbarrier` (already known-crashing, tracked at L7m)
+and `subgroupelect` to confirm neither was affected by my change either way. `subgroupbarrier` crashed
+identically with or without the fix (expected, unrelated LLVM-core bug). `subgroupelect`, however, failed
+its own runtime-value check identically with or without the fix too -- a real, previously undiscovered gap
+that happened to surface purely because I went looking at neighbounring cases in the same CTS group as due
+diligence, not because anything pointed me at it directly. Filed it as new roadmap row L7s rather than
+either silently ignoring it (out of scope creep discipline) or trying to fix it in the same session (real
+scope creep) -- this is exactly the kind of "quick aggregate-sweep glance at nearby open rows" the L7q
+session's own closing thoughts recommended, and it paid off again here, just in the other direction: instead
+of finding an *unexpected additional fix*, it found an *unexpected additional gap* that would otherwise have
+sat completely unrecorded (unlike the `subgroupbarrier` crash, which was already tracked).
