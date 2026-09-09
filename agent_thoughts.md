@@ -74679,3 +74679,101 @@ point at L7l/L7m/L7n instead. `VulkanExtensionInventory.md`: reviewed, no change
 Commits, in order: (1) the `Deserializer.h`/`Deserializer.cpp` implementation plus its three new lit-test
 files, (2) `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this
 `agent_thoughts.md` entry, on its own, last.
+
+# Session: L7l -- `spirv.MemoryBarrier` legalization pattern
+
+## Starting point
+
+Picked up exactly where L7k's own closing session left off: its real, crash-chunked `deqp-vk` sweep of
+`dEQP-VK.subgroups.*.compute.*` found that fixing the `OpTypeArray` deserializer gap let several
+`basic.compute.*` shaders reach pipeline creation for the first time, but all of them then failed
+identically with `failed to legalize operation 'spirv.MemoryBarrier'` -- a distinct, missing legalization
+pattern, filed as L7l. No stale todos to clean up this time (unlike L7j->L7k), so I just inserted a fresh
+set of `l7l-*` todos and got straight into the investigation.
+
+## The fix itself was small and quick
+
+This one was refreshingly simple compared to L7k's deserializer archaeology: `ControlBarrierConversionPattern`
+(right above where I was going to add the new pattern) already established almost the exact shape needed --
+convert a SPIR-V barrier op directly to one of the six `llvm.spv.*_memory_barrier[_with_group_sync]`
+intrinsics `feme::cpu::matchBarrierCall` already recognizes, since that recognizer and the CPU runtime's own
+fence lowering already treat DXIL-origin and SPIR-V-origin barrier calls identically. The only real design
+question was which of the three *plain* (non-`_with_group_sync`) intrinsics to map each `memory_scope` onto,
+since `spirv.MemoryBarrier` (unlike `spirv.ControlBarrier`) has no `execution_scope` operand at all and so
+never needs a group-sync-implying intrinsic. I mapped `Workgroup`->`group`, `Device`->`device`, and every
+other scope (`CrossDevice`/`QueueFamily`/`Subgroup`/`Invocation`) conservatively to the widest, `all` --
+mirroring `ControlBarrierConversionPattern`'s own existing conservative-superset convention rather than
+inventing a new one. No CPU-runtime code needed to change at all: `EntryWrapper.cpp`'s own barrier lowering
+already consumes all six intrinsics uniformly (it has to, since DXIL's own `Barrier` op already raises the
+plain variants too, per `OpRaising.cpp`'s `RaisableBarriers` table), so this was purely a missing
+SPIR-V-to-LLVM-side pattern.
+
+Wrote a new lit test (`spirv-to-llvm-memory-barrier.mlir`) covering all three scope buckets, confirmed
+`check-feme` at 2,817 (up by exactly the new cases), and committed the implementation on its own.
+
+## Real CTS re-verification: fixing one gap opens exactly one more layer, again
+
+This has become the single most consistent pattern across the whole L7-series chain, and it held again here.
+A real `deqp-vk` re-run (same crash-chunked-per-subgroup-category methodology L7k's own session established,
+still needed since L7m's own `DeleteDeadBlocks` crash is still there, unfixed, exactly where L7k's session
+left it) confirmed the `spirv.MemoryBarrier` diagnostic is completely gone -- every one of the 10 cases that
+used to hit it (the 8 `subgroupmemorybarrier*`-family cases, plus, surprisingly, `subgroupelect`/its twin,
+which I hadn't expected to be affected by this row at all until I found they share the same generic
+`subgroupMemoryBarrier()`-family call in the test harness) now legalizes and reaches real pipeline creation.
+
+But none of them actually pass. Digging into each of the 10 individually (running them one at a time, since
+a full-group run masked exactly which ones were failing how), I found three distinct new outcomes:
+
+1. 6 cases now hit the exact same "2 / 7 values passed"-shaped runtime-verification failure L7n already
+   tracks. I didn't file this as a new row -- it's clearly the same underlying gap (something about
+   `gl_Subgroup*` builtin variable values being wrong at runtime), just now reachable by more shaders than
+   before. Folding it into L7n's existing scope rather than creating `L7q`-for-the-same-thing felt like the
+   right call, consistent with how L7k's own session folded the `builtin_var` runtime gap into a single row
+   rather than one-row-per-shader.
+
+2. `subgroupelect`/its twin hit a genuinely new diagnostic: a `feme-cpu-simdize` "groupshared global ...
+   feeds a nested getelementptr" error. I recognized this diagnostic family immediately from grepping the
+   roadmap first (a good habit this whole project has reinforced for me) -- it's the same one roadmap
+   L10/L11 already narrowed down for two `offload-test-suite` repros. But it's important that this is a
+   *new* occurrence against a *different* real shader shape (a live CTS case, not the offload-test-suite
+   ones L10/L11 already fixed), so I filed it as its own new row (L7o) rather than either quietly expanding
+   L7l's own scope to "fix" it, or assuming it's the same already-closed bug reopened.
+
+3. `subgroupmemorybarriershared`/its twin crash outright with a real `SIGBUS`. I ran this one under `gdb`
+   to get more signal before filing it, since "some kind of crash" isn't a useful enough description on its
+   own to distinguish it from L7m's own already-tracked `DeleteDeadBlocks` crash. The backtrace showed the
+   crashing PC as `0xdca345eadca345ea` -- a repeating-byte pattern that looks unmistakably like a
+   poison/uninitialized-memory fill value rather than a real address, meaning something is very likely
+   calling through a corrupted or never-initialized function pointer. I noted (without confirming) that
+   this is the one shader in the family that also declares an image binding alongside the shared groupshared
+   array every sibling shares, as a plausible lead for whoever reduces this next, but I deliberately didn't
+   chase it further myself -- reducing a JIT-codegen-level pointer corruption bug is a genuinely separate,
+   potentially large investigation, and this session's own scope was the legalization gap, now closed.
+   Filed as L7p.
+
+Recomputing the full aggregate sweep (5 Pass / 144 Fail / 9,007 NotSupported / 4 unmeasured) against L7k's
+own recorded baseline (146 Fail / 2 unmeasured) shows almost no net change in the raw tally -- the 2
+`subgroupmemorybarriershared*` cases just moved from "Fail" (legalization) to "unmeasured" (crash). I want to
+record explicitly why I still consider this row a real, complete success despite the tally looking almost
+flat: the specific bug this row was filed against (the missing legalization pattern) is unambiguously,
+completely fixed -- confirmed by both the new lit test and the diagnostic's total disappearance from every
+real case that used to hit it. The tally not moving is just an artifact of how many *layers* of gap this
+whole subsystem still has stacked on top of each other; a raw pass-count metric alone would badly understate
+the real progress here, which is exactly the same lesson L7j/L7k's own sessions already learned and recorded
+first-hand.
+
+## Documentation and commits
+
+Struck through L7l on `Roadmap.md` with the real fix and full findings recorded, split out two new rows
+(L7o/L7p, each nested only one lowercase letter deep under L7), folded the third finding into L7n's existing
+scope rather than creating a new row for it, and updated L7's own umbrella-row bookkeeping text. Appended a
+new `VulkanCTSReport.md` section covering the fix, the `gdb` investigation of the new SIGBUS, and all three
+findings. Updated `Vulkan14FeatureInventory.md`'s existing subgroup-capability audit note (previously
+"blocked on L7l") to point at L7m/L7n/L7o/L7p instead, with the real sweep numbers recorded.
+`VulkanExtensionInventory.md`: reviewed, no changes needed. `Design.md`/`FeMeCPUDesign.md`/
+`FeMeVulkanDesign.md`: reviewed, no changes needed (no new design decision -- this fix follows the same
+intrinsic-based barrier-lowering design `ControlBarrierConversionPattern` already established).
+
+Commits, in order: (1) the new `SPIRVToLLVMPatterns.cpp` pattern plus its new lit-test file, (2)
+`Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md` together, (3) this `agent_thoughts.md` entry,
+on its own, last.
