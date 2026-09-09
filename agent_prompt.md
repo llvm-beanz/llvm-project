@@ -42,32 +42,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7k from the roadmap or other prerequisites blocking the
+Can you work on L7l from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A pre-existing upstream MLIR SPIR-V deserializer limitation rejects an
-> `OpTypeArray` whose length operand is a specialization constant**
-> (`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s
-> `processArrayType`: "OpTypeArray count <id> ... can only come from normal
-> constant right now", a TODO already marked verbatim in that function,
-> confirmed via a direct `deqp-vk` re-run reduction), split out of L7j's own
-> closing session this session: several
-> `dEQP-VK.subgroups.basic.compute.*`/`arithmetic.*`/`clustered.*`/`shuffle.*`
-> shaders declare a workgroup-size-derived shared-memory array (e.g. sized by
-> `gl_WorkGroupSize.x` or a subgroup-count spec constant) as an `OpTypeArray`
-> whose length operand is itself an `OpSpecConstant`, not an ordinary
-> `OpConstant`, well upstream of this project's own SPIR-V-to-LLVM conversion
-> passes (the deserializer rejects the module before any `feme`-specific pass
-> ever runs). Needs: (1) a real IR reduction of one confirmed-failing case (e.g.
-> `dEQP-VK.subgroups.basic.compute.subgroupelect`) to confirm the exact
-> array/spec-constant shape, (2) a scoping decision on whether to patch upstream
-> MLIR's own deserializer directly (recording the spec-constant `<id>` as the
-> array's dynamic length, resolved via this project's own new
-> `feme::spirv::SpecConstantValueMap`/`prepareSpecConstants` from L7j once the
-> module is fully deserialized, or via some other MLIR-upstream-appropriate
-> mechanism) versus a `feme`-side workaround, and (3) a real `deqp-vk` re-run of
-> `dEQP-VK.subgroups.*.compute.*` once fixed to measure the real pass-rate
-> improvement, plus a fresh look at whether the remaining
-> runtime-value-verification gap L7j's own sweep also surfaced (e.g.
-> `dEQP-VK.subgroups.builtin_var.compute.subgroupsize_compute`, "2 / 7 values
-> passed") is related or entirely separate
+> **A missing `spirv.MemoryBarrier` legalization pattern**, split out of L7k's
+> own closing session:
+> `dEQP-VK.subgroups.basic.compute.subgroupmemorybarrier*`'s own 10 cases
+> (`subgroupmemorybarrier`/`subgroupmemorybarrierbuffer`/`subgroupmemorybarrierimage`/`subgroupmemorybarriershared`,
+> each with a `_requiredsubgroupsize` twin) now reach real pipeline creation for
+> the first time (per L7k's own array-deserialization fix unmasking them), but
+> all fail identically with `failed to legalize operation 'spirv.MemoryBarrier'`
+> (confirmed via a direct re-run of
+> `dEQP-VK.subgroups.basic.compute.subgroupelect`, which shares the same GLSL
+> test harness's own generic `subgroupMemoryBarrier()`-family call). This is a
+> distinct SPIR-V op from `spirv.ControlBarrier` (already legalized, per the
+> `subgroupBarrier()` cases in the same test group passing this
+> deserializer/legalization stage without issue) and needs its own new pattern
+> converting it to whatever this project's CPU runtime already uses for
+> cross-invocation memory ordering (likely a fence/barrier intrinsic call
+> mirroring `ControlBarrierConversionPattern`'s own shape, scoped per
+> `memory_scope`/`memory_semantics` operand combination the CTS group actually
+> exercises)
