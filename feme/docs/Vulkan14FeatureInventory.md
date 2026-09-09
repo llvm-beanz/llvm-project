@@ -349,6 +349,22 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   rejection) split out to new rows L7r/L7q respectively.
   `supportedOperations` still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`:
   the `VOTE_BIT`/`SHUFFLE_BIT` flip now remains blocked on L7m/L7n/L7q/L7r.
+- **L7q (the `_requiredsubgroupsize` group-size-limit rejection above) is
+  now closed**: `PhysicalDeviceInfo.cpp`'s own `maxComputeWorkGroupSize[2]`
+  was pinned at the bare Vulkan-mandated spec floor (64) while X/Y were
+  both raised to 1024 back at roadmap L2 -- an internal inconsistency with
+  this device's own advertised `maxSubgroupSize` (128), since
+  `dEQP-VK.subgroups.*`'s own required-subgroup-size tests deliberately put
+  the full subgroup size in any single dimension, including Z. Raised to
+  1024 to match X/Y (nothing about this CPU target's own dispatch treats Z
+  specially). A real `deqp-vk` re-run confirms all 4
+  `_requiredsubgroupsize` cases in the `subgroupmemorybarrier*` family now
+  pass, and as an unexpected bonus this same fix also closes roadmap L7n
+  entirely (all 8 `builtin_var` cases now pass; L7n's own
+  `_requiredsubgroupsize` twins shared the exact same root cause, never
+  previously cross-referenced against this row). `supportedOperations`
+  still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`: the
+  `VOTE_BIT`/`SHUFFLE_BIT` flip now remains blocked on L7m/L7r only.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

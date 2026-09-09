@@ -34654,3 +34654,71 @@ existing one), so the section now documents both exceptions and why each is nece
 Split out: **L7q** (the newly-unmasked `_requiredsubgroupsize` group-size-limit rejection) and **L7r**
 (`subgroupmemorybarrierimage`'s own pre-existing runtime-value mismatch), both real, individually-scoped
 remaining gaps this session's own fix did not create and is not equipped to fix.
+
+## L7q: `maxComputeWorkGroupSize[2]` vs. `maxSubgroupSize` limits inconsistency
+
+**Request.** Root-cause and fix a newly-unmasked "resolved group size exceeds maxComputeWorkGroupSize/
+Invocations" pipeline-creation failure hit by every `_requiredsubgroupsize` case in the
+`subgroupmemorybarrier*` family, split out of L7p's own closing session.
+
+**Investigation.** `FEME_VULKAN_LOG_CREATION_ERRORS=1` confirmed the exact diagnostic text directly. Reading
+`dEQP-VK.subgroups.*`'s own test driver (`vktSubgroupsTestsUtils.cpp`'s `makeComputeOrMeshTestRequiredSubgroupSize`)
+showed it deliberately iterates every power-of-two required subgroup size from the device's own advertised
+`minSubgroupSize` to `maxSubgroupSize`, and for each one creates a pipeline with local sizes
+`{size, 1, 1}`, `{1, size, 1}`, and `{1, 1, size}` in turn -- i.e. it deliberately confirms the full
+subgroup size can go in *any* single workgroup dimension, X, Y, or Z alike.
+
+Comparing this device's own two, independently-set limits directly: `feme::cpu::MaxWaveSize` (this ICD's
+own maximum supported subgroup size, advertised as `maxSubgroupSize`) is 128, but `PhysicalDeviceInfo.cpp`'s
+own `Limits.maxComputeWorkGroupSize[2]` was pinned at 64 -- the bare Vulkan-mandated spec floor for that one
+dimension -- while `[0]`/`[1]` were both raised to 1024 back at roadmap L2's own closing session. This is a
+genuine internal inconsistency in this device's own advertised limits, not a group-size-resolution bug and
+not a real CTS-side requirement this ICD cannot meet: nothing about this CPU target's own compute dispatch
+treats the Z dimension any differently from X or Y (`EntryWrapper.cpp`/`SIMDize.cpp`'s own invocation-count
+math is a flat, order-independent `NumThreads[0] * NumThreads[1] * NumThreads[2]`, with no per-dimension
+special case anywhere), so there is no genuine capability gap to work around -- only an oversight from when
+L2 first raised X/Y without raising Z alongside them.
+
+**Fix.** `PhysicalDeviceInfo.cpp`'s `Limits.maxComputeWorkGroupSize[2]` raised from 64 to 1024, matching X/Y
+exactly (for the same reason those two share one value rather than two different ones: no dimension is
+meaningfully harder for this CPU target to dispatch than another).
+
+**Build/test.** `ninja -C build2 feme_vulkan FeMeVulkanTests`: clean build. `ninja -C build2 check-feme`:
+2,883 tests discovered, 2,824 passed, 59 unsupported, 0 failed -- no count change, a pure limits correction
+introduces no new test surface on its own.
+
+**Real `deqp-vk` verification.** A focused re-run of the whole `dEQP-VK.subgroups.basic.compute.
+subgroupmemorybarrier*` family (8 cases) confirms all 4 `_requiredsubgroupsize` twins now pass outright
+(`subgroupmemorybarrier`/`subgroupmemorybarrierbuffer`/`subgroupmemorybarriershared`'s own twins); the
+other 2 cases (`subgroupmemorybarrierimage`'s own twins) still fail on the pre-existing, unrelated L7r
+runtime-value gap. A direct before/after `git stash` comparison isolates this one-line change as the sole
+cause: with the fix stashed out, `subgroupmemorybarriershared_requiredsubgroupsize` reproduces the exact
+"resolved group size exceeds maxComputeWorkGroupSize/Invocations" diagnostic verbatim; with it restored,
+the same case passes.
+
+As a genuinely unexpected bonus, this same fix also fully and incidentally closes roadmap **L7n**
+(previously filed as a seemingly unrelated `gl_SubgroupSize`/`gl_NumSubgroups`/`gl_SubgroupID`
+runtime-value-verification gap): all 8 `dEQP-VK.subgroups.builtin_var.compute.*` cases now pass, including
+every `_requiredsubgroupsize` twin. The same before/after comparison shows the non-`_requiredsubgroupsize`
+case L7n's own filing had originally investigated (`subgroupsize_compute`) already passed independently of
+this fix (evidently fixed by unrelated drift somewhere in the L7k/L7l/L7o/L7p chain, never individually
+re-verified against L7n's own row until now), while every `_requiredsubgroupsize` twin across the whole
+`builtin_var` group failed at pipeline creation with the exact same diagnostic this row's own fix
+addresses -- the two rows were filed independently and never cross-referenced, so L7n's own filing never
+connected its symptom to this row's own group-size-limit inconsistency.
+
+A full aggregate `dEQP-VK.subgroups.*.compute.*` sweep (9,158 non-crashing cases, using the project's own
+`vk-default/subgroups.txt` mustpass case list, excluding the 2 still-open L7m `subgroupbarrier*` crashes):
+**19 Pass / 132 Fail / 9,007 NotSupported / 2 unmeasured (crashed) = 9,160 total**, up from L7p's own
+recorded 5 Pass / 144 Fail / 9,007 NotSupported / 4 unmeasured. Pass is up by exactly 14 (6
+`subgroupmemorybarrier*`-family cases this row's own fix newly passes, plus 8 `builtin_var` cases via the
+L7n side effect), Fail is down by 12, and unmeasured is down by 2 (the 2 `subgroupmemorybarriershared*`
+crashes L7p's own session already fixed, simply no longer counted as unmeasured once that fix landed --
+not a new effect of this row's own fix). `NotSupported` is exactly unchanged, confirming no
+capability-gating effect either way, as expected for a pure limits correction.
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's pending-flip blocker list
+narrowed from L7m/L7n/L7q/L7r to L7m/L7r only (L7n and L7q both now closed). `VulkanExtensionInventory.md`
+reviewed: no change needed -- an internal limits correction, no new feature or extension bit advertised.
+`FeMeVulkanDesign.md` reviewed: no update needed (this is a plain numeric limits correction, not a design
+decision or deviation -- the design doc never pinned this value at 64 specifically).
