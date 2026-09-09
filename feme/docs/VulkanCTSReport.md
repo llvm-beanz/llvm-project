@@ -35051,3 +35051,77 @@ handling -- rather than deviating from or extending the design itself).
 Split out: **L85** (`GroupNonUniformBallot` support -- new legalization patterns, a new
 `WaveCallKind::Ballot`-family CPU-runtime path, and its own real CTS verification pass, needed before
 `SHUFFLE_BIT` can be safely advertised).
+
+## L7f: `NonUniform` decoration deserialization gap, root cause and fix (plus new L86 `OpCopyObject` split)
+
+Investigated roadmap L7f: an `unhandled Decoration : 'NonUniform'` MLIR SPIR-V deserialization
+error, previously unreduced to a concrete failing case.
+
+**Reduction**: a minimal HLSL shader using `NonUniformResourceIndex()` to index a `Texture2D`
+array, compiled with `dxc -T vs_6_0 -E main -spirv -fspv-target-env=vulkan1.3`. `spirv-dis`
+confirms dxc emits a bare `OpDecorate %N NonUniform` unit decoration attached to an
+`OpCopyObject %uint %M` result -- dxc's own codegen convention for representing the effect of
+`NonUniformResourceIndex()`, not a SPIR-V requirement. `feme-translate --import-spirv` on this
+reproduced the exact `"unhandled Decoration : 'NonUniform'"` error.
+
+**Root cause**: a simple, symmetric omission in two otherwise-parallel exhaustive `switch`
+statements, both upstream MLIR-core code (not `feme`-specific), mirroring this roadmap's own L60
+precedent. `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s `processDecoration` and
+`mlir/lib/Target/SPIRV/Serialization/Serializer.cpp`'s `processDecorationAttr` each maintain their
+own manually-curated case list of which `spirv::Decoration` enum values round-trip as a plain
+`UnitAttr`. `spirv::Decoration::NonUniform` (SPIR-V value 5300, `SPIRV_D_NonUniform` in
+`SPIRVBase.td`, requiring `MinVersion<SPIRV_V_1_5>` + `Capability<[ShaderNonUniform]>`) is
+structurally identical to every other already-handled bare unit decoration
+(`NoContraction`/`Flat`/`Coherent`/etc.), but had simply never been added to either list.
+
+**Fix**: added `case spirv::Decoration::NonUniform:` to both files' existing unit-attribute case
+lists -- a small, surgical, exactly-symmetric two-file change. No special-casing needed in
+`Serializer.cpp`'s `getDecorationName` attribute-name-mangling helper: the generic
+snake_case-to-CamelCase conversion (`non_uniform` -> `NonUniform`) already produces the correct
+SPIR-V decoration name.
+
+**Tests added**:
+- `mlir/test/Target/SPIRV/decorations.mlir`'s new `non_uniform_decoration` case (a
+  `spirv.IAdd ... {non_uniform}` round-trip under a `requires #spirv.vce<v1.5, [Shader,
+  ShaderNonUniform], []>` module, mirroring the existing `no_contraction`/`no_signed_wrap`
+  unit-attribute test pattern). Verified via `mlir-translate --test-spirv-roundtrip` and
+  `llvm-lit`.
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-non-uniform-decoration.mlir`: confirms the
+  `non_uniform` attribute also survives `feme`'s own SPIR-V-to-LLVM conversion inertly (preserved
+  as an unrecognized discardable attribute on the resulting `llvm.add`, no conversion failure).
+  `feme`'s own code has zero special-casing of this attribute anywhere (confirmed via
+  `grep -rln "non_uniform\|NonUniform" feme/lib/ feme/include/`, whose only hits are unrelated
+  `spirv.GroupNonUniform*` wave-op patterns) -- expected, since `feme::cpu::WaveUniformity.cpp`
+  performs its own independent divergence analysis rather than trusting this SPIR-V-level hint.
+
+`ninja check-feme` (ccache + assertions build, all target dependencies auto-built): 2,887
+discovered, 2,828 passed (+1 for the new `feme`-side lit test vs. the prior session's baseline), 59
+unsupported (pre-existing, unchanged), 0 failed. Full `mlir/test/Target/SPIRV/` +
+`mlir/test/Dialect/SPIRV/` suites (113 tests): all pass, zero regressions.
+
+**Scope note -- the real end-to-end HLSL repro still does not pass**: with L7f's fix in place,
+the same `NonUniformResourceIndex()` repro's deserialization now fails one instruction further,
+on `"unhandled opcode 83"` (`OpCopyObject`). Confirmed via `grep -rln "CopyObject"
+mlir/include/mlir/Dialect/SPIRV/ mlir/lib/Dialect/SPIRV/ mlir/lib/Target/SPIRV/` returning zero
+matches: `OpCopyObject` has **no support anywhere** in upstream MLIR's SPIR-V dialect (no op
+definition, no (de)serialization case). This is a materially larger gap than L7f's own decoration
+fix, mirroring the already-documented L7g/`OpImageGather` precedent (new upstream-style MLIR
+dialect work, not a `feme`-side legalization pattern). Split out to new roadmap row **L86**.
+
+Real `deqp-vk` re-verification: ran the full `dEQP-VK.descriptor_indexing.*` group (115 cases,
+the CTS group most plausibly exercising `NonUniformResourceIndex()`-shaped shaders) against the
+`feme` ICD both before and after this fix. Result unchanged either way: 0 passed / 0 failed / 115
+`NotSupported` ("Non-uniform indexing for ... descriptor arrays is not supported") -- this ICD does
+not yet advertise `shaderSampledImageArrayNonUniformIndexing`/descriptor-indexing features at all,
+so the whole CTS group is gated off regardless of this fix. Confirms this fix, while real and
+correctly tested, does not yet unblock any actual CTS case on its own -- both the missing
+feature-bit advertisement and the L86 `OpCopyObject` gap remain full prerequisites for that.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no update needed (no feature
+bit or extension changed this session; `descriptorIndexing`-family features remain correctly
+un-advertised, consistent with this ICD's own real, still-incomplete support). `FeMeCPUDesign.md`
+reviewed: no deviation -- this is an upstream MLIR-core bug fix, not a `feme`-specific design
+change.
+
+Split out: **L86** (`OpCopyObject` has zero upstream MLIR SPIR-V dialect support -- new op
+definition, verifier, and both (de)serialization cases needed before any `feme`-side legalization
+pattern, or the real `NonUniformResourceIndex()` end-to-end repro, can proceed).
