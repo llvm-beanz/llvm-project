@@ -33916,3 +33916,115 @@ of the sibling depth-comparison *sample* variants. `Vulkan14FeatureInventory.md`
 still-unimplemented feature this row does not touch (`GatherCmp` uses only the always-available,
 single, uniform `ConstOffset` this row already handles). `FeMeCPUDesign.md`/`FeMeVulkanDesign.md`:
 reviewed, no update needed.
+
+## L7e: several `spirv.GroupNonUniform*` wave-op variants have no legalization pattern
+
+**Scope**: roadmap L7e, split out of L7's own original filing text. `IntegerGroupNonUniformReducePattern`
+(`SPIRVToLLVMPatterns.cpp`) already covers the nine arithmetic-reduce ops
+(`IAdd`/`IMul`/`SMin`/`UMin`/`SMax`/`UMax`/`BitwiseAnd`/`BitwiseOr`/`BitwiseXor`); this row's own remaining
+scope was specifically `AllEqual`/`Shuffle`/`Elect` (no pattern of any kind existed for any of these three),
+plus confirming whether `IMul`/`IAdd`'s own "non-reduce forms" were a real, separate gap.
+
+**Investigation**: `spirv.GroupNonUniformIAddOp`/`IMulOp` are themselves *only* ever a reduce/scan-shaped
+op per the SPIR-V spec (their own `GroupOperation` operand selects `Reduce`/`InclusiveScan`/
+`ExclusiveScan`/`ClusteredReduce`) -- there is no separate "broadcast" or "quad-swap" opcode variant of
+`IAdd`/`IMul` themselves at all; `GroupNonUniformBroadcast`/`GroupNonUniformQuadBroadcast`/
+`GroupNonUniformQuadSwap` are entirely separate ops in the same family, unrelated to `IAdd`/`IMul`'s own
+shape, and no known HLSL/dxc-compiled shape in this ICD's frontend surface reaches any of them today. So
+the "IMul/IAdd non-reduce forms" concern in L7e's own filing text was confirmed moot: `IntegerGroupNonUniformReducePattern`
+already fully covers both ops, nothing further to do there.
+
+For the three real remaining ops, this project's existing DXIL-origin frontend already fully supports
+the identical CPU-side intrinsics each one maps to one-to-one:
+- `spirv.GroupNonUniformElect` <-> `llvm.spv.wave.is_first_lane` (same as HLSL's `WaveIsFirstLane()`)
+- `spirv.GroupNonUniformAllEqual` (scalar operand) <-> `llvm.spv.wave.all_equal` (same as HLSL's
+  `WaveActiveAllEqual`)
+- `spirv.GroupNonUniformShuffle` <-> `llvm.spv.wave.readlane` (same as HLSL's `WaveReadLaneAt`, and
+  already the exact intrinsic `RotateConversionPattern`, roadmap F2, builds its own target invocation id
+  for)
+
+`feme::cpu::WaveUniformity`/`SIMDizePass` already classify and lower all three of these intrinsics
+correctly (confirmed by their own pre-existing lit/gtest coverage), so this closure needed **no new
+CPU-side codegen surface at all** -- unlike L7d's own `ImageDrefGather` closure (a genuinely new
+intrinsic/runtime-helper surface), L7e is purely a legalization-layer gap.
+
+**Fix**: added three new `SPIRVToLLVMConversion` patterns to `SPIRVToLLVMPatterns.cpp`:
+- `ElectConversionPattern`: `Subgroup`-scope only (mirroring `RotateConversionPattern`'s own precedent --
+  `Workgroup`-scope elect has no real HLSL/GLSL source in this ICD's frontend surface today), forwards
+  directly to `llvm.spv.wave.is_first_lane` with no operands.
+- `AllEqualConversionPattern`: `spirv.GroupNonUniformAllEqualOp` is already constrained to `Subgroup`
+  scope by its own `SPIRV_ExecutionScopeAttrIs`, so no scope check is needed; but a *vector* `Value`
+  operand is deliberately declined rather than forwarded unchanged. `spirv.GroupNonUniformAllEqualOp`'s
+  result is always a single scalar `SPIRV_Bool` even when `Value` is a vector (per the SPIR-V spec's own
+  "Result Type must be a Boolean type" text, mirrored verbatim by the dialect's
+  `results = (outs SPIRV_Bool:$result)`), collapsing the whole vector into one true/false -- a real
+  semantic mismatch with `llvm.spv.wave.all_equal`'s own `LLVMScalarOrSameVectorWidth<0, i1>` result shape
+  (a per-component `<W x i1>`, matching HLSL's own `WaveActiveAllEqual(bool2/bool3/bool4)` semantics that
+  the DXIL-origin frontend already relies on -- see `OpRaising.cpp`'s own "overloaded on the operand, not
+  the i1 result" note). No known dxc-compiled shape reaches the vector-operand case either: dxc's own
+  SPIR-V backend scalarizes a vector `WaveActiveAllEqual` into one `OpGroupNonUniformAllEqual` call per
+  component, each with a scalar operand, rather than a single vector-operand call.
+- `ShuffleConversionPattern`: `Subgroup`-scope only (same reasoning as `Elect`), forwards `Value`/`Id`
+  straight through to `llvm.spv.wave.readlane` -- `spv_wave_readlane`'s result is already conservatively
+  treated as divergent by `WaveUniformity.cpp` (unlike `dx_wave_readlane`, whose lane-index operand HLSL's
+  language rule requires to be dynamically uniform), matching `OpGroupNonUniformShuffle`'s own SPIR-V spec
+  text, which places no such restriction on `Id` at all.
+
+**Tests added**:
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-group-non-uniform-elect-all-equal-shuffle.mlir`: new
+  MLIR conversion lit test covering `Elect`, `AllEqual` (scalar operand), and `Shuffle`'s accepted shapes.
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-group-non-uniform-elect-all-equal-shuffle-invalid.mlir`:
+  new negative lit test covering `Workgroup`-scope `Elect`/`Shuffle` (declined) and a vector-operand
+  `AllEqual` (declined).
+- No new CPU resource-lowering/runtime tests were needed: all three target intrinsics
+  (`llvm.spv.wave.is_first_lane`/`all_equal`/`readlane`) already have full, passing coverage in
+  `WaveUniformity`/`SIMDize`/DXIL-raise/CPU-runtime test suites from this project's pre-existing
+  DXIL-origin frontend support.
+
+**Verification**:
+- `ninja -C build2 feme-opt`: builds cleanly, no new warnings.
+- `ninja -C build2 check-feme` (ccache + assertions build, all target dependencies auto-built):
+  **2873 discovered, 2814 Passed, 59 Unsupported (pre-existing), 0 Failed** (+2 tests from this session's
+  two new lit test files, both passing; zero regressions).
+- Real end-to-end verification via the established manual `dxc -T cs_6_0 -spirv
+  -fspv-target-env=vulkan1.3` -> `offloader` pipeline (no offload-test-suite build directory exists in
+  this checkout) against three minimal, real dxc-compiled HLSL compute shaders, each confirmed via
+  `spirv-dis` to actually emit the target op (`OpGroupNonUniformElect`/`AllEqual`/`Shuffle`):
+  - `WaveIsFirstLane()`: 4-thread group, expected `[1, 0, 0, 0]` (lane 0 is first) -- **byte-exact match**.
+  - `WaveActiveAllEqual(In[TID.x])`: two sub-cases in one dispatch, one all-identical input (`[9,9,9,9]`,
+    expected all-true `[1,1,1,1]`) and one with a differing element (`[7,7,5,7]`, expected all-false
+    `[0,0,0,0]`) -- **both byte-exact matches**.
+  - `WaveReadLaneAt(In[TID.x], 3 - TID.x)`: a per-lane-varying (not compile-time-constant) shuffle index,
+    input `[10,20,30,40]`, expected the reversed `[40,30,20,10]` -- **byte-exact match**.
+- Real `deqp-vk` re-run targeting the two CTS groups most directly exercising the three newly-legalized
+  ops (glslang's own `subgroupElect`/`subgroupAllEqual`/`subgroupShuffle*` GLSL builtins compile to the
+  identical `OpGroupNonUniformElect`/`AllEqual`/`Shuffle` opcodes these patterns now convert):
+
+  ```
+  VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.subgroups.vote.compute.*,dEQP-VK.subgroups.shuffle.compute.*"
+  ```
+
+  **1,804 cases: 0 Pass, 128 Fail, 1,676 NotSupported.** All 128 failures are pre-existing, unrelated
+  `subgroupclusteredrotate_*` cases (a real, already-latent gap in `RotateConversionPattern`'s own
+  clustered-rotate arithmetic, not touched by this change; confirmed identical before/after via the same
+  filtered re-run pattern this project's other L7 sub-rows use) -- zero new failures, zero regressions.
+  Every one of the 1,676 `NotSupported` cases (including every real `subgroupelect`/`subgroupallequal`/
+  `subgroupshuffle` case this row's own patterns target) was declined at CTS's own capability-check gate
+  (`Device does not support subgroup vote operations`, `vktSubgroupsVoteTests.cpp:330`) before ever
+  reaching a real pipeline creation or dispatch -- confirmed via `PhysicalDeviceInfo.cpp`, which hardcodes
+  `Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT` only, a pre-existing, already-tracked
+  1.1-scoped gap this closure does not touch (see `Vulkan14FeatureInventory.md`'s F2 audit note, updated
+  this session). This row's own real `deqp-vk` payoff is therefore genuinely zero today -- exactly the
+  same "no CTS case can reach it yet" situation several other L7 sub-rows already documented, but for a
+  capability-advertisement reason rather than a compiler-shape reason. **Filed as new roadmap row L7i**:
+  advertising `VK_SUBGROUP_FEATURE_VOTE_BIT`/`SHUFFLE_BIT` (plus a real re-run once each is set) is the
+  concrete next step to actually unlock this CTS surface.
+
+`Vulkan14FeatureInventory.md`: updated (F2's audit note now records L7d/L7e's own closures and the
+`supportedOperations` gate finding). `VulkanExtensionInventory.md`: reviewed -- no bit flips needed (no
+new extension is involved; `VK_KHR_shader_subgroup_extended_types`/`VK_KHR_shader_subgroup_rotate` were
+already accounted for by F2). `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update
+needed (this closure adds no new design decision beyond what `RotateConversionPattern`'s own precedent,
+already covered by `Design.md`'s wave-op sections, already established).

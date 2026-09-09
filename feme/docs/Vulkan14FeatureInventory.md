@@ -227,7 +227,25 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   into F2, since the size of that closure is comparable to an entire new
   E/F-series row of its own -- see `agent_thoughts.md`'s F2 entry for the
   full audit (which builtin-name/intrinsic mechanism each op family would
-  need).
+  need). UPDATE (roadmap L7d/L7e, later sessions): the arithmetic reduce
+  family (`IAdd`/`IMul`/`SMin`/`UMin`/`SMax`/`UMax`/`BitwiseAnd`/`Or`/`Xor`,
+  `IntegerGroupNonUniformReducePattern`) and the vote/shuffle family
+  (`Elect`/`AllEqual`/`Shuffle`, `ElectConversionPattern`/
+  `AllEqualConversionPattern`/`ShuffleConversionPattern`) now also convert,
+  each of the latter three only for `Subgroup` scope and (for `AllEqual`)
+  only a scalar operand -- still none of them exercise an 8/16-bit or
+  boolean-typed group operand for real (every one only has a 32-bit-class
+  scalar HLSL source in this ICD's frontend surface today), so
+  `shaderSubgroupExtendedTypes` remains just as unvalidated as this note
+  already found before either closure. The `supportedOperations`/
+  `supportedStages` advertisement gap this paragraph already described is
+  still open even for the op families that now convert: a real `deqp-vk`
+  re-run of `dEQP-VK.subgroups.vote.*`/`shuffle.*` (roadmap L7e's own
+  closing session) confirmed `PhysicalDeviceInfo.cpp` still only ever
+  advertises `VK_SUBGROUP_FEATURE_BASIC_BIT`, declining 1,676/1,804 of
+  those cases `NotSupported` purely on this capability gate rather than
+  exercising the new patterns at all -- see roadmap L7i (split out of
+  L7e's own closing session) for this specific follow-on.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
