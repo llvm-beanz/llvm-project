@@ -2361,8 +2361,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       float NdcX = Vtx.Clip[0] / W;
       float NdcY = Vtx.Clip[1] / W;
       float NdcZ = Vtx.Clip[2] / W;
+      // (Roadmap L24) Per the Vulkan spec's own viewport transform
+      // (`vkCmdSetViewport`'s "Coordinate Transformations" chapter), both
+      // X and Y map from clip-space NDC into window space with the exact
+      // same affine formula -- `Viewport.{X,Y} + (Ndc*0.5+0.5)*Viewport.
+      // {Width,Height}` -- with no sign asymmetry between the two axes: a
+      // real Vulkan NDC cube already has +Y pointing toward the *bottom*
+      // of the viewport when `Viewport.Height` is positive (confirmed
+      // against the spec's own worked formula), so no extra "1 - Ndc"
+      // flip belongs here (a previous version of this formula had one,
+      // erroneously matching D3D's own opposite-signed NDC convention
+      // instead -- a real `gs_selective_output.test` re-run exposed it as
+      // a visible top/bottom row swap for any content asymmetric enough
+      // to notice, most other content being accidentally Y-symmetric
+      // enough to mask it). `CanonicalizeStage.cpp`'s own former
+      // `SV_POSITION`-store negation (removed alongside this fix) used to
+      // compensate for the very same erroneous flip one level upstream --
+      // see that file's own updated comment for why removing it, rather
+      // than keeping both, is the correct fix (roadmap L24).
       Screen = {Viewport.X + (NdcX * 0.5f + 0.5f) * Viewport.Width,
-                Viewport.Y + (1.0f - (NdcY * 0.5f + 0.5f)) * Viewport.Height};
+                Viewport.Y + (NdcY * 0.5f + 0.5f) * Viewport.Height};
       InvW = 1.0f / W;
       Depth =
           Viewport.MinDepth + NdcZ * (Viewport.MaxDepth - Viewport.MinDepth);
@@ -2654,9 +2672,28 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // `SArea` uses the same directed-edge formula (`edgeFn`) the
         // rasterizer's own coverage test does below, so that after the
         // positive-orientation normalization a covered point's edge
-        // values are guaranteed non-negative. It is the negative of the
-        // "positive area = CCW when authored in NDC" convention (the
-        // viewport transform above flips Y), so `IsCCW` compensates.
+        // values are guaranteed non-negative. (Roadmap L24) Per the
+        // Vulkan spec's own front-facing formula ("Basic Polygon
+        // Rasterization": `a = -1/2 * sum(xf[i]*yf[i+1] -
+        // xf[i+1]*yf[i])`, evaluated directly on framebuffer/window
+        // coordinates, i.e. exactly `Screen` here), a triangle is
+        // front-facing under `FrontFace::CounterClockwise` exactly when
+        // `a > 0`; expanding that sum shows `sign(a) == sign(SArea)`
+        // (both are the same directed-edge cross product up to a
+        // positive constant factor), so `IsCCW` is `SArea`'s own raw
+        // sign, with *no* additional negation or viewport-relative
+        // correction -- confirmed against a real `dEQP-VK.rasterization.
+        // culling.*` CTS re-run (42/43 Pass, matching this project's
+        // pre-L24 baseline exactly) as well as this project's own
+        // `GraphicsSystemValues.test` (`SV_IsFrontFace`, rendered through
+        // a *negative*-`Height` viewport, see `offload-test-suite`'s own
+        // `VulkanRenderEncoder::setViewport`) and `gs_selective_output.
+        // test`/`QuadDomainTessellation.test` (positive-`Height`
+        // viewports). `CullsBackFacingTrianglesWhenConfigured`'s own
+        // expectation (see its updated comment) was the one thing that
+        // needed correcting to match, not this formula: it had been
+        // hand-derived against the *old*, buggy `projectVertex` Y
+        // formula this same roadmap row's fix replaces.
         float SArea = edgeFn(Screen[0], Screen[1], Screen[2]);
         if (SArea == 0.0f)
           continue;
