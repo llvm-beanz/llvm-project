@@ -2297,6 +2297,35 @@ geometry entry's own `gl_in[]`); every other stage's array-typed `Input`
 now resolves through the ordinary `Row`/`Component` byte-offset path
 instead, exactly like a real matrix's row index already does.
 
+Status (roadmap L24(b)): a `Patch`-decorated array global (a hull entry's
+own `gl_TessLevelOuter`/`gl_TessLevelInner`, always whole-patch, never
+per-control-point or per-vertex) must be excluded from *both* of the
+per-invocation array rules above, since neither is meant to apply to it.
+On the Hull-stage `Output` side, `addElements`'s `PerInvocationOutputArray`
+peeling (added for roadmap H29g's own genuine per-control-point hull
+output array) matched any `AddrSpace == 8` array global on `Hull`/`Mesh`
+regardless of `Patch` decoration, wrongly collapsing a tess-factor
+builtin's `RowCount` down to `1` and silently discarding every row past
+the first. On the Domain-stage `Input` side, `isPerVertexArrayInputGlobal`
+(the H5f/L24(a) fold immediately above) has the same gap in the other
+direction: it matches any array-typed `Input` on `Hull`/`Domain`/
+`Geometry` regardless of `Patch` decoration, wrongly marking a tess-factor
+builtin's read as `RowCountIsVertexArray`, which `StageLink.cpp`'s
+`effectiveRowCount` then also folds to `RowCount == 1` for cross-stage
+linking comparisons. Both rules now additionally require the global to
+*not* carry a `Patch` decoration (SPIR-V decoration code 15, parsed
+directly from `spirv.Decorations` metadata) before applying; a real
+DXC-compiled hull shader (confirmed via `spirv-dis`) always decorates
+`gl_TessLevelOuter`/`Inner` both `BuiltIn` and `Patch` together, so gating
+on `Patch` alone reliably distinguishes them from any genuine
+per-control-point/per-vertex array. Separately, `tessellateIsoline`
+(`Tessellator.cpp`) had its own, independent bug: it wrote the
+*which-line* (density) index into `DomainPoint::U` and the *along-line*
+(detail) position into `V`, backwards from the real `SV_DomainLocation`
+convention for the `isoline` domain (`u` = along-line, `v` = which-line),
+which `buildDomainInvocations` copies straight into
+`FemeDomainInvocation::DomainLocation` with no remapping.
+
 
 ### Amplification and mesh wrappers
 
