@@ -42,12 +42,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7b from the roadmap or other prerequisites blocking the
+Can you work on L7d from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Combined-image-sampler `spirv.Image` legalization gap**, split out of L7's
-> own original filing text -- not yet reduced to a concrete failing case this
-> session; needs its own real IR reduction (likely an HLSL shader combining a
-> `Texture2D` and `SamplerState` into a single combined `sampler2D`-shaped
-> binding, a legal but less common HLSL/SPIR-V shape than this project's own
-> usual split-resource convention) before scoping a fix
+> **`spirv.ImageDrefGather` has no conversion pattern**, split out of L7's own
+> original filing text (this op is a distinct SPIR-V core opcode, not a
+> GLSL.std.450 extended-instruction-set builtin, so is tracked separately from
+> L7c's own cluster despite being adjacent in L7's original prose). UPDATE
+> (L7b's own closing investigation this session): a real, concrete repro is now
+> confirmed -- offload-test-suite's own
+> `Vk.SampledTexture2D.GatherCmp.test.yaml` (a real dxc-compiled HLSL
+> `Texture2D::GatherCmp()` call, confirmed via a real `check-hlsl-feme-vk`
+> re-run) fails with exactly `failed to legalize operation
+> 'spirv.ImageDrefGather'`, confirming this row's own original filing (the op
+> itself already exists in upstream MLIR -- confirmed present in
+> `SPIRVBase.td`/`ImageOps.cpp` -- but
+> `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` has no legalization
+> pattern for it at all, no `ImageDrefGatherPattern` class, unlike the extensive
+> family of `ImageSample*Pattern`/`ImageSampleDref*Pattern` classes that do
+> exist). Needs its own scoping pass: likely a new `ImageDrefGatherPattern`
+> (mirroring `ImageSampleDrefImplicitLodPattern`'s own shape) converting to a
+> new `llvm.spv.resource.gathercmp`-style intrinsic, plus a corresponding new
+> `hasOnlySupportedImageUses`/`lowerImageAccesses` case in
+> `SPIRVResourceLowering.cpp` and a new `feme.cpu.image.gathercmp.*` CPU runtime
+> helper (`ImageCalls.h`) -- a real new codegen surface this project has never
+> needed before (gather returns 4 texels' worth of one component each, a
+> different intrinsic shape than an ordinary filtered sample). Note this is
+> distinct from `spirv.ImageSampleDrefImplicitLodOp`/`ImageSampleDrefGradOp` et
+> al., which this file already has patterns for
