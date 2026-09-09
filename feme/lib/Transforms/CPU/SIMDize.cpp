@@ -641,6 +641,19 @@ void flattenAggregateLeafScalarTypes(Type *Ty,
   Leaves.push_back(Ty);
 }
 
+/// Walks back through zero or more `getelementptr`s off \p Ptr to find the
+/// `alloca` it ultimately addresses, or `nullptr` if it does not bottom out
+/// at one (e.g. a function argument, a groupshared global, or a
+/// `feme.cpu.resource.*` heap pointer) -- used by
+/// `FunctionWidener::collectMaskedAllocas` to recognize a masked
+/// load/store's pointer operand as ultimately addressing a plain local
+/// variable (roadmap L84).
+AllocaInst *getUnderlyingAlloca(Value *Ptr) {
+  while (auto *GEP = dyn_cast<GetElementPtrInst>(Ptr))
+    Ptr = GEP->getPointerOperand();
+  return dyn_cast<AllocaInst>(Ptr);
+}
+
 /// Widens a single acyclic, uniform-control-flow function to \p WaveSize
 /// lanes. See the file comment above for the algorithm.
 class FunctionWidener {
@@ -685,6 +698,19 @@ class FunctionWidener {
 
   SmallVector<Instruction *, 16> ToErase;
 
+  /// (Roadmap L84) Every plain (non-groupshared) local variable's `alloca`
+  /// reached, directly or through a `getelementptr` chain, by at least one
+  /// `feme.cpu.masked.load.*`/`.store.*` call's pointer operand --
+  /// precomputed once, up front, by `collectMaskedAllocas`, since the
+  /// ordinary per-instruction uniformity classification has no way to see
+  /// that such an alloca's own *address* is uniform while the *value*
+  /// stored through it differs by lane (see `widenMaskedAlloca`'s comment
+  /// for the full explanation). `widenInstruction` special-cases any
+  /// `AllocaInst`/`GetElementPtrInst` found in this set ahead of the
+  /// ordinary `UI.isDivergentAtDef` gate, exactly like the existing
+  /// groupshared/atomicrmw special cases.
+  DenseSet<AllocaInst *> MaskedAllocas;
+
   /// Set by any `widen*` helper that diagnoses an unsupported construct via
   /// `emitError` partway through Pass 2 of `widen()` below (unlike
   /// `checkSupportedControlFlow`/`checkVectorDecompositionSupported`, which
@@ -711,6 +737,7 @@ private:
   bool checkSupportedControlFlow();
   bool checkVectorDecompositionSupported();
   bool checkAggregateValueSupported(Instruction &I);
+  void collectMaskedAllocas();
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
   SmallVector<Value *, 4> getVectorComponents(Value *V, IRBuilderBase &Builder);
@@ -749,6 +776,8 @@ private:
   void widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder);
   void widenGroupSharedStore(StoreInst &SI, IRBuilder<> &Builder);
   void widenGroupSharedAtomicRMW(AtomicRMWInst &RMW, IRBuilder<> &Builder);
+  void widenMaskedAlloca(AllocaInst &AI, IRBuilder<> &Builder);
+  void widenMaskedAllocaGEP(GetElementPtrInst &GEP, IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
   void widenInsertValue(InsertValueInst &IV, IRBuilder<> &Builder);
@@ -1252,6 +1281,31 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
     return false;
   }
   return true;
+}
+
+void FunctionWidener::collectMaskedAllocas() {
+  // (Roadmap L84) Runs once, before any widening, over the *old* function's
+  // instructions -- object identity survives `buildWidenedFunction`'s
+  // `F->splice`, so it does not matter that this scan happens to run
+  // before that splice moves them into `NewF`; the `AllocaInst`/
+  // `GetElementPtrInst` pointers recorded here are exactly the ones
+  // `widenInstruction` later visits inside `NewF`. See `getUnderlyingAlloca`
+  // and `widenMaskedAlloca`'s comment for why this set exists at all: a
+  // masked load/store's own operand-driven uniformity classification
+  // cannot see that a memory location's *value* was written divergently
+  // just because its *address* is uniform.
+  for (Instruction &I : instructions(*OldF)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI);
+    if (!Matched)
+      Matched = matchMaskedStore(*CI);
+    if (!Matched)
+      continue;
+    if (AllocaInst *AI = getUnderlyingAlloca(Matched->Ptr))
+      MaskedAllocas.insert(AI);
+  }
 }
 
 Function *FunctionWidener::buildWidenedFunction() {
@@ -2501,6 +2555,73 @@ void FunctionWidener::widenGroupSharedGEP(GetElementPtrInst &GEP,
   ToErase.push_back(&GEP);
 }
 
+void FunctionWidener::widenMaskedAlloca(AllocaInst &AI, IRBuilder<> &Builder) {
+  // (Roadmap L84) `AI` is in `MaskedAllocas`: at least one
+  // `feme.cpu.masked.load.*`/`.store.*` call reads or writes it, which
+  // `feme::cpu::LinearizePass` only ever emits for a genuinely
+  // conditionally-executed access -- so some lane stored a different
+  // value through `AI` than another lane did, even though `AI`'s own
+  // address is the same scalar pointer in every lane (a plain, non-
+  // dynamically-promotable local variable, e.g. one only mem2reg/SROA
+  // could not promote due to a dynamic index into it -- see "Promote what
+  // can be promoted" in feme/docs/FeMeCPUDesign.md). The ordinary
+  // per-instruction uniformity analysis has no dataflow edge from a store
+  // to a later load through memory, so it cannot see this and classifies
+  // both the alloca and any load of it uniform; left alone, every lane
+  // would keep sharing this one address, and whichever lane's masked
+  // store runs last would silently overwrite every other lane's own
+  // value (the exact bug this roadmap row's own re-run found).
+  //
+  // The fix, exactly as `FeMeCPUDesign.md`'s own "Phase 4: Widening" table
+  // already prescribes ("alloca T -> alloca [W x T], indexed by lane"):
+  // give this alloca real per-lane storage. `Widened[&AI]` is seeded here
+  // with a genuine `<W x ptr>`, one distinct address per lane, so that
+  // every later masked load/store gathering/scattering through it (see
+  // `widenMaskedLoad`/`widenMaskedStore`, both already unconditionally
+  // dispatched regardless of this instruction's own uniformity
+  // classification) reads back exactly the value the matching lane
+  // itself stored.
+  Type *ElemTy = AI.getAllocatedType();
+  auto *ArrTy = ArrayType::get(ElemTy, WaveSize);
+  AllocaInst *NewAI =
+      Builder.CreateAlloca(ArrTy, nullptr, AI.getName() + ".perlane");
+  NewAI->setAlignment(AI.getAlign());
+
+  Value *WidePtr = PoisonValue::get(
+      FixedVectorType::get(PointerType::get(Ctx, 0), WaveSize));
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LanePtr = Builder.CreateGEP(
+        ArrTy, NewAI, {Builder.getInt32(0), Builder.getInt32(Lane)},
+        AI.getName() + ".lane" + Twine(Lane));
+    WidePtr = Builder.CreateInsertElement(WidePtr, LanePtr, Builder.getInt32(Lane),
+                                          AI.getName() + ".perlane.ptrs");
+  }
+  Widened[&AI] = WidePtr;
+  ToErase.push_back(&AI);
+}
+
+void FunctionWidener::widenMaskedAllocaGEP(GetElementPtrInst &GEP,
+                                           IRBuilder<> &Builder) {
+  // The dual of `widenGroupSharedGEP` above for a `widenMaskedAlloca`-
+  // widened base: there, a divergent *index* off a single, intentionally-
+  // shared base is what needs widening; here, the *base* itself was
+  // replaced by a real `<W x ptr>` of distinct per-lane addresses (see
+  // `widenMaskedAlloca`), while `GEP`'s own indices are left completely
+  // unchanged (e.g. this row's own motivating case: a dynamic-but-lane-
+  // uniform loop index into a `Function`-storage `int4x4` local).
+  // `getelementptr`'s vector-base/scalar-index form broadcasts a scalar
+  // index across every lane of the base automatically, so applying `GEP`'s
+  // own indices unchanged, once, against the widened base gives each
+  // lane's own within-object address at no extra cost.
+  Value *WideBase = Widened.lookup(GEP.getPointerOperand());
+  SmallVector<Value *, 4> Indices(GEP.indices());
+  Value *NewGEP =
+      Builder.CreateGEP(GEP.getSourceElementType(), WideBase, Indices,
+                        GEP.getName() + ".wide", GEP.isInBounds());
+  Widened[&GEP] = NewGEP;
+  ToErase.push_back(&GEP);
+}
+
 void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
   // A raw `load` from a divergent groupshared address -- one
   // `feme::cpu::LinearizePass` never masked into a `feme.cpu.masked.load`
@@ -3230,6 +3351,26 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     return true;
   }
 
+  // (Roadmap L84) See `widenMaskedAlloca`'s comment: a masked-load/masked-
+  // store-touched local variable's `alloca` (and any `getelementptr`
+  // chained off it) must be widened into real per-lane storage
+  // regardless of the ordinary uniformity classification below, which has
+  // no way to see that this address's *stored value* differs by lane.
+  if (auto *AI = dyn_cast<AllocaInst>(&I)) {
+    if (MaskedAllocas.contains(AI)) {
+      widenMaskedAlloca(*AI, Builder);
+      return true;
+    }
+  }
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+    if (!isGroupSharedPointerType(GEP->getPointerOperandType()) &&
+        MaskedAllocas.contains(
+            getUnderlyingAlloca(GEP->getPointerOperand()))) {
+      widenMaskedAllocaGEP(*GEP, Builder);
+      return true;
+    }
+  }
+
   if (!UI.isDivergentAtDef(&I))
     return true; // Uniform: leave it exactly as it is.
 
@@ -3311,6 +3452,8 @@ Function *FunctionWidener::widen() {
     return nullptr;
   if (!checkVectorDecompositionSupported())
     return nullptr;
+
+  collectMaskedAllocas();
 
   NewF = buildWidenedFunction();
 
