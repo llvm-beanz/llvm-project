@@ -63,6 +63,30 @@ bool isSupportedGroupSharedLeafUser(const User *U) {
   return CI && getGatherScatterPtrOperandNo(CI).has_value();
 }
 
+/// Returns whether every user of \p V (a vector-of-pointers value: a
+/// genuinely divergent `getelementptr` (roadmap L11), or a uniform-
+/// address broadcast's own final `insertelement`/`shufflevector` link
+/// (roadmap L7o) `matchPointerBroadcasts` builds) is a leaf access this
+/// pass knows how to retarget directly, or a second-level per-component
+/// `getelementptr` into that vector-of-pointers row -- the address
+/// `FunctionWidener::widenGroupSharedLoad`'s vector case builds one per
+/// component of a vector-typed row, whether that row's own address is
+/// naturally divergent (L11) or a broadcast of a uniform one (L7o:
+/// `subgroupElect()`-style "exactly one invocation writes" code stores a
+/// whole vector-typed row through a uniform, wave-shared address, so the
+/// row address is broadcast to every lane's own masked-scatter slot
+/// rather than genuinely varying per lane) -- whose own users are, in
+/// turn, all direct leaf accesses.
+bool isSupportedGroupSharedRowUser(const Value *V) {
+  return llvm::all_of(V->users(), [V](const User *U) {
+    if (isSupportedGroupSharedLeafUser(U))
+      return true;
+    const auto *NestedGEP = dyn_cast<GetElementPtrInst>(U);
+    return NestedGEP && V->getType()->isVectorTy() &&
+           llvm::all_of(NestedGEP->users(), isSupportedGroupSharedLeafUser);
+  });
+}
+
 /// If every uniform-address use of \p V (a groupshared global, or a
 /// first-level `getelementptr` off one) is part of one or more same-value
 /// `<W x ptr>` broadcasts a gather/scatter's pointer argument still needs
@@ -161,12 +185,13 @@ std::optional<SmallVector<Value *, 4>> matchPointerBroadcasts(Value *V) {
 }
 
 /// Whether every broadcast \p V feeds (per `matchPointerBroadcasts`) is
-/// well-formed and feeds only a supported leaf access.
+/// well-formed and feeds only a supported leaf access, or (roadmap L7o) a
+/// second-level per-component `getelementptr` into the broadcast's own
+/// vector-of-pointers result -- see `isSupportedGroupSharedRowUser`.
 bool hasOnlySupportedBroadcasts(Value *V) {
   std::optional<SmallVector<Value *, 4>> Broadcasts = matchPointerBroadcasts(V);
-  return Broadcasts && llvm::all_of(*Broadcasts, [](Value *Final) {
-           return llvm::all_of(Final->users(), isSupportedGroupSharedLeafUser);
-         });
+  return Broadcasts &&
+         llvm::all_of(*Broadcasts, isSupportedGroupSharedRowUser);
 }
 
 /// `llvm::convertUsersOfConstantsToInstructions`'s per-`(Constant,
@@ -271,12 +296,16 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
     IRBuilder<> SplatBuilder(cast<Instruction>(OldWide));
     Value *NewWide = SplatBuilder.CreateVectorSplat(
         NumLanes, NewProducer, NewProducer->getName() + ".splat");
-    for (Use &U : make_early_inc_range(OldWide->uses())) {
-      auto &CI = *cast<CallInst>(U.getUser());
-      unsigned PtrOperandNo = *getGatherScatterPtrOperandNo(&CI);
-      IRBuilder<> CallBuilder(&CI);
-      rebuildGatherScatterCall(CI, PtrOperandNo, NewWide, CallBuilder);
-    }
+    // `OldWide`'s own uses are either a direct gather/scatter call (the
+    // pre-existing, always-uniform-address shape), or (roadmap L7o) a
+    // second-level per-component `getelementptr` into this broadcast row
+    // -- recursing into this same function handles both: `OldWide` has no
+    // `insertelement` users of its own (nothing re-broadcasts an already
+    // broadcast vector), so `matchPointerBroadcasts(OldWide)` is always
+    // empty and this immediately falls through to the ordinary direct-use
+    // retargeting below, exactly like retargeting a first-level `GEP`'s
+    // own leaf/nested-GEP uses does.
+    retargetGroupSharedProducer(OldWide, NewWide);
 
     // Erase in dependency order: `OldWide` is already unused (every use
     // was just retargeted above), so it is always safe to erase first;
@@ -442,11 +471,14 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           // uniform nested array/struct access chain, which milestone
           // 9's own scope narrowing still leaves unsupported) and every
           // one of the nested GEP's own users is an ordinary leaf access
-          // (in practice always a masked gather, one per component; a
-          // divergent vector-typed groupshared load has no
-          // uniform-address broadcast case to consider, unlike a scalar
-          // one, since its address is already a real vector-of-pointers
-          // `getelementptr` by construction).
+          // (in practice always a masked gather, one per component). A
+          // *uniform* row address broadcast into a vector-of-pointers
+          // (roadmap L7o: `subgroupElect()`-style "exactly one invocation
+          // writes" code stores a whole vector-typed row through a
+          // single, wave-shared address rather than a genuinely divergent
+          // one) reaching this exact same second-level-GEP shape is
+          // handled above instead, by `hasOnlySupportedBroadcasts`'s own
+          // `isSupportedGroupSharedRowUser` check on the broadcast link.
           if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(GEPUser);
               NestedGEP && GEP->getType()->isVectorTy() &&
               llvm::all_of(NestedGEP->users(), isSupportedGroupSharedLeafUser))
@@ -456,8 +488,9 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
               "' feeds a nested getelementptr or another unsupported "
               "user; only a first-level getelementptr feeding a direct "
               "load, store, atomicrmw, masked gather/scatter, or (for a "
-              "vector-typed row load) a second-level per-component "
-              "getelementptr feeding its own masked gather is supported "
+              "vector-typed row load, or a uniform row address broadcast "
+              "into one) a second-level per-component getelementptr "
+              "feeding its own masked gather/scatter is supported "
               "(roadmap milestone 9 deviation)");
           return false;
         }
