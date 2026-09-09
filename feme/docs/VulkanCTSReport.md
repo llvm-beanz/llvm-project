@@ -34122,3 +34122,80 @@ needed (no new extension involved). `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDe
 update needed (this closure adds no new design decision beyond what `ShuffleConversionPattern`'s/
 `AllEqualConversionPattern`'s own precedent, already covered by `Design.md`'s wave-op sections, already
 established).
+
+## L7j: `spirv.SpecConstantComposite`/`spirv.mlir.referenceof` legalization, and the deeper gap it uncovers
+
+Split out of L7i's own closing session (see above): every `dEQP-VK.subgroups.*` compute-stage case fails
+pipeline creation with `failed to legalize operation 'spirv.SpecConstantComposite'`, since no legalization
+pattern existed anywhere (this project or upstream MLIR) for either `spirv.SpecConstantComposite` or its
+necessary companion `spirv.mlir.referenceof` -- not even the plain scalar-spec-constant-read case.
+
+**Fix**: `feme::spirv::SpecConstantValueMap`/`prepareSpecConstants` (new, `SPIRVToLLVMPatterns.cpp`)
+resolves every `spirv.SpecConstant` to its own declared default value up front, plus every *vector*-shaped
+`spirv.SpecConstantComposite` (the `gl_WorkGroupSize`/`LocalSizeId` shape) by folding its constituents,
+mirroring the existing `prepareResourceVariables`/`prepareStageIOVariables` "collect before the conversion
+erases the declaration" idiom this file already establishes. This ICD has no runtime
+`VkSpecializationInfo` override mechanism (`Pipeline.cpp` never threads one through), so a spec constant's
+own declared default is the only value it could ever actually take, making this fold always correct. A
+`struct`/nested-`array`-shaped composite is deliberately left unresolved (declined, not approximated),
+since no known real HLSL/CTS source needs that shape today.
+
+New `ReferenceOfConversionPattern` legalizes `spirv.mlir.referenceof` by materializing the resolved value
+directly as an `llvm.mlir.constant` (reusing `ConstantScalarAndVectorPattern`'s own signed/unsigned ->
+signless integer retyping idiom, since a spec constant's declared value carries the identical SPIR-V-vs-
+LLVM mismatch an ordinary `spirv.Constant` does). New `SpecConstantCompositeErasurePattern` mirrors the
+existing scalar `SpecConstantErasurePattern`, safe since every real reference is already resolved via the
+pre-built map, independent of declaration lifetime.
+
+New lit tests: `spirv-to-llvm-spec-constants.mlir` (scalar/vector, signed/unsigned references, all
+positive) and `spirv-to-llvm-spec-constants-invalid.mlir` (a struct-shaped composite reference correctly
+remains illegal, confirming the decline). `ninja check-feme`: 2,816 tests passed, 0 failed (up by exactly
+the new lit-test cases).
+
+**Real `deqp-vk` verification**:
+
+```
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+deqp-vk --deqp-case="dEQP-VK.subgroups.*.compute.*"
+```
+
+**9,160 cases: 4 Pass, 149 Fail, 9,007 NotSupported.** This confirms the fix is real and working
+end-to-end: previously **zero** `dEQP-VK.subgroups.*` compute-stage cases could even reach pipeline
+creation (per L7i's own closing-session finding); now 4 pass outright
+(`dEQP-VK.subgroups.arithmetic.compute.subgroupadd_double`,
+`dEQP-VK.subgroups.builtin_var.compute.numsubgroups_requiredsubgroupsize`,
+`dEQP-VK.subgroups.builtin_var.compute.subgroupinvocationid_compute_requiredsubgroupsize`,
+`dEQP-VK.subgroups.size_control.compute.allow_varying_subgroup_size_spirv16`), and the specific
+`failed to legalize operation 'spirv.SpecConstantComposite'` diagnostic this row was filed against no
+longer appears anywhere in the sweep.
+
+The sweep also surfaced two new, distinct, deeper gaps this row's own fix does not touch and is not
+equipped to fix, blocking most of the remaining 149 `Fail` cases:
+
+1. **A pre-existing upstream MLIR SPIR-V deserializer limitation.** `mlir/lib/Target/SPIRV/
+   Deserialization/Deserializer.cpp`'s `processArrayType` rejects an `OpTypeArray` whose length operand
+   is itself a specialization constant, with a diagnostic matching a TODO already marked verbatim in that
+   function:
+   ```
+   error: OpTypeArray count <id> 35 can only come from normal constant right now
+   ```
+   e.g. `dEQP-VK.subgroups.basic.compute.subgroupelect` fails this way. This is well upstream of this
+   project's own SPIR-V-to-LLVM conversion passes -- the deserializer rejects the module before any
+   `feme`-specific pass ever runs. Filed as new roadmap row **L7k**.
+
+2. **A runtime value-verification gap**, distinct from legalization: a handful of cases (e.g.
+   `dEQP-VK.subgroups.builtin_var.compute.subgroupsize_compute`) now reach real pipeline creation and
+   execution successfully, but fail output verification (`"2 / 7 values passed"`). Not yet reduced or
+   scoped this session; noted in L7k's own row as a follow-up question, since it may or may not share a
+   root cause with gap 1.
+
+Given both remaining gaps, `Info.SubgroupSupportedOperations`'s `VK_SUBGROUP_FEATURE_VOTE_BIT`/
+`SHUFFLE_BIT` flip (L7i's own pending decision) remains **not yet justified** and is **not** made this
+session: most non-`NotSupported` compute-stage cases still fail on gap 1 or 2 above, neither specific to
+`Vote`/`Shuffle` itself. `PhysicalDeviceInfo.cpp` still advertises `VK_SUBGROUP_FEATURE_BASIC_BIT` only.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed -- an internal
+legalization-pass correctness/completeness fix, no new feature or extension bit advertised.
+`Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update needed (this fix follows the
+already-documented "resolve to compile-time default, no runtime specialization override" design this
+ICD's own pipeline-creation path already establishes elsewhere; no new design decision introduced).

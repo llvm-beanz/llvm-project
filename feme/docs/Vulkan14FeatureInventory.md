@@ -261,7 +261,23 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   coverage now exists, but confirming it against `dEQP-VK.subgroups.*`
   remains blocked on an unrelated `gl_WorkGroupSize`-specialization-constant
   gap that affects every compute-stage subgroup case in that CTS group,
-  not anything specific to `Vote`/`Shuffle`.
+  not anything specific to `Vote`/`Shuffle`. UPDATE (roadmap L7j, later
+  session): the `spirv.SpecConstantComposite`/`spirv.mlir.referenceof`
+  legalization gap above is now fixed (`prepareSpecConstants`/
+  `ReferenceOfConversionPattern`/`SpecConstantCompositeErasurePattern`),
+  confirmed via a real `deqp-vk` re-run of `dEQP-VK.subgroups.*.compute.*`
+  (9,160 cases: 4 now `Pass` outright, up from zero previously able to
+  even reach pipeline creation; the specific `SpecConstantComposite`
+  diagnostic no longer appears anywhere in the sweep). That same sweep
+  surfaced two further, distinct blockers unrelated to this gap -- a
+  pre-existing upstream MLIR SPIR-V deserializer limitation rejecting an
+  `OpTypeArray` sized by a specialization constant (split out to roadmap
+  L7k), and a handful of cases now reaching runtime execution but failing
+  output verification -- so `supportedOperations` still advertises only
+  `VK_SUBGROUP_FEATURE_BASIC_BIT`: the real op coverage and the spec-
+  constant-composite legalization gap are both now resolved, but
+  confirming a `VOTE_BIT`/`SHUFFLE_BIT` flip against
+  `dEQP-VK.subgroups.*` remains blocked on L7k's own gap.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
