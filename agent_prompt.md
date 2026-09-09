@@ -42,20 +42,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you close out L24 from the roadmap or other prerequisites blocking the
+Can you close out L24(a) from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **11 of L3's own 35 cases now clear both pipeline creation and submission but
-> produce a wrong rendered result**, caught by the harness's own image/buffer
-> comparison (`"no match found in search range"`, i.e. this is a genuine
-> correctness mismatch, not a pipeline-creation-time diagnostic):
-> `Feature/Semantics/{ArraySemantics,ClipDistance,CullDistance,UserSemantics}.test`,
-> `Graphics/{IsolineDomainTessellation,QuadDomainTessellation,discard}.test`,
-> and
-> `Graphics/gs_{passthrough,point_to_quad,selective_output,triangle_subdivision}.test`
-> -- a mix of tessellation-domain and geometry-shader cases plus a few
-> semantics/discard cases, none yet reduced; likely several distinct root causes
-> given the mix of shader stages involved (tessellation domain-shader output,
-> geometry-shader primitive emission, fragment discard, and plain
-> vertex/fragment semantics all appearing in the same bucket), needing
-> individual per-stage reductions rather than one shared fix
+> `Feature/Semantics/ArraySemantics.test` still fails, unrelated to L24's own
+> viewport-Y/winding scope -- pre-existing, not yet reduced
