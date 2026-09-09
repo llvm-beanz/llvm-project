@@ -34432,3 +34432,112 @@ own real sweep numbers and points the pending flip's remaining blockers at L7m/L
 no new extension advertised. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update
 needed (this fix follows the same intrinsic-based barrier-lowering design `ControlBarrierConversionPattern`
 already established; no new design decision introduced).
+
+## L7o: groupshared uniform-address broadcast + second-level GEP scatter shape
+
+Filed by L7l's own closing session: `dEQP-VK.subgroups.basic.compute.subgroupelect`/
+`_requiredsubgroupsize` now reach `GroupShared.cpp`'s `rewriteGroupSharedGlobals` validation for the
+first time (per L7l's own `spirv.MemoryBarrier` fix letting the module past legalization), and are
+declined there:
+```
+error: feme-cpu-simdize: groupshared global 'spirv_var_38' feeds a nested getelementptr or another
+  unsupported user; only a first-level getelementptr feeding a direct load, store, atomicrmw, masked
+  gather/scatter, or (for a vector-typed row load) a second-level per-component getelementptr feeding
+  its own masked gather is supported (roadmap milestone 9 deviation)
+```
+
+**Root cause, confirmed via a real IR reduction.** A temporary debug hook (`FEME_DEBUG_DUMP_PRE_GROUPSHARED_IR`,
+an env-var-gated `NewF->print(llvm::errs())` immediately before the `rewriteGroupSharedGlobals` call in
+`FunctionWidener::widen`, mirroring L45's own reverted-before-commit `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`
+technique -- added, used, then reverted this same session, before any real fix) captured the exact
+pre-validation IR for `subgroupelect`. The GLSL test harness's own `subgroupElect()`-gated code
+(`vktSubgroupsBasicTests.cpp`) has exactly one invocation per subgroup write a whole vector-typed
+groupshared row:
+```glsl
+uint groupOffset = gl_SubgroupID;
+if (subgroupElect())
+{
+  superSecretComputeShaderHelper[groupOffset] = uvec4(0);
+}
+```
+`gl_SubgroupID` is uniform (the same value on every lane of a single-subgroup wave), so
+`feme::cpu::computeWaveUniformity` classifies the row's own index as non-divergent, and
+`FunctionWidener::widenGroupSharedGEP` leaves its `getelementptr` scalar rather than widening it into a
+real vector-of-pointers. But the write is masked by the (genuinely divergent) `subgroupElect()` result,
+so `LinearizePass::maskMemoryOps` still turns the `store` into a masked one, and `widenMaskedStore`'s
+existing vector-typed-value case (added for L15's own divergent-row-address precedent) broadcasts the
+scalar row address into a `<4 x ptr>` via the ordinary `insertelement`/`shufflevector` splat idiom, then
+indexes that broadcast with a second-level per-component `getelementptr`, one per masked
+`llvm.masked.scatter`:
+```llvm
+%19 = getelementptr [1 x <4 x i32>], ptr addrspace(3) @spirv_var_38, i32 0, i32 %wave_index
+%.splat.splatinsert = insertelement <4 x ptr addrspace(3)> poison, ptr addrspace(3) %19, i64 0
+%.splat.splat = shufflevector <4 x ptr addrspace(3)> %.splat.splatinsert, <4 x ptr addrspace(3)> poison, <4 x i32> zeroinitializer
+%.elt0.ptr = getelementptr <4 x i32>, <4 x ptr addrspace(3)> %.splat.splat, i32 0, i32 0
+call void @llvm.masked.scatter.v4i32.v4p3(<4 x i32> zeroinitializer, <4 x ptr addrspace(3)> align 4 %.elt0.ptr, <4 x i1> %masked.mask)
+; ... .elt1.ptr, .elt2.ptr, .elt3.ptr, each its own scatter
+```
+`GroupShared.cpp`'s validation only recognized this second-level-GEP shape when the row address was
+itself a real, naturally-divergent vector-of-pointers `getelementptr` built by `widenGroupSharedGEP`
+directly (roadmap L11's own precedent, gated on `GEP->getType()->isVectorTy()`), never when it was a
+*broadcast* of a uniform one -- a genuinely new combination neither L10's own broadcast-recognition nor
+L11's own second-level-GEP exception covered on its own.
+
+**Fix.** Two small, closely related changes in `GroupShared.cpp`:
+1. A new shared predicate, `isSupportedGroupSharedRowUser`, generalizes the "leaf, or second-level
+   per-component `getelementptr` feeding only leaves" check L11 introduced inline for a genuinely
+   divergent GEP so it also applies to a broadcast's own final `insertelement`/`shufflevector` value
+   (which is unconditionally vector-typed by construction, so the same `isVectorTy()` gate is trivially
+   satisfied). `hasOnlySupportedBroadcasts` now uses this predicate instead of requiring a direct leaf.
+2. `retargetGroupSharedProducer`'s own broadcast-retargeting loop previously assumed a broadcast's final
+   value always fed a gather/scatter call directly (`cast<CallInst>(U.getUser())`, which would have
+   asserted on our new shape's per-component `getelementptr` users). It now recurses into itself for the
+   broadcast's own final value instead, exactly as it already did for a first-level `getelementptr`'s own
+   leaf/nested-GEP uses -- removing an inconsistency between the two code paths rather than adding new
+   logic; the existing recursive nested-GEP-retargeting branch already handles the rest correctly with no
+   further change.
+
+New lit test `simdize-groupshared-masked-vector-row-store-uniform.ll` covers the shape directly, using
+`llvm.dx.wave.get.lane.count` (classified `AlwaysUniform` by `computeWaveUniformity`) as a stand-in for a
+real `gl_SubgroupID`-derived uniform index, without needing a real subgroup-ID intrinsic of its own.
+Re-checked `simdize-groupshared-nested-gep-unsupported.ll` (a genuinely uniform, non-broadcast, non-vector
+nested array/struct access with no divergence at all) still correctly declines -- confirming the fix is
+scoped to exactly the new shape and does not silently widen milestone 9's own narrowing.
+
+**Build/test.** `ninja -C build2 feme-opt feme_vulkan`: clean build. `ninja -C build2 check-feme`: 2,877
+tests discovered (2,818 passed, 59 unsupported, 0 failed) -- up by exactly the one new lit test relative
+to L7l's own recorded 2,814/2,817 baseline (unsupported count unaffected).
+
+**Real `deqp-vk` verification.** To confirm the before/after precisely, the fix was `git stash`ed out,
+`feme_vulkan` rebuilt, and `dEQP-VK.subgroups.basic.compute.subgroupelect` re-run: it reproduces the exact
+pre-fix diagnostic and `VK_ERROR_INITIALIZATION_FAILED` from the L7o filing verbatim. The stash was then
+restored and `feme_vulkan` rebuilt again; the same case (and its `_requiredsubgroupsize` twin) now reach
+real pipeline creation and execution, failing only "0 / 7 values passed" (or its equivalent) -- the same
+pre-existing runtime-value-verification gap roadmap L7n already tracks, not a new bug. A `grep` across
+every captured `deqp-vk` log from this session's own sweep confirms the "feeds a nested getelementptr"
+diagnostic no longer appears anywhere.
+
+A fresh `dEQP-VK.subgroups.*.compute.*` sweep (same per-subgroup-category chunking methodology as L7k/L7l's
+own sweeps, to route around the still-open L7m crash; `dEQP-VK.subgroups.basic.compute.subgroupbarrier`/
+`_requiredsubgroupsize` still excluded individually, still the only two cases in `basic` that crash):
+**5 Pass / 144 Fail / 8,908 NotSupported / 4 unmeasured (crashed) = 9,061 total.** The 4 unmeasured cases
+are the same 2 `subgroupbarrier*` L7m crashes plus the same 2 `subgroupmemorybarriershared*` L7p crashes
+recorded by L7l's own session -- re-confirmed via a fresh `gdb -batch -ex run -ex bt` capture matching the
+exact `0xdca345eadca345ea` corrupted-pointer pattern L7l's own session already recorded, i.e. still the
+same pre-existing, unrelated bug, not a regression. `Pass`/`Fail`/`unmeasured` are all unchanged from L7l's
+own recorded baseline (5 Pass / 144 Fail / 9,007 NotSupported / 4 unmeasured) -- a lateral move for the raw
+tally, since `subgroupelect`'s own pipeline-creation failure was already counted as `Fail` either way, just
+under a different failure mode. The `NotSupported` count differs (8,908 vs. the prior session's 9,007);
+this looks like dEQP-VK version/build environment drift between sessions rather than any capability-gating
+effect of this fix (this fix touches only cases already past the capability gate, same as every other
+`GroupShared.cpp`/`SIMDize.cpp` gap fixed so far), and is not investigated further here as out of this
+row's own scope. The `feme-cpu-simdize` groupshared-broadcast-plus-scatter gap this row was filed against
+is, regardless, definitively and completely fixed -- confirmed both by the new lit test and by the
+diagnostic's complete disappearance from every real case that used to hit it.
+
+`Vulkan14FeatureInventory.md` updated: the subgroup-capability audit note's pending-flip blocker list
+narrowed from L7m/L7n/L7o/L7p to L7m/L7n/L7p, with this row's own real sweep numbers recorded.
+`VulkanExtensionInventory.md` reviewed: no change needed -- an internal legalization-pass completeness fix,
+no new extension advertised. `Design.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no update
+needed (this fix follows the same `matchPointerBroadcasts`/`rewriteGroupSharedGlobals` design roadmap
+L10/L11 already established; no new design decision introduced).

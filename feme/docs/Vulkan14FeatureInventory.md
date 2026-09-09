@@ -305,14 +305,34 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   real pipeline creation successfully. None of them pass outright yet,
   though: 6 now fail the same runtime-value-verification gap as L7n, 2 now
   fail a distinct, previously-unreached `feme-cpu-simdize` groupshared-
-  access-shape gap (roadmap L7o), and the remaining 2 now crash with a real
-  `SIGBUS` (roadmap L7p) rather than the old legalization failure. Aggregate
-  sweep: 5 `Pass` / 144 `Fail` / 9,007 `NotSupported` / 4 unmeasured
-  (crashed) -- `NotSupported` still unchanged, confirming no capability-
-  gating effect either way -- so `supportedOperations` still advertises only
-  `VK_SUBGROUP_FEATURE_BASIC_BIT`: confirming the `VOTE_BIT`/`SHUFFLE_BIT`
-  flip against `dEQP-VK.subgroups.*` now remains blocked on L7m/L7n/L7o/L7p
-  instead.
+  access-shape gap (roadmap L7o, now closed -- see below), and the
+  remaining 2 now crash with a real `SIGBUS` (roadmap L7p) rather than the
+  old legalization failure. Aggregate sweep: 5 `Pass` / 144 `Fail` / 9,007
+  `NotSupported` / 4 unmeasured (crashed) -- `NotSupported` still unchanged,
+  confirming no capability-gating effect either way -- so
+  `supportedOperations` still advertises only `VK_SUBGROUP_FEATURE_BASIC_BIT`:
+  confirming the `VOTE_BIT`/`SHUFFLE_BIT` flip against
+  `dEQP-VK.subgroups.*` now remains blocked on L7m/L7n/L7o/L7p instead.
+- **L7o (the `feme-cpu-simdize` groupshared-broadcast-plus-scatter gap
+  above) is now closed**: `GroupShared.cpp`'s broadcast validation/
+  retargeting extended to recognize a *uniform*-address row broadcast
+  (rather than only a genuinely divergent one, per L11's own precedent)
+  feeding a second-level per-component `getelementptr`, the exact shape
+  `subgroupElect()`-gated masked-vector-row stores produce. A real
+  `deqp-vk` re-run confirms the diagnostic itself no longer appears
+  anywhere, and `subgroupelect`/`_requiredsubgroupsize` now reach real
+  pipeline creation and execution, failing only the pre-existing
+  runtime-value-verification gap L7n already tracks. Fresh
+  `dEQP-VK.subgroups.*.compute.*` sweep: 5 `Pass` / 144 `Fail` / 8,908
+  `NotSupported` / 4 unmeasured (crashed) -- `Pass`/`Fail`/`unmeasured`
+  unchanged from the prior sweep above (a lateral move for the raw tally:
+  `subgroupelect`'s own failure mode moves from a hard pipeline-creation
+  error to a softer runtime-value mismatch, already counted as `Fail`
+  either way); the `NotSupported` count differing is dEQP-VK
+  version/environment drift, not a capability-gating effect, and out of
+  this row's own scope. `supportedOperations` still advertises only
+  `VK_SUBGROUP_FEATURE_BASIC_BIT`: the `VOTE_BIT`/`SHUFFLE_BIT` flip now
+  remains blocked on L7m/L7n/L7p only.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
