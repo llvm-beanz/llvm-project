@@ -348,6 +348,7 @@ LogicalResult spirv::Deserializer::processDecoration(ArrayRef<uint32_t> words) {
   case spirv::Decoration::Centroid:
   case spirv::Decoration::Flat:
   case spirv::Decoration::NonReadable:
+  case spirv::Decoration::NonUniform:
   case spirv::Decoration::NonWritable:
   case spirv::Decoration::NoPerspective:
   case spirv::Decoration::NoSignedWrap:

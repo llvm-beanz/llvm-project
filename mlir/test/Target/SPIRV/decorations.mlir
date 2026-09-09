@@ -180,3 +180,22 @@ spirv.module Logical OpenCL requires #spirv.vce<v1.0, [Kernel, Linkage], []> {
   // CHECK: !spirv.ptr<!spirv.struct<(f32 [0], si32 [4]), FPFastMathMode=#spirv.fastmath_mode<NotNaN>>, Private>
   spirv.GlobalVariable @var : !spirv.ptr<!spirv.struct<(f32 [0], si32 [4]), FPFastMathMode=#spirv.fastmath_mode<NotNaN>>, Private>
 }
+
+// -----
+
+// The `NonUniform` decoration (SPIR-V 1.5+, `ShaderNonUniform` capability)
+// used to be entirely unhandled by both the deserializer ("unhandled
+// Decoration : 'NonUniform'") and the serializer ("unhandled decoration
+// NonUniform"), despite being a plain unit decoration exactly like
+// `NoContraction`/`RelaxedPrecision`/... immediately above -- roadmap L7f
+// (feme/docs/Roadmap.md) found this reduced from a real
+// `NonUniformResourceIndex()`-using HLSL shader, whose dxc-compiled SPIR-V
+// applies this decoration to an `OpCopyObject` result wrapping a dynamic
+// resource-array index.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.5, [Shader, ShaderNonUniform], []> {
+  spirv.func @non_uniform_decoration(%arg: i32) -> i32 "None" {
+    // CHECK: spirv.IAdd %{{.*}}, %{{.*}} {non_uniform}
+    %0 = spirv.IAdd %arg, %arg {non_uniform} : i32
+    spirv.ReturnValue %0 : i32
+  }
+}
