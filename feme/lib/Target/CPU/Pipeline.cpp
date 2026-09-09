@@ -16,6 +16,7 @@
 #include "feme/Transforms/CPU/FragmentWrapper.h"
 #include "feme/Transforms/CPU/GeometryWrapper.h"
 #include "feme/Transforms/CPU/HullWrapper.h"
+#include "feme/Transforms/CPU/InlineHelperFunctions.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/MeshOutputWrapper.h"
 #include "feme/Transforms/CPU/PatchConstantWrapper.h"
@@ -271,6 +272,25 @@ Expected<PipelineResult> runPipeline(Module &M,
     // pipeline into two `ModulePassManager` runs around that check instead
     // of running it from within a callback pass.
     ModulePassManager Normalize;
+    // (roadmap L76b) A GLSL/glslang-sourced module's user-defined helper
+    // function -- unlike an HLSL/DXIL-sourced one's, always fully inlined
+    // into its entry point by `dxc` well before this pipeline ever sees it
+    // -- can survive as its own separate, uninlined `llvm::Function`; every
+    // later CPU-pipeline pass (`SIMDizePass`, `LinearizePass`,
+    // `WaveLoweringPass`, the stage `*WrapperPass`es, ...) only walks the
+    // one function `feme::isShaderEntryPoint` flags, so a surviving helper
+    // function's own body is left completely untransformed while its call
+    // site inside the (SIMD-widened) entry function feeds it an argument
+    // only correct for one lane -- see
+    // `feme::cpu::InlineHelperFunctionsPass`'s header comment for the full
+    // story. Running this first, before even
+    // `feme::cpu::SPIRVBuiltinFoldingPass`, restores the "exactly one
+    // non-declaration function per shader stage" invariant every later pass
+    // already assumes, rather than requiring each of them to separately
+    // learn to see through a real call graph. A no-op for the common case
+    // (an HLSL/DXIL-sourced module, or a GLSL one with no surviving helper
+    // function).
+    Normalize.addPass(InlineHelperFunctionsPass());
     // A SPIR-V-sourced module's builtin (thread/group ID) access always
     // materializes the whole 3-component vector before extracting the one
     // lane actually used (see `feme::cpu::SPIRVBuiltinFoldingPass`'s header

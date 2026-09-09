@@ -11,6 +11,7 @@ add_feme_library(FeMeTransformsCPU
   HullPhase.cpp
   HullWrapper.cpp
   ImageCalls.cpp
+  InlineHelperFunctions.cpp
   Linearize.cpp
   MaskIntrinsics.cpp
   MeshOutputWrapper.cpp
@@ -38,6 +39,7 @@ add_feme_library(FeMeTransformsCPU
   LINK_COMPONENTS
   Analysis
   Core
+  IPO
   Passes
   Scalar
   Support
