@@ -74190,3 +74190,123 @@ Commits, in order: (1) the MLIR conversion pattern plus its lit test, (2) the CP
 fix plus its lit test and gtest cases, (3) the `ImageCalls` plumbing, (4) the CPU runtime helper
 plus its gtest cases, (5) `Roadmap.md`/`Design.md`/`VulkanCTSReport.md` together, (6) this
 `agent_thoughts.md` entry, on its own, last.
+
+# Session: L7e -- several `spirv.GroupNonUniform*` wave-op variants have no legalization pattern
+
+## Starting point
+
+Picked up roadmap L7e, split out of L7's own original filing text in a prior session: several
+`spirv.GroupNonUniform*` wave-op variants (`IMul`/`IAdd`/`AllEqual`/`Shuffle`/`Elect`) have no
+legalization pattern in `SPIRVToLLVMPatterns.cpp`. The filing text already noted that
+`IntegerGroupNonUniformReducePattern` covers the nine arithmetic-reduce ops' own reduce/scan form,
+leaving this row's real scope as `AllEqual`/`Shuffle`/`Elect` (no pattern at all) plus confirming
+whether `IMul`/`IAdd` have some other unhandled "non-reduce form".
+
+## Investigation
+
+First question: is there a hidden non-reduce shape of `IAdd`/`IMul` I need to worry about? Checked
+`SPIRVNonUniformOps.td` and the SPIR-V spec directly. `spirv.GroupNonUniformIAddOp`/`IMulOp` are
+*only* ever reduce/scan-shaped ops -- their own `GroupOperation` operand is what selects
+`Reduce`/`InclusiveScan`/`ExclusiveScan`/`ClusteredReduce`/`PartitionedReduce`, there is no separate
+opcode for a "broadcast" or "quad-swap" form of `IAdd`/`IMul` themselves. The roadmap text's own
+parenthetical ("e.g. `GroupNonUniformBallot`-adjacent broadcast/quad-swap variants") was gesturing at
+an entirely different, unrelated op family (`GroupNonUniformBroadcast`/`QuadBroadcast`/`QuadSwap`),
+not a hidden shape of `IAdd`/`IMul` at all. Confirmed via `IntegerGroupNonUniformReducePattern`'s own
+registration list (`populateSPIRVToLLVMTargetPatterns`) that both ops are already fully covered.
+So: nothing further to do for `IMul`/`IAdd`, moot concern, closed as "already covered" rather than a
+real gap.
+
+For the three real ops, checked what CPU-side intrinsic each maps to. Found `int_spv_wave_all_equal`
+and `int_spv_wave_is_first_lane` already exist upstream in `IntrinsicsSPIRV.td`, and are already
+*fully* wired through this project's own CPU pipeline (`WaveUniformity.cpp`, `SIMDize.cpp`,
+`OpRaising.cpp` all already have `dx_wave_is_first_lane`/`spv_wave_is_first_lane` and
+`dx_wave_all_equal`/`spv_wave_all_equal` cases) -- because HLSL's `WaveIsFirstLane()`/
+`WaveActiveAllEqual()` already reach these same intrinsics from the *DXIL*-origin frontend. The only
+gap is that the *SPIR-V*-origin frontend (glslang/dxc's own `-spirv` output, going through
+`spirv.GroupNonUniform*` ops rather than DXIL ops) has no pattern converting to the same intrinsics.
+Similarly, `spirv.GroupNonUniformShuffle`'s semantics ("Result is the Value of the invocation
+identified by the id Id") are already an exact match for `llvm.spv.wave.readlane`, the same intrinsic
+`RotateConversionPattern` (roadmap F2) already builds its own target invocation id for. This was a
+nice discovery: L7e needed **zero new CPU-side codegen**, unlike L7d's `ImageDrefGather` closure
+(a genuinely new intrinsic/runtime surface) -- purely a legalization-layer gap.
+
+## The `AllEqual` vector-operand trap
+
+Wrote all three patterns straightforwardly at first, including an `AllEqual` MLIR test with a vector
+operand and vector-of-`i1` result (mirroring `int_spv_wave_all_equal`'s own
+`LLVMScalarOrSameVectorWidth<0, i1>` signature). This failed to even parse: `spirv.
+GroupNonUniformAllEqualOp`'s dialect definition (`SPIRVNonUniformOps.td`) has `results = (outs
+SPIRV_Bool:$result)` -- `SPIRV_Bool` is scalar-only in this dialect, not `SPIRV_BoolOrVec`. Re-read
+the op's own description text: "Result Type must be a Boolean type" -- i.e. even when `Value` is a
+vector, the whole vector collapses into a single true/false, not a per-component result. This is a
+real semantic difference from `llvm.spv.wave.all_equal`'s own vector shape (a per-component `<W x
+i1>`, which is what HLSL's own `WaveActiveAllEqual(bool2/bool3/bool4)` needs and which
+`OpRaising.cpp`'s own DXIL-side comment already flags: "overloaded on the operand, not the i1
+result"). Forwarding a vector operand straight to the intrinsic while claiming a scalar `i1` result
+type would either assert or silently produce wrong code (a type mismatch between the op's declared
+result and the intrinsic's own inferred one). Rather than attempt a real component-wise-AND reduction
+(no known HLSL/dxc shape needs it -- dxc's own SPIR-V backend scalarizes a vector
+`WaveActiveAllEqual` into one scalar-operand `OpGroupNonUniformAllEqual` call per component instead),
+declined the vector-operand case outright with a clear diagnostic, mirroring this project's existing
+convention (`RotateConversionPattern` declining `Workgroup` scope, `AllEqualConversionPattern` now
+declining vector operands) of "decline what nothing needs yet" rather than guessing at unverified
+semantics. Fixed both the pattern and the test (moved the vector case to the `-invalid.mlir` file as
+a declined-vector-operand negative test).
+
+## Testing and verification
+
+MLIR conversion lit tests: both files pass (`spirv-to-llvm-group-non-uniform-elect-all-equal-shuffle
+{,-invalid}.mlir`). No new CPU resource-lowering or runtime tests were needed -- confirmed via `grep`
+that `WaveUniformity`/`SIMDize`/DXIL-raise/CPU-runtime already have passing coverage for all three
+target intrinsics from the pre-existing DXIL path.
+
+`ninja -C build2 check-feme`: 2814/2814 non-unsupported passing (+2 from this session's new lit
+tests), zero regressions.
+
+Real end-to-end verification: wrote three minimal HLSL compute shaders (`WaveIsFirstLane`,
+`WaveActiveAllEqual` with both an all-equal and a not-all-equal sub-case, `WaveReadLaneAt` with a
+per-lane-varying index), compiled each with `dxc -T cs_6_0 -spirv -fspv-target-env=vulkan1.3`,
+confirmed via `spirv-dis` that each really emits the target `OpGroupNonUniform*` opcode, then ran each
+through `offloader` against a hand-written pipeline YAML. All byte-exact `BufferExact` matches.
+
+Real `deqp-vk` re-run: this time found the *actual* complete case list at
+`VK-GL-CTS/build/external/vulkancts/modules/vulkan/dEQP-VK-cases.txt` (7.7M lines) rather than the
+stale, truncated top-level `VK-GL-CTS/build/dEQP-VK-cases.txt` a prior session's investigation had
+already flagged as incomplete -- this deeper path has real `dEQP-VK.subgroups.vote.*`/`shuffle.*`
+groups (glslang-compiled GLSL `subgroupElect`/`subgroupAllEqual`/`subgroupShuffle*`, reaching the
+identical opcodes this session's patterns now convert). Ran `deqp-vk --deqp-case=
+"dEQP-VK.subgroups.vote.compute.*,dEQP-VK.subgroups.shuffle.compute.*"` against the real feme ICD
+(`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` pointed at the build's `feme_icd.json`). Result: 1,804 cases, 0
+Pass, 128 Fail, 1,676 NotSupported. Parsed the `.qpa` log with a small Python regex script to confirm
+every single failure was a pre-existing, unrelated `subgroupclusteredrotate_*` case (a real, already
+-latent gap in `RotateConversionPattern`'s own clustered-rotate arithmetic that this change doesn't
+touch), and every `NotSupported` case (including every real `elect`/`allequal`/`shuffle` case) was
+declined at CTS's own capability gate before even reaching pipeline creation -- confirmed via
+`PhysicalDeviceInfo.cpp`, which only ever advertises `VK_SUBGROUP_FEATURE_BASIC_BIT`.
+
+This is a real, honest "the CTS payoff is zero today, for a different reason than usual" finding
+worth recording plainly rather than either overstating it or omitting the sweep. Filed the natural
+follow-on as new roadmap row L7i (advertise `VK_SUBGROUP_FEATURE_VOTE_BIT`/`SHUFFLE_BIT` once each
+backing op family is confirmed complete for every type/width the CTS group exercises) rather than
+trying to fold the feature-bit-advertisement question into L7e itself, since it's a genuinely
+separate concern (device capability reporting, not SPIR-V legalization) with its own scope
+(`PhysicalDeviceInfo.cpp`, not `SPIRVToLLVMPatterns.cpp`) -- keeping L7e's own row narrowly about
+what it was actually filed for.
+
+## Documentation
+
+`Roadmap.md`: struck through L7e with the full closure text (the `IMul`/`IAdd` moot-concern finding,
+the three new patterns, the `AllEqual` vector-operand decline, and the CTS capability-gate finding),
+updated L7's own umbrella-row bookkeeping text, filed new L7i. `Vulkan14FeatureInventory.md`: updated
+the existing F2 audit bullet (rather than adding a new one) with an UPDATE noting L7d/L7e's own
+closures and the `supportedOperations` capability-gate finding, since it was already the natural home
+for this exact "which `GroupNonUniform*` ops convert" bookkeeping. `VulkanCTSReport.md`: appended a
+full new section with the fix, tests, and both real end-to-end and CTS verification write-ups.
+`Design.md`: reviewed, no update needed -- unlike L7d (which extended an existing "Sampling variants"
+bullet), there's no existing wave-op-legalization bullet this closure meaningfully extends, and F2's
+own `Rotate` closure set the precedent of not needing a `Design.md` touch either.
+`VulkanExtensionInventory.md`/`FeMeCPUDesign.md`/`FeMeVulkanDesign.md`: reviewed, no changes needed.
+
+Commits, in order: (1) the three new MLIR conversion patterns plus their two lit test files, (2)
+`Roadmap.md`/`Vulkan14FeatureInventory.md`/`VulkanCTSReport.md` together, (3) this
+`agent_thoughts.md` entry, on its own, last.
