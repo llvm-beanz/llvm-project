@@ -2785,6 +2785,135 @@ femeCpuResourceStoreTypedI32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   femeRTPackImageTexelI32(Desc.Format, Ptr, Texel);
 }
 
+// `feme.cpu.resource.load.typed.v2f32` (roadmap L7a): reads a `<2 x
+// float>` element through a bindless typed-buffer descriptor whose real
+// bound format has exactly two shader-visible channels (e.g.
+// `R32G32_FLOAT`) -- the shape a genuinely 2-channel `RWBuffer<float2>`/
+// `Buffer<float2>` declares (see `isSupportedTexelElementType`'s own
+// comment, SPIRVResourceLowering.cpp, for the real IR reduction --
+// `Basic/Matrix/matrix_m-based_getter.test`'s own `RWBuffer<float2>
+// OutVec2` -- that found this shape genuinely reachable, unlike this
+// file's prior "never narrower than 4 or exactly 1" assumption). Reuses
+// `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel` the same way
+// `femeCpuResourceLoadTypedV4F32` above does; only the first two lanes of
+// the `<4 x float>` those tables always decode are kept. Like V4's own
+// read side, `OpImageRead`/`OpImageFetch` never actually narrows to this
+// shape in practice (SPIR-V's Image Instructions always return a full
+// 4-component vector), so this load counterpart exists mainly for
+// symmetry with the store below and for any narrower vector shape a
+// future frontend might legitimately emit.
+FemeRTv2f32 femeCpuResourceLoadTypedV2F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex,
+    _Bool Mask) asm("feme.cpu.resource.load.typed.v2f32");
+
+__attribute__((always_inline)) FemeRTv2f32 femeCpuResourceLoadTypedV2F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  if (!(AccessOK && Mask))
+    return (FemeRTv2f32){0.0f, 0.0f};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  FemeRTv4f32 Texel = femeRTUnpackImageTexel(Desc.Format, Ptr);
+  return (FemeRTv2f32){Texel[0], Texel[1]};
+}
+
+// `feme.cpu.resource.store.typed.v2f32` (roadmap L7a): the store
+// counterpart of `femeCpuResourceLoadTypedV2F32` above, with the same UAV
+// check every typed-buffer store requires (see
+// `femeCpuResourceStoreTypedV4F32`). Widens \p Value to the full `<4 x
+// float>` `femeRTPackImageTexel` expects, matching that function's own
+// "only the bound format's real channel count is ever read back" padding
+// convention (the padding B/A lanes here are never observed for a
+// genuinely 2-channel format).
+void femeCpuResourceStoreTypedV2F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, FemeRTv2f32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.typed.v2f32");
+
+__attribute__((always_inline)) void
+femeCpuResourceStoreTypedV2F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                               uint32_t DescriptorIndex, uint64_t ElementIndex,
+                               FemeRTv2f32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!(AccessOK && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  FemeRTv4f32 Texel = {Value[0], Value[1], 0.0f, 1.0f};
+  femeRTPackImageTexel(Desc.Format, Ptr, Texel);
+}
+
+// `feme.cpu.resource.load.typed.v2i32` (roadmap L7a): the integer
+// counterpart of `femeCpuResourceLoadTypedV2F32` above, for a genuinely
+// 2-channel `RWBuffer<int2>`/`RWBuffer<uint2>` (e.g. `R32G32_UINT`/
+// `R32G32_SINT`). Reuses `femeRTUnpackImageTexelI32` the same way the
+// float view above reuses `femeRTUnpackImageTexel`.
+FemeRTv2i32 femeCpuResourceLoadTypedV2I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex,
+    _Bool Mask) asm("feme.cpu.resource.load.typed.v2i32");
+
+__attribute__((always_inline)) FemeRTv2i32 femeCpuResourceLoadTypedV2I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  if (!(AccessOK && Mask))
+    return (FemeRTv2i32){0, 0};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  FemeRTv4i32 Texel = femeRTUnpackImageTexelI32(Desc.Format, Ptr);
+  return (FemeRTv2i32){Texel[0], Texel[1]};
+}
+
+// `feme.cpu.resource.store.typed.v2i32` (roadmap L7a): the store
+// counterpart of `femeCpuResourceLoadTypedV2I32` above, mirroring
+// `femeCpuResourceStoreTypedV2F32`'s own UAV check and widening.
+void femeCpuResourceStoreTypedV2I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, FemeRTv2i32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.typed.v2i32");
+
+__attribute__((always_inline)) void
+femeCpuResourceStoreTypedV2I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                               uint32_t DescriptorIndex, uint64_t ElementIndex,
+                               FemeRTv2i32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!(AccessOK && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  FemeRTv4i32 Texel = {Value[0], Value[1], 0, 1};
+  femeRTPackImageTexelI32(Desc.Format, Ptr, Texel);
+}
+
 // Bounds-checked address helper for `feme.cpu.resource.atomic.*.typed.i32`
 // (roadmap H8w): the storage-texel-buffer counterpart of
 // `femeRTAtomicTexelAddress2D` above (`feme.cpu.image.atomic.*.2d.i32`,

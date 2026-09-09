@@ -397,11 +397,14 @@ constexpr unsigned SPIRVSampledWithoutSampler = 2;
 constexpr unsigned SPIRVSampledWithSampler = 1;
 
 /// Returns \p Handle's buffer classification if its type is a `Dim::Buffer`
-/// Returns whether \p Ty is `<4 x float>`/`<4 x i32>` (V4) or, (roadmap L9)
-/// a scalar `float`/`i32`, the shader-side element shapes the CPU runtime's
-/// typed-load/store helpers implement a format conversion for today (see
+/// Returns whether \p Ty is `<4 x float>`/`<4 x i32>` (V4), `<2 x float>`/
+/// `<2 x i32>` (V2, roadmap L7a), or (roadmap L9) a scalar `float`/`i32`,
+/// the shader-side element shapes the CPU runtime's typed-load/store
+/// helpers implement a format conversion for today (see
 /// femeCpuResourceLoadTypedV4F32/StoreTypedV4F32,
-/// femeCpuResourceLoadTypedV4I32/StoreTypedV4I32, and
+/// femeCpuResourceLoadTypedV4I32/StoreTypedV4I32,
+/// femeCpuResourceLoadTypedV2F32/StoreTypedV2F32,
+/// femeCpuResourceLoadTypedV2I32/StoreTypedV2I32, and
 /// femeCpuResourceLoadTypedF32/StoreTypedF32,
 /// femeCpuResourceLoadTypedI32/StoreTypedI32 in
 /// feme/runtime/CPU/FeMeRuntimeCPU.c). The scalar shapes are a
@@ -413,14 +416,25 @@ constexpr unsigned SPIRVSampledWithSampler = 1;
 /// operand instead takes exactly the shader-declared element shape -- a
 /// bare scalar for a single-channel `RWBuffer<T>` -- confirmed via a direct
 /// IR reduction (`RWBuffer<int> In/Out; Out[0] = In[0];` lowers its store
-/// to a scalar `i32`, not `<4 x i32>`). A vector of any other width (2 or
-/// 3 components) is still unmodeled: neither `dxc` nor glslang ever emits
-/// one for a texel-buffer access (the SPIR-V Image Instructions always
-/// read/write either a scalar per-channel or a full 4-vector, never a
-/// partial one), so nothing reaches this function with that shape.
+/// to a scalar `i32`, not `<4 x i32>`). Roadmap L7a's own real IR reduction
+/// (a `dxc -spirv` compile of `Basic/Matrix/matrix_m-based_getter.test`'s
+/// own `RWBuffer<float2> OutVec2` output, storing a matrix row's two
+/// elements) found this doc comment's prior claim here -- that a 2- or
+/// 3-component vector is "still unmodeled" because "neither `dxc` nor
+/// glslang ever emits one for a texel-buffer access" -- was simply wrong for
+/// width 2: `dxc` emits a genuine `OpImageWrite`/`v2float` Texel operand for
+/// any 2-channel `RWBuffer<T2>` write, exactly mirroring V4's own shape one
+/// width down. This 2-wide case is now accepted here the same way V4 is.
+/// Width 3 remains believed absent (SPIR-V's own mandatory texel-buffer
+/// formats are 1-, 2-, or 4-channel only -- there is no 3-channel storage
+/// texel buffer format for `dxc`/glslang to ever target in the first
+/// place), so is still rejected below; revisit this claim too if a future
+/// session's own reduction disproves it, the same way this session's did
+/// for width 2.
 bool isSupportedTexelElementType(Type *Ty) {
   if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
-    if (VecTy->getNumElements() != 4)
+    unsigned NumElements = VecTy->getNumElements();
+    if (NumElements != 2 && NumElements != 4)
       return false;
     Ty = VecTy->getElementType();
   }

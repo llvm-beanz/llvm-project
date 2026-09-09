@@ -900,6 +900,140 @@ TEST_F(RuntimeCPUTest, TypedStoreScalarI32DroppedWithoutUavFlag) {
   EXPECT_EQ(Storage[0], 3);
 }
 
+// (Roadmap L7a) `<2 x float>`/`<2 x i32>` typed-buffer load/store -- the
+// shape a genuinely 2-channel `RWBuffer<float2>`/`RWBuffer<int2>` needs
+// (e.g. `R32G32_FLOAT`/`R32G32_UINT`/`R32G32_SINT`), confirmed reachable
+// by a real IR reduction of `Basic/Matrix/matrix_m-based_getter.test`'s
+// own `RWBuffer<float2> OutVec2` write -- see
+// `femeCpuResourceLoadTypedV2F32`/`StoreTypedV2F32`/`LoadTypedV2I32`/
+// `StoreTypedV2I32` in FeMeRuntimeCPU.c and `isSupportedTexelElementType`'s
+// own comment (SPIRVResourceLowering.cpp) for why this project's prior
+// "never narrower than 4 or exactly 1" assumption was wrong for width 2.
+TEST_F(RuntimeCPUTest, TypedLoadV2F32IdentityFormat) {
+  float Storage[2] = {1.5f, -2.5f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v2f32",
+                               "feme.cpu.resource.load.typed.v2f32");
+  ASSERT_TRUE(Load);
+  float Result[2] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 1.5f);
+  EXPECT_FLOAT_EQ(Result[1], -2.5f);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadV2F32InactiveMaskReadsZero) {
+  float Storage[2] = {5.0f, 5.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v2f32_inactive_mask",
+                               "feme.cpu.resource.load.typed.v2f32");
+  ASSERT_TRUE(Load);
+  float Result[2] = {1.0f, 1.0f};
+  Load(Heap, 1, 0, 0, /*mask=*/false, Result);
+  EXPECT_FLOAT_EQ(Result[0], 0.0f);
+  EXPECT_FLOAT_EQ(Result[1], 0.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV2F32RoundTrips) {
+  // The exact shape `Basic/Matrix/matrix_m-based_getter.test`'s own real
+  // IR reduction hit (`RWBuffer<float2> OutVec2; OutVec2[0] = m._m00_m01;`).
+  float Storage[2] = {0.0f, 0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store = getStoreWrapper(
+      "test_typed_store_v2f32", "feme.cpu.resource.store.typed.v2f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 2));
+  ASSERT_TRUE(Store);
+  float ToStore[2] = {3.0f, 4.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 3.0f);
+  EXPECT_FLOAT_EQ(Storage[1], 4.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV2F32DroppedWithoutUavFlag) {
+  float Storage[2] = {3.0f, 3.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  StoreFn Store = getStoreWrapper(
+      "test_typed_store_v2f32_no_uav", "feme.cpu.resource.store.typed.v2f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 2));
+  ASSERT_TRUE(Store);
+  float ToStore[2] = {9.0f, 9.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 3.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadV2I32IdentityFormat) {
+  int32_t Storage[2] = {-7, 8};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v2i32",
+                               "feme.cpu.resource.load.typed.v2i32");
+  ASSERT_TRUE(Load);
+  int32_t Result[2] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], -7);
+  EXPECT_EQ(Result[1], 8);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV2I32RoundTrips) {
+  int32_t Storage[2] = {0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store = getStoreWrapper(
+      "test_typed_store_v2i32", "feme.cpu.resource.store.typed.v2i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 2));
+  ASSERT_TRUE(Store);
+  int32_t ToStore[2] = {11, 12};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 11);
+  EXPECT_EQ(Storage[1], 12);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV2I32DroppedWithoutUavFlag) {
+  int32_t Storage[2] = {3, 3};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  StoreFn Store = getStoreWrapper(
+      "test_typed_store_v2i32_no_uav", "feme.cpu.resource.store.typed.v2i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 2));
+  ASSERT_TRUE(Store);
+  int32_t ToStore[2] = {9, 9};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 3);
+}
+
 TEST_F(RuntimeCPUTest, TrustedFlagSkipsOffsetCheck) {
   // FEME_DESCRIPTOR_TRUSTED lets a deliberately over-reported access
   // through -- see "Per-descriptor control". The buffer is intentionally

@@ -996,20 +996,20 @@ TEST(SPIRVResourceLoweringTest, LowersScalarF32TexelBufferToScalarTypedCalls) {
 
 TEST(SPIRVResourceLoweringTest,
      LeavesUnsupportedTexelElementVectorWidthUnchanged) {
-  // Only a scalar or a full <4 x T> are supported (see
-  // `isSupportedTexelElementType`'s comment) -- neither `dxc` nor glslang
-  // ever emits a <2 x T>/<3 x T> texel-buffer access, but a partial vector
-  // is still left un-normalized rather than mis-lowered if one somehow
-  // reached this pass.
+  // Only a scalar, a genuine <2 x T> (roadmap L7a), or a full <4 x T> are
+  // supported (see `isSupportedTexelElementType`'s comment) -- SPIR-V has
+  // no 3-channel storage texel buffer format for `dxc`/glslang to ever
+  // target, so a <3 x T> is still left un-normalized rather than
+  // mis-lowered if one somehow reached this pass.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define <2 x i32> @main(i32 %idx) {
+    define <3 x i32> @main(i32 %idx) {
       %h = call target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
           @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
       %ptr = call ptr
           @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
-      %loaded = load <2 x i32>, ptr %ptr
-      ret <2 x i32> %loaded
+      %loaded = load <3 x i32>, ptr %ptr
+      ret <3 x i32> %loaded
     }
     declare target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
         @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
@@ -1022,6 +1022,73 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(F);
   EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersV2I32TexelBufferToV2TypedCalls) {
+  // (Roadmap L7a) A genuine <2 x i32> load/store -- the shape a 2-channel
+  // format like R32G32_UINT/R32G32_SINT needs (`RWBuffer<int2>` in HLSL).
+  // Confirmed reachable via a real IR reduction of
+  // `Basic/Matrix/matrix_m-based_getter.test`'s own `RWBuffer<float2>
+  // OutVec2` write (see `isSupportedTexelElementType`'s own comment) --
+  // this project's prior "never narrower than 4 (or exactly 1)" assumption
+  // was wrong for width 2. Lowers to the `.v2i32`-mangled typed calls,
+  // distinct from both `.i32` and `.v4i32`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main(i32 %idx, <2 x i32> %v) {
+      %h = call target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load <2 x i32>, ptr %ptr
+      store <2 x i32> %v, ptr %ptr
+      ret <2 x i32> %loaded
+    }
+    declare target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v2i32"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.typed.v2i32"));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.i32"));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v4i32"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersV2F32TexelBufferToV2TypedCalls) {
+  // The float counterpart of `LowersV2I32TexelBufferToV2TypedCalls` above,
+  // e.g. `RWBuffer<float2>`'s own R32G32_FLOAT shape -- the exact case
+  // `Basic/Matrix/matrix_m-based_getter.test`'s own real IR reduction hit.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x float> @main(i32 %idx, <2 x float> %v) {
+      %h = call target("spirv.Image", float, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", float, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load <2 x float>, ptr %ptr
+      store <2 x float> %v, ptr %ptr
+      ret <2 x float> %loaded
+    }
+    declare target("spirv.Image", float, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", float, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v2f32"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.typed.v2f32"));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.f32"));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v4f32"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
 }
 
 } // namespace
