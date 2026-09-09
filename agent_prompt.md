@@ -42,23 +42,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7t from the roadmap or other prerequisites blocking the
+Can you work on L7f from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Flip `PhysicalDeviceInfo.cpp`'s hardcoded `SubgroupSupportedOperations =
-> VK_SUBGROUP_FEATURE_BASIC_BIT` to also advertise `VOTE_BIT`/`SHUFFLE_BIT`**,
-> unblocked by L7s's own closing session: every
-> `dEQP-VK.subgroups.basic.compute.*` blocker this document has tracked across
-> the L7-series (L7k/L7l/L7m/L7n/L7o/L7p/L7q/L7r/L7s) is now resolved, and
-> `Vulkan14FeatureInventory.md`'s subgroup-capability audit note's
-> pending-blocker list is now empty. Not yet done this session (out of L7s's own
-> narrower scope): a real feature-flag flip needs its own broader verification
-> pass first -- a full `dEQP-VK.subgroups.*` sweep (not just `basic.compute`,
-> but `vote`/`shuffle`-specific test groups and every other shader stage the CTS
-> exercises those operations from) to confirm this ICD's
-> `feme::cpu::SIMDizePass`/`WaveCalls.cpp` handling of the actual vote/shuffle
-> wave-op family (as opposed to the basic/barrier/ballot-adjacent operations
-> exercised so far) is itself complete and correct before advertising the
-> capability bit, plus a check of whether `VkPhysicalDeviceVulkan11Properties`'
-> other subgroup-related fields (`subgroupQuadOperationsInAllStages`, etc.) need
-> any accompanying update
+> **An `unhandled Decoration : 'NonUniform'` MLIR SPIR-V deserialization
+> error**, split out of L7's own original filing text -- not yet reduced to a
+> concrete failing case this session; needs a real IR reduction of whichever
+> HLSL shape emits a `NonUniform` decoration (likely a
+> `[[vk::ext_decorate]]`-annotated or `NonUniformResourceIndex()`-wrapped
+> dynamic resource-array index) to confirm whether this is an MLIR deserializer
+> gap (mirroring roadmap L60's own upstream-fix precedent) or a `feme`-side
+> legalization gap, before scoping a fix
