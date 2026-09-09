@@ -42,21 +42,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L7e from the roadmap or other prerequisites blocking the
+Can you work on L7i from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Several `spirv.GroupNonUniform*` wave-op variants have no legalization
-> pattern**: `IMul`/`IAdd`/`AllEqual`/`Shuffle`/`Elect`, across multiple int
-> widths, split out of L7's own original filing text. The
-> `BitwiseAnd`/`BitwiseOr` pair already has a narrower, tracked
-> `feme-cpu-simdize`-side gap at H6g-b-a-i-a-i-b's own citation, but the
-> *legalization* gap for these other variants is new and untracked anywhere
-> else; `IntegerGroupNonUniformReducePattern` (`SPIRVToLLVMPatterns.cpp`)
-> already covers
-> `IAdd`/`IMul`/`SMin`/`UMin`/`SMax`/`UMax`/`BitwiseAnd`/`BitwiseOr`/`BitwiseXor`'s
-> own *reduce* form -- this row's own remaining scope is specifically
-> `AllEqual`/`Shuffle`/`Elect` (no reduce-shaped pattern exists for any of these
-> three at all, of any operand width) plus confirming whether `IMul`/`IAdd`'s
-> own *non-reduce* forms (e.g. `GroupNonUniformBallot`-adjacent
-> broadcast/quad-swap variants) are also unhandled, not yet individually reduced
-> this session
+> **Advertise the rest of the Vulkan 1.1
+> `VkPhysicalDeviceSubgroupProperties.supportedOperations` feature bits
+> `Vote`/`Shuffle`/`ShuffleRelative` now that a real legalization pattern exists
+> for at least one op in each** (`GroupNonUniformElect`/`AllEqual` for
+> `Basic`/`Vote`, `GroupNonUniformShuffle` for `Shuffle`; `ShuffleRelative`'s
+> own `ShuffleUp`/`ShuffleDown` still have no pattern at all and would need one
+> first), split out of L7e's own closing session: `PhysicalDeviceInfo.cpp`'s
+> `Info.SubgroupSupportedOperations` is hardcoded to
+> `VK_SUBGROUP_FEATURE_BASIC_BIT` only, causing
+> `dEQP-VK.subgroups.vote.*`/`shuffle.*`'s real CTS cases (confirmed via L7e's
+> own re-run, 1,804 cases, 1,676 declined `NotSupported` purely on this
+> capability gate) to never even execute against this ICD's now-real
+> `Elect`/`AllEqual`/`Shuffle` conversion patterns. Needs: (1) advertising
+> `VK_SUBGROUP_FEATURE_VOTE_BIT`/`VK_SUBGROUP_FEATURE_SHUFFLE_BIT` in
+> `PhysicalDeviceInfo.cpp` once each op family backing it is confirmed complete
+> for every operand type/width the relevant CTS group exercises
+> (`dEQP-VK.subgroups.vote.*` alone covers `bool`/`bvec2-4`/`int8_t`-`int64_t`
+> and unsigned/float variants --
+> `ElectConversionPattern`/`AllEqualConversionPattern` today only handle the
+> plain scalar 32-bit-class shapes any known HLSL source reaches, not this full
+> type matrix), and (2) a real `deqp-vk` re-run of the newly-unlocked groups to
+> confirm they now pass rather than merely stop being skipped
