@@ -121,6 +121,7 @@ add_feme_library(FeMeVulkanCore STATIC
   ProcAddr.cpp
   QueryPool.cpp
   RenderPass.cpp
+  SpecializationPatch.cpp
   Surface.cpp
   Swapchain.cpp
   Sync.cpp

@@ -10,6 +10,7 @@
 #include "Descriptor.h"
 #include "Diagnostics.h"
 #include "GroupSize.h"
+#include "SpecializationPatch.h"
 #include "Icd.h"
 #include "Objects.h"
 #include "PipelineCache.h"
@@ -560,7 +561,20 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   auto Ctx = std::make_unique<feme::Context>();
   Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
 
-  Expected<feme::Module> AsLLVMIR = importShaderModule(*Ctx, Module->words());
+  // (roadmap L7p) Apply the real, pipeline-creation-time specialization
+  // overrides to a private copy of this shader module's own words *before*
+  // deserialization, so any specialization-constant-dependent value the
+  // deserializer itself resolves at import time (most notably an
+  // `OpTypeArray` length derived from a spec constant, roadmap L7k) sees
+  // the real value rather than the module's own compile-time default --
+  // see SpecializationPatch.h's own file comment. A private copy is used
+  // (never `Module->words()` itself) since a single `VkShaderModule` may be
+  // reused by multiple pipelines, each with its own, potentially different,
+  // `VkSpecializationInfo`.
+  SmallVector<uint32_t, 0> PatchedWords(Module->words());
+  patchSpecializationConstants(PatchedWords, *Overrides);
+
+  Expected<feme::Module> AsLLVMIR = importShaderModule(*Ctx, PatchedWords);
   if (!AsLLVMIR)
     return AsLLVMIR.takeError();
 
