@@ -72916,3 +72916,50 @@ Verification: `FeMeGraphicsTests` 284/284, `FeMeVulkanTests` 662/662, `check-fem
 Passed/59 Unsupported/0 Failed, real `feme-vk` sweep 223/664 Pass (net +1, zero regressions
 via an exact fail-list diff), real `dEQP-VK.rasterization.culling.*` 42/43 Pass matching the
 pre-fix baseline exactly (same single pre-existing failure both before and after).
+
+# Session: L24(a) -- scoping isPerVertexArrayInputGlobal by stage
+
+`ArraySemantics.test` (a plain `float arr[4] : MY_ARRAY` fragment input) failed
+`vkCreateGraphicsPipelines` with `"feme-cpu-wrap-fragment: synthetic fragment layouts only
+support vertex operand 0"`. Traced this back to `CanonicalizeStage.cpp`'s
+`isPerVertexArrayInputGlobal`, which recognizes the IR shape a geometry entry's own
+`gl_in[]`-shaped per-vertex-arrayed `Input` global takes so a constant `gl_in[k]` index folds
+into the `Vertex` operand instead of `Row`. Its own doc comment was upfront that it couldn't
+(and didn't try to) distinguish that shape from any other stage's plain array-typed varying,
+deferring to `ValidateStagePass` -- but that pass only flags a *non-constant* vertex operand
+outside Geometry/Mesh, so a wrongly-folded-but-still-constant operand (exactly what a
+constant array index produces) sailed through silently, surfacing only much later as a
+confusing, unrelated-sounding diagnostic in a completely different file.
+
+This is a good example of a "purely structural, deliberately permissive" check whose own
+comment flagged the gap honestly at the time it was written, but whose consequence (a
+stage-agnostic fold silently corrupting a same-shaped-but-different-meaning access) wasn't
+actually caught by anything until a real shader exercised it. The fix itself is narrow:
+restrict the fold to `Hull`/`Domain`/`Geometry` (the only stages whose ABI genuinely supports
+addressing a control point/vertex within a patch/primitive), verified by checking
+`HullWrapper.cpp`/`DomainWrapper.cpp` both independently confirm they rely on this exact
+per-vertex-array-to-`Vertex`-operand fold for their own `InputPatch`/`OutputPatch` reads, so
+Geometry alone would have been too narrow a restriction.
+
+Fixing this broke 3 existing unit tests that had used a `"vertex"`-stage placeholder function
+attribute to exercise this same IR shape structurally (predating any real per-vertex-arrayed
+input stage to test against, back when this pass didn't discriminate by stage at all). Rather
+than loosen the fix to keep those tests passing unchanged, updated them to use a real
+`"geometry"` stage attribute instead, matching what their own doc comments already said they
+were modeling.
+
+## Final state
+
+- `CanonicalizeStage.cpp`: `isPerVertexArrayInputGlobal` takes a `ShaderStage` parameter,
+  restricted to Hull/Domain/Geometry; both call sites updated.
+- `CanonicalizeStageTest.cpp`: 3 tests' function stage attribute changed from `vertex` to
+  `geometry` (their own already-documented intent), with a short note added to each
+  explaining why.
+- `Roadmap.md`: L24(a) struck through.
+- `VulkanCTSReport.md`/`FeMeGraphicsDesign.md`: new L24(a) sections.
+
+Verification: `FeMeGraphicsTests` 284/284, `check-feme` 2786/2845 Passed/59 Unsupported/0
+Failed, real `feme-vk` sweep 224/664 Pass (net +1, `ArraySemantics.test` the sole change per
+an exact fail-list diff), real `dEQP-VK.rasterization.culling.*` 42/43 Pass matching the L24
+baseline (a more directly relevant CTS sweep of tessellation/geometry-IO groups hit this
+environment's own pre-existing missing-test-data gap before reaching a relevant case).
