@@ -35992,3 +35992,43 @@ project has done.**
 updated to assert the bit is now set, and to assert `SHUFFLE_RELATIVE_BIT` is still clear).
 
 `Vulkan14FeatureInventory.md` updated for the first `SHUFFLE_BIT` change in this chain.
+
+## L89g -- the five subgroup mask builtin variables
+
+Roadmap L89g: `gl_Subgroup{Eq,Ge,Gt,Le,Lt}Mask` were unimplemented, failing all 10
+`dEQP-VK.subgroups.builtin_mask_var.compute.*` cases at `vkCreateComputePipelines` time. They were
+found by L89f's own sweep -- the first full-tree `dEQP-VK.subgroups.*` run this project had ever
+done -- and are now implemented.
+
+### Full-tree `dEQP-VK.subgroups.*` re-sweep (48,705 cases)
+
+| Run | Passed | Failed | NotSupported |
+| --- | ------ | ------ | ------------ |
+| L89f baseline (`SHUFFLE_BIT` flip, before this change) | 350 | 346 | 48,009 |
+| After L89g | **360** | **336** | 48,009 |
+
+Exactly +10 passed and -10 failed, with `NotSupported` unchanged. Summary totals alone would not
+have proved that, so the whole result set was enumerated by group: the remaining 336 failures are
+now **exclusively** `ballot_broadcast.compute` (the known, unrelated roadmap L89e gap), and no
+other group fails anywhere in the tree. All 10 `builtin_mask_var.compute` cases pass, including
+both `_requiredsubgroupsize` variants, which exercise the same expansion at `WaveSize=64` rather
+than the host-derived default.
+
+### What was actually wrong, in two layers
+
+1. The five masks are builtin *variables*, not `OpGroupNonUniform*` instructions, so they live in a
+   different part of the SPIR-V conversion than every other ballot feature and had simply been
+   missed when `BALLOT_BIT` was advertised back in L85. A read of one fell through to the generic
+   `Input`-storage-class-variable path and became a `feme.stage.input.load` -- a graphics stage op
+   no compute-stage lowering handles -- which reached the JIT as an unresolved
+   `feme.stage.input.load.v4i32` symbol.
+2. Fixing that exposed a second gap: the `bitcast i128 -> <4 x i32>` the masks end in is the exact
+   mirror of L89h's shape, and `SIMDizePass` did not handle it either. Worse than L89h's clean
+   diagnostic, its producer check *accepted* this shape and then built an invalid
+   `bitcast <W x i128> to <W x i32>`, tripping an `llvm::CastInst::Create` assertion.
+
+Both are fixed, each with its own test coverage at the phase it belongs to (a conversion-phase
+`.mlir` test for the five masks and the access-chain shape, and a two-`WaveSize` SIMDize `.ll` test
+for the bitcast).
+
+`ninja check-feme`: 2,917 discovered, 2,858 passed, 59 unsupported, 0 failed.

@@ -555,6 +555,23 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `OpGroupNonUniformShuffleUp`/`ShuffleDown` have no conversion pattern, so
   flipping it would produce real failures rather than passes. Advertised
   subgroup operations are now `BASIC | VOTE | BALLOT | SHUFFLE`.
+  UPDATE (roadmap L89g, later session): no bit changed, but
+  `BALLOT_BIT`'s own advertised surface is now genuinely complete. That
+  bit has been advertised since roadmap L85, yet the five
+  `GroupNonUniformBallot`-gated subgroup mask builtin *variables*
+  (`SubgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask`, spelled
+  `gl_Subgroup*Mask` in GLSL) were never implemented -- they are builtin
+  variables rather than `OpGroupNonUniform*` instructions, so they sit in
+  a different part of the conversion than every other ballot feature and
+  had simply been missed. A read of one fell through to the generic
+  stage-IO variable path and reached the JIT as an unresolved
+  `feme.stage.input.load.v4i32` symbol, failing all 10
+  `dEQP-VK.subgroups.builtin_mask_var.compute.*` cases at
+  `vkCreateComputePipelines` time. All 10 now pass. This was found only
+  because L89f ran the first-ever full-tree `dEQP-VK.subgroups.*` sweep:
+  no earlier session had run that group at all, which is a useful
+  reminder that an advertised bit is only as trustworthy as the breadth
+  of the CTS run behind it.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
