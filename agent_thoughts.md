@@ -75648,3 +75648,61 @@ chasing the same CTS group, since each is independently testable and independent
 matches the "small, separately-committed changes" requirement better than one large "fix ballot"
 commit would have, and makes `git bisect`/future archaeology easier if any one of the three ever
 needs revisiting on its own.
+
+# L86: `OpCopyObject` -- the second half of the `NonUniformResourceIndex()` deserialization gap
+
+Picked up L86 straight off L7f's own closing session, since it was the most concrete,
+already-scoped prerequisite blocking the L-series: L7f fixed the `NonUniform` decoration
+deserialization gap, but its own real end-to-end HLSL repro still failed one instruction later, on
+`OpCopyObject` (SPIR-V opcode 83) -- confirmed to have zero support anywhere in upstream MLIR's
+SPIR-V dialect.
+
+This felt structurally identical to L7g's `OpImageGather` gap (a real upstream-MLIR-dialect op is
+simply missing, not a `feme`-side legalization gap), and I treated it that way from the start:
+first do the upstream-style MLIR op addition as its own clean commit, verify it round-trips
+correctly in isolation, *then* write the `feme`-side legalization pattern as a second, separate
+commit. Splitting these two concerns into separate commits (rather than one big "add CopyObject"
+commit) felt worth it here specifically because they have genuinely different audiences and
+correctness bars -- the MLIR-core op needs to look like something that could plausibly be upstreamed
+on its own merits, independent of anything `feme`-specific, while the `feme` pattern is allowed to
+lean on `feme`'s own specific assumptions (e.g. "this project has no separate non-uniform-ness
+tracking to preserve").
+
+The most useful thing I did differently this session compared to L7g: I didn't stop at "the op
+exists and round-trips" -- I went and got a *real* dxc-compiled repro (the same
+`NonUniformResourceIndex()`-indexed `Texture2D` array shape from L7f's own investigation) and ran it
+through the actual `feme-translate`/`feme-opt` pipeline end-to-end, confirming both gaps are closed
+together in the one real-world shape that motivated filing both rows in the first place. It would
+have been easy to declare victory purely on hand-written positive/negative lit tests (which I did
+also write, and which are still valuable for pinning down the op's own contract independent of any
+one frontend's codegen quirks) -- but the lit tests alone wouldn't have caught, e.g., a subtle
+interaction between the `NonUniform` attribute surviving past `CopyObjectConversionPattern`'s own
+erasure point in a way that broke something downstream. Running the literal, unmodified `dxc` output
+through the real pipeline is strictly more convincing evidence that the two fixes actually compose
+correctly, not just that each one works in isolation.
+
+One thing worth being honest about here: this fix does **not** move any real `deqp-vk` needle by
+itself. The `dEQP-VK.descriptor_indexing.*` group stays at 0/0/115 `NotSupported` before and after,
+exactly as L7f's own session found, because no `shader*ArrayNonUniformIndexing` feature bit is
+advertised. I was tempted to treat this as disappointing, but I think it's the right disposition to
+document plainly rather than either (a) skip the CTS re-run because "nothing will change" (that's
+exactly the kind of assumption that should be verified, not assumed -- and it's a cheap, fast
+verification given the group is only 115 cases), or (b) inflate the row's significance by implying
+CTS coverage improved when it didn't. This is purely infrastructure/prerequisite work: a real,
+concrete HLSL shape that previously couldn't even get past deserialization now can, which is a
+necessary (not sufficient) condition for ever advertising descriptor-indexing feature bits in the
+future. That's a legitimate, well-scoped unit of progress on its own, and I called it that rather
+than either under- or over-selling it.
+
+I checked `offload-test-suite`'s own test corpus (both its default branch and its `feme` branch)
+for a ready-made `NonUniformResourceIndex()` case before hand-authoring my own dxc repro, following
+the process instructions' own implicit preference for using real, pre-existing test assets over
+hand-constructed ones wherever they exist (as L7b's own investigation did with
+`Vk.SampledTexture2D.Gather.test.yaml`). None exists there yet, so a hand-authored `dxc`-compiled
+shader was the right call this time, not a shortcut around a better-available option.
+
+No design-document deviation here -- this is a straightforward "add the missing upstream op, then
+add the matching `feme` pattern" exercise using entirely pre-existing machinery on both sides
+(`SPIRV_Op`'s own TableGen (de)serialization-generation machinery upstream, and `feme`'s own
+`SPIRVToLLVMConversionPattern` infrastructure downstream). `FeMeCPUDesign.md` was reviewed and needs
+no changes.
