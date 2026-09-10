@@ -76589,3 +76589,258 @@ thing to build.
   completes more of its surface, as L89g did for the mask builtins. That is the
   third gap found *behind* an already-advertised bit, which keeps arguing that
   advertising a bit deserves an op-by-op audit rather than trust.
+
+# Upstream merge session: pulling `llvm/main` into `feme`, and one real regression underneath eight identical error messages
+
+The request was mechanical on its face -- fetch `origin/main`, merge it into
+`cbieneman/feme`, resolve conflicts, get the tests green -- and the merge
+itself produced only eight conflicts. What made this session worth writing
+down is that the conflicts were the easy part; almost all of the real work
+was in the changes that *did not* conflict, because upstream had changed
+behaviour that `feme` depends on without changing any line `feme` had also
+touched.
+
+## The shape of the merge
+
+`origin/main` moved from `e4693c0579ed` to `a4f04ab5e25f`. The eight
+conflicts split cleanly into two categories, and recognising which category
+each belonged to was the whole decision:
+
+**Category one: upstream independently landed what `feme` was already
+carrying.** `llvm/include/llvm/IR/IntrinsicsDirectX.td`,
+`llvm/lib/Target/DirectX/DXIL.td` and
+`llvm/test/CodeGen/DirectX/TextureStore.ll` were all this. The feme branch
+had its own DXIL `TextureStore` op 67 and its own `handlefromheap`; upstream
+now has both, arrived at separately. For these, taking upstream wholesale is
+not "giving up on our version", it is the only resolution that leaves the
+tree with a single definition -- keeping both sides would have produced two
+DXIL ops with the same opcode number.
+
+The trap here was `llvm/lib/Target/DirectX/DXILOpLowering.cpp`, which git
+auto-merged *without* reporting a conflict and in doing so left **two**
+definitions of `lowerTextureStore` in the same anonymous namespace -- both
+sides had added the function in different places in the file, so the two
+hunks did not textually overlap. A clean `git status` said nothing about
+this. It only surfaced as a compile error, and only because the DirectX
+backend happens to compile. The lesson I want on the record: after a merge
+this size, a successful auto-merge in a file that *also* had conflicts
+elsewhere in the same directory deserves to be read, not trusted. I deleted
+feme's copy and kept upstream's, while keeping feme's own
+`lowerGetDimensionsXY`, which upstream has no equivalent of.
+
+**Category two: both sides added something different to the same list.**
+The four MLIR SPIR-V conflicts (`Serializer.cpp`, `Deserializer.cpp`,
+`SPIRVStructureOps.td`, `spirv-types-to-llvm.mlir`) were all "upstream added
+a `case`, feme added a different `case`, adjacent lines". Those resolve by
+keeping both, and the only judgement needed is ordering.
+
+`mlir/lib/Dialect/SPIRV/IR/SPIRVOps.cpp` was the one genuine merge of
+*designs* rather than of lists. Upstream had refactored execution-mode
+operand validation into a table-driven `ExecutionModeOperandSchema`
+(`{bool isIdOperand; unsigned numOperands;}`) shared by `ExecutionModeOp`
+and `ExecutionModeIdOp`; feme had hand-written validation for
+`FPFastMathDefault` in `ExecutionModeIdOp::verify` alone. Keeping feme's
+hand-written version would have left `FPFastMathDefault` outside the new
+table and silently un-validated on the `ExecutionModeOp` path. The right
+answer was to *port* feme's rule into upstream's mechanism -- add
+`FPFastMathDefault` to the schema as `{isIdOperand=true, numOperands=2}`,
+then keep feme's TypeAttr/IntegerAttr *shape* check as a second step after
+the schema's count check, since the schema can express arity but not operand
+kinds. Same principle in `GlobalVariableOp::verify`: adopt upstream's
+`getInitializerAttr()` accessor, keep feme's `zero_initialized` rules.
+
+## The changes that did not conflict, which is where the work was
+
+Three upstream changes broke `feme` without touching a line `feme` had
+edited. Each was found by building, not by reading the diff, which is the
+honest account of how this went.
+
+**`llvm.dx.resource.handlefromheap` lost its `i1` operand.** Upstream now
+expresses non-uniformity by wrapping the *index* in a new
+`llvm.dx.resource.nonuniformindex` identity marker rather than by a second
+argument. Only two places in `feme` ever *created* the call; roughly thirty
+others merely read `getArgOperand(0)` and were unaffected. The interesting
+decision was what the CPU target should do with the marker. I chose to have
+the DXIL raiser emit it faithfully -- the raiser's job is to reconstruct
+what the shader meant, and discarding the hint there would make the raiser
+lossy -- and to have `ResourceLoweringPass` strip it, because on a CPU
+target every lane's descriptor index is evaluated independently anyway, so
+the hint carries no information the backend can act on. That split keeps the
+lossy step in the target-specific pass where it belongs, and it is testable
+at both ends: the raiser test asserts the marker appears, and a new lowering
+test asserts it disappears.
+
+**`llvm::PassInfoMixin` moved into `llvm::detail`.** Upstream split it into
+`RequiredPassInfoMixin` (`isRequired()` true) and `OptionalPassInfoMixin`
+(false). All 35 feme passes previously got the old default, which is
+`false`, so `Optional` across the board is the change that preserves
+behaviour exactly. It would have been easy to pick `Required` for the passes
+that "feel" mandatory; that would have been a behaviour change smuggled in
+under a mechanical rename, and this merge is not the place for it.
+
+**`mlir::ModuleOp` became visible in `DXSA.cpp`**, making unqualified
+`ModuleOp` ambiguous against `feme::dxsa::ModuleOp`. Purely mechanical, but
+worth noting as the general hazard: a downstream dialect that names an op
+after a builtin op is one upstream `#include` away from ambiguity.
+
+## Seven lit failures, none of which were feme bugs
+
+`check-feme` came back 2853/7 on the first run. All seven were tests
+asserting on details upstream had legitimately changed: MLIR tightened
+`GroupNonUniform{Elect,Ballot,Shuffle,ShuffleXor}` to verify
+`execution_scope == Subgroup` at the *op* level, which makes feme's
+conversion-level "this is illegal" negative tests for `<Workgroup>`
+unreachable -- the op verifier now rejects them first, with a different
+message; `llvm.fastmath` changed its printed form from
+`{fastmathFlags = #llvm.fastmath<X>}` to an inline `fastmath<X>`; and module
+metadata numbering shifted, which broke tests that had hardcoded `!0`..`!4`.
+
+The metadata ones are the only ones where I changed the *style* of the test
+rather than just its expected text: hardcoded metadata numbers are a latent
+failure waiting for any upstream change to metadata emission order, so I
+converted those checks to `CHECK-DAG` with `!{{[0-9]+}}` and captured
+`[[PRECISE:![0-9]+]]` where the number needed to be correlated rather than
+merely matched. That is a small durability improvement paid for by this
+merge rather than by the next one.
+
+## The regression: eight identical `si32` errors
+
+With `check-feme` green at 2860/0, `check-hlsl-feme-vk` was 268 pass / 109
+fail. The 109 are mostly a known, pre-existing wall (`spirv.GL.Normalize`,
+`IsNan`/`IsInf`, simdize/linearize divergence limits, unhandled opcodes),
+but eight of them shared a signature that was obviously new:
+
+```
+error: 'llvm.mlir.constant' op attribute and type have different integer types: 'si32' vs. 'i32'
+```
+
+My first instinct was that this was feme's own
+`SPIRVToLLVMPatterns.cpp` -- it has some thirty `LLVM::ConstantOp::create`
+sites and it is the file most likely to be wrong. That instinct was wrong,
+and I want to record why chasing it would have cost time: I checked
+upstream's `ConstantScalarAndVectorPattern` first, saw it correctly retypes
+signed SPIR-V attributes to signless, and concluded upstream was fine. That
+conclusion did not follow. "One upstream pattern handles this correctly"
+says nothing about the other patterns in the same file.
+
+Reducing it settled the question in one command. `feme-translate --import-spirv`
+on the failing shader, then `feme-opt --feme-convert-spirv-to-llvm`, pointed
+at a single line:
+
+```
+%24 = "llvm.mlir.constant"() <{value = 0 : si32}> : () -> i32
+  from:  %6 = spirv.SNegate %5 : si32
+```
+
+`SNegatePattern` builds the zero it subtracts from using
+`getElementTypeOrSelf(srcType)` -- the *SPIR-V* element type, which for
+DXC-produced SPIR-V is `si32` -- while producing a value of the converted,
+signless `i32`. That has always been wrong; it only became an error because
+upstream recently tightened `LLVM::ConstantOp`'s verifier. So this is an
+upstream latent bug that the merge *exposed* rather than a merge conflict I
+mis-resolved, and the fix belongs upstream in
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`.
+
+I fixed it in the shared helper rather than at the call site. `createIntegerConstant`
+now rebuilds its attribute against `dstType`'s own signless element type
+whatever the caller passed, which fixes `SNegatePattern`, `SignPattern`, and
+-- via `createConstantAllBitsSet` -- `NotPattern` and the bitfield patterns
+all at once, and makes the mistake unrepresentable for future callers. That
+also made the `srcType` parameter of both helpers dead, so it went; deriving
+the shape from `dstType` is strictly more correct anyway, since `dstType` is
+by construction the type the op actually produces.
+
+Writing the regression test for `spirv.Not` on `si32` then immediately found
+a *second*, independent bug in the same file: `NotPattern` passes
+`notOp.getOperand()` -- the original, unconverted operand -- to the
+`llvm.xor` it creates, instead of `adaptor.getOperand()`. On signless input
+those are the same value so nobody noticed; on `si32` it produces an
+`llvm.xor` on an `si32` operand that the LLVM dialect rejects outright. This
+is a good argument for writing the test that covers the *class* of bug
+rather than only the one instance that was reported: the reported failure
+was `SNegate`, and the second bug would have shipped.
+
+Result: 268 -> 275 passing in `check-hlsl-feme-vk`, 109 -> 102 failing, with
+`check-feme` unchanged at 2860/0.
+
+## Verifying the DirectX resolutions, which neither build directory could
+
+A late realisation worth recording: both configured build trees set
+`LLVM_TARGETS_TO_BUILD=X86;AArch64`, so `llvm/lib/Target/DirectX` is
+**not compiled and its 536 lit tests all report `Unsupported`**. Three of my
+eight conflict resolutions were in exactly that directory, including the
+duplicate-`lowerTextureStore` fix. Reporting "all tests pass" on that basis
+would have been true and useless.
+
+So I configured a throwaway DirectX-only tree and ran them properly: 535
+passed, 1 expected failure, 0 unexpected. That is the evidence that the
+DXIL/intrinsic resolutions are actually right, and it cost about fifteen
+minutes. The general point: a merge's test plan has to be derived from the
+files the merge touched, not from the targets the local build happens to
+enable, or the build configuration quietly decides what gets verified.
+
+## The CTS run I nearly reported, and why it was worthless
+
+The most valuable thing that happened this session was catching my own bad
+measurement. The full 54-group sweep came back with 846,034 passes against
+199 failures, which would have been an astonishing result to attribute to a
+merge. It was astonishing because it was lavapipe.
+
+The cause is a shell subtlety I want written down precisely, because it
+reads as correct:
+
+```sh
+export VK_ICD_FILENAMES=.../feme_icd.json VK_DRIVER_FILES=$VK_ICD_FILENAMES
+```
+
+Within a single `export`, `$VK_ICD_FILENAMES` is expanded before the
+assignment on the same line takes effect, so `VK_DRIVER_FILES` was set to
+the empty string. The Vulkan loader prefers `VK_DRIVER_FILES`, and an empty
+value does not mean "no drivers" -- it means the filter is not applied, so
+the system ICDs load. `feme/.instructions.md` warns about exactly this class
+of mistake; I still made it, in a form the warning does not literally cover.
+
+What actually caught it was not the shell. It was the *numbers being wrong
+in a specific direction*: `transform_feedback` and `shader_object` turning
+in six-figure pass counts for capabilities this ICD does not advertise at
+all. A result that is too good in a way that contradicts something you
+already know is a stronger signal than a result that is merely surprising,
+and it is worth training on. The fix is cheap and now in the report's
+reproduction recipe: `deqp-vk` records the device it used in its own `.qpa`,
+so `grep -m1 deviceName <group>.qpa` is a one-line assertion that the run
+measured what it claims to. I ran the small `info` group first and checked
+that line before launching the real sweep.
+
+## Attribution needs an A/B, not a crash count
+
+The valid sweep found nine crashing groups against the two the report's
+header records, plus four groups where a single case pins a core for over an
+hour. Taken alone, that looks like a merge that broke a lot.
+
+Taken alone is the problem. A one-sided measurement of a crash cannot
+attribute it, and the header table it would be compared against was measured
+at a much older ICD revision, against a CTS 39 commits older, over
+*complete* groups. Three independent variables moved; concluding anything
+about the merge from that comparison would have been unjustified.
+
+So I built the pre-merge tip into a separate tree and pointed the same
+`deqp-vk` binary at each ICD in turn. Every crash reproduces at the same
+case with the same signature pre-merge, including the `graphicsfuzz` hang
+and the `OperandRange::front()` assertion. And four complete groups --
+`compute`, `ssbo`, `ubo`, `memory_model`, 103,576 cases -- come back
+byte-identical on both sides.
+
+That is the actual evidence the merge is behaviour-neutral, and it is worth
+noting how much cheaper it was than it felt: the pre-merge build reused
+ccache almost entirely and took about twenty minutes, and the four A/B
+groups took another twenty. Forty minutes to turn "nine crashes, unknown
+cause" into "nine pre-existing crashes, now inventoried as roadmap L89k" was
+easily the best-value work in the session.
+
+The four long-pole groups I could not finish are recorded as incomplete
+rather than quietly omitted, and broken out as L89j. Reporting a partial
+sweep as partial is the only honest option; the alternative -- dropping the
+groups that did not finish and presenting the rest as a total -- would
+produce exactly the kind of unfalsifiable number this report exists to avoid.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
