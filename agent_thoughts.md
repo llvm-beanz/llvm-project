@@ -76844,3 +76844,110 @@ groups that did not finish and presenting the rest as a total -- would
 produce exactly the kind of unfalsifiable number this report exists to avoid.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# Roadmap consolidation session: collapsing the scattered H/L-series tail into two blocks
+
+The request this time was not a compiler change at all: review the H-series
+(Vulkan conformance) and L-series (HLSL conformance via offload-test-suite)
+milestones in `feme/docs/Roadmap.md` and re-order the *remaining* work in
+each into a consecutive block at the end of its own series, leaving closed
+work where it is. No code, no `check-feme`, no CTS re-run implied by the
+change itself -- the only artifact that could possibly need touching is the
+roadmap document, so that is where I focused, and I explicitly checked
+whether `VulkanCTSReport.md`, `Vulkan14FeatureInventory.md`, and
+`VulkanExtensionInventory.md` needed anything before deciding they did not
+(see below).
+
+## Finding "remaining" mechanically, not by reading 2000 lines
+
+The H-series and L-series tables use a strikethrough (`~~...~~`) convention
+for a closed row's own task text, wrapped around the closure write-up. A
+naive `~~` search on a line prefix is not reliable on a table where a single
+row's own text can run to several thousand characters, so I matched each
+row by its leading `| ID |` anchor and then asked, over the *entire* line
+(not a truncated prefix), whether `~~` appears anywhere in it. That is the
+same signal a human skims for, just applied exactly instead of by eye, and
+it is what actually found the real set: 39 open rows scattered through the
+H-series (`H6`/`H6r`, `H7`, `H8`, seven `H21` sub-letters, `H22`-`H29` plus
+four of its own sub-letters, `H13` plus three sub-letters, five `H19`
+sub-letters, and `H20` plus its six sub-letters) and 7 through the L-series
+(`L7h`/`L7i`, `L8`, and four `L89` sub-letters).
+
+## The mechanical part and the part that cannot be mechanical
+
+Reordering itself is safe to script: extract each open row's full line
+verbatim, delete it from its old position, and insert the full set,
+unmodified except for the `#` column, right before each series' own
+"Sequencing:" closing paragraph (a stable anchor that survives the deletion
+pass, unlike anchoring on another row that is itself being moved). I
+extracted each row's real `Depends on` column first (by splitting on `|` and
+indexing from the end, not the start, since inline code spans never contain
+literal pipes here but counting from a fixed left offset would have broken
+on rows where earlier columns' own markdown happened to look different) so
+I could see which dependencies were internal to the moved set (`H13a`/`H13c`/
+`H13e` depend on `H13` itself; `H20a`-`H20f` depend on `H20` itself) versus
+external and already-closed (everything else). That let me pick a
+renumbering order (H30-H68, L90-L96, continuing past the highest existing
+number in each series) that keeps every internal dependency pointing
+forward correctly once renamed.
+
+The renaming itself -- and every cross-reference to a renamed ID anywhere
+else in the document -- was one global, simultaneous, word-bounded regex
+substitution (`\bOLDID\b` for every old ID at once, mapped to its new ID),
+applied *after* the reordering. Word boundaries are what make this safe:
+`\bH21\b` cannot match inside `H21b`, so renaming the parent does not
+clobber a same-family child that was not itself being moved, and doing all
+36-ish substitutions as one pass (rather than sequentially) means a newly
+assigned ID can never collide with, or be re-rewritten by, a later
+substitution in the same batch.
+
+What a blind global substitution cannot get right is prose that spells out
+a *range* rather than a single reference -- "broken out as roadmap H21-H28
+below" is not a token match against any individual ID, it is two tokens
+(`H21`, `H28`) that happen to look like a range when concatenated with a
+hyphen. Substituting each token independently (`H21` stays, `H28` becomes
+`H47`) produces `H21-H47`, which is syntactically a valid-looking range but
+semantically wrong: it now claims a contiguous block of 27 IDs when the
+real referent is one unrenamed ID plus seven renamed ones scattered across
+the new H30-H68 block. I grepped for every `H\d+-H\d+`-shaped span after
+the mechanical pass specifically to catch this, found four real instances
+(plus one, `H33-H11`, that had gone fully backwards -- a hyphenated list of
+two unrelated IDs, not a range, where one end happened to get renamed and
+the other did not) and rewrote each by hand to name its actual members
+rather than imply a range that no longer holds. I did *not* try to rewrite
+descriptive spans like `H19a-H19o` that still read sensibly as shorthand for
+"the whole family" even though a few members were pulled out of it -- fixing
+every one of those would mean rewriting the surrounding sentence's own
+claim about scope, which is a larger edit than this task asked for and
+risks introducing the kind of unforced error the task itself warns about
+("things have gone a little crazy with nesting letters in strange ways").
+
+## What I deliberately left alone
+
+Closed rows keep their original IDs even when their own parent got
+renamed -- `H6`'s completed children stay `H6a`-`H6u` even though `H6`
+itself is now `H30`, because renumbering a family of already-closed rows to
+match a new parent number is a much bigger, purely cosmetic edit with no
+benefit to the actual ask (reordering *open* work), and it would multiply
+the blast radius of this change across the deeply nested sub-letter trees
+(`H6g-b-a-i-a-i-c` is a real ID in this document) for no functional reason.
+
+`VulkanCTSReport.md` mentions several of the renamed IDs by their old names
+in its own "measured impact" write-ups. I left every one of those alone on
+purpose: that file is an append-only historical log, each entry dated to
+when a fix actually landed and named after the ID that was current at that
+moment, not a live index that needs to track today's numbering. Rewriting
+history to match a later renumbering would make the log actively misleading
+about what a contributor would have seen if they had read it on the day it
+was written. `Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md`
+were checked and contain none of the renamed IDs at all, so nothing there
+needed touching either. No code changed and no capability was added or
+removed, so there is nothing for `check-feme` or a Vulkan CTS re-run to
+verify this time -- the only verification that applies is structural: every
+old ID fully replaced with no duplicates, every new ID present exactly
+once, every row's pipe-column count unchanged from before the move (one
+pre-existing malformed row, `H61`/formerly `H19p`, was already short two
+columns before this change and is untouched by it), and every dependency
+edge that used to point at a moved row now pointing at its new name.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
