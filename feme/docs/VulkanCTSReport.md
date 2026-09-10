@@ -35917,3 +35917,69 @@ deliberately **not** flipped here: advertising a subgroup feature bit changes wh
 device across the whole `dEQP-VK.subgroups.*` tree, not just the one group swept, and this chain has
 already produced three rows whose claims needed later correction for exactly that kind of
 extrapolation. Broken out as roadmap **L89f**, with its own full-tree before/after sweep.
+
+## L89f: advertising `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`, verified by a full-tree A/B sweep
+
+`SHUFFLE_BIT` had been gated behind a moving list of blockers since the L7-series work -- most
+recently L89's compile-time blowup (fixed by L89b) and L89d's missing vector-typed `wave.readlane`
+decomposition (fixed in the same session). L89b's own closing session deliberately declined to flip
+it on the strength of a single group's results, because this chain had already produced three rows
+whose claims needed later correction for exactly that kind of extrapolation. This session ran the
+sweep that row asked for instead.
+
+**Method.** A real `dEQP-VK.subgroups.*` run of all **48,705** cases, before and after the one-line
+flip, on the same build with nothing else changed. ~20 minutes before, ~33 minutes after.
+
+| | before | after | delta |
+|---|---|---|---|
+| Passed | 222 | **350** | **+128** |
+| Failed | 346 | 346 | 0 |
+| NotSupported | 48,137 | 48,009 | -128 |
+
+**Every difference is an improvement.** A case-by-case diff of the two result sets shows exactly 128
+changed cases, *all* of them `NotSupported` -> `Pass` (96 `subgroupshufflexor`, 32 `subgroupshuffle`,
+all in `shuffle.compute`). No case changed in the other direction. The 346 failures are
+byte-for-byte the same set in both runs -- 336 `ballot_broadcast` (roadmap L89e) and 10
+`builtin_mask_var` (newly found, roadmap L89g), both gated on other bits entirely.
+
+**Nothing beyond the bit was missing.** `OpGroupNonUniformShuffle` (L7e) and
+`OpGroupNonUniformShuffleXor` (L7i) -- exactly the two op types CTS gates on this bit, per
+`supportedCheck` in `vktSubgroupsShuffleTests.cpp` -- have had conversion patterns since those
+milestones. The unadvertised bit was the only thing keeping CTS from ever reaching them, so the flip
+turned on 128 cases' worth of already-working, never-before-exercised code.
+
+**The deferral's scope estimate was too pessimistic, in two specific ways** -- worth recording, since
+it is what made the flip look risky enough to defer:
+
+- It expected all 1,552 of `shuffle.compute`'s `NotSupported` cases to become live. Only 480 gate on
+  this bit at all: the 720 `subgroupshuffleup`/`shuffledown` cases gate on the **separate**
+  `SHUFFLE_RELATIVE_BIT`, and the remainder are `rotate`/`clusteredrotate`, already live. Of those
+  480, 128 clear the device's own format-support checks.
+- It expected "every `shuffle`-gated case in the `graphics`/`framebuffer`/`ray_tracing` shader-stage
+  variants" to become live too. `SubgroupSupportedStages` is `VK_SHADER_STAGE_COMPUTE_BIT` only, so
+  every non-compute stage variant stays `NotSupported` regardless of this bit. The real blast radius
+  was one stage of one group.
+
+`SHUFFLE_RELATIVE_BIT` deliberately stays un-advertised: `OpGroupNonUniformShuffleUp`/`ShuffleDown`
+have no conversion pattern at all, so flipping it would produce real failures rather than passes.
+
+**Two incidental findings, both from this being the first full-tree `dEQP-VK.subgroups.*` run this
+project has done.**
+
+- 10 pre-existing `dEQP-VK.subgroups.builtin_mask_var.compute.*` failures (the
+  `subgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask` builtin variables, all failing
+  `vkCreateComputePipelines`). No previous session had run that group. Identical in both the before
+  and after runs, so unrelated to this flip. Broken out as roadmap **L89g**.
+- **A CTS harness requirement worth knowing for every future sweep**: `deqp-vk` must be run with its
+  own module directory (`external/vulkancts/modules/vulkan/`) as the working directory. Run from
+  anywhere else, the `subgroup_uniform_control_flow` amber cases fail to open their data files and
+  abort the entire run with a `ResourceError` -- which silently truncated this session's own first
+  baseline attempt at 47,723 of 48,705 cases, reporting "Test run was ABORTED!" only in the final
+  summary. Earlier sessions' narrower per-group runs never reached those cases, so this had gone
+  unnoticed.
+
+**Build/test.** `ninja check-feme`: 2,914 discovered, 2,855 passed, 59 unsupported, 0 failed
+(unchanged -- the existing `PhysicalDeviceInfo.SubgroupSizeIsAPowerOfTwoInRange` unit test was
+updated to assert the bit is now set, and to assert `SHUFFLE_RELATIVE_BIT` is still clear).
+
+`Vulkan14FeatureInventory.md` updated for the first `SHUFFLE_BIT` change in this chain.

@@ -535,6 +535,26 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   the 1,552 cases currently reported unsupported in that one compute
   group), which needs its own full-tree before/after sweep rather than an
   extrapolation from a single group. Broken out as roadmap row L89f.
+  UPDATE (roadmap L89f, later session): **`SHUFFLE_BIT` is now
+  advertised** -- the first change to this bit in the whole chain. The
+  full-tree `dEQP-VK.subgroups.*` sweep L89f demanded was run in full,
+  before and after, at 48,705 cases each: the tree goes from 222 to 350
+  passing, with **128 cases moving `NotSupported` -> `Pass`** (96
+  `subgroupshufflexor`, 32 `subgroupshuffle`) and **not one case moving
+  the other way** -- the 346 failures are byte-for-byte the same set in
+  both runs. Nothing beyond the bit itself was missing:
+  `OpGroupNonUniformShuffle`/`ShuffleXor` (the only two op types CTS gates
+  on this bit) have had conversion patterns since roadmap L7e/L7i, so the
+  flip simply let CTS reach already-working code. The deferral's own scope
+  estimate was too pessimistic on both counts: only 480 of that group's
+  1,552 unsupported cases gate on this bit (the 720
+  `shuffleup`/`shuffledown` ones gate on the separate
+  `SHUFFLE_RELATIVE_BIT`), and no non-compute stage variant is affected at
+  all, since `SubgroupSupportedStages` is compute-only.
+  `SHUFFLE_RELATIVE_BIT` stays un-advertised deliberately:
+  `OpGroupNonUniformShuffleUp`/`ShuffleDown` have no conversion pattern, so
+  flipping it would produce real failures rather than passes. Advertised
+  subgroup operations are now `BASIC | VOTE | BALLOT | SHUFFLE`.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
