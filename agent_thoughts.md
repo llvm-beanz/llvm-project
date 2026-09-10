@@ -75517,3 +75517,134 @@ L7a-L7g) out to a new row, L87, since every one of L7g's own sibling investigati
 (L7c/L7d/L7f/L7g) instead found and closed real `unhandled opcode`-shaped gaps, not a
 `GLSL.std.450`-shaped one -- it remains genuinely unconfirmed, unlike the rest of L7's own
 original filing text.
+
+# L85: `GroupNonUniformBallot` implementation -- three real bugs stacked on top of each other
+
+Request: work on L85 (`GroupNonUniformBallot` support, entirely unimplemented anywhere in this
+project), or other prerequisites blocking the L-series milestones. This was itself a
+prerequisite split out of L7t's own closing session: `SHUFFLE_BIT` couldn't be safely advertised
+because every non-rotate `dEQP-VK.subgroups.shuffle.*` CTS shader's own verification harness
+(not the shuffle operation itself) calls `subgroupBallot()`/`subgroupBallotBitExtract()` to check
+whether the lane it read from was active.
+
+## Starting state: nothing at all
+
+`grep -rln "GroupNonUniformBallot" feme/lib/ feme/include/` returned zero matches anywhere.
+Nothing about ballot's SPIR-V-to-LLVM legalization, CPU-runtime lowering, or MLIR dialect support
+existed. Two SPIR-V opcodes were missing from upstream MLIR entirely:
+`OpGroupNonUniformInverseBallot` (340) and `OpGroupNonUniformBallotBitExtract` (341) -- the other
+four opcodes in the family (`Ballot`/`BallotBitCount`/`BallotFindLSB`/`BallotFindMSB`) already
+existed upstream, unused by this project.
+
+## Building the pieces
+
+Added the two missing MLIR ops first (`SPIRVNonUniformOps.td`/`SPIRVBase.td`, with MLIR-core lit
+tests), mirroring the existing five ops' own shape closely. This surfaced a real, pre-existing
+MLIR builder bug along the way: constructing a signless integer constant wider than 64 bits with
+`APInt`'s zero-extension (rather than sign-extension) convention was silently wrong for a
+genuinely negative-looking bit pattern -- fixed as a small, separate, upstream-style correction.
+
+Then designed six new SPIR-V-to-LLVM conversion patterns
+(`BallotConversionPattern`/`InverseBallotConversionPattern`/`BallotBitExtractConversionPattern`/
+`BallotFindLSBConversionPattern`/`BallotFindMSBConversionPattern`/
+`BallotBitCountConversionPattern`), mirroring `AllEqualConversionPattern`/`ShuffleConversionPattern`'s
+own existing precedent in `SPIRVToLLVMPatterns.cpp`. The trickiest design question was ABI: DXIL's
+own `WaveActiveBallot` returns a `{i32,i32,i32,i32}` struct (this project's own pre-existing
+`WaveCalls.h`/`WaveCallKind::Ballot` convention, already lowered for DXIL), but SPIR-V's
+`OpGroupNonUniformBallot` returns a `<4 x i32>` vector instead -- same 128-bit mask, different
+packaging. Rather than inventing a second, parallel `WaveCallKind`, reused the existing one and
+taught `SIMDize.cpp`'s `widenWaveCall` to repackage the struct result into the vector shape a
+SPIR-V-origin call's own users expect (a small `extractvalue`/`insertelement` chain), keeping one
+single CPU-runtime lowering path for both frontends.
+
+## Bug #1: found writing a permanent SIMDize.cpp lit test
+
+Writing `simdize-spirv-ballot-vector-result.ll` surfaced a real validity-check bug: SIMDize's own
+"is this vector-typed divergent value's producer one of the shapes I know how to decompose
+lane-by-lane" scan rejected `llvm.spv.subgroup.ballot`'s `<4 x i32>` result outright, since it
+depends on a divergent predicate operand but doesn't look like any of the producer shapes that
+scan already recognized (insertelement chain, phi, select, resource/image load). The ballot
+result is actually uniform-by-construction despite its divergent-looking inputs (a real ballot
+answers "which lanes are active", the same value on every lane), so it needed its own explicit
+carve-out rather than trying to force it into an existing shape. Added a targeted special case
+recognizing `WaveCallKind::Ballot` calls as supported vector-typed producers.
+
+## Bug #2: found running the real CTS
+
+With everything compiling and passing lit tests, a speculative `BALLOT_BIT` flag flip and a real
+`dEQP-VK.subgroups.ballot_other.*` re-run showed 6/14 compute cases failing
+(`subgroupballotbitcount`/`subgroupballotfindlsb`/`subgroupballotfindmsb`, each ±
+`_requiredsubgroupsize`). Used `feme-run --wave-size=4` with a hand-built minimal SPIR-V shader
+and a hand-computed expected value to confirm the core arithmetic was right in aggregate -- the
+bug had to be some specific edge case, not a wholesale wrong formula.
+
+Reading the real CTS source (`vktSubgroupsBallotOtherTests.cpp`) directly paid off immediately:
+its `MAKE_HIGH_BALLOT_RESULT(i)` macro deliberately constructs ballot masks with garbage bits set
+*beyond* the actual subgroup size, specifically to test that `FindLSB`/`FindMSB`/`BitCount`'s
+`Reduce` variant clip their input to `gl_SubgroupSize` bits per the SPIR-V spec (any bit beyond
+that is unspecified and must not affect the result). `InclusiveScan`/`ExclusiveScan` already
+happened to get this right, coincidentally, because their own per-invocation prefix mask is
+always bounded by `gl_SubgroupSize` on its own -- but the raw, un-clipped 128-bit value the
+`Reduce`/`FindLSB`/`FindMSB` patterns operated on directly had no such accidental protection.
+Fixed with a new `clipBallotBitsToSubgroupSize` helper, applied at all three call sites, and
+updated the permanent lit tests' CHECK lines to match the new IR shape. This alone got the CTS
+group to 12/14.
+
+## Bug #3: the one that took real IR-level reasoning to find
+
+The remaining two failures (`subgroupballotfindlsb`/its twin) resisted the same "read the mask
+wrong" hypothesis -- `FindMSB`/`BitCount` shared the exact same clipping fix and now passed, so
+whatever was left had to be specific to `FindLSB`'s own path through the CTS shader, not the
+ballot arithmetic in general. The captured `.qpa` log gave nothing beyond a bare `Fail`, so this
+needed a hand-reduction rather than log-reading.
+
+Re-reading the CTS shader source closely, one line stood out:
+`if (subgroupElect()) { tempResult |= 0x2; } else { tempResult |= 0 <
+subgroupBallotFindLSB(subgroupBallot(true)) ? 0x2 : 0; }`. A `subgroupBallot(true)` computed
+*inside* the non-elected `else` branch should reflect only the lanes that are currently active at
+that point in control flow (every lane except the elected one) -- but nothing in this project's
+own design obviously computed that. A minimal hand-built repro
+(`if (subgroupElect()) tempResult = 2; else { ballot = subgroupBallot(true); tempResult =
+ballot.x; }`) confirmed it directly: `ballot.x` came back `15` (all four lanes) for the
+non-elected lanes, when it should have excluded the elected lane's own bit (`14`).
+
+The actual root cause, once traced through `Linearize.cpp`: `feme::cpu::LinearizePass`'s
+`applyStageMasks` (which flattens a divergent branch into predicated straight-line code) already
+rewrites a plain `feme.cpu.resource.*`/`.image.*` call's own mask operand to the block's real,
+narrowed live mask when it sits under a divergent arm -- but it had no equivalent case for an
+ordinary wave-intrinsic call like ballot. `SIMDize.cpp`'s own `widenWaveCall` ANDs a ballot call's
+predicate operand against `Env.EntryMask` (the *whole function's* entry mask, fixed once at
+function entry), which correctly answers "is this invocation part of the group at all" but not
+"is it still active *at this exact program point*" -- that second, narrower fact only existed
+implicitly in which arm of a real (pre-flattening) branch a call sat in, and was simply lost once
+`Linearize.cpp` flattened that branch away without doing anything special for wave-intrinsic
+calls. Fixed by adding exactly the same kind of rewrite `applyStageMasks` already does for
+resource/image calls: AND a ballot call's predicate operand with the block's current live mask.
+A new lit test, `ballot-predicate-masked.ll`, isolates this in isolation (mirroring
+`resource-call-masked.ll`'s own existing shape).
+
+With all three bugs fixed, `dEQP-VK.subgroups.ballot.*` (23 cases) and
+`dEQP-VK.subgroups.ballot_other.*` (84 cases) both show 100% of applicable cases passing.
+`BALLOT_BIT` is now genuinely advertised.
+
+## The reward: SHUFFLE_BIT still isn't safe
+
+This row's own original motivation was `SHUFFLE_BIT`, blocked on ballot. With ballot's own gap
+closed, a further speculative `SHUFFLE_BIT` flip got past that blocker only to hit a brand new
+one: the very first shuffle CTS case crashes the whole `deqp-vk` process with a real
+`llvm::Value::~Value` "Uses remain when a value is destroyed!" assertion inside
+`DiamondFlattener`'s own nested-diamond `PHINode` merging. This is a genuinely distinct bug (not
+caused by anything in this session's own ballot work -- ballot doesn't touch nested diamonds at
+all), so rather than chase a fourth bug in an already-large session, split it out to new roadmap
+row L88 and left `SHUFFLE_BIT` un-advertised, documenting the new blocker precisely rather than
+attempting a rushed fix. This mirrors the project's own established pattern (L7-series) of
+"reduce first, then fix in its own session" rather than piling unrelated fixes into one row.
+
+## Process note
+
+Kept the three fixes (`WaveUniformity.cpp`, `SPIRVToLLVMPatterns.cpp`'s clipping,
+`Linearize.cpp`'s predicate narrowing) in separate commits even though they were all found while
+chasing the same CTS group, since each is independently testable and independently explainable --
+matches the "small, separately-committed changes" requirement better than one large "fix ballot"
+commit would have, and makes `git bisect`/future archaeology easier if any one of the three ever
+needs revisiting on its own.
