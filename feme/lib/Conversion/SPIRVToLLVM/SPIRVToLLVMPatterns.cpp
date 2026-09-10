@@ -1009,6 +1009,53 @@ mlir::Value ballotVectorToI128(mlir::ConversionPatternRewriter &Rewriter,
   return mlir::LLVM::BitcastOp::create(Rewriter, Loc, I128, Vector);
 }
 
+/// Masks \p Bits (a `ballotVectorToI128`-shaped 128-bit ballot bitmask)
+/// down to only the low `llvm.spv.subgroup.size` bits: `(1 << SubgroupSize)
+/// - 1`, clamped to "every bit" once `SubgroupSize` reaches the full
+/// 128-bit width (mirroring `BallotBitCountConversionPattern`'s own
+/// `>= 128`-guarded `select`, for the identical reason -- a plain
+/// `1 << 128` would otherwise be a poison out-of-range shift). Needed
+/// because the SPIR-V spec defines `OpGroupNonUniformBallotFindLSB`/
+/// `FindMSB`/`BallotBitCount`'s `Reduce` variant to only consider the
+/// bits actually representing invocations in the group -- any set bit at
+/// or beyond the group's own size is not part of the group and must not
+/// affect the result -- confirmed necessary by a real `deqp-vk`
+/// `dEQP-VK.subgroups.ballot_other.compute.subgroupballotfindlsb`-shaped
+/// failure this row's own verification pass hit: `vktSubgroupsBallotOther
+/// Tests.cpp`'s own test source deliberately passes a hand-built `uvec4`
+/// with high bits set beyond `gl_SubgroupSize` (`allOnes`/`MAKE_HIGH_
+/// BALLOT_RESULT`) and still expects a result clipped to the actual
+/// subgroup size, not the full 128-bit vector width. `BallotBitCount`'s
+/// own `InclusiveScan`/`ExclusiveScan` variants need no equivalent call
+/// to this helper: their own per-invocation prefix mask is already always
+/// bounded by the invocation's own id, itself always less than
+/// `SubgroupSize`, so high garbage bits beyond `SubgroupSize` are already
+/// excluded by that narrower mask on their own.
+mlir::Value clipBallotBitsToSubgroupSize(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value Bits) {
+  mlir::Type I128 = Rewriter.getIntegerType(128);
+  mlir::Value SubgroupSize = createIntrinsicCall(
+      Rewriter, Loc, "llvm.spv.subgroup.size", Rewriter.getI32Type(), {});
+  mlir::Value SubgroupSize128 =
+      mlir::LLVM::ZExtOp::create(Rewriter, Loc, I128, SubgroupSize);
+  mlir::Value One = mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128, 1);
+  mlir::Value AllOnes = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, I128, llvm::APInt::getAllOnes(128));
+  mlir::Value Shifted =
+      mlir::LLVM::ShlOp::create(Rewriter, Loc, One, SubgroupSize128);
+  mlir::Value LowMask =
+      mlir::LLVM::SubOp::create(Rewriter, Loc, Shifted, One);
+  mlir::Value FullWidth =
+      mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128, 128);
+  mlir::Value IsFull = mlir::LLVM::ICmpOp::create(
+      Rewriter, Loc, mlir::LLVM::ICmpPredicate::uge, SubgroupSize128,
+      FullWidth);
+  mlir::Value Mask =
+      mlir::LLVM::SelectOp::create(Rewriter, Loc, IsFull, AllOnes, LowMask);
+  return mlir::LLVM::AndOp::create(Rewriter, Loc, Bits, Mask);
+}
+
 /// Extracts bit \p Index (an `i32`, not required to be a compile-time
 /// constant, and not required to be uniform across the group -- see
 /// `InverseBallotConversionPattern`'s own "current invocation" index and
@@ -1111,13 +1158,17 @@ public:
 };
 
 /// Converts `spirv.GroupNonUniformBallotFindLSB` (roadmap L85) into
-/// `ballotVectorToI128`'s own 128-bit bitcast followed by `llvm.cttz`
-/// (`is_zero_poison=true`, matching the SPIR-V spec's own "if none of the
-/// considered bits is set to 1, the resulting value is undefined" text)
-/// and a truncation down to the op's own result width. Only a 32-bit
-/// result is supported, mirroring `BallotBitExtractConversionPattern`
-/// above: every known dxc/glslang-compiled `subgroupBallotFindLSB` call
-/// site's own `uint` result is already 32-bit.
+/// `ballotVectorToI128`'s own 128-bit bitcast, clipped to the actual
+/// `gl_SubgroupSize` via `clipBallotBitsToSubgroupSize` (see that
+/// helper's own comment for why -- the SPIR-V spec only considers bits
+/// actually representing invocations in the group), followed by
+/// `llvm.cttz` (`is_zero_poison=true`, matching the SPIR-V spec's own "if
+/// none of the considered bits is set to 1, the resulting value is
+/// undefined" text) and a truncation down to the op's own result width.
+/// Only a 32-bit result is supported, mirroring
+/// `BallotBitExtractConversionPattern` above: every known dxc/glslang-
+/// compiled `subgroupBallotFindLSB` call site's own `uint` result is
+/// already 32-bit.
 class BallotFindLSBConversionPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::GroupNonUniformBallotFindLSBOp> {
@@ -1138,6 +1189,7 @@ public:
 
     mlir::Location Loc = Op.getLoc();
     mlir::Value Bits = ballotVectorToI128(Rewriter, Loc, Adaptor.getValue());
+    Bits = clipBallotBitsToSubgroupSize(Rewriter, Loc, Bits);
     mlir::Value Lsb = mlir::LLVM::CountTrailingZerosOp::create(
         Rewriter, Loc, Bits.getType(), Bits, /*isZeroPoison=*/true);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::TruncOp>(Op, ResultType, Lsb);
@@ -1146,14 +1198,15 @@ public:
 };
 
 /// Converts `spirv.GroupNonUniformBallotFindMSB` (roadmap L85) into
-/// `ballotVectorToI128`'s own 128-bit bitcast followed by `127 -
-/// llvm.ctlz(..., is_zero_poison=true)` (the most-significant set bit's
-/// own index, counting from the low bit, matching the SPIR-V spec's
-/// "if none of the considered bits is set to 1, the resulting value is
-/// undefined" text the same way `BallotFindLSBConversionPattern` above
-/// does) and a truncation down to the op's own result width. Only a
-/// 32-bit result is supported, mirroring
-/// `BallotFindLSBConversionPattern` above.
+/// `ballotVectorToI128`'s own 128-bit bitcast, clipped to the actual
+/// `gl_SubgroupSize` exactly like `BallotFindLSBConversionPattern` above,
+/// followed by `127 - llvm.ctlz(..., is_zero_poison=true)` (the
+/// most-significant set bit's own index, counting from the low bit,
+/// matching the SPIR-V spec's "if none of the considered bits is set to
+/// 1, the resulting value is undefined" text the same way
+/// `BallotFindLSBConversionPattern` above does) and a truncation down to
+/// the op's own result width. Only a 32-bit result is supported,
+/// mirroring `BallotFindLSBConversionPattern` above.
 class BallotFindMSBConversionPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::GroupNonUniformBallotFindMSBOp> {
@@ -1175,6 +1228,7 @@ public:
     mlir::Location Loc = Op.getLoc();
     mlir::Type I128 = Rewriter.getIntegerType(128);
     mlir::Value Bits = ballotVectorToI128(Rewriter, Loc, Adaptor.getValue());
+    Bits = clipBallotBitsToSubgroupSize(Rewriter, Loc, Bits);
     mlir::Value Clz = mlir::LLVM::CountLeadingZerosOp::create(
         Rewriter, Loc, I128, Bits, /*isZeroPoison=*/true);
     mlir::Value BitWidthMinusOne =
@@ -1191,7 +1245,9 @@ public:
 /// `InclusiveBitCount`/`ExclusiveBitCount` lower to, distinguished only by
 /// this op's own `group_operation` attribute) into
 /// `ballotVectorToI128`'s own 128-bit bitcast followed by `llvm.ctpop`
-/// (`Reduce`) or, for `InclusiveScan`/`ExclusiveScan`, a mask over every
+/// (`Reduce`, clipped to the actual `gl_SubgroupSize` first via
+/// `clipBallotBitsToSubgroupSize` -- see that helper's own comment for
+/// why) or, for `InclusiveScan`/`ExclusiveScan`, a mask over every
 /// bit at-or-before (inclusive) / strictly before (exclusive) the current
 /// invocation's own position first: `(1 << N) - 1` where `N` is the
 /// invocation's own id (plus one for the inclusive variant), clamped to
@@ -1199,7 +1255,9 @@ public:
 /// would otherwise be a poison shift-by-out-of-range-amount) via a
 /// `select` over an explicit `>= 128` check -- a value never actually
 /// selected in practice (real subgroup sizes are always far below 128
-/// invocations) but kept for correctness regardless. Only a 32-bit result
+/// invocations) but kept for correctness regardless; this scan-variant
+/// mask needs no equivalent call to `clipBallotBitsToSubgroupSize` of its
+/// own (see that helper's own comment). Only a 32-bit result
 /// is supported, mirroring `BallotFindLSBConversionPattern` above.
 class BallotBitCountConversionPattern
     : public mlir::SPIRVToLLVMConversion<
@@ -1223,7 +1281,9 @@ public:
     mlir::Type I128 = Rewriter.getIntegerType(128);
     mlir::Value Bits = ballotVectorToI128(Rewriter, Loc, Adaptor.getValue());
 
-    if (Op.getGroupOperation() != mlir::spirv::GroupOperation::Reduce) {
+    if (Op.getGroupOperation() == mlir::spirv::GroupOperation::Reduce) {
+      Bits = clipBallotBitsToSubgroupSize(Rewriter, Loc, Bits);
+    } else {
       bool Inclusive =
           Op.getGroupOperation() == mlir::spirv::GroupOperation::InclusiveScan;
       mlir::Value LocalId = createIntrinsicCall(

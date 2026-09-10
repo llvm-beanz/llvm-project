@@ -72,12 +72,23 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
 // -----
 
 // Checks that `spirv.GroupNonUniformBallotFindLSB` (roadmap L85) converts
-// into `ballotVectorToI128`'s bitcast followed by `llvm.cttz` and a
-// truncation back to the op's own `i32` result.
+// into `ballotVectorToI128`'s bitcast, clipped to the actual
+// `gl_SubgroupSize` via `clipBallotBitsToSubgroupSize`, followed by
+// `llvm.cttz` and a truncation back to the op's own `i32` result.
 
 // CHECK-LABEL: llvm.func @find_lsb
 // CHECK: %[[BITS:.*]] = llvm.bitcast %arg0 : vector<4xi32> to i128
-// CHECK: %[[LSB:.*]] = "llvm.intr.cttz"(%[[BITS]]) <{is_zero_poison = true}> : (i128) -> i128
+// CHECK: %[[SIZE:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.size"() : () -> i32
+// CHECK: %[[SIZE128:.*]] = llvm.zext %[[SIZE]] : i32 to i128
+// CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i128) : i128
+// CHECK: %[[ALLONES:.*]] = llvm.mlir.constant(-1 : i128) : i128
+// CHECK: %[[SHIFTED:.*]] = llvm.shl %[[ONE]], %[[SIZE128]] : i128
+// CHECK: %[[LOWMASK:.*]] = llvm.sub %[[SHIFTED]], %[[ONE]] : i128
+// CHECK: %[[FULLWIDTH:.*]] = llvm.mlir.constant(128 : i128) : i128
+// CHECK: %[[ISFULL:.*]] = llvm.icmp "uge" %[[SIZE128]], %[[FULLWIDTH]] : i128
+// CHECK: %[[MASK:.*]] = llvm.select %[[ISFULL]], %[[ALLONES]], %[[LOWMASK]] : i1, i128
+// CHECK: %[[CLIPPED:.*]] = llvm.and %[[BITS]], %[[MASK]] : i128
+// CHECK: %[[LSB:.*]] = "llvm.intr.cttz"(%[[CLIPPED]]) <{is_zero_poison = true}> : (i128) -> i128
 // CHECK: %[[RESULT:.*]] = llvm.trunc %[[LSB]] : i128 to i32
 // CHECK: llvm.return %[[RESULT]] : i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformBallot], []> {
@@ -90,12 +101,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
 // -----
 
 // Checks that `spirv.GroupNonUniformBallotFindMSB` (roadmap L85) converts
-// into `ballotVectorToI128`'s bitcast followed by `127 - llvm.ctlz(...)`
-// and a truncation back to the op's own `i32` result.
+// into `ballotVectorToI128`'s bitcast, clipped to the actual
+// `gl_SubgroupSize` exactly like `find_lsb` above, followed by
+// `127 - llvm.ctlz(...)` and a truncation back to the op's own `i32`
+// result.
 
 // CHECK-LABEL: llvm.func @find_msb
 // CHECK: %[[BITS:.*]] = llvm.bitcast %arg0 : vector<4xi32> to i128
-// CHECK: %[[CLZ:.*]] = "llvm.intr.ctlz"(%[[BITS]]) <{is_zero_poison = true}> : (i128) -> i128
+// CHECK: %[[SIZE:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.size"() : () -> i32
+// CHECK: %[[SIZE128:.*]] = llvm.zext %[[SIZE]] : i32 to i128
+// CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i128) : i128
+// CHECK: %[[ALLONES:.*]] = llvm.mlir.constant(-1 : i128) : i128
+// CHECK: %[[SHIFTED:.*]] = llvm.shl %[[ONE]], %[[SIZE128]] : i128
+// CHECK: %[[LOWMASK:.*]] = llvm.sub %[[SHIFTED]], %[[ONE]] : i128
+// CHECK: %[[FULLWIDTH:.*]] = llvm.mlir.constant(128 : i128) : i128
+// CHECK: %[[ISFULL:.*]] = llvm.icmp "uge" %[[SIZE128]], %[[FULLWIDTH]] : i128
+// CHECK: %[[MASK:.*]] = llvm.select %[[ISFULL]], %[[ALLONES]], %[[LOWMASK]] : i1, i128
+// CHECK: %[[CLIPPED:.*]] = llvm.and %[[BITS]], %[[MASK]] : i128
+// CHECK: %[[CLZ:.*]] = "llvm.intr.ctlz"(%[[CLIPPED]]) <{is_zero_poison = true}> : (i128) -> i128
 // CHECK: %[[BITWIDTH:.*]] = llvm.mlir.constant(127 : i128) : i128
 // CHECK: %[[MSB:.*]] = llvm.sub %[[BITWIDTH]], %[[CLZ]] : i128
 // CHECK: %[[RESULT:.*]] = llvm.trunc %[[MSB]] : i128 to i32
@@ -111,12 +134,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
 
 // Checks that a `Reduce`-group-operation `spirv.GroupNonUniformBallotBitCount`
 // (roadmap L85, GLSL's `subgroupBallotBitCount`) converts into
-// `ballotVectorToI128`'s bitcast followed directly by `llvm.ctpop` (no
-// per-invocation masking, unlike the scan variants below).
+// `ballotVectorToI128`'s bitcast, clipped to the actual `gl_SubgroupSize`
+// exactly like `find_lsb`/`find_msb` above (unlike the scan variants
+// below, which need no such clipping -- see `clipBallotBitsToSubgroupSize`'s
+// own comment), followed directly by `llvm.ctpop`.
 
 // CHECK-LABEL: llvm.func @bit_count_reduce
 // CHECK: %[[BITS:.*]] = llvm.bitcast %arg0 : vector<4xi32> to i128
-// CHECK: %[[POPCOUNT:.*]] = llvm.intr.ctpop(%[[BITS]]) : (i128) -> i128
+// CHECK: %[[SIZE:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.size"() : () -> i32
+// CHECK: %[[SIZE128:.*]] = llvm.zext %[[SIZE]] : i32 to i128
+// CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i128) : i128
+// CHECK: %[[ALLONES:.*]] = llvm.mlir.constant(-1 : i128) : i128
+// CHECK: %[[SHIFTED:.*]] = llvm.shl %[[ONE]], %[[SIZE128]] : i128
+// CHECK: %[[LOWMASK:.*]] = llvm.sub %[[SHIFTED]], %[[ONE]] : i128
+// CHECK: %[[FULLWIDTH:.*]] = llvm.mlir.constant(128 : i128) : i128
+// CHECK: %[[ISFULL:.*]] = llvm.icmp "uge" %[[SIZE128]], %[[FULLWIDTH]] : i128
+// CHECK: %[[MASK:.*]] = llvm.select %[[ISFULL]], %[[ALLONES]], %[[LOWMASK]] : i1, i128
+// CHECK: %[[CLIPPED:.*]] = llvm.and %[[BITS]], %[[MASK]] : i128
+// CHECK: %[[POPCOUNT:.*]] = llvm.intr.ctpop(%[[CLIPPED]]) : (i128) -> i128
 // CHECK: %[[RESULT:.*]] = llvm.trunc %[[POPCOUNT]] : i128 to i32
 // CHECK: llvm.return %[[RESULT]] : i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformBallot], []> {
