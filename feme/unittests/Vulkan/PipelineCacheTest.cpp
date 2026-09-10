@@ -10,9 +10,13 @@
 #include "PipelineCache.h"
 #include "Descriptor.h"
 #include "EntryPoints.h"
+#include "GraphicsPipeline.h"
 #include "Icd.h"
 #include "Objects.h"
 #include "Pipeline.h"
+
+#include "feme/Core/Context.h"
+#include "feme/Target/CPU/CompiledStage.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -640,3 +644,94 @@ TEST_F(PipelineCacheTest, RealFailureOutranksPipelineCompileRequired) {
 }
 
 } // namespace
+
+namespace {
+
+PipelineCacheKey makeKey(uint8_t Seed) {
+  PipelineCacheKey Key{};
+  Key[0] = Seed;
+  return Key;
+}
+
+/// A distinct, cheap artifact identity for the bound tests below: both
+/// members may legitimately be null, so this needs no real compile.
+std::shared_ptr<CachedPipelineArtifact> makeArtifact() {
+  return std::make_shared<CachedPipelineArtifact>();
+}
+
+} // namespace
+
+/// Roadmap L89c: an unbounded cache -- what every app-created
+/// `VkPipelineCache` is, and what this class did exclusively before the
+/// implicit cache existed -- never evicts, however many entries it takes.
+TEST(PipelineCacheBoundTest, UnboundedCacheNeverEvicts) {
+  PipelineCache Cache;
+  for (uint8_t I = 0; I != 32; ++I)
+    Cache.insert(makeKey(I), makeArtifact());
+
+  for (uint8_t I = 0; I != 32; ++I)
+    EXPECT_NE(Cache.lookup(makeKey(I)), nullptr) << "entry " << unsigned(I);
+  EXPECT_EQ(Cache.keys().size(), 32u);
+}
+
+/// Roadmap L89c: a bounded cache retains its most recent `MaxEntries`
+/// insertions and drops the oldest, so an always-on implicit cache cannot
+/// grow without limit over a long-lived device.
+TEST(PipelineCacheBoundTest, BoundedCacheEvictsOldestInsertions) {
+  PipelineCache Cache(/*InitialKeys=*/{}, /*ExternallySynchronized=*/false,
+                      /*MaxEntries=*/4);
+  for (uint8_t I = 0; I != 10; ++I)
+    Cache.insert(makeKey(I), makeArtifact());
+
+  EXPECT_EQ(Cache.keys().size(), 4u);
+  for (uint8_t I = 0; I != 6; ++I)
+    EXPECT_EQ(Cache.lookup(makeKey(I)), nullptr) << "evicted " << unsigned(I);
+  for (uint8_t I = 6; I != 10; ++I)
+    EXPECT_NE(Cache.lookup(makeKey(I)), nullptr) << "retained " << unsigned(I);
+}
+
+/// Roadmap L89c: re-inserting a key already present must refresh it in
+/// place rather than count as a second insertion -- otherwise the eviction
+/// queue would fill with duplicates and evict live entries early.
+TEST(PipelineCacheBoundTest, ReinsertingAKeyDoesNotConsumeExtraCapacity) {
+  PipelineCache Cache(/*InitialKeys=*/{}, /*ExternallySynchronized=*/false,
+                      /*MaxEntries=*/2);
+  Cache.insert(makeKey(1), makeArtifact());
+  for (unsigned I = 0; I != 8; ++I)
+    Cache.insert(makeKey(2), makeArtifact());
+
+  EXPECT_EQ(Cache.keys().size(), 2u);
+  EXPECT_NE(Cache.lookup(makeKey(1)), nullptr);
+  EXPECT_NE(Cache.lookup(makeKey(2)), nullptr);
+}
+
+/// Roadmap L89c: the graphics table is bounded independently of the
+/// compute one -- they are separate tables, so filling one must not evict
+/// the other's entries.
+TEST(PipelineCacheBoundTest, ComputeAndGraphicsTablesAreBoundedSeparately) {
+  PipelineCache Cache(/*InitialKeys=*/{}, /*ExternallySynchronized=*/false,
+                      /*MaxEntries=*/2);
+  Cache.insert(makeKey(1), makeArtifact());
+  Cache.insert(makeKey(2), makeArtifact());
+  for (uint8_t I = 10; I != 20; ++I)
+    Cache.insertGraphics(makeKey(I),
+                         std::make_shared<GraphicsPipelineArtifact>());
+
+  EXPECT_NE(Cache.lookup(makeKey(1)), nullptr);
+  EXPECT_NE(Cache.lookup(makeKey(2)), nullptr);
+  EXPECT_NE(Cache.lookupGraphics(makeKey(19)), nullptr);
+  EXPECT_EQ(Cache.lookupGraphics(makeKey(10)), nullptr);
+}
+
+/// Roadmap L89c: `vkCreatePipelineCache`'s own initial keys are subject to
+/// the same bound, so a bounded cache handed more placeholder keys than it
+/// can hold still respects its limit rather than starting over-full.
+TEST(PipelineCacheBoundTest, InitialKeysRespectTheBound) {
+  std::vector<PipelineCacheKey> InitialKeys;
+  for (uint8_t I = 0; I != 8; ++I)
+    InitialKeys.push_back(makeKey(I));
+
+  PipelineCache Cache(InitialKeys, /*ExternallySynchronized=*/false,
+                      /*MaxEntries=*/3);
+  EXPECT_EQ(Cache.keys().size(), 3u);
+}
