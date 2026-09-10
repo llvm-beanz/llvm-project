@@ -1,6 +1,5 @@
 ---
 model: claude-opus-5
-resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
 
@@ -42,31 +41,5 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L89e from the roadmap or other prerequisites blocking the
-L-series milestones?
-
-> **`spirv.GroupNonUniformBroadcast`/`GroupNonUniformBroadcastFirst` are
-> unimplemented in the SPIR-V -> LLVM conversion, failing all 336
-> `dEQP-VK.subgroups.ballot_broadcast.compute.*` cases**, found by L89b's own
-> regression sweep of `dEQP-VK.subgroups.ballot*` (6,284 cases, 16 passed / 336
-> failed / 5,932 unsupported). Every failure is the same
-> `VK_ERROR_INITIALIZATION_FAILED` from `vkCreateComputePipelines`, and the
-> driver-side diagnostic is a conversion-legalization error, not a `feme`-IR
-> one: `error: failed to legalize operation 'spirv.GroupNonUniformBroadcast'
-> that was explicitly marked illegal: %148 =
-> "spirv.GroupNonUniformBroadcast"(%145, %147) <{execution_scope =
-> #spirv.scope<Subgroup>}> : (i1, i32) -> i1`. The failures cover the group
-> exhaustively -- all 48 distinct
-> `subgroupbroadcast`/`subgroupbroadcast_nonconst`/`subgroupbroadcastfirst` x
-> scalar/`vec*`/`ivec*`/`uvec*`/`bvec*` shapes, each x 7 subgroup-size variants
-> -- so this is a wholly missing op pair rather than a type-specific gap; the
-> sibling `ballot`/`ballot_mask`/`ballot_other` groups in the same sweep have no
-> failures. Confirmed pre-existing and unrelated to L89b, which changed only
-> `lowerReadLane`'s body in `WaveLowering.cpp`, a pass that runs long after
-> SPIR-V conversion. Needs conversion patterns mapping both ops onto the
-> existing `feme.cpu.wave.readlane` / first-active-lane machinery
-> (`GroupNonUniformBroadcast` is `readlane` with a subgroup-uniform index;
-> `GroupNonUniformBroadcastFirst` is a read from the first active lane, which
-> `getClampedFirstActiveLaneIndex` already computes), including the `i1` and
-> vector operand shapes the group exercises, plus lit coverage in the
-> SPIR-V-to-LLVM conversion tests
+Can you fetch upstream LLVM's main branch, merge it into the feme branch,
+resolve any conflicts and ensure all tests pass?
