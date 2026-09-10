@@ -42,30 +42,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L89b from the roadmap or other prerequisites blocking the
+Can you work on L89c from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`SIMDizePass` needs a real loop-based (not post-hoc-block-split)
-> lane-chunking redesign that reduces live-SSA-value count per scheduling
-> region, not just instruction count per block**, split out of L89a's own
-> closing session: L89a's own `llc -time-passes` A/B measurement proved that
-> merely relocating the same fully-unrolled, all-lanes-simultaneously-live
-> instruction sequence into more, smaller basic blocks (via post-hoc splitting)
-> makes compilation dramatically slower (~21x on "Instruction Scheduling"
-> alone), not faster, because it does not reduce the number of values live
-> across region boundaries -- it only adds `CopyToReg`/`CopyFromReg` bookkeeping
-> on top of the original cost. A viable fix therefore cannot be a mechanical,
-> pass-order-only transform bolted on after `SIMDizePass`; it needs
-> `SIMDizePass` itself (`feme/lib/Transforms/CPU/SIMDize.cpp`, 3714 lines) to
-> emit a genuine loop over lane-chunks (e.g. 4 or 8 lanes per iteration,
-> matching the host's native vector width) with a small, fixed number of
-> loop-carried values per iteration (accumulator/mask state only), rather than
-> unrolling all `WaveSize` lanes' worth of scalar ops inline -- the only
-> strategy that reduces both SelectionDAG node count *and*
-> register-pressure/live-range footprint together. A materially large, invasive
-> redesign (not yet started): needs careful design to avoid silently breaking
-> wave-uniform control-flow/reconvergence invariants `LinearizePass` depends on
-> downstream, a decision on chunk width (fixed vs. host-CPU-feature-derived),
-> and its own dedicated unit/lit test coverage across multiple
-> `WaveSize`/chunk-width combinations before any CTS re-verification of
-> `_requiredsubgroupsize` cases or further `SHUFFLE_BIT` consideration
+> **Advertise `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`, now that its last known blocker
+> (L89d) is closed**, split out of L89b's own closing session: the bit has been
+> gated behind a moving list of blockers since roadmap L7-series work, most
+> recently L89 (compile-time blowup, fixed by L89b) and L89d (`SIMDizePass`'s
+> missing vector-typed `wave.readlane` decomposition, fixed in the same
+> session). `dEQP-VK.subgroups.shuffle.compute.*` now runs 1,680 cases with 128
+> passed and **0 failed**, so the direct evidence for the flip exists -- but it
+> was deliberately not made, because advertising a subgroup feature bit changes
+> what CTS asks of the device across the *whole* `dEQP-VK.subgroups.*` tree (the
+> 1,552 currently-unsupported cases in that one group alone become live, plus
+> every `shuffle`-gated case in the `graphics`/`framebuffer`/`ray_tracing`
+> shader-stage variants of the same tests), and this milestone chain has already
+> produced three separate rows whose claims were later corrected for exactly
+> this kind of under-verified extrapolation. Needs the bit added to
+> `PhysicalDeviceInfo.cpp`'s `supportedOperations`, then a real full-tree
+> `dEQP-VK.subgroups.*` sweep before and after the flip, with
+> `Vulkan14FeatureInventory.md` updated for the first `SHUFFLE_BIT` change in
+> the chain
