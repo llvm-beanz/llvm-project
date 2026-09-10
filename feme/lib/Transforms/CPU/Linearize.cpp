@@ -66,6 +66,9 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
@@ -260,6 +263,35 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
                           : Masks.Live;
         if (!isa<Constant>(Mask))
           Call->setArgOperand(Call->arg_size() - 1, Mask);
+      }
+      // (roadmap L85) `WaveActiveBallot`/`subgroupBallot`'s own predicate
+      // operand (operand 0) must reflect exactly the invocations that are
+      // both requesting a `true` bit *and* still active at this exact
+      // program point: its result is a ballot over "the group's currently
+      // active invocations" (the SPIR-V/GLSL spec's own `subgroupBallot`
+      // wording), which is no longer implicit in which arm of a real
+      // branch reached it once this pass has flattened that branch away.
+      // Missing this let a `subgroupBallot(true)` sitting in a divergent
+      // arm (e.g. guarded by `subgroupElect()`'s complement, as
+      // `dEQP-VK.subgroups.ballot_other.compute.subgroupballotfindlsb`'s
+      // own shader does) see every wave-active lane instead of just the
+      // lanes that actually reached that arm, producing a stale/too-wide
+      // ballot mask -- found reducing that exact CTS failure down to this
+      // shape. `Env.EntryMask` (the whole function's entry mask, still
+      // ANDed in later by `FunctionWidener::widenWaveCall`) already covers
+      // "is this invocation part of the group at all"; this pass only
+      // needs to additionally narrow by `Masks.Live` for "is it still
+      // active *here*".
+      if (Function *Callee = Call->getCalledFunction()) {
+        Intrinsic::ID ID = Callee->getIntrinsicID();
+        if ((ID == Intrinsic::dx_wave_ballot ||
+             ID == Intrinsic::spv_subgroup_ballot) &&
+            !isa<Constant>(Masks.Live)) {
+          IRBuilder<> B(Call);
+          Call->setArgOperand(0, B.CreateAnd(Call->getArgOperand(0),
+                                             Masks.Live,
+                                             "ballot.pred.masked"));
+        }
       }
       continue;
     }
