@@ -24,7 +24,7 @@ define void @main(i32 %idx, i32 %dyn) {
   ; CHECK: [[EXT:%.*]] = zext i32 %dyn to i64
   ; CHECK: add i64 4, [[EXT]]
   %h2 = call target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32 %dyn, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32 %dyn)
   ret void
 }
 
@@ -35,4 +35,4 @@ define void @main(i32 %idx, i32 %dyn) {
 declare target("dx.RawBuffer", i8, 1, 0)
     @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_i8_1_0t(i32, i32, i32, i32, ptr)
 declare target("dx.RawBuffer", i8, 1, 0)
-    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32)

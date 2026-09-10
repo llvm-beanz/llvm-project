@@ -18,7 +18,7 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 ; CHECK-SAME: ptr %resource_heap, i32 %resource_heap_count, i32 5, i64 [[OFF]], i1 true)
 define void @byte_address_buffer(i32 %byte_offset) {
   %h = call target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32 5, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32 5)
   %loaded = call {i32, i1}
       @llvm.dx.resource.load.rawbuffer.i32.tdx.RawBuffer_i8_1_0t(
           target("dx.RawBuffer", i8, 1, 0) %h, i32 %byte_offset, i32 poison)
@@ -35,7 +35,7 @@ define void @byte_address_buffer(i32 %byte_offset) {
 ; CHECK-SAME: ptr %resource_heap, i32 %resource_heap_count, i32 9, i64 36, i1 true)
 define void @structured_buffer() {
   %h = call target("dx.RawBuffer", [16 x i8], 1, 0)
-      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_a16i8_1_0t(i32 9, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_a16i8_1_0t(i32 9)
   %loaded = call {float, i1}
       @llvm.dx.resource.load.rawbuffer.f32.tdx.RawBuffer_a16i8_1_0t(
           target("dx.RawBuffer", [16 x i8], 1, 0) %h, i32 2, i32 4)
@@ -44,13 +44,13 @@ define void @structured_buffer() {
 }
 
 declare target("dx.RawBuffer", i8, 1, 0)
-    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32)
 declare {i32, i1}
     @llvm.dx.resource.load.rawbuffer.i32.tdx.RawBuffer_i8_1_0t(
         target("dx.RawBuffer", i8, 1, 0), i32, i32)
 
 declare target("dx.RawBuffer", [16 x i8], 1, 0)
-    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_a16i8_1_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_a16i8_1_0t(i32)
 declare {float, i1}
     @llvm.dx.resource.load.rawbuffer.f32.tdx.RawBuffer_a16i8_1_0t(
         target("dx.RawBuffer", [16 x i8], 1, 0), i32, i32)

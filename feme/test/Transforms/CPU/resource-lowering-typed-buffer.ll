@@ -23,7 +23,7 @@ define void @main(i32 %idx) {
   ; CHECK: [[LOADED:%.*]] = call <4 x float> @feme.cpu.resource.load.typed.v4f32(
   ; CHECK-SAME: ptr %resource_heap, i32 %resource_heap_count, i32 3, i64 [[ELEMIDX]], i1 true)
   %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-      @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32 3, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32 3)
   %loaded = call {<4 x float>, i1}
       @llvm.dx.resource.load.typedbuffer.v4f32.tdx.TypedBuffer_v4f32_1_0_0t(
           target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %idx)
@@ -51,7 +51,7 @@ define void @main(i32 %idx) {
 ; CHECK: ![[MD]] = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0, i32 3}
 
 declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-    @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32)
 declare {<4 x float>, i1}
     @llvm.dx.resource.load.typedbuffer.v4f32.tdx.TypedBuffer_v4f32_1_0_0t(
         target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32)

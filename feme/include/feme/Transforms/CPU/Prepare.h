@@ -50,7 +50,7 @@ namespace feme::cpu {
 
 /// Phase 1: prepares a raised module for the rest of the CPU pipeline. See
 /// the file comment above for current scope.
-class PreparePass : public llvm::PassInfoMixin<PreparePass> {
+class PreparePass : public llvm::OptionalPassInfoMixin<PreparePass> {
   /// The entry point to keep, or empty to require the module to have
   /// exactly one entry point of `Stage`.
   std::string EntryPoint;

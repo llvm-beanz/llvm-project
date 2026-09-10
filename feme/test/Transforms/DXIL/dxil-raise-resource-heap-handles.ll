@@ -22,7 +22,8 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 ; `ResourceDescriptorHeap[%idx]`, non-uniformly indexed.
 ; CHECK-LABEL: define %dx.types.Handle @typed_buffer_heap(
 define %dx.types.Handle @typed_buffer_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 true)
+  ; CHECK: [[IDX:%.*]] = call i32 @llvm.dx.resource.nonuniformindex(i32 %idx)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 [[IDX]])
   ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.TypedBuffer", float, 0, 0, 1) [[HANDLE]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 true)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 10, i32 265 })
@@ -39,7 +40,8 @@ define %dx.types.Handle @typed_buffer_heap(i32 %idx) {
 ; type rather than a bare scalar `float`.
 ; CHECK-LABEL: define %dx.types.Handle @typed_buffer_heap_vec4(
 define %dx.types.Handle @typed_buffer_heap_vec4(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", <4 x float>, 1, 0, 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 true)
+  ; CHECK: [[IDX:%.*]] = call i32 @llvm.dx.resource.nonuniformindex(i32 %idx)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", <4 x float>, 1, 0, 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 [[IDX]])
   ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.TypedBuffer", <4 x float>, 1, 0, 1) [[HANDLE]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 true)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 4106, i32 1033 })
@@ -49,7 +51,7 @@ define %dx.types.Handle @typed_buffer_heap_vec4(i32 %idx) {
 ; A `RWByteAddressBuffer` (UAV, unstructured RawBuffer), uniformly indexed.
 ; CHECK-LABEL: define %dx.types.Handle @raw_buffer_heap(
 define %dx.types.Handle @raw_buffer_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.RawBuffer", i8, 1, 0) [[HANDLE]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 4107, i32 0 })
@@ -76,7 +78,8 @@ define %dx.types.Handle @unhandled_texture(i32 %idx) {
 ; (9) with `CompCount` 4.
 ; CHECK-LABEL: define %dx.types.Handle @texture2d_heap(
 define %dx.types.Handle @texture2d_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 true)
+  ; CHECK: [[IDX:%.*]] = call i32 @llvm.dx.resource.nonuniformindex(i32 %idx)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 [[IDX]])
   ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[HANDLE]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 true)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 2, i32 1033 })
@@ -86,7 +89,7 @@ define %dx.types.Handle @texture2d_heap(i32 %idx) {
 ; A `RWTexture2D<float4>` (UAV) accessed through `ResourceDescriptorHeap[%idx]`.
 ; CHECK-LABEL: define %dx.types.Handle @rwtexture2d_heap(
 define %dx.types.Handle @rwtexture2d_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.Texture", <4 x float>, 1, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Texture", <4 x float>, 1, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 4098, i32 1033 })
   ret %dx.types.Handle %h2
@@ -97,7 +100,8 @@ define %dx.types.Handle @rwtexture2d_heap(i32 %idx) {
 ; `ElementType::F32` (9), `CompCount` 4, `SampleCount` 4.
 ; CHECK-LABEL: define %dx.types.Handle @texture2dms_heap(
 define %dx.types.Handle @texture2dms_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.MSTexture", <4 x float>, 0, 4, 1, 3) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 true)
+  ; CHECK: [[IDX:%.*]] = call i32 @llvm.dx.resource.nonuniformindex(i32 %idx)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.MSTexture", <4 x float>, 0, 4, 1, 3) @llvm.dx.resource.handlefromheap{{.*}}(i32 [[IDX]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 true)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 3, i32 263177 })
   ret %dx.types.Handle %h2
@@ -109,7 +113,8 @@ define %dx.types.Handle @texture2dms_heap(i32 %idx) {
 ; table.
 ; CHECK-LABEL: define %dx.types.Handle @feedbacktexture2d_heap(
 define %dx.types.Handle @feedbacktexture2d_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.FeedbackTexture", 0, 17) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 true)
+  ; CHECK: [[IDX:%.*]] = call i32 @llvm.dx.resource.nonuniformindex(i32 %idx)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.FeedbackTexture", 0, 17) @llvm.dx.resource.handlefromheap{{.*}}(i32 [[IDX]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 true)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 17, i32 0 })
   ret %dx.types.Handle %h2
@@ -119,7 +124,7 @@ define %dx.types.Handle @feedbacktexture2d_heap(i32 %idx) {
 ; `SamplerDescriptorHeap[%idx]`.
 ; CHECK-LABEL: define %dx.types.Handle @sampler_heap(
 define %dx.types.Handle @sampler_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.Sampler", 0) [[HANDLE]])
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 true, i1 false)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 14, i32 0 })
@@ -130,7 +135,7 @@ define %dx.types.Handle @sampler_heap(i32 %idx) {
 ; Word0 = 14 | (1 << 15) = 32782.
 ; CHECK-LABEL: define %dx.types.Handle @comparison_sampler_heap(
 define %dx.types.Handle @comparison_sampler_heap(i32 %idx) {
-  ; CHECK: [[HANDLE:%.*]] = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 true, i1 false)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 32782, i32 0 })
   ret %dx.types.Handle %h2

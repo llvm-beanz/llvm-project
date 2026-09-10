@@ -49,7 +49,7 @@ namespace feme::cpu {
 /// descriptor-heap form the rest of the CPU pipeline understands. See the
 /// file comment above for current scope.
 class BoundResourceNormalizationPass
-    : public llvm::PassInfoMixin<BoundResourceNormalizationPass> {
+    : public llvm::OptionalPassInfoMixin<BoundResourceNormalizationPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

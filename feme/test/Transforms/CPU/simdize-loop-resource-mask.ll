@@ -15,7 +15,7 @@
 ; CHECK-NOT: call void @feme.cpu.resource.store.raw.i32(
 define void @main(i32 %n) #0 {
 entry:
-  %h = call target("dx.RawBuffer", i32, 1, 0) @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+  %h = call target("dx.RawBuffer", i32, 1, 0) @llvm.dx.resource.handlefromheap(i32 0)
   br label %loop
 loop:
   %i = phi i32 [0, %entry], [%inc, %latch]
@@ -31,7 +31,7 @@ latch:
 exit:
   ret void
 }
-declare target("dx.RawBuffer", i32, 1, 0) @llvm.dx.resource.handlefromheap(i32, i1)
+declare target("dx.RawBuffer", i32, 1, 0) @llvm.dx.resource.handlefromheap(i32)
 declare void @llvm.dx.resource.store.rawbuffer.i32(target("dx.RawBuffer", i32, 1, 0), i32, i32, i32)
 declare i32 @llvm.dx.thread.id(i32)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }

@@ -59,14 +59,14 @@ TEST(ResourceLoweringTest, CanonicalizesTypedBufferLoad) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(i32 %idx) {
       %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-          @llvm.dx.resource.handlefromheap(i32 3, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 3)
       %loaded = call {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
           target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %idx)
       %val = extractvalue {<4 x float>, i1} %loaded, 0
       ret <4 x float> %val
     }
     declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
     declare {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
         target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32)
   )");
@@ -103,14 +103,14 @@ TEST(ResourceLoweringTest, RecordsStaticHeapIndexMetadata) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(i32 %idx) {
       %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-          @llvm.dx.resource.handlefromheap(i32 5, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 5)
       %loaded = call {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
           target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %idx)
       %val = extractvalue {<4 x float>, i1} %loaded, 0
       ret <4 x float> %val
     }
     declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
     declare {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
         target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32)
   )");
@@ -146,11 +146,11 @@ TEST(ResourceLoweringTest, LeavesUnsupportedResourceKindUnchanged) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() {
       %h = call target("dx.CBuffer", [16 x i8])
-          @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 0)
       ret void
     }
     declare target("dx.CBuffer", [16 x i8])
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
   )");
   ASSERT_TRUE(M);
   runPass(*M);
@@ -190,14 +190,14 @@ TEST(ResourceLoweringTest, PreservesFunctionMetadataAcrossEnvParamRewrite) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(i32 %idx) !feme.signature !0 {
       %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-          @llvm.dx.resource.handlefromheap(i32 3, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 3)
       %loaded = call {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
           target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %idx)
       %val = extractvalue {<4 x float>, i1} %loaded, 0
       ret <4 x float> %val
     }
     declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
     declare {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
         target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32)
 
@@ -222,14 +222,14 @@ TEST(ResourceLoweringTest, CanonicalizesStructuredBufferByteOffset) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main() {
       %h = call target("dx.RawBuffer", [16 x i8], 1, 0)
-          @llvm.dx.resource.handlefromheap(i32 2, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 2)
       %loaded = call {float, i1} @llvm.dx.resource.load.rawbuffer(
           target("dx.RawBuffer", [16 x i8], 1, 0) %h, i32 3, i32 4)
       %val = extractvalue {float, i1} %loaded, 0
       ret float %val
     }
     declare target("dx.RawBuffer", [16 x i8], 1, 0)
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
     declare {float, i1} @llvm.dx.resource.load.rawbuffer(
         target("dx.RawBuffer", [16 x i8], 1, 0), i32, i32)
   )");
@@ -278,9 +278,9 @@ TEST(ResourceLoweringTest, LowersTexture2DSampleToImageSample) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<2 x float> %uv) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-          @llvm.dx.resource.handlefromheap.timg2d(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timg2d(i32 0)
       %samp = call target("dx.Sampler", 0)
-          @llvm.dx.resource.handlefromheap.tsamp2d(i32 1, i1 false)
+          @llvm.dx.resource.handlefromheap.tsamp2d(i32 1)
       %r = call <4 x float> @llvm.dx.resource.sample.timg2d(
           target("dx.Texture", <4 x float>, 0, 0, 0, 2) %tex,
           target("dx.Sampler", 0) %samp, <2 x float> %uv,
@@ -288,9 +288,9 @@ TEST(ResourceLoweringTest, LowersTexture2DSampleToImageSample) {
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-        @llvm.dx.resource.handlefromheap.timg2d(i32, i1)
+        @llvm.dx.resource.handlefromheap.timg2d(i32)
     declare target("dx.Sampler", 0)
-        @llvm.dx.resource.handlefromheap.tsamp2d(i32, i1)
+        @llvm.dx.resource.handlefromheap.tsamp2d(i32)
     declare <4 x float> @llvm.dx.resource.sample.timg2d(
         target("dx.Texture", <4 x float>, 0, 0, 0, 2),
         target("dx.Sampler", 0), <2 x float>, <2 x i32>)
@@ -312,14 +312,14 @@ TEST(ResourceLoweringTest, LowersTexture2DLoadToImageLoad) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<2 x i32> %xy) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-          @llvm.dx.resource.handlefromheap.timg2dl(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timg2dl(i32 0)
       %r = call <4 x float> @llvm.dx.resource.load.level.timg2dl(
           target("dx.Texture", <4 x float>, 0, 0, 0, 2) %tex,
           <2 x i32> %xy, i32 0, <2 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-        @llvm.dx.resource.handlefromheap.timg2dl(i32, i1)
+        @llvm.dx.resource.handlefromheap.timg2dl(i32)
     declare <4 x float> @llvm.dx.resource.load.level.timg2dl(
         target("dx.Texture", <4 x float>, 0, 0, 0, 2), <2 x i32>, i32,
         <2 x i32>)
@@ -338,9 +338,9 @@ TEST(ResourceLoweringTest, LowersTexture2DArraySampleToImageSampleArray) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x float> %uvw) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 7)
-          @llvm.dx.resource.handlefromheap.timg2darr(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timg2darr(i32 0)
       %samp = call target("dx.Sampler", 0)
-          @llvm.dx.resource.handlefromheap.tsamp2darr(i32 1, i1 false)
+          @llvm.dx.resource.handlefromheap.tsamp2darr(i32 1)
       %r = call <4 x float> @llvm.dx.resource.sample.timg2darr(
           target("dx.Texture", <4 x float>, 0, 0, 0, 7) %tex,
           target("dx.Sampler", 0) %samp, <3 x float> %uvw,
@@ -348,9 +348,9 @@ TEST(ResourceLoweringTest, LowersTexture2DArraySampleToImageSampleArray) {
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 7)
-        @llvm.dx.resource.handlefromheap.timg2darr(i32, i1)
+        @llvm.dx.resource.handlefromheap.timg2darr(i32)
     declare target("dx.Sampler", 0)
-        @llvm.dx.resource.handlefromheap.tsamp2darr(i32, i1)
+        @llvm.dx.resource.handlefromheap.tsamp2darr(i32)
     declare <4 x float> @llvm.dx.resource.sample.timg2darr(
         target("dx.Texture", <4 x float>, 0, 0, 0, 7),
         target("dx.Sampler", 0), <3 x float>, <2 x i32>)
@@ -370,14 +370,14 @@ TEST(ResourceLoweringTest, LowersTexture2DArrayLoadToImageLoadArray) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x i32> %xyz) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 7)
-          @llvm.dx.resource.handlefromheap.timg2darrl(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timg2darrl(i32 0)
       %r = call <4 x float> @llvm.dx.resource.load.level.timg2darrl(
           target("dx.Texture", <4 x float>, 0, 0, 0, 7) %tex,
           <3 x i32> %xyz, i32 0, <3 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 7)
-        @llvm.dx.resource.handlefromheap.timg2darrl(i32, i1)
+        @llvm.dx.resource.handlefromheap.timg2darrl(i32)
     declare <4 x float> @llvm.dx.resource.load.level.timg2darrl(
         target("dx.Texture", <4 x float>, 0, 0, 0, 7), <3 x i32>, i32,
         <3 x i32>)
@@ -396,9 +396,9 @@ TEST(ResourceLoweringTest, LowersTextureCubeSampleToImageSampleCube) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x float> %dir) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 5)
-          @llvm.dx.resource.handlefromheap.timgcube(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timgcube(i32 0)
       %samp = call target("dx.Sampler", 0)
-          @llvm.dx.resource.handlefromheap.tsampcube(i32 1, i1 false)
+          @llvm.dx.resource.handlefromheap.tsampcube(i32 1)
       %r = call <4 x float> @llvm.dx.resource.sample.timgcube(
           target("dx.Texture", <4 x float>, 0, 0, 0, 5) %tex,
           target("dx.Sampler", 0) %samp, <3 x float> %dir,
@@ -406,9 +406,9 @@ TEST(ResourceLoweringTest, LowersTextureCubeSampleToImageSampleCube) {
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 5)
-        @llvm.dx.resource.handlefromheap.timgcube(i32, i1)
+        @llvm.dx.resource.handlefromheap.timgcube(i32)
     declare target("dx.Sampler", 0)
-        @llvm.dx.resource.handlefromheap.tsampcube(i32, i1)
+        @llvm.dx.resource.handlefromheap.tsampcube(i32)
     declare <4 x float> @llvm.dx.resource.sample.timgcube(
         target("dx.Texture", <4 x float>, 0, 0, 0, 5),
         target("dx.Sampler", 0), <3 x float>, <2 x i32>)
@@ -427,9 +427,9 @@ TEST(ResourceLoweringTest, LowersTextureCubeArraySampleToImageSampleCubeArray) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<4 x float> %dirandlayer) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 9)
-          @llvm.dx.resource.handlefromheap.timgcubearr(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timgcubearr(i32 0)
       %samp = call target("dx.Sampler", 0)
-          @llvm.dx.resource.handlefromheap.tsampcubearr(i32 1, i1 false)
+          @llvm.dx.resource.handlefromheap.tsampcubearr(i32 1)
       %r = call <4 x float> @llvm.dx.resource.sample.timgcubearr(
           target("dx.Texture", <4 x float>, 0, 0, 0, 9) %tex,
           target("dx.Sampler", 0) %samp, <4 x float> %dirandlayer,
@@ -437,9 +437,9 @@ TEST(ResourceLoweringTest, LowersTextureCubeArraySampleToImageSampleCubeArray) {
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 9)
-        @llvm.dx.resource.handlefromheap.timgcubearr(i32, i1)
+        @llvm.dx.resource.handlefromheap.timgcubearr(i32)
     declare target("dx.Sampler", 0)
-        @llvm.dx.resource.handlefromheap.tsampcubearr(i32, i1)
+        @llvm.dx.resource.handlefromheap.tsampcubearr(i32)
     declare <4 x float> @llvm.dx.resource.sample.timgcubearr(
         target("dx.Texture", <4 x float>, 0, 0, 0, 9),
         target("dx.Sampler", 0), <4 x float>, <2 x i32>)
@@ -464,14 +464,14 @@ TEST(ResourceLoweringTest, LeavesATextureCubeLoadUnchanged) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<3 x i32> %xyz) {
       %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 5)
-          @llvm.dx.resource.handlefromheap.timgcubel(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap.timgcubel(i32 0)
       %r = call <4 x float> @llvm.dx.resource.load.level.timgcubel(
           target("dx.Texture", <4 x float>, 0, 0, 0, 5) %tex,
           <3 x i32> %xyz, i32 0, <3 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 5)
-        @llvm.dx.resource.handlefromheap.timgcubel(i32, i1)
+        @llvm.dx.resource.handlefromheap.timgcubel(i32)
     declare <4 x float> @llvm.dx.resource.load.level.timgcubel(
         target("dx.Texture", <4 x float>, 0, 0, 0, 5), <3 x i32>, i32,
         <3 x i32>)

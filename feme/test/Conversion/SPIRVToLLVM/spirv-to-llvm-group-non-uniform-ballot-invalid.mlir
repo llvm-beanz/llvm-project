@@ -3,11 +3,12 @@
 // `BallotConversionPattern` (roadmap L85) only implements `Subgroup`
 // execution scope, mirroring `ElectConversionPattern`/
 // `ShuffleConversionPattern`: no known dxc/glslang-compiled shape needs
-// `Workgroup`-scope ballot.
+// `Workgroup`-scope ballot. Upstream's own op verifier now rejects a
+// non-`Subgroup` scope outright, so the conversion never sees one.
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformBallot], []> {
   spirv.func @workgroup_ballot(%predicate : i1) -> vector<4xi32> "None" {
-    // expected-error@+1 {{failed to legalize operation 'spirv.GroupNonUniformBallot' that was explicitly marked illegal}}
+    // expected-error@+1 {{'spirv.GroupNonUniformBallot' op failed to verify that execution_scope must be 'Subgroup'}}
     %0 = spirv.GroupNonUniformBallot <Workgroup> %predicate : vector<4xi32>
     spirv.ReturnValue %0 : vector<4xi32>
   }

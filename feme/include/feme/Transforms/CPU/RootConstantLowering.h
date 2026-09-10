@@ -137,7 +137,7 @@ uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
 /// constant block covers into loads from it. See the file comment above
 /// for current scope.
 class RootConstantLoweringPass
-    : public llvm::PassInfoMixin<RootConstantLoweringPass> {
+    : public llvm::OptionalPassInfoMixin<RootConstantLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

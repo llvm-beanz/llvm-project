@@ -117,11 +117,11 @@ TEST(UnsupportedOpsTest, AcceptsBindlessDXHandle) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() {
       %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-          @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 0)
       ret void
     }
     declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
   )");
   ASSERT_TRUE(M);
   EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());

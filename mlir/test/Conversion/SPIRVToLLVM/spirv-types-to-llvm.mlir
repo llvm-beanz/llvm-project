@@ -19,6 +19,9 @@ spirv.func @array_with_natural_stride(!spirv.array<16 x f32, stride=4>) "None"
 // CHECK-LABEL: @array_with_natural_vector3_stride(!llvm.array<4 x vector<3xf32>>)
 spirv.func @array_with_natural_vector3_stride(!spirv.array<4 x vector<3xf32>, stride=16>) "None"
 
+// CHECK-LABEL: @array_of_strided_array(!llvm.array<3 x array<4 x f32>>)
+spirv.func @array_of_strided_array(!spirv.array<3 x !spirv.array<4 x f32, stride=4>, stride=16>) "None"
+
 //===----------------------------------------------------------------------===//
 // Image type
 //===----------------------------------------------------------------------===//

@@ -37,8 +37,8 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 define <4 x float> @sample_with_offset_unsupported(i32 %idx, i32 %sampidx, float %u, float %v) {
   ; CHECK: call <4 x float> @llvm.dx.resource.sample
   ; CHECK-NOT: feme.cpu.image
-  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
-  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
+  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx)
+  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0
   %coord = insertelement <2 x float> %coord0, float %v, i32 1
   %off0 = insertelement <2 x i32> poison, i32 1, i32 0
@@ -62,8 +62,8 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
   ; CHECK-SAME: i32 %idx, i32 %sampidx, float [[U]], float [[V]],
   ; CHECK-SAME: float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00,
   ; CHECK-SAME: float 0.000000e+00, i1 false, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
-  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
-  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
+  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx)
+  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0
   %coord = insertelement <2 x float> %coord0, float %v, i32 1
   %r = call <4 x float> @llvm.dx.resource.sample.v4f32.tdx.Texture_v4f32_0_0_1_2t.tdx.Sampler_0t.v2f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 2) %h, target("dx.Sampler", 0) %s, <2 x float> %coord, <2 x i32> zeroinitializer)
@@ -76,8 +76,8 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
 define <4 x float> @samplelevel_2d(i32 %idx, i32 %sampidx, float %u, float %v, float %lod) {
   ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(
   ; CHECK-SAME: {{.*}}, float %lod, i1 true, float 0.000000e+00, i32 0, i32 0, float {{.*}}, i1 true)
-  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
-  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
+  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx)
+  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0
   %coord = insertelement <2 x float> %coord0, float %v, i32 1
   %r = call <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_v4f32_0_0_1_2t.tdx.Sampler_0t.v2f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 2) %h, target("dx.Sampler", 0) %s, <2 x float> %coord, float %lod, <2 x i32> zeroinitializer)
@@ -92,15 +92,15 @@ define <4 x float> @load_2d(i32 %idx, i32 %x, i32 %y, i32 %mip) {
   ; CHECK: [[Y:%.*]] = extractelement <2 x i32> [[COORD2]], i64 1
   ; CHECK: call <4 x float> @feme.cpu.image.load.2d.v4f32(
   ; CHECK-SAME: ptr %image_heap, i32 %image_heap_count, i32 %idx, i32 [[X]], i32 [[Y]], i32 %mip, i32 0, i1 true)
-  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
+  %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx)
   %coord0 = insertelement <2 x i32> poison, i32 %x, i32 0
   %coord = insertelement <2 x i32> %coord0, i32 %y, i32 1
   %r = call <4 x float> @llvm.dx.resource.load.level.v4f32.tdx.Texture_v4f32_0_0_1_2t.v2i32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 2) %h, <2 x i32> %coord, i32 %mip, <2 x i32> zeroinitializer)
   ret <4 x float> %r
 }
 
-declare target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32, i1)
-declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32, i1)
+declare target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32)
+declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
 declare <4 x float> @llvm.dx.resource.sample.v4f32.tdx.Texture_v4f32_0_0_1_2t.tdx.Sampler_0t.v2f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 2), target("dx.Sampler", 0), <2 x float>, <2 x i32>)
 declare <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_v4f32_0_0_1_2t.tdx.Sampler_0t.v2f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 2), target("dx.Sampler", 0), <2 x float>, float, <2 x i32>)
 declare <4 x float> @llvm.dx.resource.load.level.v4f32.tdx.Texture_v4f32_0_0_1_2t.v2i32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 2), <2 x i32>, i32, <2 x i32>)

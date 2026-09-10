@@ -17,9 +17,9 @@
 ;--- shader.ll
 define void @main() #0 {
   %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-      @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32 0)
   %out = call target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32 1, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32 1)
   %tid = call i32 @llvm.dx.thread.id(i32 0)
   %coord0 = insertelement <2 x i32> poison, i32 %tid, i32 0
   %coord = insertelement <2 x i32> %coord0, i32 0, i32 1
@@ -48,9 +48,9 @@ define void @main() #0 {
   ret void
 }
 declare target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-    @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32)
 declare target("dx.RawBuffer", i8, 1, 0)
-    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.RawBuffer_i8_1_0t(i32)
 declare <4 x float> @llvm.dx.resource.load.level.v4f32.tdx.Texture_v4f32_0_0_0_2t.v2i32.i32.v2i32(
     target("dx.Texture", <4 x float>, 0, 0, 0, 2), <2 x i32>, i32, <2 x i32>)
 declare void @llvm.dx.resource.store.rawbuffer.i32(

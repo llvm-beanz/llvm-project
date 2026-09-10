@@ -62,7 +62,7 @@ LogicalResult DclThreadGroup::verify() {
 // ModuleOp
 //===----------------------------------------------------------------------===//
 
-ParseResult ModuleOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult feme::dxsa::ModuleOp::parse(OpAsmParser &parser, OperationState &result) {
   // Parse optional shader information like `pixel_shader 5 0`.
   StringRef typeKeyword;
   auto typeLoc = parser.getCurrentLocation();
@@ -93,7 +93,7 @@ ParseResult ModuleOp::parse(OpAsmParser &parser, OperationState &result) {
   return success();
 }
 
-void ModuleOp::print(OpAsmPrinter &printer) {
+void feme::dxsa::ModuleOp::print(OpAsmPrinter &printer) {
   if (auto programType = getProgramType()) {
     printer << ' ' << stringifyProgramType(*programType);
     printer << ' ' << *getMajorVersion() << ' ' << *getMinorVersion();
@@ -104,7 +104,7 @@ void ModuleOp::print(OpAsmPrinter &printer) {
   printer.printRegion(getBody());
 }
 
-LogicalResult ModuleOp::verify() {
+LogicalResult feme::dxsa::ModuleOp::verify() {
   bool hasType = static_cast<bool>(getProgramTypeAttr());
   bool hasMajor = static_cast<bool>(getMajorVersionAttr());
   bool hasMinor = static_cast<bool>(getMinorVersionAttr());

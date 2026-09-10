@@ -43,7 +43,7 @@ std::string getEntrySymbolName(llvm::StringRef EntryName);
 /// Phase 6: wraps a shader body in the group/wave loop and produces the
 /// `feme_cpu_entry_<name>` ABI entry point. See the file comment above for
 /// current scope.
-class EntryWrapperPass : public llvm::PassInfoMixin<EntryWrapperPass> {
+class EntryWrapperPass : public llvm::OptionalPassInfoMixin<EntryWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

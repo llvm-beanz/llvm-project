@@ -29,8 +29,8 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 ; op's fixed-arity encoding.
 ; CHECK-LABEL: define <4 x float> @sample_2d(
 define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
-  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
-  ; CHECK: [[SAMP:%.*]] = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %sampidx, i1 false)
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
+  ; CHECK: [[SAMP:%.*]] = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %sampidx)
   ; CHECK: [[C0:%.*]] = insertelement <2 x float> poison, float %u, i32 0
   ; CHECK: [[C1:%.*]] = insertelement <2 x float> [[C0]], float %v, i32 1
   ; CHECK: [[RES:%.*]] = call <4 x float> @llvm.dx.resource.sample{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[TEX]], target("dx.Sampler", 0) [[SAMP]], <2 x float> [[C1]], <2 x i32> zeroinitializer)
@@ -60,8 +60,8 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
 ; at all -- see DXIL.td).
 ; CHECK-LABEL: define <4 x float> @samplelevel_2d(
 define <4 x float> @samplelevel_2d(i32 %idx, i32 %sampidx, float %u, float %v, float %lod) {
-  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
-  ; CHECK: [[SAMP:%.*]] = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %sampidx, i1 false)
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
+  ; CHECK: [[SAMP:%.*]] = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap{{.*}}(i32 %sampidx)
   ; CHECK: [[RES:%.*]] = call <4 x float> @llvm.dx.resource.samplelevel{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[TEX]], target("dx.Sampler", 0) [[SAMP]], <2 x float> {{.*}}, float %lod, <2 x i32> zeroinitializer)
   %tex1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
   %tex2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %tex1, %dx.types.ResourceProperties { i32 2, i32 1033 })
@@ -86,7 +86,7 @@ define <4 x float> @samplelevel_2d(i32 %idx, i32 %sampidx, float %u, float %v, f
 ; `Texture2D`.
 ; CHECK-LABEL: define <4 x float> @textureload_2d(
 define <4 x float> @textureload_2d(i32 %idx, i32 %x, i32 %y, i32 %mip) {
-  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   ; CHECK: [[RES:%.*]] = call <4 x float> @llvm.dx.resource.load.level{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[TEX]], <2 x i32> {{.*}}, i32 %mip, <2 x i32> zeroinitializer)
   %tex1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
   %tex2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %tex1, %dx.types.ResourceProperties { i32 2, i32 1033 })
@@ -106,7 +106,7 @@ define <4 x float> @textureload_2d(i32 %idx, i32 %x, i32 %y, i32 %mip) {
 ; resource.getdimensions.x`, the scalar overload -- see `raiseGetDimensions`.
 ; CHECK-LABEL: define i32 @dimensions_2d(
 define i32 @dimensions_2d(i32 %idx) {
-  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   ; CHECK: [[W:%.*]] = call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[TEX]])
   ; CHECK: ret i32 [[W]]
   %tex1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
@@ -122,7 +122,7 @@ define i32 @dimensions_2d(i32 %idx) {
 ; whose two out-parameters both read this same op's result.
 ; CHECK-LABEL: define <2 x i32> @dimensions_2d_xy(
 define <2 x i32> @dimensions_2d_xy(i32 %idx) {
-  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   ; CHECK: [[DIMS:%.*]] = call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[TEX]])
   ; CHECK: [[W:%.*]] = extractelement <2 x i32> [[DIMS]], i32 0
   ; CHECK: [[H:%.*]] = extractelement <2 x i32> [[DIMS]], i32 1
@@ -147,7 +147,7 @@ define <2 x i32> @dimensions_2d_xy(i32 %idx) {
 ; `textureload_2d` above truncates `TextureLoad`'s.
 ; CHECK-LABEL: define void @texturestore_2d(
 define void @texturestore_2d(i32 %idx, i32 %x, i32 %y, <4 x float> %v) {
-  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 1, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 1, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx)
   ; CHECK: [[COORD:%.*]] = insertelement <2 x i32> poison, i32 %x, i32 0
   ; CHECK: insertelement <2 x i32> [[COORD]], i32 %y, i32 1
   ; CHECK: call void @llvm.dx.resource.store.texture{{.*}}(target("dx.Texture", <4 x float>, 1, 0, 1, 2) [[TEX]], <2 x i32> {{.*}}, <4 x float> {{.*}})

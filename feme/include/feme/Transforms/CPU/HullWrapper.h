@@ -24,7 +24,7 @@
 
 namespace feme::cpu {
 
-class HullWrapperPass : public llvm::PassInfoMixin<HullWrapperPass> {
+class HullWrapperPass : public llvm::OptionalPassInfoMixin<HullWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

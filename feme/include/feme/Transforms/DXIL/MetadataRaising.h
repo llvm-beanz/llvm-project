@@ -47,7 +47,7 @@ namespace dxil {
 /// An entry point whose own `ShaderKind` property disagrees with the module's
 /// shader model profile is reported through the LLVM context's diagnostic
 /// handler rather than resolved by picking one of the two.
-class MetadataRaisingPass : public llvm::PassInfoMixin<MetadataRaisingPass> {
+class MetadataRaisingPass : public llvm::OptionalPassInfoMixin<MetadataRaisingPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

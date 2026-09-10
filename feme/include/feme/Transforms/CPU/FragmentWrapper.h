@@ -22,7 +22,7 @@
 
 namespace feme::cpu {
 
-class FragmentWrapperPass : public llvm::PassInfoMixin<FragmentWrapperPass> {
+class FragmentWrapperPass : public llvm::OptionalPassInfoMixin<FragmentWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

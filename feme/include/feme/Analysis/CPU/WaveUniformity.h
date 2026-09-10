@@ -94,7 +94,7 @@ public:
 /// check it the same way `print<uniformity>` tests do (see the "Phase 2"
 /// section of feme/docs/FeMeCPUDesign.md).
 class WaveUniformityPrinterPass
-    : public llvm::PassInfoMixin<WaveUniformityPrinterPass> {
+    : public llvm::OptionalPassInfoMixin<WaveUniformityPrinterPass> {
   llvm::raw_ostream &OS;
 
 public:

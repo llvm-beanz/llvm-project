@@ -15,7 +15,7 @@
 ; CHECK: call void @feme.cpu.resource.store.typed.v4f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 {{%.*}}, <4 x float> %[[V3]], i1 {{%.*}})
 define void @main() #0 {
   %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-      @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32 0)
   %tid = call i32 @llvm.dx.thread.id(i32 0)
   %f = sitofp i32 %tid to float
   %v = insertelement <4 x float> <float 1.0, float 2.0, float 3.0, float 4.0>, float %f, i32 0
@@ -24,7 +24,7 @@ define void @main() #0 {
   ret void
 }
 declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-    @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32)
 declare void @llvm.dx.resource.store.typedbuffer.tdx.TypedBuffer_v4f32_1_0_0t.v4f32(
     target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32, <4 x float>)
 declare i32 @llvm.dx.thread.id(i32)

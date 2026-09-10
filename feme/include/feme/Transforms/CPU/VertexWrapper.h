@@ -21,7 +21,7 @@
 
 namespace feme::cpu {
 
-class VertexWrapperPass : public llvm::PassInfoMixin<VertexWrapperPass> {
+class VertexWrapperPass : public llvm::OptionalPassInfoMixin<VertexWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

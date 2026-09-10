@@ -49,7 +49,7 @@ namespace feme::cpu {
 /// Canonicalizes a raised shader's descriptor-heap resource access into
 /// `feme.cpu.resource.*` calls. See the file comment above for current
 /// scope.
-class ResourceLoweringPass : public llvm::PassInfoMixin<ResourceLoweringPass> {
+class ResourceLoweringPass : public llvm::OptionalPassInfoMixin<ResourceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

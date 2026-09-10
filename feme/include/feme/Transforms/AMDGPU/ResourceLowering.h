@@ -47,7 +47,7 @@ namespace amdgpu {
 /// left untouched entirely, rather than partially rewritten, so the failure
 /// is a clean "unsupported" from the backend rather than silently wrong
 /// code.
-class ResourceLoweringPass : public llvm::PassInfoMixin<ResourceLoweringPass> {
+class ResourceLoweringPass : public llvm::OptionalPassInfoMixin<ResourceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

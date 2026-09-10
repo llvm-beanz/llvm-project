@@ -51,7 +51,7 @@ namespace feme::cpu {
 /// for why a GLSL-sourced module needs this and an HLSL/DXIL-sourced one
 /// never does.
 class InlineHelperFunctionsPass
-    : public llvm::PassInfoMixin<InlineHelperFunctionsPass> {
+    : public llvm::OptionalPassInfoMixin<InlineHelperFunctionsPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

@@ -131,13 +131,13 @@ TEST(BoundResourceNormalizationTest, OffsetsNativeDynamicHeapIndex) {
       %h = call target("dx.RawBuffer", i8, 1, 0)
           @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 4, i32 %idx, ptr null)
       %h2 = call target("dx.RawBuffer", i8, 1, 0)
-          @llvm.dx.resource.handlefromheap(i32 %dyn, i1 false)
+          @llvm.dx.resource.handlefromheap(i32 %dyn)
       ret void
     }
     declare target("dx.RawBuffer", i8, 1, 0)
         @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
     declare target("dx.RawBuffer", i8, 1, 0)
-        @llvm.dx.resource.handlefromheap(i32, i1)
+        @llvm.dx.resource.handlefromheap(i32)
   )");
   ASSERT_TRUE(M);
   runPass(*M);

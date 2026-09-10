@@ -77,7 +77,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, RoundingModeRTZ]
 // decoration or execution mode.
 // CHECK-LABEL: llvm.func @fast_math_decoration
 // CHECK-NOT: strictfp
-// CHECK: llvm.fadd %{{.*}}, %{{.*}} {fastmathFlags = #llvm.fastmath<nnan, ninf, nsz>} : f32
+// CHECK: llvm.fadd %{{.*}}, %{{.*}} fastmath<nnan, ninf, nsz> : f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @fast_math_decoration(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_fast_math_mode = #spirv.fastmath_mode<NotNaN|NotInf|NSZ>} : f32
@@ -92,7 +92,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // SPIR-V's core `Fast` bit maps to LLVM's own `fast` group, which implies
 // every individual flag at once.
 // CHECK-LABEL: llvm.func @fast_math_fast_bit
-// CHECK: llvm.fadd %{{.*}}, %{{.*}} {fastmathFlags = #llvm.fastmath<fast>} : f32
+// CHECK: llvm.fadd %{{.*}}, %{{.*}} fastmath<fast> : f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @fast_math_fast_bit(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_fast_math_mode = #spirv.fastmath_mode<Fast>} : f32

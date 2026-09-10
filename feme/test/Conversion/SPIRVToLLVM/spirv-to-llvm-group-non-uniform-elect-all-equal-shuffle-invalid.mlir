@@ -3,11 +3,13 @@
 // `ElectConversionPattern` (roadmap L7e) only implements `Subgroup`
 // execution scope, mirroring `RotateConversionPattern` (roadmap F2):
 // `Workgroup`-scope elect has no real HLSL/GLSL source in this ICD's
-// frontend surface today.
+// frontend surface today. Upstream's own op verifier now rejects a
+// non-`Subgroup` scope outright, so the conversion never sees one -- the
+// same is true of the shuffle cases below.
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform], []> {
   spirv.func @workgroup_elect() -> i1 "None" {
-    // expected-error@+1 {{failed to legalize operation 'spirv.GroupNonUniformElect' that was explicitly marked illegal}}
+    // expected-error@+1 {{'spirv.GroupNonUniformElect' op failed to verify that execution_scope must be 'Subgroup'}}
     %0 = spirv.GroupNonUniformElect <Workgroup> : i1
     spirv.ReturnValue %0 : i1
   }
@@ -21,7 +23,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform]
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformShuffle], []> {
   spirv.func @workgroup_shuffle(%value : f32, %id : i32) -> f32 "None" {
-    // expected-error@+1 {{failed to legalize operation 'spirv.GroupNonUniformShuffle' that was explicitly marked illegal}}
+    // expected-error@+1 {{'spirv.GroupNonUniformShuffle' op failed to verify that execution_scope must be 'Subgroup'}}
     %0 = spirv.GroupNonUniformShuffle <Workgroup> %value, %id : f32, i32
     spirv.ReturnValue %0 : f32
   }
@@ -44,7 +46,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformShuffle], []> {
   spirv.func @workgroup_shuffle_xor(%value : f32, %mask : i32) -> f32 "None" {
-    // expected-error@+1 {{failed to legalize operation 'spirv.GroupNonUniformShuffleXor' that was explicitly marked illegal}}
+    // expected-error@+1 {{'spirv.GroupNonUniformShuffleXor' op failed to verify that execution_scope must be 'Subgroup'}}
     %0 = spirv.GroupNonUniformShuffleXor <Workgroup> %value, %mask : f32, i32
     spirv.ReturnValue %0 : f32
   }

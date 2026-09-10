@@ -45,7 +45,7 @@ namespace nvptx {
 /// anything other than a single typed buffer load/store per access -- are
 /// left untouched entirely, rather than partially rewritten (see
 /// feme::amdgpu::ResourceLoweringPass's own class comment).
-class ResourceLoweringPass : public llvm::PassInfoMixin<ResourceLoweringPass> {
+class ResourceLoweringPass : public llvm::OptionalPassInfoMixin<ResourceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

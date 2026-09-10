@@ -24,7 +24,7 @@
 namespace feme::cpu {
 
 class PatchConstantWrapperPass
-    : public llvm::PassInfoMixin<PatchConstantWrapperPass> {
+    : public llvm::OptionalPassInfoMixin<PatchConstantWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

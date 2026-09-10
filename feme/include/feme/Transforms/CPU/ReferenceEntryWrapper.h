@@ -39,7 +39,7 @@ namespace feme::cpu {
 
 /// See the file comment above.
 class ReferenceEntryWrapperPass
-    : public llvm::PassInfoMixin<ReferenceEntryWrapperPass> {
+    : public llvm::OptionalPassInfoMixin<ReferenceEntryWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

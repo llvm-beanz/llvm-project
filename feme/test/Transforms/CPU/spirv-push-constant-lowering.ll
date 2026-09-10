@@ -116,4 +116,4 @@ define i32 @keeps_metadata() !feme.fake_signature !10 {
 }
 !10 = !{!"keeps_metadata_marker"}
 ; CHECK-DAG: = !{!"reads_only_second_member", i32 8, i1 false, i32 0, i32 0, i32 4}
-; CHECK: ![[FAKE_MD]] = !{!"keeps_metadata_marker"}
+; CHECK-DAG: ![[FAKE_MD]] = !{!"keeps_metadata_marker"}

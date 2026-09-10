@@ -40,7 +40,7 @@
 
 define void @main() #0 {
   %h = call target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap(i32 0)
   %gid = call i32 @llvm.dx.group.id(i32 0)
   %val = add i32 100, %gid
   %ptr = getelementptr inbounds [1 x i32], ptr addrspace(3) @shared, i32 0, i32 0
@@ -54,7 +54,7 @@ define void @main() #0 {
   ret void
 }
 declare target("dx.RawBuffer", i8, 1, 0)
-    @llvm.dx.resource.handlefromheap(i32, i1)
+    @llvm.dx.resource.handlefromheap(i32)
 declare void @llvm.dx.resource.store.rawbuffer.i32(
     target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
 declare i32 @llvm.dx.thread.id(i32)

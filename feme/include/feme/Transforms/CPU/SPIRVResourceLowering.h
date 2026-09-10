@@ -160,7 +160,7 @@ namespace feme::cpu {
 /// DXIL `BoundResourceNormalizationPass` + `ResourceLoweringPass` pair
 /// produces. See the file comment above for current scope.
 class SPIRVResourceLoweringPass
-    : public llvm::PassInfoMixin<SPIRVResourceLoweringPass> {
+    : public llvm::OptionalPassInfoMixin<SPIRVResourceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

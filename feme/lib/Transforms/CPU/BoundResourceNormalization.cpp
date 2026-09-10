@@ -197,8 +197,8 @@ void rewriteBoundHandles(const SmallVectorImpl<BoundHandle> &Handles,
     Function *HeapFn = Intrinsic::getOrInsertDeclaration(
         BH.Handle->getModule(), Intrinsic::dx_resource_handlefromheap,
         {BH.Handle->getType()});
-    Value *NewCall = Builder.CreateCall(
-        HeapFn, {NewIndex, Builder.getInt1(false)}, BH.Handle->getName());
+    Value *NewCall =
+        Builder.CreateCall(HeapFn, {NewIndex}, BH.Handle->getName());
     BH.Handle->replaceAllUsesWith(NewCall);
     TouchedFunctions.insert(cast<Instruction>(NewCall)->getFunction());
     BH.Handle->eraseFromParent();

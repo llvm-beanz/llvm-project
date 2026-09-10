@@ -15,7 +15,7 @@
 ; CHECK: fadd <4 x float>
 define void @main() #0 {
   %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-      @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32 0)
   %tid = call i32 @llvm.dx.thread.id(i32 0)
   %r = call {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer.v4f32.tdx.TypedBuffer_v4f32_1_0_0t(
       target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %tid)
@@ -26,7 +26,7 @@ define void @main() #0 {
   ret void
 }
 declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
-    @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32)
 declare {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer.v4f32.tdx.TypedBuffer_v4f32_1_0_0t(
     target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32)
 declare i32 @llvm.dx.thread.id(i32)

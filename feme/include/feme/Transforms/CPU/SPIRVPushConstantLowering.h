@@ -125,7 +125,7 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
 /// resource access of its own -- see the file comment for the combined
 /// case, handled by `feme::cpu::SPIRVResourceLoweringPass` instead.
 class SPIRVPushConstantLoweringPass
-    : public llvm::PassInfoMixin<SPIRVPushConstantLoweringPass> {
+    : public llvm::OptionalPassInfoMixin<SPIRVPushConstantLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

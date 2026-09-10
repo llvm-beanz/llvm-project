@@ -53,7 +53,7 @@ namespace amdgpu {
 /// Rewrites the subset of raised, format-agnostic intrinsic calls this pass
 /// currently covers into the AMDGPU target intrinsic calls they correspond
 /// to, so the result is valid input to an AMDGPU `llvm::TargetMachine`.
-class RaisedLoweringPass : public llvm::PassInfoMixin<RaisedLoweringPass> {
+class RaisedLoweringPass : public llvm::OptionalPassInfoMixin<RaisedLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

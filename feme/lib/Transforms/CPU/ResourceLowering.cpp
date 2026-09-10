@@ -759,9 +759,33 @@ void attachResourceMetadata(Function &F,
 
 } // namespace
 
+/// Replaces every `llvm.dx.resource.nonuniformindex` call with its own index
+/// operand. The marker only tells a GPU backend that a descriptor index may
+/// diverge across a wave; the CPU target evaluates every lane's index
+/// independently regardless, so it carries no information anything below this
+/// point needs (see the "Resource Model" section of
+/// feme/docs/FeMeCPUDesign.md).
+static bool stripNonUniformIndexMarkers(Module &M) {
+  Function *F = M.getFunction(
+      Intrinsic::getName(Intrinsic::dx_resource_nonuniformindex));
+  if (!F)
+    return false;
+
+  for (User *U : llvm::make_early_inc_range(F->users())) {
+    auto *CI = dyn_cast<CallInst>(U);
+    if (!CI || CI->getCalledFunction() != F)
+      continue;
+    CI->replaceAllUsesWith(CI->getArgOperand(0));
+    CI->eraseFromParent();
+  }
+  if (F->isDeclaration() && F->use_empty())
+    F->eraseFromParent();
+  return true;
+}
+
 PreservedAnalyses ResourceLoweringPass::run(Module &M,
                                             ModuleAnalysisManager &) {
-  bool Changed = false;
+  bool Changed = stripNonUniformIndexMarkers(M);
   for (Function &F : llvm::make_early_inc_range(M.functions())) {
     SmallVector<uint32_t, 4> StaticHeapIndices;
     RootConstantMetadata RootConstant;

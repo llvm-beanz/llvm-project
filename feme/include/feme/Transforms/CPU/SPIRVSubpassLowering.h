@@ -46,7 +46,7 @@ namespace feme::cpu {
 /// through unchanged) and reaches `feme::cpu::FragmentWrapperPass` by name.
 /// A function with no such call is left untouched.
 class SPIRVSubpassLoweringPass
-    : public llvm::PassInfoMixin<SPIRVSubpassLoweringPass> {
+    : public llvm::OptionalPassInfoMixin<SPIRVSubpassLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

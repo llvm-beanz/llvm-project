@@ -284,7 +284,7 @@ public:
     Entry.Body += "  %tid = call i32 @llvm.dx.thread.id(i32 0)\n";
     Entry.Body += "  %gid = call i32 @llvm.dx.group.id(i32 0)\n";
     Entry.Body += "  %h = call target(\"dx.RawBuffer\", i8, 1, 0) "
-                  "@llvm.dx.resource.handlefromheap(i32 0, i1 false)\n";
+                  "@llvm.dx.resource.handlefromheap(i32 0)\n";
 
     unsigned Budget = Opts.MaxConstructs;
     OpenBlock Cur = std::move(Entry);
@@ -308,7 +308,7 @@ public:
        << "declare i32 @llvm.dx.thread.id(i32)\n"
        << "declare i32 @llvm.dx.group.id(i32)\n"
        << "declare target(\"dx.RawBuffer\", i8, 1, 0) "
-          "@llvm.dx.resource.handlefromheap(i32, i1)\n"
+          "@llvm.dx.resource.handlefromheap(i32)\n"
        << "declare void @llvm.dx.resource.store.rawbuffer.i32(\n"
        << "    target(\"dx.RawBuffer\", i8, 1, 0), i32, i32, i32)\n"
        << "attributes #0 = { \"hlsl.shader\"=\"compute\" "

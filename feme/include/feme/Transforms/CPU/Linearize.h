@@ -51,7 +51,7 @@ namespace feme::cpu {
 
 /// Phase 3: linearizes divergent control flow into masked data flow. See the
 /// file comment above for current scope.
-class LinearizePass : public llvm::PassInfoMixin<LinearizePass> {
+class LinearizePass : public llvm::OptionalPassInfoMixin<LinearizePass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

@@ -79,7 +79,7 @@ extern const char ReferenceLoweredAttrName[];
 
 /// See the file comment above.
 class ReferenceLoweringPass
-    : public llvm::PassInfoMixin<ReferenceLoweringPass> {
+    : public llvm::OptionalPassInfoMixin<ReferenceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

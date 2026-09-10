@@ -24,7 +24,7 @@
 
 namespace feme::cpu {
 
-class DomainWrapperPass : public llvm::PassInfoMixin<DomainWrapperPass> {
+class DomainWrapperPass : public llvm::OptionalPassInfoMixin<DomainWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

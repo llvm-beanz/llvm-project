@@ -60,7 +60,7 @@ constexpr char MixedResourceShaderIR[] = R"(
     %bound = call target("dx.RawBuffer", i8, 1, 0)
         @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
     %dynamic = call target("dx.RawBuffer", i8, 1, 0)
-        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+        @llvm.dx.resource.handlefromheap(i32 0)
     %tid = call i32 @llvm.dx.thread.id(i32 0)
     %offset = mul i32 %tid, 4
     call void @llvm.dx.resource.store.rawbuffer.i32(
@@ -72,7 +72,7 @@ constexpr char MixedResourceShaderIR[] = R"(
   declare target("dx.RawBuffer", i8, 1, 0)
       @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
   declare target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap(i32, i1)
+      @llvm.dx.resource.handlefromheap(i32)
   declare void @llvm.dx.resource.store.rawbuffer.i32(
       target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
   declare i32 @llvm.dx.thread.id(i32)

@@ -39,7 +39,7 @@ namespace dxil {
 /// unmodified, so this pass composes safely with targets that handle some of
 /// them natively.
 class IntrinsicExpansionPass
-    : public llvm::PassInfoMixin<IntrinsicExpansionPass> {
+    : public llvm::OptionalPassInfoMixin<IntrinsicExpansionPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

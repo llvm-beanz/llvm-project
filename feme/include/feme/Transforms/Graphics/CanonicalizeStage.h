@@ -38,7 +38,7 @@ namespace graphics {
 /// status note) builds and attaches the entry's `feme::EntrySignature` from
 /// its stage-IO interface variables.
 class CanonicalizeStagePass
-    : public llvm::PassInfoMixin<CanonicalizeStagePass> {
+    : public llvm::OptionalPassInfoMixin<CanonicalizeStagePass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

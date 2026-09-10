@@ -2008,11 +2008,13 @@ ABI error rather than a second interpretation of `FemeDispatchArgs`.
 
 ### Lowering (`feme::cpu::ResourceLoweringPass`, `feme-cpu-lower-resources`)
 
-- `llvm.dx.resource.handlefromheap(index, nonuniform)` (and its SPIR-V
-  equivalent) remains an explicit heap index rather than becoming a loaded
-  `FemeDescriptor`. The `nonuniform` flag is a GPU codegen hint and is
-  ignored; normal uniformity analysis determines whether the index varies by
-  lane.
+- `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
+  remains an explicit heap index rather than becoming a loaded
+  `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the
+  index operand in `llvm.dx.resource.nonuniformindex`; that marker is a GPU
+  codegen hint, so `ResourceLoweringPass` strips it (replacing each call with
+  its own operand) before lowering. Normal uniformity analysis determines
+  whether the index varies by lane.
 - Each operation through that handle becomes a scalar, type-mangled
   `feme.cpu.resource.*` call carrying the heap pointer and count, descriptor
   index, element or byte offset, and source-level view type. For example:

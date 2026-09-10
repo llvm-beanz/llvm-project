@@ -58,7 +58,7 @@ namespace feme::cpu {
 /// `feme.stage.emit_mesh_tasks` call into `FemeTaskArgs::MeshGroupCount`.
 /// See the file comment above for scope.
 class TaskPayloadWrapperPass
-    : public llvm::PassInfoMixin<TaskPayloadWrapperPass> {
+    : public llvm::OptionalPassInfoMixin<TaskPayloadWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

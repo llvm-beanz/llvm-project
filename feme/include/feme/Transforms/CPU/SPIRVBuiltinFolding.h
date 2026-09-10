@@ -46,7 +46,7 @@ namespace feme::cpu {
 /// the file comment above for why this specifically unblocks SPIR-V-sourced
 /// modules.
 class SPIRVBuiltinFoldingPass
-    : public llvm::PassInfoMixin<SPIRVBuiltinFoldingPass> {
+    : public llvm::OptionalPassInfoMixin<SPIRVBuiltinFoldingPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

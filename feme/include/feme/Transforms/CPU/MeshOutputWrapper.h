@@ -89,7 +89,7 @@ namespace feme::cpu {
 /// `feme.stage.output.store` writes into `FemeMeshArgs`'s flat output
 /// storage. See the file comment above for scope.
 class MeshOutputWrapperPass
-    : public llvm::PassInfoMixin<MeshOutputWrapperPass> {
+    : public llvm::OptionalPassInfoMixin<MeshOutputWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

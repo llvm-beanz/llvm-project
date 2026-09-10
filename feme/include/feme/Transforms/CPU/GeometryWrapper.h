@@ -24,7 +24,7 @@
 
 namespace feme::cpu {
 
-class GeometryWrapperPass : public llvm::PassInfoMixin<GeometryWrapperPass> {
+class GeometryWrapperPass : public llvm::OptionalPassInfoMixin<GeometryWrapperPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

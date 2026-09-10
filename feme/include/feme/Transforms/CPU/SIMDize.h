@@ -77,7 +77,7 @@ std::optional<WaveBodyEnv> getWaveBodyEnv(llvm::Function &F);
 
 /// Phase 4: widens a linearized wave body to `<W x T>`. See the file comment
 /// above for current scope.
-class SIMDizePass : public llvm::PassInfoMixin<SIMDizePass> {
+class SIMDizePass : public llvm::OptionalPassInfoMixin<SIMDizePass> {
   /// The wave size to widen to; 0 resolves it per-function from the
   /// `feme.cpu.wavesize` attribute `feme::Driver` records (see "Wave Size
   /// Selection"), falling back to `feme::cpu::MinWaveSize`.

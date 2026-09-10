@@ -36,7 +36,7 @@ namespace feme::cpu {
 
 /// Phase 5: lowers wave intrinsics and thread/group builtins in a widened
 /// module. See the file comment above for current scope.
-class WaveLoweringPass : public llvm::PassInfoMixin<WaveLoweringPass> {
+class WaveLoweringPass : public llvm::OptionalPassInfoMixin<WaveLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

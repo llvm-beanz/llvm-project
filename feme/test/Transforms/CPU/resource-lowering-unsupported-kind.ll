@@ -16,7 +16,7 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 ; CHECK: call target("dx.CBuffer", {{.*}}) @llvm.dx.resource.handlefromheap
 define void @cbuffer_via_heap() {
   %h = call target("dx.CBuffer", [16 x i8])
-      @llvm.dx.resource.handlefromheap.tdx.CBuffer_a16i8t(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.tdx.CBuffer_a16i8t(i32 0)
   ret void
 }
 
@@ -30,6 +30,6 @@ define void @register_bound() {
 }
 
 declare target("dx.CBuffer", [16 x i8])
-    @llvm.dx.resource.handlefromheap.tdx.CBuffer_a16i8t(i32, i1)
+    @llvm.dx.resource.handlefromheap.tdx.CBuffer_a16i8t(i32)
 declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
     @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)

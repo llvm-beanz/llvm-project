@@ -41,7 +41,7 @@ namespace graphics {
 /// H6g-b-c) any raw stage-IO global-variable access `CanonicalizeStagePass`
 /// left un-canonicalized. Diagnoses (but does not fix) any violation;
 /// always preserves all analyses, since it never modifies IR.
-class ValidateStagePass : public llvm::PassInfoMixin<ValidateStagePass> {
+class ValidateStagePass : public llvm::OptionalPassInfoMixin<ValidateStagePass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

@@ -901,8 +901,11 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
 /// register -- so this only needs `AnnotateHandle`'s
 /// `%dx.types.ResourceProperties` operand to recover the resource's
 /// `target("dx.")` handle type, via `buildAnnotatedHandleType`, exactly as
-/// `raiseResourceHandleFromBinding` does. The heap index and
-/// non-uniform-index operands carry over unchanged. The raw op's
+/// `raiseResourceHandleFromBinding` does. The heap index carries over
+/// unchanged; a non-uniform one is wrapped in
+/// `llvm.dx.resource.nonuniformindex`, which is how the canonical
+/// intrinsic (whose own operand list is just the index) spells that. The raw
+/// op's
 /// `SamplerHeap` operand (`CreateHandleFromHeap`'s second argument) does not
 /// need to survive separately: which heap a handle indexes is already
 /// implied by whether its reconstructed resource kind is `dx.Sampler`.
@@ -938,12 +941,19 @@ bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
 
   IRBuilder<> Builder(&AnnotateCI);
   Value *Index = HandleCI->getArgOperand(1);
-  Value *NonUniform = HandleCI->getArgOperand(3);
+
+  // Anything but a provably-zero NonUniformIndex operand (including a
+  // non-constant one) is conservatively treated as non-uniform.
+  if (getConstInt(HandleCI->getArgOperand(3)) != 0) {
+    Function *NonUniformFn = Intrinsic::getOrInsertDeclaration(
+        AnnotateCI.getModule(), Intrinsic::dx_resource_nonuniformindex);
+    Index = Builder.CreateCall(NonUniformFn, {Index});
+  }
 
   Function *HandleFromHeapFn = Intrinsic::getOrInsertDeclaration(
       AnnotateCI.getModule(), Intrinsic::dx_resource_handlefromheap,
       {HandleTy});
-  Value *NewHandle = Builder.CreateCall(HandleFromHeapFn, {Index, NonUniform});
+  Value *NewHandle = Builder.CreateCall(HandleFromHeapFn, {Index});
 
   Function *CastFn = Intrinsic::getOrInsertDeclaration(
       AnnotateCI.getModule(), Intrinsic::dx_resource_casthandle,

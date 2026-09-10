@@ -18,7 +18,7 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 ; CHECK: [[TRUNC:%.*]] = trunc i64 [[SUM]] to i32
 ; CHECK: [[CLAMPED:%.*]] = select i1 [[OVF]], i32 -1, i32 [[TRUNC]]
 ; CHECK: [[IDX:%.*]] = select i1 [[OOR]], i32 -1, i32 [[CLAMPED]]
-; CHECK: call target("dx.TypedBuffer", <4 x float>, 1, 0, 0) @llvm.dx.resource.handlefromheap.{{.*}}(i32 [[IDX]], i1 false)
+; CHECK: call target("dx.TypedBuffer", <4 x float>, 1, 0, 0) @llvm.dx.resource.handlefromheap.{{.*}}(i32 [[IDX]])
 define void @main(i32 %idx) {
   %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
       @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_v4f32_1_0_0t(i32 0, i32 0, i32 4, i32 %idx, ptr null)

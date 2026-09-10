@@ -47,7 +47,7 @@ namespace {
 constexpr char ShaderIR[] = R"(
   define void @main() #0 {
     %h = call target("dx.RawBuffer", i8, 1, 0)
-        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+        @llvm.dx.resource.handlefromheap(i32 0)
     %gid = call i32 @llvm.dx.group.id(i32 0)
     %offset = mul i32 %gid, 4
     call void @llvm.dx.resource.store.rawbuffer.i32(
@@ -55,7 +55,7 @@ constexpr char ShaderIR[] = R"(
     ret void
   }
   declare target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap(i32, i1)
+      @llvm.dx.resource.handlefromheap(i32)
   declare void @llvm.dx.resource.store.rawbuffer.i32(
       target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
   declare i32 @llvm.dx.group.id(i32)
@@ -1081,7 +1081,7 @@ constexpr char MeshGroupSharedBarrierShaderIR[] = R"(
   @shared = internal addrspace(3) global [4 x i32] undef
   define void @ms_main() #0 {
     %h = call target("dx.RawBuffer", i8, 1, 0)
-        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+        @llvm.dx.resource.handlefromheap(i32 0)
     %gid = call i32 @llvm.dx.group.id(i32 0)
     %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
     store i32 %gid, ptr addrspace(3) %ptr
@@ -1094,7 +1094,7 @@ constexpr char MeshGroupSharedBarrierShaderIR[] = R"(
     ret void
   }
   declare target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap(i32, i1)
+      @llvm.dx.resource.handlefromheap(i32)
   declare void @llvm.dx.resource.store.rawbuffer.i32(
       target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
   declare i32 @llvm.dx.group.id(i32)
@@ -1109,7 +1109,7 @@ constexpr char TaskGroupSharedBarrierShaderIR[] = R"(
   @shared = internal addrspace(3) global [4 x i32] undef
   define void @ts_main() #0 {
     %h = call target("dx.RawBuffer", i8, 1, 0)
-        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+        @llvm.dx.resource.handlefromheap(i32 0)
     %gid = call i32 @llvm.dx.group.id(i32 0)
     %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
     store i32 %gid, ptr addrspace(3) %ptr
@@ -1122,7 +1122,7 @@ constexpr char TaskGroupSharedBarrierShaderIR[] = R"(
     ret void
   }
   declare target("dx.RawBuffer", i8, 1, 0)
-      @llvm.dx.resource.handlefromheap(i32, i1)
+      @llvm.dx.resource.handlefromheap(i32)
   declare void @llvm.dx.resource.store.rawbuffer.i32(
       target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
   declare i32 @llvm.dx.group.id(i32)

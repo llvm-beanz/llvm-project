@@ -55,7 +55,7 @@ namespace dxil {
 /// covers into the raised, format-agnostic `llvm.dx.*` conventions
 /// feme::dxil::OpRaisingPass's own output already uses, so the result is
 /// valid input to feme::DXILExporter/an in-tree DirectX `TargetMachine`.
-class SPIRVRaisingPass : public llvm::PassInfoMixin<SPIRVRaisingPass> {
+class SPIRVRaisingPass : public llvm::OptionalPassInfoMixin<SPIRVRaisingPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

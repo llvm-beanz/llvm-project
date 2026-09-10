@@ -37,7 +37,7 @@ namespace spirv {
 /// valid input to a SPIRV `llvm::TargetMachine`. Ops without a counterpart
 /// are left unmodified, so this pass composes safely with modules that mix
 /// lowered and not-yet-lowered operations.
-class RaisedLoweringPass : public llvm::PassInfoMixin<RaisedLoweringPass> {
+class RaisedLoweringPass : public llvm::OptionalPassInfoMixin<RaisedLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

@@ -17,9 +17,9 @@
 ; CHECK: fadd <4 x float>
 define void @main() #0 {
   %img = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-      @llvm.dx.resource.handlefromheap.timg(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.timg(i32 0)
   %samp = call target("dx.Sampler", 0)
-      @llvm.dx.resource.handlefromheap.tsamp(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.tsamp(i32 0)
   %tid = call i32 @llvm.dx.thread.id(i32 0)
   %u = sitofp i32 %tid to float
   %coord = insertelement <2 x float> <float 0.0, float 0.0>, float %u, i32 0
@@ -33,8 +33,8 @@ define void @main() #0 {
   ret void
 }
 declare target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-    @llvm.dx.resource.handlefromheap.timg(i32, i1)
-declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tsamp(i32, i1)
+    @llvm.dx.resource.handlefromheap.timg(i32)
+declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tsamp(i32)
 declare <4 x float> @llvm.dx.resource.sample.v4f32.timg.tsamp.v2f32(
     target("dx.Texture", <4 x float>, 0, 0, 0, 2), target("dx.Sampler", 0),
     <2 x float>, <2 x i32>)
@@ -50,9 +50,9 @@ attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
 ; CHECK-NOT: call <4 x float> @feme.cpu.image.sample.2d.v4f32(
 define void @uniform_sample() #0 {
   %img = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
-      @llvm.dx.resource.handlefromheap.timg(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.timg(i32 0)
   %samp = call target("dx.Sampler", 0)
-      @llvm.dx.resource.handlefromheap.tsamp(i32 0, i1 false)
+      @llvm.dx.resource.handlefromheap.tsamp(i32 0)
   %texel = call <4 x float> @llvm.dx.resource.sample.v4f32.timg.tsamp.v2f32(
       target("dx.Texture", <4 x float>, 0, 0, 0, 2) %img,
       target("dx.Sampler", 0) %samp,

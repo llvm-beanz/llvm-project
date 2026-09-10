@@ -51,7 +51,7 @@ namespace dxil {
 /// of its operations, see `llvm/lib/Target/DirectX/DXIL.td`) back into the
 /// `llvm.dx.*`/standard LLVM intrinsic calls they were lowered from by
 /// `DXILOpLowering`, for the subset of opcodes this pass currently covers.
-class OpRaisingPass : public llvm::PassInfoMixin<OpRaisingPass> {
+class OpRaisingPass : public llvm::OptionalPassInfoMixin<OpRaisingPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
