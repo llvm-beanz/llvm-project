@@ -35052,6 +35052,86 @@ Split out: **L85** (`GroupNonUniformBallot` support -- new legalization patterns
 `WaveCallKind::Ballot`-family CPU-runtime path, and its own real CTS verification pass, needed before
 `SHUFFLE_BIT` can be safely advertised).
 
+## L85: `GroupNonUniformBallot` implementation, `BALLOT_BIT` flip, and the new L88 `Linearize.cpp` crash split
+
+Implemented roadmap L85: `GroupNonUniformBallot`'s whole family
+(`OpGroupNonUniformBallot`/`InverseBallot`/`BallotBitExtract`/`BallotFindLSB`/`BallotFindMSB`/
+`BallotBitCount`), previously entirely unimplemented anywhere in this project.
+
+Two new MLIR SPIR-V dialect ops were added first (`OpGroupNonUniformInverseBallot`/
+`OpGroupNonUniformBallotBitExtract`, confirmed missing entirely upstream), followed by six new
+SPIR-V-to-LLVM conversion patterns in `SPIRVToLLVMPatterns.cpp`
+(`BallotConversionPattern`/`InverseBallotConversionPattern`/`BallotBitExtractConversionPattern`/
+`BallotFindLSBConversionPattern`/`BallotFindMSBConversionPattern`/`BallotBitCountConversionPattern`)
+and a new `WaveCallKind::Ballot` CPU-runtime path (`SIMDize.cpp`/`WaveCalls.cpp`) bridging DXIL's
+`{i32,i32,i32,i32}` ballot ABI to SPIR-V's `<4 x i32>` one.
+
+A real, temporary `BALLOT_BIT`-only flag-flip verification run against `dEQP-VK.subgroups.ballot_other.*`
+(the group whose own CTS source, `vktSubgroupsBallotOtherTests.cpp`, most directly exercises every ballot
+variant) initially showed 6/14 compute cases failing (`subgroupballotbitcount`/`subgroupballotfindlsb`/
+`subgroupballotfindmsb`, each ± `_requiredsubgroupsize`). Two distinct, real bugs were found and fixed:
+
+1. **`WaveUniformity.cpp`'s `AlwaysUniform` intrinsic list had DXIL's `Intrinsic::dx_wave_ballot` but was
+   missing its SPIR-V twin, `Intrinsic::spv_subgroup_ballot`** -- meaning the generic `UniformityAnalysis`
+   incorrectly treated a real `spirv.GroupNonUniformBallot`-derived result as divergent whenever its own
+   predicate operand was (the common case), which in turn made `feme::cpu::SIMDizePass` try to
+   decompose/widen it lane-by-lane downstream instead of recognizing it as a supported uniform,
+   vector-typed producer. Fixed by adding the missing case.
+
+2. **`BallotFindLSBConversionPattern`/`BallotFindMSBConversionPattern`/`BallotBitCountConversionPattern`'s
+   `Reduce` variant operated on the raw, unclipped 128-bit bitcast of the ballot vector**, unlike
+   `InclusiveScan`/`ExclusiveScan` (whose own narrower prefix mask coincidentally already excludes any
+   bits beyond `gl_SubgroupSize`). Per the SPIR-V spec, these ops must only consider bits representing
+   actual invocations in the group -- confirmed via the real CTS source's own `MAKE_HIGH_BALLOT_RESULT`
+   macro, which deliberately sets garbage bits beyond `gl_SubgroupSize` specifically to test this
+   clipping requirement. Fixed by adding a new `clipBallotBitsToSubgroupSize` helper (masking to
+   `(1 << gl_SubgroupSize) - 1` via the existing `llvm.spv.subgroup.size` intrinsic, `>=128`-guarded to
+   avoid a poison shift) and applying it at all three call sites.
+
+With both fixed, a re-run showed 12/14 passing -- only `subgroupballotfindlsb`/its `_requiredsubgroupsize`
+twin still failed. A minimal hand-reduced repro (`subgroupBallot(true)` inside a `subgroupElect()`-gated
+`else` branch, mirroring the real CTS shader's own `if (subgroupElect()) {...} else { ... }` pattern)
+isolated a third, distinct bug:
+
+3. **`feme::cpu::LinearizePass`'s `applyStageMasks` had no case for a plain `subgroupBallot`/
+   `WaveActiveBallot` call**, unlike its existing `feme.cpu.resource.*`/`feme.cpu.image.*` handling (see
+   L7r's own precedent for the latter): a ballot call's own predicate operand kept its original,
+   un-narrowed value (a compile-time constant `true`, from the source shader) after this pass flattened
+   the divergent branch it used to sit inside away into predicated straight-line code -- so it saw every
+   wave-active lane instead of just the lanes that actually reached that arm, producing a stale/too-wide
+   mask (confirmed via a raw `ballot.x` dump: `15` for lanes 1-3 in the `else` arm, when it should have
+   excluded lane 0's own bit). Fixed by ANDing the ballot call's predicate operand with the block's
+   current live mask, mirroring the existing resource/image-call handling immediately above it in the
+   same function.
+
+New unit/lit tests: `spirv-to-llvm-group-non-uniform-ballot.mlir`,
+`spirv-to-llvm-group-non-uniform-ballot-invalid.mlir`, `simdize-spirv-ballot-vector-result.ll`,
+`ballot-predicate-masked.ll`. `ninja check-feme`: 2,897 discovered, 2,838 passed, 59 unsupported,
+0 failed (zero regressions).
+
+Final real `deqp-vk` re-run with `BALLOT_BIT` genuinely flipped: `dEQP-VK.subgroups.ballot.*` (23 cases)
+2 passed/0 failed/21 `NotSupported`; `dEQP-VK.subgroups.ballot_other.*` (84 cases) 14 passed/0 failed/70
+`NotSupported` -- 100% of applicable cases passing in both groups. `BALLOT_BIT` is now advertised
+(`Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+VK_SUBGROUP_FEATURE_BALLOT_BIT`).
+
+A further speculative flip of `SHUFFLE_BIT` (this row's own original motivation) then found a new,
+distinct blocker: `dEQP-VK.subgroups.shuffle.*`'s very first case
+(`subgroupclusteredrotate_bool_constant`) crashes the whole `deqp-vk` process with a real
+`llvm::Value::~Value` "Uses remain when a value is destroyed!" assertion, inside
+`DiamondFlattener`'s own nested-diamond live/side-effect-mask `PHINode` merging -- a distinct new
+`Linearize.cpp` bug, not caused by this row's own ballot work, split out to new roadmap row **L88**.
+`SHUFFLE_BIT` stays un-advertised pending that row.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updated to reflect the real `BALLOT_BIT` flip,
+the now-non-vacuous `GroupNonUniformBallot`/`Vote` coverage under `VK_KHR_shader_subgroup_extended_types`,
+and the new L88 blocker. `FeMeCPUDesign.md` reviewed: no update needed (this closes real bugs in an
+already-documented mechanism -- "Phase 3: Linearization and Predication"'s own masked-call rewriting, and
+"Phase 5: Wave and Builtin Lowering"'s own wave-op ABI bridging -- rather than deviating from or extending
+the design itself).
+
+Split out: **L88** (a real `DiamondFlattener` `PHINode`-lifetime crash blocking a safe `SHUFFLE_BIT` flip).
+
 ## L7f: `NonUniform` decoration deserialization gap, root cause and fix (plus new L86 `OpCopyObject` split)
 
 Investigated roadmap L7f: an `unhandled Decoration : 'NonUniform'` MLIR SPIR-V deserialization
