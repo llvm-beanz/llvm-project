@@ -57,14 +57,18 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
   // (roadmap L7t) `VOTE_BIT` is now safe to advertise (see
   // PhysicalDeviceInfo.cpp's own comment). (roadmap L85) `BALLOT_BIT` is
   // now also safe to advertise (`GroupNonUniformBallot`'s whole family is
-  // implemented and CTS-verified). `SHUFFLE_BIT` is still not yet, since
-  // a speculative flip crashes a real `dEQP-VK.subgroups.shuffle.*` CTS
-  // re-run on an unrelated `Linearize.cpp` bug (roadmap L88).
+  // implemented and CTS-verified). (roadmap L89f) `SHUFFLE_BIT` now joins
+  // them, once L89b's compile-time blowup and L89d's vector-typed
+  // `wave.readlane` gap were both fixed.
   EXPECT_TRUE(Info.SubgroupSupportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT);
   EXPECT_TRUE(Info.SubgroupSupportedOperations &
               VK_SUBGROUP_FEATURE_BALLOT_BIT);
+  EXPECT_TRUE(Info.SubgroupSupportedOperations &
+              VK_SUBGROUP_FEATURE_SHUFFLE_BIT);
+  // `SHUFFLE_RELATIVE_BIT` is a separate bit, gating
+  // `subgroupShuffleUp`/`Down`, which have no conversion pattern yet.
   EXPECT_FALSE(Info.SubgroupSupportedOperations &
-               VK_SUBGROUP_FEATURE_SHUFFLE_BIT);
+               VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT);
 }
 
 TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {

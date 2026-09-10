@@ -145,19 +145,28 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // correctly `NotSupported` for ray tracing/mesh shading, unrelated to
   // this bit).
   //
-  // `SHUFFLE_BIT` still stays un-advertised: the `Value.cpp`
-  // "Uses remain when a value is destroyed!" `DiamondFlattener` crash a
-  // speculative flip used to hit first (roadmap L88, now fixed --
-  // `foldRedundantFlowBlock` in `Linearize.cpp` no longer folds away a
-  // "Flow" block whose own mask phi escapes to an outer diamond) is gone,
-  // but a re-verification run immediately reached a *distinct* blocker: a
-  // real LLVM host-backend `PostMachineSchedulerLegacy` compile-time hang,
-  // confirmed to reproduce even against this file's own currently-committed
-  // feature set (`subgroupClusteredRotate`'s own `_requiredsubgroupsize`
-  // CTS variants do not gate on this bit at all), tracked as roadmap L89.
-  Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
-                                     VK_SUBGROUP_FEATURE_VOTE_BIT |
-                                     VK_SUBGROUP_FEATURE_BALLOT_BIT;
+  // (roadmap L89f) `SHUFFLE_BIT` is now also safe to advertise. It had been
+  // gated behind a moving list of blockers since the L7-series work, most
+  // recently L89's host-backend compile-time blowup (fixed by L89b, which
+  // root-caused it to `lowerReadLane`'s per-lane dynamically-indexed
+  // `extractelement` and its `O(W^2)` machine-instruction expansion) and
+  // L89d's missing vector-typed `wave.readlane` decomposition in
+  // `feme::cpu::SIMDizePass`. Both `OpGroupNonUniformShuffle` (roadmap L7e)
+  // and `OpGroupNonUniformShuffleXor` (roadmap L7i) -- exactly the two op
+  // types CTS gates on this bit, see `supportedCheck` in
+  // vktSubgroupsShuffleTests.cpp -- have had conversion patterns
+  // (`ShuffleConversionPattern`/`ShuffleXorConversionPattern` in
+  // SPIRVToLLVMPatterns.cpp) since those milestones; this bit was all that
+  // kept CTS from ever exercising them. A full real `dEQP-VK.subgroups.*`
+  // sweep (48,705 cases) before and after the flip confirms it: see
+  // VulkanCTSReport.md's "L89f" section.
+  //
+  // `SHUFFLE_RELATIVE_BIT` deliberately stays un-advertised: it is a
+  // separate bit gating `OpGroupNonUniformShuffleUp`/`ShuffleDown`
+  // (`subgroupShuffleUp`/`Down`), which have no conversion pattern at all.
+  Info.SubgroupSupportedOperations =
+      VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+      VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
 
   // (roadmap E7) `subgroupSizeControl`'s own range: every power-of-two wave
   // size `feme::cpu::resolveWaveSize` itself accepts, reused rather than
