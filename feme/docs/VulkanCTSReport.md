@@ -35313,3 +35313,80 @@ precedent before it was filed.
 Split out: **L87** (the leftover "GLSL.std.450" half of L7g's own original filing text, never
 confirmed to a concrete repro across L7a-L7g's own investigations, all of which instead found and
 closed real `unhandled opcode`-shaped gaps).
+
+## L86: `OpCopyObject` (SPIR-V opcode 83) new upstream MLIR op, `feme` legalization, and real end-to-end verification
+
+Implemented roadmap L86: `OpCopyObject` (SPIR-V opcode 83), confirmed to have zero support anywhere
+in upstream MLIR's SPIR-V dialect (`grep -rln "CopyObject" mlir/include/mlir/Dialect/SPIRV/
+mlir/lib/Dialect/SPIRV/ mlir/lib/Target/SPIRV/` returned zero matches before this session) -- the
+second of two coupled gaps (alongside L7f's own `NonUniform` decoration fix) blocking a real
+dxc-compiled `NonUniformResourceIndex()` HLSL shader from deserializing at all.
+
+**MLIR-core op addition**: added `SPIRV_OC_OpCopyObject` (opcode 83, between `OpCompositeInsert`
+(82) and `OpTranspose` (84)) to `SPIRVBase.td`'s opcode enum, and a new `SPIRV_CopyObjectOp`
+definition in `SPIRVMiscOps.td` -- the file corresponding to the SPIR-V spec's own "3.32.1.
+Miscellaneous Instructions" section, already home to `spirv.Undef`, rather than `SPIRVCastOps.td`
+(despite `CopyObject` "feeling" cast-like, its Result Type must be identical to its Operand's type,
+unlike a real cast/bitcast). Modeled closely on `SPIRV_BitcastOp`'s own shape: `Pure`,
+`AllTypesMatch<["operand", "result"]>`, `hasVerifier = 0` (the type-match trait alone is sufficient),
+assembly format `$operand attr-dict : type($result)`.
+
+Confirmed via the prior L85 session's own real precedent (`GroupNonUniformInverseBallot`/
+`BallotBitExtract`, commit `5410b6b75d3a`) that a plain `SPIRV_Op`-derived definition needs **zero**
+manual C++ (de)serialization dispatch code -- `hasOpcode`/`autogenSerialization` both default to 1,
+generating complete round-trip support automatically from the op's own `arguments`/`results`/opcode
+declaration alone (only overridden for special-cased ops like `spirv.Undef` itself).
+
+New MLIR-core tests: `mlir/test/Dialect/SPIRV/IR/misc-ops.mlir` (scalar `f32` and vector `<4xi32>`
+positive parse/print/verify cases, plus a type-mismatch negative case) and a new
+`mlir/test/Target/SPIRV/misc-ops.mlir` (no prior file existed) with two round-trip
+serialize/deserialize cases. The latter initially failed real `spirv-val` binary validation with "No
+OpEntryPoint instruction was found" for a bare `spirv.func` with no entry-point wiring -- fixed by
+adding the `Linkage` capability to the module's `#spirv.vce<...>` requirement, mirroring
+`cast-ops.mlir`'s own established convention for exactly this reason. Both files verified via
+`FileCheck`, and the Target test additionally verified against real `spirv-val` binary validation.
+`ninja check-mlir`: 3828 passed, 1 skipped, 622 unsupported, 1 expected failure, 0 regressions.
+
+**`feme`-side legalization**: added `CopyObjectConversionPattern` in `SPIRVToLLVMPatterns.cpp`
+(registered in `populateSPIRVToLLVMTargetPatterns`). Its `matchAndRewrite` is the simplest possible
+pattern -- `Rewriter.replaceOp(Op, Adaptor.getOperand())`, emitting zero new IR -- correct because
+LLVM SSA values already carry "another handle to the same value" semantics implicitly for any
+non-memory-reference value; there is nothing left for a real copy instruction to do once lowered
+this far. Confirmed via a new lit test, `spirv-to-llvm-copy-object.mlir` (scalar `f32`, vector
+`<4xi32>`), that `feme-opt --feme-convert-spirv-to-llvm` genuinely erases the op entirely with no
+trace left in the lowered `llvm.func`. `ninja check-feme`: 2899 discovered, 2840 passed, 59
+unsupported, 0 failed (0 regressions).
+
+**Real end-to-end confirmation**: compiled a fresh HLSL shader
+(`Texture2D<float4> Textures[4]` indexed via `NonUniformResourceIndex(Index)`, then sampled) with
+`dxc -T ps_6_0 -E main -spirv` -- the same real-world shape L7f's own original investigation used.
+`spirv-dis` confirmed the compiled module carries both gaps together as expected: `OpDecorate %11
+NonUniform` (L7f) attached to `%11 = OpCopyObject %uint %32` (L86). Ran the real, unmodified `.spv`
+through `feme-translate --import-spirv`: deserializes cleanly with **zero** errors, producing a
+`spirv.CopyObject %2 {non_uniform} : i32` op in the imported MLIR (both the decoration and the op
+now round-trip correctly). Ran the deserialized module through
+`feme-opt --feme-convert-spirv-to-llvm`: legalizes cleanly to a well-formed `llvm.func @main`, with
+no `spirv.CopyObject`/`NonUniform` trace remaining anywhere in the lowered output -- confirming
+`CopyObjectConversionPattern`'s own doc-comment claim (that `feme` has no separate "non-uniform-ness"
+concept to preserve past this erasure point) holds for a real repro, not just a hand-constructed
+unit test.
+
+**CTS disposition**: real `deqp-vk` re-run of `dEQP-VK.descriptor_indexing.*` (115 cases): unchanged
+at 0 passed / 0 failed / 115 `NotSupported` both before and after this fix (matching L7f's own prior
+disposition) -- this ICD does not yet advertise any `shader*ArrayNonUniformIndexing` feature bit, so
+no CTS case newly passes from this fix alone. This closes a deserialization/legalization
+*prerequisite* gap (the real HLSL repro that motivated both L7f and L86 now passes both pipeline
+stages end-to-end), not a CTS-visible feature-bit gap by itself. `offload-test-suite`'s own
+pre-existing test corpus was checked for a ready-made `NonUniformResourceIndex()` case (mirroring
+L7b's own use of `Vk.SampledTexture2D.Gather.test.yaml`) on both the default and `feme` branches --
+none exists, so the hand-authored `dxc`-compiled repro above is this row's own authoritative
+real-world confirmation instead.
+
+`Vulkan14FeatureInventory.md`'s `descriptorIndexing` note updated to record that L7f and L86 (the
+`NonUniform` decoration and `OpCopyObject` deserialization/legalization prerequisites) are both now
+closed, with the remaining blocker being a broader correctness review of whether
+`feme::cpu::SIMDizePass`/resource lowering need any different treatment for non-uniformly-indexed
+accesses before advertising any `shader*ArrayNonUniformIndexing` bit. `VulkanExtensionInventory.md`
+reviewed: no change needed (`VK_EXT_descriptor_indexing` stays correctly `Planned (in scope, not
+implemented)`). `FeMeCPUDesign.md` reviewed: no update needed -- this reuses the existing
+SPIRVToLLVM conversion-pattern infrastructure with no new mechanism or design deviation.
