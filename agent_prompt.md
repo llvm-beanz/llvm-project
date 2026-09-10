@@ -42,51 +42,30 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L89a from the roadmap or other prerequisites blocking the
+Can you work on L89b from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`SIMDizePass` needs a bounded-basic-block (e.g. lane-chunked or loop-based)
-> codegen strategy for wide required subgroup sizes**, split out of L89's own
-> closing session -- CORRECTED and re-scoped this session: implemented and
-> empirically tested the originally-proposed "naive" mitigation (a new, late
-> `feme::cpu::BoundBlockSizePass` module pass, run after `OptimizerPipeline` to
-> survive `SimplifyCFG`, mechanically chunking any oversized basic block into
-> fixed-size pieces joined by unconditional branches via `llvm::SplitBlock` --
-> semantically a no-op, preserving execution order/dominance) against the exact
-> motivating case. Confirmed via `llc -O2 -time-passes` on captured `.ll` dumps
-> of the *same* shader before/after chunking that this approach is **actively
-> counterproductive**: the un-chunked single ~2200-instruction block compiles in
-> ~2.7s total (~1.55s "Instruction Scheduling"), while the identical shader
-> chunked into ~9 blocks of 256 instructions each takes ~40s total (~32.3s
-> "Instruction Scheduling" -- roughly a **21x slowdown** in that specific
-> sub-phase), and the full `deqp-vk` case did not even complete within a 300s
-> timeout (worse than the ~210s unfixed baseline). Root cause of the regression
-> (not yet fully profiled at the `MachineInstr` level, but consistent with the
-> data): naive equal-sized chunking multiplies the number of
-> block-boundary-crossing SSA values (via `CopyToReg`/`CopyFromReg`
-> register-class plumbing at each new synthetic edge) without reducing the
-> underlying live-range/critical-path footprint at all, since split points were
-> chosen purely by instruction count, not by minimizing cross-block liveness --
-> so it adds scheduling/regalloc bookkeeping overhead on top of the original
-> cost rather than replacing it. This **falsifies** "just split the block" as a
-> viable fix; the `BoundBlockSizePass` prototype and its
-> `feme-opt`/`CompiledStage.cpp` wiring were reverted, not committed.
-> Separately, instrumented `createStage` with per-call IR-content hashing and
-> confirmed the ~210-300s wall-clock cost for this one CTS case is *also* driven
-> by ~42 separate `vkCreateComputePipelines`-triggered JIT compiles for what CTS
-> treats as parameter-swept sub-cases (not one pathological compile) -- of which
-> roughly half (21 of 42, in 4 distinct hash buckets recurring 5-6x each) are
-> byte-for-byte-identical IR, while the rest are genuinely distinct per-sub-case
-> compiles. Both findings are recorded and broken out below rather than
-> re-attempted in this session's remaining budget: L89b (the real fix -- an
-> actual loop-based lane-chunking redesign of `SIMDizePass`'s emission strategy
-> that reduces live-value count per region, not just block size) and L89c (an
-> implicit, always-on, device-level compiled-artifact cache reusing
-> `PipelineCache.h`'s existing content-hash scheme, independent of the
-> app-supplied `VkPipelineCache` handle, to eliminate the confirmed ~50%
-> genuinely-redundant-compile fraction as a complementary, lower-risk
-> mitigation). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
-> change this session (no bit flips; `SHUFFLE_BIT` remains blocked, now on
-> L89b/L89c rather than L89a directly). `ninja check-feme` (all experimental
-> source changes reverted before finishing; tree matches pre-session baseline):
-> 2,902 discovered, 2,843 passed, 59 unsupported, 0 failed
+> **`SIMDizePass` needs a real loop-based (not post-hoc-block-split)
+> lane-chunking redesign that reduces live-SSA-value count per scheduling
+> region, not just instruction count per block**, split out of L89a's own
+> closing session: L89a's own `llc -time-passes` A/B measurement proved that
+> merely relocating the same fully-unrolled, all-lanes-simultaneously-live
+> instruction sequence into more, smaller basic blocks (via post-hoc splitting)
+> makes compilation dramatically slower (~21x on "Instruction Scheduling"
+> alone), not faster, because it does not reduce the number of values live
+> across region boundaries -- it only adds `CopyToReg`/`CopyFromReg` bookkeeping
+> on top of the original cost. A viable fix therefore cannot be a mechanical,
+> pass-order-only transform bolted on after `SIMDizePass`; it needs
+> `SIMDizePass` itself (`feme/lib/Transforms/CPU/SIMDize.cpp`, 3714 lines) to
+> emit a genuine loop over lane-chunks (e.g. 4 or 8 lanes per iteration,
+> matching the host's native vector width) with a small, fixed number of
+> loop-carried values per iteration (accumulator/mask state only), rather than
+> unrolling all `WaveSize` lanes' worth of scalar ops inline -- the only
+> strategy that reduces both SelectionDAG node count *and*
+> register-pressure/live-range footprint together. A materially large, invasive
+> redesign (not yet started): needs careful design to avoid silently breaking
+> wave-uniform control-flow/reconvergence invariants `LinearizePass` depends on
+> downstream, a decision on chunk width (fixed vs. host-CPU-feature-derived),
+> and its own dedicated unit/lit test coverage across multiple
+> `WaveSize`/chunk-width combinations before any CTS re-verification of
+> `_requiredsubgroupsize` cases or further `SHUFFLE_BIT` consideration
