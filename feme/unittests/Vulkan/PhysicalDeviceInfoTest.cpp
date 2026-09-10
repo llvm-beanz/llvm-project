@@ -55,10 +55,14 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
   EXPECT_EQ(Info.SubgroupSupportedStages, VK_SHADER_STAGE_COMPUTE_BIT);
   EXPECT_TRUE(Info.SubgroupSupportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT);
   // (roadmap L7t) `VOTE_BIT` is now safe to advertise (see
-  // PhysicalDeviceInfo.cpp's own comment); `SHUFFLE_BIT` is not yet, since
-  // the real `dEQP-VK.subgroups.shuffle.*` CTS group depends on an
-  // entirely-unimplemented `GroupNonUniformBallot` capability.
+  // PhysicalDeviceInfo.cpp's own comment). (roadmap L85) `BALLOT_BIT` is
+  // now also safe to advertise (`GroupNonUniformBallot`'s whole family is
+  // implemented and CTS-verified). `SHUFFLE_BIT` is still not yet, since
+  // a speculative flip crashes a real `dEQP-VK.subgroups.shuffle.*` CTS
+  // re-run on an unrelated `Linearize.cpp` bug (roadmap L88).
   EXPECT_TRUE(Info.SubgroupSupportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT);
+  EXPECT_TRUE(Info.SubgroupSupportedOperations &
+              VK_SUBGROUP_FEATURE_BALLOT_BIT);
   EXPECT_FALSE(Info.SubgroupSupportedOperations &
                VK_SUBGROUP_FEATURE_SHUFFLE_BIT);
 }
