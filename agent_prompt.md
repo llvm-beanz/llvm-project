@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -41,5 +41,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you fetch upstream LLVM's main branch, merge it into the feme branch,
-resolve any conflicts and ensure all tests pass?
+Can you review the H-series and L-series milestones and re-order the remaining
+Vulkan conformance work into a set of consecutive milestones at the end of the
+H-series, and any remaining work for HLSL-specific conformance into a set of
+consecutive ilestones at the end of the L-series.
