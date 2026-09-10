@@ -76140,3 +76140,121 @@ create a pipeline.
 I didn't touch L89b. The motivating `_requiredsubgroupsize` case is still ~296 seconds and is still
 blocked on that redesign, and I've said so plainly in the roadmap rather than letting L89c's large
 unrelated win imply the original problem is solved. It isn't.
+
+# L89b session: profile first, and the premise was wrong
+
+## What the roadmap asked for, and why I did not do it
+
+L89b asked for "a real loop-based (not post-hoc-block-split) lane-chunking
+redesign" of `SIMDizePass`, on the premise that a wide required subgroup size
+produces a basic block too large for the backend's instruction scheduler. That
+is a 3,700-line-file, high-risk, invariant-threatening redesign, and this is the
+third row in a chain (L89 -> L89a -> L89b) where each session's stated premise
+was corrected by the next. So before writing any of it I spent the first half of
+the session doing nothing but measurement.
+
+That was the right call: the premise is false, and the actual fix turned out to
+be about 40 lines in a completely different file.
+
+## The measurement chain
+
+1. **Captured the real IR.** Temporarily instrumented `CompiledStage.cpp` with an
+   `FEME_DBG_DUMP_DIR` env-var-gated module dump after `OptimizerPipeline`, ran
+   the motivating CTS case, and got 42 modules. They are bimodal: 7 large
+   (~6,487 lines) and the rest small (~418 lines).
+
+2. **Found where the time is.** `llc -O2` per module: 6,489 lines = 52.9 s,
+   3,089 lines = 4.0 s, 418 lines = 0.026 s. Strongly superlinear. Seven large
+   modules x ~53 s accounts for the whole ~296 s case. `-time-passes` on the
+   worst: 45.9 s total, 39.2 s (85.5%) in "AArch64 Instruction Selection",
+   38.3 s (97.8%) of *that* in "Instruction Scheduling". Greedy RA: 3.0 s.
+
+3. **Confirmed the block.** `@main::entry` holds 5,144 of the module's
+   instructions (next largest block: 543). Opcode mix: 2,816 `extractelement`,
+   1,153 `insertelement`, 1,024 `select`. Also discovered `WaveSize` is **128**,
+   not 64 as L89/L89a state -- `MaxWaveSize` is 128 and CTS sweeps 4 -> 128.
+
+4. **Falsified the premise.** Built a synthetic module with a single
+   5,132-instruction basic block of the same shape. It compiles in **0.108 s**.
+   The real 5,144-instruction block takes **53 s**. A 500x gap. Whatever is
+   expensive, it is not "the block is big".
+
+   This is the moment the session's direction changed. Had I trusted the
+   roadmap row, I would have spent the whole session redesigning `SIMDizePass`
+   around a hypothesis that a fifteen-minute experiment disproves.
+
+5. **Found the real mechanism by counting the *output*.** The synthetic emits
+   7,152 machine instructions from 5,132 IR lines (~1x). The real module emits
+   **79,585** from 6,489 (~12x). So the scheduler is not slow -- it is being
+   handed twelve times more work than the IR suggests.
+
+6. **Localised the expansion.** The 12x traces to `lowerReadLane` in
+   `WaveLowering.cpp` -- *not* `SIMDize.cpp`, where all three previous
+   milestones in this chain had been looking. It built `wave.readlane`'s
+   per-lane gather from a **dynamically indexed** `extractelement` on the live
+   `<W x T>` vectors. `SelectionDAG` can only lower that by spilling the whole
+   type-legalized vector to the stack and reloading one element -- once per
+   lane, re-spilling the identical vector `W` times. Quadratic in `W`.
+
+7. **A/B'd the construct in isolation** at `W` = 128 before touching the pass:
+   old shape 646 IR lines -> 10,517 machine instructions (0.70 s); memory-gather
+   shape 1,164 IR lines -> 1,089 machine instructions (0.034 s). Only then did I
+   write the fix.
+
+## The two fixes
+
+**L89b.** Store each wide vector to an entry-block scratch array once and give
+every lane a `getelementptr`/`load` at its own index: `O(W)` instead of
+`O(W^2)`. Two details that matter for correctness rather than speed -- an `i1`
+is stored a byte per lane, because `<W x i1>`'s in-memory form is bit-packed and
+has no byte-addressable element; and each index is masked to `W - 1`, because an
+out-of-range `extractelement` is merely `poison` (which the design already
+permits) whereas an out-of-range *load* is a genuine out-of-bounds access. I
+gated it at `W` >= 16 rather than applying it unconditionally, because below
+that a `<W x T>` value is one or two registers and the scratch traffic would be
+pure overhead -- the pessimisation L89a fell into by applying a transform
+uniformly without a threshold.
+
+Result: the motivating case goes ~296 s -> 12.1 s, and the whole
+`dEQP-VK.subgroups.shuffle.compute.*` group (1,680 cases) finishes in 127 s,
+less than one case used to cost.
+
+**L89d, opportunistically.** Making the group practical to sweep for the first
+time immediately exposed 96 real failures, all `bvec*` `subgroupClusteredRotate`
+rejected by `SIMDizePass`'s vector-decomposition check. The cause is narrow:
+`RotateConversionPattern` converts `spirv.GroupNonUniformRotateKHR` straight to
+`llvm.spv.wave.readlane` at the SPIR-V op's own result type, so `ReadLane` is --
+alongside `AllEqual` -- one of only two wave kinds whose operand can be a
+vector, and only `AllEqual` had a branch for it. `AllEqual`'s existing branch
+(roadmap L7t) gave me the exact precedent to copy. A gather is independent per
+component, so `N` separate calls sharing one lane index is exact, not an
+approximation. That closes the group's last functional gap and, with it, the
+sole remaining blocker on `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`.
+
+## What I deliberately did not do
+
+I did not flip `SHUFFLE_BIT` itself. Its stated blocker is now gone, but
+advertising a subgroup feature bit is a device-capability change whose
+verification scope is the whole `dEQP-VK.subgroups.*` tree, not the one group I
+swept. That is its own roadmap step, and this chain has quite enough
+insufficiently-verified claims in it already.
+
+I also left `SIMDizePass`'s emission strategy alone entirely. It is now
+measurably not the problem, and changing it "while I was there" would have
+risked the `LinearizePass` reconvergence invariants for no demonstrated gain.
+
+## Corrections recorded
+
+Two factual errors in earlier rows of this chain are now written down where the
+next person will hit them: `WaveSize` is 128 (not 64), and `SIMDizePass` is not
+a per-lane scalarizer at all -- it genuinely vectorizes to `<W x T>`, and its
+`for (Lane...)` loops are fallbacks for the operations it cannot vectorize.
+Both errors are, I think, why three sessions in a row looked in the wrong file.
+
+## Method note
+
+The general lesson I would carry forward from this chain: when the symptom is a
+compile-time blowup, measure the *output* size (machine instructions), not the
+input size (IR lines). Every wrong turn in L89/L89a/L89b's premises came from
+reasoning about IR line counts, which hid a 12x expansion happening downstream
+in one specific construct.
