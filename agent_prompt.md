@@ -42,28 +42,44 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L88 from the roadmap or other prerequisites blocking the
+Can you work on L89 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A real `llvm::Value::~Value` "Uses remain when a value is destroyed!"
-> assertion crash in `feme::cpu::LinearizePass`'s `DiamondFlattener`**, split
-> out of L85's own closing session: newly found via a speculative
-> `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` flag-flip verification run against
-> `dEQP-VK.subgroups.shuffle.*` (now that L85's own `GroupNonUniformBallot` fix
-> closed the previously-tracked blocker for this bit) -- the very first case in
-> the group
-> (`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_bool_constant`)
-> aborts the whole `deqp-vk` process outright with `Uses still stuck around
-> after Def is destroyed: %live.merge3 = phi i1 [ %live.merge1, ... ], [
-> %live.merge1, ... ]`, consistent with this project's own documented precedent
-> for this failure class (roadmap C2/H19p/L7m: "a crash silently truncates or
-> corrupts a suite run"). A real, `feme`-side bug in `DiamondFlattener`'s own
-> nested-diamond live/side-effect-mask `PHINode` merging (not an LLVM core bug,
-> unlike L7m's own earlier `DeleteDeadBlocks` false alarm) -- some
-> nested-diamond shape leaves an outer merge's `PHINode` referenced by an inner
-> one after the outer's own block has already been simplified/erased. Needs its
-> own real IR reduction of a minimal nested-diamond-with-shuffle (or, more
-> likely, nested-diamond-with-ballot, since shuffle's own CTS verification
-> harness is what actually triggers this, per L85's own finding that every
-> non-rotate shuffle test calls `subgroupBallot()`) shape to isolate the exact
-> merge-ordering bug, before `SHUFFLE_BIT` can be safely advertised
+> **A real `PostMachineSchedulerLegacy`/`ScheduleDAGInstrs::buildSchedGraph`
+> compile-time hang (not a crash -- the process spins indefinitely, confirmed
+> via `gdb -p <pid> -batch -ex bt` sampled mid-hang, consuming 100% CPU with no
+> forward progress inside `SUnit::addPred`/`addChainDependencies`)**, split out
+> of L88's own closing session: discovered via a real `deqp-vk` re-run of
+> `dEQP-VK.subgroups.shuffle.compute.*` (initially run as a speculative
+> `SHUFFLE_BIT` re-verification after L88's own fix, but confirmed to reproduce
+> identically against the real, currently-committed, un-flipped feature set too
+> -- `subgroupclusteredrotate_*` cases exercise `subgroupClusteredRotate`
+> regardless of whether `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` is advertised, so this
+> is a live, currently-reachable bug, not one hidden behind an unadvertised
+> feature bit). Every `*_requiredsubgroupsize` variant of
+> `subgroupclusteredrotate_float_dynamically_uniform`  (and, going by the shared
+> shape, presumably every other `_requiredsubgroupsize` variant in the group)
+> hangs indefinitely at pipeline-creation time (`vkCreateComputePipelines` ->
+> `feme::cpu::CompiledStage::create` -> ORC JIT compile ->
+> `llvm::legacy::PassManagerImpl::run` -> post-RA machine scheduling), confirmed
+> via a live backtrace showing the hang is *inside* the LLVM AArch64 host
+> backend's own post-regalloc instruction scheduler, not anywhere in `feme`'s
+> own IR-level passes -- consistent with a real quadratic-or-worse blowup in
+> `ScheduleDAGInstrs`'s memory-dependence-chain construction once a scheduling
+> region's own basic block grows large enough, plausibly because "required
+> subgroup size" forces this ICD's own wave-width resolution to a much wider
+> lane count than the plain (un-suffixed) variant of the same case (which passes
+> quickly), producing a proportionally larger unrolled/masked basic block for
+> the scheduler to chew through. Not yet reduced to a minimal repro or profiled
+> to confirm the exact quadratic mechanism (this session's own investigation
+> stopped at "confirmed real, confirmed backend-side, confirmed size-sensitive"
+> via a live-process backtrace and an A/B compare against the passing
+> non-`requiredsubgroupsize` sibling case) -- needs its own IR-size profiling
+> pass (e.g. dumping the actual scheduling-region instruction count for both the
+> passing and hanging variants) to confirm the size-blowup theory, then either a
+> `feme`-side fix (if `SIMDize.cpp`/`Linearize.cpp` produces needlessly large
+> code for a wide required subgroup size that a real GPU driver would not) or an
+> upstream LLVM performance investigation (if the scheduler's own complexity is
+> inherently unfit for a code shape this ICD legitimately needs to produce for
+> wide subgroups) before this CTS group can be swept in full or `SHUFFLE_BIT`
+> considered further
