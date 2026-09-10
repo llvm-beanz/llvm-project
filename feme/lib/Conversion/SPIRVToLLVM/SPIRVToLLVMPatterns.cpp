@@ -1750,6 +1750,35 @@ public:
   }
 };
 
+/// Converts `spirv.CopyObject` -- a plain type-preserving copy with no
+/// dereferences (roadmap L86: MLIR's own `spirv.CopyObject`, added
+/// upstream-style as this row's own prerequisite) -- into nothing at all:
+/// LLVM IR's own SSA values already have this exact "make another handle
+/// to the same value" semantics implicitly for any value that isn't a
+/// pointer/memory reference, so the op's own result is simply replaced
+/// with its already-converted operand directly, with no new IR emitted.
+/// dxc's own codegen convention pairs this op with a `NonUniform`
+/// decoration on its result (see roadmap L7f's own decoration-handling
+/// fix) whenever `NonUniformResourceIndex()` wraps a dynamic resource-array
+/// index -- `feme`'s own legalization has no separate notion of
+/// "non-uniform-ness" to preserve past this point (every access already
+/// gets whatever divergent/uniform handling its own address's actual
+/// uniformity dictates, downstream in `feme::cpu::SIMDizePass`), so this
+/// decoration itself needs no equivalent handling here either.
+class CopyObjectConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CopyObjectOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CopyObjectOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CopyObjectOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.replaceOp(Op, Adaptor.getOperand());
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -1760,6 +1789,7 @@ public:
 class DotConversionPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::DotOp> {
 public:
+
   using mlir::SPIRVToLLVMConversion<mlir::spirv::DotOp>::SPIRVToLLVMConversion;
 
   mlir::LogicalResult
@@ -7822,6 +7852,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
       ControlBarrierConversionPattern, MemoryBarrierConversionPattern,
+      CopyObjectConversionPattern,
       DemoteToHelperInvocationConversionPattern, DotConversionPattern,
       ElectConversionPattern, AllEqualConversionPattern,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAllOp>,
