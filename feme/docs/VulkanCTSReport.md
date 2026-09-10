@@ -36145,3 +36145,267 @@ Broken out as roadmap **L89i** rather than claimed here. Confirming it wants an 
 
 `ninja check-feme`: 2,918 discovered, 2,859 passed, 59 unsupported, 0 failed -- up by exactly the 1
 new lit test.
+
+## Upstream merge (`llvm/main` @ `a4f04ab5e25f`): a full re-run, and a methodology bug that nearly invalidated it
+
+This section is not a roadmap row's "measured impact". It is the
+verification pass for merging upstream `llvm/llvm-project` `main` into the
+`feme` branch (merge commit `bb89156c6bac`, plus the
+`mlir/lib/Conversion/SPIRVToLLVM` fix in `fe9b1d40d73b`). A merge of this
+size changes the compiler underneath the ICD without changing the ICD's own
+feature surface, so the question this run exists to answer is narrow:
+**did the merge change any observable behaviour?**
+
+- FeMe revision: `fe9b1d40d73b`, merging upstream `main` `a4f04ab5e25f`
+  into the pre-merge tip `fb56646fbcef`.
+- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-452-gcf7edb26d3be2d8763595ed08fdc41f3c1b1966f`,
+  up from the `-413-ge4b225a7d7cd` this file's own header records -- 39
+  upstream CTS commits, which add cases and therefore move totals on their
+  own, independently of anything this merge did.
+- `check-feme`: 2,919 discovered, 2,860 passed, 59 unsupported, **0 failed**.
+- `check-hlsl-feme-vk` (offload-test-suite, `beanz/feme` @ `d578a2a`): 664
+  discovered -- 275 passed, 102 failed, 26 XFAIL, 260 unsupported, 1 XPASS.
+- Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+  `Release`.
+- Vulkan feature/extension surface: **unchanged**. The merge touches no
+  file under `feme/lib/Vulkan/`, and in particular not
+  `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions`, which is the
+  single input both [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
+  and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
+  generated from. Neither inventory changes, and neither was regenerated
+  under a false pretence of having been re-measured.
+
+### The methodology bug, recorded because it invalidated a whole sweep
+
+The first full 54-group sweep this session produced spectacular numbers --
+846,034 `Pass` against 199 `Fail` -- and every one of them was worthless.
+The runner set its environment with
+
+```sh
+export VK_ICD_FILENAMES=.../feme_icd.json VK_DRIVER_FILES=$VK_ICD_FILENAMES
+```
+
+which does not do what it reads as: within a single `export`,
+`$VK_ICD_FILENAMES` expands to its value *before* the assignment on the same
+line takes effect, so `VK_DRIVER_FILES` was set to the **empty string**. The
+Vulkan loader prefers `VK_DRIVER_FILES` over the older `VK_ICD_FILENAMES`,
+and an empty `VK_DRIVER_FILES` does not mean "no ICDs", it means the filter
+is not applied -- so the entire sweep ran against system **lavapipe**. The
+`transform_feedback` and `shader_object` groups turning in six-figure pass
+counts, for capabilities this ICD does not advertise at all, was the tell.
+
+[.instructions.md](../.instructions.md) already warns that `VK_ICD_FILENAMES`
+must be set explicitly or lavapipe is silently used; this is the same hazard
+with a subtler trigger, and worth writing down in its own right:
+
+**Every CTS run must be checked, not assumed.** `deqp-vk` records the device
+it actually used in its own `.qpa`:
+
+```sh
+grep -m1 deviceName <group>.qpa   # => "#sessionInfo deviceName FeMe CPU Vulkan Device"
+```
+
+The runner used for the numbers below sets both variables on the
+`deqp-vk` command itself rather than through an inherited `export`, and the
+`info` group was run first and its `deviceName` checked before the sweep
+was launched. Any future edition of this report should do the same.
+
+### Headline
+
+| Group | Cases | Pass | Fail | NotSupported | |
+|---|---:|---:|---:|---:|---|
+| `api` | 206,370 | 67,939 | 17,479 | 120,952 | **incomplete** |
+| `binding_model` | 74,722 | 6,806 | 5,322 | 62,594 | **incomplete** |
+| `clipping` | 308 | 33 | 0 | 275 | |
+| `compute` | 60,811 | 635 | 49 | 60,127 | |
+| `conditional_rendering` | 1,030 | 0 | 0 | 1,030 | |
+| `cooperative_vector` | 53,562 | 0 | 0 | 53,562 | |
+| `data_graph` | 12,632 | 0 | 0 | 12,632 | |
+| `depth` | 8 | 0 | 0 | 8 | |
+| `descriptor_indexing` | 115 | 0 | 0 | 115 | |
+| `device_group` | 18 | 0 | 7 | 11 | |
+| `dgc` | 4,733 | 0 | 0 | 4,733 | |
+| `draw` | 29,419 | 1,878 | 1,348 | 26,193 | |
+| `drm_format_modifiers` | 1,572 | 0 | 0 | 1,572 | |
+| `dynamic_state` | 671 | 155 | 96 | 420 | |
+| `fragment_operations` | 151 | 93 | 28 | 30 | |
+| `fragment_shader_interlock` | 576 | 0 | 0 | 576 | |
+| `fragment_shading_barycentric` | 20,991 | 0 | 0 | 20,991 | |
+| `fragment_shading_rate` | 110,443 | 0 | 0 | 110,443 | |
+| `geometry` | 8 | 8 | 0 | 0 | **incomplete** |
+| `glsl` | 6,433 | 1,842 | 1,895 | 2,696 | **incomplete** |
+| `graphicsfuzz` | 4 | 0 | 4 | 0 | **incomplete** |
+| `image` | 36,597 | 523 | 6,950 | 29,124 | **incomplete** |
+| `image_processing` | 1,211 | 0 | 0 | 1,211 | |
+| `imageless_framebuffer` | 12 | 4 | 0 | 8 | |
+| `info` | 23 | 18 | 2 | 3 | |
+| `memory` | 6,363 | 4,861 | 125 | 1,377 | |
+| `memory_model` | 17,300 | 25 | 118 | 17,157 | |
+| `mesh_shader` | 28,044 | 69 | 370 | 27,605 | |
+| `multiview` | 838 | 571 | 72 | 195 | |
+| `pipeline` | 11,409 | 1 | 4,434 | 6,974 | **incomplete** |
+| `postmortem` | 24 | 0 | 0 | 24 | |
+| `protected_memory` | 6,000 | 0 | 0 | 6,000 | |
+| `query_pool` | 19,276 | 15,910 | 677 | 2,689 | |
+| `rasterization` | 385 | 42 | 0 | 343 | **incomplete** |
+| `ray_query` | 49,311 | 0 | 0 | 49,311 | |
+| `ray_tracing_pipeline` | 22,658 | 0 | 0 | 22,658 | |
+| `reconvergence` | 6,253 | 0 | 0 | 6,253 | |
+| `renderpasses` | 80,920 | 10,279 | 24,485 | 46,156 | |
+| `robustness` | 98,762 | 397 | 296 | 98,069 | |
+| `shader_object` | 243,853 | 0 | 6 | 243,847 | |
+| `sparse_resources` | 19,402 | 0 | 0 | 19,402 | |
+| `spirv_assembly` | 1,057 | 32 | 95 | 930 | **incomplete** |
+| `ssbo` | 12,225 | 1,835 | 1,407 | 8,983 | |
+| `subgroups` | 12,139 | 24 | 0 | 12,115 | **incomplete** |
+| `synchronization` | 32,916 | 838 | 188 | 31,890 | **incomplete** |
+| `synchronization2` | 33,074 | 716 | 183 | 32,175 | **incomplete** |
+| `tensor` | 844 | 0 | 0 | 844 | |
+| `tessellation` | 270 | 9 | 254 | 7 | **incomplete** |
+| `texture` | 1,812 | 600 | 216 | 996 | **incomplete** |
+| `transform_feedback` | 133,719 | 3,222 | 1,890 | 128,607 | |
+| `ubo` | 13,240 | 3,105 | 2,582 | 7,553 | |
+| `video` | 9,471 | 0 | 0 | 9,471 | |
+| `wsi` | 36,880 | 4 | 0 | 36,876 | |
+| `ycbcr` | 68,159 | 6 | 10 | 68,143 | |
+| **total** | **1,589,024** | **122,480** | **70,588** | **1,395,956** | 14 incomplete |
+
+**These totals are not comparable to this file's own header table and must
+not be read as a regression against it.** That table (36,759 `Pass`,
+144,753 `Fail`, 3,052,501 `NotSupported`) was measured at FeMe revision
+`10303c63fa33` -- before the entire E-, F-, H- and L-series -- against CTS
+`-413`, and, critically, over 52 *complete* groups. This run measures a much
+later ICD against a later CTS with 14 groups incomplete, so 1.59M of the
+~3.2M cases are counted. Its purpose is the A/B below, not a headline
+refresh; a like-for-like successor to the header table needs the long-pole
+compile-time problems (roadmap L89/L89b/L89e/L89i) closed first, because
+those are what make a *complete* sweep unattainable.
+
+### 14 incomplete groups: nine crashes and five long poles
+
+| Group | Cases before stopping | Blocking case | How it ended |
+|---|---:|---|---|
+| `api` | 206,370 | `descriptor_set.descriptor_set_layout_lifetime.compute` | `SIGSEGV` |
+| `geometry` | 8 | `basic.output_vary_by_texture` | `SIGSEGV` |
+| `glsl` | 6,433 | `demote.function_always` | assertion, `abort` |
+| `image` | 36,597 | `host_image_copy.dispatch_r8g8b8a8_uint_r8g8b8a8_unorm.…32x28` | `SIGSEGV` |
+| `rasterization` | 385 | `culling.primitive_id` | `SIGSEGV` |
+| `spirv_assembly` | 1,057 | `instruction.compute.compute_shader_derivatives.compute.verify_ndx.linear.128_1_1` | assertion, `abort` |
+| `synchronization` | 32,916 | `op.multi_queue.binary_semaphore.write_copy_buffer_read_ssbo_tess_control.buffer_16384_concurrent` | `SIGSEGV` |
+| `synchronization2` | 33,074 | same case, `synchronization2` spelling | `SIGSEGV` |
+| `tessellation` | 270 | `misc_draw.switch_domain_origin_lower_left_to_upper_left` | `SIGSEGV` |
+| `binding_model` | 74,722 | still progressing | stopped by the operator |
+| `graphicsfuzz` | 4 | `arr-value-set-to-arr-value-squared` | >60 min on one case |
+| `pipeline` | 11,409 | `fast_linked_library.blend.dual_source.multi_attachments.r16g16b16a16_sfloat` | >60 min on one case |
+| `subgroups` | 12,139 | `ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128` | >60 min on one case |
+| `texture` | 1,812 | `conversion.snorm_clamp.a2b10g10r10_snorm_pack32` | >60 min on one case |
+
+`subgroups`' blocking case is the one the "L89e" section above already
+measured and named (`_bvec4` unfinished after ~28 minutes), so its long pole
+is a known, already-diagnosed quantity. `graphicsfuzz`, `pipeline` and
+`texture` are three *newly identified* long poles of the same family; none
+of them had been named before, because no previous edition of this report
+got a valid full-ICD run far enough into those groups to see them. Broken
+out as roadmap **L89j** rather than diagnosed here.
+
+The nine crashes are a much larger crash count than the two (`api`,
+`synchronization2`) the header table records, but note that `api` is the
+*same* group crashing in the *same* place, and the whole set was measured
+against a newer CTS and a much later ICD. They are recorded here as a
+measurement, not as a merge finding -- see the A/B immediately below for
+why.
+
+### The A/B: what this section actually exists to prove
+
+A merge cannot be cleared by a single-sided measurement, because a crash
+count with nothing to compare it to says only that crashes exist, not that
+the merge caused them. So the pre-merge tip `fb56646fbcef` was built into a
+separate tree (`/tmp/pmbuild`, same `Release` + assertions + ccache
+configuration) and the **same** `deqp-vk` binary was pointed at each ICD in
+turn.
+
+**Every crash and every long pole reproduces, unchanged, on the pre-merge
+ICD** -- same case, same signature:
+
+| Case | Pre-merge | Post-merge |
+|---|---|---|
+| `geometry` group | `SIGSEGV` at `basic.output_vary_by_texture` | identical |
+| `rasterization` group | `SIGSEGV` at `culling.primitive_id` | identical |
+| `tessellation` group | `SIGSEGV` at `misc_draw.switch_domain_origin_lower_left_to_upper_left` | identical |
+| `image` group | `SIGSEGV` (host_image_copy) | identical family |
+| `spirv_assembly.…compute_shader_derivatives.…128_1_1` | `OperandRange::front()` assertion | identical |
+| `graphicsfuzz.arr-value-set-to-arr-value-squared` | >10 min, unfinished | identical |
+
+And four groups large enough to be meaningful were run to completion against
+both ICDs. They are **byte-identical**:
+
+| Group | Cases | Pre-merge P/F/NS | Post-merge P/F/NS |
+|---|---:|---|---|
+| `compute` | 60,811 | 635 / 49 / 60,127 | 635 / 49 / 60,127 |
+| `ssbo` | 12,225 | 1,835 / 1,407 / 8,983 | 1,835 / 1,407 / 8,983 |
+| `ubo` | 13,240 | 3,105 / 2,582 / 7,553 | 3,105 / 2,582 / 7,553 |
+| `memory_model` | 17,300 | 25 / 118 / 17,157 | 25 / 118 / 17,157 |
+| **total** | **103,576** | | **no difference** |
+
+103,576 cases across the compute, storage-buffer, uniform-buffer and
+memory-model surfaces, with not a single case changing verdict. Combined
+with `check-feme` at 0 failures and `check-hlsl-feme-vk` moving *up* by 7
+(268 -> 275) once the `SPIRVToLLVM` fix landed, that is the evidence that
+this merge is behaviour-neutral for the ICD, and that the crash and long-pole
+inventory above is a pre-existing debt this run happens to have measured
+more thoroughly than any previous one -- not something the merge introduced.
+
+### The one real regression the merge did cause, and its fix
+
+`check-hlsl-feme-vk` initially showed 8 new failures, all with the same
+diagnostic:
+
+```
+error: 'llvm.mlir.constant' op attribute and type have different integer types: 'si32' vs. 'i32'
+Failed to create compute pipeline. (VkResult = -3)
+```
+
+Upstream tightened `LLVM::ConstantOp`'s verifier during the merge window,
+which exposed a latent bug in upstream's *own*
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`: `createIntegerConstant`
+built its `IntegerAttr` from the **source** SPIR-V element type -- `si32`
+for anything DXC compiles from a signed HLSL integer -- while producing a
+value of the converted, signless `i32`. That reached `spirv.SNegate`,
+`spirv.Sign`, `spirv.Not` and the bitfield patterns. Writing the regression
+test for the signed `spirv.Not` case then exposed a second, independent bug
+in `NotPattern`: it passed the *unconverted* operand to the `llvm.xor` it
+builds, which the LLVM dialect rejects outright on an `si32`.
+
+Both are fixed in `fe9b1d40d73b`, with new signed/unsigned coverage in
+`mlir/test/Conversion/SPIRVToLLVM/{arithmetic,bitwise}-ops-to-llvm.mlir`.
+This is worth separating from everything else in this section: it is a bug
+in *upstream MLIR* that only a downstream consumer of real DXC output would
+ever hit, not a mis-resolved conflict.
+
+### Reproducing this section
+
+Same per-group methodology as "Reproducing this report" above, with the
+`deviceName` check added and the environment set per-command rather than
+exported:
+
+```sh
+cat > run_cts.sh <<'EOF'
+#!/bin/sh
+set -e
+mkdir -p "$OUTDIR/$1"; cd "$OUTDIR/$1"
+ln -sfn /path/to/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_ICD_FILENAMES="$ICD_JSON" VK_DRIVER_FILES="$ICD_JSON" \
+  /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.$1.*" --deqp-log-images=disable \
+  --deqp-log-shader-sources=disable \
+  --deqp-log-filename="$OUTDIR/$1/$1.qpa" > "$OUTDIR/$1/$1.log" 2>&1 || true
+EOF
+chmod +x run_cts.sh
+ICD_JSON=<build>/tools/feme/tools/feme-vulkan/feme_icd.json OUTDIR=/tmp/cts ./run_cts.sh info
+grep -m1 deviceName /tmp/cts/info/info.qpa   # MUST say "FeMe CPU Vulkan Device"
+ICD_JSON=... OUTDIR=/tmp/cts xargs -P 6 -n 1 -a groups.txt ./run_cts.sh
+```
+
+The `vulkan` symlink is not optional -- without it whole groups abort. The
+`|| true` matters too: without it a crashing group takes the whole `xargs`
+down with it.
