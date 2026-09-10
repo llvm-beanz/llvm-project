@@ -35870,8 +35870,7 @@ body of `lowerReadLane` in a pass that runs strictly after the passes that emit 
   unsupported. All 96 failures are the `bvec2`/`bvec3`/`bvec4` variants of `subgroupclusteredrotate`,
   and all report the same `SIMDizePass` diagnostic: "has a divergent vector value ... used outside a
   supported ... pattern; component decomposition is not yet supported for this use". Broken out as
-  roadmap **L89d**, and now the sole remaining blocker on `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`, which is
-  no longer blocked on compile time at all.
+  roadmap **L89d** -- and then fixed in this same session (see below).
 - `dEQP-VK.subgroups.ballot*`: 6,284 cases -- 16 passed, 336 failed, 5,932 unsupported. All 336
   failures are the entire `ballot_broadcast` group (48 distinct operand shapes x 7 subgroup-size
   variants), failing conversion-legalization with "failed to legalize operation
@@ -35887,3 +35886,34 @@ exactly the 1 new lit test (`wave-lowering-readlane-wide.ll`, checking the memor
 `FeMeCPUDesign.md`'s Phase 5 lowering table and its "no lowering may create poison" section updated
 for the wide-wave gather. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change (no
 bit flips; `SHUFFLE_BIT` stays un-advertised, now on L89d rather than on compile time).
+
+## L89d: a vector-typed `wave.readlane` had no decomposition
+
+Making the shuffle group sweepable immediately exposed its next gap, so it was fixed in the same
+session. `RotateConversionPattern` converts `spirv.GroupNonUniformRotateKHR` straight to
+`llvm.spv.wave.readlane` at the SPIR-V op's own result type, which makes `ReadLane` -- alongside
+`AllEqual` -- one of only two `WaveCallKind`s whose operand may be a vector. Only `AllEqual` had a
+vector branch (roadmap L7t), so a `bvec2`/`bvec3`/`bvec4` `subgroupClusteredRotate` was rejected
+outright by `checkVectorDecompositionSupported` and failed `vkCreateComputePipelines`.
+
+`widenWaveCall` now decomposes it into one `feme.cpu.wave.readlane` per `<W x elemT>` component, all
+sharing the call's single widened lane index. That is exact rather than approximate: a gather is
+independent per component, since every component of output lane `L` reads the same source lane
+`I[L]`. A divergent result stays decomposed as `N` wide components for its downstream users; a
+uniform one narrows each component back to its lane 0 and rebuilds the scalar `<N x T>` vector the
+call's existing users expect.
+
+**Result.** A full re-run of `dEQP-VK.subgroups.shuffle.compute.*`: **1,680 cases, 128 passed, 0
+failed, 1,552 unsupported.** The group is completely clean, where before L89b it could not be swept
+at all. The run takes 16m15s rather than the 127s measured with the 96 `bvec*` cases still failing
+fast at pipeline creation -- expected, since those 96 now genuinely compile and execute, and a
+vector-typed gather costs one wave op per component.
+
+**Build/test.** `ninja check-feme`: 2,914 discovered, 2,855 passed, 59 unsupported, 0 failed -- up by
+exactly the 1 new lit test (`simdize-wave-readlane-vector.ll`).
+
+`VK_SUBGROUP_FEATURE_SHUFFLE_BIT` now has no known blocker for the first time in this chain. It was
+deliberately **not** flipped here: advertising a subgroup feature bit changes what CTS asks of the
+device across the whole `dEQP-VK.subgroups.*` tree, not just the one group swept, and this chain has
+already produced three rows whose claims needed later correction for exactly that kind of
+extrapolation. Broken out as roadmap **L89f**, with its own full-tree before/after sweep.

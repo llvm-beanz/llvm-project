@@ -519,11 +519,22 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   than compile time: 96 of that group's cases (all the `bvec2`/`bvec3`/
   `bvec4` `subgroupclusteredrotate` variants) still fail
   `vkCreateComputePipelines`, because `SIMDizePass` cannot decompose a
-  divergent vector-typed operand of a wave call. Now blocked on new
-  roadmap row L89d alone. (The same sweep also found all 336
+  divergent vector-typed operand of a wave call. (The same sweep also found all 336
   `dEQP-VK.subgroups.ballot_broadcast.*` cases failing on an
   unimplemented `spirv.GroupNonUniformBroadcast`, recorded as L89e; that
   one is a `BALLOT_BIT`-adjacent gap, not a `SHUFFLE_BIT` blocker.)
+  UPDATE (roadmap L89d, same session): that last gap is now fixed too --
+  `widenWaveCall` decomposes a vector-typed `wave.readlane` into one
+  `feme.cpu.wave.readlane` per component, and
+  `dEQP-VK.subgroups.shuffle.compute.*` now runs 1,680 cases with 128
+  passed and **0 failed**. `SHUFFLE_BIT` therefore has **no known
+  blocker** for the first time since it was first considered, but is
+  still not advertised: flipping it changes what CTS asks of the device
+  across the whole `dEQP-VK.subgroups.*` tree (every `shuffle`-gated case
+  in the `graphics`/`framebuffer`/`ray_tracing` stage variants too, plus
+  the 1,552 cases currently reported unsupported in that one compute
+  group), which needs its own full-tree before/after sweep rather than an
+  extrapolation from a single group. Broken out as roadmap row L89f.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
