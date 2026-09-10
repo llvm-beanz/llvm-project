@@ -76364,3 +76364,108 @@ budget would have left it unverified rather than done.
 - `SIMDizePass` divergent vector-to-scalar `bitcast` widening added, with a
   two-`WaveSize` lit test.
 - `ninja check-feme`: 2,915 discovered, 2,856 passed, 59 unsupported, 0 failed.
+
+# L89g session: the subgroup mask builtins, and trusting a diagnosis this time
+
+## The request
+
+Implement `gl_Subgroup{Eq,Ge,Gt,Le,Lt}Mask` (roadmap L89g), the five subgroup
+mask builtin variables failing all 10
+`dEQP-VK.subgroups.builtin_mask_var.compute.*` cases. (The prompt cited these as
+"L89h"; L89h was the SIMDize bitcast fix closed last session, so I worked the
+row the quoted text actually describes.)
+
+## Starting from a diagnosis I had already got wrong once
+
+Last session I wrote this row's diagnosis, then "corrected" it to something
+else, then discovered the correction was itself wrong and restored it. So the
+first thing I did was re-verify rather than trust the text: `getBuiltInMapping`
+really does lack the five builtins, and a read really does fall through to the
+generic stage-IO path. Confirmed before writing any code.
+
+## Sizing the work before committing to an approach
+
+The row said the fix "needs its own conversion path alongside that table rather
+than a new row in it". Before accepting that, I checked whether the value could
+be expressed as an intrinsic read: it cannot -- each mask is a function of *two*
+other builtins (`SubgroupLocalInvocationId` and `SubgroupSize`), so the
+one-builtin-to-one-intrinsic table shape genuinely cannot hold it. The row was
+right.
+
+The more useful thing I did before writing the conversion was to check what the
+IR I was *about* to emit would do downstream. The natural lowering ends in
+`bitcast i128 -> <4 x i32>`, the exact mirror of the shape L89h had just fixed
+in the other direction. A four-line synthetic `.ll` file through `feme-opt`
+answered it in seconds: SIMDize crashed on an `llvm::CastInst::Create`
+assertion. Had I written the conversion first, I would have debugged that
+through a whole pipeline instead.
+
+That check also turned up something worse than a missing feature. SIMDize's
+producer-side check *accepted* the scalar-operand bitcast, because that arm was
+written believing a scalar operand was "impossible for a vector-typed cast
+result, kept for symmetry". It is not impossible -- a `bitcast` is exactly the
+counterexample -- so instead of the pass's usual clean "not yet supported"
+diagnostic, this shape silently built invalid IR. A wrong comment had been
+load-bearing.
+
+## Two commits, in dependency order
+
+Fixing SIMDize first meant the conversion could use a plain symmetric `bitcast`,
+consistent by construction with the existing `ballotVectorToI128` helper's own
+layout, instead of hand-rolling a little-endian decomposition that would have
+silently disagreed with it on a big-endian target.
+
+I also un-did a defect I introduced last session: L89h's helper had been
+inserted between `isSupportedVectorReduceIntrinsic`'s doc comment and its
+definition, orphaning the comment onto the wrong function.
+
+## Letting the CTS test define the semantics
+
+The one genuine specification question was whether the masks must be clipped to
+`SubgroupSize`. Rather than reason from memory about the SPIR-V text, I read
+`vktSubgroupsBuiltinMaskVarTests.cpp`: it requires a plain 128-bit `bitCount` of
+the mask to equal `subgroupBallotBitCount`, which only counts bits below
+`SubgroupSize`. That settles it -- bits at or above the subgroup size must be
+zero -- and it settles it in terms of the thing that will actually judge the
+answer. Only the two complemented masks need the clip; the three prefix masks
+are already bounded by the invocation id.
+
+The edge case worth noting: `LeMask` as `1 << (id + 1)` is a poison shift at
+id 127 in a 128-wide subgroup. Building it as `EqMask << 1` instead simply drops
+the top bit off, leaving the all-ones prefix that case actually wants. Same
+formulation fixes `GtMask`. I checked this by hand for id 0 and id 127 before
+running anything.
+
+## Verification: composition, not just totals
+
+The re-sweep came back +10 passed / -10 failed with `NotSupported` unchanged --
+exactly the expected shape. But that is also exactly what one regression plus
+eleven gains would look like, which is the lesson I wrote down last session and
+did not want to re-learn. So I enumerated the whole 48,705-case result set by
+group: the remaining 336 failures are *exclusively* the known, unrelated L89e
+`ballot_broadcast.compute` cases, and nothing else in the tree fails at all.
+That is a stronger claim than a before/after diff, because it describes the
+end state absolutely rather than relative to a baseline I would have had to
+trust.
+
+Both `_requiredsubgroupsize` variants pass, which matters more than it looks:
+they exercise the same expansion at `WaveSize=64`, so the `<64 x i128>`
+arithmetic the masks generate is confirmed working at the wide wave width, not
+just the host-derived default of 4.
+
+## What this says about the last five milestones
+
+`BALLOT_BIT` has been advertised since L85. For five milestones the ballot
+feature was reported as supported while a whole category of its builtins was
+missing, and nothing caught it, because no session had ever run the
+`builtin_mask_var` group. It took L89f's first-ever full-tree sweep to surface
+it. An advertised capability bit is only ever as trustworthy as the breadth of
+the test run behind it -- which is an argument for the full-tree sweep being
+routine rather than exceptional.
+
+## Results
+
+- All five mask builtins implemented; `builtin_mask_var.compute` 10 failed -> 10 passed.
+- SIMDize divergent scalar-to-vector `bitcast` widening added (mirror of L89h).
+- Full tree: 350/346 -> **360 passed / 336 failed**, remaining failures exclusively L89e.
+- `ninja check-feme`: 2,917 discovered, 2,858 passed, 59 unsupported, 0 failed.
