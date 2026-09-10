@@ -76061,3 +76061,82 @@ is ruling out the cheap mitigation with hard data and sharpening what the two re
 to look like, rather than landing a working fix. I'd rather report "I tried the obvious cheap thing,
 it made things measurably worse, here's the data, here's what's actually needed" than either fake
 a partial fix or silently ship something I have direct evidence is harmful.
+
+# L89c session: building the thing L89a asked for, and finding it works for the wrong reason
+
+## Picking the work
+
+L89a's own remaining scope had already been split (by my previous session) into L89b — a real
+loop-based `SIMDizePass` lane-chunking redesign, large and risky — and L89c, an implicit always-on
+pipeline cache, small and well-scoped. I took L89c: it's independently valuable, it doesn't touch
+the core lane-processing shape that L89b will have to rewrite, and shipping it can't make L89b
+harder.
+
+## The change itself
+
+The mechanics were straightforward, because `feme` already had a real, content-hash-keyed
+`VkPipelineCache`. The only reason it wasn't helping was that `vkCreateComputePipelines`/
+`vkCreateGraphicsPipelines` consulted it solely when the app passed a non-null handle. So: give
+each `VkDevice` its own `PipelineCache` and consult it unconditionally, keyed identically.
+
+Two spec details mattered enough to test explicitly, and I'd have shipped a subtly wrong driver
+without them:
+
+1. `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT` means the *application's*
+   cache supplied the pipeline. An implicit hit must not set it. Easy to get wrong by just reusing
+   the existing `CacheHit` bool for both.
+2. If the app *did* supply a cache and the implicit cache answers first, the app's cache would
+   never get populated and would miss forever — so an implicit hit also inserts into the app's
+   cache. Without this, creating a `VkPipelineCache` would have made an app's observable hit rate
+   *worse*, which is an absurd outcome.
+
+A third thing I added unprompted: an eviction bound. An app-created cache is the app's to manage,
+but an implicit cache lives as long as the device, so unbounded it's a slow leak. I made it opt-in
+(unbounded default) specifically so every existing `VkPipelineCache` path is bit-for-bit unchanged
+and can't regress. I used insertion order rather than LRU deliberately — at a 256-entry bound the
+victim choice is irrelevant, and FIFO keeps `lookup` non-mutating. I unit-tested the bookkeeping
+directly (including that re-inserting a live key doesn't consume extra capacity, which would
+otherwise fill the eviction queue with duplicates and evict live entries early — a bug I nearly
+wrote).
+
+## Where I was wrong, and caught it
+
+L89a — my own previous session — justified this row with "roughly half of the 42 compiles in the
+motivating CTS case are byte-for-byte identical, so an implicit cache removes ~50% of them." I
+built the cache, ran that exact case, and it took 296 seconds. No improvement at all.
+
+Rather than shrug and ship it on the general argument, I instrumented the actual lookups. Result:
+all 38 pipeline creations have *distinct* cache keys, and every single implicit lookup misses.
+
+The explanation is that L89a hashed the wrong thing. It hashed the post-frontend LLVM module at
+`CompiledStage::createStage`; the pipeline cache is keyed on SPIR-V words, layout, and
+specialization data. Distinct SPIR-V that happens to lower to identical IR is entirely possible,
+and a SPIR-V-keyed cache cannot — and honestly should not — collapse it. So my own prior session's
+headline justification for this row was simply not evidence for it. I've corrected that in the
+roadmap and the CTS report rather than quietly leaving it, because an uncorrected wrong measurement
+is worse than no measurement: someone would eventually build on it.
+
+## Where it turned out to be worth far more than predicted
+
+Having falsified the stated justification, I had to decide whether the change was worth shipping at
+all. I went looking for a workload that would actually exercise it, and the obvious candidate was
+the CTS's own pipeline-caching group. A clean A/B on the same machine:
+
+- Without the implicit cache: `dEQP-VK.pipeline.monolithic.cache.*` (774 cases) **did not finish in
+  15 minutes.**
+- With it: **2.8 seconds**, 772 passed. 3,039 implicit hits against 6 misses.
+
+So the row is strongly justified — just by different evidence than it was filed on, and on the
+graphics side rather than compute. That makes sense in hindsight: graphics pipelines compile two or
+more stages per creation, and that group deliberately recreates identical pipelines.
+
+I checked the one failure in that group against a rebuild of the pre-change sources and confirmed
+it fails identically there, so it's pre-existing and not mine. I also swept `subgroups.basic` and
+`api.info` for regressions; `api.info`'s 721 failures are all format/limits queries that never
+create a pipeline.
+
+## What I deliberately did not do
+
+I didn't touch L89b. The motivating `_requiredsubgroupsize` case is still ~296 seconds and is still
+blocked on that redesign, and I've said so plainly in the roadmap rather than letting L89c's large
+unrelated win imply the original problem is solved. It isn't.
