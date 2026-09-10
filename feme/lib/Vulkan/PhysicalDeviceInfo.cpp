@@ -145,15 +145,16 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // correctly `NotSupported` for ray tracing/mesh shading, unrelated to
   // this bit).
   //
-  // `SHUFFLE_BIT` still stays un-advertised, but no longer because ballot
-  // is unimplemented (this was the reason as of L7t/L80): a speculative
-  // flip now instead crashes partway through a real
-  // `dEQP-VK.subgroups.shuffle.*` re-run with a `Value.cpp`
-  // "Uses remain when a value is destroyed!" assertion in
-  // `DiamondFlattener`'s own live-mask `PHINode` merging (a `phi` operand
-  // still referencing an already-erased `phi` result), a distinct new
-  // `Linearize.cpp` bug this session found but did not yet reduce or fix
-  // (see `Roadmap.md`'s new L-series row).
+  // `SHUFFLE_BIT` still stays un-advertised: the `Value.cpp`
+  // "Uses remain when a value is destroyed!" `DiamondFlattener` crash a
+  // speculative flip used to hit first (roadmap L88, now fixed --
+  // `foldRedundantFlowBlock` in `Linearize.cpp` no longer folds away a
+  // "Flow" block whose own mask phi escapes to an outer diamond) is gone,
+  // but a re-verification run immediately reached a *distinct* blocker: a
+  // real LLVM host-backend `PostMachineSchedulerLegacy` compile-time hang,
+  // confirmed to reproduce even against this file's own currently-committed
+  // feature set (`subgroupClusteredRotate`'s own `_requiredsubgroupsize`
+  // CTS variants do not gate on this bit at all), tracked as roadmap L89.
   Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
                                      VK_SUBGROUP_FEATURE_VOTE_BIT |
                                      VK_SUBGROUP_FEATURE_BALLOT_BIT;
