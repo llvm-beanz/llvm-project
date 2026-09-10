@@ -450,4 +450,100 @@ TEST(LinearizeTest,
   EXPECT_TRUE(FoundPlainStore);
 }
 
+// Roadmap L88: a real `llvm::Value::~Value` "Uses remain when a value is
+// destroyed!" assertion, discovered by a speculative
+// `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` verification run against
+// `dEQP-VK.subgroups.shuffle.*` (see L85) -- every non-rotate shuffle
+// test's own verification harness nests a uniform loop's own trip-count
+// check inside the shader's own divergent per-invocation guard. `%Flow`
+// below is exactly the redundant "Flow" merge block
+// loop-uniform-check-separate-structurized.ll documents (its own branch
+// condition, `%2`, is a phi of two literal constants) that
+// `feme::cpu::foldRedundantFlowBlock` (added by H19k) knows how to fold
+// away -- but because the loop is nested inside the outer divergent `%c1`
+// diamond here, `DiamondFlattener` (which runs first) has already injected
+// its own `%live.merge`/`%sideeffect.merge` mask phis directly into
+// `%Flow`, and threaded those same values up into the outer diamond's own,
+// unrelated `%Flow2` reconvergence block as a `select` operand with no
+// phi-chain relationship to `%Flow` at all. Folding `%Flow` away
+// regardless previously destroyed `%live.merge`/`%sideeffect.merge` while
+// `%Flow2`'s own select instructions still referenced them, aborting the
+// process outright rather than merely miscompiling. `foldRedundantFlowBlock`
+// must recognize this escaping use and leave `%Flow` in place instead.
+TEST(LinearizeTest,
+     PreservesRedundantFlowBlockWhoseMaskPhiEscapesToOuterDiamond) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n, ptr %buf) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c1 = icmp ne i32 %tid, 0
+      br i1 %c1, label %outer.f, label %entry.Flow1_crit_edge
+    entry.Flow1_crit_edge:
+      br label %Flow1
+    Flow1:
+      %0 = phi i1 [ false, %outer.f ], [ true, %entry.Flow1_crit_edge ]
+      br i1 %0, label %outer.t, label %Flow1.Flow2_crit_edge
+    Flow1.Flow2_crit_edge:
+      br label %Flow2
+    outer.t:
+      br label %header
+    Flow2:
+      br label %end
+    header:
+      %i = phi i32 [ %1, %Flow.header_crit_edge ], [ 0, %outer.t ]
+      br label %check
+    check:
+      %cond = icmp slt i32 %i, %n
+      br i1 %cond, label %body, label %check.Flow_crit_edge
+    check.Flow_crit_edge:
+      br label %Flow
+    body:
+      store i32 %i, ptr %buf
+      br label %latch
+    Flow:
+      %1 = phi i32 [ %inc, %latch ], [ poison, %check.Flow_crit_edge ]
+      %2 = phi i1 [ false, %latch ], [ true, %check.Flow_crit_edge ]
+      br i1 %2, label %exit, label %Flow.header_crit_edge
+    Flow.header_crit_edge:
+      br label %header
+    latch:
+      %inc = add i32 %i, 1
+      br label %Flow
+    exit:
+      br label %Flow2
+    outer.f:
+      br label %Flow1
+    end:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  // Must not crash the process (the pre-L88 fold would have destroyed a
+  // still-used `PHINode` here, aborting via `llvm::Value::~Value`'s own
+  // "Uses remain when a value is destroyed!" assertion instead of
+  // returning).
+  run(*M);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *Flow = nullptr;
+  for (BasicBlock &BB : *F)
+    if (BB.getName() == "Flow")
+      Flow = &BB;
+  ASSERT_TRUE(Flow) << "the redundant Flow block's own mask phi escapes to "
+                       "the outer diamond, so it must be left in place "
+                       "rather than folded away";
+  bool FoundMaskPhi = false;
+  for (PHINode &PN : Flow->phis())
+    if (PN.getType()->isIntegerTy(1) &&
+        PN.getName().starts_with("live.merge"))
+      FoundMaskPhi = true;
+  EXPECT_TRUE(FoundMaskPhi);
+}
+
 } // namespace
