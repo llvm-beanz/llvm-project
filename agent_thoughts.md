@@ -75991,3 +75991,73 @@ limitation of that already-documented design at wide wave sizes, not a deviation
 itself. Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed and updated: the subgroup
 capability audit's own `SHUFFLE_BIT` pending-blocker note now points at L89a instead of the original
 (corrected) L89 framing.
+
+# L89a session: chasing "bound the basic block" and finding out that's the wrong lever
+
+## Starting point
+
+L89's closing session had root-caused the apparent `PostMachineSchedulerLegacy` "hang" to a real
+but finite compile-time blowup: `SIMDizePass`'s per-lane scalarization strategy produces one
+~2200-instruction basic block at `WaveSize=64` (vs ~140 at the default `WaveSize=4`), and LLVM's
+legacy list scheduler scales poorly on huge single blocks. The proposed fix direction (L89a) was
+"give `SIMDizePass` a bounded-basic-block codegen strategy". I decided to try the cheapest,
+lowest-risk version of that idea first — a late, purely mechanical pass that chops any oversized
+block into fixed-size chunks via `llvm::SplitBlock`, run after `OptimizerPipeline` so `SimplifyCFG`
+doesn't undo it — before committing to the much larger, riskier `SIMDizePass`-internals redesign
+the milestone description flagged as the "real" fix.
+
+## The experiment, and why I'm glad I ran it before committing to anything
+
+I built `BoundBlockSizePass`, wired it into `CompiledStage.cpp` right after `OptimizerPipeline::run`,
+and confirmed via IR dumps that it does exactly what it says: the 2200-instruction block became
+~9 chunks of 257 instructions each. Good — the transform is mechanically correct.
+
+Then I timed the actual CTS case with the fix active. It was *slower* — didn't even finish in 300s,
+worse than the ~210s unfixed baseline. That's the opposite of what I expected, so I didn't just
+shrug and move on; I isolated it with `llc -O2 -time-passes` on captured `.ll` dumps of the exact
+same shader before/after chunking. Un-chunked: ~2.7s, ~1.55s of which is "Instruction Scheduling".
+Chunked: ~40s, ~32.3s of which is "Instruction Scheduling" — a ~21x slowdown in that one sub-phase
+alone, for semantically identical code that only differs in how many basic blocks it's spread
+across.
+
+This is the most useful thing I found this session, and it's a negative result: "smaller basic
+blocks are always friendlier to the instruction scheduler" is not a safe assumption. My best
+explanation (not fully profiled at the `LiveIntervals` level, so take it as a hypothesis, not a
+proven mechanism) is that equal-size chunking picks split points with zero regard for live-range
+crossing, so every new block boundary adds `CopyToReg`/`CopyFromReg` register-class bookkeeping on
+top of the *same* underlying live-range footprint the un-chunked version had — you don't reduce the
+critical path or the live-value count, you just add overhead around it. That's exactly why a
+loop-based redesign (fewer *simultaneously live* values per iteration, not just fewer instructions
+per block) is the thing the original milestone description was actually asking for, and why a
+mechanical post-hoc split can't substitute for it.
+
+I reverted `BoundBlockSizePass` and all its wiring in full rather than leaving it around
+half-working or disabled-by-default — there's no evidence it helps anywhere, and clear evidence it
+can make things dramatically worse, so shipping it (even inert) would be a landmine for someone
+later. `CompiledStage.cpp`/`CMakeLists.txt`/`feme-opt.cpp` are all back to their pre-session state;
+I diffed against a backup I took before starting to confirm the revert was clean, and `check-feme`
+confirms the tree matches the known-good baseline (2,843/2,843 passing, same as before this
+session).
+
+## The other thing I found while I was in there
+
+While instrumenting `createStage` to compare pre/post-chunk IR, I added per-call logging with an
+IR-content hash to see how many of the "many compiles for the same case" calls (a related but
+distinct observation from the L89 session) were truly identical. Answer: about half. Of ~42
+`createStage` invocations during one CTS case run, 21 fall into 4 hash buckets that recur 5-6 times
+each (genuinely redundant), and the other ~21 are distinct. `feme` already has a real
+content-hash-keyed `VkPipelineCache`, but it's only consulted when the app supplies a non-null
+handle — this CTS case passes `VK_NULL_HANDLE`, so the existing cache never engages. An
+always-on, implicit cache (reusing the same hashing scheme) would eliminate the confirmed
+redundant half, but not the genuinely-distinct half, so it's a real, valuable, and much
+lower-risk complementary fix — not a substitute for the `SIMDizePass` redesign.
+
+## Where this leaves things
+
+I split the roadmap row into L89b (the actual loop-based `SIMDizePass` redesign — the correct fix,
+still not started, genuinely large and risky) and L89c (the implicit compile cache — smaller,
+independently valuable, lower risk). Neither is implemented yet; this session's real contribution
+is ruling out the cheap mitigation with hard data and sharpening what the two real follow-ups need
+to look like, rather than landing a working fix. I'd rather report "I tried the obvious cheap thing,
+it made things measurably worse, here's the data, here's what's actually needed" than either fake
+a partial fix or silently ship something I have direct evidence is harmful.
