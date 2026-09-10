@@ -42,39 +42,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L85 from the roadmap or other prerequisites blocking the
+Can you work on L86 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`GroupNonUniformBallot`
-> (`OpGroupNonUniformBallot`/`OpGroupNonUniformBallotBitExtract`/etc., SPIR-V
-> opcode 341 for the `BitExtract` variant, `VK_SUBGROUP_FEATURE_BALLOT_BIT`) is
-> entirely unimplemented anywhere in this project**, split out of L7t's own
-> closing session: not a new regression -- confirmed via `grep -rln
-> "GroupNonUniformBallot" feme/lib/ feme/include/` returning zero matches,
-> entirely pre-existing and previously undiscovered by name (only implicitly,
-> indirectly surfaced before now as "why does `dEQP-VK.subgroups.ballot.*` show
-> `NotSupported`" rather than root-caused). Two real, distinct consequences
-> discovered this session: (1) the entire, direct `dEQP-VK.subgroups.ballot.*`
-> CTS group (correctly hidden today behind its own unadvertised `BALLOT_BIT`, so
-> currently harmless); and (2) surprisingly, essentially the **entire**
-> `dEQP-VK.subgroups.shuffle.*` CTS group too (a real flag-flip verification
-> run: 256/9562 cases newly failing with `error: unhandled opcode 341` once
-> `SHUFFLE_BIT` was speculatively advertised), because every non-rotate CTS
-> shuffle test shader's own verification harness (not the shuffle operation
-> itself) calls `subgroupBallot()`/`subgroupBallotBitExtract()` to check whether
-> the lane it read from was active -- meaning `SHUFFLE_BIT` cannot be safely
-> advertised until this gap closes, even though shuffle's own core
-> `OpGroupNonUniformShuffle`/`OpGroupNonUniformShuffleXor` legalization is
-> presumably already fine on its own (a distinct, already-implemented
-> `WaveCallKind::ReadLane`-adjacent pattern, not itself blocked by this row). A
-> materially larger prerequisite than a single-pattern fix: needs (1) new
-> SPIR-V-to-LLVM legalization pattern(s) for each `OpGroupNonUniformBallot*`
-> variant this ICD's own frontend reaches (mirroring
-> `AllEqualConversionPattern`/`ShuffleConversionPattern`'s own precedent in
-> `SPIRVToLLVMPatterns.cpp`), (2) a new `WaveCallKind::Ballot`-family
-> CPU-runtime intrinsic/lowering path (`WaveCalls.cpp`/`feme::cpu::SIMDizePass`)
-> producing the correct `<4 x uint32>`-shaped active-lane bitmask this ICD's own
-> wave width actually needs, and (3) its own real `deqp-vk` verification pass
-> across both the direct `ballot.*` group and a re-verification that flipping
-> `SHUFFLE_BIT` afterward introduces zero regressions, before either bit is
-> advertised in `PhysicalDeviceInfo.cpp`
+> **`OpCopyObject` (SPIR-V opcode 83) has zero support anywhere in upstream
+> MLIR's SPIR-V dialect**, split out of L7f's own closing session: confirmed via
+> `grep -rln "CopyObject" mlir/include/mlir/Dialect/SPIRV/
+> mlir/lib/Dialect/SPIRV/ mlir/lib/Target/SPIRV/` returning zero matches -- no
+> op definition, no deserialization case, no serialization case, anywhere.
+> Discovered as the second of two coupled gaps in a real, concrete
+> `NonUniformResourceIndex()` HLSL repro (dxc compiles this to a `Texture2D`
+> array index wrapped in `OpCopyObject %type %idx`, with the `NonUniform`
+> decoration -- L7f's own now-fixed gap -- attached to the copy's own result id
+> rather than the original value): even with L7f's decoration fix in place,
+> deserialization of this real repro still fails, now on `"unhandled opcode 83"`
+> one instruction later. In practice, essentially any real dxc-compiled shader
+> using `NonUniformResourceIndex()` needs this op, since dxc's own codegen
+> convention always pairs the two together, even though they are architecturally
+> independent SPIR-V features. A materially larger gap than an ordinary
+> `feme`-side legalization-pattern fix -- mirrors L7g's own `OpImageGather`
+> precedent exactly: needs new upstream-style MLIR dialect work (a new
+> `spirv.CopyObject` op definition, verifier, printer/parser, and both a
+> deserialization and serialization case) before any `feme`-side legalization
+> pattern converting it to LLVM IR can even be written, and before the real
+> `NonUniformResourceIndex()` end-to-end HLSL repro can pass deserialization at
+> all
