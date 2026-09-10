@@ -269,6 +269,7 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
   case Intrinsic::dx_wave_prefix_bit_count:
     return WaveCallKind::PrefixBitCount;
   case Intrinsic::dx_wave_ballot:
+  case Intrinsic::spv_subgroup_ballot:
     return WaveCallKind::Ballot;
   // Signed/unsigned addition and multiplication are bit-identical in two's
   // complement, so each signed/unsigned pair shares one `WaveCallKind` (see
@@ -1039,6 +1040,25 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       // buffer load (see `widenImageCall`).
       if ((Matched && !Matched->StoredValue) || matchImageCall(*CI)) {
         IsSupportedProducer = true;
+      } else if (Function *BallotCallee = CI->getCalledFunction();
+                 BallotCallee && classifyWaveCall(
+                                     BallotCallee->getIntrinsicID()) ==
+                                     WaveCallKind::Ballot) {
+        // (Roadmap L85) A SPIR-V-origin `llvm.spv.subgroup.ballot` call's
+        // own `<4 x i32>` result: unlike every other vector-typed
+        // producer case here, it is control-flow-*dependent* (its
+        // predicate operand may itself be divergent) but not
+        // control-flow-*varying* -- every lane's own copy of the result
+        // is, by `subgroupBallot()`'s own definition, the identical
+        // whole-subgroup mask, so generic per-lane UniformityAnalysis
+        // over-conservatively flags it divergent even though
+        // `widenWaveCall`'s own dedicated `WaveCallKind::Ballot` handling
+        // (see its comment) already produces one genuinely uniform
+        // `<4 x i32>` value shared by every lane, exactly like the
+        // DXIL-origin `WaveActiveBallot`'s `{i32,i32,i32,i32}` result
+        // already does today (that struct type simply never tripped this
+        // vector-typed-producer check in the first place).
+        IsSupportedProducer = true;
       } else if (matchMaskedLoad(*CI)) {
         // (Roadmap L15) A `feme.cpu.masked.load.*` call producing a
         // vector-typed result -- `feme::cpu::LinearizePass`'s masked form
@@ -1654,6 +1674,36 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
 
   CallInst *NewCall = createWaveCall(Builder, Kind, WaveSize, WideMask,
                                      WideOperand, WideLaneIndex, CI.getName());
+
+  // `WaveCallKind::Ballot`'s own `createWaveCall` result is always DXIL's
+  // fixed `{i32, i32, i32, i32}` ballot ABI (see that switch case's own
+  // comment), which matches `CI`'s type exactly for a DXIL-origin
+  // `WaveActiveBallot` call, but not for a SPIR-V-origin
+  // `spirv.GroupNonUniformBallot` one (raised as
+  // `Intrinsic::spv_subgroup_ballot`, see `classifyWaveCall` above):
+  // `int_spv_subgroup_ballot`'s own result type is a `<4 x i32>` vector
+  // instead (`BallotConversionPattern`'s own comment in
+  // `SPIRVToLLVMPatterns.cpp` explains why the two frontends' ballot
+  // results differ in packaging despite encoding the identical 128-bit
+  // mask), so `CI`'s own users still expect that vector shape here. A
+  // plain `CI.replaceAllUsesWith(NewCall)` would fail LLVM's own
+  // same-type RAUW requirement in that case, so this repackages the
+  // struct's four words into the vector shape `CI` itself already has
+  // before replacing it, rather than falling through to the generic
+  // `else` branch below.
+  if (Kind == WaveCallKind::Ballot && CI.getType() != NewCall->getType()) {
+    assert(CI.getType()->isVectorTy() &&
+           "unexpected non-DXIL, non-SPIR-V Ballot result type");
+    Value *Vec = PoisonValue::get(CI.getType());
+    for (unsigned I = 0; I != 4; ++I) {
+      Value *Word = Builder.CreateExtractValue(NewCall, I);
+      Vec = Builder.CreateInsertElement(Vec, Word, Builder.getInt32(I));
+    }
+    Vec->takeName(&CI);
+    CI.replaceAllUsesWith(Vec);
+    ToErase.push_back(&CI);
+    return;
+  }
 
   // A divergent result (`IsFirstLane`/`PrefixBitCount`/`PrefixSum`/
   // `PrefixProduct`, see `isDivergentWaveCallResult`) is itself widened,
