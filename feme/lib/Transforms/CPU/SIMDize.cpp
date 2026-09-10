@@ -1059,6 +1059,21 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // already does today (that struct type simply never tripped this
         // vector-typed-producer check in the first place).
         IsSupportedProducer = true;
+      } else if (Function *ReadLaneCallee = CI->getCalledFunction();
+                 ReadLaneCallee &&
+                 classifyWaveCall(ReadLaneCallee->getIntrinsicID()) ==
+                     WaveCallKind::ReadLane) {
+        // (Roadmap L89d) A vector-typed `wave.readlane` result: unlike
+        // every other `WaveCallKind` but `AllEqual`, `ReadLane`'s operand
+        // (and therefore its result) may itself be a vector, because
+        // `RotateConversionPattern` in SPIRVToLLVMPatterns.cpp converts
+        // `spirv.GroupNonUniformRotateKHR` straight to
+        // `llvm.spv.wave.readlane` at the op's own result type -- a
+        // `bvec2`/`ivec3`/`vec4` `subgroupClusteredRotate` therefore
+        // arrives here as a genuine `<N x T>` gather. `widenWaveCall`'s
+        // own dedicated vector branch decomposes it into `N` independent
+        // per-component gathers sharing one lane index (see its comment).
+        IsSupportedProducer = true;
       } else if (matchMaskedLoad(*CI)) {
         // (Roadmap L15) A `feme.cpu.masked.load.*` call producing a
         // vector-typed result -- `feme::cpu::LinearizePass`'s masked form
@@ -1210,6 +1225,18 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         if (Callee &&
             classifyWaveCall(Callee->getIntrinsicID()) ==
                 WaveCallKind::AllEqual &&
+            UserCI->getArgOperand(0) == &I)
+          continue;
+        // (Roadmap L89d) A vector-typed `subgroupClusteredRotate`/
+        // `subgroupShuffle`-family gather's own value operand -- the
+        // `ReadLane` counterpart of the `AllEqual` case just above, and
+        // decomposed the same way by `widenWaveCall`'s own dedicated
+        // vector branch (one `feme.cpu.wave.readlane` per component,
+        // all sharing this call's single lane index). Only the value
+        // operand qualifies: the lane index is always a scalar `i32`.
+        if (Callee &&
+            classifyWaveCall(Callee->getIntrinsicID()) ==
+                WaveCallKind::ReadLane &&
             UserCI->getArgOperand(0) == &I)
           continue;
         // Roadmap H6g-b-a-i-a-i-b: an argument of a vector-typed,
@@ -1664,10 +1691,54 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
     return;
   }
 
+  // (Roadmap L89d) The `ReadLane` counterpart of the `AllEqual` branch
+  // above, and the only other `WaveCallKind` whose operand may be a
+  // vector: `RotateConversionPattern` (SPIRVToLLVMPatterns.cpp) converts
+  // `spirv.GroupNonUniformRotateKHR` directly to `llvm.spv.wave.readlane`
+  // at the SPIR-V op's own result type, so a `bvec2`/`ivec3`/`vec4`
+  // `subgroupClusteredRotate`/`subgroupShuffle` arrives here as a genuine
+  // `<N x T>` gather. A gather is independent per component -- every
+  // component of output lane `L` reads the same source lane `I[L]` -- so
+  // this decomposes into `N` separate `feme.cpu.wave.readlane` calls, one
+  // per `<W x elemT>` component, all sharing this call's single widened
+  // lane index, rather than one illegal `<W x <N x T>>` call.
+  //
+  // Unlike `AllEqual`, whose per-component results are always scalar `i1`s
+  // that reassemble into an ordinary `<N x i1>` vector, a gather's result
+  // is only uniform when this specific call is (see the `ResultDivergent`
+  // comment below): a divergent one stays decomposed as `N` wide
+  // components for its downstream users, exactly like any other divergent
+  // vector producer, while a uniform one narrows each component back to
+  // its lane 0 and rebuilds the scalar `<N x T>` vector `CI`'s existing
+  // users expect.
+  if (Kind == WaveCallKind::ReadLane && CI.getType()->isVectorTy()) {
+    SmallVector<Value *, 4> Components =
+        getVectorComponents(CI.getArgOperand(0), Builder);
+    Value *WideIndex = getWidened(CI.getArgOperand(1), Builder);
+
+    SmallVector<Value *, 4> WideResults;
+    for (Value *Component : Components)
+      WideResults.push_back(createWaveCall(Builder, Kind, WaveSize, WideMask,
+                                           Component, WideIndex, CI.getName()));
+
+    if (UI.isDivergentAtDef(&CI)) {
+      WidenedVectorComponents[&CI] = std::move(WideResults);
+    } else {
+      Value *Result = PoisonValue::get(CI.getType());
+      for (auto [Idx, WideResult] : llvm::enumerate(WideResults))
+        Result = Builder.CreateInsertElement(
+            Result, Builder.CreateExtractElement(WideResult, uint64_t{0}),
+            Builder.getInt32(Idx));
+      Result->takeName(&CI);
+      CI.replaceAllUsesWith(Result);
+    }
+    ToErase.push_back(&CI);
+    return;
+  }
+
   Value *WideOperand = nullptr;
   if (Kind != WaveCallKind::GetLaneCount && Kind != WaveCallKind::IsFirstLane)
     WideOperand = getWidened(CI.getArgOperand(0), Builder);
-
   Value *WideLaneIndex = nullptr;
   if (Kind == WaveCallKind::ReadLane)
     WideLaneIndex = getWidened(CI.getArgOperand(1), Builder);
