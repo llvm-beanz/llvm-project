@@ -42,45 +42,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L89h from the roadmap or other prerequisites blocking the
+Can you work on L89e from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`subgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask` builtins are
-> unimplemented, failing all 10 `dEQP-VK.subgroups.builtin_mask_var.compute.*`
-> cases**, found by L89f's own full-tree `dEQP-VK.subgroups.*` sweep -- the
-> first such sweep this project has run, which is why these had not surfaced
-> before (no previous session ran the `builtin_mask_var` group at all). All 10
-> cases (5 mask builtins x plain/`_requiredsubgroupsize`) fail
-> `vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED`. **Root cause
-> confirmed by real IR reduction** (L89f's own closing session, after one wrong
-> intermediate diagnosis was filed here and then caught -- see below): the five
-> `SubgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask` SPIR-V builtin
-> *variables* are simply absent from `BuiltInMappings[]` in
-> `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, so a read of one
-> falls through to the generic `Input`-storage-class-variable path and converts
-> to a `feme.stage.input.load` at location 0, components 0-3 -- a *graphics*
-> stage op that no compute-stage lowering handles, so the call survives all the
-> way to codegen and the ORC JIT rejects the module with `JIT session error:
-> Symbols not found: [ feme.stage.input.load.v4i32 ]`. They are gated by the
-> `GroupNonUniformBallot` capability (which this ICD already advertises via
-> `BALLOT_BIT`), and are builtin *variables* rather than `GroupNonUniform*`
-> instructions, so they need builtin-variable decoding, not a conversion pattern
-> for an op. Each is a straightforward function of the lane index against the
-> ballot ABI's own 128-bit mask shape that `lowerBallot` in `WaveLowering.cpp`
-> already produces (`EqMask` = `1 << lane`, `LtMask` = `(1 << lane) - 1`,
-> `LeMask` = `LtMask | EqMask`, `GtMask` = `~LeMask`, `GeMask` = `~LtMask`, each
-> truncated to the subgroup size). The one real design point is that
-> `BuiltInMappings[]`'s own entry shape maps a builtin to exactly *one* LLVM
-> intrinsic call, which cannot express any of these: each needs a small computed
-> expansion producing a `vector<4xi32>` from
-> `SubgroupLocalInvocationId`/`SubgroupSize`, so the fix needs its own
-> conversion path alongside that table rather than a new row in it, plus unit
-> coverage at the SPIR-V-to-LLVM conversion phase and a lit test. **A note on
-> process**: this row's original text was correct, but L89f's own closing
-> session briefly "corrected" it to blame `SIMDizePass` instead, on the strength
-> of the *first* error a reduction surfaced. That error was real, but it was a
-> second, independent gap layered in front of this one (fixed as L89h); only
-> after fixing it did the actual missing-builtin failure become visible.
-> Confirmed pre-existing and entirely unrelated to `SHUFFLE_BIT`: identical in
-> both the before and after runs of L89f's own A/B sweep, and still 10/10
-> failing after L89h
+> **`spirv.GroupNonUniformBroadcast`/`GroupNonUniformBroadcastFirst` are
+> unimplemented in the SPIR-V -> LLVM conversion, failing all 336
+> `dEQP-VK.subgroups.ballot_broadcast.compute.*` cases**, found by L89b's own
+> regression sweep of `dEQP-VK.subgroups.ballot*` (6,284 cases, 16 passed / 336
+> failed / 5,932 unsupported). Every failure is the same
+> `VK_ERROR_INITIALIZATION_FAILED` from `vkCreateComputePipelines`, and the
+> driver-side diagnostic is a conversion-legalization error, not a `feme`-IR
+> one: `error: failed to legalize operation 'spirv.GroupNonUniformBroadcast'
+> that was explicitly marked illegal: %148 =
+> "spirv.GroupNonUniformBroadcast"(%145, %147) <{execution_scope =
+> #spirv.scope<Subgroup>}> : (i1, i32) -> i1`. The failures cover the group
+> exhaustively -- all 48 distinct
+> `subgroupbroadcast`/`subgroupbroadcast_nonconst`/`subgroupbroadcastfirst` x
+> scalar/`vec*`/`ivec*`/`uvec*`/`bvec*` shapes, each x 7 subgroup-size variants
+> -- so this is a wholly missing op pair rather than a type-specific gap; the
+> sibling `ballot`/`ballot_mask`/`ballot_other` groups in the same sweep have no
+> failures. Confirmed pre-existing and unrelated to L89b, which changed only
+> `lowerReadLane`'s body in `WaveLowering.cpp`, a pass that runs long after
+> SPIR-V conversion. Needs conversion patterns mapping both ops onto the
+> existing `feme.cpu.wave.readlane` / first-active-lane machinery
+> (`GroupNonUniformBroadcast` is `readlane` with a subgroup-uniform index;
+> `GroupNonUniformBroadcastFirst` is a read from the first active lane, which
+> `getClampedFirstActiveLaneIndex` already computes), including the `i1` and
+> vector operand shapes the group exercises, plus lit coverage in the
+> SPIR-V-to-LLVM conversion tests
