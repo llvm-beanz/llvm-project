@@ -74,6 +74,51 @@ const BuiltInMapping *getBuiltInMapping(mlir::spirv::GlobalVariableOp Global) {
   return nullptr;
 }
 
+/// One of the five `GroupNonUniformBallot`-gated subgroup mask builtin
+/// *variables*, each a `uvec4` naming the invocations in the subgroup that
+/// compare a given way against the current one.
+///
+/// Unlike every `BuiltInMappings[]` entry, none of these is a single
+/// `llvm.spv.*` intrinsic read: each is a small computed function of
+/// `SubgroupLocalInvocationId` and `SubgroupSize` that `buildSubgroupMask`
+/// below emits directly (roadmap L89g).
+enum class SubgroupMaskKind { Eq, Ge, Gt, Le, Lt };
+
+/// Returns which subgroup mask builtin \p Global is, or `std::nullopt` if it
+/// is not one.
+std::optional<SubgroupMaskKind>
+getSubgroupMaskBuiltIn(mlir::spirv::GlobalVariableOp Global) {
+  std::optional<llvm::StringRef> Name = Global.getBuiltIn();
+  if (!Name)
+    return std::nullopt;
+  std::optional<mlir::spirv::BuiltIn> BuiltIn =
+      mlir::spirv::symbolizeBuiltIn(*Name);
+  if (!BuiltIn)
+    return std::nullopt;
+  switch (*BuiltIn) {
+  case mlir::spirv::BuiltIn::SubgroupEqMask:
+    return SubgroupMaskKind::Eq;
+  case mlir::spirv::BuiltIn::SubgroupGeMask:
+    return SubgroupMaskKind::Ge;
+  case mlir::spirv::BuiltIn::SubgroupGtMask:
+    return SubgroupMaskKind::Gt;
+  case mlir::spirv::BuiltIn::SubgroupLeMask:
+    return SubgroupMaskKind::Le;
+  case mlir::spirv::BuiltIn::SubgroupLtMask:
+    return SubgroupMaskKind::Lt;
+  default:
+    return std::nullopt;
+  }
+}
+
+/// Returns true if \p Global is a builtin variable this conversion models as
+/// a *value* -- either one `BuiltInMappings[]` reads with a single intrinsic
+/// or one of `getSubgroupMaskBuiltIn`'s computed masks -- rather than as the
+/// interface memory an ordinary stage-IO variable converts to.
+bool isValueModeledBuiltIn(mlir::spirv::GlobalVariableOp Global) {
+  return getBuiltInMapping(Global) || getSubgroupMaskBuiltIn(Global);
+}
+
 /// Returns the global variable \p Op takes the address of, or a null op if
 /// there is no such symbol.
 mlir::spirv::GlobalVariableOp getReferencedGlobal(mlir::spirv::AddressOfOp Op) {
@@ -1056,6 +1101,81 @@ mlir::Value clipBallotBitsToSubgroupSize(
   return mlir::LLVM::AndOp::create(Rewriter, Loc, Bits, Mask);
 }
 
+/// Builds one of the five subgroup mask builtin variables' `<4 x i32>`
+/// values (roadmap L89g) from the current invocation's own id.
+///
+/// Each is defined by the SPIR-V spec against the same 128-bit ballot
+/// bitmask layout `ballotVectorToI128` documents, so all five are computed
+/// as `i128` arithmetic over `llvm.spv.subgroup.local.invocation.id` and
+/// bitcast back to the `uvec4` the ballot ABI spells them as:
+///
+///   EqMask = 1 << id           GeMask = ~LtMask
+///   LtMask = (1 << id) - 1     GtMask = ~LeMask
+///   LeMask = (1 << (id + 1)) - 1
+///
+/// `1 << id` is always in range (`id` is always less than `SubgroupSize`,
+/// itself at most 128), so none of these needs
+/// `clipBallotBitsToSubgroupSize`'s own out-of-range-shift guard on the
+/// shift itself. `Le`/`Gt` are deliberately built from `EqMask << 1`
+/// rather than the equivalent-looking `1 << (id + 1)`, which would be an
+/// out-of-range shift for the largest valid `id` (127, in a full 128-wide
+/// subgroup); shifting the already-computed bit instead simply drops it
+/// off the top, leaving the all-ones prefix that case wants. The two
+/// complemented masks do need that helper's clip on their *result*, though: the
+/// spec defines every bit at or beyond `SubgroupSize` as zero, and
+/// complementing a prefix mask sets all of them. The three prefix masks are
+/// already bounded by `id + 1 <= SubgroupSize` and so need no clip, exactly as
+/// `clipBallotBitsToSubgroupSize`'s own comment says of `BallotBitCount`'s
+/// scan variants. `vktSubgroupsBuiltinMaskVarTests.cpp` checks this
+/// directly by requiring a plain 128-bit `bitCount` of the mask to equal
+/// `subgroupBallotBitCount`, which only counts bits below `SubgroupSize`.
+mlir::Value buildSubgroupMask(mlir::ConversionPatternRewriter &Rewriter,
+                              mlir::Location Loc, SubgroupMaskKind Kind,
+                              mlir::Type ResultType) {
+  mlir::Type I128 = Rewriter.getIntegerType(128);
+  mlir::Value Id = createIntrinsicCall(Rewriter, Loc,
+                                       "llvm.spv.subgroup.local.invocation.id",
+                                       Rewriter.getI32Type(), {});
+  mlir::Value Id128 = mlir::LLVM::ZExtOp::create(Rewriter, Loc, I128, Id);
+  mlir::Value One = mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128, 1);
+
+  // `Eq` is the single bit; `Lt`/`Le` are the prefixes below and through it.
+  mlir::Value Eq = mlir::LLVM::ShlOp::create(Rewriter, Loc, One, Id128);
+  mlir::Value Bits;
+  switch (Kind) {
+  case SubgroupMaskKind::Eq:
+    Bits = Eq;
+    break;
+  case SubgroupMaskKind::Lt:
+    Bits = mlir::LLVM::SubOp::create(Rewriter, Loc, Eq, One);
+    break;
+  case SubgroupMaskKind::Le:
+    Bits = mlir::LLVM::SubOp::create(
+        Rewriter, Loc, mlir::LLVM::ShlOp::create(Rewriter, Loc, Eq, One), One);
+    break;
+  case SubgroupMaskKind::Ge:
+    Bits = clipBallotBitsToSubgroupSize(
+        Rewriter, Loc,
+        mlir::LLVM::XOrOp::create(
+            Rewriter, Loc, mlir::LLVM::SubOp::create(Rewriter, Loc, Eq, One),
+            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128,
+                                           llvm::APInt::getAllOnes(128))));
+    break;
+  case SubgroupMaskKind::Gt:
+    Bits = clipBallotBitsToSubgroupSize(
+        Rewriter, Loc,
+        mlir::LLVM::XOrOp::create(
+            Rewriter, Loc,
+            mlir::LLVM::SubOp::create(
+                Rewriter, Loc,
+                mlir::LLVM::ShlOp::create(Rewriter, Loc, Eq, One), One),
+            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128,
+                                           llvm::APInt::getAllOnes(128))));
+    break;
+  }
+  return mlir::LLVM::BitcastOp::create(Rewriter, Loc, ResultType, Bits);
+}
+
 /// Extracts bit \p Index (an `i32`, not required to be a compile-time
 /// constant, and not required to be uniform across the group -- see
 /// `InverseBallotConversionPattern`'s own "current invocation" index and
@@ -2016,7 +2136,8 @@ public:
     if (!Global)
       return Rewriter.notifyMatchFailure(Op, "no such global variable");
     const BuiltInMapping *Mapping = getBuiltInMapping(Global);
-    if (!Mapping)
+    std::optional<SubgroupMaskKind> MaskKind = getSubgroupMaskBuiltIn(Global);
+    if (!Mapping && !MaskKind)
       return Rewriter.notifyMatchFailure(
           Op, "not a builtin variable with an LLVM equivalent");
 
@@ -2027,6 +2148,12 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
+    if (MaskKind) {
+      Rewriter.replaceOp(
+          Op, buildSubgroupMask(Rewriter, Loc, *MaskKind, ResultType));
+      return mlir::success();
+    }
+
     auto VectorTy = mlir::dyn_cast<mlir::VectorType>(ResultType);
     if (!VectorTy) {
       llvm::SmallVector<mlir::Value, 1> Args;
@@ -2069,7 +2196,7 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (!getBuiltInMapping(Op))
+    if (!isValueModeledBuiltIn(Op))
       return Rewriter.notifyMatchFailure(
           Op, "not a builtin variable with an LLVM equivalent");
     Rewriter.eraseOp(Op);
@@ -2270,7 +2397,7 @@ getStageIOAddressSpace(mlir::spirv::GlobalVariableOp Op) {
   if (SC != mlir::spirv::StorageClass::Input &&
       SC != mlir::spirv::StorageClass::Output)
     return std::nullopt;
-  if (getBuiltInMapping(Op))
+  if (isValueModeledBuiltIn(Op))
     return std::nullopt;
   return SC == mlir::spirv::StorageClass::Input ? 7 : 8;
 }
