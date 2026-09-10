@@ -6898,6 +6898,174 @@ public:
   }
 };
 
+/// Computes the dot product of two same-shaped scalar-or-vector float
+/// operands, always returning a scalar result: a plain multiply for the
+/// scalar case, or the same per-lane `llvm.intr.fmuladd` reduction chain
+/// `DotConversionPattern` above uses for `spirv.Dot` (whose own operands
+/// are always vectors), generalized here to also accept a plain scalar
+/// operand pair. Needed by `spirv.GL.FaceForward`/`spirv.GL.Refract`
+/// below (roadmap L87) since, unlike `spirv.Dot`, the GLSL.std.450 spec
+/// allows either shape for these two ops' own vector-typed operands.
+static mlir::Value
+createScalarOrVectorDotProduct(mlir::ConversionPatternRewriter &Rewriter,
+                               mlir::Location Loc, mlir::Value V1,
+                               mlir::Value V2) {
+  auto VectorTy = mlir::dyn_cast<mlir::VectorType>(V1.getType());
+  if (!VectorTy)
+    return mlir::LLVM::FMulOp::create(Rewriter, Loc, V1, V2);
+
+  int64_t NumElements = VectorTy.getNumElements();
+  auto ExtractElement = [&](mlir::Value Vector, int64_t Index) {
+    mlir::Value IndexValue =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI64Type(),
+                                       Rewriter.getI64IntegerAttr(Index));
+    return mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vector,
+                                                IndexValue);
+  };
+
+  mlir::Value Result = mlir::LLVM::FMulOp::create(
+      Rewriter, Loc, ExtractElement(V1, 0), ExtractElement(V2, 0));
+  for (int64_t I = 1; I != NumElements; ++I)
+    Result = mlir::LLVM::FMulAddOp::create(
+        Rewriter, Loc, ExtractElement(V1, I), ExtractElement(V2, I), Result);
+  return Result;
+}
+
+/// Broadcasts scalar \p Scalar to match \p Ty's shape via `broadcastScalar`
+/// above if \p Ty is a vector type, or returns \p Scalar unchanged for a
+/// plain scalar \p Ty. Lets a single scalar (e.g. `spirv.GL.Refract`'s own
+/// `eta` operand, or an intermediate dot-product/comparison result shared
+/// by `spirv.GL.FaceForward`/`spirv.GL.Refract` below) be combined
+/// arithmetically with a scalar-or-vector operand of the same width
+/// without a separate scalar/vector code path at each call site.
+static mlir::Value
+broadcastScalarToShapeOf(mlir::ConversionPatternRewriter &Rewriter,
+                         mlir::Location Loc, mlir::Value Scalar,
+                         mlir::Type Ty) {
+  if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(Ty))
+    return broadcastScalar(Rewriter, Loc, Scalar, VecTy);
+  return Scalar;
+}
+
+/// Converts `spirv.GL.FaceForward` (roadmap L87) into the GLSL.std.450
+/// spec's own literal definition: `dot(Nref, I) < 0 ? N : -N`. `spirv.GL.
+/// FaceForward`'s generic ternary `x`/`y`/`z` operand names (see
+/// `SPIRV_GLTernaryArithmeticOp` in SPIRVGLOps.td, shared with `spirv.GL.
+/// FClamp`/`spirv.GL.SmoothStep` et al.) map to `FaceForward`'s own
+/// `N`/`I`/`Nref` positions in that order, mirroring dxc's own real
+/// `OpExtInst %type %set FaceForward %N %I %Nref` operand order. Uses a
+/// compare-then-select (`llvm.fcmp olt` against a zero constant, then
+/// `llvm.select` between `N` and `llvm.fneg N`) rather than a branch,
+/// matching every other `spirv.GL.*` pattern in this file.
+class GLFaceForwardPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLFaceForwardOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLFaceForwardOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLFaceForwardOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value N = Adaptor.getX();
+    mlir::Value I = Adaptor.getY();
+    mlir::Value Nref = Adaptor.getZ();
+
+    mlir::Value Dot = createScalarOrVectorDotProduct(Rewriter, Loc, Nref, I);
+    mlir::Value Zero =
+        createSameShapeFPConstant(Rewriter, Loc, Dot.getType(), 0.0);
+    mlir::Value IsNegative = mlir::LLVM::FCmpOp::create(
+        Rewriter, Loc, getBoolTypeLike(Dot.getType()),
+        mlir::LLVM::FCmpPredicate::olt, Dot, Zero);
+    mlir::Value IsNegativeLike =
+        broadcastScalarToShapeOf(Rewriter, Loc, IsNegative,
+                                 getBoolTypeLike(DstType));
+    mlir::Value NegN = mlir::LLVM::FNegOp::create(Rewriter, Loc, DstType, N);
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SelectOp>(Op, DstType,
+                                                      IsNegativeLike, N, NegN);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Refract` (roadmap L87) into the GLSL.std.450 spec's
+/// own literal definition:
+///
+/// ```
+/// k = 1.0 - eta * eta * (1.0 - dot(N, I) * dot(N, I))
+/// result = k < 0.0 ? genType(0) : eta * I - (eta * dot(N, I) + sqrt(k)) * N
+/// ```
+///
+/// using a compare-then-select against a zero constant for the `k < 0.0`
+/// case rather than a branch, matching every other `spirv.GL.*` pattern in
+/// this file. `eta` (always a scalar, per `SPIRV_GLRefractOp`'s own
+/// `SPIRV_Float:$eta` argument, unlike `i`/`n`/the result, which may be a
+/// scalar or vector) is broadcast to `i`/`n`'s own shape via
+/// `broadcastScalarToShapeOf` wherever it needs to combine arithmetically
+/// with them.
+class GLRefractPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLRefractOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLRefractOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLRefractOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value I = Adaptor.getI();
+    mlir::Value N = Adaptor.getN();
+    mlir::Value Eta = Adaptor.getEta();
+    mlir::Type EtaType = Eta.getType();
+
+    mlir::Value DotNI = createScalarOrVectorDotProduct(Rewriter, Loc, N, I);
+    mlir::Value EtaSq = mlir::LLVM::FMulOp::create(Rewriter, Loc, Eta, Eta);
+    mlir::Value DotNISq =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, DotNI, DotNI);
+    mlir::Value OneScalar =
+        createSameShapeFPConstant(Rewriter, Loc, EtaType, 1.0);
+    mlir::Value OneMinusDotSq =
+        mlir::LLVM::FSubOp::create(Rewriter, Loc, OneScalar, DotNISq);
+    mlir::Value EtaSqTimesOneMinusDotSq =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, EtaSq, OneMinusDotSq);
+    mlir::Value K = mlir::LLVM::FSubOp::create(Rewriter, Loc, OneScalar,
+                                               EtaSqTimesOneMinusDotSq);
+
+    mlir::Value Zero = createSameShapeFPConstant(Rewriter, Loc, DstType, 0.0);
+    mlir::Value ZeroScalar =
+        createSameShapeFPConstant(Rewriter, Loc, EtaType, 0.0);
+    mlir::Value IsKNegative = mlir::LLVM::FCmpOp::create(
+        Rewriter, Loc, getBoolTypeLike(EtaType),
+        mlir::LLVM::FCmpPredicate::olt, K, ZeroScalar);
+    mlir::Value IsKNegativeLike =
+        broadcastScalarToShapeOf(Rewriter, Loc, IsKNegative,
+                                 getBoolTypeLike(DstType));
+
+    mlir::Value EtaLike = broadcastScalarToShapeOf(Rewriter, Loc, Eta, DstType);
+    mlir::Value EtaI = mlir::LLVM::FMulOp::create(Rewriter, Loc, EtaLike, I);
+    mlir::Value SqrtK = mlir::LLVM::SqrtOp::create(Rewriter, Loc, K);
+    mlir::Value EtaDotNI = mlir::LLVM::FMulOp::create(Rewriter, Loc, Eta, DotNI);
+    mlir::Value Sum = mlir::LLVM::FAddOp::create(Rewriter, Loc, EtaDotNI, SqrtK);
+    mlir::Value SumLike = broadcastScalarToShapeOf(Rewriter, Loc, Sum, DstType);
+    mlir::Value SumTimesN =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, SumLike, N);
+    mlir::Value ResultIfKNonNegative =
+        mlir::LLVM::FSubOp::create(Rewriter, Loc, EtaI, SumTimesN);
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SelectOp>(
+        Op, DstType, IsKNegativeLike, Zero, ResultIfKNonNegative);
+    return mlir::success();
+  }
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -7953,7 +8121,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // `populateSPIRVToLLVMConversionPatterns`, confirmed by grepping both),
   // failing every one of these HLSL-derived shapes' pipeline creation with
   // "failed to legalize operation ... that was explicitly marked illegal".
-  Patterns.add<GLAtan2Pattern, GLStepPattern, GLSmoothStepPattern>(
+  Patterns.add<GLAtan2Pattern, GLStepPattern, GLSmoothStepPattern,
+               GLFaceForwardPattern, GLRefractPattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
