@@ -220,6 +220,18 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::spv_wave_product:
   case Intrinsic::dx_wave_uproduct:
   case Intrinsic::dx_wave_ballot:
+  // (Roadmap L85) `llvm.spv.subgroup.ballot`'s own DXIL-origin
+  // counterpart, `Intrinsic::dx_wave_ballot` above, was already listed
+  // here, but its SPIR-V-origin twin was missed when
+  // `classifyWaveCall`/`SPIRVToLLVMPatterns.cpp`'s `BallotConversionPattern`
+  // first wired it up (roadmap L85): a `spirv.GroupNonUniformBallot`
+  // result, exactly like `WaveActiveBallot`'s, is by definition the
+  // identical whole-subgroup mask on every lane, so it must be classified
+  // `AlwaysUniform` here too, not left at the generic operand-driven
+  // `Default` rule (which would otherwise mark it divergent whenever its
+  // predicate operand is, the common case, causing `feme::cpu::SIMDizePass`
+  // to wrongly try to decompose/widen it lane-by-lane downstream).
+  case Intrinsic::spv_subgroup_ballot:
     return ValueUniformity::AlwaysUniform;
 
   // A group-sync/memory barrier (`feme::cpu::matchBarrierCall`,
