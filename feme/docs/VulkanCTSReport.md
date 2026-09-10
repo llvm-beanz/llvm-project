@@ -35641,3 +35641,91 @@ tests since no functional change was made).
 `FeMeCPUDesign.md` reviewed: no update needed -- `SIMDizePass`'s per-lane scalarization strategy is
 already documented as the pass's own intentional design; this session found a real *performance*
 limitation of that documented design at wide wave sizes, not a deviation from it.
+
+## L89a: A naive post-hoc basic-block-splitting mitigation is actively counterproductive; real fix re-scoped into L89b/L89c
+
+L89's own closing session found the ~210s compile-time blowup for
+`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_float_dynamically_uniform_requiredsubgroupsize`
+was caused by `SIMDizePass` emitting one ~2200-instruction basic block at `WaveSize=64`, and proposed
+(as L89a) a bounded-basic-block codegen strategy as the fix. This session implemented and empirically
+tested the most conservative version of that idea first -- a late, purely mechanical pass -- before
+attempting the larger `SIMDizePass` redesign, and found it does not work.
+
+**The mitigation implemented and tested.** A new `feme::cpu::BoundBlockSizePass` module pass
+(`BoundBlockSize.h`/`.cpp`, registered under `-feme-cpu-bound-block-size` in `feme-opt`) used
+`llvm::SplitBlock` to chunk any basic block exceeding a configurable instruction-count limit
+(default 256) into a chain of smaller blocks joined by unconditional branches. This is trivially
+IR-legal (execution order and dominance are unchanged; it is not a semantic transform), and had to
+run *after* `OptimizerPipeline::run` in `CompiledStage.cpp` (not before or during `runPipeline`),
+since `OptimizerPipeline`'s own `-O2` pipeline includes `SimplifyCFG`, which would otherwise
+immediately re-merge single-predecessor/successor block pairs back together.
+
+**Confirmed the pass works exactly as designed.** With `FEME_CPU_DUMP_JIT_IR`-style temporary
+dumps (reverted before finishing), the previously-single ~2200-instruction block in `@main` was
+split into ~9 chunks of exactly 257 instructions each (256 + the new terminator), confirming the
+mechanical transform itself functions correctly.
+
+**Confirmed the mitigation makes things worse, not better.** Timing the full CTS case with the new
+pass active showed it did **not** complete within a 300-second timeout -- slower than the ~210s
+unfixed baseline. To isolate why, `llc -O2 -relocation-model=pic -filetype=obj -time-passes` was run
+directly on captured `.ll` dumps of the identical shader before and after chunking:
+
+- Un-chunked (single ~2200-instruction block): ~2.7s total compile time, of which ~1.55s is
+  "Instruction Scheduling".
+- Chunked (~9 blocks of ~257 instructions each): **~40s total**, of which **~32.3s** is
+  "Instruction Scheduling" -- roughly a **21x slowdown** in that one sub-phase, and ~15x overall,
+  for semantically identical code.
+
+This is a genuine, reproducible negative result, not a measurement artifact (confirmed via a second
+independent `llc -time-passes` run producing the same ~39-40s figure). The likely mechanism (not yet
+profiled at the `MachineInstr`/`LiveIntervals` level, so not fully confirmed): equal-size chunking
+picks split points purely by instruction count, with no regard to live-range crossing, so it
+multiplies the number of values that must cross a (now-synthetic) block boundary via
+`CopyToReg`/`CopyFromReg` register-class plumbing, without reducing the underlying critical-path
+length or live-range footprint at all -- i.e. it adds bookkeeping on top of the original cost rather
+than replacing it. **This falsifies the "just split the block into smaller pieces" hypothesis** as a
+viable fix for this specific workload/LLVM version. The `BoundBlockSizePass` prototype and its
+`CompiledStage.cpp`/`feme-opt.cpp`/`CMakeLists.txt` wiring were reverted in full before this session's
+tree was finalized -- nothing from this experiment was committed.
+
+**A second, independent finding: redundant recompilation.** While investigating, temporary
+`FEME_CPU_LOG_CREATE_STAGE` instrumentation (also reverted) logging `Stage`/`EntryPoint`/`WaveSize`
+and an `llvm::hash_value` content hash of each incoming module's printed IR on every
+`createStage` call showed the ~210-300s wall-clock cost for this one CTS case is driven by **~42
+separate `vkCreateComputePipelines`-triggered JIT compiles**, not one pathologically slow compile
+(each individual compile costs a few seconds; ~42 of them is what actually dominates). Of those 42,
+IR-hash bucketing showed 21 are byte-for-byte-identical to at least one other call (4 distinct hash
+values recurring 5-6 times each), while the remaining ~21 are genuinely distinct per-sub-case
+compiles. `feme` already has a real, content-hash-keyed `VkPipelineCache` implementation
+(`feme/lib/Vulkan/PipelineCache.h`/`.cpp`), but `Pipeline.cpp`'s `vkCreateComputePipelines` only
+consults it when the app supplies a non-null handle -- this CTS case evidently passes
+`VK_NULL_HANDLE`, so the existing cache never engages, exposing this ICD's JIT-compile latency in a
+way real hardware drivers are not as sensitive to.
+
+**Disposition.** Rather than re-attempt a larger, riskier fix within this session's remaining budget
+on top of an already-falsified simpler mitigation, both findings were recorded and the roadmap row
+was broken into two new, independent, one-level-nested rows:
+
+- **L89b**: the real fix -- a genuine loop-based lane-chunking redesign of `SIMDizePass`'s emission
+  strategy (small, fixed loop-carried live-value count per iteration, not "all lanes simultaneously
+  live, then split after the fact"), the only strategy that reduces both SelectionDAG node count and
+  register pressure together.
+- **L89c**: an implicit, always-on, device-level compiled-artifact cache (independent of the
+  app-supplied `VkPipelineCache` handle) to eliminate the confirmed ~50%-redundant-compile fraction
+  as a smaller, lower-risk, complementary mitigation -- not a substitute for L89b, since it does not
+  address the genuinely-distinct per-sub-case compiles.
+
+`SHUFFLE_BIT` remains un-advertised, now blocked on L89b/L89c rather than L89a directly.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change this session (no bit flips).
+
+**Build/test.** All experimental source changes (the new `BoundBlockSize.h`/`.cpp` files, their
+`CMakeLists.txt`/`feme-opt.cpp` registration, and all temporary debug instrumentation in
+`CompiledStage.cpp`) were reverted before finishing, restoring the tree to its pre-session state
+(`88ba85700fd9`). `ninja feme_vulkan feme-opt` rebuilds cleanly from that clean state.
+`ninja check-feme`: 2,902 discovered, 2,843 passed, 59 unsupported, 0 failed (no functional source
+change was ultimately made this session, so this is an unchanged baseline run, confirming zero
+regressions from the revert).
+
+`FeMeCPUDesign.md` reviewed: no update needed -- this session's finding is a performance-tuning
+detail about how *not* to fix the wide-`WaveSize` compile-time cost, not a change to any documented
+design or interface.
