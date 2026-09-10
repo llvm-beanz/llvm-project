@@ -447,6 +447,24 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `Linearize.cpp`'s `DiamondFlattener`'s own live-mask `PHINode` merging
   -- a distinct new bug, not yet reduced or fixed, tracked as a new
   roadmap L-series row.
+  UPDATE (roadmap L88, later session): that `DiamondFlattener` crash is
+  now fixed -- root-caused to `foldRedundantFlowBlock` (H19k) folding away
+  a `StructurizeCFG` "Flow" block whose own `DiamondFlattener`-injected
+  mask phi had already escaped to an outer divergent diamond's own
+  `select`, an escaping use its narrow phi-forwarding search never
+  discovered; fixed by having it verify every phi's uses are fully
+  accounted for before mutating anything, bailing out (leaving the
+  redundant block in place) otherwise. A speculative `SHUFFLE_BIT`
+  re-flip (reverted before committing) confirms the exact
+  previously-crashing case now passes, but a re-verification run
+  immediately reached a *distinct* blocker: a real LLVM host-backend
+  `PostMachineSchedulerLegacy` compile-time hang on every
+  `subgroupclusteredrotate_*_requiredsubgroupsize` case, confirmed via a
+  live `gdb` backtrace to reproduce even against the currently-committed,
+  un-flipped feature set (these CTS cases exercise `subgroupClusteredRotate`
+  regardless of `SHUFFLE_BIT`, so this is a live, currently-reachable
+  bug). `SHUFFLE_BIT` stays un-advertised, now blocked on new roadmap row
+  L89 instead.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

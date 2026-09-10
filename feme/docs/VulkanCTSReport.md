@@ -35474,3 +35474,87 @@ implemented (or, for `InterlockedCompareStore`, do not go through `GLSL.std.450`
 instructions at all, being ordinary atomic SPIR-V core opcodes instead); the real, confirmed gap was
 `FaceForward`/`Refract` instead, discovered via the systematic opcode-enum cross-reference method
 rather than the originally-speculated candidates.
+
+## L88: `foldRedundantFlowBlock` use-after-erase crash, root cause, fix, and the new L89 scheduler-hang split
+
+**Filing**: a real `llvm::Value::~Value` "Uses remain when a value is destroyed!" assertion crash
+in `feme::cpu::LinearizePass`'s `DiamondFlattener`, split out of L85's own closing session -- a
+speculative `SHUFFLE_BIT` flag-flip verification run against `dEQP-VK.subgroups.shuffle.*` aborted
+the whole `deqp-vk` process on its very first case
+(`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_bool_constant`).
+
+**Investigation**: `feme/lib/Transforms/CPU/Linearize.cpp` contains two cooperating passes run in
+sequence by `LinearizePass::run`: `DiamondFlattener` (flattens divergent/uniform two-way branches
+into masked data flow, threading a `MaskPair{Live, SideEffect}` through its own recursive `flatten`
+call stack) and `LoopLinearizer` (linearizes loops with divergent exits, and, via
+`foldRedundantFlowBlocksInCycle`, calls `foldRedundantFlowBlock` -- an H19k-era fix that narrowly
+folds away a `StructurizeCFG`-generated "Flow" merge block whose own branch condition is a `phi` of
+two literal constants). The only `BasicBlock::eraseFromParent()` call site in the entire file is
+inside `foldRedundantFlowBlock`, confirming it as the sole place this "Def destroyed while Use
+remains" crash could originate from within this file.
+
+Built and confirmed a real, minimal IR reduction (`/tmp/l88/repro1.ll`): an outer *divergent*
+`if (tid == 0) { <uniform for-loop with a masked store> } else {}` shape, run through
+`feme-opt --llvm -passes=feme-cpu-prepare,feme-cpu-linearize`, reproduces the exact crash class.
+Root cause: the uniform loop's own `StructurizeCFG`-generated "Flow" reconvergence block (its own
+trip-count check's redundant re-derivation, exactly `loop-uniform-check-separate-structurized.ll`'s
+own documented shape) sits inside the *outer divergent* branch's own arm. `DiamondFlattener`'s
+*uniform*-branch code path injects its own `live.merge`/`sideeffect.merge` mask `PHINode`s directly
+into that same "Flow" block, then (since the loop's own exit is a genuine cycle boundary) returns
+those mask values -- physically defined inside "Flow" -- all the way up its own recursive call
+stack to the *outer* divergent branch's own, entirely separate reconvergence point, where they are
+consumed directly by a `select` with no phi-chain relationship to "Flow" at all -- an escaping use
+`foldRedundantFlowBlock`'s own narrow "patch the immediate successor's phis" forwarding search never
+discovers or accounts for. When `LoopLinearizer` later folds "Flow" away regardless
+(`BasicBlock::eraseFromParent()`), the still-referenced mask `PHINode` triggers the crash.
+
+**Fix**: `foldRedundantFlowBlock` (`feme/lib/Transforms/CPU/Linearize.cpp`) now performs a read-only
+pre-pass computing every phi's real `(IncomingBlock, Merge)` forwarding destination *before*
+mutating anything, then verifies every phi in the block-to-be-folded (including the condition phi
+itself) has no uses beyond exactly what that forwarding plan will patch. If any phi has an
+"escaping" use -- as `DiamondFlattener`'s injected mask phis' uses do in this shape -- the function
+now bails out (`return false`, no mutation whatsoever), leaving the (merely redundant, still
+correct) "Flow" block in place rather than risking correctness for an optimization, matching this
+fold's own already-narrow, conservative design elsewhere.
+
+**New tests**: `feme/test/Transforms/CPU/Linearize/nested-uniform-loop-in-divergent-diamond.ll` (a
+lit regression test running the confirmed repro through the full `feme-cpu-prepare`,
+`feme-cpu-linearize` pipeline, checking the redundant "Flow" block and its escaping mask phis are
+left in place rather than folded away) and
+`LinearizeTest.PreservesRedundantFlowBlockWhoseMaskPhiEscapesToOuterDiamond` (a `LinearizePass`-level
+unit test exercising `foldRedundantFlowBlock` directly on the same hand-written, already-structurized
+shape). `ninja check-feme`: 2,902 discovered, 2,843 passed, 59 unsupported, 0 failed (zero
+regressions, up by exactly the 1 new lit test).
+
+**CTS disposition**: `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` is *not* advertised in the currently-committed
+build (it never was; this row's own crash was only ever reachable via a speculative flag flip), so
+this fix by itself does not change any currently-advertised feature's CTS-visible behavior --
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no bit-level change. To verify the
+fix, `SHUFFLE_BIT` was speculatively re-flipped locally (reverted before committing anything --
+`git diff` confirms `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` is unchanged by this row) and
+`dEQP-VK.subgroups.shuffle.*` re-run: the exact previously-crashing first case
+(`subgroupclusteredrotate_bool_constant`) now passes, and the crash class is confirmed gone. The
+re-run then hit a *distinct* new blocker instead: several
+`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_*_requiredsubgroupsize` cases (e.g.
+`subgroupclusteredrotate_float_dynamically_uniform_requiredsubgroupsize`) hang indefinitely rather
+than crashing or completing -- confirmed via `timeout 20 ./deqp-vk --deqp-case=...` (`EXIT: 124`) and
+a live `gdb -p <pid> -batch -ex "thread apply all bt"` sample showing the main thread stuck inside
+LLVM's own AArch64 host-backend `PostMachineSchedulerLegacy`/`ScheduleDAGInstrs::buildSchedGraph`
+(`SUnit::addPred`/`addChainDependencies`), reached via `feme::cpu::CompiledStage::create`'s ORC JIT
+compile at `vkCreateComputePipelines` time -- entirely inside LLVM codegen, not this project's own
+IR-level passes. **Confirmed this hang is not gated behind `SHUFFLE_BIT` at all**: re-running the
+same hanging case against the real, currently-committed (un-flipped) build reproduces the identical
+`EXIT: 124` hang, and the plain (non-`requiredsubgroupsize`) sibling case passes quickly -- meaning
+this is a live, currently-reachable compile-time performance bug (most likely a quadratic-or-worse
+blowup in the scheduler's memory-dependence-chain construction once "required subgroup size" forces
+a much wider, larger scheduling region than the default wave width), unrelated to this row's own
+`Linearize.cpp` fix and to `SHUFFLE_BIT`'s own advertisement state. Split out to new roadmap row
+**L89** (`feme/docs/Roadmap.md`) rather than investigated further in this session, since profiling
+and possibly fixing an LLVM backend scheduler performance cliff is a materially different, larger
+scope than an IR-level correctness bug. All temporary local state from this verification (the
+`SHUFFLE_BIT` flip, killed hung `deqp-vk` processes, scratch `/tmp/l88/*.qpa`/`*.log` files) was
+reverted/cleaned up; nothing from the speculative verification itself is committed.
+
+`FeMeCPUDesign.md` reviewed: no update needed -- this closes a real bug in an already-documented
+mechanism ("Phase 3: Linearization and Predication"'s own masked-branch flattening and the
+StructurizeCFG "Flow"-block-folding optimization it builds on), not a design deviation or extension.
