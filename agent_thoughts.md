@@ -75706,3 +75706,94 @@ add the matching `feme` pattern" exercise using entirely pre-existing machinery 
 (`SPIRV_Op`'s own TableGen (de)serialization-generation machinery upstream, and `feme`'s own
 `SPIRVToLLVMConversionPattern` infrastructure downstream). `FeMeCPUDesign.md` was reviewed and needs
 no changes.
+
+# L87: `GLSL.std.450` `FaceForward`/`Refract` deserialization/legalization gap
+
+L87 asked me to chase down the leftover "GLSL.std.450" half of L7g's own original filing text --
+`unhandled deserializations ... from extension set GLSL.std.450` -- which, unlike its `unhandled
+opcode` sibling (L7c/L7d/L7f/L7g all found and closed concrete opcode gaps), had never actually been
+confirmed to a real repro. This is exactly the kind of row I find most interesting to work: not
+"here's a known bug, go fix it" but "here's a vague symptom description with a speculative candidate
+list, go find out if it's even real."
+
+My first instinct was to trust a grep of `SPIRVGLOps.td` against the official GLSL.std.450 opcode
+enum (fetched from the SPIRV-Headers checkout under DirectXShaderCompiler) to find which opcodes
+were "missing." That produced a list of ~15 candidates, and I nearly started implementing ops for
+all of them speculatively. I'm glad I didn't: my first regex had a subtle bug (it required a space
+before the colon terminator in the TableGen `def` line, which several existing ops didn't have), so
+it falsely flagged `Round`/`RoundEven`/`Trunc` as unimplemented when they already existed. This was a
+useful reminder that a static analysis like this is only a *lead generator*, not a source of truth --
+the only way to actually confirm a gap is real is to compile genuine HLSL through the genuine `dxc`
+toolchain and run it through the genuine `feme-translate` deserializer, exactly as the process
+instructions and this project's own established methodology (real IR reduction, not speculation)
+demand. I compiled four real candidate shaders and let the tool tell me which ones actually failed:
+`round`/`trunc` deserialized fine (my grep's false positives); `faceforward()`/`refract()` failed
+with exactly the error text L87 was chasing. That's the real repro.
+
+The two ops turned out to need genuinely different TableGen shapes, which was a good design exercise.
+`FaceForward` fits the existing `SPIRV_GLTernaryArithmeticOp` base class perfectly (all three
+operands and the result share one type) -- basically free, just wire up the opcode and reuse the
+`GLFmaOp` parse/print pattern. `Refract` does not: its `eta` operand is *always* a scalar float, even
+when `i`/`n`/the result are vectors, which is a genuinely new shape none of the existing GL op base
+classes model (I checked `GLLdexpOp`'s mixed-type-operand precedent first, since it also has one
+operand that doesn't track the others' shape, but even that doesn't quite fit since `Ldexp`'s
+mismatched operand is an integer exponent, not a same-type scalar float). I ended up writing
+`SPIRV_GLRefractOp` as a bespoke `SPIRV_GLOp` with an explicit `AllTypesMatch<["i","n","result"]>`
+trait and a custom assembly format. This surfaced two small but real gotchas I hadn't hit before in
+this codebase: (1) a `hasVerifier = 0`-less op with no custom `verify()` fails at *link* time with an
+opaque undefined-reference error, not at compile time, which took a moment to place; and (2) the
+op's own custom assembly format infers `$n`'s type from `type($i)` via the `AllTypesMatch` trait
+*before* the SSA value is even parsed, which means a genuine type-mismatch negative test written
+against the custom syntax fails at the *parser* level with a generic SSA-value-mismatch message, not
+at the verifier level with the trait's own message -- I had to switch that one negative test to the
+generic op syntax (`"spirv.GL.Refract"(%a, %b, %c) : (...) -> ...`) to actually exercise the
+verifier's own check. Small thing, but worth remembering for any future op with an inferred-type
+custom assembly format.
+
+The `feme`-side legalization pattern was the more interesting design work this session. Neither
+`FaceForward` nor `Refract` (nor, for that matter, `Reflect`/`Cross`/`Normalize`/`Distance`/`Length`
+-- I checked all of them) had ever had a conversion pattern written, upstream or in `feme`, because
+no real repro had ever reached any of them before. Both of my two new ops need a dot product, and
+the existing `DotConversionPattern` (for `spirv.Dot` itself) only handles vectors, matching SPIR-V's
+own vector-only `OpDot` spec -- but GLSL.std.450's `FaceForward`/`Refract` allow scalar operands too.
+Rather than duplicate the extraction-and-fmuladd-chain logic with an `if (isVector)` fork at each
+call site, I factored out a small `createScalarOrVectorDotProduct` helper that degrades to a plain
+`fmul` for the scalar case. Similarly, I found the existing `broadcastScalar` helper (previously only
+used by the matrix-arithmetic patterns, to scale a column vector by an extracted scalar component)
+was exactly the right building block for broadcasting `Refract`'s always-scalar `eta` -- and also for
+broadcasting both patterns' own scalar dot-product comparison results -- up to a vector shape only
+when the destination type actually is one, so I wrapped it in a tiny `broadcastScalarToShapeOf`
+convenience that no-ops for the scalar case. I like this outcome: two new ops needed real new
+arithmetic, but almost all of the *plumbing* (dot product, broadcast) reused or lightly generalized
+existing precedent rather than reinventing it, which feels like the right layering for this codebase
+long-term (the next scalar-or-vector-with-mismatched-shape op that needs a dot product, e.g. if
+`Reflect`/`Cross` ever get a real repro, gets this for free).
+
+I deliberately implemented both patterns entirely with compare-then-`llvm.select`, no control flow --
+`Refract`'s "if k < 0 return zero" branch is handled by unconditionally computing the full arithmetic
+result *and* a zero constant, then selecting between them based on the broadcast comparison. This
+matches every other `spirv.GL.*` pattern in this file (`Step`/`SmoothStep` do the same for their own
+conditional pieces) and avoids introducing the only actual branching construct in this whole
+conversion pass for what's otherwise a purely arithmetic op family. It does mean `Refract` always
+computes `sqrt(k)` even when `k` is negative (where the real math value doesn't matter since it's
+selected away) -- I considered whether this could cause an actual runtime problem (e.g. `sqrt` of a
+negative float producing a NaN or trap) but concluded it's fine: IEEE `sqrt` of a negative number
+just produces a quiet NaN, doesn't trap, and the NaN is discarded by the select regardless, so no
+real correctness or crash risk, just a technically-unnecessary-but-harmless extra instruction on the
+`k < 0` path. Worth a comment if a future reader wonders why `sqrt` isn't guarded.
+
+The CTS re-run was genuinely satisfying this time -- unlike a lot of my recent prerequisite-only rows
+(L86, L7f), this one is a real, CTS-visible pass improvement on its own: `dEQP-VK.glsl.builtin.
+precision.{faceforward,refract}.*` went from "would fail pipeline creation or hit a legalization
+crash on all 20 cases" to 16/20 passing outright (the other 4 are a pre-existing, unrelated
+`NotSupported` "long vector" limitation, confirmed unaffected either way). I made sure to state that
+distinction plainly in both the CTS report and the roadmap closing summary, rather than either
+over-claiming a "full CTS group fixed" narrative or under-claiming a "just a prerequisite" one -- 16
+real passing cases is a real result, and 4 pre-existing `NotSupported` cases are an honest, separate
+fact that shouldn't be blurred into either direction.
+
+No design-document deviation this session -- this reused entirely pre-existing MLIR TableGen
+(de)serialization machinery upstream and `feme`'s own `SPIRVToLLVMConversionPattern` infrastructure
+downstream, same as L86's own disposition. `FeMeCPUDesign.md` reviewed, no changes needed.
+Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed and confirmed to need no updates:
+this is ordinary GLSL builtin-function shader math with no feature bit or extension gate of its own.
