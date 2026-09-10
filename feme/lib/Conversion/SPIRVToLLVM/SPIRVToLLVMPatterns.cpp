@@ -986,6 +986,49 @@ public:
   }
 };
 
+/// Converts `spirv.GroupNonUniformBroadcast` (roadmap L89e) directly to
+/// `llvm.spv.wave.readlane`, exactly as `ShuffleConversionPattern` above
+/// does: "Result is the Value of the invocation identified by the id Id"
+/// is the same sentence both ops' spec text uses, and this intrinsic
+/// already implements it for every scalar, vector and `i1` operand shape
+/// the `dEQP-VK.subgroups.ballot_broadcast` group exercises.
+///
+/// The only difference from `Shuffle` is a *restriction*: `Broadcast`
+/// additionally requires Id to be dynamically uniform (a constant before
+/// SPIR-V 1.5). Nothing needs to be done with that guarantee here --
+/// `lowerReadLane`'s per-lane gather computes the right answer for a
+/// uniform index as the special case where every lane happens to read the
+/// same source lane -- so honouring it would only be an optimization, and
+/// deliberately is not one this pattern tries to make: `spv_wave_readlane`
+/// is conservatively treated as divergent by `WaveUniformity.cpp` (see
+/// `ShuffleConversionPattern`'s own note), and narrowing that for this op
+/// alone would need its own uniformity evidence rather than a promise the
+/// SPIR-V producer made.
+class BroadcastConversionPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::GroupNonUniformBroadcastOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GroupNonUniformBroadcastOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GroupNonUniformBroadcastOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getExecutionScope() != mlir::spirv::Scope::Subgroup)
+      return Rewriter.notifyMatchFailure(
+          Op, "workgroup-scope broadcast is not supported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op,
+        createIntrinsicCall(Rewriter, Op.getLoc(), "llvm.spv.wave.readlane",
+                            ResultType, {Adaptor.getValue(), Adaptor.getId()}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.GroupNonUniformBallot` (roadmap L85) directly to
 /// `llvm.spv.subgroup.ballot`: both are defined identically ("a bitfield
 /// value combining the Predicate value from all invocations in the
@@ -1313,6 +1356,69 @@ public:
     mlir::Value Lsb = mlir::LLVM::CountTrailingZerosOp::create(
         Rewriter, Loc, Bits.getType(), Bits, /*isZeroPoison=*/true);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::TruncOp>(Op, ResultType, Lsb);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GroupNonUniformBroadcastFirst` (roadmap L89e) into a
+/// `llvm.spv.wave.readlane` from the first *active* invocation, computed
+/// as the lowest set bit of this subgroup's own active-invocation ballot:
+/// `readlane(Value, cttz(ballot(true)))`.
+///
+/// `ballot(true)` is by definition the mask of invocations active at this
+/// point, so its lowest set bit is precisely the "active invocation with
+/// the lowest id in the subgroup" this op broadcasts from. That makes the
+/// whole lowering a composition of two already-CTS-verified pieces (the
+/// `dEQP-VK.subgroups.ballot*` groups cover both) rather than a new wave
+/// primitive: notably it needs no new `feme::cpu::WaveCallKind`, and so no
+/// change to `SIMDize.cpp` or `WaveLowering.cpp` at all.
+///
+/// The ballot is clipped to `gl_SubgroupSize` for the same reason
+/// `BallotFindLSBConversionPattern` clips: bits at or beyond the subgroup
+/// size do not represent invocations in the group. `is_zero_poison` is
+/// deliberately *false* here, unlike that pattern -- an all-zero ballot
+/// means no invocation is active, which cannot happen at a point this op
+/// actually executes, but `cttz` of zero would otherwise yield 128 and
+/// feed `lowerReadLane` an out-of-range lane index. Returning 0 instead
+/// keeps the gather in range, matching how
+/// `getClampedFirstActiveLaneIndex` guards the identical hazard on the
+/// DXIL-origin side.
+class BroadcastFirstConversionPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::GroupNonUniformBroadcastFirstOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GroupNonUniformBroadcastFirstOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GroupNonUniformBroadcastFirstOp Op,
+                  OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getExecutionScope() != mlir::spirv::Scope::Subgroup)
+      return Rewriter.notifyMatchFailure(
+          Op, "workgroup-scope broadcast-first is not supported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type I32 = Rewriter.getI32Type();
+    mlir::Value True =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI1Type(), 1);
+    mlir::Value Ballot =
+        createIntrinsicCall(Rewriter, Loc, "llvm.spv.subgroup.ballot",
+                            mlir::VectorType::get({4}, I32), {True});
+    mlir::Value Bits = clipBallotBitsToSubgroupSize(
+        Rewriter, Loc, ballotVectorToI128(Rewriter, Loc, Ballot));
+    mlir::Value Lsb = mlir::LLVM::CountTrailingZerosOp::create(
+        Rewriter, Loc, Bits.getType(), Bits, /*isZeroPoison=*/false);
+    mlir::Value FirstLane =
+        mlir::LLVM::TruncOp::create(Rewriter, Loc, I32, Lsb);
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.readlane",
+                                ResultType, {Adaptor.getValue(), FirstLane}));
     return mlir::success();
   }
 };
@@ -8152,6 +8258,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ElectConversionPattern, AllEqualConversionPattern,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAllOp>,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAnyOp>,
+      BroadcastConversionPattern, BroadcastFirstConversionPattern,
       ShuffleConversionPattern, ShuffleXorConversionPattern,
       BallotConversionPattern, InverseBallotConversionPattern,
       BallotBitExtractConversionPattern, BallotBitCountConversionPattern,
