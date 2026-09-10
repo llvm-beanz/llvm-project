@@ -2416,9 +2416,13 @@ TEST_F(GraphicsPipelineTest, CachedPipelineSharesCompiledStages) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Without a `VkPipelineCache`, two otherwise-identical creations compile
-/// independent artifacts.
-TEST_F(GraphicsPipelineTest, NoCacheCompilesIndependentStagesEachTime) {
+/// Roadmap L89c: without a `VkPipelineCache`, two otherwise-identical
+/// creations must still share one compiled artifact, via the device's
+/// implicit cache -- the graphics counterpart of
+/// `PipelineCacheTest.NoCacheStillSharesArtifactViaImplicitCache`, and
+/// worth rather more here, since a graphics pipeline compiles two or more
+/// stages per creation.
+TEST_F(GraphicsPipelineTest, NoCacheStillSharesStagesViaImplicitCache) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 
@@ -2431,10 +2435,41 @@ TEST_F(GraphicsPipelineTest, NoCacheCompilesIndependentStagesEachTime) {
       static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
   auto *SecondPipe =
       static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
-  EXPECT_NE(&FirstPipe->vertexStage(), &SecondPipe->vertexStage());
+  EXPECT_EQ(&FirstPipe->vertexStage(), &SecondPipe->vertexStage());
 
   vkDestroyPipeline(Device, First, nullptr);
   vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap L89c: the implicit cache is keyed by exactly the same
+/// `computeGraphicsPipelineCacheKey` an app-supplied cache is, so two
+/// creations disagreeing in fixed-function state alone must still compile
+/// independent artifacts even with no app cache in play -- the
+/// no-app-cache counterpart of `DifferingFixedFunctionStateIsACacheMiss`.
+TEST_F(GraphicsPipelineTest, ImplicitCacheDoesNotShareAcrossFixedFunction) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo FrontInfo = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Front = VK_NULL_HANDLE;
+  ASSERT_EQ(create(FrontInfo, Front), VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo BackInfo = makeCreateInfo(Vertex, Fragment);
+  auto Raster = *BackInfo.pRasterizationState;
+  Raster.cullMode = VK_CULL_MODE_BACK_BIT;
+  BackInfo.pRasterizationState = &Raster;
+  VkPipeline Back = VK_NULL_HANDLE;
+  ASSERT_EQ(create(BackInfo, Back), VK_SUCCESS);
+
+  auto *FrontPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Front));
+  auto *BackPipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Back));
+  EXPECT_NE(&FrontPipe->vertexStage(), &BackPipe->vertexStage());
+
+  vkDestroyPipeline(Device, Front, nullptr);
+  vkDestroyPipeline(Device, Back, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
@@ -2475,7 +2510,7 @@ TEST_F(GraphicsPipelineTest, DifferingFixedFunctionStateIsACacheMiss) {
 /// Roadmap E9: `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`
 /// with no cache at all must always report `VK_PIPELINE_COMPILE_REQUIRED`
 /// and leave the pipeline null, the same as the compute path (see
-/// `PipelineCacheTest.FailOnCompileRequiredWithNoCacheAlwaysFails`).
+/// `PipelineCacheTest.FailOnCompileRequiredWithNoCacheFailsWhenCold`).
 TEST_F(GraphicsPipelineTest, FailOnCompileRequiredWithNoCacheAlwaysFails) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);

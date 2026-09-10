@@ -2333,7 +2333,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
 Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
-                        PipelineCache *Cache, bool &CacheHit) {
+                        PipelineCache *Cache, PipelineCache &ImplicitCache,
+                        bool &CacheHit) {
   CacheHit = false;
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
@@ -2394,12 +2395,12 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   // computed from the compiled result. (roadmap H29d) A stage using inline
   // shader-module creation (`VkPipelineShaderStageCreateInfo::module ==
   // VK_NULL_HANDLE`) has no `ShaderModule` handle for `fromHandle` to
-  // resolve, so its `*Module` stays null and the `Cache && ...` condition
-  // below is false for that stage -- caching is simply skipped for such a
-  // pipeline rather than keying on the inline `VkShaderModuleCreateInfo`'s
-  // own bytes, an honest (if not maximally performant) simplification.
+  // resolve, so its `*Module` stays null and the condition below is false
+  // for that stage -- caching is simply skipped for such a pipeline rather
+  // than keying on the inline `VkShaderModuleCreateInfo`'s own bytes, an
+  // honest (if not maximally performant) simplification.
   std::optional<PipelineCacheKey> Key;
-  if (Cache && (VertexInfo ? VertexModule : MeshModule) &&
+  if ((VertexInfo ? VertexModule : MeshModule) &&
       (!FragmentInfo || FragmentModule) &&
       (!TessControlInfo || (TessControlModule && TessEvalModule)) &&
       (!GeometryInfo || GeometryModule) && (!MeshInfo || MeshModule) &&
@@ -2451,9 +2452,22 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
         GeometryEntry, MeshWords, MeshEntry, TaskWords, TaskEntry);
   }
 
+  // (roadmap L89c) The app's own cache is consulted first and is the only
+  // one whose hit may be reported through
+  // `VK_EXT_pipeline_creation_feedback`; the device's implicit cache backs
+  // it up on every creation, including the common one that supplied no
+  // cache at all. See `Device::getImplicitPipelineCache`.
   std::shared_ptr<GraphicsPipelineArtifact> Artifact =
-      Key ? Cache->lookupGraphics(*Key) : nullptr;
+      Key && Cache ? Cache->lookupGraphics(*Key) : nullptr;
   CacheHit = Artifact != nullptr;
+  if (!Artifact && Key) {
+    Artifact = ImplicitCache.lookupGraphics(*Key);
+    // An implicit hit still populates the app's cache, so a later creation
+    // through it reports the application-cache hit the app is entitled to
+    // expect after having created one.
+    if (Artifact && Cache)
+      Cache->insertGraphics(*Key, Artifact);
+  }
   if (!Artifact) {
     // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
     // BIT`: this pipeline missed the cache (or none was given), and the
@@ -2472,8 +2486,11 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
     if (!Compiled)
       return Compiled.takeError();
     Artifact = std::move(*Compiled);
-    if (Key)
-      Cache->insertGraphics(*Key, Artifact);
+    if (Key) {
+      ImplicitCache.insertGraphics(*Key, Artifact);
+      if (Cache)
+        Cache->insertGraphics(*Key, Artifact);
+    }
   }
   Result.Artifact = std::move(Artifact);
   // (roadmap H29o) On a cache hit `compileAndValidateStages` never ran, so
@@ -3155,6 +3172,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   auto *Cache =
       pipelineCache ? fromHandle<PipelineCache>(pipelineCache) : nullptr;
+  // (roadmap L89c) Consulted whether or not the app supplied a cache.
+  PipelineCache &ImplicitCache =
+      fromHandle<Device>(device)->getImplicitPipelineCache();
   Allocator Alloc(pAllocator);
 
   VkResult Result = VK_SUCCESS;
@@ -3236,7 +3256,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     }
     bool CacheHit = false;
     Expected<std::optional<GraphicsPipelineState>> Compiled =
-        compileGraphicsPipeline(*EffectiveInfo, DeviceInfo, Cache, CacheHit);
+        compileGraphicsPipeline(*EffectiveInfo, DeviceInfo, Cache,
+                                ImplicitCache, CacheHit);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       Result = VK_ERROR_INITIALIZATION_FAILED;
