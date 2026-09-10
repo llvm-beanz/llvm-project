@@ -35803,3 +35803,87 @@ sharing, and `PipelineCacheTest.FailOnCompileRequiredWithNoCacheAlwaysFails` was
 `FeMeVulkanDesign.md`'s "Pipeline Cache" section updated for the implicit cache and the eviction
 bound. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change (no bit flips;
 `SHUFFLE_BIT` remains blocked on L89b).
+
+## L89b: a wide wave's `wave.readlane` gathered through the vector, not memory
+
+Roadmap L89b asked for a loop-based lane-chunking redesign of `SIMDizePass`, on the premise --
+inherited from L89 and L89a -- that a wide required subgroup size makes a single basic block too
+large for the backend's instruction scheduler. **That premise was wrong**, and profiling before
+implementing is what caught it.
+
+**The premise falsified.** A synthetic module built to match the real one's shape -- a single basic
+block of 5,132 instructions -- compiles in **0.108 s**. The real captured module for the motivating
+case (6,489 lines, one `@main::entry` block of 5,144 instructions) takes **53 s**. A 500x gap that
+raw instruction count cannot explain, so "the block is too big" is not the mechanism.
+
+**Where the time actually goes.** `llc -O2 -time-passes` on the real module: 45.9 s total, of which
+"AArch64 Instruction Selection" is 39.2 s (85.5%) and "Instruction Scheduling" within it is 38.3 s
+(97.8%). The Greedy Register Allocator is only 3.0 s, and the live-interval analyses are negligible.
+Swapping the pre-RA scheduler (`-pre-RA-sched=source`) changes nothing (39.4 s), so the cost is not a
+heuristic's choice -- it is the sheer size of what it is asked to schedule.
+
+**The real mechanism, found by counting machine instructions.** The real 6,489-line module emits
+**79,585** machine instructions, a ~12x expansion; the equally long synthetic emits 7,152, a ~1x one.
+The expansion traces to one construct. `feme::cpu`'s `lowerReadLane`
+(`feme/lib/Transforms/CPU/WaveLowering.cpp` -- **not** `SIMDize.cpp`, where all three prior
+milestones in this chain had been looking) built `wave.readlane`'s per-lane gather from a
+*dynamically indexed* `extractelement` on the live `<W x T>` mask and source vectors. `SelectionDAG`
+can only lower a dynamic vector extract by spilling the whole already-type-legalized vector
+(`W`/native-width registers wide) to the stack and reloading one element -- and it does so once per
+lane, re-spilling the identical vector `W` times. The cost is quadratic in the wave size.
+
+An isolated A/B of just that construct at `W` = 128 confirms it directly:
+
+| gather shape | IR lines | machine instructions | `llc -O2` |
+|---|---|---|---|
+| dynamic `extractelement` (old) | 646 | 10,517 | 0.70 s |
+| scratch-memory `getelementptr`/`load` (new) | 1,164 | **1,089** | **0.034 s** |
+
+**The fix.** Store each wide vector to an entry-block scratch array once, and give every lane a real
+`getelementptr`/`load` at its own source index: the same gather in `O(W)` rather than `O(W^2)`
+machine instructions. An `i1` is widened to a byte per lane (`<W x i1>`'s in-memory form is
+bit-packed, so it has no byte-addressable per-lane element), and each source index is masked to
+`W - 1` (an out-of-range `extractelement` is merely `poison`, but an out-of-range load would be a
+genuine out-of-bounds access; `W` is always a power of two here). Applied at or above
+`ReadLaneMemoryGatherMinWaveSize` = 16 only -- below it a `<W x T>` value fits in one or two
+registers, so the vector form is already cheap and the scratch traffic would be pure overhead.
+
+**Measured result.** The motivating case,
+`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_float_dynamically_uniform_requiredsubgroupsize`,
+goes from **~296 s to 12.1 s** (~24x) and still passes. The whole
+`dEQP-VK.subgroups.shuffle.compute.*` group -- 1,680 cases -- now completes in **127 seconds**, less
+than one case used to cost. The "impractical multiplier across dozens of cases" that L89 recorded as
+the practical blocker on sweeping `_requiredsubgroupsize` variants is gone.
+
+**Two corrections to earlier rows in this chain.** L89 and L89a both state `WaveSize` = 64 for this
+case; it is actually **128** (`feme::cpu::MaxWaveSize`, advertised as `maxSubgroupSize`, so CTS
+sweeps 4 -> 128 and this one case creates 38-42 distinct pipelines). And `SIMDizePass` is not the
+pure per-lane scalarizer those rows describe -- it genuinely *vectorizes* to `<W x T>`; its
+`for (Lane = 0; Lane != WaveSize; ++Lane)` loops are scalarization *fallbacks* for operations that
+cannot be vectorized.
+
+**Regression sweeps, now practical for the first time.** Both sweeps below surface real failures;
+both sets are pre-existing and mechanically cannot be caused by this change, which alters only the
+body of `lowerReadLane` in a pass that runs strictly after the passes that emit these diagnostics.
+
+- `dEQP-VK.subgroups.shuffle.compute.*`: 1,680 cases in 127 s -- 32 passed, 96 failed, 1,552
+  unsupported. All 96 failures are the `bvec2`/`bvec3`/`bvec4` variants of `subgroupclusteredrotate`,
+  and all report the same `SIMDizePass` diagnostic: "has a divergent vector value ... used outside a
+  supported ... pattern; component decomposition is not yet supported for this use". Broken out as
+  roadmap **L89d**, and now the sole remaining blocker on `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`, which is
+  no longer blocked on compile time at all.
+- `dEQP-VK.subgroups.ballot*`: 6,284 cases -- 16 passed, 336 failed, 5,932 unsupported. All 336
+  failures are the entire `ballot_broadcast` group (48 distinct operand shapes x 7 subgroup-size
+  variants), failing conversion-legalization with "failed to legalize operation
+  'spirv.GroupNonUniformBroadcast' that was explicitly marked illegal" -- a wholly unimplemented op
+  pair in the SPIR-V to LLVM conversion, not a type-specific gap, and the sibling
+  `ballot`/`ballot_mask`/`ballot_other` groups have no failures at all. Broken out as roadmap
+  **L89e**.
+
+**Build/test.** `ninja check-feme`: 2,913 discovered, 2,854 passed, 59 unsupported, 0 failed -- up by
+exactly the 1 new lit test (`wave-lowering-readlane-wide.ll`, checking the memory-gather shape at
+`WaveSize` 16 and the unchanged straight-line form at 8).
+
+`FeMeCPUDesign.md`'s Phase 5 lowering table and its "no lowering may create poison" section updated
+for the wide-wave gather. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change (no
+bit flips; `SHUFFLE_BIT` stays un-advertised, now on L89d rather than on compile time).
