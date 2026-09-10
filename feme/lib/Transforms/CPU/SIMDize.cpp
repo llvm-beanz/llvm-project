@@ -417,6 +417,25 @@ bool isElementwiseVectorizableIntrinsic(Intrinsic::ID ID) {
 /// none of `fadd`/`fmul`'s extra scalar `start` operand is exercised by
 /// any shape reaching this pass yet, and generalizing to it is left to a
 /// future row if a real case needs it.
+/// Returns true if \p I is a `bitcast` reinterpreting a whole vector as one
+/// equally-wide scalar integer (`bitcast <4 x i32> %m to i128`) -- the shape
+/// GLSL's `subgroupBallotBitCount`/`gl_SubgroupEqMask`-family builtins take
+/// once the `uvec4` ballot mask is folded back into a single wide integer to
+/// be popcounted or shifted (roadmap L89g).
+///
+/// This is the one `CastInst` shape whose result is *not* a vector, so it
+/// cannot go through `widenVectorElementwise`'s component-for-component
+/// rule; `widenVectorToScalarBitCast` gives it its own lowering instead.
+bool isVectorToScalarIntBitCast(const Instruction &I) {
+  const auto *BC = dyn_cast<BitCastInst>(&I);
+  if (!BC)
+    return false;
+  auto *SrcTy = dyn_cast<FixedVectorType>(BC->getSrcTy());
+  if (!SrcTy || !SrcTy->getElementType()->isIntegerTy())
+    return false;
+  return BC->getDestTy()->isIntegerTy();
+}
+
 bool isSupportedVectorReduceIntrinsic(Intrinsic::ID ID) {
   switch (ID) {
   case Intrinsic::vector_reduce_and:
@@ -786,6 +805,7 @@ private:
   void widenShuffleVector(ShuffleVectorInst &SV, IRBuilder<> &Builder);
   void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
+  void widenVectorToScalarBitCast(BitCastInst &BC, IRBuilder<> &Builder);
   void widenVectorReduce(CallInst &CI, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
@@ -1285,6 +1305,15 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       if (U->getType()->isVectorTy() &&
           (isa<BinaryOperator>(U) || isa<UnaryOperator>(U) ||
            isa<CastInst>(U)))
+        continue;
+      // (Roadmap L89g) `bitcast <N x iM> %v to i(N*M)` reinterprets the
+      // whole decomposed vector as one wide scalar integer. Its result is
+      // scalar, so it is *not* covered by the vector-typed rule above and
+      // gets its own recomposing lowering in
+      // `widenVectorToScalarBitCast`.
+      if (auto *UserI = dyn_cast<Instruction>(U);
+          UserI && isVectorToScalarIntBitCast(*UserI) &&
+          UserI->getOperand(0) == &I)
         continue;
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
@@ -3296,6 +3325,46 @@ void FunctionWidener::widenVectorReduce(CallInst &CI, IRBuilder<> &Builder) {
   ToErase.push_back(&CI);
 }
 
+// (Roadmap L89g) `bitcast <N x iM> %v to i(N*M)` over a divergent,
+// per-lane-decomposed vector: the shape GLSL's `subgroupBallotBitCount`
+// and the `gl_Subgroup{Eq,Ge,Gt,Le,Lt}Mask` builtins take once their
+// `uvec4` ballot mask is folded back into one wide integer to be
+// popcounted, shifted or compared.
+//
+// Unlike every other `CastInst`, this one's result is a *scalar*, so
+// `widenVectorElementwise`'s component-for-component rule cannot express
+// it: there is no per-component wide value to produce. Instead the `N`
+// already-decomposed `<W x iM>` components are recomposed into a single
+// `<W x i(N*M)>` by zero-extending each and OR-ing it into place at its
+// own bit offset -- lane-wise exactly what the scalar `bitcast` meant for
+// one lane. `bitcast`'s own element-to-byte ordering is the target's, so
+// component 0 occupies the *least* significant bits on a little-endian
+// target and the most significant ones on a big-endian target.
+void FunctionWidener::widenVectorToScalarBitCast(BitCastInst &BC,
+                                                 IRBuilder<> &Builder) {
+  SmallVector<Value *, 4> Components =
+      getVectorComponents(BC.getOperand(0), Builder);
+  unsigned ElemBits = BC.getSrcTy()->getScalarSizeInBits();
+  unsigned NumComponents = Components.size();
+  auto *WideTy = FixedVectorType::get(BC.getDestTy(), WaveSize);
+  bool IsLittleEndian = NewF->getDataLayout().isLittleEndian();
+
+  Value *Acc = Constant::getNullValue(WideTy);
+  for (unsigned C = 0; C != NumComponents; ++C) {
+    Value *Wide = Builder.CreateZExt(Components[C], WideTy);
+    unsigned Shift = (IsLittleEndian ? C : NumComponents - 1 - C) * ElemBits;
+    if (Shift != 0)
+      Wide = Builder.CreateShl(
+          Wide,
+          ConstantInt::get(WideTy,
+                           APInt(BC.getDestTy()->getIntegerBitWidth(), Shift)));
+    Acc = C == 0 ? Wide : Builder.CreateOr(Acc, Wide);
+  }
+  Acc->setName(BC.getName() + ".wide");
+  Widened[&BC] = Acc;
+  ToErase.push_back(&BC);
+}
+
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   if (auto *CI = dyn_cast<CallInst>(&I)) {
     // A divergent call to a "trivially vectorizable" LLVM intrinsic (see
@@ -3644,6 +3713,12 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
   if (auto *VSel = dyn_cast<SelectInst>(&I); VSel && I.getType()->isVectorTy()) {
     widenVectorSelect(*VSel, Builder);
+    return true;
+  }
+
+  if (auto *BC = dyn_cast<BitCastInst>(&I);
+      BC && isVectorToScalarIntBitCast(*BC)) {
+    widenVectorToScalarBitCast(*BC, Builder);
     return true;
   }
 
