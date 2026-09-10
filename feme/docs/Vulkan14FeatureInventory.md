@@ -501,6 +501,29 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   L89b alone. The cache proved independently valuable elsewhere --
   `dEQP-VK.pipeline.monolithic.cache.*` goes from a 15-minute timeout to
   2.8 seconds -- but that is not a subgroup capability change.
+  UPDATE (roadmap L89b, later session): the compile-time blocker is now
+  **gone**, and L89b's own premise turned out to be wrong. Profiling
+  before implementing the proposed `SIMDizePass` redesign disproved
+  "the block is too big": a synthetic module with an equally large single
+  basic block compiles 500x faster than the real one. Counting *machine*
+  instructions found the real cause -- `lowerReadLane`
+  (`WaveLowering.cpp`, not `SIMDize.cpp`) built `wave.readlane`'s
+  per-lane gather from a dynamically indexed `extractelement`, which
+  `SelectionDAG` lowers by spilling the whole type-legalized `<W x T>`
+  vector once *per lane*, a cost quadratic in the wave size. Routing the
+  gather through entry-block scratch memory instead takes the motivating
+  case from ~296s to 12.1s, and the whole
+  `dEQP-VK.subgroups.shuffle.compute.*` group (1,680 cases) now completes
+  in 127 seconds. `SHUFFLE_BIT` still stays un-advertised, but for the
+  first time in this chain the reason is a plain functional gap rather
+  than compile time: 96 of that group's cases (all the `bvec2`/`bvec3`/
+  `bvec4` `subgroupclusteredrotate` variants) still fail
+  `vkCreateComputePipelines`, because `SIMDizePass` cannot decompose a
+  divergent vector-typed operand of a wave call. Now blocked on new
+  roadmap row L89d alone. (The same sweep also found all 336
+  `dEQP-VK.subgroups.ballot_broadcast.*` cases failing on an
+  unimplemented `spirv.GroupNonUniformBroadcast`, recorded as L89e; that
+  one is a `BALLOT_BIT`-adjacent gap, not a `SHUFFLE_BIT` blocker.)
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
