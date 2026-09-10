@@ -42,28 +42,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L86 from the roadmap or other prerequisites blocking the
+Can you work on L87 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **`OpCopyObject` (SPIR-V opcode 83) has zero support anywhere in upstream
-> MLIR's SPIR-V dialect**, split out of L7f's own closing session: confirmed via
-> `grep -rln "CopyObject" mlir/include/mlir/Dialect/SPIRV/
-> mlir/lib/Dialect/SPIRV/ mlir/lib/Target/SPIRV/` returning zero matches -- no
-> op definition, no deserialization case, no serialization case, anywhere.
-> Discovered as the second of two coupled gaps in a real, concrete
-> `NonUniformResourceIndex()` HLSL repro (dxc compiles this to a `Texture2D`
-> array index wrapped in `OpCopyObject %type %idx`, with the `NonUniform`
-> decoration -- L7f's own now-fixed gap -- attached to the copy's own result id
-> rather than the original value): even with L7f's decoration fix in place,
-> deserialization of this real repro still fails, now on `"unhandled opcode 83"`
-> one instruction later. In practice, essentially any real dxc-compiled shader
-> using `NonUniformResourceIndex()` needs this op, since dxc's own codegen
-> convention always pairs the two together, even though they are architecturally
-> independent SPIR-V features. A materially larger gap than an ordinary
-> `feme`-side legalization-pattern fix -- mirrors L7g's own `OpImageGather`
-> precedent exactly: needs new upstream-style MLIR dialect work (a new
-> `spirv.CopyObject` op definition, verifier, printer/parser, and both a
-> deserialization and serialization case) before any `feme`-side legalization
-> pattern converting it to LLVM IR can even be written, and before the real
-> `NonUniformResourceIndex()` end-to-end HLSL repro can pass deserialization at
-> all
+> **The leftover "GLSL.std.450" half of L7g's own original filing text**
+> (`unhandled deserializations ... from extension set GLSL.std.450`), split out
+> of L7g's own closing session: never confirmed to a concrete repro across any
+> of L7a-L7g's own investigations (all of which found and closed real, concrete
+> `unhandled opcode`-shaped gaps instead -- L7c/L7d/L7f/L7g). Needs its own real
+> IR reduction of whichever HLSL/GLSL shape emits a currently-unhandled
+> `GLSL.std.450` extended-instruction-set builtin (dxc's own
+> intrinsic-to-`GLSL.std.450`-builtin mapping covers dozens of
+> math/bit-manipulation builtins --
+> `FindUMsb`/`FindSMsb`/`InterlockedCompareStore` families and similar
+> less-common HLSL intrinsics are plausible candidates, none yet confirmed)
+> before scoping a fix, mirroring this row's own siblings' "reduce first, then
+> fix" methodology throughout the L7-series
