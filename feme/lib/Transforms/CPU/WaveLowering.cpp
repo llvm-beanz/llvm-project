@@ -107,12 +107,14 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace llvm;
 using namespace feme;
@@ -381,6 +383,107 @@ Value *lowerAllEqual(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
   return Builder.CreateAndReduce(Selected);
 }
 
+/// The wave size at or above which `lowerReadLane` switches from its
+/// straight-line `extractelement` gather to the memory-based one
+/// `lowerReadLaneViaMemory` builds. Below this width the vector form is
+/// both smaller and faster: `SelectionDAG` materializes a narrow (one- or
+/// two-register) `<W x T>` value cheaply, and the scratch stores/loads the
+/// memory form adds would be pure overhead. Roadmap milestone L89b
+/// measured the crossover empirically -- see that milestone's entry in
+/// feme/docs/VulkanCTSReport.md.
+constexpr unsigned ReadLaneMemoryGatherMinWaveSize = 16;
+
+/// Allocates a `[WaveSize x StorageTy]` scratch array in the entry block of
+/// the function \p Builder is currently inserting into, so that it is
+/// allocated exactly once per invocation (the usual LLVM placement rule for
+/// an `alloca`) rather than at whatever point in the body the lowered call
+/// happens to sit.
+AllocaInst *createLaneScratch(IRBuilder<> &Builder, Type *StorageTy,
+                              unsigned WaveSize, const Twine &Name) {
+  BasicBlock &Entry = Builder.GetInsertBlock()->getParent()->getEntryBlock();
+  IRBuilder<> EntryBuilder(&Entry, Entry.getFirstNonPHIOrDbgOrAlloca());
+  auto *ArrTy = ArrayType::get(StorageTy, WaveSize);
+  AllocaInst *Scratch = EntryBuilder.CreateAlloca(ArrTy, nullptr, Name);
+  const DataLayout &DL = Entry.getModule()->getDataLayout();
+  Scratch->setAlignment(
+      DL.getPrefTypeAlign(FixedVectorType::get(StorageTy, WaveSize)));
+  return Scratch;
+}
+
+/// The wide-wave form of `lowerReadLane` below: the same per-lane gather,
+/// but routed through three entry-block scratch arrays (mask, source and
+/// destination) instead of through `extractelement`/`insertelement` on the
+/// live `<W x T>` vectors.
+///
+/// The straight-line vector form's per-lane `extractelement` uses a
+/// *dynamic* index, which `SelectionDAG` can only lower by spilling the
+/// whole (already type-legalized, `W`/native-width register wide) vector to
+/// the stack and reloading one element -- and it does so once per lane,
+/// re-spilling the identical vector `W` times. At `W` = 128 that turns one
+/// `wave.readlane` into thousands of machine instructions in a single
+/// scheduling region, which is what roadmap milestone L89b root-caused as
+/// the compile-time blowup behind `dEQP-VK.subgroups.shuffle.compute.*`'s
+/// `_requiredsubgroupsize` cases. Storing each wide vector to scratch
+/// *once* and indexing it with a real `getelementptr`/`load` expresses the
+/// exact same gather with `O(W)` rather than `O(W^2)` machine
+/// instructions.
+///
+/// Two representation details: an `i1` (either the mask, or an `i1`-typed
+/// operand) is widened to `i8` for storage, because `<W x i1>`'s in-memory
+/// form is bit-packed and so has no byte-addressable per-lane element; and
+/// every source index is masked to `W - 1`, since an out-of-range
+/// `extractelement` merely yields `poison` whereas an out-of-range load
+/// would be a real out-of-bounds access. `W` is always a power of two here
+/// (see \p lowerReadLane's caller check), so that mask is exact.
+Value *lowerReadLaneViaMemory(IRBuilder<> &Builder, Value *WideMask,
+                              Value *WideOperand, Value *WideLaneIndex,
+                              unsigned WaveSize) {
+  Type *ElemTy = cast<VectorType>(WideOperand->getType())->getElementType();
+  Type *I8Ty = Builder.getInt8Ty();
+  Type *StorageTy = ElemTy->isIntegerTy(1) ? I8Ty : ElemTy;
+
+  AllocaInst *MaskScratch =
+      createLaneScratch(Builder, I8Ty, WaveSize, "wave.readlane.mask");
+  AllocaInst *SrcScratch =
+      createLaneScratch(Builder, StorageTy, WaveSize, "wave.readlane.src");
+  AllocaInst *DstScratch =
+      createLaneScratch(Builder, StorageTy, WaveSize, "wave.readlane.dst");
+
+  Builder.CreateStore(
+      Builder.CreateZExt(WideMask, FixedVectorType::get(I8Ty, WaveSize)),
+      MaskScratch);
+  Value *StoredOperand =
+      StorageTy == ElemTy
+          ? WideOperand
+          : Builder.CreateZExt(WideOperand,
+                               FixedVectorType::get(StorageTy, WaveSize));
+  Builder.CreateStore(StoredOperand, SrcScratch);
+
+  Value *Zero = Constant::getNullValue(StorageTy);
+  Value *IndexMask = Builder.getInt32(WaveSize - 1);
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *SrcIdx = Builder.CreateAnd(
+        Builder.CreateExtractElement(WideLaneIndex, Builder.getInt32(Lane)),
+        IndexMask);
+    Value *LaneActive = Builder.CreateTrunc(
+        Builder.CreateLoad(
+            I8Ty, Builder.CreateInBoundsGEP(I8Ty, MaskScratch, SrcIdx)),
+        Builder.getInt1Ty());
+    Value *RawVal = Builder.CreateLoad(
+        StorageTy, Builder.CreateInBoundsGEP(StorageTy, SrcScratch, SrcIdx));
+    Builder.CreateStore(Builder.CreateSelect(LaneActive, RawVal, Zero),
+                        Builder.CreateInBoundsGEP(StorageTy, DstScratch,
+                                                  Builder.getInt32(Lane)));
+  }
+
+  Value *Result =
+      Builder.CreateLoad(FixedVectorType::get(StorageTy, WaveSize), DstScratch);
+  if (StorageTy != ElemTy)
+    Result =
+        Builder.CreateTrunc(Result, FixedVectorType::get(ElemTy, WaveSize));
+  return Result;
+}
+
 /// `wave.readlane(X, I)`: a genuine per-lane gather, not a uniform extract
 /// -- `I` is not required uniform across the wave (see WaveCalls.h's
 /// `ReadLane` documentation), so output lane `L` independently reads
@@ -392,9 +495,18 @@ Value *lowerAllEqual(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
 /// use -- since each output lane's dynamic (not necessarily equal) source
 /// index rules out a single vectorized `shufflevector`. A uniform `I` (the
 /// common HLSL case) still produces the correct answer: every iteration
-/// simply reads the same source lane.
+/// simply reads the same source lane. For a wide wave the same gather is
+/// built through scratch memory instead -- see `lowerReadLaneViaMemory`
+/// above for why, and for the power-of-two `W` its index masking assumes
+/// (a non-power-of-two wave size cannot reach here through the Vulkan
+/// entry points, which only ever resolve power-of-two subgroup sizes, but
+/// the straight-line form stays correct for one regardless).
 Value *lowerReadLane(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
                      Value *WideLaneIndex, unsigned WaveSize) {
+  if (WaveSize >= ReadLaneMemoryGatherMinWaveSize && isPowerOf2_32(WaveSize))
+    return lowerReadLaneViaMemory(Builder, WideMask, WideOperand, WideLaneIndex,
+                                  WaveSize);
+
   Type *ElemTy = cast<VectorType>(WideOperand->getType())->getElementType();
   Value *Zero = Constant::getNullValue(ElemTy);
   Value *Result = PoisonValue::get(FixedVectorType::get(ElemTy, WaveSize));
