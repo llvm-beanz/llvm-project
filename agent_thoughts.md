@@ -76258,3 +76258,16 @@ compile-time blowup, measure the *output* size (machine instructions), not the
 input size (IR lines). Every wrong turn in L89/L89a/L89b's premises came from
 reasoning about IR line counts, which hid a 12x expansion happening downstream
 in one specific construct.
+
+## Closing numbers
+
+- `dEQP-VK.subgroups.shuffle.compute.*`: 1,680 cases, **128 passed, 0 failed**,
+  1,552 unsupported (before this session: not sweepable at all -- one case cost
+  ~296 s).
+- Motivating case alone: ~296 s -> **12.1 s**.
+- `ninja check-feme`: 2,914 discovered, 2,855 passed, 59 unsupported, **0
+  failed** (baseline 2,912/2,853; +2 new lit tests).
+- Two follow-ups filed rather than guessed at: L89e (`ballot_broadcast`'s
+  unimplemented `spirv.GroupNonUniformBroadcast`, 336 cases, pre-existing) and
+  L89f (the `SHUFFLE_BIT` flip itself, now unblocked but needing a full-tree
+  sweep of its own).
