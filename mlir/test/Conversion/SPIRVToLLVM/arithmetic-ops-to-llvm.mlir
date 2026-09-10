@@ -388,3 +388,23 @@ spirv.func @snegate_vector(%arg0: vector<4xi32>) "None" {
   %0 = spirv.SNegate %arg0 : vector<4xi32>
   spirv.Return
 }
+
+// A signed SPIR-V integer converts to a signless LLVM one, so the zero this
+// pattern subtracts from must be signless too -- `llvm.mlir.constant` requires
+// its attribute's own integer type to match the type it produces.
+
+// CHECK-LABEL: @snegate_scalar_signed
+spirv.func @snegate_scalar_signed(%arg0: si32) "None" {
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i32) : i32
+  // CHECK: llvm.sub %[[ZERO]], %{{.*}} : i32
+  %0 = spirv.SNegate %arg0 : si32
+  spirv.Return
+}
+
+// CHECK-LABEL: @snegate_vector_signed
+spirv.func @snegate_vector_signed(%arg0: vector<4xsi32>) "None" {
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(dense<0> : vector<4xi32>) : vector<4xi32>
+  // CHECK: llvm.sub %[[ZERO]], %{{.*}} : vector<4xi32>
+  %0 = spirv.SNegate %arg0 : vector<4xsi32>
+  spirv.Return
+}

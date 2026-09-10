@@ -81,23 +81,29 @@ static unsigned getLLVMTypeBitWidth(Type type) {
 }
 
 /// Creates `llvm.mlir.constant` with a scalar or vector integer value,
-/// broadcasting `scalarAttr` across the vector if `srcType` is a vector.
-static Value createIntegerConstant(Location loc, Type srcType, Type dstType,
+/// broadcasting `scalarAttr` across the vector if `dstType` is a vector.
+///
+/// A SPIR-V integer type may be signed or unsigned, but its converted LLVM
+/// counterpart is always signless, and `llvm.mlir.constant` requires its
+/// attribute's own integer type to match the type it produces -- so the
+/// attribute is always rebuilt against `dstType`'s signless element type,
+/// whatever type the caller derived `scalarAttr` from.
+static Value createIntegerConstant(Location loc, Type dstType,
                                    PatternRewriter &rewriter,
                                    IntegerAttr scalarAttr) {
-  if (auto vecType = dyn_cast<VectorType>(srcType))
+  IntegerAttr signlessAttr = IntegerAttr::get(
+      cast<IntegerType>(getElementTypeOrSelf(dstType)), scalarAttr.getValue());
+  if (auto vecType = dyn_cast<VectorType>(dstType))
     return LLVM::ConstantOp::create(
-        rewriter, loc, dstType, SplatElementsAttr::get(vecType, scalarAttr));
-  return LLVM::ConstantOp::create(rewriter, loc, dstType, scalarAttr);
+        rewriter, loc, dstType, SplatElementsAttr::get(vecType, signlessAttr));
+  return LLVM::ConstantOp::create(rewriter, loc, dstType, signlessAttr);
 }
 
 /// Creates `llvm.mlir.constant` with all bits set for the given type.
-static Value createConstantAllBitsSet(Location loc, Type srcType, Type dstType,
+static Value createConstantAllBitsSet(Location loc, Type dstType,
                                       PatternRewriter &rewriter) {
-  auto integerType = cast<IntegerType>(
-      isa<VectorType>(srcType) ? cast<VectorType>(srcType).getElementType()
-                               : srcType);
-  return createIntegerConstant(loc, srcType, dstType, rewriter,
+  auto integerType = cast<IntegerType>(getElementTypeOrSelf(dstType));
+  return createIntegerConstant(loc, dstType, rewriter,
                                rewriter.getIntegerAttr(integerType, -1));
 }
 
@@ -465,7 +471,7 @@ public:
                                        *getTypeConverter(), rewriter);
 
     // Create a mask with bits set outside [Offset, Offset + Count - 1].
-    Value minusOne = createConstantAllBitsSet(loc, srcType, dstType, rewriter);
+    Value minusOne = createConstantAllBitsSet(loc, dstType, rewriter);
     Value maskShiftedByCount =
         LLVM::ShlOp::create(rewriter, loc, dstType, minusOne, count);
     Value negated = LLVM::XOrOp::create(rewriter, loc, dstType,
@@ -607,7 +613,7 @@ public:
                                        *getTypeConverter(), rewriter);
 
     // Create a mask with bits set at [0, Count - 1].
-    Value minusOne = createConstantAllBitsSet(loc, srcType, dstType, rewriter);
+    Value minusOne = createConstantAllBitsSet(loc, dstType, rewriter);
     Value maskShiftedByCount =
         LLVM::ShlOp::create(rewriter, loc, dstType, minusOne, count);
     Value mask = LLVM::XOrOp::create(rewriter, loc, dstType, maskShiftedByCount,
@@ -1133,7 +1139,7 @@ public:
     IntegerAttr zeroAttr = rewriter.getIntegerAttr(
         cast<IntegerType>(getElementTypeOrSelf(srcType)), 0);
     Value zero =
-        createIntegerConstant(loc, srcType, dstType, rewriter, zeroAttr);
+        createIntegerConstant(loc, dstType, rewriter, zeroAttr);
     rewriter.replaceOpWithNewOp<LLVM::SubOp>(op, dstType, zero,
                                              adaptor.getOperand());
     return success();
@@ -1216,7 +1222,7 @@ public:
     IntegerAttr zeroAttr = rewriter.getIntegerAttr(
         cast<IntegerType>(getElementTypeOrSelf(srcType)), 0);
     Value zero =
-        createIntegerConstant(loc, srcType, dstType, rewriter, zeroAttr);
+        createIntegerConstant(loc, dstType, rewriter, zeroAttr);
 
     Value remNonZero = LLVM::ICmpOp::create(rewriter, loc, cmpType,
                                             LLVM::ICmpPredicate::ne, rem, zero);
@@ -1287,9 +1293,9 @@ public:
       return rewriter.notifyMatchFailure(notOp, "type conversion failed");
 
     Location loc = notOp.getLoc();
-    Value mask = createConstantAllBitsSet(loc, srcType, dstType, rewriter);
-    rewriter.template replaceOpWithNewOp<LLVM::XOrOp>(notOp, dstType,
-                                                      notOp.getOperand(), mask);
+    Value mask = createConstantAllBitsSet(loc, dstType, rewriter);
+    rewriter.template replaceOpWithNewOp<LLVM::XOrOp>(
+        notOp, dstType, adaptor.getOperand(), mask);
     return success();
   }
 };
@@ -1990,11 +1996,11 @@ public:
                                 LLVM::FCmpPredicate::olt, operand, zero);
     } else {
       auto intElemType = cast<IntegerType>(getElementTypeOrSelf(srcType));
-      zero = createIntegerConstant(loc, srcType, dstType, rewriter,
+      zero = createIntegerConstant(loc, dstType, rewriter,
                                    rewriter.getIntegerAttr(intElemType, 0));
-      one = createIntegerConstant(loc, srcType, dstType, rewriter,
+      one = createIntegerConstant(loc, dstType, rewriter,
                                   rewriter.getIntegerAttr(intElemType, 1));
-      minusOne = createConstantAllBitsSet(loc, srcType, dstType, rewriter);
+      minusOne = createConstantAllBitsSet(loc, dstType, rewriter);
       gt = LLVM::ICmpOp::create(rewriter, loc, cmpType,
                                 LLVM::ICmpPredicate::sgt, operand, zero);
       lt = LLVM::ICmpOp::create(rewriter, loc, cmpType,

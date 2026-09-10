@@ -322,3 +322,22 @@ spirv.func @not_vector(%arg0: vector<2xi16>) "None" {
   %0 = spirv.Not %arg0 : vector<2xi16>
   spirv.Return
 }
+
+// A signed SPIR-V integer converts to a signless LLVM one, so the all-bits-set
+// mask this pattern XORs with must be signless too.
+
+// CHECK-LABEL: @not_scalar_signed
+spirv.func @not_scalar_signed(%arg0: si32) "None" {
+  // CHECK: %[[CONST:.*]] = llvm.mlir.constant(-1 : i32) : i32
+  // CHECK: llvm.xor %{{.*}}, %[[CONST]] : i32
+  %0 = spirv.Not %arg0 : si32
+  spirv.Return
+}
+
+// CHECK-LABEL: @not_vector_unsigned
+spirv.func @not_vector_unsigned(%arg0: vector<2xui16>) "None" {
+  // CHECK: %[[CONST:.*]] = llvm.mlir.constant(dense<-1> : vector<2xi16>) : vector<2xi16>
+  // CHECK: llvm.xor %{{.*}}, %[[CONST]] : vector<2xi16>
+  %0 = spirv.Not %arg0 : vector<2xui16>
+  spirv.Return
+}
