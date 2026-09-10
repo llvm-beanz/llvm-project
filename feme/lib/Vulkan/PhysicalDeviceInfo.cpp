@@ -130,16 +130,33 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // tracing/mesh shading/long-vector formats unrelated to this bit), once
   // the `subgroupAllEqual`-over-a-divergent-vector-operand gap in
   // `feme::cpu::SIMDizePass` (`SIMDize.cpp`'s `widenWaveCall`/
-  // `widenVectorReduce`) was fixed. `SHUFFLE_BIT` stays un-advertised: the
-  // real `dEQP-VK.subgroups.shuffle.*` CTS group's own verification
-  // harness (every non-rotate case) depends on `subgroupBallot()`/
-  // `subgroupBallotBitExtract()` (`OpGroupNonUniformBallotBitExtract`),
-  // which is entirely unimplemented here -- confirmed via a real flag-flip
-  // re-run showing 256/9562 failures, all `error: unhandled opcode 341`
-  // (`GroupNonUniformBallot`), a distinct, larger prerequisite tracked
-  // separately (see `Roadmap.md`'s new L-series row).
-  Info.SubgroupSupportedOperations =
-      VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT;
+  // `widenVectorReduce`) was fixed.
+  //
+  // (roadmap L85) `BALLOT_BIT` is now also safe to advertise:
+  // `OpGroupNonUniformBallot`/`InverseBallot`/`BallotBitExtract`/
+  // `BallotFindLSB`/`BallotFindMSB`/`BallotBitCount` are all now
+  // implemented (`SPIRVToLLVMPatterns.cpp`'s six new conversion patterns,
+  // `SIMDize.cpp`'s `WaveCallKind::Ballot` ABI bridging, and
+  // `Linearize.cpp`'s divergent-region predicate narrowing for
+  // `subgroupBallot`'s own operand -- see that file's `applyStageMasks`
+  // comment). A full real `dEQP-VK.subgroups.ballot.*` (23 cases) and
+  // `dEQP-VK.subgroups.ballot_other.*` (84 cases) re-run shows 100% of
+  // applicable cases passing (2/2 and 14/14 respectively; the rest
+  // correctly `NotSupported` for ray tracing/mesh shading, unrelated to
+  // this bit).
+  //
+  // `SHUFFLE_BIT` still stays un-advertised, but no longer because ballot
+  // is unimplemented (this was the reason as of L7t/L80): a speculative
+  // flip now instead crashes partway through a real
+  // `dEQP-VK.subgroups.shuffle.*` re-run with a `Value.cpp`
+  // "Uses remain when a value is destroyed!" assertion in
+  // `DiamondFlattener`'s own live-mask `PHINode` merging (a `phi` operand
+  // still referencing an already-erased `phi` result), a distinct new
+  // `Linearize.cpp` bug this session found but did not yet reduce or fix
+  // (see `Roadmap.md`'s new L-series row).
+  Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
+                                     VK_SUBGROUP_FEATURE_VOTE_BIT |
+                                     VK_SUBGROUP_FEATURE_BALLOT_BIT;
 
   // (roadmap E7) `subgroupSizeControl`'s own range: every power-of-two wave
   // size `feme::cpu::resolveWaveSize` itself accepts, reused rather than

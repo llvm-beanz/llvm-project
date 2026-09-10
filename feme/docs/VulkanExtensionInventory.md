@@ -442,7 +442,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_KHR_shader_non_semantic_info` | Advertised |  |
 | `VK_KHR_shader_quad_control` | Not implemented |  |
 | `VK_KHR_shader_relaxed_extended_instruction` | Not implemented |  |
-| `VK_KHR_shader_subgroup_extended_types` | Implemented (core, not advertised by name) | roadmap C6: reported true, and vacuously so -- no OpGroupNonUniform* operation is converted at all yet (EntryPoints.cpp's fillFeatures2Chain) |
+| `VK_KHR_shader_subgroup_extended_types` | Implemented (core, not advertised by name) | roadmap C6: reported true; UPDATE (roadmap L85): no longer vacuous for `Vote`/`Ballot`-family `OpGroupNonUniform*` operations (both now legalized/lowered), though 8/16-bit and boolean-typed group operands this feature bit specifically covers still aren't exercised by anything converted so far |
 | `VK_KHR_shader_subgroup_rotate` | Advertised |  |
 | `VK_KHR_shader_subgroup_uniform_control_flow` | Not implemented |  |
 | `VK_KHR_shader_terminate_invocation` | Advertised |  |

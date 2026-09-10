@@ -425,6 +425,28 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   state (48,705 cases) shows 66 passed/128 failed (the same pre-existing,
   unrelated `subgroupclusteredrotate`/`subgrouprotate` 128, unchanged)/
   48,511 not-supported -- zero regressions anywhere.
+  UPDATE (roadmap L85, later session): `GroupNonUniformBallot`'s own
+  family (`OpGroupNonUniformBallot`/`InverseBallot`/`BallotBitExtract`/
+  `BallotFindLSB`/`BallotFindMSB`/`BallotBitCount`) is now implemented
+  end-to-end (new SPIR-V-to-LLVM legalization patterns, a new
+  `WaveCallKind::Ballot` CPU-runtime path, and two real bugs found and
+  fixed along the way: `WaveUniformity.cpp` was missing an `AlwaysUniform`
+  case for the SPIR-V-origin ballot intrinsic, and
+  `SPIRVToLLVMPatterns.cpp`'s `FindLSB`/`FindMSB`/`BitCount`-`Reduce`
+  patterns needed to clip their input to `gl_SubgroupSize` bits per the
+  SPIR-V spec). A real `deqp-vk` re-run of `dEQP-VK.subgroups.ballot.*`
+  (23 cases) and `dEQP-VK.subgroups.ballot_other.*` (84 cases) shows 100%
+  of applicable cases passing (2/2 and 14/14 respectively, the rest
+  correctly `NotSupported`); `BALLOT_BIT` is now genuinely advertised
+  (`Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
+  VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT`).
+  `SHUFFLE_BIT` still stays un-advertised, but for a new, distinct reason:
+  a speculative flip now gets past ballot's own gap only to crash
+  partway through a real `dEQP-VK.subgroups.shuffle.*` re-run with a
+  `Value.cpp` "Uses remain when a value is destroyed!" assertion in
+  `Linearize.cpp`'s `DiamondFlattener`'s own live-mask `PHINode` merging
+  -- a distinct new bug, not yet reduced or fixed, tracked as a new
+  roadmap L-series row.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
