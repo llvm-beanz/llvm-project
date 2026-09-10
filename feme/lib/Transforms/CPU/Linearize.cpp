@@ -966,6 +966,64 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
                           PN.getBasicBlockIndex(Preds[1]) < 0))
       return false;
 
+  // Roadmap L88: find (without mutating anything yet) each direction's own
+  // `Merge`/`IncomingBlock` pair -- the same phi-less-relay walk the
+  // mutating loop below performs -- so every one of `BB`'s own phis' real
+  // uses can be checked *before* committing to erasing `BB`. This fold's
+  // own rewiring below only ever forwards a `BB`-defined phi's value into
+  // an *already-existing* phi at one of these two `Merge` blocks (one that
+  // already names `IncomingBlock`, i.e. `BB` or its relay, as one of its
+  // own incoming blocks) -- it was never taught to chase down any *other*
+  // kind of use. `feme::cpu::DiamondFlattener` (this same file, above) can
+  // leave exactly such another kind of use behind: it threads its own
+  // live/side-effect mask `PHINode`s (see `MaskPair`) through the call
+  // stack of its own recursive `flatten`, not through the ordinary
+  // successor-phi chain this fold understands, so a mask `PHINode` it adds
+  // to a loop's own reconvergence block (e.g. one `StructurizeCFG` already
+  // shaped like this fold's own target, per `H19k`'s own precedent) can end
+  // up consumed directly by an *outer*, unrelated `select`/`PHINode`
+  // wherever `DiamondFlattener`'s own enclosing diamond happens to
+  // reconverge -- nowhere near either `Merge` here. Folding `BB` away
+  // regardless left that outer consumer holding a `Use` of a `Value` this
+  // fold was about to destroy, a real `llvm::Value::~Value` "Uses remain
+  // when a value is destroyed!" abort (reduced from a real
+  // `dEQP-VK.subgroups.shuffle.*` verification shader's own nested
+  // uniform-loop-inside-a-divergent-diamond shape). Bailing out here
+  // (leaving `BB` -- and the harmless, if redundant, re-derivation it
+  // performs -- in place) is the safe, conservative choice once such an
+  // unaccounted-for use is found, mirroring this fold's own already-narrow,
+  // "never guess" design elsewhere.
+  BasicBlock *Merges[2];
+  BasicBlock *IncomingBlocks[2];
+  for (unsigned I = 0; I < 2; ++I) {
+    BasicBlock *IncomingBlock = BB;
+    BasicBlock *Merge = Targets[I];
+    while (Merge->phis().empty()) {
+      auto *UBr = dyn_cast<UncondBrInst>(Merge->getTerminator());
+      if (!UBr)
+        break;
+      IncomingBlock = Merge;
+      Merge = UBr->getSuccessor(0);
+    }
+    Merges[I] = Merge;
+    IncomingBlocks[I] = IncomingBlock;
+  }
+
+  for (PHINode &PN : BB->phis()) {
+    for (Use &U : PN.uses()) {
+      auto *UserInst = cast<Instruction>(U.getUser());
+      if (&PN == CondPN && UserInst == Br)
+        continue; // `Br` is erased along with `BB` itself; not a leak.
+      auto *MergePN = dyn_cast<PHINode>(UserInst);
+      bool Forwarded = false;
+      for (unsigned I = 0; I < 2 && !Forwarded; ++I)
+        Forwarded = MergePN && MergePN->getParent() == Merges[I] &&
+                    MergePN->getIncomingBlock(U) == IncomingBlocks[I];
+      if (!Forwarded)
+        return false; // An escaping use this fold cannot safely relocate.
+    }
+  }
+
   for (unsigned I = 0; I < 2; ++I) {
     BasicBlock *Pred = Preds[I];
     BasicBlock *Target = Targets[I];
@@ -981,7 +1039,9 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
     // consuming one of `BB`'s own values sits at the real merge point past
     // any such chain of relays, keyed on whichever block in the chain is
     // its own immediate, still-standing predecessor -- `BB` itself only if
-    // there is no relay at all.
+    // there is no relay at all. (Recomputed identically to the read-only
+    // walk above -- `Merges`/`IncomingBlocks` -- rather than reused, since
+    // the loop above intentionally runs before any mutation here.)
     BasicBlock *IncomingBlock = BB;
     BasicBlock *Merge = Target;
     while (Merge->phis().empty()) {
