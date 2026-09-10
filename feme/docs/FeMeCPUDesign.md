@@ -1723,7 +1723,7 @@ reduction over a vector register:
 | `wave.is.first.lane` | `M != 0 && lane == cttz(bitcast M to iW, false)` |
 | `wave.any` / `wave.all` | `reduce.or(M & X)` / `reduce.and(M ? X : true)` |
 | `wave.all.equal` | guarded broadcast of the first active lane, compared under `M` |
-| `wave.readlane(X, i)` | uniform `i`: guarded extract and broadcast; varying `i`: one guarded extract per result lane |
+| `wave.readlane(X, i)` | uniform `i`: guarded extract and broadcast; varying `i`: one guarded extract per result lane, or -- once `W` reaches `feme::cpu`'s `ReadLaneMemoryGatherMinWaveSize` -- one guarded `getelementptr`/`load` per result lane out of entry-block scratch memory |
 | `WaveReadLaneFirst` | guarded extract at `cttz(M, false)`, broadcast back |
 | `WaveActiveBallot` | `bitcast (M & X) to iW`, split and zero-pad into the source ABI's 32-bit result words |
 | `wave.active.countbits` | `ctpop(bitcast (M & X))` |
@@ -1755,6 +1755,32 @@ leaves a read from an inactive or out-of-range lane undefined, FeMe chooses
 zero for deterministic reference execution. Ballots always use the source
 ABI's full result shape (`i64` or `<4 x i32>`), zeroing words and high bits
 beyond `W`.
+
+**A wide wave's varying-index `readlane` gathers through memory, not through
+the vector.** The natural expression of "output lane `L` reads source lane
+`I[L]`" is a `<W x T>` `extractelement` at a dynamic index, and that is what
+this row lowers to for a narrow wave. It does not scale: `SelectionDAG` can
+only lower a dynamically indexed vector extract by spilling the whole
+already-type-legalized vector -- `W`/native-width registers wide -- to the
+stack and reloading one element, and it does so once per output lane,
+re-spilling the identical vector `W` times. The cost is quadratic in `W`, and
+at this target's `MaxWaveSize` of 128 it turns one `wave.readlane` into
+roughly ten thousand machine instructions in a single scheduling region,
+which the backend's list scheduler then handles superlinearly on top (roadmap
+milestone L89b measured a real CTS case at ~296 seconds of pipeline creation
+because of this). At or above `ReadLaneMemoryGatherMinWaveSize` the same
+gather is therefore built through three entry-block scratch arrays -- mask,
+source and destination -- storing each wide vector once and giving every lane
+a real `getelementptr`/`load` at its own index, which is `O(W)` machine
+instructions rather than `O(W^2)`. An `i1` (the mask, or an `i1`-typed
+operand) is widened to a byte per lane, because `<W x i1>`'s in-memory form is
+bit-packed and so has no byte-addressable per-lane element; and each source
+index is masked to `W - 1`, because an out-of-range `extractelement` merely
+yields `poison` (already permitted by the zero-for-undefined rule above)
+whereas an out-of-range load would be a genuine out-of-bounds access. Below
+the threshold a `<W x T>` value occupies one or two registers, the spill is
+correspondingly cheap, and the scratch traffic would be pure overhead, so the
+straight-line vector form is kept.
 
 ## Phase 6: Group Execution and Barriers (`feme::cpu::EntryWrapperPass`)
 
