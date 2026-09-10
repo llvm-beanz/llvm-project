@@ -1504,11 +1504,52 @@ was known-good before" without letting it skip recompilation; a hit
 within the same process (the same `VkPipelineCache` object) does skip it,
 sharing one `CachedPipelineArtifact`.
 
+**Status (roadmap L89c):** the cache above is no longer consulted only when
+the application supplies a `VkPipelineCache`. A `VkPipelineCache` is opt-in
+in Vulkan, and much real software (and much of the CTS) never creates one --
+which costs a GPU driver only a comparatively cheap native shader compile
+per repeated creation, but costs this CPU/JIT-based ICD seconds of LLVM
+codegen. Each `VkDevice` therefore owns an *implicit* `PipelineCache`
+(`Device::getImplicitPipelineCache`, Objects.h) that
+`vkCreateComputePipelines`/`vkCreateGraphicsPipelines` consult on **every**
+creation, keyed by exactly the same `computePipelineCacheKey`/
+`computeGraphicsPipelineCacheKey` an application-supplied cache uses -- so
+it can never make two differently-keyed creations collide. The specification
+explicitly anticipates implementations keeping caches of their own beyond
+the application's, and an implicit hit is observationally indistinguishable
+from a fast compile, with two deliberate exceptions:
+
+- It must not report `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_
+  CACHE_HIT_BIT`, which specifically means the *application's* cache
+  supplied the pipeline, so only an application-cache hit sets it.
+- An implicit hit still populates the application's cache when it supplied
+  one, so an application that did create a cache still observes the
+  application-cache hit it expects on a later identical creation, rather
+  than missing forever behind the implicit cache.
+
+Consequently a creation carrying `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_
+COMPILE_REQUIRED_BIT` now *succeeds* on an implicit hit, which is exactly
+what that bit asks for: no compile was required to satisfy the request.
+
+Because an implicit cache is never destroyed before its device, and would
+otherwise retain every artifact the application ever compiled,
+`PipelineCache` takes an optional entry bound with insertion-order
+eviction. It is unbounded by default -- so every application-created cache
+behaves exactly as before -- and only the implicit cache sets one (256
+entries per table, far above any plausible working set, since the bound
+exists solely to stop unbounded growth). Evicting is always safe: a live
+`VkPipeline` holds its own `shared_ptr` to its artifact, so an eviction can
+only cost a future recompile, never invalidate anything in use. Insertion
+order rather than access order is deliberate: at a bound this far above the
+working set the choice of victim is not performance-relevant, and it keeps
+`lookup` a non-mutating operation.
+
 **Status (roadmap E9):** `VK_EXT_pipeline_creation_cache_control`'s two
 bits are both honored as flag-only additions to the object model above,
 per this milestone's own scope (Roadmap.md's E9 row). A `VkPipeline`
 creation carrying `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
-BIT` that misses the cache (or has no cache to hit at all) reports
+BIT` that misses every cache consulted for it (the application's, if any,
+and -- since roadmap L89c -- the device's implicit one) reports
 `VK_PIPELINE_COMPILE_REQUIRED` and leaves that pipeline null instead of
 compiling for real (`vkCreateComputePipelines`/`vkCreateGraphicsPipelines`
 in Pipeline.cpp/GraphicsPipeline.cpp); a more severe result elsewhere in
