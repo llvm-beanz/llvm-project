@@ -53,6 +53,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -171,8 +172,19 @@ serializePipelineCacheBlob(llvm::ArrayRef<PipelineCacheKey> Keys,
 /// this flag (see their own comments in PipelineCache.cpp).
 class PipelineCache {
 public:
+  /// \p MaxEntries bounds how many artifacts each of the two tables retains,
+  /// evicting in insertion order once full; 0 (the default, and what every
+  /// app-created `VkPipelineCache` uses) means unbounded. Only the device's
+  /// implicit cache (roadmap L89c, see `Device::getImplicitPipelineCache`)
+  /// sets a bound: an app-created cache's lifetime and contents are the
+  /// app's own to manage, but an implicit cache is never destroyed before
+  /// its device and would otherwise retain every artifact the app ever
+  /// compiled. Evicting a cached artifact is always safe -- a live
+  /// `VkPipeline` holds its own `shared_ptr` to it, so eviction can only
+  /// cost a future recompile, never invalidate anything in use.
   explicit PipelineCache(std::vector<PipelineCacheKey> InitialKeys = {},
-                         bool ExternallySynchronized = false);
+                         bool ExternallySynchronized = false,
+                         size_t MaxEntries = 0);
 
   /// The compiled artifact previously `insert`ed for \p Key, or null on a
   /// cache miss.
@@ -207,14 +219,27 @@ public:
   std::vector<PipelineCacheKey> keys() const;
 
 private:
+  /// Records \p Key as the most recently inserted entry of \p Order and
+  /// evicts \p Table's oldest entries until it holds at most `MaxEntries`.
+  /// A no-op when unbounded. Callers must already hold `Mutex`.
+  template <typename TableT>
+  void recordInsertion(TableT &Table, std::deque<PipelineCacheKey> &Order,
+                       const PipelineCacheKey &Key);
+
   /// Guards `Entries`/`GraphicsEntries` below when `!ExternallySynchronized`
   /// (see the class comment); `mutable` since even `lookup`/`lookupGraphics`
   /// (logically `const`) must take it.
   mutable std::mutex Mutex;
   const bool ExternallySynchronized;
+  /// See the constructor's comment; 0 means unbounded.
+  const size_t MaxEntries;
   std::map<PipelineCacheKey, std::shared_ptr<CachedPipelineArtifact>> Entries;
   std::map<PipelineCacheKey, std::shared_ptr<GraphicsPipelineArtifact>>
       GraphicsEntries;
+  /// Insertion order of the two tables' keys, oldest first, for eviction
+  /// when bounded. Empty (and unmaintained) when `MaxEntries` is 0.
+  std::deque<PipelineCacheKey> EntryOrder;
+  std::deque<PipelineCacheKey> GraphicsEntryOrder;
 };
 
 } // namespace feme::vulkan

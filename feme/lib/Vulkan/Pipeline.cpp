@@ -667,10 +667,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
     VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkComputePipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
-  const PhysicalDeviceInfo &DeviceInfo =
-      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  Device &Dev = *fromHandle<Device>(device);
+  const PhysicalDeviceInfo &DeviceInfo = Dev.getPhysicalDevice().getInfo();
   auto *Cache =
       pipelineCache ? fromHandle<PipelineCache>(pipelineCache) : nullptr;
+  // (roadmap L89c) Consulted whether or not the app supplied a cache; see
+  // `Device::getImplicitPipelineCache`.
+  PipelineCache &ImplicitCache = Dev.getImplicitPipelineCache();
   Allocator Alloc(pAllocator);
 
   VkResult Result = VK_SUCCESS;
@@ -679,7 +682,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
     const VkComputePipelineCreateInfo &CreateInfo = pCreateInfos[I];
 
     std::optional<PipelineCacheKey> Key;
-    if (Cache && CreateInfo.layout && CreateInfo.stage.module) {
+    if (CreateInfo.layout && CreateInfo.stage.module) {
       auto *Module = fromHandle<vulkan::ShaderModule>(CreateInfo.stage.module);
       Expected<SmallVector<SpecializationOverride, 4>> Overrides =
           buildSpecializationOverrides(CreateInfo.stage.pSpecializationInfo);
@@ -697,9 +700,21 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
       }
     }
 
+    // Only an *application* cache hit may be reported as one through
+    // `VK_EXT_pipeline_creation_feedback` below; an implicit hit is
+    // reported exactly like a compile, since the app's own cache did not
+    // supply it.
     std::shared_ptr<CachedPipelineArtifact> Artifact =
-        Key ? Cache->lookup(*Key) : nullptr;
+        Key && Cache ? Cache->lookup(*Key) : nullptr;
     bool CacheHit = Artifact != nullptr;
+    if (!Artifact && Key) {
+      Artifact = ImplicitCache.lookup(*Key);
+      // An implicit hit still populates the app's cache, so a later
+      // creation through it reports the application-cache hit the app is
+      // entitled to expect after having created one.
+      if (Artifact && Cache)
+        Cache->insert(*Key, Artifact);
+    }
     if (!Artifact) {
       // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
       // BIT`: this pipeline missed the cache (or none was given), and the
@@ -718,8 +733,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
         continue;
       }
       Artifact = std::move(*Compiled);
-      if (Key)
-        Cache->insert(*Key, Artifact);
+      if (Key) {
+        ImplicitCache.insert(*Key, Artifact);
+        if (Cache)
+          Cache->insert(*Key, Artifact);
+      }
     }
 
     // (roadmap F10) `VK_EXT_pipeline_robustness`: validated (and, for a

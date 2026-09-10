@@ -20,6 +20,7 @@
 
 #include "Icd.h"
 #include "PhysicalDeviceInfo.h"
+#include "PipelineCache.h"
 
 #include <memory>
 #include <vector>
@@ -92,10 +93,34 @@ public:
     return nullptr;
   }
 
+  /// (roadmap L89c) The device's implicit pipeline cache: consulted by
+  /// `vkCreate{Compute,Graphics}Pipelines` on *every* creation, including
+  /// the common one where the app supplies no `VkPipelineCache` at all.
+  ///
+  /// A `VkPipelineCache` is opt-in in Vulkan, and many real applications
+  /// (and much of the CTS) never create one -- which for a GPU driver only
+  /// costs a comparatively cheap native shader compile, but for this
+  /// CPU/JIT-based ICD costs seconds of LLVM codegen per repeat. The spec
+  /// explicitly anticipates implementations keeping caches of their own
+  /// beyond the app's: an implicit hit is indistinguishable from a fast
+  /// compile, so it changes no observable behavior except that it must not
+  /// report `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_
+  /// BIT`, which specifically means the *application's* cache.
+  PipelineCache &getImplicitPipelineCache() { return ImplicitCache; }
+
 private:
+  /// How many artifacts the implicit cache retains per table before
+  /// evicting; see `PipelineCache`'s constructor. Sized far above any
+  /// plausible per-frame working set, since the point is only to stop
+  /// unbounded growth over a long-lived device.
+  static constexpr size_t ImplicitPipelineCacheMaxEntries = 256;
+
   PhysicalDevice &Owner;
   Allocator Alloc;
   std::vector<std::unique_ptr<Queue>> Queues;
+  PipelineCache ImplicitCache{/*InitialKeys=*/{},
+                              /*ExternallySynchronized=*/false,
+                              ImplicitPipelineCacheMaxEntries};
 };
 
 /// A `VkInstance`. Owns the allocator and the single `PhysicalDevice` this

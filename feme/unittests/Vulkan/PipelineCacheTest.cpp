@@ -177,7 +177,12 @@ TEST_F(PipelineCacheTest, CreationFeedbackReportsCacheHitOnSecondCreation) {
   vkDestroyPipelineCache(Device, Cache, nullptr);
 }
 
-TEST_F(PipelineCacheTest, NoCacheCompilesIndependentArtifactsEachTime) {
+/// Roadmap L89c: with no `VkPipelineCache` at all, two identical creations
+/// must still share one compiled artifact, via the device's implicit cache
+/// -- the whole point of that cache, since a JIT-compiling ICD cannot
+/// afford to recompile an identical shader just because the app never
+/// opted into a cache object.
+TEST_F(PipelineCacheTest, NoCacheStillSharesArtifactViaImplicitCache) {
   VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
   VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
   ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
@@ -187,11 +192,119 @@ TEST_F(PipelineCacheTest, NoCacheCompilesIndependentArtifactsEachTime) {
                                      nullptr, &Second),
             VK_SUCCESS);
 
-  EXPECT_NE(&fromHandle<ComputePipeline>(First)->getStage(),
+  EXPECT_EQ(&fromHandle<ComputePipeline>(First)->getStage(),
             &fromHandle<ComputePipeline>(Second)->getStage());
 
   vkDestroyPipeline(Device, First, nullptr);
   vkDestroyPipeline(Device, Second, nullptr);
+}
+
+/// Roadmap L89c: the implicit cache must not make two *different* shaders
+/// collide -- it is keyed by exactly the same `computePipelineCacheKey` an
+/// app-supplied cache is, so a creation differing in any keyed input still
+/// compiles its own artifact.
+TEST_F(PipelineCacheTest, ImplicitCacheDoesNotShareAcrossDifferentKeys) {
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSizeFour{};
+  RequiredSizeFour.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSizeFour.requiredSubgroupSize = 4;
+  VkComputePipelineCreateInfo CreateInfoFour = makeCreateInfo();
+  CreateInfoFour.stage.pNext = &RequiredSizeFour;
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSizeEight{};
+  RequiredSizeEight.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSizeEight.requiredSubgroupSize = 8;
+  VkComputePipelineCreateInfo CreateInfoEight = makeCreateInfo();
+  CreateInfoEight.stage.pNext = &RequiredSizeEight;
+
+  VkPipeline Four = VK_NULL_HANDLE, Eight = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfoFour,
+                                     nullptr, &Four),
+            VK_SUCCESS);
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1,
+                                     &CreateInfoEight, nullptr, &Eight),
+            VK_SUCCESS);
+
+  EXPECT_NE(&fromHandle<ComputePipeline>(Four)->getStage(),
+            &fromHandle<ComputePipeline>(Eight)->getStage());
+
+  vkDestroyPipeline(Device, Four, nullptr);
+  vkDestroyPipeline(Device, Eight, nullptr);
+}
+
+/// Roadmap L89c: an *implicit* cache hit is not an application cache hit.
+/// `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT`
+/// specifically reports that the app's own `VkPipelineCache` supplied the
+/// pipeline, so a creation that passed no cache at all must never set it,
+/// however the implementation actually satisfied the request.
+TEST_F(PipelineCacheTest, ImplicitCacheHitIsNotReportedAsApplicationCacheHit) {
+  VkComputePipelineCreateInfo First = makeCreateInfo();
+  VkPipeline Warm = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &First, nullptr,
+                                     &Warm),
+            VK_SUCCESS);
+
+  VkPipelineCreationFeedback Feedback{};
+  VkPipelineCreationFeedbackCreateInfo FeedbackInfo{};
+  FeedbackInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+  FeedbackInfo.pPipelineCreationFeedback = &Feedback;
+  VkComputePipelineCreateInfo Second = makeCreateInfo();
+  Second.pNext = &FeedbackInfo;
+
+  VkPipeline Hit = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &Second,
+                                     nullptr, &Hit),
+            VK_SUCCESS);
+  EXPECT_TRUE(Feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT);
+  EXPECT_FALSE(
+      Feedback.flags &
+      VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT);
+
+  vkDestroyPipeline(Device, Warm, nullptr);
+  vkDestroyPipeline(Device, Hit, nullptr);
+}
+
+/// Roadmap L89c: an app-supplied cache that misses, but whose key the
+/// implicit cache already knows, must adopt that artifact -- so a *later*
+/// creation through the same app cache reports the application-cache hit
+/// the app is entitled to expect, rather than perpetually missing because
+/// the implicit cache silently answered every request first.
+TEST_F(PipelineCacheTest, ImplicitHitPopulatesTheApplicationCache) {
+  VkComputePipelineCreateInfo Warmup = makeCreateInfo();
+  VkPipeline Warm = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &Warmup,
+                                     nullptr, &Warm),
+            VK_SUCCESS);
+
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo Adopting = makeCreateInfo();
+  VkPipeline Adopted = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateComputePipelines(Device, Cache, 1, &Adopting, nullptr, &Adopted),
+      VK_SUCCESS);
+
+  VkPipelineCreationFeedback Feedback{};
+  VkPipelineCreationFeedbackCreateInfo FeedbackInfo{};
+  FeedbackInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+  FeedbackInfo.pPipelineCreationFeedback = &Feedback;
+  VkComputePipelineCreateInfo Reported = makeCreateInfo();
+  Reported.pNext = &FeedbackInfo;
+  VkPipeline Hit = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateComputePipelines(Device, Cache, 1, &Reported, nullptr, &Hit),
+      VK_SUCCESS);
+  EXPECT_TRUE(Feedback.flags &
+              VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT);
+
+  vkDestroyPipeline(Device, Warm, nullptr);
+  vkDestroyPipeline(Device, Adopted, nullptr);
+  vkDestroyPipeline(Device, Hit, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
 }
 
 /// Roadmap E7: two otherwise-identical creations that disagree only in
@@ -423,10 +536,12 @@ TEST_F(PipelineCacheTest,
 }
 
 /// Roadmap E9: `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`
-/// with no cache at all -- there is never a hit to have, so creation must
-/// always report `VK_PIPELINE_COMPILE_REQUIRED` and leave the pipeline
-/// null rather than compile it for real.
-TEST_F(PipelineCacheTest, FailOnCompileRequiredWithNoCacheAlwaysFails) {
+/// with no cache at all, against a cold device -- neither the app (which
+/// supplied none) nor the implicit cache (roadmap L89c, still empty on a
+/// freshly created device) can satisfy this, so a real compile *is*
+/// required and creation must report `VK_PIPELINE_COMPILE_REQUIRED` and
+/// leave the pipeline null rather than compile it.
+TEST_F(PipelineCacheTest, FailOnCompileRequiredWithNoCacheFailsWhenCold) {
   VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
   CreateInfo.flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
   VkPipeline Pipeline = VK_NULL_HANDLE;
@@ -434,6 +549,32 @@ TEST_F(PipelineCacheTest, FailOnCompileRequiredWithNoCacheAlwaysFails) {
                                      nullptr, &Pipeline),
             VK_PIPELINE_COMPILE_REQUIRED);
   EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+}
+
+/// Roadmap L89c: once the implicit cache is warm for this exact key, a
+/// creation carrying `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
+/// BIT` and *no* app cache must now succeed: the bit asks the
+/// implementation not to compile, and no compile is needed to satisfy the
+/// request, which is precisely the case the bit exists to let an app
+/// exploit.
+TEST_F(PipelineCacheTest, FailOnCompileRequiredSucceedsOnImplicitCacheHit) {
+  VkComputePipelineCreateInfo Warmup = makeCreateInfo();
+  VkPipeline Warm = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &Warmup,
+                                     nullptr, &Warm),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo NoCompileInfo = makeCreateInfo();
+  NoCompileInfo.flags =
+      VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+  VkPipeline Hit = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &NoCompileInfo,
+                                     nullptr, &Hit),
+            VK_SUCCESS);
+  EXPECT_NE(Hit, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Warm, nullptr);
+  vkDestroyPipeline(Device, Hit, nullptr);
 }
 
 /// Roadmap E9: with a cache, a first creation carrying

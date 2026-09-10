@@ -257,16 +257,37 @@ private:
 } // namespace
 
 PipelineCache::PipelineCache(std::vector<PipelineCacheKey> InitialKeys,
-                             bool ExternallySynchronized)
-    : ExternallySynchronized(ExternallySynchronized) {
+                             bool ExternallySynchronized, size_t MaxEntries)
+    : ExternallySynchronized(ExternallySynchronized), MaxEntries(MaxEntries) {
   // Every initial key is recorded as a placeholder (null artifact) in both
   // tables: a persisted blob does not record whether a key was originally
   // compute's or graphics', and a placeholder never satisfies a lookup (see
   // the file comment's "does not skip recompiling") in either table, so
   // recording it in both cannot manufacture a false hit.
   for (const PipelineCacheKey &Key : InitialKeys) {
-    Entries.emplace(Key, nullptr);
-    GraphicsEntries.emplace(Key, nullptr);
+    if (Entries.emplace(Key, nullptr).second)
+      recordInsertion(Entries, EntryOrder, Key);
+    if (GraphicsEntries.emplace(Key, nullptr).second)
+      recordInsertion(GraphicsEntries, GraphicsEntryOrder, Key);
+  }
+}
+
+template <typename TableT>
+void PipelineCache::recordInsertion(TableT &Table,
+                                    std::deque<PipelineCacheKey> &Order,
+                                    const PipelineCacheKey &Key) {
+  if (MaxEntries == 0)
+    return;
+  Order.push_back(Key);
+  // Insertion order, not access order: for this cache's real workload (a
+  // burst of pipeline creations, many of them exact repeats, all within one
+  // frame or test case) the bound exists only to stop unbounded growth over
+  // a long-lived device, and is set far above any plausible working set --
+  // so which entry an eviction picks is not performance-relevant, and FIFO
+  // avoids making `lookup` a mutating operation.
+  while (Order.size() > MaxEntries) {
+    Table.erase(Order.front());
+    Order.pop_front();
   }
 }
 
@@ -280,7 +301,8 @@ PipelineCache::lookup(const PipelineCacheKey &Key) const {
 void PipelineCache::insert(const PipelineCacheKey &Key,
                            std::shared_ptr<CachedPipelineArtifact> Artifact) {
   ConditionalLock L(Mutex, ExternallySynchronized);
-  Entries[Key] = std::move(Artifact);
+  if (Entries.insert_or_assign(Key, std::move(Artifact)).second)
+    recordInsertion(Entries, EntryOrder, Key);
 }
 
 std::shared_ptr<GraphicsPipelineArtifact>
@@ -294,7 +316,8 @@ void PipelineCache::insertGraphics(
     const PipelineCacheKey &Key,
     std::shared_ptr<GraphicsPipelineArtifact> Artifact) {
   ConditionalLock L(Mutex, ExternallySynchronized);
-  GraphicsEntries[Key] = std::move(Artifact);
+  if (GraphicsEntries.insert_or_assign(Key, std::move(Artifact)).second)
+    recordInsertion(GraphicsEntries, GraphicsEntryOrder, Key);
 }
 
 void PipelineCache::merge(const PipelineCache &Other) {
@@ -306,9 +329,11 @@ void PipelineCache::merge(const PipelineCache &Other) {
   // extension does not relax `vkMergePipelineCaches`'s own synchronization
   // requirement, so no lock is needed (or taken) here.
   for (const auto &[Key, Artifact] : Other.Entries)
-    Entries.try_emplace(Key, Artifact);
+    if (Entries.try_emplace(Key, Artifact).second)
+      recordInsertion(Entries, EntryOrder, Key);
   for (const auto &[Key, Artifact] : Other.GraphicsEntries)
-    GraphicsEntries.try_emplace(Key, Artifact);
+    if (GraphicsEntries.try_emplace(Key, Artifact).second)
+      recordInsertion(GraphicsEntries, GraphicsEntryOrder, Key);
 }
 
 std::vector<PipelineCacheKey> PipelineCache::keys() const {
