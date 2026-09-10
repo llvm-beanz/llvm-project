@@ -465,6 +465,20 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   regardless of `SHUFFLE_BIT`, so this is a live, currently-reachable
   bug). `SHUFFLE_BIT` stays un-advertised, now blocked on new roadmap row
   L89 instead.
+  UPDATE (roadmap L89, later session): that "hang" was profiled and found
+  to be a real, severe, but *finite* compile-time performance blowup (not
+  an infinite hang) -- confirmed via `gdb` progress-sampling showing the
+  live process genuinely advancing across passes/functions over time, and
+  via letting the exact same case run to completion with no timeout: it
+  passes after ~210 seconds. Root cause: `SIMDizePass`'s per-lane
+  scalarization codegen scales directly with a shader's declared
+  `WaveSize` (64 for `requiredsubgroupsize` cases vs. 4 for the
+  host-derived default), producing a single ~2200-instruction basic block
+  that hits LLVM's legacy list scheduler's well-known poor scaling on very
+  large scheduling regions. `SHUFFLE_BIT` still stays un-advertised (a
+  full CTS sweep at minutes-per-case would be impractical), now blocked on
+  new roadmap row L89a (a `SIMDizePass` codegen-shape redesign bounding
+  basic-block size independent of `WaveSize`).
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

@@ -35558,3 +35558,86 @@ reverted/cleaned up; nothing from the speculative verification itself is committ
 `FeMeCPUDesign.md` reviewed: no update needed -- this closes a real bug in an already-documented
 mechanism ("Phase 3: Linearization and Predication"'s own masked-branch flattening and the
 StructurizeCFG "Flow"-block-folding optimization it builds on), not a design deviation or extension.
+
+## L89: The L88-era "scheduler hang" is a real, severe, but finite compile-time performance blowup, not an infinite hang
+
+L88's own closing verification found that a speculative `SHUFFLE_BIT` re-flip got past the crash
+L88 fixed only to hit a *new* apparent blocker: `dEQP-VK.subgroups.shuffle.compute.subgroupclustered
+rotate_float_dynamically_uniform_requiredsubgroupsize` appeared to hang indefinitely under a 20-second
+`timeout`, with a single `gdb -p <pid> -batch -ex bt` sample showing the main thread inside LLVM's
+own `PostMachineSchedulerLegacy`/`ScheduleDAGInstrs::buildSchedGraph`. This session's job was to
+profile and, if tractable, fix that apparent hang.
+
+**IR-size profiling.** A temporary, uncommitted `FEME_CPU_DUMP_JIT_IR`-gated debug dump was added to
+`feme::cpu::CompiledStage::createStage` (reverted before finishing this session) right before the
+module is handed to `orc::LLJITBuilder`. Comparing the passing (no-suffix) case against the hanging
+(`_requiredsubgroupsize`) case confirmed:
+
+- Passing case: `feme.cpu.wavesize=4` (host-derived default), a 377-line dumped module with `@main`
+  fully inlined away -- no large standalone function survives.
+- Hanging case: `feme.cpu.wavesize=64` (the CTS case's declared `requiredSubgroupSize`), a 3077-line
+  dumped module with a separate, un-inlined `@main` (2886 lines) containing **one basic block of
+  ~2200 instructions** (65 `load`s, 65 `call`s, 2121 total `extractelement`/`insertelement`s across
+  the file), followed by a ~14-block binary-search switch-lowering tree for the lane-index selector.
+
+This ~16x instruction-count scaling exactly matches the WaveSize=4-to-64 ratio, confirming
+`SIMDizePass`'s documented per-lane scalarization strategy ("`W` unrolled scalar clones of a divergent
+op, all emitted inline in one basic block") is the source of the size blowup, not a bug in that pass
+producing incorrect/excessive code -- it is doing exactly what it is designed to do, just for a wave
+16x wider than the common case.
+
+**Ruling out "one compile is stuck".** Feeding the exact captured hanging module through `llc`
+directly (matching CPU=generic/features/relocation-model=pic/`-filetype=obj`, i.e. as close as
+possible to `JITTargetMachineBuilder::detectHost()`'s own defaults) compiled the *entire* module,
+including `@main`, in ~2.5 seconds -- ruling out a theory where any *single* compile of this exact
+IR is itself stuck in an infinite loop.
+
+**Ruling out "the real process is frozen".** Re-running the actual hanging `deqp-vk` case in the
+background and sampling `gdb -p <pid> -batch -ex "bt 6"` three times, ~15 seconds apart, showed the
+call stack genuinely advancing: sample 1 was in `ScheduleDAGRRList`'s pre-RA list scheduler
+(`popFromQueue`/`BURRSort`) for one function; sample 2 had moved to `ScheduleDAGMILive`'s *post*-RA
+scheduler (`initRegPressure`/`collectVRegUses`) for a subsequent function; sample 3 was back in
+`ScheduleDAGRRList` (`BUCompareLatency`/`hasVRegCycleUse`) for yet another function. This is forward
+progress across distinct passes and functions, not a frozen instruction pointer -- ruling out a true
+infinite loop or deadlock.
+
+**Confirming "slow but finite".** Left running to completion with no artificial timeout, the exact
+same `deqp-vk` invocation **passed** after approximately 210 seconds (process RSS grew from ~300MB to
+~680MB over the run, consistent with real -- if extreme -- algorithmic cost, not a spin/deadlock with
+flat memory use):
+
+```
+Test case 'dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_float_dynamically_uniform_requiredsubgroupsize'..
+  Pass (OK)
+Test run totals:
+  Passed:        1/1 (100.0%)
+```
+
+**Corrected root cause.** This is a real, severe, but *finite* compile-time performance blowup,
+consistent with LLVM's legacy `BURRSort`/`ComputeHeight`-based list scheduler's well-documented poor
+scaling on single basic blocks with thousands of `SUnit`s, triggered here by `SIMDizePass`'s per-lane
+scalarization codegen scaling directly with a shader's declared/required `WaveSize` -- **not** a
+`ScheduleDAGInstrs`/memory-dependence-chain bug, and **not** an infinite loop anywhere in LLVM or
+`feme`. The original L88-session filing's "hang (not a crash -- spins indefinitely)" framing was an
+overstatement based on a single, too-short (20s) timeout and a single `gdb` sample; a longer sample
+sequence and a longer timeout both show real, if extreme, forward progress to a correct `Pass`
+result.
+
+**Disposition.** Despite not being an infinite hang, this remains a real practical blocker: a full
+`dEQP-VK.subgroups.*` sweep across every `_requiredsubgroupsize` variant (each costing minutes instead
+of seconds) would be impractically slow, so `SHUFFLE_BIT` stays un-advertised pending an actual fix.
+The real fix -- redesigning `SIMDizePass`'s lane-processing codegen shape (e.g. native-width lane
+chunking inside a real loop, or otherwise bounding a scheduling region's own size independent of
+`WaveSize`) -- is a large, invasive change to that pass's 3714-line core design, out of scope for this
+session's remaining budget; it is broken out as new roadmap row **L89a**.
+
+All temporary local state from this session's investigation (the `FEME_CPU_DUMP_JIT_IR` debug-dump
+instrumentation in `CompiledStage.cpp`, killed background `deqp-vk` processes, scratch `/tmp/l89/*`
+files) was reverted/cleaned up; no functional source change was made this session, so `SHUFFLE_BIT`'s
+advertisement state and `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` are unchanged.
+`ninja check-feme`: 2,902 discovered, 2,843 passed, 59 unsupported, 0 failed (zero regressions, no new
+tests since no functional change was made).
+
+`FeMeCPUDesign.md` reviewed: no update needed -- `SIMDizePass`'s per-lane scalarization strategy is
+already documented as the pass's own intentional design; this session found a real *performance*
+limitation of that documented design at wide wave sizes, not a deviation from it.
