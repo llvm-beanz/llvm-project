@@ -35969,7 +35969,16 @@ project has done.**
 - 10 pre-existing `dEQP-VK.subgroups.builtin_mask_var.compute.*` failures (the
   `subgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask` builtin variables, all failing
   `vkCreateComputePipelines`). No previous session had run that group. Identical in both the before
-  and after runs, so unrelated to this flip. Broken out as roadmap **L89g**.
+  and after runs, so unrelated to this flip. Broken out as roadmap **L89g**, and reduced in this
+  session's own remaining budget to a confirmed two-layer diagnosis: the outer layer was a
+  `feme-cpu-simdize` rejection of a divergent `bitcast <4 x i32> ... to i128` (the `uvec4` ballot
+  mask folded into one wide integer to be popcounted), fixed here as roadmap **L89h**; behind it,
+  the real cause is that the five mask builtins are absent from `BuiltInMappings[]`, so a read of
+  one falls through to the generic `Input`-variable path and emits a `feme.stage.input.load` that
+  no compute-stage lowering handles (`JIT session error: Symbols not found:
+  [ feme.stage.input.load.v4i32 ]`). After L89h the group still fails 10/10, one layer deeper. Note
+  that L89g's roadmap row was briefly and wrongly "corrected" mid-session to blame `SIMDizePass`
+  alone, on the strength of the first error the reduction surfaced; the row now records both layers.
 - **A CTS harness requirement worth knowing for every future sweep**: `deqp-vk` must be run with its
   own module directory (`external/vulkancts/modules/vulkan/`) as the working directory. Run from
   anywhere else, the `subgroup_uniform_control_flow` amber cases fail to open their data files and
