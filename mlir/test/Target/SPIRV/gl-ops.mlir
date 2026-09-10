@@ -163,6 +163,14 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, 
     %3 = spirv.GL.Reflect %arg0, %arg0 : f32
     // CHECK: {{%.*}} = spirv.GL.Reflect {{%.*}}, {{%.*}} : vector<3xf32>
     %4 = spirv.GL.Reflect %arg1, %arg2 : vector<3xf32>
+    // CHECK: {{%.*}} = spirv.GL.FaceForward {{%.*}}, {{%.*}}, {{%.*}} : f32
+    %faceforward0 = spirv.GL.FaceForward %arg0, %arg0, %arg0 : f32
+    // CHECK: {{%.*}} = spirv.GL.FaceForward {{%.*}}, {{%.*}}, {{%.*}} : vector<3xf32>
+    %faceforward1 = spirv.GL.FaceForward %arg1, %arg2, %arg1 : vector<3xf32>
+    // CHECK: {{%.*}} = spirv.GL.Refract {{%.*}}, {{%.*}}, {{%.*}} : f32, f32
+    %refract0 = spirv.GL.Refract %arg0, %arg0, %arg0 : f32, f32
+    // CHECK: {{%.*}} = spirv.GL.Refract {{%.*}}, {{%.*}}, {{%.*}} : vector<3xf32>, f32
+    %refract1 = spirv.GL.Refract %arg1, %arg2, %arg0 : vector<3xf32>, f32
     // CHECK: {{%.*}} = spirv.GL.Distance {{%.*}}, {{%.*}} : f32, f32 -> f32
     %5 = spirv.GL.Distance %arg0, %arg0 : f32, f32 -> f32
     // CHECK: {{%.*}} = spirv.GL.Distance {{%.*}}, {{%.*}} : vector<3xf32>, vector<3xf32> -> f32

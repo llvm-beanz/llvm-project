@@ -1355,6 +1355,18 @@ ParseResult spirv::GLFmaOp::parse(OpAsmParser &parser, OperationState &result) {
 void spirv::GLFmaOp::print(OpAsmPrinter &p) { printOneResultOp(*this, p); }
 
 //===----------------------------------------------------------------------===//
+// spirv.GLFaceForwardOp
+//===----------------------------------------------------------------------===//
+
+ParseResult spirv::GLFaceForwardOp::parse(OpAsmParser &parser,
+                                          OperationState &result) {
+  return parseOneResultSameOperandTypeOp(parser, result);
+}
+void spirv::GLFaceForwardOp::print(OpAsmPrinter &p) {
+  printOneResultOp(*this, p);
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GlobalVariable
 //===----------------------------------------------------------------------===//
 

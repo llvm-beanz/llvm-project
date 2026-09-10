@@ -1502,6 +1502,28 @@ def SPIRV_GLNormalizeOp : SPIRV_GLUnaryArithmeticOp<"Normalize", 69, SPIRV_Float
 
 // -----
 
+def SPIRV_GLFaceForwardOp : SPIRV_GLTernaryArithmeticOp<"FaceForward", 70, SPIRV_Float> {
+  let summary = "Returns N if faced correctly, otherwise -N";
+
+  let description = [{
+    If the dot product of Nref and I is negative, the result is N, otherwise
+    it is -N.
+
+    The operands must all be a scalar or vector whose component type is floating-point.
+
+    Result Type and the type of all operands must be the same type.
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.GL.FaceForward %0, %1, %2 : f32
+    %3 = spirv.GL.FaceForward %0, %1, %2 : vector<3xf32>
+    ```
+  }];
+}
+
+// -----
+
 def SPIRV_GLReflectOp : SPIRV_GLBinaryArithmeticOp<"Reflect", 71, SPIRV_Float, [AlwaysSpeculatable]> {
   let summary = "Calculate reflection direction vector";
 
@@ -1523,6 +1545,59 @@ def SPIRV_GLReflectOp : SPIRV_GLBinaryArithmeticOp<"Reflect", 71, SPIRV_Float, [
     %3 = spirv.GL.Reflect %0, %1 : vector<3xf32>
     ```
   }];
+}
+
+// -----
+
+def SPIRV_GLRefractOp :
+  SPIRV_GLOp<"Refract", 72, [
+      NoMemoryEffect, AllTypesMatch<["i", "n", "result"]>]> {
+  let summary = "Calculate the refraction direction vector";
+
+  let description = [{
+    For the incident vector I and surface normal N, and the ratio of
+    indices of refraction eta, the result is the refraction vector.
+
+    The result is computed by:
+
+    k = 1.0 - eta * eta * (1.0 - dot(N, I) * dot(N, I))
+
+    If k is less than 0.0, the result is a vector of all zeros. Otherwise,
+    the result is:
+
+    eta * I - (eta * dot(N, I) + sqrt(k)) * N
+
+    The input parameters I and N must already be normalized in order to
+    achieve the desired result.
+
+    I and N must both be a scalar or vector whose component type is
+    floating-point. eta must be a scalar of the same floating-point type.
+
+    Result Type and the type of I and N must be the same type.
+
+    #### Example:
+
+    ```mlir
+    %3 = spirv.GL.Refract %0, %1, %2 : f32, f32
+    %3 = spirv.GL.Refract %0, %1, %2 : vector<3xf32>, f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$i,
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$n,
+    SPIRV_Float:$eta
+  );
+
+  let results = (outs
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $i `,` $n `,` $eta `:` type($i) `,` type($eta)
+  }];
+
+  let hasVerifier = 0;
 }
 
 // ----
