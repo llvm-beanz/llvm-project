@@ -76271,3 +76271,96 @@ in one specific construct.
   unimplemented `spirv.GroupNonUniformBroadcast`, 336 cases, pre-existing) and
   L89f (the `SHUFFLE_BIT` flip itself, now unblocked but needing a full-tree
   sweep of its own).
+
+# L89f session: advertising SHUFFLE_BIT, and a two-layer bug behind one error message
+
+## The request
+
+Advertise `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` (roadmap L89f), verified by a real
+full-tree `dEQP-VK.subgroups.*` sweep before and after the flip.
+
+## The flip was one line; all the value was in the verification
+
+`PhysicalDeviceInfo.cpp`'s `SubgroupSupportedOperations` gained one enumerator.
+Everything else in this session was proving that was safe, and it was worth it:
+48,705 cases before and after, diffed case-by-case out of the two `.qpa` logs
+rather than by comparing summary totals. Exactly 128 cases changed, all
+`NotSupported` -> `Pass` (96 `subgroupshufflexor`, 32 `subgroupshuffle`), and
+the 346-case failure set was byte-for-byte identical across the two runs.
+
+Comparing totals alone would have been much weaker evidence: 222 -> 350 passing
+with 346 -> 346 failing is *consistent* with 128 gains and zero regressions, but
+it is equally consistent with 130 gains and two regressions that happened to be
+offset by two unrelated fixes. The per-case diff rules that out.
+
+## The deferral was right in principle and wrong in its numbers
+
+This row had been deferred for several milestones on the grounds that flipping a
+subgroup bit changes what CTS asks of the device across the whole tree. That
+instinct was correct -- but the two specific fears were both measurably wrong,
+and it is worth writing down *why*, because they are the kind of thing that is
+cheap to check and expensive to assume:
+
+1. "The 1,552 unsupported cases in `shuffle.compute` become live." Only 480 gate
+   on this bit. Reading CTS's own `supportedCheck` in
+   `vktSubgroupsShuffleTests.cpp` shows `shuffle_up`/`shuffle_down` gate on the
+   *separate* `SHUFFLE_RELATIVE_BIT`, and rotate/clusteredrotate on the rotate
+   feature, which was already live.
+2. "Every shuffle-gated case in the graphics/framebuffer/ray_tracing variants
+   becomes live too." None of them do: `SubgroupSupportedStages` is
+   `VK_SHADER_STAGE_COMPUTE_BIT` only, so every non-compute variant stays
+   `NotSupported` regardless of this bit.
+
+Both were answered by reading two files. The deferral cost several milestones.
+
+## A CTS harness gotcha that had been silently corrupting runs
+
+The first baseline run reported "Test run was ABORTED!" at 47,723 of 48,705
+cases. `deqp-vk` must run with `external/vulkancts/modules/vulkan/` as its
+working directory or the `subgroup_uniform_control_flow` amber cases cannot open
+their data files, and the `ResourceError` kills the whole run. Every prior
+session in this project ran from the build directory instead; their narrower
+per-group runs simply never reached those cases. Worth remembering that the
+abort is only reported in the final summary, so a truncated run looks like a
+completed one unless you check the case count.
+
+## The mistake I made, and caught: one error message, two bugs
+
+With budget left I started on L89g, the 10 `builtin_mask_var.compute` failures
+the sweep turned up. The roadmap row I had *just written* said the five subgroup
+mask builtins were unimplemented. Reducing the case produced a
+`feme-cpu-simdize` "divergent vector value used outside a supported pattern"
+error, so I edited the row to say the diagnosis was wrong and the real cause was
+a `SIMDizePass` decomposition gap.
+
+That edit was itself wrong. Both things were true, in sequence. The SIMDize gap
+was real -- a divergent `bitcast <4 x i32> ... to i128`, the shape a `uvec4`
+ballot mask takes when folded into one wide integer to be popcounted, which is
+the one `CastInst` whose result is not a vector and so cannot go through
+`widenVectorElementwise`'s component-for-component rule. I fixed it
+(`widenVectorToScalarBitCast`, roadmap L89h). And then the *original* diagnosis
+turned out to be right after all: with the outer error gone, the cases fail one
+layer deeper with `Symbols not found: [ feme.stage.input.load.v4i32 ]`, because
+`SubgroupEqMask` and its four siblings are genuinely absent from
+`BuiltInMappings[]` and so fall through to the generic Input-variable path.
+
+The lesson is not "the roadmap was right". It is that the first error a
+reduction surfaces is evidence about the *outermost* layer only, and rewriting a
+diagnosis on that basis -- as I did -- is the same under-verified extrapolation
+this milestone chain has been repeatedly bitten by (L89a's block split, L89b's
+block-size premise). The discipline that catches it is cheap: fix the outer
+layer, re-run the real case, and only then claim to know the cause.
+
+I stopped short of implementing the mask builtins. `BuiltInMappings[]`'s entry
+shape maps a builtin to exactly one intrinsic call and cannot express any of the
+five -- each needs a small computed expansion producing a `vector<4xi32>` from
+`SubgroupLocalInvocationId`/`SubgroupSize`. That is a real design point with its
+own tests, i.e. genuinely L89g's own work, and starting it with the remaining
+budget would have left it unverified rather than done.
+
+## Results
+
+- `SHUFFLE_BIT` advertised; +128 CTS cases, zero regressions, failure set identical.
+- `SIMDizePass` divergent vector-to-scalar `bitcast` widening added, with a
+  two-`WaveSize` lit test.
+- `ninja check-feme`: 2,915 discovered, 2,856 passed, 59 unsupported, 0 failed.
