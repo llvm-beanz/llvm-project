@@ -42,19 +42,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L87 from the roadmap or other prerequisites blocking the
+Can you work on L88 from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **The leftover "GLSL.std.450" half of L7g's own original filing text**
-> (`unhandled deserializations ... from extension set GLSL.std.450`), split out
-> of L7g's own closing session: never confirmed to a concrete repro across any
-> of L7a-L7g's own investigations (all of which found and closed real, concrete
-> `unhandled opcode`-shaped gaps instead -- L7c/L7d/L7f/L7g). Needs its own real
-> IR reduction of whichever HLSL/GLSL shape emits a currently-unhandled
-> `GLSL.std.450` extended-instruction-set builtin (dxc's own
-> intrinsic-to-`GLSL.std.450`-builtin mapping covers dozens of
-> math/bit-manipulation builtins --
-> `FindUMsb`/`FindSMsb`/`InterlockedCompareStore` families and similar
-> less-common HLSL intrinsics are plausible candidates, none yet confirmed)
-> before scoping a fix, mirroring this row's own siblings' "reduce first, then
-> fix" methodology throughout the L7-series
+> **A real `llvm::Value::~Value` "Uses remain when a value is destroyed!"
+> assertion crash in `feme::cpu::LinearizePass`'s `DiamondFlattener`**, split
+> out of L85's own closing session: newly found via a speculative
+> `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` flag-flip verification run against
+> `dEQP-VK.subgroups.shuffle.*` (now that L85's own `GroupNonUniformBallot` fix
+> closed the previously-tracked blocker for this bit) -- the very first case in
+> the group
+> (`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_bool_constant`)
+> aborts the whole `deqp-vk` process outright with `Uses still stuck around
+> after Def is destroyed: %live.merge3 = phi i1 [ %live.merge1, ... ], [
+> %live.merge1, ... ]`, consistent with this project's own documented precedent
+> for this failure class (roadmap C2/H19p/L7m: "a crash silently truncates or
+> corrupts a suite run"). A real, `feme`-side bug in `DiamondFlattener`'s own
+> nested-diamond live/side-effect-mask `PHINode` merging (not an LLVM core bug,
+> unlike L7m's own earlier `DeleteDeadBlocks` false alarm) -- some
+> nested-diamond shape leaves an outer merge's `PHINode` referenced by an inner
+> one after the outer's own block has already been simplified/erased. Needs its
+> own real IR reduction of a minimal nested-diamond-with-shuffle (or, more
+> likely, nested-diamond-with-ballot, since shuffle's own CTS verification
+> harness is what actually triggers this, per L85's own finding that every
+> non-rotate shuffle test calls `subgroupBallot()`) shape to isolate the exact
+> merge-ordering bug, before `SHUFFLE_BIT` can be safely advertised
