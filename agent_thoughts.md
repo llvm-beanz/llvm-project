@@ -75929,3 +75929,65 @@ own existing, already-documented "narrow, safe fold" mechanism, adding a safety 
 changing what it's for. `FeMeCPUDesign.md` reviewed, no changes needed.
 Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed and updated: the subgroup-capability
 audit note's own pending-blocker pointer moved from L88 (now fixed) to the new L89.
+
+# L89 session: profiling the L88-era "scheduler hang", finding it isn't one
+
+L88's own closing session left a fresh blocker on the table: a speculative `SHUFFLE_BIT` re-flip's
+verification run hit what looked like an indefinite hang inside LLVM's `PostMachineSchedulerLegacy`,
+confirmed only by a single `gdb -p <pid> -batch -ex bt` sample and a 20-second `timeout` returning
+`EXIT: 124`. This session's job was to actually profile that, per the filing's own request ("needs its
+own IR-size profiling pass ... to confirm the size-blowup theory").
+
+My first instinct was the cheap, wrong shortcut: dump the JIT-bound IR (a temporary, uncommitted
+`FEME_CPU_DUMP_JIT_IR` env-var-gated dump added right before `orc::LLJITBuilder().create()`), compare
+it against the passing sibling case, see a big basic block, declare victory, and go design a fix.
+The dump *did* confirm the WaveSize=4-vs-64 scaling and the single ~2200-instruction basic block that
+`SIMDizePass`'s documented per-lane scalarization strategy produces for a 64-wide wave. But before
+committing to "this basic block is what's hanging," I fed the *exact same captured module* through
+`llc` directly, matching CPU/features/relocation-model/object-format as closely as I could to what
+`JITTargetMachineBuilder::detectHost()` would pick. It compiled in ~2.5 seconds. That's the moment
+the original filing's theory (a memory-dependence-chain blowup in `ScheduleDAGInstrs::addChainDep
+endencies`) stopped adding up -- if the IR itself were pathological for that scheduler, `llc` should
+have shown it too.
+
+Rather than assume my `llc` repro was somehow non-equivalent and go chasing target-machine-construction
+minutiae, I went back to the actual live process and did what the original L88-session investigation
+hadn't: sampled `gdb -p <pid> -batch -ex "bt 6"` *multiple times*, several seconds apart, instead of
+once. The three samples showed the call stack moving -- from `ScheduleDAGRRList`'s pre-RA list
+scheduler for one function, to `ScheduleDAGMILive`'s post-RA scheduler for a different function, back
+to `ScheduleDAGRRList` for yet another -- clear forward progress, not a frozen instruction pointer.
+That's a strong signal this is "slow," not "stuck." The final, decisive test was the simplest one:
+just let the real case run with no artificial timeout at all. It passed after ~210 seconds.
+
+The lesson I'm taking from this session: a single `gdb bt` sample plus a short `timeout` is *not*
+enough evidence to conclude "infinite hang" -- it only tells you where the process was at one instant,
+not whether it's making progress. The original L88-session filing wasn't unreasonable given what it
+had (100% CPU, no return after 20s, one backtrace all pointing at scheduler internals), but "spins
+indefinitely" was an overstatement it never actually verified, and I nearly repeated the same mistake
+by stopping at "found a big basic block, that's obviously it" without checking whether that basic
+block alone, compiled in isolation, was actually the bottleneck. It wasn't (2.5s via `llc`) -- the
+real cost is the *cumulative* effect of that per-lane-scalarization-driven basic-block size on LLVM's
+legacy list scheduler's well-documented poor scaling, severe enough to turn a sub-3-second compile
+into a 3.5-minute one, without ever being a true infinite loop.
+
+Given that the actual, permanent fix here is a redesign of `SIMDizePass`'s core lane-processing
+strategy (making it emit bounded-size code chunks regardless of `WaveSize`, e.g. via native-width
+lane batching in a real loop instead of full unrolling) -- a change to the load-bearing design of a
+3714-line file, not a small legalization-pattern patch -- I judged it out of scope to attempt within
+this session's remaining budget, especially given how easy it would be to subtly break wave-uniform
+control-flow/reconvergence assumptions `LinearizePass` depends on downstream without very careful,
+dedicated design work and much broader test coverage than a quick patch could responsibly claim. I
+corrected L89's own roadmap row (struck through, since the *investigation* it asked for is genuinely
+done and its "hang" framing was wrong) and split the real remaining fix out to L89a, rather than force
+a same-session fix I wasn't confident I could get right. No functional source change went into this
+session's commits; the temporary `FEME_CPU_DUMP_JIT_IR` debug-dump instrumentation was reverted before
+committing anything, and `ninja check-feme` (2,902 discovered, 2,843 passed, 59 unsupported, 0 failed)
+confirms the tree is exactly where it was before this investigation, just with a corrected
+understanding recorded.
+
+`FeMeCPUDesign.md` reviewed: no update needed. `SIMDizePass`'s per-lane scalarization is already
+documented there as the pass's own intentional strategy; this session found a real performance
+limitation of that already-documented design at wide wave sizes, not a deviation from the design
+itself. Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed and updated: the subgroup
+capability audit's own `SHUFFLE_BIT` pending-blocker note now points at L89a instead of the original
+(corrected) L89 framing.
