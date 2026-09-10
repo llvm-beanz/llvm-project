@@ -35729,3 +35729,77 @@ regressions from the revert).
 `FeMeCPUDesign.md` reviewed: no update needed -- this session's finding is a performance-tuning
 detail about how *not* to fix the wide-`WaveSize` compile-time cost, not a change to any documented
 design or interface.
+
+## L89c: an implicit device-level pipeline cache -- wrong prediction, much bigger win
+
+L89a broke this row out on the theory that an always-on, device-level compiled-artifact cache
+(independent of the app-supplied `VkPipelineCache` handle) would remove a "confirmed ~50%
+redundant-compile fraction" from
+`dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_float_dynamically_uniform_requiredsubgroupsize`.
+The cache is implemented and is a large win -- but **not** on that case, and L89a's own premise for
+it was wrong. Both halves are worth recording.
+
+**The change.** Each `VkDevice` now owns an implicit `PipelineCache`
+(`Device::getImplicitPipelineCache`) consulted by `vkCreateComputePipelines` and
+`vkCreateGraphicsPipelines` on *every* creation, whether or not the app supplied a cache. It is
+keyed by exactly the same `computePipelineCacheKey`/`computeGraphicsPipelineCacheKey` an app cache
+uses, so it can never make two differently-keyed creations collide. The spec explicitly anticipates
+implementations keeping caches beyond the app's; an implicit hit is observationally
+indistinguishable from a fast compile, with two deliberate exceptions both covered by tests: it must
+not report `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT` (which specifically
+means the *application's* cache), and it still populates the app's cache when one was supplied, so
+an app that did create a cache is not left missing forever behind the implicit one. As a
+consequence `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` now succeeds on an implicit
+hit -- exactly what that bit asks for, since no compile was required. `PipelineCache` gained an
+optional insertion-order eviction bound so an always-on cache cannot retain every artifact a
+long-lived device ever compiled; it is unbounded by default (every app-created cache is bit-for-bit
+unchanged) and only the implicit cache sets one, at 256 entries per table.
+
+**The prediction was wrong.** Real instrumentation of the motivating case (temporary logging of
+every compute pipeline creation's key presence and implicit-lookup result, reverted before
+committing) shows **all 38** of its pipeline creations have *distinct* cache keys, and **every**
+implicit lookup misses. The case is therefore unchanged (~296 seconds, still gated on L89b's
+`SIMDizePass` redesign). L89a's "21 of 42 identical" measurement had hashed the *post-frontend LLVM
+module* at `CompiledStage::createStage`, not the pipeline's own SPIR-V/layout/specialization inputs
+-- i.e. distinct SPIR-V that happens to lower to identical IR, which a SPIR-V-keyed pipeline cache
+cannot (and should not) collapse. `dEQP-VK.subgroups.basic.*` likewise shows 294 lookups and zero
+hits: this ICD's compute-side CTS workload genuinely creates distinct pipelines.
+
+**The real win is much larger, on the graphics side.** A measured A/B of
+`dEQP-VK.pipeline.monolithic.cache.*` (774 cases), same machine, same build flags, differing only in
+whether the implicit cache is present:
+
+| | wall clock | result |
+|---|---|---|
+| Without implicit cache (baseline) | **did not finish within a 15-minute timeout** | -- |
+| With implicit cache | **2.8 seconds** | 772 passed / 1 failed / 1 unsupported |
+
+Instrumentation over that group counted **3,039 implicit hits against 6 misses** -- a 99.8% hit
+rate, i.e. 3,039 avoided graphics pipeline compiles. This is unsurprising in hindsight and is
+exactly the shape the cache is for: that group deliberately creates the same pipeline repeatedly to
+exercise caching behavior, and a graphics pipeline compiles two or more stages per creation, so each
+avoided repeat saves proportionally more JIT codegen than a compute one would.
+
+The single failure, `dEQP-VK.pipeline.monolithic.cache.misc_tests.invalid_size_test` (a
+`vkGetPipelineCacheData` short-buffer expectation), was **verified pre-existing** by re-running it
+against a rebuild of the pre-change sources -- it fails identically there, and nothing in this change
+touches `vkGetPipelineCacheData`.
+
+**Regression sweep.** `dEQP-VK.subgroups.basic.*` (12 passed / 0 failed / 58 unsupported) and
+`dEQP-VK.api.info.*` (5,241 passed / 721 failed / 4,524 unsupported) are unchanged; all 721
+`api.info` failures are `image_format_properties` (703) plus a handful of
+`get_physical_device_properties2`/limits-validation cases, none of which create a pipeline at all.
+The motivating L89a case still passes (in the same ~296 seconds as before).
+
+**Build/test.** `ninja check-feme`: 2,912 discovered, 2,853 passed, 59 unsupported, 0 failed -- up by
+exactly the 10 new unit tests (5 `PipelineCacheBoundTest` cases covering the eviction bookkeeping
+directly, 4 new `PipelineCacheTest` cases, 1 new `GraphicsPipelineTest` case). Two existing tests
+that asserted the *old* no-implicit-cache behavior
+(`PipelineCacheTest.NoCacheCompilesIndependentArtifactsEachTime`,
+`GraphicsPipelineTest.NoCacheCompilesIndependentStagesEachTime`) were updated to assert the new
+sharing, and `PipelineCacheTest.FailOnCompileRequiredWithNoCacheAlwaysFails` was renamed to
+`...FailsWhenCold`, since "always" is no longer true once the implicit cache is warm.
+
+`FeMeVulkanDesign.md`'s "Pipeline Cache" section updated for the implicit cache and the eviction
+bound. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change (no bit flips;
+`SHUFFLE_BIT` remains blocked on L89b).

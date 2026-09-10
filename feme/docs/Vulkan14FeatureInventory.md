@@ -492,6 +492,15 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   reduces live-value count per region) and L89c (an implicit, always-on
   compile cache, a smaller complementary mitigation for a confirmed
   ~50%-redundant-compile fraction in this same CTS case).
+  UPDATE (roadmap L89c, later session): that implicit cache is now
+  implemented, but real instrumentation shows it does *not* help this
+  case -- all 38 of its pipeline creations have distinct cache keys, so
+  every implicit lookup misses. (L89a's "~50% redundant" figure had hashed
+  the post-frontend LLVM module, not the pipeline's own SPIR-V/layout
+  inputs.) `SHUFFLE_BIT` therefore stays un-advertised, now blocked on
+  L89b alone. The cache proved independently valuable elsewhere --
+  `dEQP-VK.pipeline.monolithic.cache.*` goes from a 15-minute timeout to
+  2.8 seconds -- but that is not a subgroup capability change.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
