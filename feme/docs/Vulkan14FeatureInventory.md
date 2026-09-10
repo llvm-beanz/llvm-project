@@ -479,6 +479,19 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   full CTS sweep at minutes-per-case would be impractical), now blocked on
   new roadmap row L89a (a `SIMDizePass` codegen-shape redesign bounding
   basic-block size independent of `WaveSize`).
+  UPDATE (roadmap L89a, later session): the cheap version of that fix (a
+  late, mechanical pass splitting the oversized block into fixed-size
+  chunks after the fact) was implemented and empirically shown to be
+  *counterproductive* -- `llc -time-passes` on identical shaders before
+  and after chunking showed the chunked version takes ~21x longer in
+  "Instruction Scheduling" alone, because equal-size chunking multiplies
+  cross-block register-copy bookkeeping without reducing the underlying
+  live-range footprint. That prototype was reverted, not shipped.
+  `SHUFFLE_BIT` still stays un-advertised, now blocked on two new rows:
+  L89b (the real fix -- a loop-based `SIMDizePass` redesign that actually
+  reduces live-value count per region) and L89c (an implicit, always-on
+  compile cache, a smaller complementary mitigation for a confirmed
+  ~50%-redundant-compile fraction in this same CTS case).
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
