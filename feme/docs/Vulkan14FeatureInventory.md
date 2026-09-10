@@ -572,6 +572,29 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   no earlier session had run that group at all, which is a useful
   reminder that an advertised bit is only as trustworthy as the breadth
   of the CTS run behind it.
+  UPDATE (roadmap L89e, later session): again no bit changed, and again
+  the change completes more of `BALLOT_BIT`'s already-advertised surface
+  rather than adding a new capability. `OpGroupNonUniformBroadcast` and
+  `OpGroupNonUniformBroadcastFirst` -- both gated on `BALLOT_BIT`, both
+  advertised as working since roadmap L85 -- had no conversion pattern at
+  all, so all 336 `dEQP-VK.subgroups.ballot_broadcast.compute.*` cases
+  failed `vkCreateComputePipelines` with a conversion-legalization error.
+  `Broadcast` is the same operation `ShuffleConversionPattern` already
+  lowers, so it maps straight onto `llvm.spv.wave.readlane`;
+  `BroadcastFirst` is composed as `readlane(Value, cttz(ballot(true)))`,
+  since `ballot(true)` is by definition the active-invocation mask.
+  Verified by a real run of the 1,440 cases at every subgroup size except
+  128: **288 passed, 0 failed**, i.e. every sweepable one of the 336. The
+  48 `_requiredsubgroupsize128` variants take tens of minutes *each*, so
+  they were not swept in full -- only 4 were reached, 3 of which passed
+  and the 4th of which had not finished when the attempt was abandoned,
+  so no failure was seen but the group is not claimed clean. That cost is
+  pre-existing,
+  performance-only, and now profiled to `SROA`/`PromoteMem2Reg` in the
+  middle end rather than to codegen (roadmap L89i). This is the third
+  ballot-family gap found behind an already-advertised bit (after L89g's
+  five mask builtins), which continues to argue that a bit's advertised
+  surface deserves an explicit op-by-op audit rather than trust.
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write

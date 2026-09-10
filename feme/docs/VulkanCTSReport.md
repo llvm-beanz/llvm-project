@@ -36032,3 +36032,116 @@ Both are fixed, each with its own test coverage at the phase it belongs to (a co
 for the bitcast).
 
 `ninja check-feme`: 2,917 discovered, 2,858 passed, 59 unsupported, 0 failed.
+
+## L89e: the two `GroupNonUniform` broadcast ops, and a wide-wave cost that lives in the middle end
+
+L89b's own regression sweep of `dEQP-VK.subgroups.ballot*` left 336 failures, all in
+`ballot_broadcast.compute`, all the same `VK_ERROR_INITIALIZATION_FAILED` from
+`vkCreateComputePipelines`. The driver-side diagnostic was a conversion-legalization error rather
+than a `feme`-IR one -- `failed to legalize operation 'spirv.GroupNonUniformBroadcast' that was
+explicitly marked illegal` -- and the failures covered the group exhaustively (every
+`subgroupbroadcast`/`subgroupbroadcast_nonconst`/`subgroupbroadcastfirst` shape at every subgroup
+size), which is the signature of a wholly missing op pair rather than a type-specific gap.
+
+### `GroupNonUniformBroadcast` is a `Shuffle` with a promise attached
+
+Both ops' spec text uses the same sentence: the result is the Value of the invocation identified by
+the id. `ShuffleConversionPattern` has mapped that onto `llvm.spv.wave.readlane` since roadmap L7e,
+and since L89d that intrinsic handles the scalar, vector and `i1` operand shapes this group
+exercises. So the pattern is a direct one-to-one lowering.
+
+The only difference is a *restriction*: `Broadcast` additionally requires its Id be dynamically
+uniform. Nothing is done with that guarantee here, deliberately. `spv_wave_readlane` is
+conservatively classified as divergent by `WaveUniformity.cpp`, and narrowing that for this one op
+would need its own uniformity evidence rather than a promise the SPIR-V producer made -- and the
+per-lane gather already computes the right answer for a uniform index, as the special case where
+every lane happens to read the same source lane.
+
+### `GroupNonUniformBroadcastFirst` is a composition, not a new primitive
+
+The roadmap row proposed reusing `getClampedFirstActiveLaneIndex`. That turned out not to be
+possible, and the row has been corrected: that helper is internal to `WaveLowering.cpp`, a CPU pass
+that runs long after SPIR-V conversion, so it is not reachable from a conversion pattern at all.
+There is also no `ReadFirstLane` `WaveCallKind` to lower onto.
+
+Rather than add one, the op is built from two pieces the `dEQP-VK.subgroups.ballot*` groups already
+verify end to end:
+
+```
+readlane(Value, cttz(clip(ballot(true))))
+```
+
+`ballot(true)` is by definition the mask of invocations active at this point, so its lowest set bit
+is precisely the "active invocation with the lowest id" the op broadcasts from. The ballot is
+clipped to `gl_SubgroupSize` for the same reason `BallotFindLSBConversionPattern` clips it -- bits
+at or beyond the subgroup size do not represent invocations.
+
+One detail differs from that sibling pattern on purpose: `is_zero_poison` is **false** here.
+`BallotFindLSB` uses `true` because its result is a user-visible index whose spec says the value is
+undefined for a zero mask. Here the value is a lane index fed to `lowerReadLane`, so `cttz`'s
+all-zeros answer of 128 would be a real out-of-range gather rather than a don't-care. Returning 0
+keeps it in range, which is the same guard `getClampedFirstActiveLaneIndex` applies on the
+DXIL-origin side.
+
+The practical payoff of composing rather than extending is that this milestone touches exactly one
+file: no new `WaveCallKind`, and so no change to `SIMDize.cpp` or `WaveLowering.cpp`.
+
+### Test coverage
+
+Conversion phase: `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-group-non-uniform-broadcast.mlir`,
+covering both ops across scalar, vector and `i1` shapes plus the dynamic-Id form. That last module
+needs an explicit `spirv.target_env` at v1.5, because `GroupNonUniformBroadcastOp::verify` enforces
+the pre-1.5 "Id must be a constant" rule and reads the version from that attribute -- *not* from the
+`requires #spirv.vce<...>` clause, which is the natural place to look and has no effect.
+
+The downstream phases needed no change and are already covered: `wave.readlane` has SIMDize and
+wave-lowering lit tests from L89b/L89d, and `subgroup.ballot` from L85.
+
+### Result: the sweepable 288 of 336 now pass
+
+`dEQP-VK.subgroups.ballot_broadcast.compute.*` at every subgroup size except 128 -- 1,440 cases:
+
+| | before | after |
+|---|---|---|
+| Passed | 0 | **288** |
+| Failed | **288** | **0** |
+| NotSupported | 1,152 | 1,152 |
+
+That is exactly the sweepable portion of this row's 336 known failures, all now passing, with
+`NotSupported` unchanged.
+
+### The remaining 48: a wide-wave cost, and where it actually is
+
+The 48 supported `_requiredsubgroupsize128` variants are not a functional gap -- they pass -- but
+each takes tens of minutes, growing sharply with component count, which makes sweeping them in full
+impractical. Only 4 of the 48 were reached before the attempt was abandoned:
+`subgroupbroadcast_bool` and `_bvec2` pass in a few minutes each, `_bvec3` passes in roughly 13
+minutes, and `_bvec4` had still not finished after ~28 minutes on that one case when the run was
+stopped. So a 1.33x increase in component count costs more than a 2x increase in time -- the growth
+is superlinear in the shader's own width, not just in `WaveSize`. The cost is pre-existing and was simply unreachable while
+every one of these pipelines failed fast at conversion.
+
+It is worth being precise about *where* it is, because this chain has already profiled two different
+wide-wave compile-time problems and this is a third, distinct one. Four `gdb` backtrace samples
+taken across 30+ minutes of a single 100%-CPU `vkCreateComputePipelines` call all land in the same
+place, and it is not codegen:
+
+```
+PromoteMem2Reg::run  <-  llvm::PromoteMemToReg  <-  SROA::runSROA
+                     <-  feme::OptimizerPipeline::run  <-  createStage
+```
+
+L89 was the backend list scheduler; L89b was `SelectionDAG` re-spilling a vector once per lane. This
+is the *middle* end. The strongest candidate cause -- stated as a hypothesis, not a finding, because
+it has not been confirmed against real IR -- is that L89b's own fix is being partly undone:
+`createLaneScratch` routes a wide `wave.readlane`'s gather through an entry-block `[WaveSize x T]`
+`alloca` specifically to keep it in memory, and `SROA` runs afterwards and tries to promote those
+allocas back into SSA values. At `WaveSize=128`, with one such array per readlane and one readlane
+per vector component, that is both a lot of `PromoteMem2Reg` work and, where it succeeds, a
+re-introduction of the vector form L89b removed.
+
+Broken out as roadmap **L89i** rather than claimed here. Confirming it wants an IR-dump hook in
+`OptimizerPipeline`, which does not exist today.
+
+`ninja check-feme`: 2,918 discovered, 2,859 passed, 59 unsupported, 0 failed -- up by exactly the 1
+new lit test.
