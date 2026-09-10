@@ -42,44 +42,33 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L89 from the roadmap or other prerequisites blocking the
+Can you work on L89a from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **A real `PostMachineSchedulerLegacy`/`ScheduleDAGInstrs::buildSchedGraph`
-> compile-time hang (not a crash -- the process spins indefinitely, confirmed
-> via `gdb -p <pid> -batch -ex bt` sampled mid-hang, consuming 100% CPU with no
-> forward progress inside `SUnit::addPred`/`addChainDependencies`)**, split out
-> of L88's own closing session: discovered via a real `deqp-vk` re-run of
-> `dEQP-VK.subgroups.shuffle.compute.*` (initially run as a speculative
-> `SHUFFLE_BIT` re-verification after L88's own fix, but confirmed to reproduce
-> identically against the real, currently-committed, un-flipped feature set too
-> -- `subgroupclusteredrotate_*` cases exercise `subgroupClusteredRotate`
-> regardless of whether `VK_SUBGROUP_FEATURE_SHUFFLE_BIT` is advertised, so this
-> is a live, currently-reachable bug, not one hidden behind an unadvertised
-> feature bit). Every `*_requiredsubgroupsize` variant of
-> `subgroupclusteredrotate_float_dynamically_uniform`  (and, going by the shared
-> shape, presumably every other `_requiredsubgroupsize` variant in the group)
-> hangs indefinitely at pipeline-creation time (`vkCreateComputePipelines` ->
-> `feme::cpu::CompiledStage::create` -> ORC JIT compile ->
-> `llvm::legacy::PassManagerImpl::run` -> post-RA machine scheduling), confirmed
-> via a live backtrace showing the hang is *inside* the LLVM AArch64 host
-> backend's own post-regalloc instruction scheduler, not anywhere in `feme`'s
-> own IR-level passes -- consistent with a real quadratic-or-worse blowup in
-> `ScheduleDAGInstrs`'s memory-dependence-chain construction once a scheduling
-> region's own basic block grows large enough, plausibly because "required
-> subgroup size" forces this ICD's own wave-width resolution to a much wider
-> lane count than the plain (un-suffixed) variant of the same case (which passes
-> quickly), producing a proportionally larger unrolled/masked basic block for
-> the scheduler to chew through. Not yet reduced to a minimal repro or profiled
-> to confirm the exact quadratic mechanism (this session's own investigation
-> stopped at "confirmed real, confirmed backend-side, confirmed size-sensitive"
-> via a live-process backtrace and an A/B compare against the passing
-> non-`requiredsubgroupsize` sibling case) -- needs its own IR-size profiling
-> pass (e.g. dumping the actual scheduling-region instruction count for both the
-> passing and hanging variants) to confirm the size-blowup theory, then either a
-> `feme`-side fix (if `SIMDize.cpp`/`Linearize.cpp` produces needlessly large
-> code for a wide required subgroup size that a real GPU driver would not) or an
-> upstream LLVM performance investigation (if the scheduler's own complexity is
-> inherently unfit for a code shape this ICD legitimately needs to produce for
-> wide subgroups) before this CTS group can be swept in full or `SHUFFLE_BIT`
-> considered further
+> **`SIMDizePass` needs a bounded-basic-block (e.g. lane-chunked or loop-based)
+> codegen strategy for wide required subgroup sizes**, split out of L89's own
+> closing session: L89's own live-process `gdb` progress-sampling plus a
+> run-to-completion confirmed the
+> `PostMachineSchedulerLegacy`/`ScheduleDAGInstrs` behavior once filed as an
+> "infinite hang" is actually a real, severe, but finite (~210 seconds for one
+> pipeline, confirmed via letting a real `deqp-vk` re-run of
+> `dEQP-VK.subgroups.shuffle.compute.subgroupclusteredrotate_float_dynamically_uniform_requiredsubgroupsize`
+> complete with no timeout: it passes) compile-time blowup, root-caused to
+> `SIMDizePass`'s intentional, documented per-lane scalarization strategy (`W`
+> unrolled scalar clones of each divergent op, all inline in one basic block)
+> producing a single ~2200-instruction basic block at `WaveSize=64` (vs. ~140 at
+> the host-derived default `WaveSize=4`, a matching ~16x scaling) that hits
+> LLVM's legacy `ScheduleDAGRRList`/`BURRSort`/`ComputeHeight`-based list
+> scheduler's well-known poor scaling on basic blocks with thousands of
+> `SUnit`s. Not yet fixed: needs a `feme`-side redesign of how `SIMDizePass`
+> emits a wide wave's per-lane scalar work (e.g. processing lanes in
+> native-host-width chunks inside a real loop, or otherwise splitting the
+> unrolled work across multiple basic blocks) so that a scheduling region's own
+> size stays roughly constant regardless of the shader's declared/required
+> subgroup size, rather than scaling linearly with it -- a materially larger,
+> riskier change than a typical `feme`-side legalization-pattern fix, touching
+> the core lane-processing shape `SIMDize.cpp`'s entire 3714-line file is built
+> around, needing careful design (a wrong chunking strategy could silently break
+> wave-uniform control-flow/reconvergence assumptions `LinearizePass` depends on
+> downstream) plus its own dedicated unit/lit test coverage across multiple
+> `WaveSize`s before any CTS re-verification
