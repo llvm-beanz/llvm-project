@@ -96,3 +96,32 @@ func.func @expect_float_invalid(%val : f32, %expected : f32) -> f32 {
   %0 = "spirv.KHR.Expect"(%val, %expected) : (f32, f32) -> f32
   spirv.ReturnValue %0 : f32
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.CopyObject
+//===----------------------------------------------------------------------===//
+
+func.func @copy_object_scalar(%arg : f32) -> f32 {
+  // CHECK: %{{.*}} = spirv.CopyObject %{{.*}} : f32
+  %0 = spirv.CopyObject %arg : f32
+  spirv.ReturnValue %0 : f32
+}
+
+// -----
+
+func.func @copy_object_vector(%arg : vector<4xi32>) -> vector<4xi32> {
+  // CHECK: %{{.*}} = spirv.CopyObject %{{.*}} : vector<4xi32>
+  %0 = spirv.CopyObject %arg : vector<4xi32>
+  spirv.ReturnValue %0 : vector<4xi32>
+}
+
+// -----
+
+func.func @copy_object_type_mismatch(%arg : i32) -> i64 {
+  // expected-error @+1 {{op failed to verify that all of {operand, result} have same type}}
+  %0 = "spirv.CopyObject"(%arg) : (i32) -> i64
+  spirv.ReturnValue %0 : i64
+}
+

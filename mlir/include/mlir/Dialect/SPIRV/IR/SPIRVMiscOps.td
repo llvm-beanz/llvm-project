@@ -129,4 +129,40 @@ def SPIRV_UndefOp : SPIRV_Op<"Undef", [Pure]> {
 
 // -----
 
+def SPIRV_CopyObjectOp : SPIRV_Op<"CopyObject", [Pure, AllTypesMatch<["operand", "result"]>]> {
+  let summary = "Make a copy of Operand.";
+
+  let description = [{
+    Result Type is the type of Operand. It must be the same as Operand's
+    type.
+
+    Operand is the value to copy. There are no dereferences involved.
+
+    This instruction is guaranteed to work with all types that support
+    `OpLoad`/`OpStore`. Requires no additional capabilities beyond those
+    needed by Operand's type.
+
+    #### Example:
+
+    ```mlir
+    %1 = spirv.CopyObject %0 : f32
+    %1 = spirv.CopyObject %0 : !spirv.array<4 x i32>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_Type:$operand
+  );
+
+  let results = (outs
+    SPIRV_Type:$result
+  );
+
+  let hasVerifier = 0;
+
+  let assemblyFormat = "$operand attr-dict `:` type($result)";
+}
+
+// -----
+
 #endif // MLIR_DIALECT_SPIRV_IR_MISC_OPS
