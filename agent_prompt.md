@@ -42,24 +42,45 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L89c from the roadmap or other prerequisites blocking the
+Can you work on L89h from the roadmap or other prerequisites blocking the
 L-series milestones?
 
-> **Advertise `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`, now that its last known blocker
-> (L89d) is closed**, split out of L89b's own closing session: the bit has been
-> gated behind a moving list of blockers since roadmap L7-series work, most
-> recently L89 (compile-time blowup, fixed by L89b) and L89d (`SIMDizePass`'s
-> missing vector-typed `wave.readlane` decomposition, fixed in the same
-> session). `dEQP-VK.subgroups.shuffle.compute.*` now runs 1,680 cases with 128
-> passed and **0 failed**, so the direct evidence for the flip exists -- but it
-> was deliberately not made, because advertising a subgroup feature bit changes
-> what CTS asks of the device across the *whole* `dEQP-VK.subgroups.*` tree (the
-> 1,552 currently-unsupported cases in that one group alone become live, plus
-> every `shuffle`-gated case in the `graphics`/`framebuffer`/`ray_tracing`
-> shader-stage variants of the same tests), and this milestone chain has already
-> produced three separate rows whose claims were later corrected for exactly
-> this kind of under-verified extrapolation. Needs the bit added to
-> `PhysicalDeviceInfo.cpp`'s `supportedOperations`, then a real full-tree
-> `dEQP-VK.subgroups.*` sweep before and after the flip, with
-> `Vulkan14FeatureInventory.md` updated for the first `SHUFFLE_BIT` change in
-> the chain
+> **`subgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask` builtins are
+> unimplemented, failing all 10 `dEQP-VK.subgroups.builtin_mask_var.compute.*`
+> cases**, found by L89f's own full-tree `dEQP-VK.subgroups.*` sweep -- the
+> first such sweep this project has run, which is why these had not surfaced
+> before (no previous session ran the `builtin_mask_var` group at all). All 10
+> cases (5 mask builtins x plain/`_requiredsubgroupsize`) fail
+> `vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED`. **Root cause
+> confirmed by real IR reduction** (L89f's own closing session, after one wrong
+> intermediate diagnosis was filed here and then caught -- see below): the five
+> `SubgroupEqMask`/`GeMask`/`GtMask`/`LeMask`/`LtMask` SPIR-V builtin
+> *variables* are simply absent from `BuiltInMappings[]` in
+> `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, so a read of one
+> falls through to the generic `Input`-storage-class-variable path and converts
+> to a `feme.stage.input.load` at location 0, components 0-3 -- a *graphics*
+> stage op that no compute-stage lowering handles, so the call survives all the
+> way to codegen and the ORC JIT rejects the module with `JIT session error:
+> Symbols not found: [ feme.stage.input.load.v4i32 ]`. They are gated by the
+> `GroupNonUniformBallot` capability (which this ICD already advertises via
+> `BALLOT_BIT`), and are builtin *variables* rather than `GroupNonUniform*`
+> instructions, so they need builtin-variable decoding, not a conversion pattern
+> for an op. Each is a straightforward function of the lane index against the
+> ballot ABI's own 128-bit mask shape that `lowerBallot` in `WaveLowering.cpp`
+> already produces (`EqMask` = `1 << lane`, `LtMask` = `(1 << lane) - 1`,
+> `LeMask` = `LtMask | EqMask`, `GtMask` = `~LeMask`, `GeMask` = `~LtMask`, each
+> truncated to the subgroup size). The one real design point is that
+> `BuiltInMappings[]`'s own entry shape maps a builtin to exactly *one* LLVM
+> intrinsic call, which cannot express any of these: each needs a small computed
+> expansion producing a `vector<4xi32>` from
+> `SubgroupLocalInvocationId`/`SubgroupSize`, so the fix needs its own
+> conversion path alongside that table rather than a new row in it, plus unit
+> coverage at the SPIR-V-to-LLVM conversion phase and a lit test. **A note on
+> process**: this row's original text was correct, but L89f's own closing
+> session briefly "corrected" it to blame `SIMDizePass` instead, on the strength
+> of the *first* error a reduction surfaced. That error was real, but it was a
+> second, independent gap layered in front of this one (fixed as L89h); only
+> after fixing it did the actual missing-builtin failure become visible.
+> Confirmed pre-existing and entirely unrelated to `SHUFFLE_BIT`: identical in
+> both the before and after runs of L89f's own A/B sweep, and still 10/10
+> failing after L89h
