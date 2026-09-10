@@ -75797,3 +75797,135 @@ No design-document deviation this session -- this reused entirely pre-existing M
 downstream, same as L86's own disposition. `FeMeCPUDesign.md` reviewed, no changes needed.
 Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed and confirmed to need no updates:
 this is ordinary GLSL builtin-function shader math with no feature bit or extension gate of its own.
+
+# L88: `foldRedundantFlowBlock` use-after-erase crash -- a mask phi escaping a StructurizeCFG "Flow" block into an outer diamond's own select
+
+This session's request: work on L88, a real `llvm::Value::~Value` "Uses remain when a value is
+destroyed!" assertion crash in `feme::cpu::LinearizePass`'s `DiamondFlattener`, split out of L85's
+own closing session. L85 had just gotten `GroupNonUniformBallot` fully implemented and verified, and
+a speculative `SHUFFLE_BIT` re-flip (shuffle's own core legalization was presumably already fine,
+but every non-rotate CTS shuffle test's own verification harness calls `subgroupBallot()`, so it was
+blocked on ballot) hit this crash on its very first case instead.
+
+## Investigation
+
+Read `feme/lib/Transforms/CPU/Linearize.cpp` end to end -- `DiamondFlattener` (flattens
+divergent/uniform two-way branches into masked data flow, threading a `MaskPair{Live, SideEffect}`
+through its own recursive `flatten()` call stack) and `LoopLinearizer` (linearizes loops with
+divergent exits; its own `foldRedundantFlowBlocksInCycle` calls `foldRedundantFlowBlock`, an H19k-era
+fix folding away a `StructurizeCFG`-generated "Flow" merge block whose branch condition is a `phi` of
+two literal constants). `DiamondFlattener` runs first (whole-function), then `LoopLinearizer` (per
+cycle).
+
+I spent a good chunk of this session's early investigation on wrong theories -- tried a 3-level
+divergent/uniform/divergent nested-diamond shape first (`/tmp/l88/nested3.ll`), since the filing text
+itself speculated "some nested-diamond shape". It didn't crash. That's useful negative information,
+though: it meant the bug wasn't in `DiamondFlattener`'s own recursive nesting logic in isolation, so I
+went looking for the actual `eraseFromParent()` call site instead of continuing to guess diamond
+shapes blindly. There's exactly one in the whole file, inside `foldRedundantFlowBlock`. That
+immediately reframed the problem: this isn't a `DiamondFlattener`-internal bug at all (despite the
+filing text's own framing, which was itself a reasonable guess given the crash trace mentions
+`DiamondFlattener`'s own `live.mergeN` naming) -- it's a `DiamondFlattener`/`LoopLinearizer`
+*interaction* bug, where `DiamondFlattener` leaves something behind that `LoopLinearizer`'s own later
+optimization doesn't know how to account for.
+
+Once I had that framing, the actual shape fell out pretty directly: `foldRedundantFlowBlock` was
+written against `StructurizeCFG`'s own "vanilla" Flow-block shape (a data phi plus a
+phi-of-constants condition phi, nothing else), and its own phi-forwarding logic only patches phis at
+the block's *immediate successor* ("Merge"), one hop away. But `DiamondFlattener` can inject its own
+extra phis directly into that same block -- when a *uniform* loop's own Flow block happens to be the
+uniform branch's own reconvergence point, and that whole loop sits inside an *outer divergent*
+branch's arm, the loop's own mask values (physically defined inside Flow) get threaded, as return
+values of the recursive `flatten()` call stack, all the way up to the *outer* branch's own,
+completely separate reconvergence point -- consumed there by a `select`, with zero CFG-adjacency
+relationship to Flow at all. `foldRedundantFlowBlock`'s one-hop "Merge" search has no way to ever
+find that. It doesn't need to be told about `DiamondFlattener` specifically -- it just needs to
+*notice* it doesn't fully understand every use of every phi in the block it's about to destroy, and
+refuse to destroy it in that case.
+
+Built `/tmp/l88/repro1.ll` (outer divergent `if (tid==0) { <uniform for-loop with a masked store> }`)
+and confirmed it reproduces the exact crash class through
+`feme-opt --llvm -passes=feme-cpu-prepare,feme-cpu-linearize`. Dumped the `feme-cpu-prepare`-only
+intermediate to see the exact structurized shape (confirmed two Flow blocks: the outer if/else's own
+`Flow1`/`Flow2` pair, and the loop's own `Flow` for its back-edge decision) and traced through by hand
+exactly which phi ends up where, matching the theory above precisely.
+
+## Fix
+
+Restructured `foldRedundantFlowBlock` into three phases: (1) a read-only pre-pass computing each of
+the two predecessor/target directions' own `(IncomingBlock, Merge)` pair (the same phi-less-relay walk
+the mutation logic already needed, just performed earlier and without side effects); (2) a
+verification pass over every phi in the block, checking that every one of its uses is either the
+condition phi's own use as the branch condition (which the terminator itself, also about to be
+erased, accounts for) or an entry in an existing phi at one of the two computed `Merge` blocks that
+the forwarding logic in step 3 will actually rewrite -- if any use doesn't match either of those, bail
+out with no mutation at all; (3) the original mutation logic, now only reached once step 2 has fully
+vouched for every use.
+
+This is deliberately conservative rather than clever: rather than trying to somehow *also* forward the
+escaping use correctly (which would mean understanding an entirely different value-flow mechanism --
+`DiamondFlattener`'s own function-return-value mask threading -- from inside a pass that has no
+business knowing about it), it just declines to fold in that case, leaving a merely-redundant (but
+still fully correct) extra basic block behind. That matches this fold's own existing philosophy
+elsewhere (narrow pattern match, bail rather than guess) and keeps the fix small and reviewable rather
+than reaching across pass boundaries.
+
+New lit test `nested-uniform-loop-in-divergent-diamond.ll` (the full pipeline, checking the redundant
+Flow block and its escaping mask phis survive) and a new `LinearizeTest.cpp` unit test exercising
+`foldRedundantFlowBlock` directly via `LinearizePass` on a hand-written, already-structurized version
+of the same shape (so the test doesn't depend on `StructurizeCFG`'s own exact block-naming/shape
+choices holding steady over time). `ninja check-feme`: 2,902 discovered, 2,843 passed, 59 unsupported,
+0 failed -- zero regressions, and in particular `loop-uniform-check-separate-structurized.ll` (the
+original H19k test this fold exists for) still passes, confirming the new safety check doesn't
+over-conservatively block the legitimate fold case it was designed for (that test's own function has
+no divergent branch at all, so `DiamondFlattener` never injects anything into its Flow block, and the
+new pre-pass finds every use accounted for exactly as before).
+
+## CTS verification, and a new blocker found
+
+`SHUFFLE_BIT` isn't advertised in the committed build (it never was -- this crash was only ever
+reachable via a speculative flip), so this fix by itself doesn't change any currently-advertised
+feature's CTS behavior. To actually verify the fix against the real crash, I speculatively re-flipped
+`SHUFFLE_BIT` locally, rebuilt `libfeme_vulkan.so`, and re-ran `dEQP-VK.subgroups.shuffle.*` for real.
+The exact previously-crashing case now passes. Good -- the fix works.
+
+But the re-run didn't get far before hitting something else: several
+`subgroupclusteredrotate_*_requiredsubgroupsize` cases just... hung. Not a crash, not a timeout
+message, just spun at 100% CPU indefinitely. I attached `gdb` to a live hung process
+(`gdb -p <pid> -batch -ex "thread apply all bt"`) and found the main thread stuck deep inside LLVM's
+own AArch64 host-backend `PostMachineSchedulerLegacy`/`ScheduleDAGInstrs::buildSchedGraph`
+(`SUnit::addPred`/`addChainDependencies`), reached via the ORC JIT's own compile step at
+`vkCreateComputePipelines` time. That's entirely inside upstream LLVM codegen, not anywhere in this
+project's own IR-level passes -- a different kind of bug altogether from L88's own scope.
+
+The important thing I checked next: is this hidden behind `SHUFFLE_BIT`, or is it live right now? I
+reverted the flip, rebuilt, and re-ran the exact same hanging case against the real, currently-
+committed build. Same hang (`timeout 20 ... ; echo $?` => `124`, confirmed twice). Turns out
+`subgroupClusteredRotate` doesn't gate on `SHUFFLE_BIT` at all (it's presumably tied to a different
+extension/feature, `VK_KHR_shader_subgroup_rotate`, unrelated to this bit) -- so this hang is *already*
+reachable today, with zero flag flips, whenever `check-hlsl-feme-vk`/a real CTS sweep happens to reach
+one of these `_requiredsubgroupsize` cases. That's a more urgent finding than an ordinary
+speculative-flip-only blocker would be, so I filed it as P1 rather than the usual P2 for this kind of
+prerequisite-chain row.
+
+I did not attempt to fix or even reduce this new hang -- profiling/fixing what's very likely a
+quadratic-or-worse blowup in LLVM's own instruction scheduler (or, alternatively, `feme`'s own code
+generation producing an unnecessarily large basic block for a wide required subgroup size) is a
+meaningfully different, larger scope than this session's own IR-correctness bug, and deserves its own
+dedicated investigation rather than a rushed guess bolted onto this row. Filed as roadmap L89,
+scoped to "confirm the size-blowup theory with real instruction counts, then decide whether the fix
+belongs in `feme` (produce less code for a wide required subgroup size) or upstream (the scheduler's
+own complexity needs to handle large regions better)".
+
+Cleaned up all local state from the speculative verification before finishing: reverted the
+`SHUFFLE_BIT` flip in `PhysicalDeviceInfo.cpp` (confirmed via `git diff` showing no residual change),
+rebuilt `libfeme_vulkan.so` back to the real, currently-committed state, killed the hung `deqp-vk`
+process, and removed the scratch `/tmp/l88/*.qpa`/`*.log`/`*.ll` files. Nothing from the speculative
+verification itself is committed -- only the real fix, its tests, and the documentation of both the
+fix and the new L89 finding.
+
+No design-document deviation this session -- the fix stays entirely within `foldRedundantFlowBlock`'s
+own existing, already-documented "narrow, safe fold" mechanism, adding a safety check rather than
+changing what it's for. `FeMeCPUDesign.md` reviewed, no changes needed.
+Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed and updated: the subgroup-capability
+audit note's own pending-blocker pointer moved from L88 (now fixed) to the new L89.
