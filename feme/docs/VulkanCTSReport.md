@@ -35390,3 +35390,87 @@ accesses before advertising any `shader*ArrayNonUniformIndexing` bit. `VulkanExt
 reviewed: no change needed (`VK_EXT_descriptor_indexing` stays correctly `Planned (in scope, not
 implemented)`). `FeMeCPUDesign.md` reviewed: no update needed -- this reuses the existing
 SPIRVToLLVM conversion-pattern infrastructure with no new mechanism or design deviation.
+
+## L87: `GLSL.std.450` `FaceForward`/`Refract` deserialization/legalization gap, root cause and fix
+
+**Investigation**: L87 asked for a real, concrete repro of the leftover "GLSL.std.450" half of
+L7g's own original filing text (`unhandled deserializations ... from extension set GLSL.std.450`),
+never previously confirmed to a concrete case. Cross-referenced the full official GLSL.std.450
+opcode enum (1-81, from `/home/dev/dev/DirectXShaderCompiler/external/SPIRV-Headers/include/spirv/
+unified1/GLSL.std.450.h`) against every `SPIRV_GL*Op` actually defined in `SPIRVGLOps.td`, then
+verified each missing-opcode candidate against real `dxc`-compiled HLSL rather than trusting the
+static comparison alone (an initial grep regex had already produced false positives for `Round`/
+`RoundEven`/`Trunc`, which are in fact already implemented). Compiled `round()`, `trunc()`,
+`faceforward()`, and `refract()` HLSL shaders with `dxc -T ps_6_0 -spirv`: `round`/`trunc`
+deserialized cleanly (already supported); `faceforward()`/`refract()` failed
+`feme-translate --import-spirv` with `"unhandled deserializations of 70/72 from extension set
+GLSL.std.450"` respectively (opcodes `FaceForward`=70, `Refract`=72) -- this is L87's own real,
+concrete repro.
+
+**MLIR-core fix** (commit `56a8439de0de`): added `SPIRV_GLFaceForwardOp` (a
+`SPIRV_GLTernaryArithmeticOp`, mirroring `GLFma`/`GLSmoothStep`'s all-operands-same-type shape) and
+`SPIRV_GLRefractOp` (a bespoke `SPIRV_GLOp` with `AllTypesMatch<["i","n","result"]>`, since `eta` is
+always a scalar float regardless of whether `i`/`n` are vectors -- a shape not matching any existing
+GL op base class) to `SPIRVGLOps.td`, plus `GLFaceForwardOp::parse`/`::print` in `SPIRVOps.cpp`
+(reusing `parseOneResultSameOperandTypeOp`/`printOneResultOp`, matching `GLFClampOp`/
+`GLSmoothStepOp`). `SPIRV_GLRefractOp` needed an explicit `let hasVerifier = 0;` (a build-time
+linker error otherwise, since TableGen still generates a call site for `verify()` even when a
+declarative trait alone is sufficient). New tests in `mlir/test/Dialect/SPIRV/IR/gl-ops.mlir`
+(positive scalar/vector cases plus a negative type-mismatch case for each op -- `Refract`'s own
+negative case needed the generic op syntax rather than its custom assembly form, since the custom
+form's own parser infers `$n`'s type from `type($i)` and rejects a genuine mismatch before the
+verifier ever runs) and `mlir/test/Target/SPIRV/gl-ops.mlir` (round-trip cases, verified via both
+`FileCheck` and real `spirv-val` binary validation). `ninja check-mlir`: 3828 passed, 1 skipped, 622
+unsupported, 1 expected failure, 0 regressions.
+
+**`feme`-side legalization** (commit `f63a31593b4e`): confirmed via grep that no legalization
+pattern exists anywhere (neither upstream `SPIRVToLLVM.cpp` nor `feme`'s own
+`SPIRVToLLVMPatterns.cpp`) for any of `spirv.GL.{Reflect,Cross,Normalize,Distance,Length,
+FaceForward,Refract}` -- consistent with this whole GL-op family having never been hit by a real
+repro before now. Added `GLFaceForwardPattern`/`GLRefractPattern`, implementing the GLSL.std.450
+spec's own literal definitions (`FaceForward`: `dot(Nref, I) < 0 ? N : -N`; `Refract`: `k = 1 - eta *
+eta * (1 - dot(N, I)^2)`, then `k < 0 ? 0 : eta * I - (eta * dot(N, I) + sqrt(k)) * N`) as primitive
+`LLVM::` dialect arithmetic (compare-then-`llvm.select`, no branches), matching this file's own
+established `GLStepPattern`/`GLSmoothStepPattern` convention rather than depending on the unrelated
+`llvm.spv.faceforward`/`llvm.spv.refract` DXIL-frontend intrinsics upstream's `IntrinsicsSPIRV.td`
+happens to also define. Since both ops' operands can be scalar *or* vector (unlike `spirv.Dot`,
+which is vector-only), added a new `createScalarOrVectorDotProduct` helper generalizing the existing
+`DotConversionPattern`'s per-lane `llvm.intr.fmuladd` reduction chain to also accept scalar operands
+(a plain `llvm.fmul`), and a new `broadcastScalarToShapeOf` helper wrapping the existing
+`broadcastScalar` (previously only used by matrix-arithmetic patterns) to conditionally broadcast a
+scalar value (`Refract`'s always-scalar `eta`, or either pattern's own scalar dot-product/comparison
+intermediate) up to a vector shape only when the destination type is actually a vector. New lit test
+`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-gl-faceforward-refract.mlir` (scalar and vector cases
+for both ops, verified via `FileCheck`). `ninja check-feme`: 2900 discovered, 2841 passed, 59
+unsupported, 0 failed, 0 regressions.
+
+**Real end-to-end confirmation**: re-ran the same real `dxc`-compiled `faceforward.spv`/`refract.spv`
+repros from the investigation phase through the full `feme-translate --import-spirv` ->
+`feme-opt --feme-convert-spirv-to-llvm` pipeline: both now produce a well-formed `llvm.func @main`
+with no `spirv.GL.FaceForward`/`spirv.GL.Refract` trace remaining and no "explicitly marked illegal"
+errors -- confirming the fix end-to-end, not just via hand-constructed unit tests.
+
+**CTS disposition**: real `deqp-vk` re-run of `dEQP-VK.glsl.builtin.precision.faceforward.*` and
+`dEQP-VK.glsl.builtin.precision.refract.*` (20 cases total): **16 passed, 0 failed, 4
+`NotSupported`** (the 4 are `vec5`/"long vector" cases, a pre-existing, unrelated driver limitation
+-- `longVector not supported`, unaffected by this fix either way). Before this session's fix, all 20
+of these cases would have failed pipeline creation outright (or, if PSO caching somehow avoided that,
+crashed the CPU runtime on the legalization gap); they are now either passing outright or hitting an
+unrelated, pre-existing, correctly-reported `NotSupported` path. This is a genuine CTS-visible
+regression fix, not merely a prerequisite: these 16 `dEQP-VK.glsl.builtin.precision.*` cases are
+real, previously-unreachable passes.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no change needed --
+`faceforward()`/`refract()` are ordinary GLSL builtin-function shader math, gated behind no
+feature bit or extension of their own; `dEQP-VK.glsl.builtin.precision.*`'s own disposition is
+tracked directly in this CTS report, not in either inventory document. `FeMeCPUDesign.md` reviewed:
+no update needed -- this reuses the existing SPIRVToLLVM conversion-pattern infrastructure with no
+new mechanism or design deviation.
+
+Original L87 filing text's own speculative candidate list (`FindUMsb`/`FindSMsb`/
+`InterlockedCompareStore` families) was investigated indirectly via the opcode-enum cross-reference
+above and found not to be the actual gap -- those builtins map to other GLSL.std.450 opcodes already
+implemented (or, for `InterlockedCompareStore`, do not go through `GLSL.std.450` extended
+instructions at all, being ordinary atomic SPIR-V core opcodes instead); the real, confirmed gap was
+`FaceForward`/`Refract` instead, discovered via the systematic opcode-enum cross-reference method
+rather than the originally-speculated candidates.
