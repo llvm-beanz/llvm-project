@@ -502,6 +502,104 @@ TEST(ImageFixtureTest, PacksAndUnpacksR16G16SintNegative) {
   EXPECT_EQ(Unpacked[1], -32768.0);
 }
 
+TEST(ImageFixtureTest, PacksAndUnpacksR32Uint) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32_UINT,
+                      {4294967295.0, 0.0, 0.0, 1.0}, Texel),
+      Succeeded());
+  uint32_t V;
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_EQ(V, 4294967295u);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R32_UINT, Texel, Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], 4294967295.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+
+  // Out-of-range values clamp rather than wrap or truncate.
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32_UINT,
+                      {5000000000.0, 0.0, 0.0, 1.0}, Texel),
+      Succeeded());
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_EQ(V, 4294967295u);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32SintNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32_SINT, {-100.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  int32_t V;
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_EQ(V, -100);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R32_SINT, Texel, Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], -100.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32Uint) {
+  std::array<uint8_t, 8> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R32G32_UINT,
+                                   {123456789.0, 987654321.0, 0.0, 1.0},
+                                   Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R32G32_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 123456789.0);
+  EXPECT_EQ(Unpacked[1], 987654321.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32SintNegative) {
+  std::array<uint8_t, 8> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R32G32_SINT,
+                                   {-1.0, -2147483648.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R32G32_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -1.0);
+  EXPECT_EQ(Unpacked[1], -2147483648.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32B32Uint) {
+  std::array<uint8_t, 12> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R32G32B32_UINT,
+                                   {1.0, 2.0, 3.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R32G32B32_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 1.0);
+  EXPECT_EQ(Unpacked[1], 2.0);
+  EXPECT_EQ(Unpacked[2], 3.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32B32SintNegative) {
+  std::array<uint8_t, 12> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R32G32B32_SINT,
+                                   {-1.0, -2.0, -3.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R32G32B32_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -1.0);
+  EXPECT_EQ(Unpacked[1], -2.0);
+  EXPECT_EQ(Unpacked[2], -3.0);
+}
+
 TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8Uint) {
   std::array<uint8_t, 4> Texel{};
   ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_UINT,

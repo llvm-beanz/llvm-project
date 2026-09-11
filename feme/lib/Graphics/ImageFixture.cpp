@@ -661,6 +661,81 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H70) `R32_UINT`/`R32_SINT`: the 32-bit-wide sibling of
+  // `R16_UINT`/`_SINT` above, same raw-integer (not normalized-fraction)
+  // convention -- previously missing here entirely, so a clear of one of
+  // these single-channel 32-bit integer formats (e.g. the `VK_FORMAT_
+  // R32_UINT` storage image `dEQP-VK.mesh_shader.ext.synchronization.*`
+  // uses as its cross-stage-visible resource) fell through to the
+  // generic `Info->Components`-sized path below, which rejects `Clear`'s
+  // always-4-component shape (`VkClearColorValue`'s own union always has
+  // all 4 members populated by every caller, regardless of the
+  // destination format's real channel count) with a spurious "expected
+  // 1" error.
+  if (Format == ResourceFormat::R32_UINT ||
+      Format == ResourceFormat::R32_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                                "clear color has %zu component(s), expected 4",
+                                Clear.size());
+    if (Format == ResourceFormat::R32_SINT) {
+      int32_t V = static_cast<int32_t>(
+          std::clamp(Clear[0], -2147483648.0, 2147483647.0));
+      memcpy(Texel.data(), &V, 4);
+    } else {
+      uint32_t V =
+          static_cast<uint32_t>(std::clamp(Clear[0], 0.0, 4294967295.0));
+      memcpy(Texel.data(), &V, 4);
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H70) `R32G32_UINT`/`R32G32_SINT`: the two-channel sibling of
+  // `R32_UINT`/`_SINT` above, same raw-integer convention.
+  if (Format == ResourceFormat::R32G32_UINT ||
+      Format == ResourceFormat::R32G32_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                                "clear color has %zu component(s), expected 4",
+                                Clear.size());
+    bool Signed = Format == ResourceFormat::R32G32_SINT;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int32_t V = static_cast<int32_t>(
+            std::clamp(Clear[I], -2147483648.0, 2147483647.0));
+        memcpy(Texel.data() + I * 4, &V, 4);
+      } else {
+        uint32_t V =
+            static_cast<uint32_t>(std::clamp(Clear[I], 0.0, 4294967295.0));
+        memcpy(Texel.data() + I * 4, &V, 4);
+      }
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H70) `R32G32B32_UINT`/`R32G32B32_SINT`: the three-channel
+  // sibling of `R32_UINT`/`_SINT` above, same raw-integer convention.
+  if (Format == ResourceFormat::R32G32B32_UINT ||
+      Format == ResourceFormat::R32G32B32_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                                "clear color has %zu component(s), expected 4",
+                                Clear.size());
+    bool Signed = Format == ResourceFormat::R32G32B32_SINT;
+    for (unsigned I = 0; I != 3; ++I) {
+      if (Signed) {
+        int32_t V = static_cast<int32_t>(
+            std::clamp(Clear[I], -2147483648.0, 2147483647.0));
+        memcpy(Texel.data() + I * 4, &V, 4);
+      } else {
+        uint32_t V =
+            static_cast<uint32_t>(std::clamp(Clear[I], 0.0, 4294967295.0));
+        memcpy(Texel.data() + I * 4, &V, 4);
+      }
+    }
+    return Error::success();
+  }
+
   // (Roadmap H8p) `R10G10B10A2_UINT`: the integer sibling of
   // `R10G10B10A2_UNORM`'s own special case above -- same packed-word
   // layout, but each field holds its raw integer reference value (R/G/B
@@ -1067,6 +1142,81 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     for (unsigned I = 0; I != 4; ++I)
       Out[I] = Signed ? static_cast<double>(static_cast<int8_t>(Texel[I]))
                       : static_cast<double>(Texel[I]);
+    return Error::success();
+  }
+
+  // (Roadmap H70) `R32_UINT`/`R32_SINT`: the inverse of `packClearColor`'s
+  // own raw-integer special case above -- `Out` holds the raw integer
+  // value directly, not a normalized fraction.
+  if (Format == ResourceFormat::R32_UINT ||
+      Format == ResourceFormat::R32_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                                "unpack destination has %zu component(s), "
+                                "expected 4",
+                                Out.size());
+    if (Format == ResourceFormat::R32_SINT) {
+      int32_t V;
+      memcpy(&V, Texel.data(), 4);
+      Out[0] = V;
+    } else {
+      uint32_t V;
+      memcpy(&V, Texel.data(), 4);
+      Out[0] = V;
+    }
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H70) `R32G32_UINT`/`R32G32_SINT`: the two-channel sibling of
+  // `R32_UINT`/`_SINT` above, same raw-integer convention.
+  if (Format == ResourceFormat::R32G32_UINT ||
+      Format == ResourceFormat::R32G32_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                                "unpack destination has %zu component(s), "
+                                "expected 4",
+                                Out.size());
+    bool Signed = Format == ResourceFormat::R32G32_SINT;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int32_t V;
+        memcpy(&V, Texel.data() + I * 4, 4);
+        Out[I] = V;
+      } else {
+        uint32_t V;
+        memcpy(&V, Texel.data() + I * 4, 4);
+        Out[I] = V;
+      }
+    }
+    Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H70) `R32G32B32_UINT`/`R32G32B32_SINT`: the three-channel
+  // sibling of `R32_UINT`/`_SINT` above, same raw-integer convention.
+  if (Format == ResourceFormat::R32G32B32_UINT ||
+      Format == ResourceFormat::R32G32B32_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                                "unpack destination has %zu component(s), "
+                                "expected 4",
+                                Out.size());
+    bool Signed = Format == ResourceFormat::R32G32B32_SINT;
+    for (unsigned I = 0; I != 3; ++I) {
+      if (Signed) {
+        int32_t V;
+        memcpy(&V, Texel.data() + I * 4, 4);
+        Out[I] = V;
+      } else {
+        uint32_t V;
+        memcpy(&V, Texel.data() + I * 4, 4);
+        Out[I] = V;
+      }
+    }
+    Out[3] = 1.0;
     return Error::success();
   }
 
