@@ -38553,6 +38553,97 @@ the real bug).
 change: no functional behavior changed this session (both attempted
 fixes were reverted), and this milestone concerns an existing
 `VK_EXT_mesh_shader` diagnostic, not new feature/extension surface.
+
+## Roadmap H94a: measured impact (linearize diagnostic fixed; a new, distinct blocker exposed)
+
+**Fix implemented and landed.** Unlike H94's own triage session
+(above), this session implemented and validated a real fix rather than
+reverting a false start. Summary (full mechanism described in
+Roadmap.md's own H94a row): `getFlowConditionPhi` tolerates an
+`xor`-negation-wrapped `CondBr` condition; `peelConstantFlowPredecessors`
+(L40) now uses it; two new functions, `isPureRelayBlock` and
+`mergeTrivialRelayBlocksInCycle`, use LLVM's `MergeBlockIntoPredecessor`
+to fold a `StructurizeCFG`-synthesized relay block into its one real
+predecessor once peeling has reduced it to a single incoming edge,
+inside a new outer fixed-point loop in `linearizeCycle` that alternates
+folding/peeling/merging until no further progress is made. A new
+`isSyntheticRelayBlockName` heuristic scopes this new merging behavior
+to blocks provably matching `StructurizeCFG`'s own naming convention
+(`"Flow"`-prefixed or containing `.guard`), discovered necessary after
+an initial unscoped version regressed 6 pre-existing lit tests by also
+merging real, user-authored check blocks that happened to look
+structurally similar after an unrelated peel.
+
+**A separate, unrelated latent crash was found and fixed in the same
+function** while validating the fix against the real repro: a
+pre-existing call, `ExitBlock->removePredecessor(CheckBlock)`, defaults
+(`KeepOneInputPHIs=false`) to eagerly RAUW-and-erasing any phi left with
+only one remaining incoming value -- invalidating raw `PHINode*`
+pointers this same function's own `ExitBlockRelayValues` restore loop
+had just captured moments earlier and still needed to dereference. Root-
+-caused via a real backtrace (the build tree is `Release`-with-
+-assertions with no debug info by default, so `Linearize.cpp` alone was
+recompiled with `ccache clang++ -g -O0` using the exact flags captured
+from `ninja -t commands`, the resulting object swapped into the static
+archive via `ar d`/`ar q`, and `feme-opt` relinked via the saved link
+command, all without a full rebuild, specifically to get `gdb` a real
+source-level backtrace). Fixed by passing `KeepOneInputPHIs=true`.
+
+**Build and test validation.** `ninja check-feme`: 2947/2950 discovered,
+3 pre-existing `Unsupported`, 0 `Failed` -- up by exactly the 2 new
+tests this row adds (one lit test, one unit test), 0 regressions.
+
+New tests:
+- `Transforms/CPU/Linearize/loop-relay-chain-two-hops.ll`: a real
+  captured IR reduction of `mesh_shared_memory_size`'s own verification
+  loop (`feme-translate --import-spirv` -> `feme-opt
+  --feme-convert-spirv-to-llvm` -> `feme-translate
+  --llvmdialect-to-llvmir` -> `feme-opt`'s own `feme-cpu-prepare`
+  pipeline, matching H94's own reduction recipe), checked in directly
+  rather than synthesized from scratch. Confirmed (via `git stash`) to
+  fail at baseline with the original diagnostic and pass with the fix.
+- A matching `LinearizeTest.cpp` unit test
+  (`LinearizesLoopWithTwoRelayHopsToDivergentExit`), built from a
+  minimal, hand-distilled version of the same shape. Two earlier
+  from-scratch synthetic attempts (a hand-written two-relay-hop loop
+  with no enclosing divergent context; the same shape run through real
+  `StructurizeCFGPass`/`UnifyLoopExitsPass`/`BreakCriticalEdgesPass`
+  invocations inside the test) both **failed to reproduce the bug at
+  all** -- `UniformityInfo` does not consider a loop divergent purely
+  because it contains a uniform-address shared-memory load; the loop
+  must be nested inside a genuinely divergent *enclosing* branch (here,
+  a `thread_id == 0` check) for its own in-loop check to be classified
+  divergent at all, which neither synthetic attempt included. The final
+  version wraps the loop in such a branch and was confirmed (via a
+  `git stash` cycle) to fail at baseline with the exact original
+  diagnostic and pass with the fix.
+
+**Real CTS re-run of all 4 of H94's own target cases**: the "more than
+one divergent exit check" diagnostic is gone from every one of them. A
+broader `dEQP-VK.mesh_shader.ext.*` sweep (26921 cases) confirms no
+regressions: 323 Pass/116 Fail, vs. H93b's own closing 321/118 baseline
+(the +2/-2 delta is attributed to likely test flakiness elsewhere in
+the suite -- e.g. timing/synchronization-sensitive cases -- not
+investigated further, since it is unrelated to this change's own
+scope).
+
+**However, none of the 4 target cases newly pass outright.** Each now
+progresses to a distinct, later, pre-existing blocker instead:
+`feme-cpu-wrap-entry: function 'main' has a barrier inside non-linear
+control flow (a surviving branch not part of a supported loop); region
+splitting only supports a straight-line wave body or a single uniform
+loop (roadmap milestone 9 deviation)`. This is the same
+`EntryWrapper.cpp` "milestone 9" limitation rows H72 and L45 have each
+previously narrowed for a different specific control-flow shape (a
+barrier-free self/multi-block loop, and a barrier-free uniform diamond,
+respectively), but not yet triaged for whatever shape these 4 cases'
+own now-single-check verification loop produces. Filed as new roadmap
+row **H94b**, rather than blocking this row further, since this row's
+own scope (the linearize diagnostic itself) is fully closed regardless.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure compiler internals bug fix (loop-linearization
+capability), with no new feature/extension surface exposed or changed.
 `FeMeGraphicsDesign.md` needs no change either, for the same reason --
 no deviation from the design doc was introduced (or reverted back out)
 this session.
