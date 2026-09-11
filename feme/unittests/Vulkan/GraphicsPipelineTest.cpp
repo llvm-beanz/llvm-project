@@ -958,17 +958,12 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   VkShaderModule Fragment = createModule(FragmentSource);
   VkPipeline Pipe = VK_NULL_HANDLE;
 
-  // Rasterizer discard.
+  // (roadmap H35/H74) `rasterizerDiscardEnable` is implemented now (see
+  // `TranslatesRasterizerDiscardState` below); only its
+  // `VK_EXT_extended_dynamic_state2` dynamic counterpart
+  // (`VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE`) remains unimplemented,
+  // since `mapDynamicState` (GraphicsPipeline.cpp) has no case for it yet.
   VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
-  Raster.rasterizerDiscardEnable = VK_TRUE;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
-
-  // A dynamic state with no implemented path (`rasterizerDiscardEnable`
-  // itself is unimplemented statically -- see the rasterizer-discard case
-  // above -- so its `VK_EXT_extended_dynamic_state2` dynamic counterpart
-  // has nowhere to go either; `VK_DYNAMIC_STATE_DEPTH_BIAS`/`_BOUNDS` are
-  // both implemented now, roadmap H7d).
-  Info = makeCreateInfo(Vertex, Fragment);
   VkDynamicState Unsupported = VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE;
   VkPipelineDynamicStateCreateInfo DynamicInfo{};
   DynamicInfo.dynamicStateCount = 1;
@@ -986,6 +981,85 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   InputAssembly.primitiveRestartEnable = VK_TRUE;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H35/H74) `rasterizerDiscardEnable`: `translateRasterState` now
+/// accepts it (instead of unconditionally rejecting any pipeline that
+/// requests it) and stores it on `RasterState::DiscardEnable`, which
+/// `Executor.cpp`'s shared `RasterizePrimitives` entry point consults to
+/// skip rasterization -- and everything downstream of it -- while still
+/// running every pre-rasterization stage in full (see that field's own
+/// comment, feme/include/feme/Graphics/Pipeline.h).
+TEST_F(GraphicsPipelineTest, TranslatesRasterizerDiscardState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.rasterizerDiscardEnable = VK_TRUE;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  feme::graphics::GraphicsPipeline Executor =
+      Graphics->buildExecutorPipeline(Dynamic);
+  EXPECT_TRUE(Executor.getRasterState().DiscardEnable);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H74) Specialization constants: `compileGraphicsStage` now
+/// patches a graphics stage's real `VkSpecializationInfo` overrides
+/// directly onto its shader module's raw SPIR-V words before
+/// deserialization (mirroring the compute path's own
+/// `compileComputePipeline`), instead of unconditionally rejecting any
+/// stage that supplies one. Uses a fragment shader whose `SpecId 0` spec
+/// constant scales its output color, overriding it to a non-default
+/// value: this only proves the override reached compilation
+/// successfully (pipeline creation no longer fails), not that the
+/// resulting pixels are correct -- see `SpecializationPatchTest.cpp` for
+/// coverage of the raw patching logic itself.
+TEST_F(GraphicsPipelineTest, TranslatesGraphicsStageSpecializationConstants) {
+  constexpr llvm::StringLiteral SpecConstantFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.SpecConstant @kMul spec_id(0) = 1.0 : f32
+  spirv.func @main() -> () "None" {
+    %one = spirv.Constant 1.0 : f32
+    %mul = spirv.mlir.referenceof @kMul : f32
+    %c = spirv.CompositeConstruct %mul, %one, %one, %one : (f32, f32, f32, f32) -> vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(SpecConstantFragmentSource);
+
+  float OverrideValue = 0.5f;
+  VkSpecializationMapEntry MapEntry{/*constantID=*/0, /*offset=*/0,
+                                    /*size=*/sizeof(float)};
+  VkSpecializationInfo SpecInfo{};
+  SpecInfo.mapEntryCount = 1;
+  SpecInfo.pMapEntries = &MapEntry;
+  SpecInfo.dataSize = sizeof(float);
+  SpecInfo.pData = &OverrideValue;
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Stages[1].pSpecializationInfo = &SpecInfo;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
