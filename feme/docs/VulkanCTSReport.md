@@ -37073,3 +37073,109 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.group_memory_barrier_in_mesh_array'
 ```
+
+## Roadmap H73: measured impact (`gl_Layer`/`SV_RenderTargetArrayIndex` fragment-input read-back)
+
+H70's own per-bucket triage found the `builtin.layer{,_no_write,_shared}`/
+`properties.max_output_layers`/`smoke.{fast_lib,optimized_lib}.
+shared_frag_library*` bucket (12 cases as originally counted: `builtin` 3,
+`properties` 1, `smoke` 8) failing `vkCreateGraphicsPipelines` with
+`feme-cpu-wrap-fragment: unsupported fragment system value for element 0`.
+Reading the CTS source directly (`vktMeshShaderBuiltinTestsEXT.cpp:940`,
+`outColor = colors[gl_Layer];`) confirmed the hypothesis without needing a
+hand-written IR reduction: `gl_Layer`/`SV_RenderTargetArrayIndex` read back
+as a fragment-shader input, the exact same shape roadmap H3a already fixed
+for `gl_ViewportIndex`/`SV_ViewportArrayIndex`.
+
+Unlike H3a's own fix (which had to build the entire `ViewportIndex`
+read-back mechanism from scratch), `feme::SignatureSystemValue::
+RenderTargetArrayIndex` and its output-side wiring (`Tri.TargetLayer`
+resolution, attachment-layer slicing, DXIL/SPIR-V import) were **already
+fully implemented** -- only the fragment-side read-back was missing,
+making this a much smaller, surgical change:
+
+- `RuntimeABI.h`: added `uint32_t RenderTargetArrayIndex[4];` to
+  `FemeFragmentInvocation`, consuming one of the existing `Reserved[4]`
+  slots (shrunk to `Reserved[3]`) to keep the struct's total size
+  unchanged -- the same "reuse a reserved slot" pattern already used for
+  `ViewIndex`.
+- `StageArgsLayout.h`: mirrored the new field in
+  `FragmentInvocationField` (a new enumerator, shifting every later
+  enumerator's value by one -- all other uses in the file are by
+  symbolic name, confirmed via grep, so no other code needed updating)
+  and `getFragmentInvocationType`'s `StructType::get` field list.
+- `FragmentWrapper.cpp`: added a `RenderTargetArrayIndex` case to
+  `loadFragmentSystemValue`'s switch, structurally identical to the
+  pre-existing `ViewportArrayIndex` case immediately above it.
+- `Executor.cpp`: populated the new field from the rasterizer's
+  already-resolved `Tri.TargetLayer` per lane in the quad-fill loop
+  (the same value already used earlier in the same function to slice
+  depth/stencil/color attachments) -- no new resolution logic needed.
+
+A new unit test, `FragmentWrapperTest.LowersRenderTargetArrayIndexSystemValueInput`
+(`feme/unittests/Transforms/CPU/FragmentWrapperTest.cpp`), mirrors the
+existing `ViewportArrayIndex` regression test exactly (asserts
+`loadFragmentSystemValue` never hits the "unsupported fragment system
+value" diagnostic path for a `RenderTargetArrayIndex`-bound input
+element). `ninja check-feme` passes in full, **2936/2936** discovered
+(2877 Pass, 59 pre-existing `Unsupported`, **0 Failed**) -- exactly
+baseline plus the 1 new test, 0 regressions.
+
+**A real re-run of all three sub-buckets** confirms the original
+diagnostic is gone from all 12 originally-tracked cases:
+
+- `builtin.layer*` (3 cases): `layer` and `layer_no_write` now **Pass**;
+  `layer_shared` no longer hits the fragment-system-value diagnostic but
+  now fails a pixel comparison instead
+  (`vktMeshShaderBuiltinTestsEXT.cpp:572`).
+- `properties.*` (30 cases total in the group; confirmed via a
+  git-stash pre/post rebuild comparison): exactly one case,
+  `max_output_layers`, moves from Fail to **Pass** -- the other 13
+  pre-existing fails in this group are unrelated (`max_mesh_output_*`/
+  `*_payload_*`/`*_shared_memory_size` gaps, not associated with
+  `gl_Layer`).
+- `smoke.*` (a full sweep of `smoke.{fast_lib,monolithic,optimized_lib}.*`,
+  63 cases, git-stash pre/post rebuild compared): pre-fix, 17 fails, all
+  `VK_ERROR_INITIALIZATION_FAILED at vkPipelineConstructionUtil.cpp:176`.
+  Post-fix, still 17 fails (same total), but 8 of them --
+  `shared_frag_library{,_extra_input,_mesh_first,_mesh_first_extra_input}`
+  in both `fast_lib` and `optimized_lib` (`monolithic` does not define
+  these cases) -- no longer hit that crash at all, instead failing a
+  pixel comparison ("Unexpected color at framebuffer 0 coordinates
+  (x=0, y=0, layer=2): expected (1, 1, 0, 1) but found (0, 0, 0, 1)").
+  This confirms the original "smoke 8" count in H70's triage was
+  correct and *is* this row's own scope (not, as one plausible
+  alternative read of the original triage note speculated, an overlap
+  with H34/H48's `VK_EXT_graphics_pipeline_library` scope). The other 9
+  `smoke.*` fails (`depth_only_{points,triangles}_position_components`
+  x3 pipeline variants, `fullscreen_gradient` x3 pipeline variants) are
+  unchanged before and after this fix, confirming they are a distinct,
+  unrelated, still-untriaged gap (`depth_only_*` hits a
+  `CanonicalizeStagePass` "unresolved stage-IO global-variable access"
+  diagnostic; `fullscreen_gradient` hits a `spirv.Variable`
+  array-of-`vec4`-in-`Function`-storage-class SPIR-V-to-LLVM
+  legalization gap) -- neither is `gl_Layer`-related, so neither is
+  claimed by this row.
+
+**Roadmap H73 is closed** (its own scope -- the fragment-system-value
+rejection for `gl_Layer` -- is fully fixed for all 12 originally-tracked
+cases; none of them hit that diagnostic any longer). The residual
+9-case pixel-comparison mismatch (`builtin.layer_shared` plus the 8
+`shared_frag_library*` cases) this row's own closing re-run found is a
+new, distinct gap filed as **H86**; the 9 unrelated `smoke.*` fails
+this re-run also surfaced are out of scope for this row entirely and
+not yet filed under any milestone.
+
+`check-feme`'s full run (above) already confirms zero regression to
+existing lit/unit-test coverage; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change (a pure compiler-correctness
+fix, no feature bit or extension advertisement involved).
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.builtin.layer'
+```
