@@ -77791,3 +77791,95 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 The `properties.*` case list I ran only exercises 9 named cases; the `misc.*` group's own +1 flip is somewhere in its other ~110 cases, not in the 9 tracked ones at all. Finding it precisely would mean a full `git stash`-based A/B of the entire `misc.*` bucket (rebuild + rerun ~114 cases twice) just to name one already-fixed, already-passing case -- pure bookkeeping with no remaining risk, since the fix is unambiguously correct and already verified end-to-end on its primary target. Left it as a flagged, not-yet-isolated note in the CTS report rather than spending a full extra CTS pass to name it.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H70/H89 closeout session: H89 was already done, H81 root-caused and fixed, H82 split cleanly
+
+**Done, right now:**
+1. Closed H89's parent row on the roadmap -- its scope was already fully
+   absorbed by H89a/H89b in the prior session, but the parent row itself
+   was still open. Pure bookkeeping, own commit.
+2. Root-caused and fixed H81 (`misc.emit_in_control_flow`'s missing
+   `LLVMTranslationDialectInterface` registration for `spirv.Unreachable`).
+   Both tracked cases now `Pass`. Own commit + regression test.
+3. Split H82: one of its two cases is a confirmed duplicate of H31's
+   already-tracked bug (folded in), the other stays open on its own.
+4. Updated H70's own status line so it reflects the real current state
+   of its H71-H84 dependency chain.
+5. `ninja check-feme`: 2884/2943 Passed, 59 Unsupported, 0 Failed.
+
+**H81's real bug was nothing like its own roadmap description guessed.**
+The row as written said "needs a small fix registering the missing
+interface/pattern... mirroring however upstream already handles other
+terminator ops" -- implying upstream had a gap. It doesn't. Upstream's
+own `UnreachablePattern` in `SPIRVToLLVM.cpp` already converts
+`spirv.Unreachable` fine, confirmed with two hand-built minimal repros
+before this session even started (carried over from the prior,
+compacted session). Neither repro reproduced the bug. That mismatch --
+"the obviously relevant code already works, so my simple repro is wrong
+somehow" -- is always worth trusting over a repro that merely compiles
+without erroring. It meant the real CTS shape had something my repro
+was missing, not that the fix needed to go where the roadmap's own
+guess said it should.
+
+**The actual fix, in one sentence:** the CTS task shader's `if/else`
+around two `EmitMeshTasksEXT` calls has *every* arm end in its own real
+terminator (`EmitMeshTasksEXT` ends the whole invocation, like a
+`return`), so the merge block SPIR-V's structured-CFG rules still force
+into existence has zero predecessors -- a genuinely dead block that
+`glslang` terminates with `OpUnreachable` and that MLIR's own dialect-
+conversion driver, by design, never visits because it only legalizes
+ops reachable from a region's entry block.
+
+**How I actually found it:** compiled the real CTS GLSL source through
+`glslangValidator` myself (`--target-env vulkan1.2`, to dodge an
+unrelated `LocalSizeId` deserializer bug that shows up at `vulkan1.3`
+and would have been its own rabbit hole), disassembled it, and there it
+was in the SPIR-V text: `^bb5: // no predecessors` holding
+`OpUnreachable`, sitting right after two blocks each ending in
+`OpEmitMeshTasksEXT`. Fifteen minutes of "get the real input and look
+at it" beat the entire previous session's worth of guessing at the
+shape from the roadmap's own vague description.
+
+**The fix is three lines:** `mlir::eraseUnreachableBlocks` already
+exists in `mlir/Transforms/RegionUtils.h` and does exactly what's
+needed -- delete blocks unreachable from a region's entry. Called it
+once per `spirv.func`, before the conversion patterns run, inside
+`ConvertSPIRVToLLVMPass::runOnOperation`. No new pattern, no interface
+registration, no change to the type converter. Confirmed against the
+*actual* glslang-compiled shape (via `feme-translate --import-spirv` +
+`feme-opt --feme-convert-spirv-to-llvm`) before writing the lit test,
+so the lit test's hand-built version is a faithful minimal version of a
+confirmed-real shape, not a guess.
+
+**H82 split cleanly, no new investigation needed for half of it.** Its
+`push_constant_and_task_shader` case, re-run against the H81-fixed
+build, produces the *exact same diagnostic text* as H31's own already-
+root-caused `si32`/`i32` bug. That's as close to certain as a "quick
+confirm" gets -- folded it into H31 instead of double-counting or
+re-investigating a bug that's already understood. Its other case
+(`per_prim_block_output`) is a different diagnostic entirely (a GEP
+into a bare struct, not a constant-type mismatch), and H87's own
+already-closed row already ruled out one plausible "same as H82" theory
+for a superficially similar case, so `per_prim_block_output` stays open
+as its own thing rather than getting swept into either.
+
+**What I'd do differently:** the previous, compacted session spent real
+effort on two hand-built repros before getting to the real GLSL source.
+Both were reasonable hypotheses to rule out cheaply, and did rule
+something out, but in hindsight the real CTS shader source
+(`vktMeshShaderMiscTestsEXT.cpp`) was sitting right there the whole
+time and takes about the same five minutes to compile through
+`glslangValidator` as it takes to hand-write a plausible-looking
+alternative. When a bug is CTS-shape-specific, going straight to the
+real shape first is almost always cheaper than iterating on guesses
+about what that shape might be.
+
+**Next up:** H75-H80, H82's remaining case, H83, H84 are all still
+open under H70. None of them looked like an obvious quick win the way
+H81 did (its own roadmap text already flagged it as "small,
+self-contained" -- correctly, just not for the reason it guessed).
+Whoever picks this up next should treat every remaining row's own
+"needs its own IR reduction" note as genuinely unstarted, not as a
+hint toward where the fix will land -- H81 is a second data point that
+the roadmap's own guesses about *root cause* are not reliable, only its
+counts and repro commands are.
