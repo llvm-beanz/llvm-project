@@ -44,19 +44,15 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H74 or other blocking work to make progress on the H-series
+Can you work on H87 or other blocking work to make progress on the H-series
 milestones?
 
-> **`properties.*`/`smoke.*`'s `"rasterizer discard is not
-> implemented"`/`"specialization constants are not implemented for a graphics
-> stage yet"`** (25 + 7 = 32 cases, found by H70's own per-bucket triage):
-> confirms the roadmap's own standing suspicion that this overlaps H34/H48's own
-> `VK_EXT_graphics_pipeline_library` scope (several of these cases construct
-> their pipeline through a library/fast-linked path) but has not yet had a real
-> per-case check to confirm that overlap rather than a distinct, unrelated gap
-> in ordinary (non-library) graphics-pipeline creation. Needs a real cross-check
-> against H34/H48's own already-closed sub-rows before any new implementation
-> work: if genuinely the same scope, this row can likely close by extension once
-> H34/H48 finish; if not, it needs its own
-> rasterizer-discard/specialization-constant implementation in
-> `GraphicsPipeline.cpp`
+> **`properties.*`'s `'llvm.getelementptr' op operand #0 must be LLVM pointer
+> type...'` SPIR-V-to-LLVM legalization gap for large mesh-output arrays** (5
+> cases: `max_mesh_output_components`, and the 4 `*_no_view_index` payload-size
+> cases, newly exposed by H74's specialization-constant fix): a GEP into a large
+> mesh-output-array shape ends up with a bare LLVM struct/array operand instead
+> of a pointer, the same general shape of bug as H82's own
+> `misc.per_prim_block_output` row but not yet confirmed to be the identical
+> root cause. Not yet triaged -- needs its own IR reduction to confirm/refute
+> overlap with H82 before any new fix work
