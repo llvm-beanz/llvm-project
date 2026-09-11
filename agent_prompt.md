@@ -44,18 +44,19 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H73 or other blocking work to make progress on the H-series
+Can you work on H74 or other blocking work to make progress on the H-series
 milestones?
 
-> **`builtin.layer`/`properties`/`smoke.fast_lib.*`'s `feme-cpu-wrap-fragment:
-> unsupported fragment system value for element 0`** (12 cases: `builtin` 3,
-> `properties` 1, `smoke` 8, found by H70's own per-bucket triage): the
-> fragment-stage wrapper's input-system-value dispatch rejects some system
-> value(s) outright, mirroring the same shape H21k/H29e's own
-> hull/domain-wrapper precedent already found and fixed for those stages --
-> likely `gl_Layer`/`gl_ViewportIndex` (`builtin.layer`'s own name) or a related
-> per-primitive fragment input the mesh-shader path feeds through that the
-> existing fragment wrapper's switch does not yet route. Not yet triaged --
-> needs a real IR reduction of `builtin.layer` to identify the exact system
-> value, following the same technique H21k/H29e already used for the analogous
-> hull/domain-wrapper gaps
+> **`properties.*`/`smoke.*`'s `"rasterizer discard is not
+> implemented"`/`"specialization constants are not implemented for a graphics
+> stage yet"`** (25 + 7 = 32 cases, found by H70's own per-bucket triage):
+> confirms the roadmap's own standing suspicion that this overlaps H34/H48's own
+> `VK_EXT_graphics_pipeline_library` scope (several of these cases construct
+> their pipeline through a library/fast-linked path) but has not yet had a real
+> per-case check to confirm that overlap rather than a distinct, unrelated gap
+> in ordinary (non-library) graphics-pipeline creation. Needs a real cross-check
+> against H34/H48's own already-closed sub-rows before any new implementation
+> work: if genuinely the same scope, this row can likely close by extension once
+> H34/H48 finish; if not, it needs its own
+> rasterizer-discard/specialization-constant implementation in
+> `GraphicsPipeline.cpp`
