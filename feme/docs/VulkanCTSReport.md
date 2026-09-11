@@ -38072,3 +38072,120 @@ zero-stage-IO mesh entry), not a new feature or extension surface.
 `FeMeVulkanDesign.md` needs no change either: nothing about the
 documented mesh-stage canonicalization design changed, only a narrow
 gap in an existing, already-documented fallback's own stage coverage.
+
+## Roadmap H92: measured impact
+
+**Symptom.** `dEQP-VK.mesh_shader.ext.properties.max_mesh_output_size_
+with_payload_per_{primitive,vertex}_no_view_index` and
+`.max_mesh_output_size_without_payload_per_{primitive,vertex}_
+no_view_index` (4 cases) failed `vkCreateGraphicsPipelines` with
+`VK_ERROR_INITIALIZATION_FAILED`, the compiler emitting
+`feme-graphics-validate-stage: function 'main' has an unresolved
+stage-IO global-variable access to 'spirv_var_...', a shape
+CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*'
+call`.
+
+**Root cause.** Compiled the real CTS mesh shader source directly
+through `glslangValidator --target-env vulkan1.2 -V` and disassembled
+the result with `spirv-dis`. Every one of the 4 cases' own mesh shader
+declares a per-vertex output block:
+
+```glsl
+layout (constant_id=1) const uint locationCount = 1u;
+struct LocationBlock {
+    uvec4 elements[locationCount];
+};
+layout (location=0) out LocationBlock loc[];
+```
+
+and writes it with `loc[pointIdx].elements[elemIdx] = uvec4(...)` inside
+a doubly-nested loop -- confirmed via the disassembly's own
+`%110 = OpAccessChain %_ptr_Output_v4uint %loc %90 %int_0 %91`, where
+`%90` (`pointIdx`) and `%91` (`elemIdx`) are both genuinely non-constant
+SSA values, not the single dynamic index every other stage-IO access
+shape this pass already recognizes has.
+
+`getDynamicVertexIndexedAccess` (`CanonicalizeStage.cpp`) already peels
+a mesh entry's own outer per-vertex/per-primitive `Output` array
+dimension into a `Vertex` operand when it is non-constant (roadmap
+H5b/H6b) -- but its own walk of every index *after* that one required
+every remaining index to be a compile-time constant, bailing out
+(`return std::nullopt`) the instant it saw a second non-constant one.
+This left the whole access unrewritten -- an ordinary, still-`external`
+global load/store surviving all the way to `ValidateStagePass`, which
+correctly (per its own H6g-b-c precedent) rejects it at compile time
+rather than letting it reach the JIT as an undefined symbol.
+
+This refutes the roadmap's own standing suspicion that this row might
+overlap H76's `smoke.fast_lib.*` scope: that row's own shape is a
+fragment-library-sharing one, unrelated to this row's doubly-dynamic
+mesh-output-array access.
+
+**Fix.** Extended `getDynamicVertexIndexedAccess` to also recognize a
+second, genuinely non-constant index -- mirroring
+`getDynamicRowIndexedAccess`'s own "must be the final index, must
+directly select an array row" constraint -- and thread it through as a
+new `RowIndex` field on the function's own result type (changed from a
+plain 3-tuple to a named `DynamicVertexIndexedAccess` struct, for
+clarity now that it carries four fields instead of three).
+`resolveStageIOAccess` then builds the resulting `StageIOAccess`
+directly from both dynamic indices (`Vertex` and `Row` both
+non-constant, `Component` left null so `storeStageIOValue`'s own
+per-component recursion decomposes the stored vector) rather than
+routing through `resolveOffsetWithinElement`'s byte-offset-based
+recursion, which has no way to represent a second non-constant index at
+all.
+
+Notably, `Row` and `Vertex` were already both plain `Value*` throughout
+every downstream consumer -- `storeStageIOValue`'s own recursion,
+`ShadowValueMap::getOrCreate`'s existing non-constant-`Row`
+array-alloca fallback (roadmap H7w), and `ValidateStagePass`'s
+`validateVertex`/`validateRow` (both already skip their own bounds
+check for a non-constant operand) -- so no downstream code needed to
+change at all. This confirms the gap really was exactly
+`getDynamicVertexIndexedAccess`'s own recognition logic and nothing
+deeper in the pipeline.
+
+**Regression test.** Added
+`MeshStageCanonicalizesDoublyDynamicOutputStore`
+(`feme/unittests/Transforms/Graphics/CanonicalizeStageTest.cpp`),
+modeling the real CTS shape directly: a mesh entry storing a `<4 x
+i32>` value through a two-index dynamic GEP (`%pointIdx`, then a
+constant struct-member selector, then `%elemIdx`) into a per-vertex
+output block. Confirms both the resulting per-component
+`feme.stage.output.store` call operands (`Row` = `%elemIdx`, `Vertex` =
+`%pointIdx`) and that the original raw store through the stage-IO
+global itself is gone -- the resulting per-component shadow-value
+stores, into the non-promotable dynamic-`Row` array alloca
+`ShadowValueMap` already builds for any non-constant `Row` (roadmap
+H7w), are expected and correctly left in place, unlike every other test
+in this file (which only exercises a constant `Row`).
+
+**Build/test.** `ninja check-feme`: 2887/2946 Passed, 59 Unsupported, 0
+Failed.
+
+**Real CTS re-run.** All 4 tracked cases now pass outright:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_size_with_payload_per_primitive_no_view_index'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_size_with_payload_per_vertex_no_view_index'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_size_without_payload_per_primitive_no_view_index'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_size_without_payload_per_vertex_no_view_index'
+```
+
+A broader `dEQP-VK.mesh_shader.ext.properties.*` re-run (30 cases)
+confirms zero regressions: 7 Pass/8 Fail/15 NotSupported (up from
+3/12/15 pre-fix, exactly +4/-4), with every remaining `Fail` matching
+the already-tracked H93/H94/H95/H96 sub-bucket totals -- no new,
+previously-unseen failure surfaced.
+
+**Roadmap H92 is closed.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change: this is a pure
+compiler-correctness fix (a stage-IO-access-recognition gap for an
+already-supported feature, `VK_EXT_mesh_shader`'s per-vertex output
+blocks), not a new feature or extension surface. `FeMeGraphicsDesign.md`
+needs no change either: nothing about the documented signature
+reflection design changed, only a narrower recognition gap in one of
+its existing helper functions' own coverage.
