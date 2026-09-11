@@ -1,4 +1,5 @@
 ; RUN: clang -c -emit-llvm -O2 -ffreestanding -fno-builtin \
+; RUN:     --target=%feme_host_triple \
 ; RUN:     %S/../../../runtime/CPU/FeMeRuntimeCPU.c -o %t.bc
 ; RUN: opt -passes=verify -disable-output %t.bc
 ; RUN: opt -S %t.bc -o - | FileCheck %s

@@ -57,7 +57,13 @@ if(FEME_HAVE_VULKAN_LOADER)
     # Roadmap H10a's xcb-backed smoke test only builds (and its lit test
     # only runs, gated by `system-xcb` -- see lit.cfg.py) in a build that
     # found `libxcb`; see lib/Vulkan/CMakeLists.txt's `FEME_HAVE_XCB`.
-    list(APPEND FEME_TEST_DEPENDS feme-vulkan-xcb-smoke)
+    # `feme-vulkan-xcb-surface-lost-smoke` (Vulkan/xcb-surface-lost-smoke.
+    # test) is built by the same `feme/tools/CMakeLists.txt` guard as
+    # `feme-vulkan-xcb-smoke` but was missing from this dependency list,
+    # so `check-feme` would fail that test with "No such file or
+    # directory" unless something else happened to build it first.
+    list(APPEND FEME_TEST_DEPENDS feme-vulkan-xcb-smoke
+      feme-vulkan-xcb-surface-lost-smoke)
   endif()
 endif()
 

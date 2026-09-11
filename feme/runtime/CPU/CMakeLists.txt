@@ -32,7 +32,12 @@ set(feme_runtime_cpu_embed_cpp
 # AArch64-only driver flag clang rejects under `-Werror` on every other
 # host architecture (`-Werror,-Woption-ignored`), so it is only added when
 # actually targeting AArch64.
-set(feme_runtime_cpu_extra_flags)
+# This bitcode is always compiled for the host, but `clang_exe` (below) is
+# the just-built driver binary itself, which has no implicit default target
+# when `LLVM_DEFAULT_TARGET_TRIPLE` is left unset (as it is for a
+# multi-target build); an explicit `--target=` keeps this compile pinned to
+# the host architecture regardless of that setting.
+set(feme_runtime_cpu_extra_flags --target=${LLVM_HOST_TRIPLE})
 if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
   list(APPEND feme_runtime_cpu_extra_flags -mno-outline-atomics)
 endif()

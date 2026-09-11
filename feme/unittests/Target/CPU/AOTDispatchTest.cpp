@@ -87,7 +87,11 @@ Expected<SmallVector<char, 0>> compileToObject(llvm::Module &M) {
   if (!Result)
     return Result.takeError();
 
-  std::string TripleStr = sys::getDefaultTargetTriple();
+  // `getDefaultTargetTriple()` reflects `LLVM_DEFAULT_TARGET_TRIPLE` (empty
+  // in a build configured for multiple targets with no single default);
+  // this helper's own doc comment above promises "the host triple", so use
+  // `getProcessTriple()` (`LLVM_HOST_TRIPLE`, always the real host) instead.
+  std::string TripleStr = sys::getProcessTriple();
   std::string LookupError;
   const Target *TheTarget =
       TargetRegistry::lookupTarget(Triple(TripleStr), LookupError);

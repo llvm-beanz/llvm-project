@@ -41,7 +41,7 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 # The host's own default target triple, for tests exercising `feme
 # --target=<host-triple>` (the FeMe CPU target, see
 # feme/docs/FeMeCPUDesign.md) without hard-coding an architecture.
-config.substitutions.append(("%feme_host_triple", config.target_triple))
+config.substitutions.append(("%feme_host_triple", config.host_triple))
 
 # The CFG restructurization differential harness helper (see
 # feme/utils/feme-run-differential.py and roadmap step R1 in
