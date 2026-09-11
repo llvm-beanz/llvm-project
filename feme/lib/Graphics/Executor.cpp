@@ -3114,6 +3114,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               Inv.Coverage[Lane] = Quad.SampleMask[Lane];
               Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
               Inv.ViewportIndex[Lane] = Tri.ViewportIndex;
+              // (Roadmap H73) `gl_Layer`/`SV_RenderTargetArrayIndex` read
+              // back as a fragment-shader input: carry the same resolved
+              // per-primitive attachment layer already used to slice the
+              // depth/stencil/color attachments above through to the
+              // invocation record, mirroring `ViewportIndex` immediately
+              // above.
+              Inv.RenderTargetArrayIndex[Lane] = Tri.TargetLayer;
               Inv.ViewIndex = Draw.ViewIndex;
 
               if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {

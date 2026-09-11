@@ -258,6 +258,19 @@ Value *loadFragmentSystemValue(IRBuilder<> &Builder,
         {Builder.getInt32(0), Builder.getInt32(QuadLane)});
     return Builder.CreateLoad(Builder.getInt32Ty(), LanePtr);
   }
+  case SignatureSystemValue::RenderTargetArrayIndex: {
+    // Roadmap H73: `gl_Layer`/`SV_RenderTargetArrayIndex` read back as a
+    // fragment-shader input -- mirrors `ViewportArrayIndex` immediately
+    // above exactly (see `FemeFragmentInvocation::RenderTargetArrayIndex`'s
+    // own comment for why this is per-lane, not per-quad).
+    Value *Ptr = Builder.CreateStructGEP(
+        InvocationTy, InvocationPtr,
+        FragmentInvocationFieldRenderTargetArrayIndex);
+    Value *LanePtr = Builder.CreateInBoundsGEP(
+        ArrayType::get(Builder.getInt32Ty(), 4), Ptr,
+        {Builder.getInt32(0), Builder.getInt32(QuadLane)});
+    return Builder.CreateLoad(Builder.getInt32Ty(), LanePtr);
+  }
   default:
     Builder.getContext().emitError(
         Twine("feme-cpu-wrap-fragment: unsupported fragment system value for "

@@ -76,10 +76,11 @@ enum FragmentInvocationField : unsigned {
   FragmentInvocationFieldCoverage = 3,
   FragmentInvocationFieldIsFrontFace = 4,
   FragmentInvocationFieldViewportIndex = 5,
-  FragmentInvocationFieldViewIndex = 6,
-  FragmentInvocationFieldLiveMask = 7,
-  FragmentInvocationFieldSideEffectMask = 8,
-  FragmentInvocationFieldReserved = 9,
+  FragmentInvocationFieldRenderTargetArrayIndex = 6,
+  FragmentInvocationFieldViewIndex = 7,
+  FragmentInvocationFieldLiveMask = 8,
+  FragmentInvocationFieldSideEffectMask = 9,
+  FragmentInvocationFieldReserved = 10,
 };
 
 enum FragmentResultField : unsigned {
@@ -230,8 +231,8 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
       llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 4), 4);
   llvm::Type *I32x4 = llvm::ArrayType::get(I32Ty, 4);
   return llvm::StructType::get(Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4,
-                                     I32x4, I32Ty, I32Ty, I32Ty,
-                                     llvm::ArrayType::get(I32Ty, 4)});
+                                     I32x4, I32x4, I32Ty, I32Ty, I32Ty,
+                                     llvm::ArrayType::get(I32Ty, 3)});
 }
 
 inline llvm::StructType *getFragmentResultType(llvm::LLVMContext &Ctx) {

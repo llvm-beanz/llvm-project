@@ -963,6 +963,13 @@ struct FemeFragmentInvocation {
   /// 2x2 quad can straddle a primitive boundary where neighboring
   /// primitives resolved different viewport indices at a silhouette edge.
   uint32_t ViewportIndex[4];
+  /// (Roadmap H73) `gl_Layer`/`SV_RenderTargetArrayIndex` read back as a
+  /// fragment-shader input: the attachment layer the rasterizer resolved
+  /// for each lane's primitive (`ScreenTriangle::TargetLayer`), one value
+  /// per lane, mirroring `ViewportIndex` above for the identical reason --
+  /// a 2x2 quad can straddle a primitive boundary where neighboring
+  /// primitives resolved different layers at a silhouette edge.
+  uint32_t RenderTargetArrayIndex[4];
   /// (Roadmap H2) `gl_ViewIndex`: the current multiview render-pass
   /// instance view, or 0 for a non-multiview draw. One value per quad
   /// (not per lane), matching `FemeVertexInvocation::ViewIndex`'s own
@@ -972,8 +979,10 @@ struct FemeFragmentInvocation {
   uint32_t LiveMask;
   /// Lanes allowed to perform side effects.
   uint32_t SideEffectMask;
-  /// ABI headroom for later fragment-stage invocation metadata.
-  uint32_t Reserved[4];
+  /// ABI headroom for later fragment-stage invocation metadata. Was
+  /// `Reserved[4]` before roadmap H73 consumed one slot for
+  /// `RenderTargetArrayIndex` above.
+  uint32_t Reserved[3];
 };
 
 /// One fragment-stage quad's post-shader status. Color/depth/stencil/coverage
