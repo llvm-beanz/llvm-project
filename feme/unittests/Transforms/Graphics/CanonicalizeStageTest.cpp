@@ -2155,6 +2155,39 @@ TEST(CanonicalizeStageTest, GeometryStreamCutOnlyEntryStillGetsASignature) {
   EXPECT_TRUE(Sig->Elements.empty());
 }
 
+/// (Roadmap H91) A mesh entry that calls `SetMeshOutputsEXT(0, 0)` -- the
+/// real shape a CTS `properties.{mesh,task}_{payload,shared_memory,
+/// payload_and_shared_memory}_size` case's own mesh shader takes, since its
+/// only real work is reading a task payload/shared memory back and writing
+/// a pass/fail flag into an ordinary storage-buffer resource, never a
+/// single per-vertex/per-primitive `Output` -- reads/writes no stage-IO
+/// global at all, hitting the exact same "discovery loop found nothing,
+/// signature-building branch above never ran" gap
+/// `GeometryStreamCutOnlyEntryStillGetsASignature` above already covers
+/// for geometry's own analogous stream-cut-only shape.
+/// `feme::cpu::MeshOutputWrapperPass` is exactly as strict about requiring
+/// an attached signature as `GeometryWrapperPass` is, so before this row's
+/// own fix this left the mesh entry with no `!feme.signature` metadata at
+/// all, later hitting `MeshOutputWrapperPass`'s own "requires attached
+/// feme.signature metadata" diagnostic instead.
+TEST(CanonicalizeStageTest, MeshSetOutputsOnlyEntryStillGetsASignature) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      call void @feme.stage.set_mesh_outputs(i32 0, i32 0)
+      ret void
+    }
+    declare void @feme.stage.set_mesh_outputs(i32, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  EXPECT_TRUE(Sig->Elements.empty());
+}
+
 /// (Roadmap H6i) `CanonicalizeStagePass::run`'s stage filter now accepts
 /// `ShaderStage::Mesh`, routing it through `canonicalizeSPIRVStage` the
 /// same way `ThreadsDynamicVertexIndexIntoOutputStore` above already
@@ -2827,15 +2860,25 @@ TEST(CanonicalizeStageTest, AmplificationStageCanonicalizesTaskPayloadStore) {
     EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
-/// (Roadmap L30) A mesh entry's own bounded payload read -- the load-side
-/// counterpart of `AmplificationStageCanonicalizesTaskPayloadStore` above,
-/// through the very same `TaskPayloadGlobalVariablePattern` address-space-14
-/// global import shape, just read by the mesh workgroup a task workgroup's
-/// `EmitMeshTasksEXT` dispatched instead of written by the task workgroup
-/// itself -- canonicalizes into `feme.stage.task.payload.load` by its
-/// resolved constant byte offset, now that `canonicalizeSPIRVStage`'s
+/// (Roadmap L30, updated by H91) A mesh entry's own bounded payload read --
+/// the load-side counterpart of `AmplificationStageCanonicalizesTaskPayloadStore`
+/// above, through the very same `TaskPayloadGlobalVariablePattern`
+/// address-space-14 global import shape, just read by the mesh workgroup a
+/// task workgroup's `EmitMeshTasksEXT` dispatched instead of written by the
+/// task workgroup itself -- canonicalizes into `feme.stage.task.payload.load`
+/// by its resolved constant byte offset, now that `canonicalizeSPIRVStage`'s
 /// `LoadInst` branch has a fallback mirroring its `StoreInst` branch's own.
-/// Like the store side, this carries no `SignatureElement` at all.
+/// This synthetic entry has no stage-IO global reads/writes and (unlike a
+/// real mesh entry) no `SetMeshOutputsEXT` call either, but H91's own
+/// Mesh-stage empty-signature fallback (mirroring the pre-existing
+/// Geometry-stage one) still attaches an *empty* `SignatureElement`-less
+/// signature here: `MeshOutputWrapperPass` requires an attached signature
+/// for any mesh entry whose body contains a recognized stage op call --
+/// which a `TaskPayloadLoad` already is -- regardless of whether that op is
+/// itself an output/`SetMeshOutputsEXT` op, so leaving this entry
+/// signature-less would reproduce H91's own "requires attached
+/// feme.signature metadata" diagnostic the moment such a shape reached that
+/// pass in the real pipeline.
 TEST(CanonicalizeStageTest, MeshStageCanonicalizesTaskPayloadLoad) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -2851,7 +2894,9 @@ TEST(CanonicalizeStageTest, MeshStageCanonicalizesTaskPayloadLoad) {
   EXPECT_TRUE(run(*M));
   Function *F = M->getFunction("main");
 
-  EXPECT_FALSE(dxil::getEntrySignature(*F).has_value());
+  auto Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  EXPECT_TRUE(Sig->Elements.empty());
 
   unsigned SeenLoads = 0;
   for (Instruction &I : instructions(F)) {

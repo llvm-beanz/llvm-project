@@ -2516,7 +2516,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     addElements(OutputGlobals);
     dxil::setEntrySignature(F, Sig);
     Changed = true;
-  } else if (Stage == ShaderStage::Geometry) {
+  } else if (Stage == ShaderStage::Geometry || Stage == ShaderStage::Mesh) {
     // (Roadmap H5e-d) A geometry entry compiled from an `emit`-count shape
     // that ends its primitive without ever emitting on that particular
     // stream/count combination (e.g. a CTS `dEQP-VK.geometry.emit.*_emit_
@@ -2531,14 +2531,31 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // -- a stream cut included -- hard-requires an attached signature to
     // look element IDs up in, so it errors out instead of quietly treating
     // a missing one as empty. Attach an explicit empty signature here,
-    // scoped to `Geometry` only: unlike `Vertex`/`Fragment` (dispatched to
-    // both `canonicalizeDXILStage` and this function by
+    // scoped to `Geometry`/`Mesh` only: unlike `Vertex`/`Fragment`
+    // (dispatched to both `canonicalizeDXILStage` and this function by
     // `CanonicalizeStagePass::run`, so an empty-globals function reaching
     // here could still be a DXIL-origin entry deliberately left
     // signature-less, exactly the ambiguity roadmap H4g's own rejected fix
-    // ran into), a geometry entry is only ever routed through this
+    // ran into), a geometry or mesh entry is only ever routed through this
     // (SPIR-V-only) function, so there is no DXIL-origin ambiguity to
     // preserve.
+    //
+    // (Roadmap H91) A mesh entry that calls `SetMeshOutputsEXT(0, 0)` --
+    // i.e. genuinely emits zero vertices/primitives, the real shape a CTS
+    // `properties.{mesh,task}_{payload,shared_memory,payload_and_shared_
+    // memory}_size` case's own mesh shader takes when its only real work
+    // is reading a task payload and/or shared memory back and writing a
+    // pass/fail flag into an ordinary storage-buffer resource, never a
+    // single per-vertex/per-primitive `Output` -- hits the exact same
+    // "discovery loop found nothing, branch above never ran" gap
+    // `GeometryStreamCutOnlyEntryStillGetsASignature` already covers for
+    // geometry's own analogous stream-cut-only shape.
+    // `feme::cpu::MeshOutputWrapperPass` (`MeshOutputWrapper.cpp`) is
+    // exactly as strict about requiring an attached signature as
+    // `GeometryWrapperPass` is (any mesh entry it wraps, `SetMeshOutputsEXT`
+    // included, hard-requires one to look element IDs up in), so it hits
+    // the identical "requires attached feme.signature metadata" diagnostic
+    // this row's own missing-mesh-case left unhandled.
     Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
     dxil::setEntrySignature(F, Sig);
     Changed = true;
