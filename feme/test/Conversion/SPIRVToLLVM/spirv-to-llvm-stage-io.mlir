@@ -236,3 +236,40 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ClipDistance], [
     spirv.ReturnValue %v : f32
   }
 }
+
+// -----
+
+// (Roadmap H87) A mesh shader's own per-primitive/per-vertex flat-array
+// `Input` interface block -- e.g. a fragment stage reading a
+// `PerPrimitiveEXT` varying array a mesh shader wrote -- is a
+// single-member `spirv.struct` wrapping the array rather than a bare
+// array, since SPIR-V's `Block` decoration requires an interface block to
+// be a struct even when it logically holds nothing but one array. This
+// needs the same real-pointer treatment as the bare-array `gl_in`/
+// `gl_ClipDistance` shapes above (isArrayLikeStageIOType/
+// isArrayLikeLLVMType), both at the address-of site and in the type
+// converter's own `spirv.PointerType` conversion (the two previously
+// disagreed for this shape -- the address-of site kept a real pointer,
+// but the type converter still answered with the eagerly-loaded struct
+// value for any expected-type materialization, producing an ill-typed,
+// non-pointer `getelementptr` base): a real `spirv.AccessChain` here
+// carries the struct's own leading member-selecting index (always 0)
+// ahead of the array's own dynamic (per-primitive) index, so the
+// resulting `getelementptr` has one more index than the bare-array case,
+// selecting through the pointer, then the struct's sole member, then the
+// array.
+
+// CHECK-LABEL: llvm.func @read_block_wrapped_array
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, 0, %{{.*}}] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.struct<(array<3 x i32>)>
+// CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.GlobalVariable @in_block {per_primitive_ext} : !spirv.ptr<!spirv.struct<(!spirv.array<3 x i32>)>, Input>
+  spirv.func @read_block_wrapped_array(%idx : i32) -> i32 "None" {
+    %0 = spirv.mlir.addressof @in_block : !spirv.ptr<!spirv.struct<(!spirv.array<3 x i32>)>, Input>
+    %c0 = spirv.Constant 0 : si32
+    %ac = spirv.AccessChain %0[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.array<3 x i32>)>, Input>, si32, i32 -> !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %ac : i32
+    spirv.ReturnValue %v : i32
+  }
+}
+

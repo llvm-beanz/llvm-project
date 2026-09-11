@@ -2607,6 +2607,35 @@ public:
 /// `getDynamicVertexIndexedAccess`/`getDynamicRowIndexedAccess` are written
 /// to expect exactly this real-pointer shape (see their own comments).
 ///
+/// (Roadmap H87) Returns true if \p PointeeType is either a plain
+/// `spirv.array`, or a single-member `spirv.struct` wrapping one -- the
+/// shape a mesh shader's own per-primitive/per-vertex flat-array `Input`
+/// interface block takes (e.g. a fragment stage reading a `PerPrimitiveEXT`
+/// varying array written by a mesh shader): SPIR-V's `Block` decoration
+/// requires an interface block to be a struct even when it logically holds
+/// nothing but a single array, unlike the bare-array shape a geometry or
+/// tessellation entry's own `gl_in[]` uses. Both shapes need the same
+/// real-pointer treatment described in this file's own array-Input
+/// comments below, since both may be indexed with a genuinely dynamic
+/// (loop-carried or per-primitive) index.
+bool isArrayLikeStageIOType(mlir::Type PointeeType) {
+  if (mlir::isa<mlir::spirv::ArrayType>(PointeeType))
+    return true;
+  auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(PointeeType);
+  return StructTy && StructTy.getNumElements() == 1 &&
+         mlir::isa<mlir::spirv::ArrayType>(StructTy.getElementType(0));
+}
+
+/// LLVM-dialect counterpart of isArrayLikeStageIOType, applied to an
+/// already-converted type (see StageIOAddressOfPattern's own use, below).
+bool isArrayLikeLLVMType(mlir::Type Type) {
+  if (mlir::isa<mlir::LLVM::LLVMArrayType>(Type))
+    return true;
+  auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(Type);
+  return StructTy && StructTy.getBody().size() == 1 &&
+         mlir::isa<mlir::LLVM::LLVMArrayType>(StructTy.getBody().front());
+}
+
 /// \p StageIOVariables must have been collected by
 /// feme::spirv::prepareStageIOVariables, before the conversion ran: by the
 /// time an `Input`/`Output` variable's own use is legalized, an earlier
@@ -2652,9 +2681,11 @@ public:
     if (!ValueType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
-    // (Roadmap H7y) An array-typed `Input` variable stays a real pointer
-    // instead of an eagerly-loaded value -- see this class's own comment.
-    if (mlir::isa<mlir::LLVM::LLVMArrayType>(ValueType)) {
+    // (Roadmap H7y/H87) An array-typed `Input` variable -- plain or
+    // wrapped in a single-member interface-block struct -- stays a real
+    // pointer instead of an eagerly-loaded value -- see this class's own
+    // comment and isArrayLikeStageIOType/isArrayLikeLLVMType above.
+    if (isArrayLikeLLVMType(ValueType)) {
       Rewriter.replaceOp(Op, Address);
       return mlir::success();
     }
@@ -2668,15 +2699,16 @@ private:
 };
 
 /// Returns true if \p Op's base operand is an `Input`-storage-class
-/// pointer to an array (see StageIOAddressOfPattern's own comment for why
-/// such a variable stays a real pointer, and StageIOArrayAccessChainPattern
-/// below for what this identifies it for).
+/// pointer to an array-like type (see isArrayLikeStageIOType, and
+/// StageIOAddressOfPattern's own comment for why such a variable stays a
+/// real pointer, and StageIOArrayAccessChainPattern below for what this
+/// identifies it for).
 bool isInputArrayAccessChain(mlir::spirv::AccessChainOp Op) {
   auto BaseType =
       mlir::dyn_cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
   return BaseType &&
          BaseType.getStorageClass() == mlir::spirv::StorageClass::Input &&
-         mlir::isa<mlir::spirv::ArrayType>(BaseType.getPointeeType());
+         isArrayLikeStageIOType(BaseType.getPointeeType());
 }
 
 /// (Roadmap H7y) Converts a `spirv.AccessChain` whose base operand is a
@@ -7888,27 +7920,31 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // this conversion's answer for every scalar/vector `Input` pointer type
   // stays exactly one thing regardless of which kind of variable it is.
   //
-  // (Roadmap H7y) An *array*-typed `Input` pointer (e.g. `gl_in[]`, a
-  // geometry/tessellation entry's own per-vertex input, or the standalone
-  // `gl_ClipDistance`/`gl_CullDistance` builtin array) is the one shape this
-  // "always a value" answer cannot support at all: LLVM's `extractvalue`
-  // can only select a compile-time-constant index out of a value, so a
-  // genuinely dynamic (loop-carried) index into such an array has no
-  // representation as a value-typed read whatsoever. StageIOAddressOfPattern
-  // accordingly keeps an array-typed `Input` variable a real pointer instead
-  // (see its own comment) -- this conversion has to answer consistently, or
-  // a later pattern that calls back into it (e.g. MLIR's own generic
-  // `AccessChainPattern`, which decides whether its base operand is a real
-  // pointer by re-converting the *original* SPIR-V pointer type rather than
-  // inspecting the already-converted operand's actual type) would compute
-  // the wrong shape and build an ill-typed `getelementptr`.
+  // (Roadmap H7y/H87) An *array-like*-typed `Input` pointer (e.g. `gl_in[]`,
+  // a geometry/tessellation entry's own per-vertex input; the standalone
+  // `gl_ClipDistance`/`gl_CullDistance` builtin array; or a mesh shader's
+  // own per-primitive/per-vertex flat-array interface block, which SPIR-V's
+  // `Block` decoration forces to be a single-member struct wrapping the
+  // array rather than a bare array -- see isArrayLikeStageIOType) is the
+  // one shape this "always a value" answer cannot support at all: LLVM's
+  // `extractvalue` can only select a compile-time-constant index out of a
+  // value, so a genuinely dynamic (loop-carried or per-primitive) index
+  // into such an array has no representation as a value-typed read
+  // whatsoever. StageIOAddressOfPattern accordingly keeps an array-like
+  // `Input` variable a real pointer instead (see its own comment) -- this
+  // conversion has to answer consistently, or a later pattern that calls
+  // back into it (e.g. MLIR's own generic `AccessChainPattern`, which
+  // decides whether its base operand is a real pointer by re-converting
+  // the *original* SPIR-V pointer type rather than inspecting the
+  // already-converted operand's actual type) would compute the wrong
+  // shape and build an ill-typed `getelementptr`.
   TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
                                   -> std::optional<mlir::Type> {
     if (Type.getStorageClass() != mlir::spirv::StorageClass::Input &&
         !isResourcePointer(Type))
       return std::nullopt;
     if (Type.getStorageClass() == mlir::spirv::StorageClass::Input &&
-        mlir::isa<mlir::spirv::ArrayType>(Type.getPointeeType())) {
+        isArrayLikeStageIOType(Type.getPointeeType())) {
       if (!TypeConverter.convertType(Type.getPointeeType()))
         return std::nullopt;
       return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
