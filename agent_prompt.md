@@ -40,46 +40,32 @@ spearately. Record your thought process into a file named "agent_thoughts.md" at
 the root of the repository, appending to the file under a new top-level heading
 if it already exists, and commit it in its own commit when you're done. Please
 consult the i-have-adhd skill (from ~/.agents/skills) when writing the
-agent_thoughts.md file.
+agent_thoughts.md file. Please include suggested next steps if applicable in the
+agent thoughts.
 
 # Request
 
 Can you work on H93b or other blocking work to make progress on the H-series
 milestones?
 
-> **Thread an explicit mesh (or geometry) shader-authored `gl_PrimitiveID`
-> through to the fragment invocation, instead of the rasterizer always
-> overwriting it with an auto-incrementing raster-order counter**:
-> `Executor.cpp`'s triangle/line/point-emitting lambda (~`ST.PrimitiveID =
-> PrimitiveCounter++`) unconditionally synthesizes every fragment invocation's
-> `gl_PrimitiveID` from raster order -- correct only as the Vulkan-spec
-> *fallback* for when no earlier stage writes it, but applied even when a
-> mesh/GS stage explicitly does. `StageStorage.cpp` (~line 95-135) deliberately
-> excludes any `SystemValue`-tagged `Input` element (except
-> `ClipDistance`/`CullDistance` and geometry-input vertex-array members) from
-> ordinary interpolated stage storage, so there is currently no path at all for
-> an authored primitive-output `PrimitiveID` to reach the fragment side. For
-> `max_mesh_output_primitives_256` specifically, `emitPointQuad` calls the
-> triangle-emitting lambda twice per point (a point becomes a 2-triangle quad),
-> so `PrimitiveCounter` advances 2 per point; assuming (plausibly, not yet
-> re-confirmed with a direct `Inv.PrimitiveID` print after H93a landed) the
-> first-pushed triangle of each quad always wins the CTS's 1x1-pixel
-> framebuffer, point `P`'s surviving fragment gets auto-ID `2*P` -- exactly
-> matching the observed symptom (all 128 even indices `0,2,...,254` of the CTS's
-> `ssbo.flags` get set, all 128 odd ones never do, and `P>=128` produces
-> silently-dropped out-of-bounds writes). Needs: (1) a way for
-> `EntrySignature`/stage linking to recognize when a producing stage's `Output`
-> elements include a `SystemValue::PrimitiveID` and thread that fact to the
-> rasterizer (likely via `StageLink.cpp`); (2) `Executor.cpp`'s
-> fragment-invocation assembly to prefer that authored value (sourced from
-> `Merged`/`PrimitiveOutputs`, by primitive index, not raster order) over
-> `PrimitiveCounter++` whenever present, for every primitive class
-> (points/lines/triangles alike, not just the mesh-point shape that exposed it);
-> (3) regression coverage at both the `Executor.cpp` unit-test level (an
-> explicit-`PrimitiveID`-authoring mesh entry, asserting the fragment
-> invocation's `PrimitiveID` matches the authored value rather than raster
-> order) and a real CTS re-run of `max_mesh_output_primitives_256` confirming it
-> passes outright. Not yet started -- deferred here as its own milestone given
-> the architectural scope (touches `StageStorage.cpp`, `StageLink.cpp`, and
-> `Executor.cpp`'s triangle/line/point assembly all at once) rather than
-> attempted as a quick follow-on patch
+> **`properties.mesh_payload_and_shared_memory_size`/`mesh_shared_memory_size`/`task_shared_memory_size`/`task_payload_and_shared_memory_size`'s
+> `feme-cpu-linearize: ... has more than one divergent exit check ...`** (4
+> cases: the original 2 (newly exposed by H90's own
+> `spirv.SpecConstantOperation` fix) plus 2 more
+> (`task_shared_memory_size`/`task_payload_and_shared_memory_size`) newly
+> exposed by H91's own signature-metadata fix, hitting the identical
+> diagnostic): `LoopLinearizer`'s own `OtherCondBrBlocks` classification finds
+> two separately-divergent exit-check candidates in the same loop (this case's
+> own shared-memory read/write verification loop has two separate per-invocation
+> bounds checks -- a write-phase one and a read-phase one, per the CTS shader's
+> own two `for` loops each guarded by `if (elemIdx < sharedMemoryElements)`) and
+> conservatively refuses to linearize rather than attempting to fuse or
+> otherwise support genuinely more than one divergent check per loop -- a
+> documented, intentional "roadmap milestone 6 deviation" limitation, not a
+> crash or miscompile. Not yet triaged -- needs its own real IR reduction of one
+> of these four cases (mirroring L40/L42/H89a/H89b's own established
+> `feme-cpu-linearize`-focused reduction technique) to determine whether the two
+> checks can be fused/handled as a genuinely new `LoopLinearizer` capability, or
+> whether this specific shape has some narrower, cheaper-to-support structure
+> (e.g. one check strictly subsuming the other) that does not need full general
+> multi-divergent-check support
