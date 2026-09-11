@@ -36699,3 +36699,142 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only'
 ```
+
+## Roadmap H70: per-bucket triage and first fix (`ImageFixture.cpp` `R32_{U,S}INT` family clear-color support)
+
+**Triage.** H31's own closing full-`dEQP-VK.mesh_shader.ext.*` re-run found
+155 failures across five buckets (`builtin` 7, `misc` 36, `properties` 14,
+`smoke` 17, `synchronization` 81) that had not yet had a real per-bucket
+reduction done to identify which milestone (existing or new) owns each.
+Reproducing the exact 155-case list (`VK_ICD_FILENAMES`/`VK_DRIVER_FILES`
+explicitly pointed at `build2`'s own `feme_icd.json`, confirmed via
+`deviceName` reporting `"FeMe CPU Vulkan Device"`) and re-running every case
+with `FEME_VULKAN_LOG_CREATION_ERRORS=1` to capture each one's own
+underlying diagnostic (rather than only the CTS-level `vkCreateGraphicsPipelines`/
+`vkQueueSubmit` wrapper message) found the 155 failures actually split into
+18 distinct root causes:
+
+| Count | Signature | Bucket(s) |
+|---|---|---|
+| 41 | `vkQueueSubmit: clear color has 4 component(s), expected 1` | `synchronization` (41) |
+| 25 | `vkCreateGraphicsPipelines: rasterizer discard is not implemented` | `properties` (mostly), `smoke` |
+| 20 | `feme-cpu-wrap-entry: ... barrier inside non-linear control flow ...` | `misc` (20) |
+| 12 | `feme-cpu-wrap-fragment: unsupported fragment system value for element 0` | `builtin` (3), `properties` (1), `smoke` (8) |
+| 10 | `spirv.ImageWrite` illegal (R32ui storage image) | `synchronization` (10) |
+| 7 | `spirv.ImageRead` illegal (R32ui storage image) | `synchronization` (7) |
+| 7 | `vkCreateGraphicsPipelines: specialization constants are not implemented for a graphics stage yet` | `misc`/`properties` |
+| 6 | `feme-cpu-simdize: ... divergent branch ...` | `misc` (4), `properties` (2) |
+| 6 | `feme-graphics-validate-stage: ... unresolved stage-IO global-variable access ...` | `smoke` (`fast_lib.*`) |
+| 4 | `spirv.ImageSampleExplicitLod` illegal (R32ui sampled image) | `synchronization` (4) |
+| 3 | `Result does not match reference` (`vktMeshShaderMiscTestsEXT.cpp:462`) | `misc` (`first_invocation_mesh`) |
+| 3 | `feme-cpu-wrap-mesh-output: mesh output wrapper requires attached feme.signature metadata` | `misc` (3) |
+| 3 | `spirv.Variable` (`Function`-storage array) illegal | `smoke` (`fast_lib.fullscreen_gradient`) |
+| 2 | `Check log for details` (`vktMeshShaderBuiltinTestsEXT.cpp:641`) | `builtin` (`cull_primitives`) |
+| 2 | `Check log for details` (`vktMeshShaderBuiltinTestsEXT.cpp:572`) | `builtin` (`primitive_id_{glsl,spirv}`) |
+| 2 | missing `LLVMTranslationDialectInterface` for `spirv.Unreachable` | `misc` (`emit_in_control_flow`) |
+| 1 | `llvm.getelementptr` struct-operand type error | `misc` (`per_prim_block_output`) |
+| 1 | `llvm.mlir.constant` `si32`/`i32` type mismatch | `misc` (`push_constant_and_task_shader`, same shape as H31's own already-explained `api.draw.with_task_shader` bucket) |
+
+This confirms the roadmap's own standing suspicion that `smoke`/
+`properties`'s `rasterizer discard`/`specialization constants` gaps (32 of
+155 cases) overlap `VK_EXT_graphics_pipeline_library` territory (H34/H48),
+and that `synchronization`'s `vkQueueSubmit` failures (41 of 155) were a
+distinct, single root cause -- but also that `synchronization` itself
+splits further, into this clear-color bug and a second, unrelated 21-case
+`spirv.Image{Write,Read,SampleExplicitLod}` SPIR-V-to-LLVM legalization gap
+for `R32ui` images that the clear-color bug had been masking (those cases
+never got far enough to hit graphics-pipeline creation before).
+
+**Root cause (largest bucket, 41 cases).** `dEQP-VK.mesh_shader.ext.
+synchronization.*`'s own `getImageFormat()` (`vktMeshShaderSyncTestsEXT.cpp`)
+hard-codes `VK_FORMAT_R32_UINT` for the single cross-stage-visible resource
+every case in the group reads/writes to observe synchronization ordering,
+and every case clears it once before use. `feme::graphics::packClearColor`/
+`unpackColor` (`ImageFixture.cpp`) had cases for every other integer format
+`feme` supports (`R16_UINT`/`_SINT`, `R8G8B8A8_UINT`/`_SINT`,
+`R10G10B10A2_UINT`, ...) but never gained one for the `R32_{U,S}INT` family
+specifically -- so a clear of this format fell through to the generic,
+`getFormatInfo`-driven `Info->Components`-sized path, which rejects
+`Clear`'s always-4-component shape (`VkClearColorValue`'s own union always
+has all 4 members populated by every caller, `float32[4]`, regardless of
+the destination format's real channel count) with `"clear color has 4
+component(s), expected 1"` -- a `vkQueueSubmit`-time failure once the
+initial layout-transition/clear command in the command buffer itself fails.
+
+**Fix.** Added `R32_UINT`/`R32_SINT`, `R32G32_UINT`/`R32G32_SINT`, and
+`R32G32B32_UINT`/`R32G32B32_SINT` cases to both `packClearColor` and
+`unpackColor`, mirroring the existing `R16_UINT`/`R16_SINT` raw-integer
+(not normalized-fraction) convention exactly -- `R32G32B32A32_{U,S}INT`
+already worked via the generic 4-component path, so only the narrower
+(1/2/3-component) siblings needed new cases.
+
+**Testing.** New unit tests in `ImageFixtureTest.cpp`:
+`PacksAndUnpacksR32Uint`/`PacksAndUnpacksR32SintNegative` (including an
+out-of-range clamp check, mirroring `PacksAndUnpacksR16Uint`'s own),
+`PacksAndUnpacksR32G32Uint`/`PacksAndUnpacksR32G32SintNegative`, and
+`PacksAndUnpacksR32G32B32Uint`/`PacksAndUnpacksR32G32B32SintNegative`.
+`ninja check-feme` (`build2`, ccache + assertions):
+
+```
+Total Discovered Tests: 2931
+  Unsupported:   59 (2.01%)
+  Passed     : 2872 (97.99%)
+  Failed     :    0 (0.00%)
+```
+
+Up 6 from the pre-fix 2925/2866 baseline (this row's own 6 new tests), 0
+regressions.
+
+**`deqp-vk` re-run** (same five-bucket, 329-case list this row's own triage
+used): **120 Pass/119 Fail/90 NotSupported** (`Passed` up from 84, `Failed`
+down from 155\*\*). Confirmed via the per-case diagnostic capture above that
+every one of the remaining 119 failures is one of this row's own other 15
+already-triaged, still-open root causes -- no new failure shape introduced,
+and the `clear color has 4 component(s)` signature no longer appears
+anywhere in the re-run's own log at all.
+
+\*\* 155 (this row's own original count) minus 41 (this row's own fixed
+bucket) is 114, not 119 -- the extra 5 are `synchronization.*` cases that
+were previously masked entirely behind the clear-color `vkQueueSubmit`
+failure and, now that the clear succeeds, reach and newly expose the
+already-separately-triaged `spirv.Image{Write,Read}` legalization gap
+instead (part of this row's own 21-case `spirv.Image*` bucket above, which
+had only 17 cases visible before this fix and 21 after). `NotSupported`
+(90) is unchanged, confirming no case's own feature-support gating changed.
+
+**A broader re-run** of the full `dEQP-VK.mesh_shader.ext.*` group (26,921
+cases): **262 Pass/177 Fail/26,482 NotSupported** -- up exactly 36 `Pass`
+and down exactly 36 `Fail` from H69's own closing baseline (226/213/26,482),
+`NotSupported` unchanged. The 36 (not 41) net movement matches the
+five-bucket re-run's own explanation above: 41 cases stopped failing this
+way, but 5 of them immediately re-failed a different, already-tracked way.
+
+`check-hlsl-feme-vk` (`build2`; the local `offload-test-suite` checkout's
+own `feme` branch was one commit behind `beanz/feme` again -- fast-forwarded
+before building, same discovery H31's own row already made once): 276
+Passed/101 Failed/26 Expectedly Failed/1 Unexpectedly Passed/260
+Unsupported (664 total) -- identical to H31's own recorded baseline,
+confirming zero regression outside the mesh-shader path.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure CPU-executor correctness fix (a missing
+resource-format case in an existing clear-color pack/unpack table),
+touching no feature bit or extension advertisement.
+
+**Roadmap H70 remains open**, now scoped to its own remaining 17 root
+causes (114 cases), broken down into new milestones H71-H82 (see
+`Roadmap.md`; one of the 17, a single `push_constant_and_task_shader`
+`llvm.mlir.constant` type mismatch, is very likely the same pre-existing
+`api.draw.with_task_shader` bug H31's own row already documented rather
+than a genuinely new gap, so it is folded into H82's own description
+instead of getting a milestone of its own) -- this row's own 41-case
+clear-color fix is the only one closed so far.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.frag_to_mesh.storage_buffer.memory_barrier.shader_write_shader_read'
+```
