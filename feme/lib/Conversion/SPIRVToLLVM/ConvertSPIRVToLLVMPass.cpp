@@ -729,6 +729,19 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
       // time that use is legalized (roadmap L7j).
       for (auto &SpecConstant : feme::spirv::prepareSpecConstants(SPIRVModule))
         SpecConstants[SpecConstant.getKey()] = SpecConstant.getValue();
+      // Roadmap H90: `spirv.SpecConstantOperation` has no lowering
+      // pattern of its own anywhere (neither upstream MLIR nor this
+      // project defines one -- it is simply marked illegal along with
+      // the rest of the `spirv` dialect and left for the conversion to
+      // fail on), so inline every one of them in place first: this
+      // ICD's own `ReferenceOfConversionPattern` above already resolves
+      // a `spirv.mlir.referenceof` to its spec constant's real
+      // compile-time value, so once that substitution has happened
+      // there is nothing "specialization-time" left about the wrapped
+      // arithmetic/comparison/select op at all -- it can simply take the
+      // wrapping op's place and legalize like any other ordinary
+      // instruction, via whichever pattern already handles that op kind.
+      feme::spirv::inlineSpecConstantOperations(SPIRVModule);
       // Roadmap H81: a structured-control-flow `spirv.func` body may
       // still contain a block with no predecessors at all -- e.g. the
       // merge block SPIR-V's own structured-CFG rules require after an

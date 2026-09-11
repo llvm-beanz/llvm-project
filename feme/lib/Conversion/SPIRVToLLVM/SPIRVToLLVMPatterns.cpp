@@ -8288,6 +8288,27 @@ feme::spirv::prepareSpecConstants(mlir::spirv::ModuleOp Module) {
   return Values;
 }
 
+void feme::spirv::inlineSpecConstantOperations(mlir::spirv::ModuleOp Module) {
+  // Collect first, then rewrite: `SpecConstantOperationOp::verifyRegions`
+  // guarantees every operand referenced by the wrapped op is defined by a
+  // `spirv.Constant`/`spirv.mlir.referenceof`/another
+  // `spirv.SpecConstantOperation` that dominates it in the ordinary SSA
+  // sense (a sibling earlier in the same block, never nested inside this
+  // op's own region), so `replaceAllUsesWith` below updates every use of
+  // a since-inlined op's result module-wide regardless of which order
+  // this list is processed in -- no dependency ordering is required.
+  llvm::SmallVector<mlir::spirv::SpecConstantOperationOp> Ops;
+  Module.walk(
+      [&](mlir::spirv::SpecConstantOperationOp Op) { Ops.push_back(Op); });
+  for (mlir::spirv::SpecConstantOperationOp Op : Ops) {
+    mlir::Block &Body = Op.getBody().front();
+    mlir::Operation *Inner = &Body.front();
+    Inner->moveBefore(Op);
+    Op.replaceAllUsesWith(Inner->getResult(0));
+    Op.erase();
+  }
+}
+
 void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,

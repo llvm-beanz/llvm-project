@@ -136,6 +136,30 @@ using SpecConstantValueMap = llvm::StringMap<mlir::TypedAttr>;
 /// already have been erased.
 SpecConstantValueMap prepareSpecConstants(mlir::spirv::ModuleOp Module);
 
+/// Inlines every `spirv.SpecConstantOperation` in \p Module in place
+/// (roadmap H90): the op has no lowering pattern of its own anywhere
+/// (neither upstream MLIR nor this project defines one), so the
+/// dialect-conversion driver simply refuses to legalize it and the whole
+/// conversion fails outright. Unlike `spirv.SpecConstant`/
+/// `spirv.SpecConstantComposite` (see SpecConstantValueMap/
+/// prepareSpecConstants above), a `spirv.SpecConstantOperation` is not a
+/// declaration referenced by symbol from elsewhere -- it directly wraps
+/// one real arithmetic/comparison/select op (its own single operation's
+/// operands are ordinary SSA values already visible at that program
+/// point, most commonly a `spirv.mlir.referenceof` of a spec constant or
+/// another `spirv.SpecConstantOperation`, not values threaded through the
+/// wrapping op's own operand list, which is always empty), so there is
+/// nothing to "resolve" ahead of time the way a plain spec constant's
+/// declared default value is: the fix is simply to unwrap it, moving its
+/// one enclosed op to stand directly in its place and dropping the
+/// wrapper, so that op's own already-existing SPIR-V-to-LLVM conversion
+/// pattern (whichever one already handles that op kind for ordinary,
+/// non-specialization-constant arithmetic) legalizes it like any other
+/// instruction. Must run before the conversion, the same way
+/// prepareResourceVariables/prepareStageIOVariables/prepareSpecConstants
+/// do.
+void inlineSpecConstantOperations(mlir::spirv::ModuleOp Module);
+
 /// Recovers the address space of every non-builtin `Input`/`Output`
 /// variable \p Module declares. Must run before the conversion: unlike a
 /// resource or builtin variable, a stage-IO variable's declaration survives
