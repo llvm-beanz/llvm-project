@@ -2253,7 +2253,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       [&](const StageStorage &RasterOutRef,
           llvm::ArrayRef<std::array<uint32_t, 3>> AbsTriIndices,
           llvm::ArrayRef<std::array<uint32_t, 2>> AbsLineIndices,
-          RasterPrimitiveClass RasterClass) -> Error {
+          RasterPrimitiveClass RasterClass,
+          // (roadmap H93) Explicit point-primitive-to-vertex-row indices,
+          // mirroring `AbsTriIndices`/`AbsLineIndices` above. Left empty
+          // (the default), a point primitive is assumed to map 1:1 onto
+          // `RasterOutRef`'s own invocation range in row order -- true for
+          // every non-mesh point-topology chain (vertex/geometry), where
+          // each emitted point owns its own exclusive vertex row and no
+          // two point primitives ever reference the same one. A mesh
+          // entry's own `gl_PrimitivePointIndicesEXT` can legally violate
+          // that assumption (multiple point primitives naming the same
+          // vertex), so its caller below always passes real indices.
+          llvm::ArrayRef<uint32_t> AbsPointIndices = {}) -> Error {
     const StageStorage *RasterOut = &RasterOutRef;
 
     // (roadmap H9) `CLIPPING_INVOCATIONS`: one per primitive entering
@@ -2264,7 +2275,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (Draw.Stats)
       Draw.Stats->ClippingInvocations +=
           RasterClass == RasterPrimitiveClass::Point
-              ? RasterOutRef.InvocationCount
+              ? (AbsPointIndices.empty() ? RasterOutRef.InvocationCount
+                                         : AbsPointIndices.size())
               : AbsTriIndices.size() + AbsLineIndices.size();
 
     // (roadmap H21d) No `VSPosition` means the last pre-rasterization
@@ -2827,12 +2839,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     }
 
     if (RasterClass == RasterPrimitiveClass::Point) {
-      uint32_t PointCount = RasterOutRef.InvocationCount;
+      uint32_t PointCount = AbsPointIndices.empty()
+                                ? RasterOutRef.InvocationCount
+                                : static_cast<uint32_t>(AbsPointIndices.size());
       for (uint32_t J = 0; J != PointCount; ++J) {
-        std::optional<PrimitiveState> Primitive = resolvePrimitiveState(J);
+        uint32_t VertexIdx = AbsPointIndices.empty() ? J : AbsPointIndices[J];
+        std::optional<PrimitiveState> Primitive =
+            resolvePrimitiveState(VertexIdx);
         if (!Primitive)
           continue;
-        RasterVertex V = vertexAt(J);
+        RasterVertex V = vertexAt(VertexIdx);
         if (V.Clip[3] <= ClipEpsilon)
           continue;
         // (roadmap H7k) Per the Vulkan spec, a point primitive outside
@@ -3824,10 +3840,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // ives` below only ever sees row indices, so this is invisible to
       // it, and every other caller of `Merged` in this function already
       // only reads through those same row indices.
+      // (roadmap H93) `Points` gets a real per-primitive width (1) too,
+      // not 0: a mesh entry's `gl_PrimitivePointIndicesEXT` can legally
+      // name the *same* vertex from more than one point primitive (e.g.
+      // every primitive sharing a single, common vertex), so point
+      // primitives need exactly the same clobber protection triangles/
+      // lines already get below whenever `PerPrimitive` outputs exist.
       uint32_t VerticesPerRasterPrim =
-          Mesh.OutputTopology == MeshOutputTopology::Triangles  ? 3
-          : Mesh.OutputTopology == MeshOutputTopology::Lines    ? 2
-                                                                 : 0;
+          Mesh.OutputTopology == MeshOutputTopology::Triangles ? 3
+          : Mesh.OutputTopology == MeshOutputTopology::Lines   ? 2
+                                                               : 1;
       bool DuplicateCorners = HasPrimitiveOutputs && VerticesPerRasterPrim > 0;
       uint32_t TotalCorners = 0;
       if (DuplicateCorners)
@@ -3901,6 +3923,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
       SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
       SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
+      SmallVector<uint32_t, 8> AbsPointIndices;
       uint32_t VertexBase = 0;
       uint32_t CornerBase = TotalVertices;
       for (const Meshlet &M : Meshlets) {
@@ -3938,14 +3961,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             AbsLineIndices.push_back({RasterIdx[0], RasterIdx[1]});
             break;
           case MeshOutputTopology::Points:
-            // A point's own "index list" is a single, implicit
-            // self-reference -- `RasterizePrimitives` rasterizes every one
-            // of a point-class draw's own invocations directly (this
-            // meshlet's own vertices, already merged into `Merged`), so
-            // there is no separate index to record here. Points never
-            // share a vertex between two distinct primitives (each point
-            // primitive owns exactly one vertex), so no corner
-            // duplication is needed for them either.
+            // (roadmap H93) Unlike triangles/lines, a mesh entry's point
+            // primitives don't share `RasterIdx`'s corner-duplication
+            // decision with any neighboring primitive's *shape* -- each
+            // point is exactly one row wide either way -- but they can
+            // still share the same underlying vertex (via
+            // `gl_PrimitivePointIndicesEXT`), so `RasterIdx[0]` (the
+            // real, possibly-duplicated row) must be recorded explicitly
+            // rather than assumed to equal this primitive's own ordinal
+            // position, which `RasterizePrimitives`'s point path used to
+            // assume before this fix.
+            AbsPointIndices.push_back(RasterIdx[0]);
             break;
           }
         }
@@ -3953,7 +3979,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
 
       if (Error E = RasterizePrimitives(*Merged, AbsTriIndices, AbsLineIndices,
-                                        RasterClass))
+                                        RasterClass, AbsPointIndices))
         return E;
     }
     return Error::success();

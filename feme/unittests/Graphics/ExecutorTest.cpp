@@ -6086,6 +6086,136 @@ TEST(ExecutorTest,
   }
 }
 
+// (Roadmap H93) Four `Points`-topology mesh primitives whose own
+// `SignatureSystemValue::PrimitiveIndices` output (width 1, per
+// `getVerticesPerPrimitive(Points)`) all name the *same* single vertex --
+// mirroring `dEQP-VK.mesh_shader.ext.properties.max_mesh_output_
+// primitives_256`'s own shape (every primitive using `max_vertices=1` and
+// writing `gl_PrimitivePointIndicesEXT[primitiveID] = 0u`). Before this
+// fix, `RasterizePrimitives`'s own point path always rasterized exactly
+// `RasterOutRef.InvocationCount` points -- one per *vertex* row, correct
+// for every non-mesh point-topology chain (there, each point invocation
+// always owns its own exclusive vertex row) but silently collapsing this
+// legal mesh shape's 4 primitives down to the meshlet's own single merged
+// vertex row, so only 1 of the 4 primitives ever reached the fragment
+// stage. A constant-low-alpha fragment output, additively blended, makes
+// the miscount directly observable: 1 surviving primitive accumulates to
+// ~32/255, 4 to ~128/255.
+constexpr char MeshFourPointPrimitivesSharedVertexShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 1, i32 4)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -0.25, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.25, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 1)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 2)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 3)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+// A fragment stage with no inputs, writing a fixed low (0.125) red/alpha --
+// small enough that even 4 additively-blended fragments (0.5 total) stay
+// well clear of the 8-bit UNORM target's saturation ceiling, so the sum
+// itself is what distinguishes "1 primitive rasterized" from "4".
+constexpr char LowAlphaConstantRedFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 0.125, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 0.125, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, RastersEveryPointPrimitiveEvenWhenTheyShareASingleVertex) {
+  Context Ctx;
+  SignatureElement PosElt =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position);
+  SignatureElement IdxElt =
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/std::nullopt);
+  IdxElt.ComponentType = SignatureComponentType::UInt;
+  IdxElt.Frequency = SignatureFrequency::PerPrimitive;
+  IdxElt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  EntrySignature MeshSig;
+  MeshSig.Elements = {PosElt, IdxElt};
+  Expected<std::shared_ptr<CompiledStage>> MS =
+      compileStage(Ctx, MeshFourPointPrimitivesSharedVertexShaderIR, "ms_main",
+                   MeshSig, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, LowAlphaConstantRedFragmentShaderIR, "fs_main", FSSig,
+                   ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, Size, Size}};
+  BlendState AdditiveBlend;
+  AdditiveBlend.BlendEnable = true;
+  AdditiveBlend.SrcColorFactor = BlendFactor::One;
+  AdditiveBlend.DstColorFactor = BlendFactor::One;
+  AdditiveBlend.SrcAlphaFactor = BlendFactor::One;
+  AdditiveBlend.DstAlphaFactor = BlendFactor::One;
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments),
+      StencilState{}, std::vector<BlendState>{AdditiveBlend});
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Points;
+  Mesh.MaxOutputVertices = 1;
+  Mesh.MaxOutputPrimitives = 4;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // NDC (-0.25, 0.25) maps to pixel (1, 2) of the 4x4 target (same mapping
+  // `RendersAPointList` already establishes). All 4 primitives share that
+  // one pixel: pre-fix, only 1 of them ever reached the fragment stage
+  // (~32/255); post-fix, all 4 do (~128/255).
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Storage.data() + (Y * Size + X) * 4;
+  };
+  const uint8_t *Pixel = texel(1, 2);
+  EXPECT_NEAR(Pixel[0], 128, 2);
+  EXPECT_EQ(Pixel[1], 0);
+  EXPECT_EQ(Pixel[2], 0);
+  EXPECT_NEAR(Pixel[3], 128, 2);
+  const uint8_t *Untouched = texel(0, 0);
+  EXPECT_EQ(Untouched[3], 0);
+}
+
 // (Roadmap H8p) A fragment shader with a real `uvec2` output (`UInt`,
 // `ComponentCount == 2`) drawn to a real `R16G16_UINT` color attachment --
 // exercises `executeDraws`'s widened `FSColors` validation (accepting a
