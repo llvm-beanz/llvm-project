@@ -612,4 +612,117 @@ TEST(LinearizeTest,
   EXPECT_TRUE(FoundMaskPhi);
 }
 
+// Roadmap H94a: a hand-built two-relay-hop case, distilled directly from a
+// real captured pre-`feme-cpu-linearize` IR reduction of
+// `dEQP-VK.mesh_shader.ext.properties.mesh_shared_memory_size`'s own
+// workgroup-shared-memory verification loop (see the checked-in
+// `Transforms/CPU/Linearize/loop-relay-chain-two-hops.ll` lit test for the
+// full, real-world version this was distilled from). The loop's one real,
+// divergent exit check (`body`'s `%mismatch`) reaches the loop's exit
+// only via `Flow`, and `Flow`'s own "exit" decision reaches it in turn
+// only via a *second* relay hop, `loop.exit.guard` -- exactly the shape
+// `LoopLinearizer`'s pre-H94a `OtherCondBrBlocks` classification saw as
+// two independently divergent exit checks (`body`/`Flow` and `Flow`/
+// `loop.exit.guard` respectively) and diagnosed as unsupported.
+//
+// Two structural details this test's own development found essential,
+// not merely incidental, to reproducing the bug (earlier, simpler
+// attempts at a from-scratch synthetic two-relay-hop shape did not
+// reproduce it at all, and are recorded in agent_thoughts.md's "H94a
+// session" entry so this is not rediscovered from scratch again):
+// (1) the loop itself must be nested inside an *enclosing* divergent
+// branch (here, `entry`'s own `%is.zero` thread-ID check) -- a loop whose
+// own induction variable and checks are otherwise entirely uniform is
+// never classified as divergent at all by `UniformityInfo`'s control-
+// dependence propagation, so `body`'s in-loop shared-memory-mismatch
+// check needs that enclosing divergent context to itself become
+// divergent; (2) the loop's own two exit edges (`doexit` and
+// `loop.exit.guard._crit_edge`) must first fully unify into one single
+// block (`loopexit_merged`, mirroring what a real `UnifyLoopExits` pass
+// run would produce) before reaching the outer diamond's own
+// reconvergence block -- `DiamondFlattener::validate` requires the
+// reconvergence block to have exactly two predecessors, which a loop
+// whose two exit edges both flow directly into it (without this
+// intermediate unification) violates.
+TEST(LinearizeTest, LinearizesLoopWithTwoRelayHopsToDivergentExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @spirv_var_41 = external addrspace(3) global [1 x i32]
+    @out_buf = external addrspace(1) global i32
+
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %is.zero = icmp eq i32 %tid, 0
+      br i1 %is.zero, label %loopentry, label %falsearm
+    falsearm:
+      br label %merge
+    loopentry:
+      br label %loopstart
+    loopstart:
+      %idx = phi i32 [ %merged, %Flow._crit_edge ], [ 0, %loopentry ]
+      br label %check
+    incblock:
+      %inc = add i32 %idx, 1
+      br label %Flow24
+    check:
+      %inloop = icmp ult i32 %idx, 1
+      br i1 %inloop, label %body, label %.Flow_crit_edge
+    .Flow_crit_edge:
+      br label %Flow
+    body:
+      %gep = getelementptr [1 x i32], ptr addrspace(3) @spirv_var_41, i32 0, i32 %idx
+      %loaded = load i32, ptr addrspace(3) %gep, align 4
+      %mul = mul i32 %idx, 3
+      %expected = add i32 %mul, 1000
+      %mismatch = icmp eq i32 %loaded, %expected
+      br i1 %mismatch, label %match, label %.Flow24_crit_edge
+    .Flow24_crit_edge:
+      br label %Flow24
+    Flow24:
+      %carry = phi i32 [ %inc, %incblock ], [ poison, %.Flow24_crit_edge ]
+      %exit1 = phi i1 [ false, %incblock ], [ true, %.Flow24_crit_edge ]
+      br label %Flow
+    match:
+      br label %incblock
+    Flow:
+      %merged = phi i32 [ %carry, %Flow24 ], [ poison, %.Flow_crit_edge ]
+      %exit2 = phi i1 [ false, %Flow24 ], [ true, %.Flow_crit_edge ]
+      %exit3 = phi i1 [ %exit1, %Flow24 ], [ true, %.Flow_crit_edge ]
+      br i1 %exit3, label %loop.exit.guard, label %Flow._crit_edge
+    Flow._crit_edge:
+      br label %loopstart
+    loop.exit.guard:
+      %Guard.inv = xor i1 %exit2, true
+      br i1 %Guard.inv, label %doexit, label %loop.exit.guard._crit_edge
+    doexit:
+      br label %loopexit_merged
+    loop.exit.guard._crit_edge:
+      br label %loopexit_merged
+    loopexit_merged:
+      %found.mismatch = phi i1 [ true, %doexit ], [ false, %loop.exit.guard._crit_edge ]
+      %flag = select i1 %found.mismatch, i32 1, i32 0
+      store i32 %flag, ptr addrspace(1) @out_buf, align 4
+      br label %merge
+    merge:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="8,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundMaskAny = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getName() == "feme.cpu.mask.any")
+        FoundMaskAny = true;
+  EXPECT_TRUE(FoundMaskAny);
+}
+
 } // namespace
