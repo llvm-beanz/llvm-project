@@ -77139,3 +77139,165 @@ run indefinitely. Better to close the named target cleanly, verify it
 thoroughly, document the newly-found tail honestly, and stop there.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H69 session: two independent bugs behind one 80-case rendering-mismatch bucket
+
+H31's own closing full-`dEQP-VK.mesh_shader.ext.*` re-run left this
+session two new named blockers: H69 (80 `in_out.32_bits_only` pixel
+mismatches) and H70 (155 `builtin`/`misc`/`properties`/`smoke`/
+`synchronization` pipeline-creation/submit failures). I picked H69,
+since it had a much more specific, actionable symptom (a pixel
+comparison failure with a concrete source line,
+`vktMeshShaderInOutTestsEXT.cpp:1590`) than H70's grab-bag of five
+unrelated buckets that explicitly still needed their own per-bucket
+triage before anyone could even say which milestone should own which
+sub-case.
+
+## Reproducing and narrowing the failure
+
+I reproduced all 80 cases against the real `feme_vulkan` ICD via
+`deqp-vk` first, to confirm the roadmap's own count and get a concrete
+qpa log to extract rendered/reference/error-mask PNGs from (using
+`--deqp-log-decompiled-spirv=enable` for readable SPIR-V/GLSL alongside
+the images). `permutation_0.mesh_only` was the simplest failing case,
+so I used it as my one reduction target throughout rather than trying
+to understand all 80 permutations' own shapes up front.
+
+The rendered image showed a real but wrong shape -- not solid black or
+garbage, but a plausible-looking picture with specific pixels wrong in
+a way that looked like *index* corruption (wrong triangles being drawn,
+not wrong colors within otherwise-correct triangles). That pointed me
+at `gl_PrimitiveTriangleIndicesEXT` handling specifically, rather than
+varying interpolation/linking (which is what the CTS test name
+"in_out" and H31's own closing note about "a different mesh/fragment
+varying-linking combination" had led me to expect going in -- a good
+reminder that a test's own *name* is a hint about what it's testing,
+not a reliable claim about where the bug actually lives).
+
+## Bug 1: PerPrimitive values clobbering across shared vertices
+
+Adding a debug dump of `FemeMeshArgs::PrimitiveIndices` at the point
+`Executor.cpp` builds it showed `[0,1,2,0,2,3]` where the shader's own
+source clearly wanted `[0,1,2,2,3,1]` -- primitive 1's own indices
+(`1,3,2`) were reading back as `0,2,3` instead, i.e. corrupted in a way
+that looked like it was reading primitive 0's own data at some
+positions. Working backward from `Executor::runMeshWorkgroup`'s own
+merge step, I found `unflattenMeshPrimitiveRow` was writing every
+primitive's own `PerPrimitive` value into the *same* shared per-vertex
+row index a later primitive touching that vertex would also write to
+-- fine for `PerVertex` data (by construction, every primitive sharing
+a vertex agrees on its value), corrupting for `PerPrimitive` data. This
+was a self-contained, understand-it-and-fix-it bug: I gave each
+triangle/line primitive its own exclusive set of "corner" rows appended
+after the ordinary per-vertex ones, only when the entry point actually
+declares `PerPrimitive` outputs (a no-op otherwise, so no cost for the
+common case). I wrote a real fragment-reading regression test for this
+(`PerPrimitiveColorsDoNotBleedAcrossPrimitivesSharingAVertex`) and
+deliberately verified it *fails* against a build with only this one fix
+reverted, rather than trusting that a passing test after the fix alone
+proves anything -- a habit I want to keep doing whenever a new
+regression test is added alongside a fix, since a test that would have
+passed even without the fix is worse than no test at all (false
+confidence).
+
+## Bug 2: the real root cause, one level deeper
+
+Fixing bug 1 changed the corruption's shape but didn't fix it --
+`FemeMeshArgs::PrimitiveIndices` was still wrong, just differently
+wrong, which told me there was a second, independent bug still to find.
+This is the point where I nearly went down a wrong path: my first
+instinct was to suspect `SIMDize.cpp`'s widening of masked output
+stores (since that's the layer that turns one scalar shader invocation
+into a SIMD lane), and I spent real time instrumenting it before
+confirming (via pointer-identity debug prints) that each original
+scalar call's `ValueArg` maps 1:1 to its own distinct widened splat --
+i.e., that layer is correct. The actual bug was one level further back:
+a genuine memory dump of `@spirv_var_25` (the mesh shader's own local
+`indices` array, read via `M->getGlobalVariable(Name, /*AllowInternal=*/
+true)` -- the default `false` silently returns null for a `private`
+global, which cost me a confusing false start where my own debug code
+looked broken rather than the thing it was inspecting) showed the
+array's second element reading back at the wrong byte offset.
+
+Isolating this to a standalone `.ll` file and running `opt
+-passes=instcombine` on a bare `[2 x <3 x i32>]` global -- with both a
+real target datalayout string and no datalayout at all -- confirmed
+real LLVM always computes offset 16 for the second element (a 3-wide
+vector's array stride pads up to 16 bytes, its own next power-of-two
+SIMD width), never 12. Yet `feme`'s own compiled IR read that element
+at a hard-coded, baked-in offset of 12. This was the "aha": `feme`'s
+own SPIR-V-to-LLVM conversion pipeline has a genuine, pre-existing,
+*intentional* convention of using this "tight" (unpadded) 12-byte
+offset for exactly this array shape -- documented in
+`CanonicalizeStage.cpp`'s own `getPackedMeshElementSize` helper, which
+I found by re-reading that file rather than guessing, since its own
+doc comment already described this exact 12-vs-16 gap in almost the
+same words I'd have used. The catch: that convention is only safe for a
+mesh entry's own stage-IO *output* array, which `CanonicalizeStage.cpp`
+pattern-matches and erases entirely before any real codegen happens (a
+pure syntactic placeholder). `@spirv_var_25` is not that -- it's a
+genuinely memory-backed `Private`-storage local scratch array whose
+loads/stores survive to real, JIT-executed machine code, where the
+*real* offset (16) is what actually matters.
+
+I made two failed attempts at fixing this by changing the shared
+SPIR-V-to-LLVM array-type converter (`convertArrayTypeIgnoringDecorations`
+in `SPIRVToLLVMPatterns.cpp`) before finding the right fix, both of
+which broke the previously-correct stage-IO output-array convention
+(new `feme-graphics-validate-stage: ... component X is out of range`
+errors) because that converter has no storage-class context available
+to distinguish the two cases -- it's invoked uniformly for both a
+`Private`-storage local and an `Output`-storage stage-IO array. Rather
+than keep trying to thread storage-class context through a shared,
+general-purpose type converter (which felt like it was going to touch
+a lot of surface area for a narrow bug), I stepped back and looked at
+*where* the actual disagreement was: not "the read GEP's convention is
+wrong" (which is deliberate and relied upon elsewhere) but "the write
+doesn't match the read's own convention." That reframing pointed at a
+much smaller, more surgical fix: leave every existing GEP/type-
+conversion behavior alone, and instead decompose the *one* problematic
+instruction shape -- a single aggregate "whole array" constant
+initializing store into a `Private`/`Function`-storage
+(address-space-0) array-of-narrow-vector global -- into one store per
+element, each addressed at the same tight byte offset the existing
+reads already assume. This is a new, small, single-purpose pass
+(`LocalNarrowVectorArrayInitPass`), run first in the CPU Normalize
+pipeline, deliberately scoped to address space 0 so it can never touch
+a stage-IO array (which never receives this store shape to begin with,
+making the address-space guard defense-in-depth rather than load-
+bearing).
+
+## Verifying the fix actually generalizes, not just the one case
+
+After both fixes landed, I re-ran the same 80-case list (80/80 pass,
+up from 0/80) and then, per this project's own established discipline,
+a *broader* `dEQP-VK.mesh_shader.ext.*` sweep (26,921 cases) rather than
+trusting the narrow list alone. The broader numbers came out exactly
+right: 226 Pass/213 Fail/26,482 NotSupported, up exactly 80 Pass and
+down exactly 80 Fail from H31's own closing baseline, with
+`NotSupported` completely unchanged -- i.e. this fix's own measured
+impact lines up bit-for-bit with its intended 80-case scope and touches
+nothing in H70's still-open 155-case bucket. I take this kind of exact
+arithmetic match as a strong (though not absolute) signal that the fix
+is well-isolated rather than accidentally papering over one symptom of
+a broader problem. I also re-ran `check-feme` and `check-hlsl-feme-vk`
+(after discovering the local `offload-test-suite` checkout's own `feme`
+branch was one commit behind the `check-hlsl-feme-vk`-target-adding
+commit on the `beanz` remote, and fast-forwarding it) to confirm neither
+fix regressed anything outside the mesh-shader path at all; both came
+back at their known pre-existing baselines exactly.
+
+## What I'd flag for whoever picks up H70 next
+
+I deliberately did not touch H70 this session -- it's a genuinely
+separate, five-way grab-bag (`builtin`/`misc`/`properties`/`smoke`/
+`synchronization`) that its own roadmap entry already flags as not yet
+triaged per-bucket, and conflating it with H69's own clean, two-bug
+closure would have made this row's own measured-impact numbers much
+harder to attribute cleanly. The roadmap's own existing note that
+several of H70's sub-buckets may already overlap other tracked,
+unrelated milestones (e.g. `VK_EXT_graphics_pipeline_library`'s
+H34/H48) still stands and is worth checking first before assuming H70
+needs brand-new investigation from scratch.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
