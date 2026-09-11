@@ -37865,3 +37865,103 @@ cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
 VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow'
 ```
+
+## Roadmap H90: measured impact
+
+**Symptom.** `dEQP-VK.mesh_shader.ext.properties.mesh_shared_memory_size`
+and `.mesh_payload_and_shared_memory_size` (2 cases) failed
+`vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`, the
+compiler emitting `failed to legalize operation
+'spirv.SpecConstantOperation' that was explicitly marked illegal`.
+
+**Root cause.** Compiled the real CTS mesh shader source directly
+through `glslangValidator --target-env vulkan1.2 -V` and disassembled
+the result: its own `const uint accessIdx = sharedMemoryElements - 1u -
+elemIdx;` (`sharedMemoryElements` a `layout(constant_id=1)` spec
+constant) compiles to `%77 = OpSpecConstantOp %uint ISub
+%sharedMemoryElements %uint_1`, imported by MLIR's SPIR-V deserializer
+as `spirv.SpecConstantOperation wraps "spirv.ISub"(...)`. Neither
+upstream MLIR's own `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`
+nor this project's own `SPIRVToLLVMPatterns.cpp` had ever defined a
+lowering pattern for this op at all -- it is simply left marked illegal
+in `ConvertSPIRVToLLVMPass`'s own `ConversionTarget`, and the whole
+`applyPartialConversion` fails outright once it reaches one.
+
+Unlike `spirv.SpecConstant`/`spirv.SpecConstantComposite` (a
+declaration referenced by symbol, resolved ahead of time by
+`prepareSpecConstants`, roadmap L7j), `spirv.SpecConstantOperation` is
+not a declaration at all: it directly wraps one real
+arithmetic/comparison/select op whose own operands are ordinary SSA
+values already visible at that program point (most commonly a
+`spirv.mlir.referenceof` of a spec constant, or another
+`spirv.SpecConstantOperation`), not values threaded through the
+wrapping op's own operand list (which is always empty, confirmed via
+`SpecConstantOperationOp::verifyRegions`'s own text: "operand ... must
+be defined by a constant operation"). Since `ReferenceOfConversionPattern`
+already resolves any such reference to the spec constant's real,
+compile-time-known value (this ICD has no runtime
+`VkSpecializationInfo` override mechanism), the wrapped op has nothing
+"specialization-time" left about it by the time it needs to legalize --
+it can simply take the wrapper's place.
+
+**Fix.** Added `feme::spirv::inlineSpecConstantOperations`, called on
+every `spirv.module` before the SPIR-V-to-LLVM conversion patterns run
+(mirroring `prepareResourceVariables`/`prepareStageIOVariables`/
+`prepareSpecConstants`'s own established pattern of a preprocessing
+pass over the still-unconverted `spirv` dialect module). For every
+`spirv.SpecConstantOperation` found by a module-wide walk, it moves the
+op's one enclosed op to stand directly in the wrapper's own place
+(`Operation::moveBefore`), redirects all of the wrapper's uses to that
+moved op's result, and erases the now-empty wrapper. No cloning or
+`IRMapping` is needed: the enclosed op already references its real
+operand values directly by ordinary SSA dominance, so moving it in
+place preserves those references exactly. Because `replaceAllUsesWith`
+updates every use of an already-inlined op's result module-wide,
+processing order across multiple (even chained) `SpecConstantOperation`s
+does not matter.
+
+**Regression test.** `spirv-to-llvm-spec-constant-operation.mlir`: a
+single-op case (`spirv.ISub` wrapping a spec-constant reference and a
+literal) and a chained-pair case (a second `SpecConstantOperation`
+consuming the first's own result), confirming both the single-op
+inlining and the order-independence claim above.
+
+**Build/test.** `ninja check-feme`: 2885/2944 Passed, 59 Unsupported, 0
+Failed (up from 2943 total tests pre-fix; this row added one new lit
+test with two `RUN`-checked cases).
+
+**Real CTS re-run.** Both tracked cases no longer hit the
+`spirv.SpecConstantOperation` legalization diagnostic:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.*shared_memory_size*'
+```
+
+Neither case newly passes outright, however: each now fails on a
+distinct, later, previously-masked diagnostic instead --
+`feme-cpu-linearize: ... has more than one divergent exit check ...`
+(this shared-memory verification loop genuinely has two separate
+per-invocation bounds checks, a write-phase one and a read-phase one) --
+tracked as new roadmap row H94 rather than fixed in this row, since it
+is a distinct, conservative `LoopLinearizer` limitation unrelated to
+SPIR-V-to-LLVM legalization. A broader `dEQP-VK.mesh_shader.ext.properties.*`
+re-run (30 cases) confirms no other regressions: 3 Pass/12 Fail/15
+NotSupported, matching the pre-existing H91/H93/H94 sub-bucket totals
+with no new crashes.
+
+**Roadmap H90 is closed.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change: this is a pure compiler-
+correctness fix filling in a missing dialect-conversion pattern, not a
+new feature or extension surface. `FeMeVulkanDesign.md` needs no change
+either: nothing about the documented SPIR-V-to-LLVM conversion design
+changed.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.mesh_shared_memory_size'
+```
