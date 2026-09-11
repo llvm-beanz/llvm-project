@@ -38,23 +38,23 @@ of targets to run the tests against the feme ICD (check-hlsl-feme-vk).
 Break your changes into small code changes with each change committed
 spearately. Record your thought process into a file named "agent_thoughts.md" at
 the root of the repository, appending to the file under a new top-level heading
-if it already exists, and commit it in its own commit when you're done.
+if it already exists, and commit it in its own commit when you're done. Please
+consult the i-have-adhd skill (from ~/.agents/skills) when writing the
+agent_thoughts.md file.
 
 # Request
 
-Can you work on H70 or other blocking work to make progress on the H-series
+Can you work on H71 or other blocking work to make progress on the H-series
 milestones?
 
-> **`dEQP-VK.mesh_shader.ext.{builtin,misc,properties,smoke,synchronization}`
-> failures found by H31's own closing full-group re-run (7 + 36 + 14 + 17 + 81 =
-> 155 cases)**: mostly `vkCreateGraphicsPipelines`/`vkQueueSubmit` failures
-> (`VK_ERROR_INITIALIZATION_FAILED`) rather than pixel-comparison mismatches,
-> confirmed pre-existing (reproduces identically against the pre-H31-fix build).
-> Not yet triaged -- several may already be covered by other tracked, unrelated
-> gaps (the `smoke.fast_lib.*`/several `builtin.layer*` failures' own
-> `vkPipelineConstructionUtil.cpp` error site looks like it may overlap
-> H34/H48's own `VK_EXT_graphics_pipeline_library` scope; `synchronization.*`'s
-> `vkQueueSubmit` failures look like a distinct, not-yet-identified
-> synchronization-feature gap), but none of the five buckets has had a real
-> reduction done yet to confirm which milestone (existing or new) actually owns
-> each. Needs its own per-bucket triage pass before further breakdown
+> **`synchronization.*`'s `spirv.Image{Write,Read,SampleExplicitLod}`
+> SPIR-V-to-LLVM legalization gap for `R32ui` storage/sampled images** (10 + 7 +
+> 4 = 21 cases, found by H70's own per-bucket triage): every case using an
+> `R32_UINT` storage or sampled image (the same format H70's own clear-color fix
+> unmasked 5 further cases of, previously hidden behind the clear-color
+> `vkQueueSubmit` failure) fails `vkCreateGraphicsPipelines` with `"failed to
+> legalize operation 'spirv.Image{Write,Read,SampleExplicitLod}' that was
+> explicitly marked illegal"`. Not yet triaged for root cause -- needs its own
+> IR reduction of one of the three op shapes to identify what
+> image-descriptor/format combination `ConvertSPIRVToLLVMPass`'s existing
+> image-op conversion patterns do not yet cover
