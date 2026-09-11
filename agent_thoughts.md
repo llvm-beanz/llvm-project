@@ -78019,3 +78019,61 @@ genuinely distinct, later-stage gap the H91 fix simply exposed by
 letting these 5 cases progress past the signature error. Picking any
 one of them up next is a clean, independent start (own repro, own
 reduction, own fix).
+
+## H92: doubly-dynamic-indexed mesh output stores
+
+**Done. Next action for the reader: pick a next row from "What's still open" below.**
+
+### What's fixed
+`loc[pointIdx].elements[elemIdx] = ...` -- a mesh entry's per-vertex
+output block with a spec-constant-sized inner array, indexed by two
+independent loop variables at once -- now canonicalizes correctly.
+All 4 tracked cases now pass outright (not just "past the diagnostic").
+
+### Root cause (1 minute to read)
+1. `getDynamicVertexIndexedAccess` already handles one dynamic index
+   (the outer per-vertex array dimension, `pointIdx`).
+2. This CTS shape has a *second* dynamic index (`elemIdx`, into the
+   struct member's own inner array).
+3. The function's own index-walking loop required every index after
+   the vertex one to be constant -- bailed out the moment it saw a
+   second non-constant one.
+4. Left unresolved, `ValidateStagePass` correctly rejected it at
+   compile time (doing its job) instead of a worse outcome (an
+   undefined JIT symbol).
+
+### The fix
+Extended `getDynamicVertexIndexedAccess` to recognize a second dynamic
+index too (must be the final one, must select an array row -- same
+constraint `getDynamicRowIndexedAccess` already uses for its own single
+dynamic index). Threaded through as a new `RowIndex` field. Nothing
+downstream needed to change: `Row`/`Vertex` were already ordinary
+`Value*` everywhere else in the pipeline (shadow allocas, validation,
+store decomposition) -- this really was a pure recognition gap in one
+function.
+
+### Snag worth knowing about
+My first regression test asserted "no `StoreInst` left at all" (copying
+a nearby test's pattern) -- failed, because a genuinely dynamic `Row`
+gets a non-promotable array-alloca shadow (`ShadowValueMap`'s existing
+H7w design), which legitimately keeps real stores around. Fixed the
+test to check the *original* global's store is gone instead of
+asserting zero stores anywhere. **Lesson:** when copying an assertion
+pattern from a neighboring test, check whether that test's own shape
+(constant vs. dynamic `Row`) actually matches before reusing it.
+
+### Verify it yourself (30 seconds)
+```shell
+cd build2 && ninja check-feme   # 2887/2946 Passed, 0 Failed
+```
+
+### What's still open (filed earlier, still not started)
+1. **H94** (4 cases) -- `feme-cpu-linearize`'s "more than one divergent
+   exit check".
+2. **H95** (2 cases) -- "Unexpected shared memory result: 0".
+3. **H96** (1 case) -- "Unexpected values found in verification
+   buffer".
+4. **H93** (1 case) -- `max_mesh_output_primitives_256` pixel mismatch.
+
+None of these were touched this session -- H92's own fix didn't expose
+any *new* gaps (unlike H90/H91 before it), it just resolved cleanly.
