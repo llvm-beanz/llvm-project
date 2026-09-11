@@ -77953,3 +77953,69 @@ honestly as such rather than folded into H90 or guessed at.
 **Next up:** H94 itself, plus H70's still-open remainder (H75-H80,
 H82's remaining case, H83, H84), and H91/H92/H93 (all found by prior
 sessions' own re-runs, none yet started).
+
+## H91: mesh output wrapper requires attached feme.signature metadata
+
+**Done. Next action for the reader: skim "What's fixed" below, then decide whether to pick up H94/H95/H96 next.**
+
+### What's fixed
+A mesh entry whose only real work is `SetMeshOutputsEXT(0, 0)` plus a
+storage-buffer pass/fail write (no stage-IO global at all) now gets an
+empty `!feme.signature` attached during canonicalization, instead of
+being left signature-less and later rejected by `MeshOutputWrapperPass`.
+Confirmed via all 5 tracked cases against the real ICD: the original
+"requires attached feme.signature metadata" diagnostic is gone from
+every one of them.
+
+### Root cause (2 minutes to read)
+1. `canonicalizeSPIRVStage` only builds an `EntrySignature` when it
+   finds at least one real stage-IO global load/store.
+2. These 5 CTS cases' own mesh shader touches zero stage-IO globals --
+   only `SetMeshOutputsEXT(0,0)` + an ordinary storage-buffer write.
+3. So the signature-building branch never runs, no metadata gets
+   attached, and `MeshOutputWrapperPass` (which requires a signature
+   whenever the entry contains `SetMeshOutputsEXT`/an output
+   store/other stage op) rejects it at compile time.
+4. A near-identical gap already had a fix for `Geometry` (stream-cut-
+   only entries) -- just not for `Mesh`.
+
+### The fix
+One-line widening: `else if (Stage == ShaderStage::Geometry)` becomes
+`else if (Stage == ShaderStage::Geometry || Stage == ShaderStage::Mesh)`.
+
+### The snag (worth knowing about before touching this code again)
+A pre-existing test, `MeshStageCanonicalizesTaskPayloadLoad`, asserted
+the opposite invariant (`EXPECT_FALSE(...has_value())`) for a
+payload-load-only mesh entry with no `SetMeshOutputsEXT` call at all.
+Turns out that assumption was never actually safe -- a bare
+`TaskPayloadLoad` already counts as a "stage op" for
+`MeshOutputWrapperPass`'s own signature requirement, so this synthetic
+shape would have hit the exact same H91 diagnostic had it ever reached
+the real pipeline. Updated the test's assertion (now expects an empty
+signature, matching the new consistent behavior) rather than carving
+out a narrower, inconsistent condition to keep the old assertion true.
+**Lesson for next time:** when a fix breaks an existing test, check
+whether the test encodes a real invariant or an untested assumption
+before narrowing the fix to preserve it.
+
+### Verify it yourself (30 seconds)
+```shell
+cd build2 && ninja check-feme   # 2886/2945 Passed, 0 Failed
+```
+
+### What's still open (filed, not started)
+1. **H94** (extended, now 4 cases) -- `feme-cpu-linearize`'s "more than
+   one divergent exit check", `task_shared_memory_size`/
+   `task_payload_and_shared_memory_size` newly join the existing 2.
+2. **H95** (new) -- `mesh_payload_size`/`task_payload_size` fail
+   "Unexpected shared memory result: 0", a data-correctness mismatch,
+   not yet triaged.
+3. **H96** (new) -- `synchronization.other.barrier_across_secondary`
+   fails "Unexpected values found in verification buffer", not yet
+   triaged.
+
+None of these three needed a decision this session -- each is a
+genuinely distinct, later-stage gap the H91 fix simply exposed by
+letting these 5 cases progress past the signature error. Picking any
+one of them up next is a clean, independent start (own repro, own
+reduction, own fix).
