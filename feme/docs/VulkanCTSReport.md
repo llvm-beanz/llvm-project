@@ -37341,3 +37341,102 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 FEME_VULKAN_LOG_CREATION_ERRORS=1 \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.transfer_to_mesh.storage_buffer.memory_barrier.transfer_write_shader_read'
 ```
+
+## Roadmap H87: measured impact (block-wrapped array Input legalization gap)
+
+H74's own per-bucket triage filed this row for a 5-case
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type...'`
+legalization failure, noting a plausible but unconfirmed overlap with
+H82's own `misc.per_prim_block_output` row.
+
+**Root cause, and why it is not H82.** A real pre-conversion IR dump
+(captured via a temporary `FEME_DEBUG_DUMP_PRE_SPIRV_TO_LLVM` env-var
+hook in `SPIRVToLLVMDialectTranslator.cpp`, removed before committing
+anything) of `properties.max_mesh_output_components` showed the actual
+failing value's type was `!spirv.struct<(!spirv.array<31 x
+vector<4xi32>>)>` -- a **single-member struct wrapping an array**, read
+by a fragment stage's `Input`-storage-class `spirv.AccessChain` off a
+`per_primitive_ext`-decorated variable a mesh shader writes. This is a
+different shape from H82's own repro (`!llvm.struct<(f32, vector<3xf32>,
+f32)>`, a struct with several distinct mixed-type members, no wrapped
+array at all) -- the two rows are confirmed **not** the same root cause,
+refuting H87's own standing suspicion the same way H74 refuted its
+GPL-overlap one.
+
+SPIR-V's `Block` decoration requires an interface block to be a struct
+even when it logically holds nothing but one array (unlike the bare
+`spirv.array` shape a geometry/tessellation entry's own `gl_in[]`
+uses), and none of the three places that special-case an array-typed
+`Input` variable to stay a real pointer instead of an eagerly-loaded
+value recognized this wrapped shape: `isInputArrayAccessChain`
+(gating `StageIOArrayAccessChainPattern`), `StageIOAddressOfPattern`
+(the `spirv.mlir.addressof` conversion site), and the
+`spirv.PointerType` target-type conversion registered in
+`populateSPIRVToLLVMTargetTypeConversions`. A debug trace showed the
+first two *did* already agree with each other by coincidence for this
+exact case's real values, but the third -- consulted by the dialect
+conversion framework's own operand-type materialization whenever a
+consumer (here, `StageIOArrayAccessChainPattern`'s own `getelementptr`
+base) expects a type that disagrees with what its producer actually
+returned -- still answered with the eagerly-loaded struct *value*
+type, silently materializing an `llvm.load` that turned the real
+pointer back into a value right before the GEP was built, which is
+what actually produced the ill-typed base operand.
+
+**Fix.** Factored the existing bare-array checks in the first two
+call sites into two shared helpers, `isArrayLikeStageIOType` (SPIR-V
+side) and `isArrayLikeLLVMType` (already-converted LLVM side), that
+also recognize a single-member struct wrapping an array; used both
+consistently in all three call sites, including the type converter
+(the one that was actually missing coverage). No change was needed to
+the `getelementptr`-building logic itself in
+`StageIOArrayAccessChainPattern`: it already prepends one leading
+index (navigating through the pointer itself) ahead of whatever
+indices the real `spirv.AccessChain` carries, which correctly walks
+pointer -> struct -> array -> element for this shape with no further
+special-casing.
+
+Added a new case to `spirv-to-llvm-stage-io.mlir` reproducing the
+minimal block-wrapped-array shape (a `per_primitive_ext`-decorated,
+single-member-struct-wrapped `Input` array read through a
+two-index `spirv.AccessChain`), confirmed via `git stash` to fail
+without this fix and pass with it.
+
+`ninja check-feme` passes in full: **2938/2938** discovered (2879
+Pass, 59 pre-existing `Unsupported`, **0 Failed**) -- baseline plus 1
+new lit test, 0 regressions.
+
+**A real re-run of the 5 tracked cases** (`properties.
+max_mesh_output_components` and the 4 `*_no_view_index` payload-size
+cases), git-stash pre/post compared with `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+and shader caching disabled, confirms the target legalization
+diagnostic is **completely eliminated** (0 hits, down from 5). None of
+the 5 newly reach full Pass -- each now fails on a distinct,
+already-tracked residual bug instead:
+
+- 1 case (`max_mesh_output_components`) now fails H86's own
+  `CanonicalizeStagePass` "unresolved stage-IO global-variable access"
+  diagnostic.
+- 4 cases (the `*_no_view_index` payload-size cases) now fail H89's
+  own `feme-cpu-simdize` "divergent branch" diagnostic.
+
+Since none of the 5 newly Pass, the full `dEQP-VK.mesh_shader.ext.*`
+group's own Pass/Fail totals are unchanged from H74's own closing
+numbers (**297 Pass/142 Fail**, 26482 NotSupported) -- this row's own
+scope, the legalization failure itself, is nonetheless fully closed:
+every one of its 5 tracked cases moved off it cleanly onto other rows'
+already-tracked scope.
+
+**Roadmap H87 is closed.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change: this is a pure
+SPIR-V-to-LLVM legalization bugfix with no new Vulkan feature or
+extension surfaced.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_components'
+```
