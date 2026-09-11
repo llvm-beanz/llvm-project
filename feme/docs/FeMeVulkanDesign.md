@@ -757,6 +757,15 @@ After specialization, the resolved group size is validated against
 `maxComputeWorkGroupSize` and `maxComputeWorkGroupInvocations` at pipeline
 creation.
 
+(roadmap H88) A mesh or task entry point's group size is resolved and
+stamped onto its compiled entry point the same way, by
+`GraphicsPipeline.cpp`'s `compileGraphicsStage` -- not just consulted for
+`maxMeshWorkGroupSize`/`maxTaskWorkGroupSize` validation, which is a
+separate, additional check that stage's own `validateMeshOrTaskGroupSize`
+performs against the module's own un-specialized default (mirroring the
+compute path's own `maxComputeWorkGroupSize` check happening independently
+of the stamped, specialized value it later compiles with).
+
 ### Compilation flow
 
 ```mermaid

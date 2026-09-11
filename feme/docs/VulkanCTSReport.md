@@ -37440,3 +37440,98 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 FEME_VULKAN_LOG_CREATION_ERRORS=1 \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_components'
 ```
+
+## Roadmap H88: measured impact (LocalSizeId group size never reached the mesh/task CPU target)
+
+H74's own per-bucket triage filed this row for a 2-case pixel-comparison
+mismatch newly exposed by H74's own specialization-constant fix, noting
+it as "a 1-unit alpha-channel difference" not yet triaged.
+
+**This description was itself slightly misleading.** A real pixel
+readback of `misc.local_size_id_mesh` showed the actual rendered image
+was entirely black/transparent -- not the reference solid blue -- at
+every one of its 32 pixels. The qpa log's own `max difference = (0, 0,
+1, 1)` is reported already normalized to `[0, 1]` (compared directly
+against the `0.005` threshold, itself in the same units), so a
+component difference of `1` there means *fully* mismatched, not a
+1-of-255 raw unit off-by-one -- this was a total rendering failure, not
+a tolerance edge case.
+
+**Root cause.** Both cases declare their mesh (and, for
+`local_size_id_task`, task) entry point's workgroup size via
+`LocalSizeId` (`VK_KHR_maintenance4`'s specialization-constant-driven
+spelling) rather than a literal `LocalSize`. `ConvertSPIRVToLLVMPass`
+only ever stamps the `hlsl.numthreads` function attribute the CPU
+target's own group-size readers consult (`DispatchArgsLayout.h`'s
+`getThreadGroupSize`, `SIMDize.cpp`) from a plain `LocalSize`
+execution mode's literal operands -- `LocalSizeId` resolution is
+deliberately deferred to `GroupSize.cpp`'s `resolveComputeGroupSize`
+(see that file's own header comment for why: it needs the real
+`VkSpecializationInfo` overrides, which are a Vulkan-level, not a
+SPIR-V-level, concept). The **compute** path's own
+`compileComputePipeline` (`Pipeline.cpp`) already calls this scanner
+with the real overrides and stamps the result back onto the compiled
+entry point. The **mesh/task** path's `compileGraphicsStage`
+(`GraphicsPipeline.cpp`) never did either -- its own
+`validateMeshOrTaskGroupSize` calls the same scanner, but only to
+validate against `maxMeshWorkGroupSize`/`maxTaskWorkGroupSize`, with an
+empty override list, and never stamps anything back onto the compiled
+function either way.
+
+The practical effect: a `LocalSizeId`-only mesh/task entry reached the
+CPU target with **no `hlsl.numthreads` attribute at all**, and
+`DispatchArgsLayout.h`'s `getThreadGroupSize` silently defaults to a
+single-invocation `{1, 1, 1}` group when the attribute is absent. For
+these two cases (mesh workgroup size 32 via `LocalSizeId`'s own
+specialization constants, `SpecId`s 20/21/22), that collapsed a 32-lane
+dispatch down to exactly 1 real invocation. Since `SetMeshOutputsEXT`
+still declares 32 vertices/primitives up front but only invocation 0
+ever runs to write any of them, the framebuffer ends up essentially
+untouched -- rendering as black, matching the real readback.
+
+**Fix.** `compileGraphicsStage` now resolves the mesh/task entry
+point's group size via `resolveComputeGroupSize`, passing the same
+real `VkSpecializationInfo`-derived overrides it already computes for
+patching spec constants into the raw SPIR-V, and stamps the result
+onto the compiled entry point's own `hlsl.numthreads` attribute --
+mirroring the compute path's own `compileComputePipeline` exactly, for
+the two stages (`Mesh`, `Amplification`/task) that can declare a
+compute-shaped group size.
+
+Added `GraphicsPipelineTest.MeshStageResolvesLocalSizeIdGroupSizeWithOverrides`/
+`TaskStageResolvesLocalSizeIdGroupSizeWithOverrides` (new
+`meshStage()`/`taskStage()` accessors added to `GraphicsPipeline.h` to
+support them, mirroring the existing `vertexStage()`/`fragmentStage()`
+pair): each builds a `LocalSizeId` mesh or task entry with a real
+`VkSpecializationInfo` override and asserts
+`CompiledStage::getGroupSize()` reports the overridden size, not
+`{1, 1, 1}`. Confirmed both fail without the fix (reporting `{1, 1,
+1}`, reproducing the exact bug) and pass with it restored.
+
+`ninja check-feme` passes in full: **2940/2940** discovered (2881
+Pass, 59 pre-existing `Unsupported`, **0 Failed**) -- baseline plus 2
+new unit tests, 0 regressions.
+
+**A real re-run of both tracked cases** (`misc.local_size_id_mesh`/
+`local_size_id_task`, git-stash pre/post compared with shader caching
+disabled) confirms both now **Pass outright**: the full
+`dEQP-VK.mesh_shader.ext.misc.*` group's own totals move from 35
+Pass/36 Fail to **37 Pass/34 Fail** (`NotSupported` unchanged at 43),
+exactly the expected +2/-2. The full `dEQP-VK.mesh_shader.ext.*`
+group's own totals move from H74's own closing baseline (297 Pass/142
+Fail) to **299 Pass/140 Fail** (26482 `NotSupported`, unchanged) --
+confirming no regressions anywhere else in the group.
+
+**Roadmap H88 is closed.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change: `VK_KHR_maintenance4`'s
+`LocalSizeId` support itself was already tracked as implemented (this
+is a mesh/task-specific bugfix in how its *resolved* value reaches the
+CPU target, not a new feature or extension).
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.local_size_id_mesh' --deqp-shadercache=disable
+```
