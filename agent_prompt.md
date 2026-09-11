@@ -44,27 +44,5 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H89b or other blocking work to make progress on the H-series
-milestones?
-
-> **Fix the latent `feme::cpu::LoopLinearizer` runtime hang H89a's own
-> poison-operand fix unmasks**: once H89a stops misclassifying the outer loop's
-> trip counter as divergent, `LoopLinearizer` still (correctly) finds a
-> genuinely divergent exit signal threaded through the *same* reconvergence
-> block (the inner per-lane bounds check's own early-exit arm, merged with the
-> outer loop's own "done after N iterations" arm at one shared block) and
-> applies its masked-loop transform -- but the compiled shader then spins
-> forever at runtime (confirmed via `gdb -p <pid> -batch -ex bt` stuck inside
-> the compiled shader body, not the compiler) rather than terminating, for a
-> case (`max_mesh_output_vertices_256`) whose real per-lane bounds check is
-> always true at runtime (the loop's two sources of "should I stop" -- the outer
-> uniform trip count and the inner per-lane index bound -- coincide exactly for
-> every tested output-array size, so this is not merely a rare edge case). Needs
-> its own dedicated IR-level investigation (a fresh pre-/post-`LoopLinearizer`
-> IR diff on the reduced repro, independent of H89a's own poison-operand fix, to
-> isolate whether the masked "active" phi threading double-counts/never-clears a
-> lane once both the outer and inner exit signals can fire from the same merge
-> point, or whether `closeLatch`'s own backedge-condition construction has a
-> similar unhandled shape) before H89a's own fix can safely land; until then,
-> `feme-cpu-simdize`'s current compile-time rejection is the correct, safer
-> behavior to keep and this row should stay open
+Can you work on closing out H70 and H89 or other blocking work to make progress
+on the H-series milestones?
