@@ -2188,6 +2188,77 @@ TEST(CanonicalizeStageTest, MeshSetOutputsOnlyEntryStillGetsASignature) {
   EXPECT_TRUE(Sig->Elements.empty());
 }
 
+/// (Roadmap H92) A mesh entry's own per-vertex `Output` block whose one
+/// array member is *itself* dynamically indexed by a second, independent
+/// loop variable -- `loc[pointIdx].elements[elemIdx] = ...`, the real
+/// shape `dEQP-VK.mesh_shader.ext.properties.max_mesh_output_size_
+/// with_payload_per_vertex_no_view_index`'s own mesh shader compiles a
+/// per-vertex `layout(location=0) out LocationBlock loc[];` (`struct
+/// LocationBlock { uvec4 elements[locationCount]; };`, `locationCount` a
+/// spec constant already resolved to a compile-time array extent by the
+/// time this pass runs) write into -- both the outer per-vertex array
+/// dimension (`pointIdx`) and the inner `elements` array dimension
+/// (`elemIdx`) are genuinely non-constant, not the single dynamic index
+/// every other dynamically-indexed shape this file covers has. Before
+/// H92's own fix, `getDynamicVertexIndexedAccess` only allowed the one,
+/// outer (vertex) index to be non-constant -- any further non-constant
+/// index made it bail out entirely, leaving this access unrewritten and
+/// surfacing later as `feme-graphics-validate-stage`'s "unresolved
+/// stage-IO global-variable access" diagnostic.
+TEST(CanonicalizeStageTest, MeshStageCanonicalizesDoublyDynamicOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %struct.LocationBlock = type { [4 x <4 x i32>] }
+    @loc = external addrspace(8) global [96 x %struct.LocationBlock], !spirv.Decorations !0
+    define void @main(i32 %pointIdx, i32 %elemIdx, <4 x i32> %v) #0 {
+      %p = getelementptr inbounds [96 x %struct.LocationBlock], ptr addrspace(8) @loc, i32 0, i32 %pointIdx, i32 0, i32 %elemIdx
+      store <4 x i32> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *PointIdxArg = F->getArg(0);
+  Argument *ElemIdxArg = F->getArg(1);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // Operand order: ElementID, Row, Component, Val, Vertex.
+    EXPECT_EQ(CI->getArgOperand(1), ElemIdxArg);
+    EXPECT_EQ(CI->getArgOperand(4), PointIdxArg);
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  // Unlike `MeshStageCanonicalizesOutputArrayStore` above (a compile-time
+  // constant `Row`), this element's shadow value (roadmap H2e) is keyed
+  // on a genuinely dynamic `Row` (`elemIdx`), so `ShadowValueMap::
+  // getOrCreate` gives it a non-promotable, `RowCount`-sized array
+  // alloca instead of one plain scalar alloca per row -- real `StoreInst`s
+  // into that array legitimately remain after `PromoteMemToReg`, unlike
+  // every other test in this file that only exercises a constant `Row`.
+  // What matters here is that the original store directly through `@loc`
+  // itself (the raw SPIR-V stage-IO global) is gone.
+  for (Instruction &I : instructions(F)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    EXPECT_NE(SI->getPointerOperand()->stripPointerCasts(),
+             M->getGlobalVariable("loc"));
+  }
+}
+
 /// (Roadmap H6i) `CanonicalizeStagePass::run`'s stage filter now accepts
 /// `ShaderStage::Mesh`, routing it through `canonicalizeSPIRVStage` the
 /// same way `ThreadsDynamicVertexIndexIntoOutputStore` above already

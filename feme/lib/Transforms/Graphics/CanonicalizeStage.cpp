@@ -1223,19 +1223,53 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
 /// `Output`-storage-class, address space 7 or 8) global variable's own
 /// outer array dimension -- its first index constant zero (ordinary
 /// pointer-to-aggregate arithmetic), its second a non-constant `Value*`
-/// (the vertex/primitive index) -- with every further index, if any,
-/// constant (a builtin interface block's own member, or a matrix row
-/// within that one vertex's own value), resolved into a byte offset the
-/// same way `resolveRowComponent` already does for the ordinary
-/// constant-offset path, just starting one array dimension in. (Roadmap
-/// H5f) A constant vertex index is *not* left unresolved here:
-/// `resolveStageIOAccess`'s own ordinary constant-offset path
+/// (the vertex/primitive index) -- with every further index, if any but
+/// (roadmap H92) the last, constant (a builtin interface block's own
+/// member, or a matrix row within that one vertex's own value), resolved
+/// into a byte offset the same way `resolveRowComponent` already does for
+/// the ordinary constant-offset path, just starting one array dimension
+/// in. (Roadmap H5f) A constant vertex index is *not* left unresolved
+/// here: `resolveStageIOAccess`'s own ordinary constant-offset path
 /// (`getStageIOBaseAndOffset`) folds it in too, using
 /// `isPerVertexArrayInputGlobal` (below) to recognize the same global
 /// shape and route that constant index through `Vertex` there as well,
-/// for consistency with the dynamic case this function handles.
+/// for consistency with the dynamic case this function handles. (Roadmap
+/// H92) A *second* genuinely non-constant index -- e.g.
+/// `loc[pointIdx].elements[elemIdx]`, a mesh entry's own per-vertex output
+/// block whose one array member is itself dynamically indexed by a
+/// second loop variable -- is threaded through as \p RowIndex instead of
+/// folding into \p ByteOffset, mirroring `getDynamicRowIndexedAccess`'s
+/// own single-non-constant-row-index shape (see that function's own
+/// comment), just with a per-vertex/per-primitive array dimension already
+/// peeled off first. Before this, `resolveOffsetWithinElement`'s own
+/// byte-offset-based recursion had no way to represent a second
+/// non-constant index at all, so a doubly-dynamic-indexed access like
+/// this one was rejected outright by this function's own "only the
+/// vertex index may be non-constant" check, surfacing later as
+/// `feme-graphics-validate-stage`'s "unresolved stage-IO global-variable
+/// access" diagnostic.
+///
+/// The result of `getDynamicVertexIndexedAccess`: \p GV's own per-vertex/
+/// per-primitive array dimension peeled into \p VertexIndex, plus whatever
+/// is left to resolve one vertex's own value with. Ordinarily that
+/// remainder is a plain, fully-constant \p ByteOffset (the common case
+/// `resolveOffsetWithinElement`'s own byte-offset-based recursion
+/// resolves from there) -- but (roadmap H92) \p RowIndex is set instead,
+/// with \p ByteOffset left at the constant prefix consumed before it, when
+/// exactly one more, genuinely non-constant index follows the vertex one,
+/// directly selecting a row within an array (mirroring
+/// `getDynamicRowIndexedAccess`'s own single-non-constant-index shape, one
+/// per-vertex array dimension in). \p RowIndex is `nullptr` for the
+/// ordinary, fully-constant-remainder case.
+struct DynamicVertexIndexedAccess {
+  GlobalVariable *GV;
+  Value *VertexIndex;
+  uint64_t ByteOffset;
+  Value *RowIndex = nullptr;
+};
+
 /// Returns `std::nullopt` if \p Ptr is not this exact shape.
-std::optional<std::tuple<GlobalVariable *, Value *, uint64_t>>
+std::optional<DynamicVertexIndexedAccess>
 getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
   auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
   if (!GEP)
@@ -1258,23 +1292,33 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
 
   Type *CurTy = ArrTy->getElementType();
   uint64_t ByteOffset = 0;
+  Value *RowIndex = nullptr;
   for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
-    auto *CI = dyn_cast<ConstantInt>(*IdxIt);
-    if (!CI)
-      return std::nullopt; // Only the vertex index may be non-constant.
-    uint64_t Idx = CI->getZExtValue();
-    if (auto *ST = dyn_cast<StructType>(CurTy)) {
-      const StructLayout *SL = DL.getStructLayout(ST);
-      ByteOffset += SL->getElementOffset(Idx);
-      CurTy = ST->getElementType(Idx);
-    } else if (auto *InnerArrTy = dyn_cast<ArrayType>(CurTy)) {
-      ByteOffset += Idx * DL.getTypeAllocSize(InnerArrTy->getElementType());
-      CurTy = InnerArrTy->getElementType();
-    } else {
-      return std::nullopt;
+    if (auto *CI = dyn_cast<ConstantInt>(*IdxIt)) {
+      uint64_t Idx = CI->getZExtValue();
+      if (auto *ST = dyn_cast<StructType>(CurTy)) {
+        const StructLayout *SL = DL.getStructLayout(ST);
+        ByteOffset += SL->getElementOffset(Idx);
+        CurTy = ST->getElementType(Idx);
+      } else if (auto *InnerArrTy = dyn_cast<ArrayType>(CurTy)) {
+        ByteOffset += Idx * DL.getTypeAllocSize(InnerArrTy->getElementType());
+        CurTy = InnerArrTy->getElementType();
+      } else {
+        return std::nullopt;
+      }
+      continue;
     }
+    // (Roadmap H92) The one non-constant index left, other than the
+    // vertex index already peeled above: must directly select a row
+    // within an array, and must be the final index -- a component-level
+    // index after it is not modeled, mirroring
+    // `getDynamicRowIndexedAccess`'s own identical constraint.
+    if (RowIndex || !isa<ArrayType>(CurTy) ||
+        std::next(IdxIt) != GEP->idx_end())
+      return std::nullopt;
+    RowIndex = *IdxIt;
   }
-  return std::make_tuple(GV, VertexIndex, ByteOffset);
+  return DynamicVertexIndexedAccess{GV, VertexIndex, ByteOffset, RowIndex};
 }
 
 /// (Roadmap H7w) `gl_ClipDistance`/`gl_CullDistance` (or any other
@@ -1451,7 +1495,7 @@ GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL) {
   if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL))
     return BaseAndOffset->first;
   if (auto Dyn = getDynamicVertexIndexedAccess(Ptr, DL))
-    return std::get<0>(*Dyn);
+    return Dyn->GV;
   if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL))
     return std::get<0>(*Dyn);
   return nullptr;
@@ -2204,16 +2248,31 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     Value *Ptr, Type *ValueTy, const DataLayout &DL,
     const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
     const DenseSet<GlobalVariable *> &OutputGlobals, ShaderStage Stage) {
-  if (std::optional<std::tuple<GlobalVariable *, Value *, uint64_t>> Dyn =
+  if (std::optional<DynamicVertexIndexedAccess> Dyn =
           getDynamicVertexIndexedAccess(Ptr, DL)) {
-    auto [GV, VertexIndex, ByteOffset] = *Dyn;
-    auto It = ElementIDs.find(GV);
+    auto It = ElementIDs.find(Dyn->GV);
     if (It == ElementIDs.end())
       return std::nullopt;
-    Type *ElemTy = cast<ArrayType>(GV->getValueType())->getElementType();
-    return resolveOffsetWithinElement(ElemTy, It->second, ByteOffset, ValueTy,
-                                      DL, OutputGlobals.contains(GV),
-                                      VertexIndex);
+    // (Roadmap H92) A second, genuinely dynamic row index (e.g.
+    // `loc[pointIdx].elements[elemIdx]`) has nowhere to go in
+    // `resolveOffsetWithinElement`'s own byte-offset-based recursion, so
+    // build the `StageIOAccess` directly instead: `IDs` must name exactly
+    // one signature element (this shape has no real per-member builtin
+    // interface block use yet, and `getDynamicVertexIndexedAccess`'s own
+    // `ByteOffset` prefix, always 0 for every real case seen so far,
+    // has nowhere to go here either -- left unresolved rather than
+    // silently discarded if a future shape ever has one).
+    if (Dyn->RowIndex) {
+      if (It->second.size() != 1 || Dyn->ByteOffset != 0)
+        return std::nullopt;
+      return StageIOAccess{It->second, Dyn->RowIndex, nullptr,
+                           Dyn->VertexIndex, OutputGlobals.contains(Dyn->GV)};
+    }
+    Type *ElemTy = cast<ArrayType>(Dyn->GV->getValueType())->getElementType();
+    return resolveOffsetWithinElement(ElemTy, It->second, Dyn->ByteOffset,
+                                      ValueTy, DL,
+                                      OutputGlobals.contains(Dyn->GV),
+                                      Dyn->VertexIndex);
   }
 
   std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
