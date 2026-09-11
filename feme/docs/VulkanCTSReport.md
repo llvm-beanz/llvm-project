@@ -37535,3 +37535,127 @@ cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.local_size_id_mesh' --deqp-shadercache=disable
 ```
+
+## Roadmap H89: measured impact (real 9-case scope confirmed; a naive fix found unsafe, split into H89a/H89b)
+
+H74's own per-bucket triage filed this row from a 5-case spot-check
+(`max_mesh_output_primitives_256`/`max_mesh_output_vertices_256`/
+`mesh_payload_size`/`task_payload_size`/
+`task_payload_and_shared_memory_size`) of `properties.*` cases newly
+exposed by H74's own specialization-constant fix, all sharing a
+`feme-cpu-simdize: ... divergent branch ...` diagnostic, without a
+systematic re-run to confirm the exact scope.
+
+**A systematic per-case re-run corrects the scope.** Every
+`dEQP-VK.mesh_shader.ext.properties.*` case (30 total) was run
+individually with `FEME_VULKAN_LOG_CREATION_ERRORS=1`, and each
+failure's first `error:` line was captured to build an exact
+case-to-diagnostic table (more reliable than trusting the aggregate
+qpa's own counts, whose stderr is not captured per-case). This found
+**exactly 9** cases with H89's diagnostic:
+
+- `max_mesh_output_primitives_256`
+- `max_mesh_output_size_with_payload_per_primitive_no_view_index`
+- `max_mesh_output_size_with_payload_per_vertex_no_view_index`
+- `max_mesh_output_size_without_payload_per_primitive_no_view_index`
+- `max_mesh_output_size_without_payload_per_vertex_no_view_index`
+- `max_mesh_output_vertices_256`
+- `mesh_payload_size`
+- `task_payload_and_shared_memory_size`
+- `task_payload_size`
+
+Two of H74's original 5 spot-checked names were never H89's diagnostic
+at all: `max_mesh_output_components` is H86's own
+`feme-graphics-validate-stage` diagnostic (its own residual case,
+mapped in the H87 session), and `mesh_payload_and_shared_memory_size`/
+`mesh_shared_memory_size` are H90's `spirv.SpecConstantOperation`
+legalization gap. A further case, `task_shared_memory_size`, shares
+H78's own `feme-cpu-wrap-mesh-output` diagnostic (a `misc.*`-scoped
+row not yet folded to include this `properties.*` case) -- noted here
+for a future H78 session, out of this row's own scope.
+
+**Root cause, confirmed via a temporary, env-var-gated pre-`SIMDizePass`
+IR dump** (`Pipeline.cpp`, fully reverted before committing): every one
+of the 9 cases lowers a large fixed-size mesh-output array (256
+vertices/primitives, or a specialization-constant-sized payload) into
+an *outer* loop with a uniform, compile-time-constant trip count
+(`icmp ult i32 %counter, <N>`) wrapping an *inner* diamond guarding a
+masked store by a per-lane bounds check
+(`llvm.spv.flattened.thread.id.in.group()`-derived index compared
+against the real output count). `feme::cpu::DiamondFlattener` flattens
+the inner diamond first (`LinearizePass::run`'s documented order:
+`DiamondFlattener` before `LoopLinearizer`); `feme::cpu::SIMDizePass`'s
+`checkSupportedControlFlow` then rejects the *outer* loop's own
+trip-count branch as divergent.
+
+That rejection is a **false positive in a subtler sense than a plain
+missing-classification gap**: `DiamondFlattener::flatten`'s per-`phi`
+merge at the inner diamond's reconvergence block builds
+`select(InnerCond, ValT, ValF)` unconditionally for *every* live-out
+`phi`, including the outer loop's own uniform counter, which the inner
+diamond's condition never actually controls -- it only happens to
+reconverge *through* the same merge block. Because the inner
+diamond's "skip the store" arm never itself redefines the counter, its
+own incoming value there is `poison` (LLVM's ordinary "no definition
+reaches here" idiom), so the merge becomes `select(InnerCond, RealCounter,
+poison)`. Once one operand is genuinely `poison`, `UniformityInfo`
+(correctly, per its own dataflow-only model, which cannot see that a
+`poison` operand is a "don't-care" refinement rather than a real
+alternative) classifies the merged value -- and the outer loop's own
+trip-count check consuming it -- as divergent too, even though neither
+the counter nor its own bound genuinely varies per lane.
+
+**A narrow fix was prototyped and found unsafe to land alone.** Since
+`select(Cond, X, poison)` is always a sound refinement of plain `X`
+(poison permits substituting any concrete value, including reusing
+`X`), skipping the `select` and reusing the one real operand whenever
+the other is `poison`/`undef` is a locally sound simplification, and
+it *does* make `checkSupportedControlFlow` accept all 9 cases. A
+same-session rebuild-and-rerun A/B, however, found this fix
+**unmasks a worse, latent bug**: with the outer trip-count check no
+longer misclassified divergent, `feme::cpu::LoopLinearizer` still
+(correctly) finds a genuinely divergent exit signal threaded through
+the *same* reconvergence block -- the inner per-lane bounds check's
+own early-exit arm is merged with the outer loop's own "done after N
+iterations" arm at one shared block -- and applies its masked-loop
+transform. The resulting compiled shader then **hangs at runtime**
+(`dEQP-VK.mesh_shader.ext.properties.max_mesh_output_vertices_256`
+spun at ~100% CPU, not terminating within 60 seconds) instead of
+failing to compile. `gdb -p <pid> -batch -ex bt` on the hung process
+confirmed it was stuck inside the compiled shader body itself (via
+`feme::graphics::executeDraws`'s dispatch lambda in `libfeme_vulkan.so`),
+not stuck inside the compiler -- ruling out an infinite loop in
+`LinearizePass`/`SIMDizePass` themselves and confirming this is a real
+runtime-correctness bug in the masked-loop code `LoopLinearizer`
+generates for this specific "outer uniform loop + inner divergent
+early-exit merged at one shared reconvergence block" shape.
+
+**All debug scaffolding and the risky fix itself were fully reverted**
+(`git checkout --` on `Pipeline.cpp`/`SIMDize.cpp`/`Linearize.cpp`,
+confirmed via `git status`/`git diff`), and `feme_vulkan` rebuilt and
+`ninja check-feme` re-run to confirm a clean baseline: **2940/2940**
+discovered (2881 Pass, 59 `Unsupported`, **0 Failed**), matching H88's
+own closing numbers exactly -- no source changes landed this session.
+The 9 tracked cases were re-confirmed back to their original clean
+compile-time `feme-cpu-simdize` diagnostic (no hang) after the revert.
+A compile-time rejection is a strictly safer failure mode than a
+runtime hang for every downstream CTS run/consumer, so shipping the
+narrow fix alone was rejected in favor of splitting the real remaining
+work into **H89a** (the `DiamondFlattener` poison-operand fix itself)
+and **H89b** (the `LoopLinearizer` hang it unmasks, which must land
+first or alongside H89a, not after) -- see `Roadmap.md`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+(this is a pure CPU-target compiler-correctness investigation, not a
+new feature/extension surface). The full `dEQP-VK.mesh_shader.ext.*`
+group's own Pass/Fail totals are unchanged from H88's closing baseline
+(299 Pass/140 Fail/26482 NotSupported), since no fix landed.
+
+**Reproducing this row's diagnostic (the current, safe, compile-time
+rejection).**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_vertices_256' --deqp-shadercache=disable
+```
