@@ -44,14 +44,16 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H74 or other blocking work to make progress on the H-series
+Can you work on H91 or other blocking work to make progress on the H-series
 milestones?
 
->  **`properties.mesh_payload_and_shared_memory_size`/`mesh_shared_memory_size`'s
->  `spirv.SpecConstantOperation` legalization gap** (2 cases, newly exposed by
->  H74's specialization-constant fix): `ConvertSPIRVToLLVMPass` has no lowering
->  pattern for `spirv.SpecConstantOperation` (an arithmetic expression over one
->  or more spec constants, evaluated at specialization time rather than folded
->  to a single literal) in this shape. Not yet triaged -- needs its own IR
->  reduction to find the minimal `spirv.SpecConstantOperation` shape this pass
->  does not yet cover
+>  **`task_shared_memory_size`/`synchronization.other.barrier_across_secondary`'s
+>  "mesh output wrapper requires attached feme.signature metadata"** (now 5
+>  cases: the original 2 -- one newly exposed by H74's specialization-constant
+>  fix, the other by its rasterizer-discard fix -- plus 3 more
+>  (`properties.mesh_payload_size`/`task_payload_size`/`task_payload_and_shared_memory_size`)
+>  newly exposed by H89a/H89b's own closing re-run, hitting the identical
+>  diagnostic): `MeshOutputWrapper.cpp` expects `feme.signature` metadata to
+>  already be attached to the mesh entry point by the time it runs, which is
+>  missing for all 5. Not yet triaged -- needs its own reduction to find why
+>  signature-metadata attachment is skipped/delayed for these specific shapes
