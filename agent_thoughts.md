@@ -77443,3 +77443,100 @@ next has a real per-signature starting point instead of one more
 "grab-bag, not yet triaged" row to redo the triage on.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H71 session: R32ui SignExtend/ZeroExtend legalization gap, closed and split into H83/H84
+
+## What I did, in order
+
+1. Reproduced H71's exact 21-case bucket (`dEQP-VK.mesh_shader.ext.
+   synchronization.*`, `spirv.Image{Write,Read,SampleExplicitLod}`
+   "explicitly marked illegal" legalization failures).
+2. Root-caused it via a real IR reduction, not CTS-internal digging:
+   `glslangValidator --target-env vulkan1.2` compiling minimal
+   `imageLoad`/`imageStore`/`textureLod` GLSL against `r32ui`/
+   `usampler2D`, fed through `feme-translate`. Compiling for SPIR-V 1.0
+   (the default) does **not** reproduce it -- only 1.4+ does, because
+   that's when glslang starts attaching `SignExtend`/`ZeroExtend`
+   image operands to integer-format image ops. Mesh shaders always
+   compile at 1.6+, which is why this only showed up there.
+3. Fixed it: `SPIRVToLLVMPatterns.cpp`'s `NontemporalBit` constant only
+   allow-listed the `Nontemporal` cache-hint bit for silent discard.
+   Renamed it `DiscardedImageOperandBits` and added `SignExtend`/
+   `ZeroExtend` -- same reasoning as the existing precedent (these bits
+   describe GPU texture-unit widening behavior the CPU executor doesn't
+   need, since it drives the equivalent conversion off the real
+   `VkFormat` elsewhere).
+4. Tests, after a real detour: my first attempt added plain textual
+   `.mlir` FileCheck cases the normal way, and hit a `SIGABRT`. Not my
+   bug -- upstream `ImageOps.cpp`'s `verifyImageOperands` has a hard
+   `assert()` (not a diagnostic) that unconditionally rejects
+   `SignExtend`/`ZeroExtend`, and MLIR's textual parser always verifies
+   as it parses. Tried the `spirv-as`+binary-import route the existing
+   `spirv-import-skip-verify.test` precedent uses, but that only
+   protects the *import* stage -- re-parsing the printed result for a
+   second `--spirv-to-llvmdialect` stage hits the same assert again.
+   Also tried `feme-run` end-to-end with a real compiled `.spv` -- it
+   ran into a **different**, unrelated, already-partially-triaged bug
+   (a "raised" resource-handle-normalization gap, see H84 below) before
+   even reaching the code my fix touches, so that route was a dead
+   end for testing *this* specific bug in isolation.
+   The fix: `feme-opt --help` has
+   `--mlir-very-unsafe-disable-verifier-on-parsing`, which skips
+   *parse-time* verification only -- the pass's own legality checks
+   still run, so the test's oracle (the `CHECK` lines matching real
+   conversion output) is untouched. Added it to the existing
+   `spirv-to-llvm-image-access.mlir`'s `RUN` line and the two new test
+   cases worked immediately. Confirmed both fail pre-fix, pass post-fix
+   via `git stash`.
+5. `check-feme`: 2931/2872/59/0, byte-identical pass rate to baseline
+   with 2 new tests folded in.
+6. Real CTS: five-bucket group re-run shows `builtin`/`misc`/
+   `properties`/`smoke` completely unchanged, `synchronization` moves
+   36/45 -> 50/31 Pass/Fail. Cross-referencing the original 21 case
+   names: 14 now pass clean, 7 hit two further, previously fully
+   masked signatures instead (never new *pixel* failures -- always a
+   different pipeline-creation/submit error). Full
+   `dEQP-VK.mesh_shader.ext.*` sweep (26,921 cases) confirms an exact
+   14-Pass/14-Fail net movement, nothing else moved.
+7. `check-hlsl-feme-vk`: `offload-test-suite`'s `feme` branch was one
+   commit behind `beanz/feme` again (third session in a row this has
+   happened -- worth a standing note, see below), fast-forwarded and
+   reconfigured `build2` to pick up the newly-added target, then ran
+   it: 276/101/26/1/260, byte-identical to the documented baseline.
+
+## The two things this fix unmasked
+
+Closing H71 revealed the exact same shape H70 itself showed when it
+closed: fixing the visible bug lets some cases progress further and hit
+something else that was hiding behind it the whole time. Two new,
+distinct signatures, both filed with real per-case counts rather than
+left as vague follow-up notes:
+
+- **H83** (`"fragment input location 0 has no matching vertex stage
+  output"`, 8 cases): the interesting part is that this affects
+  `storage_buffer` cases too, not just the `storage_image` ones H71's
+  fix newly reached -- so despite superficially looking like "another
+  image thing", it almost certainly isn't image-specific at all. I
+  flagged this explicitly in the roadmap row so nobody wastes time
+  assuming it's related to `R32ui`/image formats before checking.
+- **H84** (`sampled_image` "raised" resource-handle-normalization gap,
+  4 cases): reproduces outside mesh shaders entirely -- I hit the exact
+  same diagnostic with a throwaway `feme-run` test on a plain compute
+  shader with one sampled image binding, while trying (and abandoning)
+  the `feme-run`-based testing route for H71 itself. Left that
+  reproduction detail in the roadmap row since it's a faster starting
+  point than mesh-shader CTS cases for whoever picks this up.
+
+## A pattern worth calling out for future sessions
+
+This is the third session in a row where `offload-test-suite`'s local
+`feme` branch checkout needed fast-forwarding against `beanz/feme`
+before `check-hlsl-feme-vk` would even build (this time it also needed
+a `cmake .` reconfigure in `build2` afterward, since the target itself
+didn't exist in the build graph until the new commit landed). If this
+keeps happening, it's worth either fast-forwarding it unconditionally
+at the start of every session's environment-check step, or asking
+whoever owns that branch whether it can just track `beanz/feme`
+directly instead of being a separate local ref that drifts.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
