@@ -77756,3 +77756,38 @@ actually catches you out. Naming H89b as its own row with its own severity (P2, 
 H89a's P3) is the loud sign saying "don't stop after the first half."
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H89a/H89b session: found the SSAUpdater bug the previous session left as a mystery, fixed both, landed together
+
+**Result: both closed. `max_mesh_output_vertices_256` passes (no hang). `mesh_shader.ext.*` group: 299/140 -> 301/138 Pass/Fail, 0 regressions. New rows H91 (+3 cases), H92, H93 filed for what the fix exposes next.**
+
+## What's done, in order
+
+1. Re-applied H89a's own already-prototyped poison-operand fix to `DiamondFlattener::flatten` (skip `select` when one merge-phi arm is `poison`/`undef`, reuse the other operand) -- this was necessary just to *reach* the H89b hang again, since without it the case never compiles far enough to hit `LoopLinearizer` at all.
+2. Added temporary `getenv`-gated `F.dump()` hooks after `DiamondFlattener::run`, after `peelConstantFlowPredecessorsInCycle`, and after `LoopLinearizer::run` -- per this row's own explicit instruction to do *empirical* IR dumping, not more symbolic tracing (the prior session already tried tracing by hand and didn't find it).
+3. Ran the target case with each dump enabled in turn (`timeout 15/20/30` wrapped every single time -- this function hangs, don't run it bare), captured each stage's IR to `/tmp`.
+4. Diffed the stages by hand: post-`LoopLinearizer`, the loop's real exit-check phi wasn't feeding the mask computation directly -- a second, bogus phi had been synthesized at the loop header and threaded in instead, corrupting `active.check.live`.
+5. Bisected *which* pass step introduced the bogus phi with a temporary per-phi debug print inside `peelConstantFlowPredecessors`'s own `SSAUpdater` loop -- found it: the corruption appears exactly when this function rewrites a phi's use in *its own block's terminator* (a trivially in-block, still-dominated use).
+6. Read `llvm/lib/Transforms/Utils/SSAUpdater.cpp`'s `GetValueInMiddleOfBlock` to understand why: registering `Updater.AddAvailableValue(BB, PN)` makes `HasValueForBlock(BB)` true, which skips the correct fast path and forces the "value redefined partway through the block" reconciler -- which only knows about `BB` and the one peeled predecessor, not `BB`'s *other* real predecessors, so it invents new phis walking back through the CFG to fill the gap. Classic "gave SSAUpdater a partial picture and it filled in the rest wrong."
+7. Fix: skip `SSAUpdater::RewriteUse` for any use whose block (the phi-incoming block, or the user's own parent block) is `BB` itself -- only genuinely out-of-block uses need SSAUpdater at all.
+8. Removed every debug hook (`getenv`, dumps, the per-phi print, the `<cstdlib>` include) -- confirmed via `git diff` that only the two real fixes remained before doing anything else.
+9. Rebuilt, ran the target case with `timeout 30`: **passes, exit 0, no hung process left behind.** Spot-checked `misc.local_size_id_task` too (still passes).
+10. `check-feme`: 2881/2940, 0 Failed -- matches baseline, no regressions from either fix.
+11. Wrote a regression lit test (`loop-uniform-check-fused-with-divergent-exit-inblock-use.ll`) hand-building the exact minimal CFG shape directly for `feme-cpu-linearize` (skipped `feme-cpu-prepare`, since `StructurizeCFG` restructured the CFG away from the target shape when I tried routing through it first -- several existing tests already skip it for the same reason, should've checked that convention before wasting a round-trip). Verified via `git stash` that it fails without the fix (bogus phi shows up) and passes with it.
+12. Added `LinearizeTest.ReusesRealOperandInsteadOfSelectWhenOtherArmIsPoison` for H89a specifically -- first attempt asserted "no `SelectInst` anywhere in the function" and failed, because `Masks.Live`/`Masks.SideEffect`'s own merge selects are *always* created regardless of the poison fix (that's normal, unrelated mask-merging). Fixed the assertion to check the specific value the original phi got replaced with instead of "no selects at all."
+13. Ran the CTS's own 9 tracked H89 cases as a caselist: `max_mesh_output_vertices_256` now **Pass**es outright; the other 8 no longer hang, but land on 3 *different* diagnostics instead of the old "divergent branch" one -- filed those as follow-on rows rather than chasing them in this session (see below).
+14. Full `dEQP-VK.mesh_shader.ext.*` re-run: 299/140 -> **301/138** Pass/Fail (26482 `NotSupported`, unchanged). +1 is the directly-targeted case; +1 more shows up in the `misc.*` sub-bucket's own totals (37/34 -> 38/33) as a side effect I did **not** individually isolate -- flagged in `VulkanCTSReport.md` for a future session instead of guessed at.
+15. Roadmap: struck through H89a and H89b, filed H92 (4 `_no_view_index` cases' `CanonicalizeStagePass` gap) and H93 (`max_mesh_output_primitives_256`'s pixel mismatch) as new rows, folded 3 more cases into H91's existing count (same "signature metadata" diagnostic it already tracked).
+16. `VulkanCTSReport.md` got a new "Roadmap H89a/H89b: measured impact" section. Confirmed no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/`FeMeVulkanDesign.md` changes needed -- pure compiler-correctness fix inside already-documented masking machinery.
+17. Confirmed `offload-test-suite`'s `feme` branch (`llvm-beanz` remote) still matches its own tip -- no action needed there.
+18. Committed in 4 pieces: H89a fix + its unit test, H89b fix + its lit test, doc updates, this file.
+
+## The one-sentence lesson
+
+**When a "should be safe" simplification unmasks a hang, the bug is very rarely in the code you just touched -- it was already-latent, load-bearing-incorrect code the new path finally exercised for the first time; go find *that*, don't re-audit the simplification.**
+
+## Why the caselist run undercounted by one case, and why I didn't chase it further
+
+The `properties.*` case list I ran only exercises 9 named cases; the `misc.*` group's own +1 flip is somewhere in its other ~110 cases, not in the 9 tracked ones at all. Finding it precisely would mean a full `git stash`-based A/B of the entire `misc.*` bucket (rebuild + rerun ~114 cases twice) just to name one already-fixed, already-passing case -- pure bookkeeping with no remaining risk, since the fix is unambiguously correct and already verified end-to-end on its primary target. Left it as a flagged, not-yet-isolated note in the CTS report rather than spending a full extra CTS pass to name it.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
