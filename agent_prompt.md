@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 3e3ed1ca-e8e0-43ee-a165-5cdf3bba2524
 ---
 # Initial Guidelines
 
@@ -43,19 +44,42 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H93 or other blocking work to make progress on the H-series
+Can you work on H93b or other blocking work to make progress on the H-series
 milestones?
 
-> **`properties.max_mesh_output_primitives_256`'s pixel-comparison mismatch** (1
-> case, newly exposed by H89a/H89b's own closing re-run): compiles and runs to
-> completion (no crash, no pipeline-creation error, confirmed not a hang) but
-> fails its own image comparison (`Check log for details at
-> vktMeshShaderPropertyTestsEXT.cpp:1287`) -- the sibling case
-> `max_mesh_output_vertices_256` (same H89a/H89b masked-loop fix, analogous
-> large-output-array shape) now passes outright, so this is not simply "the same
-> loop bug again"; likely a distinct, narrower issue specific to the primitive-
-> rather than vertex-output path. Not yet triaged -- needs a channel-level pixel
-> reduction, mirroring the technique H88's own closing session used for the
-> analogous `local_size_id_mesh`/`local_size_id_task` rows, to determine the
-> real vs. expected framebuffer content and narrow down which stage of the
-> primitive-output path disagrees
+> **Thread an explicit mesh (or geometry) shader-authored `gl_PrimitiveID`
+> through to the fragment invocation, instead of the rasterizer always
+> overwriting it with an auto-incrementing raster-order counter**:
+> `Executor.cpp`'s triangle/line/point-emitting lambda (~`ST.PrimitiveID =
+> PrimitiveCounter++`) unconditionally synthesizes every fragment invocation's
+> `gl_PrimitiveID` from raster order -- correct only as the Vulkan-spec
+> *fallback* for when no earlier stage writes it, but applied even when a
+> mesh/GS stage explicitly does. `StageStorage.cpp` (~line 95-135) deliberately
+> excludes any `SystemValue`-tagged `Input` element (except
+> `ClipDistance`/`CullDistance` and geometry-input vertex-array members) from
+> ordinary interpolated stage storage, so there is currently no path at all for
+> an authored primitive-output `PrimitiveID` to reach the fragment side. For
+> `max_mesh_output_primitives_256` specifically, `emitPointQuad` calls the
+> triangle-emitting lambda twice per point (a point becomes a 2-triangle quad),
+> so `PrimitiveCounter` advances 2 per point; assuming (plausibly, not yet
+> re-confirmed with a direct `Inv.PrimitiveID` print after H93a landed) the
+> first-pushed triangle of each quad always wins the CTS's 1x1-pixel
+> framebuffer, point `P`'s surviving fragment gets auto-ID `2*P` -- exactly
+> matching the observed symptom (all 128 even indices `0,2,...,254` of the CTS's
+> `ssbo.flags` get set, all 128 odd ones never do, and `P>=128` produces
+> silently-dropped out-of-bounds writes). Needs: (1) a way for
+> `EntrySignature`/stage linking to recognize when a producing stage's `Output`
+> elements include a `SystemValue::PrimitiveID` and thread that fact to the
+> rasterizer (likely via `StageLink.cpp`); (2) `Executor.cpp`'s
+> fragment-invocation assembly to prefer that authored value (sourced from
+> `Merged`/`PrimitiveOutputs`, by primitive index, not raster order) over
+> `PrimitiveCounter++` whenever present, for every primitive class
+> (points/lines/triangles alike, not just the mesh-point shape that exposed it);
+> (3) regression coverage at both the `Executor.cpp` unit-test level (an
+> explicit-`PrimitiveID`-authoring mesh entry, asserting the fragment
+> invocation's `PrimitiveID` matches the authored value rather than raster
+> order) and a real CTS re-run of `max_mesh_output_primitives_256` confirming it
+> passes outright. Not yet started -- deferred here as its own milestone given
+> the architectural scope (touches `StageStorage.cpp`, `StageLink.cpp`, and
+> `Executor.cpp`'s triangle/line/point assembly all at once) rather than
+> attempted as a quick follow-on patch
