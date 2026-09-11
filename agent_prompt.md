@@ -44,15 +44,13 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H87 or other blocking work to make progress on the H-series
+Can you work on H88 or other blocking work to make progress on the H-series
 milestones?
 
-> **`properties.*`'s `'llvm.getelementptr' op operand #0 must be LLVM pointer
-> type...'` SPIR-V-to-LLVM legalization gap for large mesh-output arrays** (5
-> cases: `max_mesh_output_components`, and the 4 `*_no_view_index` payload-size
-> cases, newly exposed by H74's specialization-constant fix): a GEP into a large
-> mesh-output-array shape ends up with a bare LLVM struct/array operand instead
-> of a pointer, the same general shape of bug as H82's own
-> `misc.per_prim_block_output` row but not yet confirmed to be the identical
-> root cause. Not yet triaged -- needs its own IR reduction to confirm/refute
-> overlap with H82 before any new fix work
+> **`misc.local_size_id_mesh`/`local_size_id_task`'s pixel-comparison mismatch**
+> (2 cases, newly exposed by H74's specialization-constant fix): both compile
+> and run to completion (no crash, no pipeline-creation error) but fail their
+> own image comparison by a 1-unit alpha-channel difference. Not yet triaged --
+> needs a channel-level reduction to determine whether this is a real off-by-one
+> in `LocalSizeId`-resolved group-size handling or an unrelated, pre-existing
+> tolerance issue
