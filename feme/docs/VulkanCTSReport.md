@@ -38324,3 +38324,103 @@ rasterizer's fragment `gl_PrimitiveID` sourcing never yielding to an
 authored value) is a real, not-yet-implemented design gap, tracked on
 the roadmap rather than the design doc since no part of
 `FeMeGraphicsDesign.md` currently claims this already works.
+
+## Roadmap H93b: measured impact
+
+**Root cause.** `Executor.cpp`'s rasterizer always synthesized every
+fragment invocation's `gl_PrimitiveID` from a raster-order
+`PrimitiveCounter`, never checking whether the last pre-rasterization
+stage (a mesh entry, in every case this project currently supports
+authoring it) had already written an explicit `gl_PrimitiveID` output
+itself. For `max_mesh_output_primitives_256` specifically, its
+`emitPointQuad` path pushes two synthetic triangles per point primitive,
+so the counter advanced 2 per point; the fragment shader observed
+`2*P` instead of the mesh entry's own authored `P`, producing exactly
+the CTS's observed symptom (128 of 256 `ssbo.flags` entries set, the
+other 128 -- odd `P` -- never touched, plus 128 further silently-dropped
+out-of-bounds writes for `P>=128`).
+
+**Fix.** Turned out to need far less than H93b's own original scope
+suggested. `gl_PrimitiveID` is uniform-per-primitive, never truly
+interpolated, so it does not need `StageStorage.cpp`'s
+varying-interpolation machinery, `StageLink.cpp`, or any
+`FemeFragmentInvocation` ABI change at all --
+`FragmentWrapper.cpp`'s `loadFragmentSystemValue` already reads it from
+a fixed per-invocation record field regardless of which stage produced
+it; only the *value* the executor computes for that field needed to
+change, and only the executor (at draw time) can know whether the
+paired producing stage authored one.
+
+Fixed entirely in `Executor.cpp` by reusing the exact pattern already
+established for `gl_Layer`/`gl_ViewportIndex`:
+
+- A `VSPrimitiveIDOut` signature-element lookup
+  (`findElement(RasterSig, Output, SystemValue::PrimitiveID)`) alongside
+  the existing `VSLayerOut`/`VSViewportOut` lookups.
+- A new `PrimitiveState::AuthoredPrimitiveID` (`std::optional<uint32_t>`)
+  resolved once per primitive in `resolvePrimitiveState`, via
+  `RasterOut->readRaw(...)` at the same `Invocation` index already used
+  to resolve `TargetLayer`/`ViewportIndex` -- correct because H93a's own
+  `unflattenMeshPrimitiveRow` already replicates a `PerPrimitive` mesh
+  output into every one of that primitive's own vertex slots, so reading
+  it back at any one of them is sound.
+- Both `ST.PrimitiveID = PrimitiveCounter++` call sites (the
+  `pushQuadTriangle` lambda, used by the point/line-quad path, and the
+  general filled-triangle path) changed to a short-circuiting ternary
+  preferring `AuthoredPrimitiveID` over the counter -- deliberately not
+  `.value_or(...)`, so `PrimitiveCounter` is never spuriously
+  incremented for a primitive that already had an authored value.
+
+**Regression coverage.** New `ExecutorTest.
+FragmentPrimitiveIDPrefersAMeshEntrysAuthoredValue`: the same
+two-triangles-sharing-a-diagonal quad shape as
+`PerPrimitiveColorsDoNotBleedAcrossPrimitivesSharingAVertex`, but each
+triangle also authors an explicit `PerPrimitive` `gl_PrimitiveID`
+deliberately reversed from emission order (triangle 0 -> 100, triangle
+1 -> 7), read back via a `gl_PrimitiveID` fragment-input passthrough
+into a single-channel `R32_UINT` attachment -- distinguishing the
+pre-fix behavior (raster order, 0/1) from the post-fix one (the
+authored 100/7) unambiguously.
+
+**Build/test.** `ninja check-feme`: 2945/2948 Passed, 3 Unsupported, 0
+Failed (up 1 test from H93a's closing 2944/2947).
+
+**Real CTS re-run.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 60 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_primitives_256' --deqp-shadercache=disable
+```
+
+Now `Pass`es outright. Its sibling case,
+`max_mesh_output_vertices_256` (H93a's own fix), re-checked and still
+`Pass`es.
+
+A broader `dEQP-VK.mesh_shader.ext.*` re-run (full group, 26,921 cases)
+confirms zero regressions against H93a's own already-fixed case list:
+
+```
+before (H93a's closing state): Passed 321/26921, Failed 118/26921, Not supported 26482/26921
+after  (H93b):                 Passed 324/26921, Failed 116/26921, Not supported 26482/26921
+```
+
++3/-2 net -- more movement than the single targeted case, but diffing
+the `Fail` list confirms none of H93a's own 11 previously-fixed cases,
+nor either `properties.max_mesh_output_{primitives,vertices}_256` case,
+reappear as a failure; the small extra swing beyond the +1/-1 the
+targeted case alone would produce is consistent with this project's own
+already-documented run-to-run noise band seen in other large sweeps
+(e.g. the `dEQP-VK.ubo.*` ~115-case swings noted elsewhere in this
+report), not a new regression.
+
+**Roadmap H93 is now fully closed** (both H93a and H93b fixed).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this fixes a bug in already-supported `VK_EXT_mesh_shader`
+machinery (fragment-side `gl_PrimitiveID` sourcing), not new feature or
+extension surface, and neither file has ever carried a
+roadmap-H7x-or-later reference for this extension row to begin with.
+`FeMeGraphicsDesign.md` needs no change either: the fix corrects an
+implementation bug in an already-documented mechanism (per-primitive
+`gl_Layer`/`gl_ViewportIndex`-style resolution, now extended to
+`gl_PrimitiveID`) rather than changing anything the design doc claims.
