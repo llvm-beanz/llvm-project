@@ -3777,8 +3777,45 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       for (const Meshlet &M : Meshlets)
         TotalVertices += M.getVertexCount();
 
+      // (roadmap H69) Whether this mesh entry has any `PerPrimitive`-
+      // frequency Output at all -- if it does not, `unflattenMeshPrimitive
+      // Row` below is a no-op for every element and the plain, shared
+      // per-vertex storage below is unambiguous as-is.
+      bool HasPrimitiveOutputs = llvm::any_of(
+          MeshSig->Elements, [](const SignatureElement &Elt) {
+            return Elt.Direction == SignatureDirection::Output &&
+                   Elt.Frequency == SignatureFrequency::PerPrimitive;
+          });
+
+      // (roadmap H69) A triangle/line-topology meshlet's vertices are
+      // routinely *shared* between neighboring primitives (e.g. a simple
+      // quad emitted as two triangles reusing two of each other's
+      // vertices) -- ordinary, legitimate vertex reuse for `PerVertex`
+      // data, since every primitive touching a shared vertex agrees on
+      // its value by construction. H31's own `PerPrimitive` merge scheme
+      // does not: it stashes each primitive's own value into that same
+      // shared per-vertex storage, so a later primitive sharing a vertex
+      // with an earlier one silently clobbers the earlier primitive's own
+      // `PerPrimitive` value at that vertex, corrupting whichever
+      // primitive was processed first. Each triangle/line primitive is
+      // instead given its own exclusive set of "corner" rows, appended
+      // after the ordinary per-vertex ones, whenever the entry point
+      // actually has `PerPrimitive` outputs to protect -- `RasterizePrimit
+      // ives` below only ever sees row indices, so this is invisible to
+      // it, and every other caller of `Merged` in this function already
+      // only reads through those same row indices.
+      uint32_t VerticesPerRasterPrim =
+          Mesh.OutputTopology == MeshOutputTopology::Triangles  ? 3
+          : Mesh.OutputTopology == MeshOutputTopology::Lines    ? 2
+                                                                 : 0;
+      bool DuplicateCorners = HasPrimitiveOutputs && VerticesPerRasterPrim > 0;
+      uint32_t TotalCorners = 0;
+      if (DuplicateCorners)
+        for (const Meshlet &M : Meshlets)
+          TotalCorners += M.getPrimitiveCount() * VerticesPerRasterPrim;
+
       Expected<StageStorage> Merged = buildStageStorage(
-          *MeshSig, SignatureDirection::Output, TotalVertices);
+          *MeshSig, SignatureDirection::Output, TotalVertices + TotalCorners);
       if (!Merged)
         return Merged.takeError();
 
@@ -3845,6 +3882,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
       SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
       uint32_t VertexBase = 0;
+      uint32_t CornerBase = TotalVertices;
       for (const Meshlet &M : Meshlets) {
         for (uint32_t V = 0; V != M.getVertexCount(); ++V)
           unflattenMeshRow(M.getVertices()[V], VertexBase + V);
@@ -3853,22 +3891,41 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           SmallVector<uint32_t, 3> AbsIdx;
           for (uint32_t I : Idx)
             AbsIdx.push_back(VertexBase + I);
-          unflattenMeshPrimitiveRow(M.getPrimitives()[P], AbsIdx);
+
+          // (roadmap H69) `RasterIdx` is what actually gets rasterized:
+          // the shared per-vertex rows normally, or -- whenever this
+          // primitive's own value could otherwise clobber a neighboring
+          // primitive's at a reused vertex -- this primitive's own
+          // exclusive corner rows instead, reseeded from the same
+          // per-vertex data those shared rows already hold.
+          SmallVector<uint32_t, 3> RasterIdx;
+          if (DuplicateCorners) {
+            for (uint32_t I : Idx) {
+              uint32_t Corner = CornerBase++;
+              unflattenMeshRow(M.getVertices()[I], Corner);
+              RasterIdx.push_back(Corner);
+            }
+          } else {
+            RasterIdx = AbsIdx;
+          }
+          unflattenMeshPrimitiveRow(M.getPrimitives()[P], RasterIdx);
           switch (Mesh.OutputTopology) {
           case MeshOutputTopology::Triangles:
-            AbsTriIndices.push_back({VertexBase + Idx[0], VertexBase + Idx[1],
-                                     VertexBase + Idx[2]});
+            AbsTriIndices.push_back(
+                {RasterIdx[0], RasterIdx[1], RasterIdx[2]});
             break;
           case MeshOutputTopology::Lines:
-            AbsLineIndices.push_back(
-                {VertexBase + Idx[0], VertexBase + Idx[1]});
+            AbsLineIndices.push_back({RasterIdx[0], RasterIdx[1]});
             break;
           case MeshOutputTopology::Points:
             // A point's own "index list" is a single, implicit
             // self-reference -- `RasterizePrimitives` rasterizes every one
             // of a point-class draw's own invocations directly (this
             // meshlet's own vertices, already merged into `Merged`), so
-            // there is no separate index to record here.
+            // there is no separate index to record here. Points never
+            // share a vertex between two distinct primitives (each point
+            // primitive owns exactly one vertex), so no corner
+            // duplication is needed for them either.
             break;
           }
         }

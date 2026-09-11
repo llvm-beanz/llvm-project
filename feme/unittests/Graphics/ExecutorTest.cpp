@@ -5937,6 +5937,155 @@ TEST(ExecutorTest,
   }
 }
 
+// (Roadmap H69) Two triangle-topology mesh primitives sharing two of a
+// quad's four vertices (the same "simple quad emitted as two triangles"
+// shape H69's own case-reduction traced the underlying bug to), each with
+// its own distinct `PerPrimitive`-frequency color. Before this fix,
+// `Executor::runMeshWorkgroup`'s merge step stashed each primitive's own
+// `PerPrimitive` value into the *same* shared per-vertex `Merged` rows
+// `RasterizePrimitives` reads a corner's varyings from -- legitimate reuse
+// for `PerVertex` data (every primitive touching a shared vertex agrees on
+// its value by construction), but not for `PerPrimitive` data, so
+// whichever primitive got merged second silently clobbered the first
+// one's own value at their two shared vertices, corrupting that first
+// primitive's rendered color at exactly the corners it shares with its
+// neighbor. This asserts each triangle's own solid color reaches every one
+// of its own covered pixels -- including the ones nearest the shared
+// edge -- rather than one of the two colors bleeding across it.
+constexpr char MeshTwoPrimitivesSharedVerticesShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 4, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 3)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 1.0, i32 3)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 3)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 3)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 1, i32 1, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 2, i32 2, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 1, i32 1)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 1, i32 3, i32 1)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 2, i32 2, i32 1)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float 0.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 1)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+TEST(ExecutorTest,
+     PerPrimitiveColorsDoNotBleedAcrossPrimitivesSharingAVertex) {
+  Context Ctx;
+  SignatureElement PosElt =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position);
+  SignatureElement IdxElt = makeElement(
+      1, SignatureDirection::Output, 3, /*Location=*/std::nullopt);
+  IdxElt.ComponentType = SignatureComponentType::UInt;
+  IdxElt.Frequency = SignatureFrequency::PerPrimitive;
+  IdxElt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  SignatureElement ColorElt =
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/0);
+  ColorElt.Frequency = SignatureFrequency::PerPrimitive;
+  EntrySignature MeshSig;
+  MeshSig.Elements = {PosElt, IdxElt, ColorElt};
+  Expected<std::shared_ptr<CompiledStage>> MS =
+      compileStage(Ctx, MeshTwoPrimitivesSharedVerticesShaderIR, "ms_main",
+                   MeshSig, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, Size, Size}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 4;
+  Mesh.MaxOutputPrimitives = 2;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Triangle 0 (vertices 0,1,2) and triangle 1 (vertices 1,3,2) meet along
+  // the quad's diagonal, so a pixel `(X, Y)`'s rasterized winner is
+  // determined by `X + Y` relative to that diagonal: `X + Y <= 2` lands in
+  // triangle 0's own solid green, `X + Y >= 3` in triangle 1's own solid
+  // blue (the tie-break along the diagonal itself, `X + Y == 2`, always
+  // resolving to triangle 0). This samples the row of pixels immediately
+  // on each side of that line -- exactly where the pre-fix bug's shared-
+  // vertex clobbering would bleed one primitive's color into the other's
+  // -- rather than only each triangle's own far corner.
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Storage.data() + (Y * Size + X) * 4;
+  };
+  // Immediately on triangle 0's side of the diagonal (X + Y == 2): solid
+  // green.
+  for (auto [X, Y] : {std::pair{0u, 2u}, std::pair{1u, 1u}, std::pair{2u, 0u}}) {
+    const uint8_t *Texel = texel(X, Y);
+    EXPECT_EQ(Texel[0], 0) << "x=" << X << " y=" << Y;
+    EXPECT_EQ(Texel[1], 255) << "x=" << X << " y=" << Y;
+    EXPECT_EQ(Texel[2], 0) << "x=" << X << " y=" << Y;
+    EXPECT_EQ(Texel[3], 255) << "x=" << X << " y=" << Y;
+  }
+  // Immediately on triangle 1's side of the diagonal (X + Y == 3): solid
+  // blue.
+  for (auto [X, Y] : {std::pair{0u, 3u}, std::pair{1u, 2u}, std::pair{2u, 1u}}) {
+    const uint8_t *Texel = texel(X, Y);
+    EXPECT_EQ(Texel[0], 0) << "x=" << X << " y=" << Y;
+    EXPECT_EQ(Texel[1], 0) << "x=" << X << " y=" << Y;
+    EXPECT_EQ(Texel[2], 255) << "x=" << X << " y=" << Y;
+    EXPECT_EQ(Texel[3], 255) << "x=" << X << " y=" << Y;
+  }
+}
+
 // (Roadmap H8p) A fragment shader with a real `uvec2` output (`UInt`,
 // `ComponentCount == 2`) drawn to a real `R16G16_UINT` color attachment --
 // exercises `executeDraws`'s widened `FSColors` validation (accepting a
