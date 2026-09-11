@@ -37764,3 +37764,104 @@ cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_vertices_256' --deqp-shadercache=disable
 ```
+
+## Roadmap H81: measured impact
+
+**Symptom.** `dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow` and
+`.emit_in_control_flow_bad_emit_last` (2 cases) failed
+`vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`, the
+compiler emitting: `missing LLVMTranslationDialectInterface
+registration for dialect for op: spirv.Unreachable`.
+
+**Root cause.** The CTS's own task shader for this case is
+`if (...) { EmitMeshTasksEXT(2,1,1); } else { EmitMeshTasksEXT(1,1,1); }`
+with nothing after the `if`/`else`. `OpEmitMeshTasksEXT` is itself a
+real SPIR-V terminator that ends the whole task invocation (like a
+`return`), so *both* arms of the `OpSelectionMerge` end in their own
+terminator instead of branching to the merge block SPIR-V's own
+structured-CFG rules still require to exist. `glslangValidator`
+generates that now-orphaned, zero-predecessor merge block terminated
+with `OpUnreachable` (confirmed directly by compiling the real CTS
+GLSL source through `glslangValidator --target-env vulkan1.2 -V` and
+disassembling the result). MLIR's own SPIR-V deserializer
+(`feme-translate --import-spirv`) imports this faithfully as a block
+with zero predecessors holding `spirv.Unreachable`.
+
+`ConvertSPIRVToLLVMPass`'s `applyPartialConversion` only legalizes ops
+reachable from a region's own entry block (an intentional property of
+MLIR's dialect-conversion driver -- converting dead code is wasted
+work), so it silently left that block's `spirv.Unreachable` in the
+`spirv` dialect. That op then survives all the way to the final
+`translateModuleToLLVMIR` step, which fails outright because no
+`LLVMTranslationDialectInterface` is registered for the `spirv` dialect
+at all -- correctly so, since every `spirv` op is expected to have
+already converted away to `llvm` dialect by that point. Two hand-built
+minimal repros attempted earlier in this row's own investigation (a
+plain conditional branch to `spirv.Unreachable`, and the same wrapped
+in a `spirv.mlir.selection` with a real merge block reached by both
+arms) both converted successfully, since in each of those the merge
+block *does* have a predecessor -- only the real CTS shape's "every arm
+already has its own terminator" property produces a genuinely orphaned
+block.
+
+**Fix.** `ConvertSPIRVToLLVMPass::runOnOperation` now erases every
+block unreachable from its own `spirv.func`'s entry block (via
+`mlir::eraseUnreachableBlocks`) before running the SPIR-V-to-LLVM
+conversion patterns. Such a block can never execute at runtime, so
+nothing of value is lost, and the conversion driver no longer has any
+leftover `spirv`-dialect op to skip.
+
+**Regression test.** `spirv-to-llvm-unreachable-merge-block.mlir`
+reproduces the minimal "every selection arm ends in its own terminator,
+merge block orphaned" shape directly (hand-built, not glslang-derived,
+for a stable/minimal lit test), and confirms the module converts
+cleanly to the `llvm` dialect with no `spirv.Unreachable`/
+`llvm.unreachable` left over (the block itself is erased, not merely
+converted, since it is unreachable).
+
+**Build/test.** `ninja check-feme`: 2884/2943 Passed, 59 Unsupported, 0
+Failed (up from 2942 total tests pre-fix; this row added one new lit
+test).
+
+**Real CTS re-run.** Both tracked cases now `Pass`:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow*'
+# Passed: 2/2 (100.0%)
+```
+
+A broader `dEQP-VK.mesh_shader.ext.misc.*` re-run (114 cases) shows no
+regressions from this change (40 Pass/31 Fail/43 NotSupported; the 31
+remaining `Fail`s are the other already-tracked H70 sub-buckets, H75-
+H80/H82-H84, none of which this fix touches).
+
+**H82's `push_constant_and_task_shader` case, quick-confirmed.** Using
+the H81-fixed build, `dEQP-VK.mesh_shader.ext.misc.push_constant_and_task_shader`
+still fails, but with `'llvm.mlir.constant' op attribute and type have
+different integer types: 'si32' vs. 'i32'` -- the exact diagnostic text
+H31's own row already root-caused and left open as the sole remaining
+cause of the `api.draw.with_task_shader` failures. Confirmed a
+duplicate, folded into H31's own tracked scope rather than double-
+counted (see Roadmap.md). H82's other case
+(`misc.per_prim_block_output`) still fails with a distinct
+`llvm.getelementptr` struct-operand-type diagnostic, confirmed (via
+H87's own already-closed precedent) to be a *different* root cause
+from that row's own resolved gap, so it remains open as its own,
+narrower row.
+
+**Roadmap H81 is closed.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change: this is a pure compiler-
+correctness fix in existing dialect-conversion machinery, not a new
+feature or extension surface. `FeMeVulkanDesign.md` needs no change
+either: nothing about the documented SPIR-V-to-LLVM conversion design
+changed, only a bug in one of its passes' handling of dead code.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow'
+```
