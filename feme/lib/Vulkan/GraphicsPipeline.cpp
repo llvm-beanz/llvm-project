@@ -17,6 +17,7 @@
 #include "Pipeline.h"
 #include "PipelineCache.h"
 #include "RenderPass.h"
+#include "SpecializationPatch.h"
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
@@ -454,16 +455,21 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
     std::optional<feme::graphics::TessellationState> *OutState = nullptr,
     std::optional<feme::graphics::GeometryState> *OutGeometryState = nullptr,
     std::optional<feme::graphics::MeshState> *OutMeshState = nullptr) {
-  // Specialization constants are not resolved for a graphics stage yet: the
-  // compute path's own resolution is group-size-specific (GroupSize.h), and
-  // nothing here consumes a specialized value. Accepting the structure
-  // silently would compile the shader's default constants instead of the
-  // application's, so it is rejected.
-  if (StageInfo.pSpecializationInfo &&
-      StageInfo.pSpecializationInfo->mapEntryCount != 0)
-    return createStringError(inconvertibleErrorCode(),
-                             "specialization constants are not implemented "
-                             "for a graphics stage yet");
+  // (roadmap H74) Resolve this stage's real specialization overrides, then
+  // patch them directly onto a private copy of the shader module's own
+  // words before deserialization -- mirroring the compute path's own
+  // `compileComputePipeline` (Pipeline.cpp) exactly, including its reason
+  // for patching the raw SPIR-V rather than the deserialized MLIR module
+  // (see `SpecializationPatch.h`'s file comment: `mlir::spirv::deserialize`
+  // folds every spec constant to its module-declared default at
+  // deserialization time, with no later plug-in point for a real
+  // override). A private copy is used (never `Module->words()` itself)
+  // since one `VkShaderModule` may back multiple pipelines, each with a
+  // different `VkSpecializationInfo`.
+  Expected<SmallVector<SpecializationOverride, 4>> Overrides =
+      buildSpecializationOverrides(StageInfo.pSpecializationInfo);
+  if (!Overrides)
+    return Overrides.takeError();
 
   // (roadmap H29d) Resolves `StageInfo.module`, honoring
   // `VK_EXT_graphics_pipeline_library`'s inline shader-module creation (a
@@ -481,7 +487,10 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
                                    ? llvm::StringRef(DefaultEntryPoint)
                                    : EntryPointOverride;
 
-  Expected<feme::Module> AsLLVMIR = importShaderModule(Ctx, Module->words());
+  SmallVector<uint32_t, 0> PatchedWords(Module->words());
+  patchSpecializationConstants(PatchedWords, *Overrides);
+
+  Expected<feme::Module> AsLLVMIR = importShaderModule(Ctx, PatchedWords);
   if (!AsLLVMIR)
     return AsLLVMIR.takeError();
 

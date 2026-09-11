@@ -18,9 +18,12 @@
 #ifndef FEME_LIB_VULKAN_PIPELINE_H
 #define FEME_LIB_VULKAN_PIPELINE_H
 
+#include "GroupSize.h"
+
 #include "feme/Core/ShaderStage.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
@@ -253,6 +256,15 @@ llvm::Expected<feme::Module> importShaderModule(feme::Context &Ctx,
 /// rewrite can silently resolve. Shared by the compute and graphics pipeline
 /// compilation paths.
 void patchUnboundedResourceRanges(llvm::Module &M, const PipelineLayout &Layout);
+
+/// Builds the `GroupSize.h` override list from \p Info
+/// (`VkSpecializationInfo`), validating every map entry's `(offset, size)`
+/// against the supplied data blob before reading it. Shared by the compute
+/// (`compileComputePipeline`) and graphics (`compileGraphicsStage`,
+/// roadmap H74) stage-compilation paths -- see its definition in
+/// Pipeline.cpp for the full doc comment.
+llvm::Expected<llvm::SmallVector<SpecializationOverride, 4>>
+buildSpecializationOverrides(const VkSpecializationInfo *Info);
 
 /// Whether \p Layout's push-constant ranges visible to \p StageFlags fully
 /// cover `[RootConstantMinOffset, RootConstantSize)` with no gap -- see

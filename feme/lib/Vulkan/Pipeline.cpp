@@ -56,6 +56,10 @@ void clearHostAgnosticMetadata(llvm::Module &M) {
     M.eraseNamedMetadata(ModuleFlags);
 }
 
+} // namespace
+
+namespace feme::vulkan {
+
 /// Builds the `GroupSize.h` override list from \p Info
 /// (`VkSpecializationInfo`), validating every map entry's `(offset, size)`
 /// against the supplied data blob before reading it (see "Error Handling
@@ -64,7 +68,10 @@ void clearHostAgnosticMetadata(llvm::Module &M) {
 /// (`LocalSizeId`/`BuiltIn WorkgroupSize` constants are always 32-bit
 /// integers); anything else is recorded as an unmatched/zero override,
 /// which is harmless since `resolveComputeGroupSize` only ever consults an
-/// override for a `SpecId` it actually depends on.
+/// override for a `SpecId` it actually depends on. Also used by the
+/// graphics-stage path (`compileGraphicsStage`, GraphicsPipeline.cpp,
+/// roadmap H74) to build the override list `patchSpecializationConstants`
+/// applies directly to a shader module's raw SPIR-V words.
 Expected<SmallVector<SpecializationOverride, 4>>
 buildSpecializationOverrides(const VkSpecializationInfo *Info) {
   SmallVector<SpecializationOverride, 4> Overrides;
@@ -86,6 +93,10 @@ buildSpecializationOverrides(const VkSpecializationInfo *Info) {
   }
   return Overrides;
 }
+
+} // namespace feme::vulkan
+
+namespace {
 
 /// The explicit subgroup size a `VkPipelineShaderStageRequiredSubgroupSize
 /// CreateInfo` chained onto \p Next requests (roadmap E7,
