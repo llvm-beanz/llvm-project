@@ -76951,3 +76951,191 @@ columns before this change and is untouched by it), and every dependency
 edge that used to point at a moved row now pointing at its new name.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H31 session: closing the last H30 blocker, two bugs deep, and a false start along the way
+
+## Starting point
+
+The task was open-ended: "work on H30 or other blocking work." H30's own
+roadmap row already named its sole remaining dependency explicitly --
+H31, "a rendering-correctness gap for direct multi-draw mesh dispatches"
+(`dEQP-VK.mesh_shader.ext.api.draw.*`'s `no_task_shader` variants with
+`draw_count > 0` reaching rendering but failing an image comparison).
+Every other sub-milestone in H30's long H6-prefixed chain was already
+closed. So this session had one concrete target from the start, not a
+fresh investigation from a vague prompt.
+
+## Reproducing, and the first real surprise
+
+Fast-forwarding `offload-test-suite` to `beanz/feme`'s tip and confirming
+`check-feme` was clean at baseline were both uneventful. Reproducing H31
+itself needed the caselist-file trick (`--deqp-case=*` only matches one
+hierarchy level, not a true recursive glob -- I'd hit this before and
+should have remembered it sooner) to get the real 540-case group rather
+than a handful of cases matching a single wildcard segment.
+
+The failing case's own reference image predicted a gradient; the actual
+output was black everywhere the gradient should have been. Debug-dumping
+the compiled IR found a push-constant field (`width`) reading as
+`poison`. That is a strange thing for a *uniform* value (every invocation
+reads the same push-constant byte range) to become -- `poison` on a
+uniform read almost always means something turned it into a *masked*
+operation that then got mishandled, since masking is the mechanism this
+codebase uses specifically for divergent, not uniform, memory access.
+
+## The chase into `Linearize.cpp`, and a fix I had to revert
+
+Tracing backward from the masked-load conversion led to
+`applyStageMasks`'s `isa<Constant>(Masks.Live)` check, and from there to
+`DiamondFlattener::flatten`'s own phi-creation for uniform diamonds' exit
+masks. My first read of this code concluded the phi-creation itself was
+the bug -- why manufacture a phi merging two arms whose masks are
+identical? I wrote a fix that skipped phi creation in exactly that case,
+confirmed via IR dump that it fixed the immediate symptom, and moved on
+to what looked like a second, narrower bug (the mesh rendering was still
+black even with the poison read fixed).
+
+Only when I ran the *full* `check-feme` suite before committing did I
+find two real regressions: `LinearizeTest.PreservesRedundantFlowBlock
+WhoseMaskPhiEscapesToOuterDiamond` and its paired lit test. Reading that
+test's own extensive comment was the moment this stopped being "an
+obviously-correct simplification" and became "a load-bearing invariant I
+almost broke": an *outer* diamond nested around a uniform one can thread
+that inner diamond's own phi value further up to its own reconvergence
+point **by identity**, and a later pass (`foldRedundantFlowBlock`)
+deliberately declines to fold away a "redundant" Flow block it can't
+fully account for every use of, specifically to protect that threading.
+Skipping the phi's creation breaks the very thing that later code
+depends on existing.
+
+This is the kind of mistake that is easy to make and expensive to leave
+in: the fix looked right from the one failing case's own IR dump, and
+would have shipped as a regression if `check-feme`'s full suite hadn't
+been run before committing, only against the single reproducer. The
+lesson, again, is one this project's own history keeps re-teaching: run
+the whole regression suite before trusting a fix that "looks obviously
+right" from one instance's IR, not just the case that motivated it.
+
+The real fix moves the correction to the *consumption* side instead:
+`DiamondFlattener::flatten` keeps creating the phi unconditionally
+(preserving the outer-diamond invariant exactly as before), and
+`applyStageMasks`'s classification now looks *through* a chain of
+trivially-redundant phis (every incoming value, ignoring back-edges, is
+the identical value) down to whatever they all actually forward. Two
+small helpers, `lookThroughTrivialPhi`/`isKnownConstantMask`, replace six
+`isa<Constant>(...)` call sites with no other change needed anywhere.
+This is strictly narrower than the reverted fix: it changes what a
+*reader* of the mask concludes, never what the *producer* emits, so it
+cannot disturb any code (like the outer-diamond threading) that only
+cares about the phi's own existence and identity, not what a classifier
+elsewhere concludes about its constness.
+
+## The second bug: a whole per-primitive output frequency silently
+## dropped on the floor
+
+With the push-constant bug fixed, the CTS case still failed -- now every
+row rendered as fully transparent black rather than gradient-colored.
+Debug instrumentation in `Executor.cpp`'s rasterization loop confirmed
+the triangle geometry, winding, and cull test were all correct, which
+narrowed the bug to something after primitive assembly but before (or
+during) the fragment read. Reading the CTS's own mesh shader source
+settled it: the color comes from a `perprimitiveEXT out vec4
+primitiveColor[]`, this test's *only* mesh color-output path.
+
+The actual bug, once found, was almost embarrassingly structural rather
+than subtle: `Executor.cpp`'s mesh-merge step
+(`unflattenMeshRow`) only ever copied `PerVertex`-frequency output
+elements into the flat storage the fragment stage's varying-linking code
+reads from. A `PerPrimitive` element's own computed value was sitting
+right there in each `Meshlet::getPrimitives()` row the whole time -- it
+was simply never copied anywhere the fragment stage could see it. Every
+such varying read back as zero-initialized storage, which is exactly
+"fully transparent black."
+
+The fix I chose deliberately avoids touching the shared varying-linking/
+interpolation code at all (it's reused identically by vertex,
+tessellation, geometry, and mesh pre-rasterization stages, and I did not
+want to teach it a second "which storage do I read this from" concept
+for one caller). Instead, since a per-primitive value is by definition
+identical across every vertex of its own primitive, I write it
+redundantly into the per-vertex storage at each of that primitive's own
+vertex slots. Ordinary per-vertex interpolation -- flat shading, or a
+linear/perspective blend of three identical corners, which is still
+exactly that same value -- then reads it back correctly with zero
+further changes anywhere else. This is the same kind of "make the
+existing mechanism correct for a new case, rather than add a parallel
+mechanism" choice this codebase's own history (H6c-a-a-ii, H6l, H6u) has
+favored throughout, and it kept the change to one small, targeted
+addition (`unflattenMeshPrimitiveRow`) rather than a wider refactor.
+
+## Testing both fixes for real, not just "looks right in an IR dump"
+
+For the `Linearize.cpp` fix, I built a minimal reproducer (two uniform
+diamonds in a row, neither narrowing masks, inside a function with an
+unrelated divergent branch elsewhere so the whole-function all-uniform
+bailout doesn't skip the walk) and confirmed it two ways: it fails
+against the pre-fix pipeline (the trailing load/store get wrongly
+converted to masked calls) and passes with the fix, without touching the
+two existing regression tests the fix is specifically designed not to
+disturb.
+
+For the `Executor.cpp` fix, I built a real triangle-topology mesh
+workgroup emitting one primitive's own `PerPrimitive` color, consumed by
+an ordinary fragment shader reading it by location -- and confirmed the
+same way: fails (reads back transparent black) against the pre-fix
+`Executor.cpp`, passes with the fix. The existing mesh unit test closest
+to this shape (`RoutesAPerPrimitiveOutputElementIntoPrimitiveOutputs
+AlongsideAPerVertexOne`) never actually has a fragment stage *read* the
+per-primitive value at all, which is why it didn't already catch this --
+worth noting for anyone extending that file later.
+
+## Closing the loop: measuring, not assuming, "no regressions"
+
+Two things I made a point of confirming empirically rather than
+asserting from code review alone:
+
+- The full `dEQP-VK.mesh_shader.ext.api.draw.*` re-run (540 cases) moved
+  from 14/102/424 to 58/58/424 (Pass/Fail/NotSupported), and I wrote a
+  small script against the `.qpa` result text to confirm, case by case,
+  that every one of the 58 remaining failures is the unrelated,
+  pre-existing `with_task_shader` `si32`/`i32` pipeline-compile bug, not
+  a rendering mismatch -- i.e. genuinely zero remaining `no_task_shader`
+  failures, not "close enough."
+
+- Running the broader `dEQP-VK.mesh_shader.ext.*` group (26,921 cases)
+  surfaced 235 failures beyond the already-explained 58. Rather than
+  assume these were new regressions from my own two fixes (a reasonable
+  worry, since `applyStageMasks` is shared by every stage, not just
+  mesh), I reverted both fixes, rebuilt, and re-ran exactly those failing
+  caselists against the pre-fix build. They reproduced identically --
+  confirming this is pre-existing debt this broader sweep happened to
+  measure for the first time, not something my own work introduced. I
+  recorded these as two new milestones (H69, H70) rather than either
+  silently ignoring them or spending unbounded time chasing an
+  open-ended new investigation that wasn't what this session was asked
+  to do.
+
+- `check-hlsl-feme-vk` showed 101 pre-existing failures plus one
+  "unexpectedly passed" test (`Feature/PushConstant/array_of_matrices
+  .test`, XFAIL'd against a documented DXC compiler bug unrelated to
+  either fix). I did not chase this further: it's a scalar compute
+  shader with no mesh stage and no chained uniform diamonds, so neither
+  fix should plausibly touch it, and confirming that with certainty
+  would cost more session time than the finding is worth relative to
+  this session's actual scope.
+
+## What I'd flag for whoever picks up H69/H70 next
+
+Both new milestones are recorded with enough detail to start from (exact
+case counts, example error sites, and — for H70 — an explicit note that
+several of its five sub-buckets may already overlap already-tracked,
+unrelated milestones like H34/H48's `VK_EXT_graphics_pipeline_library`
+scope, rather than being new work at all). I deliberately did *not* try
+to triage either of them further this session: H31 was the concrete,
+named blocker this session was asked to close, and chasing every new
+finding a closing fix uncovers is exactly the "keep drilling one level
+deeper forever" pattern this project's own roadmap history shows can
+run indefinitely. Better to close the named target cleanly, verify it
+thoroughly, document the newly-found tail honestly, and stop there.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
