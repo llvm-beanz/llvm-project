@@ -21,6 +21,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -728,6 +729,34 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
       // time that use is legalized (roadmap L7j).
       for (auto &SpecConstant : feme::spirv::prepareSpecConstants(SPIRVModule))
         SpecConstants[SpecConstant.getKey()] = SpecConstant.getValue();
+      // Roadmap H81: a structured-control-flow `spirv.func` body may
+      // still contain a block with no predecessors at all -- e.g. the
+      // merge block SPIR-V's own structured-CFG rules require after an
+      // `OpSelectionMerge`, when *neither* arm of that selection actually
+      // branches there because both instead end in a real terminator of
+      // their own (`OpEmitMeshTasksEXT`, which ends the invocation
+      // outright). `glslangValidator` emits an `OpUnreachable` into that
+      // now-orphaned block, which MLIR's own deserializer imports
+      // faithfully as `spirv.Unreachable` in a block genuinely unreachable
+      // from the function's entry block. `applyPartialConversion` below
+      // only walks ops reachable from each region's entry block (by
+      // design, converting dead code is wasted work), so such a block's
+      // `spirv.Unreachable` is silently left unconverted -- surviving,
+      // still in the `spirv` dialect, all the way to
+      // `translateModuleToLLVMIR`, which then fails outright with
+      // "missing `LLVMTranslationDialectInterface` registration ... for
+      // op: spirv.Unreachable" (no `LLVMTranslationDialectInterface` for
+      // the `spirv` dialect handles *any* op -- by design, every `spirv`
+      // op is expected to have already converted to `llvm` dialect by
+      // this point). Erasing every block truly unreachable from each
+      // function's own entry block up front sidesteps the whole
+      // question: such a block can never execute, so nothing of value is
+      // lost, and the dialect-conversion driver no longer has any
+      // `spirv`-dialect op left over to skip.
+      for (mlir::spirv::FuncOp Fn : SPIRVModule.getOps<mlir::spirv::FuncOp>()) {
+        mlir::IRRewriter Rewriter(Ctx);
+        (void)mlir::eraseUnreachableBlocks(Rewriter, Fn.getBody());
+      }
     }
     ++Index;
   }
