@@ -38189,3 +38189,138 @@ blocks), not a new feature or extension surface. `FeMeGraphicsDesign.md`
 needs no change either: nothing about the documented signature
 reflection design changed, only a narrower recognition gap in one of
 its existing helper functions' own coverage.
+
+## Roadmap H93: measured impact
+
+**Symptom.** `dEQP-VK.mesh_shader.ext.properties.max_mesh_output_
+primitives_256` compiled, linked, and ran to completion (no crash, no
+pipeline-creation error, confirmed not a hang) but failed its own image
+comparison (`Check log for details at
+vktMeshShaderPropertyTestsEXT.cpp:1287`). Its sibling case,
+`max_mesh_output_vertices_256` (same H89a/H89b masked-loop fix,
+analogous large-output-array shape), passed outright, ruling out "the
+same loop bug again."
+
+**Root cause.** Turned out to be three independent bugs stacked on the
+same case, found by working from the mesh-shader output backward
+through the rasterizer via a series of temporary, env-var-gated IR/data
+dumps (removed before landing, mirroring the established H88/H89
+precedent):
+
+1. **Mesh point primitives sharing a vertex under-rasterized**
+   (`Executor.cpp`). This CTS case's own mesh shader uses
+   `max_vertices=1`, so all 256 of its point primitives legally name
+   the *same* single vertex via `gl_PrimitivePointIndicesEXT`.
+   `RasterizePrimitives`'s `Points` path assumed a 1:1 mapping between
+   raster invocations and vertex rows (true for every non-mesh
+   point-topology chain, where each point invocation always owns its
+   own exclusive vertex row) and had `VerticesPerRasterPrim` for
+   `Points` set to 0, so this shape collapsed onto a single rasterized
+   point instead of 256.
+
+2. **`PerPrimitiveEXT` member decoration silently dropped**
+   (`SPIRVToLLVMPatterns.cpp`). Compiling the real CTS mesh shader
+   source standalone through `glslangValidator` and disassembling the
+   result with `spirv-dis` showed `gl_PrimitiveID` decorated with both
+   `OpMemberDecorate ... BuiltIn PrimitiveId` and `OpMemberDecorate
+   ... PerPrimitiveEXT` -- both genuinely per-*member* decorations (not
+   a whole-variable `OpDecorate`, as an earlier, since-reverted
+   hypothesis in this same session incorrectly assumed).
+   `buildMemberDecorationTuple`'s flag-decoration switch recognized
+   `NoPerspective`/`Flat`/`Patch`/`Centroid`/`Sample` but not
+   `PerPrimitiveEXT`, silently dropping it (`default: return nullptr`).
+   This left `gl_PrimitiveID` misclassified `SignatureFrequency::
+   PerVertex` by `CanonicalizeStage.cpp`'s `classifySPIRVElement`,
+   routing its store through the single-slot per-vertex output storage
+   instead of the 256-slot per-primitive one -- aliasing every
+   primitive's `gl_PrimitiveID` write onto the same wrong slot.
+
+3. **The rasterizer never sources `gl_PrimitiveID` from an authored
+   value** (unfixed, deferred as H93b). After fixing (1) and (2), a
+   temporary debug print confirmed the mesh shader's own
+   `gl_PrimitiveID` output data is 100% correct (0..255) by the time it
+   leaves the mesh stage -- yet the CTS case still failed with the
+   identical "128 odd primitive IDs never set" symptom. Traced to
+   `Executor.cpp`: every fragment invocation's `gl_PrimitiveID` is
+   unconditionally synthesized from an auto-incrementing
+   `PrimitiveCounter`, incremented once per *synthesized rasterizer
+   triangle* -- correct only as the Vulkan-spec fallback for "no
+   earlier stage wrote it," but applied even when a mesh/GS stage does.
+   `emitPointQuad` calls the triangle-emitting lambda twice per point
+   (each point becomes a 2-triangle quad), so `PrimitiveCounter`
+   advances by 2 per point; assuming the first-pushed triangle of each
+   quad always wins this case's 1x1-pixel framebuffer, point `P`'s
+   surviving auto-ID is `2*P` -- exactly matching the observed
+   even/odd split (all 128 even indices 0..254 get set, all 128 odd
+   ones never do, `P>=128` silently drops out-of-bounds). This is an
+   architecturally separate, deeper gap (needs threading an authored
+   `PrimitiveID` through `StageStorage.cpp`/`StageLink.cpp`/
+   `Executor.cpp`'s fragment assembly) filed as its own milestone,
+   H93b.
+
+**Fix (H93a, this session).** (1) Added an explicit `AbsPointIndices`
+list threaded through `RasterizePrimitives` (mirroring
+`AbsTriIndices`/`AbsLineIndices`) and set `VerticesPerRasterPrim` for
+`Points` to 1, giving shared-vertex point primitives the same
+corner-duplication protection triangles/lines already have. (2) Added
+`case mlir::spirv::Decoration::PerPrimitiveEXT:` to
+`buildMemberDecorationTuple`'s flag-decoration list.
+
+**Regression tests.** Added
+`ExecutorTest.RastersEveryPointPrimitiveEvenWhenTheyShareASingleVertex`
+(4 point primitives sharing one vertex, additively-blended low-alpha
+fragment output distinguishing "1 rasterized" from "4"), and a
+`spirv-to-llvm-stage-io.mlir` case confirming a
+`gl_MeshPerPrimitiveEXT`-shaped struct's `BuiltIn PrimitiveId` +
+`PerPrimitiveEXT` member decoration now survives into
+`feme.spirv.member.decorations`.
+
+**Build/test.** `ninja check-feme`: 2944/2947 Passed, 3 Unsupported, 0
+Failed.
+
+**Real CTS re-run.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 60 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_primitives_256' --deqp-shadercache=disable
+```
+
+Still `Fail`s (128 of the same `ssbo.flags` mismatches), but purely due
+to H93b now -- the mesh-side `gl_PrimitiveID` data is confirmed 100%
+correct at the point it leaves the mesh stage.
+
+A broader `dEQP-VK.mesh_shader.ext.*` re-run (`git stash`-based A/B of
+this session's two fixes, full group, 26,921 cases) confirms zero
+regressions and a wider improvement than the one targeted case:
+
+```
+before: Passed 310/26921, Failed 129/26921, Not supported 26482/26921
+after:  Passed 321/26921, Failed 118/26921, Not supported 26482/26921
+```
+
++11/-11 net. Diffing the two `Fail` lists shows the 11 newly-passing
+cases are `builtin.layer_shared`, `builtin.viewport_index_shared`,
+`misc.maximize_primitives`, and 8 `smoke.{fast_lib,optimized_lib}.
+shared_frag_library*` variants -- none newly broke. All 11 share either
+the `perprimitiveEXT`-block-member-decoration shape or the
+mesh-point-sharing-a-vertex shape these two fixes generally correct
+(e.g. `gl_Layer`/`gl_ViewportIndex` are also commonly declared inside a
+`perprimitiveEXT` block), confirming these are genuinely general fixes,
+not narrowly specific to `max_mesh_output_primitives_256`.
+
+**Roadmap H93 is closed by extension** (split into H93a, fully fixed
+this session, and H93b, deferred as its own milestone for the
+remaining rasterizer `gl_PrimitiveID`-sourcing gap).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: both fixes correct bugs in already-supported
+`VK_EXT_mesh_shader` machinery (point-primitive rasterization,
+SPIR-V-to-LLVM member-decoration preservation), not new feature or
+extension surface. `FeMeGraphicsDesign.md` needs no change either: both
+fixes correct implementation bugs in already-documented mechanisms
+(mesh point-primitive indexing, SPIR-V decoration preservation) rather
+than changing their documented design; H93b's own remaining gap (the
+rasterizer's fragment `gl_PrimitiveID` sourcing never yielding to an
+authored value) is a real, not-yet-implemented design gap, tracked on
+the roadmap rather than the design doc since no part of
+`FeMeGraphicsDesign.md` currently claims this already works.
