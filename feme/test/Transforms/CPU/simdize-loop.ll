@@ -7,7 +7,12 @@
 ; passes together produce) widens: the loop-carried "active" mask becomes a
 ; `<4 x i1>` `phi`, and `feme.cpu.mask.any` lowers to the real cross-lane
 ; reduction, `llvm.vector.reduce.or`, over it (see "Phase 4: Widening" and
-; "Mask representation between phases" in feme/docs/FeMeCPUDesign.md).
+; "Mask representation between phases" in feme/docs/FeMeCPUDesign.md). Since
+; roadmap H72, the widened mask is first ANDed against `wave_entry_mask`
+; (see `simdize-loop-partial-wave-entry-mask.ll` for the padding-lane case
+; that AND exists to fix); this workgroup's own size already matches the
+; wave width exactly, so `wave_entry_mask` is always all-true here and the
+; extra `and` changes nothing observable about this test's own case.
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: loop:
@@ -20,7 +25,8 @@
 ; CHECK-NEXT: br label %latch
 ; CHECK: latch:
 ; CHECK: %loop.cond = icmp slt i32 %inc, %n
-; CHECK: %loop.any.active = call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> %active.header.live.wide)
+; CHECK: %mask.any.real = and <4 x i1> %active.header.live.wide, %wave_entry_mask
+; CHECK-NEXT: %loop.any.active = call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> %mask.any.real)
 ; CHECK: %loop.continue = and i1 %loop.cond, %loop.any.active
 ; CHECK: br i1 %loop.continue, label %loop, label %exit
 define void @main(i32 %n) #0 {
