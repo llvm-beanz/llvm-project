@@ -44,13 +44,14 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H88 or other blocking work to make progress on the H-series
+Can you work on H89 or other blocking work to make progress on the H-series
 milestones?
 
-> **`misc.local_size_id_mesh`/`local_size_id_task`'s pixel-comparison mismatch**
-> (2 cases, newly exposed by H74's specialization-constant fix): both compile
-> and run to completion (no crash, no pipeline-creation error) but fail their
-> own image comparison by a 1-unit alpha-channel difference. Not yet triaged --
-> needs a channel-level reduction to determine whether this is a real off-by-one
-> in `LocalSizeId`-resolved group-size handling or an unrelated, pre-existing
-> tolerance issue
+> **`properties.*`'s "divergent branch" `feme-cpu-simdize` diagnostic** (newly
+> exposed by H74's specialization-constant fix; exact case count/names not yet
+> re-verified with a systematic re-run -- spot-checked via
+> `max_mesh_output_primitives_256`/`max_mesh_output_vertices_256`/`mesh_payload_size`/`task_payload_size`/`task_payload_and_shared_memory_size`):
+> `feme-cpu-simdize` rejects a branch shape these specialization-constant-sized
+> mesh/task shaders introduce as not (yet) uniform/convertible. Not yet triaged
+> -- needs a systematic re-run to get an exact case list, then a real IR
+> reduction of the simplest case
