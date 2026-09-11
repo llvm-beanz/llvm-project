@@ -36593,3 +36593,109 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_2.no_indirect_args.no_count_limit.no_count_offset.no_task_shader'
 ```
+
+## Roadmap H69: measured impact (`Executor.cpp` PerPrimitive corner duplication + `LocalNarrowVectorArrayInit.cpp` local narrow-vector-array init fix)
+
+H31's own closing full-`dEQP-VK.mesh_shader.ext.*` re-run found 80
+`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_*.{mesh_only,task_mesh}`
+cases all failing a pixel comparison, tracked as this row. A qpa-image
+reduction of `permutation_0.mesh_only` (`--deqp-log-decompiled-spirv=enable`,
+comparing the rendered/reference/error-mask PNGs the qpa embeds) found two
+independent bugs in this shape's own `gl_PrimitiveTriangleIndicesEXT`
+handling:
+
+**Bug 1** (`Executor.cpp`): a mesh workgroup emitting two triangles that
+share a vertex (e.g. a simple quad split into two triangles) had the
+second triangle's own `PerPrimitive`-frequency Output value silently
+clobber the first triangle's own value at their shared vertex/vertices,
+since `Executor::runMeshWorkgroup`'s merge step stashed every primitive's
+own `PerPrimitive` value into the *same* shared per-vertex row
+`RasterizePrimitives` reads a corner's varyings from. Fixed by giving each
+triangle/line primitive its own exclusive "corner" rows, appended after
+the ordinary per-vertex ones, whenever the entry point actually has
+`PerPrimitive` outputs to protect.
+
+**Bug 2** (the actual root cause of the observed
+`FemeMeshArgs::PrimitiveIndices` corruption -- `[0,1,2,0,2,3]` instead of
+the correct `[0,1,2,2,3,1]`, found via a runtime memory dump of the mesh
+entry's own local `indices` array): a `Private`/`Function`-storage local
+array of a narrow (non-power-of-2-width) fixed vector -- e.g. a mesh
+shader's own local `uint3 idx[2]`, built up before being copied out to
+`gl_PrimitiveTriangleIndicesEXT` -- has its single aggregate "whole array"
+initializing store written using real, ABI-padded layout (LLVM pads a
+3-wide vector's array stride up to 16 bytes, not the naively expected 12),
+while every later read of one of its elements is an access-chain-converted
+`getelementptr` that assumes the array's own *tightly packed* (12-byte)
+layout instead -- the same "tight offset" convention
+`CanonicalizeStage.cpp`'s pre-existing `getPackedMeshElementSize` helper
+already documents and deliberately relies on for a mesh entry's stage-IO
+output array, but which is a genuine bug for this local array, since
+(unlike a stage-IO array, a pure syntactic placeholder erased before real
+codegen) this local array's loads/stores are real, JIT-executed memory
+operations. Fixed by a new `feme::cpu::LocalNarrowVectorArrayInitPass`
+(run first in the CPU Normalize pipeline) that rewrites such a global's
+aggregate init store into one store per array element at the same tightly
+packed byte offset every later read already assumes -- deliberately scoped
+to address space 0 (`Private`/`Function` storage), so a mesh entry's
+stage-IO output array (address space 7/8) is untouched.
+
+New unit tests: `LocalNarrowVectorArrayInitTest.cpp`
+(`DecomposesAggregateInitStore`/`IgnoresNonPrivateAddressSpace`/
+`IgnoresPowerOfTwoWidthVector`) and `ExecutorTest.cpp`'s
+`PerPrimitiveColorsDoNotBleedAcrossPrimitivesSharingAVertex` (two triangles
+sharing two of a quad's four vertices, each with its own distinct
+`PerPrimitive` color; confirmed to fail, reproducing the color-bleed
+symptom, when run against a build with only the `Executor.cpp` fix
+reverted). `ninja check-feme` passes in full:
+
+```shell
+$ ninja -C build2 check-feme
+...
+Total Discovered Tests: 2921
+  Unsupported:   59 (2.02%)
+  Passed     : 2862 (97.98%)
+```
+
+(59 pre-existing `Unsupported`, 0 `Failed`, up 4 tests from this row's own
+new coverage.)
+
+A real re-run of the exact 80-case
+`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_*.{mesh_only,task_mesh}`
+list confirms full closure:
+
+```shell
+Test run totals:
+  Passed:        80/80 (100.0%)
+  Failed:        0/80 (0.0%)
+  Not supported: 0/80 (0.0%)
+```
+
+A broader re-run of the full `dEQP-VK.mesh_shader.ext.*` group (26,921
+cases) confirms no regression and an exact, isolated improvement:
+
+```shell
+Test run totals:
+  Passed:        226/26921 (0.8%)
+  Failed:        213/26921 (0.8%)
+  Not supported: 26482/26921 (98.4%)
+```
+
+Up exactly 80 `Pass` and down exactly 80 `Fail` from H31's own closing
+baseline (146/293/26,482) -- `NotSupported` unchanged, matching this row's
+own 80-case scope precisely with zero collateral change to H70's still-open
+155-case bucket.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: both fixes are pure compiler-internal/CPU-executor
+correctness fixes, touching no feature bit or extension advertisement.
+
+**Roadmap H69 closes.**
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only'
+```
