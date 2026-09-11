@@ -143,6 +143,55 @@ struct MaskPair {
 /// its live mask, which is precisely what `.demote` (and nothing else)
 /// does. All three calls are erased once lowered.
 ///
+/// (Roadmap H31) `DiamondFlattener::flatten` always creates a fresh
+/// `live.merge`/`sideeffect.merge` `phi` at a uniform diamond's own
+/// reconvergence point, even when neither arm's own mask actually differs
+/// from the other's (the overwhelmingly common case: neither arm contains
+/// its own `discard`/`demote`) -- deliberately, since an *outer* diamond
+/// nested around this one may thread that exact `phi` value further up to
+/// its own reconvergence block by identity, something a later pass
+/// (`nested-uniform-loop-in-divergent-diamond.ll`'s own regression test)
+/// relies on. A `phi [X, BB1], [X, BB2]` is not itself a `Constant`, even
+/// though it is trivially always `X` -- so a plain `isa<Constant>(Mask)`
+/// check no longer recognizes an all-active mask as such once it has
+/// passed through even one such redundant merge, let alone several in a
+/// row, wrongly treating every later, still-genuinely-uniform memory
+/// access as needing masking. This looks through a chain of such
+/// trivially-redundant phis (every incoming value, ignoring the phi's own
+/// self-referential back-edges if any, is the identical `Value`) down to
+/// the real shared value they all forward, so the classification below
+/// sees through them to whatever that value actually is.
+static Value *lookThroughTrivialPhi(Value *V) {
+  SmallPtrSet<PHINode *, 8> Seen;
+  while (auto *PN = dyn_cast<PHINode>(V)) {
+    if (!Seen.insert(PN).second)
+      break; // A cycle: give up rather than loop forever.
+    Value *Common = nullptr;
+    bool AllSame = true;
+    for (Value *Incoming : PN->incoming_values()) {
+      if (Incoming == PN)
+        continue; // Ignore the phi's own back-edge to itself.
+      if (!Common)
+        Common = Incoming;
+      else if (Common != Incoming) {
+        AllSame = false;
+        break;
+      }
+    }
+    if (!AllSame || !Common)
+      break;
+    V = Common;
+  }
+  return V;
+}
+
+/// Whether \p V is a compile-time constant, or is trivially always one
+/// underneath a chain of redundant merge phis -- see
+/// `lookThroughTrivialPhi`'s own comment for why that distinction matters.
+static bool isKnownConstantMask(Value *V) {
+  return isa<Constant>(lookThroughTrivialPhi(V));
+}
+
 /// Shared between `DiamondFlattener` (a divergent arm's masks) and
 /// `LoopLinearizer` (a loop iteration's "active" masks) below. A given
 /// memory access is left unmasked exactly when the mask that would govern
@@ -242,7 +291,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       if (std::optional<MatchedResourceCall> Matched =
               matchResourceCall(*Call)) {
         Value *Mask = isLoad(Matched->Kind) ? Masks.Live : Masks.SideEffect;
-        if (!isa<Constant>(Mask))
+        if (!isKnownConstantMask(Mask))
           Call->setArgOperand(Call->arg_size() - 1, Mask);
       }
       // A `feme.cpu.image.*` call's own trailing mask operand needs the
@@ -261,7 +310,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
         Value *Mask = (Matched->Texel || Matched->AtomicValue)
                           ? Masks.SideEffect
                           : Masks.Live;
-        if (!isa<Constant>(Mask))
+        if (!isKnownConstantMask(Mask))
           Call->setArgOperand(Call->arg_size() - 1, Mask);
       }
       // (roadmap L85) `WaveActiveBallot`/`subgroupBallot`'s own predicate
@@ -286,7 +335,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
         Intrinsic::ID ID = Callee->getIntrinsicID();
         if ((ID == Intrinsic::dx_wave_ballot ||
              ID == Intrinsic::spv_subgroup_ballot) &&
-            !isa<Constant>(Masks.Live)) {
+            !isKnownConstantMask(Masks.Live)) {
           IRBuilder<> B(Call);
           Call->setArgOperand(0, B.CreateAnd(Call->getArgOperand(0),
                                              Masks.Live,
@@ -304,7 +353,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       continue;
     }
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      if (!LI->isSimple() || isa<Constant>(Masks.Live))
+      if (!LI->isSimple() || isKnownConstantMask(Masks.Live))
         continue; // Atomic/volatile: not this milestone's problem yet.
       IRBuilder<> B(LI);
       Value *Passthru = Constant::getNullValue(LI->getType());
@@ -326,7 +375,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       continue;
     }
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (!SI->isSimple() || isa<Constant>(Masks.SideEffect))
+      if (!SI->isSimple() || isKnownConstantMask(Masks.SideEffect))
         continue;
       IRBuilder<> B(SI);
       CallInst *Masked =
@@ -338,7 +387,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       continue;
     }
     if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
-      if (isa<Constant>(Masks.SideEffect))
+      if (isKnownConstantMask(Masks.SideEffect))
         continue;
       IRBuilder<> B(RMW);
       CallInst *Masked = createMaskedAtomicRMW(
