@@ -44,5 +44,14 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on closing out H70 and H89 or other blocking work to make progress
-on the H-series milestones?
+Can you work on H74 or other blocking work to make progress on the H-series
+milestones?
+
+>  **`properties.mesh_payload_and_shared_memory_size`/`mesh_shared_memory_size`'s
+>  `spirv.SpecConstantOperation` legalization gap** (2 cases, newly exposed by
+>  H74's specialization-constant fix): `ConvertSPIRVToLLVMPass` has no lowering
+>  pattern for `spirv.SpecConstantOperation` (an arithmetic expression over one
+>  or more spec constants, evaluated at specialization time rather than folded
+>  to a single literal) in this shape. Not yet triaged -- needs its own IR
+>  reduction to find the minimal `spirv.SpecConstantOperation` shape this pass
+>  does not yet cover
