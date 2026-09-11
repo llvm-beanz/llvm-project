@@ -4083,8 +4083,34 @@ bool isMultisampled2DImage(mlir::spirv::ImageType ImageType) {
 /// converter has no caching model to honor it with, so every pattern below
 /// accepts and discards it rather than rejecting it like an unmodeled
 /// modifier or threading it through as if it changed the access performed.
-constexpr mlir::spirv::ImageOperands NontemporalBit =
-    mlir::spirv::ImageOperands::Nontemporal;
+///
+/// Roadmap H71: `SignExtend`/`ZeroExtend` are discarded the same way, for a
+/// different but equally model-free reason. Every SPIR-V `OpTypeImage`'s
+/// "Sampled Type" is always its scalar component type at its *full*
+/// register width (e.g. `i32` for any integer format, narrow or wide) --
+/// the declared image *format* (`R8ui`, `R32ui`, etc.) only describes the
+/// on-disk texel layout a real GPU's texture unit would need to widen from,
+/// a distinction this CPU executor has no equivalent of: a resource's real
+/// `VkFormat` (not the SPIR-V-level format literal, which is merely an
+/// optional compile-time hint and can even be `Unknown`) already drives
+/// every narrow-to-wide conversion this project performs, in the resource
+/// load/store path itself (`ImageFixture.cpp`'s `packClearColor`/
+/// `unpackColor`, and the CPU resource-access intrinsics that call them),
+/// long before or after this SPIR-V-to-LLVM-dialect conversion ever runs.
+/// So `SignExtend`/`ZeroExtend` -- which only ever tell a real GPU *how* to
+/// perform a widening this pass never performs at all -- carry no
+/// information this pass could act on, exactly like `Nontemporal`. Real
+/// `deqp-vk` SPIR-V confirms `glslang` emits one or the other on every
+/// integer-format `OpImageRead`/`OpImageWrite`/`OpImageSampleExplicitLod`
+/// once the target environment reaches SPIR-V 1.4+ (mandatory for
+/// `VK_EXT_mesh_shader`, whose required Vulkan 1.3 always implies at least
+/// SPIR-V 1.6) -- unconditionally rejecting them here, as before this
+/// milestone, broke every mesh-stage integer image access verbatim,
+/// regardless of format width.
+constexpr mlir::spirv::ImageOperands DiscardedImageOperandBits =
+    mlir::spirv::ImageOperands::Nontemporal |
+    mlir::spirv::ImageOperands::SignExtend |
+    mlir::spirv::ImageOperands::ZeroExtend;
 
 /// Returns the type a synthesized all-zero `Offset` operand should have when
 /// a sample or fetch op has no real `ConstOffset` operand of its own to
@@ -4120,27 +4146,29 @@ mlir::Type getDefaultZeroOffsetType(mlir::spirv::ImageType ImageTy,
 }
 
 /// Returns true if \p ImageOperands names any actual modifier (e.g. `Lod`,
-/// `Bias`) rather than being absent, the empty `None` bit-enum value, or the
-/// discarded `Nontemporal` cache hint -- real `dxc`-compiled SPIR-V spells
+/// `Bias`) rather than being absent, the empty `None` bit-enum value, or one
+/// of the discarded bits (`Nontemporal`/`SignExtend`/`ZeroExtend`, see
+/// `DiscardedImageOperandBits` above) -- real `dxc`-compiled SPIR-V spells
 /// "no modifiers" as an explicit `#spirv.image_operands<None>` attribute
 /// rather than omitting the (optional) attribute entirely, so a presence
 /// check alone rejects every image access real SPIR-V input produces.
 bool hasImageOperands(std::optional<mlir::spirv::ImageOperands> ImageOperands) {
   if (!ImageOperands)
     return false;
-  return mlir::spirv::bitEnumClear(*ImageOperands, NontemporalBit) !=
+  return mlir::spirv::bitEnumClear(*ImageOperands, DiscardedImageOperandBits) !=
          mlir::spirv::ImageOperands::None;
 }
 
 /// Returns true if \p ImageOperands is exactly \p Required, optionally
-/// combined with the discarded `Nontemporal` cache hint (see above).
+/// combined with any of the discarded bits (see above).
 bool hasExactImageOperands(
     std::optional<mlir::spirv::ImageOperands> ImageOperands,
     mlir::spirv::ImageOperands Required) {
   if (!ImageOperands)
     return false;
-  return mlir::spirv::bitEnumClear(*ImageOperands, NontemporalBit) == Required;
+  return mlir::spirv::bitEnumClear(*ImageOperands, DiscardedImageOperandBits) == Required;
 }
+
 
 /// Converts `spirv.ImageRead` or `spirv.ImageFetch` into a load through the
 /// read location. The two ops are otherwise handled identically here: LLVM's
@@ -4595,7 +4623,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     if (!mlir::spirv::bitEnumContainsAny(Actual,
                                          mlir::spirv::ImageOperands::Lod))
@@ -4945,7 +4973,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     // `Actual` must be a subset of the three bits this pattern understands
     // (in any combination, including none of them) -- `bitEnumContainsAll`
@@ -5056,7 +5084,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     if (!mlir::spirv::bitEnumContainsAny(Actual,
                                          mlir::spirv::ImageOperands::Lod))
@@ -5146,7 +5174,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     if (!mlir::spirv::bitEnumContainsAny(Actual,
                                          mlir::spirv::ImageOperands::Grad))
@@ -5241,7 +5269,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     mlir::spirv::ImageOperands SupportedMask =
         mlir::spirv::ImageOperands::Bias |
@@ -5350,7 +5378,7 @@ public:
                   OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     mlir::spirv::ImageOperands Actual =
-        mlir::spirv::bitEnumClear(Op.getImageOperands(), NontemporalBit);
+        mlir::spirv::bitEnumClear(Op.getImageOperands(), DiscardedImageOperandBits);
 
     if (!mlir::spirv::bitEnumContainsAny(Actual,
                                          mlir::spirv::ImageOperands::Grad))
@@ -5462,7 +5490,7 @@ public:
                   OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     mlir::spirv::ImageOperands Actual =
-        mlir::spirv::bitEnumClear(Op.getImageOperands(), NontemporalBit);
+        mlir::spirv::bitEnumClear(Op.getImageOperands(), DiscardedImageOperandBits);
     mlir::spirv::ImageOperands SupportedMask =
         mlir::spirv::ImageOperands::Lod |
         mlir::spirv::ImageOperands::ConstOffset;
@@ -5591,7 +5619,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     mlir::spirv::ImageOperands SupportedMask =
         mlir::spirv::ImageOperands::ConstOffset;
@@ -5677,7 +5705,7 @@ public:
         Op.getImageOperands();
     mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
     if (ImageOperandsAttr)
-      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     mlir::spirv::ImageOperands SupportedMask =
         mlir::spirv::ImageOperands::ConstOffset;
