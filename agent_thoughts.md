@@ -77567,3 +77567,33 @@ I started building a 4th lit test that mirrors the real structurizer-produced ma
 Twice in this one milestone, my first fix passed every test I had and then failed against the real thing for a totally different reason each time (assert on an adversarial case; a real CTS re-run showing zero movement). Both times the fix was to go get *real* captured IR from the actual failing case rather than trust a hand-written approximation further. Cheap temporary debug hooks (the env-var IR dump) that get deleted before commit are worth reaching for early, not as a last resort.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H73 session: gl_Layer fragment-input read-back fixed, real scope came out smaller and messier than the ticket described
+
+**Result: H73 closed. 4 of the 12 originally-counted cases fully Pass (builtin.layer, builtin.layer_no_write, properties.max_output_layers... wait, that's 3). Actually: 2 builtin + 1 properties + 8 smoke cases stop hitting the original diagnostic, but 9 of those 12 still fail on a *different*, deeper bug -- filed as new H86. Only 3 cases (layer, layer_no_write, max_output_layers) are fully green.**
+
+## What's done, in order
+
+1. Located `loadFragmentSystemValue` in `FragmentWrapper.cpp` -- a switch missing `SignatureSystemValue::RenderTargetArrayIndex` (`gl_Layer`). Confirmed root cause straight from CTS source (`outColor = colors[gl_Layer]`) -- no hand-written IR reduction needed, the existing `ViewportArrayIndex` case was close enough to just read off.
+2. Found the *output* side (`Tri.TargetLayer`, DXIL/SPIR-V import, attachment slicing) was already fully wired -- only the fragment-read-back path was missing. Smaller fix than H3a's original `ViewportArrayIndex` work.
+3. Fixed in 4 files: `RuntimeABI.h` (new ABI field, reused a `Reserved` slot), `StageArgsLayout.h` (mirrored enum/struct), `FragmentWrapper.cpp` (new switch case), `Executor.cpp` (populate from already-computed `Tri.TargetLayer`).
+4. Built clean. Added 1 unit test mirroring the existing `ViewportArrayIndex` test.
+5. `check-feme`: 2936/2877/59/0 -- baseline plus 1 new test, 0 regressions.
+6. Ran all 3 sub-buckets for real:
+   - `builtin.layer*`: 2/3 now Pass. `layer_shared` moved from crash to pixel mismatch.
+   - `properties.*`: exactly 1 case (`max_output_layers`) moved Fail->Pass, confirmed via git-stash before/after. Matches the "properties: 1" count exactly.
+   - `smoke.*` (full sweep, not just `fast_lib`): this is where it got interesting. Pre-fix: 17 fails, all one crash signature. Post-fix: still 17 fails total, but 8 of them (`shared_frag_library*` in `fast_lib`+`optimized_lib`) moved off that crash onto a pixel-comparison mismatch -- confirming the ticket's "smoke: 8" count was right and *is* this row's own scope. The other 9 `smoke.*` fails never moved at all -- two totally unrelated, distinct bugs (`CanonicalizeStagePass` "unresolved stage-IO global-variable access", and a `spirv.Variable` array-of-vec4 legalization gap) that happened to already exist in the same test group.
+7. Filed **H86** for the residual 9-case pixel mismatch (`layer_shared` + 8 `shared_frag_library*`) -- they all share the "single mesh workgroup emits multiple primitives with *different* `gl_Layer` values" shape, unlike the passing cases' one-workgroup-per-layer shape. Didn't investigate further -- flagged the likely area (`Executor.cpp`'s per-primitive `TargetLayer` resolution) and left it for the next session.
+8. Left the 9 unrelated `smoke.*` fails (GPL-crash and legalization-gap) **unfiled** -- they're real, but investigating and bucketing two brand-new unrelated bugs felt like scope creep for a ticket about `gl_Layer`. Noted them in the roadmap/CTS report text so they don't get lost, but didn't spend a new milestone number on them without at least a first triage pass.
+9. `check-hlsl-feme-vk`: byte-identical to the last 2 sessions' baseline (276/101/26/1/260) -- 0 regressions, 0 accidental improvement.
+10. Roadmap: struck H73, added H86. `VulkanCTSReport.md` updated with full re-run numbers and the git-stash methodology.
+
+## The thing that almost went wrong
+
+My first read of the `smoke.*` post-fix result (`fast_lib` subset only, 12 Pass / 7 Fail / 2 NotSupported) made it look like the fix did *nothing* for smoke -- the 7 fails looked unrelated by name (`depth_only_*`, `fullscreen_gradient`, `shared_frag_library*`). Only after re-running the *identical* bucket pre-fix (git stash) and diffing did the real signal show up: the crash signature for 8 specific cases changed even though the raw Fail *count* didn't move. Lesson: when a "did this fix anything" comparison shows an unchanged count, check whether the *error text* changed before concluding nothing happened -- a stable Fail count can still hide a real state transition underneath it.
+
+## Why I stopped short of a full 12/12 close
+
+Three of these nine residual failures (`layer_shared`) share a CTS source file I've already read this session (`vktMeshShaderBuiltinTestsEXT.cpp`'s `LayerCase`), so a next session could plausibly knock out H86 fast by starting there instead of from scratch. Didn't attempt it in this session to keep the H73 fix itself small and reviewable, per the project's own "small isolated commits" convention -- a second, unrelated bug in the same commit would have made review harder for no real benefit.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
