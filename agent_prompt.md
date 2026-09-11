@@ -41,19 +41,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H69 or other blocking work to make progress on the H-series
+Can you work on H70 or other blocking work to make progress on the H-series
 milestones?
 
-> **`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_*.{mesh_only,task_mesh}`
-> (80 cases, found by H31's own closing full-group re-run)**: every
-> I/O-permutation case in this bucket fails a pixel comparison
-> (`vktMeshShaderInOutTestsEXT.cpp:1590`), across both direct (`mesh_only`) and
-> task-driven (`task_mesh`) dispatch, i.e. this is not the same "direct
-> multi-draw" shape H31 covered -- it exercises a different mesh/fragment
-> varying-linking combination (many permutations of scalar/vector I/O types and
-> counts) that still mismatches even with H31's two fixes in place. Confirmed
-> pre-existing (reproduces identically against the pre-H31-fix build, not a
-> regression from H31's own changes). Not yet triaged for root cause -- needs
-> its own IR/case reduction, following the same technique H6/H21/H30's own
-> chains have used throughout, to isolate which specific I/O shape(s) within the
-> permutation space actually break
+> **`dEQP-VK.mesh_shader.ext.{builtin,misc,properties,smoke,synchronization}`
+> failures found by H31's own closing full-group re-run (7 + 36 + 14 + 17 + 81 =
+> 155 cases)**: mostly `vkCreateGraphicsPipelines`/`vkQueueSubmit` failures
+> (`VK_ERROR_INITIALIZATION_FAILED`) rather than pixel-comparison mismatches,
+> confirmed pre-existing (reproduces identically against the pre-H31-fix build).
+> Not yet triaged -- several may already be covered by other tracked, unrelated
+> gaps (the `smoke.fast_lib.*`/several `builtin.layer*` failures' own
+> `vkPipelineConstructionUtil.cpp` error site looks like it may overlap
+> H34/H48's own `VK_EXT_graphics_pipeline_library` scope; `synchronization.*`'s
+> `vkQueueSubmit` failures look like a distinct, not-yet-identified
+> synchronization-feature gap), but none of the five buckets has had a real
+> reduction done yet to confirm which milestone (existing or new) actually owns
+> each. Needs its own per-bucket triage pass before further breakdown
