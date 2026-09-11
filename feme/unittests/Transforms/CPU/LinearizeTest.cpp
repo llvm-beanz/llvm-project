@@ -110,6 +110,72 @@ TEST(LinearizeTest, LeavesUniformDiamondUnchanged) {
   EXPECT_TRUE(FoundCondBr);
 }
 
+// Roadmap H89a: a divergent diamond's own reconvergence-block `phi` may
+// merge a value one arm never actually produces (represented as `poison`
+// on that arm, exactly the shape `StructurizeCFG`/`UnifyLoopExits` leave
+// an enclosing uniform loop's own counter in when it merely reconverges
+// *through* an unrelated inner diamond rather than being genuinely
+// computed differently by each arm). `DiamondFlattener::flatten` must
+// reuse the one real operand directly instead of building
+// `select(Cond, RealValue, poison)`: the `select` is not wrong by itself,
+// but it makes `computeWaveUniformity` (correctly, per its own flow-
+// insensitive model) treat the merged value -- and anything that later
+// branches on it, like an enclosing loop's own trip-count check -- as
+// divergent, even though nothing about it actually depends on `Cond`.
+TEST(LinearizeTest, ReusesRealOperandInsteadOfSelectWhenOtherArmIsPoison) {
+  LLVMContext Ctx;
+  // `%v` is stored to `%out` (rather than left dead, as a bare `ret void`
+  // after the `phi` would let earlier dead-code cleanup erase it before
+  // `DiamondFlattener` even runs, defeating the point of this test) so its
+  // final replacement value survives to be inspected below. Note that
+  // `Masks.Live`/`Masks.SideEffect`'s own `select`s at the merge block are
+  // an unrelated, always-present part of ordinary diamond flattening (see
+  // `flatten`'s divergent-branch case) -- this test only asserts about the
+  // `%v` phi's own replacement, not about `select`s in general.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t, label %f
+    t:
+      br label %end
+    f:
+      br label %end
+    end:
+      %v = phi i32 [poison, %t], [%tid, %f]
+      store i32 %v, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  // The original `store i32 %v, ptr %out` is itself under the (uniform,
+  // in this test) diamond's own masks, so `LinearizePass`'s masking step
+  // rewrites it into a `feme.cpu.masked.store.*` call whose first operand
+  // is the value actually stored -- find that call to inspect what `%v`
+  // was replaced with.
+  CallInst *MaskedStore = nullptr;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<PHINode>(I)) << "phi should have been resolved";
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getName().starts_with(
+              "feme.cpu.masked.store"))
+        MaskedStore = CI;
+  }
+  ASSERT_TRUE(MaskedStore);
+  EXPECT_TRUE(isa<CallInst>(MaskedStore->getArgOperand(0)))
+      << "the poison arm should have been skipped, reusing %tid directly, "
+         "instead of building select(Cond, %tid, poison)";
+}
+
 TEST(LinearizeTest, MasksResourceCallUnderDivergentBranch) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

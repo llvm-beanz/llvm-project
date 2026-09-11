@@ -705,8 +705,14 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
     for (PHINode &PN : make_early_inc_range(R->phis())) {
       Value *ValT = PN.getIncomingValueForBlock(TPred);
       Value *ValF = PN.getIncomingValueForBlock(FPred);
-      Value *Sel = SelBuilder.CreateSelect(Cond, ValT, ValF,
-                                           PN.getName() + ".linearized");
+      Value *Sel;
+      if (isa<PoisonValue>(ValF) || isa<UndefValue>(ValF))
+        Sel = ValT;
+      else if (isa<PoisonValue>(ValT) || isa<UndefValue>(ValT))
+        Sel = ValF;
+      else
+        Sel = SelBuilder.CreateSelect(Cond, ValT, ValF,
+                                      PN.getName() + ".linearized");
       PN.replaceAllUsesWith(Sel);
       PN.eraseFromParent();
     }
