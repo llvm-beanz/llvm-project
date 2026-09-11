@@ -77699,3 +77699,60 @@ H74's own filing of this row said "fail their own image comparison by a 1-unit a
 The H87 session's own precedent used `git stash` on just the `.cpp` file to verify regression coverage. Here the fix spans both a `.cpp` change and a `.h` accessor addition the *test itself* depends on (`meshStage()`/`taskStage()`) -- stashing the `.h` too would have made the test fail to *compile*, not fail to *pass*, which doesn't actually verify the same thing (a build failure proves nothing about whether the assertion itself is meaningful). Wrapping only the fix's own logic in `if (false) { ... }` inside the already-committed-shape function kept everything else (including the accessors the test needs) intact, so the test could actually run and produce a real, on-topic failure (`{1,1,1}` instead of the override) rather than a build error. **General lesson: when a fix and its own test-support code changes touch different files, don't blanket-stash by file -- isolate exactly the behavioral change under test.**
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H89 session: found the real bug, but the fix hangs a shader at runtime -- shipped the write-up instead of the patch
+
+**Next action if you pick this up:** read `Roadmap.md`'s H89b row first (not H89a). The counter-intuitive
+part of this session is that the *correct-looking* fix (H89a) is not safe to land alone -- it must land
+together with H89b's own fix, or after it. Don't just implement H89a and move on.
+
+## What happened, in order
+
+1. Re-ran all 30 `properties.*` cases individually (not just the aggregate qpa) to get an exact
+   diagnostic-per-case table. H74's original filing spot-checked 5 names; the real scope is a
+   *different* 9 cases (2 of the original 5 turned out to be H86/H90's diagnostics instead).
+2. Added a temporary env-var-gated `M.dump()` right before `SIMDizePass` runs, rebuilt, ran the
+   simplest case, read the IR by hand.
+3. Found the real bug: `DiamondFlattener::flatten` (`Linearize.cpp`) builds `select(Cond, ValT, ValF)`
+   for *every* `phi` at a diamond's merge block, even when the phi's value has nothing to do with
+   `Cond` (an outer loop's own uniform counter, just passing through). One arm is `poison` (never
+   defined there), so the merge becomes `select(Cond, RealCounter, poison)`, and `UniformityInfo`
+   correctly-per-its-own-rules calls that divergent -- poisoning (pun intended) everything downstream,
+   including the outer loop's own trip-count check that `SIMDizePass` then rejects.
+4. Wrote the fix: if one operand is `poison`/`undef`, skip the `select`, just use the real one.
+   This is provably sound in isolation (`select(Cond, X, poison)` refines to `X` always).
+5. Rebuilt, ran the 9 cases. **They didn't fail to compile anymore -- and then the process hung at
+   ~100% CPU and never returned.** Not a quick failure. A real hang.
+6. Didn't just revert and shrug -- attached gdb to the hung process (`gdb -p <pid> -batch -ex bt`)
+   to find out *where* it was stuck: inside the compiled shader itself
+   (`feme::graphics::executeDraws`'s dispatch lambda), not inside the compiler. So the fix let a
+   genuinely broken program reach runtime instead of getting rejected at compile time.
+7. Traced why: once the outer counter is correctly uniform, `LoopLinearizer` *still* (correctly)
+   finds a real divergent exit signal merged at the same block (the inner per-lane bounds check's
+   own early-exit path shares a merge block with the outer loop's own "done" path) and wraps the
+   loop in its masked-continuation transform. That transform has its own latent bug for this
+   specific "outer uniform loop whose done-signal and an inner divergent early-exit share one merge
+   block" shape -- not yet root-caused, that's H89b's job.
+8. `git checkout --` on all three touched files (`Pipeline.cpp`, `SIMDize.cpp`, `Linearize.cpp`).
+   Verified `git status` was clean, rebuilt, reran the 9 cases -- back to the original clean
+   compile-time diagnostic, no hang. Ran full `check-feme` -- 2881/2940, 0 failed, matching H88's
+   own closing numbers exactly (proof the revert was complete, not just "looks reverted").
+9. Wrote up the whole chain in `Roadmap.md` (split into H89a/H89b, in that dependency order) and
+   `VulkanCTSReport.md`, instead of shipping the tempting-but-broken fix.
+
+## The one-sentence lesson
+
+**A fix that makes a diagnostic go away is not done until you've run the thing it used to protect
+you from failing on -- "compiles now" and "works now" are different claims, and this session is a
+clean example of the gap between them being a silent infinite loop instead of a loud crash.**
+
+## Why I split it H89a-then-H89b instead of filing one combined row
+
+If I'd filed one row saying "fix the select-poison thing," a future session (or future me) reading
+just the title would plausibly implement exactly what I did here, rebuild, see the diagnostic clear,
+and stop -- because nothing about "fix a divergent-branch misclassification" hints that the real
+finish line is two passes away and a runtime hang, not a compile-time error, is the thing that
+actually catches you out. Naming H89b as its own row with its own severity (P2, one tier above
+H89a's P3) is the loud sign saying "don't stop after the first half."
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
