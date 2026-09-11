@@ -500,6 +500,14 @@ public:
   bool hasMeshStages() const { return State.Artifact->MeshStage != nullptr; }
   /// Only valid to call when `hasMeshStages()` is true.
   bool hasTaskStage() const { return State.Artifact->TaskStage != nullptr; }
+  /// Only valid to call when `hasMeshStages()` is true.
+  const feme::cpu::CompiledStage &meshStage() const {
+    return *State.Artifact->MeshStage;
+  }
+  /// Only valid to call when `hasTaskStage()` is true.
+  const feme::cpu::CompiledStage &taskStage() const {
+    return *State.Artifact->TaskStage;
+  }
 
 private:
   GraphicsPipelineState State;

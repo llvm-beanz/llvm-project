@@ -516,6 +516,48 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EX
 }
 )mlir";
 
+/// (roadmap H88) `MeshSource`'s sibling declaring its workgroup size via
+/// `LocalSizeId` (three specialization constants, `SpecId`s 20/21/22 --
+/// matching real `dEQP-VK.mesh_shader.ext.misc.local_size_id_mesh`'s own
+/// choice of ids) instead of a plain `LocalSize` literal, so a test can
+/// verify the resolved, specialization-overridden group size actually
+/// reaches the compiled mesh stage (`CompiledStage::getGroupSize`) rather
+/// than silently defaulting to `{1, 1, 1}` -- the real bug this milestone
+/// fixed (`GraphicsPipeline.cpp`'s `compileGraphicsStage` did not resolve
+/// or stamp `hlsl.numthreads` for a `LocalSizeId`-only mesh/task entry at
+/// all).
+constexpr llvm::StringLiteral MeshLocalSizeIdSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.2, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.SpecConstant @wg_x spec_id(20) = 1 : i32
+  spirv.SpecConstant @wg_y spec_id(21) = 1 : i32
+  spirv.SpecConstant @wg_z spec_id(22) = 1 : i32
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "MeshEXT" @main
+  spirv.ExecutionMode @main "OutputTrianglesEXT"
+  spirv.ExecutionMode @main "OutputVertices", 3
+  spirv.ExecutionMode @main "OutputPrimitivesEXT", 1
+  spirv.ExecutionModeId @main "LocalSizeId" @wg_x, @wg_y, @wg_z
+}
+)mlir";
+
+/// `TaskSource`'s `LocalSizeId` sibling, mirroring
+/// `MeshLocalSizeIdSource` above (`SpecId`s 10/11/12, matching the real
+/// CTS case's own choice for the task stage).
+constexpr llvm::StringLiteral TaskLocalSizeIdSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.2, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.SpecConstant @wg_x spec_id(10) = 1 : i32
+  spirv.SpecConstant @wg_y spec_id(11) = 1 : i32
+  spirv.SpecConstant @wg_z spec_id(12) = 1 : i32
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "TaskEXT" @main
+  spirv.ExecutionModeId @main "LocalSizeId" @wg_x, @wg_y, @wg_z
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -1062,6 +1104,89 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H88) A mesh entry declaring its workgroup size via
+/// `LocalSizeId` must resolve its *specialization-overridden* group size
+/// (not its module-declared default, and not a silent `{1, 1, 1}`) onto
+/// the compiled mesh stage: `compileGraphicsStage` (`GraphicsPipeline.cpp`)
+/// previously never resolved or stamped `hlsl.numthreads` for a mesh/task
+/// entry at all (only `ConvertSPIRVToLLVMPass` did, and only from a plain
+/// `LocalSize` literal), so every `LocalSizeId`-only mesh/task entry
+/// reached the CPU target with no `hlsl.numthreads` attribute, and
+/// `CompiledStage::getGroupSize()` (backed by `ResourceInfo.cpp`'s
+/// `getThreadGroupSize`, which defaults to `{1, 1, 1}` when the attribute
+/// is absent) silently reported the wrong group size -- the real
+/// `dEQP-VK.mesh_shader.ext.misc.local_size_id_mesh` failure this
+/// milestone fixed.
+TEST_F(GraphicsPipelineTest,
+       MeshStageResolvesLocalSizeIdGroupSizeWithOverrides) {
+  VkShaderModule Mesh = createModule(MeshLocalSizeIdSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  const std::array<uint32_t, 3> OverrideSize{8u, 2u, 1u};
+  const VkSpecializationMapEntry MapEntries[3] = {
+      {/*constantID=*/20, /*offset=*/0 * sizeof(uint32_t), sizeof(uint32_t)},
+      {/*constantID=*/21, /*offset=*/1 * sizeof(uint32_t), sizeof(uint32_t)},
+      {/*constantID=*/22, /*offset=*/2 * sizeof(uint32_t), sizeof(uint32_t)},
+  };
+  VkSpecializationInfo SpecInfo{};
+  SpecInfo.mapEntryCount = 3;
+  SpecInfo.pMapEntries = MapEntries;
+  SpecInfo.dataSize = sizeof(OverrideSize);
+  SpecInfo.pData = OverrideSize.data();
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+  MeshStages[0].pSpecializationInfo = &SpecInfo;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  ASSERT_TRUE(Graphics->hasMeshStages());
+  EXPECT_EQ(Graphics->meshStage().getGroupSize(), OverrideSize);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// `MeshStageResolvesLocalSizeIdGroupSizeWithOverrides`'s task-stage
+/// sibling: a mesh pipeline's task stage gets the same treatment (see
+/// this test's own comment for the shared root cause).
+TEST_F(GraphicsPipelineTest,
+       TaskStageResolvesLocalSizeIdGroupSizeWithOverrides) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Task = createModule(TaskLocalSizeIdSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  const std::array<uint32_t, 3> OverrideSize{4u, 4u, 1u};
+  const VkSpecializationMapEntry MapEntries[3] = {
+      {/*constantID=*/10, /*offset=*/0 * sizeof(uint32_t), sizeof(uint32_t)},
+      {/*constantID=*/11, /*offset=*/1 * sizeof(uint32_t), sizeof(uint32_t)},
+      {/*constantID=*/12, /*offset=*/2 * sizeof(uint32_t), sizeof(uint32_t)},
+  };
+  VkSpecializationInfo SpecInfo{};
+  SpecInfo.mapEntryCount = 3;
+  SpecInfo.pMapEntries = MapEntries;
+  SpecInfo.dataSize = sizeof(OverrideSize);
+  SpecInfo.pData = OverrideSize.data();
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment, Task);
+  // `makeMeshCreateInfo` places the task stage first when present.
+  MeshStages[0].pSpecializationInfo = &SpecInfo;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  ASSERT_TRUE(Graphics->hasTaskStage());
+  EXPECT_EQ(Graphics->taskStage().getGroupSize(), OverrideSize);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Task, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
 }
 
 // Roadmap H3: `maxViewports` (`MaxViewportCount`, 16) is the real limit now;

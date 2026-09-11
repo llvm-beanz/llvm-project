@@ -494,6 +494,38 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   if (!AsLLVMIR)
     return AsLLVMIR.takeError();
 
+  // (roadmap H88) A mesh or task entry point's group size may be declared
+  // via `LocalSizeId` (spec-constant ids) rather than a literal `LocalSize`
+  // -- `ConvertSPIRVToLLVMPass` only ever stamps `hlsl.numthreads` from the
+  // latter (`EntryPointInfo::LocalSize`, populated solely from a plain
+  // `spirv.ExecutionMode LocalSize`'s literal operands), and
+  // `feme::spirv::createConvertSPIRVToLLVMPass`'s own `ExecutionModeIdPattern`
+  // just drops `LocalSizeId` outright, deferring its resolution to this
+  // Vulkan-level scanner (see GroupSize.h's file comment) -- so a
+  // `LocalSizeId`-only entry point reaches the CPU target with no
+  // `hlsl.numthreads` attribute at all, and every one of its group-size
+  // readers (`DispatchArgsLayout.h`'s `getThreadGroupSize`, `SIMDize.cpp`)
+  // silently default to a single-invocation `{1, 1, 1}` group instead of
+  // the real, specialization-resolved size. The compute path's own
+  // `compileComputePipeline` (Pipeline.cpp) already resolves and stamps
+  // this after translation for exactly this reason; do the same here for
+  // the two stages that can carry a compute-shaped group size.
+  if (Stage == feme::ShaderStage::Mesh ||
+      Stage == feme::ShaderStage::Amplification) {
+    Expected<std::array<uint32_t, 3>> GroupSize =
+        resolveComputeGroupSize(Module->words(), EntryPoint, *Overrides);
+    if (!GroupSize)
+      return GroupSize.takeError();
+    if (llvm::Function *Entry =
+            AsLLVMIR->getLLVMModule().getFunction(EntryPoint)) {
+      std::string NumThreads =
+          (llvm::Twine(GroupSize->at(0)) + "," + llvm::Twine(GroupSize->at(1)) +
+           "," + llvm::Twine(GroupSize->at(2)))
+              .str();
+      Entry->addFnAttr("hlsl.numthreads", NumThreads);
+    }
+  }
+
   // (roadmap L12c) Resolve any unbounded (`RuntimeDescriptorArray`) resource
   // range against this pipeline's own layout before compiling -- see that
   // function's comment (Pipeline.h/.cpp; shared with the compute path).
