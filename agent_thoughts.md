@@ -78325,3 +78325,97 @@ logged as noise, not investigated further, since nothing regressed.
 2. `[feme] Close roadmap H93b, and H93 by extension`
 3. `[feme] Document H93b's measured CTS impact`
 4. This file.
+
+# H94 session: root-caused a real bug, shipped the triage instead of a patch (second time this pattern's happened -- see H89)
+
+**If you pick this up next: start at Roadmap.md's H94a row, not H94's.** H94 itself is now
+a finished triage, not an open investigation -- the actual remaining work is H94a's own
+scoped description. Read `/tmp/h94dump/module0-prepared.ll` if it's still around (217 lines,
+real IR, reproduces the bug directly via `feme-opt --llvm -passes='feme-cpu-linearize'
+-feme-cpu-stage=mesh -feme-cpu-entry-point=main -S module0-prepared.ll -o out.ll`) -- it took
+a full session to get to and would be expensive to reproduce from scratch. Consider checking
+it into `feme/test/Transforms/CPU/` as a lit test input before starting H94a.
+
+## What happened, in order
+
+1. Confirmed the target: this turn's quoted diagnostic text matches Roadmap.md's existing
+   H94 row exactly (4 CTS cases, `feme-cpu-linearize`'s "more than one divergent exit check").
+2. Captured the real SPIR-V for `mesh_shared_memory_size` via a temporary env-var-gated dump
+   in `vkCreateShaderModule` (`FEME_DUMP_SPIRV_DIR`, reverted before this session's close).
+3. Walked the capture by hand through every real pipeline stage (`feme-translate
+   --import-spirv` -> fix a double `module { module attributes ... }` wrapper artifact by
+   hand -> `feme-opt --feme-convert-spirv-to-llvm` -> `feme-translate --llvmdialect-to-llvmir`
+   -> `feme-opt -passes='feme-cpu-fold-spirv-builtins,feme-cpu-prepare,...'`) until a single
+   217-line `.ll` file reproduced the exact diagnostic via `feme-opt -passes='feme-cpu-linearize'`
+   alone, outside the Vulkan runtime entirely.
+4. Traced the reduced IR's CFG by hand. Found the previous filing's guess (H91's "two separate
+   per-invocation bounds checks") doesn't match what's actually there: only ONE real,
+   data-dependent divergent check exists (block `54`, an `icmp eq` against a shared-memory
+   read). The second `DivergentCandidates` entry (`Flow`) is a `StructurizeCFG` merge block
+   whose own condition is provably (via dominance + all-constant incoming edges) just a
+   boolean re-encoding of that SAME check -- not a second, independent one.
+5. Tried the tempting fix first: extend `DivergentCandidates` classification to tolerate a
+   poison-merged loop induction variable, mirroring H89a's diamond-select fix. Built cleanly.
+   **Ran the repro before and after -- byte-for-byte identical diagnostic, no change at all.**
+   Added debug prints to find out why: the new code path was only ever hit for the real check
+   (correctly returning "not misclassified"), never for the loop's own trip-count check --
+   because that check was ALREADY excluded from consideration by an existing, older mechanism
+   (`peelConstantFlowPredecessors`/`PeeledFrom`, roadmap L40) before the new code could matter.
+   Reverted (`git checkout --`) rather than leave dead code in.
+6. Tried a second, more aggressive fix: a whole-function pass folding any phi with exactly one
+   non-poison incoming value, in `Prepare.cpp`. This one **broke IR verification outright**
+   (`Instruction does not dominate all uses!`) the first time it ran, because -- unlike H89a's
+   select case, always confined to one dominating merge point -- a phi's "real" operand does
+   not generally dominate its own block once that block has other predecessors that don't pass
+   through the real operand's defining block. Reverted immediately, never even reached testing.
+7. Traced the actual relay path further and found it's worse than one `Flow` hop: `54 ->
+   Flow24 (uncond relay) -> Flow (CondBr, boolean relay of 54) -> loop.exit.guard (a SECOND
+   CondBr relay, itself also a boolean relay) -> the loop's real exit`. Confirmed
+   `matchExitCheckWithRelay` (H19k) can't resolve an exit for either `54` or `Flow` alone as
+   `CheckBlock`, because it only tolerates a straight *unconditional* chain to the exit, not
+   further `CondBr` relay hops -- so merely collapsing `DivergentCandidates` to one entry
+   would not, on its own, be enough to finish the fix.
+8. `git status`/`git diff --stat` confirmed clean after both reverts. Rebuilt `feme-opt`/
+   `libfeme_vulkan.so`. Ran `ninja check-feme`: 2945/2948 Passed, 3 Unsupported, 0 Failed --
+   identical to H93b's own closing numbers. Re-ran all 4 of H94's own CTS cases directly:
+   same diagnostic, unchanged, for every one.
+9. Wrote up the real root cause and the properly-scoped remaining work as Roadmap.md's new
+   H94a row, and a "Roadmap H94: measured impact" section in VulkanCTSReport.md, instead of
+   shipping either of the two attempted fixes.
+
+## The one-sentence lesson
+
+**A fix that compiles and produces the same diagnostic before and after isn't a partial win --
+it's a sign the code path you changed was never on the way to being hit; add debug prints and
+confirm the new code actually runs where you think it does before concluding it "didn't help
+enough."**
+
+## Why the real fix is scoped as its own row (H94a) instead of just re-opening H94
+
+H94's own original text already undersold the real problem (it guessed "two separate bounds
+checks," which isn't what's there) and doesn't mention relay chains, dominance-based boolean
+rewriting, or the multi-hop (`Flow` then `loop.exit.guard`) shape at all. Leaving H94's own
+text in place and just re-opening it would silently drop everything this session learned.
+H94a states the actual mechanism needed (a dominance-respecting IR rewrite collapsing
+provably-redundant relay hops down to one real check, plus verifying mask-threading survives
+multiple hops) so a future session can start implementing instead of re-deriving it.
+
+## Suggested next steps (in order, if resuming this work)
+
+1. Check whether `/tmp/h94dump/module0-prepared.ll` still exists; if not, redo the capture
+   (steps 2-3 above) -- budget about half a day for the reduction alone if starting cold.
+2. Check the reduced `.ll` into the repo (e.g. `feme/test/Transforms/CPU/loop-relay-chain.ll`,
+   marked `XFAIL` or similar for now) so the reduction itself is never lost or needs redoing.
+3. Implement the dominance-respecting relay-collapse rewrite described in H94a (a new small
+   step, analogous to the existing `peelConstantFlowPredecessors`, that rewrites a relay
+   block's boolean phi into a direct `xor`/identity use of the real check's condition).
+4. Re-run `DivergentCandidates` classification against the now-collapsed IR; confirm it drops
+   to exactly one real candidate for this shape.
+5. Check `matchExitCheckWithRelay`/`linearizeCycle`'s mask-threading logic against the
+   now-single-candidate IR -- it may already "just work" once collapsed, or may need its own
+   change to handle the (still-present, just now-irrelevant-to-classification) extra hops.
+6. Add a `Linearize.cpp` unit test with a hand-built two-relay-hop `.ll` case before touching
+   the real CTS cases, to get fast iteration without the full CTS build/run loop.
+7. Re-run all 4 of H94's own CTS cases for real pass/fail, not just "no crash."
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
