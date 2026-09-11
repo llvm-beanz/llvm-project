@@ -77301,3 +77301,145 @@ H34/H48) still stands and is worth checking first before assuming H70
 needs brand-new investigation from scratch.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H70 session: per-bucket triage of a 155-case grab-bag, one fix landed, seventeen more milestones carved out
+
+## Starting point
+
+H31's own closing full-group re-run had left two new failure buckets
+behind: H69 (an 80-case rendering-mismatch bucket, already closed by a
+prior session) and H70, a 155-case grab-bag spanning
+`dEQP-VK.mesh_shader.ext.{builtin,misc,properties,smoke,synchronization}`
+that the roadmap explicitly flagged as "not yet triaged -- several may
+already be covered by other tracked, unrelated gaps... but none of the
+five buckets has had a real reduction done yet." The user's request
+this session was open-ended ("work on H70 or other blocking work"), so
+my plan was: reproduce the exact 155-case list, get a real per-case
+root-cause signature for every one of them (not just a sample), fix
+whichever single cause turned out to be both cleanly isolated and worth
+fixing this session, and leave the rest as a properly broken-down set
+of new milestones rather than one more vague "not yet triaged" note.
+
+## Triage methodology
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` turns the generic
+`VK_ERROR_INITIALIZATION_FAILED` that `deqp-vk` reports into a real
+diagnostic string on stderr. I re-ran the whole 155-case list once with
+this set, captured the log, and wrote a small Python pass to bucket
+every case by its own diagnostic's signature (stripping case-specific
+numbers/names so structurally-identical failures group together). This
+produced 18 distinct signatures, from a 41-case dominant bucket down to
+several single-case ones -- a much more actionable shape than "155
+failures, not yet triaged." I want to flag this pattern for future
+grab-bag rows: don't sample a handful of cases and generalize, actually
+bucket every single one, since the roadmap's own H6/H9/H21/H29 chains
+have repeatedly found that a bucket with a plausible-sounding one-line
+description often turns out to be two or three unrelated bugs wearing
+the same error text.
+
+## The fix I landed
+
+The single largest bucket (41 cases, entirely in `synchronization`) was
+`vkQueueSubmit: clear color has 4 component(s), expected 1`. Tracing
+this to its source: `dEQP-VK.mesh_shader.ext.synchronization.*` uses a
+hard-coded `VK_FORMAT_R32_UINT` resource format
+(`vktMeshShaderSyncTestsEXT.cpp`'s own `getImageFormat()`) for its
+cross-stage synchronization verification, and `feme`'s own
+`packClearColor`/`unpackColor` (`ImageFixture.cpp`) simply had no
+special case for the `R32_{U,S}INT` family -- unlike the neighboring
+`R16_UINT`/`_SINT`, `R8G8B8A8_UINT`/`_SINT`, `R10G10B10A2_UINT` cases
+right next to where it should have been, it fell through to a generic
+component-count-mismatch rejection path instead. I added
+`R32_UINT`/`R32_SINT`, `R32G32_UINT`/`R32G32_SINT`, and
+`R32G32B32_UINT`/`R32G32B32_SINT` cases to both functions, following
+the exact same raw-integer (non-normalized) convention the existing
+`R16_UINT`/`R16_SINT` cases already establish, plus 6 new unit tests in
+`ImageFixtureTest.cpp`.
+
+## A clang-format mishap worth remembering
+
+After writing the fix, I ran `clang-format -i --style=file` on the two
+changed files out of habit, and it reformatted large swaths of
+unrelated, pre-existing code in `ImageFixture.cpp` (not just my new
+hunks) -- the on-disk code apparently predates strict adherence to the
+repo's own `.clang-format` in several places, so a wholesale
+`clang-format -i` pass is not safe to run on existing files here. I
+tried to recover with `git checkout -- <file>`, which (correctly, in
+hindsight, but not what I wanted in the moment) discarded *all*
+uncommitted changes to that file, including my actual fix, not just the
+clang-format pass on top of it. I had to redo both files' edits from
+scratch, this time hand-formatting the new code to match its immediate
+surroundings instead of running a formatter over the whole file. Lesson
+for next time: never run a repo-wide formatter on a file with
+pre-existing, un-formatted history unless I'm prepared for it to touch
+unrelated lines, and always `git diff` before any `git checkout --` to
+make sure I know exactly what I'm about to discard.
+
+## Measuring the fix's impact
+
+Re-running the same 155-case list after the fix: 120 Pass/119 Fail/90
+NotSupported (up from 84/155/90). Only 36 net cases flipped to Pass,
+not the full 41 -- tracing the gap, 5 previously-masked cases now reach
+and expose an already-separately-triaged `spirv.Image{Write,Read}`
+legalization gap for `R32ui` images (one of H70's own 18 signatures),
+which had simply never been reached before because the clear-color
+crash happened first. This is not a regression, just previously-hidden
+failures becoming visible -- but it's a good example of why "did the
+exact case count I expected flip" is a more trustworthy signal than "no
+new failures appeared," since a masked failure surfacing looks
+identical to a regression at first glance until you check what it
+actually is. A broader `dEQP-VK.mesh_shader.ext.*` sweep (26,921 cases)
+confirmed the same shape at full scale: 226/213/26,482 (H69's own
+closing baseline) -> 262/177/26,482, an exact +36/-36/unchanged
+movement matching the five-bucket analysis. `check-feme` (2931
+discovered, 2872 Passed, up 6, 0 Failed) and `check-hlsl-feme-vk` (276
+Passed/101 Failed/26 Expectedly Failed/1 Unexpectedly Passed/260
+Unsupported, unchanged from H31's own documented baseline) both
+confirmed no regressions outside this fix's own intended scope. As with
+prior sessions, `check-hlsl-feme-vk`'s own target needed the local
+`offload-test-suite` checkout's `feme` branch fast-forwarded first
+(`.instructions.md` had warned this could happen again, and it did --
+one commit behind `beanz/feme` again).
+
+## Breaking down the remaining 17 root causes
+
+Rather than leave H70 as one still-vague "not yet triaged" row now that
+the triage itself is done, I split the remaining 17 signatures (the
+18th, this session's own clear-color fix, is closed) into twelve new
+milestone rows, H71 through H82 -- keeping to the project's own
+one-lowercase-letter nesting rule by not nesting any of them under H70
+with letters at all, just giving each (or each closely-related cluster)
+its own flat top-level ID. A few grouping decisions worth recording:
+
+- H71 bundles all three `spirv.Image{Write,Read,SampleExplicitLod}`
+  R32ui legalization failures together (21 cases total) since they are
+  almost certainly the same underlying SPIR-V-to-LLVM conversion gap
+  for that one image format, just hit via three different op shapes.
+- H74 explicitly does **not** try to fix the `rasterizer discard`/
+  `specialization constants` bucket (32 cases) -- I flagged it as
+  needing a real cross-check against H34/H48's own already-closed
+  `VK_EXT_graphics_pipeline_library` sub-rows first, since the roadmap
+  itself already suspected an overlap and I did not have time this
+  session to confirm or refute that suspicion with a real reduction.
+  Better to say "check this before doing new work" than to either
+  duplicate H34/H48's scope or guess wrong.
+- H82 folds a single-case signature
+  (`push_constant_and_task_shader`'s `llvm.mlir.constant` `si32`/`i32`
+  type mismatch) into its own description as "probably not new" rather
+  than giving it a fresh milestone, since its diagnostic text is
+  identical to the one H31's own row already documented and explicitly
+  left open for the `api.draw.with_task_shader` bug. A future session
+  should confirm this with a quick re-run before assuming it's the same
+  bug, but giving it its own milestone number when it's very likely a
+  duplicate would just create roadmap noise.
+
+I did not attempt any of H71-H82 directly this session -- the single
+largest, cleanest fix (the clear-color bug) is done, tested, and its
+impact fully measured, and getting the breakdown itself right (accurate
+per-bucket counts, sensible grouping, correct milestone numbering)
+seemed like the better use of remaining time than rushing a second,
+smaller fix without giving it the same rigor. Whoever picks up H71+
+next has a real per-signature starting point instead of one more
+"grab-bag, not yet triaged" row to redo the triage on.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
