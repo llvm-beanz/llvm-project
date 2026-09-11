@@ -1808,6 +1808,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   const SignatureElement *VSViewportOut =
       findElement(RasterSig, SignatureDirection::Output,
                   SignatureSystemValue::ViewportArrayIndex);
+  // (Roadmap H93b) A mesh (or, in principle, geometry) entry's own
+  // authored `gl_PrimitiveID` output -- absent for every other
+  // pre-rasterization chain (a plain vertex shader has no `gl_PrimitiveID`
+  // output to write at all). When present, a fragment invocation's own
+  // `gl_PrimitiveID` input must reflect *this* value, not the raster-order
+  // `PrimitiveCounter` fallback `pushQuadTriangle`/the triangle path below
+  // use when it is absent -- see `PrimitiveState::AuthoredPrimitiveID`'s
+  // own comment for why reading it back at any one of the primitive's own
+  // vertices is correct.
+  const SignatureElement *VSPrimitiveIDOut =
+      findElement(RasterSig, SignatureDirection::Output,
+                  SignatureSystemValue::PrimitiveID);
   // (roadmap H7e) Optional: not every vertex shader writes `gl_PointSize`,
   // and only a point-topology draw's own quad expansion ever reads it.
   const SignatureElement *VSPointSize = findElement(
@@ -2340,6 +2352,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // ::ViewportIndex`, mirroring how `TargetLayer` above is already
       // carried through for `gl_Layer`/`SV_RenderTargetArrayIndex`.
       uint32_t ViewportIndex = 0;
+      // (Roadmap H93b) The last pre-rasterization stage's own authored
+      // `gl_PrimitiveID` output, when it has one (a mesh or geometry
+      // entry may write it; a plain vertex shader cannot). `nullopt`
+      // means no stage wrote it, in which case `PrimitiveCounter`'s own
+      // raster-order fallback below applies instead -- see
+      // `VSPrimitiveIDOut`'s own comment.
+      std::optional<uint32_t> AuthoredPrimitiveID;
     };
     auto resolvePrimitiveState =
         [&](uint32_t Invocation) -> std::optional<PrimitiveState> {
@@ -2373,9 +2392,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       if (!Layer)
         return std::nullopt;
 
+      // (Roadmap H93b) `unflattenMeshPrimitiveRow` (and its geometry-stage
+      // analogue, if one ever exists) already replicates a `PerPrimitive`
+      // output -- `gl_PrimitiveID` included -- into every one of its own
+      // primitive's vertex slots, exactly like `gl_Layer`/
+      // `gl_ViewportIndex` above; reading it back at this same
+      // \p Invocation is therefore correct regardless of which of that
+      // primitive's own vertices \p Invocation names.
+      std::optional<uint32_t> AuthoredPrimitiveID;
+      if (VSPrimitiveIDOut)
+        AuthoredPrimitiveID = RasterOut->readRaw(
+            VSPrimitiveIDOut->ElementID, VSPrimitiveIDOut->FirstComponent,
+            Invocation);
+
       return PrimitiveState{&Draw.Viewports[*ViewportIndex],
                             &Draw.Scissors[*ScissorIndex], *Layer,
-                            *ViewportIndex};
+                            *ViewportIndex, AuthoredPrimitiveID};
     };
 
     auto projectVertex = [&](const RasterVertex &Vtx,
@@ -2509,7 +2541,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // before decomposing it, using its own real winding, so the
       // synthetic sub-primitives below never need a second cull test.
       ST.FrontFacing = true;
-      ST.PrimitiveID = PrimitiveCounter++;
+      // (Roadmap H93b) Prefer the last pre-rasterization stage's own
+      // authored `gl_PrimitiveID` (e.g. a mesh entry's `PrimitiveIndices`-
+      // adjacent per-primitive write) over the raster-order fallback --
+      // see `PrimitiveState::AuthoredPrimitiveID`'s own comment. The
+      // ternary's short-circuiting matters here: `PrimitiveCounter` must
+      // not advance at all when an authored value is used, or a later
+      // primitive with no authored value of its own would skip an ID.
+      ST.PrimitiveID = Primitive.AuthoredPrimitiveID
+                          ? *Primitive.AuthoredPrimitiveID
+                          : PrimitiveCounter++;
       ST.TargetLayer = Primitive.TargetLayer;
       ST.ViewportIndex = Primitive.ViewportIndex;
       ST.ScissorMinX = std::max<int32_t>(0, Primitive.Scissor->X);
@@ -2822,7 +2863,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         for (unsigned K = 0; K != 3; ++K)
           ST.Varyings[K] = VaryingBits->data() + K * Stride;
         ST.FrontFacing = FrontFacing;
-        ST.PrimitiveID = PrimitiveCounter++;
+        // (Roadmap H93b) See the identical `pushQuadTriangle` logic above
+        // for why this must be a short-circuiting ternary, not
+        // `value_or`.
+        ST.PrimitiveID = Primitive->AuthoredPrimitiveID
+                            ? *Primitive->AuthoredPrimitiveID
+                            : PrimitiveCounter++;
         ST.TargetLayer = Primitive->TargetLayer;
         ST.ViewportIndex = Primitive->ViewportIndex;
         ST.ScissorMinX = std::max<int32_t>(0, Primitive->Scissor->X);

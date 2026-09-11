@@ -6216,6 +6216,150 @@ TEST(ExecutorTest, RastersEveryPointPrimitiveEvenWhenTheyShareASingleVertex) {
   EXPECT_EQ(Untouched[3], 0);
 }
 
+// (Roadmap H93b) The same two-triangles-sharing-a-diagonal quad shape as
+// `PerPrimitiveColorsDoNotBleedAcrossPrimitivesSharingAVertex` above, but
+// each triangle also authors its own explicit `PerPrimitive`
+// `SignatureSystemValue::PrimitiveID` output -- deliberately the *reverse*
+// of raster/emission order (triangle 0, emitted first, authors 100;
+// triangle 1, emitted second, authors 7) so that the pre-fix behavior
+// (`RasterizePrimitives` always synthesizing `gl_PrimitiveID` from its own
+// raster-order `PrimitiveCounter`, ignoring any authored value) and the
+// post-fix behavior (preferring the mesh entry's own authored value) are
+// unambiguously distinguishable: pre-fix, the fragment shader would see
+// 0/1; post-fix, it sees the authored 100/7.
+constexpr char MeshTwoPrimitivesAuthoredPrimitiveIDShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 4, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 3)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 1.0, i32 3)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 3)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 3)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 1, i32 1, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 2, i32 2, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 1, i32 1)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 1, i32 3, i32 1)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 2, i32 2, i32 1)
+    call void @feme.stage.output.store.i32(i32 2, i32 0, i32 0, i32 100, i32 0)
+    call void @feme.stage.output.store.i32(i32 2, i32 0, i32 0, i32 7, i32 1)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+// Reads `gl_PrimitiveID` (element 0, a `SystemValue::PrimitiveID` fragment
+// input) and writes it straight through to a single-channel `R32_UINT`
+// color attachment, so each covered pixel directly reports the
+// `PrimitiveID` value the fragment invocation actually observed.
+constexpr char PrimitiveIDPassthroughFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %pid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 %pid, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, FragmentPrimitiveIDPrefersAMeshEntrysAuthoredValue) {
+  Context Ctx;
+  SignatureElement PosElt =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position);
+  SignatureElement IdxElt = makeElement(
+      1, SignatureDirection::Output, 3, /*Location=*/std::nullopt);
+  IdxElt.ComponentType = SignatureComponentType::UInt;
+  IdxElt.Frequency = SignatureFrequency::PerPrimitive;
+  IdxElt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  SignatureElement PrimitiveIDElt =
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PrimitiveID);
+  PrimitiveIDElt.ComponentType = SignatureComponentType::UInt;
+  PrimitiveIDElt.Frequency = SignatureFrequency::PerPrimitive;
+  EntrySignature MeshSig;
+  MeshSig.Elements = {PosElt, IdxElt, PrimitiveIDElt};
+  Expected<std::shared_ptr<CompiledStage>> MS = compileStage(
+      Ctx, MeshTwoPrimitivesAuthoredPrimitiveIDShaderIR, "ms_main", MeshSig,
+      ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  SignatureElement FSPrimitiveIDElt =
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PrimitiveID);
+  FSPrimitiveIDElt.ComponentType = SignatureComponentType::UInt;
+  SignatureElement FSColorOut =
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/0);
+  FSColorOut.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {FSPrimitiveIDElt, FSColorOut};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, PrimitiveIDPassthroughFragmentShaderIR, "fs_main",
+                   FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32_UINT, Size, Size}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 4;
+  Mesh.MaxOutputPrimitives = 2;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R32_UINT, Size, Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Same diagonal split as the shared-vertex-color test above: `X + Y <= 2`
+  // is triangle 0 (authored `PrimitiveID` 100), `X + Y >= 3` is triangle 1
+  // (authored `PrimitiveID` 7). Before this fix, every covered pixel would
+  // instead read back raster order (0 or 1, in emission order), never 100
+  // or 7.
+  auto texel = [&](uint32_t X, uint32_t Y) -> uint32_t {
+    uint32_t V;
+    std::memcpy(&V, Storage.data() + (Y * Size + X) * 4, sizeof(V));
+    return V;
+  };
+  for (auto [X, Y] : {std::pair{0u, 2u}, std::pair{1u, 1u}, std::pair{2u, 0u}})
+    EXPECT_EQ(texel(X, Y), 100u) << "x=" << X << " y=" << Y;
+  for (auto [X, Y] : {std::pair{0u, 3u}, std::pair{1u, 2u}, std::pair{2u, 1u}})
+    EXPECT_EQ(texel(X, Y), 7u) << "x=" << X << " y=" << Y;
+}
+
 // (Roadmap H8p) A fragment shader with a real `uvec2` output (`UInt`,
 // `ComponentCount == 2`) drawn to a real `R16G16_UINT` color attachment --
 // exercises `executeDraws`'s widened `FSColors` validation (accepting a
