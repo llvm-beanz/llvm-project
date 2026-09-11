@@ -2396,8 +2396,26 @@ void FunctionWidener::widenMaskAny(CallInst &CI, IRBuilder<> &Builder) {
   // feme/docs/FeMeCPUDesign.md) and RAUW with the (uniform, scalar `i1`)
   // result directly, rather than recording it in `Widened`, since nothing
   // needs to broadcast a value that is already what every other use expects.
+  //
+  // Roadmap H72: the operand's own loop-entry value (`active.live`'s
+  // predecessor-from-outside-the-cycle incoming value in
+  // `LoopLinearizer::makeActivePNPair`) is a plain scalar `true` -- correct
+  // in the single-invocation model `feme::cpu::LinearizePass` reasons in,
+  // where there is no such thing as a lane that is not a real invocation.
+  // Widening broadcasts that `true` across every lane of the wave,
+  // including any padding lane past the wave's real invocation count (the
+  // last, partial wave of a workgroup whose size is not a multiple of the
+  // configured wave width) -- with nothing else in this loop's own body
+  // ever narrowing a padding lane's mask back to `false`, such a lane keeps
+  // this reduction (and so the loop it gates) running forever. AND the
+  // widened mask with `Env.EntryMask` here, exactly like every other
+  // widened construct in this file that needs to know whether a lane is a
+  // real invocation before using its value for anything real, so only
+  // genuine invocations can keep the loop alive.
   Value *WideMask = getWidened(CI.getArgOperand(0), Builder);
-  Value *Reduced = Builder.CreateOrReduce(WideMask);
+  Value *RealMask =
+      Builder.CreateAnd(WideMask, Env.EntryMask, "mask.any.real");
+  Value *Reduced = Builder.CreateOrReduce(RealMask);
   Reduced->takeName(&CI);
   CI.replaceAllUsesWith(Reduced);
   ToErase.push_back(&CI);
