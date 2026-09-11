@@ -36961,3 +36961,115 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.frag_to_mesh.storage_image.memory_barrier.shader_write_shader_read'
 ```
+
+## Roadmap H72: measured impact (`feme-cpu-wrap-entry` barrier-free-loop region-splitting, and `feme-cpu-simdize` `widenMaskAny` entry-mask fix)
+
+H70's own closing full-group re-run found the `misc.group_memory_barrier_in_{mesh,task}*`/
+`misc.memory_barrier_shared_in_{mesh,task}*` bucket (20 cases) failing
+`vkCreateGraphicsPipelines` with `feme-cpu-wrap-entry: ... barrier inside
+non-linear control flow ...`. A real IR reduction (a hand-written self-loop
+spin-wait after a barrier, mirroring the CTS's own
+`while (flags[otherInvocation] != 1u) { iterations++; }` shape) reproduced
+the diagnostic in 20 lines.
+
+**First fix attempt (insufficient).** Added `matchBarrierFreeLoop` to
+`EntryWrapper.cpp`, recognizing only a loop whose own `CondBr` closes
+directly back to its own containing block. This fixed the hand-written
+repro, but a real re-run of `misc.*` (114 cases) showed **all 36 fails
+unchanged**, including all 20 target cases hitting the exact same
+diagnostic. A temporary, env-var-gated IR dump added to `Pipeline.cpp`
+(`FEME_DEBUG_DUMP_PRE_WRAP`, removed before commit) captured the actual
+pre-`feme-cpu-wrap-entry` IR for one real failing case
+(`group_memory_barrier_in_mesh_array`): because the spin-wait's own exit
+condition (`flags[1 - gl_LocalInvocationIndex]`) depends on
+per-invocation data, `feme::cpu::SIMDizePass`'s structurizer treats it as
+genuinely divergent, producing a masked "any-lane-active" loop scheme
+(`active.live.wide`, `loop.any.active = llvm.vector.reduce.or`, synthetic
+`Flow`/`Flow._crit_edge` blocks) whose own closing branch sits many
+blocks after the header it loops back to -- a shape the first fix never
+recognized.
+
+**Second, generalized fix.** Discarded `matchBarrierFreeLoop`; widened
+`isLinearChain`/`walkBarrierFreeArm` (`EntryWrapper.cpp`) to recognize a
+`CondBr` successor that is *any* already-visited earlier block (not just
+its own containing block), verifying the whole span back to that block
+is barrier-free before continuing from the other successor. Confirmed
+directly against the captured real dump: `feme-opt --llvm
+-passes=feme-cpu-wrap-entry` on it now succeeds (previously failed with
+the target diagnostic). Three new lit tests
+(`entry-wrapper-barrier-free-loop-self.ll`,
+`entry-wrapper-barrier-free-loop-two-block.ll`,
+`entry-wrapper-barrier-in-self-loop-unsupported.ll`) cover the self-loop,
+two-block-loop, and barrier-in-loop-header shapes -- the last an
+adversarial case caught by testing "the unsupported case right next to a
+newly-supported one": the first fix attempt's self-loop check never
+inspected the header itself for a barrier (only strictly-between
+blocks), silently accepting a loop with a real barrier in it and later
+tripping an internal `EntryWrapper.cpp` assertion rather than a clean
+diagnostic, since the header *is* the whole loop body in the self-loop
+case.
+
+`ninja check-feme` passes in full, **2934/2934** discovered (2875 Pass,
+59 pre-existing `Unsupported`, **0 Failed**) -- exactly baseline plus the
+3 new tests, 0 regressions.
+
+**A real re-run of `misc.*` with the region-splitting fix alone** still
+showed all 20 target cases failing -- but now via a genuine **runtime
+hang** (`deqp-vk` never returning, confirmed via a 20s `timeout` wrapper
+exiting 124) rather than a compile-time diagnostic. Root cause:
+`feme::cpu::SIMDizePass`'s `widenMaskAny` (`SIMDize.cpp`) widens the
+loop's "is this lane still looping" mask without ever ANDing it against
+the wave's own `Env.EntryMask` before reducing it with
+`llvm.vector.reduce.or`. The last, partial wave of a workgroup smaller
+than the configured wave width (this bucket's own `numthreads(2,1,1)`
+under a 4-wide wave) has real padding lanes; their masked-gather load of
+`flags[otherInvocation]` reads the gather's own zero passthrough (never
+`1`), so their "still looping" bit never clears and `loop.any.active`
+never goes false for the whole wave. Fixed by ANDing the widened mask
+with `Env.EntryMask` before the `OrReduce`, matching every other
+real-lane-gated construct already in this file (masked loads/stores,
+atomics, resource calls). This also fixes the underlying gap's own
+defensive posture for any other divergent, barrier-free, partial-wave
+loop, not just this one shape.
+
+With both fixes rebuilt into `libfeme_vulkan.so`, all 20 target cases now
+compile, run, and terminate (confirmed via a 25s `timeout` wrapper on
+`group_memory_barrier_in_mesh_array`, exit code 1, not 124) -- **no
+crash, no hang**. However, each still fails `MemoryBarrierInstance::
+verifyResult`'s own image comparison
+(`vktMeshShaderMiscTestsEXT.cpp:1828`) against both of its accepted
+references (`max difference = (0, 0, 1, 1)`, well above the 0.005
+threshold). This is a separate, deeper bug -- not this row's own
+region-splitting/hang-avoidance scope -- tracked as new roadmap **H85**.
+
+**A full re-run** of the `misc.*` bucket (114 cases): **35 Pass/36
+Fail/43 NotSupported** -- identical totals to H70's own closing baseline
+(same 36 Fail count), since these 20 cases still fail (now via pixel
+mismatch, not a pipeline-creation crash or hang) rather than newly
+passing.
+
+**A broader re-run** of the full `dEQP-VK.mesh_shader.ext.*` group
+(26,921 cases): **276 Pass/163 Fail/26,482 NotSupported** -- identical to
+H71's own closing baseline, confirming the underlying compiler defect
+(the region-split rejection/crash, and the mask.any hang) is fixed with
+zero change in net pass/fail counts (Fail is Fail whether by crash, hang,
+or pixel mismatch) and zero regression elsewhere.
+
+`check-feme`'s full run (above) already confirms zero regression to
+existing lit coverage; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change (a pure compiler-correctness
+fix, no feature bit or extension advertisement involved).
+
+**Roadmap H72 is closed** (its own scope -- the region-splitting
+rejection/assertion/hang -- is fully fixed). The residual 20-case
+pixel-comparison mismatch this row's own closing re-run found is a new,
+distinct gap filed as **H85**.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.misc.group_memory_barrier_in_mesh_array'
+```
