@@ -44,17 +44,18 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H72 or other blocking work to make progress on the H-series
+Can you work on H73 or other blocking work to make progress on the H-series
 milestones?
 
->  **`misc.*`'s `feme-cpu-wrap-entry: ... barrier inside non-linear control flow
->  ...` region-splitting gap** (20 cases, found by H70's own per-bucket triage):
->  every `misc.group_memory_barrier_in_{mesh,task}*` case fails
->  `vkCreateGraphicsPipelines` because the entry's own control flow around a
->  `GroupMemoryBarrierWithGroupSync`/`groupMemoryBarrier` call has a "surviving
->  branch not part of a supported loop" shape the existing region-splitting
->  logic (`roadmap milestone 9`'s own documented deviation) does not yet
->  support. Not yet triaged -- needs a real IR reduction of one
->  `group_memory_barrier_in_mesh_array`-shaped case to identify the exact
->  control-flow shape (likely an array-indexed or otherwise non-trivial loop
->  nest around the barrier) that trips this gap
+> **`builtin.layer`/`properties`/`smoke.fast_lib.*`'s `feme-cpu-wrap-fragment:
+> unsupported fragment system value for element 0`** (12 cases: `builtin` 3,
+> `properties` 1, `smoke` 8, found by H70's own per-bucket triage): the
+> fragment-stage wrapper's input-system-value dispatch rejects some system
+> value(s) outright, mirroring the same shape H21k/H29e's own
+> hull/domain-wrapper precedent already found and fixed for those stages --
+> likely `gl_Layer`/`gl_ViewportIndex` (`builtin.layer`'s own name) or a related
+> per-primitive fragment input the mesh-shader path feeds through that the
+> existing fragment wrapper's switch does not yet route. Not yet triaged --
+> needs a real IR reduction of `builtin.layer` to identify the exact system
+> value, following the same technique H21k/H29e already used for the analogous
+> hull/domain-wrapper gaps
