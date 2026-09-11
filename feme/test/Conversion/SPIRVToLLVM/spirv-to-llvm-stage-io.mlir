@@ -156,6 +156,28 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Geometry], []> {
 
 // -----
 
+// (Roadmap H93) A mesh entry's own `perprimitiveEXT` interface block
+// (e.g. `gl_MeshPerPrimitiveEXT { int gl_PrimitiveID; }`) decorates its
+// member with both `BuiltIn PrimitiveId` *and* `PerPrimitiveEXT` --
+// glslang emits both as `OpMemberDecorate`, never a whole-variable
+// `OpDecorate`, so this member-decoration path (not
+// `buildStageIODecorationsAttr`'s whole-variable one, exercised by the
+// bare `per_primitive_ext`-attributed `in_block`/`out_block` globals
+// elsewhere in this file) is what must preserve it.
+// `buildMemberDecorationTuple` previously only recognized
+// `NoPerspective`/`Flat`/`Patch`/`Centroid`/`Sample` as flag-shaped
+// member decorations, silently dropping `PerPrimitiveEXT` -- this let
+// `CanonicalizeStage.cpp`'s `classifySPIRVElement` default this member
+// to `SignatureFrequency::PerVertex`, routing a mesh shader's
+// `gl_PrimitiveID` store through the wrong (per-vertex) output storage.
+
+// CHECK: llvm.mlir.global external @gl_MeshPerPrimitiveEXT() {addr_space = 8 : i32, feme.spirv.member.decorations = {{\[}}[0 : i32, {{\[}}[11 : i32, 2 : i32], [5271 : i32]{{\]}}]{{\]}}}
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.GlobalVariable @gl_MeshPerPrimitiveEXT : !spirv.ptr<!spirv.struct<(i32 [BuiltIn=2 : i32, PerPrimitiveEXT])>, Output>
+}
+
+// -----
+
 // (Roadmap H7y) A real geometry/tessellation entry's own `gl_in[i].
 // gl_Position`-shaped read -- one `spirv.AccessChain` combining a
 // genuinely dynamic, loop-carried outer (per-vertex) index with a

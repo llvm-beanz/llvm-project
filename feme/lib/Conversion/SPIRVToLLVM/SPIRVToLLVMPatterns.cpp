@@ -2427,6 +2427,24 @@ mlir::Attribute buildMemberDecorationTuple(
   case mlir::spirv::Decoration::Patch:
   case mlir::spirv::Decoration::Centroid:
   case mlir::spirv::Decoration::Sample:
+  // (Roadmap H93) A mesh entry's own `perprimitiveEXT` interface block
+  // (e.g. `gl_MeshPerPrimitiveEXT`, holding builtins like `gl_PrimitiveID`
+  // as well as any user-defined per-primitive varying) gets this
+  // decoration as an `OpMemberDecorate`, exactly like `Patch` on a
+  // tessellation entry's own per-patch block -- not as a whole-variable
+  // `OpDecorate` the way `buildStageIODecorationsAttr` reads it for an
+  // ordinary (non-block) per-primitive varying. Omitting it here left
+  // every member of such a block (including builtins) silently
+  // classified `SignatureFrequency::PerVertex` by
+  // `CanonicalizeStage.cpp`'s `classifySPIRVElement`, so a mesh shader's
+  // `gl_PrimitiveID` store got lowered through the wrong (per-vertex)
+  // output storage, clamped to the single declared vertex slot -- found
+  // via `dEQP-VK.mesh_shader.ext.properties.max_mesh_output_
+  // primitives_256`, whose 128 odd-numbered primitive IDs came back
+  // unset because every primitive's `gl_PrimitiveID` aliased onto the
+  // same one-slot vertex-output location instead of its own 256-slot
+  // primitive-output one.
+  case mlir::spirv::Decoration::PerPrimitiveEXT:
     return Builder.getArrayAttr(
         {Builder.getI32IntegerAttr(static_cast<int32_t>(Info.decoration))});
   default:
