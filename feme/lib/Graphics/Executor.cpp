@@ -2641,8 +2641,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
     for (std::array<uint32_t, 3> Tri : AbsTriIndices) {
       std::optional<PrimitiveState> Primitive = resolvePrimitiveState(Tri[0]);
-      if (!Primitive)
+      if (!Primitive) {
         continue;
+      }
       std::array<RasterVertex, 3> V = {vertexAt(Tri[0]), vertexAt(Tri[1]),
                                        vertexAt(Tri[2])};
       // (roadmap H7h) `gl_CullDistance`: a whole-primitive discard, tested
@@ -3661,13 +3662,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       MeshOutputBuilder Builder(Mesh.OutputTopology, Mesh.MaxOutputVertices,
                                 Mesh.MaxOutputPrimitives);
       if (Builder.setOutputCounts(ActualVertexCount, ActualPrimitiveCount)) {
-        for (uint32_t V = 0; V != ActualVertexCount; ++V)
-          Builder.setVertex(
-              V, flattenMeshRow(*VertexOut, SignatureFrequency::PerVertex, V));
+        for (uint32_t V = 0; V != ActualVertexCount; ++V) {
+          auto Row = flattenMeshRow(*VertexOut, SignatureFrequency::PerVertex, V);
+          Builder.setVertex(V, Row);
+        }
         for (uint32_t P = 0; P != ActualPrimitiveCount; ++P) {
-          Builder.setPrimitive(
-              P, flattenMeshRow(*PrimitiveOut, SignatureFrequency::PerPrimitive,
-                                P));
+          auto Row = flattenMeshRow(*PrimitiveOut, SignatureFrequency::PerPrimitive, P);
+          Builder.setPrimitive(P, Row);
           Builder.setPrimitiveIndices(
               P, llvm::ArrayRef(PrimitiveIndices)
                      .slice((size_t)P * VerticesPerPrim, VerticesPerPrim));
@@ -3785,8 +3786,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // filter above: `M.getVertices()` rows are already narrowed to only
       // that frequency's scalars, so this must walk the identical subset
       // in the identical order to stay aligned, rather than every Output
-      // element (a `PerPrimitive` element's own data lives in
-      // `M.getPrimitives()` instead, not consumed by rasterization here).
+      // element.
       auto unflattenMeshRow = [&](llvm::ArrayRef<float> Row,
                                   uint32_t Invocation) {
         size_t Idx = 0;
@@ -3801,6 +3801,47 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         }
       };
 
+      // (roadmap H31) A `PerPrimitive`-frequency Output (e.g. a
+      // `perprimitiveEXT` varying, or `gl_PrimitiveID`) has no vertex
+      // storage slot of its own to interpolate from -- the fragment-input
+      // linking below (`Varyings`, built once for every pre-rasterization
+      // stage alike) reads every varying back out of `Merged` at a given
+      // *vertex* invocation, with no separate per-primitive storage or
+      // lookup path. Rather than teach that shared, heavily-reused
+      // linking/interpolation code a second, mesh-only storage class, this
+      // writes each primitive's own flattened row into `Merged` at every
+      // one of that primitive's own vertex slots too (redundantly, since
+      // every mesh topology's primitive touches a small, fixed set of
+      // vertices) -- a primitive-frequency value is by definition uniform
+      // across its own primitive, so `Merged` ends up with the identical
+      // value at each of that primitive's vertices, and the existing
+      // per-vertex interpolation (`Flat`, or an ordinary linear/
+      // perspective blend of three identical corners, which is just that
+      // same value again) reads it back correctly with no further change.
+      // Previously this data was computed into every `Meshlet::
+      // getPrimitives()` row and then silently dropped, never reaching
+      // `Merged` at all -- every mesh fragment shader input sourced from a
+      // `perprimitiveEXT` output (this project's *only* mesh-shader color
+      // path so far) read back as zero, which is the root cause of
+      // `dEQP-VK.mesh_shader.ext.api.draw.*`'s `no_task_shader`/
+      // `no_task_shader_secondary_cmd` cases rendering nothing at all.
+      auto unflattenMeshPrimitiveRow = [&](llvm::ArrayRef<float> Row,
+                                          llvm::ArrayRef<uint32_t> VertexIdx) {
+        size_t Idx = 0;
+        for (const SignatureElement &Elt : MeshSig->Elements) {
+          if (Elt.Direction != SignatureDirection::Output ||
+              Elt.Frequency != SignatureFrequency::PerPrimitive)
+            continue;
+          for (uint32_t R = 0; R != Elt.RowCount; ++R)
+            for (uint32_t C = 0; C != Elt.ComponentCount; ++C) {
+              float V = Row[Idx++];
+              for (uint32_t VI : VertexIdx)
+                Merged->writeFloat(Elt.ElementID, Elt.FirstComponent + C, VI,
+                                   V, R);
+            }
+        }
+      };
+
       SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
       SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
       uint32_t VertexBase = 0;
@@ -3809,6 +3850,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           unflattenMeshRow(M.getVertices()[V], VertexBase + V);
         for (uint32_t P = 0; P != M.getPrimitiveCount(); ++P) {
           llvm::ArrayRef<uint32_t> Idx = M.getPrimitiveIndices(P);
+          SmallVector<uint32_t, 3> AbsIdx;
+          for (uint32_t I : Idx)
+            AbsIdx.push_back(VertexBase + I);
+          unflattenMeshPrimitiveRow(M.getPrimitives()[P], AbsIdx);
           switch (Mesh.OutputTopology) {
           case MeshOutputTopology::Triangles:
             AbsTriIndices.push_back({VertexBase + Idx[0], VertexBase + Idx[1],

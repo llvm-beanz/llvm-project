@@ -5811,6 +5811,132 @@ TEST(
   EXPECT_EQ(Untouched[3], 0);
 }
 
+// (Roadmap H31) A real triangle-topology mesh workgroup emitting one
+// primitive with its own `PerPrimitive`-frequency color output (mirroring
+// `dEQP-VK.mesh_shader.ext.api.draw.*`'s own `perprimitiveEXT out vec4
+// primitiveColor[]` shape, the CTS's sole mesh-shader color-output path),
+// consumed by an ordinary fragment shader reading that varying by
+// location like any per-vertex one (`FragmentShaderIR` above). Before this
+// fix, `Executor::runMeshWorkgroup`'s merge step (`unflattenMeshRow`) only
+// ever copied `PerVertex`-frequency Output elements into the flat `Merged`
+// storage the shared varying-linking/interpolation code reads back from;
+// a `PerPrimitive` element's own computed value -- present in each
+// `Meshlet::getPrimitives()` row -- was never written into `Merged` at
+// all, so the fragment shader always read zero-initialized storage for
+// it, rendering fully transparent black instead of this primitive's own
+// color. This exercises the real rasterization path end to end (not just
+// `RoutesAPerPrimitiveOutputElementIntoPrimitiveOutputsAlongsideAPerVertexOne`
+// above, which never has a fragment stage actually read the per-primitive
+// value at all) and asserts every covered pixel reads back this
+// primitive's own solid green, not black/transparent.
+constexpr char MeshPerPrimitiveColorShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 3, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 3.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 3.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 2)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 1, i32 1, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 2, i32 2, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+TEST(ExecutorTest,
+     PerPrimitiveMeshColorReachesFragmentInputInsteadOfReadingAsZero) {
+  Context Ctx;
+  SignatureElement PosElt =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position);
+  SignatureElement IdxElt = makeElement(
+      1, SignatureDirection::Output, 3, /*Location=*/std::nullopt);
+  IdxElt.ComponentType = SignatureComponentType::UInt;
+  IdxElt.Frequency = SignatureFrequency::PerPrimitive;
+  IdxElt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  SignatureElement ColorElt =
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/0);
+  ColorElt.Frequency = SignatureFrequency::PerPrimitive;
+  EntrySignature MeshSig;
+  MeshSig.Elements = {PosElt, IdxElt, ColorElt};
+  Expected<std::shared_ptr<CompiledStage>> MS = compileStage(
+      Ctx, MeshPerPrimitiveColorShaderIR, "ms_main", MeshSig, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, Size, Size}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 3;
+  Mesh.MaxOutputPrimitives = 1;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // The triangle (-1,-1)/(3,-1)/(-1,3) in NDC covers the whole [-1, 1]
+  // viewport, so every pixel of this 4x4 target must read back the
+  // primitive's own solid green -- not black/transparent, which is what
+  // this fix's regression would silently render instead.
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Storage.data() + (Y * Size + X) * 4;
+  };
+  for (uint32_t Y = 0; Y != Size; ++Y) {
+    for (uint32_t X = 0; X != Size; ++X) {
+      const uint8_t *Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0) << "x=" << X << " y=" << Y;
+      EXPECT_EQ(Texel[1], 255) << "x=" << X << " y=" << Y;
+      EXPECT_EQ(Texel[2], 0) << "x=" << X << " y=" << Y;
+      EXPECT_EQ(Texel[3], 255) << "x=" << X << " y=" << Y;
+    }
+  }
+}
+
 // (Roadmap H8p) A fragment shader with a real `uvec2` output (`UInt`,
 // `ComponentCount == 2`) drawn to a real `R16G16_UINT` color attachment --
 // exercises `executeDraws`'s widened `FSColors` validation (accepting a
