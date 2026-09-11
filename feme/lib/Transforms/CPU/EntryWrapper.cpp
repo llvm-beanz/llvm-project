@@ -656,23 +656,28 @@ appendTrailingParam(Function &F, Type *ExtraType, const Twine &ExtraName) {
 
 /// Walks from \p Start following only single-successor unconditional
 /// branches, appending every block visited to \p Order, stopping as soon
-/// as a block with more than one predecessor is reached (an arm's
-/// reconvergence point) -- returned without being added to \p Order -- or
-/// returning nullptr (not a shape `isLinearChain`'s "safe diamond" case
-/// below can use) if a cycle is found first, the chain ends in anything
-/// other than an unconditional branch before reconverging, or any block
-/// visited contains a `..._with_group_sync` barrier call: such a barrier
-/// would need its own region split *inside* this one arm, which this
-/// milestone's flat, whole-region `outlineChain` has no way to represent
-/// (see "Barrier inside a surviving branch" in the file comment above).
+/// as a block already present in \p Visited is reached (either an arm's
+/// reconvergence point with more than one predecessor, or -- roadmap
+/// H72 -- a genuine loop backedge closing back to some earlier block in
+/// the very walk that reached \p Start, e.g. \p Start's own containing
+/// block for a direct self-loop) -- returned without being added to
+/// \p Order -- or returning nullptr (not a shape `isLinearChain` can use)
+/// if a cycle among blocks *not* already in \p Visited is found first,
+/// the chain ends in anything other than an unconditional branch before
+/// reconverging or closing, or any block visited contains a
+/// `..._with_group_sync` barrier call: such a barrier would need its own
+/// region split *inside* this one arm or loop, which this milestone's
+/// flat, whole-region `outlineChain` has no way to represent (see
+/// "Barrier inside a surviving branch" in the file comment above).
 BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
+                               const SmallPtrSetImpl<BasicBlock *> &Visited,
                                SmallVectorImpl<BasicBlock *> &Order) {
-  SmallPtrSet<BasicBlock *, 8> Visited;
+  SmallPtrSet<BasicBlock *, 8> LocalVisited;
   BasicBlock *BB = Start;
   while (true) {
-    if (BB->hasNPredecessorsOrMore(2))
+    if (BB->hasNPredecessorsOrMore(2) || Visited.contains(BB))
       return BB;
-    if (!Visited.insert(BB).second)
+    if (!LocalVisited.insert(BB).second)
       return nullptr;
     for (Instruction &I : *BB)
       if (auto *CI = dyn_cast<CallInst>(&I))
@@ -689,24 +694,54 @@ BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
 
 /// Whether \p F's control flow is a single straight chain from its entry
 /// block to a `ret`, filling \p Order with its blocks in that order if
-/// so -- with one exception (roadmap L45): a uniform two-way branch whose
-/// arms are each a barrier-free straight chain (`walkBarrierFreeArm`)
-/// reconverging at one common merge block is also accepted, its header
+/// so -- with two exceptions: a uniform two-way branch whose arms are
+/// each a barrier-free straight chain (`walkBarrierFreeArm`) reconverging
+/// at one common merge block is also accepted (roadmap L45), its header
 /// and both arms appended to \p Order in turn before the walk continues
 /// linearly from the merge block, since such a diamond can never itself
 /// need a region split -- it can only ever land entirely inside whichever
-/// single region contains it. A branch that does not form this shape (in
-/// particular, one whose arm contains a barrier of its own, needing a
-/// region split *inside* the branch that this milestone's flat, whole-
-/// region `outlineChain` has no way to represent) is still rejected, same
-/// as before this exception -- see `matchBranchShape`'s `BranchShape` for
-/// the (structurally different, disjoint) shape that case needs instead.
+/// single region contains it. So is a barrier-free natural loop (roadmap
+/// H72): a `while` spin-wait (e.g. `while (flags[other] != 1u) { }`,
+/// polling a groupshared flag another invocation writes) has no
+/// compile-time-constant trip count at all, unlike `LoopShape`'s "pure
+/// scalar recurrence" requirement, so it cannot use `matchLoopShape`'s
+/// clone-the-recurrence-into-the-wrapper strategy. Such a loop's own
+/// closing branch can appear in two places: directly at the two-way
+/// branch under consideration here (one successor is some *earlier*
+/// block already in \p Order, e.g. a header this same walk passed
+/// through many blocks ago -- the shape `feme::cpu::SIMDizePass`'s own
+/// mask-based handling of a divergent-trip-count loop like this one,
+/// roadmap milestone 4, produces), or at the end of one of the two arms'
+/// own `walkBarrierFreeArm` walk (that arm looping back to an
+/// already-visited block instead of reconverging at a fresh merge point
+/// -- the shape a `while` loop with a non-empty, straight-line body more
+/// commonly compiles to, before any widening). Either way, once such a
+/// closing point is found, if every block from it through the current
+/// branch (already in \p Order) plus any newly-walked arm blocks contain
+/// no barrier, the loop needs no split of its own for the identical
+/// reason a diamond doesn't -- it can only ever land entirely inside
+/// whichever single region contains it, whether or not its exit
+/// condition is a compile-time-computable recurrence -- and the walk
+/// simply continues from the branch's other successor (the loop's own
+/// exit). If the span contains a barrier, this is not a shape either
+/// exception above supports, and the walk fails same as it always has.
 bool isLinearChain(Function &F, SmallVectorImpl<BasicBlock *> &Order) {
   SmallPtrSet<BasicBlock *, 8> Visited;
+  DenseMap<BasicBlock *, unsigned> OrderIndex;
+  auto hasBarrierInSpan = [&](unsigned FromIdx) {
+    for (unsigned I = FromIdx, E = Order.size(); I != E; ++I)
+      for (Instruction &SpanInst : *Order[I])
+        if (auto *CI = dyn_cast<CallInst>(&SpanInst))
+          if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+              Matched && Matched->GroupSync)
+            return true;
+    return false;
+  };
   BasicBlock *BB = &F.getEntryBlock();
   while (true) {
     if (!Visited.insert(BB).second)
       return false; // A cycle: not a loop-free chain.
+    OrderIndex[BB] = Order.size();
     Order.push_back(BB);
     Instruction *Term = BB->getTerminator();
     if (isa<ReturnInst>(Term))
@@ -719,22 +754,67 @@ bool isLinearChain(Function &F, SmallVectorImpl<BasicBlock *> &Order) {
     if (!CondBr)
       return false; // Something other than a branch or a `ret`.
 
-    SmallVector<BasicBlock *, 4> TrueOrder, FalseOrder;
-    BasicBlock *TrueMerge =
-        walkBarrierFreeArm(CondBr->getSuccessor(0), TrueOrder);
-    BasicBlock *FalseMerge =
-        walkBarrierFreeArm(CondBr->getSuccessor(1), FalseOrder);
-    if (!TrueMerge || !FalseMerge || TrueMerge != FalseMerge)
-      return false; // Not a safe diamond: fall back to diagnosing.
-    for (BasicBlock *Arm : TrueOrder)
-      if (!Visited.insert(Arm).second)
-        return false; // An arm block reachable from elsewhere too.
-    for (BasicBlock *Arm : FalseOrder)
-      if (!Visited.insert(Arm).second)
-        return false;
-    Order.append(TrueOrder.begin(), TrueOrder.end());
-    Order.append(FalseOrder.begin(), FalseOrder.end());
-    BB = TrueMerge;
+    BasicBlock *Succ0 = CondBr->getSuccessor(0);
+    BasicBlock *Succ1 = CondBr->getSuccessor(1);
+    bool Succ0Seen = Visited.contains(Succ0);
+    bool Succ1Seen = Visited.contains(Succ1);
+    if (Succ0Seen != Succ1Seen) {
+      // Exactly one successor is a backedge to an earlier block in this
+      // same chain: a barrier-free natural loop closing from `BB` back to
+      // that block directly, per this function's own doc comment.
+      BasicBlock *Header = Succ0Seen ? Succ0 : Succ1;
+      BasicBlock *Exit = Succ0Seen ? Succ1 : Succ0;
+      if (hasBarrierInSpan(OrderIndex.lookup(Header)))
+        return false; // Barrier inside a loop this shape can't split.
+      BB = Exit;
+      continue;
+    }
+
+    // Neither successor is a backedge yet: try each as the entry to a
+    // barrier-free straight chain that either reconverges with the other
+    // (the L45 diamond) or itself closes a loop back to an earlier block
+    // (a `while` loop with a non-empty body, closing one level deeper
+    // than the branch under consideration here).
+    for (unsigned I = 0; I != 2; ++I) {
+      BasicBlock *BodyEntry = I == 0 ? Succ0 : Succ1;
+      BasicBlock *OtherSucc = I == 0 ? Succ1 : Succ0;
+      SmallVector<BasicBlock *, 4> ArmOrder;
+      BasicBlock *ClosesTo = walkBarrierFreeArm(BodyEntry, Visited, ArmOrder);
+      if (!ClosesTo || !Visited.contains(ClosesTo))
+        continue; // Not a loop backedge (an unvisited, fresh merge block
+                   // is `walkBarrierFreeArm`'s *other* stopping case,
+                   // handled by the diamond attempt below instead).
+      if (hasBarrierInSpan(OrderIndex.lookup(ClosesTo)))
+        return false; // Barrier inside a loop this shape can't split.
+      for (BasicBlock *Arm : ArmOrder)
+        if (!Visited.insert(Arm).second)
+          return false; // An arm block reachable from elsewhere too.
+      for (BasicBlock *Arm : ArmOrder) {
+        OrderIndex[Arm] = Order.size();
+        Order.push_back(Arm);
+      }
+      BB = OtherSucc;
+      goto ContinueOuterWalk;
+    }
+
+    {
+      SmallVector<BasicBlock *, 4> TrueOrder, FalseOrder;
+      BasicBlock *TrueMerge = walkBarrierFreeArm(Succ0, Visited, TrueOrder);
+      BasicBlock *FalseMerge = walkBarrierFreeArm(Succ1, Visited, FalseOrder);
+      if (!TrueMerge || !FalseMerge || TrueMerge != FalseMerge ||
+          Visited.contains(TrueMerge))
+        return false; // Not a safe diamond: fall back to diagnosing.
+      for (BasicBlock *Arm : TrueOrder)
+        if (!Visited.insert(Arm).second)
+          return false; // An arm block reachable from elsewhere too.
+      for (BasicBlock *Arm : FalseOrder)
+        if (!Visited.insert(Arm).second)
+          return false;
+      Order.append(TrueOrder.begin(), TrueOrder.end());
+      Order.append(FalseOrder.begin(), FalseOrder.end());
+      BB = TrueMerge;
+    }
+  ContinueOuterWalk:;
   }
   // Every block reached by exactly one step from the last: if some block
   // was never visited, it either merges into this chain from elsewhere (a
