@@ -21,6 +21,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   ImageCallsTest.cpp
   InlineHelperFunctionsTest.cpp
   LinearizeTest.cpp
+  LocalNarrowVectorArrayInitTest.cpp
   MaskIntrinsicsTest.cpp
   MeshOutputWrapperTest.cpp
   PatchConstantWrapperTest.cpp

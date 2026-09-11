@@ -18,6 +18,7 @@
 #include "feme/Transforms/CPU/HullWrapper.h"
 #include "feme/Transforms/CPU/InlineHelperFunctions.h"
 #include "feme/Transforms/CPU/Linearize.h"
+#include "feme/Transforms/CPU/LocalNarrowVectorArrayInit.h"
 #include "feme/Transforms/CPU/MeshOutputWrapper.h"
 #include "feme/Transforms/CPU/PatchConstantWrapper.h"
 #include "feme/Transforms/CPU/Prepare.h"
@@ -291,6 +292,19 @@ Expected<PipelineResult> runPipeline(Module &M,
     // (an HLSL/DXIL-sourced module, or a GLSL one with no surviving helper
     // function).
     Normalize.addPass(InlineHelperFunctionsPass());
+    // (roadmap H69) A SPIR-V-sourced mesh entry's own `Private`/
+    // `Function`-storage local array of a narrow (non-power-of-2-width)
+    // fixed vector -- e.g. a local `uint3 idx[2]` the shader builds up
+    // before writing it out to `gl_PrimitiveTriangleIndicesEXT` -- has its
+    // single aggregate "whole array" initializing store written using
+    // real, ABI-padded layout, while every later read of one of its
+    // elements is an access-chain-converted `getelementptr` that assumes
+    // the array's own *tightly packed* layout instead (see
+    // `feme::cpu::LocalNarrowVectorArrayInitPass`'s header comment for
+    // the full story); running this before any pass might otherwise read
+    // one of that array's later elements avoids ever observing the
+    // corrupted data such a mismatch produces.
+    Normalize.addPass(LocalNarrowVectorArrayInitPass());
     // A SPIR-V-sourced module's builtin (thread/group ID) access always
     // materializes the whole 3-component vector before extracting the one
     // lane actually used (see `feme::cpu::SPIRVBuiltinFoldingPass`'s header
