@@ -44,16 +44,19 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H91 or other blocking work to make progress on the H-series
+Can you work on H92 or other blocking work to make progress on the H-series
 milestones?
 
->  **`task_shared_memory_size`/`synchronization.other.barrier_across_secondary`'s
->  "mesh output wrapper requires attached feme.signature metadata"** (now 5
->  cases: the original 2 -- one newly exposed by H74's specialization-constant
->  fix, the other by its rasterizer-discard fix -- plus 3 more
->  (`properties.mesh_payload_size`/`task_payload_size`/`task_payload_and_shared_memory_size`)
->  newly exposed by H89a/H89b's own closing re-run, hitting the identical
->  diagnostic): `MeshOutputWrapper.cpp` expects `feme.signature` metadata to
->  already be attached to the mesh entry point by the time it runs, which is
->  missing for all 5. Not yet triaged -- needs its own reduction to find why
->  signature-metadata attachment is skipped/delayed for these specific shapes
+> **`properties.max_mesh_output_size_with_payload_per_{primitive,vertex}_no_view_index`/`max_mesh_output_size_without_payload_per_{primitive,vertex}_no_view_index`'s
+> `feme-graphics-validate-stage: ... unresolved stage-IO global-variable access
+> ...`** (4 cases, newly exposed by H89a/H89b's own closing re-run): a mesh
+> entry has a stage-IO global-variable access `CanonicalizeStagePass` does not
+> yet canonicalize into a `feme.stage.*` call, so `ValidateStagePass` correctly
+> (per its own H6g-b-c precedent) rejects it at compile time instead of letting
+> it reach the JIT as an undefined symbol -- the same diagnostic class as H76's
+> own `smoke.fast_lib.*` row, but not yet confirmed to be the identical
+> root-cause shape (these are `properties.*` mesh-output-payload-size cases, not
+> `smoke.fast_lib`'s fragment-library-sharing shape). Not yet triaged -- needs
+> its own IR reduction of one `_no_view_index` case to identify the specific
+> global-variable access shape `CanonicalizeStagePass` misses, and to
+> confirm/refute overlap with H76 before any new fix work
