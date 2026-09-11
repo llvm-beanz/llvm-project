@@ -38424,3 +38424,135 @@ roadmap-H7x-or-later reference for this extension row to begin with.
 implementation bug in an already-documented mechanism (per-primitive
 `gl_Layer`/`gl_ViewportIndex`-style resolution, now extended to
 `gl_PrimitiveID`) rather than changing anything the design doc claims.
+
+## Roadmap H94: measured impact (root-caused, not yet fixed; two false starts identified and reverted)
+
+**Scope confirmed unchanged.** The same 4 cases as H94's own original
+filing (`properties.mesh_shared_memory_size`,
+`mesh_payload_and_shared_memory_size`, `task_shared_memory_size`,
+`task_payload_and_shared_memory_size`), all still hitting
+`feme-cpu-linearize: function 'main': loop at '' has more than one
+divergent exit check ('' and 'FlowNN'); unsupported (roadmap milestone
+6 deviation)` byte-for-byte identically before and after this session's
+investigation (re-confirmed via a real, targeted re-run of all 4 at
+this section's close).
+
+**Reduction methodology.** Rather than triage from the compiled
+diagnostic alone, captured the real, in-flight SPIR-V for
+`mesh_shared_memory_size` via a temporary env-var-gated dump added to
+`vkCreateShaderModule` (`FEME_DUMP_SPIRV_DIR`, reverted before this
+session's close -- see agent_thoughts.md for the exact mechanism if a
+future session wants to reuse the technique), then walked it through
+this project's own real, individually-invokable pipeline stages by
+hand:
+
+```shell
+feme-translate --import-spirv --import-spirv-skip-verify module0.spv -o module0.mlir
+# (fix a nested `module { module attributes {...} { ... } } ` double-wrapper
+#  artifact of the raw SPIR-V-dialect dump by hand before the next step)
+feme-opt --feme-convert-spirv-to-llvm module0-llvmdialect.mlir -o module0-llvmdialect2.mlir
+feme-translate --llvmdialect-to-llvmir module0-llvmdialect2.mlir -o module0.ll
+feme-opt --llvm -passes='feme-cpu-fold-spirv-builtins,feme-cpu-prepare,feme-cpu-normalize-bound-resources,feme-cpu-lower-root-constants,feme-cpu-lower-spirv-resources,feme-cpu-lower-spirv-push-constants,feme-cpu-lower-resources' \
+  -feme-cpu-stage=mesh -feme-cpu-entry-point=main -S module0.ll -o module0-prepared.ll
+feme-opt --llvm -passes='feme-cpu-linearize' -feme-cpu-stage=mesh -feme-cpu-entry-point=main \
+  -S module0-prepared.ll -o module0-linearized.ll   # reproduces the exact diagnostic
+```
+
+This produced 217 lines of real, textual, pre-`feme-cpu-linearize`
+LLVM IR (`module0-prepared.ll`) that deterministically reproduces the
+diagnostic outside the Vulkan runtime entirely -- a genuine, minimal,
+real-world repro, not a hand-written guess at the shape.
+
+**Root cause (confirmed against the real IR, not the CTS source
+alone).** H94's own original filing (inherited from H91's) guessed the
+two divergent candidates were "two separate per-invocation bounds
+checks" (one per CTS `for` loop). Manually tracing the reduced IR's
+CFG disproves this: the failing loop is the CTS shader's *third*
+("verify") loop alone (IR header block `45`, latch
+`Flow._crit_edge`), and it has exactly *one* real, data-dependent
+divergent check -- an `icmp eq` against a value read back from shared
+memory, IR block `54`. The second `DivergentCandidates` entry is IR
+block `Flow`, a `StructurizeCFG`-built merge block that does not
+compute anything new: its own condition (`%62`, after the loop's
+pre-existing `peelConstantFlowPredecessors`/`PeeledFrom` mechanism,
+roadmap L40, already correctly peels away the loop's *actual* uniform
+trip-count check as a non-candidate) is fed solely by
+`Flow24`'s own `%49 = phi i1 [false, %50], [true,
+%.Flow24_crit_edge]` -- a "boolean relay" phi where *both* incoming
+values are literal constants, and each incoming edge is provably (via
+dominance from block `54`'s own two successors) reached only through
+one of block `54`'s own two arms. That makes `%49` -- and hence
+`Flow`'s whole condition -- exactly `xor(%59, true)` where `%59` is
+`54`'s own `icmp eq`: `Flow` is not a second, independent divergence
+source, it is the *same* one decision, re-encoded through a
+merge-block's boolean position rather than computed directly.
+Tracing further shows the real exit path is even more deeply relayed
+than a single `Flow` hop: `54 -> Flow24 (unconditional relay) -> Flow
+(CondBr, itself a boolean relay of 54) -> loop.exit.guard (a *second*
+CondBr relay hop, itself ALSO a boolean relay via its own
+`%Guard.inv = xor(%61, true)`) -> the loop's real, single exit block`.
+`matchExitCheckWithRelay` (roadmap H19k) already tolerates relaying
+through a *straight, unconditional* chain of blocks from a check to
+its exit, but not through *another* `CondBr` relay block -- so neither
+`54` nor `Flow`, tried individually as `CheckBlock`, can currently
+resolve an exit match, which is the deeper reason simply collapsing
+`DivergentCandidates` down to one entry would not be sufficient on its
+own (see H94a's own roadmap entry for why).
+
+**Two fix attempts made, tested, and reverted this session (both
+confirmed not the real fix, for different reasons).**
+
+1. A global, whole-function `foldPoisonOnlyPHIs` fold added to
+   `Prepare.cpp` (RAUW-and-erase any phi with exactly one non-poison/
+   undef/self incoming value, fixed-point) -- **unsound**: broke IR
+   dominance verification (`Instruction does not dominate all uses!`)
+   the first time it was exercised, because unlike H89a's
+   `DiamondFlattener::flatten` select-based fix (always confined to a
+   single dominating merge point), a phi's "real" operand does not
+   generally dominate the phi's own block once that block has *other*
+   predecessors that don't route through the real operand's defining
+   block. Reverted via `git checkout --` before it was ever built into
+   a shipped state.
+2. A classification-level `isInductionCheckMisclassifiedDivergent`
+   helper added to `Linearize.cpp` (recognize an ordinary
+   loop-induction-variable trip-count check even when raw
+   `UniformityInfo` calls it divergent, mirroring the "phi(X, poison)
+   refines to X" reasoning as a read-only classification tweak rather
+   than an IR mutation) -- built cleanly and is architecturally sound
+   in isolation, but **confirmed ineffective for this bug**: debug
+   instrumentation showed it is only ever invoked for block `54`'s own
+   genuine data check (correctly returning "not misclassified"), never
+   for the loop's real uniform trip-count check, because that check is
+   *already* excluded from `DivergentCandidates` by the pre-existing
+   `PeeledFrom` mechanism before this new check would ever run. Running
+   the reduced repro before and after this change produced the byte-
+   -for-byte identical diagnostic. Reverted via `git checkout --`.
+
+**No source change landed this session.** `git status`/`git diff
+--stat` confirm a clean tree (`feme/lib/Transforms/CPU/Linearize.cpp`
+and `feme/lib/Vulkan/Pipeline.cpp`, the only two files touched by the
+above two attempts plus the temporary SPIR-V dump hook, both fully
+reverted and rebuilt clean). `ninja check-feme`: 2945/2948 Passed, 3
+Unsupported, 0 Failed -- identical to H93b's own closing numbers,
+confirming the revert left no behavioral residue. The real, targeted
+re-run of all 4 of H94's own cases (above) reproduces the exact,
+unchanged diagnostic for each.
+
+**Roadmap H94 stays open**, broken down into a new H94a entry
+covering the actual next-step capability this triage identified:
+collapsing an N-hop chain of provably-redundant boolean-relay `CondBr`
+blocks down to the one real divergent check they all re-encode, before
+(or as part of) `DivergentCandidates` classification, plus verifying
+the downstream mask-threading logic handles a multi-hop relay chain
+correctly. See Roadmap.md's H94a row for the full breakdown, and
+"H94 session" in agent_thoughts.md for the complete narrative
+(including why each of the two attempted fixes turned out not to be
+the real bug).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: no functional behavior changed this session (both attempted
+fixes were reverted), and this milestone concerns an existing
+`VK_EXT_mesh_shader` diagnostic, not new feature/extension surface.
+`FeMeGraphicsDesign.md` needs no change either, for the same reason --
+no deviation from the design doc was introduced (or reverted back out)
+this session.
