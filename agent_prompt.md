@@ -44,17 +44,17 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H71 or other blocking work to make progress on the H-series
+Can you work on H72 or other blocking work to make progress on the H-series
 milestones?
 
-> **`synchronization.*`'s `spirv.Image{Write,Read,SampleExplicitLod}`
-> SPIR-V-to-LLVM legalization gap for `R32ui` storage/sampled images** (10 + 7 +
-> 4 = 21 cases, found by H70's own per-bucket triage): every case using an
-> `R32_UINT` storage or sampled image (the same format H70's own clear-color fix
-> unmasked 5 further cases of, previously hidden behind the clear-color
-> `vkQueueSubmit` failure) fails `vkCreateGraphicsPipelines` with `"failed to
-> legalize operation 'spirv.Image{Write,Read,SampleExplicitLod}' that was
-> explicitly marked illegal"`. Not yet triaged for root cause -- needs its own
-> IR reduction of one of the three op shapes to identify what
-> image-descriptor/format combination `ConvertSPIRVToLLVMPass`'s existing
-> image-op conversion patterns do not yet cover
+>  **`misc.*`'s `feme-cpu-wrap-entry: ... barrier inside non-linear control flow
+>  ...` region-splitting gap** (20 cases, found by H70's own per-bucket triage):
+>  every `misc.group_memory_barrier_in_{mesh,task}*` case fails
+>  `vkCreateGraphicsPipelines` because the entry's own control flow around a
+>  `GroupMemoryBarrierWithGroupSync`/`groupMemoryBarrier` call has a "surviving
+>  branch not part of a supported loop" shape the existing region-splitting
+>  logic (`roadmap milestone 9`'s own documented deviation) does not yet
+>  support. Not yet triaged -- needs a real IR reduction of one
+>  `group_memory_barrier_in_mesh_array`-shaped case to identify the exact
+>  control-flow shape (likely an array-indexed or otherwise non-trivial loop
+>  nest around the barrier) that trips this gap
