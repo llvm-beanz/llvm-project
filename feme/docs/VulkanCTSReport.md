@@ -37965,3 +37965,110 @@ cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
 VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.mesh_shared_memory_size'
 ```
+
+## Roadmap H91: measured impact
+
+**Symptom.** `dEQP-VK.mesh_shader.ext.properties.task_shared_memory_size`/
+`.task_payload_size`/`.mesh_payload_size`/`.task_payload_and_shared_memory_size`
+and `dEQP-VK.mesh_shader.ext.synchronization.other.barrier_across_secondary`
+(5 cases) failed `vkCreateGraphicsPipelines` with
+`VK_ERROR_INITIALIZATION_FAILED`, the compiler emitting
+`feme-cpu-wrap-mesh-output: mesh output wrapper requires attached
+feme.signature metadata`.
+
+**Root cause.** Read the real CTS source
+(`vktMeshShaderPropertyTestsEXT.cpp`'s `TaskPayloadShMemSizeCase::
+initPrograms`): every one of these 5 cases' own mesh shader does only
+`SetMeshOutputsEXT(0u, 0u)` (zero vertices/primitives) plus writes a
+pass/fail flag into an ordinary, non-stage-IO storage-buffer resource --
+no stage-IO global (an `Input`/`Output` address-space global variable)
+is ever read or written. `canonicalizeSPIRVStage`
+(`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`) only builds and
+attaches an `EntrySignature` when its own discovery loop finds at least
+one such stage-IO global load/store; for these 5 entries that loop
+finds nothing at all, so the signature-building branch never runs and
+the mesh entry point is left with no `!feme.signature` metadata
+whatsoever. `feme::cpu::MeshOutputWrapperPass`
+(`feme/lib/Transforms/CPU/MeshOutputWrapper.cpp`)'s own
+`lowerMeshStageOps` requires an attached signature for any mesh entry
+whose body contains a call satisfying `isStageOpCall(*CI) ||
+isMaskedOutputStoreCall(*CI) || isMaskedSetMeshOutputsCall(*CI)` --
+`SetMeshOutputsEXT` alone already qualifies -- so it rejects all 5 at
+compile time instead.
+
+This is exactly the same shape a pre-existing fallback already handles
+for `ShaderStage::Geometry`: a geometry entry whose only real work is a
+stream-cut call (`feme.stage.stream.cut`), with zero stage-IO globals
+of its own, still gets an *empty* (`SignatureElement`-less, not absent)
+signature attached via an explicit `else if (Stage ==
+ShaderStage::Geometry)` fallback (see
+`GeometryStreamCutOnlyEntryStillGetsASignature`) -- but no equivalent
+fallback existed for `Mesh`.
+
+**Fix.** Widened that one fallback's condition in
+`canonicalizeSPIRVStage` from `Stage == ShaderStage::Geometry` to
+`Stage == ShaderStage::Geometry || Stage == ShaderStage::Mesh`,
+attaching the same empty signature for a mesh entry found to have zero
+stage-IO globals, mirroring the geometry precedent exactly rather than
+inventing a new, narrower mesh-specific condition.
+
+While reconciling this against the existing test suite, found that a
+pre-existing, more synthetic unit test,
+`MeshStageCanonicalizesTaskPayloadLoad` (a mesh entry that only reads a
+task payload, with no `SetMeshOutputsEXT` call at all), also has zero
+stage-IO globals and also contains a recognized stage-op call
+(`TaskPayloadLoad` itself already qualifies for `MeshOutputWrapperPass`'s
+own `UsesStageOps` check, regardless of whether that particular op is
+itself output-related) -- so its own pre-existing
+`EXPECT_FALSE(dxil::getEntrySignature(*F).has_value())` assertion
+encoded an invariant that, had this exact synthetic shape ever reached
+`MeshOutputWrapperPass` in the real pipeline, would have silently
+reproduced this same H91 diagnostic. Updated that test's assertion (and
+its comment) to expect the same empty-signature attachment this fix now
+applies consistently to every zero-stage-IO mesh entry, real or
+synthetic, rather than leaving a narrower, inconsistent carve-out in
+place.
+
+**Regression test.** Added `MeshSetOutputsOnlyEntryStillGetsASignature`
+(`feme/unittests/Transforms/Graphics/CanonicalizeStageTest.cpp`),
+modeling the real CTS shape directly: a mesh entry whose only content
+is `call void @feme.stage.set_mesh_outputs(i32 0, i32 0)`, asserting it
+now gets an empty (present) `EntrySignature` rather than none at all.
+
+**Build/test.** `ninja check-feme`: 2886/2945 Passed, 59 Unsupported, 0
+Failed.
+
+**Real CTS re-run.** All 5 tracked cases no longer hit the "requires
+attached feme.signature metadata" diagnostic:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.task_shared_memory_size'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.other.barrier_across_secondary'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.mesh_payload_size'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.task_payload_size'
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.task_payload_and_shared_memory_size'
+```
+
+None of the 5 newly pass outright; each progresses to a distinct, later
+gap instead: `task_shared_memory_size`/`task_payload_and_shared_memory_size`
+now hit `feme-cpu-linearize: ... has more than one divergent exit
+check ...`, the identical diagnostic class H94 already tracks (folded
+into that row's own count rather than filed separately);
+`mesh_payload_size`/`task_payload_size` now fail a distinct "Unexpected
+shared memory result: 0" data-correctness mismatch (`vktMeshShaderPropertyTestsEXT.cpp:521`),
+filed as new row H95; and `barrier_across_secondary` now fails a
+distinct "Unexpected values found in verification buffer" data-correctness
+mismatch (`vktMeshShaderSyncTestsEXT.cpp:1771`), filed as new row H96.
+This row's own scope -- the missing-signature diagnostic itself -- is
+fully closed regardless of these newly-exposed, distinct downstream
+gaps.
+
+**Roadmap H91 is closed.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change: this is a pure compiler-
+correctness fix (a stage-IO-discovery/signature-attachment gap for a
+zero-stage-IO mesh entry), not a new feature or extension surface.
+`FeMeVulkanDesign.md` needs no change either: nothing about the
+documented mesh-stage canonicalization design changed, only a narrow
+gap in an existing, already-documented fallback's own stage coverage.
