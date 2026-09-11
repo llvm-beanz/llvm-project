@@ -1256,8 +1256,35 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
       Updater.Initialize(PN->getType(), PN->getName());
       Updater.AddAvailableValue(BB, PN);
       Updater.AddAvailableValue(Pred, V);
-      for (Use &U : llvm::make_early_inc_range(PN->uses()))
+      // Roadmap H89b: a use of `PN` *inside* `BB` itself (most notably
+      // `BB`'s own terminator, when `PN` is the condition `phi` this very
+      // function is peeling a predecessor of) is still trivially
+      // dominated by `PN`'s definition at the top of `BB` -- nothing
+      // about that reachability changes just because one of `BB`'s
+      // *other* predecessors is being bypassed. `SSAUpdater::RewriteUse`
+      // must not be asked to rewrite it: once `AddAvailableValue(BB, PN)`
+      // makes `HasValueForBlock(BB)` true, `GetValueInMiddleOfBlock`
+      // takes its "value redefined partway through the block" reconciler
+      // path instead of returning `PN` directly -- and, since this
+      // peeling only ever registers a value for `BB` and for `Pred`
+      // (never for `BB`'s *other*, still-genuine predecessors, whose
+      // real incoming value it has no reason to know), that reconciler
+      // cannot find one for them either and silently synthesizes brand
+      // new, semantically-bogus `phi`s while walking back through the
+      // rest of the cycle (as far as the loop header) trying to invent
+      // one -- corrupting the very value this peel is supposed to leave
+      // untouched. Only a use genuinely outside `BB` (where the edge
+      // being peeled really can change which value reaches it) needs
+      // `SSAUpdater`'s help at all.
+      for (Use &U : llvm::make_early_inc_range(PN->uses())) {
+        auto *UserInst = cast<Instruction>(U.getUser());
+        auto *UserPN = dyn_cast<PHINode>(UserInst);
+        BasicBlock *UserBlock =
+            UserPN ? UserPN->getIncomingBlock(U) : UserInst->getParent();
+        if (UserBlock == BB)
+          continue;
         Updater.RewriteUse(U);
+      }
     }
     for (PHINode &PN : BB->phis())
       PN.removeIncomingValue(Pred, /*DeletePHIIfEmpty=*/false);
