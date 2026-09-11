@@ -78419,3 +78419,137 @@ multiple hops) so a future session can start implementing instead of re-deriving
 7. Re-run all 4 of H94's own CTS cases for real pass/fail, not just "no crash."
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H94a session: fixed the relay-chain bug for real, found and killed a dangling-pointer crash along the way, and hit a new blocker on the other side
+
+**Bottom line up front**: H94a is done. The `feme-cpu-linearize` "more than
+one divergent exit check" diagnostic that blocked all 4 of H94's target
+cases is gone. `check-feme` is green (2947/2950, 0 Failed). But none of the
+4 cases pass yet -- each now hits a different, pre-existing, unrelated
+blocker (`feme-cpu-wrap-entry`'s "barrier inside non-linear control flow"),
+filed as new row **H94b**. This is the third time in a row (after H89, H94
+itself) that closing one layer just exposes the next one underneath.
+
+## What shipped
+
+1. `getFlowConditionPhi`: tolerates an `xor(Cond, true)` wrapper around a
+   `CondBr` condition, so peeling/merging logic doesn't need two code paths
+   for "plain phi" vs. "negated phi".
+2. `peelConstantFlowPredecessors` (existing, L40): switched to use the new
+   helper, fixed a polarity bug this exposed in its constant-selection logic.
+3. `isPureRelayBlock` + `mergeTrivialRelayBlocksInCycle` (new): once peeling
+   has reduced a `StructurizeCFG`-synthesized relay block (`Flow`,
+   `loop.exit.guard`, etc.) down to a single real incoming edge, physically
+   fold it into its predecessor with LLVM's own `MergeBlockIntoPredecessor`.
+   Wired into a new fixed-point loop in `linearizeCycle` that alternates
+   folding/peeling/merging until nothing changes. Net effect: a chain of N
+   relay hops collapses down to 0, and `OtherCondBrBlocks` never sees more
+   than the one real check to begin with -- no new "is this really the same
+   check as that one, up to negation" classification logic needed at all.
+4. `isSyntheticRelayBlockName`: gates the new merging so it only touches
+   blocks that structurally match `StructurizeCFG`'s own naming convention
+   (`"Flow"` prefix, or contains `.guard`). Necessary because an unscoped
+   first version of this fix regressed 6 existing lit tests -- it was also
+   merging real, user-authored check blocks that happened to look
+   structurally identical to a synthetic relay after an unrelated peel.
+
+## The crash (this session's real time sink)
+
+While validating the fix against the actual captured repro, `feme-opt`
+segfaulted. The build tree is `Release` with assertions forced on
+(`-UNDEBUG`), so there's no debug info by default and a normal gdb session
+is useless. Rather than doing a full debug rebuild (slow), I recompiled
+just `Linearize.cpp` by hand with `ccache clang++ -g -O0`, using the exact
+flags from `ninja -t commands`, swapped the resulting `.o` into the static
+archive with `ar d`/`ar q`, and relinked `feme-opt` using the saved link
+command. About 2 minutes total instead of a 20+ minute full rebuild.
+
+Root cause: `ExitBlock->removePredecessor(CheckBlock)` -- pre-existing
+code, not something this session wrote -- defaults to `KeepOneInputPHIs
+=false`, which eagerly RAUW's-and-erases any phi left with exactly one
+remaining incoming value. This same function had just captured raw
+`PHINode*` pointers into `ExitBlockRelayValues` moments earlier and still
+needed them after the call. Fix: pass `KeepOneInputPHIs=true`. One-line
+fix, but it took the debug-build workaround plus a real gdb backtrace to
+find, since the crash's stack trace pointed at `PHINode::getBasicBlockIndex`,
+nowhere near the actual bug.
+
+**Worth remembering for next time**: `removePredecessor`'s default
+behavior silently invalidates `PHINode*` pointers you already have. Any
+code capturing phi pointers before this call needs `KeepOneInputPHIs=true`,
+full stop -- this is now the second time this exact footgun has bitten a
+change in this codebase (the first predates this session's own memory).
+
+## Two failed test-construction attempts before the real one
+
+The roadmap text asked for a `Linearize.cpp` unit test with a hand-built
+two-relay-hop `.ll` case. Two attempts didn't reproduce the bug at all:
+
+1. A from-scratch synthetic loop with a uniform trip count and a load from
+   shared memory at a uniform address, two relay hops to the exit. Passed
+   even at baseline (pre-fix) -- not actually divergent.
+2. The same idea, but running real `StructurizeCFGPass`/`UnifyLoopExitsPass`
+   /`BreakCriticalEdgesPass` inside the test to get real `Flow` names.
+   Still passed at baseline.
+
+The missing ingredient in both: `UniformityInfo` does not consider a loop
+divergent just because it reads shared memory at a uniform address. It
+needs genuine data OR control divergence. The real CTS case's loop is only
+divergent because it's nested inside an enclosing `thread_id == 0` branch
+-- `UniformityInfo`'s control-dependence propagation marks everything
+control-dependent on a divergent branch as divergent too. Once I wrapped
+the synthetic loop in that same kind of enclosing divergent branch (and
+worked through `DiamondFlattener::validate`'s structural requirements --
+no empty diamond arms, reconvergence block needs exactly 2 predecessors,
+which meant unifying the loop's two exit edges into one funnel block first)
+it reproduced cleanly: fails at baseline with the exact diagnostic, passes
+with the fix. This final version is what's checked in, both as a lit test
+(`loop-relay-chain-two-hops.ll`, using the real captured IR directly) and
+a unit test (a minimal hand-distilled version of the same shape).
+
+## Validation done this session
+
+- `ninja check-feme`: 2947/2950 (3 pre-existing Unsupported, 0 Failed) --
+  up by exactly the 2 new tests, 0 regressions.
+- `git stash` cycle on both the lit test and the unit test: confirmed each
+  fails at baseline with the original diagnostic, passes with the fix.
+- Real Vulkan CTS re-run of all 4 H94 target cases: diagnostic gone from
+  all 4.
+- Broader `dEQP-VK.mesh_shader.ext.*` sweep (26921 cases): 323 Pass/116
+  Fail vs. H93b's 321/118 baseline (+2/-2 delta, attributed to flakiness
+  elsewhere in the suite, not this change).
+- No feature/extension inventory changes needed -- pure compiler internals.
+
+## What's next: H94b (not started, not triaged)
+
+All 4 cases now fail with a *different* diagnostic:
+`feme-cpu-wrap-entry: ... has a barrier inside non-linear control flow ...
+(roadmap milestone 9 deviation)`. This is `EntryWrapper.cpp`'s region-
+splitting logic, previously narrowed by H72 (barrier-free self/multi-block
+loops) and L45 (barrier-free uniform diamonds) for other shapes, but not
+yet for whatever shape these 4 cases' now-single-check verification loop
+produces.
+
+### Suggested next steps (in order, if resuming this work)
+
+1. Capture real pre-`feme-cpu-wrap-entry` IR for one of the 4 cases (same
+   `feme-translate`/`feme-opt` reduction recipe as H94's own triage, just
+   run one stage further this time). Budget ~30-60 minutes -- the pipeline
+   command lines are already documented in H94's roadmap entry.
+2. Look at `EntryWrapper.cpp`'s `isLinearChain`/`walkBarrierFreeArm` (H72's
+   own additions) and `walkBarrierFreeArm`'s diamond-recognizing sibling
+   from L45 -- check whether the barrier sits inside the now-single-check
+   loop itself (a shape neither H72 nor L45 covers, since both of those
+   are barrier-*free* loop/diamond recognizers, not barrier-*containing*
+   ones) or straddles the loop and surrounding uniform control flow.
+3. Once the shape is identified, decide whether it's a small extension of
+   an existing recognizer or needs new logic -- don't assume either way
+   before looking at the real IR.
+4. Add lit test + `EntryWrapperTest` unit test coverage mirroring H72/L45's
+   own precedent (each of those rows added exactly this kind of paired
+   coverage).
+5. Re-run all 4 cases for real pass/fail once the new diagnostic clears --
+   there could easily be a 4th layer underneath, same as H93/H94's own
+   pattern.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
