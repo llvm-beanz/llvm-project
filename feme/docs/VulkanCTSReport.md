@@ -36838,3 +36838,126 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.frag_to_mesh.storage_buffer.memory_barrier.shader_write_shader_read'
 ```
+
+## Roadmap H71: measured impact (`SignExtend`/`ZeroExtend` image-operand discard in `SPIRVToLLVMPatterns.cpp`)
+
+**Root cause.** SPIR-V's `OpTypeImage` "Sampled Type" is always the
+full-width scalar type (e.g. `i32`) regardless of the image's real,
+possibly-narrower storage format. For any integer-format image (this
+group's own `R32ui` storage/sampled images), a real compiler attaches an
+explicit `SignExtend`/`ZeroExtend` image operand to `OpImageRead`/
+`OpImageWrite`/`OpImageSample*` telling a real GPU's texture unit how to
+widen a narrower on-disk texel into that type on read (or narrow it back
+down on write) -- confirmed via a real IR reduction (`glslangValidator
+--target-env vulkan1.2` compiling minimal `imageLoad`/`imageStore`/
+`textureLod` GLSL shaders against `r32ui`/`usampler2D`, then importing
+the result through `feme-translate`): glslang only emits this operand
+once compiling for SPIR-V 1.4+, which mesh shaders always do (`VK_EXT_
+mesh_shader` requires Vulkan 1.3, SPIR-V 1.6) -- a plain SPIR-V-1.0
+compute shader with the same GLSL source does not reproduce it at all,
+which is why this had stayed hidden outside the mesh-shader path.
+`SPIRVToLLVMPatterns.cpp`'s `hasImageOperands`/`hasExactImageOperands`
+allow-listed only the pre-existing `Nontemporal` cache-hint bit for
+silent discard; `SignExtend`/`ZeroExtend` fell through to the general
+"unsupported image operands" rejection, so `ConvertSPIRVToLLVMPass`
+rejected the op outright with `"failed to legalize operation ...
+explicitly marked illegal"` -- one of the three failure signatures
+found by H70's own per-bucket triage (10 `spirv.ImageWrite` + 7
+`spirv.ImageRead` + 4 `spirv.ImageSampleExplicitLod` = 21 cases, all
+`dEQP-VK.mesh_shader.ext.synchronization.*`).
+
+**Fix.** Renamed `NontemporalBit` to `DiscardedImageOperandBits` and
+extended it from just `Nontemporal` to `Nontemporal | SignExtend |
+ZeroExtend`: these bits carry no actionable information for this
+converter, since the equivalent narrow/wide conversion is driven by the
+resource's real `VkFormat` elsewhere (the CPU executor's own image
+fixture), exactly mirroring the existing `Nontemporal` precedent.
+
+**Testing.** Two new FileCheck cases in `spirv-to-llvm-image-access.mlir`
+(`read_write_zero_sign_extend`, `sample_zero_extend`), following the
+existing `read_write_nontemporal` test's own pattern; both need
+`--mlir-very-unsafe-disable-verifier-on-parsing` added to the file's
+`RUN` line, since upstream `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s
+`verifyImageOperands` unconditionally asserts on `SignExtend`/
+`ZeroExtend` (an "unimplemented validation rules" `TODO`, not a real
+structural problem -- the same upstream gap `spirv-import-skip-verify.
+test` already documents for a different operand set), and MLIR's own
+textual parser verifies each op as it parses it; this does not weaken
+the test's own oracle, since every case is still checked by its `CHECK`
+lines against the pass's actual output, and the pass itself still runs
+its usual legality checks. Confirmed both new cases fail with the exact
+real diagnostic before the fix and pass after it (`git stash` round
+trip). `ninja check-feme` (`build2`, ccache + assertions):
+
+```
+Total Discovered Tests: 2931
+  Unsupported:   59 (2.01%)
+  Passed     : 2872 (97.99%)
+  Failed     :    0 (0.00%)
+```
+
+Unchanged from the pre-fix baseline (this row's own 2 new tests replace
+2 that would otherwise have been absent, net count identical), 0
+regressions.
+
+**`deqp-vk` re-run** (same five-bucket, 329-case list H70's own triage
+used): `builtin`/`misc`/`properties`/`smoke` totals are all byte-identical
+to the pre-fix baseline; `synchronization` moves from 36 Pass/45 Fail to
+50 Pass/31 Fail. The exact `spirv.Image{Write,Read,SampleExplicitLod}`
+legalization diagnostic is gone from the log entirely (21 occurrences ->
+0). Cross-referencing the original 21 case names against post-fix status:
+
+| Count | Outcome |
+|---|---|
+| 14 | Now fully `Pass` |
+| 3 | Now fail `vkQueueSubmit: fragment input location 0 has no matching vertex stage output` (`storage_image`, `mesh_to_frag`/`mesh_to_transfer`) |
+| 4 | Now fail `vkCreateGraphicsPipelines: unsupported raised operation: '...spirv.Image...' is a register-bound resource handle...` (`sampled_image`, `transfer_to_mesh`/`transfer_to_task`) |
+
+14 + 3 + 4 = 21, fully accounted for: the legalization bug itself is
+completely closed for every targeted case, and the 7 that do not yet
+pass progress further into the pipeline and hit two further, previously
+completely masked, distinct gaps instead -- filed as new rows H83/H84
+below (not this row's own remaining scope). The remaining 24
+`synchronization` failures (31 total minus these 7) are unrelated,
+already-tracked issues: 19 `"rasterizer discard is not implemented"`
+(H74), plus 5 further `"fragment input location 0 has no matching
+vertex stage output"` cases on `storage_buffer` (not `storage_image`)
+that already failed this way before this fix and are unaffected by it
+(part of H83's own 8-case footprint, just not newly unmasked by this
+row).
+
+**A broader re-run** of the full `dEQP-VK.mesh_shader.ext.*` group
+(26,921 cases): **276 Pass/163 Fail/26,482 NotSupported** -- up exactly
+14 `Pass` and down exactly 14 `Fail` from H70's own closing baseline
+(262/177/26,482), `NotSupported` unchanged. This matches the per-case
+cross-reference above exactly: 14 cases newly pass, and the other 7
+that used to fail this row's own way still fail (just a different way
+now), for a net movement of 14, not 21.
+
+`check-hlsl-feme-vk` (`build2`; the local `offload-test-suite` checkout's
+own `feme` branch was one commit behind `beanz/feme` again, same
+recurring discovery H31/H70's own rows already made -- fast-forwarded and
+`build2` reconfigured before building): 276 Passed/101 Failed/26
+Expectedly Failed/1 Unexpectedly Passed/260 Unsupported (664 total) --
+identical to H70's own recorded baseline, confirming zero regression
+outside the mesh-shader path.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure SPIR-V-to-LLVM conversion-correctness fix,
+touching no feature bit or extension advertisement.
+
+**Roadmap H71 is closed.** Its own 21-case legalization gap is fully
+fixed; the 7 cases it unmasked are new, unrelated gaps filed as H83
+(`storage_buffer`/`storage_image` fragment-input-location mismatch, 8
+cases total, only 3 of them newly unmasked by this row) and H84
+(`sampled_image` "raised" resource-handle-normalization gap, 4 cases, all
+newly unmasked by this row).
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.frag_to_mesh.storage_image.memory_barrier.shader_write_shader_read'
+```
