@@ -77540,3 +77540,30 @@ whoever owns that branch whether it can just track `beanz/feme`
 directly instead of being a separate local ref that drifts.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H72 session: barrier-free-loop region-splitting fixed in two rounds, plus a real hang bug found and fixed along the way
+
+**Result: H72 closed. Region-splitting no longer crashes/asserts/hangs on this shape. The 20 CTS cases still fail (now on pixel comparison, not a compile-time error) -- filed as new H85, not blocking this session.**
+
+## What's done, in order
+
+1. Reproduced the 20-case bucket exactly (`misc.group_memory_barrier_in_*`/`misc.memory_barrier_shared_in_*`), matching H70's own count.
+2. Reduced to a 20-line hand-written IR repro (self-loop spin-wait after a barrier) that hit the same diagnostic.
+3. First fix (`matchBarrierFreeLoop` in `EntryWrapper.cpp`) -- fixed the hand-written repro, but a real CTS re-run showed **zero movement** (all 36 `misc.*` fails unchanged). The real shape was bigger than my repro: `SIMDizePass`'s structurizer treats this loop as divergent (per-invocation exit condition) and produces a masked "any-lane-active" loop scheme, not a plain self-loop.
+4. Added a temporary env-var IR dump to `Pipeline.cpp` to capture the real pre-wrap-entry IR from one actual failing case. Confirmed the real shape, rewrote the fix around it (generalized `isLinearChain`/`walkBarrierFreeArm`), verified directly against the captured dump, removed the temporary dump hook before committing anything.
+5. `check-feme`: 2934/2875/59/0 -- baseline plus 3 new tests, 0 regressions.
+6. Real CTS re-run with the region-split fix alone: **still hung** -- `deqp-vk` never returned on the target case (confirmed via `timeout 20`, exit 124). New bug, not the one I was fixing: `widenMaskAny` (`SIMDize.cpp`) never masks the widened "still looping" value with the wave's own `Env.EntryMask`, so a padding lane (last, partial wave of a workgroup smaller than the wave width) never stops looping and the whole-wave "any active" reduction never goes false.
+7. Fixed `widenMaskAny` to AND with `Env.EntryMask` before reducing -- one line, matches the pattern every other masked construct in that file already follows.
+8. Re-ran the target case: exit 1, real `Fail` from pixel comparison, no more hang. Ran the full `misc.*` bucket (35/36/43, same 36-Fail total as before -- Fail is Fail whether by crash, hang, or pixel mismatch) and the full `mesh_shader.ext.*` sweep (276/163/26,482, byte-identical to H71's own closing baseline).
+9. `check-hlsl-feme-vk`: `offload-test-suite`'s `feme` branch was actually up to date this time (first time in 4 sessions) -- 276/101/26/1/260, byte-identical baseline.
+10. Roadmap: struck through H72 with the full two-round story; added H85 for the residual pixel-mismatch gap. `VulkanCTSReport.md` updated with the same story plus exact numbers. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` untouched -- confirmed no feature/extension bit is affected by a pure compiler-correctness fix.
+
+## The one thing I chose not to do
+
+I started building a 4th lit test that mirrors the real structurizer-produced masked-loop shape exactly (using the captured dump as source material), to get direct regression coverage for the actual bug rather than just the simplified hand-written approximations. Abandoned it: the real dump carries `!feme.signature` metadata and a much larger set of synthetic blocks that made a faithful trim fragile and low-value relative to the time it was costing. The 3 simpler lit tests plus the real CTS re-run (which now directly, repeatably exercises this exact shape) are enough regression coverage. Judgment call, not an oversight -- flagging it here in case a future session disagrees and wants to finish it.
+
+## Bug-hunting lesson worth keeping
+
+Twice in this one milestone, my first fix passed every test I had and then failed against the real thing for a totally different reason each time (assert on an adversarial case; a real CTS re-run showing zero movement). Both times the fix was to go get *real* captured IR from the actual failing case rather than trust a hand-written approximation further. Cheap temporary debug hooks (the env-var IR dump) that get deleted before commit are worth reaching for early, not as a last resort.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
