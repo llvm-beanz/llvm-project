@@ -1033,9 +1033,12 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   if (!Info)
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs rasterization state");
-  if (Info->rasterizerDiscardEnable)
-    return createStringError(inconvertibleErrorCode(),
-                             "rasterizer discard is not implemented");
+  // (roadmap H35/H74) `rasterizerDiscardEnable` needs no feature bit (core
+  // 1.0 functionality); `Executor.cpp`'s shared `RasterizePrimitives` entry
+  // point consults `RasterState::DiscardEnable` to skip rasterization and
+  // everything downstream of it while still running every pre-
+  // rasterization stage in full -- see that field's own comment.
+  Out.Raster.DiscardEnable = Info->rasterizerDiscardEnable != VK_FALSE;
   // (roadmap H7d) `depthClamp`: a pipeline may declare `depthClampEnable`
   // regardless of whether this ICD's own `depthClamp` feature bit is
   // `VK_TRUE` (see PhysicalDeviceInfo.cpp) -- consistent with this

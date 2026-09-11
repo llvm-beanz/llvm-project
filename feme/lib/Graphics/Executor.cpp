@@ -2277,6 +2277,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (!VSPosition)
       return Error::success();
 
+    // (roadmap H35/H74) `rasterizerDiscardEnable`: every pre-rasterization
+    // stage chain (vertex, tessellation, geometry, mesh/task) has already
+    // run in full by the time any call reaches this shared entry point --
+    // including `VK_EXT_transform_feedback` capture, which happens at each
+    // chain's own call site before this lambda ever runs (see
+    // `captureTransformFeedback`'s callers) -- so a transform-feedback-only
+    // capture pipeline still gets its real captured output. Only
+    // rasterization itself and everything downstream of it (clipping, the
+    // viewport transform, fragment invocation, and attachment writes) is
+    // skipped, per `RasterState::DiscardEnable`'s own comment.
+    if (Pipeline.getRasterState().DiscardEnable)
+      return Error::success();
+
     auto vertexAt = [&](uint32_t Flat) {
       RasterVertex V;
       for (unsigned C = 0; C != 4; ++C)

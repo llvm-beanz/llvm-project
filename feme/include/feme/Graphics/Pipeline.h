@@ -462,6 +462,20 @@ struct RasterState {
   /// others), left to roadmap H21e alongside real multi-stream
   /// transform-feedback capture.
   uint32_t RasterizationStream = 0;
+  /// (roadmap H35/H74) Whether rasterization -- and everything downstream
+  /// of it (clipping, the viewport transform, fragment invocation, and
+  /// attachment writes) -- is skipped entirely
+  /// (`VkPipelineRasterizationStateCreateInfo::rasterizerDiscardEnable`).
+  /// Every pre-rasterization stage (vertex/tessellation/geometry/mesh
+  /// processing, and `VK_EXT_transform_feedback` capture) still runs in
+  /// full: a pipeline that only exists to capture transform-feedback data
+  /// is this feature's own primary real-world use, per the Vulkan spec.
+  /// Only the static form is implemented; its `VK_EXT_extended_dynamic_
+  /// state2` dynamic counterpart (`VK_DYNAMIC_STATE_RASTERIZER_DISCARD_
+  /// ENABLE`) is not yet (`GraphicsPipeline.cpp`'s `mapDynamicState` has
+  /// no case for it). See `Executor.cpp`'s shared `RasterizePrimitives`
+  /// entry point for where this is actually consulted.
+  bool DiscardEnable = false;
 };
 
 /// One attachment's format/extent identity, part of the pipeline's cache key
