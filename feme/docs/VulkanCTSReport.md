@@ -36409,3 +36409,187 @@ ICD_JSON=... OUTDIR=/tmp/cts xargs -P 6 -n 1 -a groups.txt ./run_cts.sh
 The `vulkan` symlink is not optional -- without it whole groups abort. The
 `|| true` matters too: without it a crashing group takes the whole `xargs`
 down with it.
+
+## Roadmap H31: measured impact (`Linearize.cpp` chained-uniform-diamond mask tracking + `Executor.cpp` PerPrimitive mesh-varying merge)
+
+**Symptom.** Re-running H6p/H6q/H6s/H6t/H6u's own `dEQP-VK.mesh_shader.ext.api.draw.*`
+group (540 cases) after those fixes landed found the `no_task_shader`/
+`no_task_shader_secondary_cmd` direct-draw variants with `draw_count > 0`
+(44 of the group's real cases) reached rendering with no crash and no
+pipeline-creation failure, but failed an image comparison -- `draw_count_0`
+(nothing drawn at all) already passed, and the `with_task_shader` variants
+separately failed earlier, at H6q's own `vkCreateGraphicsPipelines` gap.
+This was a genuinely new, distinct failure shape from anything the H6
+chain had root-caused so far.
+
+**Root cause #1: a chained-uniform-diamond constant-mask-tracking loss in
+`Linearize.cpp`.** Reducing the failure showed a push-constant field
+(`width`) read as `poison` rather than its real bound value. Tracing this
+down through `SIMDize.cpp`'s masked-load widening led to
+`Linearize.cpp`'s `applyStageMasks`: it decides whether a load/store/
+resource/image/ballot call needs converting to its masked-CPU-intrinsic
+form via a plain `isa<Constant>(Masks.Live)`/`isa<Constant>(Masks.
+SideEffect)` check. `DiamondFlattener::flatten` always creates a real
+`live.merge`/`sideeffect.merge` `phi` at a **uniform** diamond's own
+reconvergence point, even when neither arm actually narrows the mask (the
+overwhelmingly common case, since only `feme.stage.discard`/`.demote`
+narrow it) -- deliberately, because an *outer* diamond nested around this
+one may need to thread that exact `phi` value further up to its own
+reconvergence block **by identity**, an invariant the existing
+`nested-uniform-loop-in-divergent-diamond.ll` lit test and its paired
+`LinearizeTest.PreservesRedundantFlowBlockWhoseMaskPhiEscapesToOuterDiamond`
+unit test both encode and enforce.
+
+A `phi [X, BB1], [X, BB2]` is not itself a `Constant`, even though it is
+trivially always `X` -- so `isa<Constant>(Mask)` stopped recognizing an
+all-active mask as such the moment it passed through even one such
+redundant merge, and after two or more sequential uniform diamonds
+(exactly this CTS shader's own shape, once its DXC-compiled control flow
+is linearized), the mask feeding a later, still-genuinely-uniform
+push-constant load was a phi of a phi, permanently losing the
+classification. `applyStageMasks` wrongly converted that load into a
+`feme.cpu.masked.load` call, which `FunctionWidener` then unconditionally
+widened, producing `poison` for a value every lane actually shares.
+
+A first fix attempt tried changing `DiamondFlattener::flatten` itself to
+skip creating the phi when both arms' masks are trivially the same value
+-- this was **reverted** after `ninja check-feme` showed it broke exactly
+the invariant `nested-uniform-loop-in-divergent-diamond.ll` documents (2
+real regressions: that lit test and its paired unit test). The real fix
+instead leaves `DiamondFlattener::flatten`'s own phi-creation behavior
+completely untouched, and teaches the *consumption* side
+(`applyStageMasks`) to look through chains of trivially-redundant phis
+(every incoming value, ignoring self-referential back-edges, is the
+identical `Value`) down to the real shared value, via two new helpers,
+`lookThroughTrivialPhi`/`isKnownConstantMask`, dropped in as direct
+replacements for the six `isa<Constant>(Masks.Live/.SideEffect)` call
+sites.
+
+**Root cause #2: a `PerPrimitive` mesh-varying merge gap in `Executor.cpp`.**
+Fixing root cause #1 cleared the `poison` push-constant read, but the CTS
+case still failed: every drawn row rendered as fully transparent
+`(0,0,0,0)` instead of its expected gradient color. Debug instrumentation
+in `RasterizePrimitives` confirmed the triangle geometry, winding,
+viewport, and cull test were all correct -- the bug was further
+downstream. The CTS's own mesh shader source
+(`vktMeshShaderApiTestsEXT.cpp`) writes its color through a
+`perprimitiveEXT out vec4 primitiveColor[]` -- this group's sole
+mesh-shader color-output path.
+
+`Executor.cpp`'s mesh path builds two separate per-workgroup storages
+(`VertexOut`/`PrimitiveOut`, roadmap H6c-a-a-ii), each flattened into a
+`Meshlet`. Multiple meshlets are then merged into one flat `Merged`
+`StageStorage` via `unflattenMeshRow` -- but that function only ever
+copied `PerVertex`-frequency Output elements into `Merged`. The shared,
+stage-agnostic fragment-input varying-linking code links a fragment input
+to a `RasterSig`/`MeshSig` Output element purely by `Location`, with no
+`SignatureFrequency` check, and always reads the linked varying back out
+of the per-vertex `Merged` storage. A `PerPrimitive`-frequency element's
+own computed value -- present in each `Meshlet::getPrimitives()` row --
+was therefore never written anywhere the fragment stage could read it
+back from, always reading zero-initialized storage: fully transparent
+black, exactly the observed symptom.
+
+Rather than teaching the heavily-reused varying-linking/interpolation
+code (shared identically by vertex/tessellation/geometry/mesh
+pre-rasterization stages) a second, mesh-only "per-primitive storage"
+concept, the fix instead makes the existing per-vertex storage
+semantically correct for `PerPrimitive` data too: a new
+`unflattenMeshPrimitiveRow` lambda writes a primitive's own value
+redundantly into `Merged` at every one of that primitive's own vertex
+slots (found via `Meshlet::getPrimitiveIndices`). Since a `PerPrimitive`
+value is by definition uniform across all vertices of its own primitive,
+ordinary per-vertex interpolation (flat, or a linear/perspective blend of
+three identical corners, still that same identical value) then reads it
+back correctly, with zero further changes to the interpolation code
+itself.
+
+**Testing.** `check-feme` (`build2`, ccache + assertions):
+
+```
+$ ninja check-feme
+...
+Total Discovered Tests: 2921
+  Unsupported:   59 (2.02%)
+  Passed     : 2862 (97.98%)
+  Failed     :    0 (0.00%)
+```
+
+A new lit test, `Linearize/chained-uniform-diamond-mask-load-unmasked.ll`
+(two sequential uniform diamonds, neither narrowing masks, followed by a
+plain load/store, inside a function that also has an unrelated divergent
+branch elsewhere so the whole-function all-uniform bailout does not skip
+the walk) -- confirmed failing against the pre-fix pipeline (the load/
+store were wrongly converted to `feme.cpu.masked.load`/`.store` calls)
+and passing with the fix, without touching either pre-existing regression
+test the fix is designed not to break.
+
+A new `ExecutorTest.PerPrimitiveMeshColorReachesFragmentInputInsteadOf
+ReadingAsZero` (a real triangle-topology mesh workgroup emitting one
+primitive's own `PerPrimitive` color, consumed by an ordinary fragment
+shader reading it by location) -- confirmed failing (every covered pixel
+read back transparent black) against the pre-fix `Executor.cpp` and
+passing with the fix.
+
+**`deqp-vk` re-run** (both fixes; `VK_ICD_FILENAMES` explicitly pointed at
+`build2/tools/feme/tools/feme-vulkan/feme_icd.json`, confirmed via
+`deviceName` reporting `"FeMe CPU Vulkan Device"`), the full 540-case
+`dEQP-VK.mesh_shader.ext.api.draw.*` group:
+
+```
+Test run totals:
+  Passed:        58/540 (10.7%)
+  Failed:        58/540 (10.7%)
+  Not supported: 424/540 (78.5%)
+```
+
+Up from 14/102/424 before this row. Every one of the 58 remaining `Fail`s
+was confirmed, by parsing the embedded `.qpa` result text for each case,
+to be exclusively the unrelated, pre-existing `with_task_shader`
+`'llvm.mlir.constant' op attribute and type have different integer
+types: 'si32' vs. 'i32'` pipeline-compile bug (not H31's own scope) --
+**zero** remaining `no_task_shader`/`no_task_shader_secondary_cmd`
+rendering failures.
+
+**A broader re-run** of the full `dEQP-VK.mesh_shader.ext.*` group
+(26,921 cases) found no crash and no new regression from either fix (both
+were reverted and re-applied one at a time against this broader
+caselist's own failure buckets to confirm each was pre-existing, not
+newly introduced): 146 `Pass`/293 `Fail`/26,482 `NotSupported`. Of the
+293 `Fail`s, 58 are the already-explained `api.draw.with_task_shader`
+bucket above; the remaining 235 span `builtin` (7), `in_out` (80),
+`misc` (36), `properties` (14), `smoke` (17), and `synchronization` (81)
+-- every one of these confirmed, by reverting both H31 fixes and
+re-running the same caselist, to reproduce **identically** against the
+pre-fix build, i.e. pre-existing debt this broader sweep happens to have
+measured, not something H31's own fixes introduced. These are now tracked
+as their own new milestones, H69 (`in_out`'s own rendering mismatch) and
+H70 (the remaining `builtin`/`misc`/`properties`/`smoke`/`synchronization`
+pipeline-creation/submit failures), rather than silently absorbed into
+this row.
+
+`check-hlsl-feme-vk` (`build2`, dependencies correctly ordered so
+`OffloadTest`'s own compiled test binaries build before the suite runs):
+276 Passed/101 Failed/26 Expectedly Failed/1 Unexpectedly Passed/260
+Unsupported (664 total) -- confirmed, by reverting both H31 fixes and
+re-running, that this baseline is unchanged by this row's own work (the
+one `Feature/PushConstant/array_of_matrices.test` now unexpectedly
+passing is an existing DXC-matrix-layout XFAIL unrelated to either fix:
+a scalar compute shader with no chained uniform diamonds and no mesh
+stage at all).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: both fixes are pure compiler-internal/CPU-executor
+correctness fixes, touching no feature bit or extension advertisement.
+
+**Roadmap H31 closes.** Milestone H30 depended solely on H31; it remains
+open, now depending on the two newly-found H69/H70 milestones above.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_2.no_indirect_args.no_count_limit.no_count_offset.no_task_shader'
+```
