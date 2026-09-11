@@ -71,6 +71,7 @@
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
 using namespace llvm;
@@ -859,6 +860,17 @@ private:
     Value *Cond = nullptr;
     BasicBlock *StayInLoop = nullptr;
     bool ExitOnTrue = false;
+    // The block whose own terminator (or, for a relay match, whose own
+    // "into the relay chain" successor -- see `matchExitCheckWithRelay`)
+    // directly reaches `ExitBlock`: `BB` itself for a direct match, or
+    // the relay chain's own first hop for a relay match. Roadmap H94a:
+    // this is the block whose own incoming contribution to any of
+    // `ExitBlock`'s *other* phis (besides the live/side-effect masks,
+    // which `addLatchIncoming` handles separately) is the semantically
+    // correct value to also carry along the new `Latch`->`ExitBlock`
+    // edge this milestone's "never really exit here, defer to Latch"
+    // strategy installs -- see `linearizeCycle`'s own use of it.
+    BasicBlock *RelayBlock = nullptr;
   };
 
   /// Recognizes \p BB's terminator as an `ExitCheck` targeting \p ExitBlock,
@@ -989,12 +1001,45 @@ std::optional<SmallVector<BasicBlock *, 4>> straightChain(BasicBlock *From,
 /// `return` inside a loop body reconverging with the loop's normal fall-
 /// through, `loop-early-return.ll`'s shape), since those blocks' own
 /// selecting `phi` is never *entirely* constant-valued the way this one is.
+///
+/// Roadmap H94a: `StructurizeCFG`'s own `loop.exit.guard` companion block
+/// (see this file's own H94a comment on `collapseTrivialRelayBlocksInCycle`
+/// for the full real-world shape this was reduced from) wraps an otherwise
+/// exactly-matching condition `phi` in one logical negation
+/// (`%Guard.inv = xor i1 %Cond, true`) before branching on it -- looks
+/// through that single optional wrapper here (returning \p Negated) so
+/// both this function and `peelConstantFlowPredecessors` below recognize
+/// the shape either way; every incoming-value "which successor does this
+/// select" test the two callers perform needs to flip accordingly whenever
+/// \p Negated comes back `true`.
+static PHINode *getFlowConditionPhi(CondBrInst *Br, BasicBlock *BB,
+                                    bool &Negated, Instruction *&CondUser) {
+  Value *Cond = Br->getCondition();
+  CondUser = Br;
+  Negated = false;
+  if (auto *Bin = dyn_cast<Instruction>(Cond);
+      Bin && Bin->getOpcode() == Instruction::Xor && Bin->getParent() == BB) {
+    auto *K = dyn_cast<ConstantInt>(Bin->getOperand(1));
+    if (K && K->isOne()) {
+      Cond = Bin->getOperand(0);
+      CondUser = Bin;
+      Negated = true;
+    }
+  }
+  auto *CondPN = dyn_cast<PHINode>(Cond);
+  if (!CondPN || CondPN->getParent() != BB)
+    return nullptr;
+  return CondPN;
+}
+
 bool foldRedundantFlowBlock(BasicBlock *BB) {
   auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
   if (!Br)
     return false;
-  auto *CondPN = dyn_cast<PHINode>(Br->getCondition());
-  if (!CondPN || CondPN->getParent() != BB)
+  bool Negated;
+  Instruction *CondUser;
+  PHINode *CondPN = getFlowConditionPhi(Br, BB, Negated, CondUser);
+  if (!CondPN)
     return false;
   if (CondPN->getNumIncomingValues() != 2)
     return false;
@@ -1006,7 +1051,8 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
     if (!K)
       return false; // Not every incoming value is a compile-time constant.
     Preds[I] = CondPN->getIncomingBlock(I);
-    Targets[I] = K->isOne() ? Br->getSuccessor(0) : Br->getSuccessor(1);
+    bool ExitOnSucc0 = Negated ? !K->isOne() : K->isOne();
+    Targets[I] = ExitOnSucc0 ? Br->getSuccessor(0) : Br->getSuccessor(1);
   }
   if (Preds[0] == Preds[1] || Targets[0] == Targets[1])
     return false; // Not a real two-way split once bypassed.
@@ -1067,8 +1113,9 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
   for (PHINode &PN : BB->phis()) {
     for (Use &U : PN.uses()) {
       auto *UserInst = cast<Instruction>(U.getUser());
-      if (&PN == CondPN && UserInst == Br)
-        continue; // `Br` is erased along with `BB` itself; not a leak.
+      if (&PN == CondPN && UserInst == CondUser)
+        continue; // `CondUser` (`Br`, or the `xor` it wraps) is erased
+                   // along with `BB` itself; not a leak.
       auto *MergePN = dyn_cast<PHINode>(UserInst);
       bool Forwarded = false;
       for (unsigned I = 0; I < 2 && !Forwarded; ++I)
@@ -1165,6 +1212,26 @@ bool foldRedundantFlowBlocksInCycle(CycleInfo &CI, CycleRef C,
 /// rather than reaching a merge block of its own the way
 /// `foldRedundantFlowBlock`'s narrower, fully-constant shape expects.
 ///
+/// Roadmap H94a: returns whether \p BB's own name matches one of the
+/// synthetic relay-block naming conventions `StructurizeCFG`
+/// (`"Flow"`, optionally with a disambiguating numeric suffix -- see
+/// `FlowBlockName` in `llvm/lib/Transforms/Scalar/StructurizeCFG.cpp`) or
+/// `llvm::ControlFlowUtils`' own exit-unification helper (a `".guard"`
+/// suffix, similarly possibly followed by a numeric one) actually use for
+/// the pure control-flow bookkeeping blocks they insert -- as opposed to
+/// any real, user-authored block from the original shader source, which
+/// this milestone's own scoping (`RelayTargets`/`RelayCandidates` below)
+/// must never mistake for one of these. A naming-based check is
+/// admittedly narrower than a fully structural one, but this file already
+/// relies on these same literal conventions elsewhere (see
+/// `matchExitCheckWithRelay`'s and `foldRedundantFlowBlock`'s own
+/// comments), and scoping this milestone's own new, more powerful
+/// collapse/merge capability to only what those upstream passes
+/// themselves produced is the deliberately conservative choice here.
+bool isSyntheticRelayBlockName(StringRef Name) {
+  return Name.starts_with("Flow") || Name.contains(".guard");
+}
+
 /// Peels away only \p BB's constant-valued predecessor(s) whose own
 /// terminator is a plain, single-successor unconditional branch into \p BB
 /// (never one with its own side effects to reorder), redirecting each
@@ -1186,12 +1253,15 @@ bool foldRedundantFlowBlocksInCycle(CycleInfo &CI, CycleRef C,
 /// divergent decision for a redundant one, only bypass a compile-time-
 /// provable one.
 bool peelConstantFlowPredecessors(BasicBlock *BB,
-                                  SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+                                  SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
+                                  SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr) {
   auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
   if (!Br)
     return false;
-  auto *CondPN = dyn_cast<PHINode>(Br->getCondition());
-  if (!CondPN || CondPN->getParent() != BB)
+  bool Negated;
+  Instruction *CondUser;
+  PHINode *CondPN = getFlowConditionPhi(Br, BB, Negated, CondUser);
+  if (!CondPN)
     return false;
 
   // Collect every incoming index whose value is a literal constant --
@@ -1215,7 +1285,8 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
       continue; // Not a plain, single-successor relay into `BB`.
 
     auto *K = cast<ConstantInt>(CondPN->getIncomingValue(I));
-    BasicBlock *Target = K->isOne() ? Br->getSuccessor(0) : Br->getSuccessor(1);
+    bool ExitOnSucc0 = Negated ? !K->isOne() : K->isOne();
+    BasicBlock *Target = ExitOnSucc0 ? Br->getSuccessor(0) : Br->getSuccessor(1);
 
     // Capture every one of `BB`'s own phi values along this predecessor's
     // edge before retargeting it, so `SSAUpdater` still has both the
@@ -1245,6 +1316,23 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
       Origin = Unique;
     }
     PeeledFrom.insert(Origin);
+
+    // Roadmap H94a: `BB` itself (whose predecessor count this peel just
+    // shrank) can be left with a single remaining real predecessor --
+    // exactly the shape `collapseTriviallyRedundantPhisInCycle`/
+    // `mergeTrivialRelayBlocksInCycle` below look for. Recording it here
+    // (rather than considering *every* block in the cycle a candidate)
+    // keeps that collapse narrowly scoped to blocks a peel just
+    // structurally simplified -- but only when `BB` is itself one of
+    // `StructurizeCFG`/`ControlFlowUtils`' own synthetic relay blocks
+    // (`isSyntheticRelayBlockName`): a real, user-authored check block
+    // (like a mesh shader's own genuinely divergent comparison) can
+    // *also* end up with a single remaining predecessor this same way
+    // (roadmap H89a/H89b's fused-uniform-check shape) without ever being
+    // a redundant relay itself, and must never become eligible for this
+    // milestone's later collapse/merge.
+    if (RelayTargets && isSyntheticRelayBlockName(BB->getName()))
+      RelayTargets->insert(BB);
 
     PredBr->setSuccessor(0, Target);
     Changed = true;
@@ -1300,7 +1388,8 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
 /// fully eliminated by that one instead) and safely order-independent.
 bool peelConstantFlowPredecessorsInCycle(CycleInfo &CI, CycleRef C,
                                          BasicBlock *Header, BasicBlock *Latch,
-                                         SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+                                         SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
+                                         SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr) {
   bool Changed = false;
   bool PeeledThisPass = true;
   while (PeeledThisPass) {
@@ -1308,9 +1397,147 @@ bool peelConstantFlowPredecessorsInCycle(CycleInfo &CI, CycleRef C,
     for (BasicBlock &BB : *Header->getParent()) {
       if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
         continue;
-      if (peelConstantFlowPredecessors(&BB, PeeledFrom)) {
+      if (peelConstantFlowPredecessors(&BB, PeeledFrom, RelayTargets)) {
         Changed = PeeledThisPass = true;
         break; // A predecessor edge changed; restart the scan to be safe.
+      }
+    }
+  }
+  return Changed;
+}
+
+/// Roadmap H94a: once `peelConstantFlowPredecessorsInCycle` has bypassed a
+/// block's only *constant*-valued predecessor edge, `StructurizeCFG`'s own
+/// "Flow" reconvergence scheme can leave that block with exactly ONE
+/// predecessor remaining -- at which point every one of its own `phi`s is
+/// trivially just that predecessor's value (see `lookThroughTrivialPhi`'s
+/// own comment for why a single-incoming-value, or otherwise identical-
+/// valued-on-every-edge, `phi` is always safe to replace outright: its
+/// resolved value necessarily already dominates the `phi`'s own block).
+/// Reduced from a real `dEQP-VK.mesh_shader.ext.properties.
+/// mesh_shared_memory_size` verification loop's own `Flow` block, left
+/// with a single predecessor (`Flow24`) and four now-trivial `phi`s once
+/// its own other, constant-valued predecessor is peeled away -- none of
+/// which `foldRedundantFlowBlock`/`peelConstantFlowPredecessors` above can
+/// yet see through, since neither looks past a `phi`'s own immediate
+/// incoming values.
+///
+/// Collapses any such trivially-redundant `phi` in the cycle by replacing
+/// every use with its resolved value and erasing it. Always sound (see
+/// above); deliberately narrower than a general `SimplifyCFG`-style pass,
+/// touching only `phi`s `lookThroughTrivialPhi` itself already proves
+/// redundant -- and, further, only within \p RelayCandidates (see
+/// `peelConstantFlowPredecessors`'s own `RelayTargets` comment): a real,
+/// user-authored block's own exit-check `phi` can *also* become
+/// single-incoming after an unrelated peel (e.g. a plain uniform
+/// trip-count check fused into it, roadmap H89a/H89b), but collapsing
+/// *that* one away would erase the very check this milestone's later
+/// classification (`OtherCondBrBlocks`) and its own masking logic depend
+/// on finding intact -- restricting to blocks a peel's own redirected
+/// edge just produced keeps this pass from ever touching one.
+///
+/// Contrast this with the earlier, unsound same-milestone attempt (see the
+/// "H94 session" note in agent_thoughts.md) that tried to fold away a
+/// `phi` with just one *non-poison* incoming value among several
+/// *differently*-sourced ones: that shape's real operand does not
+/// generally dominate the `phi`'s own block, since other predecessors may
+/// reach it without passing through the real operand's own defining block.
+/// `lookThroughTrivialPhi` never matches that shape at all -- it requires
+/// every non-self incoming value (there may be only one) to be the
+/// identical `Value`, which by ordinary SSA dominance rules already
+/// guarantees that value dominates every one of the `phi`'s own
+/// predecessors, hence the `phi` itself.
+bool collapseTriviallyRedundantPhisInCycle(
+    CycleInfo &CI, CycleRef C, BasicBlock *Header, BasicBlock *Latch,
+    const SmallPtrSetImpl<BasicBlock *> &RelayCandidates) {
+  bool Changed = false;
+  bool CollapsedThisPass = true;
+  while (CollapsedThisPass) {
+    CollapsedThisPass = false;
+    for (BasicBlock &BB : *Header->getParent()) {
+      if (!CI.contains(C, &BB) || !RelayCandidates.contains(&BB))
+        continue;
+      for (PHINode &PN : BB.phis()) {
+        Value *Resolved = lookThroughTrivialPhi(&PN);
+        if (Resolved == &PN)
+          continue; // Not trivially redundant.
+        PN.replaceAllUsesWith(Resolved);
+        PN.eraseFromParent();
+        Changed = CollapsedThisPass = true;
+        break; // `BB.phis()` iterator invalidated; restart this block.
+      }
+      if (CollapsedThisPass)
+        break; // Restart the whole scan too: `Resolved` may live
+               // elsewhere in the cycle and become collapsible in turn.
+    }
+  }
+  return Changed;
+}
+
+/// Returns whether every instruction in \p BB is either a `PHINode` or its
+/// own terminator -- i.e. \p BB carries no real computation of its own at
+/// all, only control-flow bookkeeping. Roadmap H94a:
+/// `mergeTrivialRelayBlocksInCycle` below only ever merges a relay block
+/// into a predecessor matching this shape, so it can never absorb a real,
+/// semantically meaningful block (like a genuine divergent check's own
+/// block computing an actual comparison) into a relay chain, even when
+/// that real block happens to also end up with a single predecessor and
+/// no `phi`s of its own.
+bool isPureRelayBlock(const BasicBlock *BB) {
+  for (const Instruction &I : *BB)
+    if (!isa<PHINode>(I) && &I != BB->getTerminator())
+      return false;
+  return true;
+}
+
+/// Roadmap H94a: `collapseTriviallyRedundantPhisInCycle` above can leave a
+/// block with no `phi`s of its own at all, and exactly one predecessor
+/// whose own sole successor is that same block -- a pure, now-empty-of-
+/// decisions relay `StructurizeCFG` built, structurally identical to
+/// `llvm::MergeBlockIntoPredecessor`'s own target shape. Merging it into
+/// that predecessor moves its own `CondBrInst` terminator (whatever
+/// condition it now directly uses, unblocked from the relay's own
+/// `phi`s) into the predecessor's block instead -- exposing
+/// `foldRedundantFlowBlock`'s already-existing fully-constant-`phi`
+/// pattern one level further back up the relay chain than it could
+/// previously see, without this function itself needing to understand
+/// anything about *why* the relay was redundant.
+///
+/// Deliberately restricted to \p RelayCandidates (see
+/// `collapseTriviallyRedundantPhisInCycle`'s own comment for why: a real
+/// block should never be absorbed into a relay chain, even a phi-less
+/// one), to predecessors additionally proven to be pure relay blocks in
+/// their own right (`isPureRelayBlock`, defense in depth against ever
+/// merging into a real block), never `Header`/`Latch` (which have their
+/// own, separately-handled roles), and to
+/// `llvm::MergeBlockIntoPredecessor`'s own default (single-successor
+/// predecessor) case -- this never needs the two-successors variant here,
+/// since a genuine `StructurizeCFG` relay's own predecessor is, by
+/// construction, itself a redundant single-successor pass-through.
+/// Returns whether anything was merged; \p RelayCandidates gains the
+/// surviving, merged-into predecessor so a longer relay chain can keep
+/// collapsing across further fixed-point iterations.
+bool mergeTrivialRelayBlocksInCycle(
+    CycleInfo &CI, CycleRef C, BasicBlock *Header, BasicBlock *Latch,
+    SmallPtrSetImpl<BasicBlock *> &RelayCandidates) {
+  bool Changed = false;
+  bool MergedThisPass = true;
+  while (MergedThisPass) {
+    MergedThisPass = false;
+    for (BasicBlock &BB : *Header->getParent()) {
+      if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch ||
+          !RelayCandidates.contains(&BB))
+        continue;
+      if (!BB.phis().empty())
+        continue; // Still carries real, unresolved values of its own.
+      BasicBlock *Pred = BB.getUniquePredecessor();
+      if (!Pred || !CI.contains(C, Pred) || Pred == Header || Pred == Latch ||
+          !isPureRelayBlock(Pred))
+        continue;
+      if (MergeBlockIntoPredecessor(&BB)) {
+        RelayCandidates.insert(Pred);
+        Changed = MergedThisPass = true;
+        break; // `BB` itself is erased; restart the scan to be safe.
       }
     }
   }
@@ -1331,6 +1558,7 @@ LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
   Result.ExitOnTrue = Br->getSuccessor(0) == ExitBlock;
   Result.StayInLoop =
       Result.ExitOnTrue ? Br->getSuccessor(1) : Br->getSuccessor(0);
+  Result.RelayBlock = &BB;
   return Result;
 }
 
@@ -1355,6 +1583,7 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
     EC.Cond = Br->getCondition();
     EC.ExitOnTrue = (I == 0);
     EC.StayInLoop = Br->getSuccessor(1 - I);
+    EC.RelayBlock = Candidate;
     Result = EC;
   }
   return Result;
@@ -1476,7 +1705,36 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // proof
   // instead wherever it applies.
   SmallPtrSet<BasicBlock *, 2> PeeledFrom;
-  peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom);
+  SmallPtrSet<BasicBlock *, 2> RelayCandidates;
+  peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom,
+                                      &RelayCandidates);
+
+  // Roadmap H94a: peeling above can leave a relay block with a single
+  // remaining predecessor and only trivially-redundant `phi`s of its own
+  // (see `collapseTriviallyRedundantPhisInCycle`'s own comment) --
+  // collapsing those and merging the resulting phi-less relay into its
+  // predecessor (`mergeTrivialRelayBlocksInCycle`) can expose a *further*
+  // fully-constant-`phi` `CondBrInst` one level back, which the two folds
+  // above did not get a chance to see the first time around. Re-running
+  // all four to a fixed point handles a relay chain of any length this
+  // way, one hop at a time, rather than needing its own N-hop-aware
+  // recognizer. `RelayCandidates` (seeded, and grown, by the two peel/
+  // merge steps themselves) keeps the two new steps scoped to blocks a
+  // peel or merge actually produced, never a genuine, semantically
+  // meaningful block this milestone must leave alone.
+  bool CollapsedRelay = true;
+  while (CollapsedRelay) {
+    CollapsedRelay = collapseTriviallyRedundantPhisInCycle(CI, C, Header,
+                                                           Latch,
+                                                           RelayCandidates);
+    CollapsedRelay |= mergeTrivialRelayBlocksInCycle(CI, C, Header, Latch,
+                                                     RelayCandidates);
+    if (CollapsedRelay) {
+      foldRedundantFlowBlocksInCycle(CI, C, Header, Latch);
+      peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom,
+                                          &RelayCandidates);
+    }
+  }
 
   // Roadmap L40: `UniformityInfo` (recomputed fresh below, now that
   // peeling has already happened) still, correctly, reports a "pass-
@@ -1698,6 +1956,23 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       applyStageMasks(*BB, Masks);
     applyStageMasks(*CheckBlock, Masks);
 
+    // Roadmap H94a: capture, for every one of `ExitBlock`'s own phis
+    // (besides the live/side-effect masks -- see `addLatchIncoming`
+    // below), whatever value `CheckExit->RelayBlock` itself contributes,
+    // *before* it is potentially removed as a predecessor just below --
+    // this milestone's own "never really exit here, defer to Latch"
+    // strategy is about to make `Latch` a brand-new predecessor of
+    // `ExitBlock` too (see the `CondBrInst::Create` below), and the
+    // semantically correct value for any such leftover phi to carry
+    // along that new edge is exactly the one this cycle's own real exit
+    // decision already associated with actually reaching `ExitBlock` --
+    // i.e., `RelayBlock`'s own contribution, not some arbitrary or
+    // undefined value.
+    SmallVector<std::pair<PHINode *, Value *>, 4> ExitBlockRelayValues;
+    for (PHINode &PN : ExitBlock->phis())
+      if (int Idx = PN.getBasicBlockIndex(CheckExit->RelayBlock); Idx != -1)
+        ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+
     IRBuilder<> CheckBuilder(CheckExit->Br);
     Value *Staying = CheckExit->ExitOnTrue
                          ? CheckBuilder.CreateNot(CheckExit->Cond)
@@ -1712,12 +1987,27 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // vanished from the CFG entirely (the lane that would have taken it
     // instead continues, masked, toward the latch): repair any of
     // `ExitBlock`'s own phis that still list `CheckBlock` as an incoming
-    // block accordingly. A no-op when the match was instead via a relay
-    // (see `matchExitCheckWithRelay`), since then `CheckBlock` itself was
-    // never really one of `ExitBlock`'s own listed predecessors to begin
-    // with -- the (now merely dead, but still syntactically valid) relay
-    // chain's own last hop was.
-    ExitBlock->removePredecessor(CheckBlock);
+    // block accordingly. Genuinely a no-op when the match was instead via
+    // a relay (see `matchExitCheckWithRelay`), since then `CheckBlock`
+    // itself was never really one of `ExitBlock`'s own listed
+    // predecessors to begin with -- the (now merely dead, but still
+    // syntactically valid) relay chain's own last hop was -- hence the
+    // explicit membership check: `removePredecessor` itself asserts its
+    // argument already is a real predecessor, rather than silently
+    // tolerating one that never was.
+    //
+    // `KeepOneInputPHIs=true` is required here: `ExitBlockRelayValues`
+    // just captured raw `PHINode *` pointers above, and
+    // `removePredecessor`'s *default* behavior (`KeepOneInputPHIs=false`)
+    // is to eagerly RAUW-and-erase any phi that this removal leaves with
+    // only one remaining incoming value -- exactly the shape a phi with
+    // only `CheckBlock` and `CheckExit->RelayBlock` as its two
+    // predecessors is in. Without this, those captured pointers can be
+    // left dangling by the time the restore loop below dereferences them
+    // (a real, reproduced use-after-free crash during this milestone's
+    // own development).
+    if (llvm::is_contained(predecessors(ExitBlock), CheckBlock))
+      ExitBlock->removePredecessor(CheckBlock, /*KeepOneInputPHIs=*/true);
     UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
     CheckExit->Br->eraseFromParent();
 
@@ -1727,6 +2017,16 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
     Value *Continue = closeLatch(Latch, Header, MasksAfterCheck);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
+    // Roadmap H94a: `Latch` just became a brand-new predecessor of
+    // `ExitBlock` (unlike the `HeaderDivergent`/`LatchDivergent` cases
+    // below, where `Latch` already targeted `ExitBlock` directly before
+    // this transform) -- restore the value each of `ExitBlock`'s own
+    // leftover phis captured above for this edge too, so every one of
+    // `ExitBlock`'s phis still lists exactly one entry per real
+    // predecessor.
+    for (auto &[PN, V] : ExitBlockRelayValues)
+      if (PN->getBasicBlockIndex(Latch) == -1)
+        PN->addIncoming(V, Latch);
     addLatchIncoming(Masks, MasksAfterCheck);
     return true;
   }
