@@ -37659,3 +37659,108 @@ cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_vertices_256' --deqp-shadercache=disable
 ```
+
+## Roadmap H89a/H89b: measured impact (both fixes landed together)
+
+H89's own closing session (above) prototyped a fix, found it unsafe to
+land alone, and split the remaining work into H89a (the
+`DiamondFlattener::flatten` poison-operand fix) and H89b (the
+`LoopLinearizer` runtime hang that fix alone would unmask). This
+session landed both, in the order and combination H89's own closing
+session required.
+
+**H89a.** `DiamondFlattener::flatten` now reuses the one real operand
+directly whenever a merge `phi`'s other incoming value is `poison`/
+`undef`, instead of building `select(Cond, RealValue, poison)` -- a
+locally sound simplification (`select(Cond, X, poison)` is always a
+valid refinement of plain `X`), landed exactly as H89's own session
+already validated it would: it alone makes `checkSupportedControlFlow`
+accept all 9 of H89's tracked cases, but does nothing about the
+runtime hang H89b addresses.
+
+**H89b.** Landing H89a alone, as H89's own session already found,
+unmasks a real runtime hang in `LoopLinearizer`'s masked-loop
+transform. This session root-caused it via *empirical* pre-/post-
+`LoopLinearizer` IR dumping (temporary, `getenv`-gated hooks, fully
+reverted before committing) -- not further symbolic/manual tracing,
+per this row's own explicit instruction -- and a per-`phi` debug trace
+through `peelConstantFlowPredecessors`'s `SSAUpdater` loop. The actual
+bug is unrelated to mask-value double-counting or `closeLatch`'s own
+backedge construction (the two hypotheses H89b's own roadmap text
+speculated about): it is a genuine `SSAUpdater` API misuse.
+`peelConstantFlowPredecessors` calls `SSAUpdater::RewriteUse` for
+*every* use of a peeled `phi`, including a use still inside the
+`phi`'s own block (in the reduced repro, that block's own terminator).
+Once `Updater.AddAvailableValue(BB, PN)` is registered,
+`SSAUpdater::HasValueForBlock(BB)` returns true, which makes
+`GetValueInMiddleOfBlock(BB)` skip its correct, fast early return and
+instead take the "value possibly redefined partway through the block"
+reconciliation path. Since this peeling only ever registers available
+values for `BB` and the one peeled predecessor -- never `BB`'s
+*other*, still-genuine predecessors -- that reconciliation cannot find
+a value for them and recursively walks back through the rest of the
+cycle (as far as the loop header, in the reduced repro), silently
+synthesizing brand-new, semantically bogus `phi` nodes and corrupting
+the very value the masked loop's own runtime termination depends on.
+
+Fixed by skipping `SSAUpdater::RewriteUse` for any use whose block
+(the incoming block, for a `phi` user; the user's own parent block,
+otherwise) is `BB` itself -- such a use is still trivially dominated by
+`PN` and unaffected by peeling a *different* predecessor of `BB`.
+
+Added `LinearizeTest.ReusesRealOperandInsteadOfSelectWhenOtherArmIsPoison`
+(H89a) and a new lit regression,
+`loop-uniform-check-fused-with-divergent-exit-inblock-use.ll` (H89b),
+modeling the exact minimal shape a real
+`max_mesh_output_vertices_256` shader hits. Both were confirmed to
+fail without their respective fix (via `git stash`) and pass with it.
+`ninja check-feme` passes in full: **2942/2942** discovered (2883
+Pass, 59 pre-existing `Unsupported`, **0 Failed**) -- baseline plus 2
+new tests, 0 regressions.
+
+**A real re-run of all 9 of H89's own tracked cases** confirms none
+hang anymore (each completes within a few seconds, `ps aux` confirmed
+no leftover process after any run): 1 now **Pass**s outright
+(`max_mesh_output_vertices_256`), and the other 8 progress past the
+compile-time rejection into distinct, further diagnostics instead of
+hanging -- `max_mesh_output_primitives_256`'s own pixel-comparison
+mismatch (filed as **H93**), the 4 `*_no_view_index` cases'
+`CanonicalizeStagePass` stage-IO gap (filed as **H92**), and
+`mesh_payload_size`/`task_payload_size`/
+`task_payload_and_shared_memory_size`'s "mesh output wrapper requires
+attached feme.signature metadata" (folded into **H91**'s own count,
+now 5 cases total).
+
+**A real full `dEQP-VK.mesh_shader.ext.*` group re-run** moves the
+group's own totals from H88's closing baseline (299 Pass/140 Fail/
+26482 NotSupported) to **301 Pass/138 Fail/26482 NotSupported** -- a
+net +2/-2. One of those is the directly-targeted
+`max_mesh_output_vertices_256`; the `misc.*` sub-bucket's own totals
+independently confirm a second, +1 Pass/-1 Fail movement (37 Pass/34
+Fail per H88's own closing numbers, now 38 Pass/33 Fail), meaning one
+further `misc.*` case also now passes as an incidental side effect of
+this fix. That second case was not individually isolated this session
+(the `misc.*` bucket's own Pass list does not obviously suggest which
+of its ~38 passing cases is newly so, since no prior per-case list
+from before this session's fix was retained for a precise diff) --
+flagged here for a future session to confirm via a `git stash`-based
+A/B of the full `misc.*` bucket, rather than guessed at.
+`synchronization.*`/`properties.*`/`builtin.*`/`smoke.*` sub-bucket
+totals show no other net movement.
+
+**Roadmap H89a and H89b are both closed.**
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure CPU-target compiler-correctness fix (within
+`DiamondFlattener`/`LoopLinearizer`'s existing masking machinery), not
+a new feature or extension surface. `FeMeVulkanDesign.md` needs no
+change either: both fixes correct bugs in an already-documented
+mechanism (per-lane masking of divergent control flow) rather than
+changing its documented design.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_vertices_256' --deqp-shadercache=disable
+```
