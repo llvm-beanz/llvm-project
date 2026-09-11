@@ -1,6 +1,5 @@
 ---
 model: claude-sonnet-5
-resume: 0a6535de-11d2-4cb7-8770-7e69bf31da83
 ---
 # Initial Guidelines
 
@@ -44,19 +43,19 @@ agent_thoughts.md file.
 
 # Request
 
-Can you work on H92 or other blocking work to make progress on the H-series
+Can you work on H93 or other blocking work to make progress on the H-series
 milestones?
 
-> **`properties.max_mesh_output_size_with_payload_per_{primitive,vertex}_no_view_index`/`max_mesh_output_size_without_payload_per_{primitive,vertex}_no_view_index`'s
-> `feme-graphics-validate-stage: ... unresolved stage-IO global-variable access
-> ...`** (4 cases, newly exposed by H89a/H89b's own closing re-run): a mesh
-> entry has a stage-IO global-variable access `CanonicalizeStagePass` does not
-> yet canonicalize into a `feme.stage.*` call, so `ValidateStagePass` correctly
-> (per its own H6g-b-c precedent) rejects it at compile time instead of letting
-> it reach the JIT as an undefined symbol -- the same diagnostic class as H76's
-> own `smoke.fast_lib.*` row, but not yet confirmed to be the identical
-> root-cause shape (these are `properties.*` mesh-output-payload-size cases, not
-> `smoke.fast_lib`'s fragment-library-sharing shape). Not yet triaged -- needs
-> its own IR reduction of one `_no_view_index` case to identify the specific
-> global-variable access shape `CanonicalizeStagePass` misses, and to
-> confirm/refute overlap with H76 before any new fix work
+> **`properties.max_mesh_output_primitives_256`'s pixel-comparison mismatch** (1
+> case, newly exposed by H89a/H89b's own closing re-run): compiles and runs to
+> completion (no crash, no pipeline-creation error, confirmed not a hang) but
+> fails its own image comparison (`Check log for details at
+> vktMeshShaderPropertyTestsEXT.cpp:1287`) -- the sibling case
+> `max_mesh_output_vertices_256` (same H89a/H89b masked-loop fix, analogous
+> large-output-array shape) now passes outright, so this is not simply "the same
+> loop bug again"; likely a distinct, narrower issue specific to the primitive-
+> rather than vertex-output path. Not yet triaged -- needs a channel-level pixel
+> reduction, mirroring the technique H88's own closing session used for the
+> analogous `local_size_id_mesh`/`local_size_id_task` rows, to determine the
+> real vs. expected framebuffer content and narrow down which stage of the
+> primitive-output path disagrees
