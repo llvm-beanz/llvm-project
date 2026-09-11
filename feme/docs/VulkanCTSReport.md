@@ -37179,3 +37179,165 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.builtin.layer'
 ```
+
+## Roadmap H74: measured impact (rasterizer discard and graphics-stage specialization constants)
+
+H70's own per-bucket triage originally described this bucket as
+`properties.*`/`smoke.*` (25 + 7 = 32 cases) with a standing suspicion
+that it overlapped H34/H48's own `VK_EXT_graphics_pipeline_library`
+scope. A fresh `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-map at the start
+of this session found the true composition had drifted from that
+original note (no `smoke.*` cases at all): `properties.*` 11 (6
+rasterizer-discard + 5 specialization), `misc.*` 2 (specialization),
+`synchronization.*` 19 (all rasterizer-discard) -- 32 total, matching
+H70's original tally exactly. Critically, **none of the 32 case names
+reference pipeline-library construction** (no `_gpl`/library
+suffixes), refuting the GPL-overlap suspicion directly: these are
+plain monolithic-pipeline cases.
+
+**Specialization constants for graphics stages.** The compute pipeline
+path (`compileComputePipeline`, Pipeline.cpp) already had a full
+mechanism for this: `buildSpecializationOverrides` (validates a
+`VkSpecializationInfo`'s map entries against its data blob) and
+`patchSpecializationConstants` (`SpecializationPatch.h`/`.cpp`, patches
+raw SPIR-V `OpSpecConstant` literal words in place before
+deserialization -- see that header's own comment for why: MLIR's
+`spirv::deserialize` folds every spec constant to its module-declared
+default at import time, with no later plug-in point for a real
+override). `buildSpecializationOverrides` was moved out of
+`Pipeline.cpp`'s anonymous namespace into `feme::vulkan` and declared
+in `Pipeline.h` (which gained `GroupSize.h`/`llvm/ADT/SmallVector.h`
+includes for the override type), and `GraphicsPipeline.cpp`'s
+`compileGraphicsStage` was rewired to build the override list, then
+apply `patchSpecializationConstants` to a private copy of the shader
+module's raw words (never `Module->words()` itself, since one
+`VkShaderModule` may back multiple pipelines with different overrides)
+before `importShaderModule` -- mirroring the compute path exactly,
+instead of unconditionally rejecting any stage that supplied a
+`VkSpecializationInfo`.
+
+**`rasterizerDiscardEnable`.** Added a `bool DiscardEnable = false;`
+field to `RasterState` (`feme/include/feme/Graphics/Pipeline.h`).
+`translateRasterState` (`GraphicsPipeline.cpp`) now sets it from
+`VkPipelineRasterizationStateCreateInfo::rasterizerDiscardEnable`
+instead of rejecting any pipeline that requests it (this needs no
+feature-bit gate: it is core 1.0 functionality). `Executor.cpp`'s
+single shared `RasterizePrimitives` lambda -- the one true integration
+point for every pre-rasterization stage chain (vertex, tessellation,
+geometry, and mesh/task, confirmed via its 2 call sites and its own
+doc comment) -- gained an early-return check for
+`Pipeline.getRasterState().DiscardEnable`, placed immediately after the
+pre-existing `!VSPosition` guard (roadmap H21d) and, critically, after
+every `VK_EXT_transform_feedback` capture call site
+(`captureTransformFeedback`, called at ~2 sites before
+`RasterizePrimitives` ever runs): an XFB-only pipeline with rasterizer
+discard enabled therefore still captures real per-vertex data, exactly
+matching the Vulkan spec's own semantics for this combination (the
+primary real-world use case named in H35's own roadmap text). Only the
+*static* form was implemented; the dynamic
+`VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE`
+(`VK_EXT_extended_dynamic_state2`) counterpart remains unimplemented
+(`mapDynamicState`'s switch has no case for it), since none of H74's
+32 tracked cases needed it.
+
+Two new unit tests were added to `GraphicsPipelineTest.cpp`:
+`TranslatesRasterizerDiscardState` (asserts
+`RasterState::DiscardEnable` is set from a real
+`VkGraphicsPipelineCreateInfo`) and
+`TranslatesGraphicsStageSpecializationConstants` (asserts a fragment
+stage with a real `VkSpecializationInfo` compiles successfully rather
+than being rejected, using a small hand-written `spirv.SpecConstant`
+MLIR module). The pre-existing `RejectsUnimplementedStateCombinations`
+test's static-rasterizer-discard-rejection assertion was removed (no
+longer true) while its adjacent dynamic-state sub-case (still
+correctly rejected) was kept, with an updated comment.
+
+`ninja check-feme` passes in full: **2938/2938** discovered (2879
+Pass, 59 pre-existing `Unsupported`, **0 Failed**) -- baseline plus 2
+new tests, 0 regressions. (This session also fixed three unrelated,
+pre-existing build/test-infrastructure gaps surfaced while getting a
+clean `check-feme` run: `feme/runtime/CPU/CMakeLists.txt`'s bitcode
+custom command and `feme/test/Runtime/CPU/runtime-cpu-bitcode.test`
+both invoked `clang`/the build's own just-built `clang` binary with no
+explicit `--target=`, which resolves to `LLVM_DEFAULT_TARGET_TRIPLE`
+-- empty in this checkout's multi-target build configuration -- rather
+than the real host; `feme/test/lit.cfg.py`'s `%feme_host_triple`
+substitution was wired to `config.target_triple`
+(`LLVM_TARGET_TRIPLE`/`LLVM_DEFAULT_TARGET_TRIPLE`, also empty) despite
+its own name and comment promising "the host's own default target
+triple" -- fixed to use `config.host_triple` (`LLVM_HOST_TRIPLE`)
+instead; and `AOTDispatchTest.cpp` called `sys::getDefaultTargetTriple()`
+for the same "host triple" purpose -- fixed to call
+`sys::getProcessTriple()` (which reads the `LLVM_HOST_TRIPLE` macro,
+always the real host, unlike the `LLVM_DEFAULT_TARGET_TRIPLE`-derived
+`getDefaultTargetTriple()`). Separately, `feme/test/CMakeLists.txt`'s
+`FEME_TEST_DEPENDS` list was missing `feme-vulkan-xcb-surface-lost-smoke`
+(built by `feme/tools/CMakeLists.txt` under the same `FEME_HAVE_XCB`
+guard as the already-listed `feme-vulkan-xcb-smoke`), so
+`Vulkan/xcb-surface-lost-smoke.test` failed with "No such file or
+directory" unless something else happened to build that tool first;
+added it to the dependency list.)
+
+**A real re-run of `dEQP-VK.mesh_shader.ext.*`** (full group, git-stash
+pre/post rebuild compared) confirms both target diagnostics
+(`"rasterizer discard is not implemented"`/`"specialization constants
+are not implemented for a graphics stage yet"`) are now **completely
+eliminated** (0 hits, down from 32), and the group's overall totals
+move from 279 Pass/160 Fail to **297 Pass/142 Fail** (+18/-18,
+26482 NotSupported unchanged):
+
+- `synchronization.*` rasterizer-discard (19 cases): **18 now fully
+  Pass**. The 19th, `other.barrier_across_secondary`, no longer hits
+  the rasterizer-discard diagnostic but now fails a new "mesh output
+  wrapper requires attached feme.signature metadata" diagnostic
+  (`MeshOutputWrapper.cpp`) instead -- filed as **H91**.
+- `properties.*` rasterizer-discard (6 cases): none hit the diagnostic
+  any longer, but none reach full Pass either -- 3 now fail a
+  "divergent branch" `feme-cpu-simdize` diagnostic (filed as **H89**),
+  2 a `spirv.SpecConstantOperation` legalization gap (filed as
+  **H90**), and 1 the same mesh-output-wrapper-metadata gap as
+  `barrier_across_secondary` above (**H91**).
+- `properties.*`/`misc.*` specialization-constant cases (5 + 2 = 7):
+  none hit the diagnostic any longer. 5 `properties.*` cases
+  (`max_mesh_output_components` and the 4 `*_no_view_index`
+  payload-size cases) now fail a `'llvm.getelementptr' op operand #0
+  must be LLVM pointer type...'` SPIR-V-to-LLVM legalization gap for
+  large mesh-output-array shapes (filed as **H87**); the 2 `misc.*`
+  cases (`local_size_id_mesh`/`local_size_id_task`) now fail a
+  1-unit-alpha-channel pixel-comparison mismatch instead (filed as
+  **H88**).
+
+None of these five residual-bug categories were cross-checked against
+the rest of the roadmap for a pre-existing match before filing (H87's
+own note flags a plausible, not-yet-confirmed overlap with H82's
+`misc.per_prim_block_output` row, the closest existing candidate); the
+next session working any of them should do that cross-check first.
+
+**Roadmap H74 is closed** (its own scope -- eliminating both rejection
+diagnostics from `GraphicsPipeline.cpp` -- is fully done project-wide,
+confirmed via a real re-run, and the GPL-overlap suspicion this row was
+opened to investigate is refuted). This same fix very likely
+substantially or fully closes roadmap **H35** as well (identical root
+cause, identical fix), but H35 is left open pending its own dedicated
+`dEQP-VK.transform_feedback.*` re-run: an attempt this session hit an
+unrelated, pre-existing `PromoteMemoryToRegister.cpp` assertion crash
+partway through a full-group sweep and did not complete. Five new,
+distinct residual gaps this row's own fixes newly exposed or unmasked
+are filed as **H87**-**H91** above.
+
+`check-feme`'s full run (above) already confirms zero regression to
+existing lit/unit-test coverage; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change (`rasterizerDiscardEnable`
+is core 1.0 state needing no feature bit, confirmed via the same
+precedent comment already used for `depthBiasEnable`; specialization
+constants are core 1.0 pipeline-creation-time state with no extension
+or feature-bit gate of their own either).
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  timeout 30 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.synchronization.transfer_to_mesh.storage_buffer.memory_barrier.transfer_write_shader_read'
+```
