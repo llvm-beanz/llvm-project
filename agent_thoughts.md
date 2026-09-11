@@ -78077,3 +78077,133 @@ cd build2 && ninja check-feme   # 2887/2946 Passed, 0 Failed
 
 None of these were touched this session -- H92's own fix didn't expose
 any *new* gaps (unlike H90/H91 before it), it just resolved cleanly.
+
+# H93 session: three bugs stacked on one CTS case -- fixed two, deferred one as H93b
+
+**Done. Next action for the reader: pick up H93b (below), or any of H94/H95/H96 from the previous session's leftovers.**
+
+## What's fixed
+
+`dEQP-VK.mesh_shader.ext.properties.max_mesh_output_primitives_256`'s
+mesh-shader-side data is now 100% correct. The CTS case still fails
+overall (see H93b), but two real, independent bugs are gone:
+
+1. Mesh point primitives sharing one vertex (`max_vertices=1`, legal via
+   `gl_PrimitivePointIndicesEXT`) used to collapse onto a single
+   rasterized point instead of one per primitive.
+2. A mesh entry's `perprimitiveEXT` block member decoration
+   (`gl_PrimitiveID` inside `gl_MeshPerPrimitiveEXT`) was silently
+   dropped during SPIR-V-to-LLVM conversion, misrouting the store
+   through per-vertex (not per-primitive) output storage.
+
+Both fixes are general, not narrowly scoped to this one CTS case: a
+full `dEQP-VK.mesh_shader.ext.*` re-run (26,921 cases) moved
+310/129/26482 (Pass/Fail/NotSupported) to 321/118/26482 -- +11/-11, zero
+regressions. Ten cases beyond the targeted one now pass:
+`builtin.layer_shared`, `builtin.viewport_index_shared`,
+`misc.maximize_primitives`, and 8 `smoke.*.shared_frag_library*`
+variants.
+
+## Verify it yourself (2 minutes)
+
+```shell
+cd build2 && ninja check-feme   # 2944/2947 Passed, 3 Unsupported, 0 Failed
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  timeout 60 ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.properties.max_mesh_output_primitives_256'
+# Still Fail -- that's expected, see H93b below.
+```
+
+## How I found it (three layers, three bugs)
+
+This took three separate rounds of "add a debug dump, rebuild, rerun,
+remove the dump" -- each one peeling back one more layer before hitting
+the next bug underneath.
+
+1. **First hypothesis, wrong.** Guessed `PerPrimitiveEXT` was a
+   whole-variable decoration `CanonicalizeStage.cpp` didn't merge down
+   to members. Built a standalone `glslangValidator` from the CTS's own
+   glslang checkout, compiled the real shader source, disassembled with
+   `spirv-dis`. It's a per-*member* `OpMemberDecorate`, same as
+   `BuiltIn`. Hypothesis dead, reverted the speculative fix cleanly
+   (confirmed via `git diff`, zero net change).
+2. **Real bug 1: `SPIRVToLLVMPatterns.cpp`.** `buildMemberDecorationTuple`'s
+   flag-decoration switch had `NoPerspective`/`Flat`/`Patch`/`Centroid`/
+   `Sample` but not `PerPrimitiveEXT` -- fell through to `default:
+   return nullptr`, silently dropped. One-case fix.
+3. **Real bug 2, found after fix 1 didn't change the CTS result:**
+   dumped the mesh shader's own IR at each pipeline stage
+   (env-var-gated `M.print`), confirmed `gl_PrimitiveID` now routes
+   through the right (per-primitive) storage -- but the CTS case still
+   failed identically. Dumped the raw primitive data leaving the mesh
+   stage (env-var-gated print in `Executor.cpp`): 0..255, perfectly
+   correct. So the bug is downstream, in the rasterizer. Read
+   `Executor.cpp`'s triangle-emission code: `gl_PrimitiveID` for a
+   fragment is always `PrimitiveCounter++`, raster order, never an
+   authored value. `emitPointQuad` increments the counter twice per
+   point (2 triangles per point-quad) -- that's exactly why odd indices
+   never got set and `P>=128` produced out-of-bounds writes. This one's
+   too big to fix in the remaining session time -- filed as H93b
+   instead, with the mechanism fully spelled out so whoever picks it up
+   doesn't have to re-derive it.
+
+All three debug-dump mechanisms (env-var-gated, temporary) were removed
+before committing -- confirmed via `git diff` showing only the real
+fixes remain in `Executor.cpp`/`Pipeline.cpp`/`SPIRVToLLVMPatterns.cpp`.
+
+## H93b: the rasterizer never sources gl_PrimitiveID from an authored value
+
+**Not started. Real architectural work, not a quick patch.**
+
+The gap: `Executor.cpp`'s triangle/line/point-emission code always
+synthesizes `gl_PrimitiveID` from `PrimitiveCounter++` (raster order).
+That's correct as the Vulkan-spec *fallback* ("if no earlier stage
+wrote it") but it applies unconditionally, even when a mesh/GS stage
+*does* write it. `StageStorage.cpp` (~line 95-135) explicitly excludes
+`PrimitiveID` from the ordinary interpolated-varying path, so there's
+currently no route at all for an authored value to reach a fragment
+invocation.
+
+Three pieces needed, roughly in order:
+
+1. A way to know, at rasterize time, whether the producing stage's
+   signature had an authored `SystemValue::PrimitiveID` output
+   (`StageLink.cpp` is the natural place).
+2. `Executor.cpp`'s fragment-invocation assembly needs to read that
+   value from `Merged`/`PrimitiveOutputs` by primitive index instead of
+   `PrimitiveCounter++`, when present -- for all three primitive
+   classes (points/lines/triangles), not just the mesh-point shape that
+   exposed this.
+3. Tests: an `Executor.cpp` unit test with an explicit-authoring mesh
+   entry, asserting the fragment sees the authored ID not a counter;
+   plus the real CTS re-run of `max_mesh_output_primitives_256`
+   confirming it passes outright once this lands.
+
+Estimate: this touches three files and needs its own design pass on
+"how does an authored `PrimitiveID` get threaded from producer to
+consumer" -- not a same-day fix. Budget a full session.
+
+## Docs touched this session
+
+- `Roadmap.md`: struck through H93 (closed by extension), added H93a
+  (both fixes, done) and H93b (the deferred gap) as sibling rows -- no
+  new nesting depth, matching the "max one lowercase letter" rule.
+- `VulkanCTSReport.md`: new "Roadmap H93: measured impact" section with
+  the full root-cause writeup and the A/B CTS numbers above.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked,
+  no changes needed -- both fixes are compiler-correctness bugfixes in
+  already-supported `VK_EXT_mesh_shader` machinery, not new
+  feature/extension surface.
+- `FeMeGraphicsDesign.md`: checked, no changes needed -- the one place
+  that mentions a related `gl_PrimitiveID` gap
+  (`rasterization.culling.primitive_id`, around line 3573) already
+  describes it as a known gap, doesn't claim the sourcing works, so
+  nothing there contradicts H93b's finding.
+
+## Commits this session
+
+1. `[feme][H93] Rasterize every mesh point primitive even when they share a vertex`
+2. `[feme][H93] Preserve PerPrimitiveEXT as a member decoration in SPIR-V->LLVM`
+3. `[feme][docs] Split roadmap H93 into H93a (fixed) and H93b (deferred)`
+4. `[feme][docs] Record H93's measured CTS impact`
+5. This file.
