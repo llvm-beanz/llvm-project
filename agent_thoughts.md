@@ -77883,3 +77883,73 @@ Whoever picks this up next should treat every remaining row's own
 hint toward where the fix will land -- H81 is a second data point that
 the roadmap's own guesses about *root cause* are not reliable, only its
 counts and repro commands are.
+
+# H74/H90 session: real gap already had its own roadmap row, closed it, found H90's own follow-up gap
+
+**Done, right now:**
+1. Closed H90 (`spirv.SpecConstantOperation` legalization gap). Both
+   tracked `properties.mesh_shared_memory_size`/
+   `mesh_payload_and_shared_memory_size` cases no longer hit this
+   diagnostic.
+2. Added H94 for the new gap those same two cases now hit instead
+   (`feme-cpu-linearize`'s "more than one divergent exit check"
+   rejection) -- not fixed this session, just triaged and tracked.
+3. `ninja check-feme`: 2885/2944 Passed, 0 Failed.
+
+**The user's own request text was H90, verbatim, already on the
+roadmap.** The request quoted a roadmap row (`properties.*`'s
+`spirv.SpecConstantOperation` legalization gap) that turned out to
+already exist as H90 -- no new row needed, just picked it up and worked
+it the same way as any other open row.
+
+**Fastest root-cause path yet: skip the deserializer's own quirks
+entirely.** Compiling the real CTS GLSL source through
+`glslangValidator` and reading the disassembly directly showed exactly
+which line (`sharedMemoryElements - 1u - elemIdx`, a `const`-qualified
+expression over a spec constant) produces the `OpSpecConstantOp`. That
+alone was enough to write a hand-built minimal `.mlir` repro without
+ever needing to get the real shape through `feme-translate
+--import-spirv` (which hit an unrelated pre-existing `si32`/`i32`
+deserializer verify failure on this particular shader, the same
+diagnostic class H31/H82 already track -- a real distraction if I'd
+tried to push through it instead of just hand-writing the equivalent
+`spirv` dialect IR directly, which was faster and cleaner anyway since
+lit tests want minimal hand-written IR, not glslang output, as their
+input).
+
+**The fix continues this session's now-established "shared prepare*
+step before conversion" pattern.** `prepareResourceVariables`/
+`prepareStageIOVariables`/`prepareSpecConstants` all already establish
+the shape: recover/rewrite something about the still-unconverted
+`spirv` dialect module before `applyPartialConversion` runs, because
+some information or structure gets lost or becomes unrecoverable once
+conversion starts. `inlineSpecConstantOperations` is the same shape,
+just simpler than the others -- no map to build and thread through,
+just an in-place `moveBefore`/`replaceAllUsesWith`/`erase`, because the
+wrapped op's own operands are already ordinary SSA values that don't
+need any information recovered at all once the spec-constant reference
+itself resolves.
+
+**One design question worth flagging for whoever reads this later:**
+I did not add any handling for a `spirv.SpecConstantOperation` whose
+wrapped op is something more exotic than plain scalar arithmetic --
+`OpVectorShuffle`, `OpCompositeExtract`/`OpCompositeInsert`, `OpSelect`
+are all in the op's own documented allow-list (see
+`SPIRVStructureOps.td`'s own `SpecConstantOperationOp` comment) but
+none of them are exercised by any real CTS case found so far. The fix
+as written handles all of them equally (it doesn't special-case by
+wrapped-op-kind at all, it just unwraps whatever's there), so this
+isn't a gap in the fix itself, just a note that only the arithmetic
+shape has a real test/repro backing it.
+
+**H94, not a fix.** Both H90 cases' own shared-memory verification
+shader genuinely has two separate bounds checks in the same loop (a
+write-phase one, a read-phase one) -- `LoopLinearizer` only supports
+fusing/handling one divergent exit check per loop today, a documented,
+intentional limitation, not a bug. Didn't attempt a fix this session;
+it's a real, separate, "needs its own IR reduction" gap, tracked
+honestly as such rather than folded into H90 or guessed at.
+
+**Next up:** H94 itself, plus H70's still-open remainder (H75-H80,
+H82's remaining case, H83, H84), and H91/H92/H93 (all found by prior
+sessions' own re-runs, none yet started).
