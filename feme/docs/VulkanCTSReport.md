@@ -39004,3 +39004,73 @@ shows 69 Pass/12 Fail, with no regressions from this investigation
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 change: no code changed this session. `FeMeGraphicsDesign.md` needs no
 change either, for the same reason.
+
+## Roadmap H75: measured impact (fixed; new pixel-comparison bug exposed, folded into H77)
+
+Re-verification at the start of this session found only 2 of the
+originally-filed 6 cases (`misc.barrier_in_mesh`, `misc.barrier_in_task`)
+still hit `feme-cpu-simdize`'s `divergent branch` diagnostic; the other 4
+(2 `misc`, 2 `properties`) had already been fixed as side effects of the
+extensive H89-H96 `Linearize.cpp` work in prior sessions.
+
+Root cause of the remaining 2 (identical shape in both): a
+single-invocation-gated `if (gl_LocalInvocationIndex == 0u) { if (counter
+== 32) {...} else {...} }`, where `counter` is a workgroup-`shared`
+counter read back after a barrier. `DiamondFlattener::flatten` correctly
+flattens the *outer* gate, rewriting the (now unconditionally-executed,
+per-lane-masked) inner block's plain `load` into a masked
+`feme.cpu.masked.load` (passthru zero for inactive lanes). But
+`UniformityInfo` is computed once, before any masking happens
+(`feme::cpu::LinearizePass::run`), against the *original* unmasked
+`load` -- whose address is a plain global, so it is, correctly for that
+unmasked IR, classified uniform. `flatten` trusted that stale
+classification for the *inner* branch (built from the masked load's
+result) and left its real `br` in place instead of flattening it,
+which `feme::cpu::SIMDizePass`'s `FunctionWidener` then correctly
+rejected as an un-removed divergent branch.
+
+Fixed by tracking every masked-load result `DiamondFlattener::
+applyStageMasks` produces (`MaskedLoadResults`) and additionally
+treating a branch as divergent in `flatten` whenever its condition
+transitively depends on one (`dependsOnTaintedValue`), regardless of
+what the (necessarily stale) `UniformityInfo` says. A genuinely-uniform
+nested branch not derived from any masked load (the
+`uniform-nested-in-divergent.ll` shape) is unaffected and still gets its
+own real `br`+`phi` -- confirmed both by that existing lit test still
+passing and by a new one added alongside the fix.
+
+New coverage: a lit test
+(`Linearize/nested-diamond-condition-from-masked-load.ll`) and a
+`LinearizeTest.cpp` unit test
+(`FlattensNestedDiamondWhoseConditionDependsOnMaskedLoad`), both built
+directly from the hand-reduced IR shape this session extracted from the
+real `misc.barrier_in_mesh` shader source (`glslangValidator` -> `feme-
+translate --import-spirv` -> `feme-opt --feme-convert-spirv-to-llvm` ->
+`feme-translate --llvmdialect-to-llvmir` -> `feme-opt -feme-cpu-
+stage=mesh -passes='feme-cpu-fold-spirv-builtins,feme-cpu-prepare,...'`).
+
+`check-feme`'s full suite (2958 tests, 3 unsupported) passes with 0
+failures, confirming no regressions in the rest of the compiler. A
+`misc.*` sweep (114 cases) shows 41 Pass/30 Fail/43 NotSupported (up
+from 40/31/43 before this fix) with 0 remaining `divergent branch`
+diagnostics (down from 2); a `properties.*` sweep (30 cases) is
+unchanged at 14 Pass/1 Fail/15 NotSupported (0 `divergent branch`
+diagnostics before or after, matching this session's own initial
+re-verification).
+
+Both target cases (`misc.barrier_in_mesh`, `misc.barrier_in_task`) now
+compile, link, and run to completion with no divergent-branch
+diagnostic, but both now fail a *different*, previously-masked
+diagnostic instead: a pixel-comparison mismatch at
+`vktMeshShaderMiscTestsEXT.cpp:462` -- the identical diagnostic line an
+already-open row, H77 (`misc.first_invocation_mesh`), tracks. Folded
+into H77 rather than double-counted as a new milestone; H77's own row
+now notes both newly-added cases explicitly, including that they should
+not be assumed to share `first_invocation_mesh`'s own root cause without
+their own reduction.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure compiler-internals fix (an `UniformityInfo`
+staleness gap in `feme::cpu::LinearizePass`), not a
+feature/extension-support change. `FeMeGraphicsDesign.md` needs no
+change either, for the same reason.
