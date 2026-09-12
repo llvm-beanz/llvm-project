@@ -358,6 +358,36 @@ TEST(ImageFixtureTest, PacksAndUnpacksR8G8SnormNegative) {
   EXPECT_EQ(Unpacked[3], 1.0);
 }
 
+// Roadmap H98a: `getFixtureFormatElementSize` (used by `CommandBuffer.cpp`'s
+// render-pass/dynamic-rendering attachment-clear path, unlike
+// `packClearColor`/`unpackColor`'s own dedicated `if`-blocks for these
+// formats above, which never reach it) previously had no `FormatInfo` entry
+// for `R8_UNORM`/`R8_SNORM`/`R8G8_UNORM`/`R8G8_SNORM` at all, failing with
+// "image fixture format is not yet supported" for any real color-attachment
+// use of these formats (`dEQP-VK.image.host_image_copy.large_images`/
+// `draw_r8_unorm_*`/`draw_r8g8_unorm_*`).
+TEST(ImageFixtureTest, GetFixtureFormatElementSizeCoversR8AndR8G8) {
+  Expected<uint32_t> R8Size =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R8_UNORM);
+  ASSERT_THAT_EXPECTED(R8Size, Succeeded());
+  EXPECT_EQ(*R8Size, 1u);
+
+  Expected<uint32_t> R8SnormSize =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R8_SNORM);
+  ASSERT_THAT_EXPECTED(R8SnormSize, Succeeded());
+  EXPECT_EQ(*R8SnormSize, 1u);
+
+  Expected<uint32_t> R8G8Size =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R8G8_UNORM);
+  ASSERT_THAT_EXPECTED(R8G8Size, Succeeded());
+  EXPECT_EQ(*R8G8Size, 2u);
+
+  Expected<uint32_t> R8G8SnormSize =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R8G8_SNORM);
+  ASSERT_THAT_EXPECTED(R8G8SnormSize, Succeeded());
+  EXPECT_EQ(*R8G8SnormSize, 2u);
+}
+
 // (Roadmap H8j) `R16_UNORM`/`R16_SNORM`: `EAC_R11_{UNORM,SNORM}`'s own
 // single-channel sampling-bridge target, the 16-bit analogue of
 // `R8_UNORM`/`_SNORM` above.
@@ -541,6 +571,50 @@ TEST(ImageFixtureTest, PacksAndUnpacksR32SintNegative) {
   ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R32_SINT, Texel, Unpacked),
                     Succeeded());
   EXPECT_EQ(Unpacked[0], -100.0);
+}
+
+// Roadmap H98a: `R32_FLOAT`/`R32G32_FLOAT` previously fell through to
+// `packClearColor`'s generic `Info->Components`-sized path (no dedicated
+// `if`-block existed for them, unlike `R32_UINT`/`R32G32_UINT`'s own
+// roadmap-H70 fix above) and failed with a spurious "clear color has 4
+// component(s), expected 1"/"expected 2" error whenever `Clear`'s
+// always-4-component shape (`VkClearColorValue`'s own convention) met one
+// of these narrower-than-4-component real color-attachment formats (the
+// `dEQP-VK.image.host_image_copy.large_images.*_r32_sfloat_*`/
+// `draw_r32g32_sfloat_*` shapes this row's own triage found).
+TEST(ImageFixtureTest, PacksAndUnpacksR32Float) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32_FLOAT, {0.5, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  float V;
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_FLOAT_EQ(V, 0.5f);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R32_FLOAT, Texel, Unpacked),
+                    Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.5);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32Float) {
+  std::array<uint8_t, 8> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R32G32_FLOAT,
+                                   {0.25, -1.5, 0.0, 1.0}, Texel),
+                    Succeeded());
+  float V0, V1;
+  memcpy(&V0, Texel.data(), 4);
+  memcpy(&V1, Texel.data() + 4, 4);
+  EXPECT_FLOAT_EQ(V0, 0.25f);
+  EXPECT_FLOAT_EQ(V1, -1.5f);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R32G32_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.25);
+  EXPECT_DOUBLE_EQ(Unpacked[1], -1.5);
 }
 
 TEST(ImageFixtureTest, PacksAndUnpacksR32G32Uint) {
