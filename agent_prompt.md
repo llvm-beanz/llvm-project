@@ -45,27 +45,16 @@ agent thoughts.
 
 # Request
 
-The last session seems to have hit a network error. Any intermediate results it
-had are stashed and can be restored by running `git stash pop`.
-
-
-Can you work on H97 or other blocking work to make progress on the H-series
+Can you work on H98 or other blocking work to make progress on the H-series
 milestones?
 
-> **New crash/hang bugs found by a genuine full 54-group CTS run (see "Headline"
-> in `VulkanCTSReport.md`), not yet triaged.** 13 groups crashed or hung partway
-> through this run -- every one newly exposed by the H-series' own
-> graphics-stage growth (mesh/geometry/tessellation/primitive-output paths that
-> used to report an instant `NotSupported` and now actually execute). None were
-> investigated as part of that measurement session (explicitly out of scope:
-> "measure, don't fix"); this row and H98-H101 below break the 13 into their
-> distinct signatures so each can be picked up as its own triage, mirroring
-> H70's own per-bucket split. This row covers the four groups whose first crash
-> is a bare `SIGSEGV` with no diagnostic at all: `api`
-> (`copy_and_blit.core.use_after_copy` family, 6 crashes), `geometry`
-> (immediately after `basic.output_vary_by_texture`, 2 crashes), `rasterization`
-> (immediately after `culling.primitive_id`, 1 crash), `texture`
-> (`explicit_lod.2d.sizes.*_repeat_compute` family, 14 crashes). Needs: a debug
-> build + core dump or `gdb`-attached repro of at least one representative case
-> per group to get a real backtrace, since none of these currently produce any
-> diagnostic at all
+> **`image.host_image_copy.*`'s systemic crash family** (73,295 of `image`'s
+> 143,086 cases, 51% of the group -- confirmed by 25 straight resume-loop
+> iterations each crashing within this exact family with zero successes
+> recorded, hence bulk-excluded rather than resumed one case at a time for this
+> session's own measurement): every `host_image_copy` case appears to crash,
+> suggesting a fundamental gap in `VK_EXT_host_image_copy` support rather than a
+> narrow per-case bug. Not yet triaged -- needs a representative single-case
+> repro and backtrace; given the density, likely a missing/unimplemented core
+> code path (e.g. the host-side copy entry point itself) rather than an edge
+> case
