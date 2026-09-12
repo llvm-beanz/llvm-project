@@ -425,6 +425,35 @@ public:
   }
 };
 
+/// Converts `spirv.Kill` (roadmap H99) -- which, like `spirv.Switch` above,
+/// MLIR has no pattern for at all -- into an unconditional discard-and-return:
+/// a call to the `llvm.spv.discard` intrinsic (already raised into
+/// `feme.stage.discard(true)` by `feme::graphics::CanonicalizeStagePass`),
+/// followed by an `llvm.return`. This is the exact same lowering
+/// `spirv.TerminateInvocation` below uses -- `OpKill`'s own SPIR-V spec
+/// wording ("results in the invocation being terminated") is functionally
+/// identical to `OpTerminateInvocation`'s -- but `OpKill` is the far more
+/// common of the two in real shaders (it is what HLSL's unconditional
+/// `discard` legalizes to, whereas `OpTerminateInvocation` requires the
+/// dedicated `SPV_KHR_terminate_invocation` extension), so this op is
+/// converted independently rather than folded into that one.
+class KillConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::KillOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<mlir::spirv::KillOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::KillOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::LLVM::CallIntrinsicOp::create(
+        Rewriter, Op.getLoc(),
+        mlir::StringAttr::get(Rewriter.getContext(), "llvm.spv.discard"),
+        mlir::ValueRange{});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(Op, mlir::ValueRange{});
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.TerminateInvocation` (roadmap E12,
 /// VK_KHR_shader_terminate_invocation) -- which, like `spirv.Switch` above,
 /// MLIR has no pattern for at all (indeed no op at all, until this same
@@ -8373,7 +8402,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ImageSampleDrefGradPattern, ImageSampleDrefImplicitLodPattern,
       ImageSampleExplicitLodPattern, ImageSampleGradPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
-      ImageTexelPointerPattern, ImageWritePattern,
+      ImageTexelPointerPattern, ImageWritePattern, KillConversionPattern,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMinOp>,
