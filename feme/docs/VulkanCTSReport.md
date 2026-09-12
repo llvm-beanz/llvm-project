@@ -39395,3 +39395,112 @@ format/clear support, not a new feature or extension being added.
 this is a pure bugfix filling in missing table entries within the
 existing "mechanical, added on demand" format-support architecture
 those documents already describe, with no design deviation.
+
+## Roadmap H99: measured impact (fixed; new correctness family exposed, broken out as H99a)
+
+`dEQP-VK.pipeline`'s "hang and `spirv.Kill` legalization crash" row
+(1,172,229 cases, ~36% of the whole suite -- the largest group by
+far) covered two unrelated symptoms in the
+`fast_linked_library.blend.dual_source` family, both root-caused and
+fixed this session.
+
+**Symptom 1: `spirv.Kill` legalization crash.** A minimal hand-written
+`.mlir` repro fed to `feme-opt --feme-convert-spirv-to-llvm` confirmed
+`spirv.Kill` (SPIR-V's `OpKill`) had no registered MLIR conversion
+pattern at all in `SPIRVToLLVMPatterns.cpp` -- neither in this
+codebase nor upstream MLIR's own SPIRVToLLVM conversion. Since
+`ConvertSPIRVToLLVMPass` marks the *entire* `spirv` dialect illegal,
+any op without a pattern hits exactly the filed error: `failed to
+legalize operation 'spirv.Kill' that was explicitly marked illegal`.
+Fixed by adding `KillConversionPattern`, mirroring the existing
+`TerminateInvocationConversionPattern` pattern exactly -- both are
+true SPIR-V terminators with identical "invocation terminates"
+semantics, lowering to a call to the `llvm.spv.discard` intrinsic
+followed by `llvm.return`. `feme::graphics::CanonicalizeStagePass`
+already raises the resulting call into `feme.stage.discard(true)`
+unmodified, so no downstream changes were needed. New lit test
+`spirv-to-llvm-kill.mlir` (mirrors the existing
+`spirv-to-llvm-terminate-invocation.mlir`), confirmed passing.
+
+**Symptom 2: the "hang."** Reproduced the single previously-reported
+case (`dual_source.multi_attachments.b5g5r5a1_unorm_pack16`) in
+isolation with a 60s timeout: 100% CPU, zero output. Attached `gdb`
+using the existing opt-in `FEME_CPU_JIT_DEBUG_SUPPORT=1` capability
+(added in H97) and took repeated ~1s-interval statistical backtrace
+samples of the main thread -- the PC kept changing (ruling out a true
+infinite-loop/deadlock) but was *always* somewhere inside
+`BitcodeReader`/`StringMap`/`APInt`. Traced the call chain
+(`vkCreateGraphicsPipelines` -> `compileGraphicsPipeline` ->
+`compileGraphicsStage` -> `CompiledStage::create` ->
+`feme::cpu::runPipeline`) to `llvm::parseBitcodeFile` re-parsing the
+entire embedded ~2.9MB `libFeMeRuntimeCPU` runtime bitcode **from
+scratch on every single shader compile**, even though the following
+`Linker::linkInModule(..., LinkOnlyNeeded)` only needs a handful of
+referenced functions. Compounding this: `multi_attachments.*`'s own
+internal `BlendAttachmentStateGenerator` iterates up to 2500
+blend-state combinations per CTS "test case," each iteration
+recompiling multiple shaders from scratch, so a single test line could
+trigger up to 10,000 full eager bitcode reparses with zero
+per-iteration progress reporting to any external observer -- looking
+exactly like a hang to a timeout-based harness, when it was actually
+finite, forward-progressing, just extremely slow.
+
+A per-process parse-once-and-clone cache was considered and ruled
+out: `CompiledStage::create` intentionally creates a fresh
+`LLVMContext` per compile (JIT isolation), and `CloneModule` requires
+source and destination to share a context. Fixed instead by switching
+both call sites (`Pipeline.cpp`, `CompiledStage.cpp`) from eager
+`parseBitcodeFile` to lazy `getLazyBitcodeModule`, which only parses
+the module's header/symbol table up front and defers per-function
+materialization to `Linker`'s own on-demand `GlobalValue::materialize()`
+calls (confirmed via `llvm/lib/Linker/IRMover.cpp`: no eager
+`materializeAll()` exists in the linking path, only
+`materializeMetadata()`) -- the same mechanism `llvm-link
+--only-needed`/ThinLTO importing already relies on. No new unit test
+was added for this fix since it is a pure performance fix with
+unchanged external behavior; the existing `PipelineTest`/
+`CompiledStageTest`/`JITEngineTest` suites (which exercise both
+modified call sites, including the `Reference=true` path) already
+passed in full both before and after.
+
+`ninja check-feme`'s full suite (2963/2966 tests, 3 pre-existing
+`Unsupported`, 0 `Failed`) passes after each fix. The single
+previously-hanging case now completes in 2m23s (`Pass (2500
+iteration(s) processed)`), down from an unbounded hang (gdb-confirmed
+zero progress after 60s+).
+
+A full re-run of the entire 8078-case `fast_linked_library.blend.dual_source`
+family confirms both symptoms are gone -- no hang, no `spirv.Kill`
+crash, anywhere in the family:
+
+```
+pipeline.fast_linked_library.blend.dual_source (8078 cases):
+  471 Pass / 3469 Fail / 4138 NotSupported
+  (was: crash/hang, family could not be measured to completion at all)
+```
+
+The 3469 failures are two distinct, previously-masked correctness
+bugs, out of this row's own scope (hang + crash only) -- broken out
+as new row H99a:
+
+- 2878 cases: `Fail (Image mismatch)`, spread broadly across
+  `format.*`/`multi_attachments.*` subfamilies and blend-state
+  combinations -- not yet reduced to a specific shape.
+- 591 cases: `VK_ERROR_INITIALIZATION_FAILED` at `vkQueueSubmit`,
+  concentrated entirely in exactly three formats (`r16_sfloat`,
+  `r16g16_sfloat`, `r32g32b32_sfloat`, ~197 cases each) -- all three
+  are single/dual-channel or non-power-of-two-friendly float formats
+  a real GPU would commonly be unable to blend, suggesting a missing
+  `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT`-style capability
+  check (should report `NotSupported` up front) rather than a
+  renderer bug, but not yet confirmed either way.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: both fixes are bug fixes within already-implemented SPIR-V
+lowering and JIT compilation infrastructure, not new feature or
+extension work. `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` need no
+update either: neither fix represents a design deviation -- the
+`spirv.Kill` fix fills a gap in the existing "one pattern per SPIR-V
+op" conversion architecture already documented, and the lazy-loading
+fix is an internal implementation detail of an already-documented
+"link only what's needed" runtime-linking strategy.
