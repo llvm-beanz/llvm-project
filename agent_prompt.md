@@ -45,41 +45,16 @@ agent thoughts.
 
 # Request
 
-Can you work on H99a and H103 or other blocking work to make progress on the
-H-series milestones?
+Can you work on H100 or other blocking work to make progress on the H-series
+milestones?
 
-The previous session suggested the next steps:
-
-> 1. **Start H103 with the smallest possible repro, not the CTS's own
->    4-overlapping-quad test.** Every failing case in this family
->    conflates two separate questions: (a) does a single blend
->    equation evaluate correctly against a known destination color at
->    all, and (b) does a *second* draw against the same attachment
->    correctly read back what the *first* draw just wrote. Write (or
->    find, if a simpler existing CTS group already does this) a
->    single-quad, single-draw, single-blend-state case first. If it
->    passes, the bug is in (b) -- likely something about how
->    `Executor.cpp` re-reads the destination attachment across
->    sequential draws within one render pass (e.g. a caching/staleness
->    bug, or an incorrect load-op assumption). If it fails, the bug is
->    in (a) -- go straight into `Executor.cpp`'s `blendFactorValue`/
->    `applyBlendOp`/`blendColor` and manually hand-compute one factor
->    combination to find the exact arithmetic divergence.
-> 2. **Do not reuse `vktPipelineDualBlendTests.cpp` as a starting
->    point** -- that was a false lead this session. The real source for
->    both the dual-source and plain blend groups' failing case names
->    is `vktPipelineBlendTests.cpp` (`BlendTest`/`DualSourceBlendTest`,
->    `QUAD_COUNT=4`) plus `createOverlappingQuads`/
->    `createOverlappingQuadsDualSource` in `vktPipelineVertexUtil.cpp`.
-> 3. **Given H103's likely size (P1, huge case count), budget a full
->    session for it alone** -- this is not a quick follow-up. Consider
->    checking whether other already-passing groups elsewhere in the
->    suite exercise ordinary (non-overlapping, single-draw) blending
->    successfully, which would help bound whether the bug is really in
->    blend-equation math or specifically in the multi-draw-accumulation
->    path.
-> 4. H100/H101 (from the original H97 13-crash filing) are still
->    untouched and next in line for the same per-bucket triage.
-> 5. Clean up `/tmp/h99a_*` scratch files (qpa logs, decoded PNGs,
->    caselists) -- no longer needed, everything relevant is now
->    captured in the roadmap/CTS-report commits.
+> **`subgroups`' hang and `synchronization`/`synchronization2`'s scattered crash
+> family**: `subgroups` hung (100% CPU, zero progress) on
+> `ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128`,
+> with slowly-growing VSZ suggesting a possible unbounded-growth bug, not just a
+> slow case. `synchronization`/`synchronization2` (149/144 crashes respectively,
+> scattered across `multi_queue`/`tess_control`/`tess_eval` SSBO cases, not one
+> bulk-excludable family the way `image`'s was) both left large unmeasured
+> remainders (30,244/46,272 cases) at this session's time-budget cutoff. Not yet
+> triaged -- the `subgroups` hang in particular warrants checking for a real
+> infinite loop or unbounded allocation, given the VSZ growth observation
