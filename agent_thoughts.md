@@ -79366,3 +79366,64 @@ work needs redoing from scratch, is the fast path.
    fully complete measurement, though the exact cited crash family
    (`explicit_lod.2d.sizes.*_repeat_compute`) was already swept in full
    with 0 crashes, so this is a nice-to-have, not a blocker.
+
+# H98 session: fixed the systemic host_image_copy crash family (73,295 cases) with a 4-line pNext fix
+
+**Fixed. Ran full re-verification. All docs/tests/commits done.**
+
+## What was broken
+
+`dEQP-VK.image.host_image_copy.*` (73,295 of `image`'s 143,086 cases,
+51% of the group) crashed with a bare `SIGSEGV` partway through any
+batch run. No diagnostic at all.
+
+## Root cause (found in ~30 min using H97's own debug tooling)
+
+1. Reproduced the crash in isolation on one case.
+2. Got a backtrace with `FEME_CPU_JIT_DEBUG_SUPPORT=1` + `gdb -batch -ex run -ex bt -ex "info registers"`.
+3. Crash was in ordinary C++ (`copyBufferImageRegion`'s `memcpy`), not JIT'd shader code -- `x0=0` in the register dump meant a null `memcpy` destination.
+4. Traced the null pointer upstream: the CTS allocates its host copy buffer from `VkSubresourceHostMemcpySizeEXT::size`, a `pNext`-chained struct on `vkGetImageSubresourceLayout2KHR`. This driver's `Image.cpp` never looked at `pLayout->pNext` at all -- `size` stayed 0, the CTS allocated a zero-byte buffer, `.data()` returned null, and the driver crashed dereferencing it.
+
+The fix is genuinely tiny: one new function (`fillSubresourceLayout2PNextChain`, ~10 lines, copy-pasted structure from the existing `fillMemoryRequirements2PNextChain`), called from two existing entrypoints, reusing a value (`ImageSubresourceLayout::Size`) the driver already computed for something else. No new logic, no new data.
+
+## Why this took the shape it did
+
+The actual crash site (`memcpy` in `ImageOps.cpp`) is three call frames and one process (the CTS) away from the actual bug (`Image.cpp`'s pNext handling). Nothing about the crash itself points at the fix -- you have to know the pNext-query convention exists and go looking for a caller who might supply garbage because of it. This is the same class of bug as H91's signature-metadata gap: a legitimate structure exists in the codebase (`VkSubresourceHostMemcpySize` is a real, spec-defined struct, header already present) but nothing was wired up to populate it.
+
+## Impact measured
+
+Full 73,295-case re-run after the fix: **0 crashes** (was: crashed
+partway through the very first batch attempt, and every one of 25
+resume-loop iterations before this session). Result:
+5828 Pass / 66 Fail / 67401 NotSupported.
+
+The 66 failures are a distinct correctness bug (`draw_<format>`
+subfamily, pixel-comparison mismatches, not crashes) -- filed as
+H98a rather than folded into this fix, since fixing them would need
+separate triage.
+
+## Commits (4, each independently buildable/testable)
+
+1. `Image.cpp` fix itself
+2. New unit tests (`ImageTest.cpp`, 2 new tests)
+3. `Roadmap.md`: strike H98, add H98a
+4. `VulkanCTSReport.md`: "Roadmap H98: measured impact" section
+
+## Suggested next steps
+
+1. **H98a** (this session's own new row): triage the 66 `draw_*`
+   failures. Start with `draw_r8_unorm_r8_unorm.host_transition.
+   memcpy.transfer_src_transfer_dst.general.optimal.0_1_0.16x16` --
+   smallest extent, simplest format, single case, should reduce fast.
+2. **H99** is the highest-value remaining crash-triage target: the
+   single largest untriaged group in the whole suite (1.17M cases,
+   ~36% of the total suite), with both a genuine hang and a
+   `spirv.Kill` legalization crash in the same `fast_linked_library.
+   blend.dual_source` family. Worth checking first whether the same
+   "bulk-excludable single root cause" pattern H98 (and H97 before
+   it) both turned out to have also applies here -- if so, fixing one
+   thing could again move a huge fraction of the suite at once.
+3. Nothing about this fix touched `VK_EXT_host_image_copy`'s
+   advertised feature/extension support level -- no
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+   was needed or made.
