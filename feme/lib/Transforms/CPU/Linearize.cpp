@@ -2129,7 +2129,22 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CycleInfo CI2;
     CI2.compute(F);
     UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
-    Changed |= LoopLinearizer(F, CI2, UI2).run();
+    bool CycleChanged = LoopLinearizer(F, CI2, UI2).run();
+    // Roadmap H94b: eliminating a loop's divergent exit `CondBr` in favor
+    // of an unconditional fall-through plus a mask computation (this
+    // pass's whole point) can leave one of that `CondBr`'s own successors
+    // -- typically a `StructurizeCFG`-built critical-edge relay stub that
+    // had no other predecessor -- entirely unreachable. Left behind, a
+    // later, stricter consumer of this pass's output
+    // (`feme::cpu::EntryWrapperPass`'s own `isLinearChain`, which requires
+    // every block in the function to be accounted for) can spuriously
+    // reject an otherwise-fully-supported shape purely because of this
+    // dead residue. Clean it up here, right after producing it, rather
+    // than expecting every downstream consumer to tolerate or work around
+    // dead blocks this pass itself introduced.
+    if (CycleChanged)
+      EliminateUnreachableBlocks(F);
+    Changed |= CycleChanged;
 
     // `DiamondFlattener`/`LoopLinearizer` only lower a `feme.stage.discard`/
     // `.demote`/`.is_helper` call inside the divergent-diamond and

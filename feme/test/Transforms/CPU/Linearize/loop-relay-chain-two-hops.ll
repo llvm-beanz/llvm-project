@@ -45,10 +45,27 @@
 ; the identical two-relay-hop shape one loop iteration earlier via
 ; `Flow26`/no third hop there since that loop's own exit is unconditional
 ; rather than routed through a `loop.exit.guard`).
+;
+; Roadmap H94b: this same fix also confirmed a related, previously
+; unnoticed side effect: converting a loop's divergent exit `CondBr` into
+; an unconditional fall-through plus a mask computation (this pass's own
+; core mechanism, not specific to the multi-hop case above) can leave one
+; of that `CondBr`'s own successors -- here, `.Flow24_crit_edge`, a
+; `StructurizeCFG`-built critical-edge relay stub with no other
+; predecessor -- entirely unreachable. Confirmed via `git stash`: this
+; reduction's own output had exactly this dead block left behind (an LLVM
+; `; No predecessors!` comment on it) before `LinearizePass::run` was
+; taught to call `llvm::EliminateUnreachableBlocks` right after
+; `LoopLinearizer` runs; the `CHECK-NOT` below guards against it
+; regressing (a later, stricter consumer of this pass's own output,
+; `feme::cpu::EntryWrapperPass`'s `isLinearChain`, requires every block to
+; be accounted for and would otherwise spuriously reject this
+; already-fully-supported shape).
 
 ; CHECK-LABEL: define void @main(
 ; CHECK-NOT: has more than one divergent exit check
 ; CHECK: feme.cpu.mask.any
+; CHECK-NOT: No predecessors!
 
 ; ModuleID = 'module0.ll'
 source_filename = "LLVMDialectModule"
