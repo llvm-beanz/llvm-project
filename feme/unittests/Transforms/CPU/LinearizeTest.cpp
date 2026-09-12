@@ -110,6 +110,67 @@ TEST(LinearizeTest, LeavesUniformDiamondUnchanged) {
   EXPECT_TRUE(FoundCondBr);
 }
 
+// Roadmap H75: an inner if/else diamond nested inside an outer divergent
+// diamond's arm, whose own condition is built from a value `applyStageMasks`
+// has already masked (a `load` inside the outer arm) -- see
+// `nested-diamond-condition-from-masked-load.ll` for the full comment and
+// the real `dEQP-VK.mesh_shader.ext.misc.barrier_in_mesh`/`barrier_in_task`
+// reduction this comes from. `UniformityInfo` is computed once, before any
+// masking happens, against the *original*, unmasked `load` -- whose address
+// is a plain function argument, so it (correctly, for that unmasked IR)
+// classifies the inner branch's condition as uniform. Left uncorrected, the
+// inner branch would keep its real `br`, a genuine divergent branch
+// `feme::cpu::SIMDizePass` cannot widen.
+TEST(LinearizeTest, FlattensNestedDiamondWhoseConditionDependsOnMaskedLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c1 = icmp eq i32 %tid, 0
+      br i1 %c1, label %t, label %f
+    t:
+      %v = load i32, ptr %p
+      %c2 = icmp eq i32 %v, 32
+      br i1 %c2, label %inner.t, label %inner.f
+    inner.t:
+      %x1 = add i32 %tid, 10
+      br label %outer.end
+    inner.f:
+      %x2 = add i32 %tid, 20
+      br label %outer.end
+    outer.end:
+      %inner.v = phi i32 [%x1, %inner.t], [%x2, %inner.f]
+      br label %end
+    f:
+      br label %end
+    end:
+      %v2 = phi i32 [%inner.v, %outer.end], [0, %f]
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundMaskedLoad = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *Br = dyn_cast<CondBrInst>(&I))
+      ADD_FAILURE() << "no conditional branch should survive: "
+                    << Br->getCondition()->getName();
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName().starts_with("feme.cpu.masked.load"))
+          FoundMaskedLoad = true;
+  }
+  EXPECT_TRUE(FoundMaskedLoad);
+}
+
 // Roadmap H89a: a divergent diamond's own reconvergence-block `phi` may
 // merge a value one arm never actually produces (represented as `poison`
 // on that arm, exactly the shape `StructurizeCFG`/`UnifyLoopExits` leave
