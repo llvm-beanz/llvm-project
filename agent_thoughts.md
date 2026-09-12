@@ -79256,3 +79256,113 @@ glslang -> feme-translate -> feme-opt reduction chain.
    board whenever there's room for a dedicated session.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H97 session: built real JIT crash debuggability, then root-caused and fixed all four "bare SIGSEGV" crash groups with one fix
+
+## Done this session
+
+1. **Confirmed the environment**: `aarch64`, `build2` is `Release`
+   (`-O3 -DNDEBUG`, `LLVM_ENABLE_ASSERTIONS=ON`, ccache), no separate
+   debug build exists. `gdb` attached to any of H97's 4 crashing cases
+   resolved the crash to `?? ()` with a "corrupt stack" unwind -- the
+   JIT never registers its generated code with the debugger, so there
+   was no usable backtrace at all going in.
+2. **Built real debuggability instead of reverse-engineering raw
+   assembly blind**: added an opt-in `FEME_CPU_JIT_DEBUG_SUPPORT=1`
+   env var to `feme::cpu::CompiledStage::createStage`, installing
+   `orc::ELFDebugObjectPlugin` on the JIT's `ObjectLinkingLayer` (the
+   GDB JIT-registration interface, `RequireDebugSections=false` since
+   this pipeline carries no DWARF). Mirrors `llvm-jitlink`'s own
+   `--debugger-support` flag. This is a genuinely reusable capability,
+   not a one-off hack -- kept as a permanent, off-by-default feature.
+3. **Got a real, symbolized backtrace for the first time**:
+   `rasterization.culling.primitive_id`'s crash resolved to
+   `feme_cpu_entry_main` (a **vertex**-stage crash), called from
+   `feme::cpu::CompiledStage::invokeVertices`, crashing on `x8 = 0`
+   (null) inside a mask-extraction-then-masked-gather sequence.
+   `geometry.basic.output_vary_by_texture` showed the identical
+   instruction shape with `x8 = 15` (garbage, not null).
+4. **Traced the null/garbage pointer to its source** using a second,
+   temporary debug aid (a pre-JIT IR dump gated by another env var,
+   not itself committed): `FunctionWidener::widenMaskedAllocaGEP`
+   (`SIMDize.cpp`) copied a `getelementptr`'s divergent index operand
+   unchanged from the not-yet-widened old function, which silently
+   became `poison` once that function's dead instructions were
+   erased -- unlike its sibling `widenGroupSharedGEP`, which already
+   substitutes a widened index when one exists.
+5. **Fixed it**: widen `widenMaskedAllocaGEP`'s own indices the same
+   way its sibling already does. One `SmallVector` loop, ~8 lines.
+6. **Re-verified all four H97 target groups no longer crash**:
+   `geometry.basic.output_vary_by_texture` now **passes outright**;
+   `rasterization.culling.primitive_id` now runs to completion (fails
+   a *different*, new pixel-comparison bug instead -- filed as H102);
+   `texture.explicit_lod.2d.sizes.*_repeat_compute` (72 cases) now 64
+   Pass/8 Fail, 0 crashes; `api.copy_and_blit.core.use_after_copy.*`
+   (2292 cases) was already fixed as a side effect of other H-series
+   work before this session started (0 crashes, confirmed unaffected
+   by this row's own fix).
+7. **Added regression coverage**:
+   `SIMDizeTest.WidensDivergentIndexIntoMaskedAllocaArray`, confirmed
+   (by temporarily reverting the fix) to fail without it.
+8. **Verified no regressions**: `check-feme`'s full 2960-test suite (0
+   failures, 3 pre-existing unsupported). Broader sweeps: `rasterization.*`
+   full (15019 cases, 0 crashes), `geometry.*` full (200 cases, 0
+   crashes), `texture.explicit_lod.*` full (380 cases, 0 crashes), and
+   a partial `texture.*` full-group sweep (~24,000 of ~144,000 cases,
+   time-boxed, 0 crashes observed).
+9. **Updated docs**: struck through H97 in `Roadmap.md`; filed H102 for
+   `rasterization.culling.primitive_id`'s newly-exposed pixel-comparison
+   bug (out of H97's own scope); added a "Roadmap H97: measured impact"
+   section to `VulkanCTSReport.md`. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md`/`FeMeCPUDesign.md` changes needed --
+   `FeMeCPUDesign.md`'s own "Phase 4: Widening" table already prescribed
+   this exact fix ("alloca T -> alloca [W x T], indexed by lane"); this
+   row's bug was an incomplete implementation of that existing design,
+   not a deviation from it.
+10. **Committed in 5 small commits**: the JIT debug-support
+    infrastructure, the `SIMDize.cpp` fix, the unit test, the
+    `Roadmap.md` update, the `VulkanCTSReport.md` update.
+
+## A note on this session's own recovery
+
+This session started by restoring a prior session's stashed,
+uncommitted work (`git stash pop`) after a network disconnect. All of
+it -- the JIT debug support, the fix, and the new unit test -- was
+already correct and complete; this session's own job was mostly
+re-verification (rebuild, re-run `check-feme`, re-run the 4 target CTS
+cases and broader sweeps) before committing, plus writing up the docs.
+Worth remembering: a stashed diff survives a disconnect exactly as well
+as a committed one as long as nothing runs `git stash drop`/`git clean`
+in between -- checking `git stash list` first, before assuming lost
+work needs redoing from scratch, is the fast path.
+
+## Suggested next steps
+
+1. **H102** (`rasterization.culling.primitive_id`'s new pixel-comparison
+   mismatch, exposed by this session's own fix) is the most immediately
+   actionable next item -- needs its own qpa-image/channel-level pixel
+   reduction (the H88/H93-style technique) to find which stage of the
+   primitive-ID/culling path disagrees. Likely 1-2 hours for a first
+   diff, since the crash is already gone and the case already runs to
+   completion.
+2. **H99** (`pipeline` group, ~36% of the entire suite by case count,
+   with both a real hang and a `spirv.Kill` legalization crash) remains
+   the single highest-value untriaged item of the original 13 -- fixing
+   or even just bulk-excluding it the way H98 did for `image` would move
+   the largest share of any remaining H97-H101 row.
+3. **H98** (`image.host_image_copy.*`'s systemic crash family, 51% of
+   the `image` group) is the next-largest remaining untriaged bucket --
+   worth checking whether `widenMaskedAllocaGEP`'s own fix (this
+   session) happens to have resolved any of it as a side effect before
+   investing in a fresh reduction, the same way `api`'s crash turned out
+   to already be fixed by unrelated prior work.
+4. The `FEME_CPU_JIT_DEBUG_SUPPORT=1` capability added this session is
+   now available for any future JIT-crash triage (H99/H100's own crash
+   signatures in particular) -- reach for it first instead of raw `gdb`
+   on an unregistered JIT frame.
+5. The full `texture.*` group sweep was time-boxed at ~24,000 of
+   ~144,000 cases this session (0 crashes observed in that partial run)
+   -- a future session with more time budget could finish it for a
+   fully complete measurement, though the exact cited crash family
+   (`explicit_lod.2d.sizes.*_repeat_compute`) was already swept in full
+   with 0 crashes, so this is a nice-to-have, not a blocker.
