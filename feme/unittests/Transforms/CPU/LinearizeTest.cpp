@@ -218,6 +218,73 @@ TEST(LinearizeTest, MasksResourceCallUnderDivergentBranch) {
   EXPECT_TRUE(FoundMaskedCall);
 }
 
+// Roadmap H95a: a `feme.cpu.resource.*` call sitting in a loop's exit
+// block, where that loop is itself nested inside a still-divergent outer
+// `if (tid == 0) { <loop-with-divergent-exit>; <resource call> }` diamond
+// (see `resource-call-after-nested-loop-in-divergent-diamond.ll` for the
+// real-world reduction this shape comes from). Before this fix,
+// `DiamondFlattener::run` always seeded a cycle's exit block -- treated as
+// a brand-new root -- with a hardcoded "every lane active" mask instead of
+// the real, narrower mask that was actually in effect when the loop was
+// reached; since nothing in the exit block's own local shape narrows that
+// placeholder any further, it constant-folded straight back down to a
+// literal `true`, and `applyStageMasks`'s constant-mask check silently
+// skipped rewriting the call's mask operand, leaving it exactly as if
+// every lane -- not just the one that took the outer branch -- should
+// execute it.
+TEST(LinearizeTest,
+     MasksResourceCallInExitBlockOfLoopNestedInDivergentDiamond) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %heap, i32 %heap_count) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c1 = icmp eq i32 %tid, 0
+      br i1 %c1, label %outer.t, label %outer.f
+    outer.t:
+      br label %header
+    header:
+      %i = phi i32 [0, %outer.t], [%inc, %latch]
+      %cond = icmp eq i32 %i, %tid
+      br i1 %cond, label %exit, label %latch
+    latch:
+      %inc = add i32 %i, 1
+      br label %header
+    exit:
+      call void @feme.cpu.resource.store.raw.i32(ptr %heap, i32 %heap_count, i32 0, i64 0, i32 1, i1 true)
+      br label %end
+    outer.f:
+      br label %end
+    end:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundMaskedCall = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+    if (!Matched)
+      continue;
+    FoundMaskedCall = true;
+    EXPECT_FALSE(isa<Constant>(Matched->Mask))
+        << "mask should have been rewritten to the outer diamond's real "
+           "mask, not left as (or folded back down to) the constant "
+           "`true` feme::cpu::ResourceLoweringPass left it as";
+  }
+  EXPECT_TRUE(FoundMaskedCall);
+}
+
 TEST(LinearizeTest, MasksImageStoreCallUnderDivergentBranch) {
   // L7r: `feme.cpu.image.*` calls need the exact same divergent-region mask
   // threading `MasksResourceCallUnderDivergentBranch` above already
