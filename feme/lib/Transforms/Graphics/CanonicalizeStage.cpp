@@ -1303,6 +1303,24 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
       } else if (auto *InnerArrTy = dyn_cast<ArrayType>(CurTy)) {
         ByteOffset += Idx * DL.getTypeAllocSize(InnerArrTy->getElementType());
         CurTy = InnerArrTy->getElementType();
+      } else if (auto *VecTy = dyn_cast<FixedVectorType>(CurTy)) {
+        // (Roadmap H76) A per-component write into a dynamically
+        // vertex-indexed stage-IO member (`gl_MeshVerticesEXT[outIndex].
+        // gl_Position.x = ...`, the real shape a real
+        // `dEQP-VK.mesh_shader.ext.smoke.fast_lib.depth_only_*_position_
+        // components` mesh entry's own per-component position write
+        // compiles into, once `outIndex` itself -- unlike every other
+        // constant-vertex-index test in this file -- is a genuinely
+        // dynamic per-invocation value): one more constant index beyond
+        // the struct member already peeled above, selecting a lane within
+        // that member's own vector type. Missing this case fell through
+        // to the `return std::nullopt` below, leaving the whole access
+        // unrewritten and surfacing later as
+        // `feme-graphics-validate-stage`'s "unresolved stage-IO
+        // global-variable access" diagnostic -- exactly what this
+        // milestone's own real CTS failures hit.
+        ByteOffset += Idx * DL.getTypeAllocSize(VecTy->getElementType());
+        CurTy = VecTy->getElementType();
       } else {
         return std::nullopt;
       }
