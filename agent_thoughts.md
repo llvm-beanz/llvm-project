@@ -79427,3 +79427,79 @@ separate triage.
    advertised feature/extension support level -- no
    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
    was needed or made.
+
+# H98a session: fixed the 66-case host_image_copy failure family (two unrelated format-table gaps, not the filed "pixel-comparison mismatch")
+
+Fixed both bugs. All 66 cases pass. Full `host_image_copy` family:
+5894 Pass / 0 Fail / 67401 NotSupported. Roadmap H98a struck through.
+
+## What actually happened vs. what was filed
+
+The filing said "pixel-comparison mismatch." A fresh repro of one
+sample case showed the real failure was `VK_ERROR_INITIALIZATION_
+FAILED` at `vkQueueSubmit` -- a completely different failure mode
+(command-buffer execution failure, not a rendering bug). The filing
+also only mentioned `draw_*`, but the true 66-case set was 48
+`draw_*` + 18 `large_images.*`. Lesson for future sessions: re-repro
+a filing's own characterization before trusting it -- roadmap notes
+drift.
+
+## Two distinct root causes, both in `ImageFixture.cpp`
+
+1. **Bug A (44 cases, r8_unorm/r8g8_unorm)**: `getFormatInfo`'s
+   `FormatInfo` switch had no entry for `R8_UNORM`/`R8_SNORM`/
+   `R8G8_UNORM`/`R8G8_SNORM`, even though `packClearColor`/
+   `unpackColor` already special-case these formats elsewhere (for
+   unrelated BC4/BC5 sampling-bridge use). Same gap shape the
+   existing `R16_UINT`/`R16G16_UINT` comments (H8p) already document
+   a precedent for.
+
+2. **Bug B (22 cases, r32g32_sfloat/r32_sfloat)**: `packClearColor`'s
+   generic fallback strictly requires `Clear.size() ==
+   Info->Components`, but every real caller always supplies 4
+   components. `R32_FLOAT`/`R32G32_FLOAT` had no dedicated
+   special-case block to intercept before that fallback -- the exact
+   same bug `R32_UINT`/`R32G32_UINT`/`R32G32B32_UINT` were already
+   special-cased for under H70, just never extended to `_FLOAT`.
+   New unit tests caught the identical, previously-unexercised
+   mirror-image gap in `unpackColor` too.
+
+Key tool: `FEME_VULKAN_LOG_CREATION_ERRORS=1` (existing opt-in env
+var, `Diagnostics.cpp`) to unmask the real internal error text
+instead of the generic `VK_ERROR_INITIALIZATION_FAILED`. This should
+be the first move for any future `VK_ERROR_INITIALIZATION_FAILED`
+triage in this driver.
+
+Architectural note worth remembering: `packClearColor`/`unpackColor`
+special-case narrower-than-4-component formats one at a time before
+falling through to a generic path that assumes exact size match.
+Any format that reaches the fallback with `Components != 4` and no
+special case is broken. `R32G32B32_FLOAT` (3 components) is a likely
+latent instance of the same bug, not yet confirmed or exercised by
+any known failing case -- worth checking if it ever surfaces.
+
+## Commits (4, each independently buildable/testable)
+
+1. `getFormatInfo` fix (Bug A: R8_UNORM/R8_SNORM/R8G8_UNORM/R8G8_SNORM)
+2. `packClearColor`/`unpackColor` fix (Bug B: R32_FLOAT/R32G32_FLOAT)
+3. New unit tests (`ImageFixtureTest.cpp`, 4 new tests, confirmed to
+   fail at baseline via a temporary `git revert --no-commit` + rebuild,
+   then restored)
+4. `Roadmap.md` + `VulkanCTSReport.md` docs update
+
+## Suggested next steps
+
+1. **H99** is still the highest-value remaining crash-triage target:
+   largest untriaged group in the suite (1.17M cases, ~36% of the
+   total), with both a genuine hang and a `spirv.Kill` legalization
+   crash in the same `fast_linked_library.blend.dual_source` family.
+   Worth checking first whether the same "one root cause, bulk-
+   excludable" pattern H97/H98/H98a all turned out to have applies
+   here too.
+2. If `R32G32B32_FLOAT` ever shows up in a future failing case with
+   the same "clear color has 4 component(s), expected 3" shape,
+   apply the identical H70/H98a fix pattern -- add a dedicated
+   special-case block to both `packClearColor` and `unpackColor`.
+3. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+   unchanged -- this was a bug fix within already-advertised support,
+   confirmed no update needed.
