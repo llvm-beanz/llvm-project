@@ -608,6 +608,38 @@ static void fillSubresourceLayout(const ImageSubresourceLayout &L,
   pLayout.depthPitch = L.DepthPitch;
 }
 
+/// (Roadmap H98) `VK_EXT_host_image_copy`'s `VkSubresourceHostMemcpySize`:
+/// the byte size the application must allocate to receive (or supply, for
+/// a `VK_HOST_IMAGE_COPY_MEMCPY_BIT` copy) one subresource's worth of
+/// tightly-packed host-side data, chained onto `vkGetImageSubresourceLayout2`/
+/// `vkGetDeviceImageSubresourceLayoutKHR`'s own `pNext`. This driver's own
+/// `ImageSubresourceLayout::Size` (the same value `fillSubresourceLayout`
+/// reports as `VkSubresourceLayout::size`) already *is* exactly that byte
+/// count -- a `VK_HOST_IMAGE_COPY_MEMCPY_BIT` region always names a single
+/// `(mipLevel, arrayLayer)` subresource, matching `Size`'s own "one array
+/// layer's own byte range" definition -- so no new computation is needed,
+/// only wiring this struct up to read it. Left unfilled (as it was before
+/// this fix), `size` stays whatever `VkSubresourceHostMemcpySize`'s own
+/// caller-side zero-initialization left it at: the real CTS shape this
+/// fixes (`vktImageHostImageCopyTests.cpp`'s own `MEMCPY` action) sizes its
+/// host buffer directly from this field
+/// (`std::vector<uint8_t> data((size_t)subresourceHostMemcpySize.size)`),
+/// so a silently-zero `size` allocates a zero-byte buffer whose `.data()`
+/// may be null, then hands that null pointer straight to
+/// `vkCopyImageToMemory`/`vkCopyMemoryToImage` as `pHostPointer` --
+/// `feme::vulkan::copyBufferImageRegion` then crashes with a bare
+/// `SIGSEGV` inside its own `std::memcpy`, dereferencing that null
+/// pointer.
+static void fillSubresourceLayout2PNextChain(const ImageSubresourceLayout &L,
+                                             void *PNext) {
+  for (auto *Base = static_cast<VkBaseOutStructure *>(PNext); Base;
+       Base = Base->pNext) {
+    if (Base->sType != VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE)
+      continue;
+    reinterpret_cast<VkSubresourceHostMemcpySize *>(Base)->size = L.Size;
+  }
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout(
     VkDevice, VkImage image, const VkImageSubresource *pSubresource,
     VkSubresourceLayout *pLayout) {
@@ -619,11 +651,13 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout(
 /// `VK_KHR_maintenance5`'s `pNext`-extensible counterpart to
 /// `vkGetImageSubresourceLayout` above, for a live image.
 VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout2KHR(
-    VkDevice device, VkImage image, const VkImageSubresource2 *pSubresource,
+    VkDevice, VkImage image, const VkImageSubresource2 *pSubresource,
     VkSubresourceLayout2 *pLayout) {
-  feme::vulkan::vkGetImageSubresourceLayout(
-      device, image, &pSubresource->imageSubresource,
-      &pLayout->subresourceLayout);
+  ImageSubresourceLayout Layout = fromHandle<Image>(image)->subresourceLayout(
+      pSubresource->imageSubresource.mipLevel,
+      pSubresource->imageSubresource.arrayLayer);
+  fillSubresourceLayout(Layout, pLayout->subresourceLayout);
+  fillSubresourceLayout2PNextChain(Layout, pLayout->pNext);
 }
 
 /// `VK_KHR_maintenance5`: the info-only counterpart to
@@ -644,10 +678,10 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(
     pLayout->subresourceLayout = VkSubresourceLayout{};
     return;
   }
-  fillSubresourceLayout(
-      computeImageCreateInfoSubresourceLayout(
-          CreateInfo, *Format, Subresource.mipLevel, Subresource.arrayLayer),
-      pLayout->subresourceLayout);
+  ImageSubresourceLayout Layout = computeImageCreateInfoSubresourceLayout(
+      CreateInfo, *Format, Subresource.mipLevel, Subresource.arrayLayer);
+  fillSubresourceLayout(Layout, pLayout->subresourceLayout);
+  fillSubresourceLayout2PNextChain(Layout, pLayout->pNext);
 }
 
 /// (roadmap E4) `VK_KHR_maintenance4`: no sparse residency is supported
