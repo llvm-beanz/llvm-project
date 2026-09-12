@@ -1909,6 +1909,79 @@ TEST(SIMDizeTest, WidensVectorAllEqualFeedingUniformSelect) {
   EXPECT_TRUE(FoundSelect);
 }
 
+// Roadmap H97: `FunctionWidener::widenMaskedAllocaGEP` (the widening rule
+// for any `getelementptr` chained off a `feme.cpu.masked.load`/`.store`-
+// touched local -- see `widenMaskedAlloca`'s own comment) copied every one
+// of that GEP's *index* operands unchanged from the not-yet-widened
+// function, on the assumption that a masked-alloca's own indexing is
+// always lane-uniform (its own motivating case: a lane-uniform loop index
+// into a `Function`-storage matrix local). That assumption does not hold
+// when the index is itself genuinely divergent -- e.g. a per-lane vertex
+// index reading back a small per-vertex array a vertex shader stored
+// through earlier in the same function (`dEQP-VK.rasterization.culling.
+// primitive_id`'s own real shape, reduced here) -- so the stale,
+// not-widened index `Value*` from the soon-to-be-discarded old function
+// silently became `poison` once that function's own dead instructions
+// were erased, producing a `getelementptr`/`llvm.masked.gather` whose
+// address is `poison` for every lane and crashing with a bare `SIGSEGV`
+// at runtime (no diagnostic at all -- this was one of the four "new
+// crash/hang bugs" roadmap milestone H97 set out to triage). The fix
+// mirrors `widenGroupSharedGEP`'s own index handling: substitute an
+// index's own widened `<W x T>` form when one exists, exactly like every
+// other divergent operand in this file, rather than assuming every index
+// here is uniform.
+TEST(SIMDizeTest, WidensDivergentIndexIntoMaskedAllocaArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %idx = urem i32 %tid, 3
+      %a = alloca [3 x i32], align 4
+      %p0 = getelementptr [3 x i32], ptr %a, i32 0, i32 0
+      call void @feme.cpu.masked.store.i32(i32 10, ptr %p0, i32 4, i1 true)
+      %p1 = getelementptr [3 x i32], ptr %a, i32 0, i32 1
+      call void @feme.cpu.masked.store.i32(i32 20, ptr %p1, i32 4, i1 true)
+      %p2 = getelementptr [3 x i32], ptr %a, i32 0, i32 2
+      call void @feme.cpu.masked.store.i32(i32 30, ptr %p2, i32 4, i1 true)
+      %addr = getelementptr [3 x i32], ptr %a, i32 0, i32 %idx
+      %val = call i32 @feme.cpu.masked.load.i32(ptr %addr, i32 4, i1 true, i32 0)
+      %off = zext i32 %tid to i64
+      %outp = getelementptr i32, ptr %out, i64 %off
+      store i32 %val, ptr %outp
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.masked.store.i32(i32, ptr, i32, i1)
+    declare i32 @feme.cpu.masked.load.i32(ptr, i32, i1, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // The widened gather reading the array back must never end up with a
+  // `poison` address operand -- every operand of every `getelementptr`
+  // feeding it must be a real value, not a since-erased dangling one.
+  bool FoundGather = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      for (Value *Idx : GEP->indices())
+        EXPECT_FALSE(isa<PoisonValue>(Idx));
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getIntrinsicID() ==
+            Intrinsic::masked_gather) {
+      FoundGather = true;
+      EXPECT_FALSE(isa<PoisonValue>(CI->getArgOperand(0)));
+    }
+  }
+  EXPECT_TRUE(FoundGather);
+}
+
 } // namespace
 
 
