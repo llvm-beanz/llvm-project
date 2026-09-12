@@ -265,6 +265,24 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // (Roadmap H8p) The two-channel sibling of `R16_UINT`/`_SINT` above,
     // same rationale.
     return FormatInfo{2, 2, false};
+  case ResourceFormat::R8_UNORM:
+  case ResourceFormat::R8_SNORM:
+    // (Roadmap H98a) A real color-attachment format, unlike its
+    // `BC4Decode`-sampling-bridge-only use elsewhere in this file --
+    // needs a real `FormatInfo` entry here since `getFixtureFormatElementSize`
+    // (used by `CommandBuffer.cpp`'s render-pass/dynamic-rendering
+    // attachment-clear path) reaches this table, unlike
+    // `packClearColor`/`unpackColor`'s own dedicated `if`-block for this
+    // format (above `getFormatInfo` in `packClearColor`'s own body),
+    // which returns before ever reaching it -- the same rationale
+    // `R16_UINT`/`_SINT` above already established for their own
+    // otherwise-sampling-bridge-only siblings.
+    return FormatInfo{1, 1, false};
+  case ResourceFormat::R8G8_UNORM:
+  case ResourceFormat::R8G8_SNORM:
+    // (Roadmap H98a) The two-channel sibling of `R8_UNORM`/`_SNORM`
+    // above, same rationale.
+    return FormatInfo{2, 1, false};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "image fixture format is not yet supported "
