@@ -2868,15 +2868,22 @@ void FunctionWidener::widenMaskedAllocaGEP(GetElementPtrInst &GEP,
   // widened base: there, a divergent *index* off a single, intentionally-
   // shared base is what needs widening; here, the *base* itself was
   // replaced by a real `<W x ptr>` of distinct per-lane addresses (see
-  // `widenMaskedAlloca`), while `GEP`'s own indices are left completely
-  // unchanged (e.g. this row's own motivating case: a dynamic-but-lane-
-  // uniform loop index into a `Function`-storage `int4x4` local).
+  // `widenMaskedAlloca`). `GEP`'s own indices are usually lane-uniform
+  // (e.g. this row's own motivating case: a dynamic-but-lane-uniform loop
+  // index into a `Function`-storage `int4x4` local) and can stay scalar --
   // `getelementptr`'s vector-base/scalar-index form broadcasts a scalar
-  // index across every lane of the base automatically, so applying `GEP`'s
-  // own indices unchanged, once, against the widened base gives each
-  // lane's own within-object address at no extra cost.
+  // index across every lane of the base automatically. But an index can
+  // itself be genuinely divergent too (e.g. a per-lane vertex index used
+  // to read back a masked-alloca'd per-vertex array, roadmap H97's own
+  // motivating case): substitute that index's own widened `<W x T>` form,
+  // exactly like `widenGroupSharedGEP` above already does for its indices,
+  // rather than reusing the stale scalar `Value*` from `OldF` (dead once
+  // that function's own instructions are erased, so this reused unchecked
+  // it silently turned into `poison`).
   Value *WideBase = Widened.lookup(GEP.getPointerOperand());
-  SmallVector<Value *, 4> Indices(GEP.indices());
+  SmallVector<Value *, 4> Indices;
+  for (Value *Idx : GEP.indices())
+    Indices.push_back(Widened.count(Idx) ? Widened[Idx] : Idx);
   Value *NewGEP =
       Builder.CreateGEP(GEP.getSourceElementType(), WideBase, Indices,
                         GEP.getName() + ".wide", GEP.isInBounds());
