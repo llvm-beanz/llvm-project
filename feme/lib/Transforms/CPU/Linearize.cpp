@@ -193,6 +193,33 @@ static bool isKnownConstantMask(Value *V) {
   return isa<Constant>(lookThroughTrivialPhi(V));
 }
 
+/// (Roadmap H75) Whether \p V is, or transitively depends (through any
+/// chain of instruction operands, including `phi` incoming values) on, one
+/// of the masked-load results \p Tainted collects -- see `applyStageMasks`'s
+/// own `MaskedLoads` parameter comment for why this matters:
+/// `UniformityInfo`, computed once before any masking happens, cannot see
+/// that a masked load's result is now per-lane-varying (a masked-off lane
+/// reads the passthru, not the real value), so a later branch's condition
+/// built from it can be misclassified uniform. Bounded by \p Visited so a
+/// cyclic def-use chain (a `phi` reachable from itself) terminates rather
+/// than looping forever; deliberately conservative (a `false` positive here
+/// only costs `DiamondFlattener::flatten` an extra `select` instead of a
+/// real branch+`phi`, never unsound -- see `flatten`'s own comment where
+/// this is used).
+static bool dependsOnTaintedValue(Value *V,
+                                  const SmallPtrSetImpl<Value *> &Tainted,
+                                  SmallPtrSetImpl<Value *> &Visited) {
+  if (Tainted.contains(V))
+    return true;
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I || !Visited.insert(V).second)
+    return false;
+  for (Value *Op : I->operands())
+    if (dependsOnTaintedValue(Op, Tainted, Visited))
+      return true;
+  return false;
+}
+
 /// Shared between `DiamondFlattener` (a divergent arm's masks) and
 /// `LoopLinearizer` (a loop iteration's "active" masks) below. A given
 /// memory access is left unmasked exactly when the mask that would govern
@@ -200,7 +227,23 @@ static bool isKnownConstantMask(Value *V) {
 /// per access rather than once for the whole block, since a
 /// `feme.stage.discard`/`.demote` call earlier in the same block can turn
 /// an initially-constant mask into a real value partway through it.
-void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
+///
+/// (Roadmap H75) When \p MaskedLoads is non-null, every `feme.cpu.masked.
+/// load` call this rewrites a plain `load` into is recorded there: unlike
+/// every other masked form this function creates, a masked load's result
+/// can itself feed a *later* branch's condition (e.g. a shared-memory
+/// counter a single invocation reads back after a barrier, then compares
+/// against an expected value), and that result is only per-lane-varying
+/// *because* of the masking this function just performed -- a masked-off
+/// lane gets the passthru (zero) instead of whatever the (possibly
+/// perfectly uniform) memory location actually holds. `UniformityInfo` is
+/// computed once, before this function ever runs (see
+/// `feme::cpu::LinearizePass::run`), so it has no way to know that; only
+/// `DiamondFlattener::flatten`, which calls this function block by block as
+/// it walks, can. See `dependsOnTaintedValue` and its use in `flatten`'s own
+/// divergent-vs-uniform branch classification.
+void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
+                     SmallPtrSetImpl<Value *> *MaskedLoads = nullptr) {
   for (Instruction &I : make_early_inc_range(BB)) {
     if (auto *Call = dyn_cast<CallInst>(&I)) {
       feme::StageOpKind Kind;
@@ -373,6 +416,8 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
         continue;
       LI->replaceAllUsesWith(Masked);
       LI->eraseFromParent();
+      if (MaskedLoads)
+        MaskedLoads->insert(Masked);
       continue;
     }
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
@@ -554,6 +599,18 @@ private:
   /// can look up (via `CycleBoundaryMasks`) every mask that reaches that
   /// root and use it directly when they all agree (see `run`).
   DenseMap<BasicBlock *, SmallVector<BasicBlock *, 2>> ExitToBoundaryBlocks;
+
+  /// Roadmap H75: every masked-load result `applyStageMasks` has produced
+  /// so far, across every root `flatten` has processed in this `run` --
+  /// see `applyStageMasks`'s own `MaskedLoads` parameter comment, and
+  /// `dependsOnTaintedValue`'s use of this set in `flatten`'s divergent-
+  /// vs-uniform branch classification, for why this needs tracking at all.
+  /// Deliberately never cleared between roots: a value from one root's own
+  /// walk can only reach a *later* root's branch condition through genuine
+  /// dominance/data flow (e.g. a cycle-exit root reading a value a masked
+  /// load before that cycle computed), in which case it is exactly as
+  /// tainted there as it was where it was created.
+  SmallPtrSet<Value *, 16> MaskedLoadResults;
 };
 
 bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
@@ -653,7 +710,7 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
       return Masks;
     }
 
-    applyStageMasks(*Cur, Masks);
+    applyStageMasks(*Cur, Masks, &MaskedLoadResults);
 
     if (isa<ReturnInst>(Term))
       return Masks; // Only reachable at the outermost call (End == nullptr).
@@ -675,7 +732,23 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
 
     BasicBlock *R = immediatePostDom(Cur);
 
-    if (!UI.isDivergentTerminator(Br)) {
+    // Roadmap H75: `UI` was computed once, before this walk masked
+    // anything (see `feme::cpu::LinearizePass::run`), so it cannot know a
+    // masked load's result (see `applyStageMasks`'s own `MaskedLoads`
+    // comment) is now per-lane-varying even when the memory it reads is
+    // itself perfectly uniform -- a masked-off lane reads the passthru
+    // (zero) instead. A branch built from one, left on the "uniform" path
+    // below, would keep its real `br`/`phi` shape with every lane
+    // executing it unconditionally (see the comment there), reintroducing
+    // exactly the divergent branch this pass exists to remove -- found
+    // reducing `dEQP-VK.mesh_shader.ext.misc.barrier_in_mesh`/
+    // `barrier_in_task` down to a single-invocation-gated `if (counter ==
+    // 32) {...} else {...}` reading a barrier-synchronized shared counter.
+    SmallPtrSet<Value *, 8> Visited;
+    bool CondTainted =
+        dependsOnTaintedValue(Br->getCondition(), MaskedLoadResults, Visited);
+
+    if (!UI.isDivergentTerminator(Br) && !CondTainted) {
       // Uniform: the real branch stays; each arm is flattened on its own,
       // still reconverging at the same `R`. Uniform control flow cannot
       // itself narrow the live/side-effect masks (only a
