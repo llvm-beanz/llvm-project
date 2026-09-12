@@ -45,16 +45,23 @@ agent thoughts.
 
 # Request
 
-Can you work on H98 or other blocking work to make progress on the H-series
+Can you work on H98a or other blocking work to make progress on the H-series
 milestones?
 
-> **`image.host_image_copy.*`'s systemic crash family** (73,295 of `image`'s
-> 143,086 cases, 51% of the group -- confirmed by 25 straight resume-loop
-> iterations each crashing within this exact family with zero successes
-> recorded, hence bulk-excluded rather than resumed one case at a time for this
-> session's own measurement): every `host_image_copy` case appears to crash,
-> suggesting a fundamental gap in `VK_EXT_host_image_copy` support rather than a
-> narrow per-case bug. Not yet triaged -- needs a representative single-case
-> repro and backtrace; given the density, likely a missing/unimplemented core
-> code path (e.g. the host-side copy entry point itself) rather than an edge
-> case
+> **`image.host_image_copy.draw_*`'s 66-case pixel-comparison failure family**
+> (newly exposed by H98's own closing re-run once the systemic crash it
+> previously masked was fixed): every failure is in the `draw_<format>`
+> subfamily (e.g. `draw_r32g32_sfloat_r32g32_sfloat`, `draw_r8_unorm_r8_unorm`)
+> specifically for `transfer_src_transfer_dst` usage combined with a
+> `general`/`optimal` layout pair at a small (16x16 or 53x61) extent, across
+> every one of that subfamily's
+> `barrier_transition_host_copy`/`host_transition`/`host_transition_host_copy` x
+> `image_to_memory`/`memcpy`/`memory_to_image` action combinations -- a narrow,
+> specific shape (renderable-format host copies around an actual draw call), not
+> a general regression of the `dispatch_*`/`simple.*` host-copy paths H98's own
+> fix already made pass. Not yet triaged -- needs a single-case repro (e.g.
+> `draw_r8_unorm_r8_unorm.host_transition.memcpy.transfer_src_transfer_dst.general.optimal.0_1_0.16x16`)
+> and a qpa-image/channel-level pixel reduction (mirroring H88/H93's own
+> technique) to determine whether the drawn content itself, the host-copy
+> readback, or the transfer-src/transfer-dst layout transition around the draw
+> is the actual source of disagreement
