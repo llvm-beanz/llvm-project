@@ -537,6 +537,23 @@ private:
   /// since a cycle's own body is `LoopLinearizer`'s problem, but the code
   /// after it is squarely this pass's.
   SmallPtrSet<BasicBlock *, 8> CycleBoundaryBlocks;
+
+  /// Roadmap H95a: for every block `flatten` itself stopped at (the same
+  /// boundary `CycleBoundaryBlocks` records during `validate`, see above),
+  /// the `MaskPair` that was actually in effect there -- i.e. the mask
+  /// describing whether the invocation reaching that block at all is live,
+  /// not merely "every invocation" -- so a cycle-exit root reached only
+  /// from inside some still-divergent enclosing region (e.g. a loop nested
+  /// in `if (laneId == 0) { ... }`) can be seeded with that real mask
+  /// instead of unconditionally assuming every lane reaches it (see `run`).
+  DenseMap<BasicBlock *, MaskPair> CycleBoundaryMasks;
+
+  /// Roadmap H95a: the reverse of the mapping `run` builds from
+  /// `CycleBoundaryBlocks` to each cycle's exit block(s) -- for a given
+  /// exit-block root, every boundary block whose walk reached it, so `run`
+  /// can look up (via `CycleBoundaryMasks`) every mask that reaches that
+  /// root and use it directly when they all agree (see `run`).
+  DenseMap<BasicBlock *, SmallVector<BasicBlock *, 2>> ExitToBoundaryBlocks;
 };
 
 bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
@@ -628,8 +645,13 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
     if (auto *Br = dyn_cast<CondBrInst>(Term);
         Br && isInCycle(Cur) &&
         (isLoopControlEdge(Cur, Br->getSuccessor(0)) ||
-         isLoopControlEdge(Cur, Br->getSuccessor(1))))
+         isLoopControlEdge(Cur, Br->getSuccessor(1)))) {
+      // Roadmap H95a: record the real mask reaching this cycle's boundary
+      // here, so `run` can seed that cycle's exit-block root(s) with it
+      // below instead of assuming every lane unconditionally reaches them.
+      CycleBoundaryMasks[Cur] = Masks;
       return Masks;
+    }
 
     applyStageMasks(*Cur, Masks);
 
@@ -773,9 +795,15 @@ bool DiamondFlattener::run() {
     for (BasicBlock *CycleBlock : CycleBoundaryBlocks) {
       SmallVector<BasicBlock *, 2> Exits;
       CI.getExitBlocks(CI.getCycle(CycleBlock), Exits);
-      for (BasicBlock *Exit : Exits)
+      for (BasicBlock *Exit : Exits) {
+        // Roadmap H95a: remember which boundary block(s) feed this exit
+        // root, so the mutation phase below can look up the real mask(s)
+        // `flatten` records for them (see `CycleBoundaryMasks`) instead of
+        // always assuming every lane reaches it.
+        ExitToBoundaryBlocks[Exit].push_back(CycleBlock);
         if (Considered.insert(Exit).second)
           Roots.push_back(Exit);
+      }
     }
   }
 
@@ -803,8 +831,48 @@ bool DiamondFlattener::run() {
 
   MaskPair AllActive{ConstantInt::getTrue(F.getContext()),
                      ConstantInt::getTrue(F.getContext())};
-  for (BasicBlock *Root : Roots)
-    flatten(Root, nullptr, AllActive, nullptr);
+  for (BasicBlock *Root : Roots) {
+    // Roadmap H95a: `Root` is either `F`'s entry block (truly reached by
+    // every lane) or a cycle's exit block reached only once that cycle's
+    // own enclosing region -- possibly still a divergent one, e.g. a loop
+    // nested inside `if (laneId == 0) { ... }` -- lets control through at
+    // all. For the latter, seed `flatten` with the real mask(s) its own
+    // cycle-boundary block(s) recorded (see `CycleBoundaryMasks`) rather
+    // than unconditionally assuming every lane reaches it: leaving that
+    // assumption in place let a trailing scalar store inside such a root
+    // keep whatever placeholder mask it already had (typically a
+    // hardcoded `true` from before this pass ever ran, since a uniform
+    // sub-diamond doesn't narrow it any further), silently overwriting the
+    // correct result the narrower mask's lanes had already computed with a
+    // stale/wrong one. When a root's boundary blocks disagree on the mask
+    // reaching them (only possible if a `feme.stage.discard`/`.demote`
+    // inside a uniform sub-diamond narrows some paths but not others
+    // before they all reach the same cycle boundary), fall back to the
+    // pre-existing `AllActive` behavior rather than guessing.
+    MaskPair EntryMasks = AllActive;
+    auto BoundaryIt = ExitToBoundaryBlocks.find(Root);
+    if (BoundaryIt != ExitToBoundaryBlocks.end()) {
+      bool Seen = false;
+      bool Mixed = false;
+      MaskPair Candidate = AllActive;
+      for (BasicBlock *BoundaryBlock : BoundaryIt->second) {
+        auto MaskIt = CycleBoundaryMasks.find(BoundaryBlock);
+        if (MaskIt == CycleBoundaryMasks.end())
+          continue;
+        if (!Seen) {
+          Candidate = MaskIt->second;
+          Seen = true;
+        } else if (Candidate.Live != MaskIt->second.Live ||
+                   Candidate.SideEffect != MaskIt->second.SideEffect) {
+          Mixed = true;
+          break;
+        }
+      }
+      if (Seen && !Mixed)
+        EntryMasks = Candidate;
+    }
+    flatten(Root, nullptr, EntryMasks, nullptr);
+  }
   return true;
 }
 
