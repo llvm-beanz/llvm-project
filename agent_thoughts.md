@@ -78884,3 +78884,101 @@ triage.
    recorded in H94's own roadmap row (~30-60 min to recapture).
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H95a session: fixed both stacked bugs, all 6 H95/H95a cases now pass
+
+**Status right now:** H95a is done. All 4 target CTS cases pass. All 6
+originally-tracked H95/H95a cases pass. Struck through in the roadmap.
+
+## What got done
+
+1. **Found the first bug** (already root-caused before this session's
+   compaction): `Linearize.cpp`'s `DiamondFlattener::run()` seeded every
+   cycle-exit-root with a hardcoded `AllActive` mask instead of the real
+   mask at the cycle boundary it exits from. Fixed by tracking each
+   boundary block's real `MaskPair` (`CycleBoundaryMasks`) and seeding
+   exit-roots from it. Added lit + unit test coverage, confirmed both
+   fail without the fix and pass with it. Committed
+   (`Linearize.cpp` fix + its tests, 2 separate commits, done before
+   this session's summary).
+2. **Ran the real CTS cases with fix #1**: `mesh_payload_size`/
+   `task_payload_size` (already fixed under H95's own `Executor.cpp`
+   fix) still passed. The 4 H95a target cases **crashed** instead of
+   failing cleanly -- an LLVM assertion
+   (`"cannot get terminator of non-well-formed block"`) deep inside the
+   standard optimizer pipeline's `CalledValuePropagationPass`, at
+   `vkCreateGraphicsPipelines` time. Not caused by malformed output from
+   fix #1 itself (verified standalone with `opt -passes=verify`).
+3. **Localized the second bug with a binary-search technique**: added
+   `FEME_DEBUG_DUMP_STAGES`-env-gated `verifyModule()` calls after each
+   pipeline stage in `Pipeline.cpp` (Linearize, SIMDize, WaveLowering,
+   mesh/task `EntryWrapperPass`). Rebuilt `feme_vulkan`, reran with the
+   env var set: module valid through WaveLowering, invalid immediately
+   after `EntryWrapperPass` (mesh stage) -- "PHI nodes not grouped at
+   top of basic block!" naming `Flow26`'s `live.merge10.wide`/
+   `sideeffect.merge11.wide` phis.
+4. **Root-caused and fixed the second bug**: `EntryWrapper.cpp`'s
+   `spillValuesLiveAcrossBarriers` always did
+   `IRBuilder<> Builder(User)` when inserting a barrier-crossing value's
+   reload. When `User` is a `PHINode`, this inserts the reload in the
+   phi's own block instead of the correct incoming predecessor block --
+   both a phi-grouping violation and an outright SSA dominance
+   violation. This bug was pre-existing but dormant: it only manifests
+   when a spilled value feeds a downstream phi, which never happened
+   before fix #1 turned a constant mask into a real SSA value doing
+   exactly that. Fixed by special-casing `PHINode` users to insert the
+   reload at `getIncomingBlock(OperandNo)->getTerminator()`.
+5. **Verified fix #2**: rebuilt `feme_vulkan`, re-ran all 4 target CTS
+   cases -- all **pass**. Removed the temporary `Pipeline.cpp` debug
+   instrumentation (`git checkout` it back to clean).
+6. **Added regression coverage for fix #2**: `EntryWrapperTest.cpp`'s
+   `SpillsValueUsedAsPhiIncomingValueAfterBarrier`. First attempt used
+   `%gid` (a uniform builtin call) directly as the phi operand -- turns
+   out uniform builtin calls get re-issued per-region rather than
+   spilled at all, so this didn't exercise the bug. Fixed the test to
+   spill a derived value (`%gplus = add i32 %gid, 7`) instead. Confirmed
+   via `git stash` A/B: fails (module invalid) without the fix, passes
+   with it.
+7. **Ran full `check-feme`**: 2953 passed / 3 unsupported / 0 failed (up
+   from 2952 by exactly the +1 new test). No regressions.
+8. **Committed in 4 separate small commits**: the `EntryWrapper.cpp`
+   fix; its regression test; the `Roadmap.md`/`VulkanCTSReport.md`
+   updates (combined, since they're both pure documentation of the same
+   completed work).
+9. **Ran a full `dEQP-VK.mesh_shader.ext.*` sweep** (26921 cases):
+   327 Pass / 112 Fail / 26482 Not supported, vs. H94b's own closing
+   baseline of 323 Pass/116 Fail -- a `+4`/`-4` delta matching exactly
+   the 4 H95a cases moving from Fail to Pass, nothing else regressed.
+10. **Updated `Roadmap.md`**: struck through H95a with a summary of both
+    fixes. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+    confirmed to need no changes (pure compiler-internals fix).
+
+## Reusable technique worth remembering
+
+Binary-searching a "malformed IR crash deep in some later, unrelated
+LLVM pass" by env-var-gating `verifyModule()` calls after every stage in
+`Pipeline.cpp`'s `runPipeline` pinpointed the exact failing stage and
+the exact failing phi/block in one rebuild-and-rerun cycle, instead of
+hand-reducing the real CTS shader. Worth reaching for again next time a
+crash surfaces several passes downstream of where a fix landed.
+
+## Suggested next steps (in order, for the next H-series session)
+
+1. Pick the next open, non-nested H-series roadmap row (or file one for
+   the next blocking gap found along the way) -- H95a and its
+   predecessor H95 are both now fully closed, so there's no immediate
+   follow-up bug to chase from this session's own work. ~10 min to scan
+   `Roadmap.md` for the next open row.
+2. Consider a periodic full `dEQP-VK.mesh_shader.ext.*` (or broader
+   `dEQP-VK.*`) sweep cadence, since each fix here has been moving the
+   count by only a handful of cases -- a wider, less-targeted sweep may
+   surface the next cluster of related failures faster than picking
+   through the 112 remaining `mesh_shader.ext` failures one at a time.
+   ~15 min to kick off, sweep itself runs unattended.
+3. `check-hlsl-feme-vk` (offload-test-suite, `feme` branch on
+   `llvm-beanz/offload-test-suite`) was not run this session -- worth a
+   quick pass next time to see whether it surfaces anything the Vulkan
+   CTS doesn't, given it hasn't been the focus of the last several H93-
+   H95a sessions either. ~20-30 min for a first look.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
