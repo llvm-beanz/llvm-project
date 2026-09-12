@@ -39504,3 +39504,63 @@ update either: neither fix represents a design deviation -- the
 op" conversion architecture already documented, and the lazy-loading
 fix is an internal implementation detail of an already-documented
 "link only what's needed" runtime-linking strategy.
+
+## Roadmap H99a: measured impact (partially fixed; residual bug broken out as H103)
+
+`pipeline.fast_linked_library.blend.dual_source`'s two-part
+3469-case failure family (H99's own closing re-run) split into a
+591-case `VK_ERROR_INITIALIZATION_FAILED` format-support gap and a
+2878-case `Fail (Image mismatch)` correctness bug.
+
+**The format-support gap is fixed.** Direct repro of the `r16_sfloat`
+case (`FEME_VULKAN_LOG_CREATION_ERRORS=1`) showed "image fixture
+format is not yet supported"; the `r32g32b32_sfloat` case showed
+"clear color has 4 component(s), expected 3" -- the exact same
+missing-`getFormatInfo`-entry / missing-`packClearColor`/`unpackColor`
+special-case shape as H98a's own fix, this time for
+`R16_FLOAT`/`R16G16_FLOAT`/`R32G32B32_FLOAT` (the last of which H98a's
+own notes had already flagged as a likely latent instance). Fixed by
+adding the missing table entries and special-case pack/unpack blocks
+in `feme/lib/Graphics/ImageFixture.cpp`, mirroring the existing
+precedent exactly. 4 new unit tests added
+(`PacksAndUnpacksR32G32B32Float`, `PacksAndUnpacksR16Float`,
+`PacksAndUnpacksR16G16Float`,
+`GetFixtureFormatElementSizeCoversR16FloatAndR16G16Float`); the full
+`FeMeGraphicsTests` suite passes 302/302 (up from 298).
+`ninja check-feme` passes in full (2967/2970, 3 pre-existing
+`Unsupported`, 0 `Failed`).
+
+**The `Fail (Image mismatch)` bucket is not fixed, and turns out to
+be much larger in scope than filed.** A channel-level pixel reduction
+(mirroring H88/H93's own technique) on a representative `r16_sfloat`
+case found the rendered output matches *neither* of the two expected
+saturation extremes -- ruling out a simple region/channel swap. A
+deliberate cross-format re-run of the exact same blend-state
+combination against `r32g32b32a32_sfloat` and `r8g8b8a8_unorm`
+reproduced the identical failure, ruling out anything specific to a
+numeric format or precision. Most importantly, a control experiment
+against the **plain, non-dual-source** `pipeline.*.blend.format.*`
+group (same `createOverlappingQuads`-style 4-overlapping-quad
+sequential-blend-accumulation structure, but ordinary single-output
+blend factors, no `Index=1`/`Src1Color` dual-source factors at all)
+reproduced the *same* `Fail (Image mismatch)` signature on 19/20
+sampled cases (95%) -- proving this is not a dual-source-specific bug,
+but a general, pre-existing blend-equation/multi-draw-accumulation
+correctness gap spanning nearly all of `pipeline.*.blend.*`. Given the
+scope, this residual bug is broken out as its own top-level row, H103,
+rather than nested further under H99a.
+
+A full re-run of the 8078-case `fast_linked_library.blend.dual_source`
+family after the format-support fix: **636 Pass / 3304 Fail / 4138
+NotSupported** (up from H99's own closing 471 Pass / 3469 Fail / 4138
+NotSupported -- +165 Pass, -165 Fail; the format fix let some
+previously-erroring cases actually pass outright, not just merge into
+the image-mismatch bucket, though the 3 directly-repro'd cases did
+merge rather than pass).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a bug fix within the existing, already-documented
+format-table architecture, not new feature or extension work.
+`FeMeGraphicsDesign.md` needs no update: no design deviation, the fix
+follows the same "mechanical, added on demand" format-support pattern
+already documented (and already used by H70/H98a).
