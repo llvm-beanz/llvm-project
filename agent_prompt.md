@@ -45,31 +45,43 @@ agent thoughts.
 
 # Request
 
-A network issue seems to have caused the agent to disconnect during the last
-session. You can find any intermediate state in the `git stash`, which you can
-restore with `git stash pop`.
-
-
-Can you work on H95 or other blocking work to make progress on the H-series
+Can you work on H95a or other blocking work to make progress on the H-series
 milestones?
 
-> **`properties.mesh_payload_size`/`task_payload_size`'s "Unexpected shared
-> memory result: 0"** (now 6 cases: the original 2, plus all 4 of
-> H94/H94a/H94b's own target cases --
-> `mesh_payload_and_shared_memory_size`/`mesh_shared_memory_size`/`task_shared_memory_size`/`task_payload_and_shared_memory_size`
-> -- newly exposed by H94b's own closing re-run once the `feme-cpu-wrap-entry`
-> diagnostic that previously masked them was fixed, hitting the identical
-> `vktMeshShaderPropertyTestsEXT.cpp:521` diagnostic): both compile, link, and
-> run to completion (no crash, no pipeline-creation error) but fail a
-> data-correctness check -- the CTS host-side verification reads back a
-> shared-memory/payload value it expects to be nonzero (a marker the shader
-> itself is supposed to have written) and finds 0 instead, suggesting either the
-> write never happens, is masked away, or lands somewhere the read never sees.
-> Not yet triaged -- needs its own IR/runtime reduction to determine whether
-> this is a task/mesh payload or workgroup-shared-memory read/write plumbing
-> gap, and whether it is the same root cause across all 6 cases or several
-> coincidentally-identical symptoms (the original 2 cases use a payload-size
-> property test with no verification loop at all, while the 4 newly-added cases
-> use the shared-memory-size property test's own write-then-read-back loop that
-> H94/H94a's own linearize work already touched once -- these are plausibly, not
-> yet confirmed, two distinct bugs sharing one symptom)
+> **The 4 remaining `*_shared_memory_size` cases' "Unexpected shared memory
+> result: 0"**: confirmed (via direct instrumentation of `GroupShared` contents
+> immediately after `invokeMesh()` returns) that the final
+> workgroup-shared-memory state is **100% correct** by the time the shader
+> finishes -- this is not a data-corruption/addressing bug. The shader's own
+> internal verification -- `if (gl_LocalInvocationIndex == 0u) { for (...) if
+> (mismatch) allOK = false; result.sharedOK = allOK; }` -- is computed once per
+> **wave** (not once per **workgroup**) by the wrapped-entry region function
+> (confirmed via a cached IR dump, `main`'s body in
+> `/tmp/h94dump/module0-wrapped3.ll`, reproduced for `mesh_shared_memory_size`):
+> `feme-cpu-linearize`'s divergent-loop lowering folds the invocation-0 gate
+> entirely into the verify-loop's own per-lane read mask (`masked.mask =
+> wave_entry_mask & live.t13.wide`), so for any wave that does *not* contain
+> invocation 0, every lane's masked gather returns its passthru value
+> (`zeroinitializer`), which never matches the expected nonzero constant, so
+> `allOK` comes out false for that wave too -- and the final `result.sharedOK`
+> store is emitted with a hard-coded `i1 true` mask (`call void
+> @feme.cpu.resource.store.raw.i32(..., i32 %17, i1 true)`), i.e. **every wave
+> in the workgroup's wave-loop unconditionally overwrites `result.sharedOK`**,
+> not just the wave containing invocation 0. Since waves execute sequentially in
+> wrapped-entry order, the *last* wave (which never contains invocation 0, and
+> so always computes `allOK=false` from garbage passthru data) always wins,
+> unconditionally clobbering whatever the wave containing invocation 0
+> legitimately computed. Root cause is narrow and specific: whichever pass
+> lowers a `for`-loop-with-early-exit nested inside a single-invocation-gated
+> `if` (this is `feme-cpu-linearize`'s `loop.exit.guard` scalar-merge shape,
+> `Linearize.cpp`) must gate that shape's own *final scalar side-effect store*
+> by whether the enclosing `if`'s condition (`live.t13.wide`, reduced across the
+> wave) held for this wave at all, not execute it unconditionally. Not yet fixed
+> -- needs: (1) a `Linearize.cpp` change threading the outer gate's own reduced
+> mask through to the final scalar store rather than defaulting to `i1 true`;
+> (2) unit-test coverage in `LinearizeTest.cpp` with a hand-built "if (single
+> lane) { loop-with-break; scalar store }" `.ll` case; (3) re-verification of
+> all 4 target CTS cases; (4) a broader `dEQP-VK.mesh_shader.ext.*` sweep to
+> check for regressions, since this store-masking shape is likely shared by
+> other single-invocation-gated verification loops elsewhere in the CTS
+> mesh/task suite.
