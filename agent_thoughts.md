@@ -78789,3 +78789,98 @@ code changes requested, measurement only. Took about 6 hours wall-clock
    long-term goal, not a repeat of the same partial-coverage exercise.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H95: fixed 2 of 6 cases, root-caused the remaining 4 as a distinct Linearize.cpp bug (H95a)
+
+**Status right now:** 2 of 6 target CTS cases pass outright and are
+committed. The other 4 have a fully-identified, evidence-backed root
+cause but no fix yet -- filed as new roadmap row H95a.
+
+## What got done
+
+1. **Resumed from a network-disconnect stash.** `git stash pop` restored
+   a prior session's already-validated fix + unit test. Rebuilt, re-ran
+   `FeMeGraphicsTests --gtest_filter="*Mesh*"` (24/24 pass), confirmed
+   the 6 H95 CTS cases split 2 pass / 4 fail.
+2. **Ran full `check-feme`**: 2950 passed / 3 unsupported / 0 failed.
+   No regressions.
+3. **Committed the fix** (`2936404bb51f`): `Executor.cpp`'s
+   `executeDraws` was skipping mesh dispatch entirely whenever a mesh
+   entry's output signature was empty. Fine for every previously-seen
+   mesh shader, wrong for a mesh entry whose only job is a side-effect
+   write (`mesh_payload_size`/`task_payload_size`'s shape). Added a
+   `MeshEmitsWithoutAttributes` flag mirroring the existing
+   `GSEmitsWithoutAttributes` one. Test:
+   `ExecutorTest.RunsAMeshEntryWithNoOutputSignatureForItsSideEffectsAndRastersNothing`.
+4. **Triaged the remaining 4 cases to a specific, named bug** (not just
+   "not yet triaged"):
+   - Instrumented `GroupShared` right after `invokeMesh()` returns:
+     shared memory is 100% correct by the end of shader execution. Not
+     a data-corruption bug.
+   - Found a prior session's cached IR dump
+     (`/tmp/h94dump/module0-wrapped3.ll`) for this exact shader and
+     read through the wrapped `main` region's body line by line.
+   - Root cause: the shader's `if (gl_LocalInvocationIndex == 0u) {
+     for(...) ...; result.sharedOK = allOK; }` pattern gets lowered by
+     `feme-cpu-linearize` such that the invocation-0 gate is folded
+     entirely into the inner loop's per-lane *read* mask, but the
+     pattern's own final scalar *store*
+     (`feme.cpu.resource.store.raw.i32(..., i1 true)`) is emitted
+     UNCONDITIONALLY -- every wave (all 32, sequentially) re-executes
+     this scalar store, and every wave except the one containing
+     invocation 0 computes `allOK=false` from garbage passthru reads
+     and clobbers the correct result. Last wave processed always wins.
+   - This is a real, scoped `Linearize.cpp` bug: the final scalar
+     side-effect store after a divergent-loop-with-break needs to be
+     gated by the enclosing single-invocation `if`'s own reduced mask,
+     not hardcoded `i1 true`.
+5. **Updated docs**: struck through H95's row (2/6 fixed), added H95a
+   with the full IR-evidence writeup and a scoped fix plan. Added a
+   "Roadmap H95: measured impact" section to `VulkanCTSReport.md`.
+   Confirmed (and stated explicitly) that
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+   changes -- this is a correctness fix, not a new capability.
+
+## Why I stopped here
+
+Fixing H95a needs a real `Linearize.cpp` change threading a mask through
+a scalar-store code path, plus new unit-test coverage in
+`LinearizeTest.cpp`, plus re-verification of 4 CTS cases -- comparable
+in scope to the H94a session (a half-day-plus effort), and I'd already
+spent this session's budget getting to a confirmed, IR-evidenced root
+cause. Landing a rushed fix to a subtle mask-threading bug without full
+test coverage risked a worse outcome than stopping at a clean, precise
+triage.
+
+## Suggested next steps (in order, if resuming H95a)
+
+1. Open `feme/lib/Transforms/CPU/Linearize.cpp`, find the
+   `loop.exit.guard` scalar-merge code (search for `Guard..inv` /
+   `.021`-style final phi + `select` + scalar store emission -- this is
+   the exact shape in the H95a roadmap row). ~15-30 min to locate.
+2. Identify how to plumb the enclosing `if`'s own reduced condition
+   mask (`live.t13.wide`, reduced via `llvm.vector.reduce.or` or
+   similar) to that point, and use it as the store's mask operand
+   instead of a hardcoded `i1 true`. ~1-2 hours, this is the real work.
+3. Add a hand-built `.ll` unit test to `LinearizeTest.cpp`: an
+   `if (single lane) { for-loop-with-break; scalar_store }` shape,
+   mirroring H94a/H94b's own precedent for adding targeted `.ll`
+   regression cases. ~30-60 min.
+4. Rebuild, run `ninja -C build2 check-feme` (should stay 2950+1
+   passed / 3 unsupported / 0 failed, or grow by exactly the new test).
+5. Re-run the 4 target CTS cases
+   (`mesh_shared_memory_size`/`task_shared_memory_size`/`mesh_payload_and_shared_memory_size`/`task_payload_and_shared_memory_size`)
+   with `VK_DRIVER_FILES` pointed at `build2`'s `feme_icd.json`. If all
+   4 pass, strike H95a in the roadmap and add the "measured impact"
+   section to `VulkanCTSReport.md`.
+6. Run a broader `dEQP-VK.mesh_shader.ext.*` sweep to check for
+   regressions -- this store-masking shape is plausibly shared by other
+   single-invocation-gated verification loops elsewhere in the suite,
+   so a fix here could silently fix (or, if done wrong, break) cases
+   outside the 4 originally tracked.
+7. The `/tmp/h94dump/` cache may or may not still exist depending on
+   `/tmp` cleanup between sessions -- if gone, redo the capture using
+   the documented `feme-translate`/`feme-opt` reduction pipeline
+   recorded in H94's own roadmap row (~30-60 min to recapture).
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
