@@ -663,12 +663,31 @@ appendTrailingParam(Function &F, Type *ExtraType, const Twine &ExtraName) {
 /// block for a direct self-loop) -- returned without being added to
 /// \p Order -- or returning nullptr (not a shape `isLinearChain` can use)
 /// if a cycle among blocks *not* already in \p Visited is found first,
-/// the chain ends in anything other than an unconditional branch before
+/// the chain ends in anything other than an unconditional branch or a
+/// roadmap-H94b nested loop-closing `CondBr` (see below) before
 /// reconverging or closing, or any block visited contains a
 /// `..._with_group_sync` barrier call: such a barrier would need its own
 /// region split *inside* this one arm or loop, which this milestone's
 /// flat, whole-region `outlineChain` has no way to represent (see
 /// "Barrier inside a surviving branch" in the file comment above).
+///
+/// Roadmap H94b: `feme::cpu::SIMDizePass`'s own widening of a
+/// divergent-trip-count loop (roadmap milestone 4) can produce a loop
+/// whose real closing decision sits one level deeper than a plain
+/// unconditional backedge -- an outer, uniform, compile-time-bounded
+/// "for" loop (recognized directly by `isLinearChain`'s own top-level
+/// walk) wrapping an inner, widened "is any lane still active"
+/// reduction (`llvm.vector.reduce.or` feeding a `CondBr`) that is the
+/// shape's *real* loop-closing test, reached only after this arm's own
+/// straight walk through the uniform loop's barrier-free body. A `CondBr`
+/// found mid-walk is tolerated in exactly this one shape: when precisely
+/// one of its two successors is already in \p Visited (a backedge to an
+/// established block, exactly like `isLinearChain`'s own top-level
+/// `Succ0Seen != Succ1Seen` case), the walk simply continues from the
+/// other, fresh successor instead of failing -- the loop-closing block
+/// itself is appended to \p Order like any other barrier-free block
+/// (still barrier-checked above), and whatever this walk eventually
+/// reconverges or closes to afterward is unaffected.
 BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
                                const SmallPtrSetImpl<BasicBlock *> &Visited,
                                SmallVectorImpl<BasicBlock *> &Order) {
@@ -684,11 +703,21 @@ BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
         if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
             Matched && Matched->GroupSync)
           return nullptr;
-    auto *Br = dyn_cast<UncondBrInst>(BB->getTerminator());
-    if (!Br)
+    if (auto *Br = dyn_cast<UncondBrInst>(BB->getTerminator())) {
+      Order.push_back(BB);
+      BB = Br->getSuccessor(0);
+      continue;
+    }
+    auto *CondBr = dyn_cast<CondBrInst>(BB->getTerminator());
+    if (!CondBr)
       return nullptr;
+    bool Succ0Seen = Visited.contains(CondBr->getSuccessor(0));
+    bool Succ1Seen = Visited.contains(CondBr->getSuccessor(1));
+    if (Succ0Seen == Succ1Seen)
+      return nullptr; // Neither a nested backedge nor a fresh exit --
+                      // some other, unsupported branch shape.
     Order.push_back(BB);
-    BB = Br->getSuccessor(0);
+    BB = Succ0Seen ? CondBr->getSuccessor(1) : CondBr->getSuccessor(0);
   }
 }
 

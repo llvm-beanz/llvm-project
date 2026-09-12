@@ -613,6 +613,86 @@ TEST(EntryWrapperTest, SplitsBarrierInsideUniformLoop) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap H94b (feme/docs/Roadmap.md): a barrier-free loop (roadmap H72)
+// whose real closing decision is reached one level deeper than the arm's
+// own final branch -- the shape `feme::cpu::SIMDizePass`'s widening of a
+// divergent-trip-count loop (roadmap milestone 4) produces, with an
+// outer, uniform trip-count check (`header`) whose body arm passes
+// through an extra block (`mid`) before that block's own `CondBr` closes
+// the loop back to `header`, and the arm's remaining block (`latch`) only
+// reached on the other, fresh side of that branch. `walkBarrierFreeArm`
+// must tolerate a `CondBr` mid-arm, not just at the arm's own final
+// terminator, when exactly one of its two successors is already an
+// established block. The whole loop is barrier-free (the single barrier
+// sits in `entry`, before it), so it must be kept intact -- not
+// diagnosed -- exactly like `SplitsAroundSafeDiamondAfterBarrier`'s own
+// diamond case above.
+TEST(EntryWrapperTest, SplitsBarrierFreeLoopWithNestedCondBr) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i, %mid ], [ %i.next, %latch ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %body, label %after
+    body:
+      br label %mid
+    mid:
+      %any = icmp ne i32 %gid, %i
+      br i1 %any, label %header, label %latch
+    latch:
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  // Not diagnosed: the loop (all of `header`/`body`/`mid`/`latch`) is
+  // barrier-free, so it stays intact in `main` (the function reused for
+  // the last region), same as a safe diamond would.
+  Function *Body = M->getFunction("main");
+  ASSERT_TRUE(Body);
+  EXPECT_TRUE(M->getFunction("main.region0"));
+  bool FoundLoopHeader = false, FoundMidCondBr = false;
+  for (BasicBlock &BB : *Body) {
+    if (BB.getName() == "header")
+      FoundLoopHeader = true;
+    if (BB.getName() == "mid" && isa<CondBrInst>(BB.getTerminator()))
+      FoundMidCondBr = true;
+  }
+  EXPECT_TRUE(FoundLoopHeader);
+  EXPECT_TRUE(FoundMidCondBr);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  unsigned NumWaveLoopHeaders = 0;
+  bool FoundFence = false;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName().starts_with("wave.loop.header"))
+      ++NumWaveLoopHeaders;
+    for (Instruction &I : BB)
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+  }
+  EXPECT_EQ(NumWaveLoopHeaders, 2u);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap step R24 (feme/docs/Roadmap.md): a `phi` live across a
 // `..._with_group_sync` barrier is spilled exactly like any other value
 // (see "A `phi` live across a barrier" in EntryWrapper.cpp's file
