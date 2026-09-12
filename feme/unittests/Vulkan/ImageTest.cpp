@@ -1653,4 +1653,58 @@ TEST_F(ImageTest, GetImageSubresourceLayoutCoversWholeDepthRangeFor3DImage) {
   vkDestroyImage(Device, Img, nullptr);
 }
 
+// Roadmap H98: VK_EXT_host_image_copy's VkSubresourceHostMemcpySize, chained
+// onto vkGetImageSubresourceLayout2KHR's own pNext, was never filled in --
+// silently leaving `.size` at its caller-side zero-initialized value. The
+// real-world fallout (dEQP-VK.image.host_image_copy.*'s own "memcpy" action)
+// sizes its host buffer directly from this field, so a silently-zero `size`
+// allocates a zero-byte buffer whose `.data()` may be null, crashing the
+// subsequent host-copy call with a bare SIGSEGV. `.size` must agree with the
+// same subresource's own VkSubresourceLayout::size.
+TEST_F(ImageTest, GetImageSubresourceLayout2KHRFillsHostMemcpySize) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory);
+
+  VkImageSubresource2 Sub2{};
+  Sub2.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+  VkSubresourceHostMemcpySize HostMemcpySize{};
+  HostMemcpySize.sType = VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE;
+  VkSubresourceLayout2 Layout2{};
+  Layout2.pNext = &HostMemcpySize;
+  vkGetImageSubresourceLayout2KHR(Device, Img, &Sub2, &Layout2);
+  EXPECT_EQ(HostMemcpySize.size, Layout2.subresourceLayout.size);
+  EXPECT_EQ(HostMemcpySize.size, 64u); // 4x4 texels * 4 bytes (RGBA8).
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// Roadmap H98: the info-only counterpart above must fill the same pNext
+// struct identically, mirroring
+// GetDeviceImageSubresourceLayoutKHRMatchesLiveImage's own live/info-only
+// agreement check.
+TEST_F(ImageTest, GetDeviceImageSubresourceLayoutKHRFillsHostMemcpySize) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+  VkImageSubresource2 Sub2{};
+  Sub2.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+  VkDeviceImageSubresourceInfo Info{};
+  Info.pCreateInfo = &ImageInfo;
+  Info.pSubresource = &Sub2;
+  VkSubresourceHostMemcpySize HostMemcpySize{};
+  HostMemcpySize.sType = VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE;
+  VkSubresourceLayout2 Layout2{};
+  Layout2.pNext = &HostMemcpySize;
+  vkGetDeviceImageSubresourceLayoutKHR(Device, &Info, &Layout2);
+  EXPECT_EQ(HostMemcpySize.size, Layout2.subresourceLayout.size);
+  EXPECT_EQ(HostMemcpySize.size, 64u); // 4x4 texels * 4 bytes (RGBA8).
+}
+
 } // namespace
