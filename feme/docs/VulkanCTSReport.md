@@ -39074,3 +39074,72 @@ change: this is a pure compiler-internals fix (an `UniformityInfo`
 staleness gap in `feme::cpu::LinearizePass`), not a
 feature/extension-support change. `FeMeGraphicsDesign.md` needs no
 change either, for the same reason.
+
+## Roadmap H76: measured impact (fixed)
+
+Re-verification at the start of this session found only 2 of the
+originally-filed 6 cases (`smoke.fast_lib.depth_only_points_position_
+components`, `smoke.fast_lib.depth_only_triangles_position_components`)
+still hit `feme-graphics-validate-stage`'s "unresolved stage-IO
+global-variable access" diagnostic. A third failure in the same
+21-case `smoke.fast_lib.*` sweep (`fullscreen_gradient`) hits a
+completely unrelated `spirv.Variable`/`Function`-storage-class
+legalization error -- already tracked separately as H79, not folded
+into this row.
+
+Root cause, found directly from the real CTS shader source
+(`vktMeshShaderSmokeTestsEXT.cpp`'s `depthOnlyPrograms`, `stepByStep
+Position` branch, explicitly commented in the CTS source itself as
+historically driver-problematic): both target cases store
+`gl_MeshVerticesEXT[outIndex].gl_Position`'s four components as four
+separate scalar stores (`.x`/`.y`/`.z`/`.w`), where `outIndex` (`col *
+primitiveVertices + i`, `col` itself `gl_LocalInvocationIndex`) is a
+genuinely dynamic per-invocation value -- unlike every prior "constant
+vertex index" fix in `CanonicalizeStage.cpp`.
+`getDynamicVertexIndexedAccess`'s own constant-index-peeling loop
+(walking whatever follows the one non-constant vertex index it already
+knows how to peel) only ever recognized `StructType` (an
+interface-block member) and `ArrayType` (a further array dimension) --
+a `FixedVectorType` (the vector-component index this per-component
+write's own trailing GEP index walks into, once `gl_Position`'s struct
+member has already been peeled) fell through to the function's final
+`return std::nullopt`, leaving the whole access unrewritten and
+undefined at JIT time.
+
+Fixed by adding a `FixedVectorType` case to that loop, accumulating the
+selected component's own byte offset exactly as `resolveRowComponent`
+already does elsewhere in this file for the constant-vertex-index path,
+and letting the existing byte-offset-based `resolveOffsetWithinElement`
+recursion resolve the rest completely unchanged -- no other function
+needed to change, confirming the gap really was this narrow.
+
+New coverage: a `CanonicalizeStageTest.cpp` unit test
+(`ThreadsDynamicVertexIndexThroughVectorComponentOutputStore`), modeling
+the real four-separate-component-store shape directly (a two-member
+interface block, `<4 x float>`/`float`, addressed by a dynamic vertex
+index followed by a constant struct-member index and then a constant
+vector-component index) and confirming all 4 stores now canonicalize to
+`feme.stage.output.store` calls with the correct per-store `Component`
+operand (0/1/2/3) and shared dynamic `Vertex` operand, instead of being
+left unresolved.
+
+`check-feme`'s full suite (2959 tests, 3 unsupported) passes with 0
+failures, confirming no regressions in the rest of the compiler (+1
+test vs. the H75 session's own last full run, from the new unit test
+added here).
+
+A real re-run confirms both target cases now **pass outright**: a
+`smoke.fast_lib.*` sweep (21 cases) shows 18 Pass/1 Fail/2 NotSupported
+(up from 16/3/2 before this fix, exactly +2/-2, with the sole remaining
+failure being `fullscreen_gradient`'s already-tracked H79 bug). A
+broader `dEQP-VK.mesh_shader.ext.smoke.*` sweep (67 cases) confirms
+zero regressions: 46 Pass/3 Fail/18 NotSupported, with all 3 failures
+being the identical, pre-existing `fullscreen_gradient` bug across its
+`fast_lib`/`monolithic`/`optimized_lib` variants (H79's own scope, not
+newly introduced or expanded by this fix).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure compiler-internals fix (a GEP-shape recognition
+gap in `feme::graphics::CanonicalizeStagePass`), not a
+feature/extension-support change. `FeMeGraphicsDesign.md` needs no
+change either, for the same reason.
