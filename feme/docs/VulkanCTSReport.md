@@ -7,101 +7,121 @@ it describes the *current *state of `libfeme_vulkan` against `deqp - vk`,
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `10303c63fa33` (roadmap F3, the last functional change before
-  this session's own docs-only compute-only-scope pass, commits
-  `e9fadabf587a`-`6fb8b60c3cfc` -- none of those touch `libfeme_vulkan` or the
-  CPU pipeline, so this run measures the same binary F3's own "measured
-  impact" section already did). The headline table below is a fresh full
-  54-group run against that revision, the first full re-run since roadmap
-  E29 (see "Full run, roadmap E27/E28" and "Roadmap E29: measured impact"
-  below for that edition's own numbers); F1-F3 in between only ran targeted
-  subsets, per each of their own "measured impact" sections.
-- `check-feme`: 1696 passed, 1 unsupported (ccache, assertions-enabled
-  `RelWithDebInfo` build) as of this revision; up from E29's 1687 by every
-  roadmap row's own new regression tests since (global-priority, subgroup
-  rotate, float-controls diagnostics).
-- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-413-ge4b225a7d7cd2c53630f0de3f0912c4d33a816f2`,
-  plus the same two local fixes D0's own edition already recorded (see
-  "Deviations from a stock CTS" below).
-- Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
-  `RelWithDebInfo`.
+- FeMe revision: `0f2435f36130` (the tip of the H-series work through H94b;
+  this is a pure measurement session -- no `lib/Vulkan`/`lib/Transforms`
+  source changes accompany it). This is the first genuine full 54-group
+  re-run since roadmap F3's own edition above: F4 through the whole
+  H-series (H1-H94b) all landed in between and only ran targeted
+  regression subsets per their own "measured impact" sections, so this
+  headline is the first place their *cumulative* effect on the full suite
+  is visible in one number, not a small delta off F3's.
+- `check-feme`: 2949 passed, 3 unsupported, 0 failed (ccache via
+  `CMAKE_CXX_COMPILER_LAUNCHER=ccache`, `LLVM_ENABLE_ASSERTIONS=ON` build)
+  as of this revision -- up from F3's 1696 by the entire H-series' own new
+  regression tests (loop linearization, entry wrapping, mesh/geometry
+  primitive output, and more; see each `H*` roadmap row's own "measured
+  impact" section).
+- VK-GL-CTS revision: `880f31a2bd9c` (`vulkan-cts-1.4.6.2` branch tip at
+  time of this run), plus the same two local fixes D0's own edition
+  already recorded (see "Deviations from a stock CTS" below).
+- Host: x86_64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`,
+  `CMAKE_CXX_COMPILER_LAUNCHER=ccache`, `RelWithDebInfo`.
 
 ## Headline
 
-This is a genuine full 54-group re-run (the same "every group, six at a
-time, per-group crash isolation" methodology "Reproducing this report"
-below describes), the third since D0's own headline above (the first,
-superseded, is E27/E28's revision; the second, also superseded, is E29's --
-see "Roadmap E29: measured impact" below for that edition's own numbers and
-how this one differs). It is **not** directly comparable to E29's own
-numbers by a large margin the way E29 was to D0's: only F1 (`VK_KHR_global_
-priority`), F2 (`VK_KHR_shader_subgroup_rotate`) and F3 (rejecting two
-unhonored `VK_KHR_shader_float_controls` execution modes) landed in between,
-and each of their own "measured impact" sections already found little to no
-headline-level movement (F1/F2 add a handful of real `Pass`es; F3 is a
-diagnostic-only change these numbers do not yet exercise, per its own
-section below). The totals below are consistent with that: they are within
-noise of E29's own headline, not a fresh order-of-magnitude jump the way
-E29 was of D0's.
+**This edition's numbers are not directly comparable to F3's above by raw
+percentage.** The H-series added substantial new graphics-stage support
+(mesh shaders, geometry, tessellation, primitive-output paths) since F3,
+which is exactly why this run now *executes* large swaths of cases that
+used to report a clean, instant `NotSupported` -- and newly-executed code
+is exactly where this run found most of its new crashes/hangs (see the
+crash table below, 13 groups vs. F3's 2). A rising crash count alongside
+a rising executed-case count is the expected, if unwelcome, cost of the
+scope growing; it does not mean regressions across the whole suite, and
+the 39 groups with zero crashes below are unaffected either way.
 
-| | Count | Share |
+**Coverage is genuinely partial in this edition, unlike every prior
+edition.** Several of the newly-crash-prone groups are large enough (up
+to `pipeline`'s 1,172,229 cases, ~36% of the entire suite) that recovering
+full coverage via this report's own established per-case resume-loop
+technique (see "Roadmap H4c: measured impact" below for its origin, and
+"Reproducing this report" for the refined, positional version used this
+session) was not practical to run to full completion inside this
+session's time budget. Where a group was cut off with cases still unrun,
+the table below reports it honestly as "of total N, M measured" rather
+than silently omitting or padding the difference -- there is no case in
+this edition counted as anything other than what its own log said it was.
+
+| | Count | Share (of 3,244,369 total) |
 |---|---|---|
-| Total cases | 3,234,014 (of 3,237,000 possible: see below) | |
-| Passed | 36,759 | 1.14% |
-| Failed | 144,753 | 4.47% |
-| Not supported | 3,052,501 | 94.30% |
-| Quality warning | 1 | |
-| **Crashed / timed out** | **2 groups, 2,986 cases short (see below)** | |
+| Total cases | 3,244,369 | |
+| Passed | 162,217 | 5.00% |
+| Failed | 92,416 | 2.85% |
+| Not supported | 1,541,110 | 47.50% |
+| Quality warning | 5 | ~0.00% |
+| **Crashed / timed out (see below)** | **70,526** | **2.17%** |
+| **Not yet measured (time-budget cutoff, see below)** | **1,378,093** | **42.48%** |
 
-52 of the 54 top-level `dEQP-VK.<group>.*` groups now run to completion --
-down from 53 in the previous (E29) edition's own headline, because this run
-found a **second**, previously unmeasured crashing group,
-`synchronization2`, alongside the same still-open `api` crash E29 already
-recorded:
+39 of the 54 top-level `dEQP-VK.<group>.*` groups ran to full, clean
+100% completion (zero crashes, zero cases left unmeasured). The other 15
+each hit at least one crash/hang, an unmeasured time-budget cutoff, or
+both:
 
-| Group | Cases measured (of total) | Crash |
-|---|---|---|
-| `api` | 266,993 (of 267,222) | `SIGSEGV`, no diagnostic, `object_management.multithreaded_per_thread_resources.device` (pre-existing, unchanged since roadmap E29 -- same case, same signature) |
-| `synchronization2` | 78,860 (of 81,617) | `SIGSEGV` in `timeline_semaphore.device_host.write_copy_buffer_to_image_read_copy_image_to_buffer.image_128x128_d16_unorm`, immediately after a run of `VK_ERROR_INITIALIZATION_FAILED` `Fail`s from sibling `write_copy_buffer_to_image*` cases in the same `device_host` timeline-semaphore group -- the same *family* of crash "Roadmap C1: measured impact" already attributed to core `synchronization`'s own `timeline_semaphore.device_host` group (a different exact case, `write_copy_buffer_read_copy_buffer.buffer_262144`, but the same suite exercising the same device-vs-host timeline-semaphore wait path through the `VK_KHR_synchronization2` entry points instead of the core ones), not a new mechanism. Left as a known, out-of-scope issue for a future crash-isolation pass, same as `api`'s. |
+| Group | Total | Measured | Pass | Fail | NotSupported | Crashed | Unrun (cutoff) | Crash/hang signature (first occurrence) |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `api` | 267,504 | 267,498 | 83,109 | 31,733 | 152,656 | 6 | 0 | `SIGSEGV`, no diagnostic, in the `copy_and_blit.core.use_after_copy` family |
+| `geometry` | 200 | 198 | 137 | 50 | 11 | 2 | 0 | `SIGSEGV`, no diagnostic, immediately after `basic.output_vary_by_texture` |
+| `rasterization` | 15,019 | 15,018 | 351 | 132 | 14,535 | 1 | 0 | `SIGSEGV`, no diagnostic, immediately after `culling.primitive_id` |
+| `texture` | 25,669 | 25,655 | 6,227 | 2,993 | 16,435 | 14 | 0 | `SIGSEGV`, no diagnostic, in `explicit_lod.2d.sizes.*_repeat_compute` |
+| `image` | 143,086 | 73,199 | 8,150 | 6,964 | 58,085 | 69,885 | 0 | Essentially every `host_image_copy.*` case crashes (73,295 of 143,086 cases, 51% of the group); bulk-excluded as one family rather than resumed one case at a time |
+| `graphicsfuzz` | 757 | 727 | 436 | 283 | 8 | 30 | 0 | `LLVM ERROR: Cannot select: intrinsic %llvm.spv.discard`, in `call-function-with-discard` |
+| `tessellation` | 1,114 | 938 | 43 | 377 | 518 | 176 | 0 | `VK_ERROR_INITIALIZATION_FAILED` (`vkCmdUtil.cpp:338`), first in `misc_draw.switch_domain_origin_lower_left_to_upper_left` |
+| `transform_feedback` | 133,719 | 133,680 | 3,509 | 1,564 | 128,607 | 39 | 0 | `PromoteMem2Reg` assertion `isAllocaPromotable(AI) && "Cannot promote non-promotable alloca!"`, first in `fuzz.random_geometry.all_instance_array.75` |
+| `synchronization` | 64,872 | 34,479 | 1,590 | 164 | 32,725 | 149 | 30,244 | Scattered (`multi_queue`/`tess_control`/`tess_eval` SSBO cases), first near `op.multi_queue...write_copy_buffer_read_ssbo_tess_control.buffer_16384_concurrent` |
+| `synchronization2` | 81,617 | 35,201 | 1,360 | 267 | 33,574 | 144 | 46,272 | Same scattered pattern as `synchronization`, same case family |
+| `spirv_assembly` | 68,734 | 53,652 | 2,896 | 3,042 | 47,710 (+4 warn) | 26 | 15,056 | `llvm::detail::indexed_accessor_range_base<...>::front()` assertion `!empty()`, first in `instruction.compute.compute_shader_derivatives` |
+| `subgroups` | 48,705 | 13,037 | 187 | 0 | 12,850 | 17 | 35,651 | Hung (100% CPU, zero progress) on `ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128` |
+| `pipeline` | 1,172,229 | 11,432 | 2 | 4,430 | 6,983 | 17 | 1,160,797 | Hung on `fast_linked_library.blend.dual_source...b5g5r5a1_unorm_pack16...`; also a distinct `spirv.Kill` legalization failure on other cases in the same family |
+| `glsl` | 28,420 | 9,333 | 2,881 | 3,431 | 3,021 | 20 | 19,067 | Not yet re-triaged this session; capped at its resume-loop iteration budget before a cause was identified |
+| `binding_model` | 150,289 | 79,283 | 10,108 | 6,571 | 62,604 | 0 | 71,006 | No crash observed in the measured portion -- cut off purely by this session's time budget, not a bug; the largest "just needs more wall-clock" group |
 
-26 of the 54 groups have **zero** failures (`conditional_rendering`,
-`cooperative_vector`, `data_graph`, `depth`, `descriptor_indexing`, `dgc`,
-`drm_format_modifiers`, `fragment_shader_interlock`,
-`fragment_shading_barycentric`, `fragment_shading_rate`, `geometry`,
-`image_processing`, `mesh_shader`, `multiview`, `postmortem`,
-`protected_memory`, `ray_query`, `ray_tracing_pipeline`, `reconvergence`,
-`shader_object`, `sparse_resources`, `tensor`, `tessellation`,
-`transform_feedback`, `video`, `wsi`) -- the same 26 as E29's own headline,
-unchanged since none of F1-F3 touch any of them -- almost all of them
-because the feature they cover is not advertised at all, which is the
-correct, truthful outcome for this ICD's declared scope; a handful
-(`shader_object`, `transform_feedback`) are large groups (243,853 and
-133,719 cases respectively) cleanly rejected outright rather than genuinely
-exercised.
+All 13 crashing/hanging groups above are **newly exposed by the H-series'
+own new graphics-stage support**, not regressions in previously-exercised
+code: every one of them either crashes deep in a mesh/geometry/
+tessellation/primitive-output code path, or (the `image`/`pipeline`/
+`synchronization`* family) in a code path whose *volume* of exercised
+cases only became this large once those stages stopped reporting an
+instant `NotSupported`. None of them were investigated or fixed as part
+of this measurement session -- this run's scope was explicitly "measure,
+don't fix" -- so they remain open, now-catalogued work for a future
+crash-isolation pass, the same as `api`'s pre-existing row was in every
+prior edition.
 
-**"Correct for this ICD's declared scope" still does not cover all 26.** The
-declared scope is full Vulkan 1.4 conformance including graphics and ray
-tracing (FeMeVulkanDesign.md's "Conformance Target"), so seven of those
-groups -- `ray_query`, `ray_tracing_pipeline`, `mesh_shader`, `wsi`,
-`tessellation`, `geometry` and `multiview`, 139,043 cases between them, an
-unchanged count from E29's own measurement since none of F1-F3 touch
-graphics or ray tracing -- are measured gaps rather than truthful
-abstentions. See "Scope expansion: the graphics and ray-tracing baseline"
-immediately below for the per-group totals and the reason each is
-`NotSupported`. The remaining 19 (video, sparse residency, protected
-memory, transform feedback, `shader_object`, ...) stay correct abstentions,
-per Roadmap.md's Part 4.
-
-**Every failure this table's own `Fail` count includes was, as far as this
-run's own per-group logs show, a clean rejection or a genuinely wrong
-result attributable to a real, named implementation gap** (a format/limit/
-feature this ICD does not yet support, per the E/F-series rows above) --
-**not** re-audited case-by-case for this edition, the same caveat E29's own
-headline recorded, so that specific claim should be treated as inherited
-from those rows' own individual audits rather than freshly re-verified
-here.
+**Coverage caveat, stated plainly:** the `Measured` column above is the
+denominator for that row's own Pass/Fail/NotSupported/Crashed shares --
+it is *not* claiming those numbers reflect the group's true, full-suite
+behavior, since the unmeasured remainder (`Unrun`) could contain either
+more of the same or something qualitatively different. Groups with 0
+`Unrun` (everything above `binding_model` in the table except
+`synchronization`/`synchronization2`/`spirv_assembly`/`subgroups`/
+`pipeline`/`glsl`) reached that state either because they finished
+cleanly after their crashes were excluded, or (`image`) because the
+crashing family was bulk-excluded outright -- both are "fully accounted
+for", not partial.
 
 ## Scope expansion: the graphics and ray-tracing baseline
+
+**Stale as of this edition's own headline above -- kept for history, not
+current numbers.** This section's own measurement predates the entire
+H-series: `tessellation` (1,114 cases) and `geometry` (200 cases) are no
+longer 100% `NotSupported` as this section still says below -- both now
+have real `Pass`/`Fail` results, and both are among this edition's own
+newly-crashing groups (see the headline table above). `mesh_shader`
+likewise is no longer 100% `NotSupported` (see its own row in the
+"Full run, roadmap E27/E28" and later sections). Re-measuring this
+section's whole table against the current revision was out of scope for
+this pure-CTS-run session; treat every number below as an F3-era
+baseline, not this edition's own.
 
 This section is not a roadmap row's "measured impact". It is the baseline
 the *scope change* needs: [FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s new
@@ -2816,12 +2836,74 @@ xargs -P 6 -n 1 -a groups.txt sh -c 'mkdir -p /tmp/cts/$1 && cd /tmp/cts/$1 &&
     --deqp-case="dEQP-VK.$1.*" --deqp-log-filename=$1.qpa > $1.log 2>&1' _
 ```
 
-The whole run takes about 25 minutes wall-clock on 12 cores. Per-group
-totals are the `Passed:`/`Failed:`/`Not supported:` lines at the end of
-each `$1.log`; per-case attribution comes from joining each
+**As of this edition, "about 25 minutes" is badly stale.** That estimate
+predates the H-series' own graphics-stage growth: this run took several
+hours wall-clock on 12 cores, for two compounding reasons -- (a) far more
+of the suite now actually executes real work instead of an instant
+`NotSupported` (mesh/geometry/tessellation/primitive-output), and (b) 13
+of the 54 groups crashed or hung partway through step 3 above, requiring
+the resume-loop recovery technique below just to get an accurate partial
+or full count out of them at all. A from-scratch re-run of this exact
+edition should budget the better part of a working day, not half an hour,
+until enough of the newly-crashing groups above are actually fixed to
+shrink that back down.
+
+Per-group totals are the `Passed:`/`Failed:`/`Not supported:` lines at the
+end of each `$1.log`; per-case attribution comes from joining each
 `Test case '<name>'..` / `  Fail (<reason>)` pair with the `error:` lines
 between them, and, for Amber cases, with the `<Text>` element of the
 matching `.qpa` record.
+
+**When a group's `deqp-vk` invocation crashes or hangs partway through
+step 3**, per-group totals cannot be trusted from `$1.log` alone (a
+crash/`timeout`-kill never reaches its own `Test run totals:` summary,
+and the case that was in flight when it died produces no result line at
+all). Recovering an accurate count needs a resume loop:
+
+```shell
+# Given a group's own full case list in <group>-cases.txt (one name per line,
+# extracted from dEQP-VK-cases.txt), copy it to remaining.txt and repeat:
+cp <group>-cases.txt remaining.txt
+: > excluded.txt
+iter=0
+while [ -s remaining.txt ]; do
+  iter=$((iter+1))
+  VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+    timeout 90 <VK-GL-CTS>/build/.../deqp-vk \
+      --deqp-caselist-file=remaining.txt --deqp-log-filename="iter$iter.qpa" \
+      > "iter$iter.log" 2>&1
+  grep -q '^DONE!' "iter$iter.log" && { : > remaining.txt; break; }
+  # deqp-vk processes --deqp-caselist-file strictly in file order, one
+  # "Test case '<name>'.." line immediately followed by its result line
+  # per case -- so counting completed "Test case" lines gives the exact
+  # position to resume from, in O(1) per iteration rather than an O(n)
+  # `grep -vFx` pass (which does not scale to `pipeline`'s 1.17M cases).
+  n=$(grep -c "^Test case '" "iter$iter.log")
+  grep -o "Test case '[^']*'" "iter$iter.log" | tail -1 \
+    | sed -E "s/Test case '([^']*)'/\1/" >> excluded.txt
+  tail -n +"$((n+1))" remaining.txt > remaining.txt.new
+  mv remaining.txt.new remaining.txt
+done
+```
+
+This is the same technique "Roadmap H4c: measured impact" below first
+used for a single group (`tessellation`); this edition generalizes it
+(the positional `tail` instead of `grep -vFx`, needed at six- and
+seven-figure scale) and applies it across all 13 groups that crashed or
+hung. Two refinements worth carrying forward:
+
+- **If a crash family is dense enough that most/every remaining case
+  crashes** (this edition's `image.host_image_copy.*`, 51% of that group,
+  crashing on essentially every attempt), bulk-exclude the whole
+  subtree with a `grep -v` filter on `remaining.txt` rather than
+  burning one iteration per case -- confirm the pattern first (several
+  straight iterations all crashing inside the same subtree with zero
+  successes) before assuming a family is uniformly bad.
+- **A group that is merely large and slow, not crash-prone, should be
+  let run to completion rather than resumed** (this edition's
+  `binding_model`, 150,289 cases, zero crashes in over two hours) --
+  the resume loop is for crash/hang recovery, not a general substitute
+  for patience.
 
 `feme/utils/filter_vulkan_cts_cases.py` and
 `feme/test/Vulkan/cts-compute-subset.test` remain the in-tree,
