@@ -2901,6 +2901,379 @@ TEST(ExecutorTest, AlphaBlendsOverExistingColor) {
   }
 }
 
+// (Roadmap H103) A minimal, single-draw, single-quad reproduction of one
+// blend-state combination taken directly from a real, currently-failing
+// `dEQP-VK.pipeline.fast_linked_library.blend.format.r8g8b8a8_unorm`
+// case (`color_1mcc_sc_add_alpha_cc_1mca_sub-...`, its first quad's own
+// state) -- deliberately avoiding that CTS test's own 4-overlapping-quad
+// geometry entirely, to isolate whether the bug is in the underlying
+// per-pixel blend-equation arithmetic (`blendColor`/`blendFactorValue`/
+// `applyBlendOp`) in isolation, decoupled from any multi-draw
+// accumulation or quad-overlap rasterization question. A first "replace"
+// draw (`SrcColorFactor=One`/`DstColorFactor=Zero`) establishes a known
+// starting (destination) color; a second draw with the real
+// `OneMinusConstantColor`/`SrcColor`/`Add` (color) and
+// `ConstantColor`/`OneMinusConstantAlpha`/`Subtract` (alpha) state blends
+// a known source color on top. The expected result is hand-computed from
+// the Vulkan blend-equation spec directly (see the comment beside each
+// expected value below), independent of this codebase's own
+// implementation.
+TEST(ExecutorTest, MatchesHandComputedBlendEquationForConstantColorFactors) {
+  Context Ctx;
+
+  // Draw 1: establish a known destination color via an unblended
+  // "replace" draw (Dst = Src exactly, since DstColorFactor/
+  // DstAlphaFactor are both Zero).
+  BlendState Replace;
+  Replace.BlendEnable = true;
+  Replace.SrcColorFactor = BlendFactor::One;
+  Replace.DstColorFactor = BlendFactor::Zero;
+  Replace.SrcAlphaFactor = BlendFactor::One;
+  Replace.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> ReplacePipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Replace);
+  ASSERT_THAT_EXPECTED(ReplacePipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Dst = (0.25, 0.55, 0.35, 0.85), a full-viewport quad.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+      3.0f,  -1.0f, 0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+      -1.0f, 3.0f,  0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+  };
+  PreparedDraw ReplaceDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*ReplacePipeline, ReplaceDraw),
+                    Succeeded());
+
+  // Draw 2: the real blend-state-under-test, its own second full-viewport
+  // quad drawn over the now-known Dst above.
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  Blend.SrcColorFactor = BlendFactor::OneMinusConstantColor;
+  Blend.DstColorFactor = BlendFactor::SrcColor;
+  Blend.ColorOp = BlendOp::Add;
+  Blend.SrcAlphaFactor = BlendFactor::ConstantColor;
+  Blend.DstAlphaFactor = BlendFactor::OneMinusConstantAlpha;
+  Blend.AlphaOp = BlendOp::Subtract;
+  std::array<float, 4> BlendConstants{0.1f, 0.2f, 0.3f, 0.4f};
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Blend,
+      /*LogicOpEnable=*/false, LogicOp::Copy, BlendConstants);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Src = (0.6, 0.4, 0.7, 0.9).
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+      3.0f,  -1.0f, 0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+      -1.0f, 3.0f,  0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Color: Result[C] = Src[C]*(1-Constant[C]) + Dst[C]*Src[C] (Add).
+  //   R: 0.6*(1-0.1) + 0.25*0.6 = 0.54 + 0.15 = 0.69 -> round(0.69*255) = 176
+  //   G: 0.4*(1-0.2) + 0.55*0.4 = 0.32 + 0.22 = 0.54 -> round(0.54*255) = 138
+  //   B: 0.7*(1-0.3) + 0.35*0.7 = 0.49 + 0.245 = 0.735 -> round(0.735*255) =
+  //      187
+  // Alpha: Result = Src[3]*Constant[3] - Dst[3]*(1-Constant[3])
+  //   (Subtract) = 0.9*0.4 - 0.85*0.6 = 0.36 - 0.51 = -0.15, clamped to 0
+  //   when packed into an 8-bit UNORM channel.
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 176, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 138, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 187, 1) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 3], 0) << "texel " << I;
+  }
+}
+
+// (Roadmap H103) The `VK_BLEND_OP_MIN`/`VK_BLEND_OP_MAX`/
+// `VK_BLEND_OP_REVERSE_SUBTRACT` counterpart of
+// `MatchesHandComputedBlendEquationForConstantColorFactors` above --
+// taken from the same real, currently-failing CTS case's *second* quad
+// (`color_1mcc_sc_min_alpha_z_1mca_rsub`), reusing that test's own
+// Src/Dst/BlendConstants values so any divergence found here is
+// specifically attributable to `Min`/`ReverseSubtract`, not to a
+// different set of input values.
+TEST(ExecutorTest, MatchesHandComputedBlendEquationForMinAndReverseSubtract) {
+  Context Ctx;
+
+  BlendState Replace;
+  Replace.BlendEnable = true;
+  Replace.SrcColorFactor = BlendFactor::One;
+  Replace.DstColorFactor = BlendFactor::Zero;
+  Replace.SrcAlphaFactor = BlendFactor::One;
+  Replace.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> ReplacePipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Replace);
+  ASSERT_THAT_EXPECTED(ReplacePipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Dst = (0.25, 0.55, 0.35, 0.85), a full-viewport quad.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+      3.0f,  -1.0f, 0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+      -1.0f, 3.0f,  0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+  };
+  PreparedDraw ReplaceDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*ReplacePipeline, ReplaceDraw),
+                    Succeeded());
+
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  Blend.SrcColorFactor = BlendFactor::OneMinusConstantColor;
+  Blend.DstColorFactor = BlendFactor::SrcColor;
+  Blend.ColorOp = BlendOp::Min;
+  Blend.SrcAlphaFactor = BlendFactor::Zero;
+  Blend.DstAlphaFactor = BlendFactor::OneMinusConstantAlpha;
+  Blend.AlphaOp = BlendOp::ReverseSubtract;
+  std::array<float, 4> BlendConstants{0.1f, 0.2f, 0.3f, 0.4f};
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Blend,
+      /*LogicOpEnable=*/false, LogicOp::Copy, BlendConstants);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Src = (0.6, 0.4, 0.7, 0.9).
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+      3.0f,  -1.0f, 0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+      -1.0f, 3.0f,  0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Color: Result[C] = min(Src[C]*(1-Constant[C]), Dst[C]*Src[C]).
+  //   R: min(0.6*0.9, 0.25*0.6) = min(0.54, 0.15) = 0.15 -> round(0.15*255)
+  //      = 38
+  //   G: min(0.4*0.8, 0.55*0.4) = min(0.32, 0.22) = 0.22 -> round(0.22*255)
+  //      = 56
+  //   B: min(0.7*0.7, 0.35*0.7) = min(0.49, 0.245) = 0.245 ->
+  //      round(0.245*255) = 62
+  // Alpha (ReverseSubtract, DstTerm - SrcTerm):
+  //   Result = Dst[3]*(1-Constant[3]) - Src[3]*0 = 0.85*0.6 - 0 = 0.51 ->
+  //     round(0.51*255) = 130
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 38, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 56, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 62, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 3], 130, 1) << "texel " << I;
+  }
+}
+
+// (Roadmap H103) Chains `MatchesHandComputedBlendEquationForConstantColor
+// Factors`'s own Add-op draw and `...ForMinAndReverseSubtract`'s own
+// Min-op draw back to back over the *same* attachment -- reusing both
+// tests' own Src/BlendConstants values, but this time reading the second
+// draw's Dst from the *first* draw's real blended-and-packed-to-8-bit
+// result (not a hand-set starting color) -- to isolate whether a
+// *second* draw correctly re-reads what a prior draw, using a different
+// blend state, just wrote, decoupled from both single-draw arithmetic
+// (already confirmed correct by the two tests above) and any
+// quad-overlap rasterization question.
+TEST(ExecutorTest,
+    SequentialDrawsWithDifferentBlendStatesCorrectlyAccumulate) {
+  Context Ctx;
+
+  BlendState Replace;
+  Replace.BlendEnable = true;
+  Replace.SrcColorFactor = BlendFactor::One;
+  Replace.DstColorFactor = BlendFactor::Zero;
+  Replace.SrcAlphaFactor = BlendFactor::One;
+  Replace.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> ReplacePipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Replace);
+  ASSERT_THAT_EXPECTED(ReplacePipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Dst = (0.25, 0.55, 0.35, 0.85), a full-viewport quad.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+      3.0f,  -1.0f, 0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+      -1.0f, 3.0f,  0.0f, 0.25f, 0.55f, 0.35f, 0.85f,
+  };
+  PreparedDraw ReplaceDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*ReplacePipeline, ReplaceDraw),
+                    Succeeded());
+
+  std::array<float, 4> BlendConstants{0.1f, 0.2f, 0.3f, 0.4f};
+  // Src = (0.6, 0.4, 0.7, 0.9) for both subsequent draws.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+      3.0f,  -1.0f, 0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+      -1.0f, 3.0f,  0.0f, 0.6f, 0.4f, 0.7f, 0.9f,
+  };
+
+  // Draw 2: Add + ConstantColor factors (same as
+  // MatchesHandComputedBlendEquationForConstantColorFactors), producing
+  // (176, 138, 187, 0) as its own real, packed 8-bit result -- confirmed
+  // by that test above.
+  BlendState AddBlend;
+  AddBlend.BlendEnable = true;
+  AddBlend.SrcColorFactor = BlendFactor::OneMinusConstantColor;
+  AddBlend.DstColorFactor = BlendFactor::SrcColor;
+  AddBlend.ColorOp = BlendOp::Add;
+  AddBlend.SrcAlphaFactor = BlendFactor::ConstantColor;
+  AddBlend.DstAlphaFactor = BlendFactor::OneMinusConstantAlpha;
+  AddBlend.AlphaOp = BlendOp::Subtract;
+  Expected<GraphicsPipeline> AddPipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{},
+      AddBlend, /*LogicOpEnable=*/false, LogicOp::Copy, BlendConstants);
+  ASSERT_THAT_EXPECTED(AddPipeline, Succeeded());
+  PreparedDraw AddDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*AddPipeline, AddDraw), Succeeded());
+  EXPECT_NEAR(Scene.AttachmentStorage[0], 176, 1);
+  EXPECT_NEAR(Scene.AttachmentStorage[1], 138, 1);
+  EXPECT_NEAR(Scene.AttachmentStorage[2], 187, 1);
+  EXPECT_EQ(Scene.AttachmentStorage[3], 0);
+
+  // Draw 3: Min + ReverseSubtract (same as
+  // MatchesHandComputedBlendEquationForMinAndReverseSubtract), this time
+  // reading Draw 2's real (176, 138, 187, 0) as its own Dst.
+  BlendState MinBlend;
+  MinBlend.BlendEnable = true;
+  MinBlend.SrcColorFactor = BlendFactor::OneMinusConstantColor;
+  MinBlend.DstColorFactor = BlendFactor::SrcColor;
+  MinBlend.ColorOp = BlendOp::Min;
+  MinBlend.SrcAlphaFactor = BlendFactor::Zero;
+  MinBlend.DstAlphaFactor = BlendFactor::OneMinusConstantAlpha;
+  MinBlend.AlphaOp = BlendOp::ReverseSubtract;
+  Expected<GraphicsPipeline> MinPipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{},
+      MinBlend, /*LogicOpEnable=*/false, LogicOp::Copy, BlendConstants);
+  ASSERT_THAT_EXPECTED(MinPipeline, Succeeded());
+  PreparedDraw MinDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*MinPipeline, MinDraw), Succeeded());
+
+  // Dst2 = (176, 138, 187, 0) / 255 = (0.6902, 0.5412, 0.7333, 0.0).
+  // Color: min(Src[C]*(1-Constant[C]), Dst2[C]*Src[C]):
+  //   R: min(0.54, 0.6902*0.6=0.41412) = 0.41412 -> round(*255) = 106
+  //   G: min(0.32, 0.5412*0.4=0.21648) = 0.21648 -> round(*255) = 55
+  //   B: min(0.49, 0.7333*0.7=0.51333) = 0.49 -> round(*255) = 125
+  // Alpha (ReverseSubtract): Dst2[3]*(1-Constant[3]) - Src[3]*0 = 0 - 0 =
+  //   0.
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 106, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 55, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 125, 1) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 3], 0) << "texel " << I;
+  }
+}
+
+// (Roadmap H103) Reproduces the real `dEQP-VK.pipeline.fast_linked_
+// library.blend.format.*` CTS family's own geometry exactly --
+// `createOverlappingQuads`' four translated, partially-overlapping
+// quads over a 32x32 attachment (`vktPipelineVertexUtil.cpp`) -- but
+// with each quad's own blend state forced to a plain "replace"
+// (`SrcColorFactor=One`/`DstColorFactor=Zero`) and a distinct solid
+// color per quad, decoupling the question entirely from blend-equation
+// arithmetic (already confirmed correct in isolation by the three tests
+// above): whichever quad is drawn *last* over a given pixel should be
+// the color that pixel ends up as, with no blending at all. Any texel
+// that ends up a color other than one of the four quads' own solid
+// colors (or the initial clear color, for the 0 pixels no quad
+// reaches) would indicate a rasterization/coverage bug specific to
+// this exact overlapping-quad geometry -- the one remaining untested
+// ingredient of the real CTS test's own repro shape.
+TEST(ExecutorTest,
+    OverlappingQuadGeometryLeavesEveryTexelOneOfTheFourSolidColors) {
+  Context Ctx;
+  BlendState Replace;
+  Replace.BlendEnable = true;
+  Replace.SrcColorFactor = BlendFactor::One;
+  Replace.DstColorFactor = BlendFactor::Zero;
+  Replace.SrcAlphaFactor = BlendFactor::One;
+  Replace.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Replace);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  constexpr uint32_t Size = 32;
+  std::array<uint8_t, Size * Size * 4> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                      Size, Size};
+  std::array<AttachmentView, 1> Attachments{Color};
+
+  // Same translations/quadSize/colors as `createOverlappingQuads`
+  // (`vktPipelineVertexUtil.cpp`).
+  struct { float X, Y; } Translations[4] = {
+      {-0.25f, -0.25f}, {-1.0f, -0.25f}, {-1.0f, -1.0f}, {-0.25f, -1.0f}};
+  struct { float R, G, B, A; } QuadColors[4] = {
+      {1.0f, 0.0f, 0.0f, 1.0f},
+      {0.0f, 1.0f, 0.0f, 1.0f},
+      {0.0f, 0.0f, 1.0f, 1.0f},
+      {1.0f, 0.0f, 1.0f, 1.0f}};
+  constexpr float QuadSize = 1.25f;
+
+  for (uint32_t Q = 0; Q != 4; ++Q) {
+    float X = Translations[Q].X, Y = Translations[Q].Y;
+    float R = QuadColors[Q].R, G = QuadColors[Q].G, B = QuadColors[Q].B,
+          A = QuadColors[Q].A;
+    std::vector<float> VertexData = {
+        X,          Y,          0.0f, R, G, B, A, // lower-left
+        X + QuadSize, Y,          0.0f, R, G, B, A, // lower-right
+        X,          Y + QuadSize, 0.0f, R, G, B, A, // upper-left
+        X + QuadSize, Y,          0.0f, R, G, B, A, // lower-right
+        X,          Y + QuadSize, 0.0f, R, G, B, A, // upper-left
+        X + QuadSize, Y + QuadSize, 0.0f, R, G, B, A, // upper-right
+    };
+    std::vector<VertexAttribute> Attributes = {
+        {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+        {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+    std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+        0, 28,
+        ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+                 VertexData.size() * sizeof(float)),
+        Attributes}};
+
+    PreparedDraw Draw;
+    Draw.Attachments = Attachments;
+    Draw.Viewports[0] =
+        ViewportState{0.0f, 0.0f, float(Size), float(Size), 0.0f, 1.0f};
+    Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+    Draw.VertexBuffers = Bindings;
+    DrawCommand Cmd;
+    Cmd.VertexCount = static_cast<uint32_t>(VertexData.size() / 7);
+    Cmd.InstanceCount = 1;
+    std::array<DrawCommand, 1> Draws{Cmd};
+    Draw.Draws = Draws;
+    ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded())
+        << "quad " << Q;
+  }
+
+  auto IsOneOf = [](uint8_t R, uint8_t G, uint8_t B, uint8_t A) {
+    // (0,0,0,0): untouched clear. The four quad colors: red, green,
+    // blue, magenta, each fully opaque.
+    return (R == 0 && G == 0 && B == 0 && A == 0) ||
+           (R == 255 && G == 0 && B == 0 && A == 255) ||
+           (R == 0 && G == 255 && B == 0 && A == 255) ||
+           (R == 0 && G == 0 && B == 255 && A == 255) ||
+           (R == 255 && G == 0 && B == 255 && A == 255);
+  };
+  uint32_t Bad = 0;
+  for (uint32_t Y = 0; Y != Size; ++Y) {
+    for (uint32_t X = 0; X != Size; ++X) {
+      uint32_t I = (Y * Size + X) * 4;
+      uint8_t R = AttachmentStorage[I], G = AttachmentStorage[I + 1],
+              B = AttachmentStorage[I + 2], A = AttachmentStorage[I + 3];
+      if (!IsOneOf(R, G, B, A)) {
+        ++Bad;
+        ADD_FAILURE() << "texel (" << X << "," << Y << ") = (" << (int)R
+                      << "," << (int)G << "," << (int)B << "," << (int)A
+                      << ") is not one of the clear color or the four "
+                         "quads' own solid colors";
+      }
+    }
+  }
+  EXPECT_EQ(Bad, 0u);
+}
+
 // roadmap C4: dual-source blend factors (`VK_BLEND_FACTOR_SRC1_*`). A
 // fragment stage's second color output -- `SV_Target0`'s `Index=1`
 // companion, `SignatureElement::Index` -- is read by a `Src1Color`/
