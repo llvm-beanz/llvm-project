@@ -38885,3 +38885,83 @@ change: this is a pure correctness bug fix to already-implemented mesh
 shader dispatch, with no new feature/extension surface exposed or
 changed. `FeMeGraphicsDesign.md` needs no change either -- no deviation
 from the design doc was introduced by this fix.
+
+## Roadmap H95a: measured impact (all 4 remaining cases fixed)
+
+Root-caused and fixed both of H95a's two independent, stacked bugs
+behind the 4 remaining `*_shared_memory_size` cases' "Unexpected shared
+memory result: 0" diagnostic:
+
+1. **`Linearize.cpp` (`DiamondFlattener::run()`)**: every cycle-exit-root
+   -- including ones nested inside a still-divergent enclosing region --
+   was seeded with a hardcoded `AllActive` mask instead of the real mask
+   in effect at the cycle boundary it exits from. Since
+   `applyStageMasks`'s constant-mask fast path skips patching a call's
+   mask operand once it looks like a known constant, this left the
+   pattern's final scalar side-effect store (`result.sharedOK = ...`)
+   masked with a stale `i1 true` -- unconditionally executed by every
+   wave in the workgroup's sequential wave loop, not just the one
+   containing invocation 0, so the last wave processed (never the one
+   containing invocation 0) always won and clobbered the correct result
+   with its own garbage (masked-off) data. Fixed by tracking each cycle
+   boundary block's real `MaskPair` (`CycleBoundaryMasks`) and seeding
+   each exit-root from its boundary block(s)' mask (when they agree)
+   instead of unconditionally falling back to `AllActive`.
+   - New coverage: lit test
+     `Linearize/resource-call-after-nested-loop-in-divergent-diamond.ll`
+     and `LinearizeTest.cpp`'s
+     `MasksResourceCallInExitBlockOfLoopNestedInDivergentDiamond`, both
+     confirmed to fail without the fix and pass with it.
+2. **`EntryWrapper.cpp` (`spillValuesLiveAcrossBarriers`)**: once (1)
+   above started threading a real, non-constant mask value into a
+   post-barrier merge `phi` (previously it was always a compile-time
+   constant, which never needs spilling), a second, previously-dormant
+   bug surfaced: the reload-insertion loop always inserted the new
+   reload immediately before its user via `IRBuilder<> Builder(User)`.
+   When `User` is a `PHINode`, this places the reload in the phi's own
+   block rather than the specific incoming predecessor block that
+   operand corresponds to -- violating both "all phis precede all
+   non-phis in a block" (if another phi follows) and, more
+   fundamentally, SSA dominance (the reload does not dominate the
+   predecessor edge it is meant to feed). Confirmed via
+   `FEME_DEBUG_DUMP_STAGES`-gated `verifyModule()` calls added
+   temporarily after each pipeline stage in `Pipeline.cpp` (removed
+   before committing), which pinpointed `EntryWrapperPass` (mesh stage)
+   as the first stage to produce an invalid module, with the verifier
+   diagnostic ("PHI nodes not grouped at top of basic block!") naming
+   the exact phi and block. Fixed by special-casing `PHINode` users to
+   insert the reload at the end of `getIncomingBlock(OperandNo)`
+   instead.
+   - New coverage: `EntryWrapperTest.cpp`'s
+     `SpillsValueUsedAsPhiIncomingValueAfterBarrier`, confirmed to fail
+     (module invalid) without the fix and pass with it.
+
+`ninja -C build2 check-feme`: **2953 passed / 3 pre-existing Unsupported
+/ 0 Failed** (up by exactly the +1 new unit test from the 2952 baseline
+recorded before this session; no regressions).
+
+A real re-run of all 6 originally-tracked H95/H95a cases confirms all 6
+now **pass outright**: `mesh_payload_size`, `task_payload_size` (fixed
+previously, under H95's own `Executor.cpp` fix), plus
+`mesh_shared_memory_size`, `task_shared_memory_size`,
+`mesh_payload_and_shared_memory_size`, and
+`task_payload_and_shared_memory_size` (fixed this session).
+
+A full `dEQP-VK.mesh_shader.ext.*` sweep (26921 cases) confirms no
+regressions and exactly the expected improvement relative to H94b's own
+closing baseline (323 Pass/116 Fail/26482 Not supported):
+
+```
+before (H94b's closing baseline): Passed 323/26921, Failed 116/26921, Not supported 26482/26921
+after  (H95a):                    Passed 327/26921, Failed 112/26921, Not supported 26482/26921
+```
+
+The `+4`/`-4` delta matches exactly the 4 H95a target cases moving from
+Fail to Pass, with nothing else regressing.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure compiler-internals correctness fix (loop
+linearization mask propagation, entry-wrapper barrier-spill reload
+placement), with no new feature/extension surface exposed or changed.
+`FeMeGraphicsDesign.md` needs no change either -- no deviation from the
+design doc was introduced this session.
