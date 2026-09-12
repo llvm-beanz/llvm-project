@@ -39228,3 +39228,87 @@ document update was needed.
 `rasterization.culling.primitive_id`'s own newly-exposed pixel-
 comparison mismatch is out of this row's scope and filed as its own
 milestone, H102.
+
+## Roadmap H98: measured impact (fixed)
+
+`dEQP-VK.image.host_image_copy.*`'s 73,295-case family (51% of
+`image`'s own 143,086 cases) previously crashed partway through any
+attempted batch run with a bare `Segmentation fault`, no diagnostic.
+Reproduced deterministically in isolation on
+`dispatch_r8g8b8a8_uint_r8g8b8a8_unorm.barrier_transition_host_copy.
+memcpy.general_general.general.linear.0_16_64.32x28`, and got a real
+backtrace using H97's own `FEME_CPU_JIT_DEBUG_SUPPORT=1` +
+`gdb -batch -ex run -ex bt -ex "info registers"` workflow -- this
+time the crash was in ordinary driver C++ code, not JIT'd shader
+code: `feme::vulkan::copyBufferImageRegion` (`ImageOps.cpp`), called
+from `vkCopyImageToMemory` (`HostImageCopy.cpp`), called from the
+CTS's own `HostImageCopyTestInstance::iterate()`. The register dump
+(AAPCS64: `memcpy(dest=x0, src=x1, n=x2)`) showed `x0=0` at the crash
+PC -- a null destination pointer.
+
+Traced the null pointer to its root cause by reading source:
+`vkGetImageSubresourceLayout2KHR`/`vkGetDeviceImageSubresourceLayoutKHR`
+(`Image.cpp`) never inspected `pLayout->pNext` at all, so a
+`VkSubresourceHostMemcpySize` struct (`VK_EXT_host_image_copy`'s own
+"how many bytes must I allocate for a memcpy-mode host copy of this
+subresource" query) chained onto that `pNext` was silently left at
+its caller-side zero-initialized `.size`. The CTS's own
+`HostImageCopyTestInstance` sizes its host buffer directly from this
+field (`std::vector<uint8_t> data((size_t)subresourceHostMemcpySize.
+size)`), so a silently-zero `size` allocates a zero-byte buffer whose
+`.data()` may be null (common in libstdc++), which the CTS then
+passes straight to `vkCopyImageToMemoryEXT` as the host pointer --
+crashing inside `copyBufferImageRegion`'s own `memcpy`.
+
+Fixed by adding `fillSubresourceLayout2PNextChain` (mirroring the
+existing `fillMemoryRequirements2PNextChain` pattern already used for
+`vkGetImageMemoryRequirements2`/`vkGetDeviceImageMemoryRequirements`)
+and calling it from both pNext-extensible subresource-layout
+entrypoints, filling `VkSubresourceHostMemcpySize::size` from the
+same `ImageSubresourceLayout::Size` already computed for the base
+`VkSubresourceLayout::size` (correct because a
+`VK_HOST_IMAGE_COPY_MEMCPY_BIT` region always names a single
+`(mipLevel, arrayLayer)` subresource, exactly matching `Size`'s own
+"one array layer's own byte range" definition). No new bounds check
+was needed/possible on the driver side:
+`vkCopyImageToMemory`/`vkCopyMemoryToImage` both pass
+`std::numeric_limits<VkDeviceSize>::max()` as the raw host pointer's
+own "size" (a raw pointer has no size of its own to validate
+against, by this file's own existing design), so the *only* real fix
+is making sure the CTS's own buffer-sizing query gets a correct
+answer in the first place.
+
+New unit tests (`feme/unittests/Vulkan/ImageTest.cpp`):
+`GetImageSubresourceLayout2KHRFillsHostMemcpySize` (live image) and
+`GetDeviceImageSubresourceLayoutKHRFillsHostMemcpySize` (info-only
+counterpart), both asserting the filled `VkSubresourceHostMemcpySize::
+size` agrees with the corresponding `VkSubresourceLayout::size`.
+
+`ninja check-feme`'s full suite (2962 tests, 3 pre-existing
+`Unsupported`) passes with 0 failures. `FeMeVulkanTests`'s own full
+684-test suite (up from 682) also passes in full.
+
+A real re-run of the complete 73,295-case `host_image_copy` family
+confirms the systemic crash is gone -- the batch now runs to
+completion with no crash at all:
+
+```
+image.host_image_copy.* (73,295 cases): 5828 Pass / 66 Fail / 67401 NotSupported, 0 crashes
+  (was: crashed partway through the very first batch attempt, with 25 straight
+   resume-loop iterations each crashing again with zero successes recorded)
+```
+
+The 66 remaining failures are entirely confined to a narrow
+`draw_<format>` (renderable-format) subfamily -- every one of them a
+pixel-comparison mismatch, not a crash -- unrelated to this row's own
+fix (which resolved every `dispatch_*`/`simple.*` host-copy case in
+the family). Filed as its own row, H98a.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: `VK_EXT_host_image_copy` support already existed in
+principle (the extension's core copy entrypoints already worked);
+this fixes a bug within already-advertised support (a missed
+`pNext`-chain query), not a new feature/extension being added.
+`FeMeCPUDesign.md` needs no update either: this is a pure
+`feme::vulkan` Vulkan-entrypoint bug fix, with no compiler-pipeline
+design deviation.
