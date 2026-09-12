@@ -39143,3 +39143,88 @@ change: this is a pure compiler-internals fix (a GEP-shape recognition
 gap in `feme::graphics::CanonicalizeStagePass`), not a
 feature/extension-support change. `FeMeGraphicsDesign.md` needs no
 change either, for the same reason.
+
+## Roadmap H97: measured impact (fixed)
+
+No separate debug/`RelWithDebInfo` build directory exists in this
+environment (this environment is `aarch64`, and `build2` is
+`Release` -- `-O3 -DNDEBUG` -- with `LLVM_ENABLE_ASSERTIONS=ON` and
+ccache, no `-g`), so a bare `SIGSEGV` inside JIT-compiled shader code
+previously produced no usable backtrace at all: `gdb` resolved the
+crashing frame to `?? ()` with a "corrupt stack" unwind, since the
+JIT never registers its generated code with the debugger.
+
+Added an opt-in `FEME_CPU_JIT_DEBUG_SUPPORT=1` environment variable
+to `feme::cpu::CompiledStage::createStage`, installing
+`orc::ELFDebugObjectPlugin` (`RequireDebugSections=false`, since this
+compiler's CPU pipeline carries no DWARF line info) onto the JIT's
+`ObjectLinkingLayer` -- the GDB JIT-registration interface,
+mirroring `llvm-jitlink`'s own `--debugger-support` flag. This gave a
+real, symbolized backtrace for the first time: `rasterization.
+culling.primitive_id`'s crash resolved to `feme_cpu_entry_main`
+(the JIT'd shader itself, called from `feme::cpu::CompiledStage::
+invokeVertices` -- a **vertex**-stage crash, not `rasterization`'s
+own driver code), crashing on `x8 = 0` (a null pointer) inside a
+mask-extraction-then-masked-gather instruction sequence.
+
+A second, temporary debug aid (a pre-JIT IR dump, not itself
+committed) traced that null/garbage pointer to
+`FunctionWidener::widenMaskedAllocaGEP` in `feme/lib/Transforms/CPU/
+SIMDize.cpp`: it copied every one of a `getelementptr`'s index
+operands unchanged from the not-yet-widened function, on the
+(previously correct, but not universal) assumption that a
+masked-alloca's own indexing is always lane-uniform. When an index
+is itself genuinely divergent (a per-lane vertex index reading back
+a small per-vertex array, `rasterization.culling.primitive_id`'s own
+real shape), the stale, not-widened index `Value*` silently became
+`poison` once the old function's dead instructions were erased,
+producing a `getelementptr`/`llvm.masked.gather` whose address was
+`poison` for every lane and crashing with a bare `SIGSEGV` at
+runtime.
+
+Fixed by substituting an index's own widened `<W x T>` form when one
+exists -- exactly like the sibling `widenGroupSharedGEP` already
+does for its own indices -- rather than assuming every index here is
+uniform. New coverage: `SIMDizeTest.
+WidensDivergentIndexIntoMaskedAllocaArray`, a hand-built reduction of
+the real crashing shape (confirmed, by temporarily reverting the
+fix, to fail without it).
+
+`check-feme`'s full suite (2960 tests, 3 pre-existing unsupported)
+passes with 0 failures.
+
+A real re-run confirms all four of H97's own target groups no longer
+crash:
+
+```
+api.copy_and_blit.core.use_after_copy.*  (2292 cases): 870 Pass / 354 Fail / 1068 NotSupported, 0 crashes
+  -- already fixed as a side effect of other H-series work before this session started;
+     confirmed unaffected by this row's own fix.
+geometry.basic.output_vary_by_texture    (1 case):    now Pass outright (was: bare SIGSEGV)
+rasterization.culling.primitive_id       (1 case):    now Fail (a pixel-comparison mismatch,
+                                                       vktRasterizationTests.cpp:8275 -- not yet
+                                                       triaged, filed as H102) (was: bare SIGSEGV)
+texture.explicit_lod.2d.sizes.*_repeat_compute (72 cases): 64 Pass / 8 Fail, 0 crashes (was: 14 crashes)
+```
+
+Broader sweeps confirm no regressions:
+
+```
+rasterization.*         (15019 cases): 351 Pass / 133 Fail / 14535 NotSupported, 0 crashes
+geometry.*              (200 cases):   139 Pass / 50 Fail / 11 NotSupported, 0 crashes
+texture.explicit_lod.*  (380 cases):   364 Pass / 16 Fail, 0 crashes
+texture.*                (partial, ~24,000 of ~144,000 cases measured before this
+                          session's own re-verification was time-boxed): 0 crashes observed
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure compiler-internals fix (a `getelementptr`-
+index-widening gap in `feme::cpu::SIMDizePass`), not a
+feature/extension-support change. `FeMeCPUDesign.md`'s own "Phase 4:
+Widening" table's existing "alloca T -> alloca [W x T], indexed by
+lane" prescription already covered this row's own fix; no design
+document update was needed.
+
+`rasterization.culling.primitive_id`'s own newly-exposed pixel-
+comparison mismatch is out of this row's scope and filed as its own
+milestone, H102.
