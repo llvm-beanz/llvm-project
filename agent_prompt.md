@@ -45,18 +45,15 @@ agent thoughts.
 
 # Request
 
-Can you work on H96 or other blocking work to make progress on the H-series
+Can you work on H75 or other blocking work to make progress on the H-series
 milestones?
 
-> **`synchronization.other.barrier_across_secondary`'s "Unexpected values found
-> in verification buffer"** (1 case, newly exposed by H91's own
-> signature-metadata fix): compiles, links, and runs to completion (no crash, no
-> pipeline-creation error) but fails a data-correctness check
-> (`vktMeshShaderSyncTestsEXT.cpp:1771`) -- the CTS verification buffer this
-> case's own cross-secondary-command-buffer barrier synchronization test reads
-> back does not match the expected values, suggesting a synchronization or
-> data-visibility gap specific to a mesh-shader barrier crossing a secondary
-> command buffer boundary. Not yet triaged -- needs its own reduction to
-> determine whether this is a genuine synchronization-primitive gap (as the H70
-> triage note originally speculated for this bucket) or a narrower, unrelated
-> data-plumbing bug like H95's own
+> **`misc.*`/`properties.*`'s `feme-cpu-simdize: ... divergent branch ...`
+> widening gap** (6 cases: `misc` 4, `properties` 2, found by H70's own
+> per-bucket triage): `feme::cpu::LinearizePass` fails to remove a divergent
+> branch `FunctionWidener` then cannot widen around, a distinct shape from H72's
+> own barrier-specific region-splitting gap (this one has no barrier involved at
+> all, per `misc.barrier_in_mesh`'s own name notwithstanding -- the barrier
+> itself is not the problem here, the surrounding branch shape is). Not yet
+> triaged -- needs its own IR reduction of `misc.barrier_in_mesh` to identify
+> the branch shape `LinearizePass` does not flatten
