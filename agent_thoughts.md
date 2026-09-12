@@ -79074,3 +79074,89 @@ late in the session.
    target by sheer case count.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H75 session: fixed the divergent-branch widening gap; both target cases now hit a different (already-tracked) bug, folded into H77
+
+## Done this session
+
+1. **Re-verified H75's scope.** Roadmap claimed 6 cases; only 2 still
+   failed (`misc.barrier_in_mesh`, `misc.barrier_in_task`). The other 4
+   were already fixed as side effects of H89-H96's own `Linearize.cpp`
+   work -- nobody had gone back to shrink the row's own case count.
+2. **Built a hand-reduction pipeline from scratch** (glslangValidator ->
+   `feme-translate --import-spirv` -> `feme-opt
+   --feme-convert-spirv-to-llvm` -> `feme-translate
+   --llvmdialect-to-llvmir` -> `feme-opt -feme-cpu-stage=mesh
+   -passes='feme-cpu-fold-spirv-builtins,feme-cpu-prepare,...'` ->
+   `feme-cpu-linearize` -> `feme-cpu-simdize`) to reproduce the real
+   diagnostic in isolation from the actual CTS shader source.
+3. **Root-caused it**: a nested `if (counter == 32) {...} else {...}`
+   inside a single-invocation-gated outer `if`, reading a
+   barrier-synchronized `shared` counter. `DiamondFlattener::flatten`
+   correctly masks the counter's `load` into a `feme.cpu.masked.load`
+   once inside the outer arm -- but `UniformityInfo` was computed once,
+   *before* any masking happened, so it still thinks the (now
+   per-lane-varying, due to the passthru) result is uniform, and
+   `flatten` trusted that stale verdict for the *inner* branch.
+4. **Fixed it** (`feme/lib/Transforms/CPU/Linearize.cpp`): track every
+   masked-load result (`DiamondFlattener::MaskedLoadResults`), and treat
+   a branch as divergent in `flatten` if its condition transitively
+   depends on one, regardless of what `UniformityInfo` says.
+5. **Added regression coverage**: a lit test
+   (`Linearize/nested-diamond-condition-from-masked-load.ll`) and a
+   `LinearizeTest.cpp` unit test
+   (`FlattensNestedDiamondWhoseConditionDependsOnMaskedLoad`).
+6. **Verified no regressions**: `check-feme`'s full 2958-test suite (0
+   failures), plus a `misc.*` sweep (41 Pass/30 Fail/43 NotSupported, up
+   from 40/31/43) and a `properties.*` sweep (unchanged at 14/1/15) --
+   both show 0 remaining `divergent branch` diagnostics.
+7. **Confirmed the fix's real effect**: both target CTS cases now
+   compile/link/run to completion (no divergent-branch error) -- but
+   both hit a *different* diagnostic, a pixel-comparison mismatch at
+   `vktMeshShaderMiscTestsEXT.cpp:462`. That's the exact line an
+   already-open row, H77, tracks -- folded these 2 cases into H77
+   instead of filing a duplicate milestone.
+8. **Updated docs**: struck through H75 in `Roadmap.md`, updated H77's
+   own row to mention the 2 newly-folded-in cases, updated H70's status
+   line, and added a "Roadmap H75: measured impact" section to
+   `VulkanCTSReport.md`. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` changes needed -- pure compiler-internals
+   fix, no feature/extension surface changed.
+9. **Committed in 5 small commits**: the `Linearize.cpp` fix, the lit
+   test, the unit test, the `Roadmap.md` update, the
+   `VulkanCTSReport.md` update.
+
+## A gotcha worth remembering
+
+`feme-opt --feme-convert-spirv-to-llvm`'s output has an extra wrapping
+`module { ... }` around the real module. `feme-translate
+--llvmdialect-to-llvmir` doesn't handle that nesting -- it silently
+produces an empty 6-line output with no error at all. Had to manually
+strip the outer wrapper with a small Python script. Worth checking
+whether building `mlir-translate` (not currently built in this
+environment) sidesteps this, since a prior session's own documented
+pipeline used it instead for this exact step.
+
+## Suggested next steps
+
+1. **Triage H77** (`misc.first_invocation_mesh`, now +2 cases from this
+   session): all 3 original cases and the 2 new ones fail the identical
+   `vktMeshShaderMiscTestsEXT.cpp:462` pixel-comparison diagnostic, but
+   don't assume they share one root cause without checking -- the new
+   cases read/write a workgroup-shared counter under a barrier, a
+   different shape from `first_invocation_mesh`'s own invocation-identity
+   check. Start with a channel-level pixel reduction (the technique H88
+   used for `local_size_id_mesh`/`local_size_id_task`) on
+   `misc.barrier_in_mesh` specifically, since that's this session's own
+   fresh reduction pipeline and scratch IR are still on hand for it.
+   ~1-2 hours to get a first real vs. expected pixel diff.
+2. **`check-hlsl-feme-vk`'s 103 failures** are still untriaged from the
+   H96 session (see that heading above) -- still the largest
+   still-open, non-Vulkan-CTS item on the board whenever there's room
+   for a dedicated session.
+3. H97-H101 (the newly-found crash/hang buckets from the full 54-group
+   CTS run) remain open; H99 (the `pipeline` group, ~36% of the whole
+   suite, P1) is still the highest-value next target by case count if
+   picking up fresh Vulkan CTS work instead.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
