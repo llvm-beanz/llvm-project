@@ -45,18 +45,27 @@ agent thoughts.
 
 # Request
 
-Can you work on H99 or other blocking work to make progress on the H-series
+Can you work on H99a or other blocking work to make progress on the H-series
 milestones?
 
-> **`pipeline`'s hang and `spirv.Kill` legalization crash** (the single largest
-> group in the entire suite, 1,172,229 cases, ~36% of the total suite -- only
-> 11,432 of which this session managed to measure): two distinct symptoms seen
-> so far -- (1) a genuine hang (100% CPU, zero forward progress for 20-35+
-> minutes) on `fast_linked_library.blend.dual_source...b5g5r5a1_unorm_pack16...`
-> cases; (2) a `spirv.Kill` legalization failure (`error: failed to legalize
-> operation 'spirv.Kill' that was explicitly marked illegal`) on sibling cases
-> in the same `fast_linked_library.blend.dual_source` family. Given the group's
-> size, this is the single highest-value crash-isolation target of the 13 --
-> fixing it (or even just finding a bulk-excludable pattern the way H98 did for
-> `image`) would move the largest share of any row here. Not yet triaged | (none
-> -- newly found)
+> **`pipeline.fast_linked_library.blend.dual_source`'s two-part 3469-case
+> failure family** (newly exposed by H99's own closing full-family re-run, once
+> the hang and crash that previously masked most of the family were fixed): (1)
+> 2878 cases fail with `Fail (Image mismatch)` -- spread broadly across
+> `format.*`/`multi_attachments.*` subfamilies and blend-state combinations, not
+> yet reduced to a specific shape; (2) 591 cases fail with
+> `VK_ERROR_INITIALIZATION_FAILED` at `vkQueueSubmit`, concentrated entirely in
+> exactly three formats (`r16_sfloat`, `r16g16_sfloat`, `r32g32b32_sfloat`, ~197
+> cases each) across both `format.*` and `multi_attachments.*` -- all three are
+> non-power-of-two-friendly or single/dual-channel float formats a real GPU
+> would commonly report as unable to support color-attachment blending,
+> suggesting the driver may be missing a
+> `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT` capability check for these
+> specific formats and should be returning `NotSupported` rather than failing at
+> submit time. Not yet triaged -- needs (1) a qpa-image/channel-level pixel
+> reduction of a representative image-mismatch case (mirroring H88/H93's own
+> technique) to determine which part of the dual-source-blend pipeline
+> disagrees, and (2) tracing why `vkQueueSubmit` fails specifically for
+> `r16_sfloat`/`r16g16_sfloat`/`r32g32b32_sfloat` to decide whether the fix is a
+> missing format-capability check (report `NotSupported` up front) or a genuine
+> renderer bug for these formats
