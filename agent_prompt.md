@@ -45,15 +45,14 @@ agent thoughts.
 
 # Request
 
-Can you work on H75 or other blocking work to make progress on the H-series
+Can you work on H76 or other blocking work to make progress on the H-series
 milestones?
 
-> **`misc.*`/`properties.*`'s `feme-cpu-simdize: ... divergent branch ...`
-> widening gap** (6 cases: `misc` 4, `properties` 2, found by H70's own
-> per-bucket triage): `feme::cpu::LinearizePass` fails to remove a divergent
-> branch `FunctionWidener` then cannot widen around, a distinct shape from H72's
-> own barrier-specific region-splitting gap (this one has no barrier involved at
-> all, per `misc.barrier_in_mesh`'s own name notwithstanding -- the barrier
-> itself is not the problem here, the surrounding branch shape is). Not yet
-> triaged -- needs its own IR reduction of `misc.barrier_in_mesh` to identify
-> the branch shape `LinearizePass` does not flatten
+> **`smoke.fast_lib.*`'s `feme-graphics-validate-stage: ... unresolved stage-IO
+> global-variable access ...`** (6 cases, found by H70's own per-bucket triage):
+> a mesh/fragment entry has a stage-IO global-variable access
+> `CanonicalizeStagePass` does not yet canonicalize into a `feme.stage.*` call,
+> so `ValidateStagePass` correctly (per its own H6g-b-c precedent) rejects it at
+> compile time instead of letting it reach the JIT as an undefined symbol. Not
+> yet triaged -- needs its own IR reduction of one `fast_lib.*` case to identify
+> the specific global-variable access shape `CanonicalizeStagePass` misses
