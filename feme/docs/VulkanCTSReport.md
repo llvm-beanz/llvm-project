@@ -39644,3 +39644,57 @@ investigation from recurring.
 change: nothing about supported features or extensions changed.
 `FeMeGraphicsDesign.md` needs no update: no design deviation, since no
 design-level fix was needed at all.
+
+## Roadmap H100: false-alarm closure (same root cause as H99a/H103)
+
+**Closed as a false alarm, not a real bug.** No source code change was
+needed.
+
+Per `feme/.instructions.md`'s new rule (added while closing H99a/H103
+this same day), rebuilt `libfeme_vulkan.so` from a clean `ninja
+check-feme` before touching any CTS case: **2971/2974 pass, 3
+pre-existing `Unsupported`, 0 `Failed`.**
+
+Re-ran all 3 groups named in H100's filing directly:
+
+1. First attempt ran from an unrelated scratch directory (`/tmp/h100`),
+   which broke every Amber-script test's own relative-path asset
+   lookup (`./vulkan/amber/...`) and produced a spurious
+   `ResourceError`/abort on `subgroups.subgroup_uniform_control_flow.
+   discard.subgroup_reconverge_discard00` -- a false failure caused
+   purely by the wrong working directory, not a driver bug. Confirmed
+   by re-running that single case from `deqp-vk`'s own directory:
+   clean `NotSupported` (the extension it needs isn't implemented,
+   which is an accurate, correct result).
+2. Re-ran all 3 groups from the correct working directory
+   (`<build>/external/vulkancts/modules/vulkan`). All three completed
+   to `DONE!` with zero hangs, zero aborts, zero failures:
+   - `subgroups`: 11525 Pass / 0 Fail / 37180 NotSupported (48705
+     cases). The specific case the filing named,
+     `ballot_broadcast.compute.subgroupbroadcast_bvec4_
+     requiredsubgroupsize128`, now reports `NotSupported` immediately
+     (no hang, no VSZ growth).
+   - `synchronization`: 12071 Pass / 0 Fail / 52801 NotSupported
+     (64872 cases).
+   - `synchronization2`: 19923 Pass / 0 Fail / 61694 NotSupported
+     (81617 cases).
+
+**Likely root cause of the original filing:** H99's own fix (this same
+day, prior session) switched `Pipeline.cpp`/`CompiledStage.cpp` from
+eager `parseBitcodeFile` to lazy `getLazyBitcodeModule` for
+`libFeMeRuntimeCPU`'s embedded bitcode, specifically because the eager
+path was re-parsing a ~2.9MB bitcode module from scratch on every
+single shader compile -- a bug whose symptom was described in H99's
+own filing as "a genuine hang (100% CPU, zero forward progress for
+20-35+ minutes)" with no per-iteration progress reporting. H100's own
+`subgroups` hang symptom ("100% CPU, zero progress," "slowly-growing
+VSZ") is the identical signature. Since `subgroups`' own
+`requiredsubgroupsize`-swept case matrix compiles a large number of
+shader variants, it is a very plausible second casualty of the exact
+same eager-reparse bug -- and H100's filing session's own build
+directory most likely simply hadn't picked up H99's fix yet when it
+ran.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed.
+`FeMeGraphicsDesign.md` needs no update: no design deviation.
