@@ -27,7 +27,9 @@
 
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/ExecutionEngine/Orc/Debugging/ELFDebugObjectPlugin.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
@@ -42,6 +44,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
+#include <cstdlib>
 
 using namespace llvm;
 using namespace feme;
@@ -57,6 +60,25 @@ Expected<std::unique_ptr<llvm::Module>> cloneIntoContext(llvm::Module &M,
   auto MemBuf =
       std::make_unique<SmallVectorMemoryBuffer>(std::move(Buffer), "clone");
   return parseBitcodeFile(MemBuf->getMemBufferRef(), NewCtx);
+}
+
+/// (Roadmap H97) Whether the JIT's ELF debug-object plugin (the GDB
+/// JIT-registration interface, `RequireDebugSections=false` -- this
+/// compiler does not carry DWARF line info through its own CPU pipeline,
+/// so this only ever exposes raw function symbols, not source lines) is
+/// requested for the JIT engine's own `ObjectLinkingLayer`. Opt-in and
+/// off by default (checked once, since a real driver run compiles many
+/// wave functions and this plugin's own per-object bookkeeping is not
+/// free) because every crash this project has ever hit inside JIT'd
+/// code (roadmap H97-H101's own "bare `SIGSEGV`, no diagnostic" bucket)
+/// left `gdb` unable to resolve the crashing frame to any symbol at
+/// all -- the JIT never registered its own generated code with the
+/// debugger. Enable with `FEME_CPU_JIT_DEBUG_SUPPORT=1` for any crash
+/// triage session that needs a real backtrace out of `gdb` instead of
+/// `?? ()`.
+bool wantsJITDebugSupport() {
+  const char *Env = std::getenv("FEME_CPU_JIT_DEBUG_SUPPORT");
+  return Env && StringRef(Env) != "0";
 }
 
 constexpr unsigned DefaultHostVectorBits = 128;
@@ -255,6 +277,18 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
                              "JIT module failed verification");
 
   auto JIT = cantFail(orc::LLJITBuilder().create());
+  if (wantsJITDebugSupport()) {
+    if (auto *ObjLinkingLayer =
+            dyn_cast<orc::ObjectLinkingLayer>(&JIT->getObjLinkingLayer())) {
+      Error DebugSupportErr = Error::success();
+      auto Plugin = std::make_unique<orc::ELFDebugObjectPlugin>(
+          JIT->getExecutionSession(), /*RequireDebugSections=*/false,
+          DebugSupportErr);
+      if (DebugSupportErr)
+        return std::move(DebugSupportErr);
+      ObjLinkingLayer->addPlugin(std::move(Plugin));
+    }
+  }
   orc::ThreadSafeModule TSM(std::move(*Cloned), TSCtx);
   if (Error E = JIT->addIRModule(std::move(TSM)))
     return std::move(E);

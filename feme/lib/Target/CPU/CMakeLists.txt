@@ -12,6 +12,7 @@ add_feme_library(FeMeTargetCPU
   Core
   ExecutionEngine
   Linker
+  OrcDebugging
   OrcJIT
   Passes
   Support
