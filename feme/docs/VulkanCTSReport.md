@@ -38828,3 +38828,60 @@ cleanup, entry-wrapper region-splitting shape recognition), with no new
 feature/extension surface exposed or changed. `FeMeGraphicsDesign.md`
 needs no change either, for the same reason -- no deviation from the
 design doc was introduced this session.
+
+## Roadmap H95: measured impact (2 of 6 cases fixed; remaining 4 broken out as H95a)
+
+Root-caused and fixed the first of H95's two independent bugs, affecting
+`mesh_payload_size`/`task_payload_size` (2 of the original 6 tracked
+cases): `Executor.cpp`'s `executeDraws` treated any mesh entry point
+whose output signature is entirely empty as an unconditional no-op,
+skipping mesh dispatch altogether. This was correct for every mesh entry
+compiled before this milestone, but wrong once a mesh entry's only
+observable effect is a side effect (a storage-buffer write) with no
+rasterizer-visible output -- exactly these two cases' shape
+(`SetMeshOutputsEXT(0, 0)`-only bodies whose sole purpose is an
+unconditional storage-buffer write). Fixed by adding a
+`MeshEmitsWithoutAttributes` flag (mirroring the existing
+`GSEmitsWithoutAttributes` pattern for geometry stages) so dispatch
+always proceeds, relaxing `RasterizePrimitives`'s `!VSPosition` rejection
+check to also tolerate it. Added a regression test,
+`ExecutorTest.RunsAMeshEntryWithNoOutputSignatureForItsSideEffectsAndRastersNothing`.
+
+`ninja -C build2 check-feme`: **2950 passed / 3 pre-existing Unsupported
+/ 0 Failed** (up by exactly the +1 new unit test from the established
+2949 baseline; no regressions). A real re-run of all 6 originally-tracked
+H95 cases confirms `mesh_payload_size`/`task_payload_size` now **pass
+outright**.
+
+**The remaining 4 cases** (`mesh_shared_memory_size`,
+`task_shared_memory_size`, `mesh_payload_and_shared_memory_size`,
+`task_payload_and_shared_memory_size`) still fail the identical
+diagnostic, but for a distinct, deeper root cause -- confirmed via direct
+instrumentation that the final workgroup-shared-memory contents are
+100% correct by the time the shader finishes executing, ruling out a
+data-corruption/addressing bug. Root-caused instead (via a cached IR
+dump from a prior session's reduction, reproduced for
+`mesh_shared_memory_size`) to a `feme-cpu-linearize` (`Linearize.cpp`)
+bug: the shader's own `if (gl_LocalInvocationIndex == 0u) { for (...)
+... result.sharedOK = allOK; }` verification pattern gets compiled such
+that the enclosing `if`'s own single-invocation gate is folded entirely
+into the inner loop's per-lane read mask, but the pattern's final scalar
+side-effect store (`result.sharedOK = ...`) is emitted with a
+hard-coded, unconditional `i1 true` store mask rather than being gated
+by whether the enclosing `if`'s condition held for the current wave at
+all. Since the wrapped entry executes all 32 waves of the workgroup
+sequentially through the same region function, and only one wave (the
+one containing invocation 0) ever legitimately satisfies the gate, every
+other wave still runs the same scalar-store code path with garbage data
+(the passthru value from its own masked-off reads) and unconditionally
+overwrites `result.sharedOK` -- the last wave processed always wins,
+clobbering the correct result. This is a narrow, well-evidenced,
+`Linearize.cpp`-scoped bug, not yet fixed; broken out as a new roadmap
+row, **H95a** (one lowercase letter deep, per the nesting rule), with the
+full IR evidence and a scoped fix plan recorded there.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure correctness bug fix to already-implemented mesh
+shader dispatch, with no new feature/extension surface exposed or
+changed. `FeMeGraphicsDesign.md` needs no change either -- no deviation
+from the design doc was introduced by this fix.
