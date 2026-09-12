@@ -18,6 +18,8 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -2257,6 +2259,84 @@ TEST(CanonicalizeStageTest, MeshStageCanonicalizesDoublyDynamicOutputStore) {
     EXPECT_NE(SI->getPointerOperand()->stripPointerCasts(),
              M->getGlobalVariable("loc"));
   }
+}
+
+/// (Roadmap H76) The real shape a `dEQP-VK.mesh_shader.ext.smoke.fast_lib.
+/// depth_only_points_position_components`/`depth_only_triangles_position_
+/// components` mesh entry's own per-component position write compiles
+/// into: `gl_MeshVerticesEXT[outIndex].gl_Position.x = ...` (and `.y`/`.z`/
+/// `.w` likewise), where `outIndex` -- unlike every other
+/// constant-vertex-index test in this file -- is a genuinely dynamic
+/// per-invocation value (`col * primitiveVertices + i`, `col` itself
+/// `gl_LocalInvocationIndex`). `getDynamicVertexIndexedAccess`'s own
+/// constant-index loop (peeling whatever follows the one non-constant
+/// vertex index) only ever handled `StructType` (a builtin interface
+/// block's own member) and `ArrayType` (a further-nested array
+/// dimension) -- a `FixedVectorType` (the vector-component index this
+/// per-component write's own trailing `i32 0`/`1`/`2`/`3` GEP index
+/// walks into, once `gl_Position`'s own struct member has already been
+/// peeled) fell through to the function's final `return std::nullopt`,
+/// leaving the whole access unrewritten and surfacing later as
+/// `feme-graphics-validate-stage`'s "unresolved stage-IO global-variable
+/// access" diagnostic -- exactly this milestone's own real CTS failures.
+/// Fixed by adding a `FixedVectorType` case to that loop, mirroring
+/// `resolveRowComponent`'s own vector-component byte-offset accumulation.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicVertexIndexThroughVectorComponentOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_verts = external addrspace(8) global [64 x { <4 x float>, float }], !feme.spirv.MemberDecorations !10
+    define void @main(i32 %outIndex, float %x, float %y, float %z, float %w) #0 {
+      %px = getelementptr inbounds [64 x { <4 x float>, float }], ptr addrspace(8) @gl_mesh_verts, i32 0, i32 %outIndex, i32 0, i32 0
+      store float %x, ptr addrspace(8) %px
+      %py = getelementptr inbounds [64 x { <4 x float>, float }], ptr addrspace(8) @gl_mesh_verts, i32 0, i32 %outIndex, i32 0, i32 1
+      store float %y, ptr addrspace(8) %py
+      %pz = getelementptr inbounds [64 x { <4 x float>, float }], ptr addrspace(8) @gl_mesh_verts, i32 0, i32 %outIndex, i32 0, i32 2
+      store float %z, ptr addrspace(8) %pz
+      %pw = getelementptr inbounds [64 x { <4 x float>, float }], ptr addrspace(8) @gl_mesh_verts, i32 0, i32 %outIndex, i32 0, i32 3
+      store float %w, ptr addrspace(8) %pw
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !10 = !{!11, !12}
+    !11 = !{i32 0, !13}
+    !12 = !{i32 1, !14}
+    !13 = !{!15}
+    !15 = !{i32 11, i32 0}
+    !14 = !{!16}
+    !16 = !{i32 11, i32 1}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *OutIndexArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::Position);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+
+  unsigned SeenStores = 0;
+  SmallVector<uint64_t, 4> SeenComponents;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    auto *Component = dyn_cast<ConstantInt>(CI->getArgOperand(2));
+    ASSERT_TRUE(Component);
+    SeenComponents.push_back(Component->getZExtValue());
+    EXPECT_EQ(CI->getArgOperand(4), OutIndexArg);
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  llvm::sort(SeenComponents);
+  EXPECT_EQ(SeenComponents, (SmallVector<uint64_t, 4>{0, 1, 2, 3}));
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
 /// (Roadmap H6i) `CanonicalizeStagePass::run`'s stage filter now accepts
