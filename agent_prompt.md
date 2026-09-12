@@ -45,29 +45,6 @@ agent thoughts.
 
 # Request
 
-Can you work on H94b or other blocking work to make progress on the H-series
-milestones?
-
-The previous run suggested next steps:
-
-> ### Suggested next steps (in order, if resuming this work)
->
-> 1. Capture real pre-`feme-cpu-wrap-entry` IR for one of the 4 cases (same
->    `feme-translate`/`feme-opt` reduction recipe as H94's own triage, just
->    run one stage further this time). Budget ~30-60 minutes -- the pipeline
->    command lines are already documented in H94's roadmap entry.
-> 2. Look at `EntryWrapper.cpp`'s `isLinearChain`/`walkBarrierFreeArm` (H72's
->    own additions) and `walkBarrierFreeArm`'s diamond-recognizing sibling
->    from L45 -- check whether the barrier sits inside the now-single-check
->    loop itself (a shape neither H72 nor L45 covers, since both of those
->    are barrier-*free* loop/diamond recognizers, not barrier-*containing*
->    ones) or straddles the loop and surrounding uniform control flow.
-> 3. Once the shape is identified, decide whether it's a small extension of
->    an existing recognizer or needs new logic -- don't assume either way
->    before looking at the real IR.
-> 4. Add lit test + `EntryWrapperTest` unit test coverage mirroring H72/L45's
->    own precedent (each of those rows added exactly this kind of paired
->    coverage).
-> 5. Re-run all 4 cases for real pass/fail once the new diagnostic clears --
->    there could easily be a 4th layer underneath, same as H93/H94's own
->    pattern.
+Can you do a full run of the Vulkan CTS against FeMe and update the CTS report
+with the current status. In particular I want to make sure we have accurate
+pass/fail/unsupported numbers for the whole suite at the top of the report.
