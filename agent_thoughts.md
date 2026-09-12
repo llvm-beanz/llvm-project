@@ -79735,3 +79735,76 @@ half is still open -- see "Suggested next steps" below.
 5. Clean up `/tmp/h99a_*` scratch files (qpa logs, decoded PNGs,
    caselists) -- no longer needed, everything relevant is now
    captured in the roadmap/CTS-report commits.
+
+# H99a/H103: chased a "systemic blend bug" for hours, then found it was a stale build
+
+Run `ninja check-feme` before trusting any CTS number. That's the whole lesson. Details below for anyone re-verifying.
+
+## What happened (~3 hours, most of it wasted on a nonexistent bug)
+
+1. Started from H99a/H103's own filing: a "systemic `pipeline.*.blend.*`
+   correctness bug," ~2878+ failing cases, spanning nearly the entire
+   blend test surface across two prior sessions' worth of investigation.
+2. Wrote 4 new isolated unit tests in `ExecutorTest.cpp` (single-draw
+   blend arithmetic, sequential multi-draw accumulation, the CTS's own
+   4-overlapping-quad geometry) -- all 4 passed. Ruled out arithmetic and
+   rasterization as the cause. ~1.5 hours.
+3. Found the CTS has a `monolithic.blend.format.*` control group
+   (same states, non-GPL construction). Ran it: 100/100 pass. This
+   pointed straight at `VK_EXT_graphics_pipeline_library` linking as the
+   suspect. ~20 minutes.
+4. Reviewed the GPL link-merge code in `GraphicsPipeline.cpp` by eye --
+   found nothing wrong.
+5. Added a temporary debug `fprintf` to trace the actual blend state
+   reaching the driver. Rebuilding `libfeme_vulkan.so` to pick up that
+   print was the first time *this session* had rebuilt it at all.
+6. **The bug vanished.** The exact same case that failed 19/20 times
+   now passed 100/100, print or no print. The prior two sessions (and
+   the first ~2.5 hours of this one) had been testing against a stale
+   `.so` that predated whatever earlier commit actually fixed this --
+   or maybe there was never a real bug in the committed history at all.
+7. Reverted the debug print, reran clean: `blend.clamp.*` 21/21,
+   `blend.format.r8g8b8a8_unorm.*` 100/100, `blend.dual_source.*.
+   r8g8b8a8_unorm.*` 196/196, `ninja check-feme` 2971/2974 (3 expected
+   `Unsupported`, 0 `Failed`), full `pipeline.*.blend.*` (every
+   construction type) 29776 Pass/0 Fail/19057 NotSupported across
+   48833 cases. Zero failures anywhere.
+
+## What actually got committed
+
+- 3 of the 4 isolation unit tests, kept as permanent regression
+  coverage (real, useful, just didn't find a real bug).
+- `feme/.instructions.md`: a warning to rebuild `libfeme_vulkan.so`
+  (or run `ninja check-feme`) before trusting any `deqp-vk` number.
+- `Roadmap.md`: H99a and H103 struck through, closed as false alarms.
+- `VulkanCTSReport.md`: full writeup of the investigation and root
+  cause, for anyone who finds this confusing later.
+
+No production code changed. That's real, not a failure to find
+something -- the CTS re-run at the end is exhaustive (48833 cases, not
+a sample) and confirms it.
+
+## Why this matters beyond H99a/H103
+
+Every H9x milestone closed in the last few sessions used the same
+build2 tree. If `libfeme_vulkan.so` sat stale for stretches of that
+run, some of those "fixed" or "confirmed passing" results could
+*also* be measuring old code rather than what's actually committed.
+I did not re-verify anything outside H99a/H103's own scope this
+session -- that would be a much bigger undertaking.
+
+## Suggested next steps
+
+1. **Spot-check 2-3 other recently-closed H-series rows** (e.g. H97,
+   H98, H98a) with a guaranteed-fresh rebuild, purely to gauge whether
+   this staleness pattern affected other "measured impact" numbers
+   already written into `VulkanCTSReport.md`. ~30 minutes each if the
+   original repro command is still in the report.
+2. **H100/H101** (from the original H97 13-crash filing) are still
+   untouched and are the next real, unclaimed triage targets in the
+   H-series. Start with a fresh `ninja check-feme` before any CTS
+   repro, per the new instructions-file rule.
+3. Consider whether `check-feme`'s own CI/local workflow should print
+   a loud warning (or just always force a rebuild) rather than relying
+   on every future session remembering to do it manually -- the
+   instructions-file note is a stopgap, not a structural fix.
