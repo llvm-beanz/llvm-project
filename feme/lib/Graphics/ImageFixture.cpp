@@ -679,6 +679,40 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H98a) `R32_FLOAT`/`R32G32_FLOAT`: real color-attachment
+  // formats (unlike `R32G32B32A32_FLOAT`, whose `Info->Components == 4`
+  // already matches `Clear`'s own always-4-component shape and so never
+  // needed special-casing) previously missing here entirely, the exact
+  // same "spurious 'expected 1'/'expected 2' error" gap `R32_UINT`/
+  // `R32G32_UINT` below were already fixed for (roadmap H70) -- a clear
+  // (or, via `CommandBuffer.cpp`'s render-pass/dynamic-rendering
+  // attachment-clear path, a `VK_ATTACHMENT_LOAD_OP_CLEAR` load) of one
+  // of these single-/two-channel 32-bit float color attachments (the
+  // `dEQP-VK.image.host_image_copy.large_images`/`draw_r32g32_sfloat_*`
+  // shapes this row's own triage found) fell through to the generic
+  // `Info->Components`-sized path below and failed with exactly that
+  // spurious error.
+  if (Format == ResourceFormat::R32_FLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    float F = static_cast<float>(Clear[0]);
+    memcpy(Texel.data(), &F, 4);
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R32G32_FLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    for (unsigned I = 0; I != 2; ++I) {
+      float F = static_cast<float>(Clear[I]);
+      memcpy(Texel.data() + I * 4, &F, 4);
+    }
+    return Error::success();
+  }
+
   // (Roadmap H70) `R32_UINT`/`R32_SINT`: the 32-bit-wide sibling of
   // `R16_UINT`/`_SINT` above, same raw-integer (not normalized-fraction)
   // convention -- previously missing here entirely, so a clear of one of
@@ -1160,6 +1194,43 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     for (unsigned I = 0; I != 4; ++I)
       Out[I] = Signed ? static_cast<double>(static_cast<int8_t>(Texel[I]))
                       : static_cast<double>(Texel[I]);
+    return Error::success();
+  }
+
+  // (Roadmap H98a) `R32_FLOAT`/`R32G32_FLOAT`: the inverse of
+  // `packClearColor`'s own special case above -- previously missing here
+  // too (same generic `Info->Components`-sized-`Out` gap `R32_UINT`/
+  // `R32G32_UINT` below were already fixed for, roadmap H70), so any
+  // real read-back of one of these narrower-than-4-component color
+  // attachments (e.g. this row's own `host_image_copy` MSAA-resolve/
+  // read-back paths) failed with a spurious "expected 1"/"expected 2"
+  // error.
+  if (Format == ResourceFormat::R32_FLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    float V;
+    memcpy(&V, Texel.data(), 4);
+    Out[0] = V;
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R32G32_FLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    for (unsigned I = 0; I != 2; ++I) {
+      float V;
+      memcpy(&V, Texel.data() + I * 4, 4);
+      Out[I] = V;
+    }
+    Out[2] = 0.0;
+    Out[3] = 1.0;
     return Error::success();
   }
 
