@@ -45,6 +45,9 @@ agent thoughts.
 
 # Request
 
+The last session seems to have hit a network error. Any intermediate results it
+had are stashed and can be restored by running `git stash pop`.
+
 Can you work on H97 or other blocking work to make progress on the H-series
 milestones?
 
