@@ -79619,3 +79619,119 @@ this agent_thoughts.md entry.
 4. H100/H101 (the other two rows from the original 13-crash H97
    filing) remain untouched and are next in line for the same
    per-bucket triage treatment.
+
+# H99a: format-support gap fixed, residual blend bug is much bigger than filed (H103)
+
+Fixed one commit, filed a much bigger one. Root cause of the harder
+half is still open -- see "Suggested next steps" below.
+
+## What got done
+
+1. **Reproduced both halves of H99a's filing.** `r16_sfloat`/
+   `r16g16_sfloat`/`r32g32b32_sfloat` all hit
+   `VK_ERROR_INITIALIZATION_FAILED` with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` showing the exact same shape
+   as H98a's fix: missing `getFormatInfo` table entries
+   (`R16_FLOAT`/`R16G16_FLOAT`) and a missing `packClearColor`/
+   `unpackColor` special case for a narrower-than-4-component format
+   (`R32G32B32_FLOAT` -- which H98a's own notes had already flagged
+   as a likely latent instance).
+2. **Fixed it** (`feme/lib/Graphics/ImageFixture.cpp`): added the
+   missing table entries and pack/unpack special-case blocks,
+   mirroring the existing H98a-era precedent exactly. 4 new unit
+   tests. `check-feme` 2967/2970 (3 pre-existing `Unsupported`, 0
+   `Failed`). Committed as `fbd8dcbb61a3`.
+3. **Hit one process snag worth flagging for next time:** ran a
+   whole-file `clang-format -i` to clean up the new code, which
+   reformatted ~170 unrelated pre-existing lines (this repo's
+   on-disk formatting doesn't match a plain `clang-format -i` run --
+   likely a version/config mismatch). Reverted with
+   `git checkout --`, which also wiped the new fix code since it was
+   all uncommitted. Redid the edits from scratch, this time using
+   `git clang-format --diff HEAD` (diff-scoped) instead, which
+   correctly showed only 2 real nits. **Lesson banked:** never
+   whole-file `clang-format -i` a file with unrelated pre-existing
+   content, and never `git checkout --` a file with uncommitted new
+   work just to fix formatting.
+4. **Re-repro'd the 3 originally-failing cases**: all 3 now compile
+   and execute to completion -- but land on `Fail (Image mismatch)`
+   instead of erroring out, i.e. they just merge into the other half
+   of H99a's filing rather than passing outright.
+5. **Started triaging the `Fail (Image mismatch)` half** (2878+ cases,
+   now more once the 3 formats above merge in). Channel-level pixel
+   reduction (H88/H93's own technique) on a representative
+   `r16_sfloat` case: real output values (~0.5, ~0.6) don't match
+   either of the reference's two expected extremes (~0.39, ~1.0) --
+   not a simple region swap. Cross-format re-run of the *same*
+   blend-state combination against `r32g32b32a32_sfloat` and
+   `r8g8b8a8_unorm`: **both fail identically.** Not a format bug.
+6. **The big finding:** ran a 20-case sample of the plain,
+   non-dual-source `pipeline.fast_linked_library.blend.format.*`
+   group (same `createOverlappingQuads`-style 4-overlapping-quad
+   sequential-blend-accumulation structure, but ordinary single-
+   output blend factors, no `Index=1`/`Src1Color` dual-source stuff
+   at all). **19/20 failed (95%) with the identical `Fail (Image
+   mismatch)` signature.** This is not a dual-source bug. It's a
+   general, pre-existing blend-equation/multi-draw-accumulation
+   correctness gap across essentially all of `pipeline.*.blend.*`.
+7. **Filed the residual as H103** (not H99b -- the "keep milestone
+   nesting to one lowercase letter deep" rule plus the scope being
+   dramatically bigger than a sub-item of H99a warranted a fresh
+   top-level row instead). Marked P1 given `pipeline`'s own
+   1,172,229-case total and blend's own large share of it.
+8. Ran the full 8078-case `dual_source` re-run after the format fix:
+   **636 Pass / 3304 Fail / 4138 NotSupported** (up from H99's own
+   471/3469/4138 -- the format fix bought +165 real passes, not just
+   0, so some previously-erroring cases pass outright rather than
+   merely merging into the mismatch bucket).
+9. Updated `Roadmap.md` (H99a annotated partially-closed with the
+   fix details; new H103 row filed) and `VulkanCTSReport.md` (new
+   "Roadmap H99a: measured impact" section). No
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/design
+   doc changes needed -- pure bug fix within already-documented
+   format-table architecture.
+
+## Commits this session
+
+1. `fbd8dcbb61a3` -- format-table fix (R16_FLOAT/R16G16_FLOAT/
+   R32G32B32_FLOAT color-attachment support) + 4 new unit tests.
+2. `6c6a479c443b` -- Roadmap.md + VulkanCTSReport.md updates (H99a
+   partial-close annotation, new H103 filing, measured-impact
+   section).
+3. This agent_thoughts.md entry (separate commit, next).
+
+## Suggested next steps
+
+1. **Start H103 with the smallest possible repro, not the CTS's own
+   4-overlapping-quad test.** Every failing case in this family
+   conflates two separate questions: (a) does a single blend
+   equation evaluate correctly against a known destination color at
+   all, and (b) does a *second* draw against the same attachment
+   correctly read back what the *first* draw just wrote. Write (or
+   find, if a simpler existing CTS group already does this) a
+   single-quad, single-draw, single-blend-state case first. If it
+   passes, the bug is in (b) -- likely something about how
+   `Executor.cpp` re-reads the destination attachment across
+   sequential draws within one render pass (e.g. a caching/staleness
+   bug, or an incorrect load-op assumption). If it fails, the bug is
+   in (a) -- go straight into `Executor.cpp`'s `blendFactorValue`/
+   `applyBlendOp`/`blendColor` and manually hand-compute one factor
+   combination to find the exact arithmetic divergence.
+2. **Do not reuse `vktPipelineDualBlendTests.cpp` as a starting
+   point** -- that was a false lead this session. The real source for
+   both the dual-source and plain blend groups' failing case names
+   is `vktPipelineBlendTests.cpp` (`BlendTest`/`DualSourceBlendTest`,
+   `QUAD_COUNT=4`) plus `createOverlappingQuads`/
+   `createOverlappingQuadsDualSource` in `vktPipelineVertexUtil.cpp`.
+3. **Given H103's likely size (P1, huge case count), budget a full
+   session for it alone** -- this is not a quick follow-up. Consider
+   checking whether other already-passing groups elsewhere in the
+   suite exercise ordinary (non-overlapping, single-draw) blending
+   successfully, which would help bound whether the bug is really in
+   blend-equation math or specifically in the multi-draw-accumulation
+   path.
+4. H100/H101 (from the original H97 13-crash filing) are still
+   untouched and next in line for the same per-bucket triage.
+5. Clean up `/tmp/h99a_*` scratch files (qpa logs, decoded PNGs,
+   caselists) -- no longer needed, everything relevant is now
+   captured in the roadmap/CTS-report commits.
