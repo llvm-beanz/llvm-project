@@ -39564,3 +39564,83 @@ format-table architecture, not new feature or extension work.
 `FeMeGraphicsDesign.md` needs no update: no design deviation, the fix
 follows the same "mechanical, added on demand" format-support pattern
 already documented (and already used by H70/H98a).
+
+## Roadmap H99a/H103: false-alarm closure (stale build, not a real bug)
+
+**Both H99a's own residual `Fail (Image mismatch)` bucket and H103 (the
+general `pipeline.*.blend.*` correctness bug it was broken out into)
+are closed as false alarms.** No source code change was needed for
+either.
+
+Root cause: the CTS `Fail`s reported by the prior two sessions
+(H99a/H103's own filing sessions) were measured against a `build2`
+tree whose `lib/libfeme_vulkan.so` had not been rebuilt since an
+earlier point in this project's own commit history -- i.e. `deqp-vk`
+was silently exercising *old* driver code the whole time, not the code
+actually sitting in the working tree at HEAD. This session spent
+several hours attempting to root-cause a "systemic blend-equation
+correctness bug" via careful isolation before discovering the real
+explanation:
+
+1. Wrote 3 targeted unit tests reusing the exact blend states from a
+   real failing CTS case (`ExecutorTest.cpp`:
+   `MatchesHandComputedBlendEquationForConstantColorFactors`,
+   `MatchesHandComputedBlendEquationForMinAndReverseSubtract`,
+   `SequentialDrawsWithDifferentBlendStatesCorrectlyAccumulate`) --
+   all passed, ruling out single-draw blend arithmetic and simple
+   sequential-draw accumulation as the cause.
+2. Wrote a 4th unit test reproducing the CTS's own
+   `createOverlappingQuads` geometry exactly (4 translated,
+   partially-overlapping quads, replace-mode blend, distinct solid
+   colors per quad) over a 32x32 attachment --
+   `OverlappingQuadGeometryLeavesEveryTexelOneOfTheFourSolidColors` --
+   which also passed, ruling out overlap-geometry rasterization as the
+   cause.
+3. Found a genuine control group in the CTS itself
+   (`dEQP-VK.pipeline.monolithic.blend.format.*`, as opposed to the
+   failing `fast_linked_library` variant) and ran it directly: **100/100
+   pass**, immediately proving the bug (if real) had to be specific to
+   `VK_EXT_graphics_pipeline_library` linking, not blend arithmetic at
+   all.
+4. Reviewed `GraphicsPipeline.cpp`'s own GPL link-time state-merging
+   code (`foldLinkedLibraryState`, `synthesizeLinkedGraphicsPipelineCreateInfo`)
+   in detail and found no defect by inspection.
+5. Added a temporary debug `fprintf` inside `translateColorBlendState`
+   to trace the actual blend state reaching the driver -- which
+   required rebuilding `lib/libfeme_vulkan.so` for the first time this
+   session (every prior CTS repro this session, and evidently the two
+   prior sessions that filed H99a/H103, had been running against
+   whatever `.so` was already sitting in `build2`, never explicitly
+   rebuilt before invoking `deqp-vk`). **The very same
+   `fast_linked_library.blend.format.r8g8b8a8_unorm.*` case that had
+   supposedly failed 19/20 times now passed 100/100**, with or without
+   the debug print present -- i.e. the rebuild alone, with *zero*
+   source changes, fixed the observed failures.
+6. Reverted the debug print (`git checkout --`) and reran fully clean:
+   `blend.clamp.*` 21/21 pass (of the non-`NotSupported` cases,
+   confirming the H103-adjacent clamp-input bug hypothesized earlier
+   this session was also a stale-build artifact, not real), `blend.
+   format.r8g8b8a8_unorm.*` 100/100 pass, `blend.dual_source.*.
+   r8g8b8a8_unorm.*` 196/196 pass.
+7. Ran `ninja check-feme` in full to guarantee every target (ICD
+   included) reflects HEAD: **2971/2974 pass, 3 pre-existing
+   `Unsupported`, 0 `Failed`.**
+8. Ran the complete `pipeline.*.blend.*` group (every pipeline
+   construction type -- `monolithic`, `fast_linked_library`,
+   `shader_object_unlinked_spirv`, etc.) against the freshly-rebuilt
+   ICD: **29776 Pass / 0 Fail / 19057 NotSupported, 48833 cases
+   total.** Zero failures, full stop.
+
+The 3 new unit tests from step 1-2 above are kept as permanent
+regression coverage (they're correct and valuable even though they
+didn't end up finding a real bug) and are committed alongside this
+closure. `feme/.instructions.md` gained a new warning under "Running
+`feme-vk`/offload-test-suite against the real driver" requiring a
+fresh `libfeme_vulkan.so` rebuild before trusting any `deqp-vk`
+Pass/Fail count, to prevent this class of multi-session false-alarm
+investigation from recurring.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed.
+`FeMeGraphicsDesign.md` needs no update: no design deviation, since no
+design-level fix was needed at all.
