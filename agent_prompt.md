@@ -45,16 +45,30 @@ agent thoughts.
 
 # Request
 
-Can you work on H100 or other blocking work to make progress on the H-series
+Can you work on H101 or other blocking work to make progress on the H-series
 milestones?
 
-> **`subgroups`' hang and `synchronization`/`synchronization2`'s scattered crash
-> family**: `subgroups` hung (100% CPU, zero progress) on
-> `ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128`,
-> with slowly-growing VSZ suggesting a possible unbounded-growth bug, not just a
-> slow case. `synchronization`/`synchronization2` (149/144 crashes respectively,
-> scattered across `multi_queue`/`tess_control`/`tess_eval` SSBO cases, not one
-> bulk-excludable family the way `image`'s was) both left large unmeasured
-> remainders (30,244/46,272 cases) at this session's time-budget cutoff. Not yet
-> triaged -- the `subgroups` hang in particular warrants checking for a real
-> infinite loop or unbounded allocation, given the VSZ growth observation
+> **Remaining newly-found crashes: `graphicsfuzz`'s `%llvm.spv.discard`
+> selection failure, `transform_feedback`'s `PromoteMem2Reg`
+> non-promotable-alloca assertion, `spirv_assembly`'s
+> `indexed_accessor_range_base::front()` empty-range assertion, and
+> `tessellation`'s `VK_ERROR_INITIALIZATION_FAILED` at pipeline-creation time.**
+> Four distinct signatures, one row each not yet split further since none has
+> been triaged: (1) `graphicsfuzz.call-function-with-discard`: `LLVM ERROR:
+> Cannot select: intrinsic %llvm.spv.discard`, an instruction-selection gap for
+> `OpKill`/discard in some code path other than the one already-working discard
+> support most other groups exercise; (2)
+> `transform_feedback.fuzz.random_geometry.all_instance_array.75` (and
+> presumably siblings, 39 crashes total): `PromoteMem2Reg`'s own
+> `isAllocaPromotable(AI)` assertion fires on an alloca some earlier pass
+> produces that isn't actually promotable, a latent IR-shape bug rather than
+> anything transform-feedback-specific; (3)
+> `spirv_assembly.instruction.compute.compute_shader_derivatives...`: an MLIR
+> `OperandRange::front()` assertion on an empty range, likely a
+> malformed/degenerate op somewhere in SPIR-V-to-MLIR conversion for compute
+> shader derivatives; (4)
+> `tessellation.misc_draw.switch_domain_origin_lower_left_to_upper_left` (176
+> crashes total in the group): `VK_ERROR_INITIALIZATION_FAILED` at
+> `vkCmdUtil.cpp:338`, a pipeline/command-buffer setup failure specific to
+> domain-origin-switching tessellation state, not yet distinguished from a
+> resource-exhaustion vs. a genuine setup bug. None yet triaged
