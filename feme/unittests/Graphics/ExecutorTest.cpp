@@ -5591,6 +5591,81 @@ TEST(ExecutorTest,
     EXPECT_EQ(B, 0);
 }
 
+// (roadmap H95) Builds a mesh pipeline whose mesh entry point's own
+// signature is entirely empty -- no `SV_Position`/any other Output
+// element at all, exactly the shape every one of the CTS's
+// `properties.*_payload_size`/`*_shared_memory_size` cases' generated
+// mesh shaders takes (`SetMeshOutputsEXT(0, 0)`-only bodies whose sole
+// observable effect is a bound UAV/storage-buffer write): a real device
+// legally omits the fragment stage too whenever nothing it could write
+// would ever reach a rendered pixel, so this also has zero color
+// attachments and no fragment stage, matching the CTS's own
+// zero-attachment render pass shape.
+Expected<GraphicsPipeline> buildSideEffectOnlyMeshPipeline(Context &Ctx) {
+  EntrySignature MeshSig; // Deliberately left with no Elements at all.
+  Expected<std::shared_ptr<CompiledStage>> MS = compileStage(
+      Ctx, MeshGroupIDDoublingShaderIR, "ms_main", MeshSig, ShaderStage::Mesh);
+  if (!MS)
+    return MS.takeError();
+
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{},
+      StencilState{}, /*ColorBlends=*/{});
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 3;
+  Mesh.MaxOutputPrimitives = 1;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh,
+                        Permissive, Permissive);
+  return Pipeline;
+}
+
+// (roadmap H95) Before this milestone, `executeDraws` treated a mesh
+// entry point with an entirely empty signature as unconditionally a
+// no-op and returned success without ever dispatching a single mesh
+// workgroup -- correct for every mesh entry this implementation could
+// compile before this milestone (none had any observable effect besides
+// contributing to the rasterizer), but wrong the moment a mesh entry's
+// only observable effect is a side effect with no rasterizer-visible
+// output at all, silently dropping it. This is the root cause this
+// milestone fixes (`dEQP-VK.mesh_shader.ext.properties.*_payload_size`'s
+// "Unexpected shared memory result: 0"): every dispatched mesh workgroup
+// must still run for its side effects even though nothing it does ever
+// reaches the rasterizer.
+TEST(ExecutorTest,
+    RunsAMeshEntryWithNoOutputSignatureForItsSideEffectsAndRastersNothing) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildSideEffectOnlyMeshPipeline(Ctx);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<int32_t> MeshBuffer(4, -1);
+  cpu::FemeDescriptor Desc{};
+  Desc.Data = MeshBuffer.data();
+  Desc.SizeInBytes = MeshBuffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(cpu::ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  PreparedDraw Draw;
+  Draw.Resources.ResourceHeap = ArrayRef<cpu::FemeDescriptor>(&Desc, 1);
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {4, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Every one of the 4 directly-dispatched mesh workgroups ran exactly
+  // once, each writing its own GroupID.x doubled at its own slot -- had
+  // the old unconditional no-op early return still been in place, every
+  // slot would still read its initial -1 sentinel instead.
+  EXPECT_EQ(MeshBuffer, (std::vector<int32_t>{0, 2, 4, 6}));
+}
+
 TEST(
     ExecutorTest,
     TaskStageDispatchDrivesWhichMeshWorkgroupsRunAndNoneRunUntilItRequestsAny) {

@@ -1786,19 +1786,30 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       Pipeline.getGeometryState().MaxOutputVertices == 0)
     return Error::success();
 
-  // (roadmap H6f) The same relaxation, for a mesh stage: a mesh entry
-  // point that never writes a per-vertex output at all (SPIR-V only lists
-  // an entry point's *used* interface variables, so this shape's
-  // signature is entirely empty, exactly like a geometry stage that never
-  // emits) can never contribute a single vertex to the rasterizer either,
-  // so every mesh draw against it is legally a no-op too. This is the
-  // shape every mesh entry this implementation can compile today takes
-  // (real per-vertex output writes are blocked on roadmap H6h/H6i), and
-  // is what lets `vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
-  // `vkCmdDrawMeshTasksIndirectCountEXT` route through this same
-  // prepared-draw path without error today.
-  if (MeshSig && MeshSig->Elements.empty())
-    return Error::success();
+  // (roadmap H95) A mesh entry point whose signature is entirely empty
+  // (SPIR-V only lists an entry point's *used* interface variables, so
+  // this shape arises whenever the entry writes no per-vertex/
+  // per-primitive output at all -- e.g. the `properties.*_payload_size`/
+  // `*_shared_memory_size` CTS cases' `SetMeshOutputsEXT(0, 0)`-only
+  // bodies, which only ever write to a bound storage buffer) can never
+  // contribute a single vertex to the rasterizer, exactly like
+  // `GSEmitsWithoutAttributes` above -- but, unlike that early return,
+  // this must *not* itself skip the mesh (and, if bound, task) stage's
+  // own dispatch below: a mesh entry can have side effects (that same
+  // storage-buffer write) that must still run on every dispatched
+  // invocation even though nothing it does ever reaches the rasterizer.
+  // This was previously handled by an unconditional early
+  // `return Error::success()` here, which happened to be correct only by
+  // accident for every mesh entry this implementation could compile
+  // before H93b (real per-vertex output writes)/H95 (side-effect-only
+  // bodies): both landed such an entry only ever being reached with no
+  // actual work left to lose by skipping its dispatch outright. That
+  // stopped being true the moment a real, side-effect-only mesh body
+  // (this case) needed the dispatch to still happen -- silently dropping
+  // every one of its invocations' writes is the root cause of
+  // `dEQP-VK.mesh_shader.ext.properties.*_payload_size`/
+  // `*_shared_memory_size`'s "Unexpected shared memory result: 0".
+  bool MeshEmitsWithoutAttributes = MeshSig && MeshSig->Elements.empty();
 
   const SignatureElement *VSPosition = findElement(
       RasterSig, SignatureDirection::Output, SignatureSystemValue::Position);
@@ -1853,7 +1864,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // rasterize with, so `RasterizePrimitives` bails out immediately after
   // counting rather than dereferencing a null `VSPosition`.
   bool GSEmitsWithoutAttributes = GSSig && GSSig->Elements.empty();
-  if (!VSPosition && !GSEmitsWithoutAttributes)
+  if (!VSPosition && !GSEmitsWithoutAttributes && !MeshEmitsWithoutAttributes)
     return createStringError(inconvertibleErrorCode(),
                              "the last pre-rasterization stage does not "
                              "write an SV_Position output; the executor "
