@@ -39312,3 +39312,86 @@ this fixes a bug within already-advertised support (a missed
 `FeMeCPUDesign.md` needs no update either: this is a pure
 `feme::vulkan` Vulkan-entrypoint bug fix, with no compiler-pipeline
 design deviation.
+
+## Roadmap H98a: measured impact (fixed)
+
+`dEQP-VK.image.host_image_copy.*`'s 66-case failure family left
+behind by H98's own closing re-run was filed as a "pixel-comparison
+mismatch," but a fresh repro of a sample case
+(`draw_r8_unorm_r8_unorm.host_transition.memory_to_image...16x16`)
+showed the real failure was `VK_ERROR_INITIALIZATION_FAILED` at
+`vkQueueSubmit` -- confirmed identical across several sampled
+`draw_*` and `large_images.*` cases. The filing's own case-count
+breakdown (only mentioning `draw_*`) also undercounted the true
+scope: extracting the exact 66 failing case names from H98's own
+prior full-run log showed 48 `draw_<format>` cases *plus* 18
+`large_images.*` cases, not just `draw_*`.
+
+Root-caused using `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an existing
+opt-in env var in `Diagnostics.cpp` that prints the real internal
+`llvm::Error` instead of silently `consumeError`-ing it) to get past
+the generic `VK_ERROR_INITIALIZATION_FAILED` and see the actual
+error text. Found two distinct, unrelated bugs in
+`feme/lib/Graphics/ImageFixture.cpp`:
+
+- **Bug A** (44 cases, all `r8_unorm`/`r8g8_unorm`):
+  `vkQueueSubmit: image fixture format is not yet supported`.
+  `getFormatInfo`'s `FormatInfo` switch (used by
+  `getFixtureFormatElementSize`, called from `CommandBuffer.cpp`'s
+  render-pass/dynamic-rendering attachment-clear path) had no entry
+  for `R8_UNORM`/`R8_SNORM`/`R8G8_UNORM`/`R8G8_SNORM`, even though
+  `packClearColor`/`unpackColor` already special-case these formats
+  elsewhere in the same file for unrelated `BC4Decode`/`BC5Decode`
+  sampling-bridge use -- exactly the same "special-cased for pack/
+  unpack but absent from the separate `getFormatInfo` table" gap the
+  existing `R16_UINT`/`R16G16_UINT` comments (roadmap H8p) already
+  document a precedent for.
+
+- **Bug B** (22 cases, all `r32g32_sfloat` `draw_*` and `r32_sfloat`
+  `large_images.*`): `vkQueueSubmit: clear color has 4 component(s),
+  expected 1/2`. `packClearColor`'s generic fallback path strictly
+  requires `Clear.size() == Info->Components`, but every real caller
+  (`VkClearColorValue`, blend/resolve arrays) always supplies exactly
+  4 components regardless of the destination format's real channel
+  count. `R32_FLOAT` (`Components == 1`) and `R32G32_FLOAT`
+  (`Components == 2`) had no dedicated special-case block to
+  intercept before that fallback -- the exact same bug shape
+  `R32_UINT`/`R32G32_UINT`/`R32G32B32_UINT` were already special-cased
+  for under roadmap H70, just never extended to their `_FLOAT`
+  siblings. New unit tests caught the mirror-image gap in
+  `unpackColor` too (previously untested and unnoticed, since this
+  failure family's own repro path never happened to exercise
+  unpack for these two formats).
+
+Fixed both gaps by adding the missing `FormatInfo` entries (Bug A)
+and mirroring the existing H70 `R32_UINT`/`R32G32_UINT` special-case
+blocks for `R32_FLOAT`/`R32G32_FLOAT` in both `packClearColor` and
+`unpackColor` (Bug B). Added 4 new unit tests
+(`ImageFixtureTest.cpp`): `GetFixtureFormatElementSizeCoversR8AndR8G8`,
+`PacksAndUnpacksR32Float`, `PacksAndUnpacksR32G32Float` -- all
+confirmed to fail with the original error at baseline (reverted the
+fix commits, reran, saw the exact same error text) and pass with the
+fix restored.
+
+`ninja check-feme`'s full suite (2965 tests, 3 pre-existing
+`Unsupported`) passes with 0 failures. `FeMeGraphicsTests`'s own full
+298-test suite passes in full.
+
+A real re-run of all 66 originally-failing cases individually shows
+100% pass, and a full re-run of the complete 73,295-case
+`host_image_copy` family now shows:
+
+```
+image.host_image_copy.* (73,295 cases): 5894 Pass / 0 Fail / 67401 NotSupported
+  (was, after H98's own fix: 5828 Pass / 66 Fail / 67401 NotSupported)
+```
+
+The family is now fully closed: 0 failures across all 73,295 cases.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a bug fix within already-advertised color-attachment
+format/clear support, not a new feature or extension being added.
+`FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` need no update either:
+this is a pure bugfix filling in missing table entries within the
+existing "mechanical, added on demand" format-support architecture
+those documents already describe, with no design deviation.
