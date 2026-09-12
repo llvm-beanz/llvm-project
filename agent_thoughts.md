@@ -78982,3 +78982,95 @@ crash surfaces several passes downstream of where a fix landed.
    H95a sessions either. ~20-30 min for a first look.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H96 session: already fixed as a side effect, bisected to confirm; also closed H94's follow-up chain and got a fresh offload-test-suite baseline
+
+**Status right now:** H96 is closed with zero code changes -- the target
+case was already passing, fixed as a side effect of H95's own
+`Executor.cpp` fix. Also struck through H94 (its full follow-up chain is
+now closed end-to-end) and ran `check-hlsl-feme-vk` for the first time
+in several sessions to get a fresh baseline.
+
+## What got done
+
+1. **Ran H96's target case first**: `synchronization.other.barrier_across_secondary`
+   already **passes** at `HEAD`. Confirmed 3x with `--deqp-shadercache=disable`
+   to rule out flakiness/caching artifacts.
+2. **Bisected to find which prior fix resolved it** (rather than just
+   noting "already passes" and moving on) -- used a `git worktree` at
+   `/tmp/pre-h95a-wt` to rebuild `feme_vulkan` at 4 candidate commits
+   without disturbing the main `build2`:
+   - H94a's closing commit: **Fail** (identical diagnostic to H96's
+     roadmap description).
+   - H94b's first fix (dead relay block elimination): **Fail**.
+   - H94b's second fix (mid-arm CondBr recognition): **Fail**.
+   - H95's `Executor.cpp` fix (mesh dispatch for empty-output-signature
+     entries): **Pass**.
+   Root cause: this case's own mesh shader is a
+   `SetMeshOutputsEXT(0, 0)`-only, side-effect-only body -- the *exact*
+   shape H95's row root-caused for `mesh_payload_size`/`task_payload_size`.
+   H91's original filing guessed a "genuine synchronization-primitive
+   gap," but it was the identical missing-mesh-dispatch bug all along.
+3. **Cleaned up the bisection worktree** (`git worktree remove --force`).
+4. **Ran a broader `dEQP-VK.mesh_shader.ext.synchronization.*` sweep**
+   (81 cases): 69 Pass/12 Fail, no regressions.
+5. **Updated `Roadmap.md`**: struck through H96 with the full bisection
+   evidence. Also struck through **H94** itself -- its own triage session
+   landed no fix, but its full follow-up chain (H94a -> H94b -> H95/H95a
+   -> H96) is now completely closed, with all 4 of H94's originally-
+   tracked cases passing outright. Mirrors how H91 was closed with its
+   own follow-ups summarized inline.
+6. **Added a "Roadmap H96: measured impact" section** to
+   `VulkanCTSReport.md` with the bisection table.
+7. **Ran a sanity `check-feme`** (2953 passed / 3 unsupported / 0 failed
+   -- unchanged, since no compiler code changed this session).
+8. **Ran `check-hlsl-feme-vk` for the first time in several sessions**
+   (per the standing instructions' mention of this suite, and the prior
+   session's own suggested next step): 274 Pass / 103 Fail / 260
+   Unsupported / 26 Expectedly Failed / **1 Unexpectedly Passed**
+   (`Feature/PushConstant/array_of_matrices.test`). Not triaged further
+   this session -- recorded as a fresh baseline and a concrete next step
+   below, since 103 failures is a large, multi-session triage effort in
+   its own right, not something to rush through at the tail end of this
+   one.
+
+## Why this session stayed small
+
+H96 turned out to need zero new code -- once bisection confirmed that,
+continuing to hunt for a "fix" would have been solving an already-solved
+problem. Redirected the remaining budget to two adjacent, low-risk wins
+instead: closing out H94's own now-fully-resolved follow-up chain (a
+pure documentation fix, no code risk) and getting a fresh
+`check-hlsl-feme-vk` baseline (informational, no fix attempted) rather
+than starting a large, likely multi-session CTS-Vulkan-suite triage this
+late in the session.
+
+## Suggested next steps (in order, for the next H-series session)
+
+1. **Triage `check-hlsl-feme-vk`'s 103 failures.** No sub-bucketing done
+   yet -- start by grouping the failure list by directory/feature (the
+   full list is in this session's build log; re-run with
+   `VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json
+   ninja -C build2 check-hlsl-feme-vk -j12` to reproduce) the same way
+   H70's own CTS triage first split things into buckets before filing
+   individual H-series rows. ~30-45 min just to get the buckets; each
+   bucket then likely needs its own dedicated session, mirroring the
+   Vulkan CTS H-series pattern.
+2. **Investigate the 1 "Unexpectedly Passed" case**
+   (`Feature/PushConstant/array_of_matrices.test`): this test is marked
+   `XFAIL` in the `offload-test-suite` `feme` branch but now passes --
+   likely a real fix already landed made it pass without anyone
+   noticing. Worth confirming it's a genuine, repeatable pass (not
+   flaky) and then either filing a small PR against
+   `llvm-beanz/offload-test-suite`'s own `feme` branch to remove its
+   `XFAIL` marker, or filing a roadmap note if it's not obviously tied
+   to a landed fix. ~15-20 min.
+3. Pick the next open, non-nested H-series roadmap row for the next
+   dedicated Vulkan CTS triage session -- H94/H94a/H94b/H95/H95a/H96 are
+   all now fully closed as one complete chain. H97-H101 (the newly-found
+   crash/hang buckets from the full 54-group CTS run) remain open and
+   untouched; H99 in particular (the `pipeline` group, ~36% of the
+   entire suite) is flagged P1 and would be the highest-value next
+   target by sheer case count.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
