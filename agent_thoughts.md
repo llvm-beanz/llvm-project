@@ -79160,3 +79160,99 @@ pipeline used it instead for this exact step.
    picking up fresh Vulkan CTS work instead.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H76 session: fixed the vector-component dynamic-vertex-index gap in CanonicalizeStage.cpp
+
+## Done this session
+
+1. **Re-verified H76's scope.** Roadmap claimed 6 cases; a fresh
+   `smoke.fast_lib.*` sweep (21 cases) found only 2 still hit H76's own
+   diagnostic (`depth_only_points_position_components`,
+   `depth_only_triangles_position_components`). A 3rd failure in the
+   same sweep (`fullscreen_gradient`) turned out to be a completely
+   unrelated `spirv.Variable`/Function-storage-class legalization
+   error -- already tracked separately as H79, left alone.
+2. **Tried mirroring H75's SPIR-V-import reduction pipeline first, then
+   abandoned it as unnecessary.** `CanonicalizeStagePass`/
+   `ValidateStagePass` live in `feme/lib/Transforms/Graphics/`, a
+   different pipeline from H75's CPU-target one -- these passes take
+   hand-written `.ll` IR with `!feme.spirv.MemberDecorations` metadata
+   directly, no SPIR-V import step needed at all (confirmed from
+   existing lit/unit tests). Saved a lot of pipeline-building time once
+   noticed.
+3. **Read the real CTS shader source**
+   (`vktMeshShaderSmokeTestsEXT.cpp`'s `depthOnlyPrograms`,
+   `stepByStepPosition` branch): both target cases write
+   `gl_MeshVerticesEXT[outIndex].gl_Position`'s 4 components as 4
+   separate scalar stores, where `outIndex` is a genuinely **dynamic**
+   per-invocation value (`col * primitiveVertices + i`) -- not a
+   compile-time constant like every prior "constant vertex index" fix
+   in this file.
+4. **Root-caused it** in `getDynamicVertexIndexedAccess`
+   (`CanonicalizeStage.cpp`): its constant-index-peeling loop (walking
+   whatever follows the one non-constant vertex index) only recognized
+   `StructType` and `ArrayType`, not `FixedVectorType`. A GEP chain
+   ending inside a vector component (after already peeling a struct
+   member) fell through to `return std::nullopt`, leaving the store
+   unresolved.
+5. **Fixed it**: added a `FixedVectorType` case to that loop,
+   accumulating the component's byte offset the same way
+   `resolveRowComponent` already does elsewhere in the file. No other
+   function needed to change -- the existing byte-offset-based
+   `resolveOffsetWithinElement` recursion picked it up unchanged.
+6. **Added regression coverage**: a `CanonicalizeStageTest.cpp` unit
+   test (`ThreadsDynamicVertexIndexThroughVectorComponentOutputStore`)
+   modeling the real 4-separate-component-store shape directly.
+7. **Verified no regressions**: `check-feme`'s full 2959-test suite (0
+   failures, 3 pre-existing unsupported).
+8. **Confirmed the real fix**: both target CTS cases now **pass
+   outright**. `smoke.fast_lib.*` sweep: 18 Pass/1 Fail/2 NotSupported
+   (up from 16/3/2, exactly +2/-2). Broader `smoke.*` sweep (67 cases):
+   46 Pass/3 Fail/18 NotSupported, all 3 fails the same pre-existing
+   H79 bug across its 3 variants -- no new or expanded failures.
+9. **Updated docs**: struck through H76 in `Roadmap.md`, added a
+   "Roadmap H76: measured impact" section to `VulkanCTSReport.md`. No
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+   needed -- pure compiler-internals fix.
+10. **Committed in 4 small commits**: the `CanonicalizeStage.cpp` fix,
+    the unit test, the `Roadmap.md` update, the `VulkanCTSReport.md`
+    update.
+
+## A time-saver worth remembering for future sessions
+
+Before building any SPIR-V-import hand-reduction pipeline for a
+`feme-graphics-validate-stage`/`CanonicalizeStagePass` bug, check
+`CanonicalizeStageTest.cpp` first -- these passes are always exercised
+directly on hand-written `.ll` IR with `!feme.spirv.MemberDecorations`
+metadata, no SPIR-V import needed. Only the CPU-target pipeline
+(`Linearize.cpp`, `SIMDize.cpp`, etc.) genuinely needs the full
+glslang -> feme-translate -> feme-opt reduction chain.
+
+## Suggested next steps
+
+1. **H77** (`misc.first_invocation_mesh` + 2 cases folded in from H75,
+   pixel-comparison mismatch at `vktMeshShaderMiscTestsEXT.cpp:462`) is
+   the most immediately actionable next item -- still untriaged, and a
+   fresh reduction pipeline/scratch IR may already be reusable if the
+   H75 session's own `/tmp` artifacts are still around (they may have
+   been cleaned up since). ~1-2 hours to get a first pixel diff via the
+   H88-style channel-level reduction technique.
+2. **H78** (`misc.*`'s missing `feme.signature` metadata on mesh output
+   wrapper, 3 cases) and **H80** (`builtin.cull_primitives`/
+   `builtin.primitive_id_{glsl,spirv}`'s own CTS-side result checks, 4
+   cases) are both still open, untriaged, and smaller in scope than
+   H77 -- good picks if H77 turns out to need a longer session.
+3. **H82** (`misc.per_prim_block_output`'s GEP struct-operand type
+   error, 1 case) is the smallest remaining open item in the H70
+   per-bucket breakdown -- worth a quick look if a short session is
+   all that's available.
+4. H97-H101 (the newly-found crash/hang buckets from the full 54-group
+   CTS run) remain open; H99 (the `pipeline` group, ~36% of the whole
+   suite, P1) is still the highest-value next target by case count if
+   picking up fresh Vulkan CTS work instead of another H7x/H8x
+   per-bucket fix.
+5. `check-hlsl-feme-vk`'s 103 failures are still untriaged from the H96
+   session -- still the largest still-open, non-Vulkan-CTS item on the
+   board whenever there's room for a dedicated session.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
