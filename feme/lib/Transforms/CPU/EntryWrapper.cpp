@@ -945,7 +945,19 @@ bool spillValuesLiveAcrossBarriers(
     Builder.CreateStore(Def, Field);
   }
   for (auto &[Def, User, OperandNo] : SpilledUses) {
-    IRBuilder<> Builder(User);
+    // Roadmap H95a: a `phi`'s operand is only ever "used" along its
+    // incoming edge, not at the `phi` itself -- inserting the reload
+    // immediately before the `phi` (as for any other user) would place it
+    // in the `phi`'s own block, ahead of a later `phi` there, violating
+    // "every phi in a block precedes every non-phi instruction" the same
+    // way a spilled `phi`'s own store (above) has to avoid. Insert at the
+    // end of the incoming block this specific operand corresponds to
+    // instead, exactly like any other value only ever produced/consumed
+    // across that one edge.
+    Instruction *InsertPt = User;
+    if (auto *UserPN = dyn_cast<PHINode>(User))
+      InsertPt = UserPN->getIncomingBlock(OperandNo)->getTerminator();
+    IRBuilder<> Builder(InsertPt);
     Value *Field = buildFieldPtr(Builder, Def, Def->getName() + ".reload");
     Value *Reloaded = Builder.CreateLoad(Def->getType(), Field,
                                          Def->getName() + ".reload.val");
