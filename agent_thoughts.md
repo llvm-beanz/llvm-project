@@ -78553,3 +78553,95 @@ produces.
    pattern.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+# H94b session: two bugs behind one diagnostic, closing exposes pre-existing H95
+
+## What's done, right now
+
+All 4 of H94/H94a's target cases (`mesh_payload_and_shared_memory_size`,
+`mesh_shared_memory_size`, `task_shared_memory_size`,
+`task_payload_and_shared_memory_size`) no longer hit the
+`feme-cpu-wrap-entry: ... has a barrier inside non-linear control flow ...`
+diagnostic. Two independent bugs fixed, both validated, `ninja check-feme`
+green (2949/2952, 0 Failed), real CTS re-run confirms the diagnostic is
+gone. Roadmap H94b closed (struck through). H95 expanded to absorb these
+4 cases' next-layer symptom rather than filing a new nested row.
+
+## The two bugs (found by manually tracing the CFG against a real repro)
+
+1. **`LoopLinearizer` leaves dead relay-stub blocks behind.** Converting a
+   divergent exit `CondBr` into an unconditional fall-through orphans the
+   old "exit" successor (a `StructurizeCFG` critical-edge stub). Pre-
+   existing in `LinearizePass`, not an H94a regression -- just never
+   observed before because H94a is the first case where a linearize-
+   touched loop with a downstream barrier ever reached `EntryWrapperPass`'s
+   strict "every block accounted for" check. Fix: one line,
+   `EliminateUnreachableBlocks(F)` after a changed `LoopLinearizer::run()`
+   in `Linearize.cpp`.
+2. **`walkBarrierFreeArm` only recognized a loop closing at its own final
+   `UncondBr`.** `SIMDizePass` widens these cases' verification loop with
+   an inner "any lane still active" mask-reduction `CondBr` that closes
+   the loop *mid-arm*, several blocks past the top-level branch point --
+   a shape the old code had no way to accept. Fix: tolerate a mid-arm
+   `CondBr` when exactly one successor is already `Visited`, mirroring
+   `isLinearChain`'s own top-level backedge case, in `EntryWrapper.cpp`.
+
+Both fixes are small, surgical, and independently testable -- confirmed
+each is necessary and sufficient together (neither alone clears the real
+repro) via a `git stash` cycle.
+
+## Why H94b closes into H95 instead of a new H94c
+
+Once both bugs were fixed, all 4 cases ran to completion but failed a new
+CTS assertion: `TCU_FAIL("Unexpected shared memory result: 0")` at
+`vktMeshShaderPropertyTestsEXT.cpp:521`. That's not a new symptom --
+roadmap row H95 already describes this exact failure for 2 other cases
+(`mesh_payload_size`/`task_payload_size`). Rather than file a new,
+separately-nested row (which would push H94's own family past the
+"no more than one lowercase letter deep" nesting rule everyone's been
+asked to respect), I expanded H95 itself to note it may now cover 6 cases
+across what could be one or two root causes -- not yet disambiguated,
+flagged explicitly in both H95's roadmap row and the CTS report.
+
+## Debugging method worth repeating
+
+Both bugs were found by hand-tracing `isLinearChain`'s algorithm block-by-
+-block against a real, un-simplified LLVM IR dump (not guessing from the
+diagnostic text). This is slow (a good chunk of the session) but reliable
+-- it directly found two genuinely distinct bugs a "try random tweaks"
+approach would likely have conflated or missed one of. Worth the time
+whenever a diagnostic's root cause isn't obvious from the pass's own doc
+comments.
+
+One sharp edge hit during the trace: `StructurizeCFG`-generated block
+names are dangerously similar (`.Flow27_crit_edge` = loop-EXIT edge vs.
+`Flow27._crit_edge` = loop BACK-edge -- differing only in where the
+leading `.` falls). Worth remembering next time any of these passes'
+output needs reading by eye.
+
+## Suggested next steps (in order, if resuming H95)
+
+1. Pick one of the 6 H95 cases and get a real IR/runtime reduction --
+   probably start with one of the original 2 (`mesh_payload_size`, no
+   verification loop at all) since it's structurally simpler than the 4
+   newly-added shared-memory-size cases. Budget ~1-2 hours for a first
+   reduction if starting cold; the reduction recipe is the same
+   `feme-translate`/`feme-opt` pipeline used throughout the H93/H94
+   family (see either row's own roadmap text for the exact command
+   lines).
+2. Once reduced, check whether the write genuinely never happens (a
+   codegen/lowering bug in mesh/task payload or groupshared plumbing) or
+   happens but is masked/never read back (a mask-application or
+   synchronization-ordering bug) -- these point at very different parts
+   of `feme/lib/Transforms/CPU/` and `feme/lib/Graphics/Executor.cpp`.
+3. Once the original-2 case's root cause is known, check whether it
+   explains the 4 newly-added cases too, or whether they need their own,
+   separate reduction -- H95's own roadmap row flags this as an open
+   question, don't assume either way.
+4. Add lit + unit test coverage for whatever the actual fix turns out to
+   be, mirroring this session's own paired-coverage precedent.
+5. Re-run all 6 of H95's cases for real pass/fail, plus the broader
+   `dEQP-VK.mesh_shader.ext.*` sweep (current baseline: 323 Pass/116
+   Fail) to confirm no regressions.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
