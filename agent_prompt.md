@@ -45,27 +45,41 @@ agent thoughts.
 
 # Request
 
-Can you work on H99a or other blocking work to make progress on the H-series
-milestones?
+Can you work on H99a and H103 or other blocking work to make progress on the
+H-series milestones?
 
-> **`pipeline.fast_linked_library.blend.dual_source`'s two-part 3469-case
-> failure family** (newly exposed by H99's own closing full-family re-run, once
-> the hang and crash that previously masked most of the family were fixed): (1)
-> 2878 cases fail with `Fail (Image mismatch)` -- spread broadly across
-> `format.*`/`multi_attachments.*` subfamilies and blend-state combinations, not
-> yet reduced to a specific shape; (2) 591 cases fail with
-> `VK_ERROR_INITIALIZATION_FAILED` at `vkQueueSubmit`, concentrated entirely in
-> exactly three formats (`r16_sfloat`, `r16g16_sfloat`, `r32g32b32_sfloat`, ~197
-> cases each) across both `format.*` and `multi_attachments.*` -- all three are
-> non-power-of-two-friendly or single/dual-channel float formats a real GPU
-> would commonly report as unable to support color-attachment blending,
-> suggesting the driver may be missing a
-> `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT` capability check for these
-> specific formats and should be returning `NotSupported` rather than failing at
-> submit time. Not yet triaged -- needs (1) a qpa-image/channel-level pixel
-> reduction of a representative image-mismatch case (mirroring H88/H93's own
-> technique) to determine which part of the dual-source-blend pipeline
-> disagrees, and (2) tracing why `vkQueueSubmit` fails specifically for
-> `r16_sfloat`/`r16g16_sfloat`/`r32g32b32_sfloat` to decide whether the fix is a
-> missing format-capability check (report `NotSupported` up front) or a genuine
-> renderer bug for these formats
+The previous session suggested the next steps:
+
+> 1. **Start H103 with the smallest possible repro, not the CTS's own
+>    4-overlapping-quad test.** Every failing case in this family
+>    conflates two separate questions: (a) does a single blend
+>    equation evaluate correctly against a known destination color at
+>    all, and (b) does a *second* draw against the same attachment
+>    correctly read back what the *first* draw just wrote. Write (or
+>    find, if a simpler existing CTS group already does this) a
+>    single-quad, single-draw, single-blend-state case first. If it
+>    passes, the bug is in (b) -- likely something about how
+>    `Executor.cpp` re-reads the destination attachment across
+>    sequential draws within one render pass (e.g. a caching/staleness
+>    bug, or an incorrect load-op assumption). If it fails, the bug is
+>    in (a) -- go straight into `Executor.cpp`'s `blendFactorValue`/
+>    `applyBlendOp`/`blendColor` and manually hand-compute one factor
+>    combination to find the exact arithmetic divergence.
+> 2. **Do not reuse `vktPipelineDualBlendTests.cpp` as a starting
+>    point** -- that was a false lead this session. The real source for
+>    both the dual-source and plain blend groups' failing case names
+>    is `vktPipelineBlendTests.cpp` (`BlendTest`/`DualSourceBlendTest`,
+>    `QUAD_COUNT=4`) plus `createOverlappingQuads`/
+>    `createOverlappingQuadsDualSource` in `vktPipelineVertexUtil.cpp`.
+> 3. **Given H103's likely size (P1, huge case count), budget a full
+>    session for it alone** -- this is not a quick follow-up. Consider
+>    checking whether other already-passing groups elsewhere in the
+>    suite exercise ordinary (non-overlapping, single-draw) blending
+>    successfully, which would help bound whether the bug is really in
+>    blend-equation math or specifically in the multi-draw-accumulation
+>    path.
+> 4. H100/H101 (from the original H97 13-crash filing) are still
+>    untouched and next in line for the same per-bucket triage.
+> 5. Clean up `/tmp/h99a_*` scratch files (qpa logs, decoded PNGs,
+>    caselists) -- no longer needed, everything relevant is now
+>    captured in the roadmap/CTS-report commits.
