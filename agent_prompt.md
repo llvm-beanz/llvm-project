@@ -45,23 +45,18 @@ agent thoughts.
 
 # Request
 
-Can you work on H98a or other blocking work to make progress on the H-series
+Can you work on H99 or other blocking work to make progress on the H-series
 milestones?
 
-> **`image.host_image_copy.draw_*`'s 66-case pixel-comparison failure family**
-> (newly exposed by H98's own closing re-run once the systemic crash it
-> previously masked was fixed): every failure is in the `draw_<format>`
-> subfamily (e.g. `draw_r32g32_sfloat_r32g32_sfloat`, `draw_r8_unorm_r8_unorm`)
-> specifically for `transfer_src_transfer_dst` usage combined with a
-> `general`/`optimal` layout pair at a small (16x16 or 53x61) extent, across
-> every one of that subfamily's
-> `barrier_transition_host_copy`/`host_transition`/`host_transition_host_copy` x
-> `image_to_memory`/`memcpy`/`memory_to_image` action combinations -- a narrow,
-> specific shape (renderable-format host copies around an actual draw call), not
-> a general regression of the `dispatch_*`/`simple.*` host-copy paths H98's own
-> fix already made pass. Not yet triaged -- needs a single-case repro (e.g.
-> `draw_r8_unorm_r8_unorm.host_transition.memcpy.transfer_src_transfer_dst.general.optimal.0_1_0.16x16`)
-> and a qpa-image/channel-level pixel reduction (mirroring H88/H93's own
-> technique) to determine whether the drawn content itself, the host-copy
-> readback, or the transfer-src/transfer-dst layout transition around the draw
-> is the actual source of disagreement
+> **`pipeline`'s hang and `spirv.Kill` legalization crash** (the single largest
+> group in the entire suite, 1,172,229 cases, ~36% of the total suite -- only
+> 11,432 of which this session managed to measure): two distinct symptoms seen
+> so far -- (1) a genuine hang (100% CPU, zero forward progress for 20-35+
+> minutes) on `fast_linked_library.blend.dual_source...b5g5r5a1_unorm_pack16...`
+> cases; (2) a `spirv.Kill` legalization failure (`error: failed to legalize
+> operation 'spirv.Kill' that was explicitly marked illegal`) on sibling cases
+> in the same `fast_linked_library.blend.dual_source` family. Given the group's
+> size, this is the single highest-value crash-isolation target of the 13 --
+> fixing it (or even just finding a bulk-excludable pattern the way H98 did for
+> `image`) would move the largest share of any row here. Not yet triaged | (none
+> -- newly found)
