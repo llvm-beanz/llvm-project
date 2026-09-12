@@ -496,9 +496,21 @@ Expected<PipelineResult> runPipeline(Module &M,
         WrapperName.c_str());
 
   // Link in only the referenced `libFeMeRuntimeCPU` helper definitions (see
-  // "Runtime Support Library" in feme/docs/FeMeCPUDesign.md).
+  // "Runtime Support Library" in feme/docs/FeMeCPUDesign.md). Loaded lazily
+  // (roadmap H99): every compile creates its own fresh `LLVMContext`
+  // (see `CompiledStage::create`), so the ~2.9MB runtime bitcode cannot be
+  // parsed once and reused across compiles the way a longer-lived cache
+  // could; `getLazyBitcodeModule` instead defers materializing each
+  // function's body until `Linker::linkInModule`'s own `LinkOnlyNeeded`
+  // pass actually references it, so a shader that calls only a handful of
+  // runtime helpers pays for parsing only those, not the whole library --
+  // avoiding what was previously a full bitstream decode of every runtime
+  // function on every single shader/pipeline compile (a real, measured
+  // contributor to `dEQP-VK.pipeline`'s own combinatorial-blend-state test
+  // cases, e.g. `fast_linked_library.blend.dual_source.*.multi_attachments.*`,
+  // appearing to hang under a CTS watchdog timeout).
   Expected<std::unique_ptr<Module>> RuntimeMod =
-      parseBitcodeFile(getRuntimeCPUBitcode(), M.getContext());
+      getLazyBitcodeModule(getRuntimeCPUBitcode(), M.getContext());
   if (!RuntimeMod)
     return RuntimeMod.takeError();
   stripAsmLabelManglingEscape(**RuntimeMod);

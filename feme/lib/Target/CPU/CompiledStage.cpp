@@ -235,8 +235,12 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
           "feme-cpu-wrap-reference-entry did not produce '%s'",
           WrapperName.c_str());
 
+    // Loaded lazily (roadmap H99, mirroring `feme::cpu::runPipeline`'s own
+    // identical fix in Pipeline.cpp): only the runtime helpers this
+    // reference-entry path actually calls get their function bodies
+    // parsed, not the whole ~2.9MB `libFeMeRuntimeCPU` bitcode.
     Expected<std::unique_ptr<llvm::Module>> RuntimeMod =
-        parseBitcodeFile(getRuntimeCPUBitcode(), Mod.getContext());
+        getLazyBitcodeModule(getRuntimeCPUBitcode(), Mod.getContext());
     if (!RuntimeMod)
       return RuntimeMod.takeError();
     feme::cpu::detail::stripAsmLabelManglingEscape(**RuntimeMod);
