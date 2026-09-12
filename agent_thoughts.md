@@ -79808,3 +79808,73 @@ session -- that would be a much bigger undertaking.
    a loud warning (or just always force a rebuild) rather than relying
    on every future session remembering to do it manually -- the
    instructions-file note is a stopgap, not a structural fix.
+
+# H100: also a false alarm (same stale-build pattern as H99a/H103, plus a wrong-cwd gotcha of my own)
+
+No code change needed. H100 is closed. Details below.
+
+## What happened (~1 hour)
+
+1. Rebuilt `libfeme_vulkan.so` from scratch first thing (per the rule I
+   added closing H99a/H103 last session). `ninja check-feme`:
+   2971/2974, 0 Failed.
+2. Repro'd the exact named hang case
+   (`subgroups.ballot_broadcast.compute.subgroupbroadcast_bvec4_
+   requiredsubgroupsize128`): reported `NotSupported` in under a
+   second. No hang.
+3. Ran all 3 named groups (`subgroups`, `synchronization`,
+   `synchronization2`) in full from `/tmp/h100` as a scratch directory
+   -- `subgroups` came back with 1 "Failed" case and an "ABORTED" run.
+   Looked real at first glance.
+4. Traced it: the "failure" was `ResourceError: Failed to open file:
+   './vulkan/amber/.../subgroup_reconverge_discard00.amber'` -- a
+   relative path. I'd run `deqp-vk` from `/tmp/h100`, not its own
+   directory, so the Amber test's own asset lookup broke. Confirmed by
+   re-running that one case from the right directory: clean
+   `NotSupported`, not a crash.
+5. Re-ran all 3 groups from the correct directory
+   (`<build>/external/vulkancts/modules/vulkan`). All 3 finished clean:
+   zero hangs, zero aborts, zero failures, ~195k cases combined.
+
+## Root cause theory for the original filing
+
+H99 (previous session, same day) fixed a bug where
+`libFeMeRuntimeCPU`'s ~2.9MB embedded bitcode was being eagerly
+re-parsed from scratch on every single shader compile -- described at
+the time as "a genuine hang, 100% CPU, zero forward progress." H100's
+own `subgroups` hang description ("100% CPU, zero progress,"
+"slowly-growing VSZ") is the same signature. `subgroups` compiles a
+huge number of shader variants (its own `requiredsubgroupsize` sweep).
+Most likely: H100's filing session's build directory just hadn't
+picked up H99's fix yet.
+
+## What got committed
+
+- `feme/.instructions.md`: two new rules -- rebuild before trusting any
+  CTS number (from last session), and always run `deqp-vk` from its
+  own directory, never a scratch directory (new this session, from my
+  own mistake in step 3-4 above).
+- `Roadmap.md`: H100 struck through, closed as false alarm.
+- `VulkanCTSReport.md`: full writeup.
+
+No unit tests added this session -- there was no bug to write a
+regression test for. (Contrast with H99a/H103, where the isolation
+tests were kept even though they didn't find the bug, because they add
+real coverage. Here there's nothing new to isolate.)
+
+## Suggested next steps
+
+1. **H101** (from the same original H97 13-crash filing) is still
+   open and untriaged: `graphicsfuzz`'s `%llvm.spv.discard` selection
+   failure, `transform_feedback`'s `PromoteMem2Reg` non-promotable-
+   alloca assertion, `spirv_assembly`'s indexing issue. Given H99/H100
+   both turned out to already be fixed or never-really-broken, **check
+   H101 first with a fresh build before spending time on root-causing
+   anything** -- it may already be fixed too.
+2. If H101 also turns out to be stale, that's 3 for 3 in one day and
+   worth flagging explicitly to whoever is scoping future sessions:
+   the original H97 "13 crash groups" filing may have been measured
+   against a build that was behind HEAD in ways beyond just H99's own
+   fix.
+3. No CTS/build state needs cleanup this session -- I didn't leave
+   background runs going and cleaned up `/tmp/h100`.
