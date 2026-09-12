@@ -38965,3 +38965,42 @@ linearization mask propagation, entry-wrapper barrier-spill reload
 placement), with no new feature/extension surface exposed or changed.
 `FeMeGraphicsDesign.md` needs no change either -- no deviation from the
 design doc was introduced this session.
+
+## Roadmap H96: measured impact (already fixed as a side effect; no new code change)
+
+`synchronization.other.barrier_across_secondary` (the single case tracked
+by H96) already passes at `HEAD` -- no code change was needed this
+session. Bisected via a separate git worktree, rebuilding `feme_vulkan`
+at each candidate commit and pointing `VK_DRIVER_FILES` at that build in
+turn:
+
+```
+H94a closing commit (0d8716f30e31):     Fail (Unexpected values found in verification buffer)
+H94b fix 1 (0a90878e656e, dead relays): Fail (identical diagnostic)
+H94b fix 2 (b060bfec300d, mid-arm CondBr): Fail (identical diagnostic)
+H95's Executor.cpp fix (2936404bb51f):  Pass
+H95a's closing commit / current HEAD:   Pass
+```
+
+Root cause: this case's own mesh shader has the exact shape H95's row
+root-caused for `mesh_payload_size`/`task_payload_size` -- a
+`SetMeshOutputsEXT(0, 0)`-only body whose sole purpose is a side-effect
+write (into this test's own cross-secondary-command-buffer verification
+buffer) with no rasterizer-visible output. `Executor.cpp`'s
+`executeDraws` was skipping mesh dispatch entirely for any such
+zero-output-signature entry, so this test's own verification write
+never happened at all, producing a verification-buffer readback of
+stale/zero data -- not a genuine synchronization-primitive gap, as H91's
+original filing speculated, but the identical missing-dispatch bug
+H95's `MeshEmitsWithoutAttributes` fix already addressed for two other
+cases.
+
+A real re-run at current `HEAD` confirms the case passes reliably (3
+repeated runs, `--deqp-shadercache=disable`, no flakiness observed). A
+broader `dEQP-VK.mesh_shader.ext.synchronization.*` sweep (81 cases)
+shows 69 Pass/12 Fail, with no regressions from this investigation
+(no code changed).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: no code changed this session. `FeMeGraphicsDesign.md` needs no
+change either, for the same reason.
