@@ -79503,3 +79503,119 @@ any known failing case -- worth checking if it ever surfaces.
 3. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
    unchanged -- this was a bug fix within already-advertised support,
    confirmed no update needed.
+
+# H99 session: fixed both symptoms in one sitting -- spirv.Kill's missing conversion pattern, and a "hang" that was actually a 2.9MB bitcode file being re-parsed from scratch on every shader compile
+
+Fixed both. `check-feme` 2963/2966 (3 pre-existing Unsupported, 0
+Failed) after each fix. Full 8078-case `fast_linked_library.blend.
+dual_source` family re-run: 471 Pass / 3469 Fail / 4138 NotSupported
+-- zero hangs, zero `spirv.Kill` crashes. Roadmap H99 struck through;
+the 3469 failures broken out as new row H99a.
+
+## `spirv.Kill`: missing pattern, exact template already existed
+
+`spirv.Kill` (SPIR-V's `OpKill`) had no MLIR conversion pattern at
+all -- not in this codebase, not upstream in MLIR itself. Since
+`ConvertSPIRVToLLVMPass` marks the whole `spirv` dialect illegal, any
+op without a pattern hits the generic "explicitly marked illegal"
+error. This is a good diagnostic signature to remember: that exact
+error message means "nobody wrote a pattern for this op yet," not a
+deeper bug.
+
+The fix was almost free: `spirv.TerminateInvocation` already has a
+pattern (`TerminateInvocationConversionPattern`) that does exactly
+what `spirv.Kill` needs (lower to `llvm.spv.discard` + `llvm.return`
+-- both ops are "invocation terminates now" semantics). Copied it
+almost verbatim as `KillConversionPattern`. Confirmed with a minimal
+hand-written `.mlir` repro fed to `feme-opt` before and after.
+
+## The "hang": not a hang, just catastrophically slow, and the loop compounded it
+
+`gdb`-attached statistical backtrace sampling (reused H97's own
+`FEME_CPU_JIT_DEBUG_SUPPORT=1` opt-in) showed the main thread's PC
+kept moving -- not a true deadlock -- but was always inside
+`BitcodeReader`. Root cause: `Pipeline.cpp`/`CompiledStage.cpp` call
+`parseBitcodeFile` on the embedded ~2.9MB `libFeMeRuntimeCPU`
+bitcode **every single shader compile**, fully materializing every
+function body, even though the following `Linker::linkInModule(...,
+LinkOnlyNeeded)` only needs a handful of referenced functions.
+
+What made this look like an actual hang rather than "just slow":
+`dual_source.multi_attachments.*`'s own CTS test iterates up to 2500
+blend-state combinations internally, each one recompiling multiple
+shaders from scratch, with zero per-iteration progress output. A
+single test line could be doing up to 10,000 full eager bitcode
+reparses. No external observer (timeout-based or human) can tell
+that apart from a deadlock without attaching a debugger.
+
+## Why not just cache the parsed module?
+
+Tempting, but `CompiledStage::create` intentionally makes a fresh
+`LLVMContext` per compile (JIT isolation/disposability), and
+`CloneModule` requires a shared context between source and dest. A
+process-wide cache-and-clone would need a real architectural change
+(e.g. a shared context + module cloning across contexts, which LLVM
+doesn't support cleanly). Went with the minimal fix instead: `parse
+BitcodeFile` (eager) -> `getLazyBitcodeModule` (lazy). Confirmed via
+reading `IRMover.cpp` that `Linker`'s own materialization is already
+on-demand (`Src.materialize()` per function, no `materializeAll()`
+anywhere in the linking path) -- this is the same mechanism `llvm-
+link --only-needed`/ThinLTO importing rely on, so it's a well-trodden
+pattern, not a novel risk.
+
+No new unit test for this fix: it's a pure performance change with
+unchanged external behavior, and the existing `PipelineTest`/
+`CompiledStageTest`/`JITEngineTest` suites already exercise both
+call sites (including the `Reference=true` path) and passed before
+and after.
+
+## Newly exposed: H99a (correctness bugs, not crashes)
+
+Once the family could run to completion at all, 3469/8078 cases
+failed for two unrelated reasons:
+
+1. **2878 cases, `Fail (Image mismatch)`** -- broad, not yet reduced
+   to a specific shape.
+2. **591 cases, `VK_ERROR_INITIALIZATION_FAILED` at `vkQueueSubmit`**
+   -- suspiciously clean: exactly 3 formats (`r16_sfloat`,
+   `r16g16_sfloat`, `r32g32b32_sfloat`), ~197 cases each. All three
+   are formats a real GPU commonly can't blend (single/dual-channel
+   or non-power-of-two-friendly floats). Strong hypothesis: missing
+   a `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT`-style capability
+   check that should report `NotSupported` up front instead of
+   letting submission fail. Not confirmed yet.
+
+## Commits (2, each independently buildable/testable)
+
+1. `spirv.Kill` conversion pattern + new lit test
+   (`spirv-to-llvm-kill.mlir`)
+2. Lazy bitcode loading (`Pipeline.cpp`, `CompiledStage.cpp`)
+
+Plus a separate docs commit (Roadmap.md + VulkanCTSReport.md) and
+this agent_thoughts.md entry.
+
+## Suggested next steps
+
+1. **H99a's `VK_ERROR_INITIALIZATION_FAILED` triage first** -- it's
+   the cheaper of the two halves: only 3 formats, very clean
+   pattern, likely a missing format-capability check (same shape as
+   several prior H-series format-table gaps) rather than a deep
+   renderer bug. Start with `FEME_VULKAN_LOG_CREATION_ERRORS=1` on
+   one `r16_sfloat` case to see the real internal error, same
+   technique that cracked H98a quickly.
+2. **H99a's 2878 image-mismatch cases** are the larger, harder half
+   -- needs a qpa-image/channel-level pixel reduction on a
+   representative case (mirroring H88/H93's own technique) before
+   any real triage can start. Given the size (2878 cases), consider
+   sampling several `format.*` vs. `multi_attachments.*` cases and a
+   few different formats before picking one to reduce, in case
+   there's more than one root cause hiding inside this bucket too.
+3. Watch for regressions: the lazy-bitcode-loading fix touches the
+   single hottest code path in the entire CPU backend (every shader
+   compile). `check-feme`'s full 2963-test suite and the 8078-case
+   `dual_source` family both passed clean, but a broader spot-check
+   across a few other pipeline families next time this area is
+   touched would add confidence.
+4. H100/H101 (the other two rows from the original 13-crash H97
+   filing) remain untouched and are next in line for the same
+   per-bucket triage treatment.
