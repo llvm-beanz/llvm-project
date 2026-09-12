@@ -751,6 +751,74 @@ TEST(EntryWrapperTest, SpillsPhiLiveAcrossGroupSyncBarrier) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap H95a: a value live across a barrier that is used directly as a
+// `phi`'s incoming value in the barrier's own reload region (rather than
+// by some later, ordinary instruction, as `SpillsValueLiveAcrossGroupSyncBarrier`
+// above covers) needs its reload placed at the end of the specific
+// incoming block that operand corresponds to, not immediately before the
+// `phi` itself -- inserting it in the `phi`'s own block instead would
+// both violate "every phi in a block precedes every non-phi instruction"
+// (if another phi follows) and, regardless of that, produce a value that
+// does not dominate the very predecessor edge it is meant to feed (this
+// exact shape -- a value live across a barrier merging into a post-
+// barrier `phi` -- is what a real `dEQP-VK.mesh_shader.ext.properties.
+// *shared_memory_size` CTS reduction exposed once roadmap H95a's own
+// `DiamondFlattener` fix started threading a real (non-constant) mask
+// value through a shape like this one).
+TEST(EntryWrapperTest, SpillsValueUsedAsPhiIncomingValueAfterBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %gplus = add i32 %gid, 7
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %cond = icmp eq i32 %gid, 0
+      br i1 %cond, label %a, label %b
+    a:
+      br label %exit
+    b:
+      br label %exit
+    exit:
+      %val = phi i32 [ %gplus, %a ], [ 0, %b ]
+      %doubled = mul i32 %val, 2
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+
+  Function *Region1 = M->getFunction("main");
+  ASSERT_TRUE(Region1);
+
+  // The reload feeding `exit`'s phi must live in `a` (the incoming block
+  // for that operand), not in `exit` itself alongside the phi.
+  bool FoundLoadInA = false, FoundLoadInExit = false;
+  for (BasicBlock &BB : *Region1) {
+    for (Instruction &I : BB) {
+      if (!isa<LoadInst>(&I))
+        continue;
+      if (BB.getName() == "a")
+        FoundLoadInA = true;
+      if (BB.getName() == "exit")
+        FoundLoadInExit = true;
+    }
+  }
+  EXPECT_TRUE(FoundLoadInA);
+  EXPECT_FALSE(FoundLoadInExit);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // An entry point that reached `SIMDizePass` still carrying a parameter of
 // its own (a shader entry point takes none -- its inputs arrive through
 // stage-IO or resource accesses) leaves that parameter ahead of the
