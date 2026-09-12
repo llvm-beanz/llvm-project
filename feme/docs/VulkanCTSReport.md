@@ -38647,3 +38647,102 @@ capability), with no new feature/extension surface exposed or changed.
 `FeMeGraphicsDesign.md` needs no change either, for the same reason --
 no deviation from the design doc was introduced (or reverted back out)
 this session.
+
+## Roadmap H94b: measured impact (both underlying bugs fixed; diagnostic gone, cases now hit pre-existing H95)
+
+**Two independent bugs found and fixed, both via manual CFG tracing
+against a real captured repro** (`feme-opt --llvm
+-passes='feme-cpu-linearize,feme-cpu-simdize,feme-cpu-lower-wave,feme-cpu-wrap-entry'
+-feme-cpu-wave-size=4` run directly on H94's own carried-over
+pre-`feme-cpu-linearize` IR reduction, `module0-prepared.ll`):
+
+1. **Dead relay-stub blocks left behind by `LoopLinearizer`.**
+   `LoopLinearizer`'s entire mechanism -- replacing a loop's divergent
+   exit `CondBr` with an unconditional fall-through plus a mask
+   computation -- orphans whichever of the original `CondBr`'s two
+   successors was the "exit" arm (typically a `StructurizeCFG`-built
+   critical-edge relay stub with only that one predecessor) once the
+   branch is eliminated. This is a genuinely pre-existing
+   `LinearizePass` characteristic (confirmed via `git stash`: it
+   predates H94a's own multi-hop relay-collapse work entirely), never
+   previously observed because H94a is the first case where a
+   `feme-cpu-linearize`-touched divergent loop with a barrier downstream
+   ever reached `EntryWrapperPass`'s `isLinearChain`, the first consumer
+   to actually require "every block accounted for"
+   (`Order.size() == F.size()`). Fixed with one call: `LinearizePass::run`
+   now calls `llvm::EliminateUnreachableBlocks(F)` immediately after a
+   changed `LoopLinearizer::run()`.
+2. **`walkBarrierFreeArm`'s "must end in `UncondBrInst`" requirement.**
+   `feme::cpu::SIMDizePass`'s own widening of these 4 cases' verification
+   loop (roadmap milestone 4) produces an outer uniform trip-count check
+   wrapping an inner, widened "is any lane still active" mask reduction
+   (`llvm.vector.reduce.or` feeding a `CondBr`) that is the loop's *real*
+   closing decision -- reached mid-arm, after walking through several more
+   blocks past the loop's own top-level branch point, a shape
+   `walkBarrierFreeArm`'s prior all-`UncondBr`-chain-only walk could not
+   recognize at all. Fixed by teaching `walkBarrierFreeArm` to also accept
+   a mid-arm `CondBr` when exactly one of its two successors is already an
+   established (`Visited`) block -- mirroring `isLinearChain`'s own
+   existing top-level `Succ0Seen != Succ1Seen` backedge case -- appending
+   the block to `Order` (still barrier-checked) and continuing the walk
+   from the other, fresh successor.
+
+**Build and test validation.** `ninja check-feme`: 2949/2952 discovered,
+3 pre-existing `Unsupported`, 0 `Failed` -- up by exactly the 2 new tests
+this row adds (one lit test, one unit test), 0 regressions.
+
+New tests:
+- `Transforms/CPU/Linearize/loop-relay-chain-two-hops.ll` (already
+  checked in by H94a): extended with `CHECK-NOT: No predecessors!` and an
+  expanded header comment documenting bug 1's dead-block finding.
+  Confirmed via a `git stash` cycle: the test's own reduced IR exhibits
+  exactly 2 dead blocks at the pre-fix baseline (matching the real
+  repro exactly) and 0 with the fix.
+- `Transforms/CPU/entry-wrapper-barrier-free-loop-nested-condbr.ll`: a
+  new, hand-built lit test modeling bug 2's shape directly (an outer
+  uniform-trip-count loop header whose body arm passes through one extra
+  block before a mid-arm `CondBr` closes the loop back to the header).
+  Confirmed via a `git stash` cycle: diagnosed as "barrier inside
+  non-linear control flow" at the pre-fix baseline (even though the loop
+  itself is barrier-free -- the whole point of the bug), recognized and
+  kept intact with the fix.
+- A matching `EntryWrapperTest.cpp` unit test
+  (`SplitsBarrierFreeLoopWithNestedCondBr`), built from the same
+  hand-distilled IR as the lit test above, additionally checking the
+  wrapped module's structure (2 wave loop headers, 1 fence, the loop's
+  blocks landing intact in `main`) and that `verifyModule` finds no
+  errors.
+
+**Real CTS re-run of all 4 of H94/H94a's own target cases**
+(`mesh_payload_and_shared_memory_size`, `mesh_shared_memory_size`,
+`task_shared_memory_size`, `task_payload_and_shared_memory_size`): the
+`feme-cpu-wrap-entry` "barrier inside non-linear control flow" diagnostic
+is gone from every one of them -- all 4 now compile, link, and run to
+completion (no crash, no pipeline-creation error). A broader
+`dEQP-VK.mesh_shader.ext.*` sweep (26921 cases) confirms no regressions:
+323 Pass/116 Fail, identical to H94a's own closing baseline (the 4 cases
+were already counted as `Failed` under the old diagnostic, and remain
+`Failed` now under a different one -- see below -- so the aggregate
+totals are unchanged).
+
+**However, none of the 4 target cases pass outright.** Each now fails
+with `TCU_FAIL("Unexpected shared memory result: 0")` at
+`vktMeshShaderPropertyTestsEXT.cpp:521` instead -- the identical symptom
+already filed as roadmap row **H95** (originally scoped to
+`mesh_payload_size`/`task_payload_size` only, 2 cases). Rather than
+filing a new, separately-nested row (which would violate the "no more
+than one lowercase letter deep" nesting rule these 4 milestones are
+already at the limit of, as `H94b`), H95's own row has been expanded to
+include these 4 additional cases and now explicitly notes they may be
+either the same root cause or a second, coincidentally-identical symptom
+(the original 2 H95 cases use a payload-size property test with no
+verification loop at all, while these 4 use the shared-memory-size
+property test's own write-then-read-back loop H94/H94a's linearize work
+already touched once) -- not yet disambiguated.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a pure compiler internals bug fix (loop-linearization
+cleanup, entry-wrapper region-splitting shape recognition), with no new
+feature/extension surface exposed or changed. `FeMeGraphicsDesign.md`
+needs no change either, for the same reason -- no deviation from the
+design doc was introduced this session.
