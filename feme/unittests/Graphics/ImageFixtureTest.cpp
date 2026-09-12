@@ -674,6 +674,69 @@ TEST(ImageFixtureTest, PacksAndUnpacksR32G32B32SintNegative) {
   EXPECT_EQ(Unpacked[2], -3.0);
 }
 
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32B32Float) {
+  std::array<uint8_t, 12> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R32G32B32_FLOAT,
+                                   {0.25, -1.5, 2.0, 1.0}, Texel),
+                    Succeeded());
+  float V0, V1, V2;
+  memcpy(&V0, Texel.data(), 4);
+  memcpy(&V1, Texel.data() + 4, 4);
+  memcpy(&V2, Texel.data() + 8, 4);
+  EXPECT_FLOAT_EQ(V0, 0.25f);
+  EXPECT_FLOAT_EQ(V1, -1.5f);
+  EXPECT_FLOAT_EQ(V2, 2.0f);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R32G32B32_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.25);
+  EXPECT_DOUBLE_EQ(Unpacked[1], -1.5);
+  EXPECT_DOUBLE_EQ(Unpacked[2], 2.0);
+  EXPECT_DOUBLE_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16Float) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16_FLOAT,
+                                   {0.5, 0.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.5);
+  EXPECT_DOUBLE_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16Float) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16_FLOAT,
+                                   {0.25, -1.5, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16G16_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.25);
+  EXPECT_DOUBLE_EQ(Unpacked[1], -1.5);
+  EXPECT_DOUBLE_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest,
+     GetFixtureFormatElementSizeCoversR16FloatAndR16G16Float) {
+  Expected<uint32_t> R16 =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R16_FLOAT);
+  ASSERT_THAT_EXPECTED(R16, Succeeded());
+  EXPECT_EQ(*R16, 2u);
+
+  Expected<uint32_t> R16G16 =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R16G16_FLOAT);
+  ASSERT_THAT_EXPECTED(R16G16, Succeeded());
+  EXPECT_EQ(*R16G16, 4u);
+}
+
 TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8Uint) {
   std::array<uint8_t, 4> Texel{};
   ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_UINT,

@@ -283,6 +283,17 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // (Roadmap H98a) The two-channel sibling of `R8_UNORM`/`_SNORM`
     // above, same rationale.
     return FormatInfo{2, 1, false};
+  case ResourceFormat::R16_FLOAT:
+    // (Roadmap H99a) A real color-attachment format, unlike its
+    // `R16_UNORM`/`_SNORM` (H8j) and `R16_UINT`/`_SINT` (H8p) neighbors
+    // above -- same "missing `FormatInfo` entry entirely" rationale
+    // those already document, needed since `getFixtureFormatElementSize`
+    // reaches this table.
+    return FormatInfo{1, 2, true};
+  case ResourceFormat::R16G16_FLOAT:
+    // (Roadmap H99a) The two-channel sibling of `R16_FLOAT` above, same
+    // rationale.
+    return FormatInfo{2, 2, true};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "image fixture format is not yet supported "
@@ -709,6 +720,51 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     for (unsigned I = 0; I != 2; ++I) {
       float F = static_cast<float>(Clear[I]);
       memcpy(Texel.data() + I * 4, &F, 4);
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H99a) `R32G32B32_FLOAT`: the three-channel sibling of
+  // `R32_FLOAT`/`R32G32_FLOAT` above -- the same "spurious 'expected 3'
+  // error" gap those were fixed for (roadmap H98a), just never extended
+  // to this three-channel format (found via
+  // `dEQP-VK.pipeline.fast_linked_library.blend.dual_source`'s own
+  // `format.r32g32b32_sfloat.*` cases).
+  if (Format == ResourceFormat::R32G32B32_FLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    for (unsigned I = 0; I != 3; ++I) {
+      float F = static_cast<float>(Clear[I]);
+      memcpy(Texel.data() + I * 4, &F, 4);
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H99a) `R16_FLOAT`/`R16G16_FLOAT`: the 2-byte-per-component
+  // sibling of `R32_FLOAT`/`R32G32_FLOAT` above -- same "spurious
+  // 'expected 1'/'expected 2' error" gap, plus a binary16 (not binary32)
+  // encode, the same convention the generic `Info->IsFloat` path below
+  // already uses for `R16G16B16A16_FLOAT` (found via this row's own
+  // `dual_source.format.r16_sfloat`/`r16g16_sfloat.*` cases).
+  if (Format == ResourceFormat::R16_FLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    uint16_t Bits = floatToHalfBits(static_cast<float>(Clear[0]));
+    memcpy(Texel.data(), &Bits, 2);
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R16G16_FLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    for (unsigned I = 0; I != 2; ++I) {
+      uint16_t Bits = floatToHalfBits(static_cast<float>(Clear[I]));
+      memcpy(Texel.data() + I * 2, &Bits, 2);
     }
     return Error::success();
   }
@@ -1228,6 +1284,58 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
       float V;
       memcpy(&V, Texel.data() + I * 4, 4);
       Out[I] = V;
+    }
+    Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H99a) `R32G32B32_FLOAT`: the inverse of `packClearColor`'s
+  // own special case above -- the three-channel sibling of
+  // `R32_FLOAT`/`R32G32_FLOAT`'s own inverses immediately above.
+  if (Format == ResourceFormat::R32G32B32_FLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    for (unsigned I = 0; I != 3; ++I) {
+      float V;
+      memcpy(&V, Texel.data() + I * 4, 4);
+      Out[I] = V;
+    }
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H99a) `R16_FLOAT`/`R16G16_FLOAT`: the inverse of
+  // `packClearColor`'s own special case above -- a binary16 (not
+  // binary32) decode via `halfBitsToFloat`, the same convention the
+  // generic `Info->IsFloat` path below already uses for
+  // `R16G16B16A16_FLOAT`.
+  if (Format == ResourceFormat::R16_FLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Bits;
+    memcpy(&Bits, Texel.data(), 2);
+    Out[0] = halfBitsToFloat(Bits);
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R16G16_FLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    for (unsigned I = 0; I != 2; ++I) {
+      uint16_t Bits;
+      memcpy(&Bits, Texel.data() + I * 2, 2);
+      Out[I] = halfBitsToFloat(Bits);
     }
     Out[2] = 0.0;
     Out[3] = 1.0;
