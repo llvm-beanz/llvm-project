@@ -258,6 +258,43 @@ struct SignatureElement {
   /// `CanonicalizeStagePass::run`'s own `addElements` comment for why.
   bool RowCountIsVertexArray = false;
 
+  /// (Roadmap H101g/H101c) `RowCount`'s own instance-array/inner-row
+  /// split for GLSL's "array of interface-block-instances" syntax
+  /// (`layout(xfb_buffer = B, ...) out BlockName { ... } blockVar[N];`).
+  /// Per the GLSL/SPIR-V transform-feedback model, each of the `N` array
+  /// elements is its own independently-captured stream: array index `k`
+  /// captures to `XfbBuffer + k`, not to a byte offset deeper within
+  /// `XfbBuffer` itself (the packing every other multi-row element -- a
+  /// real matrix, or a block member's own array member, e.g. `ivec2
+  /// b[3]`, decomposed by `CanonicalizeStage.cpp`'s `addElements` into
+  /// one `SignatureElement` per member -- already uses). `RowCount`
+  /// itself flattens both dimensions together when the block's one
+  /// member is itself a matrix (e.g. `layout(...) out Block { mat4 var;
+  /// } block[3];`, `RowCount == 12`: 3 instances of a 4-row matrix, per
+  /// `getStageIORowShape`'s own alternating-peel accumulation) -- so
+  /// `Row` alone cannot say where one instance ends and the next begins.
+  /// 0 when this element is not this shape, meaning every other
+  /// `RowCount > 1` element (a genuine matrix, or a block member's own
+  /// array member) really does pack every row into the same buffer; when
+  /// non-zero, it is the number of *inner* rows one array instance's own
+  /// member spans (1 for a plain scalar/vector member, e.g. `uvec4`; the
+  /// matrix's own row count, e.g. 4 for `mat4`, otherwise), so
+  /// `Executor.cpp`'s `captureTransformFeedback` recovers `(Instance,
+  /// InnerRow) = (Row / XfbBufferArrayStride, Row % XfbBufferArrayStride)`
+  /// and routes each row to buffer `XfbBuffer + Instance` at byte offset
+  /// `InnerRow * ComponentCount * 4`, instead of packing every row into
+  /// one buffer -- found via `dEQP-VK.transform_feedback.fuzz.
+  /// random_geometry.all_unordered_and_instance_array.28`'s own `BlockB {
+  /// uvec4 a; } blockB[3];` (`XfbBufferArrayStride == 1`, one row per
+  /// instance) and `dEQP-VK.transform_feedback.fuzz.
+  /// instance_array_basic_type.mat4.*`'s own `Block { mat4 var; }
+  /// block[3];` (`XfbBufferArrayStride == 4`, one matrix row per
+  /// instance), whose later instances'/rows' own XFB bytes were silently
+  /// captured to the wrong buffer (or dropped once the destination
+  /// buffer's own real, per-instance size was accounted for) instead of
+  /// their own, separately-bound buffers.
+  uint32_t XfbBufferArrayStride = 0;
+
   SignatureInterpolationMode Interpolation =
       SignatureInterpolationMode::Perspective;
   SignatureFrequency Frequency = SignatureFrequency::PerVertex;
@@ -371,7 +408,9 @@ bool verifySignature(const EntrySignature &Sig,
 /// `SignatureElement::RowCountIsVertexArray`. Version 5 appends
 /// `SignatureElement::XfbBuffer`/`XfbOffset`/`XfbStride` (roadmap H21a).
 /// Version 6 appends `SignatureElement::CapturedSelfIndex` (roadmap L82).
-constexpr uint32_t SignatureAbiVersion = 6;
+/// Version 7 appends `SignatureElement::XfbBufferArrayStride` (roadmap
+/// H101g).
+constexpr uint32_t SignatureAbiVersion = 7;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each

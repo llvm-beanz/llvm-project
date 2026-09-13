@@ -131,12 +131,36 @@ bool checkXfbCapture(const EntrySignature &Sig, raw_ostream *ErrOS) {
                           "without a transform-feedback buffer");
         Ok = false;
       }
+      // (Roadmap H101g) `XfbBufferArrayStride` only means anything for a
+      // captured element -- it tells `captureTransformFeedback` which
+      // *buffer* each row belongs to, which is meaningless without one to
+      // begin with.
+      if (Elt.XfbBufferArrayStride != 0) {
+        report(ErrOS,
+               "element " + Twine(Elt.ElementID) +
+                   ": transform-feedback-buffer-array stride is set "
+                   "without a transform-feedback buffer");
+        Ok = false;
+      }
       continue;
     }
     if (Elt.Direction != SignatureDirection::Output) {
       report(ErrOS, "element " + Twine(Elt.ElementID) +
                         ": transform-feedback buffer is only meaningful on "
                         "an output element");
+      Ok = false;
+    }
+    // (Roadmap H101g) A non-zero `XfbBufferArrayStride` must evenly
+    // divide `RowCount` (it is, by construction, the number of inner
+    // rows one array instance's own member spans, so `RowCount` is
+    // always an exact multiple of it -- see this field's own comment)
+    // and cannot exceed it (there must be at least one whole instance).
+    if (Elt.XfbBufferArrayStride != 0 &&
+        (Elt.XfbBufferArrayStride > Elt.RowCount ||
+         Elt.RowCount % Elt.XfbBufferArrayStride != 0)) {
+      report(ErrOS, "element " + Twine(Elt.ElementID) +
+                        ": transform-feedback-buffer-array stride does not "
+                        "evenly divide the element's own row count");
       Ok = false;
     }
   }
@@ -168,7 +192,7 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
 /// row-count-is-vertex-array flag, has-transform-feedback-buffer flag,
 /// transform-feedback buffer, transform-feedback offset, transform-feedback
 /// stride, captured-self-index flag (roadmap L82).
-constexpr size_t NumFixedFieldsPerElement = 23;
+constexpr size_t NumFixedFieldsPerElement = 24;
 
 std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
   size_t TotalSemanticBytes = 0;
@@ -216,6 +240,7 @@ std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
     WriteNext(Elt.XfbOffset);
     WriteNext(Elt.XfbStride);
     WriteNext(Elt.CapturedSelfIndex ? 1u : 0u);
+    WriteNext(Elt.XfbBufferArrayStride);
   }
   assert(P == Bytes.data() + Bytes.size() &&
          "computed size did not match bytes actually written");
@@ -417,6 +442,12 @@ Expected<EntrySignature> feme::parseSignature(ArrayRef<uint8_t> Bytes) {
     if (!CapturedSelfIndex)
       return CapturedSelfIndex.takeError();
     Elt.CapturedSelfIndex = *CapturedSelfIndex != 0;
+
+    Expected<uint32_t> XfbBufferArrayStride =
+        ReadField("transform-feedback-buffer-array stride");
+    if (!XfbBufferArrayStride)
+      return XfbBufferArrayStride.takeError();
+    Elt.XfbBufferArrayStride = *XfbBufferArrayStride;
 
     Sig.Elements.push_back(std::move(Elt));
   }
