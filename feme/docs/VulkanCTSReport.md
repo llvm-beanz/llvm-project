@@ -40262,3 +40262,109 @@ is a compiler correctness fix, not new feature/extension work).
 generalizes an existing documented technique
 (`convertOffsetStructTypeIgnoringDecorations`'s "tight vector" retry)
 to two more member shapes rather than introducing a new one.
+
+## H101j: `CanonicalizeStage.cpp` marker-struct fix for the "tight vector" type-identity split
+
+**Symptom:** `dEQP-VK.transform_feedback.fuzz.*instance_array*`'s
+majority (~77 cases) hit `feme-graphics-validate-stage` errors
+("component N is out of range for element M", "unresolved stage-IO
+global-variable access") and `VK_ERROR_INITIALIZATION_FAILED` at
+pipeline creation, once H101i's own SPIRVToLLVM fix let a struct
+member legally declare the tight `array<N x array<M x Scalar>>`
+stand-in for a matrix/array-of-vectors shape:
+`CanonicalizeStage.cpp`'s `getStageIORowShape`/`resolveRowComponent`
+had no way to recognize this substituted shape and continued to treat
+it as an ordinary nested scalar array.
+
+**Root cause:** `getTightVectorArrayType` (SPIRVToLLVMPatterns.cpp)
+only ever changes a struct member's own *declared* LLVM type; it never
+changes the type SPIR-V's independent `spirv::MatrixType`/
+`spirv::VectorType` `TypeConverter` registrations produce for the
+*same shape* as a standalone value (e.g. a whole-matrix
+`spirv.Load`/`spirv.Store` operand). `CanonicalizeStage.cpp` assumed
+these were always identical (`Type * ==` comparisons throughout), so a
+member declaring the tight stand-in never matched the real value type
+crossing it, and its shape (row vs. component axis) was computed
+wrong.
+
+**First attempt (rejected): a positional heuristic.** Before settling
+on the fix below, a first attempt classified the *first* array level
+reached while peeling a member's declared type as always a genuine
+row, and any *subsequent* array-of-scalar level as a component axis --
+reasoning that no genuine multi-dimensional scalar array existed in
+this codebase's tested surface. **This was proven wrong by running the
+full `dEQP-VK.transform_feedback.*` group** (not just the originally-
+targeted failing cases): `dEQP-VK.transform_feedback.fuzz.
+2_level_array.float.geometry` -- a genuine, directly-declared `float
+xs[2][2]` shape, confirmed via reading
+`vktTransformFeedbackFuzzLayoutTests.cpp`'s own
+`createBlockBasicTypeCases` -- crashed with a "double free or
+corruption" once this heuristic shipped (confirmed via `git stash`
+bisection to be new, not pre-existing). `array<4 x float>` is
+bit-identical whether it's a tight-vector stand-in or a genuinely-
+declared `float xs[4]`; a purely positional/shape-based rule can never
+distinguish the two. **Lesson recorded for future sessions:** a type-
+representation change this broad needs the *full* relevant CTS group
+run before being considered complete, not just the cases it was
+originally aimed at -- a narrower verification would have shipped a
+real regression.
+
+**Fix (marker struct):** `getTightVectorArrayType` now wraps its
+substituted array in a uniquely-named identified LLVM struct
+(`!llvm.struct<"feme.tight_vector"[.N], (array<...>)>`, via
+`LLVMStructType::getNewIdentified`, which auto-disambiguates the name
+per distinct substitution site in a module) instead of returning the
+bare array. This is a *positive* signal -- "this specific array level
+is a tight-vector/matrix-column stand-in" -- that a genuinely-declared
+nested scalar array (which is never wrapped this way) can never be
+confused with, unlike the rejected heuristic above.
+`CompositeConstructPattern::convertStruct` (the one place a whole
+*value* crosses a tight-substituted member's boundary) and
+`padStructToSize` (which must not treat the marker's single member as
+paddable) were updated to unwrap/preserve the marker correctly.
+`CanonicalizeStage.cpp`'s `getStageIORowShape` and `resolveRowComponent`
+now check for the marker explicitly (via a new
+`getTightVectorMarkerInnerType` helper) instead of any positional
+inference, and `peelSingleMemberStruct` stops at (rather than
+transparently unwraps) a marker so callers can detect it.
+
+**Verification:**
+- New unit tests in `CanonicalizeStageTest.cpp`:
+  `MapsArrayOfBlockInstancesWithTightMatrixMemberToXfbBufferArrayStride`,
+  `MapsTightArrayOfVectorsMemberToRowAndComponentCount` (both using
+  marker-wrapped IR), and
+  `DoesNotMisclassifyGenuineTwoLevelScalarArrayAsTightVector` (a
+  regression guard for the exact shape the rejected heuristic broke,
+  using a *plain*, unmarked `[2 x [2 x float]]`). All 80 tests in
+  `FeMeTransformsGraphicsTests` pass.
+- 4 pre-existing lit tests
+  (`spirv-to-llvm-{composite-construct,nested-identified-struct,
+  stage-io,storage-buffer-struct-element}.mlir`) updated for the
+  marker's new `CHECK` output; `ninja check-feme`: **2979/2979
+  Passed**, 3 pre-existing `Unsupported`, 0 `Failed`.
+- `dEQP-VK.transform_feedback.fuzz.2_level_array.*` /
+  `3_level_array.*`: no crash, no failures (36/68 and 24/68 passed,
+  remainder `NotSupported`) -- confirms the marker-struct fix does
+  *not* reintroduce the regression the rejected heuristic caused.
+- `dEQP-VK.transform_feedback.fuzz.*instance_array*` (790 cases): was
+  99 Passed / 77 Failed / 614 NotSupported (H101i baseline), now
+  **108 Passed / 68 Failed / 614 NotSupported** -- 9 more cases fixed
+  by this change. All 68 remaining failures are
+  `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation -- the
+  separate, distinct nested-array-member SPIR-V-to-LLVM legalization
+  gap H101i's own closing note already scoped out (not this fix's
+  concern).
+- Full `dEQP-VK.transform_feedback.*` group (133,719 cases): 1089
+  Failed total, of which 0 are new crashes and 0 are `level_array`
+  cases (confirming no regression); the remaining fails are
+  pre-existing, unrelated groups (`primitives_generated_query`,
+  `simple*_gpl`, and the 68 `instance_array` pipeline-creation
+  failures above).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a compiler correctness fix, not new feature/extension
+work. `FeMeGraphicsDesign.md`: the marker-struct mechanism (an MLIR/
+LLVM identified struct used purely as a compiler-internal type-level
+tag, with no runtime/ABI meaning) is a new, reusable technique worth a
+brief mention; see that document's own updated "Tight Vector
+Substitution" note.
