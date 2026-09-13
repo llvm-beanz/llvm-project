@@ -39698,3 +39698,99 @@ ran.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 change: nothing about supported features or extensions changed.
 `FeMeGraphicsDesign.md` needs no update: no design deviation.
+
+## Roadmap H101: measured impact (1 of 4 signatures fixed; 3 confirmed real and broken out, plus a 5th newly found)
+
+**Headline:** All four of H101's named crash signatures were confirmed
+to reproduce for real this session -- correcting this same session's
+own earlier, mistaken conclusion (reached before this report entry)
+that all four already passed. That earlier conclusion was itself an
+artifact of a testing-methodology bug: piping `deqp-vk`'s output
+through a truncating `head`/`grep` caused `SIGPIPE` to kill `deqp-vk`
+mid-run, and the resulting incomplete/truncated log was misread as a
+clean pass. Once re-run with un-truncated output capture, all four
+named cases crashed exactly as originally filed.
+
+**Signature (3) fixed:** `spirv_assembly.instruction.compute.
+compute_shader_derivatives.compute.verify_ndx.linear.128_1_1`'s
+`indexed_accessor_range_base<mlir::OperandRange>::front()` empty-range
+assertion. Root cause: upstream MLIR's own
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`,
+`AccessChainPattern::matchAndRewrite`, unconditionally read
+`op.getIndices().front().getType()` to pick an index type for the
+leading "step through the pointer" GEP index. `spirv.AccessChain`'s
+`Indexes` operand is genuinely variadic (0 or more) per its own `.td`
+definition (`Variadic<SPIRV_Integer>:$indices`, no minimum-count
+constraint) -- a zero-index access chain is a legal (if degenerate)
+SPIR-V access chain, semantically an identity pointer. The real shader
+in this CTS case (imported via `feme::SPIRVImporter`, confirmed
+byte-identical to a hand-assembled copy of the same `.amber` shader
+text) legitimately produces such a zero-index chain, and `.front()` on
+the resulting empty `OperandRange` asserted.
+
+Fix: fall back to a plain `i32` index type (a valid `SPIRV_Integer`)
+when `op.getIndices()` is empty, in
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`. New lit test
+`access_chain_zero_indices` added to
+`mlir/test/Conversion/SPIRVToLLVM/memory-ops-to-llvm.mlir`, using the
+MLIR generic op syntax (`"spirv.AccessChain"(%0) : (...) -> ...`)
+since `spirv.AccessChain`'s own pretty assembly format cannot currently
+round-trip a zero-length `$indices` list through text (a separate,
+lower-priority cosmetic gap, filed as part of H101e below, since real
+zero-index chains only arise via binary SPIR-V deserialization in
+practice, never hand-written MLIR text).
+
+**Verification:**
+- `bin/mlir-opt -convert-spirv-to-llvm` on the new test case produces
+  correct, crash-free `llvm.getelementptr %base[%zero] : (!llvm.ptr,
+  i32) -> !llvm.ptr, f32` output; `check-mlir`'s
+  `Conversion/SPIRVToLLVM` suite (23 tests) passes in full.
+- `ninja check-feme`: 2971/2974 Passed, 3 pre-existing `Unsupported`,
+  0 `Failed`.
+- Re-running `verify_ndx.linear.128_1_1` directly: the
+  `OperandRange::front()` assertion is gone (confirmed via a direct
+  `gdb`-attached backtrace before the fix, landing squarely in
+  `AccessChainPattern::matchAndRewrite`, and a clean, crash-free run
+  after). The case still fails, but now with a distinct, narrower,
+  non-crashing `VK_ERROR_INITIALIZATION_FAILED` diagnostic
+  (`'llvm.getelementptr' op operand #0 must be LLVM pointer type ...
+  but got 'i32'`) -- a different bug than the one this row targeted,
+  broken out as new row H101c.
+
+**Signatures (1), (2), (4) confirmed real, not yet fixed** -- broken
+out as H101a, H101b, H101d respectively; see `Roadmap.md` for each
+row's own detail. Briefly:
+- (1) `graphicsfuzz.call-function-with-discard`: `LLVM ERROR: Cannot
+  select: intrinsic %llvm.spv.discard`. The crash's own `gdb`
+  backtrace terminates inside ORC JIT symbol-lookup machinery
+  (`ExecutionSession::lookup`/`dispatchOutstandingMUs`) rather than the
+  actual `SelectionDAG` frame that raised the fatal error -- the
+  `report_fatal_error` unwinds from a JIT worker context, so the raw
+  backtrace isn't directly actionable yet.
+- (2) `transform_feedback.fuzz.random_geometry.all_instance_array.75`:
+  `PromoteMem2Reg`'s `isAllocaPromotable(AI)` assertion, confirmed to
+  still fire exactly as originally filed.
+- (4) `tessellation.misc_draw.
+  switch_domain_origin_lower_left_to_upper_left`: reproduces, but the
+  actual symptom has drifted from the original filing's
+  `VK_ERROR_INITIALIZATION_FAILED` to a genuine `SIGSEGV` with an
+  unsymbolized, corrupted-looking stack (`Backtrace stopped: previous
+  frame identical to this frame`), consistent with a fault inside
+  JIT-compiled shader code (mirroring the shape H97 needed
+  `FEME_CPU_JIT_DEBUG_SUPPORT=1` to get a real backtrace for).
+
+**A fifth, previously-unfiled crash found** during this row's own
+broader `spirv_assembly.*` re-scan (run to confirm no regressions from
+the `AccessChainPattern` fix): `spirv_assembly.instruction.graphics.
+mixed_relaxed_precision_operands` aborts with
+`GetElementPtrTypeIterator.h:158: getSequentialElementStride:
+Assertion 'DL.typeSizeEqualsStoreSize(ElemTy) && "Not byte-addressable"'
+failed` -- some GEP's element type has an in-memory size that doesn't
+match its store size (e.g. a sub-byte-width integer), which this
+case's own name suggests is connected to `RelaxedPrecision`-decorated
+type handling. Broken out as new row H101e. Not yet triaged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed (this
+is a compiler correctness fix, not new feature/extension work).
+`FeMeGraphicsDesign.md` needs no update: no design deviation.
