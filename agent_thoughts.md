@@ -80980,3 +80980,147 @@ process in a bad heap state for whatever runs right after it).
 
 Any of H101p/q/r is a reasonable next pickup; H101p is the highest-value
 (most cases) if picking just one.
+
+# H101p: fixed the out-of-order member-offset legalization bug -- and survived a self-inflicted data-loss incident along the way
+
+**Fixed and merged this session:** `SPIRVToLLVMPatterns.cpp` and
+`CanonicalizeStage.cpp` now handle interface blocks whose members are
+declared out of ascending byte-offset order (not just the single-leading-
+gap shape every prior fix in this family covered). Real CTS: no case in
+the targeted 200-case sweep fails due to pure reordering anymore. Full
+`check-feme`: 2986/2989, 0 regressions.
+
+## What was broken
+
+`all_unordered_and_instance_array.*`'s fuzzer deliberately declares block
+members out of natural layout order -- e.g. a `mat4x2` at byte 12
+declared *before* an `ivec3` at byte 0. Two places assumed declared order
+== physical order:
+
+1. `layOutStructIfOffsetsMatch`'s layout cursor could only ever advance
+   forward, so it failed to legalize the struct type at all once any
+   member's offset was smaller than an earlier-declared sibling's.
+2. `CanonicalizeStage.cpp`'s `TakeBlockPath` indexed the LLVM struct's
+   field list by declared SPIR-V member index, so once (1) was fixed and
+   the struct legalized in physical order, this side attached the wrong
+   decorations/types to each element.
+
+## The fix (2 files, 2 commits)
+
+1. `SPIRVToLLVMPatterns.cpp`: new `getOffsetSortedMemberIndices` helper
+   (stable-sort member indices by offset). `structHasLeadingOffsetPad`
+   and `layOutStructIfOffsetsMatch` now use it instead of assuming
+   member 0 sits first. Renamed and generalized
+   `OffsetStructLeadingPadAccessChainPattern` ->
+   `OffsetStructMemberReorderAccessChainPattern`: triggers on a leading
+   pad *or* reordering, remaps a declared member index to its rank in
+   the offset-sorted order (plus one if a pad is also present).
+2. `CanonicalizeStage.cpp`'s `TakeBlockPath`: split into two passes.
+   Pass 1 (declared order) computes each member's true physical LLVM
+   field index via `DL.getStructLayout(ST)->getElementContainingOffset`.
+   Pass 2 (`llvm::stable_sort`-ed by that index) actually calls
+   `addElement`. This is the key insight that made both constraints
+   satisfiable at once: `Location` assignment must follow *declared*
+   order, but each member's own type/decoration lookup must follow
+   *physical* order -- no single linear walk in either order alone can
+   give you both once reordering is arbitrary rather than one fixed
+   shift.
+
+## The mistake: `git checkout --` ate ~30 minutes of finished work
+
+Partway through, I tried to run `clang-format -i` on the 4 touched files
+to clean up formatting before committing. The diff came back showing
+~868 changed lines on files with maybe 150 real lines of edits -- some
+config/version mismatch reformatted far more than intended. My reaction
+was to run `git checkout -- <the 4 files>` to "back out and try a scoped
+approach." **This silently discards all uncommitted changes to those
+files, not just the clang-format pass** -- there is no confirmation
+prompt and no recovery short of re-typing from memory. It wiped:
+
+- The entire `SPIRVToLLVMPatterns.cpp` fix (already fully verified).
+- The entire `CanonicalizeStage.cpp` fix (which, it turned out, had
+  actually been written in an *even earlier* turn but never committed --
+  so it had already survived one near-miss and this time didn't).
+- Both new unit tests (one of them already confirmed passing).
+
+**Recovery:** every edit's exact text was still visible earlier in the
+same conversation transcript (as tool-call arguments), so I manually
+retyped each fix from scratch against the reverted files, rebuilt, and
+re-ran every verification step (unit tests, real CTS, full `check-feme`)
+from zero rather than assuming the recreation was faithful. It was --
+final results match what had been confirmed before the revert. But this
+cost real time and could have been much worse (e.g. if the transcript
+itself had been unavailable).
+
+**Lesson, stated plainly so future-me actually reads it:** `git checkout
+--` is destructive and irreversible on uncommitted work. Before *any*
+git operation intended to "undo" or "start over," stash first --
+`git stash push` (or `git diff > backup.patch`) -- even when the intent
+is narrow ("just undo the formatting pass"). A stash costs nothing and
+makes every subsequent operation reversible. This is now also called out
+explicitly in this file so it isn't repeated.
+
+## Also fixed along the way
+
+Found and fixed the test-authoring bug that was blocking the
+`CanonicalizeStage.cpp` unit test during recovery: SPIR-V member
+decoration metadata needs one more list-nesting level than I'd written
+(`(memberIdx, [tuple, tuple, ...])`, not `(memberIdx, tuple)`) --
+confirmed by comparing byte-for-byte against an already-passing H101k
+test's own metadata shape. Cost about 20 minutes of tracing
+`getStageIORowShape`/`getTightVectorMarkerInnerType` before spotting it.
+
+## Root-cause breakdown, re-confirmed post-recovery
+
+Isolated (one `deqp-vk` process per case) sweep of both stage variants
+of `all_unordered_and_instance_array.{0..99}` (200 cases): 24 Pass / 11
+Fail / 164 NotSupported / 1 Crash -- identical to the pre-revert numbers,
+confirming the recreated fix is behaviorally identical to the lost one.
+Of the 11 remaining failures:
+
+- 4 (cases `.2`/`.39`, both stages): distinct bug, a nested
+  single-member struct member -- broken out as new roadmap row **H101s**.
+- 6 (cases `.27`/`.51`/`.66`/`.77`): now progress past legalization into
+  the already-filed **H101r** row/component-out-of-range bucket.
+- 1 (`.66`, geometry only): pre-existing, unrelated heap-corruption
+  crash already noted in H101n/H101o.
+
+## Roadmap and docs, updated and committed
+
+- `Roadmap.md`: struck through H101p with the fix + verification
+  summary. Added new row **H101s** for the nested-single-member-struct
+  bucket (4 cases: `.2`/`.39`, both stages) that H101p's own closing
+  re-triage separated out.
+- `FeMeVulkanDesign.md`: extended the H6q/H101n/H101m leading-pad
+  discussion with a fourth paragraph covering H101p's generalization to
+  arbitrary reordering.
+- `VulkanCTSReport.md`: new closing section, including the data-loss
+  incident and recovery for transparency.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: **not
+  touched** -- bugfix, no new feature/extension surface.
+
+## Suggested next steps (pick one, ~1-2 hours each)
+
+1. **H101s** (4 cases): nested single-member struct as one member of an
+   outer multi-member block (`!spirv.struct<(vector<4xf32>
+   [RelaxedPrecision])>` shape) -- fails `spirv.GlobalVariable`
+   legalization. Check whether `SPIRVToLLVMPatterns.cpp`'s struct
+   legalization needs to recurse into/peel a nested single-member struct
+   member the way `CanonicalizeStage.cpp`'s `peelSingleMemberStruct`
+   already does at the LLVM level.
+2. **H101q** (8 cases, carried over, untouched this session): unresolved
+   stage-IO global-variable reference, same case failing differently by
+   stage (JIT-symbol-not-found vs. validate-stage diagnostic).
+3. **H101r** (6 cases, carried over, untouched this session, but 6 more
+   cases from H101p's own reordering fix now land here too --
+   re-triage its count before starting): row/component-out-of-range in
+   `feme.stage.output.store`.
+4. Any leftover heap-corruption pairs (`.44`/`.45`, `.12`/`.13`, and now
+   this session's own `.66` for `all_unordered_and_instance_array`) are
+   all still open and may share one root cause -- worth a dedicated
+   session with a memory-error detector (ASan/valgrind) rather than
+   chasing them one at a time.
+
+H101s is the most direct continuation of this session's own work (same
+file, same general shape family, smallest case count to build a fast
+repro loop around).
