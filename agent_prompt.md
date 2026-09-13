@@ -45,19 +45,19 @@ agent thoughts.
 
 # Request
 
-Can you work on H101h or other blocking work to make progress on the H-series
+Can you work on H101i or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.instance_array_basic_type.{ivec3,mat2,mat2x3,mat3,mat3x2,mat3x4,mat4x2,mat4x3,uvec3,vec3,...}`'s
-> pre-existing "off-by-one row" symptom** (newly characterized during H101g's
-> own closing regression sweep; confirmed pre-existing and unaffected by that
-> row's fix, since these odd-component-count/non-square-matrix shapes fail
-> identically before and after): 12 cases (both `.vertex` and `.geometry`
-> variants) receive a *different row's* value rather than garbage or a crash,
-> suggesting a component/row alignment or padding miscalculation specific to
-> these shapes' byte-offset arithmetic rather than a completely wrong address.
-> Not yet triaged -- needs a channel-level byte reduction of a representative
-> case (e.g. `ivec3.geometry`) to determine exactly which row's value is
-> misdirected and trace the offset arithmetic responsible, likely in
-> `resolveOffsetWithinElement`'s or `getStageIORowShape`'s handling of
-> 3-component (non-power-of-two) or non-square-matrix row/component packing
+> **`transform_feedback.fuzz.{random_geometry,random_vertex}.{all_instance_array,basic_instance_arrays,nested_structs_instance_arrays,nested_structs_arrays_instance_arrays}`'s
+> multi-member-block-with-nested-array-member SPIR-V-to-LLVM legalization
+> failure** (newly characterized during H101g's own closing regression sweep;
+> ~77 cases, all `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation): a
+> multi-member interface block (`TakeBlockPath`, `NumElements > 1`) with a
+> nested array member (e.g. `struct{ivec3, vec4, ivec2[2]}`) fails
+> SPIR-V-to-LLVM conversion outright with `failed to legalize operation
+> 'spirv.GlobalVariable'`, entirely upstream of/unrelated to
+> `CanonicalizeStage.cpp`'s plain-path logic H101g touched. Not yet triaged --
+> needs a standalone `feme-translate --spirv-to-llvmir` repro of a minimal such
+> block to identify which conversion pattern (or lack thereof) rejects the
+> nested-array member's type, likely in `SPIRVToLLVMPatterns.cpp`'s
+> block/struct-member type-conversion logic
