@@ -80582,3 +80582,77 @@ subset, before treating a fix as verified.
 `random_geometry.all_instance_array.11`, or a standalone
 `feme-translate` IR dump, to identify the unresolved `spirv_var_N`
 symbol's origin.
+
+# H101k: fixed the array-of-block-instances JIT-symbol crash
+
+**Next action for a future session:** pick up H101l (the wrong-value
+XFB mismatch H101k's own fix exposed) or H101m (the remaining 61
+distinct pipeline-creation failures, starting with the 28-case
+`si32`-vs-`i32` group, the biggest chunk).
+
+## What got fixed
+
+`dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_array.11`
+crashed with `JIT session error: Symbols not found: [ spirv_var_46 ]`.
+Root cause: `CanonicalizeStage.cpp`'s `addElements` counted a stage-IO
+global's *LLVM*-level struct field count to decide whether it was a
+genuinely multi-member SPIR-V block. A single real member at a nonzero
+byte offset gets an LLVM-level leading `[N x i8]` pad field synthesized
+ahead of it (a compiler artifact, not a second GLSL member) --
+`addElements` mistook that padded 2-field struct for 2 real members,
+took the wrong code path, and left every store to the global
+completely unrewritten. The (never-defined) global stayed referenced,
+and unresolved, at JIT-link time -- that's the crash.
+
+Fixed by keying the "how many real members" decision off
+`feme.spirv.MemberDecorations` metadata (real SPIR-V member index)
+instead of the LLVM struct's own field count, and adding a shared
+helper (`getEffectiveStageIOValueType`) so both signature-building and
+instruction-rewriting agree on the same pad-stripped type.
+
+## State right now
+
+1. Fix committed (`f8c2ac6a5b1b`), docs committed (`98aac4712ed2`).
+2. `check-feme`: 2980/2983 passed, 0 failed.
+3. Target case no longer crashes -- it now runs to completion and
+  fails a value comparison instead (`Mismatch at offset 0 expected -89
+  received 1096810496`, which decodes to `14.0f`, a neighboring
+  block's own first captured value). Filed as **H101l**.
+4. `*instance_array*` CTS sweep: still 108 passed / 68 failed / 614
+  not-supported -- same totals as before this fix, because exactly 7
+  cases moved failure *mode* (crash -> wrong-value, H101l) while the
+  other 61 failures are unrelated bugs this fix doesn't touch (filed
+  as **H101m**, broken into 4 distinct symptom families by their own
+  compiler diagnostic).
+
+## Why the pass count didn't move (read this before assuming the fix did nothing)
+
+This fix eliminates a crash mechanism, not a specific test failure.
+The 7 cases affected are still `Fail` in CTS -- just for a different,
+now-visible reason (H101l) instead of a JIT crash. That's real
+progress: a crash is opaque and blocks investigation entirely; a wrong-
+value mismatch is debuggable with the channel-reduction technique
+already used for H88/H93/H99a/H101g. Don't rediscover this fix is
+"useless" by only looking at the pass/fail number -- check the failure
+*message* per case, which is where the change shows up.
+
+## Suggested next steps, ranked
+
+1. **H101l** (~1-2 hours): channel-level byte reduction of
+  `all_instance_array.11`'s captured XFB buffer. Both `BlockB` (offset
+  0) and `BlockC` (offset 44) share one `XfbBuffer`/`XfbStride` (92
+  bytes) -- the received value is *exactly* `BlockC`'s own first byte,
+  not garbage, so look at `Executor.cpp`'s `captureTransformFeedback`
+  for a buffer-offset aliasing bug between two elements sharing one
+  buffer at different `XfbOffset`s.
+2. **H101m, si32/i32 group** (~1-2 hours, biggest single chunk, 28
+  cases): standalone repro of one such case's SPIR-V, find where an
+  `si32`-typed value ends up compared against a plain `i32` attribute
+  in constant construction -- likely a `TypeConverter` signedness gap,
+  not a `CanonicalizeStage.cpp` issue.
+3. **H101m, remaining legalization group** (~14 cases): multi-member
+  blocks combining a matrix/vector member with a *nested single-member
+  struct* member -- may need H101i's own "tight vector" retry extended
+  one more level.
+4. **H101m, unresolved-access + out-of-range-row groups** (4 cases
+  total): smallest remaining group, triage last.
