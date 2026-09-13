@@ -81259,3 +81259,40 @@ A synthetic repro built from a bug report's own textual shape description is **n
 1. **Pick the next H-series blocker from the roadmap.** No new bug rows were filed this session -- the `.2` fix closed cleanly with no fresh fallout in the swept family.
 2. Worth a broader sweep at some point (not this session): other transform-feedback fuzz families that might share the same nested-struct shape (e.g. anything using `all_unordered_and_instance_array`-adjacent generators) to confirm this fix's reach is complete elsewhere too -- did not do this here since the request scope was H101t specifically.
 3. Clean up `/tmp/h101t_repro/` and other `/tmp/h101t_*` scratch files -- not committed, safe to delete any time.
+
+# H101q session: asked to fix one bug, found three roadmap rows already fixed by the last one
+
+**Fixed:** nothing new — H101q, H101r, H101o, and H101i were all already resolved by last session's H101t fix. Confirmed with real CTS, no code changes needed.
+
+**Status:** all four rows struck through on the roadmap. No source changes this session (docs only).
+
+## What happened, in order
+
+1. Picked up H101q: `nested_structs_instance_arrays.{2,15,31}` / `basic_instance_arrays.32`, unresolved stage-IO global-variable reference.
+2. Per this project's own standing discipline ("re-triage against the current binary before investigating"), ran all 8 named cases first. **All 8 already Pass.** No investigation needed.
+3. Swept the full `nested_structs_instance_arrays.*` + `basic_instance_arrays.*` family (200 cases) to check for anything else hiding in those families: 190 Pass / 10 NotSupported / 0 Fail. Clean.
+4. This meant H101q's own root cause (an un-rewritten stage-IO access) was already fixed as a side effect of last session's H101t fix (`resolveOffsetWithinElement`'s leaf-count-aware struct indexing). Closed H101q, no code change.
+5. Since the request explicitly allows "H101q or other blocking work," and the fix that closed H101q clearly had a wide blast radius, checked the two other open rows in the same investigation lineage: **H101r** (row/component-out-of-range family) and **H101o** (heap corruption for a lone leading-pad struct with a matrix member).
+6. Both were *also* already fixed. Re-ran H101r's 6 named cases (Pass), H101o's 4 named cases (Pass, no corruption).
+7. Ran a full isolated-process sweep of the entire `*instance_array*` fuzz family (790 cases) to check the big picture: **696 Passed / 94 NotSupported / 0 Failed / 0 crashes.**
+8. Since H101o was specifically a *heap corruption* bug (only manifests running back-to-back in one process), isolation alone wasn't enough evidence it was really gone. Re-ran the same 790 cases as a single non-isolated batch (`--deqp-caselist-file`, matching real CTS invocation) — identical 696/94/0/0 result. Corruption confirmed gone, not just hidden by isolation.
+9. Checked H101i (an older row, intentionally left open pending its own downstream chain in H101j onward) — that whole chain is now closed too, so closed H101i as well, since its own "kept open" condition no longer applies.
+10. Ran `check-feme` fresh: 2990/2993, 0 Failed, 0 regressions.
+
+## The pattern here
+
+One structural fix (H101t's `resolveOffsetWithinElement` leaf-count-awareness) turned out to be the shared root cause behind four separately-filed roadmap rows (H101i, H101o, H101q, H101r) that looked like distinct bugs when originally triaged — they were all different downstream symptoms of the same "leaf-count-unaware struct indexing" mechanism. This is a good argument for **always re-triaging against the current binary before investigating a filed bug**, which is exactly what this project's own recent rows have started doing (and what caught all four closures this session).
+
+## Verification this session
+
+- Real CTS: H101q's 8 named cases, H101r's 6 named cases, H101o's 4 named cases — all Pass.
+- Full isolated-process sweep of `*instance_array*` (790 cases): 696/94/0/0 (Pass/NotSupported/Fail/crash).
+- Full non-isolated batch run of the same 790 cases (rules out heap corruption specifically): identical 696/94/0/0.
+- `check-feme`: 2990/2993, 3 pre-existing `Unsupported`, 0 `Failed`, 0 regressions.
+- No unit tests added — no source change was made this session, so no new test surface exists to cover.
+
+## Suggested next steps
+
+1. **The entire `*instance_array*` transform-feedback fuzz family (H101a through H101t) is now fully clean** (0 Fail, 0 crash, 790 cases). This multi-session investigation thread is done — no more work to pick up here.
+2. Remaining open H101 rows are unrelated to `*instance_array*` and need fresh, independent triage each: **H101c** (GEP operand-type legalization failure, `compute_shader_derivatives`), **H101d** (a `tessellation.misc_draw` crash needing `FEME_CPU_JIT_DEBUG_SUPPORT=1` + `gdb`), **H101e** (a "Not byte-addressable" GEP assertion, `mixed_relaxed_precision_operands`), **H101f** (an unconditional hang in `graphicsfuzz.arr-value-set-to-arr-value-squared`, needs a `gdb`/`perf` attach to distinguish compile-time vs. runtime spin). Any of these is a reasonable next pick — pick whichever is most convenient, they're independent of each other and of the now-closed instance_array chain.
+3. Given how many previously-filed rows turned out to already be fixed this session, it may be worth a quick blanket re-triage pass across *all* remaining open H101 rows (not just the instance_array ones) before diving into fresh investigation on any one of them — cheap to check, and this session found 3 out of 3 already fixed.
