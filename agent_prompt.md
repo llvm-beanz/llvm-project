@@ -45,19 +45,25 @@ agent thoughts.
 
 # Request
 
-Can you work on H101i or other blocking work to make progress on the H-series
+Can you work on H101j or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.{random_geometry,random_vertex}.{all_instance_array,basic_instance_arrays,nested_structs_instance_arrays,nested_structs_arrays_instance_arrays}`'s
-> multi-member-block-with-nested-array-member SPIR-V-to-LLVM legalization
-> failure** (newly characterized during H101g's own closing regression sweep;
-> ~77 cases, all `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation): a
-> multi-member interface block (`TakeBlockPath`, `NumElements > 1`) with a
-> nested array member (e.g. `struct{ivec3, vec4, ivec2[2]}`) fails
-> SPIR-V-to-LLVM conversion outright with `failed to legalize operation
-> 'spirv.GlobalVariable'`, entirely upstream of/unrelated to
-> `CanonicalizeStage.cpp`'s plain-path logic H101g touched. Not yet triaged --
-> needs a standalone `feme-translate --spirv-to-llvmir` repro of a minimal such
-> block to identify which conversion pattern (or lack thereof) rejects the
-> nested-array member's type, likely in `SPIRVToLLVMPatterns.cpp`'s
-> block/struct-member type-conversion logic
+> **`CanonicalizeStage.cpp` doesn't understand the new "tight" `array<N x
+> array<Mxf32>>` matrix/array-of-vectors representation
+> `SPIRVToLLVMPatterns.cpp` now emits** (newly exposed by H101i's own closing
+> fix): `random_vertex.all_instance_array.11` now hits
+> `feme-graphics-validate-stage` errors (`'feme.stage.output.store' ...
+> component N is out of range for element 0/1/2`, plus `unresolved stage-IO
+> global-variable access to 'spirv_var_46'`) instead of the legalization crash
+> H101i fixed -- `CanonicalizeStage.cpp`'s row/component-shape resolution logic
+> expects a matrix column or array-of-vectors element to convert to a real
+> `VectorType`, and doesn't yet recognize the tight, alignment-free `array<N x
+> array<Mxf32>>` shape H101i's fix can now produce for the same source member.
+> Most of the ~77 `*instance_array*` cases still fail at pipeline creation for
+> this reason (`VK_ERROR_INITIALIZATION_FAILED`); 2 (`all_instance_array.9`,
+> `all_instance_array.68`) get further, to a wrong-value XFB `Mismatch`, and
+> `random_geometry.all_instance_array.11` gets furthest, to a `JIT session
+> error: Symbols not found: [ spirv_var_46 ]`. Not yet triaged -- needs
+> `CanonicalizeStage.cpp`'s row/component-shape detection (`getStageIORowShape`
+> or similar) extended to recognize a tightly-packed `array<N x array<Mxf32>>`
+> member the same way it already recognizes `array<N x vector<Mxf32>>`
