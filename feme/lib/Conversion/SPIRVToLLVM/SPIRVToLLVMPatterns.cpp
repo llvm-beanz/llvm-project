@@ -2431,10 +2431,14 @@ mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
 /// (see mlir::spirv::StructType::MemberDecorationInfo), in the same shape
 /// buildStageIODecorationsAttr uses for a whole-variable decoration, or a
 /// null attribute if \p Info's decoration is not one of the ones a stage-IO
-/// interface block's own member can carry (i.e. not `Offset`/`MatrixStride`/
+/// interface block's own member can carry (i.e. not `MatrixStride`/
 /// `ColMajor`/`RowMajor`, an ordinary UBO/SSBO struct's own layout
 /// decorations, which a stage-IO struct never carries in practice, but
-/// filtered defensively all the same).
+/// filtered defensively all the same). `Offset` is handled separately by
+/// `buildMemberDecorationsAttr` below, not here -- see its own comment for
+/// why (mlir::spirv::StructType models a member's byte offset as a
+/// first-class field, `getMemberOffset`, never as one of the
+/// `MemberDecorationInfo` entries this function's caller iterates).
 mlir::Attribute buildMemberDecorationTuple(
     mlir::Builder &Builder,
     const mlir::spirv::StructType::MemberDecorationInfo &Info) {
@@ -2483,16 +2487,45 @@ mlir::Attribute buildMemberDecorationTuple(
 
 /// Builds the getStageIOMemberDecorationsAttrName() attribute for \p Struct
 /// -- a builtin interface block's own field struct (e.g. `gl_PerVertex`'s
-/// `{Position, PointSize, ClipDistance, CullDistance}`) -- from its members'
-/// own `OpMemberDecorate`d decorations
+/// `{Position, PointSize, ClipDistance, CullDistance}`), or a plain
+/// user-defined multi-member interface block's own field struct (e.g.
+/// `out BlockB { vec2 a; ivec2 b[3]; } blockB;`) -- from its members' own
+/// `OpMemberDecorate`d decorations
 /// (mlir::spirv::StructType::getMemberDecorations, already used by
 /// isBufferBlockWritable above for a storage-buffer block's `NonWritable`
-/// member decoration), or a null attribute if no member carries a
-/// recognized one (roadmap H2c: SPIR-V decorates a `BuiltIn` interface
-/// block's members individually rather than the block variable itself, so
-/// buildStageIODecorationsAttr's whole-variable read never sees them).
+/// member decoration) plus each member's own byte `Offset`
+/// (`StructType::getMemberOffset`, tracked separately from the generic
+/// decoration list -- see `buildMemberDecorationTuple`'s own comment), or a
+/// null attribute if the struct has no members at all.
+///
+/// (Roadmap H101b) A plain user-defined block like `BlockB` above carries
+/// no per-member `BuiltIn`/`Location` at all -- only `Offset` (each
+/// member's byte position within the block) and `RelaxedPrecision` (which
+/// FeMe's model has no representation for) -- so before this fix, every
+/// member of such a block produced an empty `Tuples` list and was skipped
+/// below entirely, same as a struct with literally no decorated members.
+/// `Members` then came back empty too, so no `feme.spirv.MemberDecorations`
+/// metadata was ever attached, and `CanonicalizeStage.cpp`'s `addElements`
+/// treated the whole multi-member struct as a single opaque stage-IO
+/// element instead of decomposing it per member. `resolveRowComponent`
+/// (CanonicalizeStage.cpp) has no case for a genuine multi-member
+/// `StructType` (only single-member-struct-wrapped scalars/vectors/
+/// arrays), so every store's byte offset silently resolved to the same
+/// `(Row=0, Component=0)`, all four of this shader's stores collapsing
+/// onto the same two shadow allocas and tripping `PromoteMem2Reg`'s
+/// `isAllocaPromotable` assertion on the resulting mixed-type stores --
+/// found via `dEQP-VK.transform_feedback.fuzz.random_geometry.
+/// all_instance_array.75`. Emitting each member's own `Offset` (decoration
+/// code 35, the same code `parseSPIRVDecorations` in CanonicalizeStage.cpp
+/// already reads as `XfbOffset` when it appears on a whole variable rather
+/// than a member) unconditionally -- not gated behind
+/// `buildMemberDecorationTuple` recognizing some *other* decoration first
+/// -- ensures `Members` is never empty for any multi-member struct, however
+/// plainly it's decorated.
 /// Each entry is `(memberIndex, tuples)`, where `tuples` is an `ArrayAttr`
-/// of buildMemberDecorationTuple's own per-decoration shape.
+/// of buildMemberDecorationTuple's own per-decoration shape, plus one
+/// synthesized `(35, byteOffset)` tuple in the same shape for the member's
+/// own `Offset`.
 mlir::ArrayAttr buildMemberDecorationsAttr(mlir::spirv::StructType Struct) {
   mlir::Builder Builder(Struct.getContext());
   llvm::SmallVector<mlir::Attribute> Members;
@@ -2507,6 +2540,12 @@ mlir::ArrayAttr buildMemberDecorationsAttr(mlir::spirv::StructType Struct) {
       if (mlir::Attribute Tuple =
               buildMemberDecorationTuple(Builder, Decoration))
         Tuples.push_back(Tuple);
+    if (Struct.hasOffset())
+      Tuples.push_back(Builder.getArrayAttr(
+          {Builder.getI32IntegerAttr(
+               static_cast<int32_t>(mlir::spirv::Decoration::Offset)),
+           Builder.getI32IntegerAttr(
+               static_cast<int32_t>(Struct.getMemberOffset(Index)))}));
     if (Tuples.empty())
       continue;
     Members.push_back(Builder.getArrayAttr(

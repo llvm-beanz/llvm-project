@@ -211,18 +211,51 @@ TEST(SPIRVToLLVMTest, PerVertexArrayInterfaceBlockPreservesMemberDecorations) {
       << Result;
 }
 
-// A member decoration this milestone does not model (e.g. `Offset`, which
-// an ordinary uniform block's members carry but a stage-IO struct never
-// does) is filtered out rather than corrupting the encoding, matching
-// buildStageIODecorationsAttr's own "unrecognized decoration is simply not
-// preserved" behavior for a whole-variable attribute.
+// A member decoration this milestone does not model (e.g.
+// `RelaxedPrecision`, which an ordinary block's members can carry but no
+// downstream consumer of `feme.spirv.member.decorations` ever reads) is
+// filtered out of the attribute's per-member tuple list rather than
+// corrupting the encoding, matching buildStageIODecorationsAttr's own
+// "unrecognized decoration is simply not preserved" behavior for a
+// whole-variable attribute. This member also carries no explicit `Offset`
+// (unlike `PlainMultiMemberInterfaceBlockSynthesizesOffsetDecoration`
+// below), so `buildMemberDecorationsAttr` has nothing to synthesize either
+// -- the whole `feme.spirv.member.decorations` attribute is absent, not
+// merely empty for this member.
 TEST(SPIRVToLLVMTest, UnrecognizedMemberDecorationIsFilteredOut) {
   std::string Result = convertToLLVMDialect(
       "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
       "{ spirv.GlobalVariable @block : "
-      "!spirv.ptr<!spirv.struct<(f32 [0])>, Output> }");
+      "!spirv.ptr<!spirv.struct<(f32 [RelaxedPrecision])>, Output> }");
   EXPECT_NE(Result, "<failed>");
   EXPECT_EQ(
+      Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
+      std::string::npos)
+      << Result;
+}
+
+// (Roadmap H101b) A plain (non-builtin), multi-member interface block's
+// members typically carry no recognized decoration of their own beyond an
+// explicit byte `Offset` (e.g. `layout(xfb_offset = 0) mediump uvec4 a;`) --
+// unlike `Offset`.  MLIR's own `spirv::StructType` never surfaces `Offset`
+// through the generic `getMemberDecorations` list `buildMemberDecorationTuple`
+// reads (it's tracked as a distinct first-class `OffsetInfo` field instead),
+// so without an explicit synthesis step `buildMemberDecorationsAttr` would
+// return a null attribute for such a block -- exactly as it correctly does
+// for `UnrecognizedMemberDecorationIsFilteredOut` above, only wrongly so, for
+// a struct that genuinely does need to disambiguate more than one member.
+// `buildMemberDecorationsAttr` unconditionally synthesizes a `(35 /*Offset*/,
+// memberOffset)` tuple per member whenever the struct itself
+// `hasOffset()`, ensuring the resulting attribute is never empty for a
+// genuinely multi-member, explicitly-offset-laid-out struct like this one.
+TEST(SPIRVToLLVMTest,
+     PlainMultiMemberInterfaceBlockSynthesizesOffsetDecoration) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], f32 [4])>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(
       Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
       std::string::npos)
       << Result;
