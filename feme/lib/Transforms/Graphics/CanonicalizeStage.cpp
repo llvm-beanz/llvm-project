@@ -924,9 +924,23 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
     }
   } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
     Value *New = PoisonValue::get(ArrTy);
-    for (unsigned R = 0, RE = ArrTy->getNumElements(); R != RE; ++R) {
+    unsigned RE = ArrTy->getNumElements();
+    for (unsigned R = 0; R != RE; ++R) {
+      // (Roadmap H101c) `Row` may already be a non-zero base when this
+      // array is nested one level inside an outer one (GLSL's own "array
+      // of block instances" syntax, `layout(...) out Block { mat4 var; }
+      // block[3];`, reaches here with `Row` seeded to the outer instance
+      // index, decomposing the matrix's own 4 columns on top of it) --
+      // combine (`Row * RE + R`), rather than discard the incoming `Row`
+      // outright the way overwriting it with a bare `B.getInt32(R)`
+      // always did before, which silently collapsed every instance's own
+      // inner rows onto the same absolute row 0..RE-1 regardless of which
+      // instance was being written/read.
+      Value *CombinedRow =
+          Row ? B.CreateAdd(B.CreateMul(Row, B.getInt32(RE)), B.getInt32(R))
+              : B.getInt32(R);
       Value *RowVal =
-          loadStageIOValue(B, ArrTy->getElementType(), ElementID, B.getInt32(R),
+          loadStageIOValue(B, ArrTy->getElementType(), ElementID, CombinedRow,
                            Component, Zero, Name, Shadow);
       New = B.CreateInsertValue(New, RowVal, R);
     }
@@ -975,10 +989,17 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
       return;
     }
   } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
-    for (unsigned R = 0, RE = ArrTy->getNumElements(); R != RE; ++R)
+    unsigned RE = ArrTy->getNumElements();
+    for (unsigned R = 0; R != RE; ++R) {
+      // (Roadmap H101c) See `loadStageIOValue`'s own mirrored comment:
+      // combine, rather than overwrite, an incoming non-zero base `Row`.
+      Value *CombinedRow =
+          Row ? B.CreateAdd(B.CreateMul(Row, B.getInt32(RE)), B.getInt32(R))
+              : B.getInt32(R);
       storeStageIOValue(B, B.CreateExtractValue(Val, R),
-                        ArrTy->getElementType(), ElementID, B.getInt32(R),
+                        ArrTy->getElementType(), ElementID, CombinedRow,
                         Component, Zero, Shadow);
+    }
     return;
   } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
     for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C)
@@ -2159,24 +2180,71 @@ uint64_t getPackedMeshElementSize(Type *Ty, const DataLayout &DL) {
 /// seed their own recursion with, from \p Residual -- a byte offset within
 /// one stage-IO member's own declared type \p MemberTy -- mirroring
 /// `getStageIORowShape`'s own type recursion (a single-member struct
-/// peeled, then an array's rows, then a vector's components).
+/// peeled, then each array dimension in turn, accumulating \p Row as a
+/// single flattened, outer-dimension-major index -- \p Row = \p Idx_outer
+/// * InnerRowCount + \p Idx_inner for two nested array dimensions, and so
+/// on -- exactly the same flattening `getStageIORowShape`'s own
+/// `RowCount *= ArrTy->getNumElements()` product already assumes) -- but
+/// only as far down as \p ValueTy, the type of the value actually being
+/// loaded/stored at this access: once the type remaining to peel equals
+/// \p ValueTy, this stops descending and leaves the rest of the
+/// decomposition to `loadStageIOValue`/`storeStageIOValue`'s own
+/// recursion, which starts from the `(Row, Component)` this returns as
+/// its own base and decomposes \p ValueTy's own shape on top of it.
+///
+/// (Roadmap H101c) Before this, this had no \p ValueTy to stop at, and
+/// instead always fully descended to a vector (or scalar) leaf -- correct
+/// only when \p ValueTy itself was already that same leaf (every
+/// previously-reachable shape: a single scalar/vector member, or one
+/// already-selected row of a matrix, e.g. `gl_TessLevelOuter[i]`). Once
+/// GLSL's own "array of block instances" syntax (`layout(...) out Block {
+/// mat4 var; } block[3];`) let a single whole-matrix store's own \p
+/// ValueTy be the matrix's own `[Columns x VectorType]` array (not a
+/// leaf) -- one instance's whole `mat4` assigned in one SPIR-V `OpStore`
+/// -- descending all the way to a vector leaf here computed a `Row`
+/// (`Idx_outer * ColumnCount + Idx_inner`) that already accounted for the
+/// matrix's own column index, which `storeStageIOValue`'s own array
+/// recursion (decomposing that same `[Columns x VectorType]` \p ValueTy)
+/// then multiplied and added a *second* time -- double-counting the
+/// column dimension into far-out-of-range absolute rows (observed via
+/// `dEQP-VK.transform_feedback.fuzz.instance_array_basic_type.mat4.
+/// vertex`'s own `feme-graphics-validate-stage` failure, rows 16-19/32-35
+/// instead of the correct 4-7/8-11 for instances 1 and 2). Stopping at \p
+/// ValueTy fixes this by leaving exactly the outer (instance) index in
+/// \p Row and letting `storeStageIOValue` decompose the matrix's own
+/// column dimension exactly once, matching how the geometry variant of
+/// this same shape's own capture bytes already showed (columns captured,
+/// just to the wrong absolute row) versus the vertex variant's own harder
+/// failure (a `Row` so far out of range `PromoteMemToReg`'s
+/// `validateRow`-checked signature rejected it outright).
 std::pair<uint64_t, uint64_t>
-resolveRowComponent(Type *MemberTy, uint64_t Residual, const DataLayout &DL) {
-  Type *PerRowTy = peelSingleMemberStruct(MemberTy);
+resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
+                   const DataLayout &DL) {
+  Type *PerRowTy = MemberTy;
   uint64_t Row = 0;
-  if (auto *ArrTy = dyn_cast<ArrayType>(PerRowTy)) {
+  while (true) {
+    PerRowTy = peelSingleMemberStruct(PerRowTy);
+    if (PerRowTy == ValueTy)
+      break;
+    auto *ArrTy = dyn_cast<ArrayType>(PerRowTy);
+    if (!ArrTy)
+      break;
     uint64_t RowSize = DL.getTypeAllocSize(ArrTy->getElementType());
+    uint64_t Idx = 0;
     if (RowSize) {
-      Row = Residual / RowSize;
-      Residual -= Row * RowSize;
+      Idx = Residual / RowSize;
+      Residual -= Idx * RowSize;
     }
+    Row = Row * ArrTy->getNumElements() + Idx;
     PerRowTy = ArrTy->getElementType();
   }
   uint64_t Component = 0;
-  if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy)) {
-    uint64_t CompSize = DL.getTypeAllocSize(VecTy->getElementType());
-    if (CompSize)
-      Component = Residual / CompSize;
+  if (PerRowTy != ValueTy) {
+    if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy)) {
+      uint64_t CompSize = DL.getTypeAllocSize(VecTy->getElementType());
+      if (CompSize)
+        Component = Residual / CompSize;
+    }
   }
   return {Row, Component};
 }
@@ -2239,7 +2307,7 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   if (IDs.size() == 1) {
     if (ValueTy == ElemTy)
       return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
-    auto [Row, Component] = resolveRowComponent(ElemTy, ByteOffset, DL);
+    auto [Row, Component] = resolveRowComponent(ElemTy, ByteOffset, ValueTy, DL);
     return StageIOAccess{IDs, AsConstant(Row), AsConstant(Component), Vertex,
                          IsOutput};
   }
@@ -2254,7 +2322,7 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   unsigned Member = SL->getElementContainingOffset(ByteOffset);
   uint64_t Residual = ByteOffset - SL->getElementOffset(Member);
   auto [Row, Component] =
-      resolveRowComponent(ST->getElementType(Member), Residual, DL);
+      resolveRowComponent(ST->getElementType(Member), Residual, ValueTy, DL);
   return StageIOAccess{IDs.slice(Member, 1), AsConstant(Row),
                        AsConstant(Component), Vertex, IsOutput};
 }
@@ -2545,7 +2613,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // here instead).
     auto addElement = [&](GlobalVariable *GV, unsigned AddrSpace,
                           const ParsedSPIRVDecorations &D, Type *ValueTy,
-                          bool RowCountIsVertexArray = false) {
+                          bool RowCountIsVertexArray = false,
+                          uint32_t XfbBufferArrayStride = 0) {
       SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
       SignatureElement Elt;
       Elt.ElementID = NextID;
@@ -2572,6 +2641,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Elt.ComponentCount = Shape.ComponentCount;
       Elt.RowCount = Shape.RowCount;
       Elt.RowCountIsVertexArray = RowCountIsVertexArray;
+      Elt.XfbBufferArrayStride = XfbBufferArrayStride;
       Elt.Interpolation = getInterpolationMode(D);
       Elt.Frequency = Info.Frequency;
       Elt.FromInputPatch = Info.FromInputPatch;
@@ -2749,6 +2819,42 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         Type *ValueTy = GV->getValueType();
         bool RowCountIsVertexArray =
             isPerVertexArrayInputGlobal(GV, UnusedAddrSpace, Stage);
+        // (Roadmap H101g) `PeekedST`/`MemberMD` (computed above, before
+        // `TakeBlockPath` was checked false) being non-null means `GV`'s
+        // whole value type is a single-member, non-`BuiltIn` `Block`-
+        // decorated struct -- optionally wrapped in one outer array
+        // dimension, already peeled off into `PeekedST` above. When that
+        // outer array dimension is genuinely present (`ValueTy` really is
+        // `ArrayType` of `PeekedST`, as opposed to `PeekedST` itself with
+        // no array at all) and this element is transform-feedback-
+        // captured (`D.XfbBuffer` present), that array dimension is GLSL's
+        // own "array of block instances" syntax (`layout(...) out BlockB
+        // { ... } blockB[N];`): each `blockB[k]` is an independently-
+        // captured stream, one per `XfbBuffer + k` (the GLSL/SPIR-V
+        // transform-feedback spec's own model for this shape), not
+        // `RowCount`-many rows packed back-to-back within one buffer the
+        // way a real matrix or a block member's own array member already
+        // is. `XfbBufferArrayStride` -- the block's one member's own row
+        // count (`getStageIORowShape` on `PeekedST`'s own single member,
+        // ignoring the outer array `PeekedST` itself already had peeled
+        // off; 1 for a plain scalar/vector member, or a real matrix's own
+        // row count, e.g. 4 for `mat4`) -- records this so `Executor.cpp`'s
+        // `captureTransformFeedback` can recover each instance's own
+        // `(Instance, InnerRow)` split and route it to its own buffer
+        // instead of packing every row into one -- see that field's own
+        // comment (`Signature.h`) for the full story, including the
+        // `dEQP-VK.transform_feedback.fuzz.random_geometry.
+        // all_unordered_and_instance_array.28` and `dEQP-VK.
+        // transform_feedback.fuzz.instance_array_basic_type.mat4.*` cases
+        // that exposed this.
+        uint32_t XfbBufferArrayStride = 0;
+        if (PeekedST && PeekedST->getNumElements() == 1 && MemberMD &&
+            D.XfbBuffer && !RowCountIsVertexArray) {
+          if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
+            if (ArrTy->getElementType() == PeekedST)
+              XfbBufferArrayStride =
+                  getStageIORowShape(PeekedST->getElementType(0)).RowCount;
+        }
         //
         // (Roadmap H29g) A hull entry's own plain per-control-point
         // `Output` global (e.g. `layout(location=0) out vec4 vtxColor[];`
@@ -2786,7 +2892,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           RowCountIsVertexArray = false;
         }
         addElement(GV, AddrSpace, D, ValueTy,
-                   /*RowCountIsVertexArray=*/RowCountIsVertexArray);
+                   /*RowCountIsVertexArray=*/RowCountIsVertexArray,
+                   /*XfbBufferArrayStride=*/XfbBufferArrayStride);
       }
     };
     addElements(InputGlobals);
