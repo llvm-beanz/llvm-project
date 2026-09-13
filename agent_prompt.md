@@ -45,25 +45,25 @@ agent thoughts.
 
 # Request
 
-Can you work on H101p or other blocking work to make progress on the H-series
+Can you work on H101s or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.all_unordered_and_instance_array.*`'s 26-case
-> `spirv.GlobalVariable` legalization failure for multi-member blocks whose
-> members are declared out of ascending `Offset` order** (newly characterized
-> during H101m's own closing re-triage): every failing case's own decompiled
-> SPIR-V interface block has at least one member pair where the *later*-declared
-> member has a *smaller* `Offset` than an earlier-declared one (e.g.
-> `!spirv.struct<(!spirv.matrix<4 x vector<2xf32>> [12, RelaxedPrecision],
-> vector<3xsi32> [0, RelaxedPrecision])>` -- the first declared member sits at
-> byte 12, the second at byte 0), consistent with this test family's own name
-> (`all_unordered_and_instance_array`, deliberately emitting members out of
-> natural layout order) and distinct from every previously-fixed leading-pad
-> shape (which only ever involved a *single* out-of-order gap at the very
-> front). Not yet triaged -- needs a standalone ground-truth
-> `feme-translate`/`feme-opt` repro (mirroring H101m's own technique) of one
-> such out-of-order block to determine whether `SPIRVToLLVMPatterns.cpp`'s
-> `layOutStructIfOffsetsMatch` (or whichever pass owns struct-layout synthesis)
-> assumes monotonically-increasing member offsets somewhere in its own
-> layout-matching logic, and if so, whether the fix belongs there or in a new,
-> more general "sort members by offset before laying out the LLVM struct" step
+> **`transform_feedback.fuzz.all_unordered_and_instance_array.{2,39}`'s 4-case
+> `spirv.GlobalVariable` legalization failure for a block combining a
+> matrix/vector member with a nested single-member struct member** (newly
+> re-confirmed distinct from H101p during this session's own closing isolated
+> sweep; the same bucket H101m's own closing re-triage previously grouped under
+> its bucket (2), "~14 cases ... combining a matrix/vector member with a nested
+> single-member struct member"): each failing case's own decompiled SPIR-V
+> interface block includes a member shaped like `!spirv.struct<(vector<4xf32>
+> [RelaxedPrecision])>` -- i.e. a *nested* single-member struct wrapping a
+> vector, itself one member of an outer multi-member block (e.g. `f32[20],
+> vector2i32[0], struct(vector3f32)[8]`) -- a shape distinct from every
+> reordering-only case H101p now legalizes, and one H101i's own "tight vector"
+> retry may not extend to. Not yet triaged -- needs a standalone ground-truth
+> `feme-translate`/`feme-opt` repro of one such
+> nested-single-member-struct-as-block-member shape (mirroring H101p's own
+> technique) to determine whether `SPIRVToLLVMPatterns.cpp`'s
+> struct-legalization patterns need to recurse into (or peel through) a nested
+> single-member struct member the same way `CanonicalizeStage.cpp`'s own
+> `peelSingleMemberStruct` already does for LLVM-level types
