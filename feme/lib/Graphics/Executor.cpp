@@ -1452,59 +1452,95 @@ static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
   // captured to it, so each buffer's base (already-captured) vertex
   // count is computed once, from the first such element found, before
   // the per-element write loop below.
+  //
+  // (Roadmap H101g) An `XfbBufferArrayStride != 0` element's own
+  // `RowCount` rows do *not* share one buffer the way every other
+  // element's rows do -- GLSL's own "array of block instances" syntax
+  // (`layout(...) out BlockB { ... } blockB[N];`) captures each
+  // `blockB[k]` to its own, separately-bound buffer `XfbBuffer + k` --
+  // so this element's own progress must be tracked (and later advanced)
+  // once per instance, at `BufIdx + Instance`, not once at `BufIdx`
+  // alone.
   struct XfbBufferProgress {
     uint32_t Stride = 0;
     uint64_t BaseVertex = 0;
     bool Seen = false;
   };
   llvm::SmallVector<XfbBufferProgress, 4> Progress(Draw.XfbBuffers.size());
+  auto SeedProgress = [&](uint32_t BufIdx, uint32_t Stride) {
+    if (BufIdx >= Draw.XfbBuffers.size() ||
+        !Draw.XfbBuffers[BufIdx].CapturedBytes || Stride == 0)
+      return;
+    XfbBufferProgress &Prog = Progress[BufIdx];
+    if (Prog.Seen)
+      return;
+    Prog.Stride = Stride;
+    Prog.BaseVertex = *Draw.XfbBuffers[BufIdx].CapturedBytes / Stride;
+    Prog.Seen = true;
+  };
   for (const SignatureElement *Elt : Elements) {
     if (Elt->Direction != SignatureDirection::Output || !Elt->XfbBuffer)
       continue;
-    uint32_t BufIdx = *Elt->XfbBuffer;
-    if (BufIdx >= Draw.XfbBuffers.size() ||
-        !Draw.XfbBuffers[BufIdx].CapturedBytes || Elt->XfbStride == 0)
-      continue;
-    XfbBufferProgress &Prog = Progress[BufIdx];
-    if (Prog.Seen)
-      continue;
-    Prog.Stride = Elt->XfbStride;
-    Prog.BaseVertex = *Draw.XfbBuffers[BufIdx].CapturedBytes / Elt->XfbStride;
-    Prog.Seen = true;
+    uint32_t BaseBufIdx = *Elt->XfbBuffer;
+    if (Elt->XfbBufferArrayStride != 0) {
+      uint32_t InstanceCount = Elt->RowCount / Elt->XfbBufferArrayStride;
+      for (uint32_t Instance = 0; Instance != InstanceCount; ++Instance)
+        SeedProgress(BaseBufIdx + Instance, Elt->XfbStride);
+    } else {
+      SeedProgress(BaseBufIdx, Elt->XfbStride);
+    }
   }
   for (const SignatureElement *Elt : Elements) {
     if (Elt->Direction != SignatureDirection::Output || !Elt->XfbBuffer)
       continue;
-    uint32_t BufIdx = *Elt->XfbBuffer;
-    if (BufIdx >= Draw.XfbBuffers.size())
+    uint32_t BaseBufIdx = *Elt->XfbBuffer;
+    if (Elt->XfbStride == 0)
       continue;
-    const feme::graphics::PreparedDraw::XfbCaptureBuffer &CB =
-        Draw.XfbBuffers[BufIdx];
-    if (!CB.CapturedBytes || Elt->XfbStride == 0)
-      continue;
-    uint64_t BaseVertex = Progress[BufIdx].BaseVertex;
-    for (uint32_t Flat = 0; Flat != Count; ++Flat) {
-      uint64_t RecordStart =
-          (BaseVertex + Flat) * Elt->XfbStride + Elt->XfbOffset;
-      // (Roadmap H101b) An element with `RowCount > 1` (e.g. a multi-
-      // member interface block's own array-typed member, `ivec2 b[3]`,
-      // decomposed into one `SignatureElement` per member -- see
-      // `CanonicalizeStage.cpp`'s `addElements` -- rather than one per
-      // array row) captures every one of its rows, not just row 0: each
-      // row occupies its own consecutive `ComponentCount`-many-`uint32_t`
-      // span in the XFB record, exactly the same back-to-back packing
-      // `resolveRowComponent`/`getMemberOffset` already assume when
-      // resolving a *load*/*store*'s own byte offset back into this same
-      // `(Row, Component)` shape (CanonicalizeStage.cpp). Before this,
-      // only `Row=0` was ever captured (`readRaw`'s own `Row` parameter
-      // defaults to 0), silently leaving every later row's own XFB bytes
-      // at whatever the buffer was already filled with (typically zero)
-      // -- found via `dEQP-VK.transform_feedback.fuzz.random_geometry.
-      // all_instance_array.75`'s own `ivec2 b[3]` member, whose `b[1]`/
-      // `b[2]` rows read back as 0 instead of their real stored value.
-      uint64_t RowSizeBytes = uint64_t(Elt->ComponentCount) * sizeof(uint32_t);
-      for (uint32_t Row = 0; Row != Elt->RowCount; ++Row) {
-        uint64_t RowStart = RecordStart + Row * RowSizeBytes;
+    // (Roadmap H101b) An element with `RowCount > 1` (e.g. a multi-
+    // member interface block's own array-typed member, `ivec2 b[3]`,
+    // decomposed into one `SignatureElement` per member -- see
+    // `CanonicalizeStage.cpp`'s `addElements` -- rather than one per
+    // array row) captures every one of its rows, not just row 0: each
+    // row occupies its own consecutive `ComponentCount`-many-`uint32_t`
+    // span in the XFB record, exactly the same back-to-back packing
+    // `resolveRowComponent`/`getMemberOffset` already assume when
+    // resolving a *load*/*store*'s own byte offset back into this same
+    // `(Row, Component)` shape (CanonicalizeStage.cpp). Before this,
+    // only `Row=0` was ever captured (`readRaw`'s own `Row` parameter
+    // defaults to 0), silently leaving every later row's own XFB bytes
+    // at whatever the buffer was already filled with (typically zero)
+    // -- found via `dEQP-VK.transform_feedback.fuzz.random_geometry.
+    // all_instance_array.75`'s own `ivec2 b[3]` member, whose `b[1]`/
+    // `b[2]` rows read back as 0 instead of their real stored value.
+    //
+    // (Roadmap H101g) `XfbBufferArrayStride != 0` is the one exception
+    // to that same-buffer packing: `Row` splits into `(Instance,
+    // InnerRow) = (Row / XfbBufferArrayStride, Row %
+    // XfbBufferArrayStride)`, and each row goes to buffer `BaseBufIdx +
+    // Instance` at byte offset `InnerRow * ComponentCount * 4` within
+    // it, rather than every row packing into `BaseBufIdx` alone -- see
+    // this function's own leading comment and `Signature.h`'s
+    // `XfbBufferArrayStride` for the full story.
+    uint64_t RowSizeBytes = uint64_t(Elt->ComponentCount) * sizeof(uint32_t);
+    for (uint32_t Row = 0; Row != Elt->RowCount; ++Row) {
+      uint32_t BufIdx = BaseBufIdx;
+      uint64_t RowByteOffset = Row * RowSizeBytes;
+      if (Elt->XfbBufferArrayStride != 0) {
+        BufIdx = BaseBufIdx + Row / Elt->XfbBufferArrayStride;
+        RowByteOffset =
+            (Row % Elt->XfbBufferArrayStride) * RowSizeBytes;
+      }
+      if (BufIdx >= Draw.XfbBuffers.size())
+        continue;
+      const feme::graphics::PreparedDraw::XfbCaptureBuffer &CB =
+          Draw.XfbBuffers[BufIdx];
+      if (!CB.CapturedBytes)
+        continue;
+      uint64_t BaseVertex = Progress[BufIdx].BaseVertex;
+      for (uint32_t Flat = 0; Flat != Count; ++Flat) {
+        uint64_t RecordStart =
+            (BaseVertex + Flat) * Elt->XfbStride + Elt->XfbOffset;
+        uint64_t RowStart = RecordStart + RowByteOffset;
         for (uint32_t C = 0; C != Elt->ComponentCount; ++C) {
           uint64_t Dst = RowStart + uint64_t(C) * sizeof(uint32_t);
           // (roadmap F10-style) A destination past the bound buffer's own
