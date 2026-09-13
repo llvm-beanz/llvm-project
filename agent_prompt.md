@@ -45,22 +45,16 @@ agent thoughts.
 
 # Request
 
-Can you work on H101c or other blocking work to make progress on the H-series
+Can you work on H102 or other blocking work to make progress on the H-series
 milestones?
 
-> **`spirv_assembly.instruction.compute.compute_shader_derivatives.compute.verify_ndx.linear.128_1_1`'s
-> GEP-operand-type legalization failure** (newly exposed by H101's own
-> `AccessChainPattern` zero-index fix, which converted this case from a hard
-> crash into this narrower, non-crashing pipeline-creation failure):
-> `vkCreateComputePipelines` now fails cleanly with `'llvm.getelementptr' op
-> operand #0 must be LLVM pointer type or LLVM dialect-compatible vector of LLVM
-> pointer type, but got 'i32'` instead of crashing -- some other conversion
-> pattern in this same shader (likely a `spirv.PtrAccessChain`,
-> `spirv.InBoundsAccessChain`, or `spirv.InBoundsPtrAccessChain` op, none of
-> which have a registered lowering pattern per H101's own investigation) is
-> producing a GEP whose base-pointer operand ends up as a plain integer rather
-> than an LLVM pointer, or a type-conversion step upstream of the GEP-emitting
-> pattern is not converting a pointer-typed value correctly for this shader's
-> specific derivative-related type shape. Not yet triaged -- needs a
-> `feme-translate --import-spirv` dump of this shader's SPIR-V to identify the
-> exact op producing the ill-typed GEP
+> **`rasterization.culling.primitive_id`'s pixel-comparison mismatch** (1 case,
+> newly exposed by H97's own closing re-run once its bare-`SIGSEGV` crash was
+> fixed): now compiles, links, and runs to completion (no crash, no
+> pipeline-creation error) but fails its own image comparison
+> (`vktRasterizationTests.cpp:8275`), a genuine rendering-correctness bug in
+> whichever primitive-ID-under-culling semantics this case exercises, distinct
+> from H97's own fixed `getelementptr`-index-widening bug. Not yet triaged --
+> needs its own qpa-image/case reduction (mirroring H88/H93's own channel-level
+> pixel-reduction technique) to isolate the specific incorrect value and narrow
+> down which stage of the primitive-ID/culling path disagrees
