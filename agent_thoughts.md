@@ -79963,3 +79963,67 @@ as H101c rather than chased further this session.
 4. Clean up `/tmp/h101*` scratch directories -- not done this session,
    several gigabytes of qpa logs and scratch `.spv`/`.mlir` files
    accumulated.
+
+# H101a: fixed the discard-through-helper-function crash
+
+## Do this first (2 minutes)
+
+Run `dEQP-VK.graphicsfuzz.call-function-with-discard` against the
+rebuilt ICD -- it now passes. The full `check-feme` regression suite
+(2972/2975, 3 pre-existing `Unsupported`, 0 `Failed`) already confirms
+no regressions, so there's nothing left to verify before moving on.
+
+## What happened, in order
+
+1. Bypassed the ORC JIT entirely (its symbol-lookup frames obscured the
+   real crash site, per H101's own note) by extracting the failing
+   shader's SPIR-V straight from `call-function-with-discard.amber` and
+   driving `feme-translate`/`feme-opt` on it directly.
+2. Along the way, resolved a CLI mystery left over from the H101
+   session: `--spirv-to-llvmir`/`--spirv-to-llvmdialect` need
+   `--no-implicit-module` when the input `.mlir`'s top-level op is
+   already `spirv.module` (not wrapped in `builtin.module`).
+3. Root-caused by reading `CanonicalizeStagePass::run`'s dispatch loop:
+   it only visits functions with a recognized `feme::getShaderStage`
+   attribute. The shader's helper function `func()` (GLSL/glslang
+   helpers aren't pre-inlined the way `dxc`'s HLSL output is -- see
+   `InlineHelperFunctions.cpp`'s own header comment) has no such
+   attribute, so its `llvm.spv.discard` was skipped entirely, survived
+   `InlineHelperFunctionsPass`'s later inlining unrewritten, and hit
+   instruction selection as a raw intrinsic.
+4. Fix: extracted the signature-independent discard/demote/derivative/
+   quad-read rewrite logic into its own function
+   (`rewriteSPIRVDiscardAndDerivativeIntrinsics`), confirmed it never
+   touches the `Stage`/`Phase` context, and called it for *any*
+   non-declaration function, not just recognized entry points.
+5. Added unit test `CanonicalizeStageTest.
+   RewritesSPIRVDiscardInNonEntryHelperFunction`.
+6. Verified with a stashed-diff before/after sweep of all 115
+   `graphicsfuzz.*` cases mentioning "discard" or "function": 0
+   regressions, 3 newly-passing, 1 crash converted to a clean (already
+   separately tracked) `Fail`.
+
+## New bug found, not fixed this session
+
+`graphicsfuzz.arr-value-set-to-arr-value-squared` hangs unconditionally
+(100% CPU, no progress). Confirmed via the same stashed-diff technique
+that this reproduces identically with and without this session's fix --
+pre-existing, unrelated. Filed as **H101f**.
+
+## Suggested next steps
+
+1. **H101f (the new hang)** is the most actionable pickup: attach `gdb`
+   with `FEME_CPU_JIT_DEBUG_SUPPORT=1` (H97's own technique) and
+   interrupt mid-spin to see whether it's stuck compiling or stuck
+   running JIT-compiled shader code. About 30-60 minutes to a first
+   answer.
+2. H101b (`transform_feedback`'s `PromoteMem2Reg` assertion) and H101d
+   (`tessellation`'s segfault) are both still open from the original
+   H101 triage and untouched this session.
+3. Full `graphicsfuzz.*` group has at least one more hang beyond
+   H101f's case (the full-group run in this session got stuck at case
+   5 of 757) -- worth a dedicated hang-hunting pass across the whole
+   group rather than assuming H101f is the only one, before relying on
+   full-group sweeps again.
+4. Clean up `/tmp/h101a*` scratch files (qpa logs, `.spv`/`.mlir`/`.ll`
+   repro artifacts, caselists) -- not done yet.
