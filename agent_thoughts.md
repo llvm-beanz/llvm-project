@@ -81224,3 +81224,38 @@ no incident -- but kept the habit.
 
 H101t is the most direct continuation (same investigation, same case,
 already has a `gdb` backtrace and a hypothesis to test).
+
+# H101t session: nested-struct fix needed two parts, not one -- synthetic repro lied
+
+**Fixed:** `all_unordered_and_instance_array.2` (both stages) no longer crashes. Both variants Pass outright now.
+
+**Status:** H101t closed. Roadmap struck through, docs updated, code + tests + docs committed in separate commits.
+
+## What happened, in order
+
+1. Root-caused the crash as "CanonicalizeStage.cpp has no notion of a multi-member nested struct's own members each needing their own Location/ElementID" -- exactly what H101s's closing note predicted.
+2. Built the fix: `isGenuineMultiMemberNestedStruct`, `getStageIOFlattenedRowCount`, `addStageIOStructMembers` -- decomposes a nested struct's own real members into their own `SignatureElement`s at construction time.
+3. Verified it against a hand-built synthetic `feme-translate --spirv-to-llvmir` ground-truth repro of the bug report's own textual shape. Clean. New unit test passed. Full `check-feme` passed. Looked done.
+4. Ran it against the **real** CTS case anyway (this project's own standing process requires it). **Still crashed.** Identical assertion.
+5. This was the interesting part: the synthetic repro was not wrong, it was just *incomplete* -- it only exercised one of the nested struct's two real members (never stored into the `mat3x3` one). The real shader touches both.
+6. `gdb` was useless here -- Release build, no real DWARF for locals/params, only the `assert()` macro's baked file/line string is visible. Had to add a temporary env-var-gated debug dump directly in the pass, rebuild just `libfeme_vulkan.so`, and read the dump. Found: one shadow alloca with a `float` store *and* an `i32` store. Two different accesses colliding on the same `(ElementID, Row, Component)` key.
+7. Traced it to a second, distinct bug: `resolveOffsetWithinElement`'s own access-time indexing (`IDs.slice(Member, 1)`, plus its `HasLeadingPad` check comparing `IDs.size()` against the struct's field count) assumed exactly one `ElementID` per physical field -- an assumption step 2's own fix had just broken.
+8. Fixed that too: pad detection by type instead of count, a `getStageIOLeafElementCount` helper, and recursive offset resolution into a nested struct's own layout.
+9. Added a *second*, more targeted unit test that stores into all three real leaf members (the first test's own gap). Re-ran everything.
+
+## The lesson (recorded so future sessions don't skip real-CTS verification)
+
+A synthetic repro built from a bug report's own textual shape description is **necessary but not sufficient** evidence a fix is complete. The bug report text is an approximate characterization, not verbatim ground truth, and a synthetic repro can accidentally under-exercise the real shader's own access pattern. This project's own standing rule ("run the Vulkan CTS after each change") is exactly the safety net that caught this -- don't skip it just because unit tests + `check-feme` look clean.
+
+## Verification this session
+
+- `FeMeTransformsGraphicsTests`/`FeMeConversionSPIRVToLLVMTests`: 105/105 pass (+1 test from last session's count).
+- `check-feme`: 2989/2992, 3 pre-existing `Unsupported`, 0 `Failed`, 0 regressions.
+- Real CTS: `random_vertex.all_unordered_and_instance_array.2` and `random_geometry.all_unordered_and_instance_array.2` both **Pass**.
+- Isolated per-case sweep of `all_unordered_and_instance_array.{0..99}` (200 cases, both stages): 168 Passed / 32 pre-existing NotSupported / 0 Failed / 0 crashes.
+
+## Suggested next steps
+
+1. **Pick the next H-series blocker from the roadmap.** No new bug rows were filed this session -- the `.2` fix closed cleanly with no fresh fallout in the swept family.
+2. Worth a broader sweep at some point (not this session): other transform-feedback fuzz families that might share the same nested-struct shape (e.g. anything using `all_unordered_and_instance_array`-adjacent generators) to confirm this fix's reach is complete elsewhere too -- did not do this here since the request scope was H101t specifically.
+3. Clean up `/tmp/h101t_repro/` and other `/tmp/h101t_*` scratch files -- not committed, safe to delete any time.
