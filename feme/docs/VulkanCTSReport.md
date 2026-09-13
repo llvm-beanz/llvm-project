@@ -41088,3 +41088,30 @@ synthetic repro can miss access patterns (here, storing into *all* of a
 nested struct's own members, not just one) that the real shader
 exercises. Real-CTS re-verification after every fix remains essential,
 exactly as this project's own standing process already requires.
+
+## H101q: closed with no new code change -- already fixed by H101t
+
+**Re-triage:** before doing any new investigation (per this row's own
+filing note, which explicitly called for re-triaging against the
+current binary first), re-ran all 8 originally-named cases
+(`nested_structs_instance_arrays.{2,15,31}` and `basic_instance_arrays.32`,
+both `random_geometry`/`random_vertex` variants) against the binary as
+rebuilt after H101t. All 8 now **Pass** outright -- no `JIT session
+error`, no `feme-graphics-validate-stage` diagnostic.
+
+**Root cause (retroactive):** H101t's own `resolveOffsetWithinElement`
+fix (type-based leading-pad detection, leaf-count-aware recursive offset
+resolution for a genuine multi-member nested struct) already covers the
+same "some shape is left un-rewritten" mechanism this row's own
+unresolved-global-variable symptom was one manifestation of --
+`nested_structs_instance_arrays`' own fuzzer name strongly overlaps with
+`all_unordered_and_instance_array.2`'s own nested-struct shape H101t
+fixed directly.
+
+**Verification:** a full isolated-process (one `deqp-vk` invocation per
+case) sweep of both entire families (`nested_structs_instance_arrays.*`
+and `basic_instance_arrays.*`, 200 cases, both stages) shows 190
+Passed/10 NotSupported/0 Failed/0 crashes -- confirming no other bucket
+is hiding in either family, not just the 8 originally-named cases. No
+code, test, or design-doc change was needed this session for this row;
+closed by re-verification alone.
