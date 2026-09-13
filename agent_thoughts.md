@@ -80732,3 +80732,132 @@ this time doesn't mean fixed; crash this time doesn't mean new.
   need H101i's own "tight vector" retry extended one more level.
 4. **H101m, unresolved-access + out-of-range-row groups** (4 cases):
   smallest, triage last.
+
+# H101n session: fixed the order-sensitive heap-corruption crash (two root causes), found H101o along the way
+
+**Next action if you're picking this up:** read the "H101o" entry
+below first -- it's the freshest open thread, and it's a heisenbug
+family similar to what H101n started as, so the technique that broke
+this one open (valgrind memcheck on a standalone repro, not the full
+CTS sweep) is the fastest way in.
+
+## What shipped this session
+
+1. Fixed `OffsetStructLeadingPadAccessChainPattern`
+   (`SPIRVToLLVMPatterns.cpp`) to recognize an *array* of leading-pad
+   struct instances (GLSL's "array of block instances" syntax), not
+   just a single struct directly behind an access chain's base
+   pointer. Previously every `blockC[k].b`-shaped store silently
+   landed in the struct's pad instead of the real member.
+2. Fixed a second, previously-latent bug the same pattern had always
+   had: its `llvm.mlir.constant` used the wrong (pre-conversion)
+   index type for its own attribute. Never manifested before because
+   every prior test case happened to use plain-`i32` indices.
+3. Fixed `CanonicalizeStage.cpp`'s `resolveStageIOAccess` to remap a
+   real (still-padded) byte offset into its pad-stripped equivalent
+   before resolving it against the pad-free effective type --
+   without this, offset math for instance `k > 0` computed wildly
+   out-of-range `Row` values and corrupted host memory past the
+   element's own allocated buffer. This was the actual crash.
+4. New lit test + new unit test covering both fixes.
+   `check-feme`: 2983/2986 (0 Failed). CTS `.44` now Passes, `.45`
+   fails cleanly instead of crashing.
+5. Docs updated: `Roadmap.md` (H101n struck through, H101o filed),
+   `VulkanCTSReport.md` (full closing section + H101o filing),
+   `FeMeVulkanDesign.md` (H6q section extended).
+6. 3 commits made (patterns fix + lit test, CanonicalizeStage fix +
+   unit test, docs). This is the 4th (agent_thoughts.md itself).
+
+## How the crash actually got found
+
+The `.44`+`.45` pair from last session's closing note reproduced the
+crash deterministically in well under a minute -- much faster than
+the 790-case sweep. That was the right lead to chase, exactly as last
+session's own suggested-next-steps said.
+
+`valgrind --tool=memcheck --track-origins=yes` was installed this
+session (`sudo apt-get install -y valgrind`) and pointed straight at
+a real out-of-bounds 4-byte write at the tail end of a
+`buildStageStorage`-allocated buffer -- during case `.44`'s own draw,
+*not* `.45`'s. Notably, valgrind's own allocator changed the heap
+layout enough that the crash itself never reproduced under it -- it
+would have looked like nothing was wrong if I'd only checked for the
+`SIGABRT`. The instrumented invalid-write report is what mattered,
+not the absence of a crash. Worth remembering for H101o below.
+
+From there: built a standalone SPIR-V assembly repro by hand,
+matching case `.44`'s own decompiled GLSL/SPIR-V shape exactly
+(`layout(xfb_offset=32) out BlockC { int b; } blockC[3];`), and ran it
+through `feme-translate --import-spirv` -> `feme-opt
+--feme-convert-spirv-to-llvm` -> `feme-translate --spirv-to-llvmir`
+to see the real LLVM IR at each stage, independent of the JIT. This
+directly falsified my first manual guess (I'd assumed a 4-byte
+per-instance stride; the real answer was 36 bytes, because of the
+struct's own leading pad) -- another reminder that reasoning about
+type conversion from source alone is unreliable once padding/array
+wrapping compounds, and a standalone repro is worth building early
+rather than as a last resort.
+
+## Why this took two separate fixes, not one
+
+The access-chain fix (making the store hit the right byte) and the
+offset-remap fix (making `CanonicalizeStage.cpp` interpret that byte
+correctly) are independent bugs that happened to compound on the
+exact same shape. Fixing only the access chain would have made the
+store land at the *correct* real offset, but `CanonicalizeStage.cpp`
+would still have misinterpreted that offset against the wrong
+(pad-stripped) type scale -- so the crash would have persisted, just
+from a different-looking symptom. Worth flagging in case a future
+session sees "the write moved to the right byte, but it still
+crashes" and assumes the first fix was wrong; it wasn't, there was
+just a second bug underneath it.
+
+## H101o: a new heap-corruption family, found as a side effect
+
+Fixing the `si32`-vs-`i32` attribute-type bug (item 2 above) let
+several cases that used to fail at legalization (part of H101m's own
+28-case bucket) progress much further than before -- straight into a
+*different* heap-corruption family: `all_instance_array.12`/`.61`,
+`basic_instance_arrays.15`/`.30`. Confirmed via `git stash`
+bisection that these cases previously failed earlier and more
+cleanly (the legalization error itself masked the corruption); this
+is pre-existing, not a regression from this session's own fix.
+
+The trigger shape is different from this session's own bug: a *lone*
+(not array-of-instances) leading-pad struct whose one real member is
+a `mat3x3`. No outer array index at all, so it's very unlikely to be
+the exact same root cause -- probably a related but distinct
+"structured member decomposition inside a leading-pad struct" gap.
+
+Filed as H101o rather than chased this session, since:
+- it's a genuinely different trigger shape (needs its own
+  standalone repro, not a reuse of this session's one),
+- this session's own fix was already complete and verified without
+  it, and
+- stopping here keeps the commits small and each one bisectable, per
+  the standing instructions.
+
+## Suggested next steps, ranked
+
+1. **H101o** (~1-3 hours): fastest path in is likely the same
+   valgrind-memcheck-on-a-standalone-repro technique that worked this
+   session -- build a small SPIR-V repro of `all_instance_array.12`'s
+   own shape (single leading-pad struct, `mat3x3` member, single
+   `OpAccessChain` + whole-matrix `OpStore`) and run it under
+   `valgrind --tool=memcheck --track-origins=yes` rather than relying
+   on the CTS's own order-sensitive crash to reproduce. Likely
+   territory: `resolveRowComponent`'s or `getEffectiveStageIOValueType`'s
+   own handling of a matrix member sitting directly behind a
+   leading-pad struct (as opposed to a scalar/vector member, which
+   this session's own fix covers).
+2. **H101m's remaining buckets** (~14 legalization cases, 4
+   unresolved-access/out-of-range-row cases): unchanged from last
+   session's own notes, still open. Worth re-checking case counts
+   first since this session's fixes may have shifted some between
+   buckets (a few `si32`/`i32` cases moved into either pass/fail or
+   the new H101o corruption bucket).
+3. **General**: the 786/790 `*instance_array*` sweep this session
+   (116 Passed / 56 Failed / 614 NotSupported) isn't directly
+   comparable to last session's 788-case count -- worth a fresh full
+   sweep once H101o is fixed to get a clean baseline for future
+   sessions to diff against.
