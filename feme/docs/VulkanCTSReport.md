@@ -41115,3 +41115,51 @@ Passed/10 NotSupported/0 Failed/0 crashes -- confirming no other bucket
 is hiding in either family, not just the 8 originally-named cases. No
 code, test, or design-doc change was needed this session for this row;
 closed by re-verification alone.
+
+## H101r and H101o: closed with no new code change -- both already fixed by H101t
+
+Following H101q's own pattern this session, both **H101r** (the 6-case
+row/component-out-of-range family) and **H101o** (the newly-reachable
+heap corruption for a lone leading-pad struct with a matrix member) were
+re-triaged against the current (post-H101t) binary before any new
+investigation, and both are already fixed:
+
+- **H101r**: all 6 originally-named cases (both stages of
+  `all_instance_array.4`, `all_unordered_and_instance_array.27`,
+  `basic_instance_arrays.39`) now Pass outright.
+- **H101o**: all 4 originally-named cases (both stages of
+  `all_instance_array.{12,61}`, `basic_instance_arrays.{15,30}`) now
+  Pass outright, with **no heap corruption** even when run back-to-back
+  in a single `deqp-vk` process (the exact condition this bug needed to
+  manifest).
+
+**Root cause (retroactive, both rows):** the same H101t
+`resolveOffsetWithinElement` fix that closed H101q -- type-based leading-
+pad detection (instead of a count comparison that silently broke once a
+nested-struct member could contribute more than one `ElementID`) and
+leaf-count-aware, recursive offset resolution -- also fixes the address/
+row/component miscomputation behind both of these rows' own symptoms.
+All three rows (H101q, H101r, H101o) turned out to be different
+manifestations of the identical underlying bug H101t fixed directly.
+
+**Verification, this session:** a full isolated-process (one `deqp-vk`
+invocation per case) sweep of the *entire* `dEQP-VK.transform_feedback.
+fuzz.*instance_array*` family (790 cases, both stages) shows 696
+Passed/94 NotSupported/**0 Failed**/0 crashes. To specifically rule out
+any heap-corruption side effect that isolation might mask, the identical
+790-case list was also run as a single non-isolated batch (`deqp-vk
+--deqp-caselist-file=...`, matching how CTS is normally invoked, so
+every case's own heap state is exposed to whatever the previous case
+left behind) -- an identical 696/94/0/0 result, confirming the
+corruption is genuinely gone rather than merely hidden by per-case
+isolation. `check-feme`: 2990/2993, 3 pre-existing `Unsupported`, 0
+`Failed`, 0 regressions (rebuilt fresh this session; no source change).
+
+**Status of the `*instance_array*` fuzz family as a whole:** as of this
+session, every case in this 790-case family either Passes or is
+NotSupported (a legitimate device-limit gate, e.g.
+`maxVertexOutputComponents`/`maxGeometryOutputComponents` too low for a
+`various_buffers` case's own component count) -- zero Failed, zero
+crashes, in both isolated and non-isolated runs. This closes out this
+milestone's entire multi-session `*instance_array*` investigation
+(H101a through H101t) with a fully clean sweep.
