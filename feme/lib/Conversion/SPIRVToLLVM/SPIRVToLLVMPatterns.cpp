@@ -3467,6 +3467,86 @@ mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
       VectorTy.getContext(), kTightVectorMarkerName, {ArrayTy});
 }
 
+/// If \p ElementTy is a SPIR-V struct (any member count -- e.g.
+/// `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>`, or a two-member
+/// `!spirv.struct<(!spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision],
+/// vector<4xsi32>)>`, both shapes `dEQP-VK.transform_feedback.fuzz.
+/// all_unordered_and_instance_array`'s own fuzzer emits as one member of
+/// an outer, explicitly byte-offset-laid-out block), returns a "tight"
+/// (alignment-free) re-conversion of it, substituting every vector,
+/// array-of-vector, and matrix member (recursing into any member that is
+/// itself another nested struct) with the same tight form
+/// `getTightVectorArrayType`'s own top-level retry already substitutes a
+/// *bare* vector member with; otherwise returns null.
+///
+/// (Roadmap H101s) A struct like this converts to a perfectly good,
+/// self-consistent LLVM struct all on its own (via this same file's
+/// `spirv::StructType` conversion, invoked recursively by
+/// `TypeConverter::convertType` for a nested identified struct) --
+/// trivially so if it declares no per-member `Offset` at all (real SPIR-V
+/// only requires one when the struct itself needs a layout, which a
+/// struct nested *inside* another `Block`-decorated struct's own member
+/// does not), in which case `layOutStructIfOffsetsMatch`'s own
+/// `!Type.hasOffset()` early-out just accepts its natural, real-
+/// vector/matrix layout unconditionally, with no chance to ever retry.
+/// The mismatch only surfaces one level up: this nested struct's own
+/// natural *size* and *alignment* are still driven by its real vector/
+/// matrix members' ABI-rounded size/alignment (e.g. a 3-lane vector
+/// rounds up to a 4-lane, 16-byte-aligned footprint), which the *outer*
+/// struct's declared, tightly packed offset for this member (or the gap
+/// to its following sibling) need not have reserved room for -- exactly
+/// the same tight-vector problem `getTightVectorArrayType`'s own retry
+/// already solves for a bare vector member, just one (or more) levels of
+/// struct-wrapping away from where that retry looks by default.
+///
+/// Preserves \p ElementTy's own member count and order as a new literal
+/// struct (rather than collapsing a single-member case into its own
+/// substituted member directly): an access chain's existing "select
+/// member I [of the outer struct], then select member J [of this nested
+/// struct]" index pair must keep resolving to the same field it always
+/// did, for every J, not just J == 0.
+mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
+                                    const mlir::TypeConverter &Converter) {
+  llvm::SmallVector<mlir::Type, 4> TightMembers;
+  for (unsigned I = 0, E = NestedStruct.getNumElements(); I != E; ++I) {
+    mlir::Type ElementTy = NestedStruct.getElementType(I);
+    mlir::Type MemberTy;
+    if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(ElementTy)) {
+      MemberTy = getTightVectorArrayType(VectorTy, Converter);
+    } else if (auto MatrixTy =
+                   mlir::dyn_cast<mlir::spirv::MatrixType>(ElementTy)) {
+      auto ColumnTy = mlir::cast<mlir::VectorType>(MatrixTy.getColumnType());
+      mlir::Type TightColumn = getTightVectorArrayType(ColumnTy, Converter);
+      if (TightColumn)
+        MemberTy = mlir::LLVM::LLVMArrayType::get(TightColumn,
+                                                  MatrixTy.getNumColumns());
+    } else if (auto ArrayTy =
+                   mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
+      if (auto InnerVectorTy =
+              mlir::dyn_cast<mlir::VectorType>(ArrayTy.getElementType())) {
+        mlir::Type TightElement =
+            getTightVectorArrayType(InnerVectorTy, Converter);
+        if (TightElement)
+          MemberTy = mlir::LLVM::LLVMArrayType::get(
+              TightElement, ArrayTy.getNumElements());
+      } else {
+        MemberTy = Converter.convertType(ElementTy);
+      }
+    } else if (auto InnerStructTy =
+                   mlir::dyn_cast<mlir::spirv::StructType>(ElementTy)) {
+      MemberTy = getTightNestedStructType(InnerStructTy, Converter);
+    } else {
+      MemberTy = Converter.convertType(ElementTy);
+    }
+    if (!MemberTy)
+      return nullptr;
+    TightMembers.push_back(MemberTy);
+  }
+  return mlir::LLVM::LLVMStructType::getLiteral(NestedStruct.getContext(),
+                                                TightMembers,
+                                                /*isPacked=*/false);
+}
+
 /// Pads an already-converted \p Type (an array element, or a struct
 /// member) up to \p TargetSize, by appending a trailing byte-array member
 /// to its own body if it is itself an (already-bodied) `LLVM::LLVMStructType`
@@ -3841,6 +3921,17 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
       HasVectorMember |=
           mlir::isa<mlir::VectorType>(ArrayTy.getElementType());
     HasVectorMember |= mlir::isa<mlir::spirv::MatrixType>(ElementTy);
+    // (Roadmap H101s) A nested struct member (any member count) whose
+    // own body includes a vector/matrix/array-of-vector hits the same
+    // tight-vector problem as a bare vector member, just one (or more)
+    // levels of struct-wrapping away -- make sure this struct's own
+    // retry loop below actually runs for a member shaped this way, even
+    // if no *other* member in this outer struct is a bare vector/
+    // array-of-vectors/matrix. Conservatively treats *any* nested struct
+    // member as a reason to retry (rather than recursing just to check),
+    // since the retry itself is a no-op if nothing inside actually needed
+    // tightening.
+    HasVectorMember |= mlir::isa<mlir::spirv::StructType>(ElementTy);
   }
   if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Members))
     return Result;
@@ -3889,12 +3980,15 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     return nullptr;
 
   // (Roadmap H101i) Two-tier retry: first substitute *only* bare vector
-  // members with their tight, alignment-free form -- this is exactly the
-  // retry this codebase already had before this roadmap item, proven not
-  // to regress any previously-working struct -- and only additionally
-  // substitute a member that is itself an *array of vectors* or a
-  // `spirv.matrix` (this roadmap item's own new capability) if that
-  // narrower retry still doesn't reproduce every declared offset.
+  // members (this tier now also covers any nested struct member whose
+  // own body needs tightening, roadmap H101s -- see
+  // getTightNestedStructType's own comment) with their tight,
+  // alignment-free form -- this is exactly the retry this codebase
+  // already had before this roadmap item, proven not to regress any
+  // previously-working struct -- and only additionally substitute a
+  // member that is itself an *array of vectors* or a `spirv.matrix`
+  // (this roadmap item's own new capability) if that narrower retry
+  // still doesn't reproduce every declared offset.
   //
   // Substituting a matrix/array-of-vectors member unconditionally
   // whenever *any* member in the struct needs a retry -- even one that
@@ -3915,6 +4009,17 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     if (auto VectorTy =
             mlir::dyn_cast<mlir::VectorType>(Type.getElementType(I))) {
       mlir::Type TightTy = getTightVectorArrayType(VectorTy, Converter);
+      if (!TightTy)
+        return nullptr;
+      VectorOnly[I] = TightTy;
+    } else if (auto NestedStructTy = mlir::dyn_cast<mlir::spirv::StructType>(
+                   Type.getElementType(I))) {
+      // (Roadmap H101s) Rebuild this nested struct member's own body
+      // with every vector/matrix/array-of-vector inside it tightened,
+      // preserving its own member count/order (see
+      // getTightNestedStructType's own comment for why an
+      // `spirv.AccessChain` into it still resolves correctly).
+      mlir::Type TightTy = getTightNestedStructType(NestedStructTy, Converter);
       if (!TightTy)
         return nullptr;
       VectorOnly[I] = TightTy;

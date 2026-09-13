@@ -292,6 +292,70 @@ TEST(SPIRVToLLVMTest, OutOfOrderOffsetInterfaceBlockLegalizes) {
       << Result;
 }
 
+// (Roadmap H101s) A multi-member interface block whose members include a
+// *nested*, single-member struct wrapping a plain vector (e.g.
+// `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>` used as one member
+// of an outer block -- `all_unordered_and_instance_array`'s own fuzz-test
+// family emits exactly this shape) used to fail `spirv.GlobalVariable`
+// legalization outright, distinct from H101p's reordering-only bug: the
+// nested struct converts fine on its own (its one member's offset is
+// always 0 relative to its own start, trivially matching LLVM's natural,
+// real-vector layout), but its own natural *size*/*alignment* is still
+// driven by that one vector's ABI-rounded footprint (e.g. a 3-lane vector
+// rounds up to 16 bytes), which the *outer* struct's declared, tightly
+// packed offset for this member (or the gap to its next sibling) does not
+// reserve room for. getTightNestedStructType now lets the existing
+// tight-vector retry recognize and substitute this shape too, rebuilding
+// the nested struct's own body with its vector member tightened while
+// keeping its own member count (here, one) unchanged, so an access
+// chain's existing "member I, then member 0" index pair still resolves
+// correctly.
+TEST(SPIRVToLLVMTest, NestedSingleMemberVectorStructInterfaceBlockLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : "
+      "!spirv.ptr<!spirv.struct<(f32 [20], vector<2xsi32> [0], "
+      "!spirv.struct<(vector<3xf32> [0])> [8]), Block>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  // The nested struct's own tight-substituted marker takes the place of
+  // the plain `struct<(vector<3xf32>)>` its own recursive conversion
+  // would otherwise have produced.
+  EXPECT_NE(Result.find("struct<\"feme.tight_vector"), std::string::npos)
+      << Result;
+  EXPECT_EQ(Result.find("struct<(vector<3xf32>)>"), std::string::npos)
+      << Result;
+}
+
+// (Roadmap H101s) A nested struct member need not be single-member: a
+// real `all_unordered_and_instance_array` case's own nested struct has
+// *two* members (a `mat3x3` and a `vector<4xsi32>`) and, unlike the
+// single-member case above, declares no per-member `Offset` decoration of
+// its own at all (a nested, non-`Block` struct never needs one) -- so its
+// own `layOutStructIfOffsetsMatch` call takes the `!Type.hasOffset()`
+// early-out and accepts its natural, untightened layout unconditionally,
+// with no chance to retry on its own terms; the mismatch, exactly as in
+// the single-member case, only surfaces once the *outer* struct tries to
+// place this whole nested struct at a tightly packed offset its natural
+// (ABI-rounded) alignment cannot reach. getTightNestedStructType rebuilds
+// every member of a nested struct like this (not just a lone one),
+// preserving member count/order so each of its own members remains
+// addressable by the same index it always was.
+TEST(SPIRVToLLVMTest, NestedMultiMemberStructInterfaceBlockLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : !spirv.ptr<!spirv.struct<("
+      "!spirv.struct<(!spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision], "
+      "vector<4xsi32>)> [36], vector<3xf32> [24, RelaxedPrecision]), "
+      "Block>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  // Both of the nested struct's own members (the matrix, then the
+  // trailing vector) must survive the substitution, each tightened.
+  EXPECT_NE(Result.find("struct<\"feme.tight_vector"), std::string::npos)
+      << Result;
+  EXPECT_EQ(Result.find("vector<3xf32>>, vector<4xi32>)>"), std::string::npos)
+      << Result;
+}
+
 /// Builds a one-`llvm.mlir.global` `mlir::ModuleOp` carrying
 /// getStageIODecorationsAttrName() with \p Decorations (each inner
 /// `ArrayRef<int32_t>` one `(decoration, arg...)` tuple), the shape
