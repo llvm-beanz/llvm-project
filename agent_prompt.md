@@ -45,36 +45,27 @@ agent thoughts.
 
 # Request
 
-Can you work on H101t or other blocking work to make progress on the H-series
+Can you work on H101q or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.all_unordered_and_instance_array.2`'s
-> `PromoteMemToReg`/`isAllocaPromotable` assertion crash inside
-> `CanonicalizeStagePass`** (newly exposed by H101s's own closing fix, which let
-> this case's `spirv.GlobalVariable` legalize for the first time -- confirmed
-> via a `gdb` backtrace that the crash is not a JIT-compiled-code fault but a
-> compile-time assertion in `CanonicalizeStage.cpp`'s own final
-> `PromoteMemToReg(Allocas, DT)` call, reached from `canonicalizeSPIRVStage` for
-> both `random_vertex` and `random_geometry` variants): `deqp-vk:
-> .../PromoteMemoryToRegister.cpp:816: ... Assertion \`isAllocaPromotable(AI) &&
-> "Cannot promote non-promotable alloca!"\` failed`, meaning one of
-> `ShadowValues`' own synthesized read-modify-write allocas ends this pass's
-> rewrite with a use `isAllocaPromotable` does not accept (not a plain
-> load/store) -- almost certainly because some access into this case's own
-> newly-legalized, genuinely multi-member nested-struct block member (H101s's
-> own `.2` repro shape: a nested struct with a `mat3x3` and a `vector<4xsi32>`,
-> not just one member) never gets rewritten into a `feme.stage.*` call at all,
-> since `CanonicalizeStage.cpp`'s row/component-shape derivation and per-member
-> decoration lookup (`TakeBlockPath`, `getStageIORowShape`,
-> `peelSingleMemberStruct`) only know how to peel through a *single*-member
-> nested struct, not treat each of a *multi*-member nested struct's own real
-> members as its own independently-addressable, independently-decorated stage-IO
-> element the way the outer block's own top-level members already are. Not yet
-> triaged -- needs a standalone `feme-opt --feme-canonicalize-stage` repro
-> (mirroring this milestone's own repeated technique) of `.2`'s exact shape to
-> find which specific access survives unconverted and confirm whether the fix
-> belongs in `TakeBlockPath`'s own per-member loop (extended to recurse into a
-> multi-member nested struct member, assigning each of its own real members a
-> `Location`/`ElementID` the same way an ordinary top-level member gets one) or
-> in a new, more targeted "nested struct member is itself a stage-IO-decorated
-> block" helper
+> **`transform_feedback.fuzz.{nested_structs_instance_arrays.{2,15,31},basic_instance_arrays.32}`'s
+> 8-case unresolved stage-IO global-variable reference** (newly characterized
+> during H101m's own closing re-triage): each of these 4 named cases fails
+> identically in both its `random_geometry` and `random_vertex` variant, but
+> with a *different* diagnostic depending on which stage hits it first -- the
+> `random_geometry` variant reaches JIT link time and fails with `JIT session
+> error: Symbols not found: [ spirv_var_N ]` (an unresolved global reference
+> baked all the way through to the final compiled module), while the
+> `random_vertex` variant is instead caught earlier by
+> `feme-graphics-validate-stage`'s own explicit diagnostic (`function 'main' has
+> an unresolved stage-IO global-variable access to 'spirv_var_N', a shape
+> CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*' call`)
+> -- almost certainly the same underlying "some shape `CanonicalizeStage.cpp`'s
+> `addElements`/`TakeBlockPath` doesn't yet recognize is left un-rewritten" root
+> cause as every previous JIT-symbols-not-found bucket this milestone has hit
+> (H101k's own filing, H101m's own closing note), just not yet re-triaged
+> against the current binary to confirm which specific shape trips it this time.
+> Not yet triaged -- needs each of the 4 named cases' own decompiled SPIR-V
+> pulled and diffed against every shape `TakeBlockPath`/the plain (non-block)
+> path already handles, to identify the one attribute (nesting depth,
+> array-of-struct-of-struct, or similar) still missing
