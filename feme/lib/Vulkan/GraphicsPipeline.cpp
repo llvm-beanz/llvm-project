@@ -620,12 +620,30 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// runs after tessellation, and its own emitted vertices -- not the domain
 /// stage's per-domain-point ones -- are what `Executor::executeDraws`
 /// (roadmap H5d) actually clips/interpolates/rasterizes.
+/// \p RasterizerDiscardEnable (roadmap H101b) is the pipeline's own
+/// `rasterizerDiscardEnable` (`translateRasterState`'s `RasterState::
+/// DiscardEnable`): when `true`, nothing this pipeline draws ever reaches
+/// the rasterizer, clipper, or viewport transform at all -- there is no
+/// real position for any stage to compute -- so the `SV_Position`
+/// requirement below is skipped entirely, the same way \p FragmentStage
+/// being `nullptr` already skips every fragment-side check further down.
+/// A pure transform-feedback-capture pipeline (e.g.
+/// `dEQP-VK.transform_feedback.fuzz.random_geometry.*`'s own geometry-only
+/// shape: a geometry entry that only writes a captured varying block, no
+/// `gl_Position`, paired with no fragment shader at all) sets exactly this
+/// combination, confirmed via a real `deqp-vk` run with
+/// `FEME_VULKAN_LOG_CREATION_ERRORS=1` against
+/// `all_instance_array.75` (the CTS's own `makeGraphicsPipeline` helper
+/// sets `rasterizerDiscardEnable = (fragmentShaderModule == VK_NULL_
+/// HANDLE)`, so this pipeline's own creation info already asked for
+/// exactly this).
 Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                               const feme::cpu::CompiledStage *FragmentStage,
                               const feme::cpu::CompiledStage *DomainStage,
                               const feme::cpu::CompiledStage *GeometryStage,
                               llvm::ArrayRef<AttachmentFormat> ColorAttachments,
-                              llvm::ArrayRef<VertexInputAttribute> Attributes) {
+                              llvm::ArrayRef<VertexInputAttribute> Attributes,
+                              bool RasterizerDiscardEnable) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
     return VSSig.takeError();
@@ -668,7 +686,8 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
   // varying) but genuinely forgets `gl_Position`, which is still rejected
   // below.
   bool GeometryNeverWrites = GeometryStage && PositionSig.Elements.empty();
-  if (!GeometryNeverWrites && (!Position || Position->ComponentCount != 4))
+  if (!RasterizerDiscardEnable && !GeometryNeverWrites &&
+      (!Position || Position->ComponentCount != 4))
     return createStringError(
         inconvertibleErrorCode(),
         "%s stage does not write a 4-component "
@@ -2026,7 +2045,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     llvm::ArrayRef<AttachmentFormat> ColorAttachments,
     llvm::ArrayRef<VertexInputAttribute> VertexAttributes,
     feme::graphics::TessellationState &Tessellation,
-    feme::graphics::GeometryState &Geometry, feme::graphics::MeshState &Mesh) {
+    feme::graphics::GeometryState &Geometry, feme::graphics::MeshState &Mesh,
+    bool RasterizerDiscardEnable) {
   auto Ctx = std::make_unique<feme::Context>();
   Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
 
@@ -2350,7 +2370,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     if (Error E = validateStageInterfaces(
             *VertexStage, FragmentStage.get(), DomainStage.get(),
             GeometryStageCompiled.get(), ColorAttachments,
-            VertexAttributes))
+            VertexAttributes, RasterizerDiscardEnable))
       return std::move(E);
   }
 
@@ -2526,7 +2546,7 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
             DeviceInfo.Properties.limits,
             llvm::ArrayRef(Result.Attachments),
             Result.VertexAttributes, Result.Tessellation, Result.Geometry,
-            Result.Mesh);
+            Result.Mesh, Result.Raster.DiscardEnable);
     if (!Compiled)
       return Compiled.takeError();
     Artifact = std::move(*Compiled);
