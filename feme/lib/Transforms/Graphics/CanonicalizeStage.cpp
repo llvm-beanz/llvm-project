@@ -2461,6 +2461,53 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
                        AsConstant(Component), Vertex, IsOutput};
 }
 
+/// (Roadmap H101k) Reproduces `addElements`' own "array of block
+/// instances (or a lone block instance) with exactly one real, non-
+/// `BuiltIn`-decorated member" recognition -- see the much longer comment
+/// on `addElements`' own `XfbBufferArrayStride` computation for the full
+/// story -- purely from \p GV's LLVM type and `feme.spirv.
+/// MemberDecorations` metadata, to substitute away any leading `[N x i8]`
+/// pad `layOutStructIfOffsetsMatch` (SPIRVToLLVMPatterns.cpp) may have
+/// synthesized ahead of that one real member, whenever its own declared
+/// `Offset` needed a "tight vector" ABI substitution and wasn't already 0.
+/// Both `addElements`' own `addElement` call (building this element's
+/// `SignatureElement`) and `resolveStageIOAccess`'s own byte-offset
+/// resolution (rewriting every actual load/store into it) must agree on
+/// the exact same pad-free shape, or the two independently and
+/// differently miscount this element's rows -- see
+/// `resolveOffsetWithinElement`'s own recursion, which has no way to
+/// peel a *2*-member struct the way `peelSingleMemberStruct` peels a
+/// genuine 1-member one, and so previously stopped cold on the padded
+/// shape, leaving the store's pointer operand unrewritten and the whole
+/// global still referenced -- and thus still `external`, still
+/// unresolved -- at JIT-link time (the `Symbols not found: [
+/// spirv_var_N ]` crash `dEQP-VK.transform_feedback.fuzz.random_geometry.
+/// all_instance_array.11` exposed). Returns \p GV's own, unmodified value
+/// type for every other global, including a genuinely multi-member block
+/// (`TakeBlockPath`'s own concern, entirely unaffected by this).
+Type *getEffectiveStageIOValueType(GlobalVariable *GV) {
+  Type *ValueTy = GV->getValueType();
+  const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations");
+  if (!MemberMD)
+    return ValueTy;
+  auto *ArrTy = dyn_cast<ArrayType>(ValueTy);
+  auto *PeekedST =
+      dyn_cast<StructType>(ArrTy ? ArrTy->getElementType() : ValueTy);
+  if (!PeekedST)
+    return ValueTy;
+  DenseMap<unsigned, ParsedSPIRVDecorations> MemberDecorations =
+      parseSPIRVMemberDecorations(MemberMD);
+  if (MemberDecorations.size() != 1 ||
+      MemberDecorations.lookup(0).BuiltIn.has_value())
+    return ValueTy;
+  Type *RealMemberTy = PeekedST->getElementType(PeekedST->getNumElements() - 1);
+  if (RealMemberTy == PeekedST)
+    return ValueTy; // No leading pad -- already the real member's type.
+  return ArrTy ? static_cast<Type *>(
+                     ArrayType::get(RealMemberTy, ArrTy->getNumElements()))
+               : RealMemberTy;
+}
+
 /// Resolves \p Ptr -- a load/store's pointer operand -- against \p
 /// ElementIDs (one entry per stage-IO global, one `ElementID` per struct
 /// member for a builtin interface block, a single one for everything
@@ -2588,8 +2635,17 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     }
   }
 
-  return resolveOffsetWithinElement(GV->getValueType(), It->second, ByteOffset,
-                                    ValueTy, DL, OutputGlobals.contains(GV),
+  // (Roadmap H101k) `getEffectiveStageIOValueType` -- rather than `GV->
+  // getValueType()` directly -- strips away any leading `[N x i8]` pad an
+  // array-of-block-instances (or lone-instance) single-real-member
+  // global's own LLVM type may have gained from a nonzero-offset "tight
+  // vector" member substitution, so this agrees with `addElements`' own
+  // identical substitution when it built this global's `SignatureElement`
+  // in the first place -- see that helper's own comment for why the two
+  // must match.
+  return resolveOffsetWithinElement(getEffectiveStageIOValueType(GV),
+                                    It->second, ByteOffset, ValueTy, DL,
+                                    OutputGlobals.contains(GV),
                                     /*Vertex=*/nullptr);
 }
 
@@ -2847,9 +2903,43 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // from a member's own `BuiltIn`, never the plain path -- so the
         // single-member exclusion above only applies when there's no
         // `BuiltIn` to preserve.
+        //
+        // (Roadmap H101k) `PeekedST->getNumElements()` counts the
+        // *LLVM*-level struct's own fields, which is not always the same
+        // as the real, SPIR-V-declared member count: a single real
+        // member whose own `Offset` isn't a multiple of its natural ABI
+        // alignment (e.g. a `mat3x4` member declared at `xfb_offset =
+        // 44`, requiring the H101i/H101j "tight vector" column
+        // substitution) gets an LLVM-level leading `[N x i8]` padding
+        // field synthesized ahead of it by
+        // `convertOffsetStructTypeIgnoringDecorations` purely to
+        // reproduce that offset in a real, naturally-laid-out LLVM
+        // struct -- a compiler artifact, not a second declared GLSL
+        // member. Counting *that* padded field count here wrongly took
+        // this branch for a genuinely single-member, array-of-block-
+        // instances-shaped block (e.g. `layout(...) out BlockC { mat3x4
+        // d; } blockC[2];`), whose real member count is 1: the per-
+        // member loop below then walked LLVM field index 0 (the padding)
+        // and 1 (the real member) against `MemberDecorations`, itself
+        // keyed by the *real* SPIR-V member index (always 0 for a
+        // single-member struct) -- so the padding field spuriously
+        // picked up the real member's own decorations at index 0 while
+        // the real member's own lookup at index 1 found nothing, and
+        // neither dead-ends into a store rewrite `resolveStageIOAccess`
+        // can recognize, leaving every store to the global unrewritten
+        // and the global itself live (and undefined) at JIT-link time --
+        // the `Symbols not found: [ spirv_var_N ]` crash `dEQP-VK.
+        // transform_feedback.fuzz.random_geometry.all_instance_array.11`
+        // exposed. `PeekedMemberDecorations`'s own entry count is the
+        // right proxy instead: it's keyed by real SPIR-V member index,
+        // and (per H101b's own `buildMemberDecorationsAttr` fix) every
+        // real member of an explicitly-offset (`Block`-decorated) struct
+        // gets at least its own `Offset` entry, so its size always
+        // matches the true declared member count regardless of any
+        // LLVM-level padding fields the real members' own types needed.
         bool TakeBlockPath =
             MemberMD && PeekedST &&
-            (PeekedST->getNumElements() > 1 ||
+            (PeekedMemberDecorations.size() > 1 ||
              PeekedMemberDecorations.lookup(0).BuiltIn.has_value());
         if (TakeBlockPath) {
           StructType *ST = PeekedST;
@@ -2981,13 +3071,52 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // all_unordered_and_instance_array.28` and `dEQP-VK.
         // transform_feedback.fuzz.instance_array_basic_type.mat4.*` cases
         // that exposed this.
+        // (Roadmap H101k) `PeekedMemberDecorations.size() == 1` (rather
+        // than `PeekedST->getNumElements() == 1`) is the correct "one
+        // real declared member" test here for the same reason it is for
+        // `TakeBlockPath` above: `PeekedST`'s own LLVM field count grows
+        // to 2 (a leading `[N x i8]` pad plus the real member) whenever
+        // that one real member's own `Offset` needed a "tight vector"
+        // ABI substitution and isn't naturally aligned to 0 -- e.g.
+        // `layout(..., xfb_offset = 44) out BlockC { mat3x4 d; }
+        // blockC[2];` -- without ever gaining a second genuine GLSL
+        // member. `PeekedST->getElementType(PeekedST->getNumElements() -
+        // 1)` (the *last* field, rather than always field 0) recovers
+        // that one real member's own type either way: with no leading
+        // pad, it is (and always was) the struct's only field; with one,
+        // `layOutStructIfOffsetsMatch`'s own comment (SPIRVToLLVMPatterns.
+        // cpp) guarantees it is prepended, never appended, so the real
+        // member is always the last (and, but for the pad, only) field.
         uint32_t XfbBufferArrayStride = 0;
-        if (PeekedST && PeekedST->getNumElements() == 1 && MemberMD &&
+        if (PeekedST && PeekedMemberDecorations.size() == 1 && MemberMD &&
             D.XfbBuffer && !RowCountIsVertexArray) {
           if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
-            if (ArrTy->getElementType() == PeekedST)
-              XfbBufferArrayStride =
-                  getStageIORowShape(PeekedST->getElementType(0)).RowCount;
+            if (ArrTy->getElementType() == PeekedST) {
+              Type *RealMemberTy =
+                  PeekedST->getElementType(PeekedST->getNumElements() - 1);
+              XfbBufferArrayStride = getStageIORowShape(RealMemberTy).RowCount;
+              // (Roadmap H101k) `getStageIORowShape`/`peelSingleMemberStruct`
+              // below (via the `addElement` call closing this block) only
+              // know how to peel through a genuine single-member
+              // `StructType`; `PeekedST` itself no longer looks like one
+              // once a leading `[N x i8]` pad field is present (2 elements
+              // total, not 1), so passing `ValueTy` -- the *whole*,
+              // still-padded `[NumInstances x PeekedST]` -- through
+              // unchanged left the real member's own row/component shape
+              // unrecognized (a bogus, unrepresentable "scalar" leaf,
+              // exactly the under-sizing `peelSingleMemberStruct`'s own
+              // comment already describes for a related shape), silently
+              // corrupting `StageStorage`'s allocation for this element.
+              // Rebuilding `ValueTy` here as a pad-free `[NumInstances x
+              // RealMemberTy]` -- bit-for-bit the same shape this branch
+              // already produced before any leading pad was possible --
+              // sidesteps that without teaching the lower-level, widely-
+              // shared `peelSingleMemberStruct` helper a new, narrowly-
+              // scoped padding convention it has no other reason to know
+              // about.
+              if (RealMemberTy != PeekedST)
+                ValueTy = ArrayType::get(RealMemberTy, ArrTy->getNumElements());
+            }
         }
         //
         // (Roadmap H29g) A hull entry's own plain per-control-point

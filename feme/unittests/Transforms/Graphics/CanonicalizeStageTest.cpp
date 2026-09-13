@@ -3751,4 +3751,125 @@ TEST(CanonicalizeStageTest,
   EXPECT_TRUE(SawStore);
 }
 
+/// (Roadmap H101k) A single-real-member array-of-block-instances global
+/// (`layout(..., xfb_offset = 44) out BlockC { mat3x4 d; } blockC[2];`,
+/// this test's own `@spirv_var_4`) whose one member's own declared offset
+/// (44) is non-zero gets an LLVM-level leading `[44 x i8]` pad field
+/// synthesized ahead of it (`layOutStructIfOffsetsMatch`,
+/// SPIRVToLLVMPatterns.cpp) purely to reproduce that offset -- growing
+/// its per-instance struct's own LLVM field count to 2 (pad + the real,
+/// tight-vector-substituted matrix member) despite still declaring only
+/// one real GLSL member. Before this fix, `addElements`' own
+/// `TakeBlockPath` decision (`PeekedST->getNumElements() > 1`) mistook
+/// that padded LLVM field count for "2 real SPIR-V members", taking the
+/// wrong (multi-member block) path and misaligning `MemberDecorations`
+/// (keyed by real SPIR-V member index) against the padded LLVM struct's
+/// own field indices -- and even once excluded from that path,
+/// `resolveOffsetWithinElement`'s own recursion had no way to peel a
+/// *2*-member struct the way `peelSingleMemberStruct` peels a genuine
+/// 1-member one -- so every store to `@spirv_var_4` was left entirely
+/// unrewritten, keeping the (never-defined) global itself live all the
+/// way to JIT-link time (the `Symbols not found: [ spirv_var_46 ]` crash
+/// `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_
+/// array.11` exposed). A sibling genuinely-multi-member block
+/// (`@spirv_var_3`, `BlockB { ivec3 a; vec4 b; uvec2 c[2]; }`, unaffected
+/// by this fix -- its own `PeekedMemberDecorations.size() == 3` already
+/// correctly took `TakeBlockPath` before and after) is exercised
+/// alongside it, confirming this fix does not regress the genuinely
+/// multi-member case it must still distinguish this one from.
+TEST(CanonicalizeStageTest,
+    RewritesArrayOfBlockInstancesWithLeadingPadBeforeTightMatrixMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector = type { [3 x i32] }
+    %feme.tight_vector.1 = type { [4 x float] }
+    %feme.tight_vector.2 = type { [2 x i32] }
+    %feme.tight_vector.3 = type { [4 x float] }
+
+    @spirv_var_3 = external addrspace(8) global { %feme.tight_vector, %feme.tight_vector.1, [2 x %feme.tight_vector.2] }, !spirv.Decorations !4, !feme.spirv.MemberDecorations !16
+    @spirv_var_4 = external addrspace(8) global [2 x { [44 x i8], [3 x %feme.tight_vector.3] }], !spirv.Decorations !6, !feme.spirv.MemberDecorations !20
+
+    declare void @feme.stage.stream.cut(i32)
+    declare void @feme.stage.stream.emit(i32)
+
+    define void @main() #0 {
+      store <3 x i32> <i32 -89, i32 30, i32 -70>, ptr addrspace(8) @spirv_var_3, align 4
+      store <4 x float> <float -6.000000e+01, float 7.200000e+01, float -1.020000e+02, float -1.000000e+02>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @spirv_var_3, i64 12), align 4
+      store <2 x i32> <i32 84, i32 31>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @spirv_var_3, i64 28), align 4
+      store <2 x i32> <i32 68, i32 104>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @spirv_var_3, i64 36), align 4
+      store [3 x <4 x float>] [<4 x float> <float 1.400000e+01, float 8.300000e+01, float -1.170000e+02, float 7.500000e+01>, <4 x float> <float 1.200000e+01, float -1.800000e+01, float -1.010000e+02, float 1.000000e+02>, <4 x float> <float -3.400000e+01, float -3.500000e+01, float -4.300000e+01, float 4.800000e+01>], ptr addrspace(8) @spirv_var_4, align 4
+      store [3 x <4 x float>] [<4 x float> <float 4.000000e+00, float -6.000000e+01, float 3.700000e+01, float 5.200000e+01>, <4 x float> <float 9.800000e+01, float -8.000000e+01, float -6.200000e+01, float -5.400000e+01>, <4 x float> <float -7.900000e+01, float 3.000000e+00, float -9.700000e+01, float -1.180000e+02>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @spirv_var_4, i64 92), align 4
+      call void @feme.stage.stream.emit(i32 0)
+      call void @feme.stage.stream.cut(i32 0)
+      ret void
+    }
+
+    attributes #0 = { "feme.geometry.input_primitive"="points" "feme.geometry.invocations"="1" "feme.geometry.max_output_vertices"="1" "feme.geometry.output_primitive"="points" "feme.shader.stage"="geometry" "hlsl.shader"="geometry" }
+
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 92}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 30, i32 4}
+    !6 = !{!5, !2, !3}
+    !7 = !{i32 35, i32 0}
+    !8 = !{!7}
+    !9 = !{i32 0, !8}
+    !10 = !{i32 35, i32 12}
+    !11 = !{!10}
+    !12 = !{i32 1, !11}
+    !13 = !{i32 35, i32 28}
+    !14 = !{!13}
+    !15 = !{i32 2, !14}
+    !16 = !{!9, !12, !15}
+    !17 = !{i32 35, i32 44}
+    !18 = !{!17}
+    !19 = !{i32 0, !18}
+    !20 = !{!19}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load/store survives against either global: every one of
+  // `@spirv_var_3`'s (the genuinely-multi-member block) and
+  // `@spirv_var_4`'s (this fix's own single-real-member, leading-pad
+  // block) own stores must be rewritten into a `feme.stage.output.store`
+  // call, or the global itself remains live and unresolved at JIT-link
+  // time.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  // `@spirv_var_4`'s matrix member gets its own distinct `ElementID`
+  // (never colliding with `@spirv_var_3`'s three), and every one of its
+  // two instances' three rows (columns 0-2 of each `mat3x4`) is captured
+  // -- confirming the leading pad neither swallowed a row nor duplicated
+  // one from the sibling block. Grouped per-`ElementID` (rather than
+  // assumed to be the first float store seen) since `@spirv_var_3`'s own
+  // `vec4` member is float-typed too -- only `@spirv_var_4`'s matrix
+  // member spans more than one row.
+  DenseMap<uint32_t, DenseSet<uint32_t>> RowsByElementID;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::OutputStore)
+      continue;
+    if (auto *FTy = CI->getArgOperand(3)->getType(); !FTy->isFloatTy())
+      continue;
+    uint32_t ElementID = getStageOpConstantOperand(*CI, /*Offset=*/0)
+                             .value_or(~0u);
+    uint32_t Row =
+        getStageOpConstantOperand(*CI, /*Offset=*/1).value_or(~0u);
+    RowsByElementID[ElementID].insert(Row);
+  }
+  // Two instances * 3 rows (matrix columns) each = 6 distinct rows for
+  // `@spirv_var_4`'s own `ElementID`; `@spirv_var_3`'s `vec4` member
+  // (also float-typed) only ever sees row 0.
+  uint32_t MaxRowCount = 0;
+  for (const auto &KV : RowsByElementID)
+    MaxRowCount = std::max(MaxRowCount, (uint32_t)KV.second.size());
+  EXPECT_EQ(MaxRowCount, 6u);
+}
+
 } // namespace
