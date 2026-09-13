@@ -80262,3 +80262,113 @@ A prior in-progress session had already:
    suggested `feme-translate --import-spirv` repro approach.
 4. Scratch files from this session (`/tmp/h101g/`, `/tmp/h101g2/`,
    `/tmp/h101c_cts/`) have been cleaned up.
+
+# H101h: fixed the "off-by-one row" bug -- an ABI-padded vs. tightly-packed array stride mismatch
+
+Fixed. All 20 target cases now pass. Full narrative below for anyone
+picking up H101i or a similar "wrong value, not a crash" bug next.
+
+## What was inherited (from context compaction, not this turn's own work)
+
+A prior in-progress session (same H101h request) had already:
+1. Reproduced `ivec3.geometry`'s failure and ruled out `Executor.cpp`'s
+   buffer routing, `StageStorage.cpp`'s layout math, and a standard
+   LLVM optimizer-pass miscompile (identical wrong output forced at
+   `CodeGenOptLevel::None`) as the cause.
+2. Built a genuine JIT-injected runtime tracer (a debug callback
+   registered as an `orc::absoluteSymbols` entry in `CompiledStage.cpp`,
+   since the CPU JIT resolves no arbitrary process symbols by default)
+   that captured the exact `(Row, Component, Lane, Address, Value)`
+   tuple at every lane-store execution.
+3. That trace showed the `Row` value fed into each store was itself
+   wrong (`0,0,0,0,0,0,1,1,1` instead of `0,0,0,1,1,1,2,2,2`) --
+   pinning the bug on `resolveRowComponent`'s array-index arithmetic in
+   `CanonicalizeStage.cpp`, not anything downstream.
+4. Found `RowSize` (the divisor in `Idx = Residual / RowSize`) was 16
+   for a `{<3 x i32>}` array element, while the real SPIR-V-imported
+   GEP byte offsets were 12 bytes apart -- overturning a *different*
+   prior session's own (mistaken) note that this same value was 12.
+
+## What this turn actually did
+
+1. Verified the inherited root cause was correct and complete: this is
+   exactly the same class of bug `getPackedMeshElementSize`
+   (`CanonicalizeStage.cpp`, added for mesh per-vertex/per-primitive
+   output arrays) already fixes for a different code path -- and that
+   helper's own doc comment explicitly (and, it turns out, wrongly)
+   claimed `resolveRowComponent` "has no equivalent trailing-alignment
+   gap to correct for."
+2. Fixed it: renamed `getPackedMeshElementSize` to the more accurate
+   `getPackedElementSize` (it's no longer mesh-specific) and swapped
+   `resolveRowComponent`'s `DL.getTypeAllocSize(...)` for a call to it.
+   One-line functional change; the rest was updating both functions'
+   doc comments to stop claiming the gap was mesh-only.
+3. Reverted **all** temporary debug instrumentation from the inherited
+   session before committing anything: two `llvm::errs()` prints in
+   `CanonicalizeStage.cpp`, five in `Executor.cpp`, the JIT-tracer
+   function + call site in `GeometryWrapper.cpp`, its registration in
+   `CompiledStage.cpp`, the `FEME_H101H_FORCE_O0` hook in
+   `GraphicsPipeline.cpp`, and an `FEME_H101H_DUMP_IR` dump in
+   `Pipeline.cpp` (this last one was already several sessions old).
+   `git checkout --` on the 5 debug-only files was the fast way to do
+   this once I confirmed the real fix lived entirely in one file.
+4. Rebuilt (`ninja libfeme_vulkan.so`), reran `ivec3.geometry`: pass.
+   Then ran all 20 target cases (10 shapes * vertex/geometry): all
+   pass.
+5. Ran the `*instance_array*` sweep (790 cases): 99 passed / 77 failed
+   / 614 not-supported, up from H101g's own closing 87/89/614 -- net
+   +12, exactly the shapes this row targeted, 0 regressions. Confirmed
+   (by name) the remaining 77 failures are all in the unrelated
+   `random_geometry`/`random_vertex` fuzz families H101i already
+   tracks.
+6. Added `MapsArrayOfBlockInstancesWithNarrowVectorMemberToDistinctRows`
+   to `CanonicalizeStageTest.cpp`, mirroring the two existing
+   array-of-block-instances tests but with a `{<3 x i32>}` member and
+   explicit byte offsets 0/12/24 to pin the exact packed stride.
+7. Ran full `check-feme`: 2976/2979 passed, 3 pre-existing unsupported,
+   0 failed. No ABI change this time (unlike H101g), so no fixture
+   regeneration needed.
+8. Committed in 3 separate commits: the fix, the unit test, the docs
+   (Roadmap + VulkanCTSReport).
+9. Struck through H101h on the roadmap. Confirmed
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+   change (correctness fix, not new feature/extension work); confirmed
+   no design-doc deviation (generalizing an already-documented
+   technique to a second call site, not introducing a new one).
+10. Cleaned up `/tmp/h101h/` scratch files.
+
+## A meta-note for whoever reads this next
+
+Two consecutive sessions on the *same* bug reached opposite readings
+of the identical debug print (`RowSize=12` vs. `RowSize=16`) for the
+same shape. The second (this) session's reading was right, and it
+mattered: a stray "12, not padded" note in a summary sent the next
+session's early hypotheses in a wrong direction for a while before the
+JIT-tracer produced unambiguous ground truth. Lesson: when a summary's
+"confirmed" claim about a specific numeric value is the load-bearing
+fact for a root cause, and cheap to re-verify, re-verify it before
+trusting it.
+
+## Suggested next steps
+
+1. **H101i (multi-member block + nested array member legalization
+   failure, ~77 cases)**: still open, still needs its own standalone
+   `feme-translate --spirv-to-llvmir` repro of a minimal
+   `{ivec3, vec4, ivec2[2]}`-shaped block to find which SPIRVToLLVM
+   conversion pattern rejects the nested-array member's type. Upstream
+   of `CanonicalizeStage.cpp` entirely (fails before it even runs), so
+   it's a genuinely separate investigation -- likely half a day, since
+   it may need a new conversion pattern rather than a fix to an
+   existing one.
+2. Given `getPackedElementSize` has now fixed the identical bug class
+   twice in two different call sites (mesh arrays, H6l; block-instance
+   arrays, H101h), it's worth a quick grep for any other place in
+   `CanonicalizeStage.cpp` still calling `DL.getTypeAllocSize` on an
+   array/struct element type that feeds a byte-offset division --
+   there may be a third latent instance of this same gap waiting to be
+   found the hard way. Low cost (10-15 minutes to grep + eyeball), not
+   done this session since no CTS symptom currently points at one.
+3. The real (unrelated) roadmap **H101c** (GEP-operand-type
+   legalization failure in `spirv_assembly.compute_shader_derivatives`)
+   and **H101i** above remain the two open, untriaged items directly
+   under H101's umbrella.
