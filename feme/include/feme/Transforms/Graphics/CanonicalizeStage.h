@@ -19,8 +19,15 @@
 // Scoped to the vertex and fragment stages (see that section: "Only
 // operations required by implemented stages are legal" -- patch,
 // stream-emission, mesh-output and ray operations are later milestones).
-// A function that is not a vertex/fragment entry point (per
-// `feme::getShaderStage`) is left untouched.
+// A function that is not a recognized shader-stage entry point (per
+// `feme::getShaderStage`) still has its SPIR-V-raised discard/demote-to-
+// helper-invocation/derivative/quad-read intrinsic calls rewritten to their
+// `feme.stage.*` peers (this needs no stage-IO/signature context), since a
+// GLSL/glslang-sourced helper function called (not inlined) from a real
+// entry point can itself contain one of these; only its stage-IO
+// interface-variable rewriting and signature-building are skipped (roadmap
+// H101a: a helper function's `llvm.spv.discard` was previously left
+// wholly untouched and reached instruction selection unconverted).
 //
 //===----------------------------------------------------------------------===//
 

@@ -163,6 +163,51 @@ TEST(CanonicalizeStageTest, RewritesSPIRVDerivativesInComputeStage) {
   EXPECT_TRUE(SawDerivative);
 }
 
+/// (roadmap H101a) A GLSL/glslang-sourced helper function -- i.e. one with
+/// no recognized `feme.shader.stage` attribute of its own, reached from a
+/// fragment entry point via an ordinary `call`, not inlined -- still has
+/// its own `llvm.spv.discard` rewritten to `feme.stage.discard`. Before
+/// this fix, `CanonicalizeStagePass::run`'s dispatch loop skipped any
+/// function without a recognized stage attribute entirely, so `@helper`'s
+/// raw `llvm.spv.discard` survived unrewritten through
+/// `feme::cpu::InlineHelperFunctionsPass`'s later inlining into `@main`
+/// and reached instruction selection unconverted, crashing with `LLVM
+/// ERROR: Cannot select: intrinsic %llvm.spv.discard` -- exactly the
+/// `dEQP-VK.graphicsfuzz.call-function-with-discard` failure this
+/// milestone fixes.
+TEST(CanonicalizeStageTest, RewritesSPIRVDiscardInNonEntryHelperFunction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @helper() {
+      call void @llvm.spv.discard()
+      ret void
+    }
+    define void @main() #0 {
+      call void @helper()
+      ret void
+    }
+    declare void @llvm.spv.discard()
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *Helper = M->getFunction("helper");
+  ASSERT_TRUE(Helper);
+  bool SawDiscard = false;
+  for (Instruction &I : instructions(Helper))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      EXPECT_FALSE(CI->getCalledFunction() &&
+                   CI->getCalledFunction()->getIntrinsicID() ==
+                       Intrinsic::spv_discard);
+      StageOpKind Kind;
+      if (isStageOpCall(*CI, &Kind)) {
+        EXPECT_EQ(Kind, StageOpKind::Discard);
+        SawDiscard = true;
+      }
+    }
+  EXPECT_TRUE(SawDiscard);
+}
+
 /// A non-builtin SPIR-V `Input`/`Output` global's load/store rewrites to
 /// `feme.stage.input.load`/`output.store`, and an `EntrySignature` is
 /// attached recording its `Location`.

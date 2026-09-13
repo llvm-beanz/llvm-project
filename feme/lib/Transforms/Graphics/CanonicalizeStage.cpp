@@ -2368,6 +2368,94 @@ std::optional<StageIOAccess> resolveStageIOAccess(
                                     /*Vertex=*/nullptr);
 }
 
+/// Rewrites \p F's already-legalized `llvm.spv.discard`/`.demote.to.helper.
+/// invocation`/derivative/quad-read intrinsic calls into their `feme.
+/// stage.*` peers (mirroring `canonicalizeDXILStage`'s handling of the same
+/// operations' DXIL-derived forms). Unlike the rest of
+/// `canonicalizeSPIRVStage`, this rewrite needs no stage-IO/signature
+/// context at all -- it is purely a per-intrinsic-call rewrite -- so it is
+/// both a part of that function (for a real stage entry point) and, on its
+/// own, safe and correct to run on any function whatsoever, including a
+/// helper function with no shader-stage attribute of its own (see
+/// `CanonicalizeStagePass::run`'s own comment on why that case matters: a
+/// GLSL/glslang-sourced helper function containing a discard reached via a
+/// function call, rather than inlined into the entry point, would otherwise
+/// never have its `llvm.spv.discard` rewritten at all, since
+/// `CanonicalizeStagePass::run`'s own dispatch loop only ever visits a
+/// function carrying a recognized `feme::getShaderStage` attribute).
+bool rewriteSPIRVDiscardAndDerivativeIntrinsics(Function &F) {
+  bool Changed = false;
+
+  // `llvm.spv.discard` (SPIR-V's `OpKill`) is unconditional, unlike DXIL's
+  // `Discard`/`feme.stage.discard`, which both always take a condition; a
+  // constant-true condition preserves that meaning exactly.
+  Changed |= forEachIntrinsicCall(F, Intrinsic::spv_discard, [](CallInst &CI) {
+    IRBuilder<> B(&CI);
+    createStageDiscard(B, B.getTrue());
+    CI.eraseFromParent();
+    return true;
+  });
+
+  // `llvm.spv.demote.to.helper.invocation` (SPIR-V's
+  // `OpDemoteToHelperInvocation`, roadmap E11) is likewise unconditional,
+  // and -- unlike `llvm.spv.discard`/`OpKill` -- non-terminating: it only
+  // narrows the invocation's side-effect mask, matching
+  // `feme.stage.demote`'s own semantics exactly (see StageOps.h), so it
+  // needs no further adjustment beyond the same constant-true condition.
+  Changed |= forEachIntrinsicCall(F, Intrinsic::spv_demote_to_helper_invocation,
+                                  [](CallInst &CI) {
+                                    IRBuilder<> B(&CI);
+                                    createStageDemote(B, B.getTrue());
+                                    CI.eraseFromParent();
+                                    return true;
+                                  });
+
+  // SPIR-V's plain `OpDPdx`/`OpDPdy` (raised as `llvm.spv.ddx`/`.ddy`) leave
+  // fine-vs-coarse precision to the implementation; this conservatively
+  // maps them to the fine variant, matching `feme.stage.derivative.*`'s two
+  // *explicit*-precision forms exactly and never coarsening precision the
+  // source did not ask for.
+  static const std::pair<Intrinsic::ID, StageOpKind> SPIRVDerivativeMappings[] =
+      {
+          {Intrinsic::spv_ddx, StageOpKind::DerivativeXFine},
+          {Intrinsic::spv_ddy, StageOpKind::DerivativeYFine},
+          {Intrinsic::spv_ddx_fine, StageOpKind::DerivativeXFine},
+          {Intrinsic::spv_ddy_fine, StageOpKind::DerivativeYFine},
+          {Intrinsic::spv_ddx_coarse, StageOpKind::DerivativeXCoarse},
+          {Intrinsic::spv_ddy_coarse, StageOpKind::DerivativeYCoarse},
+      };
+  for (const auto &Mapping : SPIRVDerivativeMappings) {
+    Intrinsic::ID ID = Mapping.first;
+    StageOpKind Kind = Mapping.second;
+    Changed |= forEachIntrinsicCall(F, ID, [&](CallInst &CI) {
+      IRBuilder<> B(&CI);
+      CallInst *New = createStageDerivative(B, Kind, CI.getArgOperand(0));
+      CI.replaceAllUsesWith(New);
+      CI.eraseFromParent();
+      return true;
+    });
+  }
+
+  static const std::pair<Intrinsic::ID, uint8_t> SPIRVQuadReadMappings[] = {
+      {Intrinsic::spv_quad_read_across_x, 0},
+      {Intrinsic::spv_quad_read_across_y, 1},
+      {Intrinsic::spv_quad_read_across_diagonal, 2},
+  };
+  for (const auto &Mapping : SPIRVQuadReadMappings) {
+    Intrinsic::ID ID = Mapping.first;
+    uint8_t Direction = Mapping.second;
+    Changed |= forEachIntrinsicCall(F, ID, [&](CallInst &CI) {
+      IRBuilder<> B(&CI);
+      CallInst *New = createStageQuadRead(B, CI.getArgOperand(0), Direction);
+      CI.replaceAllUsesWith(New);
+      CI.eraseFromParent();
+      return true;
+    });
+  }
+
+  return Changed;
+}
+
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
 /// `Input`/`Output` interface-variable loads/stores (address space 7/8,
 /// see `isSPIRVStageIOGlobal`) into `feme.stage.input.load`/
@@ -2815,72 +2903,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     Changed = true;
   }
 
-  // `llvm.spv.discard` (SPIR-V's `OpKill`) is unconditional, unlike DXIL's
-  // `Discard`/`feme.stage.discard`, which both always take a condition; a
-  // constant-true condition preserves that meaning exactly.
-  Changed |= forEachIntrinsicCall(F, Intrinsic::spv_discard, [](CallInst &CI) {
-    IRBuilder<> B(&CI);
-    createStageDiscard(B, B.getTrue());
-    CI.eraseFromParent();
-    return true;
-  });
-
-  // `llvm.spv.demote.to.helper.invocation` (SPIR-V's
-  // `OpDemoteToHelperInvocation`, roadmap E11) is likewise unconditional,
-  // and -- unlike `llvm.spv.discard`/`OpKill` -- non-terminating: it only
-  // narrows the invocation's side-effect mask, matching
-  // `feme.stage.demote`'s own semantics exactly (see StageOps.h), so it
-  // needs no further adjustment beyond the same constant-true condition.
-  Changed |= forEachIntrinsicCall(F, Intrinsic::spv_demote_to_helper_invocation,
-                                  [](CallInst &CI) {
-                                    IRBuilder<> B(&CI);
-                                    createStageDemote(B, B.getTrue());
-                                    CI.eraseFromParent();
-                                    return true;
-                                  });
-
-  // SPIR-V's plain `OpDPdx`/`OpDPdy` (raised as `llvm.spv.ddx`/`.ddy`) leave
-  // fine-vs-coarse precision to the implementation; this conservatively
-  // maps them to the fine variant, matching `feme.stage.derivative.*`'s two
-  // *explicit*-precision forms exactly and never coarsening precision the
-  // source did not ask for.
-  static const std::pair<Intrinsic::ID, StageOpKind> SPIRVDerivativeMappings[] =
-      {
-          {Intrinsic::spv_ddx, StageOpKind::DerivativeXFine},
-          {Intrinsic::spv_ddy, StageOpKind::DerivativeYFine},
-          {Intrinsic::spv_ddx_fine, StageOpKind::DerivativeXFine},
-          {Intrinsic::spv_ddy_fine, StageOpKind::DerivativeYFine},
-          {Intrinsic::spv_ddx_coarse, StageOpKind::DerivativeXCoarse},
-          {Intrinsic::spv_ddy_coarse, StageOpKind::DerivativeYCoarse},
-      };
-  for (const auto &Mapping : SPIRVDerivativeMappings) {
-    Intrinsic::ID ID = Mapping.first;
-    StageOpKind Kind = Mapping.second;
-    Changed |= forEachIntrinsicCall(F, ID, [&](CallInst &CI) {
-      IRBuilder<> B(&CI);
-      CallInst *New = createStageDerivative(B, Kind, CI.getArgOperand(0));
-      CI.replaceAllUsesWith(New);
-      CI.eraseFromParent();
-      return true;
-    });
-  }
-
-  static const std::pair<Intrinsic::ID, uint8_t> SPIRVQuadReadMappings[] = {
-      {Intrinsic::spv_quad_read_across_x, 0},
-      {Intrinsic::spv_quad_read_across_y, 1},
-      {Intrinsic::spv_quad_read_across_diagonal, 2},
-  };
-  for (const auto &Mapping : SPIRVQuadReadMappings) {
-    Intrinsic::ID ID = Mapping.first;
-    uint8_t Direction = Mapping.second;
-    Changed |= forEachIntrinsicCall(F, ID, [&](CallInst &CI) {
-      IRBuilder<> B(&CI);
-      CallInst *New = createStageQuadRead(B, CI.getArgOperand(0), Direction);
-      CI.replaceAllUsesWith(New);
-      CI.eraseFromParent();
-      return true;
-    });
-  }
+  Changed |= rewriteSPIRVDiscardAndDerivativeIntrinsics(F);
 
   return Changed;
 }
@@ -2914,8 +2937,27 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
          *Stage != ShaderStage::Hull && *Stage != ShaderStage::Domain &&
          *Stage != ShaderStage::Geometry && *Stage != ShaderStage::Mesh &&
          *Stage != ShaderStage::Amplification &&
-         *Stage != ShaderStage::Compute))
+         *Stage != ShaderStage::Compute)) {
+      // Not a recognized shader-stage entry point -- most commonly a
+      // GLSL/glslang-sourced helper function a real entry point calls
+      // (rather than has inlined into it, unlike `dxc`'s own HLSL/DXIL
+      // output, which always fully inlines helpers before this pipeline
+      // ever sees it -- see `feme::cpu::InlineHelperFunctionsPass`'s own
+      // header comment for that difference, and roadmap H101a for the
+      // bug this exact gap caused: a helper function's own
+      // `llvm.spv.discard`, reached only via a function call, was never
+      // rewritten at all, since this loop skipped straight past it,
+      // leaving the raw, un-legalized intrinsic to survive
+      // `InlineHelperFunctionsPass`'s later inlining and reach
+      // instruction selection unconverted). This rewrite needs no
+      // stage-IO/signature context (see
+      // `rewriteSPIRVDiscardAndDerivativeIntrinsics`'s own comment), so
+      // it is correct and safe to run on any non-declaration function,
+      // recognized entry point or not.
+      if (!F->isDeclaration())
+        Changed |= rewriteSPIRVDiscardAndDerivativeIntrinsics(*F);
       continue;
+    }
 
     // (roadmap L69) `ShaderStage::Compute` joins this list so a compute
     // entry's own `llvm.spv.ddx`/`.ddy`/discard/quad-read intrinsics get
