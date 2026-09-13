@@ -40368,3 +40368,105 @@ LLVM identified struct used purely as a compiler-internal type-level
 tag, with no runtime/ABI meaning) is a new, reusable technique worth a
 brief mention; see that document's own updated "Tight Vector
 Substitution" note.
+
+## H101k: `CanonicalizeStage.cpp` leading-pad-vs-real-member-count fix for the JIT-symbol crash
+
+**Symptom:** `dEQP-VK.transform_feedback.fuzz.random_geometry.
+all_instance_array.11` (and its `random_vertex` sibling) crashed with
+`JIT session error: Symbols not found: [ spirv_var_46 ]` immediately
+before `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation --
+H101j's own closing note left this as the single furthest-progressing
+case among the remaining 68 `*instance_array*` pipeline-creation
+failures.
+
+**Root cause:** *not* a legalization/lowering gap, contrary to H101j's
+own initial hypothesis. `CanonicalizeStage.cpp`'s `addElements`'
+`TakeBlockPath` decision (`PeekedST->getNumElements() > 1`) counts a
+stage-IO global's own *LLVM*-level struct field count -- which is not
+always the same as its real, SPIR-V-declared member count. A single
+real member whose own declared `Offset` is nonzero and needed a
+"tight vector" ABI substitution (e.g. `layout(..., xfb_offset = 44)
+out BlockC { mat3x4 d; } blockC[2];`) gets an LLVM-level leading
+`[44 x i8]` pad *field* synthesized ahead of it by
+`layOutStructIfOffsetsMatch` (SPIRVToLLVMPatterns.cpp) purely to
+reproduce that offset in a naturally-laid-out LLVM struct -- a
+compiler artifact, not a second declared GLSL member. `TakeBlockPath`
+mistook this padded 2-field LLVM struct for a genuinely multi-member
+SPIR-V block, taking the wrong branch and misaligning
+`MemberDecorations` (keyed by real SPIR-V member index, always 0 for
+a single-member block) against the padded struct's own LLVM field
+indices (0 = pad, 1 = the real member). Even once excluded from that
+branch, `resolveOffsetWithinElement`'s own recursion had no way to
+peel a *2*-field struct the way `peelSingleMemberStruct` peels a
+genuine 1-field one, so every store to the global was left completely
+unrewritten -- keeping the (never-defined, `external`) global itself
+referenced, and thus unresolved, all the way to JIT-link time. This is
+the exact mechanism behind the `Symbols not found` crash.
+
+**Fix:**
+1. Switched `TakeBlockPath`'s decision, and the sibling
+  `XfbBufferArrayStride`-computing plain-path check, from
+  `PeekedST->getNumElements()` to `PeekedMemberDecorations.size()`.
+  The latter is keyed by real SPIR-V member index and is always
+  correct regardless of LLVM-level padding, since H101b's own
+  `buildMemberDecorationsAttr` fix already guarantees every real
+  member of an explicitly-offset struct gets at least an `Offset`
+  decoration entry.
+2. Added a shared `getEffectiveStageIOValueType` helper, used
+  identically by both `addElements`' own `addElement` call (building
+  the `SignatureElement`) and `resolveStageIOAccess`'s byte-offset
+  resolution (rewriting the actual load/store), that reconstructs a
+  pad-free `[NumInstances x RealMemberTy]` type from the real member's
+  own type -- always the *last* LLVM field, per
+  `layOutStructIfOffsetsMatch`'s own "prepended, never appended"
+  invariant -- so signature-building and instruction-rewriting always
+  agree on the same shape.
+
+**Debugging technique (reusable):** `deqp-vk
+--deqp-log-shader-sources=enable --deqp-log-decompiled-spirv=enable`
+dumps GLSL source and SPIR-V assembly directly into the `.qpa` log for
+any case, including fuzz-generated ones with no static shader source
+file. Extract via regex on `<SpirVAssemblySource>`, assemble with
+`spirv-as`, then chain `feme-translate --import-spirv` ->
+`feme-opt --feme-convert-spirv-to-llvm` and/or
+`feme-translate --spirv-to-llvmir --no-implicit-module` to get a
+clean, minimal, JIT-independent repro at each compiler stage.
+`CanonicalizeStagePass` itself is an LLVM-IR-level pass with no
+standalone CLI exposure (`feme-opt` is MLIR-only, `feme-run` only
+supports compute shaders) -- the fastest way to inspect its effect on
+a minimal repro is a throwaway unit test appended to
+`CanonicalizeStageTest.cpp` using the file's own `parseIR`/`run()`
+helpers plus `M->print(llvm::errs(), nullptr)`.
+
+**Testing:**
+- New unit test `RewritesArrayOfBlockInstancesWithLeadingPadBeforeTightMatrixMember`
+  added to `CanonicalizeStageTest.cpp`, using the exact minimal IR
+  extracted from `random_geometry.all_instance_array.11`, alongside a
+  sibling genuinely-multi-member block confirming no regression to
+  the case this fix must still distinguish from. `FeMeTransformsGraphicsTests`:
+  81/81 passed.
+- `check-feme`: 2980/2983 passed (3 pre-existing `Unsupported`, 0
+  `Failed`).
+- `random_geometry.all_instance_array.11` (target case): confirmed
+  the JIT crash is gone -- moved from `VK_ERROR_INITIALIZATION_FAILED`/
+  `Symbols not found: [ spirv_var_46 ]` to `Fail (Mismatch at offset 0
+  expected -89 received 1096810496)`, a distinct, downstream XFB-value
+  bug (not a crash), now tracked separately as roadmap H101l.
+- `dEQP-VK.transform_feedback.fuzz.*instance_array*` sweep (790
+  cases): 108 Passed / 68 Failed / 614 NotSupported -- identical
+  totals to H101j's own closing count, since exactly 7 cases (this
+  shape family) moved failure *mode* (crash to wrong-value, H101l)
+  while the remaining 61 pipeline-creation failures are distinct,
+  unrelated root causes this fix does not touch (broken down and
+  filed as roadmap H101m: 28 `si32`-vs-`i32` constant-attribute
+  mismatches, ~14 further `spirv.GlobalVariable` legalization
+  failures for genuinely-multi-member blocks combining a matrix/
+  vector member with a nested single-member-struct member, 3
+  unresolved stage-IO global-variable accesses, and 1 out-of-range
+  row).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a compiler correctness fix, not new feature/extension
+work. No `FeMeGraphicsDesign.md` deviation: this fix corrects an
+existing mechanism's own bookkeeping, introducing no new design
+concept beyond what H101g/h/i/j already documented.
