@@ -295,3 +295,68 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT],
   }
 }
 
+// -----
+
+// (Roadmap H101i) A multi-member, explicitly-offset `Block` whose *last*
+// member is itself an *array of vectors* (e.g. a GLSL `ivec2 xs[2];` XFB
+// output member) hits the same declared-offset-vs-ABI-alignment mismatch
+// a bare narrow vector member does (see the two tests above/below this
+// one), just one array dimension further in: the array's own ABI
+// alignment is still driven by its vector element's own (possibly
+// SIMD-padded) alignment, which a tightly-packed XFB/
+// `-fvk-use-scalar-layout` offset scheme never reserves room for.
+// Converting every member's own array-of-vectors element to the same
+// tight, alignment-free array-of-scalars form the bare-vector case below
+// uses (keeping the outer element count) reproduces every member's own
+// declared offset.
+//
+// CHECK-LABEL: llvm.mlir.global external @multi_member_with_array_of_vectors
+// CHECK-SAME: !llvm.struct<(array<3 x i32>, array<4 x f32>, array<2 x array<2 x i32>>)>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @multi_member_with_array_of_vectors {location = 0 : i32, xfb_buffer = 0 : i32, xfb_stride = 92 : i32}
+      : !spirv.ptr<!spirv.struct<(vector<3xsi32> [0], vector<4xf32> [12, RelaxedPrecision], !spirv.array<2 x vector<2xi32>> [28, RelaxedPrecision]), Block>, Output>
+}
+
+// -----
+
+// (Roadmap H101i) A single-member `Block` whose member is a `spirv.matrix`
+// declared at an offset (44) that isn't a multiple of its own column
+// vector's ABI alignment (16, for a `vec4` column) hits the exact same
+// gap as the array-of-vectors case above -- a `spirv.matrix` converts,
+// per `MatrixTypeConverter`, to an `!llvm.array` of column vectors, so
+// it's structurally identical for this purpose. Substituting the same
+// tight, alignment-free array-of-scalars form for the matrix's own column
+// type reproduces the declared offset.
+//
+// CHECK-LABEL: llvm.mlir.global external @matrix_member_at_unaligned_offset
+// CHECK-SAME: !llvm.struct<(array<44 x i8>, array<3 x array<4 x f32>>)>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @matrix_member_at_unaligned_offset {location = 4 : i32}
+      : !spirv.ptr<!spirv.struct<(!spirv.matrix<3 x vector<4xf32>> [44]), Block>, Output>
+}
+
+// -----
+
+// (Roadmap H101i regression guard) A multi-member `Block` where *one*
+// member (a narrow, 3-component vector) genuinely needs the tight-vector
+// substitution above to reproduce a sibling's declared offset, but a
+// *different* sibling member (a matrix) is already correctly placed by
+// its own natural, ABI-aligned layout and must NOT also be substituted:
+// doing so changes no declared *offset* (the substituted matrix's
+// tightly-packed columns still land at the same byte address), but does
+// change the LLVM *type* downstream consumers (e.g.
+// `CanonicalizeStage.cpp`'s row/component-shape resolution) see for that
+// member, which was observed to silently produce wrong values for
+// `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_
+// array.74` when the array/matrix retry substituted every applicable
+// member unconditionally rather than only the ones that actually need
+// it. The matrix member here must convert to a real `vector<4xf32>`
+// column type, not a tight `array<4xf32>` one.
+//
+// CHECK-LABEL: llvm.mlir.global external @vector_needs_tight_matrix_does_not
+// CHECK-SAME: !llvm.struct<(vector<3xi32>, array<3 x vector<4xf32>>)>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vector_needs_tight_matrix_does_not {location = 0 : i32, xfb_buffer = 0 : i32, xfb_stride = 64 : i32}
+      : !spirv.ptr<!spirv.struct<(vector<3xsi32> [0], !spirv.matrix<3 x vector<4xf32>> [16, RelaxedPrecision]), Block>, Output>
+}
+

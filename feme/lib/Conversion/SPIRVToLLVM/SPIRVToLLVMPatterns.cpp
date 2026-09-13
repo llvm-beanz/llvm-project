@@ -3728,6 +3728,10 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
       return nullptr;
     Members.push_back(MemberTy);
     HasVectorMember |= mlir::isa<mlir::VectorType>(ElementTy);
+    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy))
+      HasVectorMember |=
+          mlir::isa<mlir::VectorType>(ArrayTy.getElementType());
+    HasVectorMember |= mlir::isa<mlir::spirv::MatrixType>(ElementTy);
   }
   if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Members))
     return Result;
@@ -3775,20 +3779,103 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
   if (!HasVectorMember)
     return nullptr;
 
-
-  for (unsigned I = 0, E = Members.size(); I != E; ++I) {
-    auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Type.getElementType(I));
-    if (!VectorTy)
-      continue;
-    mlir::Type TightTy = getTightVectorArrayType(VectorTy, Converter);
-    if (!TightTy)
-      return nullptr;
-    Members[I] = TightTy;
+  // (Roadmap H101i) Two-tier retry: first substitute *only* bare vector
+  // members with their tight, alignment-free form -- this is exactly the
+  // retry this codebase already had before this roadmap item, proven not
+  // to regress any previously-working struct -- and only additionally
+  // substitute a member that is itself an *array of vectors* or a
+  // `spirv.matrix` (this roadmap item's own new capability) if that
+  // narrower retry still doesn't reproduce every declared offset.
+  //
+  // Substituting a matrix/array-of-vectors member unconditionally
+  // whenever *any* member in the struct needs a retry -- even one that
+  // was already correctly placed on its own -- changes no offset, but
+  // does change the LLVM *type* a downstream consumer (e.g.
+  // `CanonicalizeStage.cpp`'s row/component-shape resolution, which
+  // recognizes a matrix column or array-of-vectors element specifically
+  // as a `VectorType`) sees for that member, and was observed (during
+  // this same roadmap item's own investigation) to silently produce
+  // wrong values, rather than a legalization failure, for
+  // `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_
+  // array.74`, whose struct has a bare vector member that genuinely
+  // needs tight substitution and a sibling matrix member that does not.
+  // Trying the narrower, already-proven-safe retry first avoids ever
+  // reaching for the new substitution unless it's actually needed.
+  llvm::SmallVector<mlir::Type, 8> VectorOnly(Members.begin(), Members.end());
+  for (unsigned I = 0, E = VectorOnly.size(); I != E; ++I) {
+    if (auto VectorTy =
+            mlir::dyn_cast<mlir::VectorType>(Type.getElementType(I))) {
+      mlir::Type TightTy = getTightVectorArrayType(VectorTy, Converter);
+      if (!TightTy)
+        return nullptr;
+      VectorOnly[I] = TightTy;
+    }
   }
-  if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Members))
+  if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, VectorOnly))
     return Result;
+  if (padUndersizedMembersIfNeeded(Type, VectorOnly, Padded))
+    if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Padded))
+      return Result;
 
-  if (padUndersizedMembersIfNeeded(Type, Members, Padded))
+  // The narrower retry didn't work either -- escalate to also
+  // substituting any array-of-vectors or matrix member, starting from the
+  // vector-only-substituted list above (a struct can need both kinds of
+  // substitution at once).
+  llvm::SmallVector<mlir::Type, 8> WithArraysAndMatrices(VectorOnly.begin(),
+                                                         VectorOnly.end());
+  bool SubstitutedArrayOrMatrix = false;
+  for (unsigned I = 0, E = WithArraysAndMatrices.size(); I != E; ++I) {
+    mlir::Type ElementTy = Type.getElementType(I);
+    // A member that is itself an *array of vectors* (e.g. a
+    // `!spirv.array<2 x vector<2xi32>>` member of a multi-member,
+    // explicitly-offset block, the shape `dEQP-VK.transform_feedback.
+    // fuzz.random_geometry.all_instance_array`'s own trailing member
+    // takes) needs the same tight-vector substitution as a bare vector
+    // member, just one array dimension further in: the *array's* own ABI
+    // alignment is still driven by its vector element's ABI-padded
+    // alignment (e.g. a 2-lane `i32` vector's own 8-byte alignment,
+    // itself a SIMD-register-driven rounding no tightly-packed XFB/
+    // `-fvk-use-scalar-layout` offset scheme reserves room for), so it
+    // hits the exact same declared-offset mismatch a bare vector member
+    // would, just discovered one level of nesting later.
+    //
+    // A `spirv.matrix` member (converted, per `MatrixTypeConverter`, to
+    // an `!llvm.array` of column vectors -- structurally identical to an
+    // ordinary array-of-vectors member for this purpose) hits the exact
+    // same gap: its own ABI alignment is still its column vector's own
+    // (possibly padded) alignment, which a tightly-packed offset scheme
+    // need not leave room for -- e.g. `all_instance_array.11`'s own
+    // `mat3x4`-typed member, declared at (whole-block-relative) offset
+    // 44, not a multiple of a `vec4` column's own 16-byte alignment.
+    unsigned InnerCount;
+    mlir::Type InnerElementTy;
+    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
+      InnerElementTy = ArrayTy.getElementType();
+      InnerCount = ArrayTy.getNumElements();
+    } else if (auto MatrixTy =
+                   mlir::dyn_cast<mlir::spirv::MatrixType>(ElementTy)) {
+      InnerElementTy = MatrixTy.getColumnType();
+      InnerCount = MatrixTy.getNumColumns();
+    } else {
+      continue;
+    }
+    auto InnerVectorTy = mlir::dyn_cast<mlir::VectorType>(InnerElementTy);
+    if (!InnerVectorTy)
+      continue;
+    mlir::Type TightElementTy =
+        getTightVectorArrayType(InnerVectorTy, Converter);
+    if (!TightElementTy)
+      return nullptr;
+    WithArraysAndMatrices[I] =
+        mlir::LLVM::LLVMArrayType::get(TightElementTy, InnerCount);
+    SubstitutedArrayOrMatrix = true;
+  }
+  if (!SubstitutedArrayOrMatrix)
+    return nullptr; // Nothing new to retry with.
+  if (mlir::Type Result =
+          layOutStructIfOffsetsMatch(Type, WithArraysAndMatrices))
+    return Result;
+  if (padUndersizedMembersIfNeeded(Type, WithArraysAndMatrices, Padded))
     return layOutStructIfOffsetsMatch(Type, Padded);
   return nullptr;
 }
