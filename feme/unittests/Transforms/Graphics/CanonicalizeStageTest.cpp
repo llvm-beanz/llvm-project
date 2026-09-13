@@ -4097,4 +4097,106 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(Elt.XfbStride, 32u);
 }
 
+/// (Roadmap H101p) A genuinely multi-member interface block
+/// (`dEQP-VK.transform_feedback.fuzz.all_unordered_and_instance_array`'s
+/// own fuzzed member order) whose members are declared out of
+/// ascending-`Offset` order -- here, a `mat4x2` declared *first* but
+/// placed (per its own `Offset` decoration) at byte 12, and an `ivec3`
+/// declared *second* but placed at byte 0 -- so `layOutStructIfOffsetsMatch`
+/// (SPIRVToLLVMPatterns.cpp, once fixed to consult
+/// `getOffsetSortedMemberIndices`) lays the LLVM struct out in *physical*
+/// (ascending-offset) order: the `ivec3` (declared member 1) as LLVM
+/// field 0, the `mat4x2` (declared member 0) as LLVM field 1 -- the
+/// reverse of declaration order. Before this fix, `addElements`'s
+/// `TakeBlockPath` loop assumed declared member index == physical LLVM
+/// field index (`I` for the LLVM-field lookup), so it looked up the
+/// wrong LLVM field/type for each member once the struct was reordered.
+/// This test's own IR mirrors exactly what the real, now-fixed
+/// `SPIRVToLLVMPatterns.cpp` pipeline emits for this shape (confirmed via
+/// a standalone `feme-translate --import-spirv` / `feme-opt
+/// --feme-convert-spirv-to-llvm` ground-truth repro of
+/// `all_unordered_and_instance_array.40`'s own exact shape).
+TEST(CanonicalizeStageTest,
+    RewritesGenuinelyMultiMemberBlockWithOutOfOrderOffsets) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector = type { [3 x i32] }
+    %feme.tight_vector.1 = type { [2 x float] }
+
+    @spirv_var_2 = external addrspace(8) global { %feme.tight_vector, [4 x %feme.tight_vector.1] }, !spirv.Decorations !0, !feme.spirv.MemberDecorations !4
+
+    define void @main() #0 {
+      store [4 x <2 x float>] [<2 x float> <float 1.000000e+00, float 1.000000e+00>, <2 x float> <float 1.000000e+00, float 1.000000e+00>, <2 x float> <float 1.000000e+00, float 1.000000e+00>, <2 x float> <float 1.000000e+00, float 1.000000e+00>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @spirv_var_2, i64 12), align 4
+      store <3 x i32> <i32 1, i32 1, i32 1>, ptr addrspace(8) @spirv_var_2, align 4
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{!1, !2, !3}
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 28}
+    !4 = !{!5, !8}
+    !5 = !{i32 0, !6}
+    !6 = !{!7}
+    !7 = !{i32 35, i32 12}
+    !8 = !{i32 1, !9}
+    !9 = !{!10}
+    !10 = !{i32 35, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load/store survives against the reordered global -- both the
+  // `mat4x2` (declared member 0, physical LLVM field 1) and `ivec3`
+  // (declared member 1, physical LLVM field 0) stores must be rewritten
+  // into `feme.stage.output.store` calls despite the mismatch between
+  // declared and physical member order.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  // GLSL's sequential `Location` assignment counts *declared* order, not
+  // physical order: the `mat4x2` declared first (4 rows) gets `Location`
+  // 0, and the `ivec3` declared second gets `Location` 4 -- confirming
+  // `addElements`'s declared-order pass (computing `NextMemberLocation`)
+  // was preserved even though the LLVM fields it reads are visited in
+  // physical order.
+  llvm::SmallVector<uint32_t, 2> Locations;
+  for (const SignatureElement &Elt : Sig->Elements)
+    Locations.push_back(Elt.Location.value_or(~0u));
+  llvm::sort(Locations);
+  EXPECT_EQ(Locations[0], 0u);
+  EXPECT_EQ(Locations[1], 4u);
+
+  // Each member's own `ElementID` must see exactly its own row count:
+  // the `mat4x2` (4 columns) gets 4 rows captured, the `ivec3` (1 row of
+  // 3 components) gets exactly 1 -- neither collapsed onto the other's
+  // `ElementID` nor missing rows, which a physical/declared-index mix-up
+  // would produce.
+  DenseMap<uint32_t, DenseSet<uint32_t>> RowsByElementID;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    uint32_t ElementID =
+        getStageOpConstantOperand(*CI, /*Offset=*/0).value_or(~0u);
+    uint32_t Row = getStageOpConstantOperand(*CI, /*Offset=*/1).value_or(~0u);
+    RowsByElementID[ElementID].insert(Row);
+  }
+  ASSERT_EQ(RowsByElementID.size(), 2u);
+  llvm::SmallVector<uint32_t, 2> RowCounts;
+  for (const auto &KV : RowsByElementID)
+    RowCounts.push_back(KV.second.size());
+  llvm::sort(RowCounts);
+  EXPECT_EQ(RowCounts[0], 1u);
+  EXPECT_EQ(RowCounts[1], 4u);
+}
+
 } // namespace

@@ -2472,6 +2472,16 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   bool HasLeadingPad = ST->getNumElements() == IDs.size() + 1;
   assert((!HasLeadingPad || LLVMMember != 0) &&
         "store/load into a struct's own leading pad");
+  // (Roadmap H101p) \p IDs is populated in `addElements`' own *physical*
+  // (ascending-byte-offset) order, not necessarily each member's own
+  // *declared* SPIR-V order, whenever a block's members are declared out
+  // of ascending-offset order -- `IDs[k]` (for `k` past any leading pad
+  // shift) names whichever member occupies physical LLVM field `k`, not
+  // necessarily the member SPIR-V declared at that position. `LLVMMember`
+  // (computed directly from \p ST's own physical `StructLayout` above) is
+  // already a physical index, so this indexing needed no further change
+  // once `addElements` was fixed to populate `IDs` in matching physical
+  // order.
   unsigned Member = HasLeadingPad ? LLVMMember - 1 : LLVMMember;
   uint64_t Residual = ByteOffset - SL->getElementOffset(LLVMMember);
   auto [Row, Component] = resolveRowComponent(ST->getElementType(LLVMMember),
@@ -3098,9 +3108,55 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           // field `I + 1`.
           bool HasLeadingPad =
               ST->getNumElements() == MemberDecorations.size() + 1;
+          // (Roadmap H101p) `layOutStructIfOffsetsMatch`
+          // (SPIRVToLLVMPatterns.cpp) now lays a struct's members out in
+          // *physical* (ascending byte-offset) order, which need not
+          // match their own *declared* SPIR-V member order once a block's
+          // members are declared out of ascending-offset order (GLSL's
+          // own `all_unordered_and_instance_array` fuzz-test family
+          // deliberately emits exactly this shape). `MemberDecorations`
+          // is keyed by declared member index, and its own `XfbOffset`
+          // (parsed from that member's `Offset` decoration) directly
+          // gives its true declared byte offset, so
+          // `DL.getStructLayout(ST)->getElementContainingOffset` finds
+          // its real physical LLVM field without needing to replicate
+          // MLIR's own permutation logic at all -- this sidesteps
+          // declared-order assumptions entirely, unlike the (still
+          // correct, for the no-reordering case) `HasLeadingPad ? I + 1
+          // : I` positional fallback below, which this generalizes rather
+          // than replaces (kept for `BuiltIn` members, which carry no
+          // `Offset` decoration in practice, so have no offset to look
+          // up).
+          //
+          // `addElement`'s own call order populates `ElementIDs[GV]`
+          // (read back by `resolveOffsetWithinElement`'s own positional
+          // `IDs.slice(Member, 1)`), so this loop is split into two
+          // passes: pass 1 (declared order) computes each member's
+          // decorations/type/physical-index -- required, since GLSL's
+          // sequential `Location` assignment for undecorated block
+          // members counts *preceding declared* members' rows, not
+          // preceding *physical* ones -- and pass 2 (sorted by physical
+          // index) actually calls `addElement`, so `ElementIDs[GV]` ends
+          // up indexed by physical struct-field position, matching what
+          // `resolveOffsetWithinElement`'s own positional slice assumes.
+          // This reordering is a no-op (byte-for-byte identical call
+          // order) for every already-ascending-offset-declared shape.
+          struct PendingMember {
+            ParsedSPIRVDecorations D;
+            Type *Ty;
+            unsigned PhysicalIndex;
+          };
+          const DataLayout &DL = GV->getDataLayout();
+          SmallVector<PendingMember, 8> Pending;
+          Pending.reserve(MemberDecorations.size());
           for (unsigned I = 0, E = MemberDecorations.size(); I != E; ++I) {
             ParsedSPIRVDecorations MemberD = MemberDecorations.lookup(I);
-            Type *MemberTy = ST->getElementType(HasLeadingPad ? I + 1 : I);
+            unsigned PhysicalIndex = HasLeadingPad ? I + 1 : I;
+            if (MemberD.XfbOffset && !MemberD.BuiltIn)
+              PhysicalIndex =
+                  DL.getStructLayout(ST)->getElementContainingOffset(
+                      *MemberD.XfbOffset);
+            Type *MemberTy = ST->getElementType(PhysicalIndex);
             uint32_t RowCount = getStageIORowShape(MemberTy).RowCount;
             if (!MemberD.BuiltIn) {
               if (!MemberD.Location)
@@ -3112,9 +3168,15 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
               if (!MemberD.XfbStride)
                 MemberD.XfbStride = WholeVarD.XfbStride;
             }
-            addElement(GV, AddrSpace, MemberD, MemberTy);
+            Pending.push_back({MemberD, MemberTy, PhysicalIndex});
             NextMemberLocation += RowCount;
           }
+          llvm::stable_sort(Pending, [](const PendingMember &A,
+                                        const PendingMember &B) {
+            return A.PhysicalIndex < B.PhysicalIndex;
+          });
+          for (const PendingMember &PM : Pending)
+            addElement(GV, AddrSpace, PM.D, PM.Ty);
           continue;
         }
         // (Roadmap H5f) A plain (non-block) per-vertex-arrayed `Input`
