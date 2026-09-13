@@ -1275,6 +1275,28 @@ offset divided directly by the packed per-row size resolved every
 instance past the first to a wildly out-of-range `Row`, corrupting host
 memory beyond `StageStorage.cpp`'s own allocated bounds for that element.
 
+Roadmap H101m: the same leading-pad shape arises a third way -- a
+genuinely *multi*-member interface block (two or more real, distinct
+members) whose first declared member also has a nonzero offset, a shape
+`structHasLeadingOffsetPad`'s own trigger condition ("first member's
+offset != 0") allows regardless of total member count, but which
+`CanonicalizeStage.cpp`'s `TakeBlockPath` branch (the per-member
+signature-building loop used for any block with more than one real
+member) had never been taught to expect: it walked the **LLVM** struct's
+own field count directly as if it were the real SPIR-V member index, so
+the pad's own synthetic byte-array field became a spurious "element 0"
+(read as an 8-bit scalar), and every real member's own decorations were
+read one index off. (The access-chain/GEP side of this same shape was
+already correctly, generically handled by H101n's own
+`OffsetStructLeadingPadAccessChainPattern` above, which matches on
+`structHasLeadingOffsetPad` regardless of member count -- only
+`CanonicalizeStage.cpp`'s signature-building and offset-resolution needed
+a matching fix.) Fixed by having both `addElements`'s `TakeBlockPath` loop
+and `resolveOffsetWithinElement` detect the same `HasLeadingPad` condition
+and shift by one whenever indexing into the real, still-padded LLVM
+struct's own field list, while keeping every *real*-member-indexed lookup
+(decorations, per-member `IDs`) unshifted.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

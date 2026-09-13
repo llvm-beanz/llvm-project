@@ -40733,3 +40733,105 @@ H101n's own array-of-instances shape (no outer array index at all
 here). Not yet triaged or fixed. See roadmap H101o for the full
 description and suggested next steps.
 
+
+## H101m: `CanonicalizeStage.cpp`'s `TakeBlockPath` multi-member leading-pad fix
+
+**Symptom:** re-triaging the current `dEQP-VK.transform_feedback.
+fuzz.*instance_array*` failure set (778 cases, excluding the pre-existing
+`.44`/`.45` heap-corruption pair) against the fully up-to-date binary
+found a fresh baseline of 114 Passed/50 Failed/614 NotSupported -- split
+as 37 `VK_ERROR_INITIALIZATION_FAILED` pipeline-creation failures, 10
+**silent** `vkQueueSubmit` failures (no diagnostic printed by default),
+and 3 wrong-value `Mismatch`es. None of these match the stale four-family
+breakdown H101m's own original roadmap filing described, confirming the
+re-triage was necessary before continuing. This session focused on the
+10 silent `vkQueueSubmit` failures, since they reproduced identically in
+isolation and had zero default diagnostic output.
+
+**Root cause:** `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an existing but
+previously-unused opt-in env var, `feme::vulkan::logCreationFailure` in
+`feme/lib/Vulkan/Diagnostics.cpp`) unmasked the real, otherwise-silently-
+consumed error: `vkQueueSubmit: stage element 2 has a 8-bit scalar; only
+32-bit elements are implemented yet` (`StageStorage.cpp:139`).
+`basic_instance_arrays.11`'s vertex shader has `BlockB{mat3x2 a; int b;}`
+and `BlockC{uvec3 c; uint d;}` -- `BlockC` is a genuinely *multi*-member
+interface block whose first member also has a nonzero `Offset` (28), a
+shape `structHasLeadingOffsetPad`/`layOutStructIfOffsetsMatch`
+(`SPIRVToLLVMPatterns.cpp`) already synthesizes a leading `[N x i8]` pad
+for (triggered purely by "first member's offset != 0", independent of
+total member count), but which `CanonicalizeStage.cpp`'s `TakeBlockPath`
+branch (the per-member signature-building loop for genuinely multi-member
+blocks) had never been taught to expect: it walked the **LLVM** struct's
+own field count directly as if it were the real SPIR-V member index, so
+the pad's own synthetic byte-array field became a spurious "element 0"
+(an 8-bit scalar), and every real member's own decorations were read one
+index off. The access-chain/GEP side of this same shape was already
+correctly, generically handled by H101n's own
+`OffsetStructLeadingPadAccessChainPattern` (which matches on
+`structHasLeadingOffsetPad` regardless of member count) -- only
+`CanonicalizeStage.cpp`'s signature-building and offset-resolution needed
+fixing.
+
+**Fix:** `addElements`'s `TakeBlockPath` loop now detects
+`HasLeadingPad` (`ST->getNumElements() == MemberDecorations.size() + 1`)
+and iterates the real (SPIR-V) member count, shifting `+1` into the LLVM
+struct's own field list only when reading each member's LLVM type.
+`resolveOffsetWithinElement` now separates the real LLVM field index
+(`LLVMMember`, used for type/offset lookups against the still-padded
+struct) from the real-member index (`Member`, used for indexing
+per-member `IDs`/`StageIOAccess`, shifted `-1` when padded), with an
+assertion guarding that the pad field itself never actually stores a
+value.
+
+**Testing:** new unit test
+`MapsMultiMemberInterfaceBlockWithLeadingPadToDistinctMembers`
+(`CanonicalizeStageTest.cpp`), built against a ground-truth repro (hand-
+written SPIR-V assembly matching `BlockC`'s exact shape, driven through
+the real `feme-translate --import-spirv` / `feme-opt
+--feme-convert-spirv-to-llvm` / `feme-translate --spirv-to-llvmir`
+pipeline to get real LLVM IR) -- this uncovered, via an assertion firing
+on the test's first, hand-guessed attempt, that H101j's own
+`%feme.tight_vector` marker-struct wrapping is not just cosmetic: a raw
+`<3 x i32>` vector type has inflated ABI alignment (16 bytes, not 12),
+silently breaking natural (non-packed) LLVM struct layout math for a
+member following a byte-array pad at a non-16-aligned offset. All 84
+`FeMeTransformsGraphicsTests` (+1 from this session's new test) pass.
+
+**Verified against the real CTS:** all 10 previously-silent
+`vkQueueSubmit` cases (`basic_instance_arrays.{11,35,43,49}`,
+`all_instance_array.82`, both `random_geometry`/`random_vertex`) now pass
+outright. Full `check-feme` (2984/2987, 3 pre-existing `Unsupported`, 0
+`Failed`) passes with 0 regressions. A fresh, isolated-process (one
+`deqp-vk` invocation per case, to sidestep a separate, unrelated,
+pre-existing heap-corruption crash newly discovered this session between
+`all_instance_array.12`+`.13` -- confirmed, via a stashed-diff before/
+after rebuild, to be entirely pre-existing and structurally identical to
+the already-filed `.44`/`.45` corruption, not caused by this fix) sweep
+of the full 778-case set now shows 124 Passed/40 Failed/614 NotSupported
+(net +10, 0 regressions).
+
+**Remaining 40 failures re-triaged fresh** by diagnostic message and
+split into three new roadmap rows:
+- **H101p** (26 cases): `spirv.GlobalVariable` legalization failures for
+  `all_unordered_and_instance_array.*`'s multi-member blocks whose
+  members are declared out of ascending `Offset` order (e.g. a matrix at
+  byte 12 declared before a vector at byte 0) -- a new, distinct
+  out-of-order shape, not the single-leading-gap shape every previous
+  fix in this family has covered.
+- **H101q** (8 cases): unresolved stage-IO global-variable access
+  (`nested_structs_instance_arrays.{2,15,31}`, `basic_instance_arrays.32`)
+  -- the same case fails with `JIT session error: Symbols not found` in
+  its `random_geometry` variant but with `feme-graphics-validate-stage`'s
+  own explicit "unresolved stage-IO" diagnostic in its `random_vertex`
+  variant, confirming these are the same root cause caught at two
+  different pipeline stages.
+- **H101r** (6 cases): `'feme.stage.output.store' ... component 1 is out
+  of range for element 1` in the `random_vertex` variant of
+  `all_instance_array.4`/`all_unordered_and_instance_array.27`/
+  `basic_instance_arrays.39`, versus a wrong-value `Mismatch` in the
+  `random_geometry` variant of the exact same three shapes -- again the
+  same underlying row/component miscount, just caught (vertex) vs.
+  silently producing a wrong value (geometry) depending on which
+  stage's own validation runs.
+
+See the roadmap for full descriptions and suggested next steps for each.
