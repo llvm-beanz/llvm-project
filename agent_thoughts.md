@@ -80153,3 +80153,112 @@ Filed as **H101g**.
    without actually running the broader group.
 4. No scratch files to clean up this session -- everything was removed
    as verification concluded (no lingering `/tmp/h101b*` files).
+
+# H101c (session request) / H101g (actual roadmap milestone fixed): Array-of-block-instances XFB fix, matrix-member sub-case
+
+**Note on naming:** the user's request this turn was labeled "H101c",
+but the quoted issue text is verbatim H101g's roadmap entry (array-of-
+block-instances wrong XFB values). The roadmap's actual H101c is a
+different, unrelated issue (a GEP-operand-type legalization failure in
+`spirv_assembly.compute_shader_derivatives`). I picked up where the
+prior session (working the same H101g text under a different label)
+left off, mid-refactor, and finished + committed + documented it. I did
+not touch the real H101c.
+
+## What was inherited (from context compaction, not this turn's own work)
+
+A prior in-progress session had already:
+1. Fixed the simple-member case (`uvec4`-style single-scalar/vector
+   member arrays) using a `RowCountIsXfbBufferArray` bool.
+2. Started refactoring that bool into a `XfbBufferArrayStride` (u32)
+   to handle matrix members (which need more than 1 inner row per
+   array instance), but the matrix case (`mat4.geometry`) still failed.
+
+## What this turn actually did
+
+1. Finished the `XfbBufferArrayStride` refactor in
+   `CanonicalizeStage.cpp` (compute the stride from the member's own
+   row shape) and `Executor.cpp` (div/mod split of `Row` into
+   `(Instance, InnerRow)`).
+2. Rebuilt, retested `mat4.geometry` -- **still wrong** ("-89 received
+   3" unchanged). This meant the bug wasn't (only) in Executor's buffer
+   routing -- something upstream was still wrong.
+3. Root-caused via the standalone SPIR-V-to-LLVM-IR repro workflow
+   (documented in earlier sessions): dumped IR right before/after the
+   relevant passes, added/removed temporary debug prints. Found:
+   `resolveRowComponent` only peeled *one* array/struct level before
+   looking for a vector leaf -- wrong for `mat4`'s two-nested-array
+   shape (`[3 x [4 x <4 x float>]]`) once inside an array of block
+   instances. Generalized it to loop through all levels.
+4. That fix alone flipped the symptom (`mat4.geometry` improved from
+   "-89 received 3" to "-18 received 0" -- instance 0 now right,
+   instance 1 unwritten) but **broke `mat4.vertex`** with a pipeline-
+   validation crash (`row 19/32-35 out of range for element 0`) --
+   classic sign of double-counting a dimension.
+5. Found the second bug: once `resolveRowComponent`'s loop reached all
+   the way to a vector leaf, `storeStageIOValue`/`loadStageIOValue`'s
+   *own* `ArrayType`-decomposition recursion (built to decompose a
+   whole multi-row matrix value in one store/load call) was
+   overwriting (or, after a naive fix attempt, double-multiplying) the
+   row `resolveRowComponent` had already resolved. Fixed by:
+   - giving `resolveRowComponent` a `ValueTy` parameter so it stops
+     descending once the remaining type-to-peel equals the value being
+     stored/loaded, handing off the rest to the caller's own recursion;
+   - making `load`/`storeStageIOValue`'s `ArrayType` branches *combine*
+     (multiply-add) an incoming base `Row` instead of overwriting it.
+6. Rebuilt: all four target CTS cases pass
+   (`all_unordered_and_instance_array.28`, `mat4.geometry`,
+   `mat4.vertex`, `uvec4.geometry`). `ivec3.geometry` still fails, but
+   confirmed as the **separate, pre-existing** off-by-one-row bug
+   (now H101h), unrelated to this fix.
+7. Ran the `*instance_array*` sweep (790 cases): 87 passed / 89 failed
+   / 614 not-supported, up from 71/105/614 -- net +16, 0 regressions.
+   Characterized (not fixed) the remaining 89 failures into two
+   buckets: 12 odd-component-count off-by-one-row cases (H101h), 77
+   multi-member-block-with-nested-array SPIR-V-to-LLVM legalization
+   failures (H101i) -- confirmed these are structurally disjoint from
+   this session's edits (different code path, fails before
+   `CanonicalizeStage` even runs).
+8. Added two unit tests to `CanonicalizeStageTest.cpp` covering the
+   simple-member and matrix-member stride computation and row
+   resolution.
+9. Ran full `check-feme`: 2968/2978 passed, **7 pre-existing fixture
+   tests failed** -- caused by this session's own ABI bump (v6->v7,
+   from adding `XfbBufferArrayStride`) invalidating hand-encoded raw-
+   byte `!feme.signature` blobs in test fixtures. Wrote a Python script
+   to decode/patch/re-encode all 7 blobs (version byte bump, +4 zero
+   bytes per element for the new field, recomputed array size).
+   Re-ran `check-feme`: **2975/2978 passed, 0 failed** (3 pre-existing
+   unsupported).
+10. Committed in 6 separate commits: ABI field, CanonicalizeStage fix,
+    Executor fix, unit tests, fixture regeneration, docs (Roadmap +
+    VulkanCTSReport).
+11. Updated `Roadmap.md`: struck through H101g, added H101h/H101i as
+    new single-letter-deep follow-ons. Confirmed
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+    change (correctness fix, not new feature/extension work).
+
+## Suggested next steps
+
+1. **H101h (off-by-one-row for odd-component shapes)**: start with a
+   byte-level reduction of `ivec3.geometry`'s captured XFB buffer.
+   Given the "received a different row's value" symptom (not garbage),
+   suspect a component-count-vs-row-stride rounding issue for 3-
+   component (non-power-of-two) or non-square-matrix shapes in
+   `resolveOffsetWithinElement` or `getStageIORowShape`. About 1-2
+   hours to a first fix attempt.
+2. **H101i (multi-member block + nested array member legalization
+   failure)**: needs a standalone `feme-translate --spirv-to-llvmir`
+   repro of a minimal `{ivec3, vec4, ivec2[2]}`-shaped block to find
+   which SPIRVToLLVM conversion pattern rejects the nested-array
+   member's type. This is upstream of `CanonicalizeStage.cpp` entirely,
+   so it needs its own separate investigation session -- likely a
+   half-day, since it may require adding a new conversion pattern
+   rather than just fixing an existing one.
+3. The real (roadmap) **H101c** (GEP-operand-type legalization failure
+   in `spirv_assembly.compute_shader_derivatives`) remains untouched
+   and is a good next pickup if a future request re-uses this label
+   correctly -- see its own roadmap entry for the specific error and
+   suggested `feme-translate --import-spirv` repro approach.
+4. Scratch files from this session (`/tmp/h101g/`, `/tmp/h101g2/`,
+   `/tmp/h101c_cts/`) have been cleaned up.
