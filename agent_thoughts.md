@@ -81336,3 +81336,35 @@ This milestone accumulated a long chain of narrowly-scoped bug rows (H101a throu
 2. One small, purely cosmetic gap was intentionally left unfiled (noted in H101e's own closing text): `spirv.AccessChain`'s pretty assembly format can't round-trip a zero-length `$indices` operand list through hand-written MLIR text. Doesn't block anything (only real SPIR-V binary deserialization produces zero-index chains, never hand-written text), so it's fine to leave for whoever next touches `SPIRVMemoryOps.td`.
 3. Time to pick a genuinely fresh milestone. H102 (`rasterization.culling.primitive_id`'s pixel-comparison mismatch, needing a channel-level pixel reduction) is the next unclaimed row right after H101 in the roadmap and is a reasonable next pick, or check the roadmap for whatever the next open, non-H101 milestone is.
 4. Given how productive "just re-triage everything in this subsystem" was across these last two sessions, it might be worth doing one more pass checking whether any *other* (non-H101) milestone rows that reference shapes similar to what H101t/H101p fixed (leading pads, out-of-order offsets, nested structs, multi-member blocks) are also now stale. Not done this session since the request scope was H101c specifically, but worth a quick check before starting fresh investigation on any unrelated row.
+
+# H102 session: fourth session in a row where the target bug was already fixed
+
+**Fixed:** nothing new — `rasterization.culling.primitive_id` was already passing. Confirmed with real CTS, no code changes needed.
+
+**Status:** H102 closed. This also closes out the entire H97-derived lineage (H97, H98-H103 all now struck through).
+
+## What happened
+
+1. Picked up H102: `rasterization.culling.primitive_id`'s pixel-comparison mismatch.
+2. Re-triaged first (now a well-worn habit after the last two sessions). **Already Pass.**
+3. Swept the broader `rasterization.culling` family (43 cases): 43/43 Pass.
+4. Checked whether H97 (the parent row this bug was spawned from) had any other still-open children: none — H98 through H103 were all already struck through from earlier sessions.
+5. `check-feme`: 2990/2993, 0 Failed, 0 regressions.
+6. Closed H102, same closing-note style as the last two sessions (not bisected to a specific fix, most likely another side effect of H101's own broad legalization work).
+
+## Pattern continuing
+
+This is the fourth consecutive session where the assigned bug turned out to already be fixed (after H101q, H101c, and now H102) — all traceable to the same handful of structural fixes in the H101 milestone (`CanonicalizeStage.cpp`/`SPIRVToLLVMPatterns.cpp` legalization and offset-resolution work) having reach far beyond their own originally-filed test cases. This session found 1 more stale row this way, bringing the running total across the last 3 sessions to 9 rows closed by re-verification alone (H101i, H101o, H101q, H101r, H101c, H101d, H101e, H101f, H102), with zero new source changes needed.
+
+## Verification this session
+
+- Real CTS: `rasterization.culling.primitive_id` re-run — Pass.
+- Full batch sweep of `rasterization.culling` (43 cases): 43/43 Pass, 0 Fail.
+- `check-feme`: 2990/2993, 3 pre-existing `Unsupported`, 0 `Failed`, 0 regressions.
+- No unit tests added — no source change was made this session.
+
+## Suggested next steps
+
+1. **There is a separate, still-largely-open lineage worth checking next**: H70's own mesh-shader triage spawned rows H71-H85, of which **H76, H77, H78, H79, H80, H82 (remaining case), H83, H84, H85 are still open** (8-9 rows, not yet re-triaged this session — out of scope for this specific H102 request, but a strong candidate for the same "re-triage first" treatment given how productive it's been the last 3 sessions running). These are a *different* subsystem though (mesh-shader-specific: `Executor.cpp`, `MeshOutputWrapper.cpp`, resource-handle normalization for the CPU target) than the H101 `*instance_array*`/transform-feedback lineage that's now fully closed, so they may genuinely still be open rather than stale — worth checking but don't assume they're free wins.
+2. If none of H76-H85 are stale, H85 (`misc.*`'s `group_memory_barrier`/`memory_barrier_shared_in_*` pixel mismatch, 20 cases) looks like the most fully-scoped starting point — it already has a suggested reduction technique in its own filing text.
+3. Given the now-repeated pattern of "later general fix closes several earlier narrow rows for free," it's probably worth doing a quick blanket re-triage of *all* currently-open H-series rows (not just one subsystem) before investing in a full IR-reduction investigation on any single one — cheap insurance against redundant work.
