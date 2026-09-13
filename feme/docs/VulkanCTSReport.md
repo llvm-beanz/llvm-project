@@ -41210,3 +41210,29 @@ format cannot round-trip a zero-length `$indices` operand list through
 hand-written MLIR text. It blocks nothing today (real zero-index access
 chains only arise via binary SPIR-V deserialization) and is left for
 whoever next touches `SPIRVMemoryOps.td`.
+
+## H102: closed with no new code change -- already fixed, likely by the H101 milestone's own broad blast radius
+
+**Re-triage:** per this project's own recently-established discipline
+("re-triage against the current binary before investigating"),
+re-ran `rasterization.culling.primitive_id` before any new
+investigation. It now **Pass**es outright -- no pixel-comparison
+mismatch.
+
+**Verification:** a full batch run of the entire `rasterization.culling`
+group (43 cases) confirms 43/43 Pass, 0 Fail. `check-feme`: 2990/2993, 3
+pre-existing `Unsupported`, 0 `Failed`, 0 regressions.
+
+**Root cause (retroactive):** not bisected to a specific prior fix.
+Most likely resolved as a side effect of the H101 milestone's own many
+`CanonicalizeStage.cpp`/`SPIRVToLLVMPatterns.cpp` legalization and
+offset-resolution fixes (H101i through H101t), several of which had a
+wide blast radius across superficially unrelated shader shapes --
+mirroring this same session's own recent closure pattern for
+H101c/H101d/H101e/H101f, H101i, H101o, H101q, and H101r, all of which
+turned out to already be fixed by later, more general fixes in the same
+subsystem.
+
+With this closure, every row spawned by H97's own original 13-crash
+CTS-run triage (H97 itself, plus H98 through H103) is now struck through
+on the roadmap.
