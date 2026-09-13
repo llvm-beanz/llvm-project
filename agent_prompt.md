@@ -45,33 +45,35 @@ agent thoughts.
 
 # Request
 
-Can you work on H101n or other blocking work to make progress on the H-series
+Can you work on H101m or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.random_geometry.nested_structs_instance_arrays.45`'s
-> `corrupted double-linked list` heap-corruption crash when run immediately
-> after case `.44`'s own (pre-existing, unrelated) `Mismatch` fail** (discovered
-> during H101l's own closing regression sweep; confirmed, via `git stash`
-> bisection against the pre-H101l binary, to be entirely pre-existing and
-> unaffected by that row's `D.XfbOffset` fold-in fix): reproducibly crashes
-> glibc's malloc consistency check (`SIGABRT`) when cases `.44` and `.45` (both
-> `random_geometry` and `random_vertex` variants of
-> `nested_structs_instance_arrays`) run back-to-back in the same `deqp-vk`
-> process, but case `.45` does **not** crash when run in isolation -- it instead
-> fails cleanly with the pre-existing, already-cataloged `si32`/`i32`
-> legalization error (part of H101m's own 28-case bucket), suggesting the
-> corruption is a heap-metadata side effect of some earlier case's (likely
-> `.44`'s own) allocation/deallocation pattern that a later case's own
-> allocation then trips over, rather than a bug in case `.45` itself.
-> Non-deterministic across repeated identical runs at different points in this
-> project's history (did not manifest during H101k's own closing full-790-case
-> sweep, despite an identical code path), consistent with a classic
-> heap-layout-randomization-sensitive use-after-free or double-free rather than
-> a deterministic logic bug. Not yet triaged -- needs a smaller, faster repro
-> than the full sweep (the `.44`+`.45` pair alone already reproduces it
-> deterministically in this session, a useful starting point) bisected further
-> with a memory-error detector (e.g. ASan or valgrind, if available in this
-> environment) to identify the actual out-of-bounds write or double-free, likely
-> in `Executor.cpp`'s per-case JIT/pipeline teardown or
-> `CanonicalizeStage.cpp`'s own per-module allocation of scratch state, given
-> neither case's own shape is otherwise anything unusual for this test family
+> **`transform_feedback.fuzz.*instance_array*`'s remaining 61 (of the original
+> 68) `VK_ERROR_INITIALIZATION_FAILED` pipeline-creation failures, confirmed
+> distinct from and unaffected by H101k's own leading-pad fix**: breaks down
+> into (at least) four distinct symptoms by their own
+> `mlir-translate`/`feme-opt` diagnostic, none sharing H101k's own
+> leading-pad-before-a-*single*-real-member shape: (1) 28 cases hit
+> `'llvm.mlir.constant' op attribute and type have different integer types:
+> 'si32' vs. 'i32'` -- an `si32`-vs-`i32` signedness mismatch somewhere in
+> constant-attribute construction, likely for a signed-integer stage-IO member
+> (roadmap H101n: this attribute-type bug itself is now fixed, letting these
+> cases progress further -- some now hit H101o's own newly-filed corruption
+> instead); (2) ~14 cases still hit `failed to legalize operation
+> 'spirv.GlobalVariable'` for a block with two or more *genuinely distinct* real
+> members (unlike H101k's single-real-member-plus-pad shape), several combining
+> a matrix/vector member with a *nested single-member struct* member (e.g.
+> `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>` as one member of an outer
+> multi-member block) -- a shape H101i's own "tight vector" retry may not extend
+> to; (3) 3 cases hit `feme-graphics-validate-stage: ... unresolved stage-IO
+> global-variable access to 'spirv_var_N'` (the rewrite genuinely not
+> recognizing some other, not-yet-identified shape, rather than H101k's own
+> now-fixed leading-pad-count-confusion mechanism); (4) 1 case hits
+> `'feme.stage.output.store' ... row 18 is out of range for element 1`, an
+> out-of-bounds row distinct from every other symptom here. Not yet triaged --
+> needs per-symptom-family standalone `feme-translate`/scratch-unit-test repros
+> (mirroring H101a's/H101k's own technique) to identify each of the (at least)
+> four distinct root causes, starting with the largest (28-case) `si32`/`i32`
+> group (roadmap H101n: this group's own attribute-type bug is now fixed;
+> re-triage this bucket's own counts against the current binary before
+> continuing)
