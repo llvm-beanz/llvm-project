@@ -40178,3 +40178,87 @@ is a compiler correctness fix, not new feature/extension work).
 `FeMeGraphicsDesign.md` needs no update: no design deviation, this
 generalizes an existing documented technique (`getPackedMeshElementSize`)
 to a second call site rather than introducing a new one.
+
+## H101i: SPIR-V-to-LLVM legalization fix for array-of-vector/matrix members (root cause fixed; new downstream issue found)
+
+**Symptom:** `dEQP-VK.transform_feedback.fuzz.{random_geometry,
+random_vertex}.{all_instance_array,basic_instance_arrays,
+nested_structs_instance_arrays,nested_structs_arrays_instance_arrays}`
+(~77 cases) all failed with `failed to legalize operation
+'spirv.GlobalVariable'` for a multi-member interface block containing
+a nested array or matrix member.
+
+**Root cause:** `convertOffsetStructTypeIgnoringDecorations`'s
+existing "tight vector" retry (which substitutes an ABI-aligned,
+possibly SIMD-padded vector member's type with a tightly-packed
+array-of-scalars form, needed to reproduce a struct's real,
+explicitly-offset XFB/`-fvk-use-scalar-layout` layout) only ever
+considered a *direct* vector-typed member. A member that is itself an
+*array of vectors* (e.g. `ivec2 xs[2];`), or a `spirv.matrix` (which
+converts, per `MatrixTypeConverter`, to an `!llvm.array` of column
+vectors -- structurally identical for this purpose), hits the exact
+same ABI-alignment-vs-declared-offset mismatch one level of nesting
+further in, and the retry loop's failure to recognize either shape
+left the whole struct's conversion -- and therefore the enclosing
+`spirv.GlobalVariable`'s legalization -- failing outright.
+
+**Fix:** generalized the retry to a two-tier scheme: first retry with
+only direct vector members substituted (the original,
+already-proven-safe behavior), and escalate to also substituting
+array-of-vector/matrix members only if that narrower retry still
+doesn't reproduce every declared offset.
+
+**A regression was found and fixed during this same session's own
+investigation, before committing:** an initial, single-tier version of
+this fix substituted *every* applicable member (vector, array-of-
+vector, or matrix) unconditionally whenever *any* retry was needed,
+rather than only the members that actually required it. This caused
+`dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_
+array.74` -- previously passing -- to start failing with a wrong-value
+XFB mismatch (`Mismatch at offset 20 expected 72 received -100`):
+its struct has one bare vector member that genuinely needs tight
+substitution and a sibling matrix member that doesn't, and
+unconditionally retyping the already-correctly-placed matrix member
+(from a real `vector<4xf32>` column type to a tight `array<4xf32>`
+one) changed no declared *offset*, but confused
+`CanonicalizeStage.cpp`'s downstream row/component resolution, which
+recognizes a matrix column specifically as a `VectorType`. The
+two-tier retry order fixes this by only ever substituting a member
+that doesn't already fit naturally, confirmed via `git stash`
+bisection against the pre-fix build.
+
+**Verification:**
+- Minimal standalone `feme-opt --feme-convert-spirv-to-llvm` repros
+  for both the array-of-vectors and matrix shapes convert cleanly.
+- New lit tests added to `spirv-to-llvm-stage-io.mlir`: one for a
+  multi-member block with an array-of-vectors member, one for a
+  single-member block with a matrix at an unaligned offset, and one
+  regression guard confirming a matrix member that fits naturally is
+  *not* retyped when a sibling vector member needs the tight
+  substitution.
+- `ninja check-feme`: **2976/2979 Passed**, 3 pre-existing
+  `Unsupported`, 0 `Failed`.
+- `random_geometry.all_instance_array.74` (the regression case):
+  confirmed passing again.
+- `dEQP-VK.transform_feedback.fuzz.*instance_array*` sweep (790
+  cases): **99 Passed / 77 Failed / 614 NotSupported** -- numerically
+  unchanged from the H101h-era baseline. All ~77 `Fail` cases now
+  progress *past* legalization (none crash), but a separate,
+  previously-invisible `CanonicalizeStage.cpp` bug (tracked as H101j)
+  now blocks most of them at pipeline creation with the same
+  `VK_ERROR_INITIALIZATION_FAILED` symptom this milestone's own
+  filing described; 2 cases (`all_instance_array.9`,
+  `all_instance_array.68`) get further, to a wrong-value XFB
+  `Mismatch`, and `random_geometry.all_instance_array.11` gets
+  furthest, to a `JIT session error: Symbols not found:
+  [ spirv_var_46 ]`. The crash this milestone specifically targeted
+  is gone; the overall CTS pass count for this filtered set doesn't
+  move yet -- see H101j.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed (this
+is a compiler correctness fix, not new feature/extension work).
+`FeMeGraphicsDesign.md` needs no update: no design deviation, this
+generalizes an existing documented technique
+(`convertOffsetStructTypeIgnoringDecorations`'s "tight vector" retry)
+to two more member shapes rather than introducing a new one.
