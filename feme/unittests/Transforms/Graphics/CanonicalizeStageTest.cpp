@@ -488,6 +488,78 @@ TEST(CanonicalizeStageTest,
            (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
 }
 
+/// (Roadmap H101h) The same "array of block instances" shape as
+/// `MapsArrayOfBlockInstancesWithSimpleMemberToXfbBufferArrayStride`
+/// above, but with the block's one member a *narrow* (3-wide,
+/// non-power-of-two) vector (`layout(xfb_buffer=0, ...) out Block {
+/// ivec3 var; } block[3];`, the exact shape `dEQP-VK.transform_feedback.
+/// fuzz.instance_array_basic_type.ivec3.{geometry,vertex}` take) rather
+/// than a 4-wide one. `{<3 x i32>}`'s own `DataLayout::
+/// getTypeAllocSize` is 16 (LLVM pads a 3-wide vector up to a 4-wide
+/// SIMD register's worth), but the real SPIR-V-imported array addresses
+/// each instance only 12 bytes apart -- `ivec3`'s own tightly packed
+/// 3-`i32` size, with no trailing padding between instances. Before this
+/// row's own fix, `resolveRowComponent`'s array-peeling loop divided
+/// each instance's own real byte offset (0, 12, 24) by the padded 16
+/// instead of the packed 12, resolving instances 1 and 2 to `Row`s 0 and
+/// 1 respectively instead of 1 and 2 -- instance 2's own store silently
+/// overwrote instance 0's own row instead of landing in its own, exactly
+/// this milestone's own "received a different row's own value" symptom.
+/// Fixed by reusing `getPackedElementSize` (originally added for
+/// `FoldsConstantVertexIndexIntoMultiMemberInterfaceBlockOutputStore`'s
+/// mesh-specific gap, roadmap H6l) for this array-peeling loop's own
+/// `RowSize`, since the same ABI-padding-vs-tight-packing gap turns out
+/// not to be mesh-specific after all.
+TEST(CanonicalizeStageTest,
+    MapsArrayOfBlockInstancesWithNarrowVectorMemberToDistinctRows) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global [3 x { <3 x i32> }], !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store <3 x i32> <i32 1, i32 2, i32 3>, ptr addrspace(8) @block
+      store <3 x i32> <i32 4, i32 5, i32 6>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 12)
+      store <3 x i32> <i32 7, i32 8, i32 9>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 24)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 12}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 3u);
+  EXPECT_EQ(Elt.XfbBufferArrayStride, 1u);
+  ASSERT_TRUE(Elt.XfbBuffer.has_value());
+  EXPECT_EQ(*Elt.XfbBuffer, 0u);
+
+  // Each instance's own store must resolve to its own distinct `Row`
+  // (0, 1, 2) -- not 0, 0, 1, the wrong result `getTypeAllocSize`'s
+  // 16-byte padded stride produced before this fix.
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2}));
+}
+
 /// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
 /// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
 /// instance view a vertex/fragment invocation runs for, readable from
