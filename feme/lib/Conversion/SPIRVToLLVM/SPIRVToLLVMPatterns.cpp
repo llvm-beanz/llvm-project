@@ -4064,35 +4064,45 @@ public:
   }
 };
 
-/// Converts a `spirv.AccessChain` whose base pointer's pointee is a
-/// `spirv::StructType` requiring a leading offset pad (roadmap H6q, see
-/// structHasLeadingOffsetPad/layOutStructIfOffsetsMatch's own comments).
-/// MLIR's own generic `AccessChainPattern` forwards every index straight
-/// through to the converted LLVM struct unmodified -- exactly wrong once
+/// Converts a `spirv.AccessChain` whose base pointer's pointee is (or, per
+/// roadmap H101n, is a single-dimensional array of) a `spirv::StructType`
+/// requiring a leading offset pad (see structHasLeadingOffsetPad/
+/// layOutStructIfOffsetsMatch's own comments). MLIR's own generic
+/// `AccessChainPattern` forwards every index straight through to the
+/// converted LLVM struct unmodified -- exactly wrong once
 /// `layOutStructIfOffsetsMatch`'s own synthetic pad member has shifted
 /// every real member up by one LLVM struct index. This pattern is
 /// otherwise identical to the generic one (same result-type/leading-zero
-/// handling), it just adds `1` to \p Op's own first index -- the one that
-/// selects a member of the leading-pad struct itself -- before forwarding
-/// every subsequent index (navigating whatever that first index selected,
-/// a type this pattern's own leading pad never touches) unchanged.
+/// handling), it just adds `1` to \p Op's own member-selecting index --
+/// the one that selects a member of the leading-pad struct itself, index 0
+/// if that struct sits directly behind the base pointer or index 1 if an
+/// outer array dimension comes first -- before forwarding every
+/// subsequent index (navigating whatever that index selected, a type this
+/// pattern's own leading pad never touches) unchanged.
 ///
-/// Scoped to only the outermost struct a `spirv.AccessChain`'s own base
-/// pointer directly points to, matching every real case in this project's
-/// own test corpus today (a flat push-constant block); a struct member
-/// that is itself a struct independently requiring its own leading pad
-/// would need a similar adjustment at that deeper level too, which this
-/// does not yet attempt (mirroring this file's own precedent elsewhere,
-/// e.g. convertUndersizedScalarArrayMemberIgnoringDecorations's "matching
-/// every real case" scoping, of not generalizing past what is actually
-/// observed).
+/// Scoped to the outermost struct a `spirv.AccessChain`'s own base pointer
+/// directly points to, or (roadmap H101n) to that same struct one level
+/// deeper, behind a single outer array dimension -- GLSL's own "array of
+/// block instances" syntax (`layout(...) out Block { T member; } block[N];`,
+/// e.g. `dEQP-VK.transform_feedback.fuzz.*instance_array*`'s own per-
+/// instance interface blocks) addresses one instance's own member through
+/// exactly that shape: `spirv.AccessChain`'s own first index selects the
+/// array element, its *second* index selects the struct member the leading
+/// pad has shifted. A struct member that is itself a struct independently
+/// requiring its own leading pad, nested more than one level deep, would
+/// need a similar adjustment at that deeper level too, which this does not
+/// yet attempt (mirroring this file's own precedent elsewhere, e.g.
+/// convertUndersizedScalarArrayMemberIgnoringDecorations's "matching every
+/// real case" scoping, of not generalizing past what is actually observed).
 ///
-/// A struct without this shape is left to the generic pattern
+/// A struct (whether pointed to directly or through that one outer array
+/// dimension) without this shape is left to the generic pattern
 /// (`notifyMatchFailure`), so no already-working access chain changes.
-/// Likewise if the first index is not a compile-time constant (always
-/// true for a real struct-member selector per the SPIR-V spec, but
+/// Likewise if the member-selecting index is not a compile-time constant
+/// (always true for a real struct-member selector per the SPIR-V spec, but
 /// declined rather than miscompiled if a malformed module ever violates
-/// that).
+/// that), or if the access chain does not reach far enough to select a
+/// struct member at all (e.g. only selects the whole array element).
 class OffsetStructLeadingPadAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
@@ -4104,13 +4114,28 @@ public:
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     auto PointerType =
         mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
-    auto StructTy =
-        mlir::dyn_cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+    mlir::Type PointeeTy = PointerType.getPointeeType();
+    // `MemberIndexPos` is which of `Op`'s own indices selects the
+    // leading-pad struct's own member -- index 0 if the struct sits
+    // directly behind the base pointer, index 1 if an outer array
+    // dimension (one "array of block instances" element) comes first.
+    unsigned MemberIndexPos = 0;
+    auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(PointeeTy);
+    if (!StructTy) {
+      if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(PointeeTy)) {
+        StructTy =
+            mlir::dyn_cast<mlir::spirv::StructType>(ArrayTy.getElementType());
+        MemberIndexPos = 1;
+      }
+    }
     if (!StructTy || !structHasLeadingOffsetPad(StructTy))
       return Rewriter.notifyMatchFailure(Op, "no leading offset pad");
+    if (Op.getIndices().size() <= MemberIndexPos)
+      return Rewriter.notifyMatchFailure(
+          Op, "access chain does not select a struct member");
 
     std::optional<uint64_t> MemberIndex =
-        getConstantMemberIndex(Op.getIndices().front());
+        getConstantMemberIndex(Op.getIndices()[MemberIndexPos]);
     if (!MemberIndex)
       return Rewriter.notifyMatchFailure(
           Op, "leading struct member selector is not a constant");
@@ -4120,29 +4145,43 @@ public:
     if (!DstType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
-    mlir::Type ElementType = getTypeConverter()->convertType(StructTy);
+    // The GEP's own source element type must match the base pointer's real
+    // (possibly array-wrapping) pointee, not just the inner struct, or its
+    // offset arithmetic would skip the outer array dimension entirely.
+    mlir::Type ElementType = getTypeConverter()->convertType(PointeeTy);
     if (!ElementType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
-    mlir::Type IndexType = Op.getIndices().front().getType();
+    mlir::Type IndexType = Op.getIndices()[MemberIndexPos].getType();
     mlir::Type LLVMIndexType = getTypeConverter()->convertType(IndexType);
     if (!LLVMIndexType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
+    // The constant's own attribute type must be `LLVMIndexType`, not the
+    // original (possibly `si32`-wrapped) SPIR-V `IndexType` -- an
+    // `llvm.mlir.constant`'s attribute and result types must agree exactly.
     mlir::Value Zero = mlir::LLVM::ConstantOp::create(
-        Rewriter, Loc, LLVMIndexType, Rewriter.getIntegerAttr(IndexType, 0));
+        Rewriter, Loc, LLVMIndexType,
+        Rewriter.getIntegerAttr(LLVMIndexType, 0));
     // The synthetic pad occupies LLVM struct index 0, shifting every real
     // member up by one -- see structHasLeadingOffsetPad/
     // layOutStructIfOffsetsMatch's own comment.
-    mlir::Value AdjustedFirst = mlir::LLVM::ConstantOp::create(
+    mlir::Value AdjustedMember = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, LLVMIndexType,
-        Rewriter.getIntegerAttr(IndexType, *MemberIndex + 1));
+        Rewriter.getIntegerAttr(LLVMIndexType, *MemberIndex + 1));
 
     llvm::SmallVector<mlir::Value, 4> Indices;
     Indices.push_back(Zero);
-    Indices.push_back(AdjustedFirst);
-    llvm::append_range(Indices, Adaptor.getIndices().drop_front());
+    if (MemberIndexPos == 1) {
+      // Forward the outer array index unchanged -- the leading pad lives
+      // inside each array element's own struct, not across the array
+      // dimension itself.
+      Indices.push_back(Adaptor.getIndices().front());
+    }
+    Indices.push_back(AdjustedMember);
+    llvm::append_range(Indices,
+                       Adaptor.getIndices().drop_front(MemberIndexPos + 1));
 
     Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
         Op, DstType, ElementType, Adaptor.getBasePtr(), Indices);
