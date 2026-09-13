@@ -40835,3 +40835,91 @@ split into three new roadmap rows:
   stage's own validation runs.
 
 See the roadmap for full descriptions and suggested next steps for each.
+
+## H101p: `SPIRVToLLVMPatterns.cpp`/`CanonicalizeStage.cpp` out-of-order member offset fix
+
+**Problem:** `transform_feedback.fuzz.all_unordered_and_instance_array.*`'s
+26-case `spirv.GlobalVariable` legalization failure -- every failing
+case's own decompiled SPIR-V interface block has at least one member pair
+where the *later*-declared member has a *smaller* `Offset` than an
+earlier-declared one (e.g. `!spirv.struct<(!spirv.matrix<4 x
+vector<2xf32>> [12, RelaxedPrecision], vector<3xsi32> [0,
+RelaxedPrecision])>`), consistent with this test family's own name
+(`all_unordered_and_instance_array`, deliberately emitting members out of
+natural layout order). This is distinct from every previously-fixed
+leading-pad shape (H101k/H101n/H101m), which only ever involved a
+*single* out-of-order gap at the very front, ahead of an otherwise
+naturally-increasing sequence of real members.
+
+**Root cause:** two independent layers both assumed declared member
+index always equals physical (offset-sorted) LLVM struct field index:
+
+1. `SPIRVToLLVMPatterns.cpp`'s `layOutStructIfOffsetsMatch` walked
+   members in raw declared order with a natural-layout cursor that could
+   only ever advance forward, so it failed to legalize a struct type at
+   all once any member's `Offset` was smaller than an earlier-declared
+   sibling's.
+2. `CanonicalizeStage.cpp`'s `TakeBlockPath` per-member loop, and the
+   access-chain pattern's own GEP-index rewriting, both indexed the LLVM
+   struct's field list using the SPIR-V member's *declared* index,
+   producing wrong decorations/GEPs whenever physical and declared order
+   diverged.
+
+**Fix:** generalized `structHasLeadingOffsetPad` and
+`layOutStructIfOffsetsMatch` to lay out and validate struct members in
+ascending-`Offset` (physical) order via a new
+`getOffsetSortedMemberIndices` helper (an `llvm::stable_sort` over member
+indices by `getMemberOffset`), rather than assuming declared order
+already matches physical order. Renamed and generalized
+`OffsetStructLeadingPadAccessChainPattern` to
+`OffsetStructMemberReorderAccessChainPattern`, triggered whenever a
+struct has a leading pad *or* its members are declared out of physical
+order, remapping each declared member index to `(rank within the
+offset-sorted order) + (1 if a leading pad is also present)`.
+
+`CanonicalizeStage.cpp`'s `TakeBlockPath` was restructured into two
+passes: pass 1 walks members in declared order and computes each
+member's true `PhysicalIndex` (via
+`DL.getStructLayout(ST)->getElementContainingOffset` on its
+`XfbOffset`, falling back to the pre-existing leading-pad shift for
+builtins/members without an `XfbOffset`), folding in `WholeVarD`'s
+`Location`/`XfbBuffer`/`XfbOffset`/`XfbStride` exactly as before; pass 2
+`llvm::stable_sort`s the resulting list by `PhysicalIndex` and only then
+calls `addElement`, so declared-order `Location` assignment is preserved
+even though members are visited in physical order.
+
+**Testing:** new unit tests
+`SPIRVToLLVMTest.OutOfOrderOffsetInterfaceBlockLegalizes` and
+`CanonicalizeStageTest.RewritesGenuinelyMultiMemberBlockWithOutOfOrderOffsets`,
+both against the `mat4x2@12, ivec3@0` shape from
+`all_unordered_and_instance_array.40` (the real driver's exact output
+shape, confirmed against a hand-verified ground-truth `feme-opt` repro).
+All 17 `FeMeConversionSPIRVToLLVMTests` and all 85
+`FeMeTransformsGraphicsTests` pass.
+
+**Verified against the real CTS:** an isolated (one `deqp-vk` invocation
+per case) sweep of both stage variants of
+`all_unordered_and_instance_array.{0..99}` (200 cases) shows 24 Passed/11
+Failed/164 NotSupported/1 Crash. No case fails due to *pure*
+member-offset reordering anymore. Of the 11 remaining failures: 4 (cases
+`.2`/`.39`, both stages) fail legalization for a genuinely distinct
+reason -- a nested single-member struct member, not pure reordering,
+broken out as a new roadmap row **H101s**; 6 (cases
+`.27`/`.51`/`.66`/`.77`) now progress past legalization into the
+already-filed **H101r** row/component-out-of-range bucket; 1 (`.66`,
+geometry only) hits the pre-existing, unrelated heap-corruption crash
+noted in H101n/H101o's own closing notes. Full `check-feme` (2986/2989, 3
+pre-existing `Unsupported`, 0 `Failed`, +2 test count from the two new
+unit tests) passes with 0 regressions.
+
+**Note on process:** partway through this session, an attempt to run
+`clang-format -i` on the touched files reformatted far more than the
+intended edits (an ~868-line diff on files with maybe 150 lines of real
+changes), and a subsequent `git checkout -- <files>` used to back out of
+that mistake also discarded *all* other uncommitted work on those files
+-- both this session's fix and a `CanonicalizeStage.cpp` fix from an
+earlier session that had never actually been committed. The fix was
+recovered by manually re-applying the same edits (their exact text was
+still visible in this conversation's own history) and re-verified from
+scratch (unit tests, real CTS, `check-feme`) to confirm the recreation
+was faithful. See `agent_thoughts.md` for the full account.

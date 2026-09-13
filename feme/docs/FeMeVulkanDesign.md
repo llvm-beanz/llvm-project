@@ -1297,6 +1297,37 @@ and shift by one whenever indexing into the real, still-padded LLVM
 struct's own field list, while keeping every *real*-member-indexed lookup
 (decorations, per-member `IDs`) unshifted.
 
+Roadmap H101p: every leading-pad shape above (H6q/H101n/H101m) shares one
+assumption -- a struct's members are declared in the *same relative
+order* as their physical byte offsets, with at most one gap, always at
+the very front. `all_unordered_and_instance_array`'s fuzzer-generated
+shaders break this assumption directly: a block's members can be declared
+in an order that does not match ascending `Offset` at all (e.g. a matrix
+at byte 12 declared *before* a vector at byte 0), with no single "pad"
+concept applicable. `layOutStructIfOffsetsMatch`'s layout cursor, which
+can only ever advance forward, failed to legalize such a struct at all.
+Generalized `structHasLeadingOffsetPad` and `layOutStructIfOffsetsMatch`
+to lay out and validate members in ascending-`Offset` (physical) order via
+a new `getOffsetSortedMemberIndices` helper (`llvm::stable_sort` by
+`getMemberOffset`), rather than assuming declared order already matches
+physical order. Renamed and generalized
+`OffsetStructLeadingPadAccessChainPattern` to
+`OffsetStructMemberReorderAccessChainPattern`, now triggered whenever a
+struct has a leading pad *or* its members are declared out of physical
+order (not just the single-leading-gap case), remapping each declared
+member index to its rank within the offset-sorted order (plus one, if a
+leading pad is *also* present). `CanonicalizeStage.cpp`'s `TakeBlockPath`
+needed a matching generalization beyond H101m's own single `+1`/`-1`
+shift: it now computes each member's true physical LLVM field index via
+`DL.getStructLayout(ST)->getElementContainingOffset` on the member's own
+`XfbOffset` in a first, declared-order pass, then visits members in a
+second, physical-order (`llvm::stable_sort`-ed) pass when calling
+`addElement` -- so `Location` assignment (which must follow declared
+order) and per-member decoration/type lookups (which must follow physical
+order) can both be correct simultaneously, something no single linear
+walk in either order alone can achieve once reordering is arbitrary
+rather than a single fixed shift.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,
