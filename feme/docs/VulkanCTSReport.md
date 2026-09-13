@@ -40096,3 +40096,85 @@ milestones:**
 change: nothing about supported features or extensions changed (this
 is a compiler/executor correctness fix, not new feature/extension
 work). `FeMeGraphicsDesign.md` needs no update: no design deviation.
+
+## H101h: array-of-block-instances "off-by-one row" fix (ABI-padded stride)
+
+**Target cases:** `dEQP-VK.transform_feedback.instance_array_basic_type.
+{ivec3,mat2,mat2x3,mat3,mat3x2,mat3x4,mat4x2,mat4x3,uvec3,vec3}.
+{vertex,geometry}` (20 cases, from H101g's own closing note).
+
+**Symptom:** each case compiled, pipeline-created, and ran to
+completion, but captured a *different row's* own value rather than
+garbage or a crash -- e.g. `ivec3.geometry`: `Mismatch at offset 0
+expected -89 received -60` (`-60` being instance 1's own first
+component, not instance 0's).
+
+**Root cause:** `CanonicalizeStage.cpp`'s `resolveRowComponent`
+array-peeling loop computed its per-array-element `RowSize` via
+`DataLayout::getTypeAllocSize`, which reports an ABI-padded size --
+16 bytes for a `{<3 x i32>}` array element (LLVM rounds a 3-wide
+vector up to a 4-wide SIMD register's worth) -- rather than the
+tightly-packed stride the SPIR-V-to-LLVM conversion actually bakes
+into the array's own constant GEP byte offsets (12 bytes for the same
+element). Dividing a real byte offset (0, 12, 24) by the wrong, larger
+stride (16) computed wrong array indices (0, 0, 1) instead of the
+correct (0, 1, 2), so instance 2's own store silently overwrote
+instance 0's own row, and instance 1's own store landed on instance
+0's own row too -- exactly the observed "different row's own value"
+symptom. Every one of this row's 10 named shapes shares the property
+that its ABI alloc size (rounded to a power-of-two SIMD width or a
+16-byte struct alignment) overstates its real packed size: 3-component
+vectors (`ivec3`/`uvec3`/`vec3`) and non-square matrices (`mat2x3`,
+`mat3x2`, `mat3x4`, `mat4x2`, `mat4x3`) plus even the square `mat2`/
+`mat3` (whose own row type is itself a narrow vector).
+
+**Diagnostic technique:** confirmed via a novel runtime-tracing
+technique developed this session: a JIT-injected debug callback
+registered as an `orc::absoluteSymbols` entry directly in
+`CompiledStage.cpp` (gated behind a throwaway env var), since the CPU
+JIT's `orc::LLJIT` resolves no arbitrary process symbols by default
+and `libfeme_vulkan.so`'s own `LLVM_EXPORTED_SYMBOL_FILE` further
+restricts what's callable from JIT'd code -- even a plain
+`visibility("default"))` function is not resolvable without this. The
+resulting trace captured the actual `(Row, Component, Lane, Mask,
+Address, Value)` tuple at every one of the compiled wrapper's 36
+lane-store executions and showed the `Row` argument itself, not any
+downstream address/lane arithmetic, was wrong at the source -- ruling
+out `StageStorage.cpp`'s layout math, `Executor.cpp`'s buffer
+routing/reconstruction, and a standard LLVM optimizer-pass miscompile
+(confirmed identical wrong output at `CodeGenOptLevel::None`) along
+the way.
+
+**Fix:** renamed the existing `getPackedMeshElementSize` helper
+(originally added only for a mesh entry's own per-vertex/
+per-primitive output array, roadmap H6l) to `getPackedElementSize` and
+reused it for `resolveRowComponent`'s own `RowSize`, since the same
+ABI-padding-vs-tight-packing gap turns out not to be mesh-specific
+after all. Corrected that helper's own stale doc comment, which had
+incorrectly claimed `resolveRowComponent` "has no equivalent
+trailing-alignment gap to correct for" -- a claim a prior session's
+own (mistaken) debug-print reading had left unchallenged.
+
+**Verification:**
+- All 20 originally-failing cases (10 shapes * `{vertex,geometry}`)
+  now pass outright.
+- New unit test
+  `CanonicalizeStageTest.MapsArrayOfBlockInstancesWithNarrowVectorMemberToDistinctRows`
+  passes; full `FeMeTransformsGraphicsTests` passes.
+- `dEQP-VK.transform_feedback.fuzz.*instance_array*` sweep (790
+  cases): **99 Passed / 77 Failed / 614 NotSupported**, up from
+  H101g's own closing 87 Passed / 89 Failed / 614 NotSupported --
+  net +12 passed, -12 failed, 0 regressions (matching exactly the 12
+  shapes this row targeted; the remaining 77 failures are all in the
+  unrelated `random_geometry`/`random_vertex` fuzz families H101i
+  already tracks, confirmed by name against that milestone's own
+  case list).
+- `ninja check-feme`: **2976/2979 Passed**, 3 pre-existing
+  `Unsupported`, 0 `Failed` (+1 test count from the new unit test).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed (this
+is a compiler correctness fix, not new feature/extension work).
+`FeMeGraphicsDesign.md` needs no update: no design deviation, this
+generalizes an existing documented technique (`getPackedMeshElementSize`)
+to a second call site rather than introducing a new one.
