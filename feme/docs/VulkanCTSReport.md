@@ -40470,3 +40470,113 @@ change: this is a compiler correctness fix, not new feature/extension
 work. No `FeMeGraphicsDesign.md` deviation: this fix corrects an
 existing mechanism's own bookkeeping, introducing no new design
 concept beyond what H101g/h/i/j already documented.
+
+## H101l: `CanonicalizeStage.cpp` missing-whole-variable-`XfbOffset` fold-in fix
+
+**Symptom:** `dEQP-VK.transform_feedback.fuzz.{random_geometry,
+random_vertex}.all_instance_array.11` (and, it turned out, 4 further
+cases in the same family) now compiled, pipeline-created, and ran to
+completion after H101k's own fix, but failed with a wrong-value XFB
+`Mismatch at offset 0 expected -89 received 1096810496` -- the
+received 32-bit pattern bit-for-bit equals `14.0f`, the very first
+captured float of this shader's *other*, sibling XFB-captured block.
+
+**Root cause:** SPIR-V decoration code 35 ("Offset") is overloaded --
+on a struct *member* it is that member's own byte offset within the
+struct; on a whole *variable*, `VK_EXT_transform_feedback` reuses the
+same code to mean `XfbOffset`. glslang's own SPIR-V codegen, for a
+GLSL block whose declared `xfb_offset` reduces to exactly one real
+member after conversion, encodes that value **only** as the member's
+own `Offset` decoration (`feme.spirv.MemberDecorations` metadata) --
+it does not additionally repeat it at the whole-variable level
+(`spirv.Decorations` metadata) the way it always does for
+`XfbBuffer`/`XfbStride`/`Location`. `CanonicalizeStage.cpp`'s
+`addElements`' plain (non-`TakeBlockPath`) path -- the path reached
+for exactly this single-real-member array-of-block-instances shape
+since H101k's own fix -- only ever read the whole-variable's own
+`spirv.Decorations` for `D.XfbOffset`, so it silently saw
+`std::nullopt`/0 for any such block whose true offset was nonzero.
+This captured the affected element at byte offset 0 within its shared
+`XfbBuffer`, colliding with and overwriting a sibling element's own
+genuinely-offset-0 data -- exactly matching the observed symptom.
+This was masked until now because every previously-tested
+single-real-member array-of-block-instances shape (H101g/h/i/j/k)
+happened to declare `xfb_offset = 0`, making the missing fold-in a
+no-op.
+
+**Fix:** in the plain-path branch of `addElements`, fold
+`PeekedMemberDecorations.lookup(0).XfbOffset` into `D.XfbOffset`
+whenever the whole-variable decoration itself lacks one. This reuses
+the already-computed `PeekedMemberDecorations` map (built earlier in
+the same loop iteration, before the `TakeBlockPath` boolean is even
+computed, and never consumed by the plain path since that only
+happens inside the `TakeBlockPath == true` branch which `continue`s)
+-- mirroring `TakeBlockPath`'s own analogous per-member `XfbOffset`
+synthesis, just applied to `D` directly since there is only one
+member to fold in.
+
+**Debugging technique (reused from H101k):** `deqp-vk
+--deqp-log-shader-sources=enable --deqp-log-decompiled-spirv=enable`
+extracted this case's GLSL source directly from the `.qpa` log,
+revealing two sibling XFB-captured blocks sharing one `XfbBuffer` at
+different `XfbOffset`s. Reading CTS's own
+`vktTransformFeedbackFuzzLayoutCase.cpp` (`computeXfbLayout`)
+confirmed the CTS harness itself assigns each block-array instance to
+its own buffer (validating the pre-existing
+`XfbBufferArrayStride`/per-instance-buffer-routing design), narrowing
+the search to `CanonicalizeStage.cpp`'s own `D.XfbOffset`
+computation.
+
+**Testing:**
+- New unit test
+  `FoldsMemberOffsetIntoXfbOffsetForArrayOfBlockInstances` added to
+  `CanonicalizeStageTest.cpp`, asserting the folded-in
+  `SignatureElement::XfbOffset` value directly (44, not 0) for a
+  minimal single-real-member block whose whole-variable decoration
+  lacks `XfbOffset`. `FeMeTransformsGraphicsTests`: 82/82 passed.
+- `check-feme`: 2981/2984 passed (3 pre-existing `Unsupported`, 0
+  `Failed`).
+- `random_geometry.all_instance_array.11` and
+  `random_vertex.all_instance_array.11` (target cases): confirmed
+  **Pass** outright (previously `Fail (Mismatch)`).
+- A pre-existing, order-sensitive heap-corruption crash
+  (`corrupted double-linked list`) was discovered mid-sweep on
+  `nested_structs_instance_arrays.45` (immediately after case `.44`'s
+  own, unrelated `Mismatch` fail) while gathering full-sweep numbers.
+  Bisected via `git stash` (rebuilding and re-running the exact same
+  two-case sequence against the pre-H101l binary): the crash
+  reproduces **identically with or without this fix**, confirming it
+  is entirely pre-existing and unrelated. Filed separately as roadmap
+  H101n rather than blocking this milestone's closeout.
+- `dEQP-VK.transform_feedback.fuzz.*instance_array*` sweep, excluding
+  the two crash-triggering cases (788 of 790 cases): 114 Passed / 60
+  Failed / 614 NotSupported, versus H101k's own closing count of 108
+  Passed / 68 Failed / 614 NotSupported on the full 790 -- a net +6
+  over the comparable 788-case basis (the 2 targeted cases, plus 4
+  more in the same `all_instance_array` family sharing the same
+  missing-fold-in root cause). The remaining 60 failures (plus the
+  H101n crash) are unrelated, pre-existing symptom families already
+  tracked under H101m.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a compiler correctness fix, not new feature/extension
+work. No `FeMeGraphicsDesign.md` deviation: this fix corrects an
+existing mechanism's own bookkeeping.
+
+## H101n (filed, not yet fixed): pre-existing order-sensitive heap-corruption crash
+
+**Symptom:** `dEQP-VK.transform_feedback.fuzz.random_geometry.
+nested_structs_instance_arrays.45` (and its `random_vertex` sibling)
+reproducibly crashes glibc's malloc consistency check
+(`corrupted double-linked list`, `SIGABRT`) when run immediately
+after case `.44`'s own (pre-existing, unrelated) `Mismatch` fail, in
+the same `deqp-vk` process. Case `.45` does **not** crash when run in
+isolation -- it instead fails cleanly with the pre-existing,
+already-cataloged `si32`/`i32` legalization error (part of H101m's
+own 28-case bucket).
+
+**Status:** discovered and confirmed pre-existing (via `git stash`
+bisection against the pre-H101l binary) during H101l's own closing
+regression sweep; not yet triaged or fixed. Not caused by, or
+affected by, the H101l fix. See roadmap H101n for the full
+description and suggested next steps.
