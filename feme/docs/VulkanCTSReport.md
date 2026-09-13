@@ -41163,3 +41163,50 @@ NotSupported (a legitimate device-limit gate, e.g.
 crashes, in both isolated and non-isolated runs. This closes out this
 milestone's entire multi-session `*instance_array*` investigation
 (H101a through H101t) with a fully clean sweep.
+
+## H101c, H101d, H101e, H101f: closed with no new code change -- the entire H101 milestone is now complete
+
+Continuing this project's own recently-established discipline
+("re-triage against the current binary before investigating a filed
+bug"), all four remaining open H101 rows were re-checked before any new
+investigation:
+
+- **H101c** (`compute_shader_derivatives.compute.verify_ndx.linear.
+  128_1_1`'s GEP-operand-type legalization failure): now **Pass**es.
+  Full non-isolated batch run of the entire `compute_shader_derivatives`
+  family (549 cases, `compute`/`mesh`/`task` variants): 549/549 Pass.
+- **H101d** (`tessellation.misc_draw.switch_domain_origin_lower_left_
+  to_upper_left`'s `SIGSEGV`): now **Pass**es, no crash. Full batch run
+  of the entire `tessellation.misc_draw` group (109 cases, the same
+  group this row's own "176 crashes" count referred to): 109/109 Pass.
+- **H101e** (`mixed_relaxed_precision_operands`'s GEP "Not
+  byte-addressable" assertion): now **Pass**es, no assertion.
+- **H101f** (`graphicsfuzz.arr-value-set-to-arr-value-squared`'s
+  unconditional hang): now completes and **Pass**es well within the
+  20-second timeout that previously never returned.
+
+None of these four was bisected to a specific prior fix -- each was
+simply re-run and found already passing. The most likely explanation is
+the same one this session's earlier H101q/H101r/H101o/H101i closures
+already demonstrated: this milestone's many `CanonicalizeStage.cpp`/
+`SPIRVToLLVMPatterns.cpp` legalization and offset-resolution fixes
+(H101i through H101t) had a wide blast radius across many superficially
+unrelated shader shapes, several of which happened to also touch these
+four rows' own GEP/pointer-typing/control-flow code paths.
+
+`check-feme`: 2990/2993, 3 pre-existing `Unsupported`, 0 `Failed`, 0
+regressions (rebuilt fresh this session; no source change).
+
+**The entire H101 milestone (H101 itself, plus every H101a-H101t
+sub-row) is now struck through on the roadmap.** What began as four
+newly-found crash signatures has, across many sessions, been fully
+triaged and closed -- some via direct code fixes (H101a/g/h/j/k/l/m/n/
+o/p/s/t), some closed by re-triage alone once an earlier row's fix
+turned out to cover their own symptom too (H101b/i/q/r, and now this
+session's c/d/e/f). One small, purely cosmetic gap remains
+intentionally unaddressed and unfiled as its own row (noted under
+H101e's own closing text above): `spirv.AccessChain`'s pretty assembly
+format cannot round-trip a zero-length `$indices` operand list through
+hand-written MLIR text. It blocks nothing today (real zero-index access
+chains only arise via binary SPIR-V deserialization) and is left for
+whoever next touches `SPIRVMemoryOps.td`.
