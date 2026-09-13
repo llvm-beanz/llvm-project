@@ -1253,6 +1253,28 @@ laid out this way, so every downstream consumer (including
 `SPIRVPushConstantLoweringPass` above, unmodified) still sees the correct
 absolute byte offset.
 
+Roadmap H101n: the same leading-pad shape also arises one level deeper --
+GLSL's "array of block instances" syntax (`layout(...) out Block { T
+member; } block[N];`) addresses one instance's own member through an
+*outer* array dimension ahead of the leading-pad struct itself, which
+`OffsetStructLeadingPadAccessChainPattern` originally did not recognize at
+all (only a struct sitting directly behind the base pointer, a
+push-constant block's own shape): every such store's constant-folded GEP
+silently addressed the *pad* itself (LLVM field 0) rather than the real
+member (field 1), since the generic `AccessChainPattern` it fell back to
+has no notion of the pad's own shift. Extended to also recognize an outer
+`spirv::ArrayType` of such a struct, shifting the array access chain's
+*second* index (its member selector) instead of its first (the array
+index, left unchanged). Beyond the access-chain fix itself,
+`CanonicalizeStage.cpp`'s own `resolveStageIOAccess` needed a matching
+`remapByteOffsetPastLeadingPad` to translate a real, still-padded byte
+offset (`k * RealStride + Gap` for instance `k`) into its pad-stripped
+equivalent (`k * PackedStride`) before resolving it against
+`getEffectiveStageIOValueType`'s own pad-free type -- without it, a real
+offset divided directly by the packed per-row size resolved every
+instance past the first to a wildly out-of-range `Row`, corrupting host
+memory beyond `StageStorage.cpp`'s own allocated bounds for that element.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

@@ -40563,20 +40563,173 @@ change: this is a compiler correctness fix, not new feature/extension
 work. No `FeMeGraphicsDesign.md` deviation: this fix corrects an
 existing mechanism's own bookkeeping.
 
-## H101n (filed, not yet fixed): pre-existing order-sensitive heap-corruption crash
+## H101n: `SPIRVToLLVMPatterns.cpp`/`CanonicalizeStage.cpp` array-of-instances leading-pad fix (heap corruption)
 
 **Symptom:** `dEQP-VK.transform_feedback.fuzz.random_geometry.
 nested_structs_instance_arrays.45` (and its `random_vertex` sibling)
-reproducibly crashes glibc's malloc consistency check
+reproducibly crashed glibc's malloc consistency check
 (`corrupted double-linked list`, `SIGABRT`) when run immediately
 after case `.44`'s own (pre-existing, unrelated) `Mismatch` fail, in
-the same `deqp-vk` process. Case `.45` does **not** crash when run in
-isolation -- it instead fails cleanly with the pre-existing,
+the same `deqp-vk` process. Case `.45` did not crash when run in
+isolation -- it instead failed cleanly with the pre-existing,
 already-cataloged `si32`/`i32` legalization error (part of H101m's
 own 28-case bucket).
 
-**Status:** discovered and confirmed pre-existing (via `git stash`
-bisection against the pre-H101l binary) during H101l's own closing
-regression sweep; not yet triaged or fixed. Not caused by, or
-affected by, the H101l fix. See roadmap H101n for the full
+**Root cause (two compounding bugs), found with `valgrind
+--tool=memcheck --track-origins=yes` (installed this session; not
+previously present):** running just the `.44`+`.45` pair under
+valgrind did not reproduce the crash itself (a heap-layout-sensitive
+heisenbug valgrind's own allocator masks), but memcheck's own
+instrumentation caught the real, underlying invalid write directly: a
+4-byte write exactly at the end of a 44-byte `feme::graphics::
+buildStageStorage`-allocated buffer, during case `.44`'s own draw
+(not `.45`'s).
+
+Case `.44`'s geometry shader has `layout(xfb_offset = 32) out BlockC
+{ int b; } blockC[3];` -- GLSL's "array of block instances" syntax
+combined with H101k/H101l's own "leading `[N x i8]` pad" shape
+(`layOutStructIfOffsetsMatch`, `SPIRVToLLVMPatterns.cpp`), making
+each instance a 36-byte `{ [32 x i8], i32 }` at the LLVM level. Built
+a standalone `feme-translate --import-spirv`/`feme-opt
+--feme-convert-spirv-to-llvm` repro of this exact shader (mirroring
+H101a's own JIT-bypass technique) to inspect the real LLVM IR:
+
+1. **`OffsetStructLeadingPadAccessChainPattern`
+   (`SPIRVToLLVMPatterns.cpp`)** only ever recognized a leading-pad
+   struct sitting *directly* behind an `spirv.AccessChain`'s own base
+   pointer (a push-constant block's own shape) -- an *array* of such
+   structs fell through to the generic `AccessChainPattern`, which
+   forwards every index unmodified, so every `blockC[k].b` store's
+   constant-folded GEP addressed byte `k * 36 + 0` (the *pad*)
+   instead of `k * 36 + 32` (the real member). Confirmed directly:
+   the repro's real LLVM IR showed `store i32 -31, ... @spirv_var_4`
+   (byte 0), `store i32 68, ... getelementptr(..., i64 36)` (byte
+   36), etc., rather than bytes 32/68/104.
+2. While fixing (1), also fixed a **pre-existing, always-latent**
+   sibling bug it exposed: the pattern's own `llvm.mlir.constant` for
+   its member-index constant used the access chain's original,
+   possibly `si32`-wrapped `IndexType` for the constant's own
+   attribute, rather than the converted plain-`i32` `LLVMIndexType`
+   -- a mismatch this project's entire pre-existing test corpus
+   happened never to trigger, since every prior leading-pad case used
+   a plain `i32` index (only reached once (1)'s fix let the array
+   case's own `si32`-typed index reach this code path for the first
+   time).
+3. Even once (1)+(2) correctly addressed byte `k * 36 + 32`,
+   `CanonicalizeStage.cpp`'s `resolveStageIOAccess` was only ever
+   handed `getEffectiveStageIOValueType`'s own pad-*stripped* `[3 x
+   i32]` type (12 bytes total) to resolve that same *real*,
+   still-36-bytes-per-instance byte offset against --
+   `resolveRowComponent`'s array-peeling loop divided the real offset
+   directly by the packed 4-byte row size, computing `Row`s 8, 17,
+   26 instead of 0, 1, 2 -- hugely out of range for `RowCount == 3`,
+   and the actual root cause of the out-of-bounds `buildStageStorage`
+   write valgrind found.
+
+**Fix:**
+1. Extended `OffsetStructLeadingPadAccessChainPattern` to also
+   recognize an outer `spirv::ArrayType` of a leading-pad struct,
+   shifting the array access chain's *second* index (the member
+   selector) by one instead of its first (the array index, left
+   unchanged) -- using the same `getPackedElementSize`/`+1`-shift
+   mechanism the direct-struct case already used.
+2. Fixed the sibling `llvm.mlir.constant` attribute-type bug by
+   building both constants' attributes from `LLVMIndexType`, not the
+   original `IndexType`.
+3. Added `remapByteOffsetPastLeadingPad` in `CanonicalizeStage.cpp`,
+   translating a real, still-padded byte offset (`k * RealStride +
+   Gap`) into its pad-stripped equivalent (`k * PackedStride`) before
+   `resolveOffsetWithinElement` sees it -- using `getPackedElementSize`
+   (not `DataLayout::getTypeAllocSize`) for both the real struct's own
+   per-instance stride and the pad's own size, matching H101h's own
+   "tightly packed, not ABI-aligned" stride precedent. Wired into
+   `resolveStageIOAccess` only for the genuine array-of-instances
+   case (a lone leading-pad instance needs no remapping at all, since
+   `resolveRowComponent`'s own loop stops immediately, without ever
+   dividing `Residual`, whenever the element's declared type already
+   matches the store's own value type exactly).
+
+**Debugging technique (new, reusable):** `valgrind --tool=memcheck`
+found the real out-of-bounds write directly, even though it could not
+reproduce the crash itself. Constructing a minimal, standalone SPIR-V
+assembly repro by hand (matching a CTS case's own decompiled SPIR-V
+exactly) and running it through `feme-translate --import-spirv` →
+`feme-opt --feme-convert-spirv-to-llvm` → `feme-translate
+--spirv-to-llvmir` gave a clean, JIT-independent, step-by-step view of
+exactly what LLVM type/GEP/byte-offset shape `CanonicalizeStage.cpp`
+sees for a given SPIR-V shape -- far more reliable than manual
+reasoning about the type-conversion rules from source alone, and
+directly falsified an initial (wrong) manual trace that had assumed a
+4-byte-per-instance layout instead of the real 36-byte one.
+
+**Testing:**
+- New lit test `spirv-to-llvm-array-of-blocks-leading-gap.mlir`
+  (`feme/test/Conversion/SPIRVToLLVM/`), covering the array-of-blocks
+  leading-pad access-chain shape directly. Full `Conversion/
+  SPIRVToLLVM` lit suite: 81/81 passed.
+- New unit test
+  `MapsArrayOfBlockInstancesWithLeadingPadScalarMemberToDistinctRows`
+  added to `CanonicalizeStageTest.cpp`, covering the exact scalar-
+  member shape and asserting distinct, in-range `Row`s (0, 1, 2).
+  `FeMeTransformsGraphicsTests`: 83/83 passed.
+- `check-feme`: 2983/2986 passed (3 pre-existing `Unsupported`, 0
+  `Failed`).
+- `nested_structs_instance_arrays.44`/`.45` (both `random_geometry`
+  and `random_vertex`): `.44` now **Passes** outright (previously a
+  pre-existing, separately-cataloged `Mismatch`, fixed as a side
+  effect of the corrected byte-offset math); `.45` fails cleanly with
+  its own already-cataloged, unrelated `si32`/`i32` pipeline-creation
+  error (H101m's own bucket) whether run in isolation or immediately
+  after `.44` -- confirmed via `strace`-free exit-code inspection
+  (134/139 vs. 0/1) that the crash itself is gone, not merely masked.
+- **A second, distinct heap-corruption family was newly exposed** by
+  the attribute-type fix in step 2 above, which let several
+  previously-hard-legalization-error-blocked cases (part of H101m's
+  28-case bucket) progress much further than before:
+  `all_instance_array.12`/`.61` and `basic_instance_arrays.15`/`.30`
+  now legalize and run, but corrupt heap state during their own draw
+  the same way `.44` used to. Confirmed, via `git stash` bisection
+  rebuilding the pre-fix binary, that these specific cases previously
+  failed earlier and more cleanly (the `si32`/`i32` legalization
+  error itself) -- this corruption is pre-existing but was entirely
+  unreachable before this fix, not a regression it introduced. Filed
+  separately as roadmap H101o rather than blocking this milestone's
+  closeout, since the trigger shape (a *lone*, non-array-of-instances
+  leading-pad struct whose one real member is a matrix) is distinct
+  from this row's own array-of-instances shape.
+- A `dEQP-VK.transform_feedback.fuzz.*instance_array*` sweep,
+  excluding the 4 newly-found H101o corruption triggers (786 of 790
+  cases): 116 Passed / 56 Failed / 614 NotSupported.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a compiler correctness fix, not new feature/extension
+work. `FeMeVulkanDesign.md` updated (H6q's own section extended) to
+document the array-of-instances extension to
+`OffsetStructLeadingPadAccessChainPattern` and the new
+`remapByteOffsetPastLeadingPad` helper.
+
+## H101o (filed, not yet fixed): newly-reachable heap corruption for a lone leading-pad struct with a matrix member
+
+**Symptom:** newly exposed once H101n's own `si32`-vs-`i32`
+attribute-type fix let several previously-hard-legalization-error-
+blocked cases (part of H101m's own 28-case bucket) progress much
+further than before: `all_instance_array.12`, `.61`, `basic_
+instance_arrays.15`, `.30` now legalize and run, but corrupt heap
+state during their own draw, crashing a later, unrelated case in the
+same `deqp-vk` process (e.g. `.12`'s own corruption surfaces on
+`.14`, two cases downstream, which fails `NotSupported` cleanly when
+run in isolation).
+
+**Status:** discovered during H101n's own closing regression sweep;
+confirmed pre-existing but previously unreachable (via `git stash`
+bisection against the pre-H101n binary, where these cases failed
+earlier and more cleanly at the `si32`/`i32` legalization error
+itself) -- not a regression from H101n's own fix. `all_instance_
+array.12`'s own decompiled SPIR-V shows the trigger shape: a
+single-member `OpTypeStruct` (not array-wrapped) whose one real
+member is a `mat3x3`, addressed via a single `OpAccessChain` (member
+index 0) and stored as one whole-matrix `OpStore` -- distinct from
+H101n's own array-of-instances shape (no outer array index at all
+here). Not yet triaged or fixed. See roadmap H101o for the full
 description and suggested next steps.
+
