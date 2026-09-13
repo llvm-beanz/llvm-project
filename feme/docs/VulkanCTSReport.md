@@ -39874,3 +39874,132 @@ out as new roadmap row H101f.
 change: nothing about supported features or extensions changed (this
 is a compiler correctness fix, not new feature/extension work).
 `FeMeGraphicsDesign.md` needs no update: no design deviation.
+
+## Roadmap H101b: measured impact (fixed; two heap-corruption crashes newly exposed and also fixed)
+
+**Root cause:** `feme.spirv.MemberDecorations` metadata was never
+attached to a plain (non-builtin), multi-member XFB-captured interface
+block. `buildMemberDecorationTuple` (SPIRVToLLVMPatterns.cpp)
+recognized `BuiltIn`/`Location`/`Component`/`Index`/interpolation
+flags/`PerPrimitiveEXT`, but such a block's members carry only
+`RelaxedPrecision`+`Offset` -- and MLIR's own `spirv::StructType`
+tracks `Offset` as a distinct first-class `OffsetInfo` field, never
+surfacing it through the generic `MemberDecorationInfo` list
+`buildMemberDecorationTuple` reads at all (confirmed via
+`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVTypes.h`). Without that
+metadata, `CanonicalizeStage.cpp`'s `addElements` never decomposed the
+block per-member, so every member's byte offset collapsed onto the
+same shadow alloca in `resolveOffsetWithinElement`/`resolveRowComponent`,
+producing an address-escaping, non-promotable alloca that crashed
+`PromoteMem2Reg`'s own `isAllocaPromotable(AI)` assertion.
+
+**Fix (three cooperating layers):**
+1. `buildMemberDecorationsAttr` now unconditionally synthesizes a
+   `(35 /*Offset*/, memberOffset)` tuple per member whenever the
+   struct `hasOffset()`, so the metadata attribute is never empty for
+   a genuinely multi-member, explicitly-offset-laid-out struct
+   regardless of what else is decorated.
+2. `CanonicalizeStage.cpp`'s `addElements` block-decomposition branch
+   now also reads the whole-variable's own `spirv.Decorations` and,
+   per member lacking a `BuiltIn`, synthesizes `Location` (sequential,
+   base + running consumed-location counter), `XfbBuffer`/`XfbStride`
+   (inherited), and `XfbOffset` (whole-variable's own base plus the
+   member's own relative `Offset` -- SPIR-V decoration code 35 means
+   different things on a member vs. a whole variable, but
+   `parseSPIRVDecorations` already maps both to `XfbOffset`). Guarded
+   by `!MemberD.BuiltIn` so an existing builtin block's own member
+   construction (e.g. `gl_PerVertex`) is completely untouched.
+3. `captureTransformFeedback` (`Executor.cpp`) gained a `Row` loop
+   over `Elt->RowCount`; it previously only ever captured `Row=0`,
+   silently dropping every other row of a per-member element with
+   `RowCount>1` -- newly possible now that per-member decomposition
+   actually produces one (e.g. an array-typed captured member).
+
+**Two further bugs, exposed only because this fix let more pipelines'
+creation succeed for the first time, fixed alongside it:**
+- `validateStageInterfaces`/`executeDraws` both unconditionally
+  required a 4-component `SV_Position` output, even for a
+  rasterizer-discard-enabled (fragment-less, pure-XFB-capture)
+  pipeline. Fixed by threading a new `RasterizerDiscardEnable` bool
+  through `validateStageInterfaces`/`compileAndValidateStages`/
+  `executeDraws`'s early check, mirroring the existing
+  `GeometryNeverWrites`/`GSEmitsWithoutAttributes` precedent
+  (roadmap H5e-b/H21d).
+
+**Verification of the original target:**
+`dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_array.75`
+now passes outright (previously crashed).
+
+**Second crash found and fixed by this row's own regression sweep:**
+a broader sweep of `transform_feedback.fuzz.random_geometry.*` (850
+cases) turned up a `double free or corruption (!prev)` heap-corruption
+abort on `all_unordered_and_instance_array.28`; a subsequent full
+`transform_feedback.*` sweep (133,719 cases) found the same signature
+on `instance_array_basic_type.mat4.geometry`. Both confirmed, via a
+stashed-diff before/after rebuild, to be newly exposed by this row's
+own `RasterizerDiscardEnable` relaxation (both cases previously failed
+cleanly at pipeline creation for the unrelated `SV_Position` reason,
+never reaching draw execution), not caused by anything else in this
+fix. `gdb` confirmed both crash inside `StageStorage`'s own destructor,
+consistent with an earlier out-of-bounds write.
+
+**Root cause of the second crash:** `getStageIORowShape` only ever
+peeled *one* single-member-struct layer and *one* array layer. A
+genuine *array-of-block-instances* shape whose one member is itself a
+matrix or vector (GLSL's own `layout(...) out Block { mat4 var; }
+block[3];` syntax for 3 independently-XFB-captured streams sharing one
+interface-block type) left an unresolved, still-aggregate "leaf" type
+after only one peel of each kind, silently defaulting to
+`ComponentCount=1` with a bogus `Scalar` type and drastically
+under-sizing the element's storage relative to what the compiled
+stores actually write into it.
+
+**Fix:** made the struct/array peel alternate and accumulate
+`RowCount` multiplicatively until a genuine scalar/vector leaf is
+reached, instead of peeling once each. This matches the back-to-back
+row-packing already assumed by `resolveOffsetWithinElement`'s own
+byte-offset arithmetic and `captureTransformFeedback`'s row loop.
+
+**Verification of the second-crash fix:** both previously-crashing
+cases now fail cleanly with a wrong-value mismatch instead of
+crashing:
+- `all_unordered_and_instance_array.28`: `Mismatch at offset 4
+  expected 30 received 72`
+- `instance_array_basic_type.mat4.geometry`: `Mismatch at offset 0
+  expected -89 received 3`
+
+This array-of-block-instances shape's per-array-index `Location`/
+`XfbOffset` assignment is still not modeled correctly (each array
+index should be its own independently-addressed captured stream, not
+folded into one flat multi-row element sharing a single `Location`/
+`XfbOffset` pair) -- broken out as a new, distinct follow-on, H101g. A
+crash-to-non-crash change is a net improvement, not a regression.
+
+**New/updated unit tests:**
+- New: `SPIRVToLLVMTest.
+  PlainMultiMemberInterfaceBlockSynthesizesOffsetDecoration` -- a
+  two-member, explicitly-offset struct now gets a non-empty
+  `feme.spirv.member.decorations` attribute.
+- Updated: `SPIRVToLLVMTest.UnrecognizedMemberDecorationIsFilteredOut`
+  -- its original `!spirv.struct<(f32 [0])>` example's `[0]` was
+  actually MLIR's own explicit-`Offset=0` member-decoration syntax,
+  not an unrecognized decoration as the test's own comment claimed
+  (confirmed via `mlir/lib/Dialect/SPIRV/IR/SPIRVDialect.cpp`'s
+  `parseStructMemberDecorations`); this row's own fix now correctly
+  attaches metadata for exactly that shape, so the test was updated to
+  use a genuinely-unrecognized `RelaxedPrecision`-only member instead.
+
+**Full-suite verification:**
+- `ninja check-feme`: 2973/2976 Passed (+1 test from the new unit
+  test), 3 pre-existing `Unsupported`, 0 `Failed`.
+- Full `dEQP-VK.transform_feedback.*` sweep: 133,719 cases, **0
+  crashes** (3845 Passed / 1267 Failed / 128607 NotSupported -- the
+  remaining failures are pre-existing/unrelated to this row, e.g.
+  other unmodeled struct/matrix shapes' `spirv.GlobalVariable`
+  legalization failures, and H101g's own array-of-block-instances
+  value-mismatch cases).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed (this
+is a compiler/executor correctness fix, not new feature/extension
+work). `FeMeGraphicsDesign.md` needs no update: no design deviation.
