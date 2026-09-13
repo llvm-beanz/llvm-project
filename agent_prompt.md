@@ -45,35 +45,25 @@ agent thoughts.
 
 # Request
 
-Can you work on H101m or other blocking work to make progress on the H-series
+Can you work on H101p or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.*instance_array*`'s remaining 61 (of the original
-> 68) `VK_ERROR_INITIALIZATION_FAILED` pipeline-creation failures, confirmed
-> distinct from and unaffected by H101k's own leading-pad fix**: breaks down
-> into (at least) four distinct symptoms by their own
-> `mlir-translate`/`feme-opt` diagnostic, none sharing H101k's own
-> leading-pad-before-a-*single*-real-member shape: (1) 28 cases hit
-> `'llvm.mlir.constant' op attribute and type have different integer types:
-> 'si32' vs. 'i32'` -- an `si32`-vs-`i32` signedness mismatch somewhere in
-> constant-attribute construction, likely for a signed-integer stage-IO member
-> (roadmap H101n: this attribute-type bug itself is now fixed, letting these
-> cases progress further -- some now hit H101o's own newly-filed corruption
-> instead); (2) ~14 cases still hit `failed to legalize operation
-> 'spirv.GlobalVariable'` for a block with two or more *genuinely distinct* real
-> members (unlike H101k's single-real-member-plus-pad shape), several combining
-> a matrix/vector member with a *nested single-member struct* member (e.g.
-> `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>` as one member of an outer
-> multi-member block) -- a shape H101i's own "tight vector" retry may not extend
-> to; (3) 3 cases hit `feme-graphics-validate-stage: ... unresolved stage-IO
-> global-variable access to 'spirv_var_N'` (the rewrite genuinely not
-> recognizing some other, not-yet-identified shape, rather than H101k's own
-> now-fixed leading-pad-count-confusion mechanism); (4) 1 case hits
-> `'feme.stage.output.store' ... row 18 is out of range for element 1`, an
-> out-of-bounds row distinct from every other symptom here. Not yet triaged --
-> needs per-symptom-family standalone `feme-translate`/scratch-unit-test repros
-> (mirroring H101a's/H101k's own technique) to identify each of the (at least)
-> four distinct root causes, starting with the largest (28-case) `si32`/`i32`
-> group (roadmap H101n: this group's own attribute-type bug is now fixed;
-> re-triage this bucket's own counts against the current binary before
-> continuing)
+> **`transform_feedback.fuzz.all_unordered_and_instance_array.*`'s 26-case
+> `spirv.GlobalVariable` legalization failure for multi-member blocks whose
+> members are declared out of ascending `Offset` order** (newly characterized
+> during H101m's own closing re-triage): every failing case's own decompiled
+> SPIR-V interface block has at least one member pair where the *later*-declared
+> member has a *smaller* `Offset` than an earlier-declared one (e.g.
+> `!spirv.struct<(!spirv.matrix<4 x vector<2xf32>> [12, RelaxedPrecision],
+> vector<3xsi32> [0, RelaxedPrecision])>` -- the first declared member sits at
+> byte 12, the second at byte 0), consistent with this test family's own name
+> (`all_unordered_and_instance_array`, deliberately emitting members out of
+> natural layout order) and distinct from every previously-fixed leading-pad
+> shape (which only ever involved a *single* out-of-order gap at the very
+> front). Not yet triaged -- needs a standalone ground-truth
+> `feme-translate`/`feme-opt` repro (mirroring H101m's own technique) of one
+> such out-of-order block to determine whether `SPIRVToLLVMPatterns.cpp`'s
+> `layOutStructIfOffsetsMatch` (or whichever pass owns struct-layout synthesis)
+> assumes monotonically-increasing member offsets somewhere in its own
+> layout-matching logic, and if so, whether the fix belongs there or in a new,
+> more general "sort members by offset before laying out the LLVM struct" step
