@@ -45,6 +45,9 @@ agent thoughts.
 
 # Request
 
+A network error stopped the last session. Please pick up where you left off and
+continue.
+
 Can you please re-triage all the open H-series milestones to figure out what is
 fixed and what isn't? Also please run a full Vulkan CTS run and update the
 headline in the CTS report with the current status.
