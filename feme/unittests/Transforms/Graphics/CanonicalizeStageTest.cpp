@@ -488,6 +488,200 @@ TEST(CanonicalizeStageTest,
            (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
 }
 
+/// (Roadmap H101j) The same "array of block instances with a matrix
+/// member" shape as
+/// `MapsArrayOfBlockInstancesWithMatrixMemberToXfbBufferArrayStride`
+/// above, but with the block's matrix member declared using the *tight*
+/// `[4 x [4 x float]]` array-of-scalar-array shape
+/// `SPIRVToLLVMPatterns.cpp`'s "tight vector" retry (roadmap H101i)
+/// substitutes for the ordinary `[4 x <4 x float>]` array-of-real-vector
+/// shape whenever the real vector's own ABI-aligned placement can't
+/// reproduce a struct member's actual, tightly-packed declared offset --
+/// exactly the shape `dEQP-VK.transform_feedback.fuzz.*instance_array*`
+/// hits at pipeline creation (`feme-graphics-validate-stage`'s own
+/// "component N is out of range for element M" diagnostic). Each whole-
+/// matrix store's own *value* type remains the ordinary, real
+/// `[4 x <4 x float>]` -- SPIRVToLLVM's independent, unmodified
+/// `spirv::MatrixType` conversion registration produces this for any
+/// standalone matrix value, regardless of what a struct member
+/// substitutes its own declared type to -- so this deliberately exercises
+/// the exact type-identity split (declared member type vs. real value
+/// type) `getStageIORowShape`/`resolveRowComponent`'s own H101j fix
+/// reconciles. The declared member type wraps its tight `[4 x [4 x
+/// float]]` array in the named `%feme.tight_vector` struct
+/// `SPIRVToLLVMPatterns.cpp`'s own `getTightVectorArrayType` marker uses,
+/// mirroring the real shape that fix produces; without recognizing this
+/// marker, this signature computed a bogus `RowCount` of 48 (12 real rows
+/// * 4 more, the tight array's own inner scalar level folded into
+/// `RowCount` a second time instead of treated as `ComponentCount`), and
+/// `resolveRowComponent`'s own then-`PerRowTy == ValueTy` exact-type check
+/// never matched the real, value-side `[4 x <4 x float>]`, producing
+/// wildly wrong `(Row, Component)` pairs -- and, before the marker itself,
+/// a plain (unmarked) `[4 x [4 x float]]` was indistinguishable from a
+/// genuinely-declared 2-level scalar array, regressing
+/// `dEQP-VK.transform_feedback.fuzz.2_level_array.*`.
+TEST(CanonicalizeStageTest,
+    MapsArrayOfBlockInstancesWithTightMatrixMemberToXfbBufferArrayStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector = type { [4 x float] }
+    @block = external addrspace(8) global [3 x { [4 x %feme.tight_vector] }], !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store [4 x <4 x float>] [<4 x float> <float 1.0, float 2.0, float 3.0, float 4.0>, <4 x float> <float 5.0, float 6.0, float 7.0, float 8.0>, <4 x float> <float 9.0, float 10.0, float 11.0, float 12.0>, <4 x float> <float 13.0, float 14.0, float 15.0, float 16.0>], ptr addrspace(8) @block
+      store [4 x <4 x float>] [<4 x float> <float 17.0, float 18.0, float 19.0, float 20.0>, <4 x float> <float 21.0, float 22.0, float 23.0, float 24.0>, <4 x float> <float 25.0, float 26.0, float 27.0, float 28.0>, <4 x float> <float 29.0, float 30.0, float 31.0, float 32.0>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 64)
+      store [4 x <4 x float>] [<4 x float> <float 33.0, float 34.0, float 35.0, float 36.0>, <4 x float> <float 37.0, float 38.0, float 39.0, float 40.0>, <4 x float> <float 41.0, float 42.0, float 43.0, float 44.0>, <4 x float> <float 45.0, float 46.0, float 47.0, float 48.0>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 128)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 64}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  // Exactly like the real-vector-column shape above: 3 instances * 4
+  // matrix rows/columns = 12, not 48 (the bogus row-count a "fold every
+  // array level into RowCount" reading of the tight shape would produce).
+  EXPECT_EQ(Elt.RowCount, 12u);
+  EXPECT_EQ(Elt.ComponentCount, 4u);
+  EXPECT_EQ(Elt.XfbBufferArrayStride, 4u);
+  ASSERT_TRUE(Elt.XfbBuffer.has_value());
+  EXPECT_EQ(*Elt.XfbBuffer, 0u);
+
+  // Instance 0's own 4 columns resolve to rows 0-3, instance 1's to
+  // rows 4-7, instance 2's to rows 8-11 -- the same result as the
+  // real-vector-column shape, despite the member's own declared type
+  // differing.
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows,
+           (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
+}
+
+/// (Roadmap H101j) The tight-array shape as it arises for a *non-matrix*
+/// array-of-vectors member (e.g. `layout(xfb_buffer=0, ...) out Block {
+/// ivec2 var[2]; } block;`, a single block instance -- no array-of-
+/// instances wrapper -- with one member that is itself an array of
+/// 2-component vectors): `SPIRVToLLVMPatterns.cpp`'s tight-vector retry
+/// can substitute the member's own declared type with a marker-wrapped
+/// `[2 x %feme.tight_vector]` in place of the ordinary `[2 x <2 x i32>]`,
+/// exactly like the matrix case above but without any surrounding
+/// array-of-block-instances dimension. A single whole-array store's own
+/// value type remains the real `[2 x <2 x i32>]`.
+TEST(CanonicalizeStageTest,
+    MapsTightArrayOfVectorsMemberToRowAndComponentCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector = type { [2 x i32] }
+    @block = external addrspace(8) global { [2 x %feme.tight_vector] }, !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store [2 x <2 x i32>] [<2 x i32> <i32 1, i32 2>, <2 x i32> <i32 3, i32 4>], ptr addrspace(8) @block
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 8}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 2u);
+  EXPECT_EQ(Elt.ComponentCount, 2u);
+
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1}));
+}
+
+/// (Roadmap H101j) The critical negative case the marker struct exists
+/// to distinguish from the tight-vector cases above: a genuinely
+/// directly-declared 2-level scalar array (e.g. `float xs[2][2]`,
+/// `dEQP-VK.transform_feedback.fuzz.2_level_array.float`'s own shape --
+/// discovered, during this milestone's own closing regression sweep, to
+/// be an actual real-world shape this codebase's own CTS suite exercises,
+/// not merely a hypothetical). Bit-for-bit, `[2 x [2 x float]]` here is
+/// identical to the tight-matrix-column case above's own inner shape --
+/// only the *absence* of the `%feme.tight_vector` marker tells them
+/// apart. Before the marker fix (an earlier, purely positional "first
+/// array is a row, any later array-of-scalar is a component" heuristic),
+/// this shape was misclassified as `RowCount=2, ComponentCount=2` instead
+/// of the correct `RowCount=4, ComponentCount=1` -- a regression this
+/// test guards against.
+TEST(CanonicalizeStageTest,
+    DoesNotMisclassifyGenuineTwoLevelScalarArrayAsTightVector) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @xs = external addrspace(8) global [2 x [2 x float]], !spirv.Decorations !0
+    define void @main() #0 {
+      store [2 x [2 x float]] [[2 x float] [float 1.0, float 2.0], [2 x float] [float 3.0, float 4.0]], ptr addrspace(8) @xs
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 4u);
+  EXPECT_EQ(Elt.ComponentCount, 1u);
+
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2, 3}));
+}
+
 /// (Roadmap H101h) The same "array of block instances" shape as
 /// `MapsArrayOfBlockInstancesWithSimpleMemberToXfbBufferArrayStride`
 /// above, but with the block's one member a *narrow* (3-wide,

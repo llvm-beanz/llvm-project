@@ -23,10 +23,18 @@
 // aligned, 12 bytes) matches the declared offset exactly. This is the
 // same struct shape (nested one level inside a runtime array) as roadmap
 // L5's own regression above; now confirmed to fully convert successfully.
+//
+// Roadmap H101j: the "tight-vector retry" above now wraps its substituted
+// `!llvm.array<3 x i32>` in a uniquely-named marker struct
+// (`!llvm.struct<"feme.tight_vector", (...)>`), letting
+// `CanonicalizeStage.cpp` positively distinguish a tight-vector stand-in
+// from a genuinely-declared multi-dimensional scalar array of the exact
+// same shape (see that file's own comments for why a purely positional
+// heuristic proved unsound).
 
 // CHECK-LABEL: llvm.func @runtime_array_of_identified_struct
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<(array<3 x i32>, i32)>>
+// CHECK-SAME: !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<(struct<"feme.tight_vector", (array<3 x i32>)>, i32)>>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]]
 // CHECK: %[[GEP:.*]] = llvm.getelementptr inbounds %[[PTR]][0, 1]
 // CHECK: %[[VAL:.*]] = llvm.load %[[GEP]]

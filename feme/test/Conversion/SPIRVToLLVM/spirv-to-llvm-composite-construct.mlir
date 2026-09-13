@@ -79,9 +79,16 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // cannot do this directly, since its own verifier requires a
 // non-aggregate result), since `llvm.insertvalue` requires the inserted
 // value's type to match the struct's declared field type exactly.
+//
+// Roadmap H101j: the substituted array is now wrapped in a uniquely-named
+// `!llvm.struct<"feme.tight_vector", ...>` marker struct (see
+// spirv-to-llvm-nested-identified-struct.mlir's own comment for why), so
+// the reassembled array must itself be re-wrapped in the marker (one
+// extra `llvm.insertvalue` into a poisoned marker struct) before it is
+// inserted into the outer struct's own field.
 
 // CHECK-LABEL: llvm.func @construct_tight_vector_struct
-// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(array<3 x i32>, i32)>
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(struct<"feme.tight_vector", (array<3 x i32>)>, i32)>
 // CHECK: %[[ARR:.*]] = llvm.mlir.poison : !llvm.array<3 x i32>
 // CHECK: %[[E0:.*]] = llvm.extractelement %arg0[%{{.*}} : i32] : vector<3xi32>
 // CHECK: %[[A0:.*]] = llvm.insertvalue %[[E0]], %[[ARR]][0]
@@ -89,7 +96,9 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // CHECK: %[[A1:.*]] = llvm.insertvalue %[[E1]], %[[A0]][1]
 // CHECK: %[[E2:.*]] = llvm.extractelement %arg0[%{{.*}} : i32] : vector<3xi32>
 // CHECK: %[[A2:.*]] = llvm.insertvalue %[[E2]], %[[A1]][2]
-// CHECK: %[[V0:.*]] = llvm.insertvalue %[[A2]], %[[POISON]][0]
+// CHECK: %[[MPOISON:.*]] = llvm.mlir.poison : !llvm.struct<"feme.tight_vector", (array<3 x i32>)>
+// CHECK: %[[MVAL:.*]] = llvm.insertvalue %[[A2]], %[[MPOISON]][0]
+// CHECK: %[[V0:.*]] = llvm.insertvalue %[[MVAL]], %[[POISON]][0]
 // CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][1]
 // CHECK: llvm.return %[[V1]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

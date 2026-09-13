@@ -15,15 +15,19 @@
 // pointer (every other `StructuredBuffer` test navigates directly to an
 // individual scalar/vector field via a single multi-index access chain
 // instead, never creating one).
+//
+// Roadmap H101j: `Legs`'s own tight-vector substitution is now wrapped in
+// a `!llvm.struct<"feme.tight_vector", ...>` marker (see
+// `spirv-to-llvm-nested-identified-struct.mlir`'s own comment for why).
 
 // CHECK-LABEL: llvm.func @copy
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<(array<3 x i32>, i32)>>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<(struct<"feme.tight_vector", (array<3 x i32>)>, i32)>>, 12, 1>
 // CHECK: %[[ELEM:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK-SAME: -> !llvm.ptr<11>
 // CHECK-NOT: !llvm.target<"spirv.VulkanBuffer"
-// CHECK: %[[VAL:.*]] = llvm.load %[[ELEM]] : !llvm.ptr<11> -> !llvm.struct<(array<3 x i32>, i32)>
-// CHECK: llvm.store %[[VAL]], %[[ELEM]] : !llvm.struct<(array<3 x i32>, i32)>, !llvm.ptr<11>
+// CHECK: %[[VAL:.*]] = llvm.load %[[ELEM]] : !llvm.ptr<11> -> !llvm.struct<(struct<"feme.tight_vector", (array<3 x i32>)>, i32)>
+// CHECK: llvm.store %[[VAL]], %[[ELEM]] : !llvm.struct<(struct<"feme.tight_vector", (array<3 x i32>)>, i32)>, !llvm.ptr<11>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader], []> {
   spirv.GlobalVariable @Buf bind(0, 0) : !spirv.ptr<!spirv.struct<type.RWStructuredBuffer.Doggo, (!spirv.rtarray<!spirv.struct<Doggo, (vector<3xsi32> [0], si32 [12])>, stride=16> [0]), Block>, StorageBuffer>
   spirv.func @copy(%idx : si32) -> () "None" {

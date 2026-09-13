@@ -614,6 +614,38 @@ std::pair<SignatureComponentType, uint32_t> getComponentType(Type *Scalar) {
   return {SignatureComponentType::Float, 32};
 }
 
+/// (Roadmap H101j) Name prefix `SPIRVToLLVMPatterns.cpp`'s own
+/// `getTightVectorArrayType` wraps its tight-substituted-vector marker
+/// struct in (mirrored there as `kTightVectorMarkerName`) -- kept as a
+/// single shared literal (duplicated, not included from a common header,
+/// since these two files belong to different, independently-linked
+/// components with no existing shared-header precedent for this small a
+/// constant) so a rename of one side is caught by the other's own tests
+/// failing to recognize the marker at all, rather than silently
+/// mismatching.
+constexpr StringLiteral TightVectorMarkerName = "feme.tight_vector";
+
+/// If \p Ty is one of `SPIRVToLLVMPatterns.cpp`'s own tight-vector marker
+/// structs -- wrapping a matrix column, or an array-of-vectors element,
+/// that member's own declared offset could only be reproduced by
+/// substituting a tightly-packed `array<M x Scalar>` for what would
+/// otherwise be a `vector<M x Scalar>` -- returns that inner array;
+/// otherwise returns null. Bit-for-bit, a tight-substituted
+/// `array<M x Scalar>` is indistinguishable from a genuinely-declared,
+/// directly-authored multi-dimensional scalar array (e.g.
+/// `dEQP-VK.transform_feedback.fuzz.2_level_array.float`'s own `float
+/// xs[2][2]`, which needs the *opposite* row/component classification --
+/// each dimension its own row, never a component axis) -- `DataLayout`
+/// reports identical size/alignment for both, so this marker is the only
+/// positive, unambiguous signal available to tell the two apart.
+Type *getTightVectorMarkerInnerType(Type *Ty) {
+  auto *ST = dyn_cast<StructType>(Ty);
+  if (!ST || ST->getNumElements() != 1 || !ST->hasName() ||
+      !ST->getName().starts_with(TightVectorMarkerName))
+    return nullptr;
+  return ST->getElementType(0);
+}
+
 /// Peels a single-member `StructType` down to its one member's own type,
 /// repeatedly. glslang wraps a `varying`-block *member* -- even a single
 /// scalar/vector/matrix one -- in an outer one-member struct at the SPIR-V
@@ -624,9 +656,18 @@ std::pair<SignatureComponentType, uint32_t> getComponentType(Type *Scalar) {
 /// (`ArrayType`) handling above does not by itself cover. A struct with
 /// more than one member has no single well-defined row/component shape and
 /// is left alone (returned as-is, to fail exactly as before this change).
+///
+/// (Roadmap H101j) Deliberately does *not* peel through a tight-vector
+/// marker struct (see `getTightVectorMarkerInnerType` above) the same
+/// generic way: unlike an ordinary single-member wrapper, a marker's own
+/// member needs special (component-axis, not row-axis) handling by this
+/// function's own callers, which must be able to tell "the type I have
+/// left is a marker" apart from "the type I have left is some other
+/// single-member struct" -- impossible if this already silently unwrapped
+/// it first.
 Type *peelSingleMemberStruct(Type *Ty) {
   while (auto *ST = dyn_cast<StructType>(Ty)) {
-    if (ST->getNumElements() != 1)
+    if (ST->getNumElements() != 1 || getTightVectorMarkerInnerType(ST))
       break;
     Ty = ST->getElementType(0);
   }
@@ -670,6 +711,27 @@ StageIORowShape getStageIORowShape(Type *ValueTy) {
   Type *PerRowTy = ValueTy;
   while (true) {
     Type *Peeled = peelSingleMemberStruct(PerRowTy);
+    // (Roadmap H101j) `SPIRVToLLVMPatterns.cpp`'s
+    // `convertOffsetStructTypeIgnoringDecorations` may substitute a
+    // struct member's own matrix-column or array-of-vectors element with
+    // a "tight" `array<M x Scalar>` in place of the ordinary
+    // `vector<M x Scalar>` (see its own "tight vector" retry comment),
+    // whenever the ABI-aligned real vector's own placement can't
+    // reproduce the member's real, tightly-packed declared offset -- e.g.
+    // a `mat3x4` member becomes `[3 x Marker<[4 x float]>]` rather than
+    // `[3 x <4 x float>]`. `getTightVectorMarkerInnerType` recognizes this
+    // positively (rather than guessing from a bare `[4 x float]`'s own
+    // position, which cannot be told apart from a genuinely-declared,
+    // directly-authored multi-dimensional scalar array -- see that
+    // function's own comment) -- treat the marked inner array's own
+    // element count as this row's component axis, exactly like a
+    // `FixedVectorType` below.
+    if (Type *Inner = getTightVectorMarkerInnerType(Peeled)) {
+      auto *ArrTy = cast<ArrayType>(Inner);
+      return {ArrTy->getElementType(),
+              static_cast<unsigned>(ArrTy->getNumElements()),
+              static_cast<unsigned>(RowCount)};
+    }
     if (auto *ArrTy = dyn_cast<ArrayType>(Peeled)) {
       RowCount *= ArrTy->getNumElements();
       PerRowTy = ArrTy->getElementType();
@@ -2226,15 +2288,73 @@ uint64_t getPackedElementSize(Type *Ty, const DataLayout &DL) {
 /// just to the wrong absolute row) versus the vertex variant's own harder
 /// failure (a `Row` so far out of range `PromoteMemToReg`'s
 /// `validateRow`-checked signature rejected it outright).
+/// (Roadmap H101j) True when \p Declared -- a type reached while peeling a
+/// struct member's own *declared* type in `resolveRowComponent`'s loop
+/// below -- describes the same shape as \p Actual -- the real value type
+/// of the load/store instruction actually being rewritten -- even when
+/// they are not the identical `Type *`. `SPIRVToLLVMPatterns.cpp`'s
+/// "tight vector" retry (see `getStageIORowShape`'s own comment above)
+/// only ever changes a struct member's own *declared* LLVM type to
+/// reproduce a tightly-packed offset; it never changes what a SPIR-V
+/// `spirv.Load`/`spirv.Store`'s own operand actually converts to
+/// elsewhere, since that goes through the ordinary, unmodified
+/// `spirv::MatrixType`/`spirv::VectorType` `TypeConverter` registrations.
+/// So a whole-matrix or whole-array-of-vectors store's own \p Actual is
+/// always the *real* `array<N x vector<M x Scalar>>` shape, even when the
+/// member it is stored into declares the *tight*, marker-wrapped
+/// `array<N x Marker<array<M x Scalar>>>` stand-in -- this recurses
+/// through matching array levels (unwrapping a marker on \p Declared's
+/// own side first), treating a declared `array<M x Scalar>` leaf as
+/// compatible with an actual `vector<M x Scalar>` leaf.
+bool isShapeCompatible(Type *Declared, Type *Actual) {
+  if (Type *Inner = getTightVectorMarkerInnerType(Declared))
+    Declared = Inner;
+  if (Declared == Actual)
+    return true;
+  auto *DeclArrTy = dyn_cast<ArrayType>(Declared);
+  if (!DeclArrTy)
+    return false;
+  if (auto *ActualArrTy = dyn_cast<ArrayType>(Actual))
+    return DeclArrTy->getNumElements() == ActualArrTy->getNumElements() &&
+           isShapeCompatible(DeclArrTy->getElementType(),
+                            ActualArrTy->getElementType());
+  if (auto *ActualVecTy = dyn_cast<FixedVectorType>(Actual))
+    return DeclArrTy->getNumElements() == ActualVecTy->getNumElements() &&
+           DeclArrTy->getElementType() == ActualVecTy->getElementType();
+  return false;
+}
+
 std::pair<uint64_t, uint64_t>
 resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
                    const DataLayout &DL) {
   Type *PerRowTy = MemberTy;
   uint64_t Row = 0;
+  // (Roadmap H101j) Set once the loop below stops at a tight-vector
+  // marker (rather than at an ordinary `isShapeCompatible` match): the
+  // Component computation after the loop then needs to index into
+  // `PerRowTy`'s own (unwrapped) tight array -- via `getPackedElementSize`
+  // -- instead of a `FixedVectorType`'s own per-lane `DataLayout` size,
+  // since the marker's own inner shape is a real LLVM array, not a
+  // vector.
+  bool StoppedAtMarker = false;
   while (true) {
     PerRowTy = peelSingleMemberStruct(PerRowTy);
-    if (PerRowTy == ValueTy)
+    if (isShapeCompatible(PerRowTy, ValueTy))
       break;
+    // \p ValueTy can never itself be shape-compatible with a marker's own
+    // *wrapper* (a real SPIR-V value never converts to this codebase's
+    // own synthetic marker struct -- only a struct member's declared type
+    // is ever substituted this way), so once `isShapeCompatible` above
+    // has already failed to match at this level, a marker here can only
+    // mean \p ValueTy needs one further (component-axis) dereference this
+    // loop does not itself perform -- e.g. a single scalar-component
+    // store into one lane of a matrix column/array-of-vectors element,
+    // narrower than even the marker's own row-of-components shape.
+    if (Type *Inner = getTightVectorMarkerInnerType(PerRowTy)) {
+      PerRowTy = Inner;
+      StoppedAtMarker = true;
+      break;
+    }
     auto *ArrTy = dyn_cast<ArrayType>(PerRowTy);
     if (!ArrTy)
       break;
@@ -2248,7 +2368,12 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
     PerRowTy = ArrTy->getElementType();
   }
   uint64_t Component = 0;
-  if (PerRowTy != ValueTy) {
+  if (StoppedAtMarker) {
+    auto *ArrTy = cast<ArrayType>(PerRowTy);
+    uint64_t CompSize = getPackedElementSize(ArrTy->getElementType(), DL);
+    if (CompSize)
+      Component = Residual / CompSize;
+  } else if (!isShapeCompatible(PerRowTy, ValueTy)) {
     if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy)) {
       uint64_t CompSize = DL.getTypeAllocSize(VecTy->getElementType());
       if (CompSize)

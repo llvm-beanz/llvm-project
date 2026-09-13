@@ -3385,6 +3385,35 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
   return true;
 }
 
+/// (Roadmap H101j) Name prefix `getTightVectorArrayType`'s own marker
+/// struct (see its comment) uses, mirrored by
+/// `CanonicalizeStage.cpp`'s own `isTightVectorMarkerStruct` -- kept as a
+/// single shared literal (duplicated, not included from a common header,
+/// since these two files belong to different, independently-linked
+/// components with no existing shared-header precedent for this small a
+/// constant) so a rename of one side is caught by the other's own tests
+/// failing to recognize the marker at all, rather than silently
+/// mismatching.
+constexpr llvm::StringLiteral kTightVectorMarkerName = "feme.tight_vector";
+
+/// If \p Ty is one of `getTightVectorArrayType`'s own marker structs,
+/// returns its one member's own (tight array) type; otherwise returns
+/// null. Lets a consumer that needs to see *through* the marker (e.g.
+/// `CompositeConstructPattern`'s own struct case below, reassembling a
+/// real vector constituent into a tight-substituted member) recognize it
+/// positively, rather than assuming any `LLVM::LLVMArrayType` struct
+/// member must itself directly be the tight-substituted array (true
+/// before this roadmap item, no longer true now that the marker wraps
+/// it).
+mlir::Type getTightVectorMarkerInnerType(mlir::Type Ty) {
+  auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(Ty);
+  if (!StructTy || !StructTy.isIdentified() ||
+      !StructTy.getName().starts_with(kTightVectorMarkerName) ||
+      StructTy.getBody().size() != 1)
+    return nullptr;
+  return StructTy.getBody()[0];
+}
+
 /// Returns the LLVM array type substituting for a SPIR-V vector-typed
 /// struct member whenever that member's own natural (ABI-alignment-driven)
 /// layout cannot reproduce a declared offset -- see the "tight-vector
@@ -3408,12 +3437,34 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
 /// below for the one place a *value* (not just a pointer) crosses this
 /// member's boundary and needs a lane-by-lane reassembly to compensate.
 /// Returns null if the vector's own element type fails to convert.
+///
+/// (Roadmap H101j) The substituted `array<M x Scalar>` is wrapped in a
+/// uniquely-named, single-member identified struct (name prefix
+/// `kTightVectorMarkerName`, mirrored in `CanonicalizeStage.cpp`'s own
+/// `isTightVectorMarkerStruct`) rather than returned bare. Bit-for-bit, a
+/// tight-substituted `array<M x Scalar>` is indistinguishable from a
+/// genuinely-declared, directly-authored multi-dimensional scalar array
+/// (e.g. `dEQP-VK.transform_feedback.fuzz.2_level_array.float`'s own
+/// `float xs[2][2]`, which needs the *opposite* row/component
+/// classification) -- `DataLayout` reports identical size/alignment for
+/// both. `CanonicalizeStage.cpp`'s row/component-shape inference
+/// (`getStageIORowShape`) and access-resolution (`resolveRowComponent`)
+/// need a positive, unambiguous signal to tell the two apart; this marker
+/// is that signal. `getNewIdentified` (rather than a fixed name via
+/// `getIdentified`) lets each call site instantiate its own body without
+/// colliding across differently-shaped substitutions in the same
+/// `MLIRContext` -- the exact name does not matter beyond the shared
+/// prefix, since nothing besides `isTightVectorMarkerStruct`'s own prefix
+/// check ever looks at it.
 mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
                                    const mlir::TypeConverter &Converter) {
   mlir::Type ElementType = Converter.convertType(VectorTy.getElementType());
   if (!ElementType)
     return nullptr;
-  return mlir::LLVM::LLVMArrayType::get(ElementType, VectorTy.getNumElements());
+  mlir::Type ArrayTy =
+      mlir::LLVM::LLVMArrayType::get(ElementType, VectorTy.getNumElements());
+  return mlir::LLVM::LLVMStructType::getNewIdentified(
+      VectorTy.getContext(), kTightVectorMarkerName, {ArrayTy});
 }
 
 /// Pads an already-converted \p Type (an array element, or a struct
@@ -3465,6 +3516,18 @@ mlir::Type padStructToSize(mlir::Type Type, uint64_t TargetSize,
 
   auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(Type);
   if (!StructTy || StructTy.isOpaque())
+    return nullptr;
+  // (Roadmap H101j) A `getTightVectorArrayType` marker struct wraps a
+  // tight-substituted vector's own array stand-in, not a "real" struct
+  // whose own body a caller may safely grow -- appending a trailing
+  // byte-array member here would silently break
+  // `getTightVectorMarkerInnerType`'s own "exactly one member" shape
+  // check downstream, and CanonicalizeStage.cpp's own analogous
+  // `isTightVectorMarkerStruct` (see either one's comment). Reject
+  // exactly as this already would for a bare (unwrapped) tight array --
+  // the "Deliberately does *not* wrap a non-struct Type" case above --
+  // since a marker is conceptually one of those, just struct-shaped.
+  if (getTightVectorMarkerInnerType(Type))
     return nullptr;
 
   llvm::SmallVector<mlir::Type, 4> Body(StructTy.getBody());
@@ -6338,13 +6401,17 @@ private:
         // Only the "tight-vector retry" substitution described above this
         // pattern's own comment is expected to disagree here: a real
         // vector-typed constituent whose member converted to a
-        // same-bit-width tightly-packed array instead. `llvm.bitcast`
-        // itself cannot reinterpret a vector as an array (its own verifier
+        // same-bit-width tightly-packed array instead -- itself wrapped
+        // in `getTightVectorArrayType`'s own marker struct (roadmap
+        // H101j), so unwrap that first if present. `llvm.bitcast` itself
+        // cannot reinterpret a vector as an array (its own verifier
         // requires a non-aggregate result), so reassemble lane-by-lane
         // instead: extract each vector lane and insert it into a poison
         // array at the same position.
+        mlir::Type MarkerInnerTy = getTightVectorMarkerInnerType(FieldTy);
         auto VecTy = mlir::dyn_cast<mlir::VectorType>(Constituent.getType());
-        auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(FieldTy);
+        auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(
+            MarkerInnerTy ? MarkerInnerTy : FieldTy);
         if (!VecTy || !ArrTy ||
             static_cast<uint64_t>(VecTy.getNumElements()) !=
                 ArrTy.getNumElements())
@@ -6358,6 +6425,12 @@ private:
               Rewriter, Loc, Constituent, LaneIndex);
           Array = mlir::LLVM::InsertValueOp::create(
               Rewriter, Loc, Array, Element, llvm::ArrayRef<int64_t>{Lane});
+        }
+        if (MarkerInnerTy) {
+          mlir::Value Wrapped =
+              mlir::LLVM::PoisonOp::create(Rewriter, Loc, FieldTy);
+          Array = mlir::LLVM::InsertValueOp::create(
+              Rewriter, Loc, Wrapped, Array, llvm::ArrayRef<int64_t>{0});
         }
         Field = Array;
       }
