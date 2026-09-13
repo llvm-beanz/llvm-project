@@ -80498,3 +80498,87 @@ failure" pattern used here.
 4. H101c (GEP-operand-type legalization failure in
    `spirv_assembly.compute_shader_derivatives`) remains open and
    untriaged, unrelated to this session's work.
+
+# H101j: marker struct fixes the tight-vector/genuine-array ambiguity
+
+**Status: done.** H101j is fixed and struck through on the roadmap.
+`check-feme` 2979/2979, CTS `*instance_array*` 99/77 -> 108/68 passed/failed
+(net +9, 0 regressions), full `transform_feedback` group re-run clean.
+
+## What happened, in order
+
+1. H101i's SPIRVToLLVM fix could legally substitute a struct member's
+   declared type with a "tight" `array<N x array<Mxf32>>` stand-in (no
+   ABI padding) for a matrix/array-of-vectors member. `CanonicalizeStage.cpp`
+   had no way to tell this apart from a genuinely-declared nested scalar
+   array of the exact same bit shape -- that's the bug this milestone
+   targeted.
+2. First attempt: a positional heuristic ("first array level is always
+   a row, any later array-of-scalar level is a component"). Unit tests
+   passed, `check-feme` passed 2978/2978, targeted CTS cases improved.
+   Looked done.
+3. **It wasn't.** Running the *full* `dEQP-VK.transform_feedback.*`
+   group (not just the targeted cases) found
+   `2_level_array.float.geometry` -- previously passing -- now crashing
+   with "double free or corruption". `git stash` bisection confirmed
+   it was new. Reading `vktTransformFeedbackFuzzLayoutTests.cpp` showed
+   `2_level_array` genuinely constructs `float xs[2][2]`: a real,
+   tested, bit-identical shape to the thing the heuristic was meant to
+   detect. No positional rule can tell them apart -- they're the same
+   bytes.
+4. Pivoted to a marker struct: `getTightVectorArrayType`
+   (SPIRVToLLVMPatterns.cpp) now wraps its substituted array in a
+   uniquely-named identified LLVM struct
+   (`!llvm.struct<"feme.tight_vector"[.N], (array<...>)>`, via
+   `LLVMStructType::getNewIdentified`). This is a positive signal a
+   genuinely-declared array never carries, so no ambiguity is possible.
+5. Updated the producer (`CompositeConstructPattern::convertStruct`,
+   `padStructToSize`) and the consumer (`getStageIORowShape`,
+   `resolveRowComponent`, new `getTightVectorMarkerInnerType` helper,
+   `peelSingleMemberStruct` stopping at the marker) to unwrap/detect it
+   correctly.
+6. Rewrote the two positional-heuristic-era unit tests to use real
+   marker-wrapped IR, and added a new regression guard
+   (`DoesNotMisclassifyGenuineTwoLevelScalarArrayAsTightVector`) using a
+   plain, unmarked 2D array -- locks in the exact bug the heuristic
+   introduced.
+7. Updated 4 pre-existing lit tests whose `CHECK` lines expected the
+   old, unwrapped array type.
+8. Verified: unit tests (80/80), `check-feme` (2979/2979),
+   `2_level_array.*`/`3_level_array.*` (no crash), the full
+   `transform_feedback` group (133,719 cases, 0 new crashes, 0
+   `level_array` failures), and the targeted `*instance_array*` subset
+   (108 passed vs. 99 before, 68 failed vs. 77 before).
+
+## The one lesson worth remembering
+
+**A type-representation change this broad needs the full relevant CTS
+group run before calling it done, not just the cases it was aimed at.**
+The positional heuristic passed every test it was written against and
+still shipped a real regression, because the regression lived in a
+part of the test suite nobody thought to re-check. If this pattern
+comes up again (a fix that changes what a shared LLVM type "means"),
+default to running the whole group the change touches, not a filtered
+subset, before treating a fix as verified.
+
+## Remaining work, filed as new roadmap rows
+
+1. **H101k** (new, not yet triaged): 68 `*instance_array*` cases still
+   fail pipeline creation with `VK_ERROR_INITIALIZATION_FAILED`,
+   sometimes preceded by `JIT session error: Symbols not found:
+   [ spirv_var_N ]` (e.g. `random_geometry.all_instance_array.11`).
+   Unrelated to H101j -- same count/symptom as H101i's own closing
+   note flagged as still open. Next step: a standalone `feme-translate`
+   IR dump of one such shader (mirroring H101a's JIT-bypass technique)
+   to find what global reference is left unresolved.
+2. H101c (GEP-operand-type legalization failure in
+   `spirv_assembly.compute_shader_derivatives`) remains open and
+   untriaged, unrelated to this session's work.
+3. H101d (`tessellation.misc_draw` crash, corrupted stack) remains open
+   and untriaged, unrelated to this session's work.
+
+**Next action for a future session:** pick up H101k. Start with
+`FEME_CPU_JIT_DEBUG_SUPPORT=1 gdb`-attached repro of
+`random_geometry.all_instance_array.11`, or a standalone
+`feme-translate` IR dump, to identify the unresolved `spirv_var_N`
+symbol's origin.
