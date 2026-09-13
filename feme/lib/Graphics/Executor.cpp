@@ -1486,17 +1486,37 @@ static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
     for (uint32_t Flat = 0; Flat != Count; ++Flat) {
       uint64_t RecordStart =
           (BaseVertex + Flat) * Elt->XfbStride + Elt->XfbOffset;
-      for (uint32_t C = 0; C != Elt->ComponentCount; ++C) {
-        uint64_t Dst = RecordStart + uint64_t(C) * sizeof(uint32_t);
-        // (roadmap F10-style) A destination past the bound buffer's own
-        // byte range is dropped, not fatal -- the same "clamp/skip
-        // rather than fail the whole draw" out-of-bounds convention
-        // `robustBufferAccess` already uses elsewhere in this file.
-        if (Dst + sizeof(uint32_t) > CB.Data.size())
-          continue;
-        uint32_t Bits =
-            Output.readRaw(Elt->ElementID, Elt->FirstComponent + C, Flat);
-        std::memcpy(CB.Data.data() + Dst, &Bits, sizeof(Bits));
+      // (Roadmap H101b) An element with `RowCount > 1` (e.g. a multi-
+      // member interface block's own array-typed member, `ivec2 b[3]`,
+      // decomposed into one `SignatureElement` per member -- see
+      // `CanonicalizeStage.cpp`'s `addElements` -- rather than one per
+      // array row) captures every one of its rows, not just row 0: each
+      // row occupies its own consecutive `ComponentCount`-many-`uint32_t`
+      // span in the XFB record, exactly the same back-to-back packing
+      // `resolveRowComponent`/`getMemberOffset` already assume when
+      // resolving a *load*/*store*'s own byte offset back into this same
+      // `(Row, Component)` shape (CanonicalizeStage.cpp). Before this,
+      // only `Row=0` was ever captured (`readRaw`'s own `Row` parameter
+      // defaults to 0), silently leaving every later row's own XFB bytes
+      // at whatever the buffer was already filled with (typically zero)
+      // -- found via `dEQP-VK.transform_feedback.fuzz.random_geometry.
+      // all_instance_array.75`'s own `ivec2 b[3]` member, whose `b[1]`/
+      // `b[2]` rows read back as 0 instead of their real stored value.
+      uint64_t RowSizeBytes = uint64_t(Elt->ComponentCount) * sizeof(uint32_t);
+      for (uint32_t Row = 0; Row != Elt->RowCount; ++Row) {
+        uint64_t RowStart = RecordStart + Row * RowSizeBytes;
+        for (uint32_t C = 0; C != Elt->ComponentCount; ++C) {
+          uint64_t Dst = RowStart + uint64_t(C) * sizeof(uint32_t);
+          // (roadmap F10-style) A destination past the bound buffer's own
+          // byte range is dropped, not fatal -- the same "clamp/skip
+          // rather than fail the whole draw" out-of-bounds convention
+          // `robustBufferAccess` already uses elsewhere in this file.
+          if (Dst + sizeof(uint32_t) > CB.Data.size())
+            continue;
+          uint32_t Bits = Output.readRaw(Elt->ElementID,
+                                        Elt->FirstComponent + C, Flat, Row);
+          std::memcpy(CB.Data.data() + Dst, &Bits, sizeof(Bits));
+        }
       }
     }
   }
@@ -1863,8 +1883,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // ever reading `VSPosition`), but has no meaningful position to clip or
   // rasterize with, so `RasterizePrimitives` bails out immediately after
   // counting rather than dereferencing a null `VSPosition`.
+  //
+  // (Roadmap H101b) A `rasterizerDiscardEnable` pipeline (`RasterState::
+  // DiscardEnable`) never reaches clipping/rasterization at all --
+  // `RasterizePrimitives` itself already bails out immediately whenever
+  // either `!VSPosition` or `DiscardEnable` is true (see its own two
+  // early returns just above its `vertexAt` lambda) -- so requiring a
+  // `SV_Position` output here, before this function even gets that far,
+  // is unnecessarily strict for such a pipeline. A pure `VK_EXT_
+  // transform_feedback`-capture pipeline legally has no fragment stage
+  // and no `gl_Position` write at all (its last pre-rasterization stage,
+  // often a geometry entry, only writes the captured varying block) --
+  // exactly `dEQP-VK.transform_feedback.fuzz.random_geometry.
+  // all_instance_array.75`'s own shape, confirmed via a real `deqp-vk`
+  // run with `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
   bool GSEmitsWithoutAttributes = GSSig && GSSig->Elements.empty();
-  if (!VSPosition && !GSEmitsWithoutAttributes && !MeshEmitsWithoutAttributes)
+  if (!VSPosition && !GSEmitsWithoutAttributes && !MeshEmitsWithoutAttributes &&
+      !Pipeline.getRasterState().DiscardEnable)
     return createStringError(inconvertibleErrorCode(),
                              "the last pre-rasterization stage does not "
                              "write an SV_Position output; the executor "
