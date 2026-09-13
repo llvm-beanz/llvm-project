@@ -40989,3 +40989,102 @@ variants of `all_unordered_and_instance_array.{0..99}` (200 cases) shows
 from `.39`, 0 regressions elsewhere -- the previously-filed H101r bucket
 (`.27`/`.51`/`.66`/`.77`) and the pre-existing, unrelated `.66`
 (geometry) heap-corruption crash are both unchanged).
+
+## H101t: `CanonicalizeStage.cpp` multi-member nested-struct construction- and access-time fix
+
+**Bug:** `all_unordered_and_instance_array.2` (both `random_vertex`/
+`random_geometry` variants), newly reachable past legalization by
+H101s's own fix, crashed `PromoteMemToReg`'s own `isAllocaPromotable`
+assertion inside `CanonicalizeStagePass`.
+
+**Root cause, part 1 (construction time):** `CanonicalizeStage.cpp`'s
+row/component-shape derivation (`getStageIORowShape`) and `addElements`'
+own `TakeBlockPath` per-member loop had no notion of a block member that
+is itself a *genuine* multi-member nested struct (H101s's own `.2`
+repro shape: a nested struct with a `mat3x3` and a `vector<4xsi32>`, two
+real members needing two different scalar types a single
+`SignatureElement`'s `ComponentType`/`BitWidth` pair cannot hold) --
+such a member was passed to `addElement` as one opaque value, producing
+one bogus, under-sized `SignatureElement` instead of one per real leaf
+member.
+
+**Fix, part 1:** added `isGenuineMultiMemberNestedStruct` (true iff a
+`StructType` with >1 elements that is not a tight-vector marker),
+`getStageIOFlattenedRowCount` (recursive row-count sum through any such
+nested struct, used so a later top-level member's own `Location` still
+starts correctly), and `addStageIOStructMembers` (recursively decomposes
+a nested struct's own body into one `AddElement` call per leaf field,
+computing each field's own sequential `Location` and its `XfbOffset` as
+`BaseD.XfbOffset` plus its own `DataLayout`-derived byte offset --
+mirroring GLSL's own implicit layout rule for an undecorated nested
+struct member). Wired into `TakeBlockPath`'s two-pass `Pending` loop.
+
+**Surprising discovery:** this fix alone verified cleanly against a
+hand-built synthetic `feme-translate --spirv-to-llvmir` ground-truth
+repro and a new unit test -- but re-testing against the *real* CTS case
+showed the identical crash *still reproduced*. `gdb` could not inspect
+locals/parameters in this Release build's own thin debuginfo (only
+`assert()`'s baked `__FILE__`/`__LINE__` string is visible, not real
+DWARF), so root-causing this residual crash required adding a temporary,
+env-var-gated instrumented debug dump directly in the pass (dumping the
+whole module plus each shadow alloca's promotability and its users) and
+rebuilding just the affected shared library -- much faster than a full
+rebuild, and the only technique that actually worked in this
+environment. That dump found the smoking gun: a shadow alloca with two
+*differently-typed* stores (`store float ...` and `store i32 ...`)
+against the same `i32`-typed alloca -- exactly the shape
+`isAllocaPromotable` rejects -- meaning two logically distinct accesses
+were colliding onto the identical `(ElementID, Row, Component)` key.
+
+**Root cause, part 2 (access time):** `resolveOffsetWithinElement`'s own
+struct-member indexing (`IDs.slice(Member, 1)`) assumed exactly one
+`ElementID` per top-level physical field, and its `HasLeadingPad`
+detection (`ST->getNumElements() == IDs.size() + 1`) used `IDs.size()`
+as a stand-in for the real declared top-level member count. Both
+assumptions were broken by fix part 1: a nested-struct field now
+contributes more than one `ElementID`, so `IDs.size()` became a *leaf*
+count, no longer 1:1 with `ST`'s own physical field count.
+
+**Fix, part 2:** detect a leading pad directly by its `[N x i8]` type
+(matching `structHasLeadingOffsetPad`'s own synthesis) instead of by
+count comparison; added `getStageIOLeafElementCount` (recursive leaf
+count, the `ElementID`-counting sibling of `getStageIOFlattenedRowCount`'s
+row-counting one) to correctly compute each physical field's own
+starting index into `IDs`; and made `resolveOffsetWithinElement` recurse
+into a nested struct's own layout (mirroring its own top-level
+struct-handling one level deeper, arbitrarily deep) to resolve the
+correct leaf field, `IDs` sub-index, and residual offset.
+
+**Testing:** the original synthetic-repro unit test
+(`RewritesGenuineMultiMemberNestedStructBlockMember`) still passes; a
+new, more targeted unit test
+(`ResolvesAllMembersOfGenuineMultiMemberNestedStructWithoutCollision`)
+stores into *all three* real leaf members (unlike the first test, which
+never touched the nested struct's own `mat3x3` member) and confirms all
+three resolve to distinct `ElementID`s with no collision -- the actual
+bug the first test's own narrower IR did not exercise.
+`FeMeTransformsGraphicsTests`/`FeMeConversionSPIRVToLLVMTests`: 105/105
+pass (87 + 19, +1 new test since H101s's own closing count). Full
+`check-feme`: 2989/2992, 3 pre-existing `Unsupported`, 0 `Failed`, 0
+regressions.
+
+**Verified against the real CTS:** both
+`random_vertex.all_unordered_and_instance_array.2` and
+`random_geometry.all_unordered_and_instance_array.2` now **Pass**
+outright (no crash, confirmed via direct `deqp-vk --deqp-case=...`
+invocation against the rebuilt ICD). A fresh isolated (one `deqp-vk`
+invocation per case) sweep of both stage variants of
+`all_unordered_and_instance_array.{0..99}` (200 cases) shows 168
+Passed/32 NotSupported/0 Failed/0 crashes -- net +2 Passed from `.2`
+itself, 0 regressions elsewhere, and (unlike this milestone's first
+attempted close) a genuinely clean result this time.
+
+**Lesson recorded for future sessions:** a fix that looks correct
+against a hand-built synthetic ground-truth repro (built via
+`feme-translate --spirv-to-llvmir` from a bug report's own textual shape
+description) is necessary but not sufficient evidence of correctness --
+the bug report's own text is only an approximate characterization, and a
+synthetic repro can miss access patterns (here, storing into *all* of a
+nested struct's own members, not just one) that the real shader
+exercises. Real-CTS re-verification after every fix remains essential,
+exactly as this project's own standing process already requires.

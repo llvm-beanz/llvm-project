@@ -1358,6 +1358,30 @@ own row/component-shape and per-member decoration logic has no notion
 yet of a multi-member nested struct's own members each needing their own
 independent `Location`/`ElementID` -- filed as new roadmap row H101t.
 
+Roadmap H101t: closing that gap needed two distinct fixes, not one.
+First, `CanonicalizeStage.cpp` construction-time logic
+(`isGenuineMultiMemberNestedStruct`/`getStageIOFlattenedRowCount`/
+`addStageIOStructMembers`) decomposes a genuine multi-member nested
+struct member into one `SignatureElement` per real leaf member, each
+with its own sequentially-assigned `Location` and a `XfbOffset` computed
+as the outer member's own `XfbOffset` plus this leaf's `DataLayout`-
+derived byte offset (mirroring GLSL's implicit layout rule for an
+undecorated nested struct member) -- this alone verified cleanly against
+a synthetic ground-truth repro, but still crashed the *real* CTS case,
+because `resolveOffsetWithinElement`'s own access-time struct-member
+indexing (keyed by a plain physical-field position, and its
+`HasLeadingPad` detection, keyed by comparing the physical field count
+against `IDs.size()`) both still assumed exactly one `ElementID` per
+top-level physical field, an assumption the construction-time fix had
+just broken. The second fix made leading-pad detection type-based
+instead of count-based, added a leaf-count-aware starting-index
+computation (`getStageIOLeafElementCount`), and made offset resolution
+recurse into a nested struct's own layout to find the correct leaf
+field, arbitrarily deep. The lesson: a fix verified only against a
+hand-built synthetic repro of a bug report's own textual shape
+description is not sufficient evidence of correctness on its own --
+real-CTS re-verification remains essential.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,
