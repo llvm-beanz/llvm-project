@@ -1328,6 +1328,36 @@ order) can both be correct simultaneously, something no single linear
 walk in either order alone can achieve once reordering is arbitrary
 rather than a single fixed shift.
 
+Roadmap H101s: a genuinely distinct shape from every case above --
+`all_unordered_and_instance_array`'s fuzzer also emits a member that is
+itself a *nested* SPIR-V struct wrapping a vector or matrix (e.g.
+`!spirv.struct<(vector<4xf32> [RelaxedPrecision])>`, or a two-member
+`!spirv.struct<(mat3x3 [RelaxedPrecision], vector<4xsi32>)>` with no
+`Offset` decoration of its own at all). A nested struct like this
+converts fine in isolation: it either has no offsets to validate at all
+(a struct nested inside another struct's member never needs one), or its
+one member's offset is trivially 0 relative to its own start -- either
+way, its own recursive `convertOffsetStructTypeIgnoringDecorations` call
+accepts its natural, ABI-rounded layout unconditionally, with no chance
+to retry on its own terms. The mismatch only surfaces one level up: this
+nested struct's own natural size/alignment is still driven by its real
+vector/matrix member's ABI rounding (e.g. a 3-lane vector rounding up to
+16 bytes), which the *outer* struct's declared, tightly packed offset for
+this member does not reserve room for -- the exact same tight-vector
+problem `getTightVectorArrayType`'s existing retry already solves for a
+bare vector member, just one (or more) levels of struct-wrapping away
+from where that retry looks by default. Added `getTightNestedStructType`,
+recursively rebuilding a nested struct member's own body (preserving its
+own member count and order, so an access chain into any of its own
+members still resolves correctly) with every vector/matrix/array-of-
+vector inside it tightened, wired into the existing `VectorOnly` retry
+tier. This fixed `all_unordered_and_instance_array.39` outright, but
+exposed a *further*, distinct gap for `.39`'s sibling case `.2` (whose
+nested struct has two real members, not one): `CanonicalizeStage.cpp`'s
+own row/component-shape and per-member decoration logic has no notion
+yet of a multi-member nested struct's own members each needing their own
+independent `Location`/`ElementID` -- filed as new roadmap row H101t.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

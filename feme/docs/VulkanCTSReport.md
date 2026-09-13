@@ -40923,3 +40923,69 @@ recovered by manually re-applying the same edits (their exact text was
 still visible in this conversation's own history) and re-verified from
 scratch (unit tests, real CTS, `check-feme`) to confirm the recreation
 was faithful. See `agent_thoughts.md` for the full account.
+
+## H101s: `SPIRVToLLVMPatterns.cpp` nested-struct tight-vector substitution fix
+
+**Problem:** `transform_feedback.fuzz.all_unordered_and_instance_array.
+{2,39}`'s 4-case `spirv.GlobalVariable` legalization failure for a block
+combining a matrix/vector member with a nested single-member struct
+member -- e.g. `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>` used
+as one member of an outer multi-member block. Distinct from H101p's
+reordering-only bug.
+
+**Root cause:** a nested SPIR-V struct wrapping a vector or matrix
+converts fine in isolation -- it either declares no per-member `Offset`
+at all (a nested struct's own layout is never independently validated
+unless it declares one) or its one member's offset is trivially 0
+relative to its own start, so its own recursive conversion accepts its
+natural, ABI-rounded layout unconditionally. The mismatch only surfaces
+one level up: the nested struct's own natural size/alignment is still
+driven by its real vector/matrix member's ABI rounding (e.g. a 3-lane
+vector rounding up to a 16-byte footprint), which the *outer* struct's
+declared, tightly packed offset for this member does not reserve room
+for -- the exact same tight-vector problem `getTightVectorArrayType`'s
+existing retry already solves for a bare vector member, just one (or
+more) levels of struct-wrapping away from where that retry looks by
+default.
+
+**Fix:** added `getTightNestedStructType`, a recursive helper that
+rebuilds a nested struct member's own body -- preserving its own member
+count and order, so an access chain into any of its own members still
+resolves correctly -- substituting every vector, array-of-vector, and
+matrix member inside it (recursing into any further-nested struct) with
+the same tight, alignment-free form used for a bare vector member. Wired
+into the existing `VectorOnly` retry tier in
+`convertOffsetStructTypeIgnoringDecorations`, and extended
+`HasVectorMember` detection so the retry actually runs whenever any
+member is itself a nested struct.
+
+**Testing:** new unit tests
+`SPIRVToLLVMTest.NestedSingleMemberVectorStructInterfaceBlockLegalizes`
+(the single-member shape named in the original bug report) and
+`.NestedMultiMemberStructInterfaceBlockLegalizes` (a real, two-member
+nested-struct shape discovered while investigating `.2`, mirroring
+`all_unordered_and_instance_array.2`'s own exact SPIR-V). All 19
+`FeMeConversionSPIRVToLLVMTests` pass.
+
+**Verified against the real CTS:** `all_unordered_and_instance_array.39`
+(both `random_vertex`/`random_geometry` variants) now passes outright.
+`.2` (both variants) progresses past legalization -- confirmed via a
+`feme-opt` ground-truth repro of its exact shape, converting cleanly
+where it previously failed -- but crashes with a *new*, distinct
+assertion inside `CanonicalizeStagePass` (`PromoteMemToReg`'s own
+`isAllocaPromotable` check), confirmed via a `gdb` backtrace to be a
+compile-time bug in `CanonicalizeStage.cpp`, not a JIT-compiled-code
+fault. Filed as new roadmap row **H101t**, since this is a genuinely
+distinct gap from legalization: `CanonicalizeStage.cpp`'s own row/
+component-shape and per-member decoration logic has no notion yet of a
+multi-member nested struct's own members each needing independent
+`Location`/`ElementID` assignment.
+
+Full `check-feme` (2988/2991, 3 pre-existing `Unsupported`, 0 `Failed`,
++2 test count from the two new unit tests) passes with 0 regressions. A
+fresh isolated (one `deqp-vk` invocation per case) sweep of both stage
+variants of `all_unordered_and_instance_array.{0..99}` (200 cases) shows
+26 Passed/7 Failed/164 NotSupported/2 Assertion/1 UNKNOWN (net +2 Passed
+from `.39`, 0 regressions elsewhere -- the previously-filed H101r bucket
+(`.27`/`.51`/`.66`/`.77`) and the pre-existing, unrelated `.66`
+(geometry) heap-corruption crash are both unchanged).
