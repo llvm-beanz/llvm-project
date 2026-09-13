@@ -348,6 +348,146 @@ TEST(CanonicalizeStageTest, MapsXfbDecorationsToTransformFeedbackCapture) {
   EXPECT_EQ(Varying.XfbStride, 32u);
 }
 
+/// (Roadmap H101c) GLSL's own "array of block instances" syntax
+/// (`layout(xfb_buffer=0, ...) out Block { uvec4 a; } block[3];`) is
+/// GLSL/SPIR-V's own model for 3 *independently*-captured transform-
+/// feedback streams sharing one interface-block type -- each `block[k]`
+/// targets its own buffer `XfbBuffer + k` (the Vulkan spec's own model
+/// for this shape), never `RowCount`-many rows packed back-to-back
+/// within one buffer the way a real matrix or a block member's own
+/// array member already is. `SignatureElement::XfbBufferArrayStride`
+/// records the block's one member's own row count (1 here, for a plain
+/// `uvec4` member) so `Executor.cpp`'s `captureTransformFeedback` can
+/// recover each instance's own row and route it to its own buffer. This
+/// case's `RowCount` (3, the instance count) already equals
+/// `XfbBufferArrayStride` (1) times the instance count, so this is the
+/// simplest sub-case: no matrix-row splitting is needed within one
+/// instance.
+TEST(CanonicalizeStageTest,
+    MapsArrayOfBlockInstancesWithSimpleMemberToXfbBufferArrayStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global [3 x { <4 x i32> }], !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store <4 x i32> <i32 1, i32 2, i32 3, i32 4>, ptr addrspace(8) @block
+      store <4 x i32> <i32 5, i32 6, i32 7, i32 8>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 16)
+      store <4 x i32> <i32 9, i32 10, i32 11, i32 12>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 32)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 16}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 3u);
+  EXPECT_EQ(Elt.XfbBufferArrayStride, 1u);
+  ASSERT_TRUE(Elt.XfbBuffer.has_value());
+  EXPECT_EQ(*Elt.XfbBuffer, 0u);
+
+  // Each instance's own store resolves to its own `Row` (0, 1, 2) --
+  // `Executor.cpp` recovers the buffer index directly from `Row` here
+  // (`XfbBufferArrayStride == 1` means `Row` already *is* the instance
+  // index).
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2}));
+}
+
+/// (Roadmap H101c) The harder sub-case of the same "array of block
+/// instances" shape: the block's one member is itself a matrix
+/// (`layout(xfb_buffer=0, ...) out Block { mat4 var; } block[3];`, the
+/// exact shape `dEQP-VK.transform_feedback.fuzz.
+/// instance_array_basic_type.mat4.{geometry,vertex}` take). Now
+/// `getStageIORowShape` flattens `RowCount` to 12 (3 instances * 4
+/// matrix rows/columns), conflating the instance index and the matrix's
+/// own column index into one `Row` -- `XfbBufferArrayStride` (4, the
+/// matrix's own column count) is what lets `Executor.cpp` split `Row`
+/// back into `(Instance, InnerRow) = (Row / 4, Row % 4)`.
+///
+/// Before this milestone's own `resolveRowComponent`/`storeStageIOValue`
+/// fix, a whole-matrix store's own base `Row` (the instance index,
+/// resolved by `resolveRowComponent`) was double-counted against the
+/// matrix's own column index a second time by `storeStageIOValue`'s
+/// array-decomposition recursion (which unconditionally overwrote,
+/// rather than combined with, its own incoming `Row`), producing rows
+/// far out of `RowCount`'s own range (e.g. 16-19 instead of 4-7 for
+/// instance 1) -- `dEQP-VK.transform_feedback.fuzz.
+/// instance_array_basic_type.mat4.vertex`'s own `feme-graphics-
+/// validate-stage` failure ("row 19 is out of range for element 0")
+/// exposed this.
+TEST(CanonicalizeStageTest,
+    MapsArrayOfBlockInstancesWithMatrixMemberToXfbBufferArrayStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global [3 x { [4 x <4 x float>] }], !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store [4 x <4 x float>] [<4 x float> <float 1.0, float 2.0, float 3.0, float 4.0>, <4 x float> <float 5.0, float 6.0, float 7.0, float 8.0>, <4 x float> <float 9.0, float 10.0, float 11.0, float 12.0>, <4 x float> <float 13.0, float 14.0, float 15.0, float 16.0>], ptr addrspace(8) @block
+      store [4 x <4 x float>] [<4 x float> <float 17.0, float 18.0, float 19.0, float 20.0>, <4 x float> <float 21.0, float 22.0, float 23.0, float 24.0>, <4 x float> <float 25.0, float 26.0, float 27.0, float 28.0>, <4 x float> <float 29.0, float 30.0, float 31.0, float 32.0>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 64)
+      store [4 x <4 x float>] [<4 x float> <float 33.0, float 34.0, float 35.0, float 36.0>, <4 x float> <float 37.0, float 38.0, float 39.0, float 40.0>, <4 x float> <float 41.0, float 42.0, float 43.0, float 44.0>, <4 x float> <float 45.0, float 46.0, float 47.0, float 48.0>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 128)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 64}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 12u);
+  EXPECT_EQ(Elt.XfbBufferArrayStride, 4u);
+  ASSERT_TRUE(Elt.XfbBuffer.has_value());
+  EXPECT_EQ(*Elt.XfbBuffer, 0u);
+
+  // Instance 0's own 4 columns resolve to rows 0-3, instance 1's to
+  // rows 4-7, instance 2's to rows 8-11 -- never double-counted (e.g.
+  // instance 1 at rows 16-19) and never collapsed onto instance 0's own
+  // rows.
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows,
+           (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
+}
+
 /// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
 /// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
 /// instance view a vertex/fragment invocation runs for, readable from
