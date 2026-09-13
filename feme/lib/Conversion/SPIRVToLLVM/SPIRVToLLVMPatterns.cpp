@@ -3574,67 +3574,113 @@ bool padUndersizedMembersIfNeeded(mlir::spirv::StructType Type,
   return ChangedAny;
 }
 
-/// Whether \p Type is an offset-decorated struct whose first member's own
-/// declared offset is nonzero -- the shape `layOutStructIfOffsetsMatch`
-/// fills with a leading, synthetic byte-array padding member (see its own
-/// comment) to preserve LLVM's own struct-layout invariant that member 0
-/// always sits at byte offset 0 within the struct. Real (`dxc`/glslang
-/// -compiled, or binary-round-tripped) SPIR-V produces this whenever the
-/// compiler or an optimization pass (e.g. `spirv-opt`'s own dead-code
-/// elimination) drops one or more members from the *front* of an interface
-/// block -- a push-constant block's own leading fields a particular entry
-/// point never reads -- while every surviving member keeps its original
-/// byte offset relative to the whole block's own start (roadmap H6q,
+/// Returns \p Type's own declared member indices (`0 .. getNumElements()
+/// - 1`), sorted by each member's ascending declared byte `Offset`
+/// (`Type.getMemberOffset`). For a struct whose members are declared in
+/// the same order as their own offsets (the overwhelmingly common case),
+/// this is simply the identity permutation. (Roadmap H101p) GLSL's own
+/// `all_unordered_and_instance_array` fuzz-test family deliberately emits
+/// interface blocks whose members are declared *out* of ascending-offset
+/// order (e.g. a `mat4x2` declared first but placed at the higher byte
+/// offset, an `ivec3` declared second but placed at byte 0) -- this
+/// permutation is what lets both `structHasLeadingOffsetPad`/
+/// `layOutStructIfOffsetsMatch` (struct-type legalization) and
+/// `OffsetStructMemberReorderAccessChainPattern` (its own member-selecting
+/// access-chain rewrite) lay out, and address, such a struct's members in
+/// physical (ascending-offset) order regardless of declaration order.
+/// `llvm::stable_sort` (rather than plain `sort`) preserves declaration
+/// order for any two members genuinely declared at the same offset (e.g.
+/// a zero-sized array member), matching LLVM's own struct layout, which
+/// likewise places same-offset members in declaration order.
+llvm::SmallVector<unsigned, 8>
+getOffsetSortedMemberIndices(mlir::spirv::StructType Type) {
+  llvm::SmallVector<unsigned, 8> Order;
+  Order.reserve(Type.getNumElements());
+  for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I)
+    Order.push_back(I);
+  llvm::stable_sort(Order, [&](unsigned A, unsigned B) {
+    return Type.getMemberOffset(A) < Type.getMemberOffset(B);
+  });
+  return Order;
+}
+
+/// Whether \p Type is an offset-decorated struct whose physically-first
+/// (lowest-offset) member -- per `getOffsetSortedMemberIndices`, not
+/// necessarily the member declared first -- has a nonzero declared offset.
+/// This is the shape `layOutStructIfOffsetsMatch` fills with a leading,
+/// synthetic byte-array padding member (see its own comment) to preserve
+/// LLVM's own struct-layout invariant that member 0 always sits at byte
+/// offset 0 within the struct. Real (`dxc`/glslang-compiled, or
+/// binary-round-tripped) SPIR-V produces this whenever the compiler or an
+/// optimization pass (e.g. `spirv-opt`'s own dead-code elimination) drops
+/// one or more members from the *front* of an interface block -- a
+/// push-constant block's own leading fields a particular entry point
+/// never reads -- while every surviving member keeps its original byte
+/// offset relative to the whole block's own start (roadmap H6q,
 /// `dEQP-VK.mesh_shader.ext.api.draw.*with_task_shader*`'s own task-stage
-/// entry). `OffsetStructLeadingPadAccessChainPattern` reproduces this exact
-/// decision to add a matching `+1` to the first index of any
+/// entry). `OffsetStructMemberReorderAccessChainPattern` reproduces this
+/// exact decision to add a matching `+1` to the first index of any
 /// `spirv.AccessChain` into a struct laid out this way, since MLIR's own
 /// generic `AccessChainPattern` forwards every index straight through
 /// unmodified and would otherwise silently select the wrong member.
 bool structHasLeadingOffsetPad(mlir::spirv::StructType Type) {
-  return Type.hasOffset() && Type.getNumElements() != 0 &&
-         Type.getMemberOffset(0) != 0;
+  if (!Type.hasOffset() || Type.getNumElements() == 0)
+    return false;
+  unsigned First = getOffsetSortedMemberIndices(Type).front();
+  return Type.getMemberOffset(First) != 0;
 }
 
 /// Builds the candidate LLVM struct for
 /// convertOffsetStructTypeIgnoringDecorations below out of an
-/// already-computed \p Members list, validating (when \p Type has explicit
-/// offsets) that LLVM's own natural ABI-alignment-driven layout for those
-/// exact member types reproduces every declared offset. Returns null if it
-/// doesn't.
+/// already-computed \p Members list (indexed by \p Type's own *declared*
+/// member order), validating (when \p Type has explicit offsets) that
+/// LLVM's own natural ABI-alignment-driven layout for those exact member
+/// types, laid out in *physical* (ascending-offset) order, reproduces
+/// every declared offset. Returns null if it doesn't.
 ///
-/// If \p Type's own first member has a nonzero declared offset (see
-/// structHasLeadingOffsetPad), prepends a synthetic `[Gap x i8]` member
-/// consuming exactly that leading gap before checking the rest -- an
-/// ordinary LLVM struct's member 0 always starts at byte offset 0, so
+/// (Roadmap H101p) Lays \p Members out in `getOffsetSortedMemberIndices`'s
+/// own physical order rather than \p Type's declared order -- required for
+/// a struct whose members are declared out of ascending-offset order (see
+/// that function's own comment): the natural-ABI-layout cursor walk below
+/// only ever increases, so a declared offset smaller than an
+/// already-consumed cursor position could never re-match if members were
+/// instead walked in raw declared order.
+///
+/// If \p Type's own physically-first member has a nonzero declared offset
+/// (see structHasLeadingOffsetPad), prepends a synthetic `[Gap x i8]`
+/// member consuming exactly that leading gap before checking the rest --
+/// an ordinary LLVM struct's member 0 always starts at byte offset 0, so
 /// without this, a struct like this one (a real, if unusual, shape: see
 /// structHasLeadingOffsetPad's own comment) could never lay its first real
 /// member out at its true declared offset at all. The resulting LLVM
-/// struct's own member N (N > 0) is \p Members[N - 1] -- every consumer
-/// that builds a GEP into a struct converted this way must account for
-/// that shift (see OffsetStructLeadingPadAccessChainPattern).
+/// struct's own member N (N > 0, or N >= 0 without a leading pad) is \p
+/// Members[Order[N or N - 1]] -- every consumer that builds a GEP into a
+/// struct converted this way must account for both that shift and this
+/// reordering (see OffsetStructMemberReorderAccessChainPattern).
 mlir::Type layOutStructIfOffsetsMatch(mlir::spirv::StructType Type,
                                       llvm::ArrayRef<mlir::Type> Members) {
   if (!Type.hasOffset())
     return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
                                                   /*isPacked=*/false);
 
+  llvm::SmallVector<unsigned, 8> Order = getOffsetSortedMemberIndices(Type);
   mlir::DataLayout DL;
   uint64_t Cursor = 0;
   llvm::SmallVector<mlir::Type, 9> Laid;
   if (structHasLeadingOffsetPad(Type)) {
-    uint64_t Gap = Type.getMemberOffset(0);
+    uint64_t Gap = Type.getMemberOffset(Order.front());
     Laid.push_back(mlir::LLVM::LLVMArrayType::get(
         mlir::IntegerType::get(Type.getContext(), 8), Gap));
     Cursor = Gap;
   }
-  llvm::append_range(Laid, Members);
 
-  for (unsigned I = 0, E = Members.size(); I != E; ++I) {
-    Cursor = llvm::alignTo(Cursor, DL.getTypeABIAlignment(Members[I]));
-    if (Cursor != Type.getMemberOffset(I))
+  for (unsigned Idx : Order) {
+    mlir::Type Member = Members[Idx];
+    Cursor = llvm::alignTo(Cursor, DL.getTypeABIAlignment(Member));
+    if (Cursor != Type.getMemberOffset(Idx))
       return nullptr; // Declared offset doesn't match the natural layout.
-    Cursor += DL.getTypeSize(Members[I]);
+    Cursor += DL.getTypeSize(Member);
+    Laid.push_back(Member);
   }
   return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Laid,
                                                 /*isPacked=*/false);
@@ -4066,19 +4112,24 @@ public:
 
 /// Converts a `spirv.AccessChain` whose base pointer's pointee is (or, per
 /// roadmap H101n, is a single-dimensional array of) a `spirv::StructType`
-/// requiring a leading offset pad (see structHasLeadingOffsetPad/
+/// requiring a leading offset pad and/or (roadmap H101p) a member
+/// reordering (see structHasLeadingOffsetPad/getOffsetSortedMemberIndices/
 /// layOutStructIfOffsetsMatch's own comments). MLIR's own generic
 /// `AccessChainPattern` forwards every index straight through to the
 /// converted LLVM struct unmodified -- exactly wrong once
-/// `layOutStructIfOffsetsMatch`'s own synthetic pad member has shifted
-/// every real member up by one LLVM struct index. This pattern is
-/// otherwise identical to the generic one (same result-type/leading-zero
-/// handling), it just adds `1` to \p Op's own member-selecting index --
-/// the one that selects a member of the leading-pad struct itself, index 0
-/// if that struct sits directly behind the base pointer or index 1 if an
-/// outer array dimension comes first -- before forwarding every
-/// subsequent index (navigating whatever that index selected, a type this
-/// pattern's own leading pad never touches) unchanged.
+/// `layOutStructIfOffsetsMatch`'s own physical, ascending-offset field
+/// order has shifted a real member's LLVM struct index away from its own
+/// declared SPIR-V member index (whether by a uniform `+1` from a leading
+/// pad, an arbitrary permutation from out-of-declaration-order members, or
+/// both at once). This pattern is otherwise identical to the generic one
+/// (same result-type/leading-zero handling), it just substitutes \p Op's
+/// own member-selecting index -- the one that selects a member of the
+/// struct itself, index 0 if that struct sits directly behind the base
+/// pointer or index 1 if an outer array dimension comes first -- with its
+/// own real physical LLVM field index (getOffsetSortedMemberIndices/
+/// structHasLeadingOffsetPad) before forwarding every subsequent index
+/// (navigating whatever that index selected, a type this pattern's own
+/// reordering never touches) unchanged.
 ///
 /// Scoped to the outermost struct a `spirv.AccessChain`'s own base pointer
 /// directly points to, or (roadmap H101n) to that same struct one level
@@ -4087,23 +4138,25 @@ public:
 /// e.g. `dEQP-VK.transform_feedback.fuzz.*instance_array*`'s own per-
 /// instance interface blocks) addresses one instance's own member through
 /// exactly that shape: `spirv.AccessChain`'s own first index selects the
-/// array element, its *second* index selects the struct member the leading
-/// pad has shifted. A struct member that is itself a struct independently
-/// requiring its own leading pad, nested more than one level deep, would
-/// need a similar adjustment at that deeper level too, which this does not
-/// yet attempt (mirroring this file's own precedent elsewhere, e.g.
-/// convertUndersizedScalarArrayMemberIgnoringDecorations's "matching every
-/// real case" scoping, of not generalizing past what is actually observed).
+/// array element, its *second* index selects the struct member this
+/// pattern remaps. A struct member that is itself a struct independently
+/// requiring its own leading pad or reordering, nested more than one level
+/// deep, would need a similar adjustment at that deeper level too, which
+/// this does not yet attempt (mirroring this file's own precedent
+/// elsewhere, e.g. convertUndersizedScalarArrayMemberIgnoringDecorations's
+/// "matching every real case" scoping, of not generalizing past what is
+/// actually observed).
 ///
 /// A struct (whether pointed to directly or through that one outer array
-/// dimension) without this shape is left to the generic pattern
-/// (`notifyMatchFailure`), so no already-working access chain changes.
-/// Likewise if the member-selecting index is not a compile-time constant
-/// (always true for a real struct-member selector per the SPIR-V spec, but
-/// declined rather than miscompiled if a malformed module ever violates
-/// that), or if the access chain does not reach far enough to select a
-/// struct member at all (e.g. only selects the whole array element).
-class OffsetStructLeadingPadAccessChainPattern
+/// dimension) needing neither a pad nor any reordering is left to the
+/// generic pattern (`notifyMatchFailure`), so no already-working access
+/// chain changes. Likewise if the member-selecting index is not a
+/// compile-time constant (always true for a real struct-member selector
+/// per the SPIR-V spec, but declined rather than miscompiled if a
+/// malformed module ever violates that), or if the access chain does not
+/// reach far enough to select a struct member at all (e.g. only selects
+/// the whole array element).
+class OffsetStructMemberReorderAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
   using mlir::SPIRVToLLVMConversion<
@@ -4116,7 +4169,7 @@ public:
         mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
     mlir::Type PointeeTy = PointerType.getPointeeType();
     // `MemberIndexPos` is which of `Op`'s own indices selects the
-    // leading-pad struct's own member -- index 0 if the struct sits
+    // reordered/padded struct's own member -- index 0 if the struct sits
     // directly behind the base pointer, index 1 if an outer array
     // dimension (one "array of block instances" element) comes first.
     unsigned MemberIndexPos = 0;
@@ -4128,8 +4181,22 @@ public:
         MemberIndexPos = 1;
       }
     }
-    if (!StructTy || !structHasLeadingOffsetPad(StructTy))
-      return Rewriter.notifyMatchFailure(Op, "no leading offset pad");
+    // (Roadmap H101p) `Order` is empty (and every declared member index
+    // already its own physical index) for a struct laid out exactly in
+    // its own declaration order and needing no leading pad -- nothing for
+    // this pattern to do, leave it to the generic one.
+    llvm::SmallVector<unsigned, 8> Order;
+    bool HasPad = false;
+    if (StructTy) {
+      Order = getOffsetSortedMemberIndices(StructTy);
+      HasPad = structHasLeadingOffsetPad(StructTy);
+    }
+    bool NeedsRemap = HasPad;
+    for (unsigned I = 0, E = Order.size(); !NeedsRemap && I != E; ++I)
+      NeedsRemap = Order[I] != I;
+    if (!StructTy || !NeedsRemap)
+      return Rewriter.notifyMatchFailure(
+          Op, "no leading offset pad or member reordering needed");
     if (Op.getIndices().size() <= MemberIndexPos)
       return Rewriter.notifyMatchFailure(
           Op, "access chain does not select a struct member");
@@ -4164,19 +4231,25 @@ public:
     mlir::Value Zero = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, LLVMIndexType,
         Rewriter.getIntegerAttr(LLVMIndexType, 0));
-    // The synthetic pad occupies LLVM struct index 0, shifting every real
-    // member up by one -- see structHasLeadingOffsetPad/
-    // layOutStructIfOffsetsMatch's own comment.
+    // \p MemberIndex's own real physical field is wherever
+    // `getOffsetSortedMemberIndices` placed it (its own position in
+    // `Order`), shifted by one more if a leading pad occupies physical
+    // field 0 -- see structHasLeadingOffsetPad/layOutStructIfOffsetsMatch
+    // /getOffsetSortedMemberIndices's own comments.
+    auto *OrderIt = llvm::find(Order, static_cast<unsigned>(*MemberIndex));
+    assert(OrderIt != Order.end() && "member index not found in struct");
+    uint64_t PhysicalIndex =
+        static_cast<uint64_t>(OrderIt - Order.begin()) + (HasPad ? 1 : 0);
     mlir::Value AdjustedMember = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, LLVMIndexType,
-        Rewriter.getIntegerAttr(LLVMIndexType, *MemberIndex + 1));
+        Rewriter.getIntegerAttr(LLVMIndexType, PhysicalIndex));
 
     llvm::SmallVector<mlir::Value, 4> Indices;
     Indices.push_back(Zero);
     if (MemberIndexPos == 1) {
-      // Forward the outer array index unchanged -- the leading pad lives
-      // inside each array element's own struct, not across the array
-      // dimension itself.
+      // Forward the outer array index unchanged -- the reordered/padded
+      // struct lives inside each array element itself, not across the
+      // array dimension.
       Indices.push_back(Adaptor.getIndices().front());
     }
     Indices.push_back(AdjustedMember);
@@ -8657,7 +8730,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
       MatrixTimesScalarPattern, TransposePattern, RowMajorMatrixStorePattern,
-      RowMajorMatrixLoadPattern, OffsetStructLeadingPadAccessChainPattern,
+      RowMajorMatrixLoadPattern, OffsetStructMemberReorderAccessChainPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,
       SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
       SUDotConversionPattern, SDotAccSatConversionPattern,

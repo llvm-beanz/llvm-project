@@ -261,6 +261,37 @@ TEST(SPIRVToLLVMTest,
       << Result;
 }
 
+// (Roadmap H101p) A multi-member interface block whose members are
+// *declared* out of ascending-`Offset` order (GLSL's own
+// `all_unordered_and_instance_array` fuzz-test family deliberately emits
+// exactly this shape, e.g. a `mat4x2` member declared first but placed at
+// the higher byte offset, with a `vector<3xsi32>` member declared second
+// but placed at byte 0) used to fail `spirv.GlobalVariable` legalization
+// outright: layOutStructIfOffsetsMatch's natural-ABI-layout cursor walk
+// only ever increases, so a declared offset smaller than an
+// already-consumed cursor position could never re-match. Both
+// layOutStructIfOffsetsMatch (struct-type legalization) and
+// OffsetStructMemberReorderAccessChainPattern (its own member-selecting
+// access-chain rewrite) now consult getOffsetSortedMemberIndices to lay
+// out, and address, the struct's members in ascending-offset (physical)
+// order regardless of declaration order, so this now legalizes cleanly
+// instead of failing.
+TEST(SPIRVToLLVMTest, OutOfOrderOffsetInterfaceBlockLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : "
+      "!spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<2xf32>> [12, "
+      "ColMajor, MatrixStride=8 : i32], vector<3xsi32> [0]), Block>, "
+      "Output> }");
+  EXPECT_NE(Result, "<failed>");
+  // The physically-first (lowest-offset) member is the `vector<3xsi32>`
+  // declared second, so it must be laid out as the LLVM struct's first
+  // field, ahead of the `mat4x2` declared first.
+  EXPECT_NE(Result.find("!llvm.struct<(struct<\"feme.tight_vector\""),
+            std::string::npos)
+      << Result;
+}
+
 /// Builds a one-`llvm.mlir.global` `mlir::ModuleOp` carrying
 /// getStageIODecorationsAttrName() with \p Decorations (each inner
 /// `ArrayRef<int32_t>` one `(decoration, arg...)` tuple), the shape
