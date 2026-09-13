@@ -45,16 +45,6 @@ agent thoughts.
 
 # Request
 
-Can you work on H102 or other blocking work to make progress on the H-series
-milestones?
-
-> **`rasterization.culling.primitive_id`'s pixel-comparison mismatch** (1 case,
-> newly exposed by H97's own closing re-run once its bare-`SIGSEGV` crash was
-> fixed): now compiles, links, and runs to completion (no crash, no
-> pipeline-creation error) but fails its own image comparison
-> (`vktRasterizationTests.cpp:8275`), a genuine rendering-correctness bug in
-> whichever primitive-ID-under-culling semantics this case exercises, distinct
-> from H97's own fixed `getelementptr`-index-widening bug. Not yet triaged --
-> needs its own qpa-image/case reduction (mirroring H88/H93's own channel-level
-> pixel-reduction technique) to isolate the specific incorrect value and narrow
-> down which stage of the primitive-ID/culling path disagrees
+Can you please re-triage all the open H-series milestones to figure out what is
+fixed and what isn't? Also please run a full Vulkan CTS run and update the
+headline in the CTS report with the current status.
