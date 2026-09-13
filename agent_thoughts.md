@@ -81124,3 +81124,103 @@ Of the 11 remaining failures:
 H101s is the most direct continuation of this session's own work (same
 file, same general shape family, smallest case count to build a fast
 repro loop around).
+
+# H101s session: nested-struct tight-vector fix, new crash found and filed as H101t
+
+Fixed. `all_unordered_and_instance_array.39` (both stages) now passes.
+`.2` (both stages) hits a new, distinct crash -- characterized and filed
+as **H101t**, not fixed this session (ran out of budget after finding
+it; see below).
+
+## What H101s actually needed
+
+The bug report's own single-member example (`struct(vector3f32)` as one
+member of an outer block) was real, but real CTS `.2` uses a **two-**
+member nested struct (`mat3x3` + `vector4si32`, no `Offset` decoration at
+all). A narrow "peel the one member out" fix would have left `.2` broken.
+Went general instead: `getTightNestedStructType` recursively rebuilds a
+nested struct's *entire* body (any member count), tightening whichever
+members need it, keeping the same member count/order so access-chain
+indices keep working. This is the same "tight vector" trick H101i/H101j
+already used for bare vector members (H6q/H101n/H101p territory too) --
+just recursing one level deeper into struct members that are themselves
+structs.
+
+## The surprise: fixing legalization uncovered a second, deeper bug
+
+`.2` now legalizes clean but crashes with `PromoteMemToReg`'s own
+`isAllocaPromotable` assertion inside `CanonicalizeStagePass`. Confirmed
+via `gdb` backtrace this is a real compiler bug (not JIT shader code) --
+`canonicalizeSPIRVStage`'s final SSA-promotion step is being handed an
+alloca some earlier rewrite left in a non-promotable state.
+
+Best guess without a deeper dive: `CanonicalizeStage.cpp`'s own
+`TakeBlockPath`/`getStageIORowShape`/`peelSingleMemberStruct` machinery
+only knows how to peel a *single*-member nested struct (turning it
+transparently into its one inner member). It has no equivalent logic for
+a *multi*-member nested struct -- each of that nested struct's own real
+members probably needs its own independent `Location`/`ElementID`, the
+same way the outer block's top-level members already get, and today
+nothing does that. Some access into the nested struct's second member
+likely survives as a raw, un-rewritten load/store against a `ShadowValues`
+alloca, which `PromoteMemToReg` then rejects.
+
+Did not chase this further -- it's a distinct, non-trivial gap in a
+different file (`CanonicalizeStage.cpp`, not
+`SPIRVToLLVMPatterns.cpp`), and this session's fix was already complete,
+tested, and regression-clean on its own terms. Filed as **H101t** with
+the hypothesis above so the next session can go straight to a
+`feme-opt --feme-canonicalize-stage` repro instead of re-deriving this.
+
+## Verification (all real, not just unit tests)
+
+- `FeMeConversionSPIRVToLLVMTests`: 19/19 (2 new: single-member and
+  multi-member nested-struct shapes).
+- Full `check-feme`: 2988/2991, 3 pre-existing `Unsupported`, 0 `Failed`.
+- Isolated (one `deqp-vk` process per case) sweep of
+  `all_unordered_and_instance_array.{0..99}`, both stages, 200 cases:
+  26 Passed/7 Failed/164 NotSupported/2 Assertion/1 UNKNOWN. Net +2
+  Passed (`.39`), 0 regressions (H101r's own bucket and the pre-existing
+  `.66` heap-corruption UNKNOWN are both unchanged).
+
+## Docs and commits, this session
+
+- `SPIRVToLLVMPatterns.cpp` + `SPIRVToLLVMTest.cpp`: one commit (the fix
+  + tests together, since the tests are what prove the fix).
+- `Roadmap.md`: struck through H101s with a closing note; added new row
+  **H101t** for the `PromoteMemToReg` crash.
+- `FeMeVulkanDesign.md`: new paragraph after the H101p reordering
+  discussion, covering the nested-struct generalization and why it
+  exposed H101t.
+- `VulkanCTSReport.md`: new closing section with the same root-cause/fix/
+  verification write-up as here, plus the exact numbers above.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: **not
+  touched** -- bugfix, no new feature/extension surface.
+- Docs commit made separately from the code commit, per the
+  "small, separately-committed changes" rule.
+
+Backed up the code fix (`git diff > /tmp/h101s_repro/h101s_fix_backup.patch`)
+before committing, per the standing precaution adopted after last
+session's `git checkout --` data-loss incident. Not needed this time --
+no incident -- but kept the habit.
+
+## Suggested next steps (pick one)
+
+1. **H101t** (2 cases, `.2` both stages, newest, most specific lead):
+   `PromoteMemToReg` assertion crash in `CanonicalizeStagePass`. Start
+   with a `feme-opt --feme-canonicalize-stage` repro of `.2`'s exact
+   two-member nested-struct shape (reuse `/tmp/h101s_repro/case2_repro.mlir`
+   before it's cleaned up) to find the specific access that survives
+   un-rewritten, then decide whether the fix belongs in `TakeBlockPath`'s
+   per-member loop (recurse into a multi-member nested struct, assigning
+   each real member its own `Location`) or a new, narrower helper.
+2. **H101q** (8 cases, carried over, still untouched): unresolved
+   stage-IO global-variable reference.
+3. **H101r** (case count needs re-triage against current binary):
+   row/component-out-of-range in `feme.stage.output.store`.
+4. Heap-corruption pairs (`.44`/`.45`, `.12`/`.13`, `.66`) are all still
+   open across multiple sessions now -- still worth a dedicated ASan/
+   valgrind session rather than one-at-a-time triage.
+
+H101t is the most direct continuation (same investigation, same case,
+already has a `gdb` backtrace and a hypothesis to test).
