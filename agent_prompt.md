@@ -45,7 +45,7 @@ agent thoughts.
 
 # Request
 
-Can you work on H101g or other blocking work to make progress on the H-series
+Can you work on H101c or other blocking work to make progress on the H-series
 milestones?
 
 > **`transform_feedback.fuzz.*instance_array*`'s array-of-block-instances shape
