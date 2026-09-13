@@ -17,6 +17,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/IR/Constants.h"
@@ -744,6 +745,108 @@ StageIORowShape getStageIORowShape(Type *ValueTy) {
     return {VecTy->getElementType(), VecTy->getNumElements(),
             static_cast<unsigned>(RowCount)};
   return {PerRowTy, /*ComponentCount=*/1, static_cast<unsigned>(RowCount)};
+}
+
+/// (Roadmap H101t) Whether \p Ty is a genuine multi-member nested struct
+/// -- one whose own real members (e.g. `all_unordered_and_instance_array
+/// .2`'s own `!spirv.struct<(mat3x3 [RelaxedPrecision], vector<4xsi32>)>`
+/// nested-struct member, which H101s's own `getTightNestedStructType`
+/// legalizes to a genuine two-member LLVM struct) `getStageIORowShape`
+/// cannot represent as one `SignatureElement`: unlike a matrix/array's
+/// own single, uniformly-typed row axis, two distinct real members can
+/// have two distinct scalar types (here, a matrix's own `float` rows
+/// alongside a vector's own `sint32` row), which `SignatureElement`'s
+/// single `ComponentType`/`BitWidth` pair has no room for. Excludes a
+/// single-member wrapper (already peeled transparently by
+/// `peelSingleMemberStruct`) and a tight-vector marker struct (which
+/// `getStageIORowShape` already recognizes positively as a row's own
+/// component axis, not a genuine aggregate of independent members).
+bool isGenuineMultiMemberNestedStruct(Type *Ty) {
+  auto *ST = dyn_cast<StructType>(Ty);
+  return ST && ST->getNumElements() > 1 && !getTightVectorMarkerInnerType(ST);
+}
+
+/// (Roadmap H101t) The total number of `Location`-consuming rows \p Ty
+/// occupies, recursing into any genuine multi-member nested struct (see
+/// `isGenuineMultiMemberNestedStruct` above) to sum each of its own real
+/// members' own row counts, rather than `getStageIORowShape`'s own
+/// single-element answer of 1 (which silently treats the whole nested
+/// struct as if it were one opaque, un-decomposed scalar row) -- the
+/// same per-member `Location` bookkeeping `addStageIOStructMembers`
+/// below performs when it actually emits one `SignatureElement` per
+/// leaf, kept in its own function so the first (declared-order,
+/// `Location`-computing) `addElements` pass can call it before any
+/// `SignatureElement` actually exists yet.
+uint32_t getStageIOFlattenedRowCount(Type *Ty) {
+  if (isGenuineMultiMemberNestedStruct(Ty)) {
+    uint32_t Total = 0;
+    for (Type *FieldTy : cast<StructType>(Ty)->elements())
+      Total += getStageIOFlattenedRowCount(FieldTy);
+    return Total;
+  }
+  return getStageIORowShape(Ty).RowCount;
+}
+
+/// (Roadmap H101t) The number of leaf `SignatureElement`s (and thus the
+/// number of consecutive `ElementIDs[GV]` entries) \p Ty contributes as a
+/// stage-IO block member, recursing into any genuine multi-member nested
+/// struct (see `isGenuineMultiMemberNestedStruct` above) to sum each of
+/// its own real members' own leaf counts, rather than the always-1 answer
+/// every other member shape has. `resolveOffsetWithinElement` uses this
+/// to walk a block's own physical fields and find the right starting
+/// index into its `IDs` for a given physical field, now that a genuine
+/// multi-member nested-struct field can contribute more than one
+/// `ElementID` (unlike every other field, which still contributes
+/// exactly one).
+uint32_t getStageIOLeafElementCount(Type *Ty) {
+  if (isGenuineMultiMemberNestedStruct(Ty)) {
+    uint32_t Total = 0;
+    for (Type *FieldTy : cast<StructType>(Ty)->elements())
+      Total += getStageIOLeafElementCount(FieldTy);
+    return Total;
+  }
+  return 1;
+}
+
+/// (Roadmap H101t) Decomposes a genuine multi-member nested-struct
+/// stage-IO member (see `isGenuineMultiMemberNestedStruct` above) into
+/// one `AddElement` call per leaf field, recursing into any
+/// further-nested genuine multi-member struct. Mirrors GLSL's own
+/// implicit block layout rule for a nested struct member that carries no
+/// `Offset` decoration of its own (case `.2`'s own repro shape has
+/// none): each real member gets the next sequential `Location` (one per
+/// row, exactly like `TakeBlockPath`'s own top-level per-member loop
+/// already computes via `RowCount`), and its own `XfbOffset` is
+/// \p BaseD's own `XfbOffset` plus this field's byte offset within
+/// \p ST, read from \p DL since there is no explicit per-member `Offset`
+/// decoration to read instead -- exactly the byte position H101s's own
+/// tight-vector substitution inside \p ST was designed to make match a
+/// real SPIR-V-declared layout. \p NextLocation is threaded through (not
+/// recomputed locally) so a struct with more than one genuine
+/// multi-member nested-struct field in a row still assigns strictly
+/// increasing `Location`s across all of them.
+void addStageIOStructMembers(
+    function_ref<void(GlobalVariable *, unsigned,
+                      const ParsedSPIRVDecorations &, Type *)>
+        AddElement,
+    GlobalVariable *GV, unsigned AddrSpace,
+    const ParsedSPIRVDecorations &BaseD, StructType *ST,
+    const DataLayout &DL, uint32_t &NextLocation) {
+  const StructLayout *SL = DL.getStructLayout(ST);
+  for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
+    Type *FieldTy = ST->getElementType(I);
+    if (isGenuineMultiMemberNestedStruct(FieldTy)) {
+      addStageIOStructMembers(AddElement, GV, AddrSpace, BaseD,
+                              cast<StructType>(FieldTy), DL, NextLocation);
+      continue;
+    }
+    ParsedSPIRVDecorations FieldD = BaseD;
+    FieldD.Location = NextLocation;
+    FieldD.XfbOffset =
+        BaseD.XfbOffset.value_or(0) + SL->getElementOffset(I);
+    AddElement(GV, AddrSpace, FieldD, FieldTy);
+    NextLocation += getStageIOFlattenedRowCount(FieldTy);
+  }
 }
 
 /// (Roadmap H6i) Whether \p GV is a task entry's own bounded payload
@@ -2462,14 +2565,24 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   // member has a nonzero offset -- exactly the same pad
   // `getEffectiveStageIOValueType`'s own comment documents for the
   // single-real-member case, just here on a genuinely multi-member
-  // block instead. `ST->getNumElements() == IDs.size() + 1` recovers
-  // that shape the same way `addElements`' own `HasLeadingPad` does;
-  // `LLVMMember`, computed above directly against \p ST's own real
-  // (still pad-inclusive) `StructLayout`, then needs the identical `-1`
-  // shift to index `IDs`/this member's own type correctly -- `LLVMMember
-  // == 0` can never occur here (nothing is ever declared to store into
-  // the pad itself).
-  bool HasLeadingPad = ST->getNumElements() == IDs.size() + 1;
+  // block instead.
+  //
+  // (Roadmap H101t) Detected directly by \p ST's own field-0 type (a
+  // synthetic pad is always `[N x i8]` -- see `structHasLeadingOffsetPad`
+  // /SPIRVToLLVMPatterns.cpp) rather than by comparing `ST->
+  // getNumElements()` against `IDs.size() + 1`, unlike `addElements`' own
+  // construction-side `HasLeadingPad` (still correct there, since it
+  // compares against `MemberDecorations.size()`, the real *declared*
+  // top-level member count, never affected by this): a genuine
+  // multi-member nested-struct member (`isGenuineMultiMemberNestedStruct`)
+  // now contributes more than one entry to \p IDs (see
+  // `addStageIOStructMembers`), so \p IDs.size() is this block's own
+  // *leaf* element count, not its top-level physical field count, and the
+  // old `+ 1` comparison no longer reliably detects a pad once any
+  // top-level member has this shape.
+  bool HasLeadingPad = false;
+  if (auto *PadArr = dyn_cast<ArrayType>(ST->getElementType(0)))
+    HasLeadingPad = PadArr->getElementType()->isIntegerTy(8);
   assert((!HasLeadingPad || LLVMMember != 0) &&
         "store/load into a struct's own leading pad");
   // (Roadmap H101p) \p IDs is populated in `addElements`' own *physical*
@@ -2477,16 +2590,37 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   // *declared* SPIR-V order, whenever a block's members are declared out
   // of ascending-offset order -- `IDs[k]` (for `k` past any leading pad
   // shift) names whichever member occupies physical LLVM field `k`, not
-  // necessarily the member SPIR-V declared at that position. `LLVMMember`
-  // (computed directly from \p ST's own physical `StructLayout` above) is
-  // already a physical index, so this indexing needed no further change
-  // once `addElements` was fixed to populate `IDs` in matching physical
-  // order.
-  unsigned Member = HasLeadingPad ? LLVMMember - 1 : LLVMMember;
+  // necessarily the member SPIR-V declared at that position.
+  //
+  // (Roadmap H101t) Each physical field before `LLVMMember` may itself
+  // have contributed more than one entry to \p IDs (a genuine
+  // multi-member nested-struct field -- see `addStageIOStructMembers`),
+  // so the right starting index into \p IDs for `LLVMMember` is the sum
+  // of every earlier (non-pad) physical field's own leaf element count,
+  // not simply `LLVMMember` (or `LLVMMember - 1`, once a leading pad also
+  // shifts everything) as when every field contributed exactly one.
+  uint32_t IDStart = 0;
+  for (unsigned I = HasLeadingPad ? 1 : 0; I != LLVMMember; ++I)
+    IDStart += getStageIOLeafElementCount(ST->getElementType(I));
+  Type *FieldTy = ST->getElementType(LLVMMember);
   uint64_t Residual = ByteOffset - SL->getElementOffset(LLVMMember);
-  auto [Row, Component] = resolveRowComponent(ST->getElementType(LLVMMember),
-                                               Residual, ValueTy, DL);
-  return StageIOAccess{IDs.slice(Member, 1), AsConstant(Row),
+  // (Roadmap H101t) `FieldTy` may itself be a genuine multi-member
+  // nested struct (case `.2`'s own shape): recurse into its own layout
+  // exactly like this function's own top-level struct handling, sliced
+  // to just its own leaf `IDs` range, until a genuine leaf field (a
+  // plain scalar/vector/matrix/single-member-wrapper, or a tight-vector
+  // marker) is reached.
+  while (isGenuineMultiMemberNestedStruct(FieldTy)) {
+    auto *NestedST = cast<StructType>(FieldTy);
+    const StructLayout *NestedSL = DL.getStructLayout(NestedST);
+    unsigned NestedMember = NestedSL->getElementContainingOffset(Residual);
+    for (unsigned I = 0; I != NestedMember; ++I)
+      IDStart += getStageIOLeafElementCount(NestedST->getElementType(I));
+    Residual -= NestedSL->getElementOffset(NestedMember);
+    FieldTy = NestedST->getElementType(NestedMember);
+  }
+  auto [Row, Component] = resolveRowComponent(FieldTy, Residual, ValueTy, DL);
+  return StageIOAccess{IDs.slice(IDStart, 1), AsConstant(Row),
                        AsConstant(Component), Vertex, IsOutput};
 }
 
@@ -3157,7 +3291,15 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                   DL.getStructLayout(ST)->getElementContainingOffset(
                       *MemberD.XfbOffset);
             Type *MemberTy = ST->getElementType(PhysicalIndex);
-            uint32_t RowCount = getStageIORowShape(MemberTy).RowCount;
+            // (Roadmap H101t) A genuine multi-member nested struct (see
+            // `isGenuineMultiMemberNestedStruct`) expands to more than
+            // one `Location`-consuming `SignatureElement` below --
+            // `getStageIOFlattenedRowCount` sums each of its own real
+            // members' own row counts instead of `getStageIORowShape`'s
+            // single-element answer of 1, so a later block member's own
+            // `Location` still starts where this member's own leaves
+            // actually end.
+            uint32_t RowCount = getStageIOFlattenedRowCount(MemberTy);
             if (!MemberD.BuiltIn) {
               if (!MemberD.Location)
                 MemberD.Location = NextMemberLocation;
@@ -3175,8 +3317,25 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                                         const PendingMember &B) {
             return A.PhysicalIndex < B.PhysicalIndex;
           });
-          for (const PendingMember &PM : Pending)
+          for (const PendingMember &PM : Pending) {
+            // (Roadmap H101t) A genuine multi-member nested struct
+            // member (e.g. `all_unordered_and_instance_array.2`'s own
+            // `!spirv.struct<(mat3x3, vector<4xsi32>)>`) cannot become
+            // one `SignatureElement` -- its own real members can have
+            // distinct scalar types `SignatureElement`'s single
+            // `ComponentType`/`BitWidth` pair has no room for -- so
+            // expand it into one `addElement` call per leaf field
+            // instead, mirroring this same loop's own top-level
+            // per-member decomposition one level deeper.
+            if (isGenuineMultiMemberNestedStruct(PM.Ty)) {
+              uint32_t NestedLocation = PM.D.Location.value_or(0);
+              addStageIOStructMembers(addElement, GV, AddrSpace, PM.D,
+                                      cast<StructType>(PM.Ty), DL,
+                                      NestedLocation);
+              continue;
+            }
             addElement(GV, AddrSpace, PM.D, PM.Ty);
+          }
           continue;
         }
         // (Roadmap H5f) A plain (non-block) per-vertex-arrayed `Input`

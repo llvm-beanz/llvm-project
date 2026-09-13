@@ -4199,4 +4199,189 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(RowCounts[1], 4u);
 }
 
+/// (Roadmap H101t) A genuinely multi-member nested-struct stage-IO member
+/// -- `dEQP-VK.transform_feedback.fuzz.all_unordered_and_instance_array.2`'s
+/// own exact shape, confirmed via a standalone `feme-translate
+/// --spirv-to-llvmir` ground-truth repro of `!spirv.struct<(!spirv.struct<(
+/// !spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision], vector<4xsi32>)>
+/// [36], vector<3xf32> [24, RelaxedPrecision]), Block>` -- used to crash
+/// `PromoteMemToReg`'s own `isAllocaPromotable` assertion (H101s's own
+/// closing note): `getStageIORowShape` had no representation for a nested
+/// struct's own *two* real members (a `mat3x3` and a `vector4si32`, which
+/// need two different scalar types -- `float` rows vs. a `sint32` row --
+/// `SignatureElement`'s single `ComponentType`/`BitWidth` pair cannot
+/// hold), so the whole nested struct became one bogus, under-sized
+/// element instead. `addStageIOStructMembers` now decomposes it into one
+/// `SignatureElement` per real member instead, mirroring how the outer
+/// block's own top-level members are already decomposed, so the vector's
+/// own store rewrites into `feme.stage.output.store` calls like any other
+/// element rather than surviving as a raw, un-rewritten store against the
+/// `PromoteMemToReg`-fed shadow alloca.
+TEST(CanonicalizeStageTest,
+    RewritesGenuineMultiMemberNestedStructBlockMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector.2 = type { [3 x float] }
+    %feme.tight_vector = type { [3 x float] }
+    %feme.tight_vector.1 = type { [4 x i32] }
+
+    @block = external addrspace(8) global { [24 x i8], %feme.tight_vector.2, { [3 x %feme.tight_vector], %feme.tight_vector.1 } }, !spirv.Decorations !2, !feme.spirv.MemberDecorations !9
+
+    define void @main() #0 {
+      store <4 x i32> <i32 1, i32 2, i32 3, i32 4>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 72), align 4
+      store <3 x float> splat (float 1.000000e+00), ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 24), align 4
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{i32 36, i32 0}
+    !1 = !{i32 37, i32 72}
+    !2 = !{!0, !1}
+    !3 = !{i32 35, i32 36}
+    !4 = !{!3}
+    !5 = !{i32 0, !4}
+    !6 = !{i32 35, i32 24}
+    !7 = !{!6}
+    !8 = !{i32 1, !7}
+    !9 = !{!5, !8}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load/store survives against the nested-struct member's own
+  // real members -- both the outer block's trailing `vector<3xf32>` and
+  // the nested struct's own `vector<4xsi32>` member must be rewritten,
+  // not just the former.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Three elements: the nested struct's own `mat3x3` (3 rows), the
+  // nested struct's own `vector4si32` (1 row, 4 components), and the
+  // outer block's trailing `vector3f32` (1 row, 3 components) -- not one
+  // bogus element for the whole two-member nested struct.
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+
+  DenseMap<uint32_t, DenseSet<uint32_t>> RowsByElementID;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    uint32_t ElementID =
+        getStageOpConstantOperand(*CI, /*Offset=*/0).value_or(~0u);
+    uint32_t Row = getStageOpConstantOperand(*CI, /*Offset=*/1).value_or(~0u);
+    RowsByElementID[ElementID].insert(Row);
+  }
+  // Only 2 of the 3 elements are ever stored to in this test's own IR
+  // (the `mat3x3` element has no store at all) -- both, distinctly, at
+  // `Row` 0 (their own lanes become distinct `Component`s instead), each
+  // its own `ElementID` rather than colliding onto one bogus shared
+  // element.
+  ASSERT_EQ(RowsByElementID.size(), 2u);
+
+  // Both stored elements decompose their own lanes into distinct
+  // `Component`s at a single `Row` 0 -- the `vector4si32` nested-struct
+  // member and the outer block's own trailing `vector3f32` member -- so
+  // each gets exactly one distinct `Row` value, confirming they landed
+  // on two genuinely distinct `ElementID`s rather than one colliding
+  // onto the other (the bug this test guards against: before the fix,
+  // the whole two-member nested struct became one bogus element, so a
+  // store into its second real member either silently mis-targeted the
+  // first member's own storage or was left unrewritten entirely).
+  llvm::SmallVector<uint32_t, 2> RowCounts;
+  for (const auto &KV : RowsByElementID)
+    RowCounts.push_back(KV.second.size());
+  llvm::sort(RowCounts);
+  EXPECT_EQ(RowCounts[0], 1u);
+  EXPECT_EQ(RowCounts[1], 1u);
+}
+
+/// (Roadmap H101t) The real bug this milestone's own closing session
+/// found underneath its first, synthetic-repro-verified fix above: that
+/// fix alone (`addStageIOStructMembers`, decomposing a genuine
+/// multi-member nested struct into multiple `SignatureElement`s at
+/// *construction* time) still crashed against the real
+/// `all_unordered_and_instance_array.2` case, because
+/// `resolveOffsetWithinElement`'s own *access*-time struct-member
+/// indexing (`IDs.slice(Member, 1)`, keyed by a plain physical field
+/// index) still assumed exactly one `ElementID` per top-level physical
+/// field -- an assumption `addStageIOStructMembers` had just broken, by
+/// letting a single top-level field (a nested struct) now contribute
+/// more than one `ElementID`. That mismatch made two logically distinct
+/// accesses (a store into the nested struct's own second real member, in
+/// this test's case) resolve to the *same* `(ElementID, Row, Component)`
+/// key as a different access, silently reusing one wrong-typed shadow
+/// alloca for both -- exactly the type-mismatched-store shape
+/// `isAllocaPromotable` rejects. Unlike the test above (which never
+/// stores into the nested struct's own first member, the `mat3x3`), this
+/// test stores into *all three* real leaf members -- the nested struct's
+/// own `mat3x3` *and* `vector4si32`, plus the outer block's own trailing
+/// `vector3f32` -- so a correct fix must resolve all three to distinct,
+/// non-colliding `ElementID`s.
+TEST(CanonicalizeStageTest,
+    ResolvesAllMembersOfGenuineMultiMemberNestedStructWithoutCollision) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector.2 = type { [3 x float] }
+    %feme.tight_vector = type { [3 x float] }
+    %feme.tight_vector.1 = type { [4 x i32] }
+
+    @block = external addrspace(8) global { [24 x i8], %feme.tight_vector.2, { [3 x %feme.tight_vector], %feme.tight_vector.1 } }, !spirv.Decorations !2, !feme.spirv.MemberDecorations !9
+
+    define void @main() #0 {
+      store [3 x %feme.tight_vector] [%feme.tight_vector { [3 x float] [float 1.0, float 0.0, float 0.0] }, %feme.tight_vector { [3 x float] [float 0.0, float 1.0, float 0.0] }, %feme.tight_vector { [3 x float] [float 0.0, float 0.0, float 1.0] }], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 36), align 4
+      store <4 x i32> <i32 1, i32 2, i32 3, i32 4>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 72), align 4
+      store <3 x float> splat (float 1.000000e+00), ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 24), align 4
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{i32 36, i32 0}
+    !1 = !{i32 37, i32 72}
+    !2 = !{!0, !1}
+    !3 = !{i32 35, i32 36}
+    !4 = !{!3}
+    !5 = !{i32 0, !4}
+    !6 = !{i32 35, i32 24}
+    !7 = !{!6}
+    !8 = !{i32 1, !7}
+    !9 = !{!5, !8}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load/store survives against any of the three real members.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+
+  // Every one of the three real members is stored to in this test, so
+  // each must land on its own distinct `ElementID` -- the collision bug
+  // this test guards against would instead see the `mat3x3` store and
+  // the `vector4si32` store resolve to the *same* `ElementID` (whichever
+  // one `resolveOffsetWithinElement`'s old, leaf-count-unaware physical
+  // indexing happened to pick for both), producing a shadow alloca with
+  // two differently-typed stores that crashes `PromoteMemToReg`'s own
+  // `isAllocaPromotable` assertion instead of legalizing cleanly.
+  DenseSet<uint32_t> ElementIDs;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ElementIDs.insert(
+        getStageOpConstantOperand(*CI, /*Offset=*/0).value_or(~0u));
+  }
+  EXPECT_EQ(ElementIDs.size(), 3u);
+}
+
 } // namespace
