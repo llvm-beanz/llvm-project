@@ -2137,9 +2137,8 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   return true;
 }
 
-/// The size, in bytes, of one element of a mesh entry's own
-/// constant-indexed per-vertex/per-primitive `Output` array (roadmap
-/// H6k), matching the *tightly packed* stride the SPIR-V-to-LLVM
+/// The size, in bytes, of one element of a constant-indexed `Output`
+/// array, matching the *tightly packed* stride the SPIR-V-to-LLVM
 /// conversion actually bakes into that access's own constant byte
 /// offset -- NOT `DataLayout::getTypeAllocSize`'s ABI-alignment-padded
 /// size, which a genuine SPIR-V/GLSL interface block's own layout rules
@@ -2149,32 +2148,42 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
 /// size) but *allocates* to 32 -- rounded up to the struct's own 16-byte
 /// alignment, driven by its leading `vec4` member -- so array elements
 /// after the first are addressed 28 bytes apart, not 32. A `<3 x i32>`
-/// (`uvec3`) element is a narrower instance of the same gap: it
+/// (`uvec3`/`ivec3`) element is a narrower instance of the same gap: it
 /// allocates to 16 (LLVM pads a 3-wide vector up to its own 4-wide SIMD
 /// register size) but is addressed 12 bytes apart, matching `uvec3`'s
-/// own tightly packed 3-`i32` size. Both gaps only ever bite a *mesh*
-/// entry's per-vertex/per-primitive array, whose element type this
-/// helper is solely used for -- `resolveRowComponent` just below still
-/// uses `getTypeAllocSize` for its own row/component peeling, since a
-/// single stage-IO member's own row shape (an ordinary fixed-size array
-/// or vector, never itself one of the two shapes described above) has
-/// no equivalent trailing-alignment gap to correct for.
-uint64_t getPackedMeshElementSize(Type *Ty, const DataLayout &DL) {
+/// own tightly packed 3-`i32` size. Originally used only for a mesh
+/// entry's own per-vertex/per-primitive array (roadmap H6k) -- but
+/// (roadmap H101h) `resolveRowComponent`'s own array-peeling loop just
+/// below hits exactly the same gap for an *ordinary* stage-IO member's
+/// row shape once that shape's element type is itself a narrow (3-wide,
+/// non-power-of-two) vector or an under-aligned struct: GLSL's "array of
+/// block instances" syntax (`layout(...) out Block { ivec3 var; }
+/// block[3];`) addresses each `block[k]`'s own tightly-packed 12-byte
+/// slot, but `getTypeAllocSize` on that same `{<3 x i32>}` element
+/// reports 16 -- an prior comment here claimed this row shape "has no
+/// equivalent trailing-alignment gap to correct for", which this fixes
+/// (`dEQP-VK.transform_feedback.fuzz.instance_array_basic_type.ivec3.*`
+/// received a different row's own value instead of its own, since
+/// `Residual / RowSize`'s integer division rounded every row index after
+/// the first down to a smaller one whenever `RowSize` overstated the
+/// real per-row stride).
+uint64_t getPackedElementSize(Type *Ty, const DataLayout &DL) {
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     if (ST->getNumElements() == 0)
       return 0;
     unsigned Last = ST->getNumElements() - 1;
     return DL.getStructLayout(ST)->getElementOffset(Last) +
-           getPackedMeshElementSize(ST->getElementType(Last), DL);
+           getPackedElementSize(ST->getElementType(Last), DL);
   }
   if (auto *VecTy = dyn_cast<FixedVectorType>(Ty))
     return VecTy->getNumElements() *
-           getPackedMeshElementSize(VecTy->getElementType(), DL);
+           getPackedElementSize(VecTy->getElementType(), DL);
   if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
     return ArrTy->getNumElements() *
-           getPackedMeshElementSize(ArrTy->getElementType(), DL);
+           getPackedElementSize(ArrTy->getElementType(), DL);
   return DL.getTypeAllocSize(Ty);
 }
+
 
 /// The (row, component) pair `loadStageIOValue`/`storeStageIOValue` need to
 /// seed their own recursion with, from \p Residual -- a byte offset within
@@ -2229,7 +2238,7 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
     auto *ArrTy = dyn_cast<ArrayType>(PerRowTy);
     if (!ArrTy)
       break;
-    uint64_t RowSize = DL.getTypeAllocSize(ArrTy->getElementType());
+    uint64_t RowSize = getPackedElementSize(ArrTy->getElementType(), DL);
     uint64_t Idx = 0;
     if (RowSize) {
       Idx = Residual / RowSize;
@@ -2443,7 +2452,7 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       ValueTy != GV->getValueType()) {
     auto *ArrTy = cast<ArrayType>(GV->getValueType());
     Type *ElemTy = ArrTy->getElementType();
-    uint64_t VertexSize = getPackedMeshElementSize(ElemTy, DL);
+    uint64_t VertexSize = getPackedElementSize(ElemTy, DL);
     if (VertexSize) {
       uint64_t VertexIdx = ByteOffset / VertexSize;
       uint64_t Residual = ByteOffset % VertexSize;
