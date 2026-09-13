@@ -45,18 +45,18 @@ agent thoughts.
 
 # Request
 
-Can you work on H101a or other blocking work to make progress on the H-series
+Can you work on H101b or other blocking work to make progress on the H-series
 milestones?
 
-> **`graphicsfuzz.call-function-with-discard`'s `LLVM ERROR: Cannot select:
-> intrinsic %llvm.spv.discard`** (confirmed reproducible this session, see
-> H101's own closing note): an instruction-selection gap for `OpKill`/discard
-> reached through a function call (rather than inlined directly in the entry
-> point), in some code path other than the one already-working discard support
-> most other groups exercise. The crash's own backtrace terminates inside ORC
-> JIT symbol-lookup machinery rather than the actual `SelectionDAG` frame that
-> raised the fatal error (the `report_fatal_error` appears to unwind from a
-> JIT-compiled worker context), so a first step is getting a more direct repro
-> (e.g. via `feme-run`/`feme-opt` compiling just this one shader's LLVM IR
-> directly, bypassing the JIT lookup layer, to get a clean, symbolized
-> `llc`/`SelectionDAGISel::Select`-level backtrace). Not yet triaged
+> **`transform_feedback.fuzz.random_geometry.all_instance_array.75`'s
+> `PromoteMem2Reg` non-promotable-alloca assertion** (39 crashes total in the
+> group per the original H97 filing; confirmed reproducible this session):
+> `PromoteMem2Reg`'s own `isAllocaPromotable(AI)` assertion fires on an alloca
+> some earlier feme pass produces that isn't actually promotable (has its
+> address escape, e.g. via a `getelementptr` fed to something
+> `PromoteMemoryToRegister.cpp` can't see through, or a non-first-class-typed
+> load/store) -- a latent IR-shape bug in whichever feme pass builds this
+> alloca, not anything transform-feedback-specific. Not yet triaged -- needs an
+> IR dump immediately before the crashing mem2reg pass runs to identify the
+> actual non-promotable use and trace it back to whichever earlier pass
+> introduced it
