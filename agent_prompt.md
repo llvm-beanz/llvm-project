@@ -45,25 +45,36 @@ agent thoughts.
 
 # Request
 
-Can you work on H101s or other blocking work to make progress on the H-series
+Can you work on H101t or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.all_unordered_and_instance_array.{2,39}`'s 4-case
-> `spirv.GlobalVariable` legalization failure for a block combining a
-> matrix/vector member with a nested single-member struct member** (newly
-> re-confirmed distinct from H101p during this session's own closing isolated
-> sweep; the same bucket H101m's own closing re-triage previously grouped under
-> its bucket (2), "~14 cases ... combining a matrix/vector member with a nested
-> single-member struct member"): each failing case's own decompiled SPIR-V
-> interface block includes a member shaped like `!spirv.struct<(vector<4xf32>
-> [RelaxedPrecision])>` -- i.e. a *nested* single-member struct wrapping a
-> vector, itself one member of an outer multi-member block (e.g. `f32[20],
-> vector2i32[0], struct(vector3f32)[8]`) -- a shape distinct from every
-> reordering-only case H101p now legalizes, and one H101i's own "tight vector"
-> retry may not extend to. Not yet triaged -- needs a standalone ground-truth
-> `feme-translate`/`feme-opt` repro of one such
-> nested-single-member-struct-as-block-member shape (mirroring H101p's own
-> technique) to determine whether `SPIRVToLLVMPatterns.cpp`'s
-> struct-legalization patterns need to recurse into (or peel through) a nested
-> single-member struct member the same way `CanonicalizeStage.cpp`'s own
-> `peelSingleMemberStruct` already does for LLVM-level types
+> **`transform_feedback.fuzz.all_unordered_and_instance_array.2`'s
+> `PromoteMemToReg`/`isAllocaPromotable` assertion crash inside
+> `CanonicalizeStagePass`** (newly exposed by H101s's own closing fix, which let
+> this case's `spirv.GlobalVariable` legalize for the first time -- confirmed
+> via a `gdb` backtrace that the crash is not a JIT-compiled-code fault but a
+> compile-time assertion in `CanonicalizeStage.cpp`'s own final
+> `PromoteMemToReg(Allocas, DT)` call, reached from `canonicalizeSPIRVStage` for
+> both `random_vertex` and `random_geometry` variants): `deqp-vk:
+> .../PromoteMemoryToRegister.cpp:816: ... Assertion \`isAllocaPromotable(AI) &&
+> "Cannot promote non-promotable alloca!"\` failed`, meaning one of
+> `ShadowValues`' own synthesized read-modify-write allocas ends this pass's
+> rewrite with a use `isAllocaPromotable` does not accept (not a plain
+> load/store) -- almost certainly because some access into this case's own
+> newly-legalized, genuinely multi-member nested-struct block member (H101s's
+> own `.2` repro shape: a nested struct with a `mat3x3` and a `vector<4xsi32>`,
+> not just one member) never gets rewritten into a `feme.stage.*` call at all,
+> since `CanonicalizeStage.cpp`'s row/component-shape derivation and per-member
+> decoration lookup (`TakeBlockPath`, `getStageIORowShape`,
+> `peelSingleMemberStruct`) only know how to peel through a *single*-member
+> nested struct, not treat each of a *multi*-member nested struct's own real
+> members as its own independently-addressable, independently-decorated stage-IO
+> element the way the outer block's own top-level members already are. Not yet
+> triaged -- needs a standalone `feme-opt --feme-canonicalize-stage` repro
+> (mirroring this milestone's own repeated technique) of `.2`'s exact shape to
+> find which specific access survives unconverted and confirm whether the fix
+> belongs in `TakeBlockPath`'s own per-member loop (extended to recurse into a
+> multi-member nested struct member, assigning each of its own real members a
+> `Location`/`ElementID` the same way an ordinary top-level member gets one) or
+> in a new, more targeted "nested struct member is itself a stage-IO-decorated
+> block" helper
