@@ -45,27 +45,22 @@ agent thoughts.
 
 # Request
 
-Can you work on H101q or other blocking work to make progress on the H-series
+Can you work on H101c or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.{nested_structs_instance_arrays.{2,15,31},basic_instance_arrays.32}`'s
-> 8-case unresolved stage-IO global-variable reference** (newly characterized
-> during H101m's own closing re-triage): each of these 4 named cases fails
-> identically in both its `random_geometry` and `random_vertex` variant, but
-> with a *different* diagnostic depending on which stage hits it first -- the
-> `random_geometry` variant reaches JIT link time and fails with `JIT session
-> error: Symbols not found: [ spirv_var_N ]` (an unresolved global reference
-> baked all the way through to the final compiled module), while the
-> `random_vertex` variant is instead caught earlier by
-> `feme-graphics-validate-stage`'s own explicit diagnostic (`function 'main' has
-> an unresolved stage-IO global-variable access to 'spirv_var_N', a shape
-> CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*' call`)
-> -- almost certainly the same underlying "some shape `CanonicalizeStage.cpp`'s
-> `addElements`/`TakeBlockPath` doesn't yet recognize is left un-rewritten" root
-> cause as every previous JIT-symbols-not-found bucket this milestone has hit
-> (H101k's own filing, H101m's own closing note), just not yet re-triaged
-> against the current binary to confirm which specific shape trips it this time.
-> Not yet triaged -- needs each of the 4 named cases' own decompiled SPIR-V
-> pulled and diffed against every shape `TakeBlockPath`/the plain (non-block)
-> path already handles, to identify the one attribute (nesting depth,
-> array-of-struct-of-struct, or similar) still missing
+> **`spirv_assembly.instruction.compute.compute_shader_derivatives.compute.verify_ndx.linear.128_1_1`'s
+> GEP-operand-type legalization failure** (newly exposed by H101's own
+> `AccessChainPattern` zero-index fix, which converted this case from a hard
+> crash into this narrower, non-crashing pipeline-creation failure):
+> `vkCreateComputePipelines` now fails cleanly with `'llvm.getelementptr' op
+> operand #0 must be LLVM pointer type or LLVM dialect-compatible vector of LLVM
+> pointer type, but got 'i32'` instead of crashing -- some other conversion
+> pattern in this same shader (likely a `spirv.PtrAccessChain`,
+> `spirv.InBoundsAccessChain`, or `spirv.InBoundsPtrAccessChain` op, none of
+> which have a registered lowering pattern per H101's own investigation) is
+> producing a GEP whose base-pointer operand ends up as a plain integer rather
+> than an LLVM pointer, or a type-conversion step upstream of the GEP-emitting
+> pattern is not converting a pointer-typed value correctly for this shader's
+> specific derivative-related type shape. Not yet triaged -- needs a
+> `feme-translate --import-spirv` dump of this shader's SPIR-V to identify the
+> exact op producing the ill-typed GEP
