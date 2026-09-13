@@ -641,8 +641,24 @@ Type *peelSingleMemberStruct(Type *Ty) {
 /// SPIRVToLLVMPatterns.cpp's "MLIR upstream has no `spirv.MatrixType`"
 /// comment: a matrix becomes `!llvm.array<Columns x VectorType>|scalar>`)
 /// -- has one row per array element, each row itself a scalar or vector.
-/// `ValueTy` is unwrapped through any single-member struct first (see
-/// `peelSingleMemberStruct`).
+/// (Roadmap H101b) Single-member struct and array wrappers are peeled off
+/// in alternation, multiplying \p RowCount at each array level, until a
+/// genuine scalar/vector leaf is reached -- not just once each, as before
+/// this milestone. This matters for a genuine *array-of-block-instances*
+/// whose one member is itself a matrix (e.g. `layout(...) out Block {
+/// mat4 var; } block[3];`, GLSL's syntax for 3 independently-captured XFB
+/// streams): its LLVM shape is `[3 x { [4 x <4 x float>] }]`, an
+/// `ArrayType` of a single-member `StructType` of *another* `ArrayType` --
+/// peeling only one of each level left the inner matrix's own `[4 x <4 x
+/// float>]` unresolved (returned as a bogus, unrepresentable "scalar"
+/// type with `ComponentCount=1`), silently under-sizing this element's
+/// storage relative to what the compiled stores it decomposes into
+/// actually write -- a `double free or corruption` heap-overflow this
+/// milestone's own regression sweep newly exposed. Treating the 3
+/// instances and the matrix's own 4 columns as one flat, 12-row element
+/// (rather than a nested 3-of-4 shape) matches the back-to-back row-
+/// packing already assumed by `resolveOffsetWithinElement`'s own byte-
+/// offset arithmetic and `captureTransformFeedback`'s row loop.
 struct StageIORowShape {
   Type *Scalar;
   unsigned ComponentCount;
@@ -650,15 +666,22 @@ struct StageIORowShape {
 };
 
 StageIORowShape getStageIORowShape(Type *ValueTy) {
-  unsigned RowCount = 1;
-  Type *PerRowTy = peelSingleMemberStruct(ValueTy);
-  if (auto *ArrTy = dyn_cast<ArrayType>(PerRowTy)) {
-    RowCount = ArrTy->getNumElements();
-    PerRowTy = ArrTy->getElementType();
+  uint64_t RowCount = 1;
+  Type *PerRowTy = ValueTy;
+  while (true) {
+    Type *Peeled = peelSingleMemberStruct(PerRowTy);
+    if (auto *ArrTy = dyn_cast<ArrayType>(Peeled)) {
+      RowCount *= ArrTy->getNumElements();
+      PerRowTy = ArrTy->getElementType();
+      continue;
+    }
+    PerRowTy = Peeled;
+    break;
   }
   if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy))
-    return {VecTy->getElementType(), VecTy->getNumElements(), RowCount};
-  return {PerRowTy, /*ComponentCount=*/1, RowCount};
+    return {VecTy->getElementType(), VecTy->getNumElements(),
+            static_cast<unsigned>(RowCount)};
+  return {PerRowTy, /*ComponentCount=*/1, static_cast<unsigned>(RowCount)};
 }
 
 /// (Roadmap H6i) Whether \p GV is a task entry's own bounded payload
@@ -2581,17 +2604,106 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // dynamically-indexed `Vertex` operand instead
         // (`getDynamicVertexIndexedAccess`'s own peeling on the access
         // side), never folded into any member's own `RowCount`.
-        if (const MDNode *MemberMD =
-                GV->getMetadata("feme.spirv.MemberDecorations")) {
-          Type *BlockTy = GV->getValueType();
-          if (auto *ArrTy = dyn_cast<ArrayType>(BlockTy))
-            BlockTy = ArrTy->getElementType();
-          auto *ST = cast<StructType>(BlockTy);
+        const MDNode *MemberMD =
+            GV->getMetadata("feme.spirv.MemberDecorations");
+        Type *PeekedBlockTy = MemberMD ? GV->getValueType() : nullptr;
+        if (PeekedBlockTy) {
+          if (auto *ArrTy = dyn_cast<ArrayType>(PeekedBlockTy))
+            PeekedBlockTy = ArrTy->getElementType();
+        }
+        auto *PeekedST =
+            PeekedBlockTy ? dyn_cast<StructType>(PeekedBlockTy) : nullptr;
+        DenseMap<unsigned, ParsedSPIRVDecorations> PeekedMemberDecorations;
+        if (PeekedST)
+          PeekedMemberDecorations = parseSPIRVMemberDecorations(MemberMD);
+        // (Roadmap H101b) A *single*-member struct whose one member has no
+        // `BuiltIn` of its own -- whether or not the struct is wrapped in
+        // an outer array dimension -- is left to the plain (non-block)
+        // path below exactly as before this milestone's own
+        // `buildMemberDecorationsAttr` change (which now attaches
+        // `feme.spirv.MemberDecorations` unconditionally whenever a
+        // struct has any `Offset`, single-member or not). There's nothing
+        // to disambiguate between multiple members when there's only one,
+        // and taking this branch for one would wrongly treat a genuine
+        // *array-of-block-instances* shape (e.g. `layout(...) out BlockB {
+        // uvec4 a; } blockB[3];`, GLSL's own syntax for 3 independently-
+        // captured XFB streams sharing one interface-block type) as if the
+        // array dimension were the same `gl_in[]`/`gl_MeshVerticesEXT[]`-
+        // style per-vertex dimension H5b/H6b peel off above -- silently
+        // discarding it instead, producing a single, wrongly-shaped 1-row
+        // element and (observed via this milestone's own regression sweep)
+        // heap corruption downstream in `Executor.cpp`'s XFB capture. This
+        // shape isn't otherwise modeled by this milestone; leaving it on
+        // the plain path preserves this fix's own pre-existing (if
+        // imperfect) behavior for it rather than introducing a new crash.
+        // A single-member struct whose one member *is* `BuiltIn`-decorated
+        // (e.g. a `gl_PerVertex`-shaped block carrying only `gl_Position`,
+        // as `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`
+        // exercises) still needs this branch -- only it maps `SystemValue`
+        // from a member's own `BuiltIn`, never the plain path -- so the
+        // single-member exclusion above only applies when there's no
+        // `BuiltIn` to preserve.
+        bool TakeBlockPath =
+            MemberMD && PeekedST &&
+            (PeekedST->getNumElements() > 1 ||
+             PeekedMemberDecorations.lookup(0).BuiltIn.has_value());
+        if (TakeBlockPath) {
+          StructType *ST = PeekedST;
           DenseMap<unsigned, ParsedSPIRVDecorations> MemberDecorations =
-              parseSPIRVMemberDecorations(MemberMD);
-          for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
-            addElement(GV, AddrSpace, MemberDecorations.lookup(I),
-                       ST->getElementType(I));
+              std::move(PeekedMemberDecorations);
+          // (Roadmap H101b) A builtin interface block (e.g.
+          // `gl_PerVertex`) carries no whole-variable `Location`/
+          // `XfbBuffer`/`XfbOffset`/`XfbStride` of its own -- SPIR-V
+          // matches those members by `BuiltIn` instead -- but a plain
+          // user-defined XFB-captured block (e.g. `layout(location = 0,
+          // xfb_buffer = 0, xfb_offset = 0) out BlockB { vec2 a; ivec2
+          // b[3]; } blockB;`) decorates *only* the block variable itself
+          // with `Location`/`XfbBuffer`/`XfbOffset`/`XfbStride`; its
+          // members carry nothing but their own `Offset` (byte position
+          // within the block, reused by `parseSPIRVDecorations` as
+          // `XfbOffset` since SPIR-V shares decoration code 35 between
+          // the two uses) and are never individually `Location`-
+          // decorated at all. Every such member's real `Location` is the
+          // block's own base `Location` plus however many locations the
+          // *preceding* members already consumed (`getStageIORowShape`'s
+          // own `RowCount`, one location per row, mirroring GLSL's own
+          // sequential interface-location assignment for block members),
+          // and its real `XfbOffset` is the block's own base `XfbOffset`
+          // plus its own relative `Offset` -- both computed below only as
+          // a fallback when the member has no explicit decoration of its
+          // own, so a real per-member-decorated block (e.g. a mesh
+          // entry's `PerVertexEXT`/`PerPrimitiveEXT` output block, which
+          // SPIR-V does decorate per member with `Location`) is
+          // unaffected. A genuinely `BuiltIn`-decorated member (e.g.
+          // `gl_PerVertex`'s own `gl_Position`/`gl_PointSize`/...) is
+          // matched downstream by `SystemValue`, never `Location`, and
+          // never carries a real `Offset`/`XfbBuffer`/... of its own in
+          // practice -- skip all of this synthesis for it, so this
+          // milestone leaves every existing builtin-block element exactly
+          // as before (an unset `Location`/`XfbBuffer`/`XfbOffset`/
+          // `XfbStride`), rather than fabricating a `Location` that could
+          // collide with a real, separately-declared user-defined
+          // variable's own `Location` 0.
+          ParsedSPIRVDecorations WholeVarD =
+              parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+          uint32_t NextMemberLocation = WholeVarD.Location.value_or(0);
+          for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
+            ParsedSPIRVDecorations MemberD = MemberDecorations.lookup(I);
+            Type *MemberTy = ST->getElementType(I);
+            uint32_t RowCount = getStageIORowShape(MemberTy).RowCount;
+            if (!MemberD.BuiltIn) {
+              if (!MemberD.Location)
+                MemberD.Location = NextMemberLocation;
+              if (!MemberD.XfbBuffer)
+                MemberD.XfbBuffer = WholeVarD.XfbBuffer;
+              MemberD.XfbOffset = WholeVarD.XfbOffset.value_or(0) +
+                                  MemberD.XfbOffset.value_or(0);
+              if (!MemberD.XfbStride)
+                MemberD.XfbStride = WholeVarD.XfbStride;
+            }
+            addElement(GV, AddrSpace, MemberD, MemberTy);
+            NextMemberLocation += RowCount;
+          }
           continue;
         }
         // (Roadmap H5f) A plain (non-block) per-vertex-arrayed `Input`
@@ -2899,7 +3011,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // not do correctly in general.
   if (!ShadowValues.empty()) {
     DominatorTree DT(F);
-    PromoteMemToReg(ShadowValues.takeAllocas(), DT);
+    SmallVector<AllocaInst *, 8> Allocas = ShadowValues.takeAllocas();
+    PromoteMemToReg(Allocas, DT);
     Changed = true;
   }
 
