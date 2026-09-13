@@ -45,29 +45,19 @@ agent thoughts.
 
 # Request
 
-Can you work on H101c or other blocking work to make progress on the H-series
+Can you work on H101h or other blocking work to make progress on the H-series
 milestones?
 
-> **`transform_feedback.fuzz.*instance_array*`'s array-of-block-instances shape
-> produces wrong XFB-captured values, not crashes** (newly exposed by H101b's
-> own closing regression sweep, once its two heap-corruption crashes were
-> fixed): `all_unordered_and_instance_array.28` (`Mismatch at offset 4 expected
-> 30 received 72`) and `instance_array_basic_type.mat4.geometry` (`Mismatch at
-> offset 0 expected -89 received 3`) both now compile, pipeline-create, and run
-> to completion, but capture the wrong bytes. Root cause not yet isolated --
-> GLSL's `layout(...) out BlockB { ... } blockB[N];` "array of block instances"
-> syntax means each `blockB[k]` is an
-> independently-`Location`/`XfbOffset`-addressed captured stream, but
-> `CanonicalizeStage.cpp`'s `addElements` plain (non-block) path currently folds
-> the whole `[N x Block]` shape into a single flat `RowCount`-many-rows element
-> sharing one `Location`/`XfbOffset` pair (fixed, this row's own H101b fix, to
-> no longer crash by making `getStageIORowShape`'s row-count accumulation
-> correct, but not to assign each array index its own distinct
-> `Location`/`XfbOffset`) -- likely needs its own per-array-index decomposition,
-> mirroring the per-member decomposition H101b already added for a block's own
-> members, but one dimension further out. Not yet triaged -- needs a
-> channel-level pixel/byte reduction of a representative case's captured XFB
-> buffer (mirroring H88/H93/H99a's own technique) to confirm whether the bug is
-> purely in `Location`/`XfbOffset` assignment or also in how far
-> `resolveOffsetWithinElement`'s byte-offset arithmetic reaches into the
-> flattened element
+> **`transform_feedback.instance_array_basic_type.{ivec3,mat2,mat2x3,mat3,mat3x2,mat3x4,mat4x2,mat4x3,uvec3,vec3,...}`'s
+> pre-existing "off-by-one row" symptom** (newly characterized during H101g's
+> own closing regression sweep; confirmed pre-existing and unaffected by that
+> row's fix, since these odd-component-count/non-square-matrix shapes fail
+> identically before and after): 12 cases (both `.vertex` and `.geometry`
+> variants) receive a *different row's* value rather than garbage or a crash,
+> suggesting a component/row alignment or padding miscalculation specific to
+> these shapes' byte-offset arithmetic rather than a completely wrong address.
+> Not yet triaged -- needs a channel-level byte reduction of a representative
+> case (e.g. `ivec3.geometry`) to determine exactly which row's value is
+> misdirected and trace the offset arithmetic responsible, likely in
+> `resolveOffsetWithinElement`'s or `getStageIORowShape`'s handling of
+> 3-component (non-power-of-two) or non-square-matrix row/component packing
