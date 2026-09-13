@@ -80027,3 +80027,129 @@ pre-existing, unrelated. Filed as **H101f**.
    full-group sweeps again.
 4. Clean up `/tmp/h101a*` scratch files (qpa logs, `.spv`/`.mlir`/`.ll`
    repro artifacts, caselists) -- not done yet.
+
+# H101b: fixed the PromoteMem2Reg crash, then chased and fixed a second heap-corruption crash it exposed
+
+## Do this first (2 minutes)
+
+Run `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_array.75`
+against the rebuilt ICD -- it now passes. `ninja check-feme` (2973/2976,
+3 pre-existing `Unsupported`, 0 `Failed`) and a full
+`dEQP-VK.transform_feedback.*` sweep (133,719 cases, 0 crashes) both
+already confirm no regressions, so there's nothing left to verify
+before moving on.
+
+## What happened, in order
+
+1. Root-caused the original assertion: `buildMemberDecorationTuple`
+   (SPIRVToLLVMPatterns.cpp) recognized no decoration a plain
+   (non-builtin) multi-member interface block's members actually carry
+   (only `RelaxedPrecision`+`Offset`), so `feme.spirv.MemberDecorations`
+   metadata never attached, `CanonicalizeStage.cpp`'s `addElements`
+   never decomposed the block per-member, and all members' byte
+   offsets collapsed onto one shadow alloca -- an address-escaping,
+   non-promotable alloca that crashed `PromoteMem2Reg`.
+2. First fix attempt (adding an `Offset` case to
+   `buildMemberDecorationTuple`) silently did nothing: MLIR's
+   `spirv::StructType` tracks `Offset` as a distinct first-class field,
+   never surfacing it through the generic `MemberDecorationInfo` list
+   that function reads at all. Reverted.
+3. Real fix, three cooperating layers: (a) `buildMemberDecorationsAttr`
+   now unconditionally synthesizes a `(35 /*Offset*/, memberOffset)`
+   tuple per member whenever the struct `hasOffset()`; (b)
+   `addElements`'s block-decomposition branch now synthesizes each
+   non-`BuiltIn` member's `Location`/`XfbBuffer`/`XfbOffset`/`XfbStride`
+   from the whole-variable's own decorations plus the member's relative
+   `Offset`; (c) `captureTransformFeedback` (`Executor.cpp`) gained a
+   `Row` loop -- it previously only ever captured `Row=0`.
+4. Two more bugs surfaced immediately by testing against the real CTS
+   case, both because the fix let this pipeline reach further than
+   before: `validateStageInterfaces`/`executeDraws` both unconditionally
+   required a 4-component `SV_Position` even for a rasterizer-discard
+   (fragment-less XFB-only) pipeline. Fixed by threading a
+   `RasterizerDiscardEnable` bool through both, mirroring the existing
+   `GeometryNeverWrites`/`GSEmitsWithoutAttributes` precedent.
+5. Target case now passed. Ran a regression sweep of
+   `transform_feedback.fuzz.random_geometry.*` (850 cases) to check for
+   fallout -- and it aborted with `double free or corruption (!prev)`
+   on `all_unordered_and_instance_array.28`.
+6. Confirmed via `gdb` (crash inside `StageStorage`'s own destructor,
+   consistent with an earlier out-of-bounds write) and a stashed-diff
+   before/after rebuild that this crash is **newly exposed by step 4's
+   own `RasterizerDiscardEnable` relaxation**, not a regression from
+   anything else -- the case previously failed cleanly at pipeline
+   creation (never reached draw execution) for the unrelated
+   `SV_Position` reason.
+7. First attempted fix: gate `addElements`'s block-decomposition branch
+   to require >1 struct member (since the crashing case is really a
+   GLSL "array of block instances" shape, `layout(...) out BlockB {
+   uvec4 a; } blockB[3];`, which the block-decomposition branch
+   mishandled by discarding the array-of-3-instances dimension
+   entirely). This fixed the crash but broke two *existing* passing
+   unit tests (`UnrecognizedMemberDecorationIsFilteredOut` and
+   `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`)
+   -- caught immediately by `ninja check-feme`, not by luck.
+8. Refined the gate: only skip block-decomposition for a single-member
+   struct when that member has no `BuiltIn` of its own (a
+   `gl_PerVertex`-shaped single-`gl_Position`-member block still needs
+   decomposition to map `SystemValue` correctly).
+9. Re-ran the full `check-feme` -- clean -- then re-ran the same 850-case
+   sweep. No crash this time, but a **second** instance-array crash
+   turned up in a wider follow-on sweep of the *entire*
+   `transform_feedback.*` group (133,719 cases):
+   `instance_array_basic_type.mat4.geometry`, same `double free or
+   corruption` signature.
+10. Root-caused: `getStageIORowShape` only ever peeled *one*
+    single-member-struct layer and *one* array layer. An
+    array-of-block-instances shape whose one member is a *matrix*
+    (`layout(...) out Block { mat4 var; } block[3];`) left an
+    unresolved, still-aggregate "leaf" type after one peel of each
+    kind, silently defaulting to `ComponentCount=1` and drastically
+    under-sizing the element's storage.
+11. Fixed by making the peel loop alternate struct/array unwrapping and
+    accumulate `RowCount` multiplicatively until a genuine scalar/vector
+    leaf is reached, instead of peeling once each. Both previously-
+    crashing cases now fail with a clean wrong-value mismatch instead
+    of crashing.
+12. Updated the two unit tests instead of leaving them broken:
+    `UnrecognizedMemberDecorationIsFilteredOut`'s own `[0]` syntax
+    turned out to actually be MLIR's explicit `Offset=0` decoration
+    syntax (not "unrecognized" at all, per `SPIRVDialect.cpp`'s
+    `parseStructMemberDecorations`) -- this row's own fix now correctly
+    attaches metadata for that exact shape, so the test needed a
+    genuinely-unrecognized example (`RelaxedPrecision`) instead. Added
+    a new test, `PlainMultiMemberInterfaceBlockSynthesizesOffsetDecoration`,
+    to cover the case the old, now-wrong test used to (mis)cover.
+
+## New bug found, not fixed this session
+
+The array-of-block-instances shape (`blockB[3]`, GLSL's syntax for 3
+independently-XFB-captured streams sharing one interface-block type)
+no longer crashes, but still captures the *wrong values*: each array
+index should be its own independently-`Location`/`XfbOffset`-addressed
+stream, and this session's fix only made the flattened `RowCount`
+correct, not the per-array-index `Location`/`XfbOffset` assignment.
+Filed as **H101g**.
+
+## Suggested next steps
+
+1. **H101g (wrong-value array-of-block-instances)** is the natural
+   pickup: needs per-array-index decomposition in `addElements`'s
+   plain path, one dimension further out than the per-member
+   decomposition this session already added. Start with a
+   channel-level byte reduction of `all_unordered_and_instance_array.28`'s
+   captured XFB buffer (mirroring H88/H93/H99a's own technique) to
+   confirm whether the bug is purely `Location`/`XfbOffset` assignment
+   or also reaches into `resolveOffsetWithinElement`'s byte-offset
+   arithmetic. About 1-2 hours to a first fix attempt.
+2. H101c/H101d/H101e/H101f (from the original H101 triage) are all
+   still open and untouched this session.
+3. This session's own two-crash chase is worth remembering as a
+   pattern: **every time this milestone relaxes an early pipeline-
+   creation/draw-time rejection (`RasterizerDiscardEnable` here,
+   `GeometryNeverWrites` before it), budget time for a full regression
+   sweep, not just the target case** -- newly-reachable code is where
+   these heap-corruption-class bugs hide, and they don't show up
+   without actually running the broader group.
+4. No scratch files to clean up this session -- everything was removed
+   as verification concluded (no lingering `/tmp/h101b*` files).
