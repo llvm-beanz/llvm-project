@@ -25,6 +25,23 @@ spirv.func @access_chain_array(%arg0 : i32) "None" {
   spirv.Return
 }
 
+// A zero-index access chain is a legal (if degenerate) SPIR-V access chain
+// -- `Indexes` is variadic and may be empty, in which case the result is
+// simply a pointer to the same pointee as the base. This must not crash
+// while picking an index type for the leading "step through the pointer"
+// GEP index, since there is no index operand to infer a type from.
+// (Uses the generic op syntax since the pretty assembly format can't
+// currently round-trip a zero-length `$indices` operand list.)
+// CHECK-LABEL: @access_chain_zero_indices
+spirv.func @access_chain_zero_indices() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i32) : i32
+  // CHECK: llvm.getelementptr %{{.*}}[%[[ZERO]]] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+  %1 = "spirv.AccessChain"(%0) : (!spirv.ptr<f32, Function>) -> !spirv.ptr<f32, Function>
+  %2 = spirv.Load "Function" %1 ["Volatile"] : f32
+  spirv.Return
+}
+
 //===----------------------------------------------------------------------===//
 // spirv.GlobalVariable and spirv.mlir.addressof
 //===----------------------------------------------------------------------===//

@@ -414,8 +414,17 @@ public:
     if (!dstType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
     // To use GEP we need to add a first 0 index to go through the pointer.
+    // `op.getIndices()` may legitimately be empty -- `spirv.AccessChain`'s
+    // indices are variadic, and a chain with zero indices is a valid (if
+    // degenerate) identity-like access into the base pointer's pointee --
+    // so the index type can't always be inferred from the first index;
+    // fall back to a plain 32-bit integer (a valid SPIR-V index type, per
+    // `SPIRV_Integer`) in that case, matching what a real zero-index-free
+    // access chain would ordinarily use.
     auto indices = llvm::to_vector<4>(adaptor.getIndices());
-    Type indexType = op.getIndices().front().getType();
+    Type indexType = op.getIndices().empty()
+                          ? rewriter.getIntegerType(32)
+                          : op.getIndices().front().getType();
     auto llvmIndexType = getTypeConverter()->convertType(indexType);
     if (!llvmIndexType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
