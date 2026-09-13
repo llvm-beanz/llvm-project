@@ -80372,3 +80372,129 @@ trusting it.
    legalization failure in `spirv_assembly.compute_shader_derivatives`)
    and **H101i** above remain the two open, untriaged items directly
    under H101's umbrella.
+
+
+# H101i: fixed the SPIR-V-to-LLVM legalization crash, found and fixed a self-inflicted regression along the way, one new downstream bug (H101j) left for next time
+
+Root cause fixed. Milestone kept open on the roadmap: the ~77-case CTS
+symptom this row describes doesn't move yet, because a second bug
+(new, H101j) produces the identical visible failure.
+
+## What this turn actually did
+
+1. Reproduced the target failure (`failed to legalize operation
+   'spirv.GlobalVariable'`) with a 2-line standalone `feme-opt
+   --feme-convert-spirv-to-llvm` repro -- much faster than going
+   through the full CTS/JIT stack, and `-debug-only=dialect-conversion`
+   pinpointed the exact rejecting pattern.
+2. Found the root cause:
+   `convertOffsetStructTypeIgnoringDecorations`'s existing "tight
+   vector" retry only handled a *direct* vector-typed struct member. An
+   *array of vectors* member, or a `spirv.matrix` member (which
+   converts to an array of column vectors), hits the identical
+   ABI-alignment-vs-declared-offset mismatch one level of nesting
+   further in, and was never covered.
+3. Wrote the first fix: extended the retry loop to substitute array-
+   of-vector and matrix members too. Verified against minimal repros
+   and the real 3-member struct: both converted.
+4. Ran the full `*instance_array*` CTS sweep to measure impact: **98
+   Passed / 78 Failed** -- worse than the 99/77 baseline. One case
+   regressed.
+5. Bisected the regression with `git stash`: confirmed
+   `all_instance_array.74` passed on the pre-fix build and failed
+   (wrong XFB value) on the fixed build. Root cause: that case's struct
+   has a bare vector member that genuinely needs tight substitution and
+   a *sibling matrix member that doesn't* -- the first fix substituted
+   both unconditionally once *any* member needed a retry, silently
+   retyping the already-correctly-placed matrix from a real
+   `vector<4xf32>` column to a tight `array<4xf32>`, which changed no
+   offset but confused `CanonicalizeStage.cpp`'s row/component
+   resolution (which expects a matrix column to be a real vector type).
+6. Tried a per-member greedy fix first (substitute a member only if its
+   own natural placement doesn't match) -- this **broke 3 existing
+   lit tests** (`spirv-to-llvm-composite-construct.mlir`,
+   `spirv-to-llvm-nested-identified-struct.mlir`,
+   `spirv-to-llvm-storage-buffer-struct-element.mlir`). Cause: the
+   first member of a struct always "naturally matches" offset 0
+   regardless of its real size, so a size-only (not alignment)
+   mismatch caused by *that* member surfaces as a failure on the
+   *next* member instead, which the greedy check can't fix by
+   substituting the wrong member. Abandoned this approach.
+7. Landed on a **two-tier retry** instead: try substituting only bare
+   vector members first (exactly the pre-existing, already-safe
+   behavior) and only escalate to also substituting array-of-vector/
+   matrix members if that narrower retry still fails. This can never
+   regress a case the old code already handled, since tier 1 is
+   byte-for-byte the old behavior tried first.
+8. Verified: `all_instance_array.74` passes again;
+   `check-feme` fully clean (2976/2979, 0 failed, was 3-failed with
+   the broken greedy version); the two original legalization-crash
+   target cases (`all_instance_array.11` vertex/geometry) now get past
+   legalization entirely (no more crash), landing on a different,
+   pre-existing-shaped `VK_ERROR_INITIALIZATION_FAILED` at pipeline
+   creation instead.
+9. Added 3 new lit tests to `spirv-to-llvm-stage-io.mlir`: array-of-
+   vectors member substitution, matrix-member substitution, and a
+   regression guard pinning down exactly the `.74` scenario (vector
+   needs tight substitution, sibling matrix does not, matrix must stay
+   a real vector type).
+10. Ran the full `*instance_array*` sweep again: **99 Passed / 77
+    Failed / 614 NotSupported** -- numerically identical to the
+    H101h-era baseline, but for a different reason than "no progress":
+    every one of the 77 `Fail` cases now fails *past* legalization
+    (no crash), so the milestone's own described crash is genuinely
+    gone; a separate, previously-invisible `CanonicalizeStage.cpp` bug
+    (which doesn't yet understand the new "tight"
+    `array<N x array<Mxf32>>` matrix representation) now blocks most
+    of the same cases with the identical visible symptom
+    (`VK_ERROR_INITIALIZATION_FAILED`).
+11. Committed in 2 commits: the fix + tests together (tightly coupled,
+    same review unit), then docs (Roadmap + VulkanCTSReport)
+    separately.
+12. Updated the roadmap: kept H101i's ID open (visible CTS count
+    unchanged), noted the root cause as fixed, and added **H101j** for
+    the newly-exposed `CanonicalizeStage.cpp` gap.
+13. Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+    need no change (correctness fix); confirmed no design-doc
+    deviation (generalizes an existing documented technique, doesn't
+    introduce a new one).
+14. Cleaned up `/tmp/h101i/` scratch files.
+
+## A meta-note for whoever reads this next
+
+The greedy per-member "does it fit naturally" check looked obviously
+correct and wasn't: `alignTo(0, anything) == 0` always, so a struct's
+*first* member can never fail a pure-offset check no matter how wrong
+its *size* is -- the actual failure always surfaces one member later,
+on someone else's offset. Any future "should I substitute this member"
+heuristic for this function needs to reason about size, not just
+alignment/offset, or needs to stick to the safer "try the narrower,
+already-proven substitution set first, escalate only on total
+failure" pattern used here.
+
+## Suggested next steps
+
+1. **H101j (new, this session)**: `CanonicalizeStage.cpp`'s row/
+   component-shape resolution doesn't recognize the tight
+   `array<N x array<Mxf32>>` shape H101i's fix can now legally
+   produce for a matrix/array-of-vectors member, so it still treats
+   most of these ~77 cases as `VK_ERROR_INITIALIZATION_FAILED` at
+   pipeline creation. Needs `getStageIORowShape` (or wherever the
+   row/component split happens) extended to accept this shape the same
+   way it already accepts `array<N x vector<Mxf32>>`. Likely half a
+   day: one test case (`all_instance_array.11`) already has the exact
+   failing error messages captured in this session's own repro work
+   to restart from.
+2. Two cases (`all_instance_array.9`, `all_instance_array.68`) get
+   further than the rest -- past pipeline creation, to a wrong-value
+   XFB `Mismatch` -- suggesting H101j's fix may need to also handle a
+   value-reassembly/GEP-shape difference, not just a legalization-time
+   type recognition gap. Worth checking once H101j's main fix lands
+   whether these two also clear up for free.
+3. `random_geometry.all_instance_array.11` gets furthest of all
+   (`JIT session error: Symbols not found: [ spirv_var_46 ]`) -- a
+   distinct runtime/JIT symbol-resolution issue, not yet investigated,
+   possibly a third distinct bug rather than a symptom of H101j.
+4. H101c (GEP-operand-type legalization failure in
+   `spirv_assembly.compute_shader_derivatives`) remains open and
+   untriaged, unrelated to this session's work.
