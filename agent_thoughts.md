@@ -80656,3 +80656,79 @@ already used for H88/H93/H99a/H101g. Don't rediscover this fix is
   one more level.
 4. **H101m, unresolved-access + out-of-range-row groups** (4 cases
   total): smallest remaining group, triage last.
+
+# H101l session: fixed the wrong-value XFB mismatch, found a pre-existing crash
+
+## What's done (verified, committed)
+
+1. Root-caused and fixed `dEQP-VK.transform_feedback.fuzz.
+  {random_geometry,random_vertex}.all_instance_array.11`'s wrong-value
+  XFB `Mismatch` from last session's H101l filing. Cause: SPIR-V
+  decoration code 35 ("Offset") means one thing on a struct member and
+  another (`XfbOffset`) on a whole variable -- glslang only encodes a
+  single-real-member block's non-zero `xfb_offset` on the *member*,
+  never repeating it on the variable, so `CanonicalizeStage.cpp`'s
+  plain-path `addElements` silently read `XfbOffset = 0` and captured
+  the element at the wrong buffer byte, overwriting a sibling block's
+  own data.
+2. Fix: fold `PeekedMemberDecorations.lookup(0).XfbOffset` into `D`
+  when the whole-variable decoration is missing one. One `if` guarded
+  by `PeekedST && MemberMD && !D.XfbOffset`, reusing a map already
+  computed earlier in the same loop iteration.
+3. New unit test `FoldsMemberOffsetIntoXfbOffsetForArrayOfBlockInstances`
+  asserts the folded value directly (44, not 0).
+4. `FeMeTransformsGraphicsTests`: 82/82. `check-feme`: 2981/2984 (3
+  pre-existing `Unsupported`, 0 `Failed`).
+5. Both target CTS cases now **Pass** outright (were `Fail`).
+6. `*instance_array*` sweep (788 of 790 cases, 2 excluded -- see
+  below): 114 passed / 60 failed / 614 not-supported, up from H101k's
+  108/68/614 -- net +6 (the 2 targeted cases plus 4 more in the same
+  family sharing the same root cause).
+7. Roadmap and CTS report updated; H101l struck through.
+
+## The detour: a pre-existing crash, confirmed not mine
+
+Running the full `*instance_array*` sweep twice both times crashed
+partway through with `corrupted double-linked list` on
+`nested_structs_instance_arrays.45`, right after case `.44`'s own
+(unrelated) `Mismatch`. Case `.45` alone does NOT crash -- it fails
+cleanly with an already-known `si32`/`i32` legalization error (H101m's
+own bucket). That's the tell: this is order/state-dependent, not a
+bug in case 45 itself.
+
+**I did not assume this was pre-existing -- I checked.** `git stash`'d
+my fix, rebuilt, reran just the `.44`+`.45` pair: **same crash**,
+identical symptom, with the old code. That's a clean bisection --
+confirmed pre-existing, unrelated to this session's change. Restored
+the fix, rebuilt again, moved on. Filed as **H101n**, does not block
+H101l's closeout.
+
+Why didn't H101k's own full sweep hit this? Heap-layout-randomization-
+sensitive bugs (classic use-after-free/double-free symptom) don't
+reproduce every run -- glibc's malloc consistency check only fires
+when corrupted metadata happens to get used a certain way. Non-crash
+this time doesn't mean fixed; crash this time doesn't mean new.
+
+## Suggested next steps, ranked
+
+1. **H101n** (~1-2 hours to bisect further, more to fix): the
+  `.44`+`.45` pair alone reproduces the crash in under a minute --
+  much faster than the 790-case sweep. Next move: if ASan or valgrind
+  is available in this environment, run that pair under it to catch
+  the actual out-of-bounds write/double-free directly, rather than
+  waiting for glibc's own (unreliable) detection. Likely suspects:
+  `Executor.cpp`'s per-case JIT/pipeline teardown, or scratch state in
+  `CanonicalizeStage.cpp` that isn't reset between modules.
+2. **H101m, si32/i32 group** (~1-2 hours, 28 cases, biggest chunk):
+  still open from last session. Standalone repro of one case's
+  SPIR-V, find where an `si32`-typed value hits a plain-`i32`-typed
+  constant-attribute comparison. Note: `nested_structs_instance_
+  arrays.44`/`.45` are in this bucket and are also H101n's own repro
+  pair -- fixing this legalization bug might make H101n's own
+  `.45` case take a different code path entirely, so tackle H101n's
+  bisection *first* to avoid chasing a moving target.
+3. **H101m, remaining legalization group** (~14 cases): matrix/vector
+  member combined with a nested single-member struct member -- may
+  need H101i's own "tight vector" retry extended one more level.
+4. **H101m, unresolved-access + out-of-range-row groups** (4 cases):
+  smallest, triage last.
