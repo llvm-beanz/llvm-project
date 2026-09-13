@@ -45,25 +45,23 @@ agent thoughts.
 
 # Request
 
-Can you work on H101j or other blocking work to make progress on the H-series
+Can you work on H101k or other blocking work to make progress on the H-series
 milestones?
 
-> **`CanonicalizeStage.cpp` doesn't understand the new "tight" `array<N x
-> array<Mxf32>>` matrix/array-of-vectors representation
-> `SPIRVToLLVMPatterns.cpp` now emits** (newly exposed by H101i's own closing
-> fix): `random_vertex.all_instance_array.11` now hits
-> `feme-graphics-validate-stage` errors (`'feme.stage.output.store' ...
-> component N is out of range for element 0/1/2`, plus `unresolved stage-IO
-> global-variable access to 'spirv_var_46'`) instead of the legalization crash
-> H101i fixed -- `CanonicalizeStage.cpp`'s row/component-shape resolution logic
-> expects a matrix column or array-of-vectors element to convert to a real
-> `VectorType`, and doesn't yet recognize the tight, alignment-free `array<N x
-> array<Mxf32>>` shape H101i's fix can now produce for the same source member.
-> Most of the ~77 `*instance_array*` cases still fail at pipeline creation for
-> this reason (`VK_ERROR_INITIALIZATION_FAILED`); 2 (`all_instance_array.9`,
-> `all_instance_array.68`) get further, to a wrong-value XFB `Mismatch`, and
-> `random_geometry.all_instance_array.11` gets furthest, to a `JIT session
-> error: Symbols not found: [ spirv_var_46 ]`. Not yet triaged -- needs
-> `CanonicalizeStage.cpp`'s row/component-shape detection (`getStageIORowShape`
-> or similar) extended to recognize a tightly-packed `array<N x array<Mxf32>>`
-> member the same way it already recognizes `array<N x vector<Mxf32>>`
+> **`transform_feedback.fuzz.*instance_array*`'s remaining 68
+> `VK_ERROR_INITIALIZATION_FAILED` pipeline-creation failures** (confirmed
+> reproducible this session, during H101j's own closing sweep -- unchanged in
+> count and symptom from H101i's own closing note, not caused by or affected by
+> H101j's marker-struct fix): e.g. `random_geometry.all_instance_array.11` fails
+> pipeline creation with `JIT session error: Symbols not found: [ spirv_var_46
+> ]` printed before the `VK_ERROR_INITIALIZATION_FAILED`, suggesting an
+> unresolved stage-IO global-variable reference somewhere in the JIT-compiled
+> shader for this specific multi-member-block-with-nested-array-member shape
+> family -- likely the same nested-array-member SPIR-V-to-LLVM
+> legalization/lowering gap H101i's own closing note flagged as still open (a
+> case that legalizes but produces an unresolved symbol reference downstream),
+> rather than a new, distinct bug. Not yet triaged -- needs a standalone
+> `feme-translate` repro of one such shader's LLVM IR (mirroring H101a's own
+> JIT-bypass technique) to identify what `spirv_var_46`-shaped global reference
+> is left unresolved and trace it back to whichever conversion/canonicalization
+> pass fails to materialize or wire it up
