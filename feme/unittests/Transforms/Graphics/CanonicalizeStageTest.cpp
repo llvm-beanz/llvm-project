@@ -826,6 +826,101 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2}));
 }
 
+/// (Roadmap H101m) A *genuinely multi-real-member*, non-`BuiltIn`
+/// interface block (`TakeBlockPath`'s own shape) whose first declared
+/// member's own offset is nonzero -- e.g. `layout(location = 4, xfb_buffer
+/// = 0, xfb_offset = 28) out BlockC { uvec3 c; uint d; } blockC;`, found
+/// in a real `dEQP-VK.transform_feedback.fuzz.random_vertex.
+/// basic_instance_arrays.11` vertex shader -- needs the very same leading
+/// `[N x i8]` pad (`layOutStructIfOffsetsMatch`, SPIRVToLLVMPatterns.cpp)
+/// as the single-real-member case, but `TakeBlockPath`'s own per-member
+/// loop (`addElements`) previously walked every *LLVM* struct field
+/// (padding included) as if it were its own same-numbered real,
+/// SPIR-V-declared member: the pad itself became a spurious element (an
+/// 8-bit-scalar byte array `StageStorage.cpp` rejects outright,
+/// `"stage element N has a 8-bit scalar; only 32-bit elements are
+/// implemented yet"`), while every real member's own decorations were
+/// read one index off from its own real LLVM type.
+/// `resolveOffsetWithinElement`'s own struct-member walk had the mirror-
+/// image bug: `IDs` (built without a pad entry, once the loop above is
+/// fixed) no longer lines up 1:1 with `SL->getElementContainingOffset`'s
+/// own LLVM-field-indexed `Member` either. Both are fixed by detecting
+/// `ST->getNumElements() == <real member count> + 1` and shifting the
+/// pad's own `+1` back out wherever a real member index is used to
+/// index something keyed by the *real*, pad-free member count.
+TEST(CanonicalizeStageTest,
+    MapsMultiMemberInterfaceBlockWithLeadingPadToDistinctMembers) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector = type { [3 x i32] }
+    @blockC = external addrspace(8) global { [28 x i8], %feme.tight_vector, i32 }, !spirv.Decorations !4, !feme.spirv.MemberDecorations !11
+    define void @main() #0 {
+      store <3 x i32> <i32 1, i32 2, i32 3>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @blockC, i64 28)
+      store i32 4, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @blockC, i64 40)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 4}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 44}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 28}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{i32 35, i32 40}
+    !9 = !{!8}
+    !10 = !{i32 1, !9}
+    !11 = !{!7, !10}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  // Member 0 (`uvec3 c`) must map to its own real 3-component vector
+  // element, not the leading pad's own 8-bit-scalar byte array.
+  const SignatureElement &C = Sig->Elements[0];
+  EXPECT_EQ(C.ComponentCount, 3u);
+  EXPECT_EQ(C.XfbOffset, 28u);
+
+  // Member 1 (`uint d`) must map to its own real scalar element at its
+  // own real offset, not the pad-shifted-by-one-index wrong member.
+  const SignatureElement &D = Sig->Elements[1];
+  EXPECT_EQ(D.ComponentCount, 1u);
+  EXPECT_EQ(D.XfbOffset, 40u);
+
+  // No raw store on `@blockC` (bare or via `getelementptr`) survives --
+  // every store is rewritten to one of the two real elements' own
+  // `feme.stage.output.store` (member 0's own `<3 x i32>` store
+  // decomposes into 3 per-row scalar stores against its own
+  // `%feme.tight_vector` member type, mirroring H101i/j's own
+  // established "tight vector" per-row store shape; member 1's own
+  // `i32` store stays whole). Every resolved `ElementID` must be 0 or
+  // 1 -- never the leading pad's own would-be index 0 shifted in front
+  // of the real members, and never an out-of-range index past 1.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+
+  SmallVector<uint64_t> ElementIDs;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      StageOpKind Kind;
+      if (!isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+        continue;
+      ElementIDs.push_back(
+          cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue());
+    }
+  // 3 rows for member 0's own vector store, plus 1 whole-value store for
+  // member 1.
+  ASSERT_EQ(ElementIDs.size(), 4u);
+  for (uint64_t ID : ElementIDs)
+    EXPECT_LE(ID, 1u);
+  EXPECT_EQ(llvm::count(ElementIDs, 0u), 3u);
+  EXPECT_EQ(llvm::count(ElementIDs, 1u), 1u);
+}
+
 /// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
 /// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
 /// instance view a vertex/fragment invocation runs for, readable from

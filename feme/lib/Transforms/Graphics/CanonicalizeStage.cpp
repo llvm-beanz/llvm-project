@@ -2453,10 +2453,29 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
     return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
 
   const StructLayout *SL = DL.getStructLayout(ST);
-  unsigned Member = SL->getElementContainingOffset(ByteOffset);
-  uint64_t Residual = ByteOffset - SL->getElementOffset(Member);
-  auto [Row, Component] =
-      resolveRowComponent(ST->getElementType(Member), Residual, ValueTy, DL);
+  unsigned LLVMMember = SL->getElementContainingOffset(ByteOffset);
+  // (Roadmap H101m) `IDs` (one per real, SPIR-V-declared member --
+  // `addElements`' own `TakeBlockPath` loop, `CanonicalizeStage.cpp`)
+  // does not carry an entry for a leading `[N x i8]` pad field
+  // `layOutStructIfOffsetsMatch` (SPIRVToLLVMPatterns.cpp) may have
+  // prepended to \p ST itself, whenever this block's own first declared
+  // member has a nonzero offset -- exactly the same pad
+  // `getEffectiveStageIOValueType`'s own comment documents for the
+  // single-real-member case, just here on a genuinely multi-member
+  // block instead. `ST->getNumElements() == IDs.size() + 1` recovers
+  // that shape the same way `addElements`' own `HasLeadingPad` does;
+  // `LLVMMember`, computed above directly against \p ST's own real
+  // (still pad-inclusive) `StructLayout`, then needs the identical `-1`
+  // shift to index `IDs`/this member's own type correctly -- `LLVMMember
+  // == 0` can never occur here (nothing is ever declared to store into
+  // the pad itself).
+  bool HasLeadingPad = ST->getNumElements() == IDs.size() + 1;
+  assert((!HasLeadingPad || LLVMMember != 0) &&
+        "store/load into a struct's own leading pad");
+  unsigned Member = HasLeadingPad ? LLVMMember - 1 : LLVMMember;
+  uint64_t Residual = ByteOffset - SL->getElementOffset(LLVMMember);
+  auto [Row, Component] = resolveRowComponent(ST->getElementType(LLVMMember),
+                                               Residual, ValueTy, DL);
   return StageIOAccess{IDs.slice(Member, 1), AsConstant(Row),
                        AsConstant(Component), Vertex, IsOutput};
 }
@@ -3051,9 +3070,37 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           ParsedSPIRVDecorations WholeVarD =
               parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
           uint32_t NextMemberLocation = WholeVarD.Location.value_or(0);
-          for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
+          // (Roadmap H101m) `structHasLeadingOffsetPad`
+          // (SPIRVToLLVMPatterns.cpp) synthesizes its leading `[N x i8]`
+          // pad whenever a struct's first *declared* member has a nonzero
+          // offset -- entirely independent of how many real members the
+          // struct has. `getEffectiveStageIOValueType`'s own comment
+          // documents this same pad for the single-real-member case (left
+          // to the plain path below, never `TakeBlockPath`); a genuinely
+          // multi-member block (e.g. `layout(location = 4, xfb_buffer =
+          // 0, xfb_offset = 28) out BlockC { uvec3 c; uint d; }
+          // blockC;`, whose `xfb_offset` is likewise encoded as member
+          // 0's own nonzero `Offset` decoration rather than repeated on
+          // the whole variable) can have the very same pad, and
+          // `TakeBlockPath` was never taught to expect it: `ST->
+          // getNumElements()` (the *LLVM* struct's own field count) then
+          // exceeds `MemberDecorations.size()` (the real, SPIR-V-declared
+          // member count) by exactly one, and walking every LLVM field as
+          // if it were its own same-numbered real member wrongly turned
+          // the pad itself into a spurious element (an 8-bit-scalar
+          // array `StageStorage.cpp` rejects outright) while shifting
+          // every real member's own decorations one index off from its
+          // real LLVM type. `HasLeadingPad` recovers the same shift
+          // `OffsetStructLeadingPadAccessChainPattern` already applied to
+          // every access chain into this same global (SPIRVToLLVMPatterns
+          // .cpp) -- skip LLVM field 0 entirely here, and read real
+          // member `I`'s own decorations/location bookkeeping from LLVM
+          // field `I + 1`.
+          bool HasLeadingPad =
+              ST->getNumElements() == MemberDecorations.size() + 1;
+          for (unsigned I = 0, E = MemberDecorations.size(); I != E; ++I) {
             ParsedSPIRVDecorations MemberD = MemberDecorations.lookup(I);
-            Type *MemberTy = ST->getElementType(I);
+            Type *MemberTy = ST->getElementType(HasLeadingPad ? I + 1 : I);
             uint32_t RowCount = getStageIORowShape(MemberTy).RowCount;
             if (!MemberD.BuiltIn) {
               if (!MemberD.Location)
