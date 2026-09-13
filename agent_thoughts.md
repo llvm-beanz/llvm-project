@@ -79878,3 +79878,88 @@ real coverage. Here there's nothing new to isolate.)
    fix.
 3. No CTS/build state needs cleanup this session -- I didn't leave
    background runs going and cleaned up `/tmp/h100`.
+
+# H101: fixed a real MLIR crash, then discovered my own "already fixed" conclusion was itself wrong
+
+## What happened, in order
+
+1. Rebuilt fresh (`ninja check-feme`, 2971/2974 pass) before touching CTS,
+   per the by-now-standard rule from H99a/H100.
+2. Re-tested H101's 4 named crash cases. All 4 appeared to pass. Declared
+   victory (in my own head) and started digging into a 5th, seemingly-new
+   `ptr_access_chain.workgroup_bad_stride` correctness bug instead.
+3. Spent a long stretch trying to explain a contradiction in that 5th bug's
+   own investigation: my manual repro of the shader's lowering pipeline hit
+   a hard MLIR legalization crash, but the real CTS run produced a wrong
+   *value*, no crash. Added temporary `fprintf`/file-dump debug hooks into
+   `Pipeline.cpp` to see what the real runtime was doing differently.
+4. The debug hook **never fired** for a supposedly-Fail case. That was the
+   tell: re-ran the exact same case with clean (non-piped, non-truncated)
+   output capture, and it actually reports `NotSupported`, not `Fail`.
+5. Root cause of my own mistake: an earlier invocation piped `deqp-vk`'s
+   output through `grep ... | head -30`. `head` closing its end of the pipe
+   early sent `deqp-vk` a `SIGPIPE`, killing it mid-test. The truncated
+   output I read afterward was leftover garbage from a *previous* full-group
+   run's `TestResults.qpa` in the same directory, misread as this test's
+   result. There was no `workgroup_bad_stride` bug at all.
+6. That made me distrust my own "all 4 H101 cases pass" conclusion from
+   step 2 -- which had been reached the same session, possibly with the
+   same kind of methodology error. Re-ran all 4 named cases again with
+   clean, un-piped output capture. **All 4 crashed for real**, exactly as
+   originally filed. My step-2 conclusion had been wrong the whole time.
+
+## The one real fix this session
+
+`spirv_assembly.instruction.compute.compute_shader_derivatives.compute.
+verify_ndx.linear.128_1_1`'s `OperandRange::front()` crash (H101's named
+signature 3). `gdb` backtrace pointed straight at upstream MLIR's own
+`AccessChainPattern::matchAndRewrite` in
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`: it reads
+`op.getIndices().front().getType()` unconditionally to pick an index type,
+but `spirv.AccessChain`'s indices are genuinely variadic (0 or more is
+legal SPIR-V) and this real shader produces a zero-index chain. Fixed by
+falling back to `i32` when there are no indices. New lit test added
+(using generic op syntax, since the op's own pretty-printer can't print a
+zero-length `$indices` list and round-trip it back through the parser --
+a separate, minor, unfixed cosmetic gap).
+
+Fixing the crash didn't make the test pass -- it now hits a different,
+narrower `VK_ERROR_INITIALIZATION_FAILED` (a GEP with an `i32` base
+operand instead of a pointer, somewhere else in the same shader). Filed
+as H101c rather than chased further this session.
+
+## What's still broken (filed as H101a/b/c/d/e, not fixed this session)
+
+1. `graphicsfuzz.call-function-with-discard` -- `Cannot select:
+   intrinsic %llvm.spv.discard`. Backtrace lands in ORC JIT lookup
+   plumbing, not the actual `SelectionDAG` failure site -- not
+   directly actionable yet.
+2. `transform_feedback...PromoteMem2Reg` non-promotable-alloca assertion
+   -- confirmed still crashing, not investigated further.
+3. `verify_ndx`'s new post-fix GEP-type failure (see above).
+4. `tessellation...switch_domain_origin...` -- now a genuine `SIGSEGV`
+   with a corrupted/unsymbolized stack (symptom drifted from the
+   original filing's `VK_ERROR_INITIALIZATION_FAILED`).
+5. `mixed_relaxed_precision_operands` -- a **new**, previously-unfiled
+   crash (`GetElementPtrTypeIterator.h`'s "Not byte-addressable"
+   assertion) found while re-scanning the full `spirv_assembly.*` group
+   to check for regressions from my own fix.
+
+## Suggested next steps
+
+1. **Before doing anything else next session: never pipe `deqp-vk`'s
+   stdout through `head`/anything that can close its read end early.**
+   Redirect to a file, then `grep`/`tail` the file separately. This is
+   the second self-inflicted methodology bug this conversation (first
+   was the wrong-cwd issue in H100) -- worth adding to
+   `feme/.instructions.md` as a third standing rule.
+2. H101a (discard-in-function-call selection failure) is probably the
+   most tractable next pickup: try compiling just that shader's LLVM IR
+   directly through `feme-run`/`llc`-equivalent to skip past the JIT
+   lookup layer and get a real `SelectionDAGISel` backtrace.
+3. H101d's tessellation segfault needs `FEME_CPU_JIT_DEBUG_SUPPORT=1`
+   (H97's own debug capability) before a `gdb` backtrace will mean
+   anything -- don't bother without it.
+4. Clean up `/tmp/h101*` scratch directories -- not done this session,
+   several gigabytes of qpa logs and scratch `.spv`/`.mlir` files
+   accumulated.
