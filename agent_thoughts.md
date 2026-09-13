@@ -80861,3 +80861,122 @@ Filed as H101o rather than chased this session, since:
    comparable to last session's 788-case count -- worth a fresh full
    sweep once H101o is fixed to get a clean baseline for future
    sessions to diff against.
+
+# H101m: fixed the multi-member leading-pad bug, found + isolated three fresh failure buckets
+
+**Fixed and merged this session:** `CanonicalizeStage.cpp`'s `TakeBlockPath`
+now correctly handles a genuinely multi-member interface block whose first
+member has a nonzero offset (the "leading pad" shape). 10 previously-silent
+`vkQueueSubmit` failures now pass. Full `check-feme`: 2984/2987, 0 regressions.
+
+## What was broken
+
+`basic_instance_arrays.11`'s `BlockC{uvec3 c; uint d;}` has 2 real members,
+and the first one starts at byte 28 (not 0). `SPIRVToLLVMPatterns.cpp`
+already knew to pad the front of the LLVM struct for this ("leading pad"),
+and the GEP/access-chain side already handled it correctly (fixed in an
+earlier session, H101n). But `CanonicalizeStage.cpp`'s per-member loop
+(`TakeBlockPath`) had never been told about the pad -- it walked the LLVM
+struct's fields 1:1 as if they were the real SPIR-V members, so the pad
+byte-array became a fake "member 0" and everything else shifted by one.
+
+This surfaced as a *completely silent* failure: `vkQueueSubmit` just failed
+with no error text at all, by default. Took a while to find the actual
+diagnostic; it's gated behind an opt-in env var nobody had used yet.
+
+## Diagnostic tool discovered (useful going forward)
+
+```
+FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case=...
+```
+
+This unlocks `feme::vulkan::logCreationFailure`'s real error text. Without
+it, pipeline/queue-submit failures print nothing. **Use this by default**
+when triaging any silent CTS failure going forward -- would have saved
+significant time this session and probably past ones.
+
+## The fix (2 files, 1 commit)
+
+1. `addElements`'s `TakeBlockPath` loop: detect `HasLeadingPad`, iterate real
+   member count, shift `+1` into the LLVM struct only when reading a
+   member's type.
+2. `resolveOffsetWithinElement`: split `LLVMMember` (real struct field,
+   for type/offset lookups) from `Member` (real SPIR-V member, for
+   indexing `IDs`), same `HasLeadingPad` shift, `-1` this time.
+
+New unit test built against a **ground-truth repro**: hand-wrote SPIR-V
+assembly matching `BlockC` exactly, ran it through the real compiler
+(`feme-translate --import-spirv` -> `feme-opt --feme-convert-spirv-to-llvm`
+-> `feme-translate --spirv-to-llvmir`) to get real LLVM IR, then used that
+IR verbatim in the test. First hand-guessed attempt (using a raw
+`<3 x i32>` member type) failed an assertion -- turned out `<3 x i32>`'s
+default ABI alignment is 16 bytes, not 12, so it wouldn't actually land at
+byte 28 in a naturally-laid-out struct. The real compiler uses
+`%feme.tight_vector = type { [3 x i32] }` (a marker struct from an earlier
+session, H101j) specifically to avoid this. **Lesson: never hand-write test
+IR with a raw vector type standing in for a compiler-emitted "tight" one --
+always pull it from a real repro.**
+
+## Verification chain (all done, all green)
+
+1. Unit tests: 84/84 pass (`FeMeTransformsGraphicsTests`).
+2. Real CTS, targeted: all 10 previously-silent cases now pass
+   (`basic_instance_arrays.{11,35,43,49}`, `all_instance_array.82`, both
+   `random_geometry`/`random_vertex`).
+3. Full `check-feme`: 2984/2987 passed, 0 failed, 0 regressions.
+4. Full `*instance_array*` sweep (778 cases, isolated one-process-per-case
+   to dodge an unrelated pre-existing corruption bug -- see below):
+   124 Passed / 40 Failed / 614 NotSupported (was 114/50/614 before this
+   session -- exactly the expected +10).
+
+## Found, but NOT fixed, and confirmed pre-existing (not my bug)
+
+**New heap-corruption pair found: `all_instance_array.12` + `.13`.**
+Running them back-to-back in one `deqp-vk` process crashes (`double free`
+or `corrupted size vs. prev_size`, non-deterministic). Confirmed via
+`git stash` + rebuild that this crashes identically on the pre-fix binary
+too -- **not caused by this session's work.** Structurally the same shape
+as the already-filed `.44`/`.45` corruption (a `Mismatch`-failing case
+followed immediately by any other case in the same process). Did not
+investigate further; out of scope for this session, but worth merging
+into whatever eventually investigates `.44`/`.45`, since they may share
+one root cause (something about how a `Mismatch`-failing case leaves the
+process in a bad heap state for whatever runs right after it).
+
+## Roadmap and docs, updated and committed
+
+- `Roadmap.md`: struck through H101m with the fix + verification summary.
+  Split the 40 remaining failures into 3 fresh rows (re-triaged from
+  scratch this session, not reused from stale earlier counts):
+  - **H101p** (26 cases): `spirv.GlobalVariable` legalization failure for
+    `all_unordered_and_instance_array.*` -- members declared *out of
+    ascending offset order* (a new shape, not the leading-pad one).
+  - **H101q** (8 cases): unresolved stage-IO global / JIT "Symbols not
+    found" -- same root cause, caught differently in vertex vs geometry.
+  - **H101r** (6 cases): output-store row/component out of range in
+    vertex, wrong-value `Mismatch` in the matching geometry case.
+- `FeMeVulkanDesign.md`: extended the leading-pad discussion with a third
+  paragraph for this multi-member variant.
+- `VulkanCTSReport.md`: new closing section, same content as above.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: **not
+  touched** -- this was a bugfix, no new feature/extension surface.
+
+## Suggested next steps (pick one, ~1-2 hours each)
+
+1. **H101p** (26 cases, biggest bucket): dump one `all_unordered_and_
+   instance_array.*` case's SPIR-V, check whether
+   `layOutStructIfOffsetsMatch` assumes members arrive in ascending-offset
+   order and needs a sort-by-offset step before laying out the LLVM struct.
+2. **H101q** (8 cases): same case fails differently by stage (JIT symbol
+   vs. validate-stage diagnostic) -- pull `nested_structs_instance_
+   arrays.2`'s SPIR-V and diff its shape against every already-handled
+   `TakeBlockPath`/plain-path case to spot what's still missing.
+3. **H101r** (6 cases): `component 1 is out of range for element 1` --
+   likely another row/component-count derivation bug in
+   `getStageIORowShape`/`resolveRowComponent`, same family as H101h's
+   earlier fix.
+4. Investigate the `.12`/`.13` heap corruption alongside `.44`/`.45` --
+   may be one root cause behind both.
+
+Any of H101p/q/r is a reasonable next pickup; H101p is the highest-value
+(most cases) if picking just one.
