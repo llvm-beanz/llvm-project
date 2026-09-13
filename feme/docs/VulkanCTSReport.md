@@ -40003,3 +40003,96 @@ crash-to-non-crash change is a net improvement, not a regression.
 change: nothing about supported features or extensions changed (this
 is a compiler/executor correctness fix, not new feature/extension
 work). `FeMeGraphicsDesign.md` needs no update: no design deviation.
+
+## H101g: Array-of-block-instances XFB row/offset resolution fix
+
+**Target cases:** `dEQP-VK.transform_feedback.fuzz.random_geometry.all_unordered_and_instance_array.28`,
+`dEQP-VK.transform_feedback.instance_array_basic_type.mat4.{geometry,vertex}`
+(from H101b's own closing note, both now failing with a value
+mismatch rather than crashing).
+
+**Symptom:** GLSL's array-of-block-instances syntax
+(`layout(...) out Block {...} arr[N];`) captured wrong XFB bytes.
+`all_unordered_and_instance_array.28`: `Mismatch at offset 4 expected
+30 received 72`. `instance_array_basic_type.mat4.geometry`: `Mismatch
+at offset 0 expected -89 received 3`.
+
+**Root cause (two parts):**
+
+1. `CanonicalizeStage.cpp`'s plain (non-block) `addElements` path
+   folded the whole `[N x Block]` shape into a single flat
+   `RowCount`-many-rows element sharing one `Location`/`XfbOffset`
+   pair, instead of giving each array instance its own independently
+   addressed captured stream.
+2. Once instance-level stride tracking was added, a matrix-typed
+   member (e.g. `mat4`) exposed a second bug: `resolveRowComponent`
+   only peeled one array/struct nesting level before looking for a
+   `FixedVectorType` leaf -- wrong for the two-nested-array shape
+   (`[3 x [4 x <4 x float>]]`) a `mat4` member inside an array of block
+   instances produces. Generalizing it to loop through all nesting
+   levels then exposed a *third* bug: `loadStageIOValue`/
+   `storeStageIOValue`'s own `ArrayType`-decomposition recursion
+   (which further decomposes a whole matrix `ValueTy` being
+   stored/loaded in one instruction) would overwrite or double-count
+   the row `resolveRowComponent` had already resolved.
+
+**Fix:**
+- Added `SignatureElement::XfbBufferArrayStride` (new ABI-v7 field,
+  `SignatureAbiVersion` 6->7): records the member's own inner row
+  count. Computed at the plain-path `addElements` call site via
+  `getStageIORowShape(PeekedST->getElementType(0)).RowCount`.
+- `Executor.cpp`'s `captureTransformFeedback` splits a flattened `Row`
+  into `(Instance, InnerRow)` via `Instance = Row / Stride`,
+  `InnerRow = Row % Stride`, routing each instance to its own
+  buffer/offset (`BufIdx = BaseBufIdx + Instance`).
+- `resolveRowComponent` gained a `ValueTy` parameter: it now loops
+  through nested single-member-structs/arrays (accumulating
+  `Row = Row * ArrTy->getNumElements() + Idx` per level, mirroring
+  `getStageIORowShape`'s own accumulation), but stops descending once
+  the remaining type-to-peel matches `ValueTy`, leaving further
+  decomposition to the caller's own recursion.
+- `loadStageIOValue`/`storeStageIOValue`'s `ArrayType` branches now
+  combine an incoming base `Row` with their own loop index via
+  multiply-add, instead of unconditionally overwriting it.
+
+**Verification:**
+- `all_unordered_and_instance_array.28`: pass.
+- `instance_array_basic_type.mat4.{geometry,vertex}`: pass.
+- `instance_array_basic_type.uvec4.geometry` (simple-member case):
+  pass.
+- New unit tests
+  `CanonicalizeStageTest.MapsArrayOfBlockInstancesWithSimpleMemberToXfbBufferArrayStride`
+  and
+  `CanonicalizeStageTest.MapsArrayOfBlockInstancesWithMatrixMemberToXfbBufferArrayStride`
+  pass; full `FeMeTransformsGraphicsTests` (76 tests) passes.
+- `dEQP-VK.transform_feedback.*instance_array*` sweep (790 cases):
+  **87 Passed / 89 Failed / 614 NotSupported**, up from the prior
+  session's 71 Passed / 105 Failed / 614 NotSupported -- net +16
+  passed, -16 failed, 0 regressions in NotSupported count.
+- `ninja check-feme`: **2975/2978 Passed**, 3 pre-existing
+  `Unsupported`, 0 `Failed` (the ABI bump to v7 required regenerating
+  7 test fixtures' hardcoded `!feme.signature` metadata blobs --
+  version byte incremented, 4 zero bytes inserted per element for the
+  new field -- see `feme/test/Tools/feme-render/draw-*.test` and
+  `feme/test/Transforms/CPU/{fragment,vertex}-wrapper-stage-io.ll`).
+
+**Remaining failures characterized (not fixed), broken out as new
+milestones:**
+- H101h: 12 `instance_array_basic_type.{ivec3,mat2,mat2x3,mat3,
+  mat3x2,mat3x4,mat4x2,mat4x3,uvec3,vec3}` cases fail with a
+  pre-existing "off-by-one row" symptom (receives a *different* row's
+  value, not garbage) -- confirmed unrelated to this fix.
+- H101i: ~77 cases across `random_geometry`/`random_vertex`'s
+  `all_instance_array`/`basic_instance_arrays`/
+  `nested_structs_instance_arrays`/`nested_structs_arrays_instance_arrays`
+  fail SPIR-V-to-LLVM legalization outright
+  (`failed to legalize operation 'spirv.GlobalVariable'`) for
+  multi-member interface blocks with a nested array member -- a
+  separate, upstream conversion-level failure in the `TakeBlockPath`
+  (`NumElements > 1`) code path, entirely disjoint from the plain-path
+  logic this row touched.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed (this
+is a compiler/executor correctness fix, not new feature/extension
+work). `FeMeGraphicsDesign.md` needs no update: no design deviation.
