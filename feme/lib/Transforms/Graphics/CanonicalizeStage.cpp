@@ -3040,6 +3040,38 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         unsigned UnusedAddrSpace = 0;
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+        // (Roadmap H101l) A single-real-member `Block`-decorated struct
+        // (`PeekedST`/`MemberMD`, computed above, before `TakeBlockPath`
+        // was checked false) whose one member's own `xfb_offset` is
+        // nonzero has that offset encoded *only* as the member's own
+        // `Offset` decoration (SPIR-V decoration code 35, reused by
+        // `parseSPIRVDecorations` as `XfbOffset` for either use) --
+        // glslang never repeats it as a second, whole-variable-level
+        // `Offset`/`XfbOffset` decoration of its own for this shape,
+        // unlike `XfbBuffer`/`XfbStride`/`Location`, which it always
+        // attaches directly to the variable regardless of member count.
+        // `D.XfbOffset` above, sourced only from the whole-variable's own
+        // decorations, therefore silently defaulted to 0 for any such
+        // block whose real `xfb_offset` isn't 0 (e.g. `layout(location =
+        // 4, xfb_buffer = 0, xfb_offset = 44, xfb_stride = 92) out BlockC
+        // { mat3x4 d; } blockC[2];`) -- wrongly capturing this element at
+        // byte 0 of its buffer instead of byte 44, silently overwriting
+        // whatever a *different*, genuinely offset-0 element sharing the
+        // same `XfbBuffer` (here, `BlockB`, this shader's own sibling
+        // block) had already captured there. Folding in
+        // `PeekedMemberDecorations.lookup(0).XfbOffset` -- present
+        // whenever this member has its own `Offset` decoration, which
+        // roadmap H101b's own `buildMemberDecorationsAttr` fix guarantees
+        // for any real member of an explicitly-offset struct -- exactly
+        // mirrors `TakeBlockPath`'s own analogous per-member `XfbOffset`
+        // synthesis just above, applied here to this element as a whole
+        // rather than to one of several sibling members (there being only
+        // one). Left untouched (the `!D.XfbOffset` guard) whenever the
+        // whole variable already carries its own explicit `Offset`
+        // decoration, so a shape that *does* redundantly repeat it there
+        // is never double-counted.
+        if (PeekedST && MemberMD && !D.XfbOffset)
+          D.XfbOffset = PeekedMemberDecorations.lookup(0).XfbOffset;
         Type *ValueTy = GV->getValueType();
         bool RowCountIsVertexArray =
             isPerVertexArrayInputGlobal(GV, UnusedAddrSpace, Stage);

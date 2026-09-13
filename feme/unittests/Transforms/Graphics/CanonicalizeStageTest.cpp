@@ -3872,4 +3872,62 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(MaxRowCount, 6u);
 }
 
+/// (Roadmap H101l) A single-real-member array-of-block-instances global
+/// (`addElements`' plain, non-`TakeBlockPath` path) whose block declares
+/// a non-zero `xfb_offset` that glslang encodes *only* as the one real
+/// member's own `Offset` decoration (SPIR-V decoration code 35, reused
+/// for both a struct member's byte offset and a whole-variable's
+/// `XfbOffset`) -- never repeating it at the whole-variable
+/// `spirv.Decorations` level the way it always does for `XfbBuffer`/
+/// `XfbStride` -- previously left `ParsedSPIRVDecorations::XfbOffset`
+/// silently at `std::nullopt` (folded to 0 by `SignatureElement::XfbOffset
+/// = D.XfbOffset.value_or(0)`), capturing this element at the wrong
+/// (zero) byte offset within its shared `XfbBuffer` and colliding with a
+/// sibling element genuinely captured at offset 0
+/// (`random_geometry.all_instance_array.11`'s own `Mismatch at offset 0
+/// expected -89 received 1096810496`, the received bit pattern being the
+/// colliding sibling's own first captured float, `14.0f`). Fixed by
+/// folding `PeekedMemberDecorations.lookup(0).XfbOffset` into `D` whenever
+/// the whole-variable decoration itself lacks one, mirroring
+/// `TakeBlockPath`'s own analogous per-member `XfbOffset` synthesis for
+/// the genuinely-multi-member case.
+TEST(CanonicalizeStageTest,
+    FoldsMemberOffsetIntoXfbOffsetForArrayOfBlockInstances) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @spirv_var = external addrspace(8) global [2 x { <4 x float> }], !spirv.Decorations !0, !feme.spirv.MemberDecorations !4
+
+    define void @main() #0 {
+      store <4 x float> <float 1.400000e+01, float 8.300000e+01, float -1.170000e+02, float 7.500000e+01>, ptr addrspace(8) @spirv_var, align 4
+      store <4 x float> <float 4.000000e+00, float -6.000000e+01, float 3.700000e+01, float 5.200000e+01>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @spirv_var, i64 16), align 4
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{!1, !2}
+    !1 = !{i32 36, i32 0}
+    !2 = !{i32 37, i32 32}
+    !3 = !{i32 35, i32 44}
+    !4 = !{!5}
+    !5 = !{i32 0, !6}
+    !6 = !{!3}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  ASSERT_TRUE(Elt.XfbBuffer.has_value());
+  EXPECT_EQ(*Elt.XfbBuffer, 0u);
+  // The whole-variable `spirv.Decorations` (!0) never carries an `Offset`
+  // (code 35) entry -- only the member's own `MemberDecorations` (!3)
+  // does -- so a correct fold-in is the only way this is 44, not 0.
+  EXPECT_EQ(Elt.XfbOffset, 44u);
+  EXPECT_EQ(Elt.XfbStride, 32u);
+}
+
 } // namespace
