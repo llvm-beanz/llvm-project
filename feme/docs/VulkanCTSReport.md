@@ -2833,7 +2833,7 @@ xargs -P 6 -n 1 -a groups.txt sh -c 'mkdir -p /tmp/cts/$1 && cd /tmp/cts/$1 &&
   ln -sfn <VK-GL-CTS>/external/vulkancts/data/vulkan vulkan &&
   VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   <VK-GL-CTS>/build/external/vulkancts/modules/vulkan/deqp-vk \
-    --deqp-case="dEQP-VK.$1.*" --deqp-log-filename=$1.qpa > $1.log 2>&1' _
+    --deqp-case="dEQP-VK.$1.*" --deqp-shadercache=disable --deqp-log-filename=$1.qpa > $1.log 2>&1' _
 ```
 
 **As of this edition, "about 25 minutes" is badly stale.** That estimate
@@ -2870,7 +2870,7 @@ while [ -s remaining.txt ]; do
   iter=$((iter+1))
   VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
     timeout 90 <VK-GL-CTS>/build/.../deqp-vk \
-      --deqp-caselist-file=remaining.txt --deqp-log-filename="iter$iter.qpa" \
+      --deqp-caselist-file=remaining.txt --deqp-shadercache=disable --deqp-log-filename="iter$iter.qpa" \
       > "iter$iter.log" 2>&1
   grep -q '^DONE!' "iter$iter.log" && { : > remaining.txt; break; }
   # deqp-vk processes --deqp-caselist-file strictly in file order, one
@@ -2904,6 +2904,30 @@ hung. Two refinements worth carrying forward:
   `binding_model`, 150,289 cases, zero crashes in over two hours) --
   the resume loop is for crash/hang recovery, not a general substitute
   for patience.
+
+**Critical correction, found during a later re-triage session:
+`deqp-vk`'s own on-disk `shadercache.bin` (written to the current working
+directory by default, `--deqp-shadercache-filename`) causes a false-crash
+storm, not a real one, once it accumulates enough entries across a long
+run.** A from-scratch full-group run (e.g. `mesh_shader.ext`, 26,921
+cases) completes several thousand cases cleanly, then starts crashing on
+almost every single subsequent case -- which looks exactly like a dense
+crash family and would trigger the resume-loop technique above, burning
+one process-spawn per case for tens of thousands of remaining cases. A
+side-by-side isolated re-run of the same "crashing" cases with a byte-fresh
+directory and `--deqp-shadercache=disable` found **only 1 of 154** such
+"crashes" reproduces standalone (a real, distinct bug, filed as roadmap
+H94) -- the other 153 are entirely an artifact of the shared, growing
+`shadercache.bin` file corrupting once it crosses some size/entry
+threshold, after which *every* subsequent case in that same working
+directory appears to crash regardless of its own content. **Always pass
+`--deqp-shadercache=disable` for any run intended to produce trustworthy
+per-case counts** (a resume loop's own `rm -f shadercache.bin` between
+iterations is not sufficient by itself if the corruption can occur within
+a single long invocation before ever crashing). This means every crash
+count in every prior edition of this report that did not use this flag
+should be treated as an upper bound, not a confirmed count, until
+re-verified.
 
 `feme/utils/filter_vulkan_cts_cases.py` and
 `feme/test/Vulkan/cts-compute-subset.test` remain the in-tree,
