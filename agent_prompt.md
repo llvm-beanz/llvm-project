@@ -45,30 +45,18 @@ agent thoughts.
 
 # Request
 
-Can you work on H101 or other blocking work to make progress on the H-series
+Can you work on H101a or other blocking work to make progress on the H-series
 milestones?
 
-> **Remaining newly-found crashes: `graphicsfuzz`'s `%llvm.spv.discard`
-> selection failure, `transform_feedback`'s `PromoteMem2Reg`
-> non-promotable-alloca assertion, `spirv_assembly`'s
-> `indexed_accessor_range_base::front()` empty-range assertion, and
-> `tessellation`'s `VK_ERROR_INITIALIZATION_FAILED` at pipeline-creation time.**
-> Four distinct signatures, one row each not yet split further since none has
-> been triaged: (1) `graphicsfuzz.call-function-with-discard`: `LLVM ERROR:
-> Cannot select: intrinsic %llvm.spv.discard`, an instruction-selection gap for
-> `OpKill`/discard in some code path other than the one already-working discard
-> support most other groups exercise; (2)
-> `transform_feedback.fuzz.random_geometry.all_instance_array.75` (and
-> presumably siblings, 39 crashes total): `PromoteMem2Reg`'s own
-> `isAllocaPromotable(AI)` assertion fires on an alloca some earlier pass
-> produces that isn't actually promotable, a latent IR-shape bug rather than
-> anything transform-feedback-specific; (3)
-> `spirv_assembly.instruction.compute.compute_shader_derivatives...`: an MLIR
-> `OperandRange::front()` assertion on an empty range, likely a
-> malformed/degenerate op somewhere in SPIR-V-to-MLIR conversion for compute
-> shader derivatives; (4)
-> `tessellation.misc_draw.switch_domain_origin_lower_left_to_upper_left` (176
-> crashes total in the group): `VK_ERROR_INITIALIZATION_FAILED` at
-> `vkCmdUtil.cpp:338`, a pipeline/command-buffer setup failure specific to
-> domain-origin-switching tessellation state, not yet distinguished from a
-> resource-exhaustion vs. a genuine setup bug. None yet triaged
+> **`graphicsfuzz.call-function-with-discard`'s `LLVM ERROR: Cannot select:
+> intrinsic %llvm.spv.discard`** (confirmed reproducible this session, see
+> H101's own closing note): an instruction-selection gap for `OpKill`/discard
+> reached through a function call (rather than inlined directly in the entry
+> point), in some code path other than the one already-working discard support
+> most other groups exercise. The crash's own backtrace terminates inside ORC
+> JIT symbol-lookup machinery rather than the actual `SelectionDAG` frame that
+> raised the fatal error (the `report_fatal_error` appears to unwind from a
+> JIT-compiled worker context), so a first step is getting a more direct repro
+> (e.g. via `feme-run`/`feme-opt` compiling just this one shader's LLVM IR
+> directly, bypassing the JIT lookup layer, to get a clean, symbolized
+> `llc`/`SelectionDAGISel::Select`-level backtrace). Not yet triaged
