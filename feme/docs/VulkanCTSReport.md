@@ -39794,3 +39794,83 @@ type handling. Broken out as new row H101e. Not yet triaged.
 change: nothing about supported features or extensions changed (this
 is a compiler correctness fix, not new feature/extension work).
 `FeMeGraphicsDesign.md` needs no update: no design deviation.
+
+## Roadmap H101a: measured impact (fixed)
+
+**Root cause:** `feme::graphics::CanonicalizeStagePass::run`'s dispatch
+loop only ever visited a function carrying a recognized
+`feme::getShaderStage` attribute (vertex/fragment/hull/domain/
+geometry/mesh/amplification/compute); any other function -- most
+commonly a GLSL/glslang-sourced helper function a real entry point
+calls rather than has inlined into it (unlike `dxc`'s own HLSL/DXIL
+output, which `feme::cpu::InlineHelperFunctionsPass`'s own header
+comment documents as always arriving pre-inlined) -- was skipped
+entirely via an unconditional `continue`. `graphicsfuzz.
+call-function-with-discard`'s fragment shader calls a helper `func()`
+containing an `OpTerminateInvocation` (raised to `llvm.spv.discard`),
+so that intrinsic was never rewritten to `feme.stage.discard`. It
+survived unchanged through `InlineHelperFunctionsPass`'s later
+inlining into the entry point and reached instruction selection as a
+raw, un-legalized intrinsic, crashing with `LLVM ERROR: Cannot select:
+intrinsic %llvm.spv.discard`.
+
+**Repro methodology:** per H101a's own filing, bypassed the ORC JIT
+entirely (whose symbol-lookup frames obscured the real crash site) by
+extracting the shader's SPIR-V directly from the CTS's own
+`call-function-with-discard.amber` source and driving `feme-translate`/
+`feme-opt` on it directly. This surfaced a second, previously-unresolved
+CLI-usage question from the prior H101 session: `feme-translate`'s
+`--spirv-to-llvmir`/`--spirv-to-llvmdialect` require the parsed
+top-level MLIR op to be a raw `spirv.module`, not the implicit
+`builtin.module` wrapper MLIR's generic text parser otherwise adds --
+resolved by passing `--no-implicit-module` alongside them.
+
+**Fix:** extracted the signature-independent discard/demote-to-helper-
+invocation/derivative/quad-read intrinsic-rewrite logic out of
+`canonicalizeSPIRVStage` into a new standalone
+`rewriteSPIRVDiscardAndDerivativeIntrinsics(Function &F)` helper
+(confirmed safe to call on any function, since it never references the
+`Stage`/`Phase` parameters that gate the rest of that function's
+stage-IO/signature-building work), and called it from
+`CanonicalizeStagePass::run`'s previously-skip-only branch for
+functions with no recognized stage attribute, in addition to its
+existing (unchanged) call from `canonicalizeSPIRVStage` for real entry
+points.
+
+**Verification:**
+- New unit test `CanonicalizeStageTest.
+  RewritesSPIRVDiscardInNonEntryHelperFunction`: a helper function
+  (no `feme.shader.stage` attribute) called, not inlined, from a
+  fragment entry point, containing `llvm.spv.discard` -- confirms it
+  is rewritten to `feme.stage.discard`.
+- `ninja check-feme`: 2972/2975 Passed (+1 test from the new unit
+  test), 3 pre-existing `Unsupported`, 0 `Failed`.
+- `dEQP-VK.graphicsfuzz.call-function-with-discard` run directly
+  against the rebuilt ICD: now `Pass (Pass)` (previously crashed).
+- A targeted before/after sweep (stashing the fix and rebuilding, to
+  get a clean baseline) of all 115 `graphicsfuzz.*` cases whose name
+  mentions "discard" or "function" (chosen to bound the full group's
+  own 90+ minute, hang-prone runtime -- see below) found: 0
+  regressions; 3 cases (`call-function-with-discard`,
+  `discard-in-loop`, `discard-in-loop-in-function`) newly passing that
+  previously hit this exact `Cannot select: intrinsic %llvm.spv.discard`
+  crash; 1 case (`cov-function-loop-condition-constant-array-always-
+  false`) also previously hit this crash and now instead fails on an
+  unrelated, already-broader-tracked control-flow-linearization
+  limitation (`feme-cpu-linearize`'s "loop ... has an internal branch
+  ... that does not reach the loop's exit block" diagnostic) rather
+  than crashing -- a net improvement (a clean `Fail` instead of a
+  crash), not a regression.
+
+**New bug found, not fixed by this row:** while running the above
+sweep, `dEQP-VK.graphicsfuzz.arr-value-set-to-arr-value-squared`
+hung unconditionally (100% CPU, no forward progress within a 20-second
+timeout). Confirmed via a stashed-diff before/after rebuild that this
+reproduces identically with and without this row's own fix -- it is a
+separate, pre-existing bug, not a regression from this change. Broken
+out as new roadmap row H101f.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: nothing about supported features or extensions changed (this
+is a compiler correctness fix, not new feature/extension work).
+`FeMeGraphicsDesign.md` needs no update: no design deviation.
