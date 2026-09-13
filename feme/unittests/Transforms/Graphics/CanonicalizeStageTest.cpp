@@ -754,6 +754,78 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2}));
 }
 
+/// (Roadmap H101n) A scalar-member "array of block instances" whose
+/// single real member's own declared offset is nonzero -- e.g.
+/// `layout(xfb_offset = 32) out BlockC { int b; } blockC[3];`, found in a
+/// real `dEQP-VK.transform_feedback.fuzz.random_geometry.
+/// nested_structs_instance_arrays.44` geometry shader -- combines
+/// H101k/H101l's own "leading `[N x i8]` pad" shape
+/// (`layOutStructIfOffsetsMatch`, SPIRVToLLVMPatterns.cpp) with this
+/// milestone's own array-of-instances one: each instance is a 36-byte
+/// `{ [32 x i8], i32 }`, only the last 4 of which are the real member.
+/// `OffsetStructLeadingPadAccessChainPattern`'s own H101n extension
+/// correctly addresses each instance's real member at byte offsets 32,
+/// 68, 104 (`k * 36 + 32`) within the whole array -- but
+/// `resolveOffsetWithinElement` is only ever handed
+/// `getEffectiveStageIOValueType`'s own pad-*stripped* `[3 x i32]` type,
+/// whose own per-row size is 4, not 36: before this row's own fix, its
+/// `resolveRowComponent` divided the real (still-padded) byte offset
+/// directly by that packed 4-byte `RowSize`, resolving instances 1 and 2
+/// to `Row`s 17 and 26 respectively -- far outside `RowCount == 3`,
+/// corrupting host memory beyond `StageStorage.cpp`'s own allocated
+/// bounds for this element (the out-of-bounds `buildStageStorage` write
+/// this milestone's own valgrind triage found, and the resulting
+/// `nested_structs_instance_arrays.45` heap-corruption crash on the very
+/// next test case's own allocation). Fixed by remapping the real,
+/// still-padded byte offset past the pad (`remapByteOffsetPastLeadingPad`)
+/// before resolving it against the pad-stripped type.
+TEST(CanonicalizeStageTest,
+    MapsArrayOfBlockInstancesWithLeadingPadScalarMemberToDistinctRows) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @blockC = external addrspace(8) global [3 x { [32 x i8], i32 }], !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store i32 1, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @blockC, i64 32)
+      store i32 2, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @blockC, i64 68)
+      store i32 3, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @blockC, i64 104)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 36}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 32}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 3u);
+
+  // Each instance's own store must resolve to its own distinct, in-range
+  // `Row` (0, 1, 2) -- not 0, 17, 26, the wildly out-of-range rows the
+  // still-padded byte offset produced before this fix.
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2}));
+}
+
 /// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
 /// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
 /// instance view a vertex/fragment invocation runs for, readable from

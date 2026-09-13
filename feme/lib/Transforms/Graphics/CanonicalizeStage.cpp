@@ -2508,6 +2508,69 @@ Type *getEffectiveStageIOValueType(GlobalVariable *GV) {
                : RealMemberTy;
 }
 
+/// (Roadmap H101n) Remaps \p ByteOffset -- a byte offset \p Ptr's own
+/// access chain actually resolved against \p GV's *real* (possibly
+/// leading-pad'd) LLVM type -- into the corresponding byte offset within
+/// `getEffectiveStageIOValueType(GV)`'s own, pad-stripped type, so the two
+/// stay consistent with each other the same way `getEffectiveStageIOValueType`
+/// already keeps the *type* consistent with `addElements`' own identical
+/// substitution.
+///
+/// Needed only for an *array*-of-block-instances shape (\p EffectiveTy is
+/// itself an `ArrayType`): each instance's own leading-pad struct is
+/// `Gap` bytes wider than its pad-stripped, tightly-packed replacement, so
+/// a raw byte offset from the real (wider, padded) global -- e.g. `k *
+/// RealStride + Gap` for instance \p k's own real member -- must become
+/// `k * PackedStride` before `resolveRowComponent`'s own array-peeling
+/// loop (which walks the *pad-stripped* `EffectiveTy`, one `PackedStride`-
+/// wide element per instance) can divide it into the right row at all.
+/// Before this, that loop instead divided the *real*, still-padded offset
+/// by the *packed* per-row size, since `resolveOffsetWithinElement` is
+/// only ever handed `getEffectiveStageIOValueType`'s own pad-stripped
+/// type, not \p GV's real one -- rounding every instance past the first to
+/// a `Row` far outside the element's own `RowCount`, corrupting host
+/// memory beyond `StageStorage.cpp`'s own allocated bounds for that
+/// element (`dEQP-VK.transform_feedback.fuzz.random_geometry.
+/// nested_structs_instance_arrays.44`'s own out-of-bounds
+/// `buildStageStorage` write, found via valgrind, followed by case `.45`'s
+/// own heap-corruption crash on the very next allocation).
+///
+/// A *lone* (non-array) leading-pad instance needs no such remapping:
+/// `resolveRowComponent`'s own loop, given a scalar/vector \p ElemTy that
+/// already matches the load/store's own value type exactly, never
+/// descends into `Residual` at all -- see that function's own
+/// `isShapeCompatible` check, which fires immediately for a pad-free
+/// single-member element -- so \p ByteOffset never needs remapping there;
+/// this function is only ever called for the array case, and asserts that
+/// \p EffectiveTy is one.
+uint64_t remapByteOffsetPastLeadingPad(GlobalVariable *GV, ArrayType *EffectiveTy,
+                                       uint64_t ByteOffset,
+                                       const DataLayout &DL) {
+  auto *RealArrTy = cast<ArrayType>(GV->getValueType());
+  auto *RealST = cast<StructType>(RealArrTy->getElementType());
+  // `getPackedElementSize`, not `DL.getTypeAllocSize`, for both the real
+  // struct's own per-instance stride and \p Gap: a genuine SPIR-V access
+  // chain into this array addresses each instance `getPackedElementSize`
+  // bytes apart, the same ABI-alignment-ignoring stride
+  // `getPackedElementSize`'s own comment documents for a narrow-vector
+  // element -- not `getTypeAllocSize`'s rounded-up one, which
+  // over-estimates the real gap between instances whenever \p RealST's
+  // own alignment exceeds its packed size (e.g. a `{ <3 x i32> }` single-
+  // member wrapper, `getTypeAllocSize` 16 but really addressed 12 bytes
+  // apart).
+  uint64_t Gap = DL.getStructLayout(RealST)->getElementOffset(
+      RealST->getNumElements() - 1);
+  uint64_t RealStride = getPackedElementSize(RealST, DL);
+  uint64_t PackedStride = getPackedElementSize(EffectiveTy->getElementType(), DL);
+  if (!RealStride)
+    return ByteOffset;
+  uint64_t InstanceIdx = ByteOffset / RealStride;
+  uint64_t Residual = ByteOffset % RealStride;
+  if (Residual < Gap)
+    return ByteOffset; // Should not happen for a real, legalized access.
+  return InstanceIdx * PackedStride + (Residual - Gap);
+}
+
 /// Resolves \p Ptr -- a load/store's pointer operand -- against \p
 /// ElementIDs (one entry per stage-IO global, one `ElementID` per struct
 /// member for a builtin interface block, a single one for everything
@@ -2642,10 +2705,17 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   // vector" member substitution, so this agrees with `addElements`' own
   // identical substitution when it built this global's `SignatureElement`
   // in the first place -- see that helper's own comment for why the two
-  // must match.
-  return resolveOffsetWithinElement(getEffectiveStageIOValueType(GV),
-                                    It->second, ByteOffset, ValueTy, DL,
-                                    OutputGlobals.contains(GV),
+  // must match. (Roadmap H101n) An array-of-instances shape also needs
+  // `ByteOffset` itself remapped past that same pad -- see
+  // `remapByteOffsetPastLeadingPad`'s own comment for why.
+  Type *EffectiveTy = getEffectiveStageIOValueType(GV);
+  if (auto *EffectiveArrTy = dyn_cast<ArrayType>(EffectiveTy);
+      EffectiveArrTy && isa<ArrayType>(GV->getValueType()) &&
+      EffectiveTy != GV->getValueType())
+    ByteOffset =
+        remapByteOffsetPastLeadingPad(GV, EffectiveArrTy, ByteOffset, DL);
+  return resolveOffsetWithinElement(EffectiveTy, It->second, ByteOffset,
+                                    ValueTy, DL, OutputGlobals.contains(GV),
                                     /*Vertex=*/nullptr);
 }
 
