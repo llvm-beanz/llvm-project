@@ -370,3 +370,40 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
       : !spirv.ptr<!spirv.struct<(vector<3xsi32> [0], !spirv.matrix<3 x vector<4xf32>> [16, RelaxedPrecision]), Block>, Output>
 }
 
+// -----
+
+// (Roadmap H82) A genuine multi-member `Input` interface block -- e.g. a
+// fragment shader's own `PerPrimitiveEXT` varying struct
+// `{ float a; vec3 b; float c; }` a mesh shader wrote -- has no array at
+// all (unlike H87's single-member array-wrapping block above), but still
+// needs the same "stay a real pointer" treatment at both the address-of
+// site and the type converter's own `spirv.PointerType` conversion
+// (isCompositeStageIOType/isCompositeLLVMType, formerly
+// isArrayLikeStageIOType/isArrayLikeLLVMType): those predicates used to
+// recognize only a plain `spirv.array`, or a single-member struct
+// wrapping one, as needing this treatment, eagerly loading any other
+// struct-typed `Input` variable's whole value at its address-of site
+// instead. A subsequent `spirv.AccessChain` selecting one member (`b`,
+// here) then fed that eagerly-loaded *value* (not a pointer) to MLIR's
+// generic `AccessChainPattern`, whose unconditional `getelementptr`
+// construction requires a real LLVM pointer base, producing an ill-typed
+// GEP ('operand #0 must be LLVM pointer type ... but got
+// '!llvm.struct<...>''). Broadening both predicates to recognize *any*
+// struct type (not just an array-wrapping one) fixes this.
+
+// CHECK-LABEL: llvm.func @read_multi_member_block
+// CHECK: %[[PTR:.*]] = llvm.mlir.addressof @in_multi_member : !llvm.ptr<7>
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %[[PTR]][%{{.*}}, 1] : (!llvm.ptr<7>, i32) -> !llvm.ptr<7>, !llvm.struct<(f32, vector<3xf32>, f32)>
+// CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> vector<3xf32>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.GlobalVariable @in_multi_member {per_primitive_ext} : !spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input>
+  spirv.func @read_multi_member_block() -> vector<3xf32> "None" {
+    %0 = spirv.mlir.addressof @in_multi_member : !spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input>
+    %c1 = spirv.Constant 1 : si32
+    %ac = spirv.AccessChain %0[%c1] : !spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input>, si32 -> !spirv.ptr<vector<3xf32>, Input>
+    %v = spirv.Load "Input" %ac : vector<3xf32>
+    spirv.ReturnValue %v : vector<3xf32>
+  }
+}
+
+
