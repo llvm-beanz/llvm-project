@@ -49,17 +49,19 @@ Can you work on the H-series milestones?
 
 The previous session suggested the next steps:
 
-1. **H110** (~1-2 hours): extend `getDynamicRowIndexedAccess` (or add a sibling)
-   in `CanonicalizeStage.cpp` to recognize a `isDynamicIndexedArrayGlobal`
-   global addressed with a constant outer index followed by a dynamic inner
-   array-member index, building a `StageIOAccess` with a constant `Vertex` +
-   dynamic `Row`. Add a unit test modeling the real shape directly, then re-run
-   `properties.max_mesh_output_components` to confirm it passes.
-2. **H111** (~15-30 min for a first diagnostic): `smoke.*.fullscreen_gradient`'s
-   `spirv.Variable`/Function-storage-class legalization failure has never been
-   IR-reduced -- H76's own note only narrows it to "unrelated to H79's own
-   (closed) Function-storage array gap." Use this session's own IR-reduction
-   command chain (glslang -> feme-translate -> feme-opt) as a starting point.
-3. Once H110 and H111 both land, `dEQP-VK.mesh_shader.ext.*` should be fully
-   green (439/439 of the currently-`Supported` cases) -- worth a final
-   confirming sweep.
+1. **H111(b)** (~30-45 min for a first diagnostic): the newly-exposed all-black
+   `fullscreen_gradient` render. Since the SPIR-V-to-LLVM-dialect conversion
+   output looks correct by inspection, use `feme-run` (the CPU JIT/dispatch
+   runner) or a channel-level pixel/IR reduction (mirroring H88's own technique)
+   further downstream through feme's own CPU lowering passes and execution to
+   find exactly where `positions[vertex]`/`colors[vertex]` -- read from a local
+   `alloca` of an array-of-vectors via a dynamic GEP index -- stops carrying the
+   right value. This is a shape (function-local, not stage-IO-global, array
+   addressed dynamically) that no prior CTS case ever reached, so it may be a
+   real gap in CPU codegen rather than a one-line fix.
+2. Once H111(b) lands, re-run the 3 `fullscreen_gradient` cases plus the broader
+   `mesh_shader.ext.*` sweep (26,921 cases) to confirm 439/439 of the
+   currently-`Supported` cases are green -- this would fully close out H70's
+   whole lineage (H93 -> H108 -> H109 -> H110 -> H111).
+3. No other blocking work was found this session -- H110 and H111(a) were the
+   only two items left on the prior session's list, and both are now closed.
