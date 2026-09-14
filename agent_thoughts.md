@@ -81883,3 +81883,32 @@ mesh/task-to-{frag,host,transfer} barrier cases). None triaged yet.
 3. **Find or construct a real CTS-level repro for H105** — still only
    proven by a hand-written unit test (unchanged from last session's
    suggestion, still not attempted). ~30-45 min to search/construct.
+
+# Agent thoughts: H108 fixed (unmatched fragment input location), H109 filed, widen* audit closed as no-op
+
+**Next action if you're picking this up:** run `dEQP-VK.mesh_shader.ext.synchronization.transfer_to_{mesh,task}.sampled_image.*` (4 cases) with `FEME_VULKAN_LOG_CREATION_ERRORS=1` to start on H109 -- it's the only real bug left in this bucket, and its own roadmap row already has a 3-step breakdown (H109(a)-H109(c)).
+
+## What happened (5 min read)
+
+1. Assigned task: triage the remaining 19 `mesh_shader.ext.*` failures, starting with the 12-case `synchronization.*` bucket; then audit `SIMDize.cpp`'s other `widen*` helpers for H107's bug pattern; then find/construct a CTS repro for H105.
+2. Split the 12 `synchronization.*` failures by error site: 4 fail at `vkCreateGraphicsPipelines` (Group A), 8 fail at `vkQueueSubmit` (Group B).
+3. **Group A** (`transfer_to_{mesh,task}.sampled_image.*`): root-caused to `SPIRVResourceLowering.cpp` unconditionally rejecting any sample against an integer-channel image (`usampler2D`), regardless of filtering mode. Real fix needs a new `V4I32`-returning sample runtime call that doesn't exist yet -- too big for this pass, filed as **H109** with a 3-step breakdown.
+4. **Group B** (`{mesh_to_frag,mesh_to_host,mesh_to_transfer}.*.subpass_dependency`): debug-instrumented `Executor.cpp` to dump the reflected mesh output signature at the failure site. Found the mesh module genuinely never writes `primitiveValue` (the CTS's own shader only writes it when a task shader precedes it, false here) while the fragment module always reads it. The sibling `memory_barrier`/`specific_barrier` variants pass because they use two separate pipelines, each pairing the real module with a passthrough counterpart that supplies the missing piece -- only the single-pipeline `subpass_dependency` shape exposes the real gap.
+5. Fixed: an unmatched fragment input `Location` is legal Vulkan (undefined value, not an error) -- same pattern as H2j/H6g-b. Changed `Executor.cpp` to skip linking it instead of erroring; `buildStageStorage` already zero-fills the storage, so the shader reads 0. **Filed/fixed as H108.**
+6. Audited `SIMDize.cpp`'s other `widen*` helpers per the assigned next-step: confirmed H107's fix was already applied at the single, shared `ToErase` cleanup loop every `widen*` helper routes through (not per-function) -- the code's own comment at that loop already documents this generically. No further per-function gap exists; nothing to fix here.
+7. Time-boxed a look for an H105 CTS repro: `vktComputeWorkgroupMemoryExplicitLayoutTests.cpp` (`VK_KHR_workgroup_memory_explicit_layout`) is a plausible candidate (explicit shared-memory offset/alignment control) but gated on an extension not yet confirmed implemented in feme -- not verified further this session.
+
+## Verification
+
+- New test `ExecutorTest.UnmatchedFragmentInputLocationReadsZeroInsteadOfErroringOut`: confirmed fails without the fix (`git stash` the fix, re-run), passes with it.
+- `ninja check-feme`: 2997/3000 passed, 3 pre-existing Unsupported, 0 Failed (up by 1 new test).
+- `dEQP-VK.mesh_shader.ext.synchronization.*` (81 cases): 77 Pass/4 Fail, up from 69/12.
+- Full `dEQP-VK.mesh_shader.ext.*` re-run (26,921 cases): 431 Pass/8 Fail/26,482 NotSupported, up from 420/19 -- exactly the 8 Group B cases, 0 regressions. Remaining 8 failures: 4 Group A (H109), `properties.max_mesh_output_components` (pre-existing), 3 `smoke.*.fullscreen_gradient` (pre-existing, H76).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no change needed (executor linkage-strictness fix, not a new feature/extension bit).
+
+## Suggested next steps
+
+1. **Start H109** (~1-2 hours): add a `V4I32`/`V4U32`-returning CPU sample entry point in `ImageCalls.h`/`.cpp`, wire `SPIRVResourceLowering.cpp` to select it for integer-sampled images instead of rejecting them, implement nearest-only sampling math, add a unit test per phase, re-run the 4 `synchronization.*` cases.
+2. **`properties.max_mesh_output_components`** (1 case, still untriaged): no session has looked at this specific case yet -- worth a first diagnostic (~15-30 min).
+3. **`smoke.*.fullscreen_gradient`** (3 cases): already known pre-existing per H76, not re-investigated this session -- check H76's own row for its current status before assuming it's still unfixed.
+4. Once H109 lands, `dEQP-VK.mesh_shader.ext.*` should be down to those 4 remaining cases -- worth a final sweep to confirm before considering H70's whole lineage closed.
