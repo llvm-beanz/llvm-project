@@ -802,6 +802,22 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // shader-stage combination (roadmap H112) means the bulk of this
   // feature's own tessellation-path conformance surface still does not
   // pass, so the bit stays `VK_FALSE` until H112 closes.)
+  //
+  // (Roadmap H112, closed) A real re-run of the full
+  // `dEQP-VK.clipping.user_defined.*` matrix (256 cases, bit flipped on
+  // for the measurement) after this milestone's two fixes --
+  // `PatchPipeline.cpp`'s `isForwardedFromProducerStage` (producer/
+  // consumer linking) and `StageStorage.cpp`'s
+  // `IsForwardedPerControlPointInput` (storage allocation for a
+  // forwarded `Position`/`PointSize` hull/domain input) -- found the
+  // entire non-`_dynamic_index`/non-`_fragmentshader_read` subset (64/64,
+  // including every `vert_tess`/`vert_tess_geom` case) now passes: the
+  // milestone's own tessellation-path rendering-correctness bug is fully
+  // fixed. The bit still stays `VK_FALSE`, however: `_dynamic_index`
+  // (32/128 passing -- H7w, still unimplemented) and
+  // `_fragmentshader_read` (50/64 passing, non-`_dynamic_index` only --
+  // H7x, still incomplete) remain open, so this feature's own mandatory
+  // conformance surface is not yet fully met.
 
 
   // (Roadmap H7i) `samplerAnisotropy`: `Image.cpp` already stored
