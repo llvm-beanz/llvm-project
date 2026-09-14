@@ -3672,8 +3672,19 @@ bool padUndersizedMembersIfNeeded(mlir::spirv::StructType Type,
 /// order for any two members genuinely declared at the same offset (e.g.
 /// a zero-sized array member), matching LLVM's own struct layout, which
 /// likewise places same-offset members in declaration order.
+///
+/// Requires \p Type.hasOffset(): a struct without any member `Offset`
+/// decorations (e.g. an ordinary, non-block aggregate) has no
+/// `getMemberOffset` values to sort by, and `getMemberOffset` itself
+/// dereferences a null offset-info array in that case (Roadmap H96 --
+/// this was the null-pointer read that manifested as a `deqp-vk` crash
+/// once a caselist happened to first exercise a non-block struct through
+/// `OffsetStructMemberReorderAccessChainPattern`, which used to call this
+/// unconditionally).
 llvm::SmallVector<unsigned, 8>
 getOffsetSortedMemberIndices(mlir::spirv::StructType Type) {
+  assert(Type.hasOffset() &&
+         "getOffsetSortedMemberIndices requires an offset-decorated struct");
   llvm::SmallVector<unsigned, 8> Order;
   Order.reserve(Type.getNumElements());
   for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I)
@@ -4290,9 +4301,17 @@ public:
     // already its own physical index) for a struct laid out exactly in
     // its own declaration order and needing no leading pad -- nothing for
     // this pattern to do, leave it to the generic one.
+    //
+    // (Roadmap H96) `StructTy.hasOffset()` must be checked here: an
+    // ordinary, non-block struct (no member `Offset` decorations, e.g.
+    // an ordinary function-scope aggregate rather than a uniform/storage
+    // block) has nothing for `getOffsetSortedMemberIndices` to sort by,
+    // and calling it unconditionally used to dereference a null
+    // offset-info array once a caselist happened to first reach such a
+    // struct through this pattern.
     llvm::SmallVector<unsigned, 8> Order;
     bool HasPad = false;
-    if (StructTy) {
+    if (StructTy && StructTy.hasOffset()) {
       Order = getOffsetSortedMemberIndices(StructTy);
       HasPad = structHasLeadingOffsetPad(StructTy);
     }
