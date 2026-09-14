@@ -42405,3 +42405,71 @@ regressions. `shaderClipDistance`/`shaderCullDistance` stay `VK_FALSE`:
 H7x is not yet fully closed, so this row's fix alone does not clear the
 whole `_dynamic_index` subset end to end. H32 and H53 remain open,
 depending only on H7x's own remaining gap.
+
+## Session: roadmap H7x -- debunking a synthetic multi-patch `CullDistance` "bug" (no real-code change)
+
+Picked up H7x (`_fragmentshader_read`, 50/64 passing, the last blocker on
+`shaderClipDistance`/`shaderCullDistance`) exactly where the prior session's
+suggested next steps left off: combining the "full" real-CTS signature
+(7-row `CullDistance` + `ClipDistance` + color, `RowCount=7`) with the
+nested `Position.y`-derived branch and correct (viewport-contained)
+geometry, then escalating to the real 15-adjacent-bar geometry shape.
+
+The single-patch combined-signature case passed outright (new permanent
+regression test, see below). Escalating to multiple adjacent tessellated
+bars (2-3 bars, 4-6 patches) at `RENDER_SIZE=16` initially looked like a
+real bug: most pixels in the rows nearest the `Position.y < 0` clamp
+boundary came back uncovered (`A=0`) instead of the expected
+`A=255`/UNORM8-clamped-to-0 color, while a naive per-pixel-continuous-
+interpolation model said every triangle vertex was analytically non-
+negative-for-all-three or otherwise correctly the affine `f(y) = 0.5*y`.
+
+A dozen bisection variants (multi-patch vs. single-patch, duplicate vs.
+distinct patches, narrow vs. wide, CullDistance vs. flat-color-only) all
+pointed at "multiple distinct on-screen patches + CullDistance" as the
+trigger -- until a **single half-width bar (2 patches, no second bar at
+all)** at 16x16 reproduced the exact same gap pattern, which ruled out
+multi-bar adjacency as the cause. Temporary `fprintf` instrumentation at
+`Executor.cpp`'s `isCulledByCullDistance` call site (in
+`RasterizePrimitives`, reverted before committing -- not landed) then
+showed the actual root cause: **the "bug" is correct, spec-compliant
+behavior.** `CullDistance` culling is a whole-*primitive* test applied to
+each already-tessellated micro-triangle (the domain shader's own output
+vertices), not a continuous per-pixel interpolation over the original
+patch. At tessellation factor 1.0 (matching the real shader), the
+tessellator emits only a handful of domain points, and some of the
+resulting micro-triangles near the `y=-1` clamp boundary legitimately have
+all 3 vertices with negative `CullDistance` on the same plane -- so
+discarding them outright is correct. The earlier single-patch tests (and
+the low-resolution `4x4` multi-patch tests) never exposed this because
+either the geometry was fine enough not to produce an all-negative
+micro-triangle, or the `4x4` attachment's own coarse pixel centers never
+happened to fall inside the (real, small) discarded micro-triangles. This
+is the same class of false positive as this row's own `008-debunking`
+checkpoint from a prior session -- a naive analytical model that didn't
+account for how the real pipeline stages actually operate, not a bug in
+the implementation.
+
+**Outcome: no production-code change.** The temporary `Executor.cpp`
+instrumentation and every throwaway `DEBUG*` diagnostic test from this
+session's bisection were reverted/deleted; only one real, permanent,
+passing regression test was kept and committed:
+`HullSelfReadOfCullDistanceRowThreeWithNestedPositionBranchAndFullSignature`
+(`feme/unittests/Graphics/ExecutorTest.cpp`), which is a genuinely new
+combination (full 7-row-`CullDistance`+`ClipDistance`+color signature
+*and* the nested `Position.y` branch together) that no prior session had
+covered, for a single tessellated patch.
+
+`ninja check-feme`: 3012/3015 pass, 3 pre-existing unsupported, 0
+failures (up by 1 test from the new regression above) -- no regressions.
+No real CTS re-run was performed this session since no production code
+changed; the real `dEQP-VK.clipping.user_defined.*_fragmentshader_read`
+number is unchanged from the prior session's own measurement (50/64).
+`shaderClipDistance`/`shaderCullDistance` remain `VK_FALSE`.
+`Vulkan14FeatureInventory.md`/`Vulkan14ExtensionInventory.md` are
+unchanged (no feature/extension status changed this session). H7x remains
+open; see `agent_thoughts.md`'s new entry for this session's own
+suggested next steps (the synthetic-repro avenue is now believed
+exhausted -- a real-CTS-image channel reduction on the actual failing
+cases is the recommended next approach, not further synthetic patch-
+geometry variations).

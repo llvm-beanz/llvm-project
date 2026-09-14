@@ -82452,3 +82452,106 @@ row is unchanged (still open, 50/64).
 4. **`offload-test-suite`'s `check-hlsl-feme-vk` target** still never
    built/run -- seventh session in a row to defer it. Worth a session
    of its own.
+
+# H7x debunked again: multi-patch CullDistance "bug" is correct per-primitive tessellation culling, not a bug
+
+Next action: run a real-CTS-image channel reduction on the actual
+failing `_fragmentshader_read` cases (see "Deferred / next steps" #1
+below) -- the synthetic-repro avenue is now exhausted.
+
+## What happened
+
+Picked up the prior session's suggested next steps for H7x: combine
+the full 7-row `CullDistance`+`ClipDistance`+color signature with the
+nested `Position.y` branch (single patch: passed, kept as a new
+regression test), then escalate to multiple adjacent tessellated bars
+matching the real 15-bar CTS geometry at `RENDER_SIZE=16`.
+
+The multi-bar escalation looked like a real bug at first: most pixels
+near the `y=-1` clamp boundary came back uncovered (`A=0`) instead of
+the expected clamped-to-0 color. A dozen bisection variants (duplicate
+vs. distinct patches, narrow vs. wide, with/without `CullDistance`)
+all pointed at "2+ distinct on-screen patches + `CullDistance`" as the
+trigger -- until a **single half-width bar (2 patches, no second bar)**
+reproduced the identical gap pattern, which ruled out multi-bar
+adjacency.
+
+Temporary `fprintf` instrumentation at `Executor.cpp`'s
+`isCulledByCullDistance` call site (never committed, reverted) showed
+the real explanation: `CullDistance` culling is a whole-*primitive*
+test applied to each already-**tessellated micro-triangle** (the
+domain shader's own output vertices), not a continuous per-pixel
+interpolation over the original patch. At tessellation factor 1.0
+(matching the real shader), some micro-triangles near the `y=-1`
+clamp boundary legitimately have all 3 vertices negative on the same
+`CullDistance` plane -- discarding them outright is **correct, spec-
+compliant behavior**, not a driver bug. The earlier single-patch and
+low-resolution (`4x4`) tests never exposed this because either the
+geometry didn't produce an all-negative micro-triangle, or the coarse
+`4x4` pixel centers never happened to land inside the (real, small)
+discarded ones.
+
+This is the same class of false positive as this row's own prior
+`008-debunking` checkpoint: a naive analytical model that didn't
+account for how the pipeline stages actually operate, not an
+implementation bug.
+
+## Pitfall to remember (for future H7x sessions)
+
+**A "coverage gap near a `CullDistance`-clamp boundary" is not proof
+of a bug** unless you've confirmed the affected micro-triangle (the
+one actually reaching the rasterizer post-tessellation, not the
+original patch) has at least one vertex with a non-negative value on
+every declared plane. Check this with `Executor.cpp` instrumentation
+(`isCulledByCullDistance`'s call site) before spending more time on
+synthetic geometry variations -- coarse tessellation factors (like the
+real shader's `1.0`) make this a real, expected, "scalloped" edge
+shape, not a smooth cutoff.
+
+## State
+
+1 commit this session:
+- `feme: add regression test combining full-signature CullDistance
+  with nested Position branch (H7x)` -- 1 new permanent, passing
+  `ExecutorTest.cpp` case combining two previously-separately-tested
+  shapes. `ninja check-feme`: 3012/3015 (3 pre-existing
+  `Unsupported`), 0 failed. `FeMeGraphicsTests`: 317/317.
+  `shaderClipDistance`/`shaderCullDistance` confirmed still `VK_FALSE`
+  (H7x still open, correctly not flipped).
+
+No production-code change this session (the suspected bug was
+debunked). `VulkanCTSReport.md` got a new "Roadmap H7x" session
+section documenting the debunking. No real CTS re-run performed (no
+production code changed; the real `_fragmentshader_read` number is
+unchanged from the last measurement, 50/64).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` unchanged
+(nothing to update). `Roadmap.md`'s H7x row is unchanged (already
+accurately describes it as open/partially-closed, blocking H32).
+
+Note: mid-session, an accidental `git checkout -- <file>` on the
+still-uncommitted test file wiped that session's own prior edits
+(including the pre-compaction work from before this file was
+committed). Recovered by reconstructing the one valuable test from the
+session's own summary/history rather than losing the finding. Lesson:
+never `git checkout --` a path with uncommitted work still pending
+review -- `git stash` first, or just don't run it on a dirty file at
+all when its history matters.
+
+## Deferred / next steps (ranked)
+
+1. **Real-CTS-image channel reduction** (~1-2 hours): pull the actual
+   framebuffer from a real failing `dEQP-VK.clipping.user_defined.
+   *_fragmentshader_read` case (via `deqp-vk`'s own image-dump/compare
+   logging) and diff it channel-by-channel against the expected image,
+   mirroring the technique H88's own closing session used for
+   `local_size_id_mesh`/`local_size_id_task`. This session's synthetic-
+   repro approach is now believed exhausted for finding H7x's remaining
+   14/64 gap -- a real captured image is the next lever, not another
+   synthetic patch-geometry variant.
+2. **`_dynamic_index` combined with `vert_geom`/`vert_tess_geom`**
+   crash (`"JIT session error: Symbols not found: [ spirv_var_N ]"`)
+   still not diagnosed -- fifth session in a row to defer it. ~15-30
+   min first diagnostic.
+3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** still never
+   built/run -- eighth session in a row to defer it. Worth a session
+   of its own.
