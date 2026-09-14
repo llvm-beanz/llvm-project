@@ -49,18 +49,19 @@ Can you work on the H-series milestones?
 
 The previous session suggested the next steps:
 
-1. **Investigate the remaining 62 `mesh_shader.ext.*` failures** —
-   `builtin.cull_primitives`, `misc.no_lines`/`no_points`/
-   `no_triangles`, `properties.max_mesh_output_components`, 3
-   `smoke.*.fullscreen_gradient`, plus ~40 `api.*`/`synchronization.*`
-   cases. None yet triaged. ~15-30 min each to get a first diagnostic.
-2. **H96 (the ~2,000-2,500-case `deqp-vk` crash) is still open** and
-   blocks any full, un-chunked CTS run — the Headline table in
-   `VulkanCTSReport.md` predates this session's fixes and needs a full
-   re-run once H96 is fixed (or worked around with batching). Real
-   time cost: hours, given the 3.2M-case scope.
-3. **Grep for other datalayout-ordering-sensitive passes**: anywhere
-   else in the CPU pipeline that runs between `importShaderModule` and
-   `feme::cpu::runPipeline`'s new datalayout substitution point could
-   have the same class of bug if it depends on `Module::getDataLayout()`
-   for anything alignment-sensitive. ~20 min grep.
+1. **Investigate the remaining ~63 `mesh_shader.ext.*` failures** — 40
+   `api.draw*`/`api.draw_indirect*` cases all sharing `with_task_shader`/
+   `with_task_shader_secondary_cmd` suffixes (likely one shared root
+   cause), `misc.no_lines`/`no_points`/`no_triangles` (3 cases),
+   `properties.max_mesh_output_components` (1 case), 3
+   `smoke.*.fullscreen_gradient` (already known pre-existing per H76),
+   and 16 `synchronization.*` cases. None yet triaged beyond this list.
+   ~15-30 min each for a first diagnostic; the `with_task_shader` bucket
+   alone is worth ~40 cases if it's one root cause.
+2. **Find or construct a real CTS-level repro for H105.** It's currently
+   proven only by a hand-written unit test; a real `groupshared`-heavy
+   compute or mesh case with no explicit `align` and a large enough
+   struct might expose it on this host. ~30-45 min to search/construct.
+3. **H96 is genuinely closed** (confirmed this session, contrary to the
+   prior session's own belief it was still open) — no more chunked-batch
+   workaround needed for full CTS runs going forward.
