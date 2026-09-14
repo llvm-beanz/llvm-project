@@ -82359,3 +82359,96 @@ diagnostic.
   session of its own.
 - `/tmp/h7w_repro/` scratch files not cleaned up (low priority, not
   part of the repo).
+
+# H7x still open: no bug found, but a major false-positive pitfall documented (geometry/tess-factor mismatch in repro tests)
+
+## Next action
+
+Start the next H7x session with the two untested repro combinations at
+the bottom of this entry -- **do not** re-run the same single-triangle
+shapes this session already cleared.
+
+## What happened
+
+Assigned H7x (`dEQP-VK.clipping.user_defined.*_fragmentshader_read`,
+50/64 passing, unchanged across several prior sessions). Spent this
+whole session building `ExecutorTest.cpp` repros trying to isolate the
+bug via a hull-stage self-read of `CullDistance`, nested with a
+self-read of `Position.y`, feeding a branch -- the same shape as the
+real failing shader. Four progressively-refined repros all showed
+"every pixel comes back fully culled" (alpha or color always 0), which
+looked exactly like a real bug.
+
+It was not a bug. It was bad test geometry.
+
+## The pitfall (read this before writing another H7x repro)
+
+Two things have to match the real shader exactly, or the interpolated
+`CullDistance` value across the *visible* viewport can be
+mathematically, correctly, always-negative even though the mechanism
+works fine:
+
+1. **Tessellation factor must be `1.0`.** The real CTS shader
+   (`vktClippingTests.cpp`) sets `gl_TessLevelInner/Outer[*] = 1.0`
+   unconditionally -- every hull "patch" is exactly one un-subdivided
+   triangle, never actually subdivided. A repro using `4.0` (a
+   reasonable-looking default) produces a completely different
+   domain-shader/interpolation shape.
+2. **The triangle must be fully contained in `[-1,1]` NDC.** The real
+   geometry is 15 thin, viewport-height "bars." An oversized triangle
+   (e.g. one corner at `y=3`) puts its one "positive branch" corner
+   outside the visible clip volume -- so every pixel *inside* the
+   viewport legitimately interpolates to a negative value. That is
+   correct math on bad geometry, not a cull bug.
+
+Verify any "fully culled" repro result by hand: solve the barycentric
+weights for each pixel-center NDC coordinate against the triangle's
+three vertices, and check whether the interpolated per-corner branch
+value really should be negative there. This session did that
+arithmetic and found every one of its four repros' outputs matched the
+analytical prediction exactly -- i.e. the self-read/branch/interpolate
+mechanism is provably correct for every shape tested.
+
+Also confirmed: the framebuffer's row-to-NDC-y mapping is row 0 = NDC
+bottom (`y=-1`), row 3 (of a 4-row attachment) = NDC top (`y=+1`) --
+row increases with NDC y, opposite of a naive top-down image
+assumption. Got this backwards once mid-session and it produced a
+false "only 1 pixel covered" reading; re-derived it correctly via a
+throwaway non-tessellated sanity test (since deleted).
+
+## State
+
+1 commit this session:
+- `feme: add hull self-read CullDistance/Position regression tests
+  (H7x)` -- 4 new `ExecutorTest.cpp` tests (hull self-read of scalar
+  `CullDistance`, array `CullDistance`, `CullDistance`+`ClipDistance`+
+  color combined, and the nested `CullDistance`+`Position.y` branch),
+  all passing, with real analytically-derived per-pixel assertions
+  (not placeholder/fprintf debug output). `ninja check-feme`: 3011/3014
+  (3 pre-existing `Unsupported`), 0 failed. `shaderClipDistance`/
+  `shaderCullDistance` confirmed still `VK_FALSE` in the committed tree
+  (H7x still open, correctly not flipped). `FeMeGraphicsTests`: 316/316.
+
+No roadmap/CTSReport/FeatureInventory/DesignDoc changes this session --
+no fix landed, so no measured-impact update to make. H7x's own roadmap
+row is unchanged (still open, 50/64).
+
+## Deferred / next steps (ranked)
+
+1. **Combine `RowCount=7` + FS reads row index 3 + coexisting
+   `ClipDistance`/color + the nested `Position.y` branch + correct
+   (contained) geometry** (~45-60 min). This exact combination -- the
+   real shader's full signature richness plus the real branch logic --
+   has never been tested together. Every repro this session used either
+   the full signature *or* the nested branch, never both.
+2. **If (1) doesn't reproduce a bug, try the real 15-adjacent-narrow-bar
+   geometry at `RENDER_SIZE=16`** (~1-2 hours) -- much closer to the
+   literal real CTS setup; adjacency or narrow-triangle-width effects
+   are untested.
+3. **`_dynamic_index` combined with `vert_geom`/`vert_tess_geom`**
+   still crashes with `"JIT session error: Symbols not found:
+   [ spirv_var_N ]"` -- flagged for the fourth session in a row,
+   still no milestone filed. ~15-30 min first diagnostic.
+4. **`offload-test-suite`'s `check-hlsl-feme-vk` target** still never
+   built/run -- seventh session in a row to defer it. Worth a session
+   of its own.
