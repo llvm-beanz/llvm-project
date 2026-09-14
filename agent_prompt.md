@@ -45,6 +45,8 @@ agent thoughts.
 
 # Request
 
+The previous connection lost network connectivity and stalled. Can you resume?
+
 Can you work on the H-series milestones?
 
 The previous session suggested the next steps:
