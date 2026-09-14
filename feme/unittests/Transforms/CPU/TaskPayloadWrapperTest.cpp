@@ -23,6 +23,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
@@ -30,6 +31,7 @@
 using namespace feme;
 using namespace feme::cpu;
 using namespace llvm;
+using namespace llvm::PatternMatch;
 
 namespace {
 
@@ -397,6 +399,75 @@ TEST(TaskPayloadWrapperTest, LowersEmitMeshTasks) {
     if (isa<StoreInst>(I))
       ++NumStores;
   EXPECT_GE(NumStores, 3u);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap H85) `EmitMeshTasksEXT`, like `SetMeshOutputsEXT`
+// (`MeshOutputWrapperTest.cpp`'s own
+// `GatesSetMeshOutputsToWaveZeroLaneZero`), is spec'd to be honored from
+// invocation 0 of the workgroup only, but this test suite's own
+// generated task shaders call it unconditionally from every invocation,
+// each passing its own (frequently stale/default `(0,0,0)`) values -- so
+// this pass must gate every write on the true flattened invocation id
+// (`wave_index == 0 && Lane == 0`), not merely on the call site's own
+// reachability mask. Confirms the generated `icmp eq i32 %wave_index, 0`
+// feeds (via `and`) into the final `select`s that choose the stored
+// group-count values.
+TEST(TaskPayloadWrapperTest, GatesEmitMeshTasksToWaveZeroLaneZero) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @as_main() #0 {
+      call void @feme.stage.emit_mesh_tasks(i32 4, i32 5, i32 6)
+      ret void
+    }
+    declare void @feme.stage.emit_mesh_tasks(i32, i32, i32)
+    attributes #0 = { "feme.shader.stage"="amplification" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  TaskPayloadWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("as_main");
+  ASSERT_TRUE(Body);
+
+  Argument *WaveIndexArg = nullptr;
+  for (Argument &Arg : Body->args())
+    if (Arg.getName() == "wave_index")
+      WaveIndexArg = &Arg;
+  ASSERT_TRUE(WaveIndexArg) << "expected a wave_index parameter";
+
+  ICmpInst *WaveZeroCmp = nullptr;
+  for (Instruction &I : instructions(*Body))
+    if (auto *Cmp = dyn_cast<ICmpInst>(&I))
+      if (Cmp->getPredicate() == ICmpInst::ICMP_EQ &&
+          Cmp->getOperand(0) == WaveIndexArg &&
+          match(Cmp->getOperand(1), m_Zero()))
+        WaveZeroCmp = Cmp;
+  ASSERT_TRUE(WaveZeroCmp) << "expected an `icmp eq %wave_index, 0` gate";
+
+  // That comparison must feed (through an `and`) the `select`s choosing
+  // each of the three stored group-count values.
+  unsigned SelectsGatedByWaveZero = 0;
+  for (Instruction &I : instructions(*Body)) {
+    auto *Sel = dyn_cast<SelectInst>(&I);
+    if (!Sel)
+      continue;
+    Value *Cond = Sel->getCondition();
+    auto *And = dyn_cast<Instruction>(Cond);
+    if (!And || And->getOpcode() != Instruction::And)
+      continue;
+    if (And->getOperand(0) == WaveZeroCmp ||
+        And->getOperand(1) == WaveZeroCmp)
+      ++SelectsGatedByWaveZero;
+  }
+  EXPECT_EQ(SelectsGatedByWaveZero, 3u)
+      << "expected all three group-count selects to be gated on "
+         "wave_index == 0";
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }

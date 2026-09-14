@@ -139,6 +139,21 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
   return V;
 }
 
+/// Finds \p F's own `wave_index` parameter (named by
+/// `feme::cpu::SIMDizePass`, see `SIMDize.cpp`'s `Env.WaveIndex->setName`):
+/// this wave's index within its shader entry's group, used by
+/// `lowerEmitMeshTasks` below to identify the one lane that is truly
+/// SPIR-V invocation 0 (`WaveLowering.cpp`'s `buildFlattenedThreadIdInGroup`
+/// computes a flattened invocation id of `wave_index * WaveSize + lane`, so
+/// invocation 0 is exactly `wave_index == 0 && lane == 0`) -- mirroring
+/// `MeshOutputWrapper.cpp`'s own `getWaveIndexArg`.
+Value *getWaveIndexArg(Function &F) {
+  for (Argument &Arg : F.args())
+    if (Arg.getName() == "wave_index")
+      return &Arg;
+  return nullptr;
+}
+
 /// Lowers one `feme.cpu.masked.task.payload.store` call: every active lane
 /// stores its own value at `Env.Payload + Offset`. `Offset` is usually a
 /// single compile-time constant shared by every lane of this call (per
@@ -224,15 +239,21 @@ void lowerTaskPayloadStore(CallInst &CI, const TaskPayloadStageEnv &Env,
   }
 }
 
-/// Lowers one `feme.cpu.masked.emit_mesh_tasks` call (roadmap H6s): every
-/// active lane writes its own `(groupCountX, groupCountY, groupCountZ)` to
-/// `Env.MeshGroupCount`'s three contiguous slots, the same
-/// "every lane may write, the mask decides whose value survives, repeated
-/// writes of a spec-identical value are idempotent" shape
-/// `MeshOutputWrapper.cpp`'s `lowerSetMeshOutputs` already uses for its own
-/// workgroup-uniform pair -- just three slots instead of two, and no
-/// per-slot addressing since there is only ever one dispatch request per
-/// workgroup.
+/// Lowers one `feme.cpu.masked.emit_mesh_tasks` call (roadmap H6s): writes
+/// `Env.MeshGroupCount`'s three contiguous slots from the one lane that is
+/// truly SPIR-V invocation 0 (`wave_index == 0 && Lane == 0`, see
+/// `getWaveIndexArg`'s own comment). `EmitMeshTasksEXT`, like
+/// `SetMeshOutputsEXT` (`MeshOutputWrapper.cpp`'s `lowerSetMeshOutputs`,
+/// roadmap H85's own re-investigation), is spec'd to be called *only* from
+/// invocation 0, but this test suite's own generated task shaders call it
+/// unconditionally -- every other invocation reaches the same call with
+/// its own un-set-by-the-shader-body `(0, 0, 0)` default, so the naive
+/// "every active lane's value is idempotent" assumption this comment's own
+/// prior revision made does not hold: whichever lane's write lands last in
+/// iteration order wins, non-deterministically zeroing out invocation 0's
+/// real dispatch request. Gating on the true flattened invocation id, not
+/// merely the call site's own reachability mask, is what actually
+/// implements the spec's "invocation 0 only" contract.
 void lowerEmitMeshTasks(CallInst &CI, const TaskPayloadStageEnv &Env) {
   IRBuilder<> Builder(&CI);
   Value *GroupCountXArg = CI.getArgOperand(0);
@@ -246,8 +267,19 @@ void lowerEmitMeshTasks(CallInst &CI, const TaskPayloadStageEnv &Env) {
         ScalarTy, Env.MeshGroupCount, Builder.getInt32(Dim),
         "mesh.group.count.addr");
 
+  Value *WaveIndex = getWaveIndexArg(*CI.getFunction());
+  Value *IsWaveZero =
+      WaveIndex ? Builder.CreateICmpEQ(WaveIndex, Builder.getInt32(0))
+                : Builder.getTrue();
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    // Only `Lane == 0` can ever be the flattened invocation 0 (see this
+    // function's own comment); every other lane is unconditionally a
+    // no-op here, regardless of what the call site's own mask says.
+    if (Lane != 0)
+      continue;
+
     Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+    Mask = Builder.CreateAnd(Mask, IsWaveZero);
     auto *MaskConst = dyn_cast<ConstantInt>(Mask);
     if (MaskConst && MaskConst->isZero())
       continue;
