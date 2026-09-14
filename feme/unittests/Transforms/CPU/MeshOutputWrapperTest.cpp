@@ -23,6 +23,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
@@ -30,6 +31,7 @@
 using namespace feme;
 using namespace feme::cpu;
 using namespace llvm;
+using namespace llvm::PatternMatch;
 
 namespace {
 
@@ -418,6 +420,83 @@ TEST(MeshOutputWrapperTest, LowersSetMeshOutputsCall) {
   for (const Instruction &I : instructions(*Body))
     if (const auto *CI = dyn_cast<CallInst>(&I))
       EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap H85) `SetMeshOutputsEXT` is spec'd to be honored from
+// invocation 0 of the workgroup only, but this test suite's own
+// generated mesh shaders (e.g.
+// `dEQP-VK.mesh_shader.ext.misc.group_memory_barrier_in_mesh_*`) call it
+// unconditionally from every invocation, each passing its own
+// (frequently stale/default) values -- so the call site's own
+// reachability-derived mask alone is not a sufficient gate: this pass
+// must additionally gate every write on the true flattened invocation
+// id (`wave_index == 0 && Lane == 0`), not merely `Lane == 0`. This
+// confirms the store's value is only ever selected from the call's
+// operands when `wave_index` is provably zero, i.e. the generated
+// `icmp eq i32 %wave_index, 0` feeds (via `and`) into the final
+// `select`s that choose between the new value and the previously
+// stored one.
+TEST(MeshOutputWrapperTest, GatesSetMeshOutputsToWaveZeroLaneZero) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      call void @feme.stage.set_mesh_outputs(i32 3, i32 1)
+      ret void
+    }
+    declare void @feme.stage.set_mesh_outputs(i32, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  dxil::setEntrySignature(*M->getFunction("ms_main"), EntrySignature{});
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("ms_main");
+  ASSERT_TRUE(Body);
+
+  Argument *WaveIndexArg = nullptr;
+  for (Argument &Arg : Body->args())
+    if (Arg.getName() == "wave_index")
+      WaveIndexArg = &Arg;
+  ASSERT_TRUE(WaveIndexArg) << "expected a wave_index parameter";
+
+  // Find `icmp eq i32 %wave_index, 0` -- the gate this fix introduces.
+  ICmpInst *WaveZeroCmp = nullptr;
+  for (Instruction &I : instructions(*Body))
+    if (auto *Cmp = dyn_cast<ICmpInst>(&I))
+      if (Cmp->getPredicate() == ICmpInst::ICMP_EQ &&
+          Cmp->getOperand(0) == WaveIndexArg &&
+          match(Cmp->getOperand(1), m_Zero()))
+        WaveZeroCmp = Cmp;
+  ASSERT_TRUE(WaveZeroCmp) << "expected an `icmp eq %wave_index, 0` gate";
+
+  // That comparison must feed (through an `and`) both `select`s that
+  // choose the stored vertex/primitive counts -- i.e. every write is
+  // gated on being in wave 0, not merely on the call site's own
+  // reachability mask.
+  unsigned SelectsGatedByWaveZero = 0;
+  for (Instruction &I : instructions(*Body)) {
+    auto *Sel = dyn_cast<SelectInst>(&I);
+    if (!Sel)
+      continue;
+    Value *Cond = Sel->getCondition();
+    auto *And = dyn_cast<Instruction>(Cond);
+    if (!And || And->getOpcode() != Instruction::And)
+      continue;
+    if (And->getOperand(0) == WaveZeroCmp ||
+        And->getOperand(1) == WaveZeroCmp)
+      ++SelectsGatedByWaveZero;
+  }
+  EXPECT_EQ(SelectsGatedByWaveZero, 2u)
+      << "expected both the vertex-count and primitive-count selects to "
+         "be gated on wave_index == 0";
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
