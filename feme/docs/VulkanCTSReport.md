@@ -41779,3 +41779,54 @@ change: no feature or extension bit changes. `FeMeCPUDesign.md` needs
 no change: this only extends H82's own already-undocumented
 DataLayout-ordering implementation detail to a second call site, not
 a new design decision.
+
+## Roadmap H106: measured impact
+
+**What changed:** `gl_CullPrimitiveEXT` (SPIR-V `BuiltIn
+CullPrimitiveEXT`, 5299) mapped to `SignatureSystemValue::None` in
+`getSystemValueForBuiltIn` (`CanonicalizeStage.cpp`) -- the fallback
+for "a builtin FeMe's signature model has no representation for yet."
+A mesh entry's own `gl_CullPrimitiveEXT` write therefore became an
+ordinary, `Location`-less output that `MeshOutputWrapperPass` stored
+like any other per-primitive value, but nothing in `Executor.cpp`'s
+rasterizer ever read back to skip rasterizing a culled primitive --
+this builtin was simply unimplemented, not a regression.
+`dEQP-VK.mesh_shader.ext.builtin.cull_primitives` compiled, linked,
+and ran to completion (no crash, no pipeline-creation error) but
+failed its own image comparison (`vktMeshShaderBuiltinTestsEXT.cpp:641`):
+both of its two triangles (one meant to be culled, one not)
+rasterized.
+
+**Fix:** added `SignatureSystemValue::CullPrimitive` (appended at the
+end of the enum, per its own established no-renumbering convention),
+mapped `BuiltIn CullPrimitiveEXT` to it, and -- mirroring roadmap
+H93b's already-fixed `gl_PrimitiveID`-authoring pattern exactly --
+threaded a new `PrimitiveState::Culled` bool through `Executor.cpp`'s
+`resolvePrimitiveState`, read back once per primitive from the mesh
+entry's own authored output when present. All three primitive-class
+emission call sites (the general filled-triangle path, the point-quad
+path, and the line path) now skip a primitive outright when
+`Culled` is set, ahead of every other per-primitive test (mirroring
+where the existing `gl_CullDistance` whole-primitive discard already
+runs). New regression test
+`ExecutorTest.MeshCullPrimitiveDiscardsAnAuthoredCulledPrimitive` (two
+triangles sharing a diagonal, one authored culled, one not) confirmed
+to genuinely fail without the fix (both triangles render) and pass
+with it restored.
+
+**Verification:** `ninja check-feme`: 2995/2998 passed, 3 pre-existing
+`Unsupported`, 0 `Failed` (up by the 1 new test).
+`dEQP-VK.mesh_shader.ext.builtin.cull_primitives` now passes outright.
+A same-shaped `dEQP-VK.mesh_shader.ext.*` re-run: **376 Pass/63
+Fail/26,482 Not supported**, up 1 Pass and down 1 Fail from the
+pre-fix baseline (376/64/26,482 under this same case-pattern scope),
+confirming zero regressions and exactly the one expected fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: `VK_EXT_mesh_shader` was already listed as supported; this
+fills in a previously-unimplemented builtin within that same
+already-advertised extension, not a new feature/extension bit.
+`FeMeGraphicsDesign.md` needs no change: `gl_CullPrimitiveEXT`'s
+per-primitive-discard semantics are exactly what the SPIR-V/GLSL
+extension specifies, with no FeMe-specific design deviation to
+record.
