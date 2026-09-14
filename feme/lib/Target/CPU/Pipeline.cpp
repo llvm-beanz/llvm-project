@@ -39,6 +39,7 @@
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
@@ -48,6 +49,8 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -242,6 +245,46 @@ Expected<PipelineResult> runPipeline(Module &M,
           "feme-cpu pipeline: graphics validation failed for '%s' (see "
           "stderr)",
           EntryName.c_str());
+  }
+
+  // (Roadmap H82) `feme::vulkan::importShaderModule`'s own
+  // `clearHostAgnosticMetadata` deliberately leaves \p M's `DataLayout`
+  // exactly as `SPIRVToLLVMTranslator` set it (the SPIR-V execution
+  // model's own triple-derived one), so `CanonicalizeStagePass`'s
+  // struct-offset-to-`SignatureElement` resolution above sees the same
+  // struct-layout math that produced the byte offsets it is resolving.
+  // That `DataLayout` has already served its purpose once
+  // `ValidateStagePass` above finishes without error; every later pass
+  // (`PreparePass`, `LinearizePass`, `SIMDizePass`, ... below) generates
+  // or reasons about ordinary scalar/vector IR the host's real ABI must
+  // agree with once this module is JIT-linked against
+  // `libFeMeRuntimeCPU`, so it is substituted for the host's own real
+  // `DataLayout` right here -- late enough to not disturb
+  // `CanonicalizeStagePass`'s own offset math, but before anything that
+  // needs the real one runs. Detection failing (unexpected for an
+  // in-process JIT host) leaves \p M's existing `DataLayout` in place
+  // rather than failing shader compilation outright over it.
+  //
+  // `getDefaultDataLayoutForTarget` needs the host's target registered;
+  // `CompiledStage::createStage`'s own `call_once` normally does this,
+  // but only later, once actual JIT compilation begins (after this
+  // function returns) -- `InitializeNativeTarget`/
+  // `InitializeNativeTargetAsmPrinter` are idempotent (each guards its own
+  // one-time registration internally), so registering here too, earlier,
+  // is harmless.
+  static llvm::once_flag DataLayoutInitFlag;
+  llvm::call_once(DataLayoutInitFlag, [] {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+  });
+  if (Expected<orc::JITTargetMachineBuilder> JTMB =
+          orc::JITTargetMachineBuilder::detectHost()) {
+    if (Expected<DataLayout> DL = JTMB->getDefaultDataLayoutForTarget())
+      M.setDataLayout(*DL);
+    else
+      consumeError(DL.takeError());
+  } else {
+    consumeError(JTMB.takeError());
   }
 
   {

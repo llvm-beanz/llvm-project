@@ -49,9 +49,33 @@ namespace {
 /// `feme-run`'s `clearHostAgnosticMetadata` applies (see that tool's own
 /// comment): the FeMe CPU target compiles against the host, not whatever
 /// SPIR-V's own addressing-model-derived triple happened to be.
+///
+/// (Roadmap H82) Unlike `feme-run`'s own helper, this module's `DataLayout`
+/// is deliberately left untouched here (only its target triple/module
+/// flags are cleared): `feme::graphics::CanonicalizeStagePass`, which runs
+/// on this same module shortly after import (`GraphicsPipeline.cpp`'s
+/// `compileGraphicsStage`, then again from `feme::cpu::runPipeline`),
+/// resolves each stage-IO struct member's byte offset (baked into a
+/// SPIR-V-derived `getelementptr` using *this* `DataLayout`, by
+/// `SPIRVToLLVMTranslator`'s own SPIR-V-triple-derived one --
+/// see `setTargetAttributes`, ConvertSPIRVToLLVMPass.cpp) back to its
+/// declared `SignatureElement` via `DL.getStructLayout(...)
+/// ->getElementContainingOffset(...)`. Replacing that `DataLayout` with a
+/// *different* one before `CanonicalizeStagePass` runs (this function
+/// used to reset it to an empty, default one) re-derives those same
+/// offsets against different (or, for the empty case, alignment-free)
+/// struct-layout math than what actually produced them, silently
+/// misresolving any alignment-sensitive stage-IO shape (e.g. a
+/// `struct { float; vec3; float; }`-shaped `PerPrimitiveEXT` interface
+/// block) onto the wrong `SignatureElement`, and surfacing later,
+/// confusingly, as `ValidateStagePass`'s own "component ... is out of
+/// range" diagnostic. `feme::cpu::runPipeline` is responsible for
+/// substituting the real host `DataLayout` once `CanonicalizeStagePass`/
+/// `ValidateStagePass` have both finished consuming this one (see its own
+/// comment), before anything past that point -- `feme::cpu::PreparePass`,
+/// codegen, and JIT linking against `libFeMeRuntimeCPU` -- runs.
 void clearHostAgnosticMetadata(llvm::Module &M) {
   M.setTargetTriple(llvm::Triple());
-  M.setDataLayout(llvm::DataLayout());
   if (NamedMDNode *ModuleFlags = M.getNamedMetadata("llvm.module.flags"))
     M.eraseNamedMetadata(ModuleFlags);
 }
