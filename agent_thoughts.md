@@ -81912,3 +81912,30 @@ mesh/task-to-{frag,host,transfer} barrier cases). None triaged yet.
 2. **`properties.max_mesh_output_components`** (1 case, still untriaged): no session has looked at this specific case yet -- worth a first diagnostic (~15-30 min).
 3. **`smoke.*.fullscreen_gradient`** (3 cases): already known pre-existing per H76, not re-investigated this session -- check H76's own row for its current status before assuming it's still unfixed.
 4. Once H109 lands, `dEQP-VK.mesh_shader.ext.*` should be down to those 4 remaining cases -- worth a final sweep to confirm before considering H70's whole lineage closed.
+
+# H109 completed (after a network-stall re-implementation), H110/H111 filed for the last two mesh_shader.ext.* failures
+
+**Next action if you're picking this up:** start on H110 -- `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`'s `getDynamicRowIndexedAccess` needs a sibling case for a constant-outer/dynamic-inner-array-member shape. Its own roadmap row already has a 2-step breakdown (H110(a)-H110(b)), and this session's IR-reduction commands are in this entry's step 3 below -- reuse them instead of re-deriving.
+
+## What happened (5 min read)
+
+1. Assigned task: work H109 (nearest-filtered sampling of integer-channel sampled images) or other blocking work.
+2. Mid-session network stall lost an already-implemented, uncommitted H109 change -- git tree was back to a clean `befbac34b68c` (just an `agent_prompt.md` add) on reconnect. Re-implemented the whole thing from scratch in 3 commits instead of trying to recover the lost diff.
+3. **H109 fixed:** added `ImageCallKind::Sample2DI32`/`createSample2DI32` (`ImageCalls.h`/`.cpp`), wired `SPIRVResourceLowering.cpp` to accept/emit it for a `Plain2D`/explicit-LOD/no-`Bias`/`Grad`/`MinLod` integer sample, added `femeCpuImageSample2DV4I32` to `FeMeRuntimeCPU.c` (always-nearest, `{0,0,0,1}` fallback for `CLAMP_TO_BORDER` only). No SPIR-V-to-LLVM conversion-pattern change needed -- it already emits a type-agnostic call regardless of channel type.
+4. Triaged `properties.max_mesh_output_components` (assigned as secondary work): reduced the real CTS shader through `glslangValidator` -> `feme-translate --import-spirv` -> `feme-translate --no-implicit-module --spirv-to-llvmir` -> `feme-opt --llvm -passes=feme-graphics-canonicalize-stage` (mirroring H92's own technique). Root cause: a per-primitive output block whose one struct member is itself an array (`uvec4 location_var[maxLocations]`), written through a loop-carried dynamic index (`ls[0].location_var[i] = ...`). `getDynamicRowIndexedAccess` already handles a dynamic index into a *plain* array element (`gl_ClipDistance[i]`), but explicitly excludes any `isDynamicIndexedArrayGlobal` global (to avoid double-recognizing H92's own doubly-dynamic shape) -- which also excludes this narrower case, where the *outer* index (`ls[0]`) is constant and only the *inner* member-array index is dynamic. Filed as **H110** with a 2-step breakdown, not fixed this session (needed its own design work, ran out of budget after H109 + triage).
+5. Ran the full `dEQP-VK.mesh_shader.ext.*` sweep (26,921 cases) in the background during triage: confirmed **435 Pass/4 Fail** (up from 431/8 pre-H109), an exact 4/4 movement, 0 regressions.
+6. The 4 remaining failures are `properties.max_mesh_output_components` (H110, above) and 3 `smoke.*.fullscreen_gradient` cases -- checked H76's own closing note per this session's assigned next-step and confirmed that bug was explicitly scoped *out* of H76 ("a completely unrelated ... error, out of scope for this row (not yet separately filed)") and never given its own milestone since. Filed as **H111** (untriaged beyond H76's own one-line note).
+7. Updated `Roadmap.md` (struck through H109/H109(a)-(c), added H110/H110(a)-(b) and H111) and `VulkanCTSReport.md` (H109's real measured-impact numbers replacing the "not yet fixed" placeholder, plus H110/H111 "not yet fixed" sections). Confirmed no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed (H109 is a bug fix restoring already-advertised sampling behavior, not a new feature bit).
+
+## Verification
+
+- `FeMeTransformsCPUTests`: 468/468 passed. New tests (`MatchesSample2DI32Call`, `LowersIntegerSampledImageToImageSampleV4I32`) confirmed to genuinely fail without the fix (reverted `SPIRVResourceLowering.cpp`, rebuilt) and pass with it restored.
+- `ninja check-feme`: 2999/3002 passed, 3 pre-existing `Unsupported`, 0 `Failed` (up by 2 new tests).
+- All 4 target `synchronization.transfer_to_{mesh,task}.sampled_image.*` cases: **Pass** (previously `VK_ERROR_INITIALIZATION_FAILED`). `synchronization.*` bucket: 81/81 Pass (up from 77/81).
+- Full `dEQP-VK.mesh_shader.ext.*` (26,921 cases): 435 Pass/4 Fail/26,482 NotSupported, up from 431/8 -- 0 regressions.
+
+## Suggested next steps
+
+1. **H110** (~1-2 hours): extend `getDynamicRowIndexedAccess` (or add a sibling) in `CanonicalizeStage.cpp` to recognize a `isDynamicIndexedArrayGlobal` global addressed with a constant outer index followed by a dynamic inner array-member index, building a `StageIOAccess` with a constant `Vertex` + dynamic `Row`. Add a unit test modeling the real shape directly, then re-run `properties.max_mesh_output_components` to confirm it passes.
+2. **H111** (~15-30 min for a first diagnostic): `smoke.*.fullscreen_gradient`'s `spirv.Variable`/Function-storage-class legalization failure has never been IR-reduced -- H76's own note only narrows it to "unrelated to H79's own (closed) Function-storage array gap." Use this session's own IR-reduction command chain (glslang -> feme-translate -> feme-opt) as a starting point.
+3. Once H110 and H111 both land, `dEQP-VK.mesh_shader.ext.*` should be fully green (439/439 of the currently-`Supported` cases) -- worth a final confirming sweep.
