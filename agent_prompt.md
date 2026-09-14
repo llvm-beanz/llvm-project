@@ -49,24 +49,19 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Root-cause H112** (~45-90 min): the static IR is provably correct,
-   so the bug is at runtime. Fastest path: add a hand-written
-   `ExecutorTest.cpp`-level repro (mirroring H111(b)'s own successful
-   bisection technique) driving the compiled hull+domain pipeline
-   directly, and inspect the actual per-control-point `ClipDistance`
-   values in `PatchPipeline.cpp`'s `copyLinkedElements` with a debugger or
-   printf-instrumentation, comparing against the already-correct
-   `gl_Position` handling in the exact same function.
-2. Once H112 is fixed, re-run the full `dEQP-VK.clipping.user_defined.
-   {clip_distance,clip_cull_distance}.*` matrix (non-`_dynamic_index`)
-   to confirm 128/128, then flip `shaderClipDistance`/`shaderCullDistance`
-   to `VK_TRUE` for real and close H53 and H32.
-3. **Separately, not yet investigated**: the `_dynamic_index` variants
-   combined with `vert_geom`/`vert_tess_geom` fail with `"JIT session
-   error: Symbols not found: [ spirv_var_N ]"` -- a distinct bug, no
-   milestone filed yet, worth a first diagnostic (~15-30 min) once H112
-   closes.
-4. `offload-test-suite`'s `check-hlsl-feme-vk` target is still never
-   built/run in any session -- flagged again as a standing gap, not
-   picked up this session either (out of scope for H32/H112, but worth a
-   session of its own).
+1. **H7w** (`_dynamic_index`, 32/128 passing) and **H7x**
+   (`_fragmentshader_read`, 50/64 passing) are the only remaining
+   blockers on `shaderClipDistance`/`shaderCullDistance`. Both already
+   have their own roadmap rows with partial-fix history -- worth a fresh
+   session picking up exactly where their own rows leave off, ~1-2 hours
+   each for a real diagnostic given the rows are already partially
+   fixed.
+2. **`_dynamic_index` combined with `vert_geom`/`vert_tess_geom`** still
+   crashes at pipeline creation with `"JIT session error: Symbols not
+   found: [ spirv_var_N ]"` -- a distinct, unrelated, not-yet-filed bug,
+   flagged again this session (third session in a row to notice it and
+   defer it). Worth its own ~15-30 min first diagnostic, and probably its
+   own new milestone row once triaged.
+3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** is still never
+   built/run in any session -- flagged again as a standing gap (fourth
+   session in a row). Worth a session of its own to wire it up.
