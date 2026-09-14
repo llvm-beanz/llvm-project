@@ -41462,3 +41462,62 @@ crash of this kind.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 change: this is a crash fix, not a feature/extension status change.
 `FeMeGraphicsDesign.md` needs no change either, for the same reason.
+
+## H94: false-alarm closure (same stale-`.so` shape as H99a/H100)
+
+**Re-triage:** per this project's own established discipline
+("rebuild before trusting any Pass/Fail count"), rebuilt
+`libfeme_vulkan.so`/`feme-opt`/`feme-translate` fresh, then re-ran
+`dEQP-VK.mesh_shader.ext.misc.payload_not_accessed` (the case this row's
+own original filing found crashing with a bare `SIGSEGV`).
+
+**Result:** it **Pass**es cleanly, 3 repeats standalone
+(`--deqp-shadercache=disable`) and again inside a full 114-case
+`dEQP-VK.mesh_shader.ext.misc.*` group run (42 Pass / 29 Fail / 43 Not
+supported, 0 crashes) -- no crash in any of the 4 runs.
+
+**Root cause (retroactive):** this row's own original crash was almost
+certainly reported against a stale `libfeme_vulkan.so` left over from an
+earlier point in the source tree, exactly the shape `feme/.instructions.md`
+already documents for H99a/H103 and H100 -- a from-scratch rebuild
+immediately before re-testing is enough to make the crash disappear
+entirely, with no source change required.
+
+**Verification:** `ninja check-feme`: 2991/2994 passed, 3 pre-existing
+`Unsupported`, 0 `Failed`, 0 regressions (identical to the baseline
+before this row was investigated).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: no code changed this session. `FeMeGraphicsDesign.md` needs no
+change either, for the same reason.
+
+## H104 (originally mis-filed as a duplicate `H95`): false-alarm closure, and H70 fully closed
+
+**Re-triage:** `dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow_bad_emit_last`
+(the case this row tracked -- filed with a duplicate `H95` ID that
+clashed with the earlier, already-closed `properties.mesh_payload_size`/
+`task_payload_size` milestone; renumbered to H104 on the roadmap this
+session to remove the collision) was re-tested against a from-scratch
+`libfeme_vulkan.so` rebuild.
+
+**Result:** it **Pass**es cleanly, 3 repeats standalone
+(`--deqp-shadercache=disable`) and again inside the same full 114-case
+`dEQP-VK.mesh_shader.ext.misc.*` group run used to verify H94 (42 Pass /
+29 Fail / 43 Not supported, 0 crashes, 0 mismatches on this case).
+
+**Root cause (retroactive):** same stale-`.so` shape as H94/H99a/
+H100 -- a from-scratch rebuild before re-testing is enough to make the
+originally-reported pixel mismatch disappear entirely, no source change
+required.
+
+**H70 now fully closed:** with both of its remaining open children (H94,
+H104) resolved this session, every case H70's own closing re-triage ever
+surfaced (H71 through H86, plus H94/H104) is now closed.
+
+**Verification:** `ninja check-feme`: 2991/2994 passed, 3 pre-existing
+`Unsupported`, 0 `Failed`, 0 regressions (identical to the baseline
+before this session).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: no code changed this session. `FeMeGraphicsDesign.md` needs no
+change either, for the same reason.
