@@ -192,9 +192,13 @@ enum class ImageCallKind : uint8_t {
   /// `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
   /// counterpart of `Load2D` -- an explicit-mip, no-sampler texel fetch of
   /// a `_UINT`/`_SINT` image, returning `<4 x i32>` instead of
-  /// `<4 x float>`. No filtered-sample counterpart exists: SPIR-V only
-  /// legalizes `OpImageFetch` (never `OpImageSample*`) against an integer-
-  /// sampled image, so there is nothing for a `SampleImage2DI32` to mean.
+  /// `<4 x float>`. Roadmap H109: a prior version of this comment claimed
+  /// no filtered-sample counterpart could exist, reasoning that SPIR-V
+  /// only legalizes `OpImageFetch` (never `OpImageSample*`) against an
+  /// integer-sampled image -- this was wrong: `OpImageSampleExplicitLod`
+  /// against an integer-channel sampled image is legal SPIR-V (just
+  /// restricted, per the Vulkan spec, to `NEAREST` filtering), and is
+  /// exactly what `Sample2DI32` below now covers.
   Load2DI32,
   /// `feme.cpu.image.sample.2darray.v4f32` (roadmap H7b-a): the
   /// `Texture2DArray` counterpart of `Sample2D`, adding a float array-layer
@@ -573,6 +577,25 @@ enum class ImageCallKind : uint8_t {
   /// from each of the four texels, rather than comparing each texel's
   /// depth component against a `Dref` reference value.
   Gather2D,
+  /// `feme.cpu.image.sample.2d.v4i32` (roadmap H109): a `Plain2D` nearest-
+  /// filtered sample against an integer-channel (`usampler2D`/
+  /// `isampler2D`) sampled image, returning `<4 x i32>` instead of
+  /// `Sample2D`'s `<4 x float>`. Per the Vulkan/SPIR-V spec, sampling an
+  /// integer-format image is legal but only with `VK_FILTER_NEAREST`
+  /// mag/min filtering and `VK_SAMPLER_MIPMAP_MODE_NEAREST` -- unlike
+  /// `Sample2D`, this kind's own runtime entry point always point-samples
+  /// a single mip level, regardless of the bound sampler's own filter
+  /// state, and never blends between two adjacent levels. Scoped, for
+  /// now, to an explicit-LOD sample only (`UseExplicitLod` always
+  /// `true`) -- no `Bias`/`Grad`/`MinLod` operand exists here, unlike
+  /// `Sample2D`'s own: no real CTS case has yet motivated an implicit-LOD
+  /// integer sample, and SPIR-V forbids `Bias`/`Grad`/`MinLod` alongside
+  /// an explicit `Lod` operand regardless. `OffsetX`/`OffsetY` (SPIR-V's
+  /// own `ConstOffset` image operand) are still threaded through, exactly
+  /// like `Sample2D`'s own, since a real CTS case (`dEQP-VK.mesh_shader.
+  /// ext.synchronization.transfer_to_{mesh,task}.sampled_image.*`, this
+  /// kind's own motivating case) needs no offset but a future one might.
+  Sample2DI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -796,6 +819,23 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                llvm::Value *OffsetX, llvm::Value *OffsetY,
                                llvm::Value *MinLodClamp, llvm::Value *Mask,
                                const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.2d.v4i32` call (roadmap H109): the
+/// integer-channel, always-nearest-filtered counterpart of `createSample2D`.
+/// Unlike `createSample2D`, there are no `DUdX`/`DUdY`/`DVdX`/`DVdY`, `Bias`,
+/// or `MinLodClamp` operands -- \p Lod is always an explicit LOD (SPIR-V
+/// forbids combining `Bias`/implicit LOD with an integer-channel image's
+/// mandatory `NEAREST` filtering in any case this pass has needed to
+/// support yet). \p OffsetX/\p OffsetY mirror `createSample2D`'s own
+/// `ConstOffset` image operand.
+llvm::CallInst *createSample2DI32(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex,
+                                  llvm::Value *SamplerIndex, llvm::Value *U,
+                                  llvm::Value *V, llvm::Value *Lod,
+                                  llvm::Value *OffsetX, llvm::Value *OffsetY,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY
 /// (roadmap L50d) are the same `ConstOffset` image operand
