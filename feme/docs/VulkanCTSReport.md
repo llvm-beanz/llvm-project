@@ -42157,3 +42157,75 @@ anywhere else in the suite. This closes H111 in full, and with it H70's
 entire lineage (H93 -> H108 -> H109 -> H110 -> H111), started across
 many prior sessions' worth of `mesh_shader.ext.*` triage.
 
+
+## Roadmap H53/H54/H55/H56: measured impact (re-triage, `shaderClipDistance`/`shaderCullDistance`)
+
+This session re-measured the three blockers roadmap H53 spawned (H54,
+H55, H56 -- known in this report's own earlier sections as H13a/H13b/
+H13c) against the real Vulkan CTS, `shaderClipDistance`/
+`shaderCullDistance` provisionally flipped on to measure, to check
+whether they are still the operative blockers.
+
+Full non-`_dynamic_index` matrix, `dEQP-VK.clipping.user_defined.
+{clip_distance,clip_cull_distance}.*` (128 cases):
+
+- `vert.*` and `vert_geom.*` (64 cases, including every
+  `_fragmentshader_read` variant): **64/64 Pass**. This is a change from
+  every session's prior measurement: H54's own stage-linkage mismatch
+  and H55's own fragment-read-back error no longer reproduce anywhere in
+  this bucket. No code in this session touched either code path --  both
+  appear to have been fixed as side effects of later, unrelated work
+  (most likely the same struct/offset and `splitTessellationControlEntry`
+  -adjacent fixes that closed other H-series rows in the interim).
+  Closed with no code change.
+- `vert_tess.*` and `vert_tess_geom.*` (64 cases): **0/64 Pass** -- but
+  the failure mode has changed. H56's own originally-diagnosed
+  `"feme-cpu-wrap-patch-constant: masked output store references an
+  unknown patch-output signature element"` crash no longer reproduces
+  either (confirmed against the exact case its own row cites,
+  `clip_distance.vert_tess.1_fragmentshader_read`) -- also closed with no
+  code change. Every case in this bucket now compiles, creates its
+  pipeline, and runs to completion, but fails a plain image comparison
+  (`"Fail (Rendered image(s) are incorrect)"`) instead: a new, distinct,
+  still-open rendering-correctness bug, filed as **H112**.
+
+`_dynamic_index` variants combined with `vert_geom`/`vert_tess_geom`
+still fail separately with `"JIT session error: Symbols not found:
+[ spirv_var_N ]"` -- an unrelated, pre-existing, not-yet-investigated
+bug, out of scope for H53/H54/H55/H56/H112 and not further triaged this
+session.
+
+A minimal repro for H112 (hand-authored GLSL matching the real CTS
+shader's exact non-dynamic-index shape: a 3-control-point hull stage
+self-indexing `gl_out[gl_InvocationID].gl_ClipDistance[0] =
+gl_in[gl_InvocationID].gl_ClipDistance[0]` with no explicit barrier,
+alongside constant `gl_TessLevelInner`/`gl_TessLevelOuter` writes, and a
+domain stage barycentric-interpolating `gl_in[0/1/2].gl_ClipDistance[0]`
+at constant vertex indices) was pushed through the
+`glslangValidator`/`feme-translate`/`feme-opt
+-passes=feme-graphics-canonicalize-stage` reduction pipeline. The
+resulting IR for both the tessellation-control clone (`main`) and the
+patch-constant clone (`main.patchconstant`, which `splitTessellationControlEntry`
+still produces even though the source has no explicit barrier) looks
+structurally correct: both clones store the right `SignatureElement`s,
+with matching `RowCount`/`ComponentCount` for the `ClipDistance` member,
+and the control-point clone's per-invocation `gl_out`/`gl_in`
+self-indexing (a genuinely dynamic `gl_InvocationID` SSA value, not a
+compile-time constant) mirrors the exact same pattern every other
+passing tessellation CTS case already uses correctly for `gl_Position`.
+This means H112's bug most likely does **not** live in
+`CanonicalizeStage.cpp`'s static signature classification (H54/H55/H56's
+own territory) -- it is most likely further downstream, in the actual
+runtime execution of the linked hull-to-domain pipeline
+(`PatchPipeline.cpp`'s invocation dispatch/copy, or the CPU-lowered
+`HullWrapperPass`/`DomainWrapperPass` storage for a per-control-point
+block member at a non-zero struct offset). Not yet isolated further --
+needs a `feme-run`/pixel-level reduction (mirroring H88's own technique)
+or gdb-level runtime inspection of the real per-control-point
+`ClipDistance` values as they flow from hull output storage into domain
+input storage, since the static IR shows no obvious defect.
+
+`ninja check-feme`: 3003/3003 pass, 3 pre-existing unsupported, 0
+failures (no code change made this session; the feature bits remain
+`VK_FALSE`, so no `check-feme`/unit-test regression risk from this
+session's investigation). H53 and H32 remain open, depending on H112.
