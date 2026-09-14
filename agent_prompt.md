@@ -45,5 +45,23 @@ agent thoughts.
 
 # Request
 
-Can you re-triage the H-series milestones and provide a recommendation for next
-steps?
+Can you work the the H-series milestones?
+
+The last session suggested the next steps:
+
+> **Next session: H7x**, via the real-CTS-image channel reduction this
+> session's predecessor already recommended (pull the actual failing
+> `dEQP-VK.clipping.user_defined.*_fragmentshader_read` case's own
+> rendered image and expected image, diff channel-by-channel, mirroring
+> H88's own closing technique for `local_size_id_mesh`/`local_size_id_
+> task`). This is the highest-leverage open item in the whole H-series:
+> one fix closes both H32 and H53. Do not repeat this and the last two
+> sessions' synthetic-unit-test bisection approach -- it has now twice
+> produced a false positive (see the two "H7x debunked" entries above)
+> without finding the real bug; a real captured CTS image is the
+> untried lever.
+>
+> **If H7x stalls again**, pivot to **H52** instead (SIGSEGV crash,
+> isolated scope, unrelated area, blocks accurate measurement of the
+> whole `tessellation.*` group) rather than re-attempting H7x a third
+> time with the same technique.
