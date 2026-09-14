@@ -818,6 +818,7 @@ private:
   void widenGroupSharedAtomicRMW(AtomicRMWInst &RMW, IRBuilder<> &Builder);
   void widenMaskedAlloca(AllocaInst &AI, IRBuilder<> &Builder);
   void widenMaskedAllocaGEP(GetElementPtrInst &GEP, IRBuilder<> &Builder);
+  void widenMaskedAllocaStore(StoreInst &SI, IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
   void widenInsertValue(InsertValueInst &IV, IRBuilder<> &Builder);
@@ -2891,6 +2892,95 @@ void FunctionWidener::widenMaskedAllocaGEP(GetElementPtrInst &GEP,
   ToErase.push_back(&GEP);
 }
 
+void FunctionWidener::widenMaskedAllocaStore(StoreInst &SI,
+                                            IRBuilder<> &Builder) {
+  // (Roadmap H111(b)) `SI` addresses a `MaskedAllocas` base (directly, or
+  // through a `widenMaskedAllocaGEP`-widened `getelementptr`) but is
+  // itself *not* one of the masked-store calls `collectMaskedAllocas`
+  // scanned for -- i.e. it runs unconditionally, writing the identical
+  // value into what `widenMaskedAlloca` has since split into `WaveSize`
+  // separate per-lane copies (e.g. a mesh shader's local `const float4
+  // positions[4] = {...}` initializer, later read back with a per-vertex
+  // dynamic index -- the exact shape a real `dEQP-VK.mesh_shader.ext.
+  // smoke.*.fullscreen_gradient` shader reduces to). Left as an ordinary
+  // "uniform: leave it exactly as it is" instruction (the general gate
+  // just below this function's only caller), only *one* of those per-lane
+  // copies -- whichever the H107 "leftover stale use" recovery in
+  // `widen()`'s own erasure loop narrows this store's now-widened pointer
+  // operand down to (lane 0) -- would ever actually get initialized,
+  // leaving every other lane's copy to be read back as poison/garbage by
+  // a later masked load through it (the actual bug this row's own session
+  // reduced down to: a real triangle rendered with well-formed *position*
+  // data but garbage *color* data, or vice-versa, depending on which
+  // array happened to still resolve to lane 0's copy). The fix: actually
+  // execute this store once per lane, into that lane's own real address,
+  // exactly as if every lane's masked-store predicate had been `true` --
+  // correct whether `SI`'s value operand is uniform (the common case;
+  // every lane's write is identical, exactly like this store's single
+  // pre-widening execution already was) or itself divergent (rarer, but
+  // not excluded: an unconditional, per-lane-varying scalar/vector store
+  // into a *constant*-indexed slot of a `MaskedAllocas` array that some
+  // other, genuinely masked access elsewhere also touches).
+  Value *WideBase = Widened.lookup(SI.getPointerOperand());
+  assert(WideBase && "a MaskedAllocas base pointer must already be widened "
+                     "by the time a store through it is reached, since "
+                     "reverse post-order visits a def before any use in "
+                     "the same acyclic block");
+
+  Value *Val = SI.getValueOperand();
+  Type *ValTy = Val->getType();
+  bool ValueDivergent = UI.isDivergentAtDef(&SI);
+
+  Value *WideScalar = nullptr;
+  SmallVector<Value *, 4> WideVectorComponents;
+  if (ValueDivergent) {
+    if (isa<FixedVectorType>(ValTy))
+      WideVectorComponents = getVectorComponents(Val, Builder);
+    else if (ValTy->isAggregateType()) {
+      // A genuinely divergent *aggregate*-typed store into a
+      // `MaskedAllocas` base has no per-lane reconstruction here yet
+      // (unlike the vector/scalar cases just above/below, `WidenedAggregate
+      // Components` is only ever populated for a divergent `insertvalue`
+      // chain producing that exact aggregate value, not for an arbitrary
+      // constant/instruction of aggregate type this store might see) --
+      // roadmap milestone left for a future session if a real CTS case
+      // ever needs it.
+      Ctx.emitError(&SI,
+                    "feme-cpu-simdize: unsupported divergent store of "
+                    "aggregate type through a per-lane-private local "
+                    "variable (roadmap H111(b) does not cover this shape)");
+      HadError = true;
+      return;
+    } else {
+      WideScalar = getWidened(Val, Builder);
+    }
+  }
+
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LanePtr = Builder.CreateExtractElement(
+        WideBase, Builder.getInt32(Lane), SI.getName() + ".lane" + Twine(Lane));
+    Value *LaneVal = Val;
+    if (ValueDivergent) {
+      if (!WideVectorComponents.empty()) {
+        auto *VecTy = cast<FixedVectorType>(ValTy);
+        Value *LaneVector = PoisonValue::get(VecTy);
+        for (unsigned Component = 0, End = VecTy->getNumElements();
+             Component != End; ++Component) {
+          Value *LaneScalar = Builder.CreateExtractElement(
+              WideVectorComponents[Component], Builder.getInt32(Lane));
+          LaneVector = Builder.CreateInsertElement(LaneVector, LaneScalar,
+                                                   Builder.getInt32(Component));
+        }
+        LaneVal = LaneVector;
+      } else {
+        LaneVal = Builder.CreateExtractElement(WideScalar, Builder.getInt32(Lane));
+      }
+    }
+    Builder.CreateAlignedStore(LaneVal, LanePtr, SI.getAlign(), SI.isVolatile());
+  }
+  ToErase.push_back(&SI);
+}
+
 void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
   // A raw `load` from a divergent groupshared address -- one
   // `feme::cpu::LinearizePass` never masked into a `feme.cpu.masked.load`
@@ -3737,6 +3827,21 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
         MaskedAllocas.contains(
             getUnderlyingAlloca(GEP->getPointerOperand()))) {
       widenMaskedAllocaGEP(*GEP, Builder);
+      return true;
+    }
+  }
+  // (Roadmap H111(b)) An unconditional, *not itself* masked, store into a
+  // `MaskedAllocas` base -- e.g. the single uniform initializer store of a
+  // local constant lookup table some other, genuinely masked access to
+  // the same alloca also touches -- must still run once per lane, into
+  // that lane's own now-separate storage, exactly like the alloca/GEP
+  // cases just above; see `widenMaskedAllocaStore`'s own comment for why
+  // this can't simply fall through to the ordinary uniformity gate below.
+  if (auto *SI = dyn_cast<StoreInst>(&I)) {
+    if (SI->isSimple() &&
+        !isGroupSharedPointerType(SI->getPointerOperandType()) &&
+        MaskedAllocas.contains(getUnderlyingAlloca(SI->getPointerOperand()))) {
+      widenMaskedAllocaStore(*SI, Builder);
       return true;
     }
   }
