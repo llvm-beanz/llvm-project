@@ -45,23 +45,24 @@ agent thoughts.
 
 # Request
 
-Can you work on the H-series milestones?
+Can you work on H32 or other work blocking the the H-series milestones?
 
-The previous session suggested the next steps:
-
-1. **H111(b)** (~30-45 min for a first diagnostic): the newly-exposed all-black
-   `fullscreen_gradient` render. Since the SPIR-V-to-LLVM-dialect conversion
-   output looks correct by inspection, use `feme-run` (the CPU JIT/dispatch
-   runner) or a channel-level pixel/IR reduction (mirroring H88's own technique)
-   further downstream through feme's own CPU lowering passes and execution to
-   find exactly where `positions[vertex]`/`colors[vertex]` -- read from a local
-   `alloca` of an array-of-vectors via a dynamic GEP index -- stops carrying the
-   right value. This is a shape (function-local, not stage-IO-global, array
-   addressed dynamically) that no prior CTS case ever reached, so it may be a
-   real gap in CPU codegen rather than a one-line fix.
-2. Once H111(b) lands, re-run the 3 `fullscreen_gradient` cases plus the broader
-   `mesh_shader.ext.*` sweep (26,921 cases) to confirm 439/439 of the
-   currently-`Supported` cases are green -- this would fully close out H70's
-   whole lineage (H93 -> H108 -> H109 -> H110 -> H111).
-3. No other blocking work was found this session -- H110 and H111(a) were the
-   only two items left on the prior session's list, and both are now closed.
+> **The optional core 1.0 graphics feature bits.** `PhysicalDeviceInfo.cpp`
+> reports exactly three `VkPhysicalDeviceFeatures` bits `VK_TRUE`
+> (`robustBufferAccess`, `dualSrcBlend`, `textureCompressionASTC_LDR`, lines
+> 349-373); the other ~52 are all `VK_FALSE`. Each is *optional* for a 1.4
+> submission, so none blocks a conformance claim — but each is a block of
+> mandatory-list cases reported `NotSupported`, and several are cheap on a
+> software device (`imageCubeArray`, `independentBlend`, `fillModeNonSolid`,
+> `depthClamp`, `depthBiasClamp`, `depthBounds`, `wideLines`/`largePoints` once
+> F5's line rasterization lands, `sampleRateShading`, `alphaToOne`, `logicOp`,
+> `occlusionQueryPrecise`, `multiDrawIndirect`, `drawIndirectFirstInstance`,
+> `vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`,
+> `shaderClipDistance`, `shaderCullDistance`, `samplerAnisotropy`,
+> `shaderStorageImage*`). Split into sub-rows per cluster when assigned; do
+> **not** land as one commit (broken down below the same way H4/H5/H30 were,
+> after a full survey of every candidate bit's own real implementation status:
+> H7a closes the first, lowest-risk cluster -- five bits the executor/pipeline
+> layer already genuinely implements and simply never advertised; H7b-H7j each
+> track one remaining cluster that needs real new work first, none of it started
+> yet -- milestone remains open, depending on H7b-H7j)
