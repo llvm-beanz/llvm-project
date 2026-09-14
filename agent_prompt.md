@@ -47,19 +47,20 @@ agent thoughts.
 
 Can you work on the H-series milestones?
 
-The last session suggested these next steps:
+The previous session suggested the next steps:
 
-1. **Grep for other "invocation 0 only" builtins** in the mesh/task/
-   amplification lowering (`feme/lib/Transforms/CPU/*.cpp`) that might
-   share this same latent bug class — anywhere a `feme.cpu.masked.*`
-   call represents a workgroup-uniform write, check whether it's
-   gated on `wave_index==0 && Lane==0` or still relies on the naive
-   "every active lane is idempotent" assumption. ~30 min grep + read.
-2. **Re-run the broader `dEQP-VK.mesh_shader.ext.*` sweep** (26,921
-   cases) to confirm the previous 90-failure count drops by (at least)
-   these 20 and see if any of the other 70 (44 `api`, 28 `misc` minus
-   these 20, 12 `synchronization`, 1 `builtin`) also happen to share
-   this root cause. ~20-30 min.
-3. Continue working the still-open H93/H96-adjacent/H102 rows from the
-   roadmap backlog (H85 was blocking nothing else directly, but was
-   found opportunistically while looking for "other blocking work").
+1. **Investigate the remaining 62 `mesh_shader.ext.*` failures** —
+   `builtin.cull_primitives`, `misc.no_lines`/`no_points`/
+   `no_triangles`, `properties.max_mesh_output_components`, 3
+   `smoke.*.fullscreen_gradient`, plus ~40 `api.*`/`synchronization.*`
+   cases. None yet triaged. ~15-30 min each to get a first diagnostic.
+2. **H96 (the ~2,000-2,500-case `deqp-vk` crash) is still open** and
+   blocks any full, un-chunked CTS run — the Headline table in
+   `VulkanCTSReport.md` predates this session's fixes and needs a full
+   re-run once H96 is fixed (or worked around with batching). Real
+   time cost: hours, given the 3.2M-case scope.
+3. **Grep for other datalayout-ordering-sensitive passes**: anywhere
+   else in the CPU pipeline that runs between `importShaderModule` and
+   `feme::cpu::runPipeline`'s new datalayout substitution point could
+   have the same class of bug if it depends on `Module::getDataLayout()`
+   for anything alignment-sensitive. ~20 min grep.
