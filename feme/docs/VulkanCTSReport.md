@@ -7,23 +7,22 @@ it describes the *current *state of `libfeme_vulkan` against `deqp - vk`,
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `8133e3be5d9a` (the tip of the H-series work through
-  H96's own filing; this is again a pure measurement/re-triage session --
-  no `lib/Vulkan`/`lib/Transforms` source changes accompany it). This is
-  the second genuine full 54-group re-run, superseding the `0f2435f36130`
-  edition above: this session's own re-triage closed H70's entire
-  mesh-shader-lineage subtree (H77-H86, ~57 cases) as already-fixed by
-  intervening work, filed two small new regressions (H94, H95), and --
-  the most consequential finding of this edition -- discovered that the
-  *previous* edition's own "13 crashing groups, ~1.38M cases never
-  measured" picture was itself an artifact of two distinct measurement
-  bugs, not real coverage limits. See "Two methodology corrections in
-  this edition" immediately below before reading any number.
-- `check-feme`: 2990 passed, 3 unsupported, 0 failed (ccache via
+- FeMe revision: `372560e82483` (the tip of the H-series work through
+  this session's own H85 regression fix; this session found and fixed a
+  genuine regression -- H85's prior "all 20 Pass" closure was false, and
+  is now genuinely re-fixed, see "H85 correction" below). Superseding the
+  `8133e3be5d9a` edition above, whose own re-triage had closed H70's
+  entire mesh-shader-lineage subtree (H77-H86) as already-fixed --
+  this session found that H85 specifically was not, in fact, fixed, and
+  root-caused + fixed the real bug (`SetMeshOutputsEXT`/
+  `EmitMeshTasksEXT` invocation-0-only gating in
+  `MeshOutputWrapper.cpp`/`TaskPayloadWrapper.cpp`).
+- `check-feme`: 2993 passed, 3 unsupported, 0 failed (ccache via
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`, `LLVM_ENABLE_ASSERTIONS=ON` build)
-  as of this revision -- unchanged in pass/fail terms from the prior
-  edition's 2949 plus H94-era additions, since this session added no new
-  regression tests of its own (no code fix landed; see below).
+  as of this revision -- up from the prior edition's 2990 by the two new
+  regression tests this session's H85 fix added
+  (`MeshOutputWrapperTest.GatesSetMeshOutputsToWaveZeroLaneZero`,
+  `TaskPayloadWrapperTest.GatesEmitMeshTasksToWaveZeroLaneZero`).
 - VK-GL-CTS revision: `880f31a2bd9c` (`vulkan-cts-1.4.6.2` branch tip,
   unchanged from the prior edition), plus the same two local fixes D0's
   own edition already recorded (see "Deviations from a stock CTS" below).
@@ -41521,3 +41520,87 @@ before this session).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 change: no code changed this session. `FeMeGraphicsDesign.md` needs no
 change either, for the same reason.
+
+## H85 correction: genuine regression found and root-caused (SetMeshOutputsEXT/EmitMeshTasksEXT invocation-0-only)
+
+**Re-triage:** while looking for other blocking work after H94/H104/H70's
+false-alarm closures above, a full `dEQP-VK.mesh_shader.ext.*` sweep
+(26,921 cases, 0 crashes, 349 Pass / 90 Fail / 26,482 Not supported) was
+run to validate the prior session's H96 fix. That sweep's own 90
+failures included all 20 of H85's previously-"closed" cases
+(`dEQP-VK.mesh_shader.ext.misc.{group_memory_barrier,
+memory_barrier_shared}_in_{mesh,task}_{array,float,struct,uint64,
+vector}`), confirmed still failing 3/3 repeats standalone with
+`--deqp-shadercache=disable`. **H85's prior closure ("all 20 Pass") was
+false** -- unlike H94/H104/H99a/H100's stale-`.so` pattern, a from-scratch
+rebuild did not make this one disappear.
+
+**Bisection abandoned:** suspecting H95a, a separate worktree built at
+`db1a3277156d^` (pre-H95a) still failed cleanly (ruling out H95a); a
+worktree at `8fc4d91ebad3` (the commit that originally closed H85)
+instead **crashed** (`SIGSEGV`) rather than failing cleanly -- a third,
+different outcome. This non-monotonic fail→crash→fail pattern across
+three commits was judged inconsistent with a simple linear regression
+and abandoned as unproductive; direct root-cause investigation on
+current `HEAD` was far more productive for this bug.
+
+**Root cause:** env-gated whole-module IR dumps (temporarily added to
+`Pipeline.cpp`'s `runAndCheck` lambda, since fully reverted) captured
+every CPU pipeline stage's IR for the failing
+`group_memory_barrier_in_mesh_float` case. Extracting and decoding the
+qpa's own embedded PNG images showed the actual rendered pixel was
+`(0,0,0,0)` (fully transparent black) against two accepted references
+`(0,0,1,1)`/`(0,0,0,1)` -- the point primitive's real color write never
+landed. Reading `vktMeshShaderMiscTestsEXT.cpp`'s own shader-generation
+source confirmed the mesh-only shader calls `SetMeshOutputsEXT` (and,
+for the task-shader variant, `EmitMeshTasksEXT`) **unconditionally**, by
+every invocation -- not gated by `gl_LocalInvocationIndex==0` -- even
+though only invocation 0 sets its own real values first. Per the
+`GL_EXT_mesh_shader` spec, both builtins must be honored **only from
+invocation 0**; a conformant driver silently ignores every other
+invocation's call. Temporary runtime `printf`-based tracing (added to,
+then removed from, `MeshOutputWrapper.cpp`) confirmed the smoking gun
+directly: `lane=0` wrote the real `(vertexCount=1, primitiveCount=1)`,
+immediately followed by `lane=1` (also "active" per the call site's own
+unconditional-reachability mask) overwriting it with its own
+un-set-by-the-shader-body default `(0, 0)`.
+
+**Fix:** `feme/lib/Transforms/CPU/MeshOutputWrapper.cpp`'s
+`lowerSetMeshOutputs` and `feme/lib/Transforms/CPU/
+TaskPayloadWrapper.cpp`'s `lowerEmitMeshTasks` both previously assumed
+"every active lane's value at this call is spec-identical and idempotent
+to write" -- true in general per the SPIR-V-level spec text, but false
+for these CTS-generated shaders' actual invocation pattern. Both were
+rewritten to gate every write on the *true* flattened invocation 0
+(`wave_index == 0 && Lane == 0`, per `WaveLowering.cpp`'s
+`buildFlattenedThreadIdInGroup`, which computes each lane's flattened id
+as `wave_index * WaveSize + lane`), ANDing the existing per-lane
+reachability mask with an `icmp eq i32 %wave_index, 0` gate, rather than
+relying on the call site's own mask alone. This correctly handles both
+single-wave and multi-wave (workgroup larger than one wave) shapes.
+
+**New regression tests:** `MeshOutputWrapperTest
+.GatesSetMeshOutputsToWaveZeroLaneZero` and `TaskPayloadWrapperTest
+.GatesEmitMeshTasksToWaveZeroLaneZero` build a small IR module, run the
+full `Linearize`/`SIMDize`/`WaveLowering`/(`MeshOutputWrapper`|
+`TaskPayloadWrapper`) pipeline, and assert the generated `icmp eq
+%wave_index, 0` feeds (via `and`) every `select` that chooses the
+stored output values. Both were verified to **fail** against the
+pre-fix code (confirming they actually catch this regression) and
+**pass** against the fix.
+
+**Verification:** the 20 named H85 cases now **Pass 20/20**, confirmed
+3 times for determinism (previously 0/20 passed before the fix; with
+only the `SetMeshOutputsEXT` fix applied, 10/20 passed -- the
+`_in_mesh_` variants -- with all 10 `_in_task_` variants still failing
+until the `EmitMeshTasksEXT` fix was also applied). `ninja check-feme`:
+2993/2996 passed, 3 pre-existing `Unsupported`, 0 `Failed`, +2 new tests
+(the two regression tests above), 0 regressions elsewhere.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a correctness bugfix to `GL_EXT_mesh_shader`/
+`VK_EXT_mesh_shader` support already listed as supported, not a new
+feature or extension. `FeMeGraphicsDesign.md` needs no change: the CPU
+lowering's own documented invocation-numbering model
+(`buildFlattenedThreadIdInGroup`) already supported this; only the two
+lowering passes' own local assumption about caller behavior was wrong.
