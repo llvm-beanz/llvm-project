@@ -45,6 +45,7 @@
 #include "feme/Core/ShaderStage.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Error.h"
 
@@ -123,6 +124,21 @@ llvm::Expected<PipelineResult> runPipeline(llvm::Module &M,
 /// above.
 llvm::Expected<PipelineResult>
 runPipeline(llvm::Module &M, llvm::StringRef EntryPoint, unsigned WaveSize);
+
+/// Returns the real host `DataLayout` `runPipeline` itself substitutes into
+/// its module once `CanonicalizeStagePass`/`ValidateStagePass` finish (see
+/// that substitution's own comment in Pipeline.cpp for why it must happen
+/// there and not earlier). Exposed so any other caller that needs to reason
+/// about a module's real, JIT-target ABI layout -- rather than the
+/// SPIR-V-translation-time one `runPipeline` still expects to find on entry
+/// -- gets the exact same answer `runPipeline` will end up using, instead
+/// of separately reimplementing `JITTargetMachineBuilder::detectHost()` and
+/// risking the two ever disagreeing (see roadmap H82's own datalayout-
+/// ordering bug for what happens when two different DataLayouts are used
+/// to reason about the same offsets/sizes). Registers the native target if
+/// not already done, exactly as `runPipeline` and
+/// `CompiledStage::createStage` both already do (idempotent).
+llvm::Expected<llvm::DataLayout> getHostDataLayout();
 
 } // namespace feme::cpu
 

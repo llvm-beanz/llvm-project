@@ -170,7 +170,26 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
 
+  // `Mod`'s `DataLayout` here is still the SPIR-V-translation-time one (the
+  // non-`Reference` path below needs it left untouched for
+  // `CanonicalizeStagePass`, run inside `runPipeline`, roadmap H82) -- not
+  // the real host ABI layout `computeGroupSharedLayout`'s
+  // `getPreferredAlign`/`getTypeAllocSize` must agree with, since the same
+  // `groupshared` globals get their real, host-`DataLayout`-based layout
+  // recomputed again downstream (`SIMDizePass`/`EntryWrapperPass`, both
+  // after `runPipeline`'s own host-`DataLayout` substitution). A mismatch
+  // here would size/align this stage's host-side scratch allocation
+  // (`Artifact.GroupSharedSize`/`GroupSharedAlign`, used before the JIT'd
+  // function ever runs) against the wrong layout. Substitute the real host
+  // layout just for this one query, then restore the original immediately,
+  // so nothing downstream of this call is affected.
+  DataLayout OriginalDL = Mod.getDataLayout();
+  if (Expected<DataLayout> HostDL = getHostDataLayout())
+    Mod.setDataLayout(*HostDL);
+  else
+    consumeError(HostDL.takeError());
   GroupSharedRequirements GroupSharedReqs = getGroupSharedRequirements(Mod);
+  Mod.setDataLayout(OriginalDL);
   uint32_t SideEffectFlags = computeSideEffectFlags(**Entry);
   // (Roadmap H4g) An entry point with no `!feme.signature` metadata at all
   // (e.g. a genuine SPIR-V entry with no stage-IO varyings of its own,

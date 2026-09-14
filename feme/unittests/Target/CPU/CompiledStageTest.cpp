@@ -185,6 +185,62 @@ TEST(CompiledStageTest, GetArtifactInfoReportsGroupSharedRequirements) {
   EXPECT_EQ(Artifact.GroupSharedAlign, 16u);
 }
 
+// Mirrors the SPIR-V execution model's own triple-derived `DataLayout`
+// (`SPIRVToLLVMTranslator`'s, e.g. for the "vulkan" environment) that a real
+// module still carries at this point (roadmap H82's `clearHostAgnosticMetadata`
+// deliberately leaves it untouched until `feme::cpu::runPipeline`'s own
+// `CanonicalizeStagePass` finishes) -- unlike `GroupSharedShaderIR` above,
+// whose default (empty) `DataLayout` happens to already agree with most real
+// hosts for a 16-byte-aligned `i32` array. This one gives no explicit
+// `align` for `@tile` (a `[4 x i8]`, so its layout-derived preferred
+// alignment differs between this `DataLayout` and a real host one) to
+// exercise `getGroupSharedRequirements`'s own `DataLayout`-dependent
+// alignment computation.
+constexpr char GroupSharedSPIRVLayoutShaderIR[] = R"(
+  target datalayout = "e-ve-i64:64-n8:16:32:64-G10"
+
+  @tile = addrspace(3) global [4 x i8] zeroinitializer
+
+  define void @main() #0 {
+    ret void
+  }
+  attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="1,1,1" }
+)";
+
+// Regression test for roadmap H82's own datalayout-ordering bug class,
+// found latent in `CompiledStage::createStage`'s own
+// `getGroupSharedRequirements` call: it ran on the module's
+// still-SPIR-V-triple-derived `DataLayout` (needed, unmodified, by
+// `CanonicalizeStagePass` inside `runPipeline`, which had not yet run),
+// rather than the real host `DataLayout` the same `groupshared` globals get
+// relaid-out against later (`SIMDizePass`/`EntryWrapperPass`, both
+// downstream of `runPipeline`'s own host-layout substitution) -- sizing/
+// aligning the host-side scratch allocation
+// (`StageArtifactInfo::GroupSharedAlign`) against the wrong layout.
+TEST(CompiledStageTest,
+     GetArtifactInfoUsesHostDataLayoutForGroupSharedAlignment) {
+  Context Ctx;
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(GroupSharedSPIRVLayoutShaderIR, Err,
+                                     Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << Err.getMessage().str();
+
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+  JITOptions Opts;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      CompiledStage::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  Expected<DataLayout> HostDL = getHostDataLayout();
+  ASSERT_THAT_EXPECTED(HostDL, Succeeded());
+  unsigned ExpectedAlign =
+      HostDL->getPrefTypeAlign(Type::getInt8Ty(Ctx.getLLVMContext())).value();
+
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.GroupSharedSize, 4u);
+  EXPECT_EQ(Artifact.GroupSharedAlign, ExpectedAlign);
+}
+
 constexpr char VertexShaderIR[] = R"(
   define void @vs_main() #0 {
     %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)

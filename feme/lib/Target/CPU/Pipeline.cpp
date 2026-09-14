@@ -55,6 +55,23 @@
 
 using namespace llvm;
 
+namespace feme::cpu {
+
+Expected<DataLayout> getHostDataLayout() {
+  static llvm::once_flag DataLayoutInitFlag;
+  llvm::call_once(DataLayoutInitFlag, [] {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+  });
+  Expected<orc::JITTargetMachineBuilder> JTMB =
+      orc::JITTargetMachineBuilder::detectHost();
+  if (!JTMB)
+    return JTMB.takeError();
+  return JTMB->getDefaultDataLayoutForTarget();
+}
+
+} // namespace feme::cpu
+
 namespace {
 
 /// RAII installation of a diagnostic handler that records whether any
@@ -259,33 +276,15 @@ Expected<PipelineResult> runPipeline(Module &M,
   // or reasons about ordinary scalar/vector IR the host's real ABI must
   // agree with once this module is JIT-linked against
   // `libFeMeRuntimeCPU`, so it is substituted for the host's own real
-  // `DataLayout` right here -- late enough to not disturb
-  // `CanonicalizeStagePass`'s own offset math, but before anything that
-  // needs the real one runs. Detection failing (unexpected for an
+  // `DataLayout` (`getHostDataLayout`) right here -- late enough to not
+  // disturb `CanonicalizeStagePass`'s own offset math, but before anything
+  // that needs the real one runs. Detection failing (unexpected for an
   // in-process JIT host) leaves \p M's existing `DataLayout` in place
   // rather than failing shader compilation outright over it.
-  //
-  // `getDefaultDataLayoutForTarget` needs the host's target registered;
-  // `CompiledStage::createStage`'s own `call_once` normally does this,
-  // but only later, once actual JIT compilation begins (after this
-  // function returns) -- `InitializeNativeTarget`/
-  // `InitializeNativeTargetAsmPrinter` are idempotent (each guards its own
-  // one-time registration internally), so registering here too, earlier,
-  // is harmless.
-  static llvm::once_flag DataLayoutInitFlag;
-  llvm::call_once(DataLayoutInitFlag, [] {
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
-  });
-  if (Expected<orc::JITTargetMachineBuilder> JTMB =
-          orc::JITTargetMachineBuilder::detectHost()) {
-    if (Expected<DataLayout> DL = JTMB->getDefaultDataLayoutForTarget())
-      M.setDataLayout(*DL);
-    else
-      consumeError(DL.takeError());
-  } else {
-    consumeError(JTMB.takeError());
-  }
+  if (Expected<DataLayout> DL = getHostDataLayout())
+    M.setDataLayout(*DL);
+  else
+    consumeError(DL.takeError());
 
   {
     PassBuilder PB;
