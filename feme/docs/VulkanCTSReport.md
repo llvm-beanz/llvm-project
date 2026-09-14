@@ -41830,3 +41830,83 @@ already-advertised extension, not a new feature/extension bit.
 per-primitive-discard semantics are exactly what the SPIR-V/GLSL
 extension specifies, with no FeMe-specific design deviation to
 record.
+
+## Roadmap H107: measured impact
+
+**What changed:** `dEQP-VK.mesh_shader.ext.api.draw*with_task_shader*`
+(298 cases, a subset of the prior session's own "still open"
+next-steps list) compiled, ran to completion (no crash, no
+pipeline-creation error), but produced zero mesh-shader output: a task
+shader's `EmitMeshTasksEXT(pc.one, pc.one, pc.one)` requested zero
+mesh workgroups every time. An IR dump right after
+`TaskPayloadWrapperPass` showed the merged push-constant value feeding
+it was `poison`, not the real, uniform gathered constant, even though
+`TaskPayloadWrapper.cpp`'s own "invocation 0 only" wave/lane-zero
+gating (the fix roadmap H85 landed) was already correct. Traced
+upstream through `Linearize.cpp`'s `maskMemoryOps` (converts a scalar
+load into a `feme.cpu.masked.load.*` call once its governing mask
+isn't a compile-time constant) into `SIMDize.cpp`'s
+`FunctionWidener::widen`: `widenMaskedLoad` unconditionally widens
+*every* masked-load call into a real `<W x T>` `llvm.masked.gather`,
+regardless of whether `UI.isDivergentAtDef` says the result is
+actually uniform -- unlike the sibling `widenVectorElementwise`
+elementwise-intrinsic path, which already gates on exactly this and
+has a code comment describing this identical failure mode. A
+genuinely-uniform `phi` consumer (correctly left un-widened, since
+only `DivergentPHIs` get processed) that referenced the erased call
+therefore fell through to the pass's own blanket final-cleanup
+`replaceAllUsesWith(PoisonValue::get(...))`, silently zeroing what
+should have been a real, uniform value.
+
+**Fix:** replaced the blanket per-`ToErase`-instruction poison
+substitution in `FunctionWidener::widen`'s final cleanup loop with a
+`SmallPtrSet<Instruction*> ErasedSet`-aware version: uses whose
+consumer is itself being erased are still poisoned (a harmless,
+transient edge -- both ends are being replaced anyway), but every
+genuine surviving/external use instead gets a real lane-0
+`extractelement` lazily built from the widened value. That extraction
+is correctly positioned at a block's first non-`phi` insertion point
+when the original instruction is itself a `PHINode` still followed by
+other phis (mirroring `getWidened`'s own existing phi special-case),
+avoiding a "phis must be grouped at a block's top" violation an
+earlier, cruder version of this fix hit (surfacing much later as an
+unrelated `BasicBlock::getTerminator()` assertion inside EarlyCSE
+during full pipeline compilation). An even earlier version of the fix
+(narrowing *every* remaining use unconditionally, without the
+`ErasedSet` distinction) also regressed 6 pre-existing groupshared
+`check-feme` tests, by leaving a real-but-dead `extractelement`
+consumer of a groupshared global that `rewriteGroupSharedGlobals`'s
+own validation didn't recognize; the `ErasedSet` refinement fixed that
+regression too. New regression test
+`SIMDizeTest.ReadsBackRealUniformValueThroughAMaskedLoadFeedingAnUnwidenedPhi`
+confirmed to genuinely fail (`poison` incoming phi value) without the
+fix and pass with it restored.
+
+**Verification:** `ninja check-feme`: 2996/2999 passed, 3 pre-existing
+`Unsupported`, 0 `Failed` (up by the 1 new test).
+`dEQP-VK.mesh_shader.ext.api.draw*with_task_shader*` (298 cases): 58
+Pass/0 Fail/240 Not supported, up from 14 Pass/44 Fail. A full
+`dEQP-VK.mesh_shader.ext.*` re-run (26,921 cases) found this same bug
+class also explained 25 more failures beyond this bucket --
+`misc.group_memory_barrier_in_{mesh,task}_*` (10),
+`misc.memory_barrier_shared_in_{mesh,task}_*` (10),
+`misc.payload_read` (1), and `properties.*_shared_memory_size`/
+`*_payload_and_shared_memory_size` (4) -- for a combined **420
+Pass/19 Fail/26,482 Not supported**, down from the pre-fix 376
+Pass/63 Fail baseline (per roadmap H106's own edition above) by 44
+newly-fixed (this fix) plus a further 25 (the same bug class, other
+CTS buckets), confirming zero regressions.
+
+The 19 remaining `dEQP-VK.mesh_shader.ext.*` failures are unrelated
+and pre-existing: `misc.no_lines`/`no_points`/`no_triangles` (3),
+`properties.max_mesh_output_components` (1),
+`smoke.*.fullscreen_gradient` (3, already known per roadmap H76), and
+`synchronization.*` (12, mesh/task-to-{frag,host,transfer} barrier
+cases) -- none yet triaged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a compiler correctness fix inside the CPU backend's
+SIMD-widening pass, not a new feature/extension bit.
+`FeMeCPUDesign.md` needs no change: the fix restores this pass's own
+documented uniform/divergent-consumer contract; it does not deviate
+from the design.
