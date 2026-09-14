@@ -11,6 +11,7 @@
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
@@ -2041,6 +2042,79 @@ TEST(SIMDizeTest, ReadsBackRealUniformValueThroughAMaskedLoadFeedingAnUnwidenedP
       EXPECT_FALSE(isa<PoisonValue>(Incoming));
   }
   EXPECT_TRUE(FoundUniformPHI);
+}
+
+// Roadmap H111(b): `FunctionWidener::widenMaskedAlloca` gives a
+// `MaskedAllocas`-tracked local real per-lane storage (a distinct
+// `WaveSize`-element array, one slot per lane) precisely because some
+// masked load/store elsewhere proves at least one lane's own value
+// through that address can genuinely differ from another lane's. But an
+// *unconditional* store into that same local -- e.g. a single whole-array
+// constant initializer, run identically (and redundantly) by every lane,
+// exactly like `dEQP-VK.mesh_shader.ext.smoke.*.fullscreen_gradient`'s own
+// mesh shader's function-local `const float4 positions[4] = {...}` -- is
+// itself provably uniform, so the general "uniform: leave it exactly as
+// it is" gate in `widenInstruction` used to leave it as the single,
+// original scalar store it always was, now writing into what has become
+// only *one* lane's own separate copy (`widenMaskedAlloca`'s new `<W x
+// ptr>` collapses to a single scalar pointer only via the "leftover stale
+// use" recovery in `widen()`'s own final cleanup loop, which always picks
+// lane 0). Every other lane's own copy was left as uninitialized stack
+// garbage, silently corrupting any later masked read of it (reduced from
+// a real CTS failure whose mesh shader read back well-formed data for one
+// of its two function-local arrays and garbage for the other, depending
+// on unrelated stack layout). The fix (`widenMaskedAllocaStore`) executes
+// this store once per lane, into that lane's own real address, exactly
+// like a genuinely masked store with an all-true predicate would.
+TEST(SIMDizeTest, ReplicatesUniformStoreIntoEveryLaneOfAMaskedAllocaArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %a = alloca [4 x i32], align 4
+      store [4 x i32] [i32 10, i32 20, i32 30, i32 40], ptr %a, align 4
+      %addr = getelementptr [4 x i32], ptr %a, i32 0, i32 %tid
+      %val = call i32 @feme.cpu.masked.load.i32(ptr %addr, i32 4, i1 true, i32 0)
+      %off = zext i32 %tid to i64
+      %outp = getelementptr i32, ptr %out, i64 %off
+      store i32 %val, ptr %outp
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @feme.cpu.masked.load.i32(ptr, i32, i1, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // The array's constant initializer must be stored once per lane (one
+  // real `store` per lane's own extracted address), not just once total
+  // -- the exact distinction between "only lane 0's copy is initialized"
+  // (the bug) and "every lane's own copy is initialized" (the fix). Each
+  // such store's value operand stays the *whole*, unwidened `[4 x i32]`
+  // constant (this test's store is uniform, so `widenMaskedAllocaStore`
+  // never needs to decompose it into per-lane components -- it only
+  // needs to run it once per lane's own address).
+  unsigned StoreCount = 0;
+  bool FoundGather = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (isa<ConstantArray>(SI->getValueOperand()) ||
+          isa<ConstantDataArray>(SI->getValueOperand()))
+        ++StoreCount;
+    }
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getIntrinsicID() == Intrinsic::masked_gather)
+      FoundGather = true;
+  }
+  EXPECT_EQ(StoreCount, 4u);
+  EXPECT_TRUE(FoundGather);
 }
 
 } // namespace
