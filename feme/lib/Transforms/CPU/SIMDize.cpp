@@ -3907,9 +3907,89 @@ Function *FunctionWidener::widen() {
   // incoming values, in pass 3 above; a resource call's stored-value
   // operand; ...) has already happened by this point, so nothing is lost,
   // and it makes every remaining erasure order equally safe.
-  for (Instruction *I : ToErase)
-    if (!I->getType()->isVoidTy())
-      I->replaceAllUsesWith(PoisonValue::get(I->getType()));
+  //
+  // Roadmap H107: a to-be-erased instruction's *scalar* result can still
+  // have a genuine remaining use here, not just the "honest cycle" case
+  // the paragraph above describes -- a `phi` (or other instruction) this
+  // pass's own `UI.isDivergentAtDef` correctly classified as uniform (see
+  // e.g. `SPIRVPushConstantLoweringPass`'s own `push_const.value` merge
+  // phi) is never widened or RAUW'd via `getWidened` at all (only
+  // `DivergentPHIs`/divergent producers go through that path), yet one of
+  // *its* incoming values can still be a masked load/store call this pass
+  // unconditionally widens into a real `<W x T>` (`widenMaskedLoad`'s own
+  // comment notwithstanding -- unlike the elementwise-vectorizable-
+  // intrinsic case a few hundred lines up, whose `UI.isDivergentAtDef`
+  // gate this mirrors, a masked load/store's own callee is this pass's own
+  // opaque, always-widened `feme.cpu.masked.*` declaration, never a real
+  // LLVM instruction a uniform consumer could keep referencing unwidened).
+  // Blindly poisoning that remaining use silently zeroed out a real,
+  // uniform value -- found reducing a `with_task_shader` CTS mesh-shader
+  // failure down to a task shader's own `EmitMeshTasksEXT(pc.one, pc.one,
+  // pc.one)` call reading a `poison` `pc.one` instead of the real,
+  // uniform push-constant value, itself gathered under a divergent-shaped
+  // but dynamically-uniform `if (pc.dimCoord == ...)` chain. Lane 0 of
+  // every wave this pass ever iterates is guaranteed a real invocation
+  // (`feme::cpu::EntryWrapperPass`'s own `WavesPerGroup` loop bound
+  // guarantees `wave_index * WaveSize < GroupSizeTotal` for every
+  // iterated `wave_index`, see `buildEntryMask`'s own comment), so -- for
+  // a value this pass's own analysis already proved is uniform, meaning
+  // every active lane necessarily agrees -- lane 0 of `Widened[I]` is
+  // exactly the scalar value such a leftover use expects, recovered
+  // instead of poisoned.
+  //
+  // Only a use whose *user* survives this whole cleanup (is not itself a
+  // `ToErase` entry) needs that real recovery, though: the "honest cycle"
+  // case just above -- one `ToErase` entry using another -- only ever
+  // needs its edge severed, never narrowed, because the user is about to
+  // be erased (or fully replaced) in its own right regardless of what its
+  // stale operand momentarily reads. Narrowing that edge anyway is not
+  // merely wasted work: the new `extractelement` this builds is a real,
+  // surviving instruction (nothing later erases it, since it is never
+  // itself a `ToErase` entry) that can still read through a `ToErase`
+  // pointer-typed producer -- e.g. a groupshared `getelementptr` -- into
+  // exactly the "unsupported user" shape `feme::cpu::
+  // rewriteGroupSharedGlobals` (this same pass's own final step) rejects,
+  // even though the whole edge is dead code by construction. Building the
+  // real narrowed value lazily, only once a genuine surviving use is
+  // found, keeps every `ToErase`-to-`ToErase` edge exactly as harmlessly
+  // poisoned as before this fix.
+  SmallPtrSet<Instruction *, 32> ErasedSet(ToErase.begin(), ToErase.end());
+  for (Instruction *I : ToErase) {
+    if (I->getType()->isVoidTy() || I->use_empty())
+      continue;
+    Value *UniformReplacement = nullptr;
+    for (Use &U : llvm::make_early_inc_range(I->uses())) {
+      if (ErasedSet.contains(cast<Instruction>(U.getUser()))) {
+        U.set(PoisonValue::get(I->getType()));
+        continue;
+      }
+      if (!UniformReplacement) {
+        auto It = Widened.find(I);
+        if (It == Widened.end()) {
+          UniformReplacement = PoisonValue::get(I->getType());
+        } else {
+          // A `phi` must stay grouped with every other `phi` at its
+          // block's own top (LLVM's own well-formedness rule) --
+          // inserting straight "before `I`" the way every non-`phi`
+          // producer safely can would land this `extractelement` in the
+          // middle of that group whenever another, later-in-the-group
+          // `phi` still follows `I` (exactly `Linearize.cpp`'s own
+          // "live.merge"/"sideeffect.merge" multi-`phi` merge blocks).
+          // The block's first *non*-`phi` insertion point, mirroring
+          // `FunctionWidener::getWidened`'s own identical `phi` special
+          // case a few hundred lines up, is always both legal and --
+          // because it dominates every instruction in the block --
+          // sufficient.
+          IRBuilder<> B(isa<PHINode>(I)
+                            ? &*I->getParent()->getFirstInsertionPt()
+                            : I);
+          UniformReplacement = B.CreateExtractElement(
+              It->second, uint64_t(0), I->getName() + ".uniform");
+        }
+      }
+      U.set(UniformReplacement);
+    }
+  }
   for (Instruction *I : llvm::reverse(ToErase))
     I->eraseFromParent();
 

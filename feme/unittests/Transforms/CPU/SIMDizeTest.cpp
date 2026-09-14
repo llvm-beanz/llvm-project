@@ -1982,6 +1982,67 @@ TEST(SIMDizeTest, WidensDivergentIndexIntoMaskedAllocaArray) {
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap H107: a `feme.cpu.masked.load`/`.store` call is *unconditionally*
+// widened into a real `<W x T>` `llvm.masked.gather`/`.scatter`
+// (`widenMaskedLoad`'s own comment notwithstanding, unlike the sibling
+// elementwise-vectorizable-intrinsic case `LeavesUniformVectorizableIntrinsicCallUnchanged`
+// above gates on `UI.isDivergentAtDef`), even when `UI.isDivergentAtDef`
+// proves the call's own result is uniform -- so a `phi` merging that
+// result with another uniform value (this pass's own analysis correctly
+// leaves such a `phi` scalar and unwidened, since every active lane
+// genuinely agrees) must still read back the *real* uniform value, not a
+// `poison` one silently substituted by this pass's own final "sever every
+// remaining `ToErase` use" cleanup. Reduced from a real
+// `dEQP-VK.mesh_shader.ext.api.draw*with_task_shader*` CTS failure (44
+// cases): a task shader's own `EmitMeshTasksEXT(pc.one, pc.one, pc.one)`
+// read a `poison` `pc.one` -- itself gathered under a divergent-*shaped*
+// but dynamically-uniform `if (pc.dimCoord == ...)` chain -- instead of
+// the real, uniform push-constant value, so every task workgroup silently
+// requested zero mesh workgroups (see `agent_thoughts.md` for the full
+// reduction).
+TEST(SIMDizeTest, ReadsBackRealUniformValueThroughAMaskedLoadFeedingAnUnwidenedPhi) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %g, ptr %out, i32 %uniform_bound) #0 {
+    entry:
+      %cond = icmp ult i32 %uniform_bound, 100
+      br i1 %cond, label %then, label %else
+    then:
+      %masked = call i32 @feme.cpu.masked.load.i32(ptr %g, i32 4, i1 true, i32 0)
+      br label %merge
+    else:
+      br label %merge
+    merge:
+      %val = phi i32 [ %masked, %then ], [ 0, %else ]
+      store i32 %val, ptr %out
+      ret void
+    }
+    declare i32 @feme.cpu.masked.load.i32(ptr, i32, i1, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // `%val`'s merge phi is uniform (the branch condition and both incoming
+  // values are workgroup-uniform), so it must stay a plain, unwidened
+  // scalar phi -- but whichever value it reads from the (now-widened,
+  // gather-based) `then` edge must be a real extraction, never `poison`.
+  bool FoundUniformPHI = false;
+  for (Instruction &I : instructions(F)) {
+    auto *PN = dyn_cast<PHINode>(&I);
+    if (!PN || PN->getType()->isVectorTy())
+      continue;
+    FoundUniformPHI = true;
+    for (Value *Incoming : PN->incoming_values())
+      EXPECT_FALSE(isa<PoisonValue>(Incoming));
+  }
+  EXPECT_TRUE(FoundUniformPHI);
+}
+
 } // namespace
 
 
