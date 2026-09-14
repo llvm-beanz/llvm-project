@@ -41981,17 +41981,85 @@ feature/extension bit. `FeMeVulkanDesign.md` needs no change: the fix
 restores the documented "undefined value for an unmatched fragment
 input" spec behavior; it does not deviate from the design.
 
-## Roadmap H109: not yet fixed
+## Roadmap H109: measured impact
 
-**Status:** filed, not started. The remaining 4
+**Status:** fixed. Added `ImageCallKind::Sample2DI32`/`createSample2DI32`
+(`ImageCalls.h`/`.cpp`), wired `SPIRVResourceLowering.cpp`'s
+`hasOnlySupportedImageUses`/`lowerImageAccesses` to accept and emit it
+for a `Plain2D`/explicit-LOD/no-`Bias`/`Grad`/`MinLod` integer-channel
+sample (the SPIR-V-to-LLVM conversion pattern itself needed no
+change), and added `femeCpuImageSample2DV4I32` to `FeMeRuntimeCPU.c` --
+an always-nearest, single-mip-level point sample, falling back to a
+fixed `{0,0,0,1}` only for `CLAMP_TO_BORDER` (no integer border-color
+storage exists; no known CTS case needs it). Two new unit tests
+(`ImageCallsTest.MatchesSample2DI32Call`,
+`SPIRVResourceLoweringTest.LowersIntegerSampledImageToImageSampleV4I32`)
+both confirmed to genuinely fail without the fix and pass with it
+restored.
+
+`ninja check-feme`: 2999/3002 (3 pre-existing `Unsupported`), 0
+`Failed`, up by 2 new tests -- 0 regressions.
+
+All 4 target
 `dEQP-VK.mesh_shader.ext.synchronization.transfer_to_{mesh,task}.
-sampled_image.*` failures (`vkCreateGraphicsPipelines` ->
-`VK_ERROR_INITIALIZATION_FAILED`) are a distinct, real feature gap:
-`SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
-unconditionally rejects any ordinary (non-fetch) sample against an
-integer-channel (`usampler2D`/`isampler2D`) sampled image, and no
-integer-returning sample runtime call exists anywhere to relax that
-check into. See roadmap H109/H109(a)-H109(c) in `Roadmap.md` for the
-breakdown of the work required (a new `V4I32`/`V4U32`-returning CPU
-sample entry point, `SPIRVResourceLowering.cpp`/SPIR-V-to-LLVM wiring,
-and a real nearest-sample CPU implementation with tests).
+sampled_image.*` cases now **Pass** (previously `vkCreateGraphicsPipelines`
+-> `VK_ERROR_INITIALIZATION_FAILED`). The broader `synchronization.*`
+bucket: 81/81 Pass (up from 77/81). A full `dEQP-VK.mesh_shader.ext.*`
+re-run (26,921 cases) confirms **435 Pass/4 Fail/26,482 NotSupported**
+(up from 431/8), an isolated, exact 4-`Pass`/4-`Fail` movement with
+`NotSupported` unchanged -- 0 regressions elsewhere. The 4 remaining
+failures are unrelated, pre-existing gaps, each now filed with its own
+milestone: `properties.max_mesh_output_components` (roadmap H110) and
+the 3 `smoke.*.fullscreen_gradient` cases (roadmap H111, explicitly
+scoped out of H76 but never previously given its own row).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change:
+this is a bug fix restoring already-advertised sampling behavior for
+an already-supported image-resource shape, not a newly advertised
+feature or extension. `FeMeVulkanDesign.md` needs no change: the
+narrow `Plain2D`/explicit-LOD-only scope matches what Vulkan/SPIR-V
+actually requires (`ConstOffset`/`Bias`/`Grad`/`MinLod` sampling of an
+integer image is illegal per spec, not merely unimplemented), so this
+is a gap-fill within the documented design, not a deviation from it.
+
+## Roadmap H110: not yet fixed
+
+**Status:** filed, not started. `properties.max_mesh_output_components`
+(1 case) fails with `feme-graphics-validate-stage: ... has an
+unresolved stage-IO global-variable access ...`. Root-caused via IR
+reduction (`glslangValidator`/`feme-translate --import-spirv`/
+`feme-translate --spirv-to-llvmir`/`feme-opt -passes=
+feme-graphics-canonicalize-stage`, mirroring H92's own technique) of
+the real CTS shader: a per-primitive output block (`layout(location=0)
+perprimitiveEXT flat out LocationStruct ls[]`, `struct LocationStruct {
+uvec4 location_var[maxLocations]; }`) written in a loop as
+`ls[0].location_var[i] = ...` with a genuinely dynamic (loop-carried)
+`i`. `CanonicalizeStage.cpp`'s `getDynamicRowIndexedAccess` already
+handles a dynamic index into a *plain* array-typed stage-IO element
+(`gl_ClipDistance[i]`'s own shape), but explicitly excludes any global
+`isDynamicIndexedArrayGlobal` recognizes (i.e. any per-vertex/
+per-primitive-arrayed global `getDynamicVertexIndexedAccess` already
+owns) to avoid double-recognizing H92's own doubly-dynamic shape --
+which incorrectly also excludes this narrower shape, where the
+*outer* per-primitive index happens to be constant (`ls[0]`, since
+`max_primitives=1`) and only the *inner* struct-member array index is
+dynamic. See roadmap H110/H110(a)-H110(b) in `Roadmap.md` for the
+breakdown of the work required (extending `getDynamicRowIndexedAccess`
+to recognize a constant-outer/dynamic-inner combination on an
+otherwise-`isDynamicIndexedArrayGlobal` global, plus a unit test
+modeling the real CTS shape directly).
+
+## Roadmap H111: not yet fixed
+
+**Status:** filed, not started. `smoke.*.fullscreen_gradient` (3
+cases -- `fast_lib`/`monolithic`/`optimized_lib` variants) was
+explicitly scoped out of H76's own closing note as "a completely
+unrelated `spirv.Variable`/Function-storage-class legalization
+error, out of scope for this row (not yet separately filed)", and
+reconfirmed unchanged by this session's full `mesh_shader.ext.*`
+re-run after H109. Needs its own first IR-level diagnostic; H76's own
+note already narrows it to a `spirv.Variable`/Function-storage-class
+legalization failure, distinct from H79's own (already-closed)
+`Function`-storage array legalization gap in the same test group, so
+likely a different unmodeled `Function`-storage shape in
+`ConvertSPIRVToLLVMPass`. See roadmap H111 in `Roadmap.md`.
