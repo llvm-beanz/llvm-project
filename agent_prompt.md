@@ -45,34 +45,22 @@ agent thoughts.
 
 # Request
 
-Can you work on H96 or other blocking work to make progress on the H-series
+Can you work on H94 or other blocking work to make progress on the H-series
 milestones?
 
-> **A long-lived `deqp-vk` process crashes (bare `SIGSEGV`) after processing
-> roughly 2,000-2,500 test cases, regardless of which case is next in the
-> caselist**, discovered during this same re-triage session while diagnosing
-> what first looked like a dense, shader-cache-related crash family (see the
-> "Critical correction" note in `VulkanCTSReport.md`'s "Reproducing this report"
-> section for the shader-cache half of that story). After ruling out `deqp-vk`'s
-> own `shadercache.bin` (disabling it with `--deqp-shadercache=disable` did
-> **not** stop the crash), a `dEQP-VK.pipeline.*` re-run still crashed after
-> exactly 2,401 cases in one process, and -- critically -- **every
-> freshly-restarted process then crashed again on its own very first case**,
-> even though that exact case (confirmed via a standalone, single-case re-run in
-> a byte-fresh directory) passes cleanly in isolation. This rules out both "one
-> specific case is buggy" and "corrupted shared on-disk state" (no feme-specific
-> on-disk cache path was found in `feme/lib/Vulkan/`), leaving **some form of
-> unbounded, in-process resource growth carried across test cases within a
-> single long-lived `VkInstance`/`VkDevice`** (JIT-compiled-code arena,
-> pipeline-cache growth, or similar) as the most likely cause -- serious not
-> only for CTS-run accuracy but for any real, long-running Vulkan application on
-> this driver. Not yet triaged -- needs a memory-growth profile (e.g. `valgrind
-> --tool=massif` or periodic `/proc/<pid>/status` `VmRSS` sampling) across a few
-> thousand sequential `deqp-vk` cases in one process to identify which
-> allocation grows unboundedly, and whether the fix belongs in the JIT engine's
-> code-cache eviction, the pipeline-cache/shader-cache implementation, or
-> elsewhere in `feme/lib/Vulkan/`. Until fixed, any full-suite CTS run should
-> chunk each group's own caselist into fixed-size batches (roughly 1,500-2,000
-> cases per `deqp-vk` invocation) from the start, rather than relying on
-> crash-triggered resume loops, which degrade to one process-spawn per case once
-> this threshold is crossed
+> **`misc.payload_not_accessed`'s bare `SIGSEGV` crash** (1 case, newly
+> discovered during a full H70-closing re-triage sweep, confirmed reproducible
+> standalone via a fully isolated, shader-cache-disabled `deqp-vk
+> --deqp-case=...` invocation, so it is a real, deterministic crash and not a
+> shared-shader-cache artifact of the kind this same re-triage session found
+> elsewhere): earlier design-doc history (see `L40`'s own closing note) shows
+> this exact case previously passed cleanly, so this is a genuine regression,
+> not a never-fixed gap, though the regressing commit has not yet been
+> identified. A `gdb` backtrace lands in unsymbolized JIT-compiled code (`0x...
+> in ?? ()`, "corrupt stack?"), consistent with prior mesh-shader JIT crashes in
+> this file's own history, so a real root-cause needs an IR-level reduction
+> (`feme-translate`/`feme-opt`, mirroring this file's own repeated technique)
+> rather than a native-code debugger session alone. Not yet triaged -- needs its
+> own IR reduction to identify which pass/lowering step miscompiles this case's
+> specific payload-declared-but-unread shape, and a bisection to identify the
+> regressing commit
