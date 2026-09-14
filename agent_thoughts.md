@@ -82652,3 +82652,123 @@ untried lever.
 isolated scope, unrelated area, blocks accurate measurement of the
 whole `tessellation.*` group) rather than re-attempting H7x a third
 time with the same technique.
+
+# H7x closed for real: the tessellator's spurious inset/bridge subdivision at TessLevel=1, root-caused via a real captured CTS image
+
+**Next action: none -- H7x, H7w, H32, and H53 are all closed.** All
+changes are committed. Skip straight to "Recommendation" below for
+what's next.
+
+## What happened this session
+
+Picked up H7x exactly where the prior session's own hand-off said to:
+use a **real captured CTS image**, not another synthetic unit-test
+repro. Two prior sessions had already burned themselves out on
+synthetic bisection and produced two separate false positives (see the
+"H7x debunked" entries above). This session broke that streak.
+
+1. Captured the real failing `dEQP-VK.clipping.user_defined.
+   clip_cull_distance.vert_tess.1_7_fragmentshader_read` image
+   (16x16 pixels), decoded it, and pulled the exact GLSL source for
+   all 4 shader stages from the CTS's own generated shaders.
+2. Found the CTS's own verification math in `vktClippingTests.cpp`
+   (`testClipDistance`, `checkFragColors`, `countPixels`) -- the exact
+   analytic formula the test uses to decide pass/fail.
+3. Computed that analytic expected image in Python and diffed it
+   pixel-by-pixel against the real captured image. Per-pixel color
+   values matched perfectly (0 mismatches) -- but the black-pixel
+   *count* didn't (44 actual vs. 16 expected). Printing the mask showed
+   **two full rows at the very top of the image were fully black**,
+   not just the 2 columns of "bar 0" that should be black -- an extra
+   full-width black band exactly at `gl_Position.y == -1`.
+4. Root-caused it in `feme/lib/Graphics/Tessellator.cpp`: at
+   `TessLevel == 1` (no subdivision needed at all), `tessellateTriangle`
+   was still running its general inset/bridge algorithm, splitting one
+   real triangle into 7 synthetic sub-triangles. This is invisible to
+   linear-interpolated values (position, ordinary varyings) but *not*
+   invisible to `gl_CullDistance`'s whole-primitive discard rule
+   (`Executor.cpp`'s `isCulledByCullDistance`): a synthetic
+   sub-triangle straddling the real `y == -1` edge can end up with all
+   3 of its own vertices cull-negative even though the real triangle's
+   3 real vertices were a mix of positive/negative -- so a sliver along
+   that edge got spuriously culled.
+
+## The fix
+
+Special-cased the fully-unsubdivided factor
+(`E01 == E12 == E20 == N == 1`) in `tessellateTriangle` to skip the
+inset/bridge algorithm entirely and emit the real single triangle (3
+exact corners, 1 triangle). Added a regression test
+(`TriangleFullyUnsubdividedFactorEmitsOneRealTriangle`) verifying the
+exact output shape.
+
+## Validation (all real CTS runs against feme's own ICD)
+
+- `dEQP-VK.clipping.user_defined.*_fragmentshader_read` (128 cases):
+  **128/128 pass** (up from 50/64 on the non-dynamic-index subset).
+- Full `dEQP-VK.clipping.user_defined.*` matrix (256 cases, every
+  `_dynamic_index` x `_fragmentshader_read` x topology combination):
+  **256/256 pass**.
+- `dEQP-VK.tessellation.*` regression check (~1003 cases via git-stash
+  A/B): **zero regressions**, one net new pass
+  (`geometry_interaction.passthrough.passthrough_tessellation_geometry_
+  shade_triangles_no_change`). Found 2 pre-existing, unrelated bugs in
+  the process (see "Filed for later" below) -- confirmed both reproduce
+  identically with and without this session's fix.
+- `ninja check-feme`: **3013/3016 pass**, 3 unsupported, 0 failures.
+
+With this in hand, flipped `shaderClipDistance`/`shaderCullDistance` to
+a **permanent** `VK_TRUE` in `PhysicalDeviceInfo.cpp` (previously a
+temporary measurement-only flip). This closes:
+- **H7x** (the tessellation-path bug itself)
+- **H7w** (was already closed by a prior session's H113 JIT-crash fix;
+  confirmed still closed)
+- **H32** (`shaderClipDistance` feature bit)
+- **H53** (`shaderCullDistance` feature bit)
+
+## Commits (4, in order)
+
+1. `Tessellator.cpp` fix + `TessellatorTest.cpp` regression test.
+2. `PhysicalDeviceInfo.cpp` permanent `VK_TRUE` flip +
+   `PhysicalDeviceInfoTest.cpp` updates.
+3. `Roadmap.md` + `FeMeGraphicsDesign.md` doc updates (H7x/H32/H53
+   closure).
+4. `VulkanCTSReport.md` + `Vulkan14FeatureInventory.md` doc updates.
+
+(This entry is commit 5, on its own.)
+
+## Filed for later (found, not fixed -- explicitly out of scope this
+session)
+
+Both confirmed pre-existing via git-stash A/B (identical with and
+without this session's fix -- not caused by it):
+
+1. **`PromoteMemoryToRegister.cpp` assertion crash** in
+   `dEQP-VK.tessellation.user_defined_io.per_patch{,_block,/per_vertex}.
+   vertex_io_array_size_implicit.{isolines,quads,triangles}`. No
+   milestone row filed yet.
+2. **`"JIT session error: Symbols not found: [ spirv_var_N ]"`** in
+   `per_patch_block.vertex_io_array_size_spec_min.*` -- this is the same
+   bug flagged by name in several prior sessions' own "next steps" (the
+   `_dynamic_index` + `vert_geom`/`vert_tess_geom` JIT crash class).
+   Still no milestone row filed despite being independently rediscovered
+   ~5 times now.
+
+## Recommendation
+
+1. **File milestone rows for the two bugs above** (~15 min each just to
+   write the row; real fix time unknown, no diagnostic done yet on
+   either). The `spirv_var_N` one especially -- it's been rediscovered
+   and deferred across at least 5 sessions in a row without ever
+   getting a row of its own.
+2. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+   built or run in any session on record. This is a standing gap, not a
+   quick add-on -- give it a dedicated session.
+3. **Re-triage the roadmap from scratch** for the next H-series pick.
+   With H32/H53/H7w/H7x all closed, the "shaderClipDistance/
+   shaderCullDistance" thread that dominated the last several sessions
+   is fully wound down. Check `Roadmap.md` for the next open P1/P2 row
+   (last known: H62 broken into H63-H68 sub-buckets, ~14-48 cases
+   apiece, each independently assignable).
+4. Clean up `/tmp/h7x_*` scratch files (low priority, not part of the
+   repo).
