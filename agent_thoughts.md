@@ -81964,3 +81964,102 @@ mesh/task-to-{frag,host,transfer} barrier cases). None triaged yet.
 1. **H111(b)** (~30-45 min for a first diagnostic): the newly-exposed all-black `fullscreen_gradient` render. Since the SPIR-V-to-LLVM-dialect conversion output looks correct by inspection, use `feme-run` (the CPU JIT/dispatch runner) or a channel-level pixel/IR reduction (mirroring H88's own technique) further downstream through feme's own CPU lowering passes and execution to find exactly where `positions[vertex]`/`colors[vertex]` -- read from a local `alloca` of an array-of-vectors via a dynamic GEP index -- stops carrying the right value. This is a shape (function-local, not stage-IO-global, array addressed dynamically) that no prior CTS case ever reached, so it may be a real gap in CPU codegen rather than a one-line fix.
 2. Once H111(b) lands, re-run the 3 `fullscreen_gradient` cases plus the broader `mesh_shader.ext.*` sweep (26,921 cases) to confirm 439/439 of the currently-`Supported` cases are green -- this would fully close out H70's whole lineage (H93 -> H108 -> H109 -> H110 -> H111).
 3. No other blocking work was found this session -- H110 and H111(a) were the only two items left on the prior session's list, and both are now closed.
+
+# H111(b) fixed: H70's whole lineage now fully closed (439/439 mesh_shader.ext.* passing)
+
+**Done. All 3 `smoke.*.fullscreen_gradient` cases now pass. Full `dEQP-VK.mesh_shader.ext.*` sweep: 439 Pass/0 Fail/26,482 NotSupported.**
+
+## What just happened
+
+1. Bisected the all-black gradient render to a 3-way split: a hand-written
+   `ExecutorTest.cpp` repro (local `alloca [4 x <4 x float>]`, populated by
+   one uniform whole-array `store`, read back via a divergent per-lane
+   `getelementptr`+`load`) reproduced the bug exactly.
+2. Root-caused to `SIMDize.cpp`'s `widenMaskedAlloca` (roadmap L84): it
+   splits a masked-load/store-touched local into `WaveSize` separate
+   private per-lane copies, but a *plain, unconditional* store into that
+   same local (never itself a masked call, since it always executes) was
+   left "uniform: unchanged" -- so it kept running as one scalar store,
+   narrowed by the pass's own H107 cleanup to lane 0's copy only. Every
+   other lane's copy stayed uninitialized garbage.
+3. Fixed with a new `FunctionWidener::widenMaskedAllocaStore` (dispatched
+   in `widenInstruction` next to the existing masked-alloca/GEP checks):
+   replicates the store once per lane, into that lane's own real address.
+4. Added `SIMDizeTest.ReplicatesUniformStoreIntoEveryLaneOfAMaskedAllocaArray`
+   (pass-level unit test) and finalized
+   `ExecutorTest.MeshLocalArrayDynamicIndexProducesFullScreenGradient`
+   (end-to-end regression test) -- both pass.
+5. `check-feme`: 3003/3003 pass (3 pre-existing unsupported, 0 failures,
+   up by 2 tests). `FeMeTransformsCPUTests`: 469/469. `FeMeGraphicsTests`:
+   309/309.
+6. Real CTS re-run confirms all 3 `fullscreen_gradient` cases pass, and a
+   full `mesh_shader.ext.*` sweep (26,921 cases) shows **439 Pass/0
+   Fail/26,482 NotSupported** -- every currently-`Supported` case now
+   passes, zero regressions.
+7. Committed in 5 small steps: the fix, the `SIMDizeTest`, the
+   `ExecutorTest`, the `Roadmap.md`/`VulkanCTSReport.md` closing update,
+   and the `VulkanExtensionInventory.md`/`FeMeCPUDesign.md` update.
+
+This closes H111 (and with it H70's entire lineage: H93 -> H108 -> H109
+-> H110 -> H111, which spanned many prior sessions of `mesh_shader.ext.*`
+triage). `dEQP-VK.mesh_shader.ext.*` is now fully green for every case
+this ICD currently claims to support.
+
+## The bisection trail (in case the same shape shows up again)
+
+The key diagnostic technique: reuse `ExecutorTest.cpp`'s `compileStage`/
+`buildMeshPipeline`/`executeDraws` harness to run hand-written
+`feme.stage.*`-style LLVM IR through the *real* CPU lowering pipeline
+(`PreparePass` -> `ResourceLoweringPass` -> `LinearizePass` ->
+`SIMDizePass` -> `WaveLoweringPass` -> `EntryWrapperPass`) plus the
+graphics `Executor`'s rasterizer -- no SPIR-V conversion or real Vulkan
+ICD needed, ~40ms per run. Swapping one block of the shader IR for a
+`select`-chain equivalent and re-running isolates exactly which array
+read is buggy in under a minute per round.
+
+The specific insight that cracked it: this bug needs a **uniform-valued
+but divergently-*addressed*** load -- distinct from every other shape
+`SIMDize.cpp`'s widening rules already covered (plain uniform load/store,
+masked/divergent store into a per-lane-private local, groupshared
+cross-lane-visible access). It's "a private local array, redundantly-but-
+uniformly initialized once per lane, then gathered from with a divergent
+index." The `SIMDizeTest.cpp` unit test for this shape *without* any
+enclosing divergent branch already existed and passed
+(`DecomposesPrivateMemoryDivergentLoadIntoExtractElement`, roadmap H7o) --
+the missing ingredient was wrapping the read in an `if` (a real mesh
+shader's `if (invocationId < numPrimitives)` guard), which is what turns
+the plain `load` into a `feme.cpu.masked.load` call via `LinearizePass`
+and routes its alloca into `MaskedAllocas` in the first place.
+
+## Suggested next steps
+
+No more work items are queued for this milestone lineage -- H70's whole
+family (H93/H108/H109/H110/H111) is now fully closed, and a full CTS
+sweep confirms it. A few options for what to look at next, not yet
+scoped or started:
+
+1. **Broaden beyond `mesh_shader.ext.*`**: grep the rest of the CPU
+   pipeline for any other local array/aggregate shape that might hit the
+   same "uniform store into a `MaskedAllocas` base" bug outside mesh
+   shaders specifically (e.g. a vertex or compute shader's own local
+   constant lookup table, gated by an unrelated divergent branch
+   elsewhere in the same function). ~20-30 min grep across other CTS
+   test groups (`compute.*`, `pipeline.*`) for a similar failure signature
+   (all-black/garbage-but-not-crashing) that hasn't been attributed to
+   this bug yet.
+2. **Pick a new H-series area to triage.** With H70's lineage closed,
+   there's no obvious next blocking item queued -- would need a fresh
+   full or partial `deqp-vk` sweep outside `mesh_shader.ext.*` (e.g.
+   `compute.*`, `subgroups.*`, `pipeline.*`) to find the next real
+   failure bucket worth its own milestone. Real time cost: the full
+   `deqp-vk` corpus is ~3.2M cases; a targeted group sweep is
+   10-30 minutes depending on the group.
+3. **offload-test-suite's `check-hlsl-feme-vk`** (the `feme` branch at
+   `https://github.com/llvm-beanz/offload-test-suite.git`, already
+   checked out locally) has never been built or run in any session so
+   far per this file's own history -- no build directory exists yet.
+   Setting it up (CMake configure + build + run) is a real, currently
+   entirely unexplored surface that might turn up its own distinct
+   failure set, separate from VK-GL-CTS. Not attempted this session
+   (out of scope for the H111(b) fix); ~30-45 min to get a first build
+   and initial run going, more to triage whatever it finds.
