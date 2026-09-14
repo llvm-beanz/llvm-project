@@ -142,7 +142,15 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `independentBlend`, `occlusionQueryPrecise`, and `multiDrawIndirect`
   alongside two feature bits this file never grouped as
   "graphics-specific" in the first place (`logicOp`,
-  `drawIndirectFirstInstance`, closed by the same H7a row).
+  `drawIndirectFirstInstance`, closed by the same H7a row). **These
+  final 2 are now also closed**, by roadmap H7x's own final fix
+  (`Tessellator.cpp`'s triangle-domain tessellator no longer spuriously
+  subdivides a fully unsubdivided, `TessLevel == 1` patch, which used to
+  let `gl_CullDistance`'s whole-primitive culling rule spuriously cull a
+  sliver along the patch's own `y == -1` edge) -- a real CTS re-run of
+  the full `dEQP-VK.clipping.user_defined.*` matrix now passes 256/256,
+  leaving 0 of the 38 unimplemented 1.0 feature bits as graphics
+  capabilities.
   `sampleRateShading` itself stayed open after roadmap H7o fixed
   two real, distinct pipeline-creation-time gaps that had blocked it
   (a `SIMDize.cpp` divergent-vector-load producer gap, and a
@@ -726,8 +734,9 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `shaderSampledImageArrayDynamicIndexing` | no |  |
 | feature | VK_VERSION_1_0 | `shaderStorageBufferArrayDynamicIndexing` | no |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageArrayDynamicIndexing` | no |  |
-| feature | VK_VERSION_1_0 | `shaderClipDistance` | no | roadmap H7h: real vertex-stage, static-index consumer implemented and CTS-confirmed. A real re-measurement (roadmap H53/H54/H55/H56/H112, see "Roadmap H112: root cause and fix" in VulkanCTSReport.md) now finds the entire non-`_dynamic_index`/non-`_fragmentshader_read` `dEQP-VK.clipping.user_defined.clip_distance.*` subset (64/64, including every `vert_tess`/`vert_tess_geom` case) passes outright -- H54/H55/H56's own stage-linkage/fragment-read/patch-constant-phase errors, and H112's own tessellation-path rendering-correctness bug, are all now fixed. `_dynamic_index` variants (114/128 passing, up from 32/128 -- roadmap H113 fixed the `vert_geom`/`vert_tess`/`vert_tess_geom` JIT-symbol-resolution crash class outright; the 14 remaining failures are exactly the `clip_cull_distance` `_fragmentshader_read` intersection with H7x below) and `_fragmentshader_read` (100/128 passing, up from 50/64 on the broader post-H113 measurement -- roadmap H7x, still incomplete) remain the only open gaps. Stays `VK_FALSE` until H7x closes |
-| feature | VK_VERSION_1_0 | `shaderCullDistance` | no | roadmap H7h, same reproduction and rationale as `shaderClipDistance` above (`dEQP-VK.clipping.user_defined.clip_cull_distance.*`, same current 64/64 non-`_dynamic_index`/non-`_fragmentshader_read` pass including every `vert_tess`/`vert_tess_geom` case, same remaining `_dynamic_index`/`_fragmentshader_read` gaps, see roadmap H113's own measured impact for `_dynamic_index`) |
+| feature | VK_VERSION_1_0 | `shaderClipDistance` | **yes** | roadmap H7h: real vertex-stage, static-index consumer implemented and CTS-confirmed. A real re-measurement (roadmap H53/H54/H55/H56/H112, see "Roadmap H112: root cause and fix" in VulkanCTSReport.md) found the entire non-`_dynamic_index`/non-`_fragmentshader_read` `dEQP-VK.clipping.user_defined.clip_distance.*` subset (64/64, including every `vert_tess`/`vert_tess_geom` case) passing outright -- H54/H55/H56's own stage-linkage/fragment-read/patch-constant-phase errors, and H112's own tessellation-path rendering-correctness bug, were all fixed. Roadmap H113 then closed `_dynamic_index`'s own JIT-symbol-resolution crash class. Roadmap H7x's own final blocker -- `Tessellator.cpp`'s triangle-domain tessellator spuriously subdividing a fully unsubdivided (`TessLevel == 1`) patch, letting `gl_CullDistance`'s whole-primitive culling rule spuriously cull a sliver along the patch's own `y == -1` edge -- is now fixed too (see "Roadmap H7x: final closure" in VulkanCTSReport.md). A real CTS re-run confirms the full `dEQP-VK.clipping.user_defined.*` matrix (256 cases, every `_dynamic_index`/`_fragmentshader_read`/`vert`/`vert_geom`/`vert_tess`/`vert_tess_geom` combination) now passes 256/256. Flips to `VK_TRUE`, closing H7x, H32 and H53 |
+| feature | VK_VERSION_1_0 | `shaderCullDistance` | **yes** | roadmap H7h, same reproduction and rationale as `shaderClipDistance` above (`dEQP-VK.clipping.user_defined.clip_cull_distance.*`, same 256/256 full matrix pass following H7x's own final `Tessellator.cpp` fix) |
+
 | feature | VK_VERSION_1_0 | `shaderFloat64` | no |  |
 | feature | VK_VERSION_1_0 | `shaderInt64` | no |  |
 | feature | VK_VERSION_1_0 | `shaderInt16` | no |  |

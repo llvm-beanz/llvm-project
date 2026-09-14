@@ -42473,3 +42473,114 @@ suggested next steps (the synthetic-repro avenue is now believed
 exhausted -- a real-CTS-image channel reduction on the actual failing
 cases is the recommended next approach, not further synthetic patch-
 geometry variations).
+
+## Roadmap H7x: final closure (`shaderClipDistance`/`shaderCullDistance`, full clean sweep)
+
+**Method.** Per this session's own assignment, avoided the synthetic-repro
+bisection technique the two prior sessions had already run to a dead end
+(each independently landed on "this looks like correct spec-compliant
+behavior") and instead captured a **real failing CTS image**:
+`shaderClipDistance`/`shaderCullDistance` provisionally flipped to
+`VK_TRUE` (`feme_vulkan` rebuilt), then a real `deqp-vk` run of
+`dEQP-VK.clipping.user_defined.clip_cull_distance.vert_tess.
+1_7_fragmentshader_read` with `--deqp-log-images=enable`, extracting the
+actual rendered 16x16 RGBA8888 PNG plus the full GLSL/SPIR-V source for
+all 4 stages directly from the `.qpa` log.
+
+**Confirming the failure is narrower than "all fragment reads".** A
+64-case summary run of `dEQP-VK.clipping.user_defined.
+{clip_distance,clip_cull_distance}.*_fragmentshader_read` (no images)
+reconfirmed the prior session's own number, 50/64, and pinned down the
+exact 14 failures: every one is `clip_cull_distance.{vert_tess,
+vert_tess_geom}.{1..7}_{7..1}_fragmentshader_read` -- every `clip_distance`
+(no `CullDistance`) case passes, and every non-tessellated
+`clip_cull_distance` case (`vert`/`vert_geom`) passes. Only the
+tessellation-stage-forwarded `CullDistance` + fragment-read-back
+combination fails.
+
+**Root cause.** Reading the actual `vktClippingTests.cpp` CTS source
+(not just its own log text) gave the exact analytic formula
+`checkFragColors` uses to verify every pixel, and a byte-for-byte diff of
+that formula against the captured image found **zero** per-pixel mismatches
+outside one specific region: **rows 0 and 1 of the 16-row image were
+fully black across the entire 16-pixel width**, when only the first 2
+columns (bar 0's own real clip region, rows 0-7) should have been. The
+image's `numBlackPixels` count (44) vs. the CTS's own expected count (16,
+`clipRegion.x() * clipRegion.y()`) is exactly this extra 2-row,
+full-width band -- the test's `numBlackPixels == expectedClippedPixels`
+check, not `checkFragColors`, is what actually fails this case (every
+other per-pixel channel value the test also checks already matched the
+analytic formula within tolerance).
+
+That 2-row band sits exactly at `gl_Position.y == -1` -- the top edge
+every one of the test's 8 bars shares, since each bar is drawn as 2
+triangles spanning `y = -1` to `y = +1`. Tracing `Tessellator.cpp`'s
+`tessellateTriangle` at the test's own `TessLevelInner`/`TessLevelOuter ==
+1.0` (a fully unsubdivided patch, matching the tessellation-control
+shader's own fixed `gl_TessLevel*` writes) found it *always* runs its
+general inset/bridge subdivision regardless of factor, even though a
+factor-1 patch needs none: it insets a small "core" triangle strictly
+toward the centroid and bridges it to the real outer boundary with 6
+annulus triangles, synthesizing 7 sub-triangles out of what should be one
+real, un-subdivided triangle. That inset is invisible to ordinary affine
+position/varying interpolation (any consistent subdivision reproduces
+the same interpolated values), but *not* to `gl_CullDistance`'s
+whole-*primitive* culling rule (`Executor.cpp`'s `isCulledByCullDistance`:
+a primitive is discarded outright if one cull-plane index is negative at
+*every* one of its own vertices). For the real shader's own
+`gl_CullDistance[row] = (gl_Position.y < 0) ? -0.5 : 0.5` per-control-point
+value, the 2 synthetic sub-triangles bridging the real `y == -1` edge
+(both its own 2 real corners *and* their inset counterparts) have all 4
+relevant vertices negative -- spuriously culling a thin sliver along that
+edge that a real, non-subdividing tessellator (or a conformant
+implementation honoring "tess factor 1 needs no subdivision") would
+render correctly. This is a distinct, more precise root cause than the
+prior two sessions' own "this looks like correct behavior" conclusion --
+their synthetic repros used simplified patch shapes/factors that happened
+not to reproduce the exact all-negative micro-triangle shape the real
+CTS test's own 8-bar, `TessLevel == 1` geometry hits.
+
+**The fix.** `Tessellator.cpp`'s `tessellateTriangle` now special-cases
+the fully-unsubdivided factor (`E01 == E12 == E20 == N == 1`) to emit the
+real, single triangle directly (the 3 exact corners, no inset, no
+bridge), never creating the spurious internal primitive boundary. New
+regression test: `TessellatorTest.cpp`'s
+`TriangleFullyUnsubdividedFactorEmitsOneRealTriangle`.
+
+**Real Vulkan CTS re-run.** With the fix built into `feme_vulkan` (bits
+still provisionally `VK_TRUE` for the measurement):
+
+- `dEQP-VK.clipping.user_defined.*_fragmentshader_read` (128 cases,
+  including every `_dynamic_index` combination): **128/128 passing**
+  (previously 50/64 on the non-`_dynamic_index` subset alone).
+- The full `dEQP-VK.clipping.user_defined.*` matrix (256 cases -- every
+  `_dynamic_index`/`_fragmentshader_read`/`vert`/`vert_geom`/`vert_tess`/
+  `vert_tess_geom` combination): **256/256 passing.**
+
+**Regression check.** A broad `dEQP-VK.tessellation.*` re-run (excluding
+one pre-existing, unrelated crash this session also independently
+confirmed reproduces identically with the fix reverted --
+`user_defined_io.per_patch{,_block,/per_vertex}.vertex_io_array_size_
+implicit.*`'s own `PromoteMemoryToRegister.cpp` assertion failure, and a
+separate, already-known `"JIT session error: Symbols not found:
+[ spirv_var_N ]"` case, neither touched by this fix) found **zero**
+regressions across 1003 cases: exactly one case flipped from `Fail` to
+`Pass` (`geometry_interaction.passthrough.
+passthrough_tessellation_geometry_shade_triangles_no_change`), none the
+other direction.
+
+`ninja check-feme`: 3013/3016 pass (3 pre-existing unsupported, 0
+failures, up 1 test from the new `TessellatorTest.cpp` case, plus 2 new
+`PhysicalDeviceInfoTest.cpp` assertions for the newly-`VK_TRUE` bits).
+
+**Feature-bit decision.** `shaderClipDistance`/`shaderCullDistance` flip
+to `VK_TRUE` for real (`PhysicalDeviceInfo.cpp`'s own long-standing
+rationale comment rewritten to describe the real, final closure). This
+closes roadmap H32, H53, H7w and H7x.
+
+**Documentation.** `feme/docs/Roadmap.md`'s H7x row updated to record the
+final closure (H32/H53 struck through as closed); `FeMeGraphicsDesign.md`'s
+"Status (roadmap H7x)" section gained a closing paragraph;
+`Vulkan14FeatureInventory.md`'s `shaderClipDistance`/`shaderCullDistance`
+rows flipped to `VK_TRUE`; `VulkanExtensionInventory.md` confirmed no
+change needed (no extension gates these two feature bits).
