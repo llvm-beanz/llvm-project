@@ -41910,3 +41910,88 @@ SIMD-widening pass, not a new feature/extension bit.
 `FeMeCPUDesign.md` needs no change: the fix restores this pass's own
 documented uniform/divergent-consumer contract; it does not deviate
 from the design.
+
+## Roadmap H108: measured impact
+
+**What changed:** `dEQP-VK.mesh_shader.ext.synchronization.*`'s 12-case
+failure bucket (the largest untriaged group left from roadmap H107's
+own re-triage) split into two distinct signatures by error site. Group
+A (4 cases, `transfer_to_{mesh,task}.sampled_image.*`) fails at
+`vkCreateGraphicsPipelines`; Group B (8 cases,
+`{mesh_to_frag,mesh_to_host,mesh_to_transfer}.*.subpass_dependency`)
+fails at `vkQueueSubmit` with `"fragment input location 0 has no
+matching vertex stage output"`. This entry covers Group B (filed
+separately as roadmap H109 below).
+
+Debug-instrumented `Executor.cpp` (temporarily, reverted before this
+commit) to dump the reflected `RasterSig` at the failure site: the
+mesh module genuinely never writes its own `primitiveValue` output --
+the CTS's own `initPrograms` only writes it `if (prevTaskInMainMesh)`,
+false for every `mesh_to_*` case (no task shader) -- while the paired
+fragment module unconditionally reads it. Comparing the exact same
+resource/stage/shader-source combination's `memory_barrier`/
+`specific_barrier` siblings (which pass) explained why only
+`subpass_dependency` is affected: those two use *two separate
+pipelines* (per the CTS's own `needsTwoPipelines()`), pairing the real
+write-side mesh module with a `fragPassthrough` fragment module for
+the write draw, and a `meshPassthrough` mesh module (which *does*
+write `primitiveValue`) with the real read-side fragment module for
+the read draw -- so the real mesh module's unwritten `primitiveValue`
+never actually reaches a fragment module that reads it in those two
+variants. Only the single-pipeline `subpass_dependency` shape (one
+mesh+frag pair reused for both draws, joined by an in-render-pass
+subpass self-dependency) exposes the genuine interface mismatch.
+
+**Fix:** per the Vulkan spec's "Shader Interfaces" text, a fragment
+input with no matching output from the last pre-rasterization stage is
+legal -- its value is simply undefined, not a pipeline-creation or
+draw-time error. This is the same "stricter than the spec allows"
+pattern already fixed for a missing fragment stage (roadmap H2j) and
+an ignored mesh input-assembly state (roadmap H6g-b). Changed
+`Executor.cpp`'s draw-time fragment-varying-linkage loop to simply
+omit an unmatched `Location` from the linked `Varyings` list instead
+of returning an error; `buildStageStorage` already zero-fills fragment
+input storage, so the shader reads back 0 for it -- a valid
+realization of "undefined value". New regression test
+`ExecutorTest.UnmatchedFragmentInputLocationReadsZeroInsteadOfErroringOut`
+(a full-screen mesh triangle authoring no ordinary output, paired with
+a fragment shader that reads a `Location=0` input anyway) confirmed to
+genuinely fail (the old error) without the fix and pass (reading back
+0) with it restored.
+
+**Verification:** `ninja check-feme`: 2997/3000 passed, 3
+pre-existing `Unsupported`, 0 `Failed` (up by the 1 new test).
+`dEQP-VK.mesh_shader.ext.synchronization.*` (81 cases): **77 Pass/4
+Fail**, up from 69 Pass/12 Fail -- exactly Group B's 8 cases fixed,
+Group A's 4 (roadmap H109) untouched. A full `dEQP-VK.mesh_shader.ext.*`
+re-run (26,921 cases): **431 Pass/8 Fail/26,482 Not supported**, up
+from 420 Pass/19 Fail (per roadmap H107's own edition above) by
+exactly these 8 newly-fixed cases, confirming zero regressions
+elsewhere.
+
+The 8 remaining `dEQP-VK.mesh_shader.ext.*` failures are unrelated and
+pre-existing: `properties.max_mesh_output_components` (1),
+`smoke.*.fullscreen_gradient` (3, already known per roadmap H76), and
+`synchronization.transfer_to_{mesh,task}.sampled_image.*` (4, roadmap
+H109, a distinct integer-sampled-image feature gap -- not yet fixed).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is an executor linkage-strictness fix, not a new
+feature/extension bit. `FeMeVulkanDesign.md` needs no change: the fix
+restores the documented "undefined value for an unmatched fragment
+input" spec behavior; it does not deviate from the design.
+
+## Roadmap H109: not yet fixed
+
+**Status:** filed, not started. The remaining 4
+`dEQP-VK.mesh_shader.ext.synchronization.transfer_to_{mesh,task}.
+sampled_image.*` failures (`vkCreateGraphicsPipelines` ->
+`VK_ERROR_INITIALIZATION_FAILED`) are a distinct, real feature gap:
+`SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
+unconditionally rejects any ordinary (non-fetch) sample against an
+integer-channel (`usampler2D`/`isampler2D`) sampled image, and no
+integer-returning sample runtime call exists anywhere to relax that
+check into. See roadmap H109/H109(a)-H109(c) in `Roadmap.md` for the
+breakdown of the work required (a new `V4I32`/`V4U32`-returning CPU
+sample entry point, `SPIRVResourceLowering.cpp`/SPIR-V-to-LLVM wiring,
+and a real nearest-sample CPU implementation with tests).
