@@ -49,19 +49,12 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H7w** (`_dynamic_index`, 32/128 passing) and **H7x**
-   (`_fragmentshader_read`, 50/64 passing) are the only remaining
-   blockers on `shaderClipDistance`/`shaderCullDistance`. Both already
-   have their own roadmap rows with partial-fix history -- worth a fresh
-   session picking up exactly where their own rows leave off, ~1-2 hours
-   each for a real diagnostic given the rows are already partially
-   fixed.
-2. **`_dynamic_index` combined with `vert_geom`/`vert_tess_geom`** still
-   crashes at pipeline creation with `"JIT session error: Symbols not
-   found: [ spirv_var_N ]"` -- a distinct, unrelated, not-yet-filed bug,
-   flagged again this session (third session in a row to notice it and
-   defer it). Worth its own ~15-30 min first diagnostic, and probably its
-   own new milestone row once triaged.
-3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** is still never
-   built/run in any session -- flagged again as a standing gap (fourth
-   session in a row). Worth a session of its own to wire it up.
+- **H7x** (`_fragmentshader_read`, 50/64 passing, unchanged): the last
+  real blocker on `shaderClipDistance`/`shaderCullDistance`. No IR
+  reduction attempted yet this session -- next session should start
+  here (see top of this entry).
+- **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+  built/run in any session (6th session in a row to defer it). Worth a
+  session of its own.
+- `/tmp/h7w_repro/` scratch files not cleaned up (low priority, not
+  part of the repo).
