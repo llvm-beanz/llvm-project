@@ -81368,3 +81368,52 @@ This is the fourth consecutive session where the assigned bug turned out to alre
 1. **There is a separate, still-largely-open lineage worth checking next**: H70's own mesh-shader triage spawned rows H71-H85, of which **H76, H77, H78, H79, H80, H82 (remaining case), H83, H84, H85 are still open** (8-9 rows, not yet re-triaged this session — out of scope for this specific H102 request, but a strong candidate for the same "re-triage first" treatment given how productive it's been the last 3 sessions running). These are a *different* subsystem though (mesh-shader-specific: `Executor.cpp`, `MeshOutputWrapper.cpp`, resource-handle normalization for the CPU target) than the H101 `*instance_array*`/transform-feedback lineage that's now fully closed, so they may genuinely still be open rather than stale — worth checking but don't assume they're free wins.
 2. If none of H76-H85 are stale, H85 (`misc.*`'s `group_memory_barrier`/`memory_barrier_shared_in_*` pixel mismatch, 20 cases) looks like the most fully-scoped starting point — it already has a suggested reduction technique in its own filing text.
 3. Given the now-repeated pattern of "later general fix closes several earlier narrow rows for free," it's probably worth doing a quick blanket re-triage of *all* currently-open H-series rows (not just one subsystem) before investing in a full IR-reduction investigation on any single one — cheap insurance against redundant work.
+
+# Agent thoughts: full re-triage of all open H-series rows + full 54-group CTS sweep
+
+**Next action if you're picking this up:** run `cd /tmp/cts && python3 tally2.py` for the latest tally, then decide whether to (a) root-cause H96 via a memory-growth profile (`valgrind --tool=massif` or `/proc/<pid>/status` VmRSS sampling on a long `deqp-vk` run), or (b) chase one of the small independent crash bugs (`geometry`, `multiview`, `query_pool`, `tessellation`, `transform_feedback`'s `double free`) that are NOT the H96 pattern. Either is a real, scoped next step; H96 is higher-value since it unblocks accurate measurement of ~5 more groups at once.
+
+## What happened
+
+1. Enumerated every open (non-strikethrough) H-series row on the Roadmap: only **H30, H70 (parent epics, legitimately still-open feature work), H32-H68 (future feature epics, out of scope), and H94/H95/H96** (this session's own new filings) are real, currently-open bug rows. Every H1-H29-range row the task prompt called out by name (H13b, H13d, H19k/l/m, H21b-e/k, H29a/o/r) was **already struck through** from earlier sessions — nothing to do there.
+2. Re-triaged H70's entire mesh-shader-lineage subtree (H77-H86, ~57 cases) with a clean, isolated (`--deqp-shadercache=disable`, fresh directory per case) methodology: **all confirmed already fixed**, closed on the Roadmap. Found 2 new regressions while doing it: `misc.payload_not_accessed` (real crash, filed H94) and `misc.emit_in_control_flow_bad_emit_last` (pixel Fail, filed H95).
+3. While re-triaging, hit a **154-case false-crash storm** in a `mesh_shader.ext` resume-loop run. Root-caused it: `deqp-vk`'s own `shadercache.bin`, reused across resumed invocations in the same directory, corrupts once it accumulates enough entries, and every subsequent case then falsely reports as a crash. Verified: only 1 of the 154 was a real crash when re-tested with a fresh directory and `--deqp-shadercache=disable`. **This means every crash count in every prior report edition that didn't disable the shader cache is an upper bound, not a confirmed count.** Documented in the report's methodology section.
+4. Launched the full 54-group sweep with the shader-cache fix applied — and hit a **second, more serious bug**: even with the cache disabled, a single long-lived `deqp-vk` process still crashes with a bare `SIGSEGV` after roughly 2,000-2,500 cases, regardless of content (confirmed: the "crashing" case passes standalone; a freshly-restarted process crashes again on its own first case). Filed as **H96** (P2, unfixed — root cause not yet found, best guess is JIT code-arena or pipeline-cache growth in `feme/lib/Vulkan/` never evicted).
+5. Mitigated H96 for measurement purposes by pre-splitting every group's case list into ~1,800-case batches, each its own fresh process (`run_group_batched.sh`), instead of relying on crash-triggered resume loops within one process. This alone took measured coverage from the prior edition's 57.5% to **79.0%** of the full 3,244,369-case suite, with zero driver code changes.
+6. Ran the full batched sweep to completion (all 53 non-`subgroups` groups reached their own `DONE` marker; `subgroups` was killed after repeated ~20-minute retries on a still-open, pre-existing hang — the one group actually cut off by this session's own time budget, not the batch script's give-up logic).
+7. Rewrote `VulkanCTSReport.md`'s Headline section from scratch with the new totals, a 25-row incomplete-group table (crash signature + last-case-seen for each), and two new "methodology correction" writeups explaining why this edition's numbers aren't directly comparable to the prior one.
+8. Re-verified `check-feme`: 2990/2993 passed, 3 pre-existing Unsupported, 0 Failed — unchanged, since no source code was touched this session.
+
+## Fixed vs. filed vs. still-open
+
+**Fixed (confirmed via clean re-run, not by any code change this session):** H77, H78, H79, H80, H82, H83, H84, H85, H86 — all closed on the Roadmap.
+
+**Filed, not yet root-caused:**
+- **H94** — `misc.payload_not_accessed`, a real standalone crash.
+- **H95** — `misc.emit_in_control_flow_bad_emit_last`, a pixel-comparison Fail.
+- **H96** — the systemic ~2,000-2,500-case-threshold `SIGSEGV`, P2, likely the single highest-value fix available right now since it's silently capping measured coverage on ~20 groups at once, not just one bug.
+
+**Noticed but not yet filed (found while building the Headline's crash-signature table, out of scope for this session to chase further):**
+- `transform_feedback.fuzz.random_geometry.all_unordered_and_missing.91` crashes with `double free or corruption (out)` — a genuinely distinct signature from H96's bare `SIGSEGV`, worth its own row if it reproduces standalone.
+- `geometry`, `multiview`, `query_pool`, `tessellation`, `graphicsfuzz` all crash at a small, consistent case count (well under H96's ~2,000 threshold) — these are independent small-scale crash bugs, not H96, and not yet triaged individually.
+
+## Verification this session
+
+- Real CTS: full clean isolated re-runs of H77-H86's own ~57 cases (all Pass), a 144-case `misc`+`properties` sweep, a 64-case synchronization sweep, a 20-case sweep, a 9-case sweep — all per the report's established isolated-per-case methodology.
+- Full 54-group CTS sweep: 2,563,400 of 3,244,369 cases (79.0%) measured, 143,949 Pass / 110,806 Fail / 2,304,602 NotSupported / 4,043 Crashed.
+- `check-feme`: 2990/2993, 3 Unsupported, 0 Failed, 0 regressions (no source changes this session).
+- No unit tests added — this was a pure re-triage/measurement/methodology session, no `lib/Vulkan`/`lib/Transforms` changes.
+
+## Two findings that matter more than any single bug fix this session
+
+1. **The shader cache must always be disabled for trustworthy per-case counts.** Any future session re-checking an older report edition's specific crash numbers should treat them as upper bounds if that edition didn't use `--deqp-shadercache=disable`.
+2. **H96 is silently the dominant "root cause" behind most of the previous edition's 13 "crashing groups."** It is not 13 independent bugs — it's mostly one systemic issue plus a handful of genuinely independent small-scale crashes. Fixing H96 alone would likely raise measured coverage well past 79.0% without touching any of the specific-case bugs at all.
+
+## Suggested next steps
+
+1. **Root-cause H96** — the highest-leverage next step by far. Use `valgrind --tool=massif` or periodic `/proc/<pid>/status` `VmRSS` sampling on a long single-process `deqp-vk` run (e.g. the `api` group, which crashes reliably around case 2,000-2,500) to find what's growing unbounded. Best guesses to check first: `feme/lib/Vulkan/`'s JIT engine code-cache (is compiled-module memory ever released?) and any `VkPipelineCache`-equivalent in-process structure that grows per-pipeline without eviction.
+2. Once H96 is fixed, **re-run the full 54-group sweep once more** — expect measured coverage to jump substantially past 79.0%, and expect several of this edition's "H96 pattern" rows (`api`, `pipeline`, `binding_model`, `image`, `synchronization`/`synchronization2`, etc.) to either finish cleanly or surface their own genuine, previously-hidden bugs now that the crash they were bottlenecked on is gone.
+3. **File and triage `transform_feedback`'s `double free or corruption`** signature — distinct from H96, only 1 case seen so far, worth a standalone repro before assuming scope.
+4. **Triage the small independent crash bugs** (`geometry`, `multiview`, `query_pool`, `tessellation`, `graphicsfuzz`) — each crashes at a small, fixed case count well under H96's threshold, so each is likely its own narrow, fixable bug rather than another instance of H96.
+5. **`subgroups`' own pre-existing hang** (`ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128`) is unchanged across at least two editions now and was never actually re-triaged this session (just re-confirmed still hanging) — worth a dedicated debugging session with `gdb` attach to see where it's spinning.
+6. Fix H94/H95 (both already scoped, not yet started).
