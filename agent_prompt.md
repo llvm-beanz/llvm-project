@@ -49,19 +49,19 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-> **Next session: H7x**, via the real-CTS-image channel reduction this
-> session's predecessor already recommended (pull the actual failing
-> `dEQP-VK.clipping.user_defined.*_fragmentshader_read` case's own
-> rendered image and expected image, diff channel-by-channel, mirroring
-> H88's own closing technique for `local_size_id_mesh`/`local_size_id_
-> task`). This is the highest-leverage open item in the whole H-series:
-> one fix closes both H32 and H53. Do not repeat this and the last two
-> sessions' synthetic-unit-test bisection approach -- it has now twice
-> produced a false positive (see the two "H7x debunked" entries above)
-> without finding the real bug; a real captured CTS image is the
-> untried lever.
->
-> **If H7x stalls again**, pivot to **H52** instead (SIGSEGV crash,
-> isolated scope, unrelated area, blocks accurate measurement of the
-> whole `tessellation.*` group) rather than re-attempting H7x a third
-> time with the same technique.
+1. **File milestone rows for the two bugs above** (~15 min each just to
+   write the row; real fix time unknown, no diagnostic done yet on
+   either). The `spirv_var_N` one especially -- it's been rediscovered
+   and deferred across at least 5 sessions in a row without ever
+   getting a row of its own.
+2. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+   built or run in any session on record. This is a standing gap, not a
+   quick add-on -- give it a dedicated session.
+3. **Re-triage the roadmap from scratch** for the next H-series pick.
+   With H32/H53/H7w/H7x all closed, the "shaderClipDistance/
+   shaderCullDistance" thread that dominated the last several sessions
+   is fully wound down. Check `Roadmap.md` for the next open P1/P2 row
+   (last known: H62 broken into H63-H68 sub-buckets, ~14-48 cases
+   apiece, each independently assignable).
+4. Clean up `/tmp/h7x_*` scratch files (low priority, not part of the
+   repo).
