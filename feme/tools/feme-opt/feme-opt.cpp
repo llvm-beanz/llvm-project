@@ -34,6 +34,7 @@
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/FragmentWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
+#include "feme/Transforms/CPU/MeshOutputWrapper.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
 #include "feme/Transforms/CPU/ReferenceLowering.h"
@@ -312,6 +313,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::cpu::FragmentWrapperPass::name())
           return false;
         MPM.addPass(feme::cpu::FragmentWrapperPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::MeshOutputWrapperPass::name())
+          return false;
+        MPM.addPass(feme::cpu::MeshOutputWrapperPass());
         return true;
       });
   // `--reference`'s two passes (see the "CFG restructurization test suite"
