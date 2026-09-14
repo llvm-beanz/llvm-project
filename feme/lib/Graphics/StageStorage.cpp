@@ -91,10 +91,32 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
     //
     // (roadmap H7x) `gl_ClipDistance`/`gl_CullDistance` fragment *inputs*,
     // and (roadmap H5h) any geometry-stage `gl_in[]` system-value input
-    // when \p AllInputSystemValuesAreStorageBacked is set, are the two
+    // when \p AllInputSystemValuesAreStorageBacked is set, are two
     // exceptions: both are read/written through this same `StageStorage`
     // rather than a per-invocation record field, so both still need real
     // storage allocated here.
+    //
+    // (roadmap H112) A hull/domain stage's own `Position`/`ClipDistance`/
+    // `CullDistance`/`PointSize` *input* -- a per-control-point attribute
+    // merely forwarded from the previous stage's matching output, per
+    // `HullWrapper.cpp`'s `lowerHullInputLoad`/`DomainWrapper.cpp`'s
+    // `lowerDomainInputLoad`'s own `default` case, which addresses it
+    // exactly like an ordinary varying (through this same
+    // `computeStageStorageAddress`-based storage, never an invocation
+    // record) -- is a third such exception, alongside `ClipDistance`/
+    // `CullDistance` above. `PatchPipeline.cpp`'s own
+    // `isForwardedFromProducerStage` (this same milestone's earlier
+    // producer/consumer *linking* fix) already lets `copyLinkedElements`
+    // try to copy a value into exactly this element; without also listing
+    // `Position`/`PointSize` here, `buildStageStorage` still silently left
+    // their own `FemeStageElement` at its zero-initialized default (no
+    // storage allocated at all, `BitWidth == 0`), and `copyLinkedElements`
+    // wrote straight past the (empty) `Data` buffer -- the fragment-stage
+    // `gl_FragCoord`/`gl_FragCoord`-alike case below is unaffected: per
+    // `FragmentWrapper.cpp`'s `loadFragmentSystemValue`, a fragment
+    // stage's own `Position` input is always read from its invocation
+    // record, never this storage, so allocating (unused) storage for it
+    // here is harmless.
     //
     // (roadmap H7x) `Executor.cpp` links `ClipDistance`/`CullDistance`
     // fragment inputs into the ordinary `Varyings` list by `SystemValue`
@@ -120,10 +142,12 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
     // which does try to copy it, since `linkStageElements`'s own consumer
     // filter only excludes `PrimitiveID`/`InvocationID` -- wrote straight
     // past the (empty) `Data` buffer.
-    bool IsInterpolatedFragmentInput =
+    bool IsForwardedPerControlPointInput =
         Direction == SignatureDirection::Input &&
         (Elt.SystemValue == SignatureSystemValue::ClipDistance ||
-         Elt.SystemValue == SignatureSystemValue::CullDistance);
+         Elt.SystemValue == SignatureSystemValue::CullDistance ||
+         Elt.SystemValue == SignatureSystemValue::Position ||
+         Elt.SystemValue == SignatureSystemValue::PointSize);
     bool IsGeometryInputVertexArrayMember =
         AllInputSystemValuesAreStorageBacked &&
         Direction == SignatureDirection::Input &&
@@ -131,7 +155,7 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
         Elt.SystemValue != SignatureSystemValue::InvocationID;
     if (Elt.SystemValue != SignatureSystemValue::None &&
         Direction == SignatureDirection::Input &&
-        !IsInterpolatedFragmentInput && !IsGeometryInputVertexArrayMember)
+        !IsForwardedPerControlPointInput && !IsGeometryInputVertexArrayMember)
       continue;
     if (Elt.BitWidth != 32)
       return createStringError(inconvertibleErrorCode(),

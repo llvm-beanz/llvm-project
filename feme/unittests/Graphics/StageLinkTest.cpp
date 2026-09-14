@@ -277,13 +277,43 @@ TEST(StageLinkTest, CopiesLinkedElementsRemappingInvocations) {
 // is read through a genuinely dynamic per-vertex-in-primitive index
 // (`GeometryWrapper.cpp`'s `lowerGeometryInputLoad`), so it needs the same
 // real storage an ordinary varying gets. Without
-// `AllInputSystemValuesAreStorageBacked`, the `Position` input element
+// `AllInputSystemValuesAreStorageBacked`, the `PrimitiveID` input element
 // below gets no storage at all (`Data.size() == 0`), and
 // `copyLinkedElements` writes straight past the empty buffer -- this is
 // the exact shape that crashed a real `dEQP-VK.geometry.basic.*` case
 // (`vkQueueSubmit` heap corruption via `StageStorage::writeRaw`) until
 // this row's fix.
+//
+// (roadmap H112) This test used to use `Position` as its example, but
+// `Position` (along with `ClipDistance`/`CullDistance`/`PointSize`) is now
+// itself one of the storage-backed exceptions below -- a hull/domain
+// stage's own per-control-point forwarding of these needs real storage
+// too, see `IsForwardedPerControlPointInput`'s own comment -- so
+// `PrimitiveID` (still never storage-backed regardless of this flag, see
+// `BuildStageStorageStillSkipsGeometryInvocationRecordSystemValues` below)
+// is used here instead to keep testing the same "no exception applies"
+// default-skip behavior.
 TEST(StageLinkTest, BuildStageStorageSkipsSystemValueInputStorageByDefault) {
+  EntrySignature Sig;
+  SignatureElement PrimitiveIDIn = makeElement(
+      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/1);
+  PrimitiveIDIn.SystemValue = SignatureSystemValue::PrimitiveID;
+  Sig.Elements = {PrimitiveIDIn};
+
+  Expected<StageStorage> Storage =
+      buildStageStorage(Sig, SignatureDirection::Input, /*InvocationCount=*/4);
+  ASSERT_THAT_EXPECTED(Storage, Succeeded());
+  EXPECT_EQ(Storage->Data.size(), 0u);
+}
+
+// (roadmap H112) `Position`/`PointSize` inputs (like `ClipDistance`/
+// `CullDistance` already did) are now storage-backed unconditionally --
+// see `IsForwardedPerControlPointInput`'s own comment in
+// `StageStorage.cpp` -- because a hull/domain stage's own wrapper reads
+// its per-control-point `Position` input from this same storage, not an
+// invocation record (unlike the fragment stage's own `gl_FragCoord`,
+// which never goes through this path regardless).
+TEST(StageLinkTest, BuildStageStorageAllocatesForwardedPositionInputStorage) {
   EntrySignature Sig;
   SignatureElement PositionIn = makeElement(0, SignatureDirection::Input,
                                             std::nullopt, /*ComponentCount=*/4);
@@ -293,7 +323,7 @@ TEST(StageLinkTest, BuildStageStorageSkipsSystemValueInputStorageByDefault) {
   Expected<StageStorage> Storage =
       buildStageStorage(Sig, SignatureDirection::Input, /*InvocationCount=*/4);
   ASSERT_THAT_EXPECTED(Storage, Succeeded());
-  EXPECT_EQ(Storage->Data.size(), 0u);
+  EXPECT_GT(Storage->Data.size(), 0u);
 }
 
 TEST(StageLinkTest,
