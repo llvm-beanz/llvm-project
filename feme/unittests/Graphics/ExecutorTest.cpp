@@ -7400,4 +7400,172 @@ TEST(ExecutorTest,
   EXPECT_EQ(V, 0u);
 }
 
+// (roadmap H111(b)) A mesh shader that builds two function-local constant
+// arrays of `<4 x float>` (one for `SV_Position`, one for a `Location=0`
+// color varying), then reads each one back through a *dynamic* (per-lane)
+// index -- exactly the shape `dEQP-VK.mesh_shader.ext.smoke.*.
+// fullscreen_gradient`'s own mesh shader uses for its `positions[vertex]`/
+// `colors[vertex]` lookups (`vertex` being `gl_LocalInvocationIndex`),
+// once H111(a)'s fix let such an array-initialized local `spirv.Variable`
+// reach the CPU lowering pipeline at all. Four lanes (`hlsl.numthreads`
+// `4,1,1`, matching `WaveSize=4`) each read a different array element and
+// write a different output vertex/color, forming a full-screen quad out
+// of two triangles.
+constexpr char MeshLocalArrayDynamicIndexShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 4, i32 2)
+    %positions = alloca [4 x <4 x float>], align 16
+    store [4 x <4 x float>] [
+      <4 x float> <float -1.0, float -1.0, float 0.0, float 1.0>,
+      <4 x float> <float -1.0, float  1.0, float 0.0, float 1.0>,
+      <4 x float> <float  1.0, float -1.0, float 0.0, float 1.0>,
+      <4 x float> <float  1.0, float  1.0, float 0.0, float 1.0>
+    ], ptr %positions, align 16
+    %colors = alloca [4 x <4 x float>], align 16
+    store [4 x <4 x float>] [
+      <4 x float> <float 0.0, float 0.0, float 0.0, float 1.0>,
+      <4 x float> <float 0.0, float 0.0, float 1.0, float 1.0>,
+      <4 x float> <float 0.0, float 1.0, float 0.0, float 1.0>,
+      <4 x float> <float 0.0, float 1.0, float 1.0, float 1.0>
+    ], ptr %colors, align 16
+    %indices = alloca [2 x <3 x i32>], align 16
+    store [2 x <3 x i32>] [
+      <3 x i32> <i32 0, i32 1, i32 2>,
+      <3 x i32> <i32 1, i32 3, i32 2>
+    ], ptr %indices, align 16
+
+    %vertex = call i32 @llvm.spv.flattened.thread.id.in.group()
+    %vcmp = icmp ult i32 %vertex, 4
+    br i1 %vcmp, label %writevertex, label %afterVertex
+
+  writevertex:
+    %posptr = getelementptr [4 x <4 x float>], ptr %positions, i32 0, i32 %vertex
+    %pos = load <4 x float>, ptr %posptr, align 16
+    %p0 = extractelement <4 x float> %pos, i32 0
+    %p1 = extractelement <4 x float> %pos, i32 1
+    %p2 = extractelement <4 x float> %pos, i32 2
+    %p3 = extractelement <4 x float> %pos, i32 3
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %p0, i32 %vertex)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float %p1, i32 %vertex)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float %p2, i32 %vertex)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float %p3, i32 %vertex)
+    %colptr = getelementptr [4 x <4 x float>], ptr %colors, i32 0, i32 %vertex
+    %col = load <4 x float>, ptr %colptr, align 16
+    %c0 = extractelement <4 x float> %col, i32 0
+    %c1 = extractelement <4 x float> %col, i32 1
+    %c2 = extractelement <4 x float> %col, i32 2
+    %c3 = extractelement <4 x float> %col, i32 3
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %c0, i32 %vertex)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %c1, i32 %vertex)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %c2, i32 %vertex)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float %c3, i32 %vertex)
+    br label %afterVertex
+
+  afterVertex:
+    %primitive = call i32 @llvm.spv.flattened.thread.id.in.group()
+    %pcmp = icmp ult i32 %primitive, 2
+    br i1 %pcmp, label %writeprim, label %end
+
+  writeprim:
+    %idxptr = getelementptr [2 x <3 x i32>], ptr %indices, i32 0, i32 %primitive
+    %idx = load <3 x i32>, ptr %idxptr, align 16
+    %i0 = extractelement <3 x i32> %idx, i32 0
+    %i1 = extractelement <3 x i32> %idx, i32 1
+    %i2 = extractelement <3 x i32> %idx, i32 2
+    call void @feme.stage.output.store.i32(i32 2, i32 0, i32 0, i32 %i0, i32 %primitive)
+    call void @feme.stage.output.store.i32(i32 2, i32 0, i32 1, i32 %i1, i32 %primitive)
+    call void @feme.stage.output.store.i32(i32 2, i32 0, i32 2, i32 %i2, i32 %primitive)
+    br label %end
+
+  end:
+    ret void
+  }
+  declare i32 @llvm.spv.flattened.thread.id.in.group()
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="4,1,1" }
+)";
+
+// Passes a `Location=0` `vec4` varying straight through to `SV_Target0`,
+// reused from this file's own `FragmentShaderIR` shape.
+TEST(ExecutorTest, MeshLocalArrayDynamicIndexProducesFullScreenGradient) {
+  Context Ctx;
+  EntrySignature MeshSig;
+  SignatureElement ColorElt =
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0);
+  SignatureElement IdxElt = makeElement(
+      2, SignatureDirection::Output, 3, /*Location=*/std::nullopt);
+  IdxElt.ComponentType = SignatureComponentType::UInt;
+  IdxElt.Frequency = SignatureFrequency::PerPrimitive;
+  IdxElt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  MeshSig.Elements = {makeElement(0, SignatureDirection::Output, 4,
+                                  /*Location=*/std::nullopt,
+                                  SignatureSystemValue::Position),
+                      ColorElt, IdxElt};
+  Expected<std::shared_ptr<CompiledStage>> MS = compileStage(
+      Ctx, MeshLocalArrayDynamicIndexShaderIR, "ms_main", MeshSig,
+      ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, FragmentShaderIR, "fs_main", FSSig,
+                  ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32G32B32A32_FLOAT, Size, Size}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 4;
+  Mesh.MaxOutputPrimitives = 2;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4 * sizeof(float), 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R32G32B32A32_FLOAT, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Every covered pixel's green channel should increase left-to-right and
+  // its blue channel top-to-bottom -- a gradient, not a uniformly black
+  // image (roadmap H111(b)'s own symptom: every pixel reading back
+  // `(0, 0, 0, 1)` instead).
+  std::array<float, 4> TopLeft, TopRight, BottomLeft;
+  std::memcpy(TopLeft.data(), Storage.data(), sizeof(TopLeft));
+  std::memcpy(TopRight.data(),
+              Storage.data() + (size_t)(Size - 1) * 4 * sizeof(float),
+              sizeof(TopRight));
+  std::memcpy(BottomLeft.data(),
+              Storage.data() + (size_t)(Size - 1) * Size * 4 * sizeof(float),
+              sizeof(BottomLeft));
+
+  EXPECT_LT(TopLeft[1], TopRight[1]);
+  EXPECT_LT(TopLeft[2], BottomLeft[2]);
+  EXPECT_NE(TopRight[1], 0.0f);
+  EXPECT_NE(BottomLeft[2], 0.0f);
+}
+
 } // namespace
