@@ -1482,6 +1482,20 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
 /// `getDynamicRowIndexedAccess`'s own single-non-constant-index shape, one
 /// per-vertex array dimension in). \p RowIndex is `nullptr` for the
 /// ordinary, fully-constant-remainder case.
+///
+/// (Roadmap H110) \p VertexIndex itself may also be a compile-time
+/// constant when \p RowIndex is set -- e.g. `ls[0].location_var[i]`, a
+/// per-primitive output block with exactly one primitive (so the outer
+/// index is always the constant `0`) whose one struct member is itself an
+/// array written through a loop-carried `i`. This function is still the
+/// only one that resolves that shape: `getDynamicRowIndexedAccess`
+/// explicitly excludes any `isDynamicIndexedArrayGlobal` global (to avoid
+/// double-recognizing this function's own genuinely-dynamic-vertex-index
+/// shape), so it never gets a chance to see this one either, even though
+/// its own outer index happens to be constant this time. When \p
+/// RowIndex is null, \p VertexIndex is never constant (the "ordinary
+/// constant-offset path" caveat above), since that fully-constant case is
+/// left for `getStageIOBaseAndOffset` to resolve as before.
 struct DynamicVertexIndexedAccess {
   GlobalVariable *GV;
   Value *VertexIndex;
@@ -1508,8 +1522,13 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
   if (!OuterIdx || !OuterIdx->isZero())
     return std::nullopt;
   Value *VertexIndex = *++IdxIt;
-  if (isa<Constant>(VertexIndex))
-    return std::nullopt; // The ordinary constant-offset path handles this.
+  // (Roadmap H110) A *constant* vertex index is not rejected outright here
+  // anymore: whether the ordinary constant-offset path
+  // (`getStageIOBaseAndOffset`) can fully handle it instead depends on
+  // whether a further, genuinely non-constant `RowIndex` also turns up
+  // below (that path cannot fold a non-constant index at all) -- deferred
+  // until after the walk below determines that.
+  bool ConstantVertexIndex = isa<Constant>(VertexIndex);
 
   Type *CurTy = ArrTy->getElementType();
   uint64_t ByteOffset = 0;
@@ -1557,6 +1576,24 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
       return std::nullopt;
     RowIndex = *IdxIt;
   }
+  // (Roadmap H110) A constant vertex index with no further non-constant
+  // `RowIndex` is a fully constant-offset access after all -- leave it for
+  // the ordinary constant-offset path (`getStageIOBaseAndOffset`) to
+  // resolve, exactly as before this roadmap entry. Only a constant vertex
+  // index *paired with* a genuinely dynamic `RowIndex` (e.g.
+  // `ls[0].location_var[i]`, a per-primitive output block with exactly one
+  // primitive -- so the outer index is always the compile-time constant
+  // `0` -- whose one struct member is itself an array written through a
+  // loop-carried `i`) needs this function's own result: that shape's
+  // `RowIndex` is a non-constant index `getStageIOBaseAndOffset` cannot
+  // fold at all, but the outer per-primitive dimension is not itself
+  // dynamic, so it was never `getDynamicRowIndexedAccess`'s shape either
+  // (that function explicitly excludes any `isDynamicIndexedArrayGlobal`
+  // global, to avoid double-recognizing this function's own genuinely
+  // dynamic-vertex-index shape) -- previously falling through both
+  // functions entirely unresolved.
+  if (ConstantVertexIndex && !RowIndex)
+    return std::nullopt;
   return DynamicVertexIndexedAccess{GV, VertexIndex, ByteOffset, RowIndex};
 }
 
