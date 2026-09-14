@@ -1424,10 +1424,34 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     bool HasBias = false;
     bool HasGrad = false;
     if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias, HasGrad)) {
-      if (IsInteger)
-        return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
         return false;
+      // Roadmap H109: an ordinary sample against an integer-channel
+      // (`_UINT`/`_SINT`) image is legal SPIR-V (`OpImageSampleExplicitLod`
+      // against a `usampler2D`/`isampler2D`), just restricted, per the
+      // Vulkan spec, to `NEAREST` filtering -- unlike the general
+      // `Sample2D` path below, only the narrow shape a real CTS case
+      // (`dEQP-VK.mesh_shader.ext.synchronization.*.sampled_image.*`)
+      // needs is accepted for now: a plain (non-arrayed, non-cube,
+      // non-1D/3D) `Plain2D` image, an explicit LOD (SPIR-V forbids
+      // `Bias`/`Grad`/implicit LOD alongside the mandatory `NEAREST`
+      // filtering in every case this pass has needed to support so far),
+      // and no `MinLod` clamp (`createSample2DI32` has no such operand).
+      if (IsInteger) {
+        if (Shape != ImageShape::Plain2D || !ExplicitLod || HasMinLodClamp ||
+            HasBias || HasGrad)
+          return false;
+        unsigned OffsetIdx =
+            getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
+        if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth,
+                      /*Float=*/true) ||
+            !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape,
+                               /*AllowArray2D=*/false,
+                               /*AllowPlain1DArray1D=*/false) ||
+            !isV4I32(CI->getType()))
+          return false;
+        continue;
+      }
       // Roadmap L73: `Plain2DMS`/`Array2DMS` (a multisampled sampled
       // image) has no ordinary filtered-sample counterpart -- no
       // `runtime/CPU` helper exists to sample a multisampled image, and
@@ -3051,6 +3075,28 @@ void lowerImageAccesses(
         Value *ExplicitLodFlag = Builder.getInt1(ExplicitLod);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        // Roadmap H109: an integer-channel sample is only ever accepted
+        // by `hasOnlySupportedImageUses` as a `Plain2D`, explicit-LOD,
+        // no-`Bias`/`Grad`/`MinLod` call (see its own comment) -- so this
+        // narrower emission runs before, and instead of, the general
+        // float-sample shape dispatch below, which would otherwise need
+        // an `IsInteger` branch threaded through every shape's own case.
+        if (isV4I32(CI->getType())) {
+          Value *IntC0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+          Value *IntC1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+          Value *IntOffset = CI->getArgOperand(
+              getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+          Value *IntOffsetX =
+              Builder.CreateExtractElement(IntOffset, uint64_t{0});
+          Value *IntOffsetY =
+              Builder.CreateExtractElement(IntOffset, uint64_t{1});
+          CallInst *NewSampleI32Call = createSample2DI32(
+              Builder, Env, ImageIndex, SamplerIndex, IntC0, IntC1, Lod,
+              IntOffsetX, IntOffsetY, Mask, CI->getName());
+          CI->replaceAllUsesWith(NewSampleI32Call);
+          CI->eraseFromParent();
+          continue;
+        }
         // Roadmap L52a: `Plain1D`/`Array1D` are handled separately, before
         // the generic `C0`/`C1` extraction below, since `Plain1D`'s own
         // coordinate is a bare scalar float (see `isCoordN`'s own comment

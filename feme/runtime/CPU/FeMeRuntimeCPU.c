@@ -4892,6 +4892,71 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
   return Sum * (1.0f / (float)Plan.TapCount);
 }
 
+// (Roadmap H109) Nearest-filtered, explicit-LOD-only sample of an
+// integer-channel (`_UINT`/`_SINT`) image, for `feme.cpu.image.sample.
+// 2d.v4i32` -- the integer counterpart of `femeCpuImageSample2DV4F32`
+// above. Unlike that function, this always reads a single mip level via
+// `femeRTNearestMipLevel` and never bilinearly/trilinearly blends,
+// regardless of `Samp`'s own filter/mipmap-mode fields: the Vulkan spec
+// requires a `VkSampler` bound against an integer-format image to already
+// use `VK_FILTER_NEAREST`/`VK_SAMPLER_MIPMAP_MODE_NEAREST` (enforced by
+// validation before this driver ever sees the call), but this function is
+// still defensive about it rather than trusting the caller, matching this
+// file's general style elsewhere. There is no `Bias`/`Grad`/`MinLodClamp`
+// operand -- see `ImageCallKind::Sample2DI32`'s own doc for why this is
+// explicit-LOD only.
+FemeRTv4i32 femeCpuImageSample2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
+    int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) asm("feme.cpu.image.sample.2d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
+    int32_t OffsetX, int32_t OffsetY, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+
+  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
+  // `0.0f`), mirroring `femeCpuImageSample2DV4F32`'s own explicit-LOD
+  // case -- see this call kind's own doc for why no such operand exists.
+  float ClampedLod = femeRTComputeClampedLod(
+      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  uint32_t Level = femeRTNearestMipLevel(MipPlan);
+  uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
+  uint32_t LevelHeight = femeRTMipExtent(Img.Height, Level);
+  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + OffsetX;
+  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight) + OffsetY;
+  _Bool BorderX = 0, BorderY = 0;
+  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                         Samp.AddressU, &BorderX);
+  int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
+                                         Samp.AddressV, &BorderY);
+  if (BorderX || BorderY) {
+    // Roadmap H109: `FemeRTSamplerDescriptor` has no integer border-color
+    // storage (only a float `BorderColor[4]`) -- fall back to a fixed
+    // `{0, 0, 0, 1}` default. Documented, narrow limitation: no real CTS
+    // case is known to exercise `CLAMP_TO_BORDER` addressing against an
+    // integer-sampled image yet (this call kind's own motivating case
+    // always addresses an in-bounds coordinate).
+    FemeRTv4i32 Border = {0, 0, 0, 1};
+    return Border;
+  }
+  return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/0, AddrX, AddrY,
+                               /*Sample=*/0);
+}
+
 // (Roadmap L52e) The raw, unclamped LOD `OpImageQueryLod`'s own second
 // (`calculate.lod.unclamped`) lane reports, computed from the same
 // texel-space "scale factor" construction `femeRTPlanImplicitLod` already
