@@ -236,6 +236,15 @@ TEST(PhysicalDeviceInfo,
   // every other shape already has -- see PhysicalDeviceInfo.cpp's own
   // comment for the full measured breakdown.
   EXPECT_EQ(Info.Features.shaderResourceMinLod, VK_TRUE);
+  // (Roadmap H7w/H7x) `Tessellator.cpp`'s triangle-domain tessellator no
+  // longer synthesizes a spurious 7-triangle subdivision out of a fully
+  // unsubdivided (`TessLevelInner/Outer == 1`) patch, which used to let
+  // `gl_CullDistance`'s whole-primitive culling rule spuriously cull a
+  // sliver along one real edge -- see PhysicalDeviceInfo.cpp's own
+  // comment for the full measured breakdown (256/256 real
+  // `dEQP-VK.clipping.user_defined.*` cases now passing).
+  EXPECT_EQ(Info.Features.shaderClipDistance, VK_TRUE);
+  EXPECT_EQ(Info.Features.shaderCullDistance, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -269,6 +278,8 @@ TEST(PhysicalDeviceInfo,
   Cleared.shaderStorageImageReadWithoutFormat = VK_FALSE;
   Cleared.shaderStorageImageWriteWithoutFormat = VK_FALSE;
   Cleared.shaderResourceMinLod = VK_FALSE;
+  Cleared.shaderClipDistance = VK_FALSE;
+  Cleared.shaderCullDistance = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

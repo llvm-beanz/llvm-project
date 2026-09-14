@@ -797,13 +797,36 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   //   for the measurement) confirms the entire non-`_dynamic_index`/
   //   non-`_fragmentshader_read` subset (64/64, including every
   //   `vert_tess`/`vert_tess_geom` case) now passes.
-  // - The only remaining gaps are H7w (`_dynamic_index`, 32/128 passing)
-  //   and H7x (`_fragmentshader_read`, 50/64 passing, non-`_dynamic_index`
-  //   only) -- both still incomplete, so this feature's own mandatory
-  //   conformance surface is not yet fully met.
+  // - Roadmap H7x (which, once fixed, also fully closed H7w -- both
+  //   shared the same one root cause): `Tessellator.cpp`'s triangle-domain
+  //   tessellator always ran its general inset/bridge subdivision, even
+  //   at the fully unsubdivided `TessLevelInner/Outer == 1` factor, so a
+  //   single input triangle became 7 synthetic sub-triangles. That split
+  //   is invisible to ordinary affine position/varying interpolation, but
+  //   not to `gl_CullDistance`'s whole-*primitive* culling rule
+  //   (`isCulledByCullDistance`): a synthetic sub-triangle whose 3
+  //   vertices all land near one real edge of the un-subdivided triangle
+  //   can be all-negative (and so get culled outright) even when the
+  //   *real*, un-subdivided triangle's own 3 control points are not --
+  //   spuriously culling a sliver along that edge. A real captured
+  //   `dEQP-VK.clipping.user_defined.clip_cull_distance.vert_tess.
+  //   1_7_fragmentshader_read` image (H7x's own remaining failure)
+  //   showed exactly this: a full-width band of spuriously culled pixels
+  //   along the `gl_Position.y == -1` patch edge shared by every one of
+  //   the test's 8 bars, while every other pixel already matched the
+  //   CTS's own analytic expected value exactly. `tessellateTriangle` now
+  //   special-cases the fully-unsubdivided factor to emit the real,
+  //   single triangle directly, never creating that spurious internal
+  //   primitive boundary. A real re-run of the full
+  //   `dEQP-VK.clipping.user_defined.*` matrix (256 cases, every
+  //   `_dynamic_index`/`_fragmentshader_read`/`vert`/`vert_geom`/
+  //   `vert_tess`/`vert_tess_geom` combination, bit flipped on for the
+  //   measurement) confirms 256/256 passing -- this feature's full
+  //   mandatory conformance surface is now met, closing H7w and H7x.
   // `Info.Features.shaderClipDistance`/`shaderCullDistance` are therefore
-  // intentionally left at their zero-initialized `VK_FALSE` until H7w/H7x
-  // close.
+  // now genuinely `VK_TRUE`.
+  Info.Features.shaderClipDistance = VK_TRUE;
+  Info.Features.shaderCullDistance = VK_TRUE;
 
 
   // (Roadmap H7i) `samplerAnisotropy`: `Image.cpp` already stored
