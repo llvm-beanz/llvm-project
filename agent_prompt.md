@@ -45,24 +45,28 @@ agent thoughts.
 
 # Request
 
-Can you work on H32 or other work blocking the the H-series milestones?
+Can you work the the H-series milestones?
 
-> **The optional core 1.0 graphics feature bits.** `PhysicalDeviceInfo.cpp`
-> reports exactly three `VkPhysicalDeviceFeatures` bits `VK_TRUE`
-> (`robustBufferAccess`, `dualSrcBlend`, `textureCompressionASTC_LDR`, lines
-> 349-373); the other ~52 are all `VK_FALSE`. Each is *optional* for a 1.4
-> submission, so none blocks a conformance claim — but each is a block of
-> mandatory-list cases reported `NotSupported`, and several are cheap on a
-> software device (`imageCubeArray`, `independentBlend`, `fillModeNonSolid`,
-> `depthClamp`, `depthBiasClamp`, `depthBounds`, `wideLines`/`largePoints` once
-> F5's line rasterization lands, `sampleRateShading`, `alphaToOne`, `logicOp`,
-> `occlusionQueryPrecise`, `multiDrawIndirect`, `drawIndirectFirstInstance`,
-> `vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`,
-> `shaderClipDistance`, `shaderCullDistance`, `samplerAnisotropy`,
-> `shaderStorageImage*`). Split into sub-rows per cluster when assigned; do
-> **not** land as one commit (broken down below the same way H4/H5/H30 were,
-> after a full survey of every candidate bit's own real implementation status:
-> H7a closes the first, lowest-risk cluster -- five bits the executor/pipeline
-> layer already genuinely implements and simply never advertised; H7b-H7j each
-> track one remaining cluster that needs real new work first, none of it started
-> yet -- milestone remains open, depending on H7b-H7j)
+The last session suggested the next steps:
+
+1. **Root-cause H112** (~45-90 min): the static IR is provably correct,
+   so the bug is at runtime. Fastest path: add a hand-written
+   `ExecutorTest.cpp`-level repro (mirroring H111(b)'s own successful
+   bisection technique) driving the compiled hull+domain pipeline
+   directly, and inspect the actual per-control-point `ClipDistance`
+   values in `PatchPipeline.cpp`'s `copyLinkedElements` with a debugger or
+   printf-instrumentation, comparing against the already-correct
+   `gl_Position` handling in the exact same function.
+2. Once H112 is fixed, re-run the full `dEQP-VK.clipping.user_defined.
+   {clip_distance,clip_cull_distance}.*` matrix (non-`_dynamic_index`)
+   to confirm 128/128, then flip `shaderClipDistance`/`shaderCullDistance`
+   to `VK_TRUE` for real and close H53 and H32.
+3. **Separately, not yet investigated**: the `_dynamic_index` variants
+   combined with `vert_geom`/`vert_tess_geom` fail with `"JIT session
+   error: Symbols not found: [ spirv_var_N ]"` -- a distinct bug, no
+   milestone filed yet, worth a first diagnostic (~15-30 min) once H112
+   closes.
+4. `offload-test-suite`'s `check-hlsl-feme-vk` target is still never
+   built/run in any session -- flagged again as a standing gap, not
+   picked up this session either (out of scope for H32/H112, but worth a
+   session of its own).
