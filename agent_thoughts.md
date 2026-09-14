@@ -81417,3 +81417,82 @@ This is the fourth consecutive session where the assigned bug turned out to alre
 4. **Triage the small independent crash bugs** (`geometry`, `multiview`, `query_pool`, `tessellation`, `graphicsfuzz`) — each crashes at a small, fixed case count well under H96's threshold, so each is likely its own narrow, fixable bug rather than another instance of H96.
 5. **`subgroups`' own pre-existing hang** (`ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128`) is unchanged across at least two editions now and was never actually re-triaged this session (just re-confirmed still hanging) — worth a dedicated debugging session with `gdb` attach to see where it's spinning.
 6. Fix H94/H95 (both already scoped, not yet started).
+
+# H96 root cause: it was never resource growth, it was a null-pointer read
+
+**Fixed and verified.** The 4,000-case reproduction that reliably crashed
+`deqp-vk` at case 2,401 now runs to completion, 0 crashes. `check-feme`:
+2991/2994 passed, 3 pre-existing unsupported, 0 failed.
+
+## What actually happened (5 min read)
+
+1. Roadmap's own H96 filing guessed "unbounded in-process resource growth"
+   (JIT arena, pipeline cache). I distrusted this immediately — a genuine
+   leak should show gradual RSS growth, not a threshold.
+2. Sampled `/proc/<pid>/status` once per case during a crashing run: RSS
+   flat for ~2,363 cases, then a sudden spike right as it crashed. Not a
+   leak shape.
+3. Swapped out every case from position 2,401 onward for different cases,
+   re-ran: still crashed at exactly 2,401. **The crash is a fixed case
+   count, not a specific case or accumulated state.** This screams "rare
+   shape that happens to first appear around here," not "resource
+   exhaustion."
+4. `gdb` backtrace landed in `mlir::spirv::StructType::getMemberOffset`,
+   called from `getOffsetSortedMemberIndices` in
+   `SPIRVToLLVMPatterns.cpp` (H101p's struct-reorder `AccessChain`
+   pattern). A debug counter showed this helper runs **exactly once** in
+   the whole 2,401-case run — so it's not corrupting itself over time
+   either.
+5. `valgrind --track-origins=yes` on the full 2,402-case window (13s
+   wall-clock, totally viable — don't be afraid to reach for Valgrind on
+   this codebase) caught it directly: `Invalid read of size 4 ... Address
+   0x4 is not stack'd, malloc'd or (recently) free'd`. `OffsetInfo` is
+   `uint32_t` (4 bytes); `offsetInfo[1]` off a null base is exactly
+   address `0x4`.
+6. Root cause: `matchAndRewrite` called `getOffsetSortedMemberIndices`
+   unconditionally on every struct-typed `AccessChain` pointee, even
+   structs with **no offset decorations at all** (ordinary
+   `Function`-storage-class locals, never `Block`-decorated). Every
+   *other* caller of this helper in the same file checks
+   `Type.hasOffset()` first — this one call site didn't.
+
+## The fix (1 file, ~15 lines)
+
+Guard both `getOffsetSortedMemberIndices` (added an `assert` precondition
++ doc comment) and its `matchAndRewrite` call site behind
+`StructType::hasOffset()`. Added a minimal `feme-opt` regression lit test
+(`spirv-to-llvm-non-offset-struct-access-chain.mlir`) — crashes pre-fix,
+converts cleanly post-fix, runs in well under a second (much faster than
+CTS for future bisection of similar bugs).
+
+## Lesson for next time
+
+When a bug "only happens after N cases" or "only in long runs," don't
+assume resource growth by default — check whether it's actually a rare,
+deterministic *shape* that a caselist just happens not to hit until deep
+in — a `gdb` backtrace plus a caselist-substitution experiment (swap out
+everything past the crash point, see if the threshold moves) settles this
+in under 10 minutes and is much cheaper than a memory-growth profiling
+session. Valgrind is fast enough on this codebase (single-digit seconds
+per hundred cases) to be a first-choice tool, not a last resort — reach
+for it earlier next time a `gdb` backtrace alone doesn't explain why an
+assertion-enabled build produced a bare `SIGSEGV` instead of an assert.
+
+## Suggested next steps
+
+1. **Re-run a broader CTS sweep** (the `query_pool`/`dynamic_state`/
+   `geometry`/`tessellation`/`multiview` groups this and prior sessions
+   found crashing at *much smaller* case counts than 2,401) to check
+   whether any of those were actually this same bug reached sooner via a
+   denser concentration of non-offset structs in those groups, now
+   fixed as a side effect. ~30-60 min for a batch re-run of those 5
+   groups.
+2. **Do a full 54-group CTS sweep** now that this systemic crash is gone
+   — expect noticeably higher completion/coverage than any edition run
+   while H96 was still open, since every group's caselist used to risk
+   truncating early once ~2,000+ cases of accumulated non-crashing state
+   happened to include enough non-offset-struct shapes. Half a day for a
+   full sweep at this codebase's current pass rate.
+3. Continue working the open H10x (H101q/H101c/H93/H102-adjacent) rows
+   from the still-open roadmap backlog — none of them are blocked by
+   H96 anymore.
