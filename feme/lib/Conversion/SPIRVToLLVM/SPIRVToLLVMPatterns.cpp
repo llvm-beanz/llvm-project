@@ -6498,6 +6498,59 @@ public:
   }
 };
 
+/// Converts a function-local `spirv.Variable` whose initializer is an
+/// aggregate (array, matrix, or struct) rather than a scalar or vector --
+/// e.g. a GLSL local `const vec4 positions[4] = vec4[](...)` array, the
+/// real shape `dEQP-VK.mesh_shader.ext.smoke.*.fullscreen_gradient`'s own
+/// mesh shader declares to hold its per-vertex position/color lookup
+/// tables (roadmap H111). Upstream MLIR's own `VariablePattern`
+/// (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) explicitly restricts
+/// initialization support to `pointeeType.isIntOrFloat()` or a plain
+/// `VectorType`, rejecting anything else outright ("Initialization is
+/// supported for scalars and vectors only") -- even though the
+/// `alloca`-then-`store` lowering it already performs for those two cases
+/// is entirely type-agnostic and works identically for any type
+/// `ArrayConstantPattern`/`CompositeConstructPattern`/etc. can already
+/// build a real `!llvm.array`/`struct` constant or value for. Registered
+/// at `FeMeBenefit` so it wins over upstream's own pattern for exactly
+/// this shape; falls back to `failure()` (letting upstream's own pattern
+/// handle it, unchanged) for every scalar/vector/uninitialized case this
+/// pattern does not need to touch.
+class AggregateInitializedVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::VariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::VariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::VariableOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Value Init = Op.getInitializer();
+    if (!Init)
+      return Rewriter.notifyMatchFailure(Op, "no initializer");
+    auto PointeeType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getType()).getPointeeType();
+    if (PointeeType.isIntOrFloat() || mlir::isa<mlir::VectorType>(PointeeType))
+      return Rewriter.notifyMatchFailure(
+          Op, "scalar/vector initializer already handled upstream");
+
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    mlir::Type ElementType = getTypeConverter()->convertType(PointeeType);
+    if (!DstType || !ElementType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Size =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), 1);
+    mlir::Value Allocated =
+        mlir::LLVM::AllocaOp::create(Rewriter, Loc, DstType, ElementType, Size);
+    mlir::LLVM::StoreOp::create(Rewriter, Loc, Adaptor.getInitializer(),
+                                Allocated);
+    Rewriter.replaceOp(Op, Allocated);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.CompositeConstruct` building a 1-D vector out of scalar
 /// and/or shorter-vector constituents (e.g. HLSL's `float3(x, x, x)`, which
 /// SPIR-V spells as a `CompositeConstruct` of three scalar constituents, or
@@ -8811,6 +8864,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const FloatControlInfoMap &DenormFlushToZeroWidths,
     const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
+      AggregateInitializedVariablePattern,
       ArrayConstantPattern, AssumeTrueConversionPattern,
       AtomicCompareExchangePattern,
       AtomicRMWPattern<mlir::spirv::AtomicIAddOp, mlir::LLVM::AtomicBinOp::add>,
