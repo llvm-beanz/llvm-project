@@ -81496,3 +81496,111 @@ assertion-enabled build produced a bare `SIGSEGV` instead of an assert.
 3. Continue working the open H10x (H101q/H101c/H93/H102-adjacent) rows
    from the still-open roadmap backlog — none of them are blocked by
    H96 anymore.
+
+# H94 session: false alarm, but a real regression (H85) turned up right behind it
+
+**Run `ninja check-feme` next if you're picking this up cold** — 2996
+tests, 2993 pass, 3 pre-existing unsupported, 0 regressions.
+
+## What happened (short version)
+
+1. H94 (`misc.payload_not_accessed` `SIGSEGV`) — stale-`.so` false alarm,
+   same pattern as H99a/H100. No code change. Struck through.
+2. Found a **duplicate milestone ID**: a second open row was also
+   labeled `H95` (collided with the already-closed original `H95`).
+   Renumbered it `H104`.
+3. H104 — also a stale-`.so` false alarm. Struck through.
+4. H70 fully closed (its only two open children, H94/H104, both done).
+5. Ran a full `dEQP-VK.mesh_shader.ext.*` sweep (26,921 cases, 0
+   crashes) to sanity-check H96's fix and look for other work.
+6. **Found H85 was wrongly closed.** All 20 of its cases
+   (`group_memory_barrier_in_*`/`memory_barrier_shared_in_*`) still
+   fail, deterministically, 3/3 repeats. The prior closing note's "all
+   20 Pass" claim was false.
+7. Bisection attempt (suspecting H95a) gave a non-monotonic
+   fail→crash→fail pattern across 3 commits — abandoned as
+   unproductive, went straight to root-causing on current `HEAD`
+   instead.
+8. **Root cause found and fixed**: `SetMeshOutputsEXT`/
+   `EmitMeshTasksEXT` must only be honored from invocation 0 of the
+   workgroup (per `GL_EXT_mesh_shader`), but the CTS's own generated
+   shaders call both unconditionally from every invocation. FeMe's
+   lowering wrongly treated every active lane's write as idempotent,
+   so whichever lane wrote last clobbered invocation 0's real value.
+9. Fixed both `MeshOutputWrapper.cpp`'s `lowerSetMeshOutputs` and
+   `TaskPayloadWrapper.cpp`'s `lowerEmitMeshTasks` — gate every write
+   on the true flattened invocation 0 (`wave_index==0 && Lane==0`).
+10. Added 2 regression tests, verified each fails pre-fix / passes
+    post-fix.
+11. Re-ran all 20 H85 cases: **20/20 Pass, 3x for determinism**.
+12. `ninja check-feme`: 2993/2996 pass, no regressions.
+13. Updated `Roadmap.md` (H85's row now documents the correction) and
+    `VulkanCTSReport.md` (new section + headline revision/counts bumped).
+
+## How the root cause was actually found
+
+Two techniques, both temporary and both fully reverted before
+committing:
+
+1. **Env-gated whole-module IR dumps** in `Pipeline.cpp`'s
+   `runAndCheck` lambda — dumped every CPU pipeline stage's IR for the
+   failing case.
+2. **qpa PNG extraction** — a `.qpa` log embeds base64 PNGs; decoded
+   the actual-vs-reference pixels directly with `PIL`. Actual was
+   `(0,0,0,0)` (nothing rendered); references were `(0,0,1,1)`/
+   `(0,0,0,1)`.
+3. Reading the CTS's own shader-generation source
+   (`vktMeshShaderMiscTestsEXT.cpp`) showed `SetMeshOutputsEXT` called
+   unconditionally, not gated on `gl_LocalInvocationIndex==0`.
+4. **Runtime `printf` tracing** added directly into
+   `lowerSetMeshOutputs`/`lowerMeshOutputStore` confirmed it live:
+   `lane=0` wrote the real `(1,1)`, then `lane=1` (also "active" per the
+   call site's unconditional mask) overwrote it with `(0,0)`.
+
+Both temporary-instrumentation techniques worked well and are cheap
+(minutes each) — reach for them again before reaching for `gdb` alone
+on a "compiles and runs but wrong pixels" bug.
+
+## Why bisection failed here
+
+Fail → crash → fail across three candidate commits looked like real
+non-determinism, but was actually a coincidence: the "crash" seen at
+one historical commit was very likely an unrelated bug active only at
+that specific point in history, not evidence about H85's real bug
+(which was a plain, always-there logic error). **Lesson: if a
+bisection produces a non-monotonic result, don't trust it as evidence
+about determinism — go straight to direct root-causing (IR dump +
+runtime trace) instead of spending more time on bisection.**
+
+## Files changed (4 commits, in order)
+
+1. `feme/lib/Transforms/CPU/MeshOutputWrapper.cpp` +
+   `feme/unittests/Transforms/CPU/MeshOutputWrapperTest.cpp` — the
+   `SetMeshOutputsEXT` fix + regression test.
+2. `feme/lib/Transforms/CPU/TaskPayloadWrapper.cpp` +
+   `feme/unittests/Transforms/CPU/TaskPayloadWrapperTest.cpp` — the
+   identical `EmitMeshTasksEXT` fix + regression test.
+3. `feme/docs/Roadmap.md` + `feme/docs/VulkanCTSReport.md` — the H85
+   correction.
+4. This file.
+
+(The H94/H104/H70 roadmap-only commits from earlier in this same
+session were already committed before this segment started; see the
+git log around `32d3e5748977`/`43a035f05fb5`.)
+
+## Suggested next steps
+
+1. **Grep for other "invocation 0 only" builtins** in the mesh/task/
+   amplification lowering (`feme/lib/Transforms/CPU/*.cpp`) that might
+   share this same latent bug class — anywhere a `feme.cpu.masked.*`
+   call represents a workgroup-uniform write, check whether it's
+   gated on `wave_index==0 && Lane==0` or still relies on the naive
+   "every active lane is idempotent" assumption. ~30 min grep + read.
+2. **Re-run the broader `dEQP-VK.mesh_shader.ext.*` sweep** (26,921
+   cases) to confirm the previous 90-failure count drops by (at least)
+   these 20 and see if any of the other 70 (44 `api`, 28 `misc` minus
+   these 20, 12 `synchronization`, 1 `builtin`) also happen to share
+   this root cause. ~20-30 min.
+3. Continue working the still-open H93/H96-adjacent/H102 rows from the
+   roadmap backlog (H85 was blocking nothing else directly, but was
+   found opportunistically while looking for "other blocking work").
