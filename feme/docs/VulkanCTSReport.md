@@ -41604,3 +41604,118 @@ feature or extension. `FeMeGraphicsDesign.md` needs no change: the CPU
 lowering's own documented invocation-numbering model
 (`buildFlattenedThreadIdInGroup`) already supported this; only the two
 lowering passes' own local assumption about caller behavior was wrong.
+
+## Roadmap H82: measured impact (this session's correction)
+
+**Correction to this row's prior closure.** H82 was previously closed
+with the claim "already resolved," found false during this session's
+own re-triage sweep of every open H-series row: `dEQP-VK.mesh_shader
+.ext.misc.per_prim_block_output` still deterministically fails,
+reproducing the exact original `'llvm.getelementptr' op operand #0
+must be LLVM pointer type or LLVM dialect-compatible vector of LLVM
+pointer type, but got '!llvm.struct<(f32, vector<3xf32>, f32)>'`
+diagnostic.
+
+**Major correction to this bug's own shape.** Every prior investigation
+of this row (including its own title, "PerPrimitive output block")
+assumed the fault was in a mesh shader's own `Output` write of its
+`PerPrimitiveEXT` block. A temporary `FEME_DEBUG_DUMP_SPIRV_DIR`
+env-var-gated dump added directly inside `feme::vulkan
+::importShaderModule` (writing the exact raw SPIR-V words production
+feeds into `vkCreateGraphicsPipelines`, removed before committing)
+captured only **one** dumped module for this failing case -- the
+fragment shader, identifiable by its `gl_PrimitiveID`/`Flat` builtin
+and its own `PerPrimitiveEXT`-decorated `Input` struct. The mesh shader
+compiles cleanly; this is purely a fragment-stage `Input`-*read* bug.
+
+**Bug 1 (GEP legalization gap).** `isArrayLikeStageIOType`/
+`isArrayLikeLLVMType` (`SPIRVToLLVMPatterns.cpp`, introduced by H87)
+recognized only a plain `spirv.array`, or a single-member struct
+wrapping one, as needing "stay a real pointer" treatment for an `Input`
+variable. This case's own interface block -- a genuine multi-member
+struct, `{ float a; vec3 b; float c; }`, no array at all -- was eagerly
+loaded to a plain SSA value at its address-of site instead, same as any
+ordinary scalar/vector `Input`; a subsequent `spirv.AccessChain`
+selecting member `b` then fed that eagerly-loaded value into MLIR's
+generic `AccessChainPattern`, whose unconditional `getelementptr`
+construction requires a real pointer base, producing the ill-typed GEP.
+Fixed by broadening both predicates (renamed `isCompositeStageIOType`/
+`isCompositeLLVMType`) to recognize *any* struct type, at all three call
+sites (address-of, the type converter's `spirv.PointerType`
+conversion, and `isInputArrayAccessChain`). A new
+`spirv-to-llvm-stage-io.mlir` case (`read_multi_member_block`) covers
+this shape, confirmed to reproduce the original diagnostic without the
+fix and pass with it.
+
+**Bug 2 (datalayout-ordering gap, only exposed once Bug 1 was fixed).**
+With Bug 1 fixed, the same case traded its diagnostic for a different
+one: `feme-graphics-validate-stage: 'feme.stage.input.load' ...
+component 1/2 is out of range for element 1` (the middle `vec3`
+member's read misresolved onto the same `SignatureElement` as the
+leading `float`). Root-caused via three further rounds of temporary
+env-gated whole-module IR dumps (added to `Pipeline.cpp`, `Target/CPU/
+Pipeline.cpp`, and `GraphicsPipeline.cpp`, all reverted before
+committing): `feme::vulkan::clearHostAgnosticMetadata` reset the
+imported module's `DataLayout` to an empty, default one immediately
+after SPIR-V-to-LLVM translation, *before* `feme::graphics
+::CanonicalizeStagePass` ever runs. That pass resolves each stage-IO
+struct member's byte offset (baked into a SPIR-V-derived
+`getelementptr` using the `DataLayout` `SPIRVToLLVMTranslator` itself
+set) back to its declared `SignatureElement` via `DL.getStructLayout
+(...)->getElementContainingOffset(...)`; replacing that `DataLayout`
+with an empty one first re-derives those same offsets against
+alignment-free struct-layout math instead of the real one that
+produced them, misresolving any alignment-sensitive shape -- exactly a
+`{ float; vec3; float }` struct, where a real ABI pads the leading
+`float` before the natively-aligned `vec3` but the empty layout does
+not.
+
+Manually stripping `target datalayout`/`target triple` from a
+known-good, byte-accurate reproduction of the real captured module
+(matching `clearHostAgnosticMetadata`'s post-clear state) and
+re-running `feme-opt --llvm -passes=feme-graphics-canonicalize-stage`
+on it standalone exactly reproduced the bug, confirming the mechanism
+before any fix was written.
+
+Fixed by no longer touching the module's `DataLayout` in
+`clearHostAgnosticMetadata` at all (only its target triple/module
+flags, neither struct-layout-sensitive), leaving `CanonicalizeStagePass`
+free to resolve offsets against the same `DataLayout` that produced
+them. `feme::cpu::runPipeline` now substitutes the real host
+`DataLayout` (via `JITTargetMachineBuilder::detectHost()`) immediately
+after its own `CanonicalizeStagePass`/`ValidateStagePass` pair finishes
+without error -- late enough not to disturb that resolution, but before
+`feme::cpu::PreparePass`/codegen/JIT linking against
+`libFeMeRuntimeCPU` need the real one. (An intermediate attempt that
+substituted the real host `DataLayout` immediately in
+`clearHostAgnosticMetadata`, i.e. *before* `CanonicalizeStagePass` runs,
+was tried and rejected: it still mis-resolved the same element mapping,
+since the byte offsets baked in at translation time were computed
+against the SPIR-V-triple-derived `DataLayout`, not the host one, and
+also produced a "linking two modules of different data layouts"
+warning against `libFeMeRuntimeCPU` when the module's `DataLayout` was
+*never* switched back to the SPIR-V-triple one afterward -- confirming
+both that `CanonicalizeStagePass` needs the *original* translation-time
+`DataLayout`, and that the JIT link step needs the *real host* one.)
+
+**Verification:** `dEQP-VK.mesh_shader.ext.misc.per_prim_block_output`
+now genuinely **Passes** (confirmed standalone, `--deqp-shadercache
+=disable`). A full `dEQP-VK.mesh_shader.ext.*` mustpass re-run
+(28,044 cases) confirms **375 Pass/64 Fail/27,605 Not supported** (up
+from 373/66/27,605 before this session's fixes) -- fixing this case
+plus, as a bonus (same root cause, not separately investigated before
+now), `misc.complex_task_data`, with zero regressions (a full diff of
+both runs' own failing-case lists shows only removals, no additions).
+`ninja check-feme`: 2993/2996 passed, 3 pre-existing `Unsupported`, 0
+`Failed` -- unchanged from before this session's fixes.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a correctness bugfix to `VK_EXT_mesh_shader` support
+already listed as supported, not a new feature or extension.
+`FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` need no change: neither
+design document specified an ordering contract for when the CPU
+pipeline's `DataLayout` should be switched between the SPIR-V-derived
+one and the real host one relative to `CanonicalizeStagePass`; this fix
+establishes that ordering as an implementation detail internal to
+`feme::vulkan::importShaderModule`/`feme::cpu::runPipeline`'s own
+contract, not a documented design decision.
