@@ -49,18 +49,17 @@ Can you work on the H-series milestones?
 
 The previous session suggested the next steps:
 
-1. **Triage the remaining 19 `mesh_shader.ext.*` failures** — the
-   `synchronization.*` bucket (12 cases, all barrier-related) is the
-   largest single group and untouched so far. ~15-30 min each for a first
-   diagnostic.
-2. **Audit other `widen*` helpers in `SIMDize.cpp` for the same bug
-   pattern** — this session's fix was applied generically at the
-   `ToErase` cleanup-loop level (so it covers every unconditional-widen
-   producer, not just masked loads/stores), but a targeted audit of each
-   individual `widen*` function for whether it *should* have gated on
-   `isDivergentAtDef` earlier (skipping the widen outright, the way
-   `widenVectorElementwise` does) rather than relying on this session's
-   cleanup-loop safety net, hasn't been done. ~30 min grep + read.
-3. **Find or construct a real CTS-level repro for H105** — still only
-   proven by a hand-written unit test (unchanged from last session's
-   suggestion, still not attempted). ~30-45 min to search/construct.
+1. **Start H109** (~1-2 hours): add a `V4I32`/`V4U32`-returning CPU sample entry
+   point in `ImageCalls.h`/`.cpp`, wire `SPIRVResourceLowering.cpp` to select it
+   for integer-sampled images instead of rejecting them, implement nearest-only
+   sampling math, add a unit test per phase, re-run the 4 `synchronization.*`
+   cases.
+2. **`properties.max_mesh_output_components`** (1 case, still untriaged): no
+   session has looked at this specific case yet -- worth a first diagnostic
+   (~15-30 min).
+3. **`smoke.*.fullscreen_gradient`** (3 cases): already known pre-existing per
+   H76, not re-investigated this session -- check H76's own row for its current
+   status before assuming it's still unfixed.
+4. Once H109 lands, `dEQP-VK.mesh_shader.ext.*` should be down to those 4
+   remaining cases -- worth a final sweep to confirm before considering H70's
+   whole lineage closed.
