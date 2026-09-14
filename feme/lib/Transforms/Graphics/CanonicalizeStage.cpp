@@ -1496,11 +1496,42 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
 /// RowIndex is null, \p VertexIndex is never constant (the "ordinary
 /// constant-offset path" caveat above), since that fully-constant case is
 /// left for `getStageIOBaseAndOffset` to resolve as before.
+///
+/// (Roadmap H7w) \p Member is only meaningful alongside \p RowIndex: which
+/// of \p GV's own per-vertex struct members (if it has more than one --
+/// e.g. `gl_PerVertex`'s `{Position, ClipDistance, CullDistance}`) the row
+/// index selects a row within, since \p ByteOffset alone cannot tell
+/// `resolveStageIOAccess` which of \p GV's several `ElementIDs` to use the
+/// way it can for the ordinary, fully-constant-remainder case. Before this
+/// field existed, `resolveStageIOAccess`'s own `RowIndex` branch assumed
+/// \p GV had exactly one signature element and \p ByteOffset was always
+/// `0` -- true for a plain, single-member global like `ls[0].location_
+/// var[i]` above, but false for `gl_in[vertNdx].gl_ClipDistance[i]`/
+/// `gl_CullDistance[i]` (a real `dEQP-VK.clipping.user_defined.
+/// {clip_distance,clip_cull_distance}_dynamic_index.{vert_geom,vert_tess,
+/// vert_tess_geom}.*` shape, `ClipDistance`/`CullDistance` never being
+/// `gl_PerVertex`'s first member) -- silently leaving that access
+/// unrewritten, which surfaced downstream not as a
+/// `feme-graphics-validate-stage` diagnostic (its own "unresolved
+/// stage-IO global-variable access" check has this exact gap too, see
+/// that pass's own fix) but as a JIT-link-time `"Symbols not found: [
+/// spirv_varN ]"` failure once the leftover raw load/GEP reached
+/// `feme::cpu`'s JIT with no real definition for the SPIR-V-derived global
+/// it still referenced.
 struct DynamicVertexIndexedAccess {
   GlobalVariable *GV;
   Value *VertexIndex;
   uint64_t ByteOffset;
   Value *RowIndex = nullptr;
+  // (Roadmap H7w) Which of \p GV's own per-vertex struct members \p
+  // RowIndex selects a row within -- e.g. `1` for `gl_ClipDistance` in a
+  // `gl_PerVertex` block (`{Position, ClipDistance, CullDistance}`).
+  // Meaningless when \p RowIndex is null (the ordinary constant-offset
+  // path resolves that case without ever consulting it). Always `0` for a
+  // plain, single-member global (a non-block per-vertex-arrayed output/
+  // input with nothing but its one row-indexed array), matching the
+  // implicit assumption every caller made before this field existed.
+  unsigned Member = 0;
 };
 
 /// Returns `std::nullopt` if \p Ptr is not this exact shape.
@@ -1532,6 +1563,7 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
 
   Type *CurTy = ArrTy->getElementType();
   uint64_t ByteOffset = 0;
+  unsigned Member = 0;
   Value *RowIndex = nullptr;
   for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
     if (auto *CI = dyn_cast<ConstantInt>(*IdxIt)) {
@@ -1539,6 +1571,12 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
       if (auto *ST = dyn_cast<StructType>(CurTy)) {
         const StructLayout *SL = DL.getStructLayout(ST);
         ByteOffset += SL->getElementOffset(Idx);
+        // (Roadmap H7w) Only meaningful once `RowIndex` is also set below
+        // (see `DynamicVertexIndexedAccess::Member`'s own comment); simply
+        // records the *last* struct member index seen, mirroring
+        // `getDynamicRowIndexedAccess`'s own identical, single-level
+        // tracking -- no real shape nests a struct within a struct here.
+        Member = Idx;
         CurTy = ST->getElementType(Idx);
       } else if (auto *InnerArrTy = dyn_cast<ArrayType>(CurTy)) {
         ByteOffset += Idx * DL.getTypeAllocSize(InnerArrTy->getElementType());
@@ -1594,7 +1632,8 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
   // functions entirely unresolved.
   if (ConstantVertexIndex && !RowIndex)
     return std::nullopt;
-  return DynamicVertexIndexedAccess{GV, VertexIndex, ByteOffset, RowIndex};
+  return DynamicVertexIndexedAccess{GV, VertexIndex, ByteOffset, RowIndex,
+                                    Member};
 }
 
 /// (Roadmap H7w) `gl_ClipDistance`/`gl_CullDistance` (or any other
@@ -2821,17 +2860,18 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     // (Roadmap H92) A second, genuinely dynamic row index (e.g.
     // `loc[pointIdx].elements[elemIdx]`) has nowhere to go in
     // `resolveOffsetWithinElement`'s own byte-offset-based recursion, so
-    // build the `StageIOAccess` directly instead: `IDs` must name exactly
-    // one signature element (this shape has no real per-member builtin
-    // interface block use yet, and `getDynamicVertexIndexedAccess`'s own
-    // `ByteOffset` prefix, always 0 for every real case seen so far,
-    // has nowhere to go here either -- left unresolved rather than
-    // silently discarded if a future shape ever has one).
+    // build the `StageIOAccess` directly instead: `Dyn->Member` (roadmap
+    // H7w) selects which of `It->second`'s signature elements the row
+    // index applies to, so a real per-member builtin interface block
+    // (e.g. `gl_in[vertNdx].gl_ClipDistance[i]`, `ClipDistance` being
+    // `gl_PerVertex`'s second member, not its only one) resolves here too,
+    // not just a plain single-element global.
     if (Dyn->RowIndex) {
-      if (It->second.size() != 1 || Dyn->ByteOffset != 0)
+      if (Dyn->Member >= It->second.size())
         return std::nullopt;
-      return StageIOAccess{It->second, Dyn->RowIndex, nullptr,
-                           Dyn->VertexIndex, OutputGlobals.contains(Dyn->GV)};
+      return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1),
+                           Dyn->RowIndex, nullptr, Dyn->VertexIndex,
+                           OutputGlobals.contains(Dyn->GV)};
     }
     Type *ElemTy = cast<ArrayType>(Dyn->GV->getValueType())->getElementType();
     return resolveOffsetWithinElement(ElemTy, It->second, Dyn->ByteOffset,

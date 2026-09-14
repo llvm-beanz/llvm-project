@@ -1554,6 +1554,93 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenLoads, 4u);
 }
 
+/// (Roadmap H7w) The real shape a `dEQP-VK.clipping.user_defined.
+/// {clip_distance,clip_cull_distance}_dynamic_index.{vert_geom,vert_tess,
+/// vert_tess_geom}.*` geometry/tessellation entry's own
+/// `gl_in[vertNdx].gl_ClipDistance[i] = ...`/`gl_CullDistance[i]` read
+/// compiles into: a genuinely dynamic *vertex* index (`vertNdx`, a
+/// loop-carried vertex-in-primitive counter) *and* a genuinely dynamic
+/// *row* index (`i`, a loop-carried clip/cull-plane counter) into the same
+/// access, selecting a member -- `gl_ClipDistance`, `gl_PerVertex`'s
+/// third, not first, member -- that is neither `gl_Position` (member 0,
+/// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad` above's
+/// own shape, no row of its own to index) nor this global's sole element
+/// (`MeshStageCanonicalizesDoublyDynamicOutputStore`'s own shape, a
+/// single-member, non-block global). Before this row's own fix,
+/// `getDynamicVertexIndexedAccess` still recognized this exact GEP shape
+/// (peeling the vertex index, then the constant member-2 selector, then
+/// the row index) and returned a `DynamicVertexIndexedAccess` for it, but
+/// `resolveStageIOAccess`'s own `RowIndex` branch discarded that result
+/// outright: it assumed any global reaching that branch had exactly one
+/// signature element and a zero `ByteOffset`, both false for
+/// `gl_ClipDistance` here (`gl_PerVertex` has four elements, and member
+/// 2's own struct offset is nonzero) -- silently leaving the whole access
+/// unrewritten. That raw load survived `feme-graphics-validate-stage`
+/// undetected (a pointer-operand check only, not a per-shape one) and
+/// reached `feme::cpu`'s JIT as a "Symbols not found" link failure
+/// instead of a clean diagnostic or a correct rewrite.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicVertexAndRowIndexIntoInterfaceBlockMemberLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_in = external addrspace(7) global [3 x { <4 x float>, float, [1 x float], [1 x float] }], !feme.spirv.MemberDecorations !10
+    define float @main(i32 %vertNdx, i32 %i) #0 {
+      %p = getelementptr inbounds [3 x { <4 x float>, float, [1 x float], [1 x float] }], ptr addrspace(7) @gl_in, i32 0, i32 %vertNdx, i32 2, i32 %i
+      %v = load float, ptr addrspace(7) %p
+      ret float %v
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *VertNdxArg = F->getArg(0);
+  Argument *IArg = F->getArg(1);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+  EXPECT_EQ(Sig->Elements[2].SystemValue, SignatureSystemValue::ClipDistance);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[2].ElementID);
+    EXPECT_EQ(CI->getArgOperand(1), IArg);
+    EXPECT_EQ(CI->getArgOperand(3), VertNdxArg);
+  }
+  EXPECT_EQ(SeenLoads, 1u);
+
+  // (Roadmap H7w) The original raw load through `@gl_in`, and the GEP
+  // that computed its address, must both be gone -- not just the load:
+  // a dead `GetElementPtrInst` left referencing this external,
+  // never-defined global would still need `feme::cpu`'s JIT to resolve
+  // its address, exactly the "Symbols not found" failure this row fixes.
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<LoadInst>(&I));
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      EXPECT_NE(GEP->getPointerOperand(), M->getGlobalVariable("gl_in"));
+  }
+}
+
 /// (Roadmap H5f) The *constant*-index counterpart of
 /// `ThreadsDynamicVertexIndexIntoInputLoad`: `gl_in[k]`-shaped (or any
 /// other per-vertex-arrayed `Input` global's) access with a compile-time
