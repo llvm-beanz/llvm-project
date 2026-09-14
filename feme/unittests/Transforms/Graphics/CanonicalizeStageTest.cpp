@@ -2879,6 +2879,78 @@ TEST(CanonicalizeStageTest, MeshStageCanonicalizesDoublyDynamicOutputStore) {
   }
 }
 
+/// (Roadmap H110) A mesh entry's own per-primitive `Output` block with
+/// exactly one primitive -- so its outer per-primitive array index is
+/// always the compile-time constant `0`, unlike
+/// `MeshStageCanonicalizesDoublyDynamicOutputStore` above's genuinely
+/// dynamic outer index -- whose one struct member is itself an array
+/// written through a loop-carried, genuinely non-constant index:
+/// `ls[0].location_var[i] = ...`, the real shape
+/// `dEQP-VK.mesh_shader.ext.properties.max_mesh_output_components`'s own
+/// mesh shader compiles a per-primitive
+/// `layout(location=0) perprimitiveEXT flat out LocationStruct ls[];`
+/// (`struct LocationStruct { uvec4 location_var[maxLocations]; };`) write
+/// into. Before this roadmap entry, `getDynamicVertexIndexedAccess`
+/// rejected *any* constant outer index outright (leaving it for the
+/// ordinary constant-offset path, which cannot fold the further
+/// non-constant inner index either), and `getDynamicRowIndexedAccess`
+/// explicitly excludes any `isDynamicIndexedArrayGlobal` global (to avoid
+/// double-recognizing `getDynamicVertexIndexedAccess`'s own shape) -- so
+/// this access fell through both functions entirely unresolved, surfacing
+/// as `feme-graphics-validate-stage`'s "unresolved stage-IO
+/// global-variable access" diagnostic.
+TEST(CanonicalizeStageTest,
+     MeshStageCanonicalizesConstantOuterDynamicInnerOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %struct.LocationStruct = type { [4 x <4 x i32>] }
+    @ls = external addrspace(8) global [1 x %struct.LocationStruct], !spirv.Decorations !0
+    define void @main(i32 %i, <4 x i32> %v) #0 {
+      %p = getelementptr inbounds [1 x %struct.LocationStruct], ptr addrspace(8) @ls, i32 0, i32 0, i32 0, i32 %i
+      store <4 x i32> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IdxArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // Operand order: ElementID, Row, Component, Val, Vertex.
+    EXPECT_EQ(CI->getArgOperand(1), IdxArg);
+    auto *VertexConst = dyn_cast<ConstantInt>(CI->getArgOperand(4));
+    ASSERT_NE(VertexConst, nullptr);
+    EXPECT_TRUE(VertexConst->isZero());
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  // As in `MeshStageCanonicalizesDoublyDynamicOutputStore` above, the
+  // genuinely dynamic `Row` (`i`) gives this element a non-promotable,
+  // `RowCount`-sized array alloca rather than one plain scalar alloca per
+  // row -- what matters is that the original store directly through
+  // `@ls` itself is gone.
+  for (Instruction &I : instructions(F)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    EXPECT_NE(SI->getPointerOperand()->stripPointerCasts(),
+              M->getGlobalVariable("ls"));
+  }
+}
+
 /// (Roadmap H76) The real shape a `dEQP-VK.mesh_shader.ext.smoke.fast_lib.
 /// depth_only_points_position_components`/`depth_only_triangles_position_
 /// components` mesh entry's own per-component position write compiles
