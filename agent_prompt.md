@@ -45,22 +45,21 @@ agent thoughts.
 
 # Request
 
-Can you work on H94 or other blocking work to make progress on the H-series
-milestones?
+Can you work on the H-series milestones?
 
-> **`misc.payload_not_accessed`'s bare `SIGSEGV` crash** (1 case, newly
-> discovered during a full H70-closing re-triage sweep, confirmed reproducible
-> standalone via a fully isolated, shader-cache-disabled `deqp-vk
-> --deqp-case=...` invocation, so it is a real, deterministic crash and not a
-> shared-shader-cache artifact of the kind this same re-triage session found
-> elsewhere): earlier design-doc history (see `L40`'s own closing note) shows
-> this exact case previously passed cleanly, so this is a genuine regression,
-> not a never-fixed gap, though the regressing commit has not yet been
-> identified. A `gdb` backtrace lands in unsymbolized JIT-compiled code (`0x...
-> in ?? ()`, "corrupt stack?"), consistent with prior mesh-shader JIT crashes in
-> this file's own history, so a real root-cause needs an IR-level reduction
-> (`feme-translate`/`feme-opt`, mirroring this file's own repeated technique)
-> rather than a native-code debugger session alone. Not yet triaged -- needs its
-> own IR reduction to identify which pass/lowering step miscompiles this case's
-> specific payload-declared-but-unread shape, and a bisection to identify the
-> regressing commit
+The last session suggested these next steps:
+
+1. **Grep for other "invocation 0 only" builtins** in the mesh/task/
+   amplification lowering (`feme/lib/Transforms/CPU/*.cpp`) that might
+   share this same latent bug class — anywhere a `feme.cpu.masked.*`
+   call represents a workgroup-uniform write, check whether it's
+   gated on `wave_index==0 && Lane==0` or still relies on the naive
+   "every active lane is idempotent" assumption. ~30 min grep + read.
+2. **Re-run the broader `dEQP-VK.mesh_shader.ext.*` sweep** (26,921
+   cases) to confirm the previous 90-failure count drops by (at least)
+   these 20 and see if any of the other 70 (44 `api`, 28 `misc` minus
+   these 20, 12 `synchronization`, 1 `builtin`) also happen to share
+   this root cause. ~20-30 min.
+3. Continue working the still-open H93/H96-adjacent/H102 rows from the
+   roadmap backlog (H85 was blocking nothing else directly, but was
+   found opportunistically while looking for "other blocking work").
