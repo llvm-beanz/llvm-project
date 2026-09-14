@@ -42326,3 +42326,82 @@ failures, up by 3 tests (the two new `ExecutorTest.cpp` regression
 cases plus one new `StageLinkTest.cpp` case) -- no regressions. H112 is
 closed; H53 and H32 remain open, now depending only on H7w/H7x (not yet
 assigned/broken down further this session).
+
+## Roadmap H113: measured impact (fixed; H7w's `_dynamic_index` JIT-crash class closed)
+
+Picked up H7w's own previously-flagged `_dynamic_index` +
+`vert_geom`/`vert_tess`/`vert_tess_geom` JIT-symbol-resolution crash
+(noted but deferred across at least 3 prior sessions). A real re-run
+confirmed the crash was the *entire* remaining H7w gap: 32/128 `vert`
+combo passing, 96/128 (every `vert_geom`/`vert_tess`/`vert_tess_geom`
+case) failing identically at `vkCreateGraphicsPipelines` with `"JIT
+session error: Symbols not found: [ spirv_var_22 ]"`.
+
+Root-caused via a hand-built IR-reduction repro (`glslangValidator` ->
+`feme-translate --no-implicit-module --spirv-to-llvmir` (the one-shot
+translator; the two-step `--spirv-to-llvmdialect`+`--llvmdialect-to-
+llvmir` path silently skips `attachStageIODecorations`, dropping the
+metadata `CanonicalizeStagePass` depends on -- a red herring that cost
+real time before being worked around) -> `feme-opt
+-passes=feme-graphics-canonicalize-stage,feme-graphics-validate-stage`)
+mirroring the real `gl_in[vertNdx].gl_ClipDistance[i]`/
+`gl_CullDistance[i]` shape (a *combined* dynamic vertex-index and
+dynamic row-index access into `gl_PerVertex`, a multi-member builtin
+interface block).
+
+Found two distinct bugs:
+
+- **Bug #1 (the load-side crash):** `getDynamicVertexIndexedAccess`'s
+  type-walk loop already computed which struct member a dynamic
+  vertex-indexed access selected (via its existing `ByteOffset`
+  accumulation), but never exposed that member index to
+  `resolveStageIOAccess`. Its `RowIndex` branch instead hard-required
+  the target global to have exactly one signature element and a zero
+  `ByteOffset` -- true for H92's own single-member `ls[0].location_
+  var[i]` shape, false for `gl_ClipDistance`/`gl_CullDistance`
+  (`gl_PerVertex`'s 2nd/3rd members, not its only one) -- silently
+  leaving the access unrewritten. Fixed by adding a `Member` field to
+  `DynamicVertexIndexedAccess`, populating it alongside the existing
+  `ByteOffset` tracking, and slicing `It->second` by `Member` in
+  `resolveStageIOAccess` instead of requiring exactly one element.
+- **Bug #2 (a second, related crash, found only once bug #1's fix
+  exposed it clean):** even a correctly-converted load/store left its
+  original `GetElementPtrInst` behind as dead code. A constant-index
+  GEP folds into a reference-counted `ConstantExpr` with nothing left
+  to clean up once unused, but a genuinely non-constant-index GEP
+  (every shape `getDynamicVertexIndexedAccess`/
+  `getDynamicRowIndexedAccess` recognize) is always a real
+  `Instruction`, surviving in its basic block even after the load/store
+  consuming it is erased -- and `feme::cpu`'s JIT still had to resolve
+  the now-dead GEP's own referenced (never-defined) SPIR-V global,
+  failing identically to bug #1. Fixed by a new `EraseIfNowDead` helper
+  (`RecursivelyDeleteTriviallyDeadInstructions`) called on each
+  load/store's captured pointer operand immediately after erasing it,
+  at all 6 erase sites.
+
+Confirmed against the repro: the canonicalized module has zero
+remaining references anywhere to either stage-IO global (not just no
+load/store) after both fixes. New `CanonicalizeStageTest.cpp` case,
+`ThreadsDynamicVertexAndRowIndexIntoInterfaceBlockMemberLoad`, models
+the exact combined shape.
+
+**Real CTS re-measurement** (bit flipped on for the measurement only,
+reverted before landing):
+
+- `dEQP-VK.clipping.user_defined.*dynamic_index*` (128 cases): **114/128
+  Pass** -- up from 32/128 before this session. Every previously-crashing
+  `vert_geom`/`vert_tess`/`vert_tess_geom` case now compiles, links, and
+  runs; the JIT-crash class is fully closed.
+- The 14 remaining failures are exactly
+  `clip_cull_distance_dynamic_index.{vert_tess,vert_tess_geom}.
+  *_fragmentshader_read` -- the intersection with H7x's own
+  still-incomplete `_fragmentshader_read` gap (separately re-measured
+  this session at 100/128 on the broader `*fragmentshader_read*`
+  filter), not a new bug introduced by this row's own fix.
+
+`ninja check-feme`: 3007/3010 pass, 3 pre-existing unsupported, 0
+failures, up by 1 test (the new `CanonicalizeStageTest.cpp` case) -- no
+regressions. `shaderClipDistance`/`shaderCullDistance` stay `VK_FALSE`:
+H7x is not yet fully closed, so this row's fix alone does not clear the
+whole `_dynamic_index` subset end to end. H32 and H53 remain open,
+depending only on H7x's own remaining gap.

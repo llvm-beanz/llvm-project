@@ -1208,6 +1208,22 @@ particular loop shape, stage-IO or not. `shaderClipDistance`/
 alone does not flip a feature bit whose bulk of mandatory CTS surface
 still fails, the same standard as H7h/H7o).
 
+**Update (roadmap H113)**: a later real re-run of the full
+`_dynamic_index` matrix (`vert_geom`/`vert_tess`/`vert_tess_geom`
+combos, not just the `vert`-only subset this row's own original
+reproduction covered) found a second, distinct gap in the same
+`RowIndex` branch this row added: `getDynamicVertexIndexedAccess`'s own
+*combined* dynamic-vertex-index-plus-dynamic-row-index shape
+(`gl_in[vertNdx].gl_ClipDistance[i]`, a genuinely dynamic *outer*
+per-vertex index on top of this row's own dynamic *inner* row index)
+hit a hard-required "exactly one signature element, zero `ByteOffset`"
+check in `resolveStageIOAccess` that this row's own `getDynamicRowIndexed
+Access` path never needed (its own shape has no outer dynamic vertex
+index to combine with). See roadmap H113 and "Roadmap H113: measured
+impact" in `VulkanCTSReport.md` for the fix (a `Member` field on
+`DynamicVertexIndexedAccess`) and a second, related dead-GEP cleanup bug
+found alongside it.
+
 #### Status (roadmap H7x)
 
 A fragment stage's own read of `gl_ClipDistance`/`gl_CullDistance` --
