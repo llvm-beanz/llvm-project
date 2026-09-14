@@ -42105,3 +42105,55 @@ sweep (26,921 cases, from before H111(a) landed): 436 Pass/3 Fail (the
 same 3 `fullscreen_gradient` cases), up from 435/4 after H110. See
 roadmap H111/H111(a)-H111(b) in `Roadmap.md`.
 
+## Roadmap H111(b): measured impact (fixed; H70's whole lineage now fully closed)
+
+**Status:** fixed. Bisected the all-black render down to a hand-written
+`ExecutorTest.cpp` repro (`MeshLocalArrayDynamicIndexProducesFullScreenGradient`)
+that isolates the real shader's shape: a function-local `alloca [4 x
+<4 x float>]` populated by a single, unconditional, uniform whole-array
+`store` of a compile-time constant, later read back through a
+divergent (per-lane) `getelementptr`+`load`, itself gated by an `if`
+(a real mesh shader's `if (invocationId < numPrimitives) { ... }`
+guard around its primitive-index writes). Root-caused to
+`feme/lib/Transforms/CPU/SIMDize.cpp`'s `widenMaskedAlloca`
+(roadmap L84): once `feme::cpu::LinearizePass` converts the divergently-
+gated `load` into a `feme.cpu.masked.load` call, `collectMaskedAllocas`
+correctly recognizes the array's `alloca` as needing real per-lane
+storage and splits it into `WaveSize` separate private copies -- but the
+array's own *unconditional* initializer `store` (never itself a masked
+call, since it always executes) was left classified "uniform: leave it
+exactly as it is" by the ordinary per-instruction uniformity gate, so it
+kept running as a single scalar store into what the pass's own final
+"leftover stale use" cleanup (roadmap H107) narrows a since-erased
+`AllocaInst`'s remaining use down to: lane 0's copy only. Every other
+lane's own private copy was left as uninitialized stack memory, read
+back as garbage by the later masked gather -- matching this session's
+own three-way bisection exactly (a garbage-valued read from whichever
+array happened to still resolve through lane 0, degenerate/garbage
+`gl_Position` values collapsing rasterization entirely when it was the
+position array). Fixed by adding `FunctionWidener::widenMaskedAllocaStore`,
+dispatched (in `widenInstruction`, alongside the existing masked-`alloca`/
+masked-GEP checks) for any plain, non-masked `store` whose pointer
+operand's underlying `alloca` is in `MaskedAllocas`: it now executes the
+store once per lane, into that lane's own real address, replicating a
+uniform value operand unchanged (the common case; this array's own
+compile-time-constant initializer) or decomposing a genuinely divergent
+scalar/vector value operand into its own per-lane components first (a
+rarer shape, in case some other, distinctly-shaped masked-alloca access
+elsewhere ever needs it too). Added
+`SIMDizeTest.ReplicatesUniformStoreIntoEveryLaneOfAMaskedAllocaArray`
+(confirms all `WaveSize` per-lane copies now receive a real store of the
+array's constant, not just one) and finalized
+`ExecutorTest.MeshLocalArrayDynamicIndexProducesFullScreenGradient` as a
+passing end-to-end regression test. `FeMeTransformsCPUTests`: 469/469
+pass. `FeMeGraphicsTests`: 309/309 pass. `check-feme`: 3003/3003 pass, 3
+pre-existing unsupported, 0 failures, up by 2 tests.
+
+A real re-run confirms all 3 `smoke.*.fullscreen_gradient` cases now
+**pass outright**. A full `dEQP-VK.mesh_shader.ext.*` sweep (26,921
+cases) confirms **439 Pass/0 Fail/26,482 NotSupported** -- every one of
+the currently-`Supported` cases now passes, with zero regressions
+anywhere else in the suite. This closes H111 in full, and with it H70's
+entire lineage (H93 -> H108 -> H109 -> H110 -> H111), started across
+many prior sessions' worth of `mesh_shader.ext.*` triage.
+
