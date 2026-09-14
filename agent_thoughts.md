@@ -81604,3 +81604,76 @@ git log around `32d3e5748977`/`43a035f05fb5`.)
 3. Continue working the still-open H93/H96-adjacent/H102 rows from the
    roadmap backlog (H85 was blocking nothing else directly, but was
    found opportunistically while looking for "other blocking work").
+
+# H82 correction: fragment `Input` read, not mesh `Output` write (two stacked bugs)
+
+**Fixed. `dEQP-VK.mesh_shader.ext.misc.per_prim_block_output` passes.**
+Bonus: `misc.complex_task_data` also fixed (same root cause). Zero
+regressions: full `mesh_shader.ext.*` sweep 375/64/27,605 (was
+373/66/27,605), `check-feme` 2993/2996 unchanged.
+
+## What was wrong with the prior "closed" claim
+
+H82 was marked "already resolved" in a past session. It wasn't: the
+case still failed with the exact original diagnostic. Every session
+before this one, including H82's own title ("PerPrimitive **output**
+block"), assumed the bug was in a mesh shader's own `Output` write.
+
+**It's the opposite.** A temporary env-var dump inside
+`importShaderModule` (production's own SPIR-V-import entry point,
+instrumentation removed before committing) proved only **one** module
+ever gets compiled for this failing case: the **fragment** shader
+reading `PerPrimitiveEXT` as an `Input`. The mesh shader compiles fine.
+**Lesson: when a hand-written repro won't trigger a bug real CTS
+traffic does, don't keep refining the repro — dump production's real
+input instead.** This one swap turned days of dead ends into a
+same-session fix.
+
+## Two bugs, stacked
+
+1. **GEP legalization gap** (`SPIRVToLLVMPatterns.cpp`): a
+   multi-member `Input` struct (`{ float; vec3; float; }`, no array)
+   wasn't recognized as needing "stay a pointer" treatment — only a
+   bare array or an array-wrapping single-member struct was. Fix:
+   broadened the predicate to any struct. Fixing this alone flipped
+   the error to a new one below it.
+2. **Datalayout-ordering gap** (`Pipeline.cpp` /
+   `Target/CPU/Pipeline.cpp`): the module's `DataLayout` got cleared to
+   empty *before* `CanonicalizeStagePass` ran, so it re-derived struct
+   member offsets with alignment-free math instead of the real math
+   that produced them — misrouting the `vec3` member onto the wrong
+   signature element. Fix: stop clearing the datalayout early; set the
+   real host one only *after* Canonicalize/Validate finish, right
+   before codegen/JIT-linking need it.
+
+Bug 2 was invisible until Bug 1 was fixed — the GEP error masked it
+completely.
+
+## Commits (4, in order)
+
+1. `feme-opt.cpp` — register `MeshOutputWrapperPass` for standalone
+   testing (small infra gap found along the way).
+2. `SPIRVToLLVMPatterns.cpp` + new `spirv-to-llvm-stage-io.mlir` case —
+   Bug 1 fix.
+3. `Vulkan/Pipeline.cpp` + `Target/CPU/Pipeline.cpp` — Bug 2 fix.
+4. `Roadmap.md` + `VulkanCTSReport.md` — H82 correction with real root
+   cause (this session's own "measured impact" section).
+5. This file (committed separately, as instructed).
+
+## Suggested next steps
+
+1. **Investigate the remaining 62 `mesh_shader.ext.*` failures** —
+   `builtin.cull_primitives`, `misc.no_lines`/`no_points`/
+   `no_triangles`, `properties.max_mesh_output_components`, 3
+   `smoke.*.fullscreen_gradient`, plus ~40 `api.*`/`synchronization.*`
+   cases. None yet triaged. ~15-30 min each to get a first diagnostic.
+2. **H96 (the ~2,000-2,500-case `deqp-vk` crash) is still open** and
+   blocks any full, un-chunked CTS run — the Headline table in
+   `VulkanCTSReport.md` predates this session's fixes and needs a full
+   re-run once H96 is fixed (or worked around with batching). Real
+   time cost: hours, given the 3.2M-case scope.
+3. **Grep for other datalayout-ordering-sensitive passes**: anywhere
+   else in the CPU pipeline that runs between `importShaderModule` and
+   `feme::cpu::runPipeline`'s new datalayout substitution point could
+   have the same class of bug if it depends on `Module::getDataLayout()`
+   for anything alignment-sensitive. ~20 min grep.
