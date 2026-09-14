@@ -42022,10 +42022,10 @@ actually requires (`ConstOffset`/`Bias`/`Grad`/`MinLod` sampling of an
 integer image is illegal per spec, not merely unimplemented), so this
 is a gap-fill within the documented design, not a deviation from it.
 
-## Roadmap H110: not yet fixed
+## Roadmap H110: measured impact (fixed)
 
-**Status:** filed, not started. `properties.max_mesh_output_components`
-(1 case) fails with `feme-graphics-validate-stage: ... has an
+**Status:** fixed. `properties.max_mesh_output_components` (1 case)
+previously failed with `feme-graphics-validate-stage: ... has an
 unresolved stage-IO global-variable access ...`. Root-caused via IR
 reduction (`glslangValidator`/`feme-translate --import-spirv`/
 `feme-translate --spirv-to-llvmir`/`feme-opt -passes=
@@ -42034,32 +42034,74 @@ the real CTS shader: a per-primitive output block (`layout(location=0)
 perprimitiveEXT flat out LocationStruct ls[]`, `struct LocationStruct {
 uvec4 location_var[maxLocations]; }`) written in a loop as
 `ls[0].location_var[i] = ...` with a genuinely dynamic (loop-carried)
-`i`. `CanonicalizeStage.cpp`'s `getDynamicRowIndexedAccess` already
-handles a dynamic index into a *plain* array-typed stage-IO element
-(`gl_ClipDistance[i]`'s own shape), but explicitly excludes any global
-`isDynamicIndexedArrayGlobal` recognizes (i.e. any per-vertex/
-per-primitive-arrayed global `getDynamicVertexIndexedAccess` already
-owns) to avoid double-recognizing H92's own doubly-dynamic shape --
-which incorrectly also excludes this narrower shape, where the
-*outer* per-primitive index happens to be constant (`ls[0]`, since
-`max_primitives=1`) and only the *inner* struct-member array index is
-dynamic. See roadmap H110/H110(a)-H110(b) in `Roadmap.md` for the
-breakdown of the work required (extending `getDynamicRowIndexedAccess`
-to recognize a constant-outer/dynamic-inner combination on an
-otherwise-`isDynamicIndexedArrayGlobal` global, plus a unit test
-modeling the real CTS shape directly).
+`i`. Fixed by deferring `getDynamicVertexIndexedAccess`'s own
+constant-vertex-index rejection until after its index walk determines
+whether a genuinely dynamic `RowIndex` was also found in the same GEP
+-- only bailing out (leaving it for the ordinary constant-offset path)
+when no dynamic `RowIndex` exists; otherwise building a
+`DynamicVertexIndexedAccess` with a constant `Vertex` (an already-
+supported downstream shape, since `resolveStageIOAccess`'s own
+per-vertex-array constant-offset fold already builds one). Added
+`CanonicalizeStageTest.MeshStageCanonicalizesConstantOuterDynamicInnerOutputStore`,
+confirmed to genuinely fail (`Sig->Elements.size() == 0` instead of
+`1`) without the fix and pass with it restored.
+`FeMeTransformsGraphicsTests`: 88/88 pass. `check-feme`: 3000/3003
+pass, 3 pre-existing unsupported, 0 failures, up by 1 test. A real
+re-run confirms `properties.max_mesh_output_components` now **passes
+outright**; the broader `properties.*` bucket: 15/30 Pass/0 Fail, up
+from 14 Pass/1 Fail -- 0 regressions. See roadmap H110/H110(a)-H110(b)
+in `Roadmap.md`.
 
-## Roadmap H111: not yet fixed
+## Roadmap H111: measured impact (H111(a) fixed; H111(b) newly filed, not yet fixed)
 
-**Status:** filed, not started. `smoke.*.fullscreen_gradient` (3
-cases -- `fast_lib`/`monolithic`/`optimized_lib` variants) was
-explicitly scoped out of H76's own closing note as "a completely
-unrelated `spirv.Variable`/Function-storage-class legalization
-error, out of scope for this row (not yet separately filed)", and
-reconfirmed unchanged by this session's full `mesh_shader.ext.*`
-re-run after H109. Needs its own first IR-level diagnostic; H76's own
-note already narrows it to a `spirv.Variable`/Function-storage-class
-legalization failure, distinct from H79's own (already-closed)
-`Function`-storage array legalization gap in the same test group, so
-likely a different unmodeled `Function`-storage shape in
-`ConvertSPIRVToLLVMPass`. See roadmap H111 in `Roadmap.md`.
+**Status:** partially fixed. `smoke.*.fullscreen_gradient` (3 cases --
+`fast_lib`/`monolithic`/`optimized_lib` variants) was explicitly scoped
+out of H76's own closing note as "a completely unrelated
+`spirv.Variable`/Function-storage-class legalization error, out of
+scope for this row (not yet separately filed)". IR reduction
+(`glslangValidator`/`feme-translate --import-spirv`/`feme-translate
+--spirv-to-llvmir`) of the real CTS shader
+(`vktMeshShaderSmokeTestsEXT.cpp`'s `initGradientPrograms`) reproduces
+the exact error against a local `const vec4 positions[4] =
+vec4[](...)` array. Root-caused to *upstream* MLIR's `VariablePattern`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`), which explicitly
+restricts a function-local `spirv.Variable`'s initializer support to
+`IntOrFloat`/`VectorType` only, rejecting any array/matrix initializer
+outright even though its `alloca`+`store` lowering is otherwise fully
+type-agnostic -- the same class of upstream gap already worked around
+for `spirv.Constant` of array/matrix type (`ArrayConstantPattern`), just
+on the *variable* side rather than the *value* side. Fixed (H111(a)) by
+adding `AggregateInitializedVariablePattern` in
+`SPIRVToLLVMPatterns.cpp` (registered at `FeMeBenefit`, following the
+same "override upstream, higher benefit, fail through for shapes
+upstream already handles" idiom as `StageIOGlobalVariablePattern`/
+`SubpassLoadPattern`/etc.), mirroring upstream's own alloca+store logic
+without its scalar/vector-only restriction. Added
+`SPIRVToLLVMTest.LocalArrayInitializedVariableConvertsInsteadOfFailing`,
+confirmed to genuinely fail without the fix and pass with it restored.
+`check-feme`: 3001/3004 pass, 3 pre-existing unsupported, 0 failures,
+up by 1 test.
+
+A real re-run confirms the `spirv.Variable` legalization crash is gone
+-- all 3 cases now compile, create their pipeline, and run to
+completion -- but they still fail: `Color mismatch; check log for more
+details at vktMeshShaderSmokeTestsEXT.cpp:993`. Extracting the result
+image from the `.qpa` log shows it is entirely black
+(`(0, 0, 0, 255)` at every sampled pixel, including all four corners
+and the center) instead of the expected `(0, x, y, 255)` gradient --
+i.e. nothing is being rasterized at all, not merely a wrong-color
+pixel comparison. This is a newly-exposed, distinct bug (filed as
+H111(b)): since the SPIR-V-to-LLVM-dialect conversion output for the
+shader's `positions[]`/`colors[]` local-array reads and
+`gl_Position`/`outColor[]` stores all look correct by inspection, the
+bug likely lives further downstream in feme's own CPU codegen/
+execution of a function-local `alloca` of an array-of-vectors
+addressed by a dynamic GEP index -- a shape no prior CTS case
+exercised, since H111(a)'s fix is the first thing that ever let such a
+shape reach this stage at all. The broader `smoke.*` bucket: 46/67
+Pass/3 Fail/18 NotSupported -- the same 3 cases as before H111(a), 0
+regressions, 0 new failures elsewhere. The full `mesh_shader.ext.*`
+sweep (26,921 cases, from before H111(a) landed): 436 Pass/3 Fail (the
+same 3 `fullscreen_gradient` cases), up from 435/4 after H110. See
+roadmap H111/H111(a)-H111(b) in `Roadmap.md`.
+
