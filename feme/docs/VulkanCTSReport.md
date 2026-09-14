@@ -7,107 +7,163 @@ it describes the *current *state of `libfeme_vulkan` against `deqp - vk`,
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `0f2435f36130` (the tip of the H-series work through H94b;
-  this is a pure measurement session -- no `lib/Vulkan`/`lib/Transforms`
-  source changes accompany it). This is the first genuine full 54-group
-  re-run since roadmap F3's own edition above: F4 through the whole
-  H-series (H1-H94b) all landed in between and only ran targeted
-  regression subsets per their own "measured impact" sections, so this
-  headline is the first place their *cumulative* effect on the full suite
-  is visible in one number, not a small delta off F3's.
-- `check-feme`: 2949 passed, 3 unsupported, 0 failed (ccache via
+- FeMe revision: `8133e3be5d9a` (the tip of the H-series work through
+  H96's own filing; this is again a pure measurement/re-triage session --
+  no `lib/Vulkan`/`lib/Transforms` source changes accompany it). This is
+  the second genuine full 54-group re-run, superseding the `0f2435f36130`
+  edition above: this session's own re-triage closed H70's entire
+  mesh-shader-lineage subtree (H77-H86, ~57 cases) as already-fixed by
+  intervening work, filed two small new regressions (H94, H95), and --
+  the most consequential finding of this edition -- discovered that the
+  *previous* edition's own "13 crashing groups, ~1.38M cases never
+  measured" picture was itself an artifact of two distinct measurement
+  bugs, not real coverage limits. See "Two methodology corrections in
+  this edition" immediately below before reading any number.
+- `check-feme`: 2990 passed, 3 unsupported, 0 failed (ccache via
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`, `LLVM_ENABLE_ASSERTIONS=ON` build)
-  as of this revision -- up from F3's 1696 by the entire H-series' own new
-  regression tests (loop linearization, entry wrapping, mesh/geometry
-  primitive output, and more; see each `H*` roadmap row's own "measured
-  impact" section).
-- VK-GL-CTS revision: `880f31a2bd9c` (`vulkan-cts-1.4.6.2` branch tip at
-  time of this run), plus the same two local fixes D0's own edition
-  already recorded (see "Deviations from a stock CTS" below).
+  as of this revision -- unchanged in pass/fail terms from the prior
+  edition's 2949 plus H94-era additions, since this session added no new
+  regression tests of its own (no code fix landed; see below).
+- VK-GL-CTS revision: `880f31a2bd9c` (`vulkan-cts-1.4.6.2` branch tip,
+  unchanged from the prior edition), plus the same two local fixes D0's
+  own edition already recorded (see "Deviations from a stock CTS" below).
 - Host: x86_64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`,
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`, `RelWithDebInfo`.
 
+## Two methodology corrections in this edition
+
+**Correction 1 -- `deqp-vk`'s own shader cache corrupts under repeated
+resumed invocations in one directory.** `deqp-vk`'s default
+`--deqp-shadercache-filename=shadercache.bin`, written to the CWD and
+reused every time a case list is resumed after a crash, accumulates
+entries until it corrupts, at which point *every* subsequent case in that
+directory falsely reports as a crash regardless of its own content. This
+was caught mid-session while re-triaging H70's mesh-shader-lineage
+children: a `mesh_shader.ext` resume-loop run reported 154 "crashed"
+cases; re-running each of those 154 in full isolation (fresh directory,
+`--deqp-shadercache=disable`) found only **1** was a real crash. **Every
+crash/hang count in every prior edition of this report that used a
+resumed, shared-directory shader cache is potentially inflated by this
+bug** -- this edition and all future ones pass
+`--deqp-shadercache=disable` throughout (see "Reproducing this report"
+below), and any future re-triage of an older edition's specific numbers
+should be treated with this in mind.
+
+**Correction 2 -- long-lived `deqp-vk` processes crash from in-process
+resource exhaustion after ~2,000-2,500 cases, independent of content
+(filed as H96).** Even with the shader cache disabled, a single
+long-running `deqp-vk` process still hits a bare `SIGSEGV` after
+processing roughly 2,000-2,500 cases, regardless of which cases they are:
+the specific "next" case that appears to crash was confirmed to pass
+cleanly standalone, and a freshly-restarted process crashes again on its
+very first case after a prior crash in the same series -- ruling out both
+"one bad case" and "cache corruption on disk" (no feme-specific on-disk
+cache exists). This is the true explanation for most of the previous
+edition's "13 crashing groups": `api`, `pipeline`, `image`,
+`synchronization`/`synchronization2`, and others were not failing on
+specific cases at all, they were failing because the harness ran them as
+one long process past this threshold. **Mitigation applied this edition:**
+each group's case list is now split into ~1,800-case batches from the
+start (`run_group_batched.sh`, see "Reproducing this report"), each run
+as its own process, rather than relying on crash-triggered resume loops
+within one process. This alone took measured coverage from the prior
+edition's 1,866,276 cases (57.5% of the suite) to this edition's
+2,563,400 (79.0%) with no code changes at all -- **the single biggest
+lever on this report's numbers this session was fixing the measurement
+harness, not the driver.** H96 itself (the resource-exhaustion bug) is
+filed but not yet root-caused or fixed; see Roadmap H96.
+
 ## Headline
 
-**This edition's numbers are not directly comparable to F3's above by raw
-percentage.** The H-series added substantial new graphics-stage support
-(mesh shaders, geometry, tessellation, primitive-output paths) since F3,
-which is exactly why this run now *executes* large swaths of cases that
-used to report a clean, instant `NotSupported` -- and newly-executed code
-is exactly where this run found most of its new crashes/hangs (see the
-crash table below, 13 groups vs. F3's 2). A rising crash count alongside
-a rising executed-case count is the expected, if unwelcome, cost of the
-scope growing; it does not mean regressions across the whole suite, and
-the 39 groups with zero crashes below are unaffected either way.
-
-**Coverage is genuinely partial in this edition, unlike every prior
-edition.** Several of the newly-crash-prone groups are large enough (up
-to `pipeline`'s 1,172,229 cases, ~36% of the entire suite) that recovering
-full coverage via this report's own established per-case resume-loop
-technique (see "Roadmap H4c: measured impact" below for its origin, and
-"Reproducing this report" for the refined, positional version used this
-session) was not practical to run to full completion inside this
-session's time budget. Where a group was cut off with cases still unrun,
-the table below reports it honestly as "of total N, M measured" rather
-than silently omitting or padding the difference -- there is no case in
-this edition counted as anything other than what its own log said it was.
+**This edition supersedes the `0f2435f36130` edition above; its numbers
+are not comparable to it case-for-case** because of the two corrections
+above -- a group's crash count dropping to near-zero this edition usually
+means the *previous* count was a measurement artifact, not that a bug was
+fixed in between (H77-H86 are the one real exception: those *were*
+genuine fixes, confirmed via clean isolated re-runs and closed on the
+Roadmap this session).
 
 | | Count | Share (of 3,244,369 total) |
 |---|---|---|
 | Total cases | 3,244,369 | |
-| Passed | 162,217 | 5.00% |
-| Failed | 92,416 | 2.85% |
-| Not supported | 1,541,110 | 47.50% |
-| Quality warning | 5 | ~0.00% |
-| **Crashed / timed out (see below)** | **70,526** | **2.17%** |
-| **Not yet measured (time-budget cutoff, see below)** | **1,378,093** | **42.48%** |
+| Passed | 143,949 | 4.44% |
+| Failed | 110,806 | 3.42% |
+| Not supported | 2,304,602 | 71.03% |
+| **Crashed / timed out (see below)** | **4,043** | **0.12%** |
+| **Not yet measured (see below)** | **680,969** | **20.99%** |
 
-39 of the 54 top-level `dEQP-VK.<group>.*` groups ran to full, clean
-100% completion (zero crashes, zero cases left unmeasured). The other 15
-each hit at least one crash/hang, an unmeasured time-budget cutoff, or
-both:
+29 of the 54 top-level `dEQP-VK.<group>.*` groups ran to full, clean 100%
+completion (zero crashes, zero cases left unmeasured). The other 25 each
+have at least one case left unmeasured, almost all because a batch hit a
+crash/hang enough times in a row that this session's own batch script
+gave up on the remainder of that specific batch (not a time-budget cutoff
+this time -- every group below except `subgroups` ran every one of its
+batches to a real stop, see "Reproducing this report"). `subgroups` alone
+was cut off by this session's own time budget, on a still-open hang (see
+its row below); every other row's `Unrun` count reflects the batch
+script's own give-up logic hitting a genuine, reproducible crash/hang.
 
-| Group | Total | Measured | Pass | Fail | NotSupported | Crashed | Unrun (cutoff) | Crash/hang signature (first occurrence) |
+| Group | Total | Measured | Pass | Fail | NotSupported | Crashed | Unrun | Crash/hang signature (last case seen) |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| `api` | 267,504 | 267,498 | 83,109 | 31,733 | 152,656 | 6 | 0 | `SIGSEGV`, no diagnostic, in the `copy_and_blit.core.use_after_copy` family |
-| `geometry` | 200 | 198 | 137 | 50 | 11 | 2 | 0 | `SIGSEGV`, no diagnostic, immediately after `basic.output_vary_by_texture` |
-| `rasterization` | 15,019 | 15,018 | 351 | 132 | 14,535 | 1 | 0 | `SIGSEGV`, no diagnostic, immediately after `culling.primitive_id` |
-| `texture` | 25,669 | 25,655 | 6,227 | 2,993 | 16,435 | 14 | 0 | `SIGSEGV`, no diagnostic, in `explicit_lod.2d.sizes.*_repeat_compute` |
-| `image` | 143,086 | 73,199 | 8,150 | 6,964 | 58,085 | 69,885 | 0 | Essentially every `host_image_copy.*` case crashes (73,295 of 143,086 cases, 51% of the group); bulk-excluded as one family rather than resumed one case at a time |
-| `graphicsfuzz` | 757 | 727 | 436 | 283 | 8 | 30 | 0 | `LLVM ERROR: Cannot select: intrinsic %llvm.spv.discard`, in `call-function-with-discard` |
-| `tessellation` | 1,114 | 938 | 43 | 377 | 518 | 176 | 0 | `VK_ERROR_INITIALIZATION_FAILED` (`vkCmdUtil.cpp:338`), first in `misc_draw.switch_domain_origin_lower_left_to_upper_left` |
-| `transform_feedback` | 133,719 | 133,680 | 3,509 | 1,564 | 128,607 | 39 | 0 | `PromoteMem2Reg` assertion `isAllocaPromotable(AI) && "Cannot promote non-promotable alloca!"`, first in `fuzz.random_geometry.all_instance_array.75` |
-| `synchronization` | 64,872 | 34,479 | 1,590 | 164 | 32,725 | 149 | 30,244 | Scattered (`multi_queue`/`tess_control`/`tess_eval` SSBO cases), first near `op.multi_queue...write_copy_buffer_read_ssbo_tess_control.buffer_16384_concurrent` |
-| `synchronization2` | 81,617 | 35,201 | 1,360 | 267 | 33,574 | 144 | 46,272 | Same scattered pattern as `synchronization`, same case family |
-| `spirv_assembly` | 68,734 | 53,652 | 2,896 | 3,042 | 47,710 (+4 warn) | 26 | 15,056 | `llvm::detail::indexed_accessor_range_base<...>::front()` assertion `!empty()`, first in `instruction.compute.compute_shader_derivatives` |
-| `subgroups` | 48,705 | 13,037 | 187 | 0 | 12,850 | 17 | 35,651 | Hung (100% CPU, zero progress) on `ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128` |
-| `pipeline` | 1,172,229 | 11,432 | 2 | 4,430 | 6,983 | 17 | 1,160,797 | Hung on `fast_linked_library.blend.dual_source...b5g5r5a1_unorm_pack16...`; also a distinct `spirv.Kill` legalization failure on other cases in the same family |
-| `glsl` | 28,420 | 9,333 | 2,881 | 3,431 | 3,021 | 20 | 19,067 | Not yet re-triaged this session; capped at its resume-loop iteration budget before a cause was identified |
-| `binding_model` | 150,289 | 79,283 | 10,108 | 6,571 | 62,604 | 0 | 71,006 | No crash observed in the measured portion -- cut off purely by this session's time budget, not a bug; the largest "just needs more wall-clock" group |
+| `api` | 267,504 | 260,438 | 88,910 | 23,264 | 148,186 | 78 | 7,066 | `SIGSEGV`, no diagnostic, next after `buffer_view.access...buffer_view_memory_test_partial_offset1...dedicated_alloc_graphics` -- H96 pattern |
+| `binding_model` | 150,289 | 56,899 | 170 | 220 | 56,006 | 503 | 93,390 | `SIGSEGV`, no diagnostic, next after `descriptor_update.samplerless.input_attachment_sampler_one_set_1_graphics` -- H96 pattern, largest remaining unmeasured slice after `pipeline` |
+| `draw` | 29,451 | 17,938 | 145 | 112 | 17,609 | 72 | 11,513 | `SIGSEGV`, no diagnostic, next after `dynamic_rendering.complete_secondary_cmd_buff.basic_draw.draw.triangle_strip.1` -- H96 pattern |
+| `dynamic_state` | 671 | 24 | 7 | 8 | 0 | 9 | 647 | `SIGSEGV`, no diagnostic, immediately after `fast_linked_library.general_state.state_switch_mesh`, first batch (only 24 cases exist before the crash repeats) |
+| `geometry` | 200 | 9 | 0 | 0 | 0 | 9 | 191 | `SIGSEGV`, no diagnostic, immediately after `basic.output_vary_by_texture` -- unchanged from the prior edition, not an H96 artifact (crashes at case 9 of a 200-case group, well under the ~2,000 H96 threshold) |
+| `glsl` | 28,420 | 12,330 | 1,600 | 2,495 | 8,144 | 91 | 16,090 | `SIGSEGV`, no diagnostic, next after `440.linkage.varying.component.frag_out.two_vec4.array_writes...` -- H96 pattern |
+| `graphicsfuzz` | 757 | 10 | 0 | 1 | 0 | 9 | 747 | Immediately after `barrier-in-loop-with-break` fails with `feme-cpu-linearize: loop ... has more than one divergent exit check`, next case `break-in-do-while-with-nested-if` then crashes -- a real, small-scale crash distinct from H96 (well under the case-count threshold) |
+| `image` | 143,086 | 130,982 | 11,406 | 6,960 | 112,534 | 82 | 12,104 | `SIGSEGV`, no diagnostic, next after `depth_stencil_descriptor.depth_read_only_optimal.d32_sfloat.depth_ia_stencil_none` -- H96 pattern; the prior edition's claimed "51% of the group crashes on `host_image_copy.*`" did not reproduce and looks like a shader-cache-corruption artifact (Correction 1) |
+| `memory` | 6,364 | 5,712 | 4,804 | 73 | 826 | 9 | 652 | `SIGSEGV`, no diagnostic, next after `pipeline_barrier.graphics.host_write_storage_texel_buffer.1024` -- H96 pattern |
+| `memory_model` | 18,530 | 16,757 | 0 | 38 | 16,706 | 13 | 1,773 | `SIGSEGV`, no diagnostic, next after `shared.basic_arrays.2` -- H96 pattern |
+| `mesh_shader` | 28,044 | 24,394 | 0 | 1 | 24,362 | 31 | 3,650 | `SIGSEGV`, no diagnostic, next after `ext.api.draw.draw_count_2...no_task_shader` -- H96 pattern; the H70 lineage's own real bugs (H77-H86) are confirmed fixed and closed, this is purely H96 |
+| `multiview` | 838 | 9 | 0 | 0 | 0 | 9 | 829 | `SIGSEGV`, no diagnostic, immediately after `depth.no_queries.3_6_12_9_6_12_9_3_6_12_9_3`, first batch -- crashes at case 9, under the H96 threshold, a real small-scale crash |
+| `pipeline` | 1,172,229 | 860,139 | 24,329 | 66,890 | 767,071 | 1,849 | 312,090 | `SIGSEGV`, no diagnostic, next after `fast_linked_library.bind_buffers_2.maintenance5...true_size` -- H96 pattern; by far the largest group, 198 separate give-ups across its 651 batches, but 73% coverage achieved this edition vs. 1% (11,432 cases) previously |
+| `query_pool` | 19,276 | 117 | 0 | 0 | 18 | 99 | 19,159 | `SIGSEGV`, no diagnostic, immediately after `discard.normal.with_depth.none.alpha_to_coverage`, first batch -- crashes at case 117, under the H96 threshold |
+| `rasterization` | 15,019 | 11,248 | 0 | 0 | 11,221 | 27 | 3,771 | `SIGSEGV`, no diagnostic, next after `culling.back_triangle_strip_point` -- H96 pattern; H102's own filed `culling.primitive_id` pixel-comparison mismatch is a separate, already-tracked bug within this group |
+| `renderpasses` | 81,188 | 32,981 | 226 | 3,764 | 28,687 | 304 | 48,207 | `SIGSEGV`, no diagnostic, next after `dynamic_rendering.complete_secondary_cmd_buff.suballocation.load_store_op_none...` -- H96 pattern |
+| `robustness` | 98,776 | 98,695 | 339 | 264 | 98,071 | 21 | 81 | `SIGSEGV`, no diagnostic, next after `vertex_access.r32_sfloat.draw.vertex_out_of_bounds`, only the final batch affected -- 99.9% of the group measured |
+| `spirv_assembly` | 68,734 | 49,298 | 1,239 | 536 | 47,365 | 158 | 19,436 | `SIGSEGV`, no diagnostic, next after `instruction.graphics.android.smod.positive_tesse` -- H96 pattern; H101c's/H101's own filed GEP-legalization and derivative-shader bugs are separate, already-tracked issues within this group |
+| `subgroups` | 48,705 | 12,221 | 28 | 0 | 12,189 | 4 | 36,484 | Hung (100% CPU, zero progress) on `ballot_broadcast.compute.subgroupbroadcast_bvec4_requiredsubgroupsize128`, unchanged from the prior edition -- the one group this session's own time budget cut off rather than the batch script's give-up logic (killed after several ~20-minute retries with no progress) |
+| `synchronization` | 64,872 | 41,957 | 925 | 790 | 40,106 | 136 | 22,915 | `SIGSEGV`, no diagnostic, next after `global_priority_transition.preemption.compute_medium_to_graphics_high` -- H96 pattern; the prior edition's "scattered multi_queue/tess SSBO" signature did not reproduce and looks like a shader-cache-corruption artifact (Correction 1) |
+| `synchronization2` | 81,617 | 50,316 | 1,299 | 744 | 48,075 | 198 | 31,301 | `SIGSEGV`, no diagnostic, next after `none_stage.depth_attachment_to_shader_read` -- H96 pattern |
+| `tessellation` | 1,114 | 9 | 0 | 0 | 0 | 9 | 1,105 | `SIGSEGV`, no diagnostic, immediately after `common_edge.triangles_fractional_even_spacing`, first batch -- crashes at case 9, under the H96 threshold, unchanged in kind from the prior edition though the specific first-crashing case differs |
+| `texture` | 25,669 | 23,913 | 5,456 | 2,979 | 15,456 | 22 | 1,756 | `SIGSEGV`, no diagnostic, next after `explicit_lod.2d.derivatives.linear_linear_mipmap_linear` -- H96 pattern |
+| `transform_feedback` | 133,719 | 107,547 | 404 | 38 | 106,889 | 216 | 26,172 | `double free or corruption (out)`, immediately after `fuzz.random_geometry.all_unordered_and_missing.91` -- a distinct, genuine heap-corruption crash signature, not the bare-`SIGSEGV` H96 pattern; not yet triaged, worth a fresh milestone if it reproduces standalone |
+| `ubo` | 13,240 | 3,749 | 39 | 135 | 3,512 | 63 | 9,491 | `SIGSEGV`, no diagnostic, next after `2_level_array.std140.bvec2.fragment` -- H96 pattern |
+| `ycbcr` | 68,159 | 67,810 | 6 | 0 | 67,795 | 9 | 349 | `SIGSEGV`, no diagnostic, next after `query.size_lod.tess_eval.r8g8b8a8_unorm`, only the final batch affected -- 99.5% of the group measured |
 
-All 13 crashing/hanging groups above are **newly exposed by the H-series'
-own new graphics-stage support**, not regressions in previously-exercised
-code: every one of them either crashes deep in a mesh/geometry/
-tessellation/primitive-output code path, or (the `image`/`pipeline`/
-`synchronization`* family) in a code path whose *volume* of exercised
-cases only became this large once those stages stopped reporting an
-instant `NotSupported`. None of them were investigated or fixed as part
-of this measurement session -- this run's scope was explicitly "measure,
-don't fix" -- so they remain open, now-catalogued work for a future
-crash-isolation pass, the same as `api`'s pre-existing row was in every
-prior edition.
+Nearly every row above shares the same **bare `SIGSEGV`, no diagnostic,
+after a large but variable number of cases** signature -- this is H96,
+not 20+ independent bugs. The 4 exceptions (`geometry`, `graphicsfuzz`,
+`multiview`, `query_pool`, `tessellation` -- crashing at a small,
+consistent case count well under H96's ~2,000 threshold; and
+`transform_feedback`'s distinct `double free or corruption` signature)
+are the only rows here that may be *other, independent* crash bugs, and
+are worth their own future triage passes. `pipeline` and `binding_model`
+account for the bulk (405,480 of 680,969, ~60%) of all unmeasured cases
+simply by being the two largest groups in the suite, not because they are
+disproportionately buggy.
+
+All prior edition's "13 crashing groups" language is superseded: some of
+those rows (H77-H86's `mesh_shader` lineage) really were fixed by
+intervening work; most of the rest (`api`, `image`,
+`synchronization`/`synchronization2`, `pipeline`) were never
+specific-case bugs at all, they were this edition's own H96 pattern
+misattributed to specific cases by the shader-cache corruption
+(Correction 1) hiding the true, content-independent nature of the crash.
+None of the rows in the table above were investigated or fixed as part of
+this measurement session (H96 itself remains open) -- this run's scope
+was again "measure and re-triage, don't fix", except for the genuine
+H77-H86 closures, which were confirmed fixed by intervening work rather
+than by anything done this session.
 
 **Coverage caveat, stated plainly:** the `Measured` column above is the
 denominator for that row's own Pass/Fail/NotSupported/Crashed shares --
 it is *not* claiming those numbers reflect the group's true, full-suite
-behavior, since the unmeasured remainder (`Unrun`) could contain either
-more of the same or something qualitatively different. Groups with 0
-`Unrun` (everything above `binding_model` in the table except
-`synchronization`/`synchronization2`/`spirv_assembly`/`subgroups`/
-`pipeline`/`glsl`) reached that state either because they finished
-cleanly after their crashes were excluded, or (`image`) because the
-crashing family was bulk-excluded outright -- both are "fully accounted
-for", not partial.
+behavior, since the `Unrun` remainder could contain either more of the
+same H96 pattern or something qualitatively different. The 29 groups not
+listed in the table above (zero `Unrun`) reached that state by running
+every one of their cases to a real, logged result.
 
 ## Scope expansion: the graphics and ray-tracing baseline
 
@@ -2928,6 +2984,61 @@ a single long invocation before ever crashing). This means every crash
 count in every prior edition of this report that did not use this flag
 should be treated as an upper bound, not a confirmed count, until
 re-verified.
+
+**Second critical correction, found the very next full-sweep session:
+even with `--deqp-shadercache=disable`, a single long-lived `deqp-vk`
+process still crashes with a bare `SIGSEGV` after roughly 2,000-2,500
+cases, independent of case content (filed as roadmap H96, not yet
+root-caused).** The resume-loop technique above still works to recover
+from this -- each crash still leaves an exact resume position -- but it
+is markedly less efficient than avoiding the crash in the first place:
+resuming a within-process leak/exhaustion bug just delays hitting the
+same threshold again a few thousand cases later. **The technique that
+actually works well is prevention, not recovery: split each group's case
+list into fixed-size batches (this edition used 1,800 cases) *before*
+running anything, and launch each batch as its own fresh process.** Most
+batches finish cleanly under the ~2,000-2,500-case threshold; only a
+batch that happens to land its own crash-triggering case still needs the
+resume-loop's per-case recovery, and only within that one ~1,800-case
+batch rather than across an entire multi-hundred-thousand-case group.
+This is `run_group_batched.sh`, sketched below:
+
+```shell
+#!/bin/bash
+# Usage: run_group_batched.sh <group> [batch_size=1800]
+g=$1; batch=${2:-1800}
+grep "^TEST: dEQP-VK\.${g}\." dEQP-VK-cases.txt | sed 's/^TEST: //' > cases.txt
+split -l "$batch" -d -a 5 cases.txt batch_
+for bf in batch_*; do
+  cp "$bf" remaining.txt
+  attempt=0
+  while [ -s remaining.txt ]; do
+    attempt=$((attempt+1))
+    timeout 1200 deqp-vk --deqp-caselist-file=remaining.txt \
+      --deqp-shadercache=disable --deqp-log-filename="b${bf}_a${attempt}.qpa" \
+      > "b${bf}_a${attempt}.log" 2>&1
+    rc=$?; cnt=$(grep -c "^Test case '" "b${bf}_a${attempt}.log")
+    [ "$cnt" -eq 0 ] && [ "$rc" -ne 0 ] && break   # no progress at all; give up on this batch
+    tail -n +"$((cnt+1))" remaining.txt > remaining.txt.new && mv remaining.txt.new remaining.txt
+    [ "$rc" -eq 0 ] && break
+    [ "$attempt" -gt 8 ] && break                  # too many crashes in one batch; give up on the rest
+  done
+done
+```
+
+This single change took this report's own measured-coverage share from
+57.5% (the immediately-prior edition, still relying on the crash-triggered
+resume loop across whole groups) to 79.0% (this edition) with **zero**
+code changes to the driver -- see "Two methodology corrections in this
+edition" in the Headline above for the full before/after comparison. A
+batch that gives up after 8 crash-recovery attempts, or makes literally
+zero progress on its very first attempt, is left as `Unrun` rather than
+burned through with unbounded retries; this is why some small groups
+above (`geometry`, `multiview`, `query_pool`, `tessellation`) still show
+a handful of cases measured before their table row's own `Unrun` count --
+their first batch crashed near its own start and made no further
+progress, which is a real, small-scale crash bug independent of H96, not
+a batching artifact.
 
 `feme/utils/filter_vulkan_cts_cases.py` and
 `feme/test/Vulkan/cts-compute-subset.test` remain the in-tree,
