@@ -777,47 +777,33 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // vert.*` (non-`_fragmentshader_read`) re-run, 16/16 passing once the
   // bit was flipped on for that measurement.
   //
-  // The bit stays `VK_FALSE`, however: that same re-run also exercises
-  // `_fragmentshader_read` (fragment-stage read-back of the interpolated
-  // value; 0/16, an unimplemented fragment-side system-value consumer),
-  // `*_dynamic_index` (a non-constant `gl_ClipDistance`/`gl_CullDistance`
-  // array index; 0/32, `CanonicalizeStagePass` does not yet canonicalize
-  // this shape at all -- "an unresolved stage-IO global-variable access"),
-  // and `vert_tess`/`vert_geom` (clip/cull-distance written from a
-  // tessellation-evaluation or geometry stage rather than the vertex
-  // stage; 0/2 sampled, an LLVM GEP-into-an-array-typed-SSA-value lowering
-  // failure). Only the vertex-stage, static-index, non-fragment-read
-  // subset (16 of this feature's ~330 real CTS cases) is real today --
-  // advertising the bit before the bulk of its own mandatory conformance
-  // surface can pass would be a conformance violation, matching the
-  // standard set by roadmap H7o/`sampleRateShading`. Tracked as three new
-  // follow-ons: H7w (dynamic indexing), H7x (fragment-shader read-back),
-  // H7y (tessellation/geometry-stage clip/cull-distance).
+  // The bit stays `VK_FALSE`, however. History, oldest to newest:
+  // - That same re-run also exercised `_fragmentshader_read`
+  //   (fragment-stage read-back of the interpolated value; 0/16 at the
+  //   time), `*_dynamic_index` (a non-constant array index; 0/32), and
+  //   `vert_tess`/`vert_geom` (clip/cull-distance written from a
+  //   tessellation-evaluation or geometry stage; 0/2 sampled). Only the
+  //   vertex-stage, static-index, non-fragment-read subset (16 of this
+  //   feature's ~330 real CTS cases) was real at that point. Tracked as
+  //   three follow-ons: H7w (dynamic indexing), H7x (fragment-shader
+  //   read-back), H7y (tessellation/geometry-stage clip/cull-distance).
+  // - Roadmap H53/H54/H55/H56/H112: `vert_tess`/`vert_tess_geom` is now
+  //   fully fixed. `PatchPipeline.cpp`'s `isForwardedFromProducerStage`
+  //   (producer/consumer linking) and `StageStorage.cpp`'s
+  //   `IsForwardedPerControlPointInput` (storage allocation for a
+  //   forwarded `Position`/`PointSize` hull/domain input) closed H112,
+  //   the last of this cluster's own bugs. A real re-run of the full
+  //   `dEQP-VK.clipping.user_defined.*` matrix (256 cases, bit flipped on
+  //   for the measurement) confirms the entire non-`_dynamic_index`/
+  //   non-`_fragmentshader_read` subset (64/64, including every
+  //   `vert_tess`/`vert_tess_geom` case) now passes.
+  // - The only remaining gaps are H7w (`_dynamic_index`, 32/128 passing)
+  //   and H7x (`_fragmentshader_read`, 50/64 passing, non-`_dynamic_index`
+  //   only) -- both still incomplete, so this feature's own mandatory
+  //   conformance surface is not yet fully met.
   // `Info.Features.shaderClipDistance`/`shaderCullDistance` are therefore
-  // intentionally left at their zero-initialized `VK_FALSE`. (Roadmap H53:
-  // a real re-measurement found H54/H55's own originally-diagnosed
-  // stage-linkage/fragment-read errors, and H56's own originally-diagnosed
-  // patch-constant-phase crash, are all already fixed -- but a new, still
-  // unfixed rendering-correctness bug in the `vert_tess`/`vert_tess_geom`
-  // shader-stage combination (roadmap H112) means the bulk of this
-  // feature's own tessellation-path conformance surface still does not
-  // pass, so the bit stays `VK_FALSE` until H112 closes.)
-  //
-  // (Roadmap H112, closed) A real re-run of the full
-  // `dEQP-VK.clipping.user_defined.*` matrix (256 cases, bit flipped on
-  // for the measurement) after this milestone's two fixes --
-  // `PatchPipeline.cpp`'s `isForwardedFromProducerStage` (producer/
-  // consumer linking) and `StageStorage.cpp`'s
-  // `IsForwardedPerControlPointInput` (storage allocation for a
-  // forwarded `Position`/`PointSize` hull/domain input) -- found the
-  // entire non-`_dynamic_index`/non-`_fragmentshader_read` subset (64/64,
-  // including every `vert_tess`/`vert_tess_geom` case) now passes: the
-  // milestone's own tessellation-path rendering-correctness bug is fully
-  // fixed. The bit still stays `VK_FALSE`, however: `_dynamic_index`
-  // (32/128 passing -- H7w, still unimplemented) and
-  // `_fragmentshader_read` (50/64 passing, non-`_dynamic_index` only --
-  // H7x, still incomplete) remain open, so this feature's own mandatory
-  // conformance surface is not yet fully met.
+  // intentionally left at their zero-initialized `VK_FALSE` until H7w/H7x
+  // close.
 
 
   // (Roadmap H7i) `samplerAnisotropy`: `Image.cpp` already stored
