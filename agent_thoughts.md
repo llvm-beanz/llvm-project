@@ -82555,3 +82555,100 @@ all when its history matters.
 3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** still never
    built/run -- eighth session in a row to defer it. Worth a session
    of its own.
+
+# H-series re-triage: H30 closed (no code needed), H32/H53 dependency text fixed, H7x confirmed the sole remaining blocker
+
+Next action: start H7x's real-CTS-image channel reduction (see "Deferred /
+next steps" #1 below) -- that is still the single highest-leverage next
+session's work.
+
+## What happened
+
+This was a pure documentation/triage session -- no production code
+changed, no new CTS run performed (nothing to re-measure). Swept all 36
+open (non-struck) H-series rows in `Roadmap.md` looking for two things:
+(1) any row whose blocking dependency is actually already closed
+elsewhere but never reflected back, and (2) any row that's fully
+resolvable right now without new work.
+
+Found two real issues:
+
+1. **H30 (mesh/task shading) was still open, but shouldn't have been.**
+   Its own text said "milestone remains open, depending on H69 and H70."
+   Both are struck-through/closed, and H111's own already-recorded
+   measured-impact note (`VulkanCTSReport.md`) confirms a real
+   `dEQP-VK.mesh_shader.ext.*` sweep (26,921 cases): **439 Pass/0
+   Fail/26,482 NotSupported** -- every currently-`Supported` case
+   passes, zero regressions. Struck through H30 with a closing note
+   pointing at that existing measurement (no new CTS run needed, the
+   data already exists).
+2. **H32 and H53 both had stale dependency text.** Both said they
+   depend on "H7w (`_dynamic_index`, still incomplete) and H7x
+   (`_fragmentshader_read`, still incomplete)" -- but H7w was fully
+   closed by roadmap H113 two sessions ago (the `_dynamic_index`
+   JIT-crash class), leaving H7x as the *only* real remaining blocker
+   for both. Corrected both rows' own text.
+
+Systematically checked the other 33 open rows' own "Depends on" column
+and body-text "depending on X" phrases against the full closed-ID set --
+no other stale references found. The 5 hits for "depends on H19" (H19f,
+H57-H60) are all children citing their own already-closed parent
+umbrella row, which is expected and not stale in the same sense.
+
+## State
+
+1 commit this session (documentation only, no test/build changes were
+needed -- the working tree was already clean and `check-feme` was
+already green from the end of the prior session):
+- `feme: re-triage H-series -- close H30, fix stale H32/H53 dependency
+  text`
+
+## Current H-series map (35 open rows, ranked by leverage)
+
+- **H7x** (`_fragmentshader_read`, 50/64 non-`_dynamic_index`, plus 14
+  more in the `_dynamic_index` intersection): the **sole** remaining
+  blocker for both **H32** (P1, the optional-feature-bits milestone)
+  and **H53** (the clip/cull-distance tessellation-path milestone).
+  Fixing H7x closes two milestones at once. Already deeply diagnosed
+  across many sessions; last session's synthetic-unit-test approach is
+  believed exhausted (see the prior "H7x debunked again" entry above).
+- **H52** (P2): a hard SIGSEGV inside JIT-compiled shader code at
+  `dEQP-VK.tessellation.misc_draw.switch_domain_origin_lower_left_to_
+  upper_left` that **kills the whole process**, losing every case
+  ordered after it in the group -- so the real `tessellation.*` numbers
+  this report cites may be an undercount. Isolated, single bug, already
+  has a hypothesized cause (`PatchPipeline.cpp`/`DomainWrapper.cpp`
+  domain-origin addressing). Good second candidate: different area from
+  H7x, unblocks accurate measurement of a whole CTS group.
+- **H33** (P0, "format table completeness"): highest nominal priority,
+  but not yet broken into sub-rows -- large, ill-defined scope (BC/ETC2
+  compressed sampling, full vertex-buffer format list, mandatory
+  blit/filter bits, multisample-per-format). Needs a scoping/survey
+  session (mirroring H4/H5/H30's own breakdown pattern) before a single
+  session can make a dent -- not a quick win.
+- **H62** (P2, depended on by H63-H68): 867 `dynamic_rendering.*
+  secondary` failures, already broken into 6 sub-buckets (H63-H68) by
+  root-cause signature -- each independently assignable, ~14-48 cases
+  apiece.
+- Everything else (H34-H51, H57-H61) is P3, mostly single-extension or
+  single-format-cluster rows already fully scoped, assignable in any
+  order without further triage.
+
+## Recommendation
+
+**Next session: H7x**, via the real-CTS-image channel reduction this
+session's predecessor already recommended (pull the actual failing
+`dEQP-VK.clipping.user_defined.*_fragmentshader_read` case's own
+rendered image and expected image, diff channel-by-channel, mirroring
+H88's own closing technique for `local_size_id_mesh`/`local_size_id_
+task`). This is the highest-leverage open item in the whole H-series:
+one fix closes both H32 and H53. Do not repeat this and the last two
+sessions' synthetic-unit-test bisection approach -- it has now twice
+produced a false positive (see the two "H7x debunked" entries above)
+without finding the real bug; a real captured CTS image is the
+untried lever.
+
+**If H7x stalls again**, pivot to **H52** instead (SIGSEGV crash,
+isolated scope, unrelated area, blocks accurate measurement of the
+whole `tessellation.*` group) rather than re-attempting H7x a third
+time with the same technique.
