@@ -82149,3 +82149,120 @@ before this session.
    built/run in any session -- flagged again as a standing gap, not
    picked up this session either (out of scope for H32/H112, but worth a
    session of its own).
+
+# H112 root-caused and fixed: two separate bugs, 64/64 real clipping cases now pass
+
+**H112 is closed. Two distinct bugs found and fixed, both via an empirical `ExecutorTest.cpp` repro (static IR review alone found nothing last session). Real CTS confirms the entire non-`_dynamic_index`/non-`_fragmentshader_read` `dEQP-VK.clipping.user_defined.*` subset (64/64) now passes, including every `vert_tess`/`vert_tess_geom` case.**
+
+## What just happened
+
+1. Built `ExecutorTest.cpp`'s `ClipsATessellatedPatchAgainstAWrittenClipDistance`
+   -- a hand-written vertex->hull->domain pipeline threading
+   `gl_ClipDistance[0]` through a self-indexed passthrough, mirroring the
+   real CTS shape. It failed: every texel came out lit instead of the
+   expected half-clipped pattern. Confirmed reproducible.
+2. Instrumented `Executor.cpp` with temporary `fprintf`s and found the
+   per-vertex `ClipDistances[0]` read back during rasterization was
+   always `0.0`, no matter what the vertex stage actually wrote.
+3. **Bug #1**: `PatchPipeline.cpp`'s `linkPatchPipeline` filtered every
+   producer/consumer stage link with `isNotSystemValue`, which excludes
+   *every* system-value input from linkage -- not just the four a
+   hull/domain stage's own wrapper genuinely synthesizes itself
+   (`OutputControlPointID`, `PatchVertices`, `PrimitiveID`,
+   `DomainLocation`). `Position`/`ClipDistance`/`CullDistance`/
+   `PointSize` are merely *forwarded* per-control-point attributes that
+   need the same linkage an ordinary varying gets -- confirmed by reading
+   `HullWrapper.cpp`/`DomainWrapper.cpp`'s own comments, which already
+   said this. Fixed with a new `isForwardedFromProducerStage` function.
+4. Rebuilt, test passed. But a real CTS re-run (bit flipped on to
+   measure) still showed every `vert_tess`/`vert_tess_geom` case failing
+   -- now with `"Fail (Rendered image(s) are incorrect)"` instead of a
+   crash. Real progress, but not done.
+5. Dug into the real CTS's own 8-bar shader shape (not just my repro):
+   `clip_distance.vert_tess.1`'s entire 16x16 render came back solid
+   black -- not just the one bar that should clip. Ruled out a generic
+   multi-patch bug (a plain-color sanity test with the same 16-patch
+   geometry rendered fine).
+6. Dumped the real converted IR's own signature for that exact case and
+   found `gl_Position` genuinely *is* marked `SystemValue::Position` at
+   every stage boundary in a real SPIR-V shader -- contradicting what
+   every existing hand-written test (including my new one) assumed
+   (`Location`-based instead). Wrote a second, dedicated test,
+   `ClipsATessellatedPatchWithSystemValuePositionForwarding`, matching
+   that exact shape. It crashed immediately on
+   `StageStorage::writeRaw`'s own out-of-bounds assertion.
+7. **Bug #2**: `StageStorage.cpp`'s `buildStageStorage` skips allocating
+   storage for any system-value *input* by default (it assumes a
+   compiled wrapper always sources it from an invocation-record field
+   instead). `ClipDistance`/`CullDistance` were already carved out as
+   exceptions from an earlier H5h/H7x fix, but `Position`/`PointSize`
+   were not -- even though `HullWrapper.cpp`/`DomainWrapper.cpp` read a
+   forwarded `Position` input through this exact same storage, never an
+   invocation record. Once bug #1 let `copyLinkedElements` try to copy a
+   real value in, the missing storage turned into an immediate
+   out-of-bounds write. Fixed by extending the same exception (renamed
+   `IsInterpolatedFragmentInput` -> `IsForwardedPerControlPointInput`) to
+   cover `Position`/`PointSize` too.
+8. Rebuilt, both new tests passed, all 313 `FeMeGraphicsTests` passed.
+   One pre-existing test (`BuildStageStorageSkipsSystemValueInputStorage-
+   ByDefault`) used `Position` as its "generic system value, no exception
+   applies" example -- no longer valid after bug #2's fix, so switched it
+   to `PrimitiveID` (still genuinely unbacked) and added a new dedicated
+   test for the new `Position`-is-storage-backed behavior.
+9. `ninja check-feme`: 3006/3006 pass, 3 pre-existing unsupported, 0
+   failures -- up by 3 tests, no regressions.
+10. Flipped `shaderClipDistance`/`shaderCullDistance` to `VK_TRUE`
+    (measurement only) and ran the full real
+    `dEQP-VK.clipping.user_defined.*` matrix (256 cases): **146/256
+    overall**, but the number that matters is the non-`_dynamic_index`/
+    non-`_fragmentshader_read` subset: **64/64, up from 32/64** --
+    every `vert_tess`/`vert_tess_geom` case now passes. `_dynamic_index`
+    (32/128) and `_fragmentshader_read` (50/64, non-dynamic-index only)
+    remain the only gaps, both already tracked as H7w/H7x.
+11. Reverted the feature-bit flip (bit stays `VK_FALSE` -- H7w/H7x aren't
+    closed yet, so the feature's full mandatory conformance surface
+    still isn't met) and updated its rationale comment.
+12. Committed in 4 small steps: the first repro test, the first fix
+    (`PatchPipeline.cpp`), the second repro test + second fix
+    (`StageStorage.cpp` + `StageLinkTest.cpp` update, since they're
+    tightly coupled -- the test alone crashes without the fix), and the
+    `PhysicalDeviceInfo.cpp` comment update. Then a fifth commit for the
+    `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
+    doc updates.
+13. Struck through H112 in `Roadmap.md`, updated H53/H32's own text to
+    point at H7w/H7x as the only remaining blockers (both already filed
+    and partially fixed, no new milestone rows needed).
+
+## Why two bugs, not one
+
+Bug #1 (linking) and bug #2 (storage allocation) are independent layers
+of the same subsystem, and neither alone explains the symptom: bug #1
+without bug #2 fixed would still crash (nothing to write into once
+linked); bug #2 without bug #1 would never even try to write (nothing
+linked to copy). Both had to be found and fixed together. The second one
+in particular was only reachable because a real SPIR-V shader marks
+`gl_Position` `SystemValue`-tagged at intermediate hull/domain stages --
+a shape every prior hand-written test (including a lot of this project's
+own history) never exercised, since every prior test happened to use the
+`Location`-based encoding instead. Worth remembering for future hull/
+domain-stage bugs: a hand-written repro that avoids `SystemValue`-tagged
+intermediate `Position` is not actually testing the real CTS shape.
+
+## What's still open (not this session's scope)
+
+1. **H7w** (`_dynamic_index`, 32/128 passing) and **H7x**
+   (`_fragmentshader_read`, 50/64 passing) are the only remaining
+   blockers on `shaderClipDistance`/`shaderCullDistance`. Both already
+   have their own roadmap rows with partial-fix history -- worth a fresh
+   session picking up exactly where their own rows leave off, ~1-2 hours
+   each for a real diagnostic given the rows are already partially
+   fixed.
+2. **`_dynamic_index` combined with `vert_geom`/`vert_tess_geom`** still
+   crashes at pipeline creation with `"JIT session error: Symbols not
+   found: [ spirv_var_N ]"` -- a distinct, unrelated, not-yet-filed bug,
+   flagged again this session (third session in a row to notice it and
+   defer it). Worth its own ~15-30 min first diagnostic, and probably its
+   own new milestone row once triaged.
+3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** is still never
+   built/run in any session -- flagged again as a standing gap (fourth
+   session in a row). Worth a session of its own to wire it up.
