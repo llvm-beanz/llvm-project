@@ -108,8 +108,49 @@ void applyResources(ResourcesT &To, const cpu::DispatchResources *From) {
   To.RootConstants = From->RootConstants;
 }
 
-bool isNotSystemValue(const SignatureElement &Elt) {
-  return Elt.SystemValue == SignatureSystemValue::None;
+/// Whether \p Elt is eligible to be linked to a producer stage's matching
+/// output at all, as opposed to being sourced from the consuming stage's
+/// own invocation record by its compiled wrapper.
+///
+/// (Roadmap H112) `VertexToHull`/`VertexToInputPatch`/`HullToPatchConstant`/
+/// `HullToDomain` below used to filter with `isNotSystemValue` above --
+/// which excludes *every* system-value input, not just the ones a hull or
+/// domain stage's own wrapper actually synthesizes itself
+/// (`OutputControlPointID`/`PatchVertices`/`PrimitiveID` for the hull
+/// phase, `DomainLocation`/`PatchVertices`/`PrimitiveID` for the domain
+/// stage -- see `HullWrapper.cpp`'s `lowerHullInputLoad` and
+/// `DomainWrapper.cpp`'s `lowerDomainInputLoad`, whose own `default` case
+/// comments already document that every *other* system value (`Position`,
+/// `ClipDistance`, `CullDistance`, `PointSize`) is a per-control-point
+/// attribute merely *forwarded* from the previous stage's matching output,
+/// exactly like an ordinary user varying, and needs the same producer
+/// linkage one gets). Since `isNotSystemValue` excluded those too, no
+/// `LinkedStageElement` was ever created for them, so `copyLinkedElements`
+/// never copied the real value into the consumer's own input storage --
+/// silently leaving it zero-initialized instead. This went unnoticed for
+/// `Position` only because every existing tessellation test (and, per
+/// `CanonicalizeStage.cpp`'s own convention, every real SPIR-V-derived
+/// shader up to this point) forwards it through an ordinary `Location`-
+/// based varying between the vertex/hull/domain stages, only marking it
+/// `SystemValue::Position` at the domain stage's own final output -- so it
+/// was never actually filtered out by `isNotSystemValue`. `gl_ClipDistance`/
+/// `gl_CullDistance` have no such non-system-value spelling: SPIR-V/GLSL
+/// only ever expose them as `gl_ClipDistance`/`gl_CullDistance`, a system
+/// value at every stage that touches them, so this bug was reachable only
+/// once a real per-control-point `ClipDistance`/`CullDistance` passthrough
+/// shape existed to trigger it -- `dEQP-VK.clipping.user_defined.
+/// {clip_distance,clip_cull_distance}.vert_tess*`, this milestone's own
+/// root cause.
+bool isForwardedFromProducerStage(const SignatureElement &Elt) {
+  switch (Elt.SystemValue) {
+  case SignatureSystemValue::OutputControlPointID:
+  case SignatureSystemValue::PatchVertices:
+  case SignatureSystemValue::PrimitiveID:
+  case SignatureSystemValue::DomainLocation:
+    return false;
+  default:
+    return true;
+  }
 }
 
 } // namespace
@@ -132,14 +173,18 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
   Link.PatchConstantSig = std::move(*PatchConstantSig);
   Link.DomainSig = std::move(*DomainSig);
 
-  // A stage's system-value inputs (the hull phase's `OutputControlPointID`,
-  // the domain stage's `DomainLocation`) are sourced from its invocation
-  // record by the compiled wrapper, not from the previous stage's output,
-  // so only ordinary per-control-point attributes are linked here.
+  // A stage's own wrapper-synthesized system-value inputs (the hull
+  // phase's `OutputControlPointID`/`PatchVertices`/`PrimitiveID`, the
+  // domain stage's `DomainLocation`/`PatchVertices`/`PrimitiveID`) are
+  // sourced from its invocation record by the compiled wrapper, not from
+  // the previous stage's output, so those are excluded here; every other
+  // per-control-point attribute (ordinary varyings, and forwarded system
+  // values like `Position`/`ClipDistance`/`CullDistance`/`PointSize` --
+  // see `isForwardedFromProducerStage`'s own comment) is linked normally.
   Expected<SmallVector<LinkedStageElement, 4>> VertexToHull = linkStageElements(
       VertexOutputSig, SignatureDirection::Output, Link.HullSig,
       SignatureDirection::Input, "vertex stage output -> hull stage input",
-      isNotSystemValue);
+      isForwardedFromProducerStage);
   if (!VertexToHull)
     return VertexToHull.takeError();
   Link.VertexToHull = std::move(*VertexToHull);
@@ -154,7 +199,7 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
                           "vertex stage output -> patch-constant InputPatch",
                           [](const SignatureElement &Elt) {
                             return isInputPatchElement(Elt) &&
-                                   isNotSystemValue(Elt);
+                                   isForwardedFromProducerStage(Elt);
                           });
     if (!VertexToInputPatch)
       return VertexToInputPatch.takeError();
@@ -167,7 +212,7 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
                         "hull stage output -> patch-constant OutputPatch",
                         [](const SignatureElement &Elt) {
                           return isOutputPatchElement(Elt) &&
-                                 isNotSystemValue(Elt);
+                                 isForwardedFromProducerStage(Elt);
                         });
   if (!HullToPatchConstant)
     return HullToPatchConstant.takeError();
@@ -176,7 +221,7 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
   Expected<SmallVector<LinkedStageElement, 4>> HullToDomain = linkStageElements(
       Link.HullSig, SignatureDirection::Output, Link.DomainSig,
       SignatureDirection::Input, "hull stage output -> domain stage input",
-      isNotSystemValue);
+      isForwardedFromProducerStage);
   if (!HullToDomain)
     return HullToDomain.takeError();
   Link.HullToDomain = std::move(*HullToDomain);
