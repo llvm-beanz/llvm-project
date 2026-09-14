@@ -45,9 +45,34 @@ agent thoughts.
 
 # Request
 
-A network error stopped the last session. Please pick up where you left off and
-continue.
+Can you work on H96 or other blocking work to make progress on the H-series
+milestones?
 
-Can you please re-triage all the open H-series milestones to figure out what is
-fixed and what isn't? Also please run a full Vulkan CTS run and update the
-headline in the CTS report with the current status.
+> **A long-lived `deqp-vk` process crashes (bare `SIGSEGV`) after processing
+> roughly 2,000-2,500 test cases, regardless of which case is next in the
+> caselist**, discovered during this same re-triage session while diagnosing
+> what first looked like a dense, shader-cache-related crash family (see the
+> "Critical correction" note in `VulkanCTSReport.md`'s "Reproducing this report"
+> section for the shader-cache half of that story). After ruling out `deqp-vk`'s
+> own `shadercache.bin` (disabling it with `--deqp-shadercache=disable` did
+> **not** stop the crash), a `dEQP-VK.pipeline.*` re-run still crashed after
+> exactly 2,401 cases in one process, and -- critically -- **every
+> freshly-restarted process then crashed again on its own very first case**,
+> even though that exact case (confirmed via a standalone, single-case re-run in
+> a byte-fresh directory) passes cleanly in isolation. This rules out both "one
+> specific case is buggy" and "corrupted shared on-disk state" (no feme-specific
+> on-disk cache path was found in `feme/lib/Vulkan/`), leaving **some form of
+> unbounded, in-process resource growth carried across test cases within a
+> single long-lived `VkInstance`/`VkDevice`** (JIT-compiled-code arena,
+> pipeline-cache growth, or similar) as the most likely cause -- serious not
+> only for CTS-run accuracy but for any real, long-running Vulkan application on
+> this driver. Not yet triaged -- needs a memory-growth profile (e.g. `valgrind
+> --tool=massif` or periodic `/proc/<pid>/status` `VmRSS` sampling) across a few
+> thousand sequential `deqp-vk` cases in one process to identify which
+> allocation grows unboundedly, and whether the fix belongs in the JIT engine's
+> code-cache eviction, the pipeline-cache/shader-cache implementation, or
+> elsewhere in `feme/lib/Vulkan/`. Until fixed, any full-suite CTS run should
+> chunk each group's own caselist into fixed-size batches (roughly 1,500-2,000
+> cases per `deqp-vk` invocation) from the start, rather than relying on
+> crash-triggered resume loops, which degrade to one process-spawn per case once
+> this threshold is crossed
