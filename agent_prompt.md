@@ -45,7 +45,6 @@ agent thoughts.
 
 # Request
 
-
 Can you work on the H-series milestones?
 
 The previous session suggested the next steps:
