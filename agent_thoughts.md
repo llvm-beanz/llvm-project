@@ -82063,3 +82063,89 @@ scoped or started:
    failure set, separate from VK-GL-CTS. Not attempted this session
    (out of scope for the H111(b) fix); ~30-45 min to get a first build
    and initial run going, more to triage whatever it finds.
+
+# H32 re-triaged: H54/H55/H56 closed with no code change (already fixed elsewhere), H112 filed for a new tessellation rendering bug
+
+**No code fix landed this session. Real progress made anyway: confirmed 2 of 3 blockers under H32/H53 are already fixed, and precisely re-scoped the third to a new, narrower, still-open bug (H112).**
+
+## What just happened
+
+1. Started from H32 ("optional core 1.0 feature bits"), found it's
+   effectively just waiting on `shaderClipDistance`/`shaderCullDistance`
+   (every other H7-letter cluster already closed), which in turn depends
+   on H53's three children: H54, H55, H56.
+2. Re-measured all three against the **real** Vulkan CTS (feature bits
+   provisionally flipped on) instead of trusting their years-old
+   descriptions:
+   - H54 (geometry-stage `gl_ClipDistance` input stage-linkage mismatch):
+     **gone**. `vert_geom.*` bucket, 32/32 pass.
+   - H55 (fragment read-back from non-vertex producer): **gone**. Same
+     32/32, including every `_fragmentshader_read` case.
+   - H56 (patch-constant-phase compile crash): **gone**. The exact case
+     its own row cites no longer crashes.
+   - All three were almost certainly fixed as side effects of later,
+     unrelated sessions' work (struct/offset fixes, `splitTessellation-
+     ControlEntry`-adjacent changes) -- nobody ever went back to check.
+3. But the `vert_tess`/`vert_tess_geom` bucket (64 cases) still fails
+   100% -- now with a **silent wrong-pixels** result instead of a crash.
+   Built a minimal hand-written GLSL repro matching the real CTS shader's
+   exact shape (3-control-point hull, self-indexed `gl_out[gl_InvocationID]
+   .gl_ClipDistance[0] = gl_in[gl_InvocationID].gl_ClipDistance[0]`, no
+   barrier; domain stage barycentric-interpolating `gl_in[0/1/2]
+   .gl_ClipDistance[0]` at constant indices), pushed it through the
+   `glslangValidator` -> `feme-translate` -> `feme-opt
+   -passes=feme-graphics-canonicalize-stage` reduction pipeline, and
+   inspected the resulting `SignatureElement`s directly with a small
+   standalone tool (`/tmp/h54_repro/dumpsig`, built against `build2`'s
+   static libs). Everything looked structurally correct -- both the
+   control-point clone and the patch-constant clone store the right
+   elements with matching `RowCount`/`ComponentCount`.
+4. Conclusion: the bug is **not** in `CanonicalizeStage.cpp`'s static
+   classification (H54/H55/H56's own territory). It's downstream, most
+   likely in `PatchPipeline.cpp`'s runtime hull-to-domain linkage/copy, or
+   the CPU-lowered `HullWrapperPass`/`DomainWrapperPass` storage for a
+   per-control-point block member. Filed as **H112**, pointing future
+   sessions at the right place to keep digging instead of re-treading
+   H54/H55/H56's already-closed ground.
+5. Reverted the temporary `VK_TRUE` measurement patch on
+   `PhysicalDeviceInfo.cpp` (kept the bit `VK_FALSE`, updated its comment
+   to cite H53/H112 instead of the stale H7w/H7x/H7y text).
+6. `ninja check-feme`: 3003/3003 pass, 3 pre-existing unsupported, 0
+   failures -- no regression risk since no functional code changed.
+7. Committed in 3 small steps: the `PhysicalDeviceInfo.cpp` comment
+   update, the `Roadmap.md` close-out (H54/H55/H56 struck through, H112
+   added, H53/H32 text corrected), and the `VulkanCTSReport.md`/
+   `Vulkan14FeatureInventory.md` measured-impact writeup.
+
+## Why this matters even without a fix
+
+The roadmap previously implied H32 was blocked on **new implementation
+work** (H7b-H7j, itself stale text). It's actually blocked on exactly
+**one** real, already-isolated bug (H112) with a working minimal repro
+and a `dumpsig`-based reduction technique any future session can reuse in
+seconds. That's a much smaller, better-defined remaining scope than
+before this session.
+
+## Next steps (for whoever picks up H112)
+
+1. **Root-cause H112** (~45-90 min): the static IR is provably correct,
+   so the bug is at runtime. Fastest path: add a hand-written
+   `ExecutorTest.cpp`-level repro (mirroring H111(b)'s own successful
+   bisection technique) driving the compiled hull+domain pipeline
+   directly, and inspect the actual per-control-point `ClipDistance`
+   values in `PatchPipeline.cpp`'s `copyLinkedElements` with a debugger or
+   printf-instrumentation, comparing against the already-correct
+   `gl_Position` handling in the exact same function.
+2. Once H112 is fixed, re-run the full `dEQP-VK.clipping.user_defined.
+   {clip_distance,clip_cull_distance}.*` matrix (non-`_dynamic_index`)
+   to confirm 128/128, then flip `shaderClipDistance`/`shaderCullDistance`
+   to `VK_TRUE` for real and close H53 and H32.
+3. **Separately, not yet investigated**: the `_dynamic_index` variants
+   combined with `vert_geom`/`vert_tess_geom` fail with `"JIT session
+   error: Symbols not found: [ spirv_var_N ]"` -- a distinct bug, no
+   milestone filed yet, worth a first diagnostic (~15-30 min) once H112
+   closes.
+4. `offload-test-suite`'s `check-hlsl-feme-vk` target is still never
+   built/run in any session -- flagged again as a standing gap, not
+   picked up this session either (out of scope for H32/H112, but worth a
+   session of its own).
