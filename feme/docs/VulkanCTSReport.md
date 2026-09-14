@@ -41719,3 +41719,63 @@ one and the real host one relative to `CanonicalizeStagePass`; this fix
 establishes that ordering as an implementation detail internal to
 `feme::vulkan::importShaderModule`/`feme::cpu::runPipeline`'s own
 contract, not a documented design decision.
+
+## Roadmap H105: measured impact
+
+**What changed:** `feme::cpu::CompiledStage::createStage`'s own
+`getGroupSharedRequirements(Mod)` call -- which sizes/aligns the
+host-side scratch buffer allocated for a stage's `groupshared`
+memory before its JIT'd function ever runs -- ran *before*
+`feme::cpu::runPipeline`, on a module whose `DataLayout` was still the
+SPIR-V-translation-time one roadmap H82 established must stay
+untouched until `CanonicalizeStagePass`/`ValidateStagePass` finish
+(both run inside `runPipeline`, later). `SIMDizePass`/
+`EntryWrapperPass` (also inside `runPipeline`, downstream of its own
+host-`DataLayout` substitution) separately re-lay-out the same
+`groupshared` globals against the *real* host `DataLayout` -- a
+second instance of H82's own "two different `DataLayout`s used to
+reason about the same offsets/sizes" bug class, found by this
+session's own targeted grep for other pre-`runPipeline`
+`Module::getDataLayout()` consumers (a suggested next step from the
+H82-closing session).
+
+**Fix:** extracted the existing inline host-`DataLayout`-detection
+logic in `Pipeline.cpp` into a new, shared
+`feme::cpu::getHostDataLayout()`; `CompiledStage.cpp` now temporarily
+substitutes the real host layout just for this one query, restoring
+the module's original `DataLayout` immediately afterward so
+`CanonicalizeStagePass` still sees what it expects once `runPipeline`
+runs. New regression test
+`CompiledStageTest.GetArtifactInfoUsesHostDataLayoutForGroupSharedAlignment`
+uses a `groupshared` global whose alignment genuinely differs between
+a SPIR-V-execution-model `DataLayout` string and the real host one;
+confirmed to fail (expected 4-byte alignment, actual 1-byte) with the
+fix reverted, and pass with it restored.
+
+**Verification:** `ninja check-feme`: 2994/2997 passed, 3 pre-existing
+`Unsupported`, 0 `Failed` (up by the 1 new test). Two scoped CTS
+re-runs, both zero regressions:
+- All 31 `dEQP-VK.compute.*shared*` cases (the CTS's own
+  `groupshared`-focused compute coverage): 15 Pass/0 Fail/16
+  NotSupported (`VK_EXT_shader_object` variants), unchanged.
+- The full `dEQP-VK.mesh_shader.ext.*` mustpass group (28,044 cases):
+  **375 Pass/64 Fail/27,605 Not supported**, byte-for-byte identical
+  to H82's own closing numbers -- this fix touches no currently-known
+  failing case.
+
+No CTS case is currently known to actually exercise a real size/
+alignment mismatch from this bug on this session's own aarch64 host
+(every `groupshared`-using case in the two sweeps above either has an
+explicit LLVM IR `align` already masking it, or happens not to need
+more alignment/size than the buggy pre-fix computation already gave
+it) -- this is a preventive fix for a real, confirmed-latent bug
+(proven via the new unit test, not via any failing CTS case), not one
+closing a specific reported failure. See this session's own
+`agent_thoughts.md` entry for a suggested next step to construct a
+CTS-level (rather than only unit-level) repro.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: no feature or extension bit changes. `FeMeCPUDesign.md` needs
+no change: this only extends H82's own already-undocumented
+DataLayout-ordering implementation detail to a second call site, not
+a new design decision.
