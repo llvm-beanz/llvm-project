@@ -4842,6 +4842,218 @@ constexpr char TessClipDistanceSolidRedFragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// H112 diagnostic: identical shape to `TessClipDistanceVertexShaderIR`
+// above, except `gl_Position` is a full `vec4` forwarded as
+// `SignatureSystemValue::Position` at *every* stage boundary (matching
+// what the real SPIR-V-derived CTS shader's own converted IR actually
+// does -- confirmed by dumping `main`/`main.patchconstant`'s signatures
+// for the real `dEQP-VK.clipping.user_defined.clip_distance.vert_tess.1`
+// case), rather than as an ordinary `Location`-based varying the way
+// `TessClipDistanceVertexShaderIR` above (deliberately) does. If this
+// test fails while the sibling above passes, the remaining bug is
+// specific to forwarding a `SystemValue`-tagged element (not just
+// `ClipDistance`/`CullDistance` -- `Position` too) through hull/domain
+// storage, not to `PatchPipeline.cpp`'s own producer/consumer linking
+// (already fixed this session).
+constexpr char TessSysValPositionVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %clip = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %clip, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char TessSysValPositionHullShaderIR[] = R"(
+  define void @hs_main() #0 {
+    %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+    %pw = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 %id)
+    %clip = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %pw, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %clip, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+constexpr char TessSysValPositionDomainShaderIR[] = R"(
+  define void @ds_main() #0 {
+    %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+    %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+    %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+    %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+    %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+    %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+    %xu = fmul float %x0, %u
+    %xv = fmul float %x1, %v
+    %xw = fmul float %x2, %w
+    %xa = fadd float %xu, %xv
+    %x = fadd float %xa, %xw
+    %yu = fmul float %y0, %u
+    %yv = fmul float %y1, %v
+    %yw = fmul float %y2, %w
+    %ya = fadd float %yu, %yv
+    %y = fadd float %ya, %yw
+    %zu = fmul float %z0, %u
+    %zv = fmul float %z1, %v
+    %zw = fmul float %z2, %w
+    %za = fadd float %zu, %zv
+    %z = fadd float %za, %zw
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    %c0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    %c1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 1)
+    %c2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 2)
+    %cu = fmul float %c0, %u
+    %cv = fmul float %c1, %v
+    %cw = fmul float %c2, %w
+    %ca = fadd float %cu, %cv
+    %c = fadd float %ca, %cw
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %c, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+/// Like `buildTessClipDistancePipeline`, but marks `gl_Position` as
+/// `SignatureSystemValue::Position` at every stage boundary (VS output,
+/// hull input/output, domain input) instead of an ordinary `Location`
+/// varying -- matching the real CTS shader's own converted-IR shape. See
+/// the file comment on `TessSysValPositionVertexShaderIR` above.
+Expected<GraphicsPipeline>
+buildTessSysValPositionPipeline(Context &Ctx, uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, TessSysValPositionVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(1, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::ClipDistance,
+                                /*RowCount=*/1),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(4, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::ClipDistance,
+                                /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> HS =
+      compileStage(Ctx, TessSysValPositionHullShaderIR, "hs_main", HSSig,
+                  ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("4.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessSysValPositionDomainShaderIR, "ds_main", DSSig, ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, TessClipDistanceSolidRedFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
 /// Builds the vertex/hull/patch-constant/domain/fragment pipeline the
 /// shaders above implement: like `buildTessellatedPipeline`, but each
 /// control point also carries a `gl_ClipDistance[0]` value (location 1)
@@ -4971,6 +5183,71 @@ TEST(ExecutorTest, ClipsATessellatedPatchAgainstAWrittenClipDistance) {
       -1.0f, -1.0f, 0.0f, -1.0f, // control point 0
       3.0f,  -1.0f, 0.0f, -1.0f, // control point 1
       -1.0f, 3.0f,  0.0f, 3.0f,  // control point 2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 16,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Storage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {2u, 3u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (uint32_t Y : {0u, 1u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
+}
+
+// (Roadmap H112) A second regression case alongside
+// `ClipsATessellatedPatchAgainstAWrittenClipDistance` above: identical
+// shape, but with `gl_Position` forwarded as a
+// `SignatureSystemValue::Position`-tagged element at every stage boundary
+// (matching what a real SPIR-V-derived shader's own converted IR actually
+// does -- confirmed by dumping the real
+// `dEQP-VK.clipping.user_defined.clip_distance.vert_tess.1` case's own
+// signatures) rather than as an ordinary `Location` varying. This is a
+// distinct bug from the producer/consumer *linking* one
+// `PatchPipeline.cpp`'s `isForwardedFromProducerStage` fixes: even once
+// linked, `buildStageStorage` still needs to allocate real storage for a
+// `Position`/`PointSize` hull/domain *input* (it already did for
+// `ClipDistance`/`CullDistance`) -- see `IsForwardedPerControlPointInput`
+// in `StageStorage.cpp`. Before that fix, this test crashed
+// (`StageStorage::writeRaw`'s own out-of-bounds assertion) rather than
+// merely rendering incorrectly.
+TEST(ExecutorTest, ClipsATessellatedPatchWithSystemValuePositionForwarding) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessSysValPositionPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Same full-viewport triangle + written clip distance as
+  // `ClipsATessellatedPatchAgainstAWrittenClipDistance` above.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, -1.0f,
+      3.0f,  -1.0f, 0.0f, -1.0f,
+      -1.0f, 3.0f,  0.0f, 3.0f,
   };
   std::vector<VertexAttribute> Attributes = {
       {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
