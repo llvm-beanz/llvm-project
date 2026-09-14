@@ -81677,3 +81677,108 @@ completely.
    `feme::cpu::runPipeline`'s new datalayout substitution point could
    have the same class of bug if it depends on `Module::getDataLayout()`
    for anything alignment-sensitive. ~20 min grep.
+
+# H96 was already fixed; H105 (GroupShared DataLayout) + H106 (gl_CullPrimitiveEXT) landed this session
+
+**Fixed. `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` passes.** Plus a
+preventive fix (H105) for a real, confirmed-latent bug with no known CTS
+repro yet, plus 8 roadmap rows whose labels were silently unstruck despite
+fully-closed content. Zero regressions: `check-feme` 2995/2998 (was
+2993/2996 at session start), a same-shaped `mesh_shader.ext.*` re-run
+376/63/26,482 (up 1 Pass, down 1 Fail from baseline).
+
+## First: re-triage found most of the backlog already done
+
+The prior session's own "suggested next steps" said H96 (the ~2,000-2,500-
+case `deqp-vk` crash) was still open. It wasn't — a scan of the full
+H-series table found H93a/H93b/H94/H95/H96/H97/H98/H99/H100-H104 all
+already closed in turns this session doesn't have full history for.
+**Lesson: re-scan the whole roadmap table before trusting a prior
+session's own "still open" list — it can be stale by several turns.**
+
+## Bug 1 found along the way: 8 roadmap rows looked open but weren't
+
+H31/H69/H72/H73/H74/H87/H88/H93a all had their full row content wrapped in
+`~~...~~` (genuinely closed) but the leading `| H31 |` row-label cell was
+never struck through — so a quick grep for `~~H31~~`-style patterns (or an
+eyeball scan of just the label column) misses them. Fixed by a small
+Python script striking through just the 8 labels, no content changes.
+Committed separately.
+
+## Bug 2 (H105): groupshared sized against the wrong DataLayout
+
+Grepped for other `Module::getDataLayout()` consumers running in the same
+pre-`runPipeline` window H82 (a past session) had already fixed once.
+Found a second instance: `CompiledStage::createStage`'s own
+`getGroupSharedRequirements(Mod)` call runs *before* `runPipeline`'s own
+host-`DataLayout` substitution, so it sizes/aligns a `groupshared`
+global's host-side scratch buffer against the still-SPIR-V-translation-
+time `DataLayout` — a different one than `SIMDizePass`/`EntryWrapperPass`
+(downstream, inside `runPipeline`) use when they lay the same global out
+again. Fix: extracted the existing inline host-detection logic into a
+shared `feme::cpu::getHostDataLayout()`, and `CompiledStage.cpp` now
+temporarily swaps in the real host layout just for this one query,
+restoring the original immediately after.
+
+**No known CTS case exercises this today** — every `groupshared` global
+this session's own sweeps touch either has an explicit `align` masking it,
+or doesn't need enough alignment for the bug to matter on this host. Proven
+only via a new unit test (`CompiledStageTest.
+GetArtifactInfoUsesHostDataLayoutForGroupSharedAlignment`), confirmed to
+genuinely fail without the fix (expected align 4, got align 1) and pass
+with it restored.
+
+## Bug 3 (H106): gl_CullPrimitiveEXT was never implemented at all
+
+Triaged `builtin.cull_primitives` from the 64 remaining
+`mesh_shader.ext.*` failures. It compiles and runs to completion but fails
+its own pixel comparison — both of the mesh shader's two triangles
+rasterized, though one was meant to be culled. Grepped for `CullPrimitive`
+across `feme/lib`: found only a passing comment about `i1`-to-`i32`
+widening, **no actual dispatch anywhere**. SPIR-V `BuiltIn
+CullPrimitiveEXT` (5299) mapped to `SignatureSystemValue::None` in
+`getSystemValueForBuiltIn`, so a mesh entry's `gl_CullPrimitiveEXT` write
+was stored as an ordinary output and the rasterizer never consulted it.
+This was a real, never-implemented feature gap, not a regression.
+
+Fix mirrors H93b's already-fixed `gl_PrimitiveID`-authoring pattern
+exactly: added `SignatureSystemValue::CullPrimitive` (appended at the end
+of the enum, per its own no-renumbering convention), mapped the `BuiltIn`
+to it, and threaded a new `PrimitiveState::Culled` bool through
+`Executor.cpp`'s `resolvePrimitiveState`, read back once per primitive and
+consulted at all three primitive-emission call sites (triangles, points,
+lines) to skip rasterizing a culled primitive outright. New test
+`ExecutorTest.MeshCullPrimitiveDiscardsAnAuthoredCulledPrimitive`
+(two triangles sharing a diagonal, one authored culled, one not),
+confirmed to genuinely fail without the fix and pass with it.
+
+## Commits (5, in order)
+
+1. `Roadmap.md` — strike through the 8 mislabeled-but-closed rows.
+2. `CompiledStage.cpp`/`Pipeline.cpp`/`Pipeline.h`/`CompiledStageTest.cpp`
+   — H105 fix + regression test.
+3. `Roadmap.md`/`VulkanCTSReport.md` — H105 row + measured-impact section.
+4. `Signature.h`/`CanonicalizeStage.cpp`/`Executor.cpp`/`ExecutorTest.cpp`
+   — H106 fix + regression test.
+5. `Roadmap.md`/`VulkanCTSReport.md`/`VulkanExtensionInventory.md` — H106
+   row + measured-impact section + extension-inventory note.
+6. This file (committed separately, as instructed).
+
+## Suggested next steps
+
+1. **Investigate the remaining ~63 `mesh_shader.ext.*` failures** — 40
+   `api.draw*`/`api.draw_indirect*` cases all sharing `with_task_shader`/
+   `with_task_shader_secondary_cmd` suffixes (likely one shared root
+   cause), `misc.no_lines`/`no_points`/`no_triangles` (3 cases),
+   `properties.max_mesh_output_components` (1 case), 3
+   `smoke.*.fullscreen_gradient` (already known pre-existing per H76),
+   and 16 `synchronization.*` cases. None yet triaged beyond this list.
+   ~15-30 min each for a first diagnostic; the `with_task_shader` bucket
+   alone is worth ~40 cases if it's one root cause.
+2. **Find or construct a real CTS-level repro for H105.** It's currently
+   proven only by a hand-written unit test; a real `groupshared`-heavy
+   compute or mesh case with no explicit `align` and a large enough
+   struct might expose it on this host. ~30-45 min to search/construct.
+3. **H96 is genuinely closed** (confirmed this session, contrary to the
+   prior session's own belief it was still open) — no more chunked-batch
+   workaround needed for full CTS runs going forward.
