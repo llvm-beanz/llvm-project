@@ -794,7 +794,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // follow-ons: H7w (dynamic indexing), H7x (fragment-shader read-back),
   // H7y (tessellation/geometry-stage clip/cull-distance).
   // `Info.Features.shaderClipDistance`/`shaderCullDistance` are therefore
-  // intentionally left at their zero-initialized `VK_FALSE`.
+  // intentionally left at their zero-initialized `VK_FALSE`. (Roadmap H53:
+  // a real re-measurement found H54/H55's own originally-diagnosed
+  // stage-linkage/fragment-read errors, and H56's own originally-diagnosed
+  // patch-constant-phase crash, are all already fixed -- but a new, still
+  // unfixed rendering-correctness bug in the `vert_tess`/`vert_tess_geom`
+  // shader-stage combination (roadmap H112) means the bulk of this
+  // feature's own tessellation-path conformance surface still does not
+  // pass, so the bit stays `VK_FALSE` until H112 closes.)
+
 
   // (Roadmap H7i) `samplerAnisotropy`: `Image.cpp` already stored
   // `anisotropyEnable`/`maxAnisotropy` on the sampler descriptor at
