@@ -270,6 +270,40 @@ TessellatedPatch tessellateTriangle(const TessFactors &Factors,
   uint32_t N =
       computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
 
+  if (E01 == 1 && E12 == 1 && E20 == 1 && N == 1) {
+    // (roadmap H7x) At the minimum, fully unsubdivided factor (every edge
+    // and the interior both at 1 segment), the general inset+bridge path
+    // below still synthesizes a 7-triangle core+annulus split out of this
+    // single triangle, purely for its own crack-avoidance bookkeeping (see
+    // the `Inset` comment below). That split is invisible to ordinary
+    // linear position/varying interpolation (barycentric interpolation is
+    // affine, so any consistent subdivision reproduces it exactly), but it
+    // is *not* invisible to `gl_CullDistance`'s whole-*primitive* culling
+    // rule (Vulkan spec: a primitive is discarded outright if some one
+    // cull-distance index is negative at *every one* of its own vertices).
+    // A synthetic sub-triangle whose 3 vertices all happen to land near
+    // one real edge of the un-subdivided triangle can satisfy that
+    // all-negative test even when the *real*, un-subdivided triangle's own
+    // 3 control points do not (e.g. two adjacent corners share a negative
+    // cull distance while the third does not) -- spuriously culling a
+    // sliver along that edge that a non-subdividing tessellator (or any
+    // conformant implementation that honors "tess factor 1 needs no
+    // subdivision") would render correctly. This was
+    // `dEQP-VK.clipping.user_defined.clip_cull_distance.{vert_tess,
+    // vert_tess_geom}.*_fragmentshader_read`'s own remaining failure: a
+    // full-width band of spuriously culled sub-triangles along the
+    // `gl_Position.y == -1` patch edge shared by every one of the test's 8
+    // bars. Emitting the real, single triangle directly here avoids ever
+    // creating that spurious internal primitive boundary in the first
+    // place.
+    TessellatedPatch Patch;
+    Patch.Points = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    appendTriangle(Patch, 0, 1, 2, Cw);
+    if (OutputPrimitive == TessOutputPrimitive::Point)
+      Patch.Indices.clear();
+    return Patch;
+  }
+
   TessellatedPatch Patch;
   RingEdges OuterRing = appendTriangleBoundaryRing(Patch, E01, E12, E20);
   // Inset the uniform interior core strictly within the outer boundary --

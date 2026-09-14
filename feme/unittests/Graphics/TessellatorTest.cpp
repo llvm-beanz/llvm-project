@@ -128,6 +128,41 @@ TEST(TessellatorTest, TriangleDomainGeneratesTheAnalyticLatticeSize) {
   }
 }
 
+// (Roadmap H7x) At the fully unsubdivided factor (every edge and the
+// interior both at 1 segment), `tessellateTriangle` must emit the real,
+// single triangle directly -- not the general inset/bridge path's usual
+// 7-triangle core+annulus split, which spuriously shrinks two of the
+// patch's own three corners toward the centroid. That inset is invisible
+// to affine position/varying interpolation, but not to
+// `gl_CullDistance`'s whole-*primitive* culling rule: a synthetic
+// sub-triangle whose 3 vertices all land near one real edge of the
+// unsubdivided triangle can be all-negative (and so get spuriously
+// culled) even when the real, unsubdivided triangle's own 3 control
+// points are not. See PhysicalDeviceInfo.cpp's own comment for the real
+// `dEQP-VK.clipping.user_defined.clip_cull_distance.vert_tess.
+// 1_7_fragmentshader_read` failure this closed.
+TEST(TessellatorTest, TriangleFullyUnsubdividedFactorEmitsOneRealTriangle) {
+  TessFactors Factors;
+  Factors.Inside = {1.0f, 0.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  ASSERT_EQ(Patch.Points.size(), 3u);
+  ASSERT_EQ(Patch.Indices.size(), 3u);
+  // The 3 points are exactly the real corners (barycentric (1,0,0),
+  // (0,1,0), (0,0,1)), not inset toward the centroid.
+  auto HasCorner = [&](float U, float V, float W) {
+    return llvm::any_of(Patch.Points, [&](const DomainPoint &P) {
+      return std::abs(P.U - U) < Epsilon && std::abs(P.V - V) < Epsilon &&
+             std::abs(P.W - W) < Epsilon;
+    });
+  };
+  EXPECT_TRUE(HasCorner(1.0f, 0.0f, 0.0f));
+  EXPECT_TRUE(HasCorner(0.0f, 1.0f, 0.0f));
+  EXPECT_TRUE(HasCorner(0.0f, 0.0f, 1.0f));
+}
+
 /// The signed area of triangle (A, B, C)'s (U, V) projection: positive for
 /// a counter-clockwise winding, negative for clockwise. Every domain point
 /// this file generates has a well-defined (U, V) (a triangle domain's `W`
