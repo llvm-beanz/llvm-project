@@ -4721,6 +4721,293 @@ std::vector<uint8_t> renderTessellatedPatch(const GraphicsPipeline &Pipeline,
   return Storage;
 }
 
+// (Roadmap H112) A tessellation-path counterpart to
+// `ClipCullDistanceVertexShaderIR`/`ClipsATriangleAgainstAWrittenClip
+// Distance` above: each control point's own `gl_ClipDistance[0]` (location
+// 1, a plain per-vertex scalar attribute here, not derived from position)
+// is passed through the hull stage's own per-invocation self-indexed
+// `gl_out[id].gl_ClipDistance[0] = gl_in[id].gl_ClipDistance[0]` (mirroring
+// the real, non-barrier `dEQP-VK.clipping.user_defined.clip_distance.
+// vert_tess.*` shader's exact shape -- see this milestone's own roadmap
+// row and `VulkanCTSReport.md`), then the domain stage barycentrically
+// interpolates it the same way it already interpolates position, and
+// writes the result to the final `SignatureSystemValue::ClipDistance`
+// output `Executor.cpp`'s own clip-plane test reads.
+constexpr char TessClipDistanceVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %clip = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %clip, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+// The hull control-point phase: a self-indexed passthrough of this
+// invocation's own input control point's position and `gl_ClipDistance`,
+// exactly matching the real CTS shader's own shape (see the file comment
+// above).
+constexpr char TessClipDistanceHullShaderIR[] = R"(
+  define void @hs_main() #0 {
+    %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+    %clip = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %clip, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+// The domain stage: barycentric evaluation of the three control points'
+// position (as `TessDomainShaderIR` above) and `gl_ClipDistance` alike,
+// writing the interpolated clip distance to the final
+// `SignatureSystemValue::ClipDistance` output (element 4) `Executor.cpp`'s
+// own clip-plane test reads back.
+constexpr char TessClipDistanceDomainShaderIR[] = R"(
+  define void @ds_main() #0 {
+    %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+    %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+    %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+    %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+    %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+    %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+    %xu = fmul float %x0, %u
+    %xv = fmul float %x1, %v
+    %xw = fmul float %x2, %w
+    %xa = fadd float %xu, %xv
+    %x = fadd float %xa, %xw
+    %yu = fmul float %y0, %u
+    %yv = fmul float %y1, %v
+    %yw = fmul float %y2, %w
+    %ya = fadd float %yu, %yv
+    %y = fadd float %ya, %yw
+    %zu = fmul float %z0, %u
+    %zv = fmul float %z1, %v
+    %zw = fmul float %z2, %w
+    %za = fadd float %zu, %zv
+    %z = fadd float %za, %zw
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    %c0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    %c1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 1)
+    %c2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 2)
+    %cu = fmul float %c0, %u
+    %cv = fmul float %c1, %v
+    %cw = fmul float %c2, %w
+    %ca = fadd float %cu, %cv
+    %c = fadd float %ca, %cw
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %c, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+/// A constant, solid-red fragment shader taking no inputs -- this test
+/// only cares whether the executor's own clip-distance test admits a
+/// fragment at all, not what color it writes.
+constexpr char TessClipDistanceSolidRedFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+/// Builds the vertex/hull/patch-constant/domain/fragment pipeline the
+/// shaders above implement: like `buildTessellatedPipeline`, but each
+/// control point also carries a `gl_ClipDistance[0]` value (location 1)
+/// threaded through the hull and domain stages instead of a color varying.
+Expected<GraphicsPipeline>
+buildTessClipDistancePipeline(Context &Ctx, uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 3, /*Location=*/1),
+      makeElement(3, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, TessClipDistanceVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    makeElement(1, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::ClipDistance,
+                                /*RowCount=*/1),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 3,
+                                /*Location=*/1),
+                    makeElement(4, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::ClipDistance,
+                                /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> HS =
+      compileStage(Ctx, TessClipDistanceHullShaderIR, "hs_main", HSSig,
+                  ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("4.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 3, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessClipDistanceDomainShaderIR, "ds_main", DSSig, ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, TessClipDistanceSolidRedFragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
+// (Roadmap H112) A tessellation-path counterpart to
+// `ClipsATriangleAgainstAWrittenClipDistance`: the same full-viewport
+// triangle, tessellated (factor 4.0, so this only rasterizes correctly if
+// every one of the domain stage's own generated points really carries the
+// right interpolated `gl_ClipDistance[0]`), each control point's own clip
+// distance written equal to its own NDC Y coordinate -- exactly the same
+// affine-interpolation trick `ClipsATriangleAgainstAWrittenClipDistance`
+// uses, except carried through the hull/domain chain instead of read
+// straight off the vertex stage. If this test fails while
+// `ClipsATriangleAgainstAWrittenClipDistance` (the non-tessellated
+// sibling) passes, the bug is specific to the tessellation path -- see
+// this milestone's own roadmap row.
+TEST(ExecutorTest, ClipsATessellatedPatchAgainstAWrittenClipDistance) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessClipDistancePipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Interleaved position (xyz), clip-distance (1 float), 4 floats/control
+  // point -- clip-distance equal to each control point's own NDC Y, same
+  // as `ClipsATriangleAgainstAWrittenClipDistance`'s own vertex data.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, -1.0f, // control point 0
+      3.0f,  -1.0f, 0.0f, -1.0f, // control point 1
+      -1.0f, 3.0f,  0.0f, 3.0f,  // control point 2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 16,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Storage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {2u, 3u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (uint32_t Y : {0u, 1u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
+}
+
 TEST(ExecutorTest, TessellatedPatchListCoversTheWholeViewport) {
   Context Ctx;
   // Factor 1 emits the undivided patch (a single triangle); factor 4
