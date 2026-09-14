@@ -156,6 +156,26 @@ TEST(SPIRVToLLVMTest, NonBuiltinInputOutputConvertsInsteadOfFailing) {
       << Result;
 }
 
+// (Roadmap H111) A function-local `spirv.Variable` initialized with an
+// array (as opposed to a scalar or vector) constant -- e.g. GLSL's `const
+// vec4 positions[4] = vec4[](...)`, the shape
+// `dEQP-VK.mesh_shader.ext.smoke.*.fullscreen_gradient`'s own mesh shader
+// declares -- converts to a real `llvm.alloca` + `llvm.store` instead of
+// failing to legalize, the same way upstream MLIR's own `VariablePattern`
+// already handles a scalar/vector initializer.
+TEST(SPIRVToLLVMTest, LocalArrayInitializedVariableConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry() -> () \"None\" { %0 = spirv.Constant "
+      "[1 : i32, 2 : i32] : !spirv.array<2 x i32> %1 = spirv.Variable "
+      "init(%0) : "
+      "!spirv.ptr<!spirv.array<2 x i32>, Function> spirv.Return } "
+      "spirv.EntryPoint \"GLCompute\" @entry }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(Result.find("llvm.alloca"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.store"), std::string::npos) << Result;
+}
+
 // (Roadmap H2c) A builtin interface block (a struct-typed `Output`
 // variable with no whole-variable `BuiltIn` attribute of its own, e.g.
 // glslang's implicit `gl_PerVertex`) still converts through the ordinary
