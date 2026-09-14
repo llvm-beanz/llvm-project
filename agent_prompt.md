@@ -45,23 +45,21 @@ agent thoughts.
 
 # Request
 
-The previous connection lost network connectivity and stalled. Can you resume?
-
 Can you work on the H-series milestones?
 
 The previous session suggested the next steps:
 
-1. **Start H109** (~1-2 hours): add a `V4I32`/`V4U32`-returning CPU sample entry
-   point in `ImageCalls.h`/`.cpp`, wire `SPIRVResourceLowering.cpp` to select it
-   for integer-sampled images instead of rejecting them, implement nearest-only
-   sampling math, add a unit test per phase, re-run the 4 `synchronization.*`
-   cases.
-2. **`properties.max_mesh_output_components`** (1 case, still untriaged): no
-   session has looked at this specific case yet -- worth a first diagnostic
-   (~15-30 min).
-3. **`smoke.*.fullscreen_gradient`** (3 cases): already known pre-existing per
-   H76, not re-investigated this session -- check H76's own row for its current
-   status before assuming it's still unfixed.
-4. Once H109 lands, `dEQP-VK.mesh_shader.ext.*` should be down to those 4
-   remaining cases -- worth a final sweep to confirm before considering H70's
-   whole lineage closed.
+1. **H110** (~1-2 hours): extend `getDynamicRowIndexedAccess` (or add a sibling)
+   in `CanonicalizeStage.cpp` to recognize a `isDynamicIndexedArrayGlobal`
+   global addressed with a constant outer index followed by a dynamic inner
+   array-member index, building a `StageIOAccess` with a constant `Vertex` +
+   dynamic `Row`. Add a unit test modeling the real shape directly, then re-run
+   `properties.max_mesh_output_components` to confirm it passes.
+2. **H111** (~15-30 min for a first diagnostic): `smoke.*.fullscreen_gradient`'s
+   `spirv.Variable`/Function-storage-class legalization failure has never been
+   IR-reduced -- H76's own note only narrows it to "unrelated to H79's own
+   (closed) Function-storage array gap." Use this session's own IR-reduction
+   command chain (glslang -> feme-translate -> feme-opt) as a starting point.
+3. Once H110 and H111 both land, `dEQP-VK.mesh_shader.ext.*` should be fully
+   green (439/439 of the currently-`Supported` cases) -- worth a final
+   confirming sweep.
