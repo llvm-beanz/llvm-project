@@ -82266,3 +82266,96 @@ intermediate `Position` is not actually testing the real CTS shape.
 3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** is still never
    built/run in any session -- flagged again as a standing gap (fourth
    session in a row). Worth a session of its own to wire it up.
+
+# H7w's `_dynamic_index` JIT crash closed: 32/128 -> 114/128
+
+**Start here next session:** `_fragmentshader_read` (H7x, 50/64 passing,
+unchanged this session) is the only real remaining gap on
+`shaderClipDistance`/`shaderCullDistance`. Root-cause it the same way
+this session root-caused H7w: build a hand-written IR-reduction repro
+of `dEQP-VK.clipping.user_defined.clip_cull_distance.vert_tess.1_7_
+fragmentshader_read` (the exact failing shape), push it through
+`glslangValidator` -> `feme-translate --no-implicit-module
+--spirv-to-llvmir` (the one-shot translator -- do NOT use the two-step
+`--spirv-to-llvmdialect`+`--llvmdialect-to-llvmir` path, it silently
+skips `attachStageIODecorations` and drops the metadata
+`CanonicalizeStagePass` needs) -> `feme-opt`. ~45-90 min for a first
+diagnostic.
+
+## What got done
+
+1. Picked up the standing "JIT session error: Symbols not found:
+   [ spirv_var_N ]" crash on `_dynamic_index` + `vert_geom`/`vert_tess`/
+   `vert_tess_geom` -- flagged but deferred across 3+ prior sessions.
+   Confirmed via a real CTS run it was the entire remaining H7w gap:
+   32/128 passing (`vert` combo only), 96/128 crashing identically.
+2. Root-caused it with a hand-built repro
+   (`/tmp/h7w_repro/geom.glsl` etc., not committed) mirroring the real
+   `gl_in[vertNdx].gl_ClipDistance[i]` shape -- a combined dynamic
+   vertex-index *and* dynamic row-index access into `gl_PerVertex`, a
+   multi-member builtin block. Found two separate bugs in
+   `CanonicalizeStage.cpp`:
+   - `getDynamicVertexIndexedAccess`'s type-walk loop already computed
+     which struct member (`ClipDistance`/`CullDistance`, not
+     `Position`) a dynamic vertex-indexed access selected, but never
+     exposed it. `resolveStageIOAccess`'s `RowIndex` branch hard-required
+     exactly one signature element, which is false for a multi-member
+     block -- silently left the load unrewritten.
+   - Even a correctly-rewritten store left its own now-dead
+     `GetElementPtrInst` behind, unlike a constant-index GEP (which
+     folds to a `ConstantExpr` with nothing to clean up). The JIT still
+     tried to resolve the dead GEP's referenced global and crashed the
+     same way.
+3. Fixed both: added a `Member` field to `DynamicVertexIndexedAccess`
+   (bug #1), added an `EraseIfNowDead` helper called after every
+   load/store erase site (bug #2, 6 call sites total).
+4. Added `CanonicalizeStageTest.
+   ThreadsDynamicVertexAndRowIndexIntoInterfaceBlockMemberLoad`
+   modeling the exact combined shape. Ran the full
+   `FeMeTransformsGraphicsTests` suite (89/89) and `ninja check-feme`
+   (3007/3010, 3 pre-existing `Unsupported`, 0 `Failed`) -- no
+   regressions from the `Member`-tracking behavior change.
+5. Re-measured the real CTS with the feature bit temporarily flipped on
+   (reverted before landing, since H7x still gates it): `_dynamic_index`
+   went from 32/128 to **114/128**. The 14 remaining failures are
+   exactly `clip_cull_distance_dynamic_index.{vert_tess,vert_tess_geom}.
+   *_fragmentshader_read` -- the intersection with H7x's own gap, not a
+   new bug.
+6. Filed roadmap row **H113** (closed) for this fix, since H7w's own row
+   was already closed for a narrower shape and this project's
+   one-letter-deep nesting convention rules out extending past `H7z`
+   (confirmed by H53's own precedent comment making the same call).
+   Updated `VulkanCTSReport.md` (new "Roadmap H113: measured impact"
+   section), `Vulkan14FeatureInventory.md`'s `shaderClipDistance`/
+   `shaderCullDistance` rows, and `FeMeGraphicsDesign.md`'s existing
+   "Status (roadmap H7w)" section with a pointer to H113.
+7. Separately re-measured H7x's own exact scope (non-`_dynamic_index`
+   `_fragmentshader_read`, 64 cases): unchanged at 50/64. Confirmed this
+   is a real, distinct, still-open gap, not something H113's fix
+   incidentally touches.
+
+## State
+
+- 5 commits this session, each independently buildable/testable:
+  1. Comment consolidation (no functional change).
+  2. `Member`-tracking read-side fix + new unit test.
+  3. Dead-GEP cleanup (`EraseIfNowDead`).
+  4. Docs (Roadmap/CTSReport/FeatureInventory/DesignDoc).
+  5. This file.
+- `shaderClipDistance`/`shaderCullDistance` are `VK_FALSE` in the
+  committed tree (correctly -- H7x still blocks a full close). Verified
+  clean `git status` and a final `libfeme_vulkan.so` rebuild match.
+- `ninja check-feme`: 3007/3010, 3 pre-existing `Unsupported`, 0
+  `Failed`.
+
+## Deferred (not this session)
+
+- **H7x** (`_fragmentshader_read`, 50/64 passing, unchanged): the last
+  real blocker on `shaderClipDistance`/`shaderCullDistance`. No IR
+  reduction attempted yet this session -- next session should start
+  here (see top of this entry).
+- **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+  built/run in any session (6th session in a row to defer it). Worth a
+  session of its own.
+- `/tmp/h7w_repro/` scratch files not cleaned up (low priority, not
+  part of the repo).
