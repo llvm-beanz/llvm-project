@@ -7275,4 +7275,129 @@ TEST(ExecutorTest, RejectsBlendEnableForAnIntegerColorAttachment) {
   EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
 }
 
+// (roadmap H108) A single full-screen mesh triangle that authors only
+// `SV_Position` -- deliberately never writing any ordinary (non-system-
+// value) output at all, exactly like `dEQP-VK.mesh_shader.ext.
+// synchronization.mesh_to_frag.*.subpass_dependency`'s own mesh module
+// (which only ever writes `primitiveValue` when a preceding task shader
+// is present, absent here).
+constexpr char MeshFullScreenTriangleNoOrdinaryOutputShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 3, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 3.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 3.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 2)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 2)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 1, i32 1, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 2, i32 2, i32 0)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+// Reads a `Location=0` fragment input (which no vertex/mesh output
+// authors) and writes it straight through to a single-channel
+// `R32_UINT` color attachment, so a covered pixel directly reports
+// whatever value the executor supplied for the unmatched input.
+constexpr char UnmatchedLocationZeroPassthroughFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %v = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 %v, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+// (roadmap H108) Before this fix, `executeDraws` rejected any fragment
+// input `Location` with no matching pre-rasterization-stage output as a
+// hard error ("fragment input location %u has no matching vertex stage
+// output"), exactly the failure `dEQP-VK.mesh_shader.ext.synchronization.
+// mesh_to_frag.*.subpass_dependency` hit at `vkQueueSubmit` even though
+// its shader source is legal Vulkan (the mesh module simply never writes
+// a `Location` the paired fragment module happens to read). Per the
+// spec's "Shader Interfaces" text this is legal -- the unmatched input
+// merely has an undefined value -- so the fix leaves it out of the
+// linked `Varyings` list instead of erroring; `buildStageStorage` already
+// zero-fills fragment input storage, so the shader reads back 0.
+TEST(ExecutorTest,
+     UnmatchedFragmentInputLocationReadsZeroInsteadOfErroringOut) {
+  Context Ctx;
+  EntrySignature MeshSig;
+  SignatureElement IdxElt = makeElement(
+      1, SignatureDirection::Output, 3, /*Location=*/std::nullopt);
+  IdxElt.ComponentType = SignatureComponentType::UInt;
+  IdxElt.Frequency = SignatureFrequency::PerPrimitive;
+  IdxElt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  MeshSig.Elements = {makeElement(0, SignatureDirection::Output, 4,
+                                  /*Location=*/std::nullopt,
+                                  SignatureSystemValue::Position),
+                      IdxElt};
+  Expected<std::shared_ptr<CompiledStage>> MS =
+      compileStage(Ctx, MeshFullScreenTriangleNoOrdinaryOutputShaderIR,
+                  "ms_main", MeshSig, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  SignatureElement FSIn = makeElement(0, SignatureDirection::Input, 1,
+                                      /*Location=*/0);
+  FSIn.ComponentType = SignatureComponentType::UInt;
+  SignatureElement FSColorOut =
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/0);
+  FSColorOut.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {FSIn, FSColorOut};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, UnmatchedLocationZeroPassthroughFragmentShaderIR, "fs_main",
+      FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32_UINT, Size, Size}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 3;
+  Mesh.MaxOutputPrimitives = 1;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0xAB);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R32_UINT, Size, Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  uint32_t V;
+  std::memcpy(&V, Storage.data(), sizeof(V));
+  EXPECT_EQ(V, 0u);
+}
+
 } // namespace

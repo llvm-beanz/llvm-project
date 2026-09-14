@@ -1995,11 +1995,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                FSIn.ElementID);
     const SignatureElement *VSOut = findElementByLocation(
         RasterSig, SignatureDirection::Output, *FSIn.Location);
+    // (roadmap H108) It is legal Vulkan for the last pre-rasterization
+    // stage to never write a `Location` that the fragment stage reads --
+    // e.g. `dEQP-VK.mesh_shader.ext.synchronization.mesh_to_frag.*.
+    // subpass_dependency`'s mesh module never writes its own
+    // `primitiveValue` output (only the sibling "passthrough" mesh module
+    // used by the two-pipeline `memory_barrier`/`specific_barrier`
+    // variants of the same test does), yet the shared fragment module
+    // unconditionally reads it. Per the spec's "Shader Interfaces" text,
+    // an unmatched fragment input simply has an undefined value rather
+    // than making the pipeline invalid -- the same "stricter than the
+    // spec allows" pattern already fixed for a missing fragment stage
+    // (roadmap H2j) and an ignored mesh input-assembly state (roadmap
+    // H6g-b) above. This was originally rejected outright
+    // (`VK_ERROR_INITIALIZATION_FAILED` at `vkQueueSubmit`), breaking
+    // every one of these otherwise-valid subpass-self-dependency shapes.
+    // Leaving `FSIn` out of `Varyings` below is a valid realization of
+    // "undefined value": `buildStageStorage` zero-fills the fragment
+    // input storage, so the shader simply reads zero for this location.
     if (!VSOut)
-      return createStringError(inconvertibleErrorCode(),
-                               "fragment input location %u has no matching "
-                               "vertex stage output",
-                               *FSIn.Location);
+      continue;
     if (VSOut->ComponentCount != FSIn.ComponentCount ||
         VSOut->RowCount != FSIn.RowCount ||
         VSOut->ComponentType != FSIn.ComponentType)
