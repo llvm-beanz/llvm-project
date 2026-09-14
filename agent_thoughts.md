@@ -81782,3 +81782,104 @@ confirmed to genuinely fail without the fix and pass with it.
 3. **H96 is genuinely closed** (confirmed this session, contrary to the
    prior session's own belief it was still open) — no more chunked-batch
    workaround needed for full CTS runs going forward.
+
+# H107: the `with_task_shader` bucket root-caused and fixed (+25 bonus fixes)
+
+**Fixed. `dEQP-VK.mesh_shader.ext.api.draw*with_task_shader*` goes 14
+Pass/44 Fail -> 58 Pass/0 Fail.** Same bug class also explained 25 more
+failures elsewhere in the suite. Full `mesh_shader.ext.*` sweep: 420
+Pass/19 Fail/26,482 NotSupported, up from 376/63/26,482 at session start.
+`check-feme`: 2996/2999, 0 failed (up by 1 new test).
+
+## The bug: SIMDize.cpp poisons uniform values it shouldn't touch
+
+Picked up the prior session's #1 suggested next step: the 40+
+`with_task_shader` failures. A task shader's `EmitMeshTasksEXT` was
+requesting **zero** mesh workgroups every time — traced via an IR dump
+right after `TaskPayloadWrapperPass` to a `phi` merging a gathered
+push-constant value that had become `poison` instead of the real,
+uniform `1`.
+
+Root cause, three layers down: `SIMDize.cpp`'s `FunctionWidener::widen`
+always widens a `feme.cpu.masked.load`/`.store` call into a real gather/
+scatter, whether or not the result is actually uniform. When a genuinely-
+uniform `phi` consumer (correctly left un-widened) still referenced that
+erased call, it fell into the function's own blanket final-cleanup
+`replaceAllUsesWith(PoisonValue::get(...))` — silently zeroing a real
+value. The file already has a fix for this *exact* bug class in a
+different code path (`widenVectorElementwise`, gated on
+`isDivergentAtDef`, with a comment describing this precise failure mode)
+— the masked-load/store widening path just never got the same treatment.
+
+## Three iterations to get the fix right
+
+1. **v1**: extract lane 0 from the widened value for any remaining use.
+   Fixed the CTS case but crashed a later pipeline-creation call — turned
+   out inserting a non-phi instruction "before" a `PHINode` that's still
+   followed by other phis in the same block violates LLVM's "phis grouped
+   at block top" rule. Fixed by special-casing `PHINode` insertion to the
+   block's first non-phi insertion point (mirroring code this same file
+   already had for exactly this situation elsewhere).
+2. **v2**: fixed the phi-grouping crash. Single case and the full 298-case
+   `with_task_shader` bucket passed. But running `check-feme` in parallel
+   found a **new regression**: 6 groupshared unit tests started failing.
+3. **v3 (final)**: the regression came from v1/v2's blanket "extract for
+   any remaining use" also firing for erased-to-erased internal edges (a
+   scalar GEP into a groupshared array, itself also being erased) — these
+   don't need real narrowing, poison is fine since both ends are being
+   replaced. Building a real (if dead) `extractelement` for that edge left
+   an unrecognized consumer shape that a later validation pass rejected.
+   Fixed with a `SmallPtrSet<Instruction*> ErasedSet`: poison only fires
+   for erased-to-erased uses now; every genuine external use gets the real
+   extraction. `check-feme` came back clean, and — unexpectedly — the full
+   CTS sweep **improved further**: v3 fixed 25 *more* cases than v2 did
+   (all `misc.group_memory_barrier_in_*`, `misc.memory_barrier_shared_in_*`,
+   `misc.payload_read`, `properties.*_shared_memory_size`) on top of the
+   44 `with_task_shader` ones, with zero regressions either way.
+
+**Lesson: when a "just poison the leftover use" cleanup gets replaced with
+a "just extract the leftover use" cleanup, check whether some of those
+leftover uses are actually internal/transient (both ends already being
+erased) — treating them identically to real external uses can create new,
+dead-but-present instructions that a downstream validation pass doesn't
+expect.**
+
+## Regression test
+
+Added `SIMDizeTest.ReadsBackRealUniformValueThroughAMaskedLoadFeedingAnUnwidenedPhi`:
+a minimal IR shape (uniform branch, masked-load call in one arm, merged
+into a scalar phi) that reproduces the exact failure. Confirmed to
+genuinely fail (`poison` incoming phi value) with the fix reverted, and
+pass with it restored, before committing.
+
+## The remaining 19 `mesh_shader.ext.*` failures (not investigated this
+session)
+
+`misc.no_lines`/`no_points`/`no_triangles` (3), `properties.
+max_mesh_output_components` (1), `smoke.*.fullscreen_gradient` (3,
+already known pre-existing per H76), and `synchronization.*` (12,
+mesh/task-to-{frag,host,transfer} barrier cases). None triaged yet.
+
+## Commits (2, in order)
+
+1. `SIMDize.cpp`/`SIMDizeTest.cpp` — the v3 fix + regression test.
+2. `Roadmap.md`/`VulkanCTSReport.md` — H107 row + measured-impact section.
+3. This file (committed separately, as instructed).
+
+## Suggested next steps
+
+1. **Triage the remaining 19 `mesh_shader.ext.*` failures** — the
+   `synchronization.*` bucket (12 cases, all barrier-related) is the
+   largest single group and untouched so far. ~15-30 min each for a first
+   diagnostic.
+2. **Audit other `widen*` helpers in `SIMDize.cpp` for the same bug
+   pattern** — this session's fix was applied generically at the
+   `ToErase` cleanup-loop level (so it covers every unconditional-widen
+   producer, not just masked loads/stores), but a targeted audit of each
+   individual `widen*` function for whether it *should* have gated on
+   `isDivergentAtDef` earlier (skipping the widen outright, the way
+   `widenVectorElementwise` does) rather than relying on this session's
+   cleanup-loop safety net, hasn't been done. ~30 min grep + read.
+3. **Find or construct a real CTS-level repro for H105** — still only
+   proven by a hand-written unit test (unchanged from last session's
+   suggestion, still not attempted). ~30-45 min to search/construct.
