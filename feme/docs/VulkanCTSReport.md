@@ -41371,3 +41371,94 @@ subsystem.
 With this closure, every row spawned by H97's own original 13-crash
 CTS-run triage (H97 itself, plus H98 through H103) is now struck through
 on the roadmap.
+
+## Roadmap H96: measured impact (fixed; systemic `deqp-vk` crash root-caused and corrected)
+
+**Root cause (this row's own original hypothesis was wrong):** the row
+as filed speculated "some form of unbounded, in-process resource
+growth carried across test cases within a single long-lived
+`VkInstance`/`VkDevice`" (JIT code-cache/pipeline-cache growth). Real
+investigation found otherwise:
+
+- `VmRSS`/`VmData` sampling (`/proc/<pid>/status`, once per case)
+  across a reliably-crashing `dEQP-VK.pipeline.*` run showed memory
+  staying essentially flat (~95-96 MB) for ~2,363 consecutive cases,
+  then a sudden +40-60 MB spike in ~40ms during the one case that
+  crashes -- a flat-then-spike shape, not gradual accumulation. Thread
+  count stayed at 1 and FD count stayed at 4 throughout, ruling out
+  thread/FD leaks too.
+- A caselist-substitution experiment (same first 2,400 cases kept
+  identical, every case from position 2,401 onward swapped for a
+  *different* case) still crashed at exactly case 2,401, on whichever
+  new case now occupied that position -- proving the crash is a fixed,
+  content-independent case *count*, not a specific buggy case or
+  corrupted on-disk state.
+- A real `gdb` backtrace of the crash landed in
+  `mlir::spirv::StructType::getMemberOffset`, called from a
+  `std::stable_sort` comparator inside
+  `(anonymous namespace)::getOffsetSortedMemberIndices`
+  (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`), itself
+  called from `OffsetStructMemberReorderAccessChainPattern::
+  matchAndRewrite` -- the Roadmap H101p struct-member-reordering
+  `spirv.AccessChain` lowering. A temporary call counter showed this
+  helper is invoked **exactly once** across the entire crashing run,
+  disproving any "this pattern corrupts itself across repeated calls"
+  theory.
+- `valgrind --track-origins=yes` against the full 2,402-case
+  reproduction window (13s wall-clock -- fast enough to be a fully
+  viable tool for this workload) caught the real fault directly:
+  `Invalid read of size 4 ... Address 0x4 is not stack'd, malloc'd or
+  (recently) free'd`. `StructType::OffsetInfo` is `uint32_t` (4
+  bytes), and `StructType::getMemberOffset`'s implementation
+  (`mlir/lib/Dialect/SPIRV/IR/SPIRVTypes.cpp`) unconditionally
+  dereferences `getImpl()->offsetInfo[index]` with no null check --
+  `offsetInfo` is null whenever `StructType::hasOffset()` is false
+  (an ordinary struct with no member `Offset` decorations at all,
+  e.g. a plain `Function`-storage-class local variable's struct
+  type). `offsetInfo[1]` against a null base is exactly address
+  `0x4`, matching Valgrind's report precisely.
+- `matchAndRewrite` called `getOffsetSortedMemberIndices` (and
+  `structHasLeadingOffsetPad`) unconditionally on *every* struct-typed
+  `spirv.AccessChain` pointee, unlike every other call site of
+  `getOffsetSortedMemberIndices` in the same file (lines 2543, 3640,
+  3717, 3752 as of this fix), all of which check
+  `Type.hasOffset()` first. This non-offset-decorated-struct shape is
+  simply rare in most CTS caselists, so its first occurrence lands
+  deep into a run (~2,000-2,500 cases for `pipeline`), which is what
+  made a deterministic, shape-triggered null-pointer read look like a
+  slow, count-dependent resource leak.
+
+**Fix:** guard both `getOffsetSortedMemberIndices` (a documented
+precondition plus a debug-build `assert`) and its `matchAndRewrite`
+call site behind `StructType::hasOffset()`, matching this file's own
+existing convention everywhere else it calls this helper.
+
+**Verification:**
+- A minimal `feme-opt --feme-convert-spirv-to-llvm` repro (a
+  `Function`-storage-class local struct with no `Offset` decorations,
+  accessed via `spirv.AccessChain`) crashes on the pre-fix binary and
+  converts cleanly post-fix; added as a permanent regression lit test
+  (`spirv-to-llvm-non-offset-struct-access-chain.mlir`).
+- The original 4,000-case `dEQP-VK.pipeline.*` reproduction that
+  reliably crashed at case 2,401 (`--deqp-shadercache=disable`, one
+  long-lived process) now runs to completion: all 4,000 cases
+  processed, 35 Pass / 866 Fail / 3,099 Not supported, **0 crashes**.
+  The specific case that used to crash the process
+  (`bind_buffers_2.maintenance5.triangle_list.buffers5.
+  stride_offset_rnd321.true_size`) now reaches an ordinary pixel-
+  comparison `Fail` instead of crashing the whole process -- a
+  separate, pre-existing correctness gap unrelated to this row.
+- `ninja check-feme`: 2991/2994 Passed (+1 test from the new
+  regression test), 3 pre-existing `Unsupported`, 0 `Failed`, 0
+  regressions.
+
+**Methodology note:** this row's own "chunk every group into
+1,500-2,000-case batches" mitigation is no longer strictly necessary
+now that the underlying crash is fixed, but is left in place in the
+"Reproducing this report" section below since it remains a harmless,
+generally-useful safety margin against any *other* not-yet-discovered
+crash of this kind.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this is a crash fix, not a feature/extension status change.
+`FeMeGraphicsDesign.md` needs no change either, for the same reason.
