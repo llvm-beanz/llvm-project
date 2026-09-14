@@ -35,6 +35,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 using namespace llvm;
@@ -3675,13 +3676,32 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                                              OutputGlobals.end());
   ShadowValueMap ShadowValues(F, Sig);
 
+  // (Roadmap H7w) Every successful rewrite below erases the load/store it
+  // replaces, but not the `GetElementPtrInst` that computed its pointer
+  // operand: that GEP's own result is now unused, but -- unlike a
+  // constant-index GEP, which `SPIRVToLLVMTranslator` folds into a
+  // `ConstantExpr` with no separate instruction of its own to begin with
+  // -- a GEP with a genuinely non-constant index (`getDynamicVertexIndexed
+  // Access`/`getDynamicRowIndexedAccess`'s own shapes) must be a real
+  // `Instruction`, so it survives as dead code in its own basic block
+  // unless explicitly cleaned up. Left alone, `feme::cpu`'s JIT still has
+  // to resolve the external SPIR-V-derived global that dead GEP
+  // references -- which is never actually defined anywhere (canonical-
+  // ization having just proven no real memory access to it remains) --
+  // failing with a raw `"Symbols not found: [ spirv_varN ]"` link error.
+  auto EraseIfNowDead = [](Value *V) {
+    if (auto *I = dyn_cast<Instruction>(V))
+      RecursivelyDeleteTriviallyDeadInstructions(I);
+  };
+
   for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
     IRBuilder<> B(&I);
     Value *Zero = B.getInt32(0);
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      Value *Ptr = LI->getPointerOperand();
       std::optional<StageIOAccess> Access =
-          resolveStageIOAccess(LI->getPointerOperand(), LI->getType(), DL,
-                               ElementIDs, OutputGlobalSet, Stage);
+          resolveStageIOAccess(Ptr, LI->getType(), DL, ElementIDs,
+                               OutputGlobalSet, Stage);
       if (!Access) {
         // (Roadmap L30) A mesh entry's bounded payload read -- the
         // load-side counterpart of the task entry's own payload write
@@ -3704,21 +3724,21 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // offset either -- `getTaskPayloadDynamicOffsetAccess` recognizes
         // that one additional shape instead, computing a real dynamic
         // byte-offset `Value*` in its place.
-        if (auto BaseAndOffset =
-                getStageIOBaseAndOffset(LI->getPointerOperand(), DL)) {
+        if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
           if (isTaskPayloadGlobal(BaseAndOffset->first)) {
             Value *New =
                 loadTaskPayloadValue(B, LI->getType(),
                                      B.getInt32(BaseAndOffset->second), DL);
             LI->replaceAllUsesWith(New);
             LI->eraseFromParent();
+            EraseIfNowDead(Ptr);
             Changed = true;
           }
-        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(
-                       B, LI->getPointerOperand(), DL)) {
+        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
           Value *New = loadTaskPayloadValue(B, LI->getType(), Dyn->second, DL);
           LI->replaceAllUsesWith(New);
           LI->eraseFromParent();
+          EraseIfNowDead(Ptr);
           Changed = true;
         }
         continue;
@@ -3748,12 +3768,13 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           LI->getName(), Access->IsOutput ? &ShadowValues : nullptr);
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
+      EraseIfNowDead(Ptr);
       Changed = true;
     } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      Value *Ptr = SI->getPointerOperand();
       Value *Val = SI->getValueOperand();
-      std::optional<StageIOAccess> Access =
-          resolveStageIOAccess(SI->getPointerOperand(), Val->getType(), DL,
-                               ElementIDs, OutputGlobalSet, Stage);
+      std::optional<StageIOAccess> Access = resolveStageIOAccess(
+          Ptr, Val->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
       if (!Access) {
         // (Roadmap H6i) A task entry's bounded payload write -- an
         // ordinary store through a (possibly GEP'd) address-space-14
@@ -3779,18 +3800,18 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // shape that used to leave the raw `addrspace(14)` store on the
         // imported global entirely unconverted, surviving all the way to
         // JIT link time as an unresolved external symbol reference.
-        if (auto BaseAndOffset =
-                getStageIOBaseAndOffset(SI->getPointerOperand(), DL)) {
+        if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
           if (isTaskPayloadGlobal(BaseAndOffset->first)) {
             storeTaskPayloadValue(B, Val, Val->getType(),
                                   B.getInt32(BaseAndOffset->second), DL);
             SI->eraseFromParent();
+            EraseIfNowDead(Ptr);
             Changed = true;
           }
-        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(
-                       B, SI->getPointerOperand(), DL)) {
+        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
           storeTaskPayloadValue(B, Val, Val->getType(), Dyn->second, DL);
           SI->eraseFromParent();
+          EraseIfNowDead(Ptr);
           Changed = true;
         }
         continue;
@@ -3826,6 +3847,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
                              Component, Vertex, &ShadowValues);
       SI->eraseFromParent();
+      EraseIfNowDead(Ptr);
       Changed = true;
     }
   }
