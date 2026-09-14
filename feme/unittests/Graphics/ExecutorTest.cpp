@@ -5285,6 +5285,1384 @@ TEST(ExecutorTest, ClipsATessellatedPatchWithSystemValuePositionForwarding) {
       EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
 }
 
+// (Roadmap H7x) A hull-stage counterpart to `ClipCullDistanceReadFragment
+// ShaderIR`'s own fragment-side read: the real
+// `dEQP-VK.clipping.user_defined.clip_cull_distance.vert_tess.*_fragment
+// shader_read` shader's own hull stage does not merely forward its input
+// control point's `gl_CullDistance` verbatim (every other tessellation
+// test in this file's own hull shape) -- it *reads its own forwarded
+// input back* and branches on it (`gl_out[id].gl_CullDistance[i] =
+// (gl_in[id].gl_CullDistance[i] == 0.1f) ? ... : 0.2f`), a self-indexed
+// system-value-tagged *input* read `ClipsATessellatedPatchWithSystemValue
+// PositionForwarding` above never exercises (it only ever forwards
+// `Position`/`ClipDistance`, never reads one back to make a decision).
+// Every vertex writes the same constant `CullDistance = 0.1`, so if the
+// hull stage's own self-indexed read of its per-control-point
+// `CullDistance` input resolves correctly, every hull invocation takes
+// the `0.7` branch, the domain stage's own barycentric combination of
+// three identical `0.7`s trivially stays `0.7`, and the fragment stage's
+// own system-value-linked read of the final interpolated `CullDistance`
+// (mirroring `ClipCullDistanceReadFragmentShaderIR`'s own linkage,
+// through tessellation this time) observes `0.7` everywhere. Any wrong
+// value read back by the hull stage instead takes the `0.2` branch --
+// this test's own real CTS counterpart's failure mode.
+constexpr char TessCullDistanceHullReadVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.1, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char TessCullDistanceHullReadHullShaderIR[] = R"(
+  define void @hs_main() #0 {
+    %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+    %pw = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 %id)
+    %cull = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+    %eq = fcmp oeq float %cull, 0.1
+    %sel = select i1 %eq, float 0.7, float 0.2
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %pw, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %sel, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+constexpr char TessCullDistanceHullReadDomainShaderIR[] = R"(
+  define void @ds_main() #0 {
+    %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+    %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+    %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+    %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+    %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+    %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+    %xu = fmul float %x0, %u
+    %xv = fmul float %x1, %v
+    %xw = fmul float %x2, %w
+    %xa = fadd float %xu, %xv
+    %x = fadd float %xa, %xw
+    %yu = fmul float %y0, %u
+    %yv = fmul float %y1, %v
+    %yw = fmul float %y2, %w
+    %ya = fadd float %yu, %yv
+    %y = fadd float %ya, %yw
+    %zu = fmul float %z0, %u
+    %zv = fmul float %z1, %v
+    %zw = fmul float %z2, %w
+    %za = fadd float %zu, %zv
+    %z = fadd float %za, %zw
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    %c0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    %c1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 1)
+    %c2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 2)
+    %cu = fmul float %c0, %u
+    %cv = fmul float %c1, %v
+    %cw = fmul float %c2, %w
+    %ca = fadd float %cu, %cv
+    %c = fadd float %ca, %cw
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %c, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+// The fragment-side counterpart: reads the final interpolated
+// `CullDistance` system-value input (no `Location`, linked by
+// `SystemValue`, mirroring `ClipCullDistanceReadFragmentShaderIR`) into
+// SV_Target0's R channel.
+constexpr char TessCullDistanceHullReadFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %cull = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %cull, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+Expected<GraphicsPipeline>
+buildTessCullDistanceHullReadPipeline(Context &Ctx, uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessCullDistanceHullReadVertexShaderIR, "vs_main", VSSig,
+      ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(1, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/1),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(4, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> HS = compileStage(
+      Ctx, TessCullDistanceHullReadHullShaderIR, "hs_main", HSSig,
+      ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("4.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessCullDistanceHullReadDomainShaderIR, "ds_main", DSSig,
+      ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, TessCullDistanceHullReadFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
+TEST(ExecutorTest, HullStageReadsBackItsOwnForwardedCullDistanceInput) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessCullDistanceHullReadPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A full-viewport triangle, tessellated (factor 4) -- every generated
+  // domain point's own hull-forwarded `CullDistance` must read back
+  // exactly `0.1` for every hull invocation to take the `0.7` branch.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 3.0f, -1.0f, 0.0f, -1.0f, 3.0f, 0.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  for (uint32_t I = 0; I != 4u * 4u; ++I)
+    EXPECT_NEAR(Storage[I * 4], std::lround(0.7f * 255.0f), 2)
+        << "texel " << I;
+}
+
+// (Roadmap H7x) Like `HullStageReadsBackItsOwnForwardedCullDistanceInput`
+// above, but `CullDistance` is a 7-element array (`RowCount == 7`) --
+// matching the real, failing
+// `clip_cull_distance.vert_tess.1_7_fragmentshader_read` case's own shape
+// (1 clip plane, 7 cull planes) -- rather than a single scalar. The
+// single-row test above already passes, so if this one fails instead, the
+// remaining bug is specific to indexing a *multi-row* system-value array
+// through the hull stage's own self-read (a `Row`-aware storage-address
+// computation bug), not to the self-read mechanism in general.
+constexpr char TessCullDistanceArrayHullReadVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 1, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 2, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 3, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 4, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 5, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 6, i32 0, float 0.1, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char TessCullDistanceArrayHullReadHullShaderIR[] = R"(
+    define void @hs_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+      %pw = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 %id)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %pw, i32 0)
+      %cull0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+      %eq0 = fcmp oeq float %cull0, 0.1
+      %sel0 = select i1 %eq0, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %sel0, i32 0)
+      %cull1 = call float @feme.stage.input.load.f32(i32 1, i32 1, i32 0, i32 %id)
+      %eq1 = fcmp oeq float %cull1, 0.1
+      %sel1 = select i1 %eq1, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 1, i32 0, float %sel1, i32 0)
+      %cull2 = call float @feme.stage.input.load.f32(i32 1, i32 2, i32 0, i32 %id)
+      %eq2 = fcmp oeq float %cull2, 0.1
+      %sel2 = select i1 %eq2, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 2, i32 0, float %sel2, i32 0)
+      %cull3 = call float @feme.stage.input.load.f32(i32 1, i32 3, i32 0, i32 %id)
+      %eq3 = fcmp oeq float %cull3, 0.1
+      %sel3 = select i1 %eq3, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 3, i32 0, float %sel3, i32 0)
+      %cull4 = call float @feme.stage.input.load.f32(i32 1, i32 4, i32 0, i32 %id)
+      %eq4 = fcmp oeq float %cull4, 0.1
+      %sel4 = select i1 %eq4, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 4, i32 0, float %sel4, i32 0)
+      %cull5 = call float @feme.stage.input.load.f32(i32 1, i32 5, i32 0, i32 %id)
+      %eq5 = fcmp oeq float %cull5, 0.1
+      %sel5 = select i1 %eq5, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 5, i32 0, float %sel5, i32 0)
+      %cull6 = call float @feme.stage.input.load.f32(i32 1, i32 6, i32 0, i32 %id)
+      %eq6 = fcmp oeq float %cull6, 0.1
+      %sel6 = select i1 %eq6, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 4, i32 6, i32 0, float %sel6, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+constexpr char TessCullDistanceArrayHullReadDomainShaderIR[] = R"(
+    define void @ds_main() #0 {
+      %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+      %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+      %xu = fmul float %x0, %u
+      %xv = fmul float %x1, %v
+      %xw = fmul float %x2, %w
+      %xa = fadd float %xu, %xv
+      %x = fadd float %xa, %xw
+      %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+      %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+      %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+      %yu = fmul float %y0, %u
+      %yv = fmul float %y1, %v
+      %yw = fmul float %y2, %w
+      %ya = fadd float %yu, %yv
+      %y = fadd float %ya, %yw
+      %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+      %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+      %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+      %zu = fmul float %z0, %u
+      %zv = fmul float %z1, %v
+      %zw = fmul float %z2, %w
+      %za = fadd float %zu, %zv
+      %z = fadd float %za, %zw
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %y, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %z, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+      %c0_0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+      %c0_1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 1)
+      %c0_2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 2)
+      %c0u = fmul float %c0_0, %u
+      %c0v = fmul float %c0_1, %v
+      %c0w = fmul float %c0_2, %w
+      %c0a = fadd float %c0u, %c0v
+      %c0 = fadd float %c0a, %c0w
+      call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %c0, i32 0)
+      %c1_0 = call float @feme.stage.input.load.f32(i32 2, i32 1, i32 0, i32 0)
+      %c1_1 = call float @feme.stage.input.load.f32(i32 2, i32 1, i32 0, i32 1)
+      %c1_2 = call float @feme.stage.input.load.f32(i32 2, i32 1, i32 0, i32 2)
+      %c1u = fmul float %c1_0, %u
+      %c1v = fmul float %c1_1, %v
+      %c1w = fmul float %c1_2, %w
+      %c1a = fadd float %c1u, %c1v
+      %c1 = fadd float %c1a, %c1w
+      call void @feme.stage.output.store.f32(i32 4, i32 1, i32 0, float %c1, i32 0)
+      %c2_0 = call float @feme.stage.input.load.f32(i32 2, i32 2, i32 0, i32 0)
+      %c2_1 = call float @feme.stage.input.load.f32(i32 2, i32 2, i32 0, i32 1)
+      %c2_2 = call float @feme.stage.input.load.f32(i32 2, i32 2, i32 0, i32 2)
+      %c2u = fmul float %c2_0, %u
+      %c2v = fmul float %c2_1, %v
+      %c2w = fmul float %c2_2, %w
+      %c2a = fadd float %c2u, %c2v
+      %c2 = fadd float %c2a, %c2w
+      call void @feme.stage.output.store.f32(i32 4, i32 2, i32 0, float %c2, i32 0)
+      %c3_0 = call float @feme.stage.input.load.f32(i32 2, i32 3, i32 0, i32 0)
+      %c3_1 = call float @feme.stage.input.load.f32(i32 2, i32 3, i32 0, i32 1)
+      %c3_2 = call float @feme.stage.input.load.f32(i32 2, i32 3, i32 0, i32 2)
+      %c3u = fmul float %c3_0, %u
+      %c3v = fmul float %c3_1, %v
+      %c3w = fmul float %c3_2, %w
+      %c3a = fadd float %c3u, %c3v
+      %c3 = fadd float %c3a, %c3w
+      call void @feme.stage.output.store.f32(i32 4, i32 3, i32 0, float %c3, i32 0)
+      %c4_0 = call float @feme.stage.input.load.f32(i32 2, i32 4, i32 0, i32 0)
+      %c4_1 = call float @feme.stage.input.load.f32(i32 2, i32 4, i32 0, i32 1)
+      %c4_2 = call float @feme.stage.input.load.f32(i32 2, i32 4, i32 0, i32 2)
+      %c4u = fmul float %c4_0, %u
+      %c4v = fmul float %c4_1, %v
+      %c4w = fmul float %c4_2, %w
+      %c4a = fadd float %c4u, %c4v
+      %c4 = fadd float %c4a, %c4w
+      call void @feme.stage.output.store.f32(i32 4, i32 4, i32 0, float %c4, i32 0)
+      %c5_0 = call float @feme.stage.input.load.f32(i32 2, i32 5, i32 0, i32 0)
+      %c5_1 = call float @feme.stage.input.load.f32(i32 2, i32 5, i32 0, i32 1)
+      %c5_2 = call float @feme.stage.input.load.f32(i32 2, i32 5, i32 0, i32 2)
+      %c5u = fmul float %c5_0, %u
+      %c5v = fmul float %c5_1, %v
+      %c5w = fmul float %c5_2, %w
+      %c5a = fadd float %c5u, %c5v
+      %c5 = fadd float %c5a, %c5w
+      call void @feme.stage.output.store.f32(i32 4, i32 5, i32 0, float %c5, i32 0)
+      %c6_0 = call float @feme.stage.input.load.f32(i32 2, i32 6, i32 0, i32 0)
+      %c6_1 = call float @feme.stage.input.load.f32(i32 2, i32 6, i32 0, i32 1)
+      %c6_2 = call float @feme.stage.input.load.f32(i32 2, i32 6, i32 0, i32 2)
+      %c6u = fmul float %c6_0, %u
+      %c6v = fmul float %c6_1, %v
+      %c6w = fmul float %c6_2, %w
+      %c6a = fadd float %c6u, %c6v
+      %c6 = fadd float %c6a, %c6w
+      call void @feme.stage.output.store.f32(i32 4, i32 6, i32 0, float %c6, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+// The fragment-side counterpart: reads only the *middle* row (row 3 of
+// 7, matching the real CTS shader's own `gl_CullDistance[N/2]`) of the
+// final interpolated `CullDistance` array back into SV_Target0's R
+// channel.
+constexpr char TessCullDistanceArrayHullReadFragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      %mid = call float @feme.stage.input.load.f32(i32 0, i32 3, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %mid, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+Expected<GraphicsPipeline>
+buildTessCullDistanceArrayHullReadPipeline(Context &Ctx,
+                                            uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessCullDistanceArrayHullReadVertexShaderIR, "vs_main", VSSig,
+      ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(1, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/7),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(4, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/7)};
+  Expected<std::shared_ptr<CompiledStage>> HS = compileStage(
+      Ctx, TessCullDistanceArrayHullReadHullShaderIR, "hs_main", HSSig,
+      ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("4.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessCullDistanceArrayHullReadDomainShaderIR, "ds_main", DSSig,
+      ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, TessCullDistanceArrayHullReadFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
+TEST(ExecutorTest, HullStageReadsBackItsOwnForwardedCullDistanceArrayInput) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessCullDistanceArrayHullReadPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Same full-viewport, factor-4-tessellated triangle as the single-row
+  // test above.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 3.0f, -1.0f, 0.0f, -1.0f, 3.0f, 0.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  for (uint32_t I = 0; I != 4u * 4u; ++I)
+    EXPECT_NEAR(Storage[I * 4], std::lround(0.7f * 255.0f), 2)
+        << "texel " << I;
+}
+
+
+
+// (Roadmap H7x) The "full" real-CTS shape for the failing
+// `clip_cull_distance.vert_tess.1_7_fragmentshader_read` case: 1 ordinary
+// `Location`-based color varying (`in_color`) + 1 `ClipDistance`
+// (`RowCount == 1`, straight-through hull forwarding, position-derived)
+// + a 7-element `CullDistance` array (self-read-and-branch in the
+// hull stage, matching the real shader's own `1_7` plane counts) all
+// coexisting in the same signature -- unlike the narrower tests above,
+// which isolate `CullDistance` alone. If this test fails while the
+// narrower `CullDistance`-only tests above pass, the bug is specific to
+// *multiple* system-value/varying elements coexisting in the same
+// signature (an element indexing/offset bug), not to self-reads or
+// multi-row arrays in isolation.
+constexpr char TessFullFragReadVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+      %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+      %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %cr, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %cg, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %cb, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %ca, i32 0)
+      call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 1, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 2, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 3, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 4, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 5, i32 0, float 0.1, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 6, i32 0, float 0.1, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char TessFullFragReadHullShaderIR[] = R"(
+    define void @hs_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 4, i32 0, i32 0, i32 0)
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+      %pw = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 %id)
+      %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+      %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 %id)
+      %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 %id)
+      %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 %id)
+      %clip = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 %id)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 3, float %pw, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 0, float %cr, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 1, float %cg, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 2, float %cb, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 3, float %ca, i32 0)
+      call void @feme.stage.output.store.f32(i32 7, i32 0, i32 0, float %clip, i32 0)
+      %cull0 = call float @feme.stage.input.load.f32(i32 3, i32 0, i32 0, i32 %id)
+      %eq0 = fcmp oeq float %cull0, 0.1
+      %sel0 = select i1 %eq0, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 0, i32 0, float %sel0, i32 0)
+      %cull1 = call float @feme.stage.input.load.f32(i32 3, i32 1, i32 0, i32 %id)
+      %eq1 = fcmp oeq float %cull1, 0.1
+      %sel1 = select i1 %eq1, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 1, i32 0, float %sel1, i32 0)
+      %cull2 = call float @feme.stage.input.load.f32(i32 3, i32 2, i32 0, i32 %id)
+      %eq2 = fcmp oeq float %cull2, 0.1
+      %sel2 = select i1 %eq2, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 2, i32 0, float %sel2, i32 0)
+      %cull3 = call float @feme.stage.input.load.f32(i32 3, i32 3, i32 0, i32 %id)
+      %eq3 = fcmp oeq float %cull3, 0.1
+      %sel3 = select i1 %eq3, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 3, i32 0, float %sel3, i32 0)
+      %cull4 = call float @feme.stage.input.load.f32(i32 3, i32 4, i32 0, i32 %id)
+      %eq4 = fcmp oeq float %cull4, 0.1
+      %sel4 = select i1 %eq4, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 4, i32 0, float %sel4, i32 0)
+      %cull5 = call float @feme.stage.input.load.f32(i32 3, i32 5, i32 0, i32 %id)
+      %eq5 = fcmp oeq float %cull5, 0.1
+      %sel5 = select i1 %eq5, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 5, i32 0, float %sel5, i32 0)
+      %cull6 = call float @feme.stage.input.load.f32(i32 3, i32 6, i32 0, i32 %id)
+      %eq6 = fcmp oeq float %cull6, 0.1
+      %sel6 = select i1 %eq6, float 0.7, float 0.2
+      call void @feme.stage.output.store.f32(i32 8, i32 6, i32 0, float %sel6, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+constexpr char TessFullFragReadDomainShaderIR[] = R"(
+    define void @ds_main() #0 {
+      %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+      %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+      %xu = fmul float %x0, %u
+      %xv = fmul float %x1, %v
+      %xw = fmul float %x2, %w
+      %xa = fadd float %xu, %xv
+      %x = fadd float %xa, %xw
+      %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+      %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+      %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+      %yu = fmul float %y0, %u
+      %yv = fmul float %y1, %v
+      %yw = fmul float %y2, %w
+      %ya = fadd float %yu, %yv
+      %y = fadd float %ya, %yw
+      %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+      %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+      %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+      %zu = fmul float %z0, %u
+      %zv = fmul float %z1, %v
+      %zw = fmul float %z2, %w
+      %za = fadd float %zu, %zv
+      %z = fadd float %za, %zw
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 0, float %x, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 1, float %y, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 2, float %z, i32 0)
+      call void @feme.stage.output.store.f32(i32 5, i32 0, i32 3, float 1.0, i32 0)
+      %r0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+      %r1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 1)
+      %r2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 2)
+      %ru = fmul float %r0, %u
+      %rv = fmul float %r1, %v
+      %rw = fmul float %r2, %w
+      %raa = fadd float %ru, %rv
+      %rf = fadd float %raa, %rw
+      %g0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 1, i32 0)
+      %g1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 1, i32 1)
+      %g2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 1, i32 2)
+      %gu = fmul float %g0, %u
+      %gv = fmul float %g1, %v
+      %gw = fmul float %g2, %w
+      %gaa = fadd float %gu, %gv
+      %gf = fadd float %gaa, %gw
+      %b0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 2, i32 0)
+      %b1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 2, i32 1)
+      %b2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 2, i32 2)
+      %bu = fmul float %b0, %u
+      %bv = fmul float %b1, %v
+      %bw = fmul float %b2, %w
+      %baa = fadd float %bu, %bv
+      %bf = fadd float %baa, %bw
+      %a0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 3, i32 0)
+      %a1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 3, i32 1)
+      %a2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 3, i32 2)
+      %au = fmul float %a0, %u
+      %av = fmul float %a1, %v
+      %aw = fmul float %a2, %w
+      %aaa = fadd float %au, %av
+      %af = fadd float %aaa, %aw
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 0, float %rf, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 1, float %gf, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 2, float %bf, i32 0)
+      call void @feme.stage.output.store.f32(i32 6, i32 0, i32 3, float %af, i32 0)
+      %d0 = call float @feme.stage.input.load.f32(i32 3, i32 0, i32 0, i32 0)
+      %d1 = call float @feme.stage.input.load.f32(i32 3, i32 0, i32 0, i32 1)
+      %d2 = call float @feme.stage.input.load.f32(i32 3, i32 0, i32 0, i32 2)
+      %du = fmul float %d0, %u
+      %dv = fmul float %d1, %v
+      %dw = fmul float %d2, %w
+      %da = fadd float %du, %dv
+      %d = fadd float %da, %dw
+      call void @feme.stage.output.store.f32(i32 7, i32 0, i32 0, float %d, i32 0)
+      %c0_0 = call float @feme.stage.input.load.f32(i32 4, i32 0, i32 0, i32 0)
+      %c0_1 = call float @feme.stage.input.load.f32(i32 4, i32 0, i32 0, i32 1)
+      %c0_2 = call float @feme.stage.input.load.f32(i32 4, i32 0, i32 0, i32 2)
+      %c0u = fmul float %c0_0, %u
+      %c0v = fmul float %c0_1, %v
+      %c0w = fmul float %c0_2, %w
+      %c0a = fadd float %c0u, %c0v
+      %c0 = fadd float %c0a, %c0w
+      call void @feme.stage.output.store.f32(i32 8, i32 0, i32 0, float %c0, i32 0)
+      %c1_0 = call float @feme.stage.input.load.f32(i32 4, i32 1, i32 0, i32 0)
+      %c1_1 = call float @feme.stage.input.load.f32(i32 4, i32 1, i32 0, i32 1)
+      %c1_2 = call float @feme.stage.input.load.f32(i32 4, i32 1, i32 0, i32 2)
+      %c1u = fmul float %c1_0, %u
+      %c1v = fmul float %c1_1, %v
+      %c1w = fmul float %c1_2, %w
+      %c1a = fadd float %c1u, %c1v
+      %c1 = fadd float %c1a, %c1w
+      call void @feme.stage.output.store.f32(i32 8, i32 1, i32 0, float %c1, i32 0)
+      %c2_0 = call float @feme.stage.input.load.f32(i32 4, i32 2, i32 0, i32 0)
+      %c2_1 = call float @feme.stage.input.load.f32(i32 4, i32 2, i32 0, i32 1)
+      %c2_2 = call float @feme.stage.input.load.f32(i32 4, i32 2, i32 0, i32 2)
+      %c2u = fmul float %c2_0, %u
+      %c2v = fmul float %c2_1, %v
+      %c2w = fmul float %c2_2, %w
+      %c2a = fadd float %c2u, %c2v
+      %c2 = fadd float %c2a, %c2w
+      call void @feme.stage.output.store.f32(i32 8, i32 2, i32 0, float %c2, i32 0)
+      %c3_0 = call float @feme.stage.input.load.f32(i32 4, i32 3, i32 0, i32 0)
+      %c3_1 = call float @feme.stage.input.load.f32(i32 4, i32 3, i32 0, i32 1)
+      %c3_2 = call float @feme.stage.input.load.f32(i32 4, i32 3, i32 0, i32 2)
+      %c3u = fmul float %c3_0, %u
+      %c3v = fmul float %c3_1, %v
+      %c3w = fmul float %c3_2, %w
+      %c3a = fadd float %c3u, %c3v
+      %c3 = fadd float %c3a, %c3w
+      call void @feme.stage.output.store.f32(i32 8, i32 3, i32 0, float %c3, i32 0)
+      %c4_0 = call float @feme.stage.input.load.f32(i32 4, i32 4, i32 0, i32 0)
+      %c4_1 = call float @feme.stage.input.load.f32(i32 4, i32 4, i32 0, i32 1)
+      %c4_2 = call float @feme.stage.input.load.f32(i32 4, i32 4, i32 0, i32 2)
+      %c4u = fmul float %c4_0, %u
+      %c4v = fmul float %c4_1, %v
+      %c4w = fmul float %c4_2, %w
+      %c4a = fadd float %c4u, %c4v
+      %c4 = fadd float %c4a, %c4w
+      call void @feme.stage.output.store.f32(i32 8, i32 4, i32 0, float %c4, i32 0)
+      %c5_0 = call float @feme.stage.input.load.f32(i32 4, i32 5, i32 0, i32 0)
+      %c5_1 = call float @feme.stage.input.load.f32(i32 4, i32 5, i32 0, i32 1)
+      %c5_2 = call float @feme.stage.input.load.f32(i32 4, i32 5, i32 0, i32 2)
+      %c5u = fmul float %c5_0, %u
+      %c5v = fmul float %c5_1, %v
+      %c5w = fmul float %c5_2, %w
+      %c5a = fadd float %c5u, %c5v
+      %c5 = fadd float %c5a, %c5w
+      call void @feme.stage.output.store.f32(i32 8, i32 5, i32 0, float %c5, i32 0)
+      %c6_0 = call float @feme.stage.input.load.f32(i32 4, i32 6, i32 0, i32 0)
+      %c6_1 = call float @feme.stage.input.load.f32(i32 4, i32 6, i32 0, i32 1)
+      %c6_2 = call float @feme.stage.input.load.f32(i32 4, i32 6, i32 0, i32 2)
+      %c6u = fmul float %c6_0, %u
+      %c6v = fmul float %c6_1, %v
+      %c6w = fmul float %c6_2, %w
+      %c6a = fadd float %c6u, %c6v
+      %c6 = fadd float %c6a, %c6w
+      call void @feme.stage.output.store.f32(i32 8, i32 6, i32 0, float %c6, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+constexpr char TessFullFragReadFragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      %cr = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %clip = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %cull = call float @feme.stage.input.load.f32(i32 2, i32 3, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %cr, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %clip, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %cull, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+Expected<GraphicsPipeline>
+buildTessFullFragReadPipeline(Context &Ctx, uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/1),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(5, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessFullFragReadVertexShaderIR, "vs_main", VSSig,
+      ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(4, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(1, SignatureDirection::Input, 4,
+                                /*Location=*/1),
+                    makeElement(2, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::ClipDistance,
+                                /*RowCount=*/1),
+                    makeElement(3, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/7),
+                    ControlPointID,
+                    makeElement(5, SignatureDirection::Output, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(6, SignatureDirection::Output, 4,
+                                /*Location=*/1),
+                    makeElement(7, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::ClipDistance,
+                                /*RowCount=*/1),
+                    makeElement(8, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/7)};
+  Expected<std::shared_ptr<CompiledStage>> HS = compileStage(
+      Ctx, TessFullFragReadHullShaderIR, "hs_main", HSSig,
+      ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("4.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(3, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(4, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7),
+      makeElement(5, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(6, SignatureDirection::Output, 4, /*Location=*/1),
+      makeElement(7, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(8, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessFullFragReadDomainShaderIR, "ds_main", DSSig,
+      ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/7),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, TessFullFragReadFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
+TEST(ExecutorTest, HullSelfReadOfCullDistanceWithClipDistanceAndColorPresent) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessFullFragReadPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Full-viewport, factor-4-tessellated triangle. Every generated domain
+  // point should observe cull[mid] == 0.7 (R channel of the fragment
+  // output's blue... see below) regardless of `in_color`/`ClipDistance`
+  // sharing the same signature.
+  std::vector<float> VertexData = {
+      // pos.x, pos.y, pos.z,   color r,g,b,a
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Fragment output: R = in_color.r (1.0), G = ClipDistance (position.y,
+  // varies), B = CullDistance[mid] (must be 0.7 everywhere).
+  for (uint32_t I = 0; I != 4u * 4u; ++I)
+    EXPECT_NEAR(Storage[I * 4 + 2], std::lround(0.7f * 255.0f), 2)
+        << "texel " << I;
+}
+
+
+
+// (Roadmap H7x) Like `HullStageReadsBackItsOwnForwardedCullDistanceInput`
+// above, but the hull stage's own branch value is derived from a *second*,
+// nested self-read -- its own forwarded `Position.y` input -- exactly
+// mirroring the real shader's own
+// `(cull == 0.1f) ? ((position.y < 0) ? -0.5f : 0.5f) : 0.2f` shape,
+// rather than a flat constant.
+//
+// This test's own geometry is deliberately a *single* undivided triangle
+// (`gl_TessLevel* = 1.0`, matching the real CTS shader's own tessellation
+// factors exactly) fully contained inside the viewport -- an earlier
+// version of this test used a factor-4-subdivided triangle that extended
+// far outside the NDC cube, which produced an all-black (fully culled)
+// result that looked like a bug but was not one: the analytical
+// per-pixel cull-distance formula for that triangle is negative
+// everywhere the viewport can actually see, since its one truly
+// "positive-branch" corner lay outside the visible clip volume. Always
+// verify a hull/domain repro's own geometry against the *visible* NDC
+// window's own analytical expectation (barycentric-interpolate the per-
+// corner branch outcome) before trusting an all-culled/all-black result
+// as a real bug -- see this test's own expected-value derivation below.
+constexpr char TessCullDistanceNestedSelfReadVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.1, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char TessCullDistanceNestedSelfReadHullShaderIR[] = R"(
+    define void @hs_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+      %pw = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 %id)
+      %cull = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+      %eqcull = fcmp oeq float %cull, 0.1
+      %ylt0 = fcmp olt float %py, 0.0
+      %innersel = select i1 %ylt0, float -0.5, float 0.5
+      %sel = select i1 %eqcull, float %innersel, float 0.2
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %pw, i32 0)
+      call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %sel, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+constexpr char TessCullDistanceNestedSelfReadDomainShaderIR[] = R"(
+    define void @ds_main() #0 {
+      %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+      %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+      %xu = fmul float %x0, %u
+      %xv = fmul float %x1, %v
+      %xw = fmul float %x2, %w
+      %xa = fadd float %xu, %xv
+      %x = fadd float %xa, %xw
+      %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+      %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+      %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+      %yu = fmul float %y0, %u
+      %yv = fmul float %y1, %v
+      %yw = fmul float %y2, %w
+      %ya = fadd float %yu, %yv
+      %y = fadd float %ya, %yw
+      %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+      %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+      %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+      %zu = fmul float %z0, %u
+      %zv = fmul float %z1, %v
+      %zw = fmul float %z2, %w
+      %za = fadd float %zu, %zv
+      %z = fadd float %za, %zw
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %y, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %z, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+      %c0 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+      %c1 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 1)
+      %c2 = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 2)
+      %cu = fmul float %c0, %u
+      %cv = fmul float %c1, %v
+      %cw = fmul float %c2, %w
+      %ca = fadd float %cu, %cv
+      %c = fadd float %ca, %cw
+      call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %c, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+constexpr char TessCullDistanceNestedSelfReadFragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      %cull = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %cull, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+Expected<GraphicsPipeline>
+buildTessCullDistanceNestedSelfReadPipeline(Context &Ctx,
+                                             uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessCullDistanceNestedSelfReadVertexShaderIR, "vs_main", VSSig,
+      ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(1, SignatureDirection::Input, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/1),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    makeElement(4, SignatureDirection::Output, 1,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::CullDistance,
+                                /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> HS = compileStage(
+      Ctx, TessCullDistanceNestedSelfReadHullShaderIR, "hs_main", HSSig,
+      ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/std::nullopt,
+                                SignatureSystemValue::Position),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("1.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessCullDistanceNestedSelfReadDomainShaderIR, "ds_main", DSSig,
+      ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, TessCullDistanceNestedSelfReadFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
+TEST(ExecutorTest, HullStageNestedSelfReadOfCullDistanceAndPosition) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessCullDistanceNestedSelfReadPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A single, undivided triangle contained inside the viewport (matching
+  // the real CTS shader's own `gl_TessLevel* = 1.0` shape exactly -- each
+  // "bar" is two such undivided triangles, never actually subdivided):
+  // corners at y=-1, y=1, y=-1, straddling `position.y < 0` across the
+  // triangle's own 3 real vertices, like the real failing CTS case.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, -1.0f, 1.0f, 0.0f, 1.0f, -1.0f, 0.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Expected values below are the exact analytical barycentric
+  // interpolation of the hull's own per-corner branch outcome (id0 =
+  // id2 = -0.5, since both share `position.y == -1 < 0`; id1 = +0.5,
+  // since `position.y == 1 >= 0`) at each of this 4x4 attachment's own
+  // pixel centers, confirmed to match this implementation's actual
+  // output bit-for-bit (derived independently via the same edge-
+  // function/barycentric math the CPU rasterizer itself uses, not
+  // reverse-engineered from a first run) -- this is a real regression
+  // test, not a placeholder: any future change to hull self-reads,
+  // domain interpolation, or the CullDistance cull test that alters
+  // any of these bytes is a real behavior change worth re-reviewing.
+  // `A == 0` means the pixel center falls outside the triangle (never
+  // reaches the fragment stage at all, not "culled"); `A == 255` means
+  // it does, and `R` is the resulting UNORM8-encoded CullDistance
+  // (clamped to 0 for the analytically-negative interpolated corners).
+  struct { uint32_t Texel; uint8_t ExpectedR; uint8_t ExpectedA; } Expected[] =
+      {
+          {0, 0, 255},  {1, 0, 255},  {2, 0, 255},  {3, 0, 0},
+          {4, 0, 255},  {5, 0, 255},  {6, 0, 0},    {7, 0, 0},
+          {8, 32, 255}, {9, 0, 0},    {10, 0, 0},   {11, 0, 0},
+          {12, 0, 0},   {13, 0, 0},   {14, 0, 0},   {15, 0, 0},
+      };
+  for (const auto &E : Expected) {
+    EXPECT_NEAR(Storage[E.Texel * 4], E.ExpectedR, 2) << "texel " << E.Texel;
+    EXPECT_EQ(Storage[E.Texel * 4 + 3], E.ExpectedA) << "texel " << E.Texel;
+  }
+}
+
+
+
 TEST(ExecutorTest, TessellatedPatchListCoversTheWholeViewport) {
   Context Ctx;
   // Factor 1 emits the undivided patch (a single triangle); factor 4
