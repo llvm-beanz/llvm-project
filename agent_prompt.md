@@ -45,24 +45,5 @@ agent thoughts.
 
 # Request
 
-Can you work the the H-series milestones?
-
-The last session suggested the next steps:
-
-1. **Combine `RowCount=7` + FS reads row index 3 + coexisting
-   `ClipDistance`/color + the nested `Position.y` branch + correct
-   (contained) geometry** (~45-60 min). This exact combination -- the
-   real shader's full signature richness plus the real branch logic --
-   has never been tested together. Every repro this session used either
-   the full signature *or* the nested branch, never both.
-2. **If (1) doesn't reproduce a bug, try the real 15-adjacent-narrow-bar
-   geometry at `RENDER_SIZE=16`** (~1-2 hours) -- much closer to the
-   literal real CTS setup; adjacency or narrow-triangle-width effects
-   are untested.
-3. **`_dynamic_index` combined with `vert_geom`/`vert_tess_geom`**
-   still crashes with `"JIT session error: Symbols not found:
-   [ spirv_var_N ]"` -- flagged for the fourth session in a row,
-   still no milestone filed. ~15-30 min first diagnostic.
-4. **`offload-test-suite`'s `check-hlsl-feme-vk` target** still never
-   built/run -- seventh session in a row to defer it. Worth a session
-   of its own.
+Can you re-triage the H-series milestones and provide a recommendation for next
+steps?
