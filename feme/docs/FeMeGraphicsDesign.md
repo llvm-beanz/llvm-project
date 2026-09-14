@@ -1313,6 +1313,39 @@ its own investigation. `shaderClipDistance`/`shaderCullDistance` stay
 `VK_FALSE` (this row's own fixes, while real and independently tested,
 do not by themselves clear a real passing CTS case end to end).
 
+**Final closure.** Once H7z's own fix let the exact CTS case clear every
+earlier compilation gate, a real-CTS-image channel reduction of
+`dEQP-VK.clipping.user_defined.clip_cull_distance.vert_tess.
+1_7_fragmentshader_read`'s actual rendered pixels found this row's own
+fourth and final blocker -- a real rendering-correctness bug this time,
+not a compilation one, and it lives one layer below this file entirely,
+in `Tessellator.cpp`. `tessellateTriangle`'s general inset/bridge
+subdivision always ran, even at the fully unsubdivided
+`TessLevelInner`/`TessLevelOuter == 1` factor, synthesizing 7
+sub-triangles out of one real input triangle. Ordinary affine
+position/varying interpolation cannot see that split (any consistent
+subdivision reproduces the same values), but `gl_CullDistance`'s
+whole-*primitive* culling rule (`isCulledByCullDistance`) can: a
+synthetic sub-triangle whose 3 vertices all land near one real edge of
+the un-subdivided triangle can be all-negative even when the real,
+un-subdivided triangle's own 3 control points are not, spuriously
+culling a sliver along that edge. The captured image showed exactly
+that: a full-width band of spuriously culled pixels along the
+`gl_Position.y == -1` patch edge shared by every one of the CTS test's 8
+bars, with every other pixel already matching the test's own analytic
+expected value (`vktClippingTests.cpp`'s `checkFragColors`) exactly.
+`tessellateTriangle` now special-cases the fully-unsubdivided factor to
+emit the real, single triangle directly, never creating that spurious
+internal boundary -- see `Tessellator.cpp`'s own comment and the new
+`TessellatorTest.cpp` case `TriangleFullyUnsubdividedFactorEmitsOneRealTriangle`.
+A real CTS re-run confirms the full `dEQP-VK.clipping.user_defined.*`
+matrix (256 cases -- every `_dynamic_index`/`_fragmentshader_read`/
+`vert`/`vert_geom`/`vert_tess`/`vert_tess_geom` combination) now passes
+256/256, with no regressions found across a broad
+`dEQP-VK.tessellation.*` re-run. `shaderClipDistance`/`shaderCullDistance`
+are therefore now genuinely `VK_TRUE`, closing this row, H7w, H32 and
+H53.
+
 #### Status (roadmap H7y)
 
 Writing `gl_ClipDistance`/`gl_CullDistance` from a tessellation-evaluation
