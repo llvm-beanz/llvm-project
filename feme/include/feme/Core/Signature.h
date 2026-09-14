@@ -141,6 +141,17 @@ enum class SignatureSystemValue : uint8_t {
   /// vertices-per-primitive (3 for triangles, 2 for lines, 1 for points).
   /// Added at the end for the same no-renumbering reason `PointSize` was.
   PrimitiveIndices,
+  /// (Roadmap H106) `gl_CullPrimitiveEXT`: a mesh stage's own per-
+  /// primitive output, `true` when the workgroup wants this one
+  /// primitive discarded before rasterization -- an ordinary `bool`
+  /// output otherwise, stored and replicated across a primitive's own
+  /// vertex slots exactly like `PrimitiveID`'s own
+  /// `AuthoredPrimitiveID`/`unflattenMeshPrimitiveRow` path
+  /// (`Executor.cpp`'s `PrimitiveState::Culled` reads it back once per
+  /// primitive, ahead of every other per-primitive test). Added at the
+  /// end for the same no-renumbering reason `PointSize`/`PrimitiveIndices`
+  /// were.
+  CullPrimitive,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };

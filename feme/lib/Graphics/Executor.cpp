@@ -1887,6 +1887,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   const SignatureElement *VSPrimitiveIDOut =
       findElement(RasterSig, SignatureDirection::Output,
                   SignatureSystemValue::PrimitiveID);
+  // (Roadmap H106) A mesh entry's own authored `gl_CullPrimitiveEXT`
+  // output -- absent for every other pre-rasterization chain, just like
+  // `VSPrimitiveIDOut` above. When present, `resolvePrimitiveState`
+  // reads it back once per primitive and `PrimitiveState::Culled` skips
+  // rasterizing that primitive outright.
+  const SignatureElement *VSCullPrimitiveOut =
+      findElement(RasterSig, SignatureDirection::Output,
+                  SignatureSystemValue::CullPrimitive);
   // (roadmap H7e) Optional: not every vertex shader writes `gl_PointSize`,
   // and only a point-topology draw's own quad expansion ever reads it.
   const SignatureElement *VSPointSize = findElement(
@@ -2441,6 +2449,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // raster-order fallback below applies instead -- see
       // `VSPrimitiveIDOut`'s own comment.
       std::optional<uint32_t> AuthoredPrimitiveID;
+      // (Roadmap H106) `true` when a mesh entry's own authored
+      // `gl_CullPrimitiveEXT` output requested this primitive be
+      // discarded; see `VSCullPrimitiveOut`'s own comment.
+      bool Culled = false;
     };
     auto resolvePrimitiveState =
         [&](uint32_t Invocation) -> std::optional<PrimitiveState> {
@@ -2487,9 +2499,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             VSPrimitiveIDOut->ElementID, VSPrimitiveIDOut->FirstComponent,
             Invocation);
 
+      // (Roadmap H106) Same replication argument as `AuthoredPrimitiveID`
+      // just above: `unflattenMeshPrimitiveRow` already replicated
+      // `gl_CullPrimitiveEXT` into every one of this primitive's own
+      // vertex slots, so reading it back at this same \p Invocation is
+      // correct regardless of which of the primitive's own vertices it
+      // names. The value is a `bool` widened to `i32` (see
+      // `getSystemValueForBuiltIn`'s own comment), so any nonzero raw
+      // bit pattern means "cull".
+      bool Culled = false;
+      if (VSCullPrimitiveOut)
+        Culled = RasterOut->readRaw(VSCullPrimitiveOut->ElementID,
+                                    VSCullPrimitiveOut->FirstComponent,
+                                    Invocation) != 0;
+
       return PrimitiveState{&Draw.Viewports[*ViewportIndex],
-                            &Draw.Scissors[*ScissorIndex], *Layer,
-                            *ViewportIndex, AuthoredPrimitiveID};
+                            &Draw.Scissors[*ScissorIndex],
+                            *Layer,
+                            *ViewportIndex,
+                            AuthoredPrimitiveID,
+                            Culled};
     };
 
     auto projectVertex = [&](const RasterVertex &Vtx,
@@ -2792,6 +2821,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       if (!Primitive) {
         continue;
       }
+      // (Roadmap H106) A mesh entry's own authored `gl_CullPrimitiveEXT`:
+      // a whole-primitive discard, tested before any of the other tests
+      // below run (a culled primitive has no fragments to clip/rasterize
+      // regardless).
+      if (Primitive->Culled)
+        continue;
       std::array<RasterVertex, 3> V = {vertexAt(Tri[0]), vertexAt(Tri[1]),
                                        vertexAt(Tri[2])};
       // (roadmap H7h) `gl_CullDistance`: a whole-primitive discard, tested
@@ -2976,6 +3011,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             resolvePrimitiveState(VertexIdx);
         if (!Primitive)
           continue;
+        // (Roadmap H106) See the identical triangle-path check above.
+        if (Primitive->Culled)
+          continue;
         RasterVertex V = vertexAt(VertexIdx);
         if (V.Clip[3] <= ClipEpsilon)
           continue;
@@ -3008,6 +3046,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       for (std::array<uint32_t, 2> Ln : AbsLineIndices) {
         std::optional<PrimitiveState> Primitive = resolvePrimitiveState(Ln[0]);
         if (!Primitive)
+          continue;
+        // (Roadmap H106) See the identical triangle-path check above.
+        if (Primitive->Culled)
           continue;
         if (!PrevEnd || *PrevEnd != Ln[0])
           ArcAccum = 0.0f;

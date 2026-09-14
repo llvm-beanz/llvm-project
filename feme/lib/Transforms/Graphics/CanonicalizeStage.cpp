@@ -501,6 +501,16 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 /// meshlet's real index list at its zero-initialized default, so every
 /// emitted primitive degenerated to "all three vertices are vertex 0" and
 /// never rasterized.
+///
+/// (Roadmap H106) `CullPrimitiveEXT` (`gl_CullPrimitiveEXT`) now maps to
+/// `SignatureSystemValue::CullPrimitive`: `Executor.cpp`'s
+/// `resolvePrimitiveState` reads a mesh entry's own authored value back
+/// (when present) and skips rasterizing that one primitive outright,
+/// mirroring `PrimitiveID`'s already-existing authored-value path. Before
+/// this row it mapped to `None`, making a real `gl_CullPrimitiveEXT =
+/// true` write an ordinary, unlinkable output that
+/// `ValidateStagePass`/the executor simply ignored -- every primitive
+/// rasterized regardless of the shader's own culling intent.
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
@@ -556,6 +566,8 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   case 5295: // PrimitiveLineIndicesEXT
   case 5296: // PrimitivePointIndicesEXT
     return SignatureSystemValue::PrimitiveIndices;
+  case 5299: // CullPrimitiveEXT
+    return SignatureSystemValue::CullPrimitive;
   default:
     return SignatureSystemValue::None;
   }
