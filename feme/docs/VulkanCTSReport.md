@@ -42229,3 +42229,100 @@ input storage, since the static IR shows no obvious defect.
 failures (no code change made this session; the feature bits remain
 `VK_FALSE`, so no `check-feme`/unit-test regression risk from this
 session's investigation). H53 and H32 remain open, depending on H112.
+
+
+## Roadmap H112: root cause and fix (tessellation-path clip/cull-distance forwarding)
+
+This session root-caused and fixed **H112**, the silent
+rendering-correctness bug left over once H53/H54/H55/H56 closed the
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.
+{vert_tess,vert_tess_geom}.*` bucket's compile/link-time crashes. Static
+review of the converted IR (H112's own earlier session) found nothing
+wrong, so this session built an empirical `ExecutorTest.cpp` repro
+(`ClipsATessellatedPatchAgainstAWrittenClipDistance`) mirroring the real
+CTS shader's self-indexed vertex->hull->domain `gl_ClipDistance`
+passthrough shape, confirmed it reproduced the bug (every texel lit
+instead of the expected half-clipped pattern), then instrumented
+`Executor.cpp` to find the actual per-vertex `ClipDistances[0]` read
+back during rasterization was always `0.0`, regardless of the real
+per-vertex value written by the vertex stage.
+
+**Bug #1 (fixed):** `PatchPipeline.cpp`'s `linkPatchPipeline` filtered
+every vertex->hull, vertex->patch-constant-`InputPatch`,
+hull->patch-constant-`OutputPatch`, and hull->domain link with
+`isNotSystemValue`, which excludes *every* system-value input from
+producer linkage -- not just the ones a hull/domain stage's own wrapper
+genuinely synthesizes itself (`OutputControlPointID`, `PatchVertices`,
+`PrimitiveID` for hull; `DomainLocation`, `PatchVertices`, `PrimitiveID`
+for domain). `Position`/`ClipDistance`/`CullDistance`/`PointSize` are
+merely *forwarded* per-control-point attributes needing the same
+producer linkage an ordinary varying gets (confirmed via
+`HullWrapper.cpp`'s `lowerHullInputLoad` and `DomainWrapper.cpp`'s
+`lowerDomainInputLoad`, whose own `default` case comments already
+document this) -- but `isNotSystemValue` silently excluded them too, so
+no `LinkedStageElement` was ever created and `copyLinkedElements` never
+copied the real value in, leaving it zero-initialized. This went
+unnoticed for `Position` because every real SPIR-V-derived shader (and
+every prior test) forwards it as an ordinary `Location`-based varying at
+every intermediate stage, only becoming `SystemValue::Position` at the
+domain stage's own final output; `ClipDistance`/`CullDistance` have no
+such non-system-value spelling, so this bug was reachable only once a
+real per-control-point clip/cull-distance passthrough shape existed --
+exactly H112's own CTS cases. Fixed by replacing `isNotSystemValue` with
+`isForwardedFromProducerStage`, excluding only the four genuinely
+wrapper-synthesized system values.
+
+With bug #1 fixed alone, the new unit test passed, but a real CTS re-run
+still showed every `vert_tess`/`vert_tess_geom` case failing -- now with
+`"Fail (Rendered image(s) are incorrect)"` (a real improvement over the
+prior compile/link-time crash, but still wrong). Investigating further
+with the real CTS's own 8-bar shape (not just the hand-written repro)
+found the entire 16x16 render came back solid black for
+`clip_distance.vert_tess.1` -- not just the one expected bar's half.
+
+**Bug #2 (fixed):** dumping the real converted IR's own signature
+(`main`/`main.patchconstant` for the exact
+`dEQP-VK.clipping.user_defined.clip_distance.vert_tess.1` case) found
+`Position` genuinely *is* marked `SystemValue::Position` at every
+intermediate stage boundary in a real SPIR-V-derived shader -- contrary
+to this session's own earlier assumption, and to what every existing
+hand-written test exercised. A dedicated new unit test
+(`ClipsATessellatedPatchWithSystemValuePositionForwarding`, mirroring
+this exact shape) immediately crashed on `StageStorage::writeRaw`'s own
+out-of-bounds assertion. Root cause: `StageStorage.cpp`'s
+`buildStageStorage` skips allocating storage for any system-value
+*input* by default (assuming a compiled wrapper always sources it from
+an invocation-record field instead) -- `ClipDistance`/`CullDistance`
+were already carved out as exceptions (per an earlier H5h/H7x fix), but
+`Position`/`PointSize` were not, even though `HullWrapper.cpp`/
+`DomainWrapper.cpp` address a forwarded `Position` input exactly like an
+ordinary varying, through this same storage. Once bug #1's fix let
+`copyLinkedElements` try to copy a real value into that (unallocated)
+storage, it wrote straight past the empty buffer. Fixed by renaming
+`IsInterpolatedFragmentInput` to `IsForwardedPerControlPointInput` and
+extending it to also cover `Position`/`PointSize`.
+
+**Real CTS re-measurement** (bit flipped on for the measurement only),
+full `dEQP-VK.clipping.user_defined.*` matrix (256 cases):
+
+- Non-`_dynamic_index`/non-`_fragmentshader_read` subset (64 cases,
+  every `vert`/`vert_geom`/`vert_tess`/`vert_tess_geom` case): **64/64
+  Pass** -- up from 32/64 before this session (the `vert_tess`/
+  `vert_tess_geom` half was 0/32). H112's own tessellation-path bug is
+  fully fixed.
+- `_dynamic_index` (128 cases, both `_fragmentshader_read` and not):
+  32/128 Pass -- unchanged, a separate, already-known gap (roadmap H7w,
+  plus a `vert_tess_geom`/`vert_geom` JIT-symbol-resolution crash not yet
+  filed).
+- `_fragmentshader_read`, non-`_dynamic_index` (64 cases): 50/64 Pass --
+  a separate, already-known gap (roadmap H7x).
+
+The bit stays `VK_FALSE`: `_dynamic_index` and the remaining
+`_fragmentshader_read` gap mean this feature's own mandatory conformance
+surface is still not fully met, even though H112 itself is closed.
+
+`ninja check-feme`: 3006/3006 pass, 3 pre-existing unsupported, 0
+failures, up by 3 tests (the two new `ExecutorTest.cpp` regression
+cases plus one new `StageLinkTest.cpp` case) -- no regressions. H112 is
+closed; H53 and H32 remain open, now depending only on H7w/H7x (not yet
+assigned/broken down further this session).
