@@ -83340,3 +83340,219 @@ Cleaned up all `/tmp/h117_*`/`/tmp/h118_*` scratch files and a stray
    session, since `valgrind`'s own stack trace is a strong head start.
 4. Low priority: no scratch files left to clean up (this session's own
    were removed, including a stray `tese.spv`).
+
+# H116 confirmed closed, check-hlsl-feme-vk run for the first time ever, and H123 found+fixed
+
+## What happened, in order
+
+1. Reviewed `feme/.instructions.md` again per standing instructions --
+   its `check-hlsl-feme-vk`/`VK_ICD_FILENAMES` warning (system defaults
+   to Mesa `lavapipe` unless explicitly overridden) and its stale-`.so`
+   warning (rebuild `libfeme_vulkan.so` fresh before trusting any CTS
+   count, referencing the old H99a/H103 false alarm) were both directly
+   relevant this session and followed carefully.
+
+2. **H116 triage** (`per_patch_array.vertex_io_array_size_*`, 9 cases,
+   "Invalid input value in tessellation evaluation shader"): rebuilt
+   `libfeme_vulkan.so` fresh, no source change, and re-ran the 9 cases:
+   **9/9 pass** (was 0/9). Ran the full `user_defined_io.*` matrix (54
+   cases): **54/54 pass** -- this closes the entire matrix H114
+   originally exposed (H115 through H122, now also H116). `check-feme`:
+   3020/3023, 3 unsupported, 0 failed, unchanged. Concluded H116 was
+   fixed as a side effect of the prior session's H117/H118
+   `CanonicalizeStage.cpp` changes -- no code change needed. Committed
+   the Roadmap.md/VulkanCTSReport.md updates (`97beedd323a4`).
+
+3. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: confirmed
+   the checkout is already on the `feme` branch (`d578a2a`) and
+   `build2`'s `CMakeCache.txt` already has the
+   `LLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR`/`LLVM_EXTERNAL_PROJECTS`
+   wiring done (some earlier, unremarked session must have done this --
+   it was not redone here). Ran `ninja check-hlsl-feme-vk` for the
+   **first time in this project's history**: 664 total tests, 274
+   passed, 103 failed, 260 unsupported, 26 XFAIL, 1 XPASS. Captured a
+   full verbose `llvm-lit -v` log to `/tmp/feme_vk_first_run/` for
+   offline triage (env vars set manually for this direct invocation,
+   per the `.instructions.md` warning -- `ninja` itself handles them
+   automatically via the CMake wiring).
+
+4. **Bucketed all 103 failures by error-message signature** (not by
+   test directory, since the same root cause spans several) using
+   `awk`/`grep`/`sort | uniq -c` over the captured log rather than
+   reading each of the 103 individually. Found seven real, disjoint
+   buckets:
+   - Vector-typed `spirv.GroupNonUniform*` legalization gap (largest,
+     ~26 cases, almost all of `WaveOps/*`) -- only scalar-operand
+     subgroup reductions seem implemented today.
+   - `CBuffer`/`Matrix`-layout `spirv.AccessChain` legalization gap
+     (~10 cases).
+   - Missing fp16 vector resource-load runtime intrinsics
+     (`feme.cpu.resource.load.raw.{v2f16,v3f16,v4f16,f16}` unresolved
+     at JIT link time).
+   - Unhandled SPIR-V/graphics opcode 209 at pipeline creation (~7
+     cases, `fwidth`/`ddx`/`ddy` cluster -- opcode 209 is `OpDPdx`'s
+     own numbering, strongly suggesting a single missing
+     derivative-family opcode).
+   - `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+     divergence-handling gaps (~11 cases, several distinct
+     diagnostics, not one shared cause).
+   - Scalar-only `GLSL.std.450`/core-op legalization gaps
+     (`Normalize`/`Length`/`IsNan`/`IsInf` on vectors, 8 cases).
+   - One I actually root-caused and fixed this session (next item).
+
+5. **Picked the smallest, most self-contained bucket to actually fix**
+   rather than just filing all seven as open rows:
+   `Feature/DynamicResources/dyn-res-texture-sampler.test` failed with
+   `"error: redefinition of symbol named 'SamplerDescriptorHeap.str'"`.
+   Reproduced standalone with a small hand-written HLSL file and
+   `spirv-dis`'d DXC's own output: the shader indexes
+   `SamplerDescriptorHeap` through two different index expressions
+   (`Samp0Index`/`Samp1Index`), and DXC emits **two** `OpVariable`s for
+   it -- `%SamplerDescriptorHeap`/`%SamplerDescriptorHeap_0` -- both
+   `OpName`d `"SamplerDescriptorHeap"`, both `DescriptorSet 0`/
+   `Binding 3`. Confirmed `feme-translate --import-spirv` on the real
+   SPIR-V also hits an MLIR-level `"redefinition of symbol"` diagnostic
+   at deserialization -- MLIR's SPIR-V deserializer does not
+   de-duplicate `OpName`-colliding globals, it just builds each
+   `spirv.GlobalVariableOp` via `OpBuilder` without a follow-up
+   symbol-table verification. Root cause in feme's own code:
+   `SPIRVToLLVMPatterns.cpp`'s `prepareResourceVariables` builds a
+   `mlir::SymbolTable Table(Module)` **once**, before its loop starts,
+   then uses `Table.lookup(NameSymbol)` to uniquify each
+   `<name>.str` LLVM global it creates -- but that snapshot never
+   reflects a global the very same loop already created moments ago,
+   so a second `spirv.GlobalVariableOp` sharing a `sym_name` always
+   collides silently, only surfacing as a hard LLVM-level redefinition
+   error much later, at pipeline-creation time.
+
+6. **Fixed it**: track each `(DescriptorSet, Binding)` pair's
+   already-created name-global in a local `DenseMap`, and reuse it for
+   any later `GlobalVariableOp` sharing that pair, rather than trying
+   to define a second, colliding one (both duplicates genuinely
+   describe the same conceptual heap resource, confirmed by their
+   identical `Set`/`Binding`). `Resources[SymName]` still gets a valid
+   entry for *both* symbol names, pointing at the one shared
+   name-global, so downstream access-chain lowering (which looks up
+   `Resources` by the SPIR-V op's own `sym_name`) resolves correctly
+   for both duplicate variables.
+
+7. **Added a real unit test**: `feme-translate --import-spirv` on the
+   actual repro SPIR-V hits MLIR's *parser-level* symbol-uniqueness
+   verifier before ever reaching `prepareResourceVariables`, so a
+   textual-parse-based test can't reproduce the shape the real
+   deserializer produces. Built the exact duplicate-`OpVariable` shape
+   directly via `OpBuilder::create` calls instead (bypassing the
+   parser's verifier the same way the real deserializer does), then
+   asserted `prepareResourceVariables` returns a valid entry for the
+   shared symbol name and creates exactly one name-global (not two,
+   not a `.str.0`-suffixed second one).
+
+## Verified (all real, not assumed)
+
+- `ninja check-feme`: **3020/3023 passed, 3 unsupported, 0 failed**,
+  both before and after H123's fix -- no regressions.
+- `FeMeConversionSPIRVToLLVMTests`: **22/22 pass** (21 pre-existing + 1
+  new), run standalone and filtered to just the new test first.
+- Real CTS re-runs for H116: `per_patch_array.*` 9/9 (was 0/9);
+  `user_defined_io.*` full matrix 54/54.
+- `check-hlsl-feme-vk` re-run after H123's fix: **275 passed, 102
+  failed, 260 unsupported, 26 XFAIL, 1 XPASS** (of 664) -- exactly the
+  one target test (`dyn-res-texture-sampler.test`) moved from fail to
+  pass, everything else unchanged (confirmed by diffing the two
+  `Failed Tests` lists).
+
+## What didn't work / dead ends (don't repeat)
+
+- Tried reproducing the duplicate-global shape via
+  `mlir::parseSourceString<mlir::spirv::ModuleOp>` with two
+  textually-identical `spirv.GlobalVariable @Name` lines -- MLIR's
+  parser runs the module verifier immediately and rejects this outright
+  (`"redefinition of symbol"`), so it can never reach
+  `prepareResourceVariables` at all this way. Had to build the module
+  directly via `OpBuilder` (no verifier call in between) to get a test
+  that actually exercises the fix.
+- `mlir::spirv::EntryPointOp::create` has an overload set that's easy
+  to mis-target: passing a `mlir::FlatSymbolRefAttr`/`SymbolRefAttr`
+  for the function name doesn't match any overload cleanly with the
+  other arguments used here -- the `llvm::StringRef` fn-name overload is
+  the one that actually works with an `ExecutionModel` + empty
+  interface-vars `ArrayAttr`.
+
+## Committed (3 commits, small and separate)
+
+1. `97beedd323a4` -- close H116 (docs only, no code change).
+2. `1ac405e02178` -- H123's fix + its unit test (`SPIRVToLLVMPatterns.cpp`
+   + `SPIRVToLLVMTest.cpp` together, since they're tightly coupled --
+   `git add -A` on both paths staged them jointly before the commit).
+3. `81a4676f6a17` -- Roadmap.md (H123 closed, H124/H124a-g filed) +
+   VulkanCTSReport.md (check-hlsl-feme-vk's historic first-run numbers,
+   the triage methodology, H123's writeup).
+
+## Not done this session
+
+- **H124a-H124g** (the other six failure buckets): filed as roadmap
+  rows with root-cause descriptions and candidate files, but none
+  fixed -- each is a real, separate, likely multi-hour investigation
+  (especially H124a, the vector `GroupNonUniform*` gap, and H124e, the
+  CPU divergence-handling cluster, which isn't even one bug).
+- **`Feature/PushConstant/array_of_matrices.test`'s XPASS**: confirmed
+  its `XFAIL: DXC` annotation references a specific upstream DXC bug
+  (`microsoft/DirectXShaderCompiler#8080`, matrix-swizzle codegen) that
+  did not reproduce against this session's own DXC build -- looks like
+  an upstream DXC fix landed since the XFAIL was written, not a FeMe-
+  side change. Any fix (narrowing/removing the XFAIL) belongs in the
+  separate `offload-test-suite` repo, not this one, and wasn't made
+  here (filed as part of H124g instead).
+- **The `transform_feedback.fuzz.random_geometry.all_instance_array.12`
+  pre-existing heap corruption**: still not started, now deferred
+  across at least 2 sessions since it was first flagged. Not touched
+  at all this session -- `check-hlsl-feme-vk` was judged the higher-
+  priority standing gap (well over a dozen sessions deferring it vs.
+  2 for this one), and there wasn't time for both in one session.
+
+## Suggested next steps, ranked
+
+1. **H124a** (~2-4 hours, highest-leverage single bucket): the vector
+   `spirv.GroupNonUniform*` legalization gap accounts for ~26 of the
+   102 remaining `check-hlsl-feme-vk` failures, almost the whole
+   `WaveOps/*` cluster. Start by finding the existing pattern that
+   *does* legalize a scalar-operand `GroupNonUniform*` op in
+   `SPIRVToLLVMPatterns.cpp` and understand why it doesn't generalize
+   to a `vector<NxT>` operand already -- likely a per-lane
+   scalarization loop is missing, not a fundamentally different
+   lowering strategy.
+2. **H124d** (~1 hour, second-highest leverage per unit effort): the
+   `"unhandled opcode 209"` (derivative-family) gap affects ~7 cases
+   across a tight cluster (`fwidth`/`ddx`/`ddy` family) and opcode 209
+   is very likely a single missing `OpDPdx`-family case in whatever
+   dispatches graphics-stage SPIR-V opcodes -- first find that dispatch
+   site (not yet located this session).
+3. **H124c** (~1 hour, narrow and mechanical): add the missing
+   `feme.cpu.resource.load.raw.{v2f16,v3f16,v4f16,f16}` runtime
+   intrinsics/lowering, mirroring whatever pattern the existing f32/i32
+   variants already use -- looks self-contained.
+4. **H124b** (~1-2 hours): `CBuffer`/`Matrix` `spirv.AccessChain`
+   legalization gap, ~10 cases across several matrix-layout/nesting
+   shapes -- needs a real investigation into which shapes are and
+   aren't covered by existing patterns.
+5. **H124f** (~1 hour, may piggyback on H124a's own generalization
+   work): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
+   legalization gaps, 8 cases.
+6. **H124e** (~2-4+ hours, not one bug): the CPU divergence-handling
+   cluster, ~11 cases with several distinct diagnostics -- needs
+   per-case triage before estimating real scope; likely spans multiple
+   future sessions on its own.
+7. **H124g** (low priority, ~30-60 min): confirm `layout.test`'s
+   `FileCheck` mismatch is a real functional gap vs. a stale test
+   expectation; separately, consider whether `array_of_matrices.test`'s
+   `XFAIL: DXC` is worth removing upstream (in `offload-test-suite`,
+   not this repo).
+8. **Still fully pending, now deferred across 2+ sessions**: the
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`
+   pre-existing heap corruption -- `valgrind`'s own trace already
+   points at `buildStageStorage`/`executeDraws` allocating a too-small
+   buffer for a fuzzed multi-member XFB block-array shape, a strong
+   head start for whoever picks it up.
+9. Clean up `/tmp/h123_repro/`, `/tmp/dup_test.mlir`,
+   `/tmp/feme_vk_first_run/`, `/tmp/feme_vk_rerun.log` (this session's
+   own scratch files, low priority, not part of the repo).
