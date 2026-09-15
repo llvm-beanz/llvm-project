@@ -43554,3 +43554,103 @@ this fix's code path; only reachable in practice via HLSL/
 `offload-test-suite`'s own `check-hlsl-feme-vk` suite). No
 `VulkanCTSReport.md` Pass/Fail delta from this session;
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` unaffected.
+
+## Session: H124c fixed (missing fp16/int16 vector resource-load runtime intrinsics)
+
+**Root cause.** `feme::cpu::mangleResourceCallName`/`appendScalarMangling`
+(`ResourceCalls.cpp`) already generically mangles any scalar/vector
+element type (including `half` -> `f16` and any integer width ->
+`i<bitwidth>`), so `SPIRVToLLVMPatterns.cpp`'s resource-lowering path
+could already *emit* calls to `feme.cpu.resource.{load,store}.raw.{f16,
+i16,...}` -- only `feme/runtime/CPU/FeMeRuntimeCPU.c` was missing the
+actual C function definitions for these narrower element types, so the
+JIT failed to resolve them at link time
+(`"Symbols not found: [ feme.cpu.resource.load.raw.v4f16, ... ]"`).
+
+**Fix.** Added, in `feme/runtime/CPU/FeMeRuntimeCPU.c`:
+- `FemeRTv2f16`/`FemeRTv3f16`/`FemeRTv4f16` (using `_Float16` element
+  type) and `FemeRTv2i16`/`FemeRTv3i16`/`FemeRTv4i16` (using `int16_t`
+  element type) typedefs, plus their `Unaligned` counterparts, mirroring
+  the existing `FemeRTv2f32`/`FemeRTv3f32` typedefs exactly.
+- Scalar `femeCpuResourceLoadRawF16`/`StoreRawF16` and
+  `LoadRawI16`/`StoreRawI16` (asm-labeled `feme.cpu.resource.
+  {load,store}.raw.{f16,i16}`), plain mirrors of the existing `.f32`/
+  `.i32` scalar pairs -- a bounds-checked `__builtin_memcpy` with no
+  arithmetic on the half/int16 value at all.
+- Vector `femeCpuResourceLoadRawV{2,3,4}F16`/`V{2,3,4}I16` and their
+  `Store` counterparts, mirroring the existing `.v2f32`/`.v3f32`/`.v4f32`
+  vector functions' exact structure, including V3's already-established
+  `__builtin_memcpy`-with-explicit-byte-count workaround for Clang's
+  store-widening past the true (non-power-of-2) element count.
+
+Covered by 8 new `feme/unittests/Runtime/CPU/RuntimeCPUTest.cpp` tests
+(`RawLoadStoreRoundTripF16`/`V2F16`/`V3F16`/`V4F16`/`I16`/`V2I16`/
+`V3I16`/`V4I16`), using the file's established JIT-based
+`addLoadWrapper`/`addStoreWrapper` test-harness pattern, with
+half-precision test values represented as raw `uint16_t` IEEE-754
+binary16 bit patterns (matching the existing convention in
+`ExecutorTest.cpp`'s `R16G16B16A16_FLOAT` test).
+
+**A second, smaller bug found and fixed while writing these tests.**
+`RuntimeCPUTest.cpp`'s own `addStoreWrapper` helper adapts a wrapper's
+logical `ValueTy` to the runtime function's *actual*, Clang-ABI-coerced
+parameter type before calling it (needed because Clang's C ABI lowering
+coerces some vector-by-value parameters, e.g. `<3 x float>` -> `<4 x
+i32>`). The existing adaptation logic only handled one such shape --
+"widen the vector by one poison lane, then bitcast" -- which is correct
+for an odd-width vector padded up to a *wider* legal vector, but wrong
+for `<2 x half>` (4 bytes), which Clang instead coerces down to a bare
+scalar `i32` (already the same total width, no padding needed): the old
+code unconditionally tried the widen-then-bitcast path regardless, which
+tried to bitcast a widened 3-element (6-byte) shuffle result into a
+4-byte `i32`, tripping `CastInst::Create`'s `castIsValid` assertion.
+Fixed by comparing `DataLayout`-reported bit widths first and choosing a
+direct same-size bitcast (no widening) when the sizes already match,
+falling back to the original widen-then-bitcast path otherwise.
+
+**Verification.**
+- `FeMeRuntimeCPUTests` (261 tests, full suite): all pass, including the
+  8 new fp16/int16 round-trip tests.
+- `ninja check-feme`: **3037/3040 passed** (3 unsupported), 0 failed --
+  no regressions.
+- `check-hlsl-feme-vk` re-run (664 total): **295 passed, 82 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- up from 291 passed/86 failed.
+  `WaveActiveAllEqual.fp16.test`/`WaveReadLaneFirst.fp16.test`/
+  `WaveReadLaneFirst.int16.test` now pass, plus one additional
+  fp16/int16-dependent case; discovered/unsupported/XFAIL/XPASS counts
+  all unchanged, confirming no regressions elsewhere.
+
+**Feature/extension bits.** No change: this is a pure CPU-backend
+runtime-intrinsic addition, not a feature/extension gate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
+
+**VK-GL-CTS sweep.** Regenerated the (previously stale, tessellation-
+group-only) `dEQP-VK-cases.txt` caselist via `deqp-vk
+--deqp-runmode=txt-caselist`, then ran the closest real `deqp-vk` group
+to this fix's own code path,
+`dEQP-VK.spirv_assembly.instruction.compute.16bit_storage.*` (535
+cases): 100% `NotSupported` (`"At least following requested feature is
+not supported: 16BitStorage.storageBuffer16BitAccess"` /
+`uniformAndStorageBuffer16BitAccess` / `storagePushConstant16`, plus a
+`shaderFloat64`-gated sub-group) -- this device/ICD does not advertise
+`VK_KHR_16bit_storage`, so no real `deqp-vk` case reaches this fix's
+code path; a legitimate zero-payoff result, matching H124h/H125/H126's
+own precedent for a feature this device doesn't expose. Only reachable
+in practice via HLSL/`offload-test-suite`'s own `check-hlsl-feme-vk`
+suite.
+
+**H124d investigated and deprioritized, not fixed, this session.**
+`"unhandled opcode 209"` (`OpFwidth`, derivative family:
+`fwidth`/`ddx`/`ddy`) was reproduced and root-caused, but turned out to
+be a materially larger task than the roadmap's original "~1 hour, single
+missing dispatch case" estimate: upstream MLIR's own SPIR-V dialect
+(`mlir/include/mlir/Dialect/SPIRV/IR/*.td`) has **no `OpDPdx`/`OpDPdy`/
+`OpFwidth` op definitions at all**, despite the `SPIRV_C_
+DerivativeControl` capability enum already existing -- fixing this
+properly needs new upstream SPIR-V dialect op definitions (tablegen op
+definitions, verifiers, and the serializer/deserializer support tablegen
+generates from them), then a new SPIR-V-to-LLVM legalization pattern,
+and possibly new CPU runtime support: a multi-hour, multi-file,
+upstream-MLIR-touching task. Roadmap H124d updated in place with this
+finding rather than attempted this session.
