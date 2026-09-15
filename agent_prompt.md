@@ -49,34 +49,31 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H129** (~1-2 hours, real investigation, newly filed this session):
-   representable-layout matrix dynamic row/column/scalar-element
-   `AccessChain` gap, 418 cases — see this session's own H128 entry
-   above for the starting point (`rewriteBlockAccess` in
-   `SPIRVToLLVMPatterns.cpp`). Highest priority: same file/area as this
-   session's own fix, momentum carries over, and it's the next-biggest
-   `dEQP-VK.ubo.*` bucket by far.
-2. **H130** (~2-4 hours, needs fresh triage, newly filed this session):
-   the four smaller untriaged `dEQP-VK.ubo.*` buckets (76/34/30/16
-   cases) — re-run `FEME_VULKAN_LOG_CREATION_ERRORS=1` triage fresh
-   after H129 lands, since bucket counts may shift.
-3. **H124f** (~2-4+ hours, larger than previously scoped — checked this
-   session): `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/
-   `spirv.IsInf` on vector operands have **no legalization pattern at
-   all** in this tree (grepped both `feme/lib/Conversion/SPIRVToLLVM/`
-   and upstream `mlir/lib/Conversion/SPIRVToLLVM/` — nothing handles
-   these ops, scalar or vector). This is not a "vector variant of an
-   existing scalar pattern is missing" fix like H124a/H126/H127 turned
-   out to be; it needs new patterns written from scratch for all four
-   ops (scalar forms too, if those are even currently reached some
-   other way — not confirmed). Re-scope before starting: check whether
-   scalar `IsNan`/`IsInf` actually pass today via some other path, or
-   whether this is a bigger gap than the roadmap row currently implies.
-4. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
-   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, still its own
-   multi-session effort — skip unless someone wants the upstream-MLIR
-   piece specifically.
-5. Lower priority, deferred 9+ sessions now: `transform_feedback.fuzz.
-   random_geometry.all_instance_array.12`'s pre-existing heap
-   corruption — `valgrind`'s own trace already points at
+1. **H129** (~2-4 hours, re-scoped, now highest priority): 236 cases,
+   `"failed to legalize operation 'spirv.AccessChain'"` on a
+   fully-representable-layout (`ColMajor`, natural `MatrixStride`)
+   matrix member of a Block/Uniform struct, attempting a dynamic
+   row/column select. Start by reducing one of these 236 cases the
+   same way this session reduced `.38` (`deqp-vk
+   --deqp-log-decompiled-spirv=enable`, re-import via
+   `feme-translate --import-spirv` / `feme-opt
+   --feme-convert-spirv-to-llvm`) to see the exact `spirv.AccessChain`
+   shape hitting "explicitly marked illegal", and check whether an
+   existing whole-matrix-access pattern (H124b/H124i) is close enough
+   to extend, or a new pattern is needed.
+2. **H130** (~2-4 hours, needs fresh triage): the remaining ~165
+   non-H129 cases in the 401-failure set -- 76 dominance errors, ~44
+   "cannot normalize" (spread thin, no single common shape found yet),
+   16 struct-index-out-of-bounds (check first whether this folds into
+   H129 once that's fixed), rest one-offs.
+3. **H124f** (~2-4+ hours, still not started across many sessions):
+   `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
+   on vector operands have no legalization pattern at all (confirmed
+   in a prior session, grepped both this tree and upstream MLIR).
+4. **H124d** (large, deprioritized): needs new upstream MLIR SPIR-V
+   dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` -- skip unless someone
+   wants the upstream-MLIR piece specifically.
+5. Lower priority, deferred 10+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption -- `valgrind`'s own trace already points at
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
