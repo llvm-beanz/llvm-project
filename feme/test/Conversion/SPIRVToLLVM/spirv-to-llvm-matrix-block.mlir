@@ -10,7 +10,7 @@
 
 // CHECK-LABEL: llvm.func @read_column
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(array<4 x vector<4xf32>>)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<4 x vector<4xf32>>)>, 2, 0>
 // CHECK: %[[MEMBER:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: %[[COL:.*]] = llvm.getelementptr inbounds %[[MEMBER]][0, %{{.*}}]
 // CHECK: llvm.load %[[COL]] : !llvm.ptr<12> -> vector<4xf32>

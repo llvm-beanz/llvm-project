@@ -15,7 +15,7 @@
 // CHECK: %[[BINDING:.*]] = llvm.mlir.constant(2 : i32) : i32
 // CHECK: %[[NAME:.*]] = llvm.mlir.addressof @cb.str : !llvm.ptr
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"(%[[SET]], %[[BINDING]], %{{.*}}, %{{.*}}, %[[NAME]])
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(f32, i32)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (f32, i32)>, 2, 0>
 // CHECK: %[[FIELD:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK-SAME: -> !llvm.ptr<12>
 // CHECK: llvm.load %[[FIELD]] : !llvm.ptr<12> -> i32
@@ -43,7 +43,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // CHECK-LABEL: llvm.func @read_field
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(f32, i32)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (f32, i32)>, 2, 0>
 // CHECK: %[[FIELD:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: llvm.load %[[FIELD]] : !llvm.ptr<12> -> i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

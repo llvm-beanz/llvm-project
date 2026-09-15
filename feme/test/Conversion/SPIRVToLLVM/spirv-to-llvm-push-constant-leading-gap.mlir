@@ -17,7 +17,7 @@
 // `OffsetStructLeadingPadAccessChainPattern` (SPIRVToLLVMPatterns.cpp)
 // adds a matching `+1` to every `spirv.AccessChain` selecting a member of
 // this struct, so `%c0`/`%c1` below become GEP indices 1/2, not 0/1.
-// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<(array<12 x i8>, i32, i32)>
+// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (array<12 x i8>, i32, i32)>
 // CHECK-LABEL: llvm.func @read_first
 // CHECK: %[[BASE0:.*]] = llvm.mlir.addressof @pc : !llvm.ptr<13>
 // CHECK: %[[FIELD0:.*]] = llvm.getelementptr %[[BASE0]][%{{.*}}, 1]
@@ -49,7 +49,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // A single-member struct isolates the leading-gap shape from any
 // second-member concern: the whole struct is exactly the gap plus one
 // real member, with nothing after it.
-// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<(array<12 x i8>, i32)>
+// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (array<12 x i8>, i32)>
 // CHECK-LABEL: llvm.func @read_only
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @pc : !llvm.ptr<13>
 // CHECK: %[[FIELD:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, 1]

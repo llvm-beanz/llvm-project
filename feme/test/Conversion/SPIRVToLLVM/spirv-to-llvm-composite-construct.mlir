@@ -57,9 +57,9 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // converted type exactly and no `llvm.bitcast` is emitted.
 
 // CHECK-LABEL: llvm.func @construct_struct
-// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(i32, vector<4xf32>)>
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<packed (i32, array<12 x i8>, vector<4xf32>)>
 // CHECK: %[[V0:.*]] = llvm.insertvalue %arg0, %[[POISON]][0]
-// CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][1]
+// CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][2]
 // CHECK: llvm.return %[[V1]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @construct_struct(%x : si32, %v : vector<4xf32>) -> !spirv.struct<Naturally, (si32 [0], vector<4xf32> [16])> "None" {
@@ -88,7 +88,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // inserted into the outer struct's own field.
 
 // CHECK-LABEL: llvm.func @construct_tight_vector_struct
-// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(struct<"feme.tight_vector", (array<3 x i32>)>, i32)>
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, i32)>
 // CHECK: %[[ARR:.*]] = llvm.mlir.poison : !llvm.array<3 x i32>
 // CHECK: %[[E0:.*]] = llvm.extractelement %arg0[%{{.*}} : i32] : vector<3xi32>
 // CHECK: %[[A0:.*]] = llvm.insertvalue %[[E0]], %[[ARR]][0]
@@ -152,7 +152,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // constituent inserted as-is.
 
 // CHECK-LABEL: llvm.func @construct_array_of_struct
-// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.array<3 x struct<(vector<4xf32>)>>
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.array<3 x struct<packed (vector<4xf32>)>>
 // CHECK: %[[V0:.*]] = llvm.insertvalue %arg0, %[[POISON]][0]
 // CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][1]
 // CHECK: %[[V2:.*]] = llvm.insertvalue %arg2, %[[V1]][2]

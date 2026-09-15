@@ -32,7 +32,7 @@
 
 // CHECK-LABEL: llvm.func @array_and_member_of_identified_struct
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(struct<(i32, array<12 x i8>)>, struct<(i32, array<12 x i8>)>, array<2 x struct<(i32, array<12 x i8>)>>)>
+// CHECK-SAME: !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<packed (i32, array<12 x i8>)>, struct<packed (i32, array<12 x i8>)>, array<2 x struct<packed (i32, array<12 x i8>)>>)>
 
 // The array-element access (`xs[idx].a1`) needs no extra "unwrap" index:
 // CHECK: %[[PTR0:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]]

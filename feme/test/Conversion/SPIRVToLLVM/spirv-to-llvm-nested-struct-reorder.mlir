@@ -24,7 +24,7 @@
 //
 // CHECK-LABEL: llvm.func @read_col
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(array<2 x struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<3 x f32>)>>, array<8 x i8>, i32, i32, array<8 x i8>, struct<(array<2 x struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<2 x f32>)>>, array<16 x i8>, struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<4 x i32>)>, i32, array<12 x i8>, array<4 x struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<2 x f32>)>>)>)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<2 x struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<3 x f32>)>>, array<8 x i8>, i32, i32, array<8 x i8>, struct<packed (array<2 x struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<2 x f32>)>>, array<16 x i8>, struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<4 x i32>)>, i32, array<12 x i8>, array<4 x struct<"feme.tight_vector{{[a-zA-Z0-9_.]*}}", (array<2 x f32>)>>)>)>, 2, 0>
 // CHECK: %[[OUTER_IDX:.*]] = llvm.mlir.constant(5 : i32) : i32
 // CHECK-NEXT: %[[FIELD:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %[[OUTER_IDX]])
 // CHECK: llvm.getelementptr inbounds %[[FIELD]][0, 5, %{{.*}}]

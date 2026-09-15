@@ -318,7 +318,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT],
 // same shape.
 //
 // CHECK-LABEL: llvm.mlir.global external @multi_member_with_array_of_vectors
-// CHECK-SAME: !llvm.struct<(struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x i32>)>, struct<"feme.tight_vector{{[.0-9]*}}", (array<4 x f32>)>, array<2 x struct<"feme.tight_vector{{[.0-9]*}}", (array<2 x i32>)>>)>
+// CHECK-SAME: !llvm.struct<packed (struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x i32>)>, struct<"feme.tight_vector{{[.0-9]*}}", (array<4 x f32>)>, array<2 x struct<"feme.tight_vector{{[.0-9]*}}", (array<2 x i32>)>>)>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @multi_member_with_array_of_vectors {location = 0 : i32, xfb_buffer = 0 : i32, xfb_stride = 92 : i32}
       : !spirv.ptr<!spirv.struct<(vector<3xsi32> [0], vector<4xf32> [12, RelaxedPrecision], !spirv.array<2 x vector<2xi32>> [28, RelaxedPrecision]), Block>, Output>
@@ -339,7 +339,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // `!llvm.struct<"feme.tight_vector"[.N], ...>` marker.
 //
 // CHECK-LABEL: llvm.mlir.global external @matrix_member_at_unaligned_offset
-// CHECK-SAME: !llvm.struct<(array<44 x i8>, array<3 x struct<"feme.tight_vector{{[.0-9]*}}", (array<4 x f32>)>>)>
+// CHECK-SAME: !llvm.struct<packed (array<44 x i8>, array<3 x struct<"feme.tight_vector{{[.0-9]*}}", (array<4 x f32>)>>)>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @matrix_member_at_unaligned_offset {location = 4 : i32}
       : !spirv.ptr<!spirv.struct<(!spirv.matrix<3 x vector<4xf32>> [44]), Block>, Output>
@@ -364,7 +364,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // column type, not a tight `array<4xf32>` one.
 //
 // CHECK-LABEL: llvm.mlir.global external @vector_needs_tight_matrix_does_not
-// CHECK-SAME: !llvm.struct<(vector<3xi32>, array<3 x vector<4xf32>>)>
+// CHECK-SAME: !llvm.struct<packed (vector<3xi32>, array<3 x vector<4xf32>>)>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @vector_needs_tight_matrix_does_not {location = 0 : i32, xfb_buffer = 0 : i32, xfb_stride = 64 : i32}
       : !spirv.ptr<!spirv.struct<(vector<3xsi32> [0], !spirv.matrix<3 x vector<4xf32>> [16, RelaxedPrecision]), Block>, Output>

@@ -23,7 +23,7 @@
 // reach on its own, so this becomes `!llvm.struct<(i32, array<12 x i8>,
 // f32)>` -- declared member 0 (f32) is real physical field 2, declared
 // member 1 (i32) is real physical field 0.
-// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<(i32, array<12 x i8>, f32)>
+// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (i32, array<12 x i8>, f32)>
 // CHECK-LABEL: llvm.func @read_f32
 // CHECK: %[[BASE0:.*]] = llvm.mlir.addressof @pc : !llvm.ptr<13>
 // CHECK: %[[FIELD0:.*]] = llvm.getelementptr %[[BASE0]][%{{.*}}, 2]
@@ -60,13 +60,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // to a `spirv.VulkanBuffer` handle rather than an ordinary LLVM pointer.
 // CHECK-LABEL: llvm.func @read_f32
 // CHECK: %[[HANDLE0:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(i32, array<12 x i8>, f32)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (i32, array<12 x i8>, f32)>, 2, 0>
 // CHECK: %[[IDX0:.*]] = llvm.mlir.constant(2 : i32) : i32
 // CHECK-NEXT: %[[FIELD0:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE0]], %[[IDX0]])
 // CHECK: llvm.load %[[FIELD0]] : !llvm.ptr<12> -> f32
 // CHECK-LABEL: llvm.func @read_i32
 // CHECK: %[[HANDLE1:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(i32, array<12 x i8>, f32)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (i32, array<12 x i8>, f32)>, 2, 0>
 // CHECK: %[[IDX1:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK-NEXT: %[[FIELD1:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE1]], %[[IDX1]])
 // CHECK: llvm.load %[[FIELD1]] : !llvm.ptr<12> -> i32

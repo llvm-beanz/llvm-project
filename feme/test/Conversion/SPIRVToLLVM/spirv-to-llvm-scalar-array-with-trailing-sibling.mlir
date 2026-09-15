@@ -49,7 +49,7 @@
 // immediately following as S's own second member:
 // CHECK-LABEL: llvm.func @scalar_array_with_trailing_sibling
 // CHECK: llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(struct<packed (array<16 x i8>, i32)>, i32)>
+// CHECK-SAME: !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<packed (array<16 x i8>, i32)>, i32)>
 
 // x[0]: `getpointer`'s own index selects S's first member (`x`, index 0);
 // the residual GEP navigates `x`'s own type in isolation -- a plain,

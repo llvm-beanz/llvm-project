@@ -342,7 +342,7 @@ TEST(SPIRVToLLVMTest, OutOfOrderOffsetInterfaceBlockLegalizes) {
   // The physically-first (lowest-offset) member is the `vector<3xsi32>`
   // declared second, so it must be laid out as the LLVM struct's first
   // field, ahead of the `mat4x2` declared first.
-  EXPECT_NE(Result.find("!llvm.struct<(struct<\"feme.tight_vector\""),
+  EXPECT_NE(Result.find("!llvm.struct<packed (struct<\"feme.tight_vector\""),
             std::string::npos)
       << Result;
 }
@@ -441,7 +441,7 @@ TEST(SPIRVToLLVMTest, InteriorOffsetGapInterfaceBlockLegalizes) {
   // before the `f32` declared first, which its own 4-byte alignment can
   // never reach unaided, so an explicit pad must be synthesized between
   // them.
-  EXPECT_NE(Result.find("!llvm.struct<(i32, array<12 x i8>, f32)>"),
+  EXPECT_NE(Result.find("!llvm.struct<packed (i32, array<12 x i8>, f32)>"),
             std::string::npos)
       << Result;
 }

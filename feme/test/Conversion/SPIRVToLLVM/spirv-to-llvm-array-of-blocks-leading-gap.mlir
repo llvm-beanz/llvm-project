@@ -15,7 +15,7 @@
 // (LLVM struct field 0) rather than the real member (field 1), computing the
 // wrong byte address for every array element after the first and eventually
 // writing out of bounds of the whole variable's own allocated storage.
-// CHECK: llvm.mlir.global external @block() {{.*}} : !llvm.array<3 x struct<(array<32 x i8>, i32)>>
+// CHECK: llvm.mlir.global external @block() {{.*}} : !llvm.array<3 x struct<packed (array<32 x i8>, i32)>>
 // CHECK-LABEL: llvm.func @write_element
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @block : !llvm.ptr<8>
 // CHECK: %[[FIELD:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, %{{.*}}, 1]

@@ -8,7 +8,7 @@
 // is needed here beyond routing the storage class to that address space
 // (see `llvm/lib/Target/SPIRV/SPIRVPushConstantAccess.cpp`).
 
-// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<(f32, i32)>
+// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (f32, i32)>
 // CHECK-LABEL: llvm.func @read_pc
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @pc : !llvm.ptr<13>
 // CHECK: %[[FIELD:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, 0]
@@ -35,7 +35,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // `convertOffsetStructTypeIgnoringDecorations`'s comment in
 // SPIRVToLLVMPatterns.cpp for why), so this is the regression test for the
 // fix: identical output to the case above, decoration aside.
-// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<(f32, i32)>
+// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (f32, i32)>
 // CHECK-LABEL: llvm.func @read_pc
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @pc : !llvm.ptr<13>
 // CHECK: %[[FIELD:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, 0]

@@ -37,7 +37,7 @@
 
 // CHECK-LABEL: llvm.func @read_scalar_member
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(struct<"feme.tight_vector", (array<4 x i32>)>, i32, array<12 x i8>, array<5 x array<4 x struct<"feme.tight_vector.{{[0-9]+}}", (array<3 x f32>)>>>, struct<"feme.tight_vector.{{[0-9]+}}", (array<2 x i32>)>)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector", (array<4 x i32>)>, i32, array<12 x i8>, array<5 x array<4 x struct<"feme.tight_vector.{{[0-9]+}}", (array<3 x f32>)>>>, struct<"feme.tight_vector.{{[0-9]+}}", (array<2 x i32>)>)>, 2, 0>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: llvm.load %[[PTR]] : !llvm.ptr<12> -> i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

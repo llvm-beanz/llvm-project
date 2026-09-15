@@ -17,7 +17,7 @@
 
 // CHECK-LABEL: llvm.func @read_column
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(array<4 x array<4 x f32>>)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<4 x array<4 x f32>>)>, 2, 0>
 // CHECK: %[[MEMBER:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: %[[ROW0:.*]] = llvm.getelementptr inbounds %[[MEMBER]][0, 0, %{{.*}}]
 // CHECK: llvm.load %[[ROW0]] : !llvm.ptr<12> -> f32
@@ -54,7 +54,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // CHECK-LABEL: llvm.func @read_column
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(array<4 x struct<packed (array<4 x f32>, array<32 x i8>)>>)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<4 x struct<packed (array<4 x f32>, array<32 x i8>)>>)>, 2, 0>
 // CHECK: %[[MEMBER:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: %[[COL:.*]] = llvm.getelementptr inbounds %[[MEMBER]][%{{.*}}]
 // CHECK-SAME: !llvm.array<48 x i8>
