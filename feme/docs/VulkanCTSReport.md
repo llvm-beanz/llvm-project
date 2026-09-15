@@ -45009,3 +45009,52 @@ CHECK-annotated sub-tests (`cross_vector`, `reflect_vector`,
 
 H124j is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new capability.
+
+## Session: H124l fixed (`GroupNonUniformQuadSwap` legalization gap)
+
+**Root cause.** `spirv.GroupNonUniformQuadSwap` had no SPIRVToLLVM
+conversion pattern at all, distinct from H124a's own already-fixed
+"vector-typed `GroupNonUniform*`" bucket, which evidently did not cover
+this specific op.
+
+**Fix.** Added `QuadSwapConversionPattern` to
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, reusing the
+same "compute a target invocation id, then `llvm.spv.wave.readlane`"
+shape `ShuffleXorConversionPattern` already established for
+`GroupNonUniformShuffleXor`. A quad swap reduces to exactly that
+shape: the SPIR-V spec's own quad index is `LocalId % 4`, and each
+`Direction` value's swap pairs differ in a fixed subset of the low two
+bits, so `Direction`'s own enum value (`Horizontal`=0, `Vertical`=1,
+`Diagonal`=2) plus one is precisely the XOR mask needed (1, 2, 3).
+Since that mask never sets any bit above bit 1, XOR'ing it into the
+*full* subgroup-local id is already safe -- it can only move an
+invocation to another lane within the same quad, never across quad
+boundaries -- so no extra masking is needed beyond `ShuffleXor`'s own
+full-id XOR approach, just with a direction-derived compile-time
+constant instead of a runtime mask operand.
+
+**New lit test coverage.** Added three sub-tests to the existing
+`spirv-to-llvm-group-non-uniform-elect-all-equal-shuffle.mlir`
+(`quad_swap_horizontal`, `quad_swap_vertical_vector`,
+`quad_swap_diagonal`), covering all three `Direction` values and
+scalar/vector/integer operand shapes.
+
+**Verification.**
+- `ninja check-feme`: **3051/3054 passed** (3 unsupported), 0 failed,
+  0 regressions.
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): all 6 originally-named
+  `WaveOps/QuadReadAcross{X,Y,Diagonal}.32.test`/`.convergence.test`
+  cases pass. Full suite re-run: **49 -> 43 failed** (of 664), exactly
+  the 6 target cases moved from fail to pass, no regressions.
+- VK-GL-CTS: `dEQP-VK.subgroups.quad.compute.subgroupquadswap*` (360
+  cases) is 100% `NotSupported` ("Device does not support subgroup
+  quad operations in this shader stage") -- this ICD does not
+  currently advertise `VK_SUBGROUP_FEATURE_QUAD_BIT` for the compute
+  stage, a legitimate zero-payoff result matching several prior rows'
+  own precedent; only reachable in practice via HLSL/
+  `offload-test-suite`'s own direct SPIR-V-module path.
+
+H124l is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new Vulkan-visible
+capability.
