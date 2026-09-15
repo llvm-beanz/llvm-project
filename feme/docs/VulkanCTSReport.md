@@ -44690,3 +44690,98 @@ one vector case per op (8 cases total), verified against real
 
 H124f is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new capability.
+
+## Session: H135 -- packed-struct trailing/interior-gap layout bug fixed (two follow-up corrections)
+
+**Context.** This session began investigating a reported
+`check-hlsl-feme-vk` run-to-run flakiness. That turned out to be a false
+alarm: one particular invocation was missing `VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES`, not a real nondeterminism -- confirmed stable across
+repeated full-suite re-runs once both are set correctly. The from-scratch
+re-run this investigation required, however, surfaced a genuinely new bug.
+
+**Root cause.** `layOutStructIfOffsetsMatch` computes exact byte placement
+for offset-decorated SPIR-V struct members (inserting explicit
+`[N x i8]` gap members where needed) but built the final
+`LLVMStructType` with `isPacked=false`. A non-packed LLVM struct adds its
+own *implicit trailing* padding to round the total size up to its largest
+member's ABI alignment (e.g. `{vector<2xf32>, f32}`, true size 12, silently
+becomes 16 due to the vector's 8-byte alignment). Since `!llvm.array<N x T>`
+has no separate stride field (always exactly `sizeof(T)`), this corrupted
+every array of such a struct -- any `RWStructuredBuffer<B>`-shaped SSBO/UBO
+with this size/alignment mismatch.
+
+**Fix, step 1 (core).** Build the offset-decorated branch's result
+`isPacked=true`, and change the gap-insertion condition from
+`NaturalCursor < DeclaredOffset` to `Cursor < DeclaredOffset` so a purely
+alignment-driven ("natural") gap -- one a non-packed struct used to supply
+implicitly -- is now always materialized explicitly too, since packing
+removes that implicit padding entirely. `NaturalCursor` is still used,
+unchanged, for the separate "is this pad even permitted without
+`AllowInteriorPad`" gating check.
+
+**Fix, step 2 (regression #1: `CompositeConstruct`).** Step 1 broke
+`CompositeConstructOp`'s `convertStruct` pattern, which assumed the
+SPIR-V struct's declared member count always equals the LLVM struct's
+physical field count -- true before step 1 (gaps were rare, handled by
+other retry tiers with known index-remap machinery) but false as soon as
+"natural" gaps are also materialized. Fixed by mapping each declared
+member index to its physical index via the existing
+`getStructMemberPhysicalIndex` helper (previously only used by
+access-chain patterns).
+
+**Fix, step 3 (regression #2: nested nested-struct alignment collapse).**
+A full `dEQP-VK.ssbo.*` sweep after steps 1-2 found 36 newly-failing
+cases, all `dEQP-VK.ssbo.layout.multi_nested_struct.*`/
+`unsized_nested_struct_array.*`. Root cause:
+`mlir::DataLayout::getTypeABIAlignment` returns 1 for any packed LLVM
+struct (LLVM's own correct rule) -- but once every offset-decorated struct
+is unconditionally packed (step 1), a *nested* struct member's own real
+natural alignment (e.g. 16, from its own vector members) collapses to 1
+from its *outer* struct's own point of view, making a genuinely natural
+gap before/after that nested member look like a false "interior" gap
+requiring `AllowInteriorPad` (never set on this function's own first,
+ordinary attempt) -- forcing the whole outer struct through several
+failing retry tiers and eventually an unrelated tight-vector-substitution
+tier that does not correctly handle a matrix column in this doubly-nested
+shape. Fixed with a new `getNaturalAlignmentIgnoringPacking` helper
+(recursively takes the max alignment of an `LLVMStructType`'s/
+`LLVMArrayType`'s own members/element, ignoring the type's own `isPacked`
+bit) used for this one gap-detection computation.
+
+**New lit test.**
+`spirv-to-llvm-struct-trailing-gap-packed.mlir`: a standalone Uniform
+struct exercising the core trailing-gap fix (an explicit
+`array<8 x i8>` gap between two vector members), and the same struct
+re-embedded as a StorageBuffer struct's own member (exercising step 3's
+own natural-alignment-collapse fix), both verified against real
+`feme-opt` output.
+
+**Verification.**
+- `ninja check-feme`: **3050/3053 passed** (3 unsupported), 0 failed --
+  net +1 test vs. the H134 baseline (3049/3052), from the new lit test;
+  0 regressions. 19 pre-existing lit tests needed `packed` added to their
+  own `!llvm.struct<(...)>` CHECK lines (one composite-construct test also
+  needed a newly-materialized gap member and an `insertvalue` index
+  update), and two C++ unit tests needed `packed` added to their
+  `EXPECT_NE` string literals -- all pure representation-format updates,
+  no test's own pass/fail outcome changed.
+- VK-GL-CTS: `dEQP-VK.ssbo.*` (12,225 cases): **12,162 passed / 0 failed /
+  63 not supported**. The 36-case regression found after steps 1-2 (all
+  `multi_nested_struct`/`unsized_nested_struct_array` sub-variants) is
+  fully resolved by step 3 -- both groups now individually re-verified at
+  100% passing (48/48 and 36/36 respectively). No other cases regressed.
+- `check-hlsl-feme-vk` (664 tests): 11 failed (down from the pre-session
+  baseline), with `Feature/StructuredBuffer/layout.test` (this bug's own
+  originally reported symptom) and `UseCase/particle-life.test` both now
+  passing outright, and zero other differences either direction. The
+  remaining 11 failures (`HLSLLib/{degrees,log,log10,log2,radians,rsqrt,
+  sinh,sqrt}.32.test`, `InlineRT/{aabb-procedural,geometry-transform,
+  tlas-array}.test`) are stable and reproducible both with and without
+  this session's own fix in place (confirmed via `git stash`), and are
+  unrelated categories (transcendental-function precision, ray tracing) to
+  this session's struct-layout change -- left for future triage, not
+  investigated further this session.
+
+H135 is struck through on the roadmap. No feature/extension-inventory
+change: a pure struct-layout bugfix, not a new capability.
