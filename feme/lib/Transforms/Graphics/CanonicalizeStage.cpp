@@ -1715,19 +1715,116 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
 /// that first hit `ValidateStagePass`'s "unresolved stage-IO
 /// global-variable access" diagnostic in that real CTS case.
 ///
-/// Returns \p GV, the index into \p GV's own per-member `ElementIDs` slice
-/// (in `resolveStageIOAccess`'s own `ElementIDs` map) that the constant
-/// prefix selects -- 0 for a plain, non-block stage-IO global, which only
-/// ever has one -- and the non-constant row index itself, or
-/// `std::nullopt` if \p Ptr is not this exact shape. Deliberately excludes
-/// any global `getDynamicVertexIndexedAccess` already recognizes
-/// (`isDynamicIndexedArrayGlobal`), so a genuinely per-vertex-/
-/// per-primitive-arrayed global's own outer dimension is never
-/// double-recognized as a member's own row dimension instead. A
-/// component-level index after the row (e.g. a vector-typed row) is not
-/// modeled: no real CTS shape needs it yet, and it is left for
-/// `ValidateStagePass` to diagnose like any other unsupported shape.
-std::optional<std::tuple<GlobalVariable *, unsigned, Value *>>
+/// Deliberately excludes any global `getDynamicVertexIndexedAccess`
+/// already recognizes (`isDynamicIndexedArrayGlobal`), so a genuinely
+/// per-vertex-/per-primitive-arrayed global's own outer dimension is
+/// never double-recognized as a member's own row dimension instead.
+///
+/// (Roadmap H115/H117/H118) A genuine multi-member nested struct (or
+/// array-of-struct) reached through the array's own row dimension is
+/// modeled too, via `collectDynamicRowTerms` below: one further constant
+/// index selecting a member within it (e.g. `blockSa[i].x`), or -- if
+/// that member is itself array-typed -- one further *non-constant* index
+/// into it too (`blockSa[i].z[j]`, two independently dynamic indices
+/// combining into one flattened `Row`). Returns `std::nullopt` if \p Ptr
+/// is not one of these shapes.
+/// (Roadmap H115/H117/H118) Recursively walks the GEP indices from \p It
+/// to \p End against \p Ty, mirroring `resolveNestedStageIOField`'s own
+/// compile-time-`Residual`-based recursion but over a GEP's own index
+/// sequence instead, to support a genuine multi-member nested struct (or
+/// array-of-struct) member reached through one or more genuinely
+/// non-constant (dynamic) indices -- e.g. `blockSa[gl_InvocationID].z[j]`,
+/// the real shape a `dEQP-VK.tessellation.user_defined_io.per_patch_block`
+/// tessellation-control shader's own per-invocation array-of-struct member
+/// write takes: `gl_InvocationID` selects which `blockSa` instance, and a
+/// second, independently loop-carried `j` selects a row within that
+/// instance's own `z` member, which is itself a two-element array. Every
+/// non-constant index found is appended to \p Terms as an (index,
+/// multiplier) pair, where the multiplier is that index's own leaf-
+/// specific `RowCount` -- the same quantity `resolveNestedStageIOField`
+/// computes to scale an *enclosing* array-of-struct level's own instance
+/// index -- so that summing `Terms[i].first * Terms[i].second` (order
+/// irrelevant, addition being commutative) over every term yields the
+/// final flattened `Row`, without this function itself needing to build
+/// any `mul`/`add` IR -- `combineDynamicRowTerms` below does that once, at
+/// the one call site that actually needs a materialized `Value*`. \p
+/// IDStart accumulates this leaf's own starting `ElementID` offset,
+/// exactly like `resolveNestedStageIOField`'s identically-named field.
+/// Returns this leaf's own `RowCount` (unused by the top-level caller, but
+/// needed by an enclosing recursive call the same way
+/// `resolveNestedStageIOField` needs it), or `std::nullopt` if the
+/// remaining indices are not a supported shape (a non-constant index into
+/// anything but an array, or a constant index into anything but a struct
+/// or array).
+std::optional<uint32_t> collectDynamicRowTerms(
+    Type *Ty, User::op_iterator &It, User::op_iterator End,
+    uint32_t &IDStart, SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms) {
+  if (It == End)
+    return getStageIORowShape(Ty).RowCount;
+  Value *Idx = It->get();
+  if (auto *CI = dyn_cast<ConstantInt>(Idx)) {
+    uint64_t I = CI->getZExtValue();
+    ++It;
+    if (auto *ST = dyn_cast<StructType>(Ty)) {
+      if (I >= ST->getNumElements())
+        return std::nullopt;
+      for (unsigned J = 0; J != I; ++J)
+        IDStart += getStageIOLeafElementCount(ST->getElementType(J));
+      return collectDynamicRowTerms(ST->getElementType(I), It, End, IDStart,
+                                    Terms);
+    }
+    if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
+      return collectDynamicRowTerms(ArrTy->getElementType(), It, End, IDStart,
+                                    Terms);
+    return std::nullopt;
+  }
+  // A non-constant index must directly select a row within an array.
+  auto *ArrTy = dyn_cast<ArrayType>(Ty);
+  if (!ArrTy)
+    return std::nullopt;
+  ++It;
+  std::optional<uint32_t> InnerRowCount = collectDynamicRowTerms(
+      ArrTy->getElementType(), It, End, IDStart, Terms);
+  if (!InnerRowCount)
+    return std::nullopt;
+  Terms.emplace_back(Idx, *InnerRowCount);
+  return static_cast<uint32_t>(ArrTy->getNumElements()) * *InnerRowCount;
+}
+
+/// Materializes `collectDynamicRowTerms`'s own flat (index, multiplier)
+/// list into a single `Value*` via \p B: `Terms[0].first *
+/// Terms[0].second + Terms[1].first * Terms[1].second + ...`, skipping
+/// the multiply entirely for a unit multiplier (the common single-term
+/// case, e.g. plain `gl_ClipDistance[i]`, matching the plain `RowIndex =
+/// *IdxIt` this function's own predecessor used before roadmap
+/// H115/H117/H118 taught it to combine more than one dynamic index).
+Value *combineDynamicRowTerms(
+    IRBuilderBase &B, ArrayRef<std::pair<Value *, uint64_t>> Terms) {
+  Value *Row = nullptr;
+  for (auto &[Idx, Multiplier] : Terms) {
+    Value *Term = B.CreateZExtOrTrunc(Idx, B.getInt32Ty());
+    if (Multiplier != 1)
+      Term = B.CreateMul(Term, B.getInt32(Multiplier));
+    Row = Row ? B.CreateAdd(Row, Term) : Term;
+  }
+  return Row;
+}
+
+struct DynamicRowIndexedAccess {
+  GlobalVariable *GV;
+  /// The index into \p GV's own per-member `ElementIDs` slice (in
+  /// `resolveStageIOAccess`'s own `ElementIDs` map) the constant/struct
+  /// prefix and any genuine multi-member nested struct member selects --
+  /// `0` for a plain, non-block stage-IO global, which only ever has one.
+  unsigned Member;
+  /// One (index, multiplier) pair per dynamic index found, in whatever
+  /// order `collectDynamicRowTerms` happened to append them -- see its
+  /// own comment for why summing `Terms[i].first * Terms[i].second` is
+  /// order-independent and always yields the correct flattened `Row`.
+  SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
+};
+
+std::optional<DynamicRowIndexedAccess>
 getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL) {
   auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
   if (!GEP)
@@ -1742,35 +1839,15 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL) {
   auto *OuterIdx = dyn_cast<ConstantInt>(*IdxIt);
   if (!OuterIdx || !OuterIdx->isZero())
     return std::nullopt;
+  ++IdxIt;
 
-  Type *CurTy = GV->getValueType();
-  unsigned Member = 0;
-  Value *RowIndex = nullptr;
-  for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
-    if (auto *CI = dyn_cast<ConstantInt>(*IdxIt)) {
-      uint64_t Idx = CI->getZExtValue();
-      if (auto *ST = dyn_cast<StructType>(CurTy)) {
-        Member = Idx;
-        CurTy = ST->getElementType(Idx);
-        continue;
-      }
-      if (auto *ArrTy = dyn_cast<ArrayType>(CurTy)) {
-        CurTy = ArrTy->getElementType();
-        continue;
-      }
-      return std::nullopt;
-    }
-    // The one non-constant index: must directly select a row within an
-    // array, and must be the final index -- a component-level index
-    // after it is not modeled (see this function's own comment).
-    if (RowIndex || !isa<ArrayType>(CurTy) ||
-        std::next(IdxIt) != GEP->idx_end())
-      return std::nullopt;
-    RowIndex = *IdxIt;
-  }
-  if (!RowIndex)
+  uint32_t IDStart = 0;
+  SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
+  std::optional<uint32_t> RowCount = collectDynamicRowTerms(
+      GV->getValueType(), IdxIt, GEP->idx_end(), IDStart, Terms);
+  if (!RowCount || Terms.empty())
     return std::nullopt;
-  return std::make_tuple(GV, Member, RowIndex);
+  return DynamicRowIndexedAccess{GV, IDStart, std::move(Terms)};
 }
 
 /// (Roadmap L47) A task/mesh entry's own bounded payload
@@ -1874,7 +1951,7 @@ GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL) {
   if (auto Dyn = getDynamicVertexIndexedAccess(Ptr, DL))
     return Dyn->GV;
   if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL))
-    return std::get<0>(*Dyn);
+    return Dyn->GV;
   return nullptr;
 }
 
@@ -2991,7 +3068,7 @@ uint64_t remapByteOffsetPastLeadingPad(GlobalVariable *GV, ArrayType *EffectiveT
 /// the result's `IsOutput`, so a caller can tell a genuinely-input load
 /// from an `Output`-direction read-back.
 std::optional<StageIOAccess> resolveStageIOAccess(
-    Value *Ptr, Type *ValueTy, const DataLayout &DL,
+    IRBuilderBase &B, Value *Ptr, Type *ValueTy, const DataLayout &DL,
     const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
     const DenseSet<GlobalVariable *> &OutputGlobals, ShaderStage Stage) {
   if (std::optional<DynamicVertexIndexedAccess> Dyn =
@@ -3027,20 +3104,23 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   if (!BaseAndOffset) {
     // (Roadmap H7w) Neither of the above matched -- try a non-constant
     // index into a stage-IO element's own row dimension instead (e.g.
-    // `gl_ClipDistance[i]` with a loop-carried `i`). Unlike the two paths
-    // above, this one resolves directly to a single scalar element (a
-    // plain float/int array member, never itself a vector or further
-    // nested aggregate in any real shape seen so far), so it builds its
-    // own `StageIOAccess` rather than routing through
-    // `resolveOffsetWithinElement`'s byte-offset-based recursion, which
-    // has no way to represent a non-constant `Row` mid-recursion.
+    // `gl_ClipDistance[i]` with a loop-carried `i`, or, roadmap
+    // H115/H117/H118, a genuine multi-member nested struct member reached
+    // through one or more such indices, e.g. `blockSa[i].z[j]`). Unlike
+    // the two paths above, this one resolves directly to a single leaf
+    // element, so it builds its own `StageIOAccess` rather than routing
+    // through `resolveOffsetWithinElement`'s byte-offset-based recursion,
+    // which has no way to represent a non-constant `Row` mid-recursion.
     if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL)) {
-      auto [GV, Member, RowIndex] = *Dyn;
-      auto It = ElementIDs.find(GV);
+      auto It = ElementIDs.find(Dyn->GV);
       if (It == ElementIDs.end())
         return std::nullopt;
-      return StageIOAccess{ArrayRef(It->second).slice(Member, 1), RowIndex,
-                           nullptr, nullptr, OutputGlobals.contains(GV)};
+      if (Dyn->Member >= It->second.size())
+        return std::nullopt;
+      Value *RowIndex = combineDynamicRowTerms(B, Dyn->Terms);
+      return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1),
+                           RowIndex, nullptr, nullptr,
+                           OutputGlobals.contains(Dyn->GV)};
     }
     return std::nullopt;
   }
@@ -3840,7 +3920,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
       Value *Ptr = LI->getPointerOperand();
       std::optional<StageIOAccess> Access =
-          resolveStageIOAccess(Ptr, LI->getType(), DL, ElementIDs,
+          resolveStageIOAccess(B, Ptr, LI->getType(), DL, ElementIDs,
                                OutputGlobalSet, Stage);
       if (!Access) {
         // (Roadmap L30) A mesh entry's bounded payload read -- the
@@ -3914,7 +3994,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Value *Ptr = SI->getPointerOperand();
       Value *Val = SI->getValueOperand();
       std::optional<StageIOAccess> Access = resolveStageIOAccess(
-          Ptr, Val->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
+          B, Ptr, Val->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
       if (!Access) {
         // (Roadmap H6i) A task entry's bounded payload write -- an
         // ordinary store through a (possibly GEP'd) address-space-14
@@ -3988,6 +4068,34 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                              Component, Vertex, &ShadowValues);
       SI->eraseFromParent();
       EraseIfNowDead(Ptr);
+      Changed = true;
+    }
+  }
+
+  // (Roadmap H115/H117/H118) A `GetElementPtrInst` addressing a stage-IO
+  // global that never had a load/store consumer at all -- e.g. a real
+  // compiled tessellation-control shader's own dead per-invocation address
+  // computation into a `Block` member on some unreachable-in-practice (but
+  // not dead-code-eliminated by the SPIR-V producer) control-flow path --
+  // is never visited by the loop above (which only ever calls
+  // `EraseIfNowDead` on a load/store's own pointer operand immediately
+  // after successfully rewriting that exact load/store), so it survives
+  // as a genuinely unused instruction that still references the same
+  // never-actually-defined SPIR-V-derived global at JIT-link time,
+  // surfacing as a raw `"Symbols not found: [ spirv_varN ]"` link failure
+  // with no compile-time diagnostic at all -- exactly the shape a real
+  // `dEQP-VK.tessellation.user_defined_io.per_patch_block` (and sibling
+  // `per_patch_block_array`/`per_vertex_block`) case's own array-of-struct
+  // `Block` member compiled into. Sweep once more for any such GEP left
+  // with no uses at all once every load/store above has been rewritten.
+  for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
+    auto *GEP = dyn_cast<GetElementPtrInst>(&I);
+    if (!GEP || !GEP->use_empty())
+      continue;
+    unsigned AddrSpace = 0;
+    if (isSPIRVStageIOGlobal(
+            dyn_cast<GlobalVariable>(GEP->getPointerOperand()), AddrSpace)) {
+      GEP->eraseFromParent();
       Changed = true;
     }
   }
