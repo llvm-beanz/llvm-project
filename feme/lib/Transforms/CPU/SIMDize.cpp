@@ -328,6 +328,31 @@ bool isVectorOperandReduceKind(WaveCallKind Kind) {
   }
 }
 
+/// (roadmap H127) The `PrefixSum`/`PrefixProduct` counterpart of
+/// `isVectorOperandReduceKind` above: `GroupNonUniformScanPattern`
+/// (SPIRVToLLVMPatterns.cpp, H126) hands a vector operand straight to its
+/// matching `llvm.spv.wave.prefix.sum`/`.product` intrinsic unscalarized
+/// (both are `llvm_any_ty`-overloaded, exactly like the reduce
+/// intrinsics), so a `int4`/`uint4`/`float4`-shaped `WavePrefixSum`/
+/// `WavePrefixProduct` reaches this pass as a genuine vector-operand
+/// call. Unlike `isVectorOperandReduceKind`'s nine kinds, a prefix scan's
+/// *result* is never uniform (`isDivergentWaveCallResult` already
+/// returns true for both): each lane's own prefix over the lanes before
+/// it necessarily differs from every other lane's, exactly like
+/// `PrefixBitCount`'s existing always-divergent `<W x i32>` result, just
+/// overloaded on the operand's element type and reassembled component-
+/// wise instead of a single scalar-typed result. So `widenWaveCall`'s own
+/// vector-decomposition branch for this case decomposes the operand
+/// per-component (like the reduce kinds), but -- like `ReadLane`'s own
+/// divergent case -- keeps each component's own wide `<W x T>` result
+/// decomposed in `WidenedVectorComponents` rather than reassembling a
+/// single narrowed `<N x T>` value, since there is no single uniform
+/// per-lane value to narrow down to.
+bool isVectorOperandPrefixScanKind(WaveCallKind Kind) {
+  return Kind == WaveCallKind::PrefixSum ||
+        Kind == WaveCallKind::PrefixProduct;
+}
+
 /// Whether \p ID is trivially widenable to a vector-typed overload with the
 /// same, single overloaded type shared by its return and every argument:
 /// `llvm::isTriviallyVectorizable`'s target-independent intrinsics, plus the
@@ -1069,6 +1094,24 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // own dedicated vector branch decomposes it into `N` independent
         // per-component gathers sharing one lane index (see its comment).
         IsSupportedProducer = true;
+      } else if (Function *ScanCallee = CI->getCalledFunction();
+                 ScanCallee &&
+                 classifyWaveCall(ScanCallee->getIntrinsicID()) &&
+                 isVectorOperandPrefixScanKind(
+                     *classifyWaveCall(ScanCallee->getIntrinsicID()))) {
+        // (Roadmap H127) A vector-typed `WavePrefixSum`/`WavePrefixProduct`
+        // result: `GroupNonUniformScanPattern` (SPIRVToLLVMPatterns.cpp,
+        // H126) converts a vector-operand `spirv.GroupNonUniform*`
+        // exclusive scan straight to the matching `llvm.spv.wave.
+        // prefix.*` intrinsic's own vector-typed overload, so a
+        // `int4`/`uint4`/`float4`-shaped `WavePrefixSum`/
+        // `WavePrefixProduct` reaches this pass as a genuine `<N x T>`
+        // scan. `widenWaveCall`'s own dedicated vector-prefix-scan branch
+        // decomposes it into `N` independent per-component scans, each
+        // left as its own wide, divergent `<W x T>` value (see that
+        // function's comment) -- the prefix-scan counterpart of the
+        // `ReadLane` case just above.
+        IsSupportedProducer = true;
       } else if (matchMaskedLoad(*CI)) {
         // (Roadmap L15) A `feme.cpu.masked.load.*` call producing a
         // vector-typed result -- `feme::cpu::LinearizePass`'s masked form
@@ -1243,6 +1286,19 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           std::optional<WaveCallKind> ReduceKind =
               classifyWaveCall(Callee->getIntrinsicID());
           if (ReduceKind && isVectorOperandReduceKind(*ReduceKind) &&
+              UserCI->getArgOperand(0) == &I)
+            continue;
+        }
+        // (roadmap H127) A vector-typed `WavePrefixSum`/`WavePrefixProduct`'s
+        // own operand -- decomposed the same way by `widenWaveCall`'s own
+        // dedicated vector-prefix-scan branch (one per-component scan
+        // call, left decomposed in `WidenedVectorComponents` since a
+        // prefix scan's result is always divergent per-lane), the
+        // prefix-scan counterpart of the reduce-kind case above.
+        if (Callee) {
+          std::optional<WaveCallKind> ScanKind =
+              classifyWaveCall(Callee->getIntrinsicID());
+          if (ScanKind && isVectorOperandPrefixScanKind(*ScanKind) &&
               UserCI->getArgOperand(0) == &I)
             continue;
         }
@@ -1779,6 +1835,35 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
     }
     Result->takeName(&CI);
     CI.replaceAllUsesWith(Result);
+    ToErase.push_back(&CI);
+    return;
+  }
+
+  // (roadmap H127) The prefix-scan counterpart of the reduce-kind branch
+  // just above: `GroupNonUniformScanPattern` (SPIRVToLLVMPatterns.cpp,
+  // H126) hands a vector operand straight to its matching `llvm.spv.
+  // wave.prefix.sum`/`.product` intrinsic unscalarized, so a
+  // `int4`/`uint4`/`float4`-shaped `WavePrefixSum`/`WavePrefixProduct`
+  // arrives here as a genuine vector-operand call. Unlike a reduce (whose
+  // per-component result is a single uniform scalar, insertable directly
+  // into the result vector), each component's own prefix scan is itself a
+  // genuine per-lane `<W x T>` value (see `isVectorOperandPrefixScanKind`'s
+  // own comment) -- there is no single uniform `<N x T>` value to
+  // reassemble here, so (exactly like `ReadLane`'s own always-divergent
+  // sibling case above) this leaves the `N` wide per-component results
+  // decomposed in `WidenedVectorComponents` for `CI`'s own users to
+  // consume piecewise, rather than ever attempting to narrow or
+  // reassemble a scalar-typed `CI` replacement.
+  if (isVectorOperandPrefixScanKind(Kind) && CI.getType()->isVectorTy()) {
+    SmallVector<Value *, 4> Components =
+        getVectorComponents(CI.getArgOperand(0), Builder);
+    SmallVector<Value *, 4> WideResults;
+    for (Value *Component : Components)
+      WideResults.push_back(createWaveCall(Builder, Kind, WaveSize, WideMask,
+                                           Component,
+                                           /*WideLaneIndex=*/nullptr,
+                                           CI.getName()));
+    WidenedVectorComponents[&CI] = std::move(WideResults);
     ToErase.push_back(&CI);
     return;
   }
