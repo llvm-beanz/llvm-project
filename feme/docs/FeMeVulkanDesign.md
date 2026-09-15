@@ -1570,6 +1570,43 @@ multi-level nested-struct-reorder gap (Roadmap H133, unchanged by this
 fix) and 1 newly-isolated distinct "cannot normalize" case (Roadmap
 H134, not yet triaged).
 
+Roadmap H134: `convertOffsetStructTypeIgnoringDecorations`'s existing
+"array-or-matrix" retry tier (roadmap H101i) only ever looked one level
+past a struct member's own type for a bare `VectorType` -- a direct
+`spirv.matrix` (whose column type is the vector) or a direct array-of-
+vectors (`!spirv.array<N x vector<M x T>>`) -- so an *array of
+matrices* (`!spirv.array<N x !spirv.matrix<...>>`, a matrix nested one
+array dimension deeper than either shape) fell through every retry tier
+untouched, kept at its natural (tightly-packed, alignment-driven)
+conversion, which failed to reproduce this member's own declared
+offset. Since no other member could substitute for it either, the
+whole struct's conversion returned null, cascading up through
+`convertUniformBlockType`/`convertBufferBlockType` to the same silent
+raw-pointer-handle fallback H130's own investigation above found.
+Fixed by adding a third case to the same retry tier: a new
+`getTightMatrixType` helper (factored out of the existing direct-matrix
+case's own inline logic) builds a matrix's own tight form -- an
+`!llvm.array<NumColumns x TightColumn>`, `TightColumn` built by the
+existing `getTightVectorArrayType` -- and the new array-of-matrix case
+wraps that in one more outer `!llvm.array<N x TightMatrix>` matching
+the declared element count. `HasVectorMember`'s own per-member
+classification (which gates whether this retry tier is even attempted
+at all) is extended identically, since an array-of-matrices member
+sharing a struct with no *other* vector/matrix/nested-struct member
+would otherwise never reach this tier in the first place. New lit
+test: `spirv-to-llvm-array-of-matrix-struct-member.mlir`, verified
+against real `feme-opt` output. Root-caused via `dEQP-VK.ubo.random.
+all_shared_buffer.26` (isolated by H130's own closing triage as a
+distinct "cannot normalize" case) -- a `float4x3 m[5]` `RowMajor`
+member of an explicitly-offset Uniform block. `check-feme`: 3047/3050
+passed (3 unsupported), 0 failed, no regressions. VK-GL-CTS: the exact
+failing case now passes outright (correct pixel output, confirming the
+`RowMajor` data itself loads correctly, not merely that the type
+converts); the full `dEQP-VK.ubo.*` sweep (13,240 cases) drops from 5
+to 4 failing cases (5682 -> 5683 passed), exactly the expected 1-case
+improvement, with the remaining 4 confirmed to be precisely H133's own
+already-known nested-struct-reorder bucket, unchanged.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

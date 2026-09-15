@@ -44456,3 +44456,73 @@ array), each verified against real `feme-opt` output.
 H130 is struck through on the roadmap; H133 (nested-struct-reorder gap)
 and H134 (newly-isolated distinct "cannot normalize" case) are added as
 new, separately-tracked follow-on entries.
+
+## Session: H134 -- array-of-matrices struct member layout gap fixed
+
+Continuing directly from H130's own session above, picking up its own
+follow-on H134 (the 1 remaining, distinct "cannot normalize" case left
+after H130's length-1-array fix).
+
+**Root cause.** `convertOffsetStructTypeIgnoringDecorations`'s existing
+"array-or-matrix" retry tier (roadmap H101i) substitutes a "tight"
+(alignment-free) re-conversion for a struct member whose *natural*
+conversion cannot reproduce its declared byte offset, but that tier
+only ever looked one level past a member's own type for a bare
+`VectorType` -- a direct `spirv.matrix` (whose own column type is the
+vector) or a direct array-of-vectors (`!spirv.array<N x vector<M x
+T>>`). An *array of matrices* (`!spirv.array<N x !spirv.matrix<...>>`,
+a matrix nested one array dimension deeper than either of those two
+shapes -- `dEQP-VK.ubo.random.all_shared_buffer.26`'s own `float4x3
+m[5]` `RowMajor` member) fell through every retry tier completely
+untouched, kept at its natural (tightly-packed, alignment-driven)
+conversion, which failed to reproduce the member's own declared byte
+offset. Since no other member in the struct could be substituted for
+either, the *whole struct's* conversion returned null -- cascading up
+through `convertUniformBlockType`/`convertBufferBlockType` to the same
+silent raw-pointer-handle fallback H130's own session (immediately
+above) investigated, surfacing as the generic "cannot normalize"
+diagnostic.
+
+**Fix.** Added a third case to the same retry tier: a new
+`getTightMatrixType` helper (factored out of the existing direct-matrix
+case's own inline substitution logic, so both cases share one
+implementation) builds a matrix's own tight form, and the new array-of-
+matrix case wraps that in one more outer array matching the member's
+own declared element count. `HasVectorMember`'s own per-member
+classification (which gates whether this whole retry tier is even
+attempted) is extended identically, since a struct whose *only*
+vector/matrix-shaped member is an array-of-matrices would otherwise
+never reach this tier at all.
+
+**Methodology.** Extracted the real failing shader's decompiled SPIR-V
+(`--deqp-log-decompiled-spirv=enable`), reduced it to a minimal
+standalone repro (`feme-translate --import-spirv` / `feme-opt
+--feme-convert-spirv-to-llvm`) isolating just the one problem struct
+member, and iterated on the fix directly against that repro -- the same
+fast loop H130's own session established.
+
+**New lit test.** `spirv-to-llvm-array-of-matrix-struct-member.mlir`,
+verified against real `feme-opt` output: the block now converts to a
+real `spirv.VulkanBuffer` handle with the array-of-matrices member laid
+out via the new tight substitution, rather than falling back to a raw
+pointer.
+
+**Verification.**
+- `ninja check-feme`: **3047/3050 passed** (3 unsupported), 0 failed --
+  net +1 test vs. the H130 baseline (3046/3049), from the new lit test;
+  0 regressions.
+- VK-GL-CTS: re-ran `dEQP-VK.ubo.random.all_shared_buffer.26` standalone
+  -- now **passes outright** ("Full white image ok"), confirming the
+  `RowMajor` matrix data itself loads correctly through the new tight
+  substitution, not merely that the type conversion no longer fails.
+  Re-ran the full `dEQP-VK.ubo.*` sweep (13,240 cases): **5683 passed /
+  4 failed** (was 5682 passed / 5 failed) -- exactly the expected
+  1-case improvement, 0 regressions. A case-by-case diff confirms the
+  remaining 4 failures are precisely H133's own already-known
+  nested-struct-reorder bucket (`dEQP-VK.ubo.random.
+  all_shared_buffer.47`, `.nested_structs_arrays_instance_arrays_
+  compute.4`/`.17`, `.nested_structs_compute.14`), unchanged by this
+  fix.
+
+H134 is struck through on the roadmap. Only H133 (the 4-case
+nested-struct-reorder gap) now remains of the original H130 bucket.
