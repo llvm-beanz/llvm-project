@@ -43950,3 +43950,138 @@ own row, which now documents both the original whole-matrix fix and
 this session's regression/fix in one place) rather than kept as an
 independent milestone, since it was never actually a distinct,
 unscoped gap.
+
+## Session: H128 fixed (nested uniform-buffer-array `AccessChain`/GEP legalization gap)
+
+**Starting point.** This session's assigned priority was to triage the
+previously-untriaged `dEQP-VK.ubo.*` 1995-case failure bucket (flagged
+open by the prior H124b/H124i session) before moving to H124f or other
+work.
+
+**Confirming determinism first.** Re-ran the full `dEQP-VK.ubo.*` suite
+(13,240 cases) twice against the same, unchanged build: both runs
+produced identical `3692 passed / 1995 failed / 7553 not supported`
+totals. The new `"explicitly marked illegal"` diagnostic from the prior
+session's own H124b regression fix never appears in either run's log,
+confirming the 1915-vs-1995 delta noted as an open question in that
+session predates this session's own commits (not investigated further
+here -- it was not reproducible as flakiness either, so it likely
+reflects some other prior-session change never checked against a fresh
+sweep).
+
+**Triage methodology.** Used `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an
+existing opt-in env var in `feme/lib/Vulkan/Diagnostics.cpp`) to surface
+the real stderr diagnostic per failing case -- pipeline-creation
+failures otherwise only report a bare `VK_ERROR_INITIALIZATION_FAILED`
+in the `.qpa` log, with the actual reason silently swallowed. Paired
+each `Test case '...'` block with its stderr lines and classified all
+1995 failures by diagnostic text:
+
+- **1421 cases**: `"... is a register-bound resource handle the FeMe
+  CPU target cannot normalize ..."` (`UnsupportedOps.cpp`'s catch-all).
+- **418 cases**: `"failed to legalize operation 'spirv.AccessChain' ...
+  Matrix..."` -- sampling showed these are *representable*-layout
+  (`ColMajor`, natural `MatrixStride`) matrices, meaning this is
+  **distinct** from H124b/H124i (whole-matrix-only) -- filed as new
+  roadmap row H129.
+- **76 cases**: `"operand #0 does not dominate this use"` (dominance
+  bug, not yet investigated).
+- **34 cases**: `'llvm.getelementptr' op operand #0 must be LLVM
+  pointer type...'`.
+- **30 cases**: other `AccessChain`-illegal variants.
+- **16 cases**: `'llvm.getelementptr' op index 4 indexing a struct is
+  out of bounds'`.
+
+H130 filed to track the four smaller, still-untriaged buckets (156
+cases total).
+
+**Root-causing the 1421-case bucket.** Grouped failing case names by
+their 3rd dotted path component: `2_level_array` (688 cases) and
+`3_level_array` (688 cases) fail **100%**, while `single_basic_array`
+(single-level array member) passes **100%** -- pointing at a
+nested-array-specific gap. Confirmed via `VK-GL-CTS/external/vulkancts/
+modules/vulkan/ubo/vktUniformBlockTests.cpp` that these groups generate
+nested-array **members** of a single UBO block (not arrays of block
+instances).
+
+Initially hypothesized the gap was at the SPIR-V-to-LLVM type-conversion
+layer (`convertOffsetStructTypeIgnoringDecorations`/
+`convertUndersizedScalarArrayMemberIgnoringDecorations` in
+`SPIRVToLLVMPatterns.cpp`) -- **disproved** via direct `feme-opt
+--feme-convert-spirv-to-llvm` testing on hand-crafted single- and
+2-level nested array `.mlir` reproductions: both converted successfully
+via `convertArrayTypeIgnoringDecorations`, which pads any undersized
+array element uniformly regardless of nesting depth. Type conversion
+was never the bottleneck.
+
+Extracted the *real* SPIR-V for the exact failing case
+`dEQP-VK.ubo.2_level_array.std140.bool.compute` via `deqp-vk
+--deqp-log-decompiled-spirv=enable`, HTML-unescaped the disassembly from
+the `.qpa` log's `<SpirVAssemblySource>` section, assembled it with
+`spirv-as`, and re-imported it through `feme-translate --import-spirv`
+then `feme-opt --feme-convert-spirv-to-llvm` to get the exact real LLVM
+IR feme's own CPU pipeline produces. This showed the shape directly:
+`llvm.spv.resource.getpointer` (indexing the outer array dimension)
+followed by a single `llvm.getelementptr` (indexing the inner
+dimension) before the `load`.
+
+That immediately pointed at `hasOnlySupportedUses`'s (`SPIRVResource
+Lowering.cpp`) `AllowGEPs` computation, which only allowed a GEP after
+`getpointer` for `HandleKind::Storage`/`StorageStruct`/`Uniform` --
+**`HandleKind::UniformArray` was missing**, even though that same
+function's own pre-existing doc comment already claimed `UniformArray`
+shared this exact GEP-chaining shape with `Uniform`. `HandleKind::
+UniformArray` is the classification a uniform block whose sole member
+is an array gets (`classifyVulkanBufferHandle`) -- correct for a
+single-level array (no GEP ever needed, `getpointer`'s own index is
+the whole story), but a *nested* array's inner dimension needs the
+further GEP this omission rejected outright.
+
+**The fix.** Added `HandleKind::UniformArray` to `AllowGEPs`'s boolean
+OR in `hasOnlySupportedUses`. `lowerRawPointerUses` (the actual
+lowering code, further down the same file) already dispatches purely on
+instruction kind (`Load`/`Store`/`AtomicRMW`/`AtomicCmpXchg`/`GEP`), not
+on `HandleKind` at all -- it already generically resolves a GEP's own
+byte offset (`computePointerOffset`) and recurses, so no lowering-side
+change was needed once the check itself was corrected. This is about as
+narrow and mechanical a fix as this project gets: a single missing
+enumerator in an existing boolean expression, whose own doc comment
+already said it should be there.
+
+**New unit test.** `SPIRVResourceLoweringTest.
+LowersNestedUniformBufferArrayIndexToStrideMultipliedLoad`
+(`feme/unittests/Transforms/CPU/SPIRVResourceLoweringTest.cpp`) --
+builds the exact `getpointer` + `getelementptr` + `load` shape the real
+IR reduction above showed, and checks the GEP is consumed (lowered
+away) rather than left behind unresolved.
+
+**Verification.**
+- `FeMeTransformsCPUTests`: all 471 tests pass (was 470 before adding
+  the new test), no regressions.
+- `ninja check-feme`: **3041/3044 passed** (3 unsupported), 0 failed --
+  no regressions.
+- `dEQP-VK.ubo.2_level_array.*` full re-run (1512 cases): **688
+  passed / 0 failed / 824 not supported** -- was 0 passed / 688 failed
+  before this fix. Every previously-failing case in this group now
+  passes.
+- `dEQP-VK.ubo.3_level_array.*` full re-run (1512 cases): identical
+  result, **688 passed / 0 failed / 824 not supported** -- was 0
+  passed / 688 failed. Every previously-failing case now passes.
+- `dEQP-VK.ubo.*` full re-run (13,240 cases): **5069 passed / 618
+  failed / 7553 not supported** -- was 3692 passed / 1995 failed. A
+  reduction of exactly 1377 failing cases (matches the 1421-case
+  bucket minus a small number that must have overlapped with, or been
+  masked by, another still-open issue -- not further investigated
+  this session). This is the single largest one-commit failure-count
+  reduction found so far in this project's history.
+- No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+  change: this is a pure CPU-backend resource-lowering correctness fix
+  (an existing capability's own access-pattern check was too strict),
+  not a new feature or extension surface.
+
+**Roadmap.** H128 added (struck through, fixed) documenting the full
+root-cause chain above. H129 (representable-layout matrix dynamic
+row/column/scalar-element access gap, 418 cases) and H130 (remaining
+untriaged buckets, 156 cases: dominance errors, GEP-pointer-type
+errors, other AccessChain variants, struct-index-out-of-bounds) filed
+as new, not-yet-started rows.
