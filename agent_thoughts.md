@@ -83138,3 +83138,79 @@ as H122, `Depends on` H121.
 4. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
    built/run in any session on record (well over a dozen sessions
    deferring it) -- worth a dedicated session.
+
+# H119/H122 session: isoline output primitive misclassified as a triangle -- fixed
+
+**Next action if you're picking this up:** read `feme/docs/VulkanCTSReport.md`'s
+new "H119/H122" entry (bottom of file) for full detail. Then start on H117/H118
+(IR-reduction, still untouched across ~4 sessions now).
+
+## What happened, in order
+
+1. Followed the prior session's #1 recommendation: H122+H119 together, via
+   channel-level pixel reduction (H88's technique).
+2. Ran the H119 repro case with `--deqp-log-images=enable`, decoded the
+   embedded PNGs. **Result image was 100% black** -- zero primitives
+   rendered, not a subtle mismatch.
+3. Traced `Tessellator.cpp`/`Executor.cpp`'s isoline path -- both looked
+   correct.
+4. Built a minimal glslang repro (`layout(isolines) in;` TES),
+   `glslangValidator -H`'d it. **glslang always emits `VertexOrderCw`/
+   `VertexOrderCcw` for every TES entry point, even isoline domains where
+   it's spec-meaningless.**
+5. Found the real bug in `ConvertSPIRVToLLVMPass.cpp`: the execution-mode
+   switch wrote vertex-order modes straight into the same field
+   (`EntryPointInfo::TessOutputPrimitive`) the isoline-default fixup only
+   filled in when unset. Vertex order always won, so every isoline shader's
+   output primitive was misclassified as a triangle.
+6. Fixed by giving `TessVertexOrder`/`TessPointMode` their own fields and
+   computing `TessOutputPrimitive` unconditionally in one place afterward.
+
+## Verified (all real, not assumed)
+
+- New unit test `GraphicsPipelineTest.
+  IsolineDomainOutputsLineDespiteVertexOrderMode`: confirmed it **fails
+  without the fix** (`git stash`'d the fix, reran, saw `TriangleCcw`
+  instead of `Line`), passes with it.
+- `check-feme`: 3018/3021 -> 3019/3022 (the +1 is the new test), **no
+  regressions**.
+- `user_defined_io.*` CTS group: 18/54 -> 27/54 pass (exactly +9 = H119's
+  6 + H122's 3).
+- Broader `dEQP-VK.tessellation.*` sweep (1114 cases): 164 -> 181 pass
+  (+17, not just +9). Chased down the extra +8: `misc_draw.isolines_*`
+  (6 cases) and `geometry_interaction.passthrough.*isolines*` (2 cases) --
+  same bug, different rows. Documented in the roadmap/report so credit
+  isn't lost.
+
+## Committed (3 commits, small and separate)
+
+1. `a577864` -- the actual fix in `ConvertSPIRVToLLVMPass.cpp`
+2. `da2a902` -- the regression unit test
+3. `9f78ea8` -- Roadmap.md (H119/H122 struck through) + VulkanCTSReport.md
+   (new session entry)
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, no
+row references H119/H122 -- confirmed no update needed (internal
+correctness fix, no new feature/extension surface).
+
+Cleaned up all `/tmp/h119_*` scratch files.
+
+## Suggested next steps, ranked
+
+1. **H117/H118** (~1-2 hours, real IR-reduction needed, still untouched
+   across ~4 sessions now): `per_patch_block_array`/`per_vertex_block`'s
+   own `"JIT session error: Symbols not found: [ spirv_var_43/31 ]"`.
+   Confirmed unaffected by both H121's and this session's fixes. Use
+   `feme-translate --import-spirv`/`feme-opt -passes=feme-graphics-
+   canonicalize-stage` (H115's own successful technique) on the real
+   SPIR-V for one of these two cases first.
+2. **H116** (~45-60 min, still untriaged across ~4 sessions): `per_patch_
+   array.*`, "Invalid input value in tessellation evaluation shader" --
+   different error class from H117/H118, look at separately.
+3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** (well over a
+   dozen sessions deferring this now): still never built/run in any
+   session on record. This is a standing gap that keeps getting bumped --
+   worth a dedicated session with no other competing priority, purely to
+   get it building and to see what it reports.
+4. Low priority: no scratch files to clean up right now (this session's
+   own were removed).
