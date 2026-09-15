@@ -5025,6 +5025,38 @@ unsigned getStructMemberPhysicalIndex(mlir::spirv::StructType Struct,
   return PhysicalIndexOf[DeclaredIndex];
 }
 
+/// (Roadmap H124o) Returns \p Struct's own declared member \p
+/// DeclaredIndex's *real* converted LLVM field type, as it actually
+/// appears in `convertOffsetStructTypeIgnoringDecorations`'s own
+/// resulting struct -- as opposed to independently re-converting the
+/// SPIR-V member type on its own via `Converter.convertType`, which
+/// cannot see the struct-context-driven substitutions (e.g.
+/// `getTightVectorArrayType`'s marker-struct wrapper, roadmap H101j)
+/// that only ever apply *inside* a struct/array conversion's own retry
+/// tiers, never to a bare vector type reconverted in isolation. Returns
+/// null if \p Struct fails to convert here (should not happen: see
+/// getStructMemberPhysicalIndex's own comment on why this redoes
+/// already-necessary work) or its physical index falls outside the
+/// resulting struct's own body.
+mlir::Type
+getStructMemberPhysicalFieldType(mlir::spirv::StructType Struct,
+                                 unsigned DeclaredIndex,
+                                 const mlir::TypeConverter &Converter) {
+  llvm::SmallVector<unsigned, 8> PhysicalIndexOf;
+  mlir::Type Converted = convertOffsetStructTypeIgnoringDecorations(
+      Struct, Converter, &PhysicalIndexOf);
+  auto LLVMStructTy =
+      mlir::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(Converted);
+  if (!LLVMStructTy)
+    return nullptr;
+  unsigned Physical = DeclaredIndex < PhysicalIndexOf.size()
+                          ? PhysicalIndexOf[DeclaredIndex]
+                          : DeclaredIndex;
+  if (Physical >= LLVMStructTy.getBody().size())
+    return nullptr;
+  return LLVMStructTy.getBody()[Physical];
+}
+
 /// (Roadmap H133) See this function's own forward-declaration comment.
 /// \p CurrentType is the SPIR-V type \p Op's own index at \p StartIndex
 /// selects into (already resolved by the caller's own first-level remap
@@ -5042,9 +5074,32 @@ unsigned getStructMemberPhysicalIndex(mlir::spirv::StructType Struct,
 /// type; a struct that *does* need reordering has its selector remapped
 /// exactly as getStructMemberPhysicalIndex already does for a single
 /// level. Stops (successfully, leaving every remaining index unchanged)
-/// at the first matrix/vector/scalar leaf -- no further struct-member
-/// selector is possible past that point -- or once \p Indices is
-/// exhausted.
+/// at the first matrix/scalar leaf -- no further struct-member selector
+/// is possible past that point -- or once \p Indices is exhausted.
+///
+/// (Roadmap H124o) A struct member that is itself a *vector* gets one
+/// further check, right when it is selected: `spirv.AccessChain`'s own
+/// vector-component index (e.g. `.x`/`.y`/`.z`) assumes the vector
+/// converted to a real LLVM vector/array type directly, but a member
+/// whose own natural LLVM vector size would overshoot the room \p
+/// StructTy's declared (tightly packed, no implicit padding) layout
+/// leaves for it instead converts to `getTightVectorArrayType`'s own
+/// marker struct wrapping that array (roadmap H101j) -- one extra level
+/// of nesting a plain forwarded index does not account for. Whether that
+/// substitution actually applies is a struct-context-driven property (is
+/// there enough room here, in *this* struct's own layout, for the
+/// member's natural vector size?), not an intrinsic property of the
+/// vector type on its own, so it is checked against \p StructTy's own
+/// *real* converted field type (via getStructMemberPhysicalFieldType),
+/// never by reconverting the vector type in isolation. When it does
+/// apply, an extra `0` index (stepping through the marker struct's own
+/// sole member to reach the array it wraps) is inserted immediately
+/// after the member selector, before the vector-component index that
+/// follows it, exactly as though the marker struct were transparent. A
+/// vector is always a leaf (no further struct-member selector is
+/// possible past its own component index), so this insertion is only
+/// ever attempted once per access chain, and the loop naturally stops on
+/// the next iteration regardless.
 bool remapNestedStructMemberIndices(
     mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
@@ -5071,7 +5126,34 @@ bool remapNestedStructMemberIndices(
               Rewriter.getIntegerAttr(LLVMIndexType, Physical));
         }
       }
+      // (Roadmap H124o) `Declared`'s own member may itself be a vector
+      // that needed `getTightVectorArrayType`'s marker-struct
+      // substitution (see this function's own comment above) -- checked
+      // here, against \p StructTy's own *real* converted field type
+      // (via getStructMemberPhysicalFieldType), rather than against a
+      // standalone reconversion of the vector type in isolation:
+      // `getTightVectorArrayType`'s substitution is a struct-context-
+      // driven retry (does this member's own natural LLVM vector size
+      // overshoot the room \p StructTy's declared layout leaves for
+      // it?), not an intrinsic property of the vector type on its own,
+      // so a bare `Converter.convertType(VectorTy)` call never reports
+      // it. Only relevant when a further (component-selecting) index
+      // still remains -- a vector is always a leaf, so this is the last
+      // possible insertion point on this path.
       ElementType = StructTy.getElementType(Declared);
+      if (StructTy.hasOffset() && Pos + 1 < Op.getIndices().size()) {
+        if (mlir::isa<mlir::VectorType>(ElementType)) {
+          mlir::Type PhysicalFieldTy =
+              getStructMemberPhysicalFieldType(StructTy, Declared, Converter);
+          if (PhysicalFieldTy && getTightVectorMarkerInnerType(PhysicalFieldTy)) {
+            mlir::Type LLVMIndexType = Indices[Pos + 1].getType();
+            mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+                Rewriter, Op.getLoc(), LLVMIndexType,
+                Rewriter.getIntegerAttr(LLVMIndexType, 0));
+            Indices.insert(Indices.begin() + Pos + 1, Zero);
+          }
+        }
+      }
     } else if (auto ArrayTy =
                    mlir::dyn_cast<mlir::spirv::ArrayType>(CurrentType)) {
       ElementType = ArrayTy.getElementType();
@@ -5326,9 +5408,27 @@ public:
            ++I)
         NeedsRemap = PhysicalIndexOf[I] != I;
     }
-    if (!StructTy || !NeedsRemap)
+    // (Roadmap H124o) A struct needing no member reordering/padding at
+    // all may still have a member whose own vector type needed
+    // `getTightVectorArrayType`'s marker-struct substitution (roadmap
+    // H101j) -- e.g. a `float3`/`uint3` member immediately followed by a
+    // sibling with no room for the raw LLVM vector's own (possibly
+    // wider) natural size. MLIR's generic `AccessChainPattern` forwards
+    // every further (vector-component) index straight through, one level
+    // too shallow for that extra wrapper -- exactly the same problem
+    // `remapNestedStructMemberIndices`'s own vector-leaf check now fixes.
+    // Proceed through this pattern's own rewrite whenever *either* an
+    // index needs remapping *or* the access reaches far enough past the
+    // member selector that such a tight-vector-wrapped component index
+    // could be in play; `remapNestedStructMemberIndices` itself is a
+    // no-op when neither turns out to apply, so this never changes an
+    // already-correct access chain's own output.
+    bool MayNeedTightVectorFixup = StructTy && StructTy.hasOffset() &&
+                                   Op.getIndices().size() > MemberIndexPos + 1;
+    if (!StructTy || !(NeedsRemap || MayNeedTightVectorFixup))
       return Rewriter.notifyMatchFailure(
-          Op, "no leading offset pad or member reordering needed");
+          Op, "no leading offset pad, member reordering, or tight-vector "
+              "component access needed");
     if (Op.getIndices().size() <= MemberIndexPos)
       return Rewriter.notifyMatchFailure(
           Op, "access chain does not select a struct member");
@@ -5380,12 +5480,25 @@ public:
       Indices.push_back(Adaptor.getIndices().front());
     }
     Indices.push_back(AdjustedMember);
+    mlir::Type SelectedMemberType =
+        StructTy.getElementType(static_cast<unsigned>(*MemberIndex));
+    // (Roadmap H124o) \p MemberIndex's own member may itself be a vector
+    // that needed `getTightVectorArrayType`'s marker-struct substitution
+    // (see remapNestedStructMemberIndices's own comment for why this is
+    // checked against \p StructTy's real converted field type, not a
+    // standalone reconversion of the vector type). Only relevant when a
+    // further (component-selecting) index still remains.
+    if (StructTy.hasOffset() && Op.getIndices().size() > MemberIndexPos + 1 &&
+        mlir::isa<mlir::VectorType>(SelectedMemberType)) {
+      mlir::Type PhysicalFieldTy = getStructMemberPhysicalFieldType(
+          StructTy, static_cast<unsigned>(*MemberIndex), *getTypeConverter());
+      if (PhysicalFieldTy && getTightVectorMarkerInnerType(PhysicalFieldTy))
+        Indices.push_back(Zero);
+    }
     // (Roadmap H133) Any further index may itself select into a member of
     // a further reordered/padded struct, nested more than one level below
     // \p StructTy -- remap every one of those exactly as \p MemberIndex's
     // own selector was above.
-    mlir::Type SelectedMemberType =
-        StructTy.getElementType(static_cast<unsigned>(*MemberIndex));
     llvm::SmallVector<mlir::Value, 4> RemappedTail(Adaptor.getIndices().begin(),
                                                    Adaptor.getIndices().end());
     if (!remapNestedStructMemberIndices(SelectedMemberType, Op,
