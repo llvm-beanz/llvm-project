@@ -1527,6 +1527,49 @@ unsupported), 0 failed. VK-GL-CTS: full `dEQP-VK.ubo.*` sweep re-run, no
 regressions (no measurable count change expected, since no known real
 case exercises this exact wrapper-partial-access shape).
 
+Roadmap H130: `ResourceAddressOfPattern`, `ArrayedBlockAccessChainPattern`,
+and `ResourceArrayAccessChainPattern` (`SPIRVToLLVMPatterns.cpp`) each
+decided whether a `spirv.GlobalVariable` was an arrayed block/resource
+by comparing `ResourceInfoMap::Count` against `1` (`!= 1`/`<= 1`/`== 1`)
+-- but `Count == 1` is also the correct, structurally-computed value for
+a genuine single-element array (`T blocks[1];`), numerically
+indistinguishable in the map from a truly non-arrayed resource's own
+default `Count` of 1. `ResourceAddressOfPattern` therefore built a
+single non-arrayed handle directly from the address-of op's own
+array-typed pointer (rather than erasing it for the two `AccessChain`
+patterns, which build the real arrayed handle at their own leading
+access-chain index) -- the target type converter cannot represent an
+array-of-`StructType`/array-of-resource pointee as a real
+`spirv.VulkanBuffer`/image/sampler handle, silently falling back to a
+raw address-space pointer instead, unclassifiable by
+`SPIRVResourceLoweringPass`. Fixed all three patterns to gate
+structurally instead of on `Count`'s value: `ResourceAddressOfPattern`
+now `dyn_cast`s the address-of op's own pointee type to
+`ArrayType`/`RuntimeArrayType` directly; `ArrayedBlockAccessChainPattern`
+now `dyn_cast`s the pointee similarly (reusing the result for its
+existing subsequent code, which already assumed a successful cast);
+`ResourceArrayAccessChainPattern` simply drops its redundant, incorrect
+early-decline, since its own subsequent `getArrayedResourceCount` call
+already performs the correct structural check. Root-caused via a new
+permanent `FEME_CPU_LOG_RESOURCE_NORMALIZATION`-gated debug-logging
+facility added to `SPIRVResourceLoweringPass` (`SPIRVResourceLowering.cpp`,
+modeled on `feme::vulkan::creationErrorLoggingEnabled`), which
+immediately pinpointed the exact failing handle
+(`dEQP-VK.ubo.random.basic_instance_arrays.1`'s binding 4, an array of
+exactly one uniform block instance) -- previously the only symptom was
+the generic "cannot normalize" diagnostic with no indication of which
+handle or use actually failed classification. New lit tests: a length-1
+variant added alongside each existing multi-element case in
+`spirv-to-llvm-arrayed-blocks.mlir`/`spirv-to-llvm-resource-arrays.mlir`.
+`check-feme`: 3046/3049 passed (3 unsupported), 0 failed, no
+regressions. VK-GL-CTS: the full `dEQP-VK.ubo.*` sweep (13,240 cases)
+drops from 73 to 5 failing cases (5614 -> 5682 passed), a reduction of
+exactly 68 -- the 5 remaining failures are confirmed (by individually
+re-running each) to fail for unrelated reasons: 4 for the pre-known
+multi-level nested-struct-reorder gap (Roadmap H133, unchanged by this
+fix) and 1 newly-isolated distinct "cannot normalize" case (Roadmap
+H134, not yet triaged).
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

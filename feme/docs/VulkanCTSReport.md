@@ -44375,3 +44375,84 @@ real CTS case exercises this shape.
 No roadmap milestone bucket count changes as a result of this fix (it
 closes a latent defensive gap, not a currently-measured CTS failure
 bucket); H132 is struck through on the roadmap.
+
+## Session: H130 -- length-1 arrayed block/resource conflated with non-arrayed
+
+Continuing directly from H132's own session above. Picked up H130 triage
+(the 73-case "cannot normalize" + nested-struct-reorder remainder bucket
+left after H129's own fix).
+
+**Root cause.** `ResourceAddressOfPattern`, `ArrayedBlockAccessChainPattern`,
+and `ResourceArrayAccessChainPattern` (all `SPIRVToLLVMPatterns.cpp`) each
+decided whether a `spirv.GlobalVariable` was an arrayed block/resource by
+comparing `ResourceInfoMap::Count` against `1` (`!= 1`/`<= 1`/`== 1`
+respectively), but `Count == 1` is also the correct, structurally-computed
+value for a genuine single-element array (`T blocks[1];`, a legal, if
+unusual, GLSL declaration one of dEQP's own `dEQP-VK.ubo.random.
+basic_instance_arrays.*` randomized-length fuzzer cases can generate) --
+numerically indistinguishable in the map from a truly non-arrayed
+resource's own default `Count` of 1. `ResourceAddressOfPattern` therefore
+built a single non-arrayed handle directly from the address-of op's own
+array-typed pointer type instead of erasing it for the two `AccessChain`
+patterns to build the real arrayed handle from -- but the target type
+converter cannot represent an array-of-`StructType`/array-of-resource
+pointee as a real `spirv.VulkanBuffer`/image/sampler handle type, and
+silently falls back to a raw address-space pointer, which
+`SPIRVResourceLoweringPass` then cannot classify at all -- surfacing as
+the generic "cannot normalize" diagnostic on a handle that may not even
+be the one whose actual access triggered the failure.
+
+**Diagnostic tooling added.** Added a new, permanent
+`FEME_CPU_LOG_RESOURCE_NORMALIZATION`-gated debug-logging facility to
+`SPIRVResourceLoweringPass` (`SPIRVResourceLowering.cpp`, modeled on
+`feme::vulkan::creationErrorLoggingEnabled`), instrumenting every
+rejection point in `hasOnlySupportedPointerUses`/`hasOnlySupportedUses`/
+`collectHandles` with a specific reason string and the offending
+`Value*`. This immediately pinpointed the exact failing handle for
+`dEQP-VK.ubo.random.basic_instance_arrays.1` (binding 4, "handle result
+type is not one of the kinds this pass normalizes") -- previously the
+only symptom visible from a real CTS run was the generic "cannot
+normalize" diagnostic with no indication of which handle or use actually
+failed classification. Combined with the pre-existing
+`--deqp-log-decompiled-spirv=enable` / `feme-translate --import-spirv` /
+`feme-opt --feme-convert-spirv-to-llvm` fast-iteration loop (much faster
+than re-running `deqp-vk` for every hypothesis), this pinned down the
+real root cause directly in the converted IR.
+
+**Fix.** All three patterns now gate structurally instead of on
+`Count`'s numeric value: `ResourceAddressOfPattern` `dyn_cast`s the
+address-of op's own pointee type to `ArrayType`/`RuntimeArrayType`
+directly; `ArrayedBlockAccessChainPattern` `dyn_cast`s the pointee
+similarly (reusing the result for its existing subsequent code, which
+already assumed a successful cast); `ResourceArrayAccessChainPattern`
+simply drops its redundant, incorrect early-decline, since its own
+subsequent `getArrayedResourceCount` call already performs the correct
+structural check.
+
+**New lit tests.** A length-1 variant added alongside each existing
+multi-element case in `spirv-to-llvm-arrayed-blocks.mlir` (uniform
+block array) and `spirv-to-llvm-resource-arrays.mlir` (image resource
+array), each verified against real `feme-opt` output.
+
+**Verification.**
+- `ninja check-feme`: **3046/3049 passed** (3 unsupported), 0 failed --
+  unchanged from the H132 baseline; the two new lit test files' extra
+  `RUN`-line cases add coverage without adding to the discovered-test
+  count (each file is still one lit test, split via `--split-input-file`).
+- VK-GL-CTS: re-ran the full `dEQP-VK.ubo.*` sweep (13,240 cases) with
+  the fix applied: **5682 passed / 5 failed** (was 5614 passed / 73
+  failed) -- a reduction of exactly 68 failing cases, 0 regressions.
+  Confirmed by individually re-running each of the 5 remaining failures
+  standalone: 4 fail with the pre-known, already-documented multi-level
+  nested-struct-reorder `'llvm.getelementptr' op {type 'i32' cannot be
+  indexed | index 2 indexing a struct is out of bounds}'` diagnostic
+  (unchanged by this fix, broken out on the roadmap as H133), and 1
+  (`dEQP-VK.ubo.random.all_shared_buffer.26`) still hits the generic
+  "cannot normalize" diagnostic for a genuinely different, not-yet-
+  triaged reason (broken out on the roadmap as H134). The exact 68-case
+  delta (73 - 5 = 68, matching the passed-count increase precisely)
+  confirms no new failures were introduced anywhere else in the suite.
+
+H130 is struck through on the roadmap; H133 (nested-struct-reorder gap)
+and H134 (newly-isolated distinct "cannot normalize" case) are added as
+new, separately-tracked follow-on entries.
