@@ -1583,102 +1583,126 @@ public:
 /// `mlir::GroupReducePattern` (`mlir/lib/Conversion/SPIRVToLLVM/
 /// SPIRVToLLVM.cpp`), the upstream pattern for `spirv.GroupNonUniform*`
 /// arithmetic reductions (`WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/
-/// `Or`/`Xor`'s own SPIR-V shape), builds its call's result (and, for a
-/// binary reduction, its data operand) directly from `op.getResult()`'s
-/// raw SPIR-V type rather than running it through the dialect
-/// conversion's own `TypeConverter` first -- correct for `spirv.GroupNon
-/// UniformFAdd`/`FMin`/`FMax`... (a SPIR-V float type is already a valid,
-/// signedness-free LLVM dialect type unchanged) but not for an *integer*
-/// reduction: HLSL's `int`/`uint` distinction survives into MLIR's SPIR-V
-/// dialect as `si32`/`ui32` (a signless `i32`'s two signedness-carrying
-/// siblings, used only to preserve `OpSConvert`/`OpUConvert`-style
-/// signedness information for as long as possible), and `si32`/`ui32`
-/// are not themselves valid LLVM dialect types at all -- only signless
-/// `i32` is (roadmap L10, reduced from a real `dEQP`-independent
-/// `offload-test-suite` `WaveOps/WaveActiveSum.convergence.test` case
-/// whose `int`-typed `RWBuffer` read feeds `WaveActiveSum` directly,
-/// giving `spirv.GroupNonUniformIAdd`'s own operand and result an `si32`
-/// type the upstream pattern passes straight through to `llvm.call`,
-/// producing the dialect-conversion legalizer's own "result #0 must be
-/// LLVM dialect-compatible type, but got 'si32'" diagnostic). Registered
-/// at `FeMeBenefit` (see `populateSPIRVToLLVMTargetPatterns` below) so it
-/// wins over the upstream pattern for exactly the nine integer-typed
-/// `spirv.GroupNonUniform*` arithmetic reductions HLSL's own `Wave*`
-/// intrinsics can produce; every other `spirv.GroupNonUniform*`/`spirv.
-/// Group*` reduction (float, or workgroup- rather than subgroup-scoped,
-/// neither reachable from any HLSL `Wave*` intrinsic today) is left to
-/// the upstream pattern, which already handles it correctly.
+/// `Or`/`Xor`'s own SPIR-V shape), lowers every one of them to a raw
+/// mangled-name `llvm.call` (e.g. `_Z27__spirv_GroupNonUniformIAddii`)
+/// rather than a real LLVM intrinsic. `feme::cpu::WaveUniformity`/
+/// `SIMDizePass` (`feme/lib/Transforms/CPU/WaveUniformity.cpp`/
+/// `SIMDize.cpp`) only ever classify and widen a *real* `llvm::
+/// IntrinsicInst` (matched via `dyn_cast<IntrinsicInst>`) -- never a raw
+/// mangled `CallInst` -- so every HLSL `WaveActiveSum`/`Product`/`Min`/
+/// `Max`/`BitAnd`/`Or`/`Xor` call compiled through SPIR-V import silently
+/// hit `feme-cpu-simdize`'s "unsupported divergent call" diagnostic,
+/// scalar or vector, all along (roadmap H124a, reduced from
+/// `offload-test-suite`'s own `WaveOps/WaveActiveMax.test`, a scalar-only
+/// control case that reproduces this identically). This also let the
+/// pre-existing `IntegerGroupNonUniformReducePattern` (which only fixed
+/// up the `si32`/`ui32`-vs-`i32` signedness mismatch described below, not
+/// this deeper issue) go unnoticed.
+///
+/// This pattern instead converts every `Reduce`-group-operation
+/// arithmetic reduction directly to the matching `llvm.spv.wave.*`
+/// intrinsic (mirroring `AllEqualConversionPattern`/
+/// `RotateConversionPattern` above's own established convention), which
+/// MLIR translates to a real `IntrinsicInst` `feme-cpu-simdize` already
+/// knows how to classify (`WaveUniformity.cpp`) and widen
+/// (`SIMDize.cpp`'s `widenWaveCall`, extended this same roadmap entry to
+/// decompose a vector operand into its per-component reduce calls, see
+/// `isVectorOperandReduceKind` there). Every `llvm.spv.wave.reduce.*`/
+/// `llvm.spv.wave.product` intrinsic (`llvm/include/llvm/IR/
+/// IntrinsicsSPIRV.td`) is `llvm_any_ty`-overloaded, so a *vector*
+/// operand needs no scalarization at all at this MLIR level -- unlike
+/// `AllEqualConversionPattern`'s own vector case, which does need one
+/// extra step because its *result* type does not vary with the operand.
+///
+/// Running the op's result through the dialect conversion's own
+/// `TypeConverter` (rather than passing `op.getResult()`'s raw SPIR-V
+/// type straight through, as upstream's own pattern does) additionally
+/// fixes the pre-existing `IntegerGroupNonUniformReducePattern`'s own
+/// signedness bug: HLSL's `int`/`uint` distinction survives into MLIR's
+/// SPIR-V dialect as `si32`/`ui32` (a signless `i32`'s two
+/// signedness-carrying siblings, used only to preserve `OpSConvert`/
+/// `OpUConvert`-style signedness information for as long as possible),
+/// and `si32`/`ui32` are not themselves valid LLVM dialect types at all
+/// -- only signless `i32` is (roadmap L10, reduced from a real
+/// `offload-test-suite` `WaveOps/WaveActiveSum.convergence.test` case).
+///
+/// Only the `Reduce` group operation has a matching intrinsic: `Inclusive
+/// Scan`/`ExclusiveScan` (HLSL's `WavePrefixSum`/`WavePrefixProduct`) and
+/// `ClusteredReduce` (unreachable from any HLSL `Wave*` intrinsic today)
+/// are left to upstream's own `GroupReducePattern`, which already
+/// handles every group operation correctly via its raw call's own
+/// runtime `GroupOperation` parameter (not a fix for those cases, so out
+/// of scope for this roadmap entry).
 template <typename ReduceOp>
-constexpr llvm::StringLiteral getIntegerGroupNonUniformFuncName();
+constexpr llvm::StringLiteral getGroupNonUniformReduceIntrinsicName();
 template <>
 constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformIAddOp>() {
-  return "_Z27__spirv_GroupNonUniformIAddii";
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformIAddOp>() {
+  return "llvm.spv.wave.reduce.sum";
 }
 template <>
 constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformIMulOp>() {
-  return "_Z27__spirv_GroupNonUniformIMulii";
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformFAddOp>() {
+  return "llvm.spv.wave.reduce.sum";
 }
 template <>
 constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformSMinOp>() {
-  return "_Z27__spirv_GroupNonUniformSMinii";
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformIMulOp>() {
+  return "llvm.spv.wave.product";
 }
 template <>
 constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformUMinOp>() {
-  return "_Z27__spirv_GroupNonUniformUMinii";
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformFMulOp>() {
+  return "llvm.spv.wave.product";
 }
 template <>
 constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformSMaxOp>() {
-  return "_Z27__spirv_GroupNonUniformSMaxii";
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformSMinOp>() {
+  return "llvm.spv.wave.reduce.min";
 }
 template <>
 constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformUMaxOp>() {
-  return "_Z27__spirv_GroupNonUniformUMaxii";
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformFMinOp>() {
+  return "llvm.spv.wave.reduce.min";
 }
 template <>
-constexpr llvm::StringLiteral getIntegerGroupNonUniformFuncName<
+constexpr llvm::StringLiteral
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformUMinOp>() {
+  return "llvm.spv.wave.reduce.umin";
+}
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformSMaxOp>() {
+  return "llvm.spv.wave.reduce.max";
+}
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformFMaxOp>() {
+  return "llvm.spv.wave.reduce.max";
+}
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformReduceIntrinsicName<mlir::spirv::GroupNonUniformUMaxOp>() {
+  return "llvm.spv.wave.reduce.umax";
+}
+template <>
+constexpr llvm::StringLiteral getGroupNonUniformReduceIntrinsicName<
     mlir::spirv::GroupNonUniformBitwiseAndOp>() {
-  return "_Z33__spirv_GroupNonUniformBitwiseAndii";
+  return "llvm.spv.wave.reduce.and";
 }
 template <>
-constexpr llvm::StringLiteral
-getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformBitwiseOrOp>() {
-  return "_Z32__spirv_GroupNonUniformBitwiseOrii";
+constexpr llvm::StringLiteral getGroupNonUniformReduceIntrinsicName<
+    mlir::spirv::GroupNonUniformBitwiseOrOp>() {
+  return "llvm.spv.wave.reduce.or";
 }
 template <>
-constexpr llvm::StringLiteral getIntegerGroupNonUniformFuncName<
+constexpr llvm::StringLiteral getGroupNonUniformReduceIntrinsicName<
     mlir::spirv::GroupNonUniformBitwiseXorOp>() {
-  return "_Z33__spirv_GroupNonUniformBitwiseXorii";
-}
-
-/// Mirrors `mlir::getTypeMangling`'s `IntegerType` case (`mlir/lib/
-/// Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) for the 32-bit-only integer
-/// width every `getIntegerGroupNonUniformFuncName` specialization above is
-/// reachable with -- upstream's own call always passes `isSigned=false`
-/// regardless of the reduction's real signedness (matching the SPIR-V
-/// backend's own recognized builtin name mangling, which does not
-/// distinguish `int`/`uint` operands either), so this does not need the
-/// `isSigned`parameter upstream's version carries at all.
-llvm::StringRef getUnsignedIntegerTypeMangling(mlir::Type Type) {
-  auto IntTy = mlir::cast<mlir::IntegerType>(Type);
-  switch (IntTy.getWidth()) {
-  case 32:
-    return "j";
-  case 64:
-    return "m";
-  default:
-    llvm_unreachable("getIntegerGroupNonUniformFuncName's own reductions are "
-                     "only ever 32- or 64-bit");
-  }
+  return "llvm.spv.wave.reduce.xor";
 }
 
 template <typename ReduceOp>
-class IntegerGroupNonUniformReducePattern
+class GroupNonUniformReducePattern
     : public mlir::SPIRVToLLVMConversion<ReduceOp> {
 public:
   using mlir::SPIRVToLLVMConversion<ReduceOp>::SPIRVToLLVMConversion;
@@ -1686,53 +1710,22 @@ public:
   mlir::LogicalResult
   matchAndRewrite(ReduceOp Op, typename ReduceOp::Adaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Adaptor.getGroupOperation() != mlir::spirv::GroupOperation::Reduce)
+      return Rewriter.notifyMatchFailure(
+          Op, "only the Reduce group operation has a matching intrinsic; "
+              "InclusiveScan/ExclusiveScan/ClusteredReduce fall back to "
+              "upstream's own GroupReducePattern");
+
     mlir::Type ResultType =
         this->getTypeConverter()->convertType(Op.getResult().getType());
-    if (!ResultType || !mlir::isa<mlir::IntegerType>(ResultType))
-      return Rewriter.notifyMatchFailure(
-          Op, "result is not an integer type this pattern fixes up");
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
-    llvm::SmallString<40> FuncName(getIntegerGroupNonUniformFuncName<ReduceOp>());
-    FuncName += getUnsignedIntegerTypeMangling(ResultType);
-
-    mlir::Type I32 = Rewriter.getI32Type();
-    llvm::SmallVector<mlir::Type> ParamTypes{I32, I32, ResultType};
-    if (Adaptor.getClusterSize()) {
-      FuncName += "j";
-      ParamTypes.push_back(I32);
-    }
-
-    mlir::Operation *SymbolTable =
-        Op->template getParentWithTrait<mlir::OpTrait::SymbolTable>();
-    auto Func = mlir::dyn_cast_or_null<mlir::LLVM::LLVMFuncOp>(
-        mlir::SymbolTable::lookupSymbolIn(SymbolTable, FuncName));
-    if (!Func) {
-      mlir::OpBuilder Builder(SymbolTable->getRegion(0));
-      Func = mlir::LLVM::LLVMFuncOp::create(
-          Builder, SymbolTable->getLoc(), FuncName,
-          mlir::LLVM::LLVMFunctionType::get(ResultType, ParamTypes));
-      Func.setCConv(mlir::LLVM::cconv::CConv::SPIR_FUNC);
-      Func.setConvergent(true);
-      Func.setNoUnwind(true);
-      Func.setWillReturn(true);
-    }
-
-    mlir::Location Loc = Op.getLoc();
-    mlir::Value Scope = mlir::LLVM::ConstantOp::create(
-        Rewriter, Loc, I32,
-        static_cast<int32_t>(Adaptor.getExecutionScope()));
-    mlir::Value GroupOp = mlir::LLVM::ConstantOp::create(
-        Rewriter, Loc, I32,
-        static_cast<int32_t>(Adaptor.getGroupOperation()));
-    llvm::SmallVector<mlir::Value> Operands{Scope, GroupOp};
-    llvm::append_range(Operands, Adaptor.getOperands());
-
-    auto Call = mlir::LLVM::CallOp::create(Rewriter, Loc, Func, Operands);
-    Call.setCConv(Func.getCConv());
-    Call.setConvergentAttr(Func.getConvergentAttr());
-    Call.setNoUnwindAttr(Func.getNoUnwindAttr());
-    Call.setWillReturnAttr(Func.getWillReturnAttr());
-    Rewriter.replaceOp(Op, Call);
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(
+                Rewriter, Op.getLoc(),
+                getGroupNonUniformReduceIntrinsicName<ReduceOp>(), ResultType,
+                {Adaptor.getValue()}));
     return mlir::success();
   }
 };
@@ -1745,7 +1738,7 @@ public:
 /// accessors -- rather than `adaptor.getTrueTargetOperands()`/
 /// `adaptor.getFalseTargetOperands()`, the dialect conversion's own
 /// remapped (type-converted) operands. This is the identical class of bug
-/// roadmap L10's `IntegerGroupNonUniformReducePattern` above fixed for
+/// roadmap L10's `GroupNonUniformReducePattern` above fixed for
 /// `spirv.GroupNonUniform*`'s reduce operand/result: whenever a successor
 /// block argument being passed along a conditional branch is itself an
 /// `si32`/`ui32` value (HLSL's `int`/`uint` distinction, preserved in
@@ -1759,7 +1752,7 @@ public:
 /// merges an `si32`-typed `TailState` value back into `^bb1` via exactly
 /// this shape). Registered at `FeMeBenefit` so it wins over the upstream
 /// pattern for every `spirv.BranchConditional`; unlike
-/// `IntegerGroupNonUniformReducePattern` (which only needs to special-case
+/// `GroupNonUniformReducePattern` (which only needs to special-case
 /// nine specific integer-typed ops), this fix applies uniformly to every
 /// `spirv.BranchConditional` regardless of its successor operands' types,
 /// since simply using the adaptor's own already-correctly-remapped
@@ -8954,18 +8947,19 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ImageSampleExplicitLodPattern, ImageSampleGradPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
       ImageTexelPointerPattern, ImageWritePattern, KillConversionPattern,
-      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
-      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
-      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMinOp>,
-      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformUMinOp>,
-      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMaxOp>,
-      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformUMaxOp>,
-      IntegerGroupNonUniformReducePattern<
-          mlir::spirv::GroupNonUniformBitwiseAndOp>,
-      IntegerGroupNonUniformReducePattern<
-          mlir::spirv::GroupNonUniformBitwiseOrOp>,
-      IntegerGroupNonUniformReducePattern<
-          mlir::spirv::GroupNonUniformBitwiseXorOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformFAddOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformFMulOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMinOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformFMinOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformUMinOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMaxOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformFMaxOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformUMaxOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformBitwiseAndOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformBitwiseOrOp>,
+      GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformBitwiseXorOp>,
       LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
