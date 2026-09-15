@@ -43199,3 +43199,38 @@ signature-construction correctness fix (disambiguating a static
 per-vertex/per-invocation array), not a new feature or extension surface.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
 confirmed unaffected.
+
+## H116: confirmed closed as a side effect of H117/H118, no new code needed
+
+**Symptom (as filed).**
+`dEQP-VK.tessellation.user_defined_io.per_patch_array.vertex_io_array_size_*`
+(9 cases) failed pipeline creation with `"Invalid input value in
+tessellation evaluation shader"` -- newly exposed by H114's own crash fix,
+never triaged in isolation across ~5 sessions.
+
+**Finding.** Re-ran the 9 `per_patch_array.*` cases against a freshly
+rebuilt `libfeme_vulkan.so` (no source changes made this session) and all
+9 now pass outright. The prior session's H117/H118 fix touched exactly
+the class of logic this shape depends on: `isDynamicIndexedArrayGlobal`'s
+`Patch`-decoration-aware disambiguation, `addElements`' `TakeBlockPath`/
+`BlockArrayCount` construction logic, and `getDynamicVertexIndexedAccess`'s
+`RowTerms` probe-first fix. `per_patch_array`'s own shape (a `patch`-
+qualified array of per-patch scalars/vectors, not a genuine multi-member
+block) evidently hit the same "array of instances vs. dynamic index"
+misclassification H117 fixed, or a downstream consequence of the RowTerms
+fix -- no further code change was required to close it.
+
+**Verification.**
+- `ninja check-feme`: **3020/3023 passed, 3 unsupported, 0 failed**
+  (unchanged from the prior session's end state -- no code changed).
+- Real CTS re-run (`VK_ICD_FILENAMES` pointed at a freshly rebuilt
+  `libfeme_vulkan.so`):
+  - `dEQP-VK.tessellation.user_defined_io.per_patch_array.*`: **9/9
+    pass** (from 0/9).
+  - `dEQP-VK.tessellation.user_defined_io.*` (all 54 cases): **54/54
+    pass** -- the entire matrix H114 originally exposed (H115 through
+    H122) is now fully closed with no known-failing case remaining.
+
+**Feature/extension bits.** No change: no code was modified this
+session. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed, confirmed unaffected.
