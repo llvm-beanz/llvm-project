@@ -42584,3 +42584,90 @@ final closure (H32/H53 struck through as closed); `FeMeGraphicsDesign.md`'s
 `Vulkan14FeatureInventory.md`'s `shaderClipDistance`/`shaderCullDistance`
 rows flipped to `VK_TRUE`; `VulkanExtensionInventory.md` confirmed no
 change needed (no extension gates these two feature bits).
+
+## Roadmap H114: root cause and fix (`user_defined_io` `PromoteMemoryToRegister.cpp` crash)
+
+**Method.** `build2` is a Release build with no debug info, so `gdb`
+against the live `deqp-vk` crash yielded only a bare call stack
+(`PromoteMem2Reg::run` <- `PromoteMemToReg` <- `canonicalizeSPIRVStage`
+<- ... <- `deqp-vk`'s `main`), no locals. Added temporary `errs()`
+diagnostics directly in `CanonicalizeStage.cpp` (a promotability
+pre-check on every shadow alloca before handing it to `PromoteMemToReg`,
+a `Sig.Elements` dump, an `addElement`-call dump, and a
+`ShadowValueMap::getOrCreate` collision dump), rebuilt, and re-ran the
+single crashing case (`dEQP-VK.tessellation.user_defined_io.per_patch.
+vertex_io_array_size_implicit.isolines`) three times, narrowing from "an
+alloca is non-promotable" to "two different-typed elements collide on
+the same `(ElementID, Row, Component)` key" to "the collision is because
+one global (`patch out S { int x; vec4 y; } s;`, a plain, non-`Block`
+struct) only ever got *one* `SignatureElement` for its *two* members".
+
+**Root cause.** `buildMemberDecorationsAttr` (SPIRVToLLVMPatterns.cpp)
+only ever attached `feme.spirv.MemberDecorations` metadata when at least
+one member had a recognized per-member decoration (`BuiltIn`/`Location`/
+`Component`/`Index`/certain flags) or the whole struct itself
+`hasOffset()` (true only for a `Block`-decorated interface block). A
+plain (non-`Block`) struct used directly as a `patch`/per-vertex stage-IO
+variable's type has *neither*: SPIR-V leaves every member's own location
+to be derived sequentially from the whole variable's single `Location`,
+with no per-member decoration at all. With no metadata attached,
+`CanonicalizeStage.cpp`'s `addElements` had nothing to detect
+`TakeBlockPath` from and fell through to the plain, single-
+`SignatureElement` path -- silently merging `S`'s `int x`/`vec4 y`
+members onto one shadow-alloca slot regardless of type, tripping
+`PromoteMem2Reg`'s `isAllocaPromotable` assertion on the resulting
+mixed-type stores.
+
+**Fix.** `buildMemberDecorationsAttr` now synthesizes a (possibly
+decoration-less) `Members` entry per member whenever the struct has more
+than one member, regardless of whether any individual member carries a
+decoration. `TakeBlockPath`'s own pre-existing
+`PeekedMemberDecorations.size() > 1` check and its already-implemented
+sequential-`Location` fallback (added for `Block`-decorated structs by
+H101b) then correctly decompose this shape with no further changes
+needed. A genuinely single-member struct is left untouched, matching
+H101b's own single-member exclusion (there being nothing to disambiguate
+between one member, and doing so unconditionally would wrongly divert a
+real array-of-block-instances shape onto the per-member path instead of
+the array-peeling one).
+
+**Regression check.** `ninja check-feme`: 3014/3017 pass (3 pre-existing
+unsupported, 0 failures) -- up one test from the new
+`SPIRVToLLVMTest.PlainMultiMemberInterfaceBlockWithNoMemberDecorationsStillDecomposes`
+regression test. A `git stash` A/B against `dEQP-VK.tessellation.
+shader_input_output.cross_invocation_per_patch_float` (a *different*
+multi-member-struct case this fix's broad blast radius could plausibly
+have newly regressed) confirmed its `"masked output store references an
+unknown patch-output signature element"` failure reproduces identically
+with and without this fix -- pre-existing, unrelated to this change.
+
+**True scope, corrected.** The crash's real reach was not the 9 cases
+H114 was originally filed against, but the full 54-case
+`user_defined_io.{per_patch,per_patch_array,per_patch_block,
+per_patch_block_array,per_vertex,per_vertex_block}.
+vertex_io_array_size_{implicit,shader_builtin,spec_min}.
+{isolines,quads,triangles}` matrix: every one of those 54 cases crashed
+the whole `deqp-vk` process before this fix; **zero** do now. Of the 54:
+- **12 now pass outright** -- `per_patch`/`per_vertex`'s own `quads`/
+  `triangles` variants, all three array-size kinds.
+- **42 now fail gracefully** (no crash) in four distinct, newly-visible
+  shapes, filed as their own roadmap rows (H116-H119) rather than closing
+  H114 over them:
+  - **H115, re-scoped** (was 3 cases, now 9): `per_patch_block.*`, all
+    three array-size variants, `"JIT session error: Symbols not found:
+    [ spirv_var_21 ]"`.
+  - **H116** (9 cases): `per_patch_array.*`, `"Invalid input value in
+    tessellation evaluation shader"` at pipeline creation.
+  - **H117** (9 cases): `per_patch_block_array.*`, `"JIT session error:
+    Symbols not found: [ spirv_var_43 ]"`.
+  - **H118** (9 cases): `per_vertex_block.*`, `"JIT session error:
+    Symbols not found: [ spirv_var_31 ]"`.
+  - **H119** (6 cases): `per_patch`/`per_vertex`'s own `isolines`
+    topology only (all three array-size variants each), image comparison
+    failure -- the `quads`/`triangles` siblings of these same 6 cases all
+    pass, so this is topology-specific.
+
+**Feature/extension bits.** No change: this is an internal IR-
+canonicalization correctness fix, not a feature or extension gate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
