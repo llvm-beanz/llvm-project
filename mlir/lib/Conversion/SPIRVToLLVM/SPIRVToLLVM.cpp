@@ -409,6 +409,22 @@ public:
   LogicalResult
   matchAndRewrite(spirv::AccessChainOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // This pattern builds an `LLVM::GEPOp`, which requires an ordinary LLVM
+    // pointer base operand; some downstream `TypeConverter`s (e.g. FeMe's
+    // own resource-handle representation, `feme::spirv::VulkanBuffer`)
+    // legally convert a `spirv.PointerType` base to a non-pointer
+    // `LLVM::LLVMTargetExtType` handle instead, for a base whose access
+    // pattern that downstream client's own higher-benefit pattern does not
+    // (yet, or ever) handle -- e.g. a base pointer that legally converts,
+    // but whose *specific* access shape a client's own pattern still
+    // declines. Requiring the base to already be a genuine LLVM pointer
+    // here declines cleanly in that case, rather than blindly building a
+    // GEP from an operand it was never a valid base for, which would only
+    // surface as a confusing, unrelated-looking failure once the whole
+    // module is verified.
+    if (!isa<LLVM::LLVMPointerType>(adaptor.getBasePtr().getType()))
+      return rewriter.notifyMatchFailure(op, "base is not an LLVM pointer");
+
     auto dstType =
         getTypeConverter()->convertType(op.getComponentPtr().getType());
     if (!dstType)

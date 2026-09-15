@@ -3256,30 +3256,30 @@ mlir::LogicalResult rewriteBlockAccess(
   // (rather than silently computing the wrong address) until that harder
   // gap is closed.
   //
-  // Unlike every other rejection in this function, simply returning
-  // failure here is not safe: Op's own base pointer has *already*
-  // legally converted to a `spirv.VulkanBuffer` handle (not an ordinary
-  // `!llvm.ptr`) by this point, so upstream's own generic, lower-benefit
-  // `AccessChainPattern` fallback would otherwise still be tried next --
-  // and, never expecting a handle-typed base pointer, blindly builds an
-  // ill-typed `llvm.getelementptr` from it, which only surfaces once the
-  // whole module is verified (a confusing, unrelated-looking diagnostic),
-  // not with this file's own clear "explicitly marked illegal" message.
-  // Emitting a real, specific error here and replacing the op with a
-  // same-typed poison value -- rather than declining outright -- consumes
-  // it for good, so neither that fallback nor a bogus GEP is ever
-  // reached; `emitOpError` still fails the overall conversion, exactly as
-  // any other declined op would.
+  // A plain `notifyMatchFailure` is safe here (unlike an earlier version
+  // of this fix, which instead emitted a real error and replaced the op
+  // with poison, `mlir::success()`-ing the pattern to stop upstream's own
+  // generic `AccessChainPattern` fallback from being tried next): that
+  // upstream pattern (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+  // now itself requires its base operand to already be a genuine LLVM
+  // pointer before it ever builds a GEP from it, so it correctly declines
+  // too for this handle-typed (`spirv.VulkanBuffer`) base pointer,
+  // leaving no pattern that accepts this op -- which correctly fails the
+  // whole conversion with a real, hard "failed to legalize ... explicitly
+  // marked illegal" diagnostic (pipeline creation aborts) rather than
+  // this file's earlier approach, which was discovered (via this
+  // session's own VK-GL-CTS run) to silently keep compiling with a poison
+  // value baked in and only ever printing a diagnostic as a side effect
+  // -- `emitOpError` alone does not fail an op's own conversion, so that
+  // "successfully" produced a real shader that ran to completion with
+  // wrong data, not the intended hard failure.
   if (mlir::isa<mlir::spirv::MatrixType>(SelectedType)) {
     if (!isMatrixMemberLayoutRepresentable(
-            BlockStruct, MatrixDecorationMemberIndex, ElementType)) {
-      Op.emitOpError(
-          "partial access (a row, column, or scalar element) into a "
-          "matrix member whose declared RowMajor/MatrixStride layout is "
-          "not yet supported");
-      Rewriter.replaceOpWithNewOp<mlir::LLVM::PoisonOp>(Op, ResultType);
-      return mlir::success();
-    }
+            BlockStruct, MatrixDecorationMemberIndex, ElementType))
+      return Rewriter.notifyMatchFailure(
+          Op, "partial access (a row, column, or scalar element) into a "
+              "matrix member whose declared RowMajor/MatrixStride layout "
+              "is not yet supported");
   }
 
   llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;

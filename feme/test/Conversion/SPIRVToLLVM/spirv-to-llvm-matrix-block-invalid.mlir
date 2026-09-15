@@ -15,7 +15,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @read_column(%idx : i32) -> vector<4xf32> "None" {
     %0 = spirv.mlir.addressof @ubo : !spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<4xf32>> [0, RowMajor, MatrixStride=16]), Block>, Uniform>
     %c0 = spirv.Constant 0 : i32
-    // expected-error@+1 {{partial access (a row, column, or scalar element) into a matrix member whose declared RowMajor/MatrixStride layout is not yet supported}}
+    // expected-error@+1 {{failed to legalize operation 'spirv.AccessChain' that was explicitly marked illegal}}
     %ac = spirv.AccessChain %0[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<4xf32>> [0, RowMajor, MatrixStride=16]), Block>, Uniform>, i32, i32 -> !spirv.ptr<vector<4xf32>, Uniform>
     %v = spirv.Load "Uniform" %ac : vector<4xf32>
     spirv.ReturnValue %v : vector<4xf32>
@@ -36,7 +36,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @read_column(%idx : i32) -> vector<4xf32> "None" {
     %0 = spirv.mlir.addressof @ubo : !spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<4xf32>> [0, ColMajor, MatrixStride=48]), Block>, Uniform>
     %c0 = spirv.Constant 0 : i32
-    // expected-error@+1 {{partial access (a row, column, or scalar element) into a matrix member whose declared RowMajor/MatrixStride layout is not yet supported}}
+    // expected-error@+1 {{failed to legalize operation 'spirv.AccessChain' that was explicitly marked illegal}}
     %ac = spirv.AccessChain %0[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<4xf32>> [0, ColMajor, MatrixStride=48]), Block>, Uniform>, i32, i32 -> !spirv.ptr<vector<4xf32>, Uniform>
     %v = spirv.Load "Uniform" %ac : vector<4xf32>
     spirv.ReturnValue %v : vector<4xf32>
