@@ -1607,7 +1607,55 @@ to 4 failing cases (5682 -> 5683 passed), exactly the expected 1-case
 improvement, with the remaining 4 confirmed to be precisely H133's own
 already-known nested-struct-reorder bucket, unchanged.
 
-Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
+Roadmap H133: `OffsetStructMemberReorderAccessChainPattern` and
+`rewriteBlockAccess`'s own fallback GEP path each only ever remapped the
+*first* struct-member selector past their own scoping point to its
+physical (post-reordering/padding) index, forwarding every further index
+unchanged -- exactly wrong once a member reached by one of those further
+indices is itself a reordered/padded struct (e.g. a `Block`'s member is
+itself a struct whose own member is itself another struct needing
+interior-gap padding). Fixed by adding `remapNestedStructMemberIndices`,
+which generalizes `getStructMemberPhysicalIndex`'s single-level remap
+(Roadmap H129) to an arbitrary chain depth: it walks an access chain's
+remaining indices against the SPIR-V type tree, remapping every constant
+struct-member selector it finds via the existing single-level helper,
+transparently passing through `ArrayType`/`RuntimeArrayType` levels
+(homogeneous, no remap needed), and stopping at the first matrix/vector/
+scalar leaf. Wired into both patterns' tail GEP-building paths.
+
+Root-causing why one of the four known cases still failed after the
+above alone uncovered a second, distinct, pre-existing bug, unrelated to
+access-chain remapping: `convertOffsetStructTypeIgnoringDecorations`
+converted a struct-typed member via `Converter.convertType`, relying on
+`TypeConverter`'s own type-conversion cache (keyed only on the raw
+SPIR-V type) to return a consistent answer -- but that cache could
+return a stale/incorrect result computed for a *different* calling
+context, since nothing about a struct's own conversion is actually
+context-dependent, only the (buggy) cached value was. Separately,
+`getTightNestedStructType` (the array-or-matrix retry tier's own
+nested-struct substitution, Roadmap H101s) tightened every vector/
+matrix leaf while preserving member count/order verbatim, but never
+reproduced an *interior* gap the nested struct's own declared offsets
+might still need between two now-differently-sized tightened members --
+correct only when the tightened, gap-free layout happens to already
+match those offsets. Fixed both: a struct-typed member is now always
+converted via `convertOffsetStructTypeIgnoringDecorations` directly
+(bypassing the type-converter cache entirely -- safe, since that
+function is a pure function of its own two arguments and cheap to
+recompute given an already-necessary earlier conversion), and
+`getTightNestedStructType` now runs its own `layOutStructIfOffsetsMatch`
+pass (natural layout first, then interior-pad) over its tightened member
+list whenever the nested struct declares offsets, degrading to its
+prior (already-correct) behavior whenever no gap is actually needed.
+New lit test: `spirv-to-llvm-nested-struct-reorder.mlir` (a two-level
+-deep reordered/padded struct member, accessed via a dynamic-column
+matrix selector). `check-feme`: 3048/3051 passed (3 unsupported), 0
+failed, no regressions. VK-GL-CTS: all 4 known H133 cases
+(`all_shared_buffer.47`, `nested_structs_arrays_instance_arrays_
+compute.4`/`.17`, `nested_structs_compute.14`) now pass outright; the
+full `dEQP-VK.ubo.*` sweep (13,240 cases) drops from 4 to 0 failing
+cases (5683 -> 5687 passed).
+
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,
 which `SetMeshOutputsEXTConversionPattern` already converted, nothing

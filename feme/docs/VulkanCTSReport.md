@@ -44526,3 +44526,106 @@ pointer.
 
 H134 is struck through on the roadmap. Only H133 (the 4-case
 nested-struct-reorder gap) now remains of the original H130 bucket.
+
+## Session: H133 -- multi-level nested reordered/padded struct AccessChain gap fixed
+
+**Root cause (part 1: access-chain remap depth).**
+`OffsetStructMemberReorderAccessChainPattern` and `rewriteBlockAccess`'s
+own fallback GEP path each only ever remapped the *first* struct-member
+selector past their own scoping point (`MemberIndexPos`/`Selector`) to
+its physical (post-reordering/padding) index, via
+`getStructMemberPhysicalIndex` -- then forwarded every *further* index
+completely unchanged. Exactly wrong once a member reached by one of
+those further indices is itself a reordered/padded struct: e.g. a
+`Block`'s member is a struct A, itself containing a member that is
+itself struct B, needing its own interior-gap padding -- the selector
+into struct B's own member was never remapped at all.
+
+**Fix (part 1).** Added `remapNestedStructMemberIndices`, generalizing
+`getStructMemberPhysicalIndex`'s single-level remap (Roadmap H129) to an
+arbitrary chain depth: walks an access chain's remaining indices against
+the SPIR-V type tree starting from wherever the caller's own first-level
+remap left off, remapping every constant struct-member selector it finds
+(via the existing single-level helper) at whatever depth it occurs,
+transparently passing through `ArrayType`/`RuntimeArrayType` levels
+(homogeneous, no remap needed regardless of which element is selected),
+and stopping successfully at the first matrix/vector/scalar leaf -- no
+further struct-member selector is possible past that point. Wired into
+both patterns' tail GEP-building paths.
+
+**Root cause (part 2: a second, deeper, pre-existing bug).** Verifying
+the above fix against the four known cases found 3/4 passing outright,
+but the fourth (`nested_structs_arrays_instance_arrays_compute.4`) still
+failed with `'llvm.getelementptr' op index 2 indexing a struct is out of
+bounds` -- the *correct* remapped physical index (5) applied to an
+*incorrectly* laid-out embedded struct type (only 4 fields, no interior
+padding, when the correct standalone conversion of that same struct
+produces 6 fields with two interior padding gaps).
+
+Root-caused via extensive debug instrumentation (a temporary,
+env-var-gated print inside `convertOffsetStructTypeIgnoringDecorations`'s
+own member-conversion loop, later removed) to two independent causes,
+both inside `convertOffsetStructTypeIgnoringDecorations`:
+
+1. A struct-typed member was converted via `Converter.convertType`,
+   which routes through `mlir::TypeConverter`'s own type-conversion
+   cache (keyed only on the raw SPIR-V type, per
+   `TypeConverter::convertTypeImpl`) -- reasonable in general, but this
+   function's own several retry tiers are a pure function of their two
+   arguments (the struct type and the type converter), so relying on
+   a *cached* answer computed for some other calling context is both
+   unnecessary and, in this case, wrong.
+2. `getTightNestedStructType` (used by the array-or-matrix retry tier,
+   Roadmap H101s, to substitute a nested struct member's own body with
+   every vector/matrix inside it tightened) preserved the nested
+   struct's member count and order exactly, tightening only leaf
+   vector/matrix types -- but never checked whether the *tightened*
+   member list still needed an *interior* gap to satisfy the nested
+   struct's own declared offsets (only correct when it happens not to).
+
+**Fix (part 2).** A struct-typed member is now always converted via
+`convertOffsetStructTypeIgnoringDecorations` directly, bypassing
+`Converter.convertType`'s cache entirely (safe: every real caller
+already depends on this exact conversion having succeeded once, for the
+struct's own base pointer). `getTightNestedStructType` now runs its own
+`layOutStructIfOffsetsMatch` pass (natural layout first, then
+interior-pad) over its already-tightened member list whenever the
+nested struct declares offsets, exactly mirroring
+`convertOffsetStructTypeIgnoringDecorations`'s own no-op-when-unneeded
+behavior: a nested struct whose tightened, gap-free layout already
+matches its declared offsets gets back the identical literal struct as
+before this fix.
+
+**Methodology.** Extracted the real failing shader's decompiled SPIR-V
+(`--deqp-log-decompiled-spirv=enable`), reduced it to a minimal
+standalone repro isolating the exact 3-level-deep struct nest and the
+one failing `spirv.AccessChain`, and iterated directly against
+`feme-opt --feme-convert-spirv-to-llvm` -- the same fast loop prior
+sessions established. Root-causing part 2 required careful,
+brace-safe temporary debug instrumentation (a naive insertion before a
+brace-less single-statement `if (... ) return Result;` body silently
+moved the `return` outside the `if`'s own scope, causing a compile
+error -- any future instrumentation of this pattern must wrap the whole
+modified body in explicit braces) comparing a nested struct's
+standalone conversion against its conversion as another struct's
+embedded member.
+
+**New lit test.** `spirv-to-llvm-nested-struct-reorder.mlir`: a
+`Block`/`Uniform` struct whose member is itself a reordered/padded
+struct, accessed via a dynamic-column matrix selector two struct levels
+deep -- verified against real `feme-opt` output (both levels' physical
+indices, 5 and 5, are independently derived from each level's own
+layout, not simply left unchanged).
+
+**Verification.**
+- `ninja check-feme`: **3048/3051 passed** (3 unsupported), 0 failed --
+  net +1 test vs. the H134 baseline (3047/3050), from the new lit test;
+  0 regressions.
+- VK-GL-CTS: re-ran all four known H133 cases standalone -- all **pass
+  outright** ("Full white image ok"). Re-ran the full `dEQP-VK.ubo.*`
+  sweep (13,240 cases): **5687 passed / 0 failed** (was 5683 passed / 4
+  failed) -- exactly the expected 4-case improvement, 0 regressions.
+
+H133 is struck through on the roadmap. The `dEQP-VK.ubo.*` sweep now
+passes 100% (0 failing cases) for the first time this project has
+measured it.
