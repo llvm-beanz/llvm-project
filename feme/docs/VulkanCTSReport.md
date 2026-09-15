@@ -43234,3 +43234,79 @@ fix -- no further code change was required to close it.
 **Feature/extension bits.** No change: no code was modified this
 session. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed, confirmed unaffected.
+
+## `check-hlsl-feme-vk`: first run, failure triage, and H123's fix
+
+**Context.** `offload-test-suite`'s `feme` branch (already checked out at
+`/home/dev/dev/offload-test-suite`, commit `d578a2a`) wires up a
+`check-hlsl-feme-vk` target testing FeMe against the `hlsl-tests`
+(`OffloadTest`) suite, gated on `feme_vulkan` and `build2`'s own
+`LLVM_EXTERNAL_PROJECTS=OffloadTest` configuration. This target had never
+been built or run in any session on record before this one.
+
+**First run.** `ninja check-hlsl-feme-vk` (env vars handled automatically
+by the CMake wiring) built and ran end-to-end for the first time, out of
+664 total discovered tests:
+
+| Status | Count | % |
+|---|---|---|
+| Passed | 274 | 41.27% |
+| Failed | 103 | 15.51% |
+| Unsupported | 260 | 39.16% |
+| Expectedly Failed (XFAIL) | 26 | 3.92% |
+| Unexpectedly Passed (XPASS) | 1 | 0.15% |
+
+A full verbose log (`llvm-lit -v`, `VK_DRIVER_FILES`/`VK_ICD_FILENAMES`
+pointed at a freshly rebuilt `libfeme_vulkan.so`'s ICD manifest) was
+captured for offline triage.
+
+**Failure triage.** Grouping the 103 failures' own error signatures (not
+by test directory, since the same root cause spans several) found the
+buckets filed as roadmap H124a-H124g: a vector-typed `GroupNonUniform*`
+SPIR-V-to-LLVM legalization gap (largest, ~26 cases, almost all of
+`WaveOps/*`); a `CBuffer`/`Matrix`-layout `spirv.AccessChain` legalization
+gap (~10 cases); missing fp16 vector resource-load runtime intrinsics;
+an unhandled SPIR-V/graphics opcode 209 (derivative-family, `fwidth`/
+`ddx`/`ddy` cluster, ~7 cases); a cluster of `feme-cpu-simdize`/
+`feme-cpu-linearize`/`feme-cpu-wrap-entry` divergence-handling gaps (~11
+cases, each a distinct diagnostic); scalar-only HLSL-intrinsic-to-GLSL-
+extension legalization gaps (`Normalize`/`Length`/`IsNan`/`IsInf` on
+vectors, 8 cases); and one bug fixed this session (H123, below). See
+`Roadmap.md`'s H124/H124a-H124g rows for the full breakdown and per-bucket
+file pointers.
+
+**H123's fix (closed this session).** `Feature/DynamicResources/dyn-res-
+texture-sampler.test` failed with `"error: redefinition of symbol named
+'SamplerDescriptorHeap.str'"` at compute-pipeline creation. Root cause:
+DXC emits two separate `OpVariable`s for the same bindless
+`SamplerDescriptorHeap` binding when a shader indexes it through more
+than one distinct expression (confirmed via `spirv-dis`:
+`%SamplerDescriptorHeap`/`%SamplerDescriptorHeap_0`, both `OpName`d
+`"SamplerDescriptorHeap"`, both `DescriptorSet 0`/`Binding 3`). MLIR's
+SPIR-V deserializer does not de-duplicate these, so
+`prepareResourceVariables` (`SPIRVToLLVMPatterns.cpp`) saw two
+`spirv.GlobalVariableOp`s sharing one `sym_name`; its own uniquing check
+(`Table.lookup`, a `mlir::SymbolTable` snapshotted once before the loop
+starts) could never see the first `<name>.str` LLVM global the loop
+itself had just created, so the second one silently collided with it.
+Fixed by tracking each `(DescriptorSet, Binding)` pair's already-created
+name-global and reusing it for later duplicates instead of trying to
+define a second, colliding one. New unit test:
+`SPIRVToLLVMTest.PrepareResourceVariablesDedupesDuplicateHeapGlobals`
+(builds the exact duplicate-`OpVariable` shape via `OpBuilder`, bypassing
+the parser's own symbol-uniqueness verifier, mirroring how the real
+deserializer produces it).
+
+**Verification.**
+- `ninja check-feme`: **3020/3023 passed, 3 unsupported, 0 failed**
+  (unaffected by this fix).
+- `FeMeConversionSPIRVToLLVMTests`: all 22 tests pass (21 pre-existing +
+  1 new).
+- `check-hlsl-feme-vk` re-run: **275 passed, 102 failed, 260 unsupported,
+  26 XFAIL, 1 XPASS** (of 664) -- exactly the one target test moved from
+  fail to pass, no regressions elsewhere.
+
+**Feature/extension bits.** No change: this fix is a SPIR-V-to-LLVM
+conversion bug fix, not a feature/extension gate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
