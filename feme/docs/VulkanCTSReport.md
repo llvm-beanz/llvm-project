@@ -43085,3 +43085,117 @@ had a real `TessOutputPrimitive::Line` in practice before this fix), not
 a new feature or extension surface.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
 confirmed unaffected.
+
+## H117/H118: root cause and fix (`spirv_var_43`/`spirv_var_31` JIT symbol errors, block-array vs. per-invocation-array disambiguation)
+
+**Symptom.** `dEQP-VK.tessellation.user_defined_io.per_patch_block_array.*`
+(H117, 9 cases) and `.per_vertex_block.*` (H118, 9 cases) failed pipeline
+creation with `"JIT session error: Symbols not found: [ spirv_var_43 ]"`
+and `"[ spirv_var_31 ]"` respectively -- confirmed, across several prior
+sessions, to reproduce unchanged after both H115's `collectDynamicRowTerms`
+fix and H120's `Linearize` dominance fix, meaning neither shape was
+actually covered by either of those fixes as originally assumed.
+
+**Root cause (H117).** `isDynamicIndexedArrayGlobal` treated *any*
+`ArrayType`-shaped stage-IO global (address space 7 or 8) as a genuine
+dynamically-indexed per-vertex array, with no awareness of GLSL's `patch`
+qualifier. `per_patch_block_array`'s own shape is glslang's "array of
+block instances" syntax for a `patch`-qualified block (e.g.
+`patch out TheBlock {...} tcBlock[2];`) -- a *static* array of
+independently-captured patch instances, never a per-vertex/per-invocation
+dynamic index. Wrongly claiming it here threaded the block-array's own
+instance index through as a bogus `Vertex` operand, leaving the block's
+real backing global still `external`/unresolved at JIT-link time.
+
+**Root cause (H118).** `per_vertex_block`'s own shape (a Hull entry's
+per-invocation `Output` interface block, indexed by `gl_InvocationID`,
+never `Patch`-decorated) is the structurally-similar *dynamic*
+counterpart to H117's static case. Fixing H117 made this shape reach
+`addElements`' `TakeBlockPath` construction logic for the first time,
+exposing two further, distinct bugs there:
+1. An initial fix attempt set `PeekedBlockTy = nullptr` to skip
+   `TakeBlockPath`'s per-member decomposition for this shape (trying to
+   avoid folding the per-invocation array into `RowCount`), which also
+   disabled the per-real-struct-member `ElementID` decomposition any
+   genuine multi-member nested struct needs -- silently collapsing every
+   member onto one shared, wrongly-typed shadow-alloca slot, and tripping
+   `PromoteMemToReg`'s `isAllocaPromotable` assertion (a `ShadowValueMap`
+   key collision: its `(ElementID, Row, Component)` key has no room for
+   the value's own LLVM type).
+2. The corrected fix -- always running `TakeBlockPath`'s per-member
+   decomposition, but conditionally folding the outer array into
+   `BlockArrayCount` (widening each member's own storage) versus leaving
+   it a dynamically-indexed `Vertex` operand -- initially used too broad
+   a heuristic (folding for any non-Mesh, non-Hull-non-`Patch`
+   address-space-8 array). This wrongly started folding a genuine,
+   non-`Patch`, *multi-member* XFB "array of block instances" too (a
+   shape previously left unfolded, routed instead through a separate,
+   single-member-only `XfbBufferArrayStride` mechanism), corrupting
+   `StageStorage`'s heap allocation for that unrelated shape.
+
+**Discovering the XFB regression.** A broader post-fix regression sweep
+(`dEQP-VK.transform_feedback.fuzz.*`) crashed with `"corrupted size vs.
+prev_size while consolidating"` on
+`random_geometry.all_instance_array.12`. A `valgrind` run pinpointed an
+out-of-bounds write in `feme::graphics::buildStageStorage`'s own
+allocation, from `executeDraws`. Narrowing the `BlockArrayCount`
+fold condition (both at `addElements`' construction site and the
+corresponding access-side `resolveOffsetWithinElement`) to apply *only*
+when the block's own members are genuinely `Patch`-decorated (checked via
+`feme.spirv.MemberDecorations`) restored the pre-existing (unfolded)
+behavior for this shape and eliminated the corrupting write.
+
+A separate crash on `all_instance_array.16` during the same full-suite
+run turned out to be a red herring: run in isolation, `.16` reports
+`NotSupported` (insufficient `maxGeometryOutputComponents`) with no
+crash at all -- the earlier abort was `.12`'s own corruption manifesting
+on a later, unrelated allocation. Once `.12`'s underlying write was
+fixed, a `git stash`-isolated `valgrind` comparison confirmed
+`.12` itself still shows the *exact same* 91 invalid-read/write errors on
+the **unmodified baseline** (`git stash`, no session changes at all) --
+i.e. this heap corruption is a **pre-existing, unrelated bug**, not a
+regression from this session's fix (the fix only avoided introducing a
+*second*, distinct corruption of the same general kind by touching this
+shape's construction logic for the first time). Left as a known,
+separate, out-of-scope issue for a future session.
+
+**Verification.**
+- New unit test
+  `CanonicalizeStageTest.ThreadsInvocationIndexIntoMultiMemberHullPerInvocationOutputBlock`:
+  a Hull-stage, non-`Patch`, genuine multi-member per-invocation output
+  block (mirroring `per_vertex_block`'s own shape) asserts both members
+  decompose into their own `SignatureElement` (`TakeBlockPath` ran) with
+  `RowCount == 1` (the per-invocation array is *not* folded), and the
+  invocation index threads through as each store's own `Vertex` operand.
+- `FeMeTransformsGraphicsTests`: all 93 tests pass (92 pre-existing + the
+  1 new test above), including the full set of previously-existing
+  `MapsArrayOfBlockInstancesWithSimpleMemberToXfbBufferArrayStride`/
+  `FoldsMemberOffsetIntoXfbOffsetForArrayOfBlockInstances`/etc. XFB
+  regression tests -- confirming the narrowed `Patch`-only fold condition
+  does not disturb any previously-passing shape.
+- `ninja check-feme`: **3020/3023 passed, 3 unsupported, 0 failed** (up
+  from 3019/3022 -- the +1 new test, no regressions).
+- Real CTS re-run (`VK_ICD_FILENAMES` pointed at a freshly rebuilt
+  `libfeme_vulkan.so`):
+  - `dEQP-VK.tessellation.user_defined_io.per_patch_block_array.*`
+    (H117): **9/9 pass** (from 0/9, JIT-link crash).
+  - `dEQP-VK.tessellation.user_defined_io.per_vertex_block.*` (H118):
+    **9/9 pass** (from 0/9, JIT-link crash).
+  - `dEQP-VK.tessellation.user_defined_io.*` (all 54 cases): **54/54
+    pass** -- this closes the last two open rows in the whole
+    `user_defined_io` matrix (H114's original 54-case scope: H115/H119/
+    H120/H121/H122/H117/H118 all now closed; only H116, untriaged,
+    remains).
+  - `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_array.12`:
+    still fails (`Mismatch at offset 72...`, a pre-existing, separate
+    correctness gap) but **no longer crashes** with this session's fix in
+    place, and is confirmed (via the baseline comparison above) to have
+    crashed with the same probability/pattern before this session's
+    changes too, once triggered directly -- not a regression.
+
+**Feature/extension bits.** No change: this is an internal
+signature-construction correctness fix (disambiguating a static
+`Patch`-qualified "array of block instances" from a dynamic
+per-vertex/per-invocation array), not a new feature or extension surface.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
