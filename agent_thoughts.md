@@ -83892,3 +83892,95 @@ investigated further.
    `executeDraws` allocating a too-small buffer.
 7. Cleanup: `/tmp/h125_repro/`, `/tmp/h125_test*.ll` (this session's own
    scratch files, not part of the repo).
+
+# H126 fixed: WavePrefixSum/WavePrefixProduct si32 legalization gap
+
+**Fixed. `WavePrefixSum.convergence.test`/`WavePrefixProduct.convergence.test` now pass.** `check-hlsl-feme-vk`: 291/664 passed (was 289).
+
+## What was wrong
+
+`GroupNonUniformReducePattern` (added by H124a, in `feme/lib/Conversion/
+SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) only matches `GroupOperation::Reduce`,
+deliberately falling back to upstream MLIR's own `GroupReducePattern` for
+`InclusiveScan`/`ExclusiveScan`/`ClusteredReduce` -- H124a's own comment
+claimed upstream "already handles every group operation correctly." That
+turned out wrong for `ExclusiveScan`: upstream's pattern builds its
+`llvm.call` using `op.getResult().getType()` **raw**, never running it
+through the real `TypeConverter`. A SPIR-V `si32`/`ui32` result type
+(HLSL's `WavePrefixSum`/`WavePrefixProduct` lower to `spirv.
+GroupNonUniformIAdd`/`IMul <ExclusiveScan>`) reaches the LLVM dialect
+completely unconverted, which is rejected outright (only signless `i32`
+is a valid LLVM dialect type) -- the exact same signedness bug
+`GroupNonUniformReducePattern` had already fixed for `Reduce`, just never
+extended to its scan sibling.
+
+## The fix
+
+Added `GroupNonUniformScanPattern<ScanOp>`, mirroring
+`GroupNonUniformReducePattern`'s own structure but matching
+`GroupOperation::ExclusiveScan`, registered at `FeMeBenefit` for the four
+op families with a matching CPU-backend intrinsic: `IAdd`/`FAdd` ->
+`llvm.spv.wave.prefix.sum`, `IMul`/`FMul` -> `llvm.spv.wave.prefix.
+product`. Both intrinsics, and the rest of the CPU divergence pipeline's
+support for them (`classifyWaveCall`, `isArithmeticReduceOrPrefixKind`,
+`lowerPrefixReduce`), already existed from earlier work -- this was
+purely a legalization-layer gap. `InclusiveScan`/`ClusteredReduce` remain
+unreached by any HLSL intrinsic and are left to upstream's pattern
+unchanged.
+
+## Verification
+
+1. Direct IR trace (`feme-translate --import-spirv`/`--spirv-to-llvmir`
+   on a minimal `switch`-gated `WavePrefixSum` repro): `si32` error gone,
+   real `llvm.spv.wave.prefix.sum` call appears, passes cleanly through
+   `feme-cpu-linearize`/`feme-cpu-simdize`.
+2. `ninja check-feme`: 3029/3032 passed, 0 failed -- unchanged before/after.
+3. `check-hlsl-feme-vk`: 291 passed/86 failed (was 289/88) -- both
+   `WavePrefixSum.convergence.test`/`WavePrefixProduct.convergence.test`
+   now pass, no regressions.
+4. `dEQP-VK.subgroups.arithmetic.*` (12087 cases): still 100%
+   NotSupported, unchanged (device doesn't advertise the feature bit).
+
+## Commits (3, in order)
+
+1. `[feme] Fix H126: WavePrefixSum/WavePrefixProduct si32 legalization gap` -- the fix + 1 new lit test (5 sub-cases).
+2. `[feme] Close H126 on roadmap, file H127 for vector prefix-scan gap` -- roadmap/CTS report updates.
+3. This file.
+
+## New roadmap row filed
+
+**H127** (not fixed this session, found while verifying H126):
+`WavePrefixSum.32.test`/`WavePrefixProduct.32.test` (vector-operand,
+`int4`/`uint4`/`float4`) still fail with a distinct `feme-cpu-simdize`
+diagnostic: "component decomposition is not yet supported" for a
+divergent vector value. `isVectorOperandReduceKind` (`SIMDize.cpp`,
+H124a) only covers the nine uniform `WaveActive*` reduce kinds --
+`WavePrefixSum`/`WavePrefixProduct` are genuinely per-lane-divergent
+(each lane's prefix differs), so naively adding them to that table would
+be unsound without teaching the decomposition path to handle a
+per-lane-varying result. Needs real design work, not a one-line fix.
+
+## Suggested next steps, ranked
+
+1. **H127** (~1-2 hours, real design work, newly filed this session):
+   vector-operand `WavePrefixSum`/`WavePrefixProduct` component-
+   decomposition gap above. Start by reading `widenWaveCall`'s own
+   vector-decomposition branch in `SIMDize.cpp` (~line 1769) to see
+   exactly what it assumes about uniformity, and how `WaveReadLaneAt`'s
+   own divergent-result handling (if any) differs -- that may be the
+   closer existing precedent to generalize from, not
+   `isVectorOperandReduceKind`'s own uniform-only table.
+2. **H124b** (~1-2 hours, still not started across many sessions):
+   `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
+3. **H124d** (~1 hour, still not started): `"unhandled opcode 209"`
+   (derivative family, `fwidth`/`ddx`/`ddy`), ~7 cases.
+4. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
+   legalization gaps, 8 cases.
+5. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
+   resource-load runtime intrinsics, ~2 cases.
+6. Lower priority, deferred 5+ sessions now: `transform_feedback.fuzz.
+   random_geometry.all_instance_array.12`'s pre-existing heap corruption
+   -- `valgrind`'s own trace already points at `buildStageStorage`/
+   `executeDraws` allocating a too-small buffer.
+7. Cleanup: `/tmp/h126_repro/` (this session's own scratch files, not
+   part of the repo).
