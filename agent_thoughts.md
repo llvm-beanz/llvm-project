@@ -82971,3 +82971,100 @@ pick this up:
 5. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
    built/run in any session on record (now well over a dozen sessions
    deferring it) -- worth a dedicated session.
+
+# H120 session: root-causing and fixing the Linearize `CycleBoundaryMasks` overwrite
+
+## Done this session
+
+1. Fixed **H120** (the `InstCombine` dominance crash blocking H115/H117/H118's
+   full closure). Committed in 3 steps: fix (`8367db8`), regression test
+   (`3b400db`), docs (`aa3655e`).
+2. Root cause: `Linearize.cpp`'s `DiamondFlattener::flatten` recorded
+   `CycleBoundaryMasks[Cur] = Masks` unconditionally at a cycle's own
+   boundary check. A block that is *both* an outer diamond's own two-arm
+   merge point *and* its own separate cycle's boundary could get this
+   recording overwritten by a second, later, independent walk (starting from
+   a *different*, nested cycle's own exit root) that only threads through
+   one arm. Fix: `try_emplace` (first recording wins) -- 1 line, well-tested.
+3. Verified thoroughly:
+   - 0 `InstCombine` dominance violations in all 5 real per-stage IR dumps
+     (was 1/4/10).
+   - Real CTS: 0 crashes across the 27 H115/H117/H118 cases (was 27/27
+     crashing).
+   - `check-feme`: 3017/3020 passed (unchanged baseline).
+   - New unit test verified to actually catch the bug (fails pre-fix,
+     passes post-fix) -- took 3 attempts to build a synthetic repro that
+     actually exercised the overwrite path (see "what didn't work" below).
+
+## What didn't work (don't repeat)
+
+- **Attempt 1**: outer uniform diamond + nested loop, reconverging at a
+  block that branches back to itself. Never even hit the recording code
+  path at all -- `run()`'s `HasDivergentBranch` gate short-circuits the
+  whole pass when the only divergent branch in the function is itself a
+  loop's own control edge (explicitly excluded). Needed a *genuine*,
+  unrelated divergent diamond elsewhere in the function just to get
+  `run()` to do anything.
+- **Attempt 2**: same shape, with the divergent diamond added. Now the
+  double-recording *did* happen (confirmed via temporary debug tracing:
+  `record CBM[merge]` printed twice), but both recordings held the *same*
+  mask value (uniform control flow alone never narrows masks -- only
+  `feme.stage.discard`/`.demote` does), so no dominance violation resulted
+  and the test spuriously passed even with the bug present.
+- **Attempt 3 (the one that worked)**: added `feme.stage.demote` in the
+  arm containing the nested loop, so that arm's mask genuinely differs
+  from the other arm's. This made the two recordings differ, producing a
+  real, observable dominance violation. Confirmed by temporarily reverting
+  the fix and re-running: the test fails the exact same way
+  (`verifyModule`'s "Instruction does not dominate all uses!").
+- **Lesson for next time**: when building a synthetic repro for a masking
+  bug in this pass, always (a) confirm `HasDivergentBranch` will be true
+  for reasons unrelated to the bug you're chasing, and (b) add a genuine
+  `discard`/`demote` narrowing so two structurally-different mask
+  computations actually produce different values instead of coincidentally
+  matching.
+
+## Corrected a stale assumption from last session
+
+H117/H118 were filed last session as "same root cause and fix as H115" and
+assumed to be blocked only by H120. Re-running their real CTS cases after
+both H115's and H120's fixes: **they still fail with their original
+`"JIT session error: Symbols not found: [ spirv_var_43/31 ]"`**, unchanged.
+H115's `collectDynamicRowTerms` fix did not actually cover these two
+sibling shapes. Updated `Roadmap.md` to stop treating them as
+closed-by-proxy -- they need their own fresh IR-reduction session.
+
+## Not done this session
+
+- H116 (`per_patch_array`, "Invalid input value") -- not touched.
+- H119 (isolines image-comparison failures) -- not touched.
+- `getDynamicVertexIndexedAccess`'s sibling bug -- not touched.
+- `offload-test-suite`'s `check-hlsl-feme-vk` target -- still never
+  built/run in any session on record.
+- A `dEQP-VK.tessellation.*` broad sweep was started as a regression sanity
+  check but time-boxed/stopped before full completion (no new crashes seen
+  in what did run -- only pre-existing, already-catalogued failure shapes).
+
+## Next steps
+
+1. **H121** (~30-60 min, not yet triaged): `per_patch_block`'s own 9 cases
+   now run to completion but fail at `vk.queueSubmit(...):
+   VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338`. Start with a
+   validation-layer message or `gdb` backtrace through `feme-vulkan`'s own
+   `vkQueueSubmit` entry point.
+2. **H117/H118** (~1-2 hours, real IR-reduction needed): re-run the same
+   `feme-translate --import-spirv`/`feme-opt -passes=feme-graphics-
+   canonicalize-stage` technique H115 used, but on `per_patch_block_array`/
+   `per_vertex_block`'s own real SPIR-V, since H115's fix does not cover
+   whatever their own `spirv_var_43`/`spirv_var_31` shape actually is.
+3. **H116** (~45-60 min): `per_patch_array.*`, "Invalid input value" --
+   different error class, still not triaged at all.
+4. **H119** (~45-60 min): isolines-only image comparison failures (6
+   cases) -- use H88's own channel-level pixel-reduction technique.
+5. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+   built/run in any session on record (well over a dozen sessions
+   deferring it now) -- worth a dedicated session of its own.
+6. Clean up `/tmp/h120_*` scratch files (low priority, not part of the
+   repo) -- `/tmp/h120_preopt/pre_opt_2_1_main.ll` specifically is worth
+   keeping a copy of if further Linearize/SIMDize work is anticipated,
+   since it's a proven, real, minimal (1-violation) reproducer.
