@@ -43,26 +43,33 @@ consult the i-have-adhd skill (from ~/.agents/skills) when writing the
 agent_thoughts.md file. Please include suggested next steps if applicable in the
 agent thoughts.
 
+**Before doing anything else**: `vulkaninfo --summary | grep deviceName` and
+confirm `FeMe CPU Vulkan Device`. Every session from now on, every time, not
+just once at the start.
+
 # Request
 
 Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Triage `check-hlsl-feme-vk`'s 11 stable failures** (~1-2 hours):
-   `HLSLLib/*.32.test` transcendental-function precision (8 cases,
-   likely all one root cause — pick one, reduce it) and
-   `InlineRT/*.test` ray tracing (3 cases, likely one shared root
-   cause too). Neither was investigated this session — new territory.
-2. **H124e** (~several sessions, carried over untouched for a while
-   now): `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
-   divergence-handling gaps, ~11 of the original 102
-   `check-hlsl-feme-vk` failures across 5+ distinct root causes — needs
-   per-case triage first, don't assume one fix covers all.
-3. **H124d** (large, deprioritized, unchanged for many sessions): new
-   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` —
-   skip unless someone specifically wants the upstream-MLIR piece.
-4. Lower priority, deferred 14+ sessions now:
-   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
-   pre-existing heap corruption — `valgrind`'s own trace points at
-   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+2. **H124j** (~1-2 hours): missing GLSL.std.450 legalization for
+   `Cross`/`Reflect`/`Distance`/`FindUMsb`/`FindILsb` (5 cases). Same
+   shape as H124f's already-fixed `Normalize`/`Length`/`IsNan`/`IsInf`
+   — look at that fix first, likely directly extensible.
+3. **H124l** (~1-2 hours): `GroupNonUniformQuadSwap` has no
+   legalization pattern (6 cases, all `WaveOps/QuadReadAcross*`).
+4. **H124o** (~1-2 hours): push-constant struct GEP out-of-bounds (2
+   cases) — check whether it's the same declared-vs-physical
+   member-index remap H128/H129/H131/H133 already fixed for UBO/SSBO.
+5. **H124g's untriaged ~18 cases**: needs `FEME_VULKAN_LOG_CREATION_ERRORS=1`-
+   style fresh triage, especially the 7 `Textures/*` pipeline-creation
+   failures (no specific opcode/error captured yet) and the two
+   `VK_ERROR_VALIDATION_FAILED_EXT` device-creation failures (need
+   `-validation-layer`'s actual message, not just the VkResult code).
+6. **H124d/H124e** (large, unchanged for many sessions, confirmed still
+   real): upstream MLIR SPIR-V derivative ops and CPU
+   divergence-handling gaps, respectively. Still deprioritized/multi-
+   session efforts.
+7. Lower priority, deferred 15+ sessions: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s heap corruption.
