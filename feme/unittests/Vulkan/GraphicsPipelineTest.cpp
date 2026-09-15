@@ -184,6 +184,33 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
 }
 )mlir";
 
+/// (Roadmap H119) `TessEvalSource`'s sibling, declaring an `Isolines`
+/// domain alongside a `VertexOrderCcw` execution mode -- the real shape a
+/// GLSL compiler (glslang, confirmed via a hand-compiled `layout(isolines)
+/// in;` reproducer) always emits for a tessellation-evaluation entry
+/// point, even though vertex order is only meaningful for a `Triangles`/
+/// `Quads` domain. Used to confirm the isoline domain's own output
+/// primitive resolves to `Line`, not `TriangleCcw`, regardless of this
+/// spurious vertex-order mode.
+constexpr llvm::StringLiteral TessEvalIsolineWithVertexOrderSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @patch_in {location = 0 : i32, patch} : !spirv.ptr<f32, Input>
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %inp = spirv.mlir.addressof @patch_in : !spirv.ptr<f32, Input>
+    %f = spirv.Load "Input" %inp : f32
+    %v = spirv.CompositeConstruct %f, %f, %f, %f : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %v : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationEvaluation" @main, @patch_in, @out_pos
+  spirv.ExecutionMode @main "Isolines"
+  spirv.ExecutionMode @main "SpacingEqual"
+  spirv.ExecutionMode @main "VertexOrderCcw"
+}
+)mlir";
+
 /// (Roadmap L77) `TessControlSource`'s sibling, declaring the full
 /// domain-shape execution-mode group (`Triangles`/`SpacingEqual`/
 /// `VertexOrderCw`) alongside its own `OutputVertices` -- the real DXC
@@ -2863,6 +2890,49 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationStages) {
             feme::graphics::TessPartitioning::FractionalOdd);
   EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
             feme::graphics::TessOutputPrimitive::TriangleCcw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap H119) An `Isolines`-domain tessellation-evaluation entry that
+/// also declares `VertexOrderCcw` (`TessEvalIsolineWithVertexOrderSource`,
+/// the real shape glslang always emits) must still merge an
+/// `OutputPrimitive` of `Line`, not `TriangleCcw`. Before this row's own
+/// fix, `ConvertSPIRVToLLVMPass`'s entry-point-attribute collection wrote
+/// `VertexOrderCcw` straight into the same field the isoline-domain
+/// default fixup only applied when unset, so a spurious (but ubiquitous
+/// in practice) vertex-order mode silently overrode the isoline domain's
+/// own always-`Line` output primitive -- the tessellator's own
+/// `tessellateIsoline` (`Tessellator.cpp`) only emits line-segment indices
+/// when `OutputPrimitive == Line`, so this produced patches with points
+/// but no connecting indices at all: a real, rendered-but-invisible
+/// (fully culled) primitive, confirmed against several real
+/// `dEQP-VK.tessellation.user_defined_io.*.isolines` CTS cases whose
+/// entire framebuffer stayed background-colored.
+TEST_F(GraphicsPipelineTest, IsolineDomainOutputsLineDespiteVertexOrderMode) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalIsolineWithVertexOrderSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasTessellationStages());
+  EXPECT_EQ(Executor.getTessellationState().Domain,
+            feme::graphics::TessellatorDomain::Isoline);
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::Line);
 
   vkDestroyPipeline(Device, Handle, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
