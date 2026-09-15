@@ -49,19 +49,34 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Triage the `dEQP-VK.ubo.*` failure bucket** (~2-4 hours, spans
-   several sessions of "still untriaged" now): 1995 failing cases, no
-   crashes. Also worth quickly confirming the 1995-vs-1915 delta isn't
-   itself a real regression before assuming it's flakiness — diff this
-   session's `ubo_full_h124b_regcheck.qpa` case-by-case against a fresh
-   re-run on the same build to check for nondeterminism first.
-2. **H124f** (~1 hour, still not started across many sessions):
-   scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector legalization gaps,
-   8 cases.
-3. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
-   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, its own multi-session
-   effort — skip unless someone wants the upstream-MLIR piece specifically.
-4. Lower priority, deferred 8+ sessions now:
-   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
-   pre-existing heap corruption — `valgrind`'s own trace already points at
+1. **H129** (~1-2 hours, real investigation, newly filed this session):
+   representable-layout matrix dynamic row/column/scalar-element
+   `AccessChain` gap, 418 cases — see this session's own H128 entry
+   above for the starting point (`rewriteBlockAccess` in
+   `SPIRVToLLVMPatterns.cpp`). Highest priority: same file/area as this
+   session's own fix, momentum carries over, and it's the next-biggest
+   `dEQP-VK.ubo.*` bucket by far.
+2. **H130** (~2-4 hours, needs fresh triage, newly filed this session):
+   the four smaller untriaged `dEQP-VK.ubo.*` buckets (76/34/30/16
+   cases) — re-run `FEME_VULKAN_LOG_CREATION_ERRORS=1` triage fresh
+   after H129 lands, since bucket counts may shift.
+3. **H124f** (~2-4+ hours, larger than previously scoped — checked this
+   session): `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/
+   `spirv.IsInf` on vector operands have **no legalization pattern at
+   all** in this tree (grepped both `feme/lib/Conversion/SPIRVToLLVM/`
+   and upstream `mlir/lib/Conversion/SPIRVToLLVM/` — nothing handles
+   these ops, scalar or vector). This is not a "vector variant of an
+   existing scalar pattern is missing" fix like H124a/H126/H127 turned
+   out to be; it needs new patterns written from scratch for all four
+   ops (scalar forms too, if those are even currently reached some
+   other way — not confirmed). Re-scope before starting: check whether
+   scalar `IsNan`/`IsInf` actually pass today via some other path, or
+   whether this is a bigger gap than the roadmap row currently implies.
+4. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
+   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, still its own
+   multi-session effort — skip unless someone wants the upstream-MLIR
+   piece specifically.
+5. Lower priority, deferred 9+ sessions now: `transform_feedback.fuzz.
+   random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace already points at
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
