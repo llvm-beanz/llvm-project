@@ -1626,6 +1626,17 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
 /// spirv_varN ]"` failure once the leftover raw load/GEP reached
 /// `feme::cpu`'s JIT with no real definition for the SPIR-V-derived global
 /// it still referenced.
+///
+/// (Roadmap H117/H118) Forward-declared here so this struct's own
+/// `getDynamicVertexIndexedAccess` (defined immediately below) can
+/// delegate to it directly, rather than duplicating its recursive
+/// struct/array-walking logic -- see `collectDynamicRowTerms`'s own
+/// definition further below for the full recursion.
+std::optional<uint32_t>
+collectDynamicRowTerms(Type *Ty, User::op_iterator &It, User::op_iterator End,
+                       uint32_t &IDStart,
+                       SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms);
+
 struct DynamicVertexIndexedAccess {
   GlobalVariable *GV;
   Value *VertexIndex;
@@ -1640,6 +1651,19 @@ struct DynamicVertexIndexedAccess {
   // input with nothing but its one row-indexed array), matching the
   // implicit assumption every caller made before this field existed.
   unsigned Member = 0;
+  // (Roadmap H117/H118) One (index, multiplier) pair per dynamic index
+  // found among the indices *following* a genuine multi-member nested
+  // struct member select within this per-vertex instance (e.g.
+  // `blockSa[gl_InvocationID].blockSa[j].x`, `getDynamicVertexIndexedAccess`'s
+  // own per-vertex-array counterpart of `DynamicRowIndexedAccess::Terms`
+  // above) -- populated instead of (never alongside) \p RowIndex, by
+  // delegating to the same `collectDynamicRowTerms` this struct's sibling
+  // uses, whenever a non-constant index is found anywhere in the
+  // remaining index walk (`RowIndex`'s own single-terminal-index
+  // restriction cannot represent one more constant member-select after
+  // it). Empty for every other shape, including the plain
+  // single-non-constant-terminal-index one `RowIndex` already covers.
+  SmallVector<std::pair<Value *, uint64_t>, 2> RowTerms;
 };
 
 /// Returns `std::nullopt` if \p Ptr is not this exact shape.
@@ -1670,6 +1694,30 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
   bool ConstantVertexIndex = isa<Constant>(VertexIndex);
 
   Type *CurTy = ArrTy->getElementType();
+
+  // (Roadmap H117/H118) Try the same generic recursive resolver
+  // `getDynamicRowIndexedAccess` uses first, on a *copy* of the iterator
+  // so the ordinary walk below still runs unmodified if this finds no
+  // dynamic index at all (a fully constant remainder, e.g. `gl_Position.x`,
+  // still needs that walk's own vector-lane-select support this recursion
+  // does not have -- see `collectDynamicRowTerms`'s own comment). Only
+  // used when it finds at least one non-constant index (`Terms` non-empty)
+  // -- e.g. `blockSa[gl_InvocationID].blockSa[j].x`, a genuine multi-member
+  // nested struct's own array dimension indexed dynamically *and* followed
+  // by one more constant member-select, a shape the walk below cannot
+  // represent at all (its own `RowIndex` must be the very last index).
+  {
+    auto ProbeIt = IdxIt;
+    ++ProbeIt;
+    uint32_t IDStart = 0;
+    SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
+    std::optional<uint32_t> RowCount =
+        collectDynamicRowTerms(CurTy, ProbeIt, GEP->idx_end(), IDStart, Terms);
+    if (RowCount && !Terms.empty())
+      return DynamicVertexIndexedAccess{GV, VertexIndex, 0, nullptr,
+                                        IDStart, std::move(Terms)};
+  }
+
   uint64_t ByteOffset = 0;
   unsigned Member = 0;
   Value *RowIndex = nullptr;
@@ -1741,7 +1789,7 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
   if (ConstantVertexIndex && !RowIndex)
     return std::nullopt;
   return DynamicVertexIndexedAccess{GV, VertexIndex, ByteOffset, RowIndex,
-                                    Member};
+                                    Member, {}};
 }
 
 /// (Roadmap H7w) `gl_ClipDistance`/`gl_CullDistance` (or any other
@@ -2903,7 +2951,8 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
 std::optional<StageIOAccess>
 resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
                            uint64_t ByteOffset, Type *ValueTy,
-                           const DataLayout &DL, bool IsOutput, Value *Vertex) {
+                           const DataLayout &DL, bool IsOutput, Value *Vertex,
+                           bool AllowBlockArrayInstanceFold = false) {
   LLVMContext &Ctx = ElemTy->getContext();
   auto AsConstant = [&](uint64_t V) -> Value * {
     return V ? ConstantInt::get(Type::getInt32Ty(Ctx), V) : nullptr;
@@ -2917,13 +2966,64 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   }
 
   auto *ST = dyn_cast<StructType>(ElemTy);
-  if (!ST)
-    return std::nullopt;
-  if (ValueTy == ST)
-    return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
+  uint64_t InstanceResidual = ByteOffset;
+  uint64_t BlockInstance = 0;
+  if (ST) {
+    if (ValueTy == ST)
+      return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
+  } else {
+    // (Roadmap H117/H118) `ElemTy` may also be an outer *array* of a
+    // genuine multi-member `Block`-decorated struct -- glslang's "array
+    // of block instances" syntax for a `patch`-qualified block (e.g.
+    // `patch out TheBlock {...} tcBlock[2];`), one array dimension
+    // further out than the lone (non-arrayed) instance this function
+    // handled before this milestone (see the H6c-a-a-iii comment this
+    // generalizes). Each instance occupies its own contiguous
+    // `DL.getTypeAllocSize(ST)`-sized span; \p ByteOffset is split into
+    // this instance's own index (`BlockInstance`) and the byte offset
+    // *within* that one instance (`InstanceResidual`), and
+    // `BlockInstance` is folded into the eventual leaf's own `Row`
+    // below, scaled by that leaf's own per-instance `RowCount` --
+    // exactly the same row-major flattening `resolveNestedStageIOField`'s
+    // own array-of-struct branch already applies one level deeper (for a
+    // block *member's* own array-of-struct field). A whole-array-of-
+    // block-instances aggregate access (\p ValueTy naming the whole
+    // array) is not modeled: glslang always compile-time unrolls block-
+    // array stores into one per-instance member store at a time in
+    // practice, so this shape gracefully falls back to `std::nullopt`,
+    // exactly like any other unrecognized pointer this function rejects.
+    // (Roadmap H117/H118) This array-of-instances flattening must only
+    // run when \p AllowBlockArrayInstanceFold's own caller has confirmed
+    // `addElements`' own `TakeBlockPath` construction-side logic actually
+    // folded this same array dimension into each member's `RowCount`
+    // (only a genuinely `patch`-qualified block array does, see that
+    // logic's own comment) -- otherwise this access-side `BlockInstance`
+    // math silently disagrees with the (unwidened) storage construction
+    // actually allocated, producing a `Row` past the end of that
+    // storage's own bounds (`dEQP-VK.transform_feedback.fuzz.
+    // random_geometry.all_instance_array.12`'s own out-of-bounds
+    // `StageStorage` write/heap corruption, exposed when this whole
+    // flattening was unconditional). Falling back to `std::nullopt` here
+    // for the non-`Patch` case leaves the access unrewritten, exactly
+    // matching this shape's own pre-H117/H118 (imperfect, but non-
+    // corrupting) behavior.
+    if (!AllowBlockArrayInstanceFold)
+      return std::nullopt;
+    auto *ArrTy = dyn_cast<ArrayType>(ElemTy);
+    auto *InnerST = ArrTy ? dyn_cast<StructType>(ArrTy->getElementType())
+                          : nullptr;
+    if (!InnerST)
+      return std::nullopt;
+    if (ValueTy == ElemTy)
+      return std::nullopt;
+    ST = InnerST;
+    uint64_t InstanceSize = DL.getTypeAllocSize(ST).getFixedValue();
+    BlockInstance = InstanceSize ? ByteOffset / InstanceSize : 0;
+    InstanceResidual = InstanceSize ? ByteOffset % InstanceSize : ByteOffset;
+  }
 
   const StructLayout *SL = DL.getStructLayout(ST);
-  unsigned LLVMMember = SL->getElementContainingOffset(ByteOffset);
+  unsigned LLVMMember = SL->getElementContainingOffset(InstanceResidual);
   // (Roadmap H101m) `IDs` (one per real, SPIR-V-declared member --
   // `addElements`' own `TakeBlockPath` loop, `CanonicalizeStage.cpp`)
   // does not carry an entry for a leading `[N x i8]` pad field
@@ -2970,7 +3070,7 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   for (unsigned I = HasLeadingPad ? 1 : 0; I != LLVMMember; ++I)
     IDStart += getStageIOLeafElementCount(ST->getElementType(I));
   Type *FieldTy = ST->getElementType(LLVMMember);
-  uint64_t Residual = ByteOffset - SL->getElementOffset(LLVMMember);
+  uint64_t Residual = InstanceResidual - SL->getElementOffset(LLVMMember);
   // (Roadmap H101t, extended by H115) `FieldTy` may itself be a genuine
   // multi-member nested struct (case `.2`'s own shape), or (roadmap
   // H115) an *array* of one (e.g. `S blockSa[2];`): recurse via
@@ -2982,7 +3082,12 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   NestedStageIOField Nested =
       resolveNestedStageIOField(FieldTy, Residual, ValueTy, DL);
   IDStart += Nested.IDStart;
-  return StageIOAccess{IDs.slice(IDStart, 1), AsConstant(Nested.Row),
+  // (Roadmap H117/H118) Folds this block-array instance's own index
+  // into the eventual leaf's own `Row`, scaled by that leaf's own
+  // per-instance `RowCount` -- `BlockInstance` is 0 for the (far more
+  // common) non-arrayed-block case, leaving `Nested.Row` unchanged.
+  uint64_t Row = BlockInstance * Nested.RowCount + Nested.Row;
+  return StageIOAccess{IDs.slice(IDStart, 1), AsConstant(Row),
                        AsConstant(Nested.Component), Vertex, IsOutput};
 }
 
@@ -3140,6 +3245,21 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     // (e.g. `gl_in[vertNdx].gl_ClipDistance[i]`, `ClipDistance` being
     // `gl_PerVertex`'s second member, not its only one) resolves here too,
     // not just a plain single-element global.
+    if (!Dyn->RowTerms.empty()) {
+      // (Roadmap H117/H118) The `collectDynamicRowTerms`-delegated shape
+      // (e.g. `blockSa[gl_InvocationID].blockSa[j].x`, a genuine
+      // multi-member nested struct's own array dimension indexed
+      // dynamically *and* followed by one more constant member-select):
+      // `Dyn->Member` here is already the flattened leaf `IDStart`
+      // `collectDynamicRowTerms` computed, exactly like
+      // `DynamicRowIndexedAccess::Member`'s identically-named field.
+      if (Dyn->Member >= It->second.size())
+        return std::nullopt;
+      Value *Row = combineDynamicRowTerms(B, Dyn->RowTerms);
+      return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1), Row,
+                           nullptr, Dyn->VertexIndex,
+                           OutputGlobals.contains(Dyn->GV)};
+    }
     if (Dyn->RowIndex) {
       if (Dyn->Member >= It->second.size())
         return std::nullopt;
@@ -3243,9 +3363,24 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       EffectiveTy != GV->getValueType())
     ByteOffset =
         remapByteOffsetPastLeadingPad(GV, EffectiveArrTy, ByteOffset, DL);
+  // (Roadmap H117/H118) Mirrors `addElements`' own `TakeBlockPath`
+  // construction-side check exactly: only a genuinely `patch`-qualified
+  // block's own members fold an outer array-of-instances dimension into
+  // `RowCount` -- see `resolveOffsetWithinElement`'s own
+  // `AllowBlockArrayInstanceFold` parameter comment for why passing this
+  // unconditionally corrupted `StageStorage` for a non-`Patch` multi-
+  // member XFB "array of block instances".
+  bool AllowBlockArrayInstanceFold = false;
+  if (const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations")) {
+    for (const auto &KV : parseSPIRVMemberDecorations(MemberMD)) {
+      AllowBlockArrayInstanceFold = KV.second.Patch;
+      break;
+    }
+  }
   return resolveOffsetWithinElement(EffectiveTy, It->second, ByteOffset,
                                     ValueTy, DL, OutputGlobals.contains(GV),
-                                    /*Vertex=*/nullptr);
+                                    /*Vertex=*/nullptr,
+                                    AllowBlockArrayInstanceFold);
 }
 
 /// Rewrites \p F's already-legalized `llvm.spv.discard`/`.demote.to.helper.
@@ -3466,9 +3601,119 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         const MDNode *MemberMD =
             GV->getMetadata("feme.spirv.MemberDecorations");
         Type *PeekedBlockTy = MemberMD ? GV->getValueType() : nullptr;
+        // (Roadmap H117/H118) `BlockArrayCount`, when non-zero, records
+        // this outer array's own element count -- glslang's "array of
+        // block instances" syntax for a genuinely multi-member block
+        // (e.g. `patch out TheBlock {...} tcBlock[2];`, or a plain
+        // XFB-captured `out BlockB {...} blockB[3];`, as opposed to a
+        // lone, non-arrayed instance) -- so each member's own storage
+        // below can be widened to hold every instance's own copy,
+        // back-to-back, the same way `addStageIOStructMembers`'s own
+        // `ArrayType` branch already widens a *member*'s array-of-struct
+        // storage one level further in. Every block-array instance
+        // shares the same base `Location`(s) (SPIR-V attaches only one
+        // `Location` decoration to the whole variable regardless of this
+        // array dimension, exactly like a lone instance would), so
+        // `NextMemberLocation`'s own per-member bookkeeping below is
+        // deliberately left unmultiplied.
+        //
+        // A genuine per-vertex/per-primitive dynamically-indexed I/O
+        // array (address space 7's `gl_in[]`-shaped `Input` -- never
+        // ambiguous with a static "array of block instances", since
+        // transform feedback only ever captures an `Output` variable --
+        // `isPerVertexArrayMeshOutputGlobal`'s own
+        // `gl_MeshVerticesEXT[]`/`gl_MeshPrimitivesEXT[]`-shaped `Output`,
+        // or -- this milestone's own gap -- a Hull control-point stage's
+        // own per-invocation `Output` block, e.g. `per_vertex_block`,
+        // indexed by `gl_InvocationID`) wraps the *same* genuine
+        // multi-member struct shape in an outer array too, but that
+        // array is the dynamically-indexed `Vertex` operand the big
+        // comment above already describes -- never a `BlockArrayCount`
+        // to fold into `RowCount`. Folding it here regardless (this
+        // check's own original gap) wrongly multiplied every member's
+        // storage by the per-vertex array's own size, desynchronizing
+        // this stage's own element/row count from the consuming stage's
+        // (which never folds a per-vertex array this way at all), and
+        // surfaced downstream as `vkQueueSubmit`'s own "producer/consumer
+        // element disagree on component/row count" rejection.
+        //
+        // A Hull `Output` block array is otherwise indistinguishable
+        // from this same genuinely dynamic shape by address space and
+        // stage alone (both are address space 8, and a genuine
+        // `patch`-qualified block-array can occur in a Hull entry too),
+        // so it's disambiguated the same way `isDynamicIndexedArrayGlobal`
+        // already does: only a genuinely `patch`-qualified block's own
+        // members ever carry a `Patch` decoration (GLSL's `patch`
+        // qualifier applies to a whole block, so every member carries an
+        // identical one) -- a Hull `Output` array without one is the
+        // dynamically-indexed per-invocation shape instead.
+        //
+        // The outer `ArrayType` layer is still peeled off `PeekedBlockTy`
+        // in *every* case below, though -- only whether `BlockArrayCount`
+        // itself gets set (widening each member's own storage) differs.
+        // `TakeBlockPath`'s own per-member decomposition (multiple
+        // `ElementID`s, one per real struct member) is needed regardless
+        // of whether the array folds into `RowCount` or is left to the
+        // dynamically-indexed `Vertex` operand instead: leaving
+        // `PeekedBlockTy` as the *array* type (this fix's own original
+        // mistake, skipping `TakeBlockPath` entirely for the dynamic
+        // case) fell through to the plain (non-block) path instead, which
+        // has no notion of a genuine multi-member nested struct and
+        // silently collapsed every member onto one shared, wrongly-typed
+        // shadow value -- the `isAllocaPromotable`/`PromoteMemToReg`
+        // assertion crash `dEQP-VK.tessellation.user_defined_io.
+        // per_vertex_block` hit.
+        uint32_t BlockArrayCount = 0;
         if (PeekedBlockTy) {
-          if (auto *ArrTy = dyn_cast<ArrayType>(PeekedBlockTy))
+          if (auto *ArrTy = dyn_cast<ArrayType>(PeekedBlockTy)) {
+            bool ArrayMembersArePatch = false;
+            if (MemberMD) {
+              DenseMap<unsigned, ParsedSPIRVDecorations>
+                  ProbeMemberDecorations = parseSPIRVMemberDecorations(MemberMD);
+              ArrayMembersArePatch = !ProbeMemberDecorations.empty() &&
+                                     ProbeMemberDecorations.begin()->second.Patch;
+            }
+            // (Roadmap H117/H118) Only a genuinely `patch`-qualified
+            // multi-member block array (H117's own `per_patch_block_
+            // array`, and its Domain-side mirror reading a Hull
+            // patch-constant function's own matching `Output`) folds
+            // this outer array dimension into `BlockArrayCount`
+            // (widening each member's own storage to hold every
+            // instance's own copy back-to-back) here. Every other
+            // multi-member block array -- a genuine per-vertex/
+            // per-primitive dynamically-indexed array (`gl_in[]`-shaped
+            // `Input`, a Mesh entry's own per-vertex/per-primitive
+            // `Output`, or this milestone's own Hull per-invocation
+            // `Output`, e.g. `per_vertex_block`) *and* a genuine,
+            // non-`Patch` XFB "array of block instances" (glslang's
+            // `layout(xfb_buffer=0, ...) out Block {...} block[3];` for
+            // a *multi*-member `Block`, as opposed to the single-member
+            // sub-case `XfbBufferArrayStride` already models below) --
+            // leaves `BlockArrayCount` at 0 (no fold) here, exactly
+            // matching this array dimension's own pre-H117/H118
+            // handling (this whole `BlockArrayCount`/`AddBlockElement`
+            // mechanism is new to this milestone; only the `Patch` case
+            // ever needed it). Folding it for the latter, non-`Patch`
+            // multi-member XFB case too (this fix's own first attempt)
+            // wrongly conflated `BlockArrayCount`'s "pack every instance's
+            // rows back-to-back" semantics with a *separate*, pre-
+            // existing, single-member-only mechanism
+            // (`XfbBufferArrayStride`, below) that instead routes each
+            // instance to its own `XfbBuffer + k` -- the two disagreed on
+            // this element's own storage size, silently corrupting
+            // `StageStorage`'s heap allocation (`dEQP-VK.
+            // transform_feedback.fuzz.random_geometry.all_instance_
+            // array.12`'s own "corrupted size vs. prev_size while
+            // consolidating" crash, newly exposed by this fix touching
+            // this shape for the first time). A genuine multi-member
+            // XFB "array of block instances" is therefore left with the
+            // same (pre-existing, imperfect) handling it had before this
+            // milestone -- fixing it a proper `XfbBufferArrayStride`-like
+            // mechanism for the multi-member case is out of scope here.
             PeekedBlockTy = ArrTy->getElementType();
+            if (ArrayMembersArePatch)
+              BlockArrayCount = static_cast<uint32_t>(ArrTy->getNumElements());
+          }
         }
         auto *PeekedST =
             PeekedBlockTy ? dyn_cast<StructType>(PeekedBlockTy) : nullptr;
@@ -3693,13 +3938,34 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // expand it into one `addElement` call per leaf field
             // instead, mirroring this same loop's own top-level
             // per-member decomposition one level deeper.
+            // (Roadmap H117/H118) When the whole block itself is
+            // further wrapped in an outer array (`BlockArrayCount > 1`,
+            // e.g. `patch out TheBlock {...} tcBlock[2];`), each leaf's
+            // own type is re-wrapped in that same outer array dimension
+            // before reaching `addElement`, so its own
+            // `getStageIORowShape` call folds this array level into the
+            // leaf's `RowCount` -- widening its storage to hold every
+            // block-array instance's own copy back-to-back -- exactly
+            // mirroring `addStageIOStructMembers`'s own `ArrayType`
+            // branch one level further in (for a *member's* own array-
+            // of-struct field, e.g. `S blockSa[2]`).
+            auto AddBlockElement = [&](GlobalVariable *EltGV,
+                                       unsigned EltAddrSpace,
+                                       const ParsedSPIRVDecorations &EltD,
+                                       Type *EltTy) {
+              Type *WrappedTy =
+                  BlockArrayCount > 1
+                      ? ArrayType::get(EltTy, BlockArrayCount)
+                      : EltTy;
+              addElement(EltGV, EltAddrSpace, EltD, WrappedTy);
+            };
             if (isGenuineMultiMemberNestedStruct(PM.Ty)) {
               uint32_t NestedLocation = PM.D.Location.value_or(0);
-              addStageIOStructMembers(addElement, GV, AddrSpace, PM.D, PM.Ty,
-                                      DL, NestedLocation);
+              addStageIOStructMembers(AddBlockElement, GV, AddrSpace, PM.D,
+                                      PM.Ty, DL, NestedLocation);
               continue;
             }
-            addElement(GV, AddrSpace, PM.D, PM.Ty);
+            AddBlockElement(GV, AddrSpace, PM.D, PM.Ty);
           }
           continue;
         }
