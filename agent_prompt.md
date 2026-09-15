@@ -49,22 +49,32 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H134** (~1-2 hours, partially triaged this session): array-of-
-   RowMajor-matrices struct member causes `convertUniformBlockType`'s
-   content conversion to silently return null, falling back to a raw
-   pointer handle. Start by instrumenting/stepping through
-   `convertOffsetStructTypeIgnoringDecorations` on a reduced repro of
-   `dEQP-VK.ubo.random.all_shared_buffer.26` (binding 5) — see H134's
-   roadmap row for the exact member shape and methodology.
-2. **H133** (~2-3 hours, real design work, described in H131's own
-   closing note): extend `OffsetStructMemberReorderAccessChainPattern`'s
-   (and `rewriteBlockAccess`'s) declared-to-physical remap to recurse
-   into a second level of struct nesting, not just the first selector
-   past `Selector`. 4 known cases.
-3. **H124f** (~2-4+ hours, still not started across many sessions):
-   `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
-   on vector operands have no legalization pattern at all.
-4. Lower priority, deferred 12+ sessions now: `transform_feedback.
+1. **Investigate `check-hlsl-feme-vk`'s run-to-run flakiness** (~1-2
+   hours, newly discovered this session, not yet root-caused): re-run
+   the full suite 3+ times back-to-back with no rebuild in between and
+   diff the failing-test lists to confirm this is real (not a one-off
+   fluke from something else on the machine). If confirmed, check
+   whether tests share GPU/descriptor/JIT state that isn't reset
+   between cases — likely somewhere in `OffloadTest`'s own executor,
+   not this repo's `feme` code, but worth confirming before redirecting
+   elsewhere.
+2. **H124e** (~several sessions, large): `feme-cpu-simdize`/
+   `feme-cpu-linearize`/`feme-cpu-wrap-entry` divergence-handling gaps,
+   ~11 of the original 102 `check-hlsl-feme-vk` failures across at
+   least 5 distinct root causes (non-linear-control-flow barrier,
+   divergent-aggregate decomposition, groupshared-global GEP, divergent
+   branch `LinearizePass` missed, multi-exit-check loop, out-of-bounds
+   struct GEP). Needs per-case triage first to confirm which (if any)
+   share a root cause — don't assume one fix covers all 11.
+3. **H124d** (large, deprioritized, unchanged from many sessions ago):
+   needs new upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/
+   `OpFwidth` — skip unless someone wants the upstream-MLIR piece
+   specifically.
+4. **H124g's `layout.test`/`array_of_matrices.test` items**: given the
+   flakiness finding above, don't re-triage either in isolation next
+   session — first resolve item 1, then re-check whether either is a
+   real, stable failure/XPASS at all.
+5. Lower priority, deferred 13+ sessions now: `transform_feedback.
    fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
    corruption — `valgrind`'s own trace points at
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
