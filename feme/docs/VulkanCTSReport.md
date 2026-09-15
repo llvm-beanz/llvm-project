@@ -43310,3 +43310,94 @@ deserializer produces it).
 conversion bug fix, not a feature/extension gate.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
 confirmed unaffected.
+
+## H124a: root cause and fix (`WaveActive*` reduce silently unrecognized by `feme-cpu-simdize`, scalar and vector alike)
+
+**Context.** H124a was filed as "vector-typed `GroupNonUniform*`
+SPIR-V-to-LLVM legalization gap, ~26 of the 102 `check-hlsl-feme-vk`
+failures." Investigation found the real root cause much broader: both the
+pre-existing `IntegerGroupNonUniformReducePattern` (scalar integer) and
+upstream MLIR's own `GroupReducePattern` (scalar float, and -- unfixed --
+every vector case) lower `spirv.GroupNonUniform{IAdd,IMul,SMin,SMax,UMin,
+UMax,BitwiseAnd,BitwiseOr,BitwiseXor,FAdd,FMul,FMin,FMax}` (`WaveActiveSum`/
+`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor`'s own SPIR-V shape) to a raw
+mangled `llvm.call spir_funccc @_Z27__spirv_GroupNonUniform*` rather than a
+real LLVM intrinsic. `feme-cpu-simdize`'s `WaveUniformity`/`SIMDize`
+passes only ever classify and widen a genuine `llvm::IntrinsicInst`
+(`dyn_cast<IntrinsicInst>`), never a raw mangled `CallInst` -- so **every**
+HLSL `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor` call compiled
+through SPIR-V import was silently broken all along, scalar or vector,
+across every prior session (confirmed by re-running `WaveActiveMax.test`,
+a scalar-only control case, and reproducing the identical
+"unsupported divergent call" failure H124a's own vector-focused
+investigation first noticed).
+
+**Fix.** Replaced `IntegerGroupNonUniformReducePattern` and upstream's own
+scalar-only special-casing with a single unified
+`GroupNonUniformReducePattern<ReduceOp>` template (13 arithmetic ops) in
+`SPIRVToLLVMPatterns.cpp`, converting each op's `Reduce`-group-operation
+case directly to the matching `llvm.spv.wave.reduce.*`/`llvm.spv.wave.
+product` intrinsic (mirroring `AllEqualConversionPattern`'s established
+convention). Every one of these intrinsics
+(`llvm/include/llvm/IR/IntrinsicsSPIRV.td`) is `llvm_any_ty`-overloaded, so
+a vector operand needs no MLIR-level scalarization at all -- unlike
+`AllEqualConversionPattern`'s own vector case, whose *result* type does
+not vary with the operand. `InclusiveScan`/`ExclusiveScan` (HLSL's
+`WavePrefixSum`/`WavePrefixProduct`) and `ClusteredReduce` (unreachable
+from any HLSL `Wave*` intrinsic today) have no matching intrinsic and
+explicitly fall back (`notifyMatchFailure`) to upstream's own
+`GroupReducePattern`, which already handles every group operation
+correctly via its raw call's own runtime parameter.
+
+Added a matching `feme-cpu-simdize` fix (`SIMDize.cpp`): a new
+`isVectorOperandReduceKind` helper and vector-decomposition branch in
+`widenWaveCall` (mirroring the existing `AllEqual`/`ReadLane` vector
+branches), plus a matching consumer-check case in
+`checkVectorDecompositionSupported`.
+
+**Verification.**
+- `ninja check-feme`: **3023/3023 passed** (3 unsupported), 0 failed,
+  including one updated pre-existing test
+  (`spirv-to-llvm-group-nonuniform-integer.mlir`, whose `CHECK` lines now
+  match the new `llvm.call_intrinsic` shape) and two new lit tests
+  (`spirv-to-llvm-group-nonuniform-reduce-vector.mlir`,
+  `simdize-wave-active-reduce-vector.ll`).
+- `check-hlsl-feme-vk` re-run (664 total): **278 passed, 99 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- down from 102 failed before this
+  session, closing ~16 of H124a's originally-targeted ~26-case bucket
+  with no regressions.
+- **Not fully closed**: the remaining ~10 cases (`WaveActiveSum.int32/
+  fp32/convergence.test`, `WaveActiveMax.fp32/int32.test`/`.test`,
+  `WaveActiveMin.fp32/int32.test`, `WaveActiveBitXor.int/convergence.
+  test`) now compile, JIT, and run to completion with no crash, but
+  produce a wrong numeric result. Root-caused to a *distinct* bug (broken
+  out as new roadmap entry H124h): every one of these failing cases
+  computes its `WaveActiveSum`/`Max`/... **inside a divergent `if`**
+  (e.g. `tid.x <= N ? WaveActiveSum(v.x) : 0` for varying `N`), while
+  every *passing* reduce case (e.g. `WaveActiveBitAnd.int.test`) has no
+  such branch. `FunctionWidener::widenWaveCall` always feeds the wave's
+  whole `Env.EntryMask` to `createWaveCall` for every reduce kind, never
+  narrowing it by the enclosing divergent branch's own active-lane
+  predicate -- confirmed via `WaveActiveSum.int32.test`'s own mismatch:
+  expected a distinct per-subset sum `[1, 2, 3, 4]` (one subset per
+  `tid.x <= N` mask), got the full-wave sum (`4`) uniformly for every
+  subset. This is a real, separate design gap in the divergent-mask
+  threading between `feme-cpu-linearize` and `feme-cpu-simdize`'s reduce
+  lowering, not a legalization gap -- out of scope for this session, filed
+  as H124h for a future one.
+
+**Feature/extension bits.** No change: this fix is a SPIR-V-to-LLVM
+conversion + CPU-backend bug fix, not a feature/extension gate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
+
+**VK-GL-CTS sweep.** `dEQP-VK.subgroups.arithmetic.*` (12087 cases, the
+closest real `deqp-vk` group to this fix's own code path): re-ran after
+this session's fix, still 100% `NotSupported` ("Device does not support
+subgroup arithmetic operations", `vktSubgroupsArithmeticTests.cpp:285`) --
+unchanged from roadmap L10's own prior finding: this device does not
+advertise `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT` at all, so no real
+`deqp-vk` case reaches this fix's code path. No `VulkanCTSReport.md`
+Pass/Fail delta from this session; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` unaffected (same gate, not touched by this
+fix).
