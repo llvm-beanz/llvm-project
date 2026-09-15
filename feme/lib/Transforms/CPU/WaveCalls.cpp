@@ -8,12 +8,16 @@
 
 #include "feme/Transforms/CPU/WaveCalls.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -319,6 +323,131 @@ std::optional<MatchedWaveCall> matchWaveCall(const CallInst &CI) {
   if (hasLaneIndex(*Kind))
     Result.WideLaneIndex = CI.getArgOperand(OperandIdx++);
   return Result;
+}
+
+std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
+  switch (ID) {
+  case Intrinsic::dx_wave_get_lane_count:
+  case Intrinsic::spv_wave_get_lane_count:
+  case Intrinsic::spv_subgroup_size:
+    return WaveCallKind::GetLaneCount;
+  case Intrinsic::dx_wave_is_first_lane:
+  case Intrinsic::spv_wave_is_first_lane:
+    return WaveCallKind::IsFirstLane;
+  case Intrinsic::dx_wave_any:
+  case Intrinsic::spv_wave_any:
+    return WaveCallKind::Any;
+  case Intrinsic::dx_wave_all:
+  case Intrinsic::spv_wave_all:
+    return WaveCallKind::All;
+  case Intrinsic::dx_wave_all_equal:
+  case Intrinsic::spv_wave_all_equal:
+    return WaveCallKind::AllEqual;
+  case Intrinsic::dx_wave_readlane:
+  case Intrinsic::spv_wave_readlane:
+    return WaveCallKind::ReadLane;
+  case Intrinsic::dx_wave_active_countbits:
+  case Intrinsic::spv_wave_active_countbits:
+    return WaveCallKind::ActiveCountBits;
+  case Intrinsic::dx_wave_prefix_bit_count:
+    return WaveCallKind::PrefixBitCount;
+  case Intrinsic::dx_wave_ballot:
+  case Intrinsic::spv_subgroup_ballot:
+    return WaveCallKind::Ballot;
+  // Signed/unsigned addition and multiplication are bit-identical in two's
+  // complement, so each signed/unsigned pair shares one `WaveCallKind` (see
+  // `WaveCallKind::ActiveSum`'s comment).
+  case Intrinsic::dx_wave_reduce_sum:
+  case Intrinsic::dx_wave_reduce_usum:
+  case Intrinsic::spv_wave_reduce_sum:
+    return WaveCallKind::ActiveSum;
+  case Intrinsic::dx_wave_product:
+  case Intrinsic::dx_wave_uproduct:
+  case Intrinsic::spv_wave_product:
+    return WaveCallKind::ActiveProduct;
+  case Intrinsic::dx_wave_reduce_max:
+  case Intrinsic::spv_wave_reduce_max:
+    return WaveCallKind::ActiveMax;
+  case Intrinsic::dx_wave_reduce_umax:
+  case Intrinsic::spv_wave_reduce_umax:
+    return WaveCallKind::ActiveUMax;
+  case Intrinsic::dx_wave_reduce_min:
+  case Intrinsic::spv_wave_reduce_min:
+    return WaveCallKind::ActiveMin;
+  case Intrinsic::dx_wave_reduce_umin:
+  case Intrinsic::spv_wave_reduce_umin:
+    return WaveCallKind::ActiveUMin;
+  case Intrinsic::dx_wave_reduce_and:
+  case Intrinsic::spv_wave_reduce_and:
+    return WaveCallKind::ActiveBitAnd;
+  case Intrinsic::dx_wave_reduce_or:
+  case Intrinsic::spv_wave_reduce_or:
+    return WaveCallKind::ActiveBitOr;
+  case Intrinsic::dx_wave_reduce_xor:
+  case Intrinsic::spv_wave_reduce_xor:
+    return WaveCallKind::ActiveBitXor;
+  case Intrinsic::dx_wave_prefix_sum:
+  case Intrinsic::dx_wave_prefix_usum:
+  case Intrinsic::spv_wave_prefix_sum:
+    return WaveCallKind::PrefixSum;
+  case Intrinsic::dx_wave_prefix_product:
+  case Intrinsic::dx_wave_prefix_uproduct:
+  case Intrinsic::spv_wave_prefix_product:
+    return WaveCallKind::PrefixProduct;
+  default:
+    return std::nullopt;
+  }
+}
+
+bool isArithmeticReduceOrPrefixKind(WaveCallKind Kind) {
+  switch (Kind) {
+  case WaveCallKind::ActiveSum:
+  case WaveCallKind::ActiveProduct:
+  case WaveCallKind::ActiveMax:
+  case WaveCallKind::ActiveUMax:
+  case WaveCallKind::ActiveMin:
+  case WaveCallKind::ActiveUMin:
+  case WaveCallKind::ActiveBitAnd:
+  case WaveCallKind::ActiveBitOr:
+  case WaveCallKind::ActiveBitXor:
+  case WaveCallKind::PrefixSum:
+  case WaveCallKind::PrefixProduct:
+    return true;
+  default:
+    return false;
+  }
+}
+
+Constant *getReduceIdentity(WaveCallKind Kind, Type *EltTy) {
+  bool IsFP = EltTy->isFloatingPointTy();
+  switch (Kind) {
+  case WaveCallKind::ActiveSum:
+  case WaveCallKind::PrefixSum:
+    return Constant::getNullValue(EltTy); // additive identity: 0
+  case WaveCallKind::ActiveProduct:
+  case WaveCallKind::PrefixProduct:
+    return IsFP ? ConstantFP::get(EltTy, 1.0)
+                : ConstantInt::get(EltTy, 1); // multiplicative identity: 1
+  case WaveCallKind::ActiveMax:
+    return IsFP ? ConstantFP::getInfinity(EltTy, /*Negative=*/true)
+                : ConstantInt::get(EltTy, APInt::getSignedMinValue(
+                                              EltTy->getIntegerBitWidth()));
+  case WaveCallKind::ActiveUMax:
+    return Constant::getNullValue(EltTy); // unsigned min: 0
+  case WaveCallKind::ActiveMin:
+    return IsFP ? ConstantFP::getInfinity(EltTy, /*Negative=*/false)
+                : ConstantInt::get(EltTy, APInt::getSignedMaxValue(
+                                              EltTy->getIntegerBitWidth()));
+  case WaveCallKind::ActiveUMin:
+    return ConstantInt::getAllOnesValue(EltTy); // unsigned max: ~0
+  case WaveCallKind::ActiveBitAnd:
+    return ConstantInt::getAllOnesValue(EltTy);
+  case WaveCallKind::ActiveBitOr:
+  case WaveCallKind::ActiveBitXor:
+    return Constant::getNullValue(EltTy);
+  default:
+    llvm_unreachable("not a reduction WaveCallKind");
+  }
 }
 
 } // namespace feme::cpu

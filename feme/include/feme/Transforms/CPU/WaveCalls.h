@@ -33,6 +33,7 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/IR/Intrinsics.h"
 
 #include <cstdint>
 #include <optional>
@@ -40,6 +41,7 @@
 
 namespace llvm {
 class CallInst;
+class Constant;
 class Function;
 class IRBuilderBase;
 class Module;
@@ -172,6 +174,40 @@ llvm::CallInst *createWaveCall(llvm::IRBuilderBase &Builder, WaveCallKind Kind,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee
 /// isn't one.
 std::optional<MatchedWaveCall> matchWaveCall(const llvm::CallInst &CI);
+
+/// Which `WaveCallKind` a *raised, not-yet-widened* `llvm.{dx,spv}.wave.*`/
+/// `llvm.spv.subgroup.*` intrinsic \p ID corresponds to (`std::nullopt` for
+/// anything else, including `wave.getlaneindex` -- a `BuiltinCallKind`
+/// instead -- and `QuadOp`'s `llvm.dx.quad.read.*` family, not yet
+/// lowered). Shared between `feme::cpu::SIMDizePass` (which widens a call
+/// already recognized this way) and `feme::cpu::LinearizePass` (which needs
+/// the same recognition *before* widening, to mask a reduce/scan call's own
+/// value operand for a divergent region -- see `getReduceIdentity` and
+/// `isArithmeticReduceOrPrefixKind` below).
+std::optional<WaveCallKind> classifyWaveCall(llvm::Intrinsic::ID ID);
+
+/// Whether \p Kind is one of the eleven arithmetic reduce (`ActiveSum`,
+/// `ActiveProduct`, `ActiveMax`, `ActiveUMax`, `ActiveMin`, `ActiveUMin`,
+/// `ActiveBitAnd`, `ActiveBitOr`, `ActiveBitXor`) or scan (`PrefixSum`,
+/// `PrefixProduct`) kinds `getReduceIdentity` has an identity element for --
+/// unlike `AllEqual`/`ReadLane`, this file's other two type-overloaded
+/// kinds, every one of these combines its active lanes with an associative
+/// operator that has a genuine identity element a masked-off lane can stand
+/// in for (see "Phase 5: Wave and Builtin Lowering"'s `llvm.vector.reduce.*
+/// over select(M, X, identity)` row), which `feme::cpu::LinearizePass` uses
+/// to mask a divergent region's own such call before `feme::cpu::
+/// SIMDizePass` ever widens it (roadmap H124h).
+bool isArithmeticReduceOrPrefixKind(WaveCallKind Kind);
+
+/// A masked reduction's identity element -- the value substituted for an
+/// inactive lane so it cannot affect \p Kind's result (see
+/// `isArithmeticReduceOrPrefixKind`'s own comment). \p EltTy is the
+/// reduction's own (scalar) element type; the caller splats this to a
+/// vector itself if it needs one. Not every `WaveCallKind` this is called
+/// for supports every element type (e.g. `ActiveUMax`/`ActiveBitAnd` are
+/// integer-only per DXIL.td's `Overloads`), so only the combinations that
+/// occur are handled.
+llvm::Constant *getReduceIdentity(WaveCallKind Kind, llvm::Type *EltTy);
 
 } // namespace feme::cpu
 

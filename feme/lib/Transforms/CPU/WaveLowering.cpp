@@ -592,45 +592,10 @@ Value *lowerBallot(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
   return Result;
 }
 
-/// A masked reduction's identity element -- the value substituted for an
-/// inactive lane (per \p WideMask) so it cannot affect the reduction's
-/// result, matching "Phase 5"'s `llvm.vector.reduce.* over select(M, X,
-/// identity)` row. \p Kind picks the identity appropriate to the
-/// reduction/element-type pair; not every `WaveCallKind` this is called for
-/// supports every element type (e.g. `ActiveUMax`/`ActiveBitAnd` are
-/// integer-only per DXIL.td's `Overloads`), so only the combinations that
-/// occur are handled.
-Constant *getReduceIdentity(WaveCallKind Kind, Type *EltTy) {
-  bool IsFP = EltTy->isFloatingPointTy();
-  switch (Kind) {
-  case WaveCallKind::ActiveSum:
-  case WaveCallKind::PrefixSum:
-    return Constant::getNullValue(EltTy); // additive identity: 0
-  case WaveCallKind::ActiveProduct:
-  case WaveCallKind::PrefixProduct:
-    return IsFP ? ConstantFP::get(EltTy, 1.0)
-                : ConstantInt::get(EltTy, 1); // multiplicative identity: 1
-  case WaveCallKind::ActiveMax:
-    return IsFP ? ConstantFP::getInfinity(EltTy, /*Negative=*/true)
-                : ConstantInt::get(EltTy, APInt::getSignedMinValue(
-                                              EltTy->getIntegerBitWidth()));
-  case WaveCallKind::ActiveUMax:
-    return Constant::getNullValue(EltTy); // unsigned min: 0
-  case WaveCallKind::ActiveMin:
-    return IsFP ? ConstantFP::getInfinity(EltTy, /*Negative=*/false)
-                : ConstantInt::get(EltTy, APInt::getSignedMaxValue(
-                                              EltTy->getIntegerBitWidth()));
-  case WaveCallKind::ActiveUMin:
-    return ConstantInt::getAllOnesValue(EltTy); // unsigned max: ~0
-  case WaveCallKind::ActiveBitAnd:
-    return ConstantInt::getAllOnesValue(EltTy);
-  case WaveCallKind::ActiveBitOr:
-  case WaveCallKind::ActiveBitXor:
-    return Constant::getNullValue(EltTy);
-  default:
-    llvm_unreachable("not a reduction WaveCallKind");
-  }
-}
+// `getReduceIdentity` (a masked reduction's identity element) now lives in
+// WaveCalls.h/.cpp -- shared with `feme::cpu::LinearizePass`, which masks a
+// divergent region's own reduce/scan call operand with it *before*
+// `feme::cpu::SIMDizePass` ever widens the call (roadmap H124h).
 
 /// `WaveActiveSum/Product/Max/UMax/Min/UMin/BitAnd/BitOr/BitXor`:
 /// `llvm.vector.reduce.*` over `select(M, X, identity)` (see "Phase 5"'s

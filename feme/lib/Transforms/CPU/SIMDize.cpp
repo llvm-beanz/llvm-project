@@ -230,91 +230,10 @@ std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
   }
 }
 
-/// Which raised wave intrinsic \p ID canonicalizes to a `feme.cpu.wave.*`
-/// call (see feme::cpu::WaveCalls); `std::nullopt` for anything else,
-/// including `wave.getlaneindex` (a `BuiltinCallKind` instead -- see
-/// `classifyBuiltin` above) and `QuadOp`'s `llvm.dx.quad.read.*` family
-/// (raised, per roadmap step R4, but not yet lowered -- quad/derivative
-/// support is an explicit v1 non-goal, see feme/docs/FeMeCPUDesign.md's
-/// "Non-Goals"). (V4) `llvm.spv.subgroup.size` -- Vulkan's
-/// `SPIRV_BuiltIn::SubgroupSize` -- reports the same value
-/// `llvm.{dx,spv}.wave.get.lane.count` already does (the pinned wave size,
-/// per "Builtin and execution-shape mapping" in
-/// feme/docs/FeMeVulkanDesign.md), so it shares `WaveCallKind::GetLaneCount`
-/// rather than needing its own classification.
-std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
-  switch (ID) {
-  case Intrinsic::dx_wave_get_lane_count:
-  case Intrinsic::spv_wave_get_lane_count:
-  case Intrinsic::spv_subgroup_size:
-    return WaveCallKind::GetLaneCount;
-  case Intrinsic::dx_wave_is_first_lane:
-  case Intrinsic::spv_wave_is_first_lane:
-    return WaveCallKind::IsFirstLane;
-  case Intrinsic::dx_wave_any:
-  case Intrinsic::spv_wave_any:
-    return WaveCallKind::Any;
-  case Intrinsic::dx_wave_all:
-  case Intrinsic::spv_wave_all:
-    return WaveCallKind::All;
-  case Intrinsic::dx_wave_all_equal:
-  case Intrinsic::spv_wave_all_equal:
-    return WaveCallKind::AllEqual;
-  case Intrinsic::dx_wave_readlane:
-  case Intrinsic::spv_wave_readlane:
-    return WaveCallKind::ReadLane;
-  case Intrinsic::dx_wave_active_countbits:
-  case Intrinsic::spv_wave_active_countbits:
-    return WaveCallKind::ActiveCountBits;
-  case Intrinsic::dx_wave_prefix_bit_count:
-    return WaveCallKind::PrefixBitCount;
-  case Intrinsic::dx_wave_ballot:
-  case Intrinsic::spv_subgroup_ballot:
-    return WaveCallKind::Ballot;
-  // Signed/unsigned addition and multiplication are bit-identical in two's
-  // complement, so each signed/unsigned pair shares one `WaveCallKind` (see
-  // `WaveCallKind::ActiveSum`'s comment).
-  case Intrinsic::dx_wave_reduce_sum:
-  case Intrinsic::dx_wave_reduce_usum:
-  case Intrinsic::spv_wave_reduce_sum:
-    return WaveCallKind::ActiveSum;
-  case Intrinsic::dx_wave_product:
-  case Intrinsic::dx_wave_uproduct:
-  case Intrinsic::spv_wave_product:
-    return WaveCallKind::ActiveProduct;
-  case Intrinsic::dx_wave_reduce_max:
-  case Intrinsic::spv_wave_reduce_max:
-    return WaveCallKind::ActiveMax;
-  case Intrinsic::dx_wave_reduce_umax:
-  case Intrinsic::spv_wave_reduce_umax:
-    return WaveCallKind::ActiveUMax;
-  case Intrinsic::dx_wave_reduce_min:
-  case Intrinsic::spv_wave_reduce_min:
-    return WaveCallKind::ActiveMin;
-  case Intrinsic::dx_wave_reduce_umin:
-  case Intrinsic::spv_wave_reduce_umin:
-    return WaveCallKind::ActiveUMin;
-  case Intrinsic::dx_wave_reduce_and:
-  case Intrinsic::spv_wave_reduce_and:
-    return WaveCallKind::ActiveBitAnd;
-  case Intrinsic::dx_wave_reduce_or:
-  case Intrinsic::spv_wave_reduce_or:
-    return WaveCallKind::ActiveBitOr;
-  case Intrinsic::dx_wave_reduce_xor:
-  case Intrinsic::spv_wave_reduce_xor:
-    return WaveCallKind::ActiveBitXor;
-  case Intrinsic::dx_wave_prefix_sum:
-  case Intrinsic::dx_wave_prefix_usum:
-  case Intrinsic::spv_wave_prefix_sum:
-    return WaveCallKind::PrefixSum;
-  case Intrinsic::dx_wave_prefix_product:
-  case Intrinsic::dx_wave_prefix_uproduct:
-  case Intrinsic::spv_wave_prefix_product:
-    return WaveCallKind::PrefixProduct;
-  default:
-    return std::nullopt;
-  }
-}
+// `classifyWaveCall` (which raised wave intrinsic canonicalizes to which
+// `feme.cpu.wave.*` call) now lives in WaveCalls.h/.cpp -- shared with
+// `feme::cpu::LinearizePass`, which needs the same recognition *before*
+// widening (roadmap H124h; see `getReduceIdentity`'s own comment there).
 
 bool isGroupIdCall(Intrinsic::ID ID) {
   return ID == Intrinsic::dx_group_id || ID == Intrinsic::spv_group_id;
