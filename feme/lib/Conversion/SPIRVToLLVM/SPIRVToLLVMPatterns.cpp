@@ -3997,6 +3997,28 @@ mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
       VectorTy.getContext(), kTightVectorMarkerName, {ArrayTy});
 }
 
+/// Returns a "tight" (alignment-free) re-conversion of \p MatrixTy --
+/// `!llvm.array<NumColumns x TightColumn>`, where `TightColumn` is
+/// \p MatrixTy's own column vector re-converted via
+/// `getTightVectorArrayType` -- the same substitution the array-or-matrix
+/// retry tier in `convertOffsetStructTypeIgnoringDecorations` already
+/// builds inline for a *direct* matrix member; factored out here so a
+/// matrix nested one level inside an outer *array* member (roadmap H134,
+/// e.g. `!spirv.array<5 x !spirv.matrix<4 x vector<3xf32>>>`, an array of
+/// matrix instances -- as opposed to `spirv.matrix`'s own column-vector
+/// array, which is a different axis) can reuse the exact same
+/// substitution for its own element type. Returns null if the column
+/// vector's own element type fails to convert.
+mlir::Type getTightMatrixType(mlir::spirv::MatrixType MatrixTy,
+                              const mlir::TypeConverter &Converter) {
+  auto ColumnTy = mlir::cast<mlir::VectorType>(MatrixTy.getColumnType());
+  mlir::Type TightColumnTy = getTightVectorArrayType(ColumnTy, Converter);
+  if (!TightColumnTy)
+    return nullptr;
+  return mlir::LLVM::LLVMArrayType::get(TightColumnTy,
+                                        MatrixTy.getNumColumns());
+}
+
 /// If \p ElementTy is a SPIR-V struct (any member count -- e.g.
 /// `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>`, or a two-member
 /// `!spirv.struct<(!spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision],
@@ -4527,9 +4549,18 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     }
     Members.push_back(MemberTy);
     HasVectorMember |= mlir::isa<mlir::VectorType>(ElementTy);
-    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy))
+    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
       HasVectorMember |=
           mlir::isa<mlir::VectorType>(ArrayTy.getElementType());
+      // (Roadmap H134) An array-of-matrices member (e.g.
+      // `!spirv.array<5 x !spirv.matrix<4 x vector<3xf32>>>`) needs the
+      // same retry as a bare matrix member, just one array dimension
+      // further in -- see the array-of-matrix case
+      // `getTightMatrixType`'s own caller below adds to the
+      // array-or-matrix retry tier.
+      HasVectorMember |=
+          mlir::isa<mlir::spirv::MatrixType>(ArrayTy.getElementType());
+    }
     HasVectorMember |= mlir::isa<mlir::spirv::MatrixType>(ElementTy);
     // (Roadmap H101s) A nested struct member (any member count) whose
     // own body includes a vector/matrix/array-of-vector hits the same
@@ -4681,6 +4712,31 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     // need not leave room for -- e.g. `all_instance_array.11`'s own
     // `mat3x4`-typed member, declared at (whole-block-relative) offset
     // 44, not a multiple of a `vec4` column's own 16-byte alignment.
+    // A member that is itself an *array of matrices* (roadmap H134,
+    // e.g. `!spirv.array<5 x !spirv.matrix<4 x vector<3xf32>>>`, a
+    // `float4x3` instance array member of a multi-member, explicitly-
+    // offset block) hits the same gap one dimension further in still --
+    // its own ABI alignment is driven by the matrix's own column
+    // vector's (possibly padded) alignment, exactly like a bare matrix
+    // member, just wrapped in one more array dimension the two cases
+    // below do not look through. Handled separately (rather than falling
+    // into the array-of-vectors/matrix-of-vectors case below, which only
+    // ever looks one level past `ElementTy` for a `VectorType`) since
+    // the substitution here needs *two* array dimensions preserved: the
+    // declared array's own `InnerCount` around a tight matrix, itself an
+    // array of tight column vectors.
+    if (auto OuterArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
+      if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
+              OuterArrayTy.getElementType())) {
+        mlir::Type TightMatrixTy = getTightMatrixType(MatrixTy, Converter);
+        if (!TightMatrixTy)
+          return nullptr;
+        WithArraysAndMatrices[I] = mlir::LLVM::LLVMArrayType::get(
+            TightMatrixTy, OuterArrayTy.getNumElements());
+        SubstitutedArrayOrMatrix = true;
+        continue;
+      }
+    }
     unsigned InnerCount;
     mlir::Type InnerElementTy;
     if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
