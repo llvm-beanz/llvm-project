@@ -84587,3 +84587,82 @@ Scratch files from this session, not yet cleaned up:
 `/tmp/h129_regress*.log`, `/tmp/h129_regress*.qpa`,
 `/tmp/h129_case47_*.{spvasm,mlir,spv}`, `/tmp/ubo_full_h129_fix*.log`,
 `/tmp/ubo_full_h129_fix*.qpa`.
+
+# Session: H132 finished, then H130 fixed (68 fewer `dEQP-VK.ubo.*` failures)
+
+## What shipped this session
+
+1. **H132 finished** (was "in progress" per last session's checkpoint):
+   `isMatrixMemberLayoutRepresentable` never unwrapped a `dxc`-wrapper
+   member's array-of-Matrix element type before checking its layout
+   decorations. Split it into `isMatrixLayoutRepresentable` (takes the
+   already-resolved matrix type) + a thin wrapper preserving the old
+   behavior for its one remaining, deliberately-unfixed caller. New lit
+   tests verified against real `feme-opt` output. `check-feme`:
+   3046/3049, 0 failed. Full `dEQP-VK.ubo.*` sweep: 5614/73, confirmed
+   byte-for-byte identical failing case list (no known CTS case
+   exercises this shape). 3 commits.
+
+2. **H130 fixed** (the 69-case "cannot normalize" bucket): root cause
+   was `ResourceAddressOfPattern`/`ArrayedBlockAccessChainPattern`/
+   `ResourceArrayAccessChainPattern` all deciding "is this variable
+   arrayed?" by comparing `ResourceInfoMap::Count` to `1`, when
+   `Count == 1` is *also* the correct value for a genuine single-element
+   array (`T blocks[1];`, a real thing `dEQP-VK.ubo.random.
+   basic_instance_arrays.*`'s fuzzer generates) — indistinguishable from
+   a non-arrayed resource's own default. Fixed all three to check the
+   pointee type structurally instead (`ArrayType`/`RuntimeArrayType`
+   `dyn_cast`, or the pre-existing `getArrayedResourceCount` helper,
+   which already did this right).
+
+   Added a permanent `FEME_CPU_LOG_RESOURCE_NORMALIZATION` debug
+   facility to `SPIRVResourceLoweringPass` first — this is what found
+   the bug in minutes instead of hours. Worth using again for any
+   future "cannot normalize" triage.
+
+   **Full `dEQP-VK.ubo.*` sweep: 5614/73 → 5682/5.** 68 cases fixed, 0
+   regressions (confirmed: 73 − 5 = 68 matches the passed-count delta
+   exactly). `check-feme`: 3046/3049, 0 failed, unchanged. 4 commits
+   (debug facility, fix, lit tests, docs).
+
+3. **Triaged the 5 remaining failures**: 4 are the already-known
+   nested-struct-reorder gap from H131's closing note (broken out as
+   **H133**, unchanged by this fix). The 5th
+   (`all_shared_buffer.26`) is a genuinely different bug — broken out
+   as **H134** and partially triaged: it's a third, distinct
+   "array-of-RowMajor-matrices struct member" shape (not H129's bare
+   matrix, not H132's wrapper-array-of-matrix). Root cause not yet
+   found; next session should instrument
+   `convertOffsetStructTypeIgnoringDecorations` directly.
+
+## Lesson worth keeping
+
+When a numeric field's default value for "not applicable" collides
+with a legitimate real value (here: `Count == 1` meaning both "not an
+array" and "array of exactly one"), grep for every place that field is
+compared to that specific number — there were three near-identical
+copies of the same bug in this file, not one.
+
+## Next steps, ranked
+
+1. **H134** (~1-2 hours, partially triaged this session): array-of-
+   RowMajor-matrices struct member causes `convertUniformBlockType`'s
+   content conversion to silently return null, falling back to a raw
+   pointer handle. Start by instrumenting/stepping through
+   `convertOffsetStructTypeIgnoringDecorations` on a reduced repro of
+   `dEQP-VK.ubo.random.all_shared_buffer.26` (binding 5) — see H134's
+   roadmap row for the exact member shape and methodology.
+2. **H133** (~2-3 hours, real design work, described in H131's own
+   closing note): extend `OffsetStructMemberReorderAccessChainPattern`'s
+   (and `rewriteBlockAccess`'s) declared-to-physical remap to recurse
+   into a second level of struct nesting, not just the first selector
+   past `Selector`. 4 known cases.
+3. **H124f** (~2-4+ hours, still not started across many sessions):
+   `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
+   on vector operands have no legalization pattern at all.
+4. Lower priority, deferred 12+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+All scratch files from this session have been cleaned up.
