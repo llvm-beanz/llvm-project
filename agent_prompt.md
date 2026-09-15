@@ -49,25 +49,22 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H127** (~1-2 hours, real design work, newly filed this session):
-   vector-operand `WavePrefixSum`/`WavePrefixProduct` component-
-   decomposition gap above. Start by reading `widenWaveCall`'s own
-   vector-decomposition branch in `SIMDize.cpp` (~line 1769) to see
-   exactly what it assumes about uniformity, and how `WaveReadLaneAt`'s
-   own divergent-result handling (if any) differs -- that may be the
-   closer existing precedent to generalize from, not
-   `isVectorOperandReduceKind`'s own uniform-only table.
+1. **H127** (~1-2 hours, real design work, still not started): vector-
+   operand `WavePrefixSum`/`WavePrefixProduct` component-decomposition
+   gap. Read `widenWaveCall`'s vector-decomposition branch in
+   `SIMDize.cpp` (~line 1769); compare against `WaveReadLaneAt`'s own
+   divergent-result handling as a possibly-closer precedent than
+   `isVectorOperandReduceKind`'s uniform-only table.
 2. **H124b** (~1-2 hours, still not started across many sessions):
    `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
-3. **H124d** (~1 hour, still not started): `"unhandled opcode 209"`
-   (derivative family, `fwidth`/`ddx`/`ddy`), ~7 cases.
-4. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
-   legalization gaps, 8 cases.
-5. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
-   resource-load runtime intrinsics, ~2 cases.
-6. Lower priority, deferred 5+ sessions now: `transform_feedback.fuzz.
-   random_geometry.all_instance_array.12`'s pre-existing heap corruption
-   -- `valgrind`'s own trace already points at `buildStageStorage`/
-   `executeDraws` allocating a too-small buffer.
-7. Cleanup: `/tmp/h126_repro/` (this session's own scratch files, not
-   part of the repo).
+3. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
+   vector legalization gaps, 8 cases.
+4. **H124d** (now properly scoped, large): needs new upstream MLIR
+   SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` before any
+   feme-side fix is even possible -- likely its own multi-session
+   effort, not a quick win. Deprioritize unless someone wants to take on
+   the upstream-MLIR piece specifically.
+5. Lower priority, deferred 6+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption -- `valgrind`'s own trace already points
+   at `buildStageStorage`/`executeDraws` allocating a too-small buffer.
