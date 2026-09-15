@@ -83556,3 +83556,143 @@ Cleaned up all `/tmp/h117_*`/`/tmp/h118_*` scratch files and a stray
 9. Clean up `/tmp/h123_repro/`, `/tmp/dup_test.mlir`,
    `/tmp/feme_vk_first_run/`, `/tmp/feme_vk_rerun.log` (this session's
    own scratch files, low priority, not part of the repo).
+
+# Session: H124a root cause and fix (scalar+vector `WaveActive*` reduce, `feme-cpu-simdize` bug)
+
+**Start here:** H124a fixed. `check-hlsl-feme-vk` 278 passed/99 failed (was
+102 failed), no regressions. 3 commits made. New H124h filed for the
+~10 cases still broken (a different, deeper bug).
+
+## What actually happened (bigger than the ticket said)
+
+H124a was filed as "vector `GroupNonUniform*` legalization gap." The real
+bug was much bigger: every `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/
+`Or`/`Xor` call -- **scalar or vector** -- lowered to a raw mangled
+`_Z27__spirv_GroupNonUniform*` call instead of a real LLVM intrinsic.
+`feme-cpu-simdize` only recognizes real `IntrinsicInst`s, never a raw
+mangled call, so **every one of these reduce calls was silently broken
+across every prior H-series session**, not just vector ones. Confirmed by
+re-running `WaveActiveMax.test` (scalar-only) and seeing the identical
+crash.
+
+## The fix (2 code commits)
+
+1. `SPIRVToLLVMPatterns.cpp`: one unified `GroupNonUniformReducePattern
+   <ReduceOp>` template (13 ops) converting straight to `llvm.spv.wave.
+   reduce.*`/`llvm.spv.wave.product` intrinsics. Vector operands need
+   zero extra MLIR code -- the intrinsics are already vector-overloaded.
+   `ClusteredReduce`/prefix-scan cases fall back to upstream's pattern
+   unchanged (no matching intrinsic exists for those).
+2. `SIMDize.cpp`: taught `feme-cpu-simdize` to decompose a vector-operand
+   reduce call into per-component calls (`isVectorOperandReduceKind` +
+   a new branch in `widenWaveCall`), mirroring the existing `AllEqual`/
+   `ReadLane` vector-handling code.
+
+## A costly mistake this session, and the recovery
+
+Ran `clang-format -i` on the two edited files to "clean up before
+committing." The local clang-format config/version reformatted the
+**entire file**, not just my diff. Reverted with `git checkout --`, which
+(since nothing had been committed yet) **destroyed my own uncommitted
+session work** -- both files went back to their pre-session state. No
+backup existed (not committed, no editor swap file, ccache doesn't
+preserve full source).
+
+Recovered by re-implementing from the detailed technical description
+already captured in this conversation's own context (exact intrinsic
+names, template structure, `GroupOperation::Reduce`-only guard, etc.) and
+re-verifying byte-for-byte against the two *new* test files, which
+survived (they were untracked, `git checkout --` only touches tracked
+paths). Re-implementation matched the original design; `check-feme` and
+`check-hlsl-feme-vk` re-runs confirm it behaves identically.
+
+**Lesson for future sessions:** never run a formatter across a whole file
+when only committing part of it -- use `git clang-format` (diff-scoped)
+instead of `clang-format -i`, and commit working code before running any
+tool that can silently rewrite or discard it.
+
+## One correctness detail worth flagging for reviewers
+
+The new pattern only matches when `Adaptor.getGroupOperation() ==
+GroupOperation::Reduce`. This is required for correctness: `Inclusive
+Scan`/`ExclusiveScan` (`WavePrefixSum`/`WavePrefixProduct`) use the *same*
+op type with a different `group_operation` attribute, and there is no
+matching `llvm.spv.wave.*` intrinsic for those -- only upstream's own
+generic raw-call pattern (which threads `GroupOperation` through as a
+runtime parameter) handles them correctly. Verified this guard is in
+place and the `ClusteredReduce` lit test case still falls through as
+expected.
+
+## Verification
+
+- `ninja check-feme`: **3023/3023 passed** (3 unsupported), 0 failed.
+- `check-hlsl-feme-vk` full run (664 total): **278 passed, 99 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- was 102 failed before this session.
+  ~16 net-new passes, 0 regressions.
+- `dEQP-VK.subgroups.arithmetic.*` (12087 cases): still 100%
+  `NotSupported` -- this device doesn't advertise
+  `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT` at all (matches roadmap L10's
+  prior finding, unrelated to this fix). No `VulkanCTSReport.md` Pass/Fail
+  delta expected or found.
+
+## Committed (3 commits, small and separate)
+
+1. `f9ec48a34abe` -- `SPIRVToLLVMPatterns.cpp` unified reduce pattern +
+   updated existing lit test + new vector/`ClusteredReduce` lit test.
+2. `432379164c10` -- `SIMDize.cpp` vector-decomposition fix + new lit
+   test.
+3. `9618b5d050e8` -- `Roadmap.md` (H124a struck through with summary,
+   H124h filed for the remaining masking bug) + `VulkanCTSReport.md`
+   (fix writeup, CTS sweep result).
+
+## Not done this session (now H124h, new)
+
+**Divergent-branch reduce masking bug** (~10 `check-hlsl-feme-vk` cases,
+e.g. `WaveActiveSum.int32.test`, `WaveActiveMax.fp32.test`,
+`WaveActiveBitXor.int.test`): these now run to completion with no crash
+but return the **full-wave** reduce result instead of the
+**divergent-subset** result when the `WaveActive*` call sits inside an
+`if`. Root cause isolated to `FunctionWidener::widenWaveCall`
+(`SIMDize.cpp`): it always passes the wave's whole `Env.EntryMask` to
+`createWaveCall` for every reduce kind, never narrowed by the enclosing
+branch's own active-lane predicate. Confirmed by contrast: every reduce
+test *without* a divergent branch (e.g. `WaveActiveBitAnd.int.test`)
+already passes. This is a real, separate bug in how `feme-cpu-linearize`'s
+per-region mask threads into `feme-cpu-simdize`'s reduce lowering, not a
+legalization gap -- filed as roadmap H124h, not touched this session
+(would need its own real investigation into the masked-call mechanism
+other divergent-region ops already use, e.g. `feme.cpu.masked.store.*`).
+
+## Suggested next steps, ranked
+
+1. **H124h** (~1-2 hours, real investigation, newly filed this session):
+   the divergent-branch reduce-masking bug above -- highest priority,
+   since it's the direct continuation of this session's own work and
+   closes the rest of H124a's original bucket. Start by comparing
+   `WaveActiveBitAnd.int.test` (passes, no branch) against
+   `WaveActiveSum.int32.test` (fails, branch-gated) at the IR level
+   right before `feme-cpu-simdize` runs, to see what mask (if any) the
+   branch's own divergent region produces and why `widenWaveCall` isn't
+   using it.
+2. **H124d** (~1 hour): `"unhandled opcode 209"` (derivative family),
+   ~7 cases, still not started across 2+ sessions now.
+3. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
+   resource-load runtime intrinsics, ~2 cases.
+4. **H124b** (~1-2 hours): `CBuffer`/`Matrix` `spirv.AccessChain`
+   legalization gap, ~10 cases.
+5. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
+   vector legalization gaps, 8 cases.
+6. **H124e** (~2-4+ hours, not one bug): CPU divergence-handling
+   cluster, ~11 cases, needs per-case triage first.
+7. **H124g** (low priority): confirm `layout.test`'s `FileCheck`
+   mismatch is real; consider removing `array_of_matrices.test`'s stale
+   `XFAIL: DXC` upstream (in `offload-test-suite`, not this repo).
+8. **Still fully pending, now deferred 3+ sessions**:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption -- `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+9. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: no longer a
+   standing gap -- built and run repeatedly this session, working
+   correctly with dependency wiring intact.
+10. No scratch files to clean up this session (recovery work used only
+    file views and edits, nothing written to `/tmp`).
