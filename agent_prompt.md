@@ -49,11 +49,15 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H126** (~1 hour, not started): the `si32` prefix-scan type-legality
-   gap above. Start by finding wherever `WavePrefixSum`/`WavePrefixProduct`
-   gets legalized to see where an `si32` (rather than plain `i32`) type
-   survives into an `llvm.call`'s result.
-2. **H124b** (~1-2 hours, still not started across several sessions):
+1. **H127** (~1-2 hours, real design work, newly filed this session):
+   vector-operand `WavePrefixSum`/`WavePrefixProduct` component-
+   decomposition gap above. Start by reading `widenWaveCall`'s own
+   vector-decomposition branch in `SIMDize.cpp` (~line 1769) to see
+   exactly what it assumes about uniformity, and how `WaveReadLaneAt`'s
+   own divergent-result handling (if any) differs -- that may be the
+   closer existing precedent to generalize from, not
+   `isVectorOperandReduceKind`'s own uniform-only table.
+2. **H124b** (~1-2 hours, still not started across many sessions):
    `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
 3. **H124d** (~1 hour, still not started): `"unhandled opcode 209"`
    (derivative family, `fwidth`/`ddx`/`ddy`), ~7 cases.
@@ -61,9 +65,9 @@ The last session suggested the next steps:
    legalization gaps, 8 cases.
 5. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
    resource-load runtime intrinsics, ~2 cases.
-6. Lower priority, deferred 4+ sessions now: `transform_feedback.fuzz.
+6. Lower priority, deferred 5+ sessions now: `transform_feedback.fuzz.
    random_geometry.all_instance_array.12`'s pre-existing heap corruption
    -- `valgrind`'s own trace already points at `buildStageStorage`/
    `executeDraws` allocating a too-small buffer.
-7. Cleanup: `/tmp/h125_repro/`, `/tmp/h125_test*.ll` (this session's own
-   scratch files, not part of the repo).
+7. Cleanup: `/tmp/h126_repro/` (this session's own scratch files, not
+   part of the repo).
