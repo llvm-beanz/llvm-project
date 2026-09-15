@@ -58,3 +58,35 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %v : f32
   }
 }
+
+// -----
+
+// (Roadmap H130) A single-element ("length-1") array of uniform blocks --
+// a legal, if unusual, GLSL `T ubos[1];` declaration (one of dEQP-VK's own
+// `dEQP-VK.ubo.random.basic_instance_arrays.*` randomized-length cases can
+// legitimately generate this). This must still be treated as arrayed:
+// `ResourceAddressOfPattern` must still erase the address (not build a
+// single non-arrayed handle straight from the array-typed pointer), and
+// this pattern must still fire (not decline as "not an arrayed block"),
+// exactly like the 3-element case above, just with `Count` == 1 instead
+// of a larger value.
+
+// CHECK-LABEL: llvm.func @read_field_one
+// CHECK: %[[SET:.*]] = llvm.mlir.constant(5 : i32) : i32
+// CHECK: %[[BINDING:.*]] = llvm.mlir.constant(3 : i32) : i32
+// CHECK: %[[COUNT:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: %[[NAME:.*]] = llvm.mlir.addressof @ubo_one.str : !llvm.ptr
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"(%[[SET]], %[[BINDING]], %[[COUNT]], %arg0, %[[NAME]])
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(vector<4xf32>, f32)>, 2, 0>
+// CHECK: %[[FIELD:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
+// CHECK: llvm.load %[[FIELD]] : !llvm.ptr<12> -> f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @ubo_one bind(5, 3) : !spirv.ptr<!spirv.array<1 x !spirv.struct<(vector<4xf32> [0], f32 [16]), Block>>, Uniform>
+  spirv.func @read_field_one(%idx : i32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @ubo_one : !spirv.ptr<!spirv.array<1 x !spirv.struct<(vector<4xf32> [0], f32 [16]), Block>>, Uniform>
+    %c1 = spirv.Constant 1 : i32
+    %ac = spirv.AccessChain %0[%idx, %c1] : !spirv.ptr<!spirv.array<1 x !spirv.struct<(vector<4xf32> [0], f32 [16]), Block>>, Uniform>, i32, i32 -> !spirv.ptr<f32, Uniform>
+    %v = spirv.Load "Uniform" %ac : f32
+    spirv.ReturnValue %v : f32
+  }
+}

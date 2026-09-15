@@ -56,3 +56,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, SampledBuffer, I
     spirv.ReturnValue %r : vector<4xsi32>
   }
 }
+
+// -----
+
+// (Roadmap H130) A single-element ("length-1") array of image resources --
+// a legal, if unusual, `RWBuffer<T> Buf[1];` declaration. This must still
+// convert as arrayed (`Count` == 1 is a real, structurally-computed
+// descriptor count here, not a signal that the variable is actually
+// non-arrayed): `ResourceAddressOfPattern` must still erase the address,
+// and this pattern (not some non-arrayed fallback) must still build the
+// handle, with the access chain's own leading index feeding
+// `handlefrombinding`'s `Index` operand, exactly like the 3-element case
+// above.
+
+// CHECK-LABEL: llvm.func @read_elem_one
+// CHECK: %[[SET:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: %[[BINDING:.*]] = llvm.mlir.constant(4 : i32) : i32
+// CHECK: %[[COUNT:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: %[[NAME:.*]] = llvm.mlir.addressof @Buf_one.str : !llvm.ptr
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"(%[[SET]], %[[BINDING]], %[[COUNT]], %arg0, %[[NAME]])
+// CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %arg1)
+// CHECK: llvm.load %[[PTR]] : !llvm.ptr -> vector<4xi32>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, SampledBuffer, ImageBuffer], []> {
+  spirv.GlobalVariable @Buf_one bind(0, 4) : !spirv.ptr<!spirv.array<1 x !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>>, UniformConstant>
+  spirv.func @read_elem_one(%idx : i32, %coord : i32) -> vector<4xsi32> "None" {
+    %0 = spirv.mlir.addressof @Buf_one : !spirv.ptr<!spirv.array<1 x !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>>, UniformConstant>
+    %ac = spirv.AccessChain %0[%idx] : !spirv.ptr<!spirv.array<1 x !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>>, UniformConstant>, i32 -> !spirv.ptr<!spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, UniformConstant>
+    %v = spirv.Load "UniformConstant" %ac : !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>
+    %r = spirv.ImageRead %v, %coord ["None"] : !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, i32 -> vector<4xsi32>
+    spirv.ReturnValue %r : vector<4xsi32>
+  }
+}
