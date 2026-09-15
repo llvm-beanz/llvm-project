@@ -3159,10 +3159,31 @@ std::optional<uint64_t> getConstantMemberIndex(mlir::Value Index) {
 /// \p AllIndices[Selector] of \p Element's content from \p Handle, then an
 /// ordinary GEP for any indices beyond it -- see BlockElement's own comment
 /// for what that selector means in each shape.
+/// Forward declaration: defined below, used by rewriteBlockAccess to
+/// reject (rather than silently miscompile) a partial access into a
+/// matrix member whose declared layout it does not represent naturally
+/// -- see its own definition's comment.
+bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
+                                       unsigned Index,
+                                       mlir::Type ConvertedMember);
+
+/// \p BlockStruct is the struct Element was itself derived from (see
+/// BlockElement's own comment) -- always a plain struct type, whether or
+/// not `Element.HasWrapper`, since both getBufferBlockElement and
+/// getUniformBlockElement only ever construct a BlockElement after first
+/// confirming their own input pointer's pointee is one. It is threaded
+/// through explicitly, rather than re-derived from `Op.getBasePtr()`'s own
+/// type here, because BlockAccessChainPattern's and
+/// ArrayedBlockAccessChainPattern's own base pointers point at different
+/// things -- a struct directly for the former, but an *array* of structs
+/// (one instance per array element) for the latter, whose own element
+/// type (not `Op.getBasePtr()`'s own pointee) is what Element was actually
+/// derived from.
 mlir::LogicalResult rewriteBlockAccess(
     mlir::spirv::AccessChainOp Op, mlir::ConversionPatternRewriter &Rewriter,
     const mlir::TypeConverter &TypeConverter, const BlockElement &Element,
-    mlir::Value Handle, mlir::ValueRange AllIndices, unsigned Selector) {
+    mlir::spirv::StructType BlockStruct, mlir::Value Handle,
+    mlir::ValueRange AllIndices, unsigned Selector) {
   mlir::Type ResultType =
       TypeConverter.convertType(Op.getComponentPtr().getType());
   if (!ResultType)
@@ -3190,6 +3211,13 @@ mlir::LogicalResult rewriteBlockAccess(
   // dereferences through the pointer `llvm.spv.resource.getpointer`
   // returned, exactly as an ordinary GEP into a pointer operand would.
   mlir::Type SelectedType;
+  // (Roadmap H124b) The struct member whose own `RowMajor`/`MatrixStride`
+  // decorations describe SelectedType's real layout, when SelectedType
+  // turns out to be a matrix -- always member 0 of Op's own base struct
+  // for either array-wrapped shape below (the wrapper's sole member,
+  // whatever its element type), or the constant member index the
+  // non-array (direct struct-content) branch already has to read anyway.
+  unsigned MatrixDecorationMemberIndex = 0;
   if (auto Array =
           mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Element.Content)) {
     SelectedType = Array.getElementType();
@@ -3204,10 +3232,55 @@ mlir::LogicalResult rewriteBlockAccess(
                                          "member selector is not a constant");
     SelectedType = mlir::cast<mlir::spirv::StructType>(Element.Content)
                        .getElementType(*MemberIndex);
+    MatrixDecorationMemberIndex = static_cast<unsigned>(*MemberIndex);
   }
   mlir::Type ElementType = TypeConverter.convertType(SelectedType);
   if (!ElementType)
     return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+  // (Roadmap H124b) A matrix reached through more than just the member
+  // selector above -- e.g. one row/column or scalar element of it, rather
+  // than the matrix in its own entirety (see getMatrixWholeAccess's own
+  // comment for the one shape this file does support) -- whose own
+  // declared layout isMatrixMemberLayoutRepresentable rejects (a
+  // `RowMajor` matrix, physically transposed from ElementType's own
+  // logical, always column-major shape, or a `MatrixStride` this
+  // member's own physically substituted layout pads between
+  // rows/columns) cannot be addressed by an ordinary GEP at all: it would
+  // compute byte offsets from ElementType's own natural (unpadded,
+  // logical) layout, not the member's real physical one, and a
+  // `RowMajor` member's own physically contiguous axis (rows) does not
+  // even match a `spirv.AccessChain`'s own always-column-first index
+  // order in the first place -- reading one logical column back out
+  // would need a genuine strided gather, not a single address. Declined
+  // (rather than silently computing the wrong address) until that harder
+  // gap is closed.
+  //
+  // Unlike every other rejection in this function, simply returning
+  // failure here is not safe: Op's own base pointer has *already*
+  // legally converted to a `spirv.VulkanBuffer` handle (not an ordinary
+  // `!llvm.ptr`) by this point, so upstream's own generic, lower-benefit
+  // `AccessChainPattern` fallback would otherwise still be tried next --
+  // and, never expecting a handle-typed base pointer, blindly builds an
+  // ill-typed `llvm.getelementptr` from it, which only surfaces once the
+  // whole module is verified (a confusing, unrelated-looking diagnostic),
+  // not with this file's own clear "explicitly marked illegal" message.
+  // Emitting a real, specific error here and replacing the op with a
+  // same-typed poison value -- rather than declining outright -- consumes
+  // it for good, so neither that fallback nor a bogus GEP is ever
+  // reached; `emitOpError` still fails the overall conversion, exactly as
+  // any other declined op would.
+  if (mlir::isa<mlir::spirv::MatrixType>(SelectedType)) {
+    if (!isMatrixMemberLayoutRepresentable(
+            BlockStruct, MatrixDecorationMemberIndex, ElementType)) {
+      Op.emitOpError(
+          "partial access (a row, column, or scalar element) into a "
+          "matrix member whose declared RowMajor/MatrixStride layout is "
+          "not yet supported");
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::PoisonOp>(Op, ResultType);
+      return mlir::success();
+    }
+  }
 
   llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
   GEPIndices.push_back(0);
@@ -3265,8 +3338,10 @@ public:
     if (Indices.size() <= Selector)
       return Rewriter.notifyMatchFailure(Op, "not enough indices");
 
-    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), *Element,
-                              Adaptor.getBasePtr(), Indices, Selector);
+    return rewriteBlockAccess(
+        Op, Rewriter, *getTypeConverter(), *Element,
+        mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType()),
+        Adaptor.getBasePtr(), Indices, Selector);
   }
 };
 
@@ -3345,8 +3420,10 @@ public:
              mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
              It->second.NameSymbol)});
 
-    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), *Element,
-                              Handle, Indices, Selector);
+    return rewriteBlockAccess(
+        Op, Rewriter, *getTypeConverter(), *Element,
+        mlir::cast<mlir::spirv::StructType>(ElementPointerType.getPointeeType()),
+        Handle, Indices, Selector);
   }
 
 private:
@@ -3484,6 +3561,112 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
       return false;
   }
   return true;
+}
+
+/// A `spirv.MatrixType` struct member's own `RowMajor`/`MatrixStride`
+/// decorations, describing its *physical* (as opposed to
+/// `spirv.MatrixType`'s own ordinary conversion's logical,
+/// always-column-major, tightly-packed) in-memory layout -- see
+/// getPhysicalMatrixMemberType's own comment for what \p IsRowMajor and
+/// \p Stride mean to it, and getMatrixWholeAccess's for how a
+/// `spirv.AccessChain`/`spirv.Load`/`spirv.Store` triple later recovers
+/// the same facts independently, from the very same struct member
+/// decorations, to interpret the address this substituted type
+/// describes (Roadmap H124b).
+struct MatrixMemberLayout {
+  bool IsRowMajor = false;
+  uint64_t Stride = 0;
+};
+
+/// Returns \p Struct's member \p Index's own `RowMajor`/`MatrixStride`
+/// decorations (see MatrixMemberLayout), or `std::nullopt` if it has no
+/// `MatrixStride` decoration at all -- a matrix member always needs one
+/// to be laid out in memory in the first place, so this indicates a
+/// malformed module this declines to convert (matches
+/// isMatrixMemberLayoutRepresentable's own "reject" behavior for the same
+/// input, which every real caller of this function has already checked).
+std::optional<MatrixMemberLayout>
+getMatrixMemberLayout(mlir::spirv::StructType Struct, unsigned Index) {
+  llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
+      Decorations;
+  Struct.getMemberDecorations(Index, Decorations);
+  MatrixMemberLayout Layout;
+  bool HasStride = false;
+  for (const auto &Decoration : Decorations) {
+    if (Decoration.decoration == mlir::spirv::Decoration::RowMajor) {
+      Layout.IsRowMajor = true;
+    } else if (Decoration.decoration ==
+               mlir::spirv::Decoration::MatrixStride) {
+      auto StrideAttr =
+          mlir::dyn_cast<mlir::IntegerAttr>(Decoration.decorationValue);
+      if (!StrideAttr)
+        return std::nullopt;
+      Layout.Stride = static_cast<uint64_t>(StrideAttr.getInt());
+      HasStride = true;
+    }
+  }
+  if (!HasStride)
+    return std::nullopt;
+  return Layout;
+}
+
+/// Returns the "physical" LLVM type substituting for a `spirv.MatrixType`
+/// struct member whenever isMatrixMemberLayoutRepresentable rejects its
+/// ordinary (logical, always column-major, tightly packed) conversion --
+/// an `!llvm.array<MajorCount x MajorEntryTy>`, where MajorCount and
+/// MajorEntryTy's own element count are chosen by \p Layout's own
+/// `RowMajor`/`ColMajor`-ness (RowMajor: MajorCount = NumRows, one entry
+/// holds NumColumns scalars; ColMajor: MajorCount = NumColumns, one entry
+/// holds NumRows scalars -- the "major" axis is whichever one is
+/// physically contiguous in memory), and MajorEntryTy is padded (a
+/// trailing byte array, packed) up to \p Layout's own declared
+/// `MatrixStride` whenever the tightly-packed natural size of one major
+/// entry undershoots it -- real HLSL cbuffer packing reserves a whole
+/// 16-byte register for every row/column regardless of its own true
+/// element count (Roadmap H124b).
+///
+/// This substituted type does not attempt to reproduce the matrix's
+/// *logical* (always column-major) shape at all -- unlike the ordinary
+/// MatrixType conversion, whose `!llvm.array<NumColumns x
+/// vector<NumRows>>` every other pattern in this file already assumes --
+/// so nothing besides a pointer (GEP address) computation may use it
+/// directly. getMatrixWholeAccess below (used by
+/// RowMajorMatrixLoadPattern/StorePattern) recomputes this exact same
+/// physical shape independently, from the same struct member
+/// decorations, and transposes/depads to/from the ordinary logical
+/// representation at the moment a real `spirv.Load`/`spirv.Store`
+/// crosses this member's address boundary -- see their own comments.
+///
+/// Returns null if \p MatrixTy's own element type fails to convert, or if
+/// \p Layout's declared `MatrixStride` is smaller than one major entry's
+/// own natural (tightly packed) size -- a genuinely overlapping,
+/// unrepresentable layout, not a mere padding gap.
+mlir::Type getPhysicalMatrixMemberType(mlir::spirv::MatrixType MatrixTy,
+                                       const MatrixMemberLayout &Layout,
+                                       const mlir::TypeConverter &Converter,
+                                       mlir::DataLayout &DL) {
+  mlir::Type ElemTy = Converter.convertType(MatrixTy.getElementType());
+  if (!ElemTy)
+    return nullptr;
+  uint64_t ElemSize = DL.getTypeSize(ElemTy);
+  int64_t MajorCount =
+      Layout.IsRowMajor ? MatrixTy.getNumRows() : MatrixTy.getNumColumns();
+  int64_t MinorCount =
+      Layout.IsRowMajor ? MatrixTy.getNumColumns() : MatrixTy.getNumRows();
+  uint64_t NaturalMinorBytes = static_cast<uint64_t>(MinorCount) * ElemSize;
+  if (Layout.Stride < NaturalMinorBytes)
+    return nullptr; // Overlapping rows/columns: genuinely unrepresentable.
+
+  auto MinorArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, MinorCount);
+  mlir::Type MajorEntryTy = MinorArrTy;
+  if (Layout.Stride != NaturalMinorBytes) {
+    auto PadTy = mlir::LLVM::LLVMArrayType::get(
+        mlir::IntegerType::get(MatrixTy.getContext(), 8),
+        Layout.Stride - NaturalMinorBytes);
+    MajorEntryTy = mlir::LLVM::LLVMStructType::getLiteral(
+        MatrixTy.getContext(), {MinorArrTy, PadTy}, /*isPacked=*/true);
+  }
+  return mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
 }
 
 /// (Roadmap H101j) Name prefix `getTightVectorArrayType`'s own marker
@@ -4022,11 +4205,32 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     mlir::spirv::StructType Type, const mlir::TypeConverter &Converter) {
   llvm::SmallVector<mlir::Type, 8> Members;
   bool HasVectorMember = false;
+  mlir::DataLayout DL;
   for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I) {
     mlir::Type ElementTy = Type.getElementType(I);
     mlir::Type MemberTy = Converter.convertType(ElementTy);
-    if (!MemberTy || !isMatrixMemberLayoutRepresentable(Type, I, MemberTy))
+    if (!MemberTy)
       return nullptr;
+    if (!isMatrixMemberLayoutRepresentable(Type, I, MemberTy)) {
+      // (Roadmap H124b) Rather than rejecting the whole struct's own
+      // conversion outright, retry with this one member substituted for
+      // its own physical (RowMajor/ColMajor- and MatrixStride-aware, but
+      // no longer logical/column-major-shaped) layout -- see
+      // getPhysicalMatrixMemberType's own comment. Only a pointer (GEP
+      // address) computation into this member may use the substituted
+      // type directly; getMatrixWholeAccess (used by
+      // RowMajorMatrixLoadPattern/StorePattern below) is responsible for
+      // interpreting a real Load/Store through it correctly.
+      std::optional<MatrixMemberLayout> Layout =
+          getMatrixMemberLayout(Type, I);
+      MemberTy =
+          Layout ? getPhysicalMatrixMemberType(
+                       mlir::cast<mlir::spirv::MatrixType>(ElementTy),
+                       *Layout, Converter, DL)
+                 : nullptr;
+      if (!MemberTy)
+        return nullptr;
+    }
     Members.push_back(MemberTy);
     HasVectorMember |= mlir::isa<mlir::VectorType>(ElementTy);
     if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy))
@@ -7299,27 +7503,37 @@ public:
   }
 };
 
-/// Returns \p Op's own matrix element type if it is a `spirv.AccessChain`
-/// selecting one whole element of a `RWStructuredBuffer<matCxR>`/
-/// `StructuredBuffer<matCxR>`-shaped block's own content array (dxc's own
-/// single-member wrapper shape -- see BlockElement's own comment; glslang's
-/// non-wrapper shape is not covered, since no case reaching it is known to
-/// exist), decorated `RowMajor` with a `MatrixStride` matching a tightly
-/// packed row of the matrix's own `NumColumns` elements -- the one shape
-/// RowMajorMatrixStorePattern/RowMajorMatrixLoadPattern below know how to
-/// reproduce as a real physical layout (roadmap L83's own real IR
-/// reduction found this gap: a `RWStructuredBuffer<float3x4>`'s own
-/// `RowMajor`+`MatrixStride`-decorated content is silently ignored by the
-/// ordinary `BlockAccessChainPattern`/`rewriteBlockAccess` path -- unlike
-/// `isMatrixMemberLayoutRepresentable`, which already rejects this exact
-/// decoration combination, but only ever runs for a matrix that is
-/// *directly* a named struct member, not one reached through the
-/// wrapper's own content array). Returns `std::nullopt` for every other
-/// case (not a block access, not a whole-element access, a natural
-/// (`ColMajor`) layout the ordinary conversion already handles correctly,
-/// or some other stride this conversion cannot reproduce).
-std::optional<mlir::spirv::MatrixType>
-getRowMajorMatrixAccess(mlir::spirv::AccessChainOp Op) {
+/// A whole-matrix `spirv.AccessChain` access this file's own physical
+/// layout substitution (getPhysicalMatrixMemberType) can interpret: the
+/// matrix's ordinary (logical, always column-major) MatrixType, and the
+/// RowMajor/ColMajor- and MatrixStride-decoration facts describing its
+/// member's own physical (substituted) layout.
+struct MatrixWholeAccess {
+  mlir::spirv::MatrixType MatrixTy;
+  MatrixMemberLayout Layout;
+};
+
+/// Returns \p Op's own matrix type and physical-layout decorations if it
+/// is a `spirv.AccessChain` selecting one *whole* matrix that
+/// isMatrixMemberLayoutRepresentable rejected (any `RowMajor`- or
+/// `ColMajor`-decorated matrix whose `MatrixStride` does not exactly
+/// match its natural, tightly packed size -- e.g. real HLSL cbuffer
+/// packing's whole-register-per-row/column rule, roadmap H124b), in
+/// either of the two shapes FeMe's own upstream HLSL resource
+/// representation produces (see BlockElement's own comment): a matrix
+/// directly a named struct member (the `cbuffer`/`ConstantBuffer<T>`
+/// shape), or a matrix directly the element type of a dxc wrapper's own
+/// dynamically-indexed array member (the `RWStructuredBuffer<matCxR>`/
+/// `StructuredBuffer<matCxR>` shape, roadmap L83). Returns `std::nullopt`
+/// for every other case (not a block access, a natural layout the
+/// ordinary conversion already handles correctly, or an access reaching
+/// only part of a matrix -- a single row/column or scalar element, which
+/// this conversion does not yet cover -- see BlockElement's own comment
+/// for the reasoning; the matrix's own physical layout may not even be
+/// addressable one part at a time when RowMajor, so no such access is
+/// handled here yet).
+std::optional<MatrixWholeAccess>
+getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
   auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
       mlir::cast<mlir::spirv::PointerType>(Op.getComponentPtr().getType())
           .getPointeeType());
@@ -7333,60 +7547,76 @@ getRowMajorMatrixAccess(mlir::spirv::AccessChainOp Op) {
   std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
   if (!Element)
     Element = getUniformBlockElement(PointerType);
-  // The wrapper shape's sole member is always index 0; a second index
-  // selects the specific array element (the runtime index into the
-  // `RWStructuredBuffer`) and nothing further, matching this pattern's own
-  // "whole matrix element" scope -- its own value does not matter here,
-  // since every element of the array shares the same layout.
-  if (!Element || !Element->HasWrapper || Op.getIndices().size() != 2 ||
-      !mlir::isa<mlir::spirv::RuntimeArrayType, mlir::spirv::ArrayType>(
-          Element->Content))
+  if (!Element)
     return std::nullopt;
 
-  auto Struct = mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
-  llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
-      Decorations;
-  Struct.getMemberDecorations(0, Decorations);
-  bool IsRowMajor = false;
-  bool StrideMatches = false;
-  uint32_t RowStride = MatrixTy.getNumColumns() *
-                       (MatrixTy.getElementType().getIntOrFloatBitWidth() / 8);
-  for (const auto &Decoration : Decorations) {
-    if (Decoration.decoration == mlir::spirv::Decoration::RowMajor)
-      IsRowMajor = true;
-    else if (Decoration.decoration == mlir::spirv::Decoration::MatrixStride) {
-      auto StrideAttr =
-          mlir::dyn_cast<mlir::IntegerAttr>(Decoration.decorationValue);
-      StrideMatches =
-          StrideAttr && static_cast<uint64_t>(StrideAttr.getInt()) == RowStride;
-    }
+  auto Struct =
+      mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+  unsigned MemberIndex;
+  if (Element->HasWrapper) {
+    // The wrapper's own sole member is always index 0; a second index
+    // selects the specific array element (the runtime index into the
+    // `RWStructuredBuffer`/`StructuredBuffer`) and nothing further,
+    // matching this pattern's own "whole matrix" scope -- its own value
+    // does not matter here, since every element of the array shares the
+    // same layout. The decorations describing that shared layout are
+    // attached to the wrapper's own member 0 (the array itself), not to
+    // any one of its elements.
+    if (Op.getIndices().size() != 2 ||
+        !mlir::isa<mlir::spirv::RuntimeArrayType, mlir::spirv::ArrayType>(
+            Element->Content))
+      return std::nullopt;
+    MemberIndex = 0;
+  } else {
+    // A matrix directly a named struct member (the `cbuffer`/
+    // `ConstantBuffer<T>` shape all of H124b's real failures hit) --
+    // exactly one index (the member selector) reaches a whole matrix,
+    // with no room for a further one that would select only part of it.
+    if (Op.getIndices().size() != 1)
+      return std::nullopt;
+    std::optional<uint64_t> Idx =
+        getConstantMemberIndex(Op.getIndices()[0]);
+    if (!Idx)
+      return std::nullopt;
+    MemberIndex = static_cast<unsigned>(*Idx);
   }
-  if (!IsRowMajor || !StrideMatches)
+
+  std::optional<MatrixMemberLayout> Layout =
+      getMatrixMemberLayout(Struct, MemberIndex);
+  if (!Layout)
     return std::nullopt;
-  return MatrixTy;
+  return MatrixWholeAccess{MatrixTy, *Layout};
 }
 
-/// Converts a `spirv.Store` of a whole `RowMajor`-decorated
-/// `RWStructuredBuffer<matCxR>` matrix element (roadmap L83) -- see
-/// getRowMajorMatrixAccess's own comment for the exact shape matched. The
-/// value to store is always modeled with the ordinary "logical" (natural,
-/// always column-major) MatrixType -> LLVM conversion throughout the rest
-/// of the IR (arithmetic, temporaries, `spirv.CompositeConstruct`/
-/// `Extract`, an `!llvm.array<NumColumns x vector<NumRows x T>>`); this
-/// pattern transposes it into the "physical" (row-major) layout only at
-/// the exact point it crosses the memory boundary, immediately before the
-/// real `llvm.store`. The physical row type is a flat, packed
-/// `!llvm.array<NumColumns x T>` of scalars -- deliberately *not* a
-/// `vector<NumColumns x T>`, since LLVM's own data layout pads a
-/// non-power-of-two-width vector's in-memory (store/alloc) size up to the
-/// next power of two on this target (e.g. `vector<3xf32>` occupies 16
-/// bytes, not 12), which would silently corrupt this exact stride whenever
-/// `NumColumns` (an HLSL row's own element count) isn't a power of two --
-/// an array's own per-element layout has no such padding. Registered at
-/// `FeMeBenefit`, above upstream's own generic `spirv.Store` pattern
-/// (registered at the default benefit by
-/// `populateSPIRVToLLVMConversionPatterns`), so it wins only for this one
-/// shape; every other store keeps using the upstream pattern unchanged.
+/// Converts a `spirv.Store` of a whole matrix through a member whose
+/// declared layout isMatrixMemberLayoutRepresentable rejects -- any
+/// `RowMajor`- or `ColMajor`-decorated matrix whose `MatrixStride` is not
+/// exactly its natural, tightly packed size (roadmap H124b, generalizing
+/// roadmap L83's own original `RowMajor`+exact-stride-only wrapper-array
+/// case) -- see getMatrixWholeAccess's own comment for the two shapes
+/// matched. The value to store is always modeled with the ordinary
+/// "logical" (natural, always column-major) MatrixType -> LLVM
+/// conversion throughout the rest of the IR (arithmetic, temporaries,
+/// `spirv.CompositeConstruct`/`Extract`, an `!llvm.array<NumColumns x
+/// vector<NumRows x T>>`); this pattern transposes (if `RowMajor`) and
+/// pads (if `MatrixStride` exceeds one major entry's own natural size)
+/// into the "physical" layout getPhysicalMatrixMemberType's own struct
+/// type conversion already substituted for this member, only at the
+/// exact point the value crosses the memory boundary, immediately before
+/// the real `llvm.store`. A physical "major" entry (one row if
+/// `RowMajor`, one column if `ColMajor`) is a flat, packed
+/// `!llvm.array<MinorCount x T>` of scalars -- deliberately *not* a
+/// `vector<MinorCount x T>`, since LLVM's own data layout pads a
+/// non-power-of-two-width vector's in-memory (store/alloc) size up to
+/// the next power of two on this target (e.g. `vector<3xf32>` occupies
+/// 16 bytes, not 12), which would silently corrupt this exact stride
+/// whenever `MinorCount` isn't a power of two -- an array's own
+/// per-element layout has no such padding, matching
+/// getPhysicalMatrixMemberType's own choice. Registered at `FeMeBenefit`,
+/// above upstream's own generic `spirv.Store` pattern (registered at the
+/// default benefit by populateSPIRVToLLVMConversionPatterns), so it wins
+/// only for this one shape; every other store keeps using the upstream
+/// pattern unchanged.
 class RowMajorMatrixStorePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::StoreOp> {
 public:
@@ -7400,34 +7630,62 @@ public:
         Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
     if (!AccessChain)
       return Rewriter.notifyMatchFailure(Op, "not an access chain store");
-    std::optional<mlir::spirv::MatrixType> MatrixTy =
-        getRowMajorMatrixAccess(AccessChain);
-    if (!MatrixTy)
-      return Rewriter.notifyMatchFailure(Op, "not a RowMajor matrix store");
+    std::optional<MatrixWholeAccess> Access = getMatrixWholeAccess(AccessChain);
+    if (!Access)
+      return Rewriter.notifyMatchFailure(
+          Op, "not a physically-substituted whole-matrix store");
 
     mlir::Location Loc = Op.getLoc();
-    int64_t NumColumns = MatrixTy->getNumColumns();
-    int64_t NumRows = MatrixTy->getNumRows();
+    mlir::spirv::MatrixType MatrixTy = Access->MatrixTy;
+    bool IsRowMajor = Access->Layout.IsRowMajor;
     mlir::Type ElemTy =
-        getTypeConverter()->convertType(MatrixTy->getElementType());
-    auto RowArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, NumColumns);
-    auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(RowArrTy, NumRows);
+        getTypeConverter()->convertType(MatrixTy.getElementType());
+    mlir::DataLayout DL;
+    uint64_t ElemSize = DL.getTypeSize(ElemTy);
+    int64_t MajorCount =
+        IsRowMajor ? MatrixTy.getNumRows() : MatrixTy.getNumColumns();
+    int64_t MinorCount =
+        IsRowMajor ? MatrixTy.getNumColumns() : MatrixTy.getNumRows();
+    uint64_t NaturalMinorBytes = static_cast<uint64_t>(MinorCount) * ElemSize;
+    bool NeedsPad = Access->Layout.Stride != NaturalMinorBytes;
+
+    auto MinorArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, MinorCount);
+    mlir::Type MajorEntryTy = MinorArrTy;
+    if (NeedsPad) {
+      auto PadTy = mlir::LLVM::LLVMArrayType::get(
+          mlir::IntegerType::get(Rewriter.getContext(), 8),
+          Access->Layout.Stride - NaturalMinorBytes);
+      MajorEntryTy = mlir::LLVM::LLVMStructType::getLiteral(
+          Rewriter.getContext(), {MinorArrTy, PadTy}, /*isPacked=*/true);
+    }
+    auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
 
     mlir::Value Physical =
         mlir::LLVM::PoisonOp::create(Rewriter, Loc, PhysicalArrTy);
-    for (int64_t R = 0; R != NumRows; ++R) {
-      mlir::Value RowIndex =
-          mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), R);
-      mlir::Value Row = mlir::LLVM::PoisonOp::create(Rewriter, Loc, RowArrTy);
-      for (int64_t C = 0; C != NumColumns; ++C) {
+    for (int64_t Major = 0; Major != MajorCount; ++Major) {
+      mlir::Value MinorArr =
+          mlir::LLVM::PoisonOp::create(Rewriter, Loc, MinorArrTy);
+      for (int64_t Minor = 0; Minor != MinorCount; ++Minor) {
+        int64_t Col = IsRowMajor ? Minor : Major;
+        int64_t Row = IsRowMajor ? Major : Minor;
         mlir::Value Column =
-            extractColumn(Rewriter, Loc, Adaptor.getValue(), C);
+            extractColumn(Rewriter, Loc, Adaptor.getValue(), Col);
+        mlir::Value RowIndex = mlir::LLVM::ConstantOp::create(
+            Rewriter, Loc, Rewriter.getI32Type(), Row);
         mlir::Value Elem = mlir::LLVM::ExtractElementOp::create(
             Rewriter, Loc, Column, RowIndex);
-        Row = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Row, Elem, C);
+        MinorArr = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, MinorArr,
+                                                      Elem, Minor);
       }
-      Physical =
-          mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Physical, Row, R);
+      mlir::Value Entry = MinorArr;
+      if (NeedsPad) {
+        mlir::Value PaddedEntry =
+            mlir::LLVM::PoisonOp::create(Rewriter, Loc, MajorEntryTy);
+        Entry = mlir::LLVM::InsertValueOp::create(
+            Rewriter, Loc, PaddedEntry, MinorArr, llvm::ArrayRef<int64_t>{0});
+      }
+      Physical = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Physical,
+                                                    Entry, Major);
     }
     Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Physical,
                                                      Adaptor.getPtr());
@@ -7435,13 +7693,15 @@ public:
   }
 };
 
-/// Converts a `spirv.Load` of a whole `RowMajor`-decorated
-/// `RWStructuredBuffer<matCxR>` matrix element (roadmap L83) -- the exact
+/// Converts a `spirv.Load` of a whole matrix through a member whose
+/// declared layout isMatrixMemberLayoutRepresentable rejects -- the exact
 /// inverse of RowMajorMatrixStorePattern above (see its own comment, and
-/// getRowMajorMatrixAccess's, for the shape matched and why the physical
-/// row is a flat scalar array rather than a vector): the real `llvm.load`
-/// reads the physical (row-major) bytes as an `!llvm.array<NumRows x
-/// !llvm.array<NumColumns x T>>`, which this pattern then transposes back
+/// getMatrixWholeAccess's, for the shapes matched and why a physical
+/// major entry is a flat scalar array rather than a vector): the real
+/// `llvm.load` reads the physical bytes as an `!llvm.array<MajorCount x
+/// MajorEntryTy>` (getPhysicalMatrixMemberType's own substituted member
+/// type), which this pattern then depads (if `MatrixStride` exceeds one
+/// major entry's own natural size) and transposes (if `RowMajor`) back
 /// into the ordinary logical (natural, column-major) MatrixType
 /// representation used everywhere else in the IR. Registered at
 /// `FeMeBenefit` for the same reason as RowMajorMatrixStorePattern.
@@ -7458,44 +7718,70 @@ public:
         Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
     if (!AccessChain)
       return Rewriter.notifyMatchFailure(Op, "not an access chain load");
-    std::optional<mlir::spirv::MatrixType> MatrixTy =
-        getRowMajorMatrixAccess(AccessChain);
-    if (!MatrixTy)
-      return Rewriter.notifyMatchFailure(Op, "not a RowMajor matrix load");
+    std::optional<MatrixWholeAccess> Access = getMatrixWholeAccess(AccessChain);
+    if (!Access)
+      return Rewriter.notifyMatchFailure(
+          Op, "not a physically-substituted whole-matrix load");
 
     mlir::Location Loc = Op.getLoc();
-    int64_t NumColumns = MatrixTy->getNumColumns();
-    int64_t NumRows = MatrixTy->getNumRows();
+    mlir::spirv::MatrixType MatrixTy = Access->MatrixTy;
+    bool IsRowMajor = Access->Layout.IsRowMajor;
+    int64_t NumColumns = MatrixTy.getNumColumns();
     mlir::Type ElemTy =
-        getTypeConverter()->convertType(MatrixTy->getElementType());
-    auto RowArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, NumColumns);
-    auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(RowArrTy, NumRows);
+        getTypeConverter()->convertType(MatrixTy.getElementType());
+    mlir::DataLayout DL;
+    uint64_t ElemSize = DL.getTypeSize(ElemTy);
+    int64_t MajorCount =
+        IsRowMajor ? MatrixTy.getNumRows() : MatrixTy.getNumColumns();
+    int64_t MinorCount =
+        IsRowMajor ? MatrixTy.getNumColumns() : MatrixTy.getNumRows();
+    uint64_t NaturalMinorBytes = static_cast<uint64_t>(MinorCount) * ElemSize;
+    bool NeedsPad = Access->Layout.Stride != NaturalMinorBytes;
+
+    auto MinorArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, MinorCount);
+    mlir::Type MajorEntryTy = MinorArrTy;
+    if (NeedsPad) {
+      auto PadTy = mlir::LLVM::LLVMArrayType::get(
+          mlir::IntegerType::get(Rewriter.getContext(), 8),
+          Access->Layout.Stride - NaturalMinorBytes);
+      MajorEntryTy = mlir::LLVM::LLVMStructType::getLiteral(
+          Rewriter.getContext(), {MinorArrTy, PadTy}, /*isPacked=*/true);
+    }
+    auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
     mlir::Value Physical = mlir::LLVM::LoadOp::create(Rewriter, Loc,
                                                       PhysicalArrTy,
                                                       Adaptor.getPtr());
 
     auto LogicalColumnTy = mlir::cast<mlir::VectorType>(
-        getTypeConverter()->convertType(MatrixTy->getColumnType()));
+        getTypeConverter()->convertType(MatrixTy.getColumnType()));
     auto LogicalArrTy =
         mlir::LLVM::LLVMArrayType::get(LogicalColumnTy, NumColumns);
     mlir::Value Logical =
         mlir::LLVM::PoisonOp::create(Rewriter, Loc, LogicalArrTy);
-    for (int64_t C = 0; C != NumColumns; ++C) {
+    for (int64_t Col = 0; Col != NumColumns; ++Col) {
       mlir::Value NewColumn =
           mlir::LLVM::PoisonOp::create(Rewriter, Loc, LogicalColumnTy);
-      for (int64_t R = 0; R != NumRows; ++R) {
-        mlir::Value Row =
-            mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Physical, R);
+      for (int64_t Row = 0, NumRows = MatrixTy.getNumRows(); Row != NumRows;
+           ++Row) {
+        int64_t Major = IsRowMajor ? Row : Col;
+        int64_t Minor = IsRowMajor ? Col : Row;
+        mlir::Value Entry =
+            mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Physical, Major);
+        mlir::Value MinorArr =
+            NeedsPad ? mlir::LLVM::ExtractValueOp::create(
+                           Rewriter, Loc, Entry,
+                           0)
+                     : Entry;
         mlir::Value Elem =
-            mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Row, C);
+            mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, MinorArr, Minor);
         mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
-            Rewriter, Loc, Rewriter.getI32Type(), R);
+            Rewriter, Loc, Rewriter.getI32Type(), Row);
         NewColumn = mlir::LLVM::InsertElementOp::create(Rewriter, Loc,
                                                         NewColumn, Elem,
                                                         DstIndex);
       }
       Logical = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Logical,
-                                                  NewColumn, C);
+                                                  NewColumn, Col);
     }
     Rewriter.replaceOp(Op, Logical);
     return mlir::success();
