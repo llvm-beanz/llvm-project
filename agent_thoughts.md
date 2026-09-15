@@ -84666,3 +84666,131 @@ copies of the same bug in this file, not one.
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
 
 All scratch files from this session have been cleaned up.
+
+# Session: H124f fixed (IsNan/IsInf/GL.Length/GL.Normalize legalization gap)
+
+## What shipped this session
+
+**H124f fixed** (next item in the prior session's ranked next-steps
+list, after H133/H134 which were already complete): `spirv.IsNan`,
+`spirv.IsInf`, `spirv.GL.Length`, and `spirv.GL.Normalize` had **no**
+SPIRVToLLVM legalization pattern at all — not a "vector-only gap in an
+existing scalar pattern" like the roadmap's prior framing assumed
+(mirroring H124a's `GroupNonUniform*` shape), but a from-scratch gap
+for both scalar and vector operands, confirmed by grepping both this
+file and upstream MLIR's own `populateSPIRVToLLVMConversionPatterns`.
+Only the reverse direction exists upstream (`MathToSPIRV.cpp` builds
+`spirv.IsNan`/`IsInf` *from* `math.isnan`/`math.isinf`, not to LLVM).
+
+Found the existing `GLAtan2Pattern`/`GLStepPattern`/`GLFaceForwardPattern`
+/`GLRefractPattern` group (roadmap L7c/L87) as a near-identical
+precedent — same "had no pattern at all" shape, same file location,
+and already had two reusable helpers I needed:
+`createScalarOrVectorDotProduct` (scalar-or-vector dot product,
+always scalar result) and `broadcastScalarToShapeOf` (broadcast a
+scalar back across a vector's shape). Both existing helpers meant none
+of the four new patterns needed a separate scalar/vector code path.
+
+Added:
+- `IsNanPattern`: `llvm.fcmp uno %x, %x` (unordered-with-self is
+  IEEE-754's own definition of NaN) — reusing the exact predicate
+  `FComparePattern<spirv::UnorderedOp, ...>` already uses for the
+  two-operand `spirv.Unordered`.
+- `IsInfPattern`: `llvm.intr.fabs(x) == +Inf` (`llvm.fcmp oeq`) — one
+  compare catches both infinity signs after folding the sign away.
+- `GLLengthPattern`: `sqrt(dot(x, x))`.
+- `GLNormalizePattern`: `x / Length(x)`, via the same dot-product +
+  broadcast.
+
+New lit test (`spirv-to-llvm-gl-length-normalize-isnan-isinf.mlir`,
+8 cases: one scalar + one vector per op) verified against real
+`feme-opt` output — iterated on a couple of `CHECK` lines that assumed
+lane-0 was reused for both dot-product operands when the generated IR
+actually re-extracts it twice (harmless, just needed looser wildcards).
+
+## Verification
+
+- `ninja check-feme`: **3049/3052 passed** (3 unsupported), 0 failed —
+  net +1 vs. the H133 baseline (3048/3051), from the new lit test; 0
+  regressions.
+- VK-GL-CTS: ran the real CTS groups exercising these four ops.
+  `dEQP-VK.glsl.builtin.function.common.isnan.*`/`isinf.*`: 16/16
+  supported cases pass (14 more `NotSupported` for `double`/
+  `longVector`, this ICD's known limits). `dEQP-VK.glsl.builtin.
+  precision.length.*`/`normalize.*`: 16/16 supported cases pass (4
+  `NotSupported`, same reason). Also re-ran the full `dEQP-VK.glsl.
+  builtin.function.common.*` group (81 cases, 57 passed / 0 failed) to
+  confirm no regressions in the same test module. All previously-
+  failing, now-supported cases pass outright — every one of these had
+  failed pipeline creation before this fix.
+- `clang-format-diff.py` scoped to the diff: no changes needed (the new
+  code was already clang-format-clean as written).
+
+3 commits: code fix, lit test, docs (`Roadmap.md` H124f struck through
++ re-scoped writeup, `VulkanCTSReport.md` new session report). No
+Vulkan14FeatureInventory.md/VulkanExtensionInventory.md change — pure
+legalization-gap fix, no new capability exposed, matching H133/H134's
+precedent (checked: neither file mentions any of these four ops).
+
+## A loose thread worth flagging, not chased down
+
+While looking for the next small task, I spot-checked H124g's two
+remaining items (`Feature/StructuredBuffer/layout.test`'s prior
+`FileCheck` mismatch, and `array_of_matrices.test`'s prior unexpected
+XPASS) by re-running `check-hlsl-feme-vk` under `llvm-lit` a few
+different ways:
+- Filtered to just `layout.test`: passes cleanly.
+- Filtered to just `array_of_matrices.test`: shows as `XFAIL`
+  (expectedly failed, i.e. *not* XPASS) in isolation.
+- Full suite run via `ninja check-hlsl-feme-vk`: 56 failed, and
+  `array_of_matrices.test` XPASS reappears.
+- Full suite run via a second, direct `llvm-lit` invocation right
+  after: only 11 failed.
+
+Three different failure counts (56 / 11, plus isolated single-test
+passes) from what should be the same fixed suite, with no code changes
+in between, strongly suggests **some of `check-hlsl-feme-vk`'s own
+failures are order-dependent/flaky** (shared state across test cases —
+maybe a shared descriptor pool, JIT cache, or GPU/ICD-level state not
+reset between cases — rather than each `.test` file being hermetic).
+This is a distinct, potentially significant finding: any future
+`check-hlsl-feme-vk` triage session should first confirm a failure is
+stable (re-run the same filtered subset 2-3 times) before spending time
+root-causing it, and separately, someone should eventually investigate
+*why* results vary run-to-run at all, since a flaky test harness makes
+every future triage session's own bucketing suspect.
+
+## Next steps, ranked
+
+1. **Investigate `check-hlsl-feme-vk`'s run-to-run flakiness** (~1-2
+   hours, newly discovered this session, not yet root-caused): re-run
+   the full suite 3+ times back-to-back with no rebuild in between and
+   diff the failing-test lists to confirm this is real (not a one-off
+   fluke from something else on the machine). If confirmed, check
+   whether tests share GPU/descriptor/JIT state that isn't reset
+   between cases — likely somewhere in `OffloadTest`'s own executor,
+   not this repo's `feme` code, but worth confirming before redirecting
+   elsewhere.
+2. **H124e** (~several sessions, large): `feme-cpu-simdize`/
+   `feme-cpu-linearize`/`feme-cpu-wrap-entry` divergence-handling gaps,
+   ~11 of the original 102 `check-hlsl-feme-vk` failures across at
+   least 5 distinct root causes (non-linear-control-flow barrier,
+   divergent-aggregate decomposition, groupshared-global GEP, divergent
+   branch `LinearizePass` missed, multi-exit-check loop, out-of-bounds
+   struct GEP). Needs per-case triage first to confirm which (if any)
+   share a root cause — don't assume one fix covers all 11.
+3. **H124d** (large, deprioritized, unchanged from many sessions ago):
+   needs new upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/
+   `OpFwidth` — skip unless someone wants the upstream-MLIR piece
+   specifically.
+4. **H124g's `layout.test`/`array_of_matrices.test` items**: given the
+   flakiness finding above, don't re-triage either in isolation next
+   session — first resolve item 1, then re-check whether either is a
+   real, stable failure/XPASS at all.
+5. Lower priority, deferred 13+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+All scratch files from this session (`/tmp/h124f*.qpa`, `/tmp/h124f*.diff`,
+`/tmp/feme-vk-full.xml`) have been cleaned up.
