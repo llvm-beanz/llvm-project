@@ -44785,3 +44785,144 @@ own natural-alignment-collapse fix), both verified against real
 
 H135 is struck through on the roadmap. No feature/extension-inventory
 change: a pure struct-layout bugfix, not a new capability.
+
+## Session: H136 investigation -- `check-hlsl-feme-vk` baseline was silently wrong for several sessions (env-var self-reference bug); corrected to 54 failed + 1 XPASS, re-triaged
+
+**Context.** This session picked up the prior session's suggested next
+step: triage the 8 `HLSLLib/*.32.test` transcendental-function failures
+(`log`/`log2`/`log10`/`sqrt`/`sinh`/`rsqrt`/`radians`/`degrees`) that had
+been tracked as part of an "11 stable failures" baseline across several
+recent sessions. Deep investigation of `log10.32.test` (see below) led to
+discovering that baseline itself was wrong.
+
+**The `log10.32.test` investigation (extensive, ultimately moot).** Traced
+the failure through every layer: confirmed the pre-existing
+`flushSubnormalToZero`/`TranscendentalFlushInputPattern`/
+`FlushedInverseSqrtPattern`/`FlushedScalePattern` SPIR-V-to-LLVM
+legalization machinery (already implemented, registered for exactly the
+ops these tests need) produces structurally correct IR for both
+hand-written and real (`dxc`-compiled) `Log2`/`Sqrt` shaders; confirmed
+raw `llvm.is.fpclass` plus the full flush sequence computes the correct
+answer standalone via `lli` and survives `opt -O2` unmodified; added
+temporary debug instrumentation (`FEME_CPU_DUMP_IR_BEFORE_OPT`/
+`FEME_CPU_DUMP_IR_AFTER_OPT` env vars bracketing `OptimizerPipeline::run`
+in `CompiledStage.cpp`) to inspect the real CPU-lowering pipeline's IR --
+and found the instrumentation's print statement never fired at all, even
+at the top of `createStage` itself.
+
+**Root cause of *that* mystery: `vulkaninfo --summary` showed the wrong
+device.** `export VK_ICD_FILENAMES=<feme path> VK_DRIVER_FILES=$VK_ICD_FILENAMES`
+on a single line is silently wrong: bash expands `$VK_ICD_FILENAMES` on
+the right-hand side using its *pre-existing* value in the environment
+(this container's own default, `/usr/share/vulkan/icd.d/lvp_icd.json`,
+i.e. lavapipe/llvmpipe) *before* applying the left-hand assignment on the
+same line -- so `VK_DRIVER_FILES` ends up silently set to lavapipe's ICD
+path while `VK_ICD_FILENAMES` itself looks correctly set to FeMe's. The
+Vulkan loader prefers `VK_DRIVER_FILES` over `VK_ICD_FILENAMES` when both
+are present, so every `offloader`/`check-hlsl-feme-vk` invocation using
+this exact one-line export pattern was silently running against
+**lavapipe, not FeMe** -- explaining both why `createStage` (FeMe-only
+code) never printed, and why `log10.32.test` "failed" in a way that
+superficially matched the FTZ-assuming golden data (lavapipe, a real
+IEEE-754-compliant software rasterizer, plausibly doesn't flush
+subnormal inputs to zero either, coincidentally failing the same
+FTZ-assuming test data for an entirely unrelated, non-FeMe reason).
+Re-running `log10.32.test` (and by extension all 8
+`HLSLLib/*.32.test` cases) directly against the real FeMe driver, with
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set via two **separate** `export`
+statements and cross-checked via `vulkaninfo --summary | grep
+deviceName` (`FeMe CPU Vulkan Device`, not `llvmpipe`), confirms **all 8
+pass outright** -- there was no bug here at all.
+
+**This exact failure mode was already half-diagnosed once before and
+recurred silently.** H135's own closing note records: *"This session
+began investigating a reported `check-hlsl-feme-vk` run-to-run
+flakiness. That turned out to be a false alarm: one particular
+invocation was missing `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`, not a real
+nondeterminism."* That session confirmed stability once "both are set
+correctly" but evidently did not identify *this* specific
+single-line-export self-reference mechanism, allowing it to recur
+silently in some number of sessions between H135 and this one, during
+which the tracked `check-hlsl-feme-vk` failure count drifted from
+H124's own accurately-triaged buckets (which already correctly listed
+H124d/H124e/H124g as unfixed, ~19 combined cases) down to a
+misleadingly small "11 stable failures" -- a number that was actually
+lavapipe's failure count, not FeMe's, and coincidentally close enough in
+shape (8 FTZ-assuming tests + 3 ray-tracing tests, both plausible
+lavapipe gaps too) to look like real, consistent, reproducible FeMe
+data across multiple independent re-runs.
+
+**Corrected real baseline (`check-hlsl-feme-vk`, verified against the
+real FeMe driver, confirmed stable across 2 back-to-back full-suite
+re-runs with no rebuild in between):**
+
+```
+Total Discovered Tests: 664
+  Unsupported        : 260 (39.16%)
+  Passed             : 323 (48.64%)
+  Expectedly Failed  :  26 (3.92%)
+  Failed             :  54 (8.13%)
+  Unexpectedly Passed:   1 (0.15%)
+```
+
+This supersedes every `check-hlsl-feme-vk` number reported between H135
+and this session; treat all of it as unverified against the real driver.
+`check-feme` (the compiler unit-test suite, no Vulkan ICD dependency) is
+unaffected by this bug and remains correctly tracked at 3050/3053
+passed, 0 failed throughout.
+
+**Re-triage of the real 54 failures + 1 XPASS**, added to the roadmap as
+new H124 sub-rows (H124j/H124o/H124p) and an expanded H124g, reconciling
+with the pre-existing (and, it turns out, still-accurate) H124d/H124e
+buckets:
+
+- H124d (~7, unchanged, unhandled derivative opcode 209/213 cluster,
+  upstream MLIR gap) and H124e (~11, unchanged, CPU divergence/barrier
+  gaps) are both confirmed still real and still unfixed -- their own
+  triage from several sessions ago held up correctly this whole time.
+- H124j (new, 5 cases): missing SPIR-V GLSL.std.450 legalization for
+  `Cross`/`Reflect`/`Distance`/`FindUMsb`/`FindILsb` -- the same
+  "no pattern at all" shape H124f fixed for `Normalize`/`Length`/
+  `IsNan`/`IsInf`, but a different op subset H124f's own fix did not
+  cover.
+- H124l (new, 6 cases): missing `GroupNonUniformQuadSwap` legalization
+  (`QuadReadAcross{X,Y,Diagonal}.32/.convergence.test`) -- distinct from
+  H124a's own already-fixed vector-typed `GroupNonUniform*` bucket.
+- H124m (new, 3 cases): `OpArrayLength` has no MLIR SPIR-V dialect op at
+  all (`*/GetDimensions.test` on unbounded resources) -- same upstream-gap
+  class as H124d.
+- H124o (new, 2 cases): push-constant struct-layout `getelementptr`
+  index-out-of-bounds (`PushConstant/{multiple_values_offset,
+  padding}.test`) -- likely the same declared-vs-physical member-index
+  remap class H128/H129/H131/H133 fixed for UBO/SSBO, but for
+  push-constant blocks, not yet confirmed to share the fix site.
+- H124p (new, 1 case): `Basic/Mandelbrot.test`'s
+  `feme-cpu-simdize: unsupported divergent call to
+  'llvm.is.fpclass.f32'` -- a real, different gap in the same intrinsic
+  this session's own (ultimately moot) FTZ investigation spent most of
+  its time on, but in a genuinely divergent-call context this time.
+- H124g (expanded, ~18 cases + the 1 XPASS): every remaining
+  not-yet-individually-triaged case -- three distinct `FileCheck`/value
+  mismatches (`PushConstant/matrix.test`,
+  `SpecializationConstant/spec_const_32_bits.test`,
+  `StructuredBuffer/inc_counter_array_imm_idx.test`), five `WaveOps/*`
+  cases possibly overlapping H124e, `ConstantBufferT/nested.test` plus 7
+  `Textures/*` cases all failing pipeline creation with no
+  finer-grained diagnostic captured yet, and two cases
+  (`Bugs/UAV-Sequental-Consistency.yaml`,
+  `Tools/Offloader/BufferFormats.test`) failing at *device* creation
+  with `VK_ERROR_VALIDATION_FAILED_EXT` rather than pipeline creation --
+  a distinct failure class needing the actual validation message
+  captured. `array_of_matrices.test`'s XPASS re-confirmed directly
+  (not just via lit): its `XFAIL: DXC` marker for
+  `microsoft/DirectXShaderCompiler#8080` does not reproduce against this
+  session's DXC build, most likely an upstream DXC fix landing since
+  the XFAIL was written -- any correction belongs in the
+  `offload-test-suite` repo itself, not this one.
+
+No code changes this session (the one exploratory debug-print addition
+to `CompiledStage.cpp` was reverted once it had served its diagnostic
+purpose). No roadmap milestone struck through -- H124 remains open, its
+sub-bucket breakdown corrected and substantially expanded instead. No
+feature/extension-inventory change: this session's work was pure
+process-bug discovery and re-triage, no capability changed.
