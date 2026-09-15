@@ -83818,3 +83818,77 @@ under H124h, per the "no more than one lowercase letter deep" rule).
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
 10. Clean up `/tmp/h124h_repro/` (this session's own scratch files, low
     priority, not part of the repo).
+
+# H125 fixed: LoopLinearizer never froze a loop-carried value escaping a divergent-exit loop
+
+**Fixed. `WaveActiveBitXor.convergence.test` now passes, plus 2 undiagnosed siblings.** `check-hlsl-feme-vk`: 289/664 passed (was 286).
+
+## What was wrong
+
+`LoopLinearizer` (`feme/lib/Transforms/CPU/Linearize.cpp`) if-converts a
+loop with a per-lane variable trip count: the body runs unconditionally
+every "wide" iteration, gated only by live/side-effect masks. It masked
+side-effecting instructions and wave-reduce operands correctly (H124h's
+fix), but never froze an *ordinary* loop-carried value. A lane that
+finished early kept having its value silently overwritten every
+subsequent wide iteration, since the body always re-executes for the
+whole wave. Confirmed general (not reduce-specific) with a second,
+wave-op-free `R2 = R2 + 1` repro.
+
+## The fix
+
+Added `freezeLoopCarriedValues` in `Linearize.cpp`, wired into all three
+loop shapes `linearizeCycle` supports, right before `addLatchIncoming`.
+For each `Header` phi (other than the two mask phis), wraps the backedge
+value: `select(<this-iteration-was-real>, <new-value>, <phi's-current-
+value>)`.
+
+**First attempt broke 3 existing tests** (`simdize-loop.ll` and 2
+siblings) with `"function 'main' has a divergent branch"` -- freezing
+*every* carried value, including one never read after the loop (e.g. an
+induction variable feeding only an internal uniform trip-count check),
+turned it genuinely divergent and broke a downstream uniformity
+assumption for zero observable benefit. Fixed by scoping the freeze to
+only a phi with a use *outside* the loop's own blocks.
+
+## Verification
+
+1. `ninja check-feme`: 3028/3031 passed, 0 failed -- unchanged before/after.
+2. `check-hlsl-feme-vk`: 289 passed/88 failed (was 286/91) -- no regressions.
+3. `dEQP-VK.subgroups.arithmetic.*` (12087 cases): still 100% NotSupported, unchanged (device doesn't advertise the feature bit).
+
+## Commits (3, in order)
+
+1. `[feme] H125: freeze loop-carried values escaping a divergent-exit loop` -- the fix + 2 new lit tests.
+2. `[feme] H125: close roadmap row, file H126, update VulkanCTSReport`.
+3. This file.
+
+## New roadmap row filed
+
+**H126** (not fixed this session): `WavePrefixSum.convergence.test`/
+`WavePrefixProduct.convergence.test` fail with `"'llvm.call' op result #0
+must be LLVM dialect-compatible type, but got 'si32'"` -- an MLIR
+type-legality gap in the prefix-scan lowering path, distinct from this
+session's fix. Found while re-triaging the remaining 88 failures; not
+investigated further.
+
+## Suggested next steps, ranked
+
+1. **H126** (~1 hour, not started): the `si32` prefix-scan type-legality
+   gap above. Start by finding wherever `WavePrefixSum`/`WavePrefixProduct`
+   gets legalized to see where an `si32` (rather than plain `i32`) type
+   survives into an `llvm.call`'s result.
+2. **H124b** (~1-2 hours, still not started across several sessions):
+   `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
+3. **H124d** (~1 hour, still not started): `"unhandled opcode 209"`
+   (derivative family, `fwidth`/`ddx`/`ddy`), ~7 cases.
+4. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
+   legalization gaps, 8 cases.
+5. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
+   resource-load runtime intrinsics, ~2 cases.
+6. Lower priority, deferred 4+ sessions now: `transform_feedback.fuzz.
+   random_geometry.all_instance_array.12`'s pre-existing heap corruption
+   -- `valgrind`'s own trace already points at `buildStageStorage`/
+   `executeDraws` allocating a too-small buffer.
+7. Cleanup: `/tmp/h125_repro/`, `/tmp/h125_test*.ll` (this session's own
+   scratch files, not part of the repo).
