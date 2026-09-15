@@ -49,25 +49,21 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H121** (~30-60 min, not yet triaged): `per_patch_block`'s own 9 cases
-   now run to completion but fail at `vk.queueSubmit(...):
-   VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338`. Start with a
-   validation-layer message or `gdb` backtrace through `feme-vulkan`'s own
-   `vkQueueSubmit` entry point.
-2. **H117/H118** (~1-2 hours, real IR-reduction needed): re-run the same
-   `feme-translate --import-spirv`/`feme-opt -passes=feme-graphics-
-   canonicalize-stage` technique H115 used, but on `per_patch_block_array`/
-   `per_vertex_block`'s own real SPIR-V, since H115's fix does not cover
-   whatever their own `spirv_var_43`/`spirv_var_31` shape actually is.
-3. **H116** (~45-60 min): `per_patch_array.*`, "Invalid input value" --
-   different error class, still not triaged at all.
-4. **H119** (~45-60 min): isolines-only image comparison failures (6
-   cases) -- use H88's own channel-level pixel-reduction technique.
-5. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+1. **H122 + H119 together** (~1-2 hours): both are isolines-only image
+   comparison failures across sibling block shapes (`per_patch`,
+   `per_vertex`, now `per_patch_block`). Strong chance of a shared root
+   cause in tessellation-coordinate generation or interpolation specific
+   to the isolines domain. Use H88's own channel-level pixel-reduction
+   technique on one representative case first.
+2. **H117/H118** (~1-2 hours, still not touched): `per_patch_block_array`/
+   `per_vertex_block`'s own `"JIT session error: Symbols not found:
+   [ spirv_var_43/31 ]"` -- confirmed **unaffected** by this session's
+   H121 fix (still reproduces identically). Needs its own fresh
+   IR-reduction session (`feme-translate --import-spirv`/`feme-opt
+   -passes=feme-graphics-canonicalize-stage`), same technique H115 used.
+3. **H116** (~45-60 min, still untriaged): `per_patch_array.*`,
+   "Invalid input value in tessellation evaluation shader" -- different
+   error class, look at separately from the two groups above.
+4. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
    built/run in any session on record (well over a dozen sessions
-   deferring it now) -- worth a dedicated session of its own.
-6. Clean up `/tmp/h120_*` scratch files (low priority, not part of the
-   repo) -- `/tmp/h120_preopt/pre_opt_2_1_main.ll` specifically is worth
-   keeping a copy of if further Linearize/SIMDize work is anticipated,
-   since it's a proven, real, minimal (1-violation) reproducer.
-
+   deferring it) -- worth a dedicated session.
