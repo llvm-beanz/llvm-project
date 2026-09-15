@@ -49,47 +49,34 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H124a** (~2-4 hours, highest-leverage single bucket): the vector
-   `spirv.GroupNonUniform*` legalization gap accounts for ~26 of the
-   102 remaining `check-hlsl-feme-vk` failures, almost the whole
-   `WaveOps/*` cluster. Start by finding the existing pattern that
-   *does* legalize a scalar-operand `GroupNonUniform*` op in
-   `SPIRVToLLVMPatterns.cpp` and understand why it doesn't generalize
-   to a `vector<NxT>` operand already -- likely a per-lane
-   scalarization loop is missing, not a fundamentally different
-   lowering strategy.
-2. **H124d** (~1 hour, second-highest leverage per unit effort): the
-   `"unhandled opcode 209"` (derivative-family) gap affects ~7 cases
-   across a tight cluster (`fwidth`/`ddx`/`ddy` family) and opcode 209
-   is very likely a single missing `OpDPdx`-family case in whatever
-   dispatches graphics-stage SPIR-V opcodes -- first find that dispatch
-   site (not yet located this session).
-3. **H124c** (~1 hour, narrow and mechanical): add the missing
-   `feme.cpu.resource.load.raw.{v2f16,v3f16,v4f16,f16}` runtime
-   intrinsics/lowering, mirroring whatever pattern the existing f32/i32
-   variants already use -- looks self-contained.
+1. **H124h** (~1-2 hours, real investigation, newly filed this session):
+   the divergent-branch reduce-masking bug above -- highest priority,
+   since it's the direct continuation of this session's own work and
+   closes the rest of H124a's original bucket. Start by comparing
+   `WaveActiveBitAnd.int.test` (passes, no branch) against
+   `WaveActiveSum.int32.test` (fails, branch-gated) at the IR level
+   right before `feme-cpu-simdize` runs, to see what mask (if any) the
+   branch's own divergent region produces and why `widenWaveCall` isn't
+   using it.
+2. **H124d** (~1 hour): `"unhandled opcode 209"` (derivative family),
+   ~7 cases, still not started across 2+ sessions now.
+3. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
+   resource-load runtime intrinsics, ~2 cases.
 4. **H124b** (~1-2 hours): `CBuffer`/`Matrix` `spirv.AccessChain`
-   legalization gap, ~10 cases across several matrix-layout/nesting
-   shapes -- needs a real investigation into which shapes are and
-   aren't covered by existing patterns.
-5. **H124f** (~1 hour, may piggyback on H124a's own generalization
-   work): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
-   legalization gaps, 8 cases.
-6. **H124e** (~2-4+ hours, not one bug): the CPU divergence-handling
-   cluster, ~11 cases with several distinct diagnostics -- needs
-   per-case triage before estimating real scope; likely spans multiple
-   future sessions on its own.
-7. **H124g** (low priority, ~30-60 min): confirm `layout.test`'s
-   `FileCheck` mismatch is a real functional gap vs. a stale test
-   expectation; separately, consider whether `array_of_matrices.test`'s
-   `XFAIL: DXC` is worth removing upstream (in `offload-test-suite`,
-   not this repo).
-8. **Still fully pending, now deferred across 2+ sessions**: the
-   `transform_feedback.fuzz.random_geometry.all_instance_array.12`
-   pre-existing heap corruption -- `valgrind`'s own trace already
-   points at `buildStageStorage`/`executeDraws` allocating a too-small
-   buffer for a fuzzed multi-member XFB block-array shape, a strong
-   head start for whoever picks it up.
-9. Clean up `/tmp/h123_repro/`, `/tmp/dup_test.mlir`,
-   `/tmp/feme_vk_first_run/`, `/tmp/feme_vk_rerun.log` (this session's
-   own scratch files, low priority, not part of the repo).
+   legalization gap, ~10 cases.
+5. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
+   vector legalization gaps, 8 cases.
+6. **H124e** (~2-4+ hours, not one bug): CPU divergence-handling
+   cluster, ~11 cases, needs per-case triage first.
+7. **H124g** (low priority): confirm `layout.test`'s `FileCheck`
+   mismatch is real; consider removing `array_of_matrices.test`'s stale
+   `XFAIL: DXC` upstream (in `offload-test-suite`, not this repo).
+8. **Still fully pending, now deferred 3+ sessions**:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption -- `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+9. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: no longer a
+   standing gap -- built and run repeatedly this session, working
+   correctly with dependency wiring intact.
+10. No scratch files to clean up this session (recovery work used only
+    file views and edits, nothing written to `/tmp`).
