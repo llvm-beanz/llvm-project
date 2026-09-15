@@ -84196,3 +84196,94 @@ somewhere in how a dynamic row/element index turns into GEP indices.
 Cleanup done: removed `/tmp/h124b_replacement.cpp` (this session's own
 scratch splice file) and `/tmp/ubo.qpa` (this session's own CTS-sweep
 log).
+
+# Session: H124i retracted — it was a regression in H124b's own poison-hack fix
+
+**Done this session:** fixed a real, silent-miscompile regression that the
+prior session's H124b fix introduced, and struck through H124i (it was never
+a distinct bug). Two commits landed, both docs updated, `check-feme` clean.
+
+## What I found
+
+H124i (filed last session) claimed `mat_cbuffer.f32.test`'s dynamic row
+subscripts (`M_f2x4[0]`, `M_f2x4[1]`) read back wrong data as a *new*,
+unrelated bug. It wasn't. It's H124b's own declined shape (partial row/
+scalar-element access into a `RowMajor`/padded matrix member — H124b's
+commit message says outright it "intentionally still declines" this), now
+**silently miscompiling instead of hard-failing**, because H124b's own fix
+for a different problem broke the failure path:
+
+```cpp
+Op.emitOpError("partial access ... is not yet supported"); // diagnostic only!
+Rewriter.replaceOpWithNewOp<mlir::LLVM::PoisonOp>(Op, ResultType);
+return mlir::success(); // tells the conversion driver this op is FINE
+```
+
+`emitOpError` prints text but does not fail the pattern. `success()` tells
+MLIR's dialect conversion driver the op converted correctly. Net effect:
+the whole shader compiles, the pipeline gets created, it runs to completion
+with poison data quietly substituted in — worse than the pre-H124b behavior
+(a loud, hard compile failure that never produced a wrong-but-working
+pipeline at all). Confirmed directly: the old build printed 9 error
+diagnostics to stderr for `mat_cbuffer.f32.test` yet still logged "Compute
+Pipeline created" / "Dispatched compute shader".
+
+## The fix (2 commits)
+
+1. **`896b70bcd7c3`** — Guard upstream's own `spirv::AccessChainPattern`
+   (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) to `notifyMatchFailure`
+   whenever its base operand isn't a genuine `LLVM::LLVMPointerType`. This
+   closes the *actual* gap that motivated the poison-hack in the first place
+   (that pattern used to blindly build an ill-typed GEP from a
+   `spirv.VulkanBuffer`-handle base pointer). With that fallback now
+   correctly declining too, `rewriteBlockAccess` reverts its own rejection
+   to a plain `notifyMatchFailure` — restoring the safe, hard
+   `"failed to legalize operation 'spirv.AccessChain' that was explicitly
+   marked illegal"` failure. Updated `spirv-to-llvm-matrix-block-invalid.mlir`
+   to match.
+2. **`c15bd27e51be`** — Docs: struck through H124i in `Roadmap.md`, folded
+   its description into H124b's own row; appended a `VulkanCTSReport.md`
+   session section with full root-cause/fix/verification writeup.
+
+## Verification
+
+- `feme-opt --verify-diagnostics` on the invalid-matrix lit test: passes
+  with the restored "explicitly marked illegal" diagnostic.
+- `ninja check-feme`: **3040/3043 passed**, 3 unsupported, 0 failed — no
+  regressions from touching the (broadly-used) upstream pattern.
+- All 10 `Feature/CBuffer/Matrix/{MatrixElement,MatrixSubscript,
+  SingleSubscript}/*` CTS cases individually re-run: all 10 now correctly
+  hard-fail at pipeline creation (`VkResult = -3`) instead of silently
+  succeeding with poison data.
+- `check-hlsl-feme-vk` full re-run (664 total): 302 passed / 75 failed /
+  260 unsupported / 26 XFAIL / 1 XPASS — same counts as before this fix
+  (these 10 were already counted `Failed`; only *why* they fail changed).
+- `dEQP-VK.ubo.*` full re-run (13,240 cases): 3692 passed, 1995 failed,
+  7553 not supported, **zero crashes**. Grepped the log for the new
+  "explicitly marked illegal" diagnostic: zero hits, confirming this fix
+  doesn't touch any currently-exercised `ubo` path. The 1995-failed count
+  differs slightly from the prior session's own untriaged 1915 baseline —
+  flagged below as still-unresolved, likely pre-existing variance in that
+  never-triaged bucket, not caused by this session's change.
+
+## Next steps, ranked
+
+1. **Triage the `dEQP-VK.ubo.*` failure bucket** (~2-4 hours, spans
+   several sessions of "still untriaged" now): 1995 failing cases, no
+   crashes. Also worth quickly confirming the 1995-vs-1915 delta isn't
+   itself a real regression before assuming it's flakiness — diff this
+   session's `ubo_full_h124b_regcheck.qpa` case-by-case against a fresh
+   re-run on the same build to check for nondeterminism first.
+2. **H124f** (~1 hour, still not started across many sessions):
+   scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector legalization gaps,
+   8 cases.
+3. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
+   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, its own multi-session
+   effort — skip unless someone wants the upstream-MLIR piece specifically.
+4. Lower priority, deferred 8+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption — `valgrind`'s own trace already points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+No scratch files to clean up this session (used only pre-built `.tmp.o`
+files and lit re-runs, nothing written to `/tmp`).
