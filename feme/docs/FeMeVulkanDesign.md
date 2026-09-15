@@ -1410,7 +1410,80 @@ its own matching remap of the `llvm.spv.resource.getpointer` index
 operand. Known remaining limitation: a multi-level nested reordered
 struct (a member that is itself a reordered struct, indexed via further
 chained GEP indices after the initial member selector) is not yet
-remapped -- pre-existing, not introduced by this fix.
+remapped -- pre-existing, not introduced by this fix. (Confirmed by
+H129 below: the 4 `dEQP-VK.ubo.*` cases hitting exactly this limitation
+were already failing, for this exact reason, before H129's own fix --
+H129 simply unblocked the rest of their shaders enough for the CTS run
+to reach them.)
+
+Roadmap H129: the same H124b/H124i matrix-layout narrative (RowMajor
+transpose, ColMajor/RowMajor padding) only ever covered *whole-matrix*
+member access; a *partial* access into an otherwise fully-representable
+matrix member -- `matrix[col]` ("column-select", producing a
+`vector<NumRows x T>`) or `matrix[col][row]` ("scalar-element",
+producing a scalar `T`) -- still hit a hard decline, since no code path
+addressed less than the matrix's own full byte range. Classification of
+all 236 real `dEQP-VK.ubo.*` failures in this bucket showed exactly one
+shape reachable through `spirv.AccessChain`: column-select (168 RowMajor
+/ 68 ColMajor); a second shape, scalar-element, was found mid-session
+co-occurring in the *same* shader source as the 236 column-select cases
+(so fixing column-select alone produced no measured CTS improvement
+until scalar-element access was also handled). SPIR-V's own matrix
+indexing is always column-first regardless of physical majorness (a
+`spirv.Matrix` is modeled as an array of column vectors at the type
+level), so an `AccessChain`'s extra indices past the member selector are
+always `[col]` or `[col, row]`, never `[row]` alone or `[row, col]` --
+row-select alone is therefore not a reachable shape needing separate
+handling.
+
+Both shapes are resolved entirely inside `rewriteBlockAccess`
+(`SPIRVToLLVMPatterns.cpp`), with different strategies per shape and
+majorness:
+  - ColMajor column-select: one logical column *is* one physical major
+    entry -- a single, contiguous, `MatrixStride`-sized block -- so
+    `member_base + col * Stride` bytes is directly computable via one
+    GEP (`array<Stride x i8>` element type, one dynamic index), and an
+    ordinary `spirv.Load`/`spirv.Store` of that address as
+    `vector<NumRows x T>` reads/writes the right bytes with no dedicated
+    pattern needed (this target's vector ABI size for 2/3/4 lanes never
+    exceeds a real observed `MatrixStride`).
+  - RowMajor column-select: one logical column is scattered across
+    `NumRows` separate, non-contiguous row entries, so no single address
+    describes it -- `rewriteBlockAccess` instead defers (returns the
+    member's own base address unconverted, exactly like the existing
+    whole-matrix pattern), and two new dedicated patterns,
+    `MatrixColumnLoadPattern`/`MatrixColumnStorePattern` (matched on a
+    `spirv::LoadOp`/`StoreOp` with a defining `AccessChainOp` of this
+    exact shape), perform the real per-row gather/scatter via a GEP+
+    load/store loop, recovering the already-converted column index from
+    the original `AccessChain`'s own operand with
+    `Rewriter.getRemappedValue()` -- a new API usage pattern in this
+    file. A new `getMatrixColumnAccess` helper (mirroring
+    `getMatrixWholeAccess`) and `getRowMajorPhysicalMemberType` support
+    both patterns, restricted to the non-wrapper shape (see the H132
+    gap below).
+  - Scalar-element (both majors): simpler than column-select, since one
+    scalar element is always exactly one static entry of one physical
+    major/minor pair, addressable via a single GEP through a locally-
+    built `!llvm.array<MajorCount x MajorEntryTy>` physical type (the
+    same physical shape `getPhysicalMatrixMemberType` uses for whole-
+    matrix access), with `col`/`row` swapped into major/minor position
+    depending on `Layout->IsRowMajor` (since `AccessChain`'s own index
+    order is always `[col, row]`, but physical major/minor order depends
+    on majorness) -- resolved entirely inline, no dedicated pattern
+    needed.
+
+VK-GL-CTS impact: the full `dEQP-VK.ubo.*` sweep (13,240 cases) drops
+from 401 to 73 failing cases (5286 to 5614 passing), with zero remaining
+"failed to legalize" errors and a case-by-case pass/fail diff against
+the pre-fix run confirming zero regressions. New gap discovered while
+scoping this fix's own "invalid" decline test (not fixed this session,
+filed as roadmap H132): `isMatrixMemberLayoutRepresentable` never
+unwraps a `dxc`-wrapper member's array-of-Matrix element type before
+checking its decorations, so a wrapper-shape RowMajor/padded-ColMajor
+partial matrix access is never declined at all -- a latent, pre-existing
+bug, not introduced this session, with no currently-known real CTS case
+exercising it.
 
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion

@@ -44194,3 +44194,109 @@ documented scoping note. Not yet known to correspond to any of the 401
 still-counted failures on its own; filed only as a documented limitation,
 not a new roadmap row, since no concrete failing case has been pinned to
 it yet.
+
+## Roadmap H129 fixed (matrix column-select/scalar-element `AccessChain` legalization gap)
+
+**Correcting the H129 hypothesis.** The prior session's re-triage found
+236 `dEQP-VK.ubo.*` cases hitting `"failed to legalize operation
+'spirv.AccessChain'"` on a fully-representable-layout matrix member,
+believed to be a single "dynamic row/column-select" shape. Classifying
+all 236 (via `deqp-vk --deqp-log-decompiled-spirv=enable`, reduced
+through `feme-translate --import-spirv`/`feme-opt
+--feme-convert-spirv-to-llvm`) confirmed exactly one reachable shape via
+`spirv.AccessChain`: **column-select** (`matrix[col]`, a 3-operand
+AccessChain producing `vector<NumRows x T>`), split 168 RowMajor/68
+ColMajor. Fixing column-select alone (ColMajor via a single byte-offset
+GEP; RowMajor via new dedicated `MatrixColumnLoadPattern`/
+`MatrixColumnStorePattern` gather/scatter patterns) and re-running the
+full `dEQP-VK.ubo.*` sweep showed **no change at all** (still 5286
+passed / 401 failed) -- investigation showed the same 236 underlying
+shader source files *also* separately exercise scalar-element access
+(`matrix[col][row]`, a 4-operand AccessChain producing a scalar `T`)
+elsewhere in the same shader, so both shapes had to be fixed before any
+of the 236 tests would pass end-to-end.
+
+**Scalar-element fix.** Turned out simpler than column-select for both
+majors: one scalar element is always exactly one static entry of one
+physical major/minor pair, addressable via a single GEP through a
+locally-built `!llvm.array<MajorCount x MajorEntryTy>` physical type,
+with `col`/`row` swapped into major/minor position depending on
+`Layout->IsRowMajor` (SPIR-V's own index order is always `[col, row]`
+regardless of physical majorness) -- resolved entirely inside
+`rewriteBlockAccess`, no dedicated Load/Store pattern needed.
+
+**VK-GL-CTS full re-run** (`dEQP-VK.ubo.*`, 13,240 cases, same
+`VK_ICD_FILENAMES`/`FEME_VULKAN_LOG_CREATION_ERRORS=1` setup as prior
+sessions):
+```
+./deqp-vk --deqp-case='dEQP-VK.ubo.*' --deqp-shadercache=disable ...
+```
+**5614 passed / 73 failed / 7553 not supported** -- was 5286 passed /
+401 failed. A reduction of **328 failing cases**, with **zero**
+remaining "failed to legalize" errors. `check-feme`: 3045/3048 passed (3
+unsupported), 0 failed, no regressions.
+
+**Regression check.** A suspected regression (new
+`'llvm.getelementptr' op type 'i32' cannot be indexed` / `index 2
+indexing a struct is out of bounds` errors on 4 cases, e.g.
+`dEQP-VK.ubo.random.all_shared_buffer.47`) was investigated by diffing
+this session's own column-select-only run against the final
+column-select+scalar-element run, case by case, across all 13,240
+cases:
+```
+Regressions (Pass->Fail): 0
+Improvements (Fail->Pass): 328
+```
+**Zero regressions** -- the 4 GEP-error cases were already failing, with
+the exact same error, in *both* runs; they simply weren't individually
+noticed as "already failing before this session's changes" until this
+diff was run. Root cause confirmed: these 4 cases hit the exact,
+already-documented "multi-level nested reordered/padded struct" gap
+H131's own closing note flagged as a known follow-on limitation (an
+array-of-blocks descriptor whose block struct's own member is itself a
+further nested/reordered struct -- `OffsetStructMemberReorderAccessChainPattern`'s/
+`rewriteBlockAccess`'s declared-to-physical member-index remap only ever
+applies at the first struct-member selector, never a second, deeper
+nesting level). Not a new bug, not introduced this session, and not
+matrix-related at all -- these 4 cases were simply never reached by
+conversion until H129's own fix unblocked the rest of their shaders'
+matrix accesses.
+
+**Final classification of the remaining 73 failures**
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1`-driven, full-body log parse, not
+just a 15-line lookback):
+- **69 cases**: `"...is a register-bound resource handle the FeMe CPU
+  target cannot normalize..."` (the generic `UnsupportedOps.cpp`
+  decline) -- these previously-guessed-at "76 dominance error" and
+  "~44 cannot normalize" buckets turn out to be the same, single bucket
+  once actually re-triaged post-H129 (the H130 roadmap row's prior
+  counts were stale estimates from before H129 changed the shape of
+  what remained). Not yet individually reduced to a common root cause.
+- **4 cases**: the nested-struct-reorder GEP gap described above (folds
+  into H131's own documented limitation, not a separate H130 bucket).
+
+No feature/extension-inventory change: a pure `AccessChain` legalization
+fix in the CPU-target SPIR-V-to-LLVM conversion path, not a new Vulkan
+capability.
+
+**New gap discovered while scoping this fix's own "invalid" decline
+test (not fixed this session, filed as H132).**
+`isMatrixMemberLayoutRepresentable` only ever examines whether a struct
+member's *direct* type is a `spirv::MatrixType`; for the `dxc`-wrapper
+shape (`RWStructuredBuffer<matCxR>`/`StructuredBuffer<matCxR>`, whose
+member is an `RTArrayType`-of-Matrix, not a Matrix directly), this check
+always short-circuits to "representable" regardless of the member's
+actual `RowMajor`/`MatrixStride` decorations -- confirmed by inspecting
+`spirv-to-llvm-matrix-rowmajor-buffer-block.mlir`'s own compiled output,
+which shows the *type conversion* treats the wrapper's array member as
+fully "natural"/unsubstituted, with the real RowMajor
+transpose/pad handled entirely inside `RowMajorMatrixLoadPattern`/
+`StorePattern`'s own independent reinterpretation of the raw pointer
+bytes (via `getMatrixWholeAccess`'s own separate decoration check,
+unrelated to `isMatrixMemberLayoutRepresentable`). This means a
+wrapper-shape RowMajor/padded-ColMajor *partial* (column-select or
+scalar-element) access is never declined at all and falls straight
+through to the ordinary, wrong generic GEP path -- a latent,
+pre-existing, silent-miscompile bug, not introduced this session. No
+real `dEQP-VK.ubo.*` case is currently known to exercise this shape
+(confirmed: none of the 236 real H129 failures were wrapper-shape).
