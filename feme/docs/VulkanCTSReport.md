@@ -43441,3 +43441,52 @@ session's own finding (this device does not advertise
 this fix's code path). No `VulkanCTSReport.md` Pass/Fail delta from this
 session; `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 unaffected.
+
+## Session: H125 fixed (divergent-loop `LoopLinearizer` value-freeze gap)
+
+**What changed.** `feme::cpu::LoopLinearizer` (`Linearize.cpp`) now freezes
+an ordinary loop-carried value (any `Header` `phi` besides the two mask
+phis this pass creates itself) once a given lane's own real per-lane trip
+count has been exhausted, but only when that value is actually read after
+the loop exits -- new `freezeLoopCarriedValues`, wired into all three loop
+shapes `LoopLinearizer::linearizeCycle` supports, right before
+`addLatchIncoming`. See `feme/docs/Roadmap.md`'s H125 row for the full
+root-cause writeup (this was **not** a `WaveActive*`-reduce-specific
+masking gap as H124h's own closing note speculated -- it affects any
+loop-carried value read after a divergent-exit loop, confirmed with a
+second, wave-op-free repro).
+
+**Verification.**
+- `ninja check-feme`: **3028/3031 passed** (3 unsupported), 0 failed --
+  unchanged before/after this session's fix.
+- `check-hlsl-feme-vk` re-run (664 total): **289 passed, 88 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- up from 286 passed/91 failed.
+  `WaveActiveBitXor.convergence.test`'s own `ExpectedOut5` sub-case (this
+  fix's own reproducer) now passes, along with two previously-undiagnosed
+  siblings sharing the identical root cause: `WaveActiveBitAnd.
+  convergence.test`, `WaveActiveBitOr.convergence.test`. No regressions
+  elsewhere.
+- **Newly discovered while re-triaging the remaining 88 failures** (not
+  part of this fix, filed as roadmap H126): `WavePrefixSum.convergence.
+  test`/`WavePrefixProduct.convergence.test` fail with `"error: 'llvm.
+  call' op result #0 must be LLVM dialect-compatible type, but got
+  'si32'"` -- a distinct MLIR type-legality gap in the prefix-scan
+  lowering path, unrelated to this fix or to H124a/H124h's own masking
+  work.
+
+**Feature/extension bits.** No change: this is a CPU-backend divergent-
+loop code-generation bug fix, not a feature/extension gate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
+
+**VK-GL-CTS sweep.** Re-ran `dEQP-VK.subgroups.arithmetic.*` (12087
+cases, the closest real `deqp-vk` group to this fix's own code path):
+still 100% `NotSupported` ("Device does not support subgroup arithmetic
+operations", `vktSubgroupsArithmeticTests.cpp:285`) -- unchanged from
+H124h's own session finding (this device does not advertise
+`VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, so no real `deqp-vk` case reaches
+this fix's code path; the CPU driver's own divergent-loop handling is
+only reachable in practice via HLSL/`offload-test-suite`'s own
+`check-hlsl-feme-vk` suite). No `VulkanCTSReport.md` Pass/Fail delta from
+this session; `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+unaffected.
