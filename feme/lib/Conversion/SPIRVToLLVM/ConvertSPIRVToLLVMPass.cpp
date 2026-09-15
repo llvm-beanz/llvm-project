@@ -99,6 +99,24 @@ struct EntryPointInfo {
   std::optional<feme::graphics::TessellatorDomain> TessDomain;
   std::optional<feme::graphics::TessPartitioning> TessPartitioning;
   std::optional<feme::graphics::TessOutputPrimitive> TessOutputPrimitive;
+  /// (Roadmap H119) SPIR-V's own `VertexOrderCw`/`VertexOrderCcw`
+  /// execution modes, tracked separately from `TessOutputPrimitive`
+  /// rather than folded directly into it: a real GLSL compiler (e.g.
+  /// glslang, confirmed via a hand-compiled `layout(isolines) in;`
+  /// reproducer) always emits one of the two regardless of domain, even
+  /// though vertex order is only ever meaningful for a `Triangles`/
+  /// `Quads` domain -- the isoline domain's own output primitive is
+  /// always `Line` (unless `TessPointMode` below), independent of
+  /// whichever order happens to be present. Kept separate so the
+  /// post-loop fixup below can compute the real
+  /// `TessOutputPrimitive` once every execution mode for this entry is
+  /// known, rather than have whichever of `PointMode`/`VertexOrderCw`/
+  /// `VertexOrderCcw` is encountered last in the module silently win.
+  std::optional<feme::graphics::TessOutputPrimitive> TessVertexOrder;
+  /// SPIR-V's own `PointMode` execution mode (legal for any domain), also
+  /// tracked separately from `TessOutputPrimitive` for the same reason as
+  /// `TessVertexOrder` above.
+  bool TessPointMode = false;
   std::optional<uint32_t> TessOutputControlPointCount;
   /// (Roadmap H5a) A geometry entry point's declared shape: its input/
   /// output primitive classes (SPIR-V's `InputPoints`/.../
@@ -383,15 +401,14 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
           feme::graphics::TessPartitioning::FractionalEven;
       break;
     case mlir::spirv::ExecutionMode::PointMode:
-      It->second.TessOutputPrimitive =
-          feme::graphics::TessOutputPrimitive::Point;
+      It->second.TessPointMode = true;
       break;
     case mlir::spirv::ExecutionMode::VertexOrderCw:
-      It->second.TessOutputPrimitive =
+      It->second.TessVertexOrder =
           feme::graphics::TessOutputPrimitive::TriangleCw;
       break;
     case mlir::spirv::ExecutionMode::VertexOrderCcw:
-      It->second.TessOutputPrimitive =
+      It->second.TessVertexOrder =
           feme::graphics::TessOutputPrimitive::TriangleCcw;
       break;
     case mlir::spirv::ExecutionMode::OutputVertices:
@@ -471,9 +488,25 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
   for (auto &[Name, Info] : EntryPoints) {
     if (!Info.TessDomain || !Info.TessPartitioning)
       continue;
-    if (!Info.TessOutputPrimitive) {
-      if (*Info.TessDomain == feme::graphics::TessellatorDomain::Isoline)
-        Info.TessOutputPrimitive = feme::graphics::TessOutputPrimitive::Line;
+    // (Roadmap H119) The isoline domain's own output primitive is always
+    // `Line` (or `Point`, if `PointMode` is present) regardless of
+    // whether `VertexOrderCw`/`VertexOrderCcw` also appears -- a real
+    // GLSL compiler (glslang) always emits one of the two vertex-order
+    // modes for every tessellation-evaluation entry point, even though
+    // vertex order is only meaningful for a `Triangles`/`Quads` domain;
+    // `TessVertexOrder` is deliberately never consulted here for an
+    // isoline domain. `Triangles`/`Quads` domains keep their prior
+    // behavior: `PointMode` wins over `TessVertexOrder` if both are
+    // present, and the SPIR-V spec requires one of the two vertex orders
+    // to be present otherwise.
+    if (*Info.TessDomain == feme::graphics::TessellatorDomain::Isoline) {
+      Info.TessOutputPrimitive = Info.TessPointMode
+                                      ? feme::graphics::TessOutputPrimitive::Point
+                                      : feme::graphics::TessOutputPrimitive::Line;
+    } else if (Info.TessPointMode) {
+      Info.TessOutputPrimitive = feme::graphics::TessOutputPrimitive::Point;
+    } else {
+      Info.TessOutputPrimitive = Info.TessVertexOrder;
     }
   }
 
