@@ -49,22 +49,47 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H116** (~45-60 min, still untriaged across ~5 sessions now):
-   `per_patch_array.*` (9 cases), "Invalid input value in tessellation
-   evaluation shader" -- a different error class from H117/H118, never
-   looked at in isolation. Only 9 cases and the last open row in the
-   `user_defined_io` matrix, likely the fastest remaining close.
-2. **`offload-test-suite`'s `check-hlsl-feme-vk` target** (well over a
-   dozen sessions deferring this now): still never built/run in any
-   session on record. Give it a dedicated session with no competing
-   priority.
-3. **The `transform_feedback.fuzz.random_geometry.all_instance_array.12`
-   pre-existing heap corruption** (~1-2 hours, real bug, now clearly
-   isolated): confirmed pre-existing and unrelated to H117/H118, not
-   fixed this session (out of scope for the H117/H118 task). The
-   `valgrind` trace already points at `buildStageStorage`/`executeDraws`
-   allocating a too-small buffer for this fuzzed multi-member XFB
-   block-array shape -- worth its own roadmap row and a dedicated
-   session, since `valgrind`'s own stack trace is a strong head start.
-4. Low priority: no scratch files left to clean up (this session's own
-   were removed, including a stray `tese.spv`).
+1. **H124a** (~2-4 hours, highest-leverage single bucket): the vector
+   `spirv.GroupNonUniform*` legalization gap accounts for ~26 of the
+   102 remaining `check-hlsl-feme-vk` failures, almost the whole
+   `WaveOps/*` cluster. Start by finding the existing pattern that
+   *does* legalize a scalar-operand `GroupNonUniform*` op in
+   `SPIRVToLLVMPatterns.cpp` and understand why it doesn't generalize
+   to a `vector<NxT>` operand already -- likely a per-lane
+   scalarization loop is missing, not a fundamentally different
+   lowering strategy.
+2. **H124d** (~1 hour, second-highest leverage per unit effort): the
+   `"unhandled opcode 209"` (derivative-family) gap affects ~7 cases
+   across a tight cluster (`fwidth`/`ddx`/`ddy` family) and opcode 209
+   is very likely a single missing `OpDPdx`-family case in whatever
+   dispatches graphics-stage SPIR-V opcodes -- first find that dispatch
+   site (not yet located this session).
+3. **H124c** (~1 hour, narrow and mechanical): add the missing
+   `feme.cpu.resource.load.raw.{v2f16,v3f16,v4f16,f16}` runtime
+   intrinsics/lowering, mirroring whatever pattern the existing f32/i32
+   variants already use -- looks self-contained.
+4. **H124b** (~1-2 hours): `CBuffer`/`Matrix` `spirv.AccessChain`
+   legalization gap, ~10 cases across several matrix-layout/nesting
+   shapes -- needs a real investigation into which shapes are and
+   aren't covered by existing patterns.
+5. **H124f** (~1 hour, may piggyback on H124a's own generalization
+   work): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
+   legalization gaps, 8 cases.
+6. **H124e** (~2-4+ hours, not one bug): the CPU divergence-handling
+   cluster, ~11 cases with several distinct diagnostics -- needs
+   per-case triage before estimating real scope; likely spans multiple
+   future sessions on its own.
+7. **H124g** (low priority, ~30-60 min): confirm `layout.test`'s
+   `FileCheck` mismatch is a real functional gap vs. a stale test
+   expectation; separately, consider whether `array_of_matrices.test`'s
+   `XFAIL: DXC` is worth removing upstream (in `offload-test-suite`,
+   not this repo).
+8. **Still fully pending, now deferred across 2+ sessions**: the
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`
+   pre-existing heap corruption -- `valgrind`'s own trace already
+   points at `buildStageStorage`/`executeDraws` allocating a too-small
+   buffer for a fuzzed multi-member XFB block-array shape, a strong
+   head start for whoever picks it up.
+9. Clean up `/tmp/h123_repro/`, `/tmp/dup_test.mlir`,
+   `/tmp/feme_vk_first_run/`, `/tmp/feme_vk_rerun.log` (this session's
+   own scratch files, low priority, not part of the repo).
