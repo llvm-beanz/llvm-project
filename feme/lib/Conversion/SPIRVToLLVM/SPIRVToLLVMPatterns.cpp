@@ -3167,6 +3167,21 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
                                        unsigned Index,
                                        mlir::Type ConvertedMember);
 
+/// Forward declaration: defined below, alongside
+/// isMatrixMemberLayoutRepresentable, whose own decoration-inspecting
+/// body this factors out (roadmap H132) -- used by rewriteBlockAccess,
+/// which (unlike isMatrixMemberLayoutRepresentable's own other callers)
+/// already knows \p Index's own member is a matrix by the time it needs
+/// this answer, however many array levels of a dxc wrapper (see
+/// BlockElement's own comment) it took to reach it: \p Index always
+/// names the matrix's own *declaring* struct member (decorations are
+/// attached there regardless of how many array levels wrap the matrix
+/// itself), even when \p ConvertedMember is the matrix's own natural
+/// conversion recovered from further inside that member's own type, not
+/// `Struct.getElementType(Index)` directly.
+bool isMatrixLayoutRepresentable(mlir::spirv::StructType Struct,
+                                 unsigned Index, mlir::Type ConvertedMember);
+
 /// Forward declaration: defined below (alongside
 /// convertOffsetStructTypeIgnoringDecorations, whose own struct-layout
 /// decision this recovers), used by rewriteBlockAccess to remap a
@@ -3364,8 +3379,19 @@ mlir::LogicalResult rewriteBlockAccess(
   // a scalar element, one row/column index at a time, not a row
   // directly).
   if (mlir::isa<mlir::spirv::MatrixType>(SelectedType)) {
-    if (!isMatrixMemberLayoutRepresentable(
-            BlockStruct, MatrixDecorationMemberIndex, ElementType)) {
+    // (Roadmap H132) Call isMatrixLayoutRepresentable directly here, not
+    // isMatrixMemberLayoutRepresentable: SelectedType is already
+    // confirmed to be the matrix itself (the condition above), however
+    // many array levels of a dxc wrapper it took to reach it (see
+    // BlockElement's own comment) -- isMatrixMemberLayoutRepresentable's
+    // own redundant re-check of `Struct.getElementType(Index)` directly
+    // would incorrectly see the wrapper's own array type there instead
+    // of the matrix, always answering "representable" for a wrapper-shape
+    // member regardless of its real RowMajor/MatrixStride decorations,
+    // silently miscompiling this partial access instead of correctly
+    // handling or declining it.
+    if (!isMatrixLayoutRepresentable(BlockStruct, MatrixDecorationMemberIndex,
+                                     ElementType)) {
       std::optional<MatrixMemberLayout> Layout =
           getMatrixMemberLayout(BlockStruct, MatrixDecorationMemberIndex);
       if (Layout && AllIndices.size() == Selector + 2) {
@@ -3690,21 +3716,21 @@ private:
   const feme::spirv::ResourceInfoMap &Resources;
 };
 
-/// Returns false if \p Struct's member \p Index is a matrix decorated
-/// `RowMajor` -- a physical layout transposed from the logical column-major
-/// type LLVM's own natural array-of-column-vectors representation always
-/// uses (see the `spirv.MatrixType` conversion in
-/// populateSPIRVToLLVMTargetTypeConversions), which reinterpreting the same
-/// bytes cannot reproduce -- or decorated `MatrixStride` with a value other
-/// than \p ConvertedMember's own natural per-column stride (the size of one
-/// column, since LLVM array elements pack with no interior padding); true
-/// for every other member, including one that is not a matrix at all.
-bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
-                                       unsigned Index,
-                                       mlir::Type ConvertedMember) {
-  if (!mlir::isa<mlir::spirv::MatrixType>(Struct.getElementType(Index)))
-    return true;
-
+/// Returns false if \p Struct's member \p Index -- already known to be a
+/// matrix, at whatever array-wrapping depth its own decorations still
+/// describe (see isMatrixLayoutRepresentable's own forward-declaration
+/// comment for why this differs from isMatrixMemberLayoutRepresentable
+/// below, its sole other caller) -- is decorated `RowMajor` -- a physical
+/// layout transposed from the logical column-major type LLVM's own
+/// natural array-of-column-vectors representation always uses (see the
+/// `spirv.MatrixType` conversion in
+/// populateSPIRVToLLVMTargetTypeConversions), which reinterpreting the
+/// same bytes cannot reproduce -- or decorated `MatrixStride` with a
+/// value other than \p ConvertedMember's own natural per-column stride
+/// (the size of one column, since LLVM array elements pack with no
+/// interior padding); true otherwise.
+bool isMatrixLayoutRepresentable(mlir::spirv::StructType Struct,
+                                 unsigned Index, mlir::Type ConvertedMember) {
   llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
       Decorations;
   Struct.getMemberDecorations(Index, Decorations);
@@ -3723,6 +3749,21 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
       return false;
   }
   return true;
+}
+
+/// Returns false if \p Struct's member \p Index is *directly* a matrix
+/// (not, e.g., a dxc wrapper's array of one -- see isMatrixLayoutRepresentable's
+/// own comment for that shape, which rewriteBlockAccess checks instead)
+/// decorated `RowMajor`/non-natural `MatrixStride` (see
+/// isMatrixLayoutRepresentable, which this defers to once it has
+/// confirmed \p Index is a matrix at all); true for every other member,
+/// including one that is not a matrix, direct or wrapped, at all.
+bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
+                                       unsigned Index,
+                                       mlir::Type ConvertedMember) {
+  if (!mlir::isa<mlir::spirv::MatrixType>(Struct.getElementType(Index)))
+    return true;
+  return isMatrixLayoutRepresentable(Struct, Index, ConvertedMember);
 }
 
 /// (MatrixMemberLayout's own struct definition now lives with its
