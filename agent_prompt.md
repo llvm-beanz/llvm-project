@@ -49,40 +49,21 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H125** (~1-2 hours, real investigation, newly filed this session):
-   the divergent-loop reduce-masking gap above -- highest priority
-   since it's the direct continuation of this session's own work, and
-   the reproducer already exists
-   (`offload-test-suite/test/WaveOps/WaveActiveBitXor.convergence.
-   test`'s own `ExpectedOut5`/`Out5` shader body, no new repro needed).
-   Start by tracing that exact shader through `feme-cpu-linearize`
-   (mirroring this session's own `feme-translate`/`feme-opt` chaining
-   recipe) to see what `LoopLinearizer` computes for `Masks.Live` inside
-   the loop body, and whether `applyStageMasks`'s new masking code (this
-   session's own fix) is even reached there with a non-constant mask.
-2. **H124d** (~1 hour): `"unhandled opcode 209"` (derivative family),
-   ~7 cases, still not started across 3+ sessions now.
-3. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
+1. **H126** (~1 hour, not started): the `si32` prefix-scan type-legality
+   gap above. Start by finding wherever `WavePrefixSum`/`WavePrefixProduct`
+   gets legalized to see where an `si32` (rather than plain `i32`) type
+   survives into an `llvm.call`'s result.
+2. **H124b** (~1-2 hours, still not started across several sessions):
+   `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
+3. **H124d** (~1 hour, still not started): `"unhandled opcode 209"`
+   (derivative family, `fwidth`/`ddx`/`ddy`), ~7 cases.
+4. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector
+   legalization gaps, 8 cases.
+5. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
    resource-load runtime intrinsics, ~2 cases.
-4. **H124b** (~1-2 hours): `CBuffer`/`Matrix` `spirv.AccessChain`
-   legalization gap, ~10 cases.
-5. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
-   vector legalization gaps, 8 cases (`isnan_mat.test` confirmed still
-   failing this session with exactly this signature).
-6. **H124e** (~2-4+ hours, not one bug): CPU divergence-handling
-   cluster, ~11 cases, needs per-case triage first.
-7. **`WaveActiveBitAnd.convergence.test`/`WaveActiveBitOr.convergence.
-   test`/`WaveActiveMax.test`** (no numeric suffix): confirmed still
-   failing this session but were **not** part of H124h's own cited
-   list -- likely distinct pre-existing bugs (possibly folding into
-   H124e or H124f, not yet confirmed which). Worth a quick triage pass
-   before assuming they're H125 duplicates.
-8. **H124g** (low priority): confirm `layout.test`'s `FileCheck`
-   mismatch is real; consider removing `array_of_matrices.test`'s stale
-   `XFAIL: DXC` upstream (in `offload-test-suite`, not this repo).
-9. **Still fully pending, now deferred 4+ sessions**:
-   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
-   pre-existing heap corruption -- `valgrind`'s own trace points at
-   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
-10. Clean up `/tmp/h124h_repro/` (this session's own scratch files, low
-    priority, not part of the repo).
+6. Lower priority, deferred 4+ sessions now: `transform_feedback.fuzz.
+   random_geometry.all_instance_array.12`'s pre-existing heap corruption
+   -- `valgrind`'s own trace already points at `buildStageStorage`/
+   `executeDraws` allocating a too-small buffer.
+7. Cleanup: `/tmp/h125_repro/`, `/tmp/h125_test*.ll` (this session's own
+   scratch files, not part of the repo).
