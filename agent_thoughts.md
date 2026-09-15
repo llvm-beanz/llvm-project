@@ -84934,3 +84934,127 @@ Scratch files from this session (`/tmp/repro*.mlir`, `/tmp/h135_test*.mlir`,
 have been left in `/tmp` (outside the repo, not committed) in case the
 InlineRT/HLSLLib triage above wants to reuse the same qpa-parsing
 technique; safe to delete otherwise.
+
+# Session: the "11 failures" baseline was fake — real driver never ran
+
+**TL;DR:** `check-hlsl-feme-vk` was silently testing lavapipe, not
+FeMe, in an unknown number of recent sessions. Real state: **54 failed
++ 1 unexpectedly-passed** (not 11 failed). No code bug found or fixed
+this session — the whole session was this one discovery plus re-triage.
+
+## What happened, in order
+
+1. Started on the assigned task: triage the 8 `HLSLLib/*.32.test`
+   "transcendental-function precision" failures.
+2. Spent most of the session tracing `log10.32.test` through every
+   layer of the compiler — SPIR-V legalization patterns, MLIR-to-LLVM
+   conversion, raw LLVM `is.fpclass` behavior, `opt -O2` — everything
+   checked out correct in isolation.
+3. Added a debug print at the very top of `CompiledStage::createStage`
+   (the function that JITs every compute shader). **It never fired.**
+   That's not a subtle bug — it means FeMe's own compiler was never
+   being invoked at all.
+4. Ran `vulkaninfo --summary | grep deviceName`. Got `llvmpipe`, not
+   `FeMe CPU Vulkan Device`.
+5. Found why: `export VK_ICD_FILENAMES=<feme> VK_DRIVER_FILES=$VK_ICD_FILENAMES`
+   on one line is a shell footgun. Bash expands the right-hand side
+   `$VK_ICD_FILENAMES` using whatever it was set to *before* this
+   command ran (this container's own baked-in default,
+   `/usr/share/vulkan/icd.d/lvp_icd.json` — lavapipe), not the new
+   value being assigned on the same line. So `VK_ICD_FILENAMES` ends
+   up correct but `VK_DRIVER_FILES` silently ends up pointing at
+   lavapipe — and the Vulkan loader prefers `VK_DRIVER_FILES` when
+   both are set. Every invocation using that one-line pattern this
+   session ran against lavapipe.
+6. Fixed by splitting into two `export` statements. Re-ran
+   `check-hlsl-feme-vk` against the real FeMe driver:
+   **54 failed, 1 unexpectedly passed**, not 11. Confirmed stable
+   across 2 back-to-back re-runs.
+7. `log10.32.test` (and the other 7 `HLSLLib/*.32.test` cases) **pass**
+   against real FeMe. There was no bug. The "11 failures" numbers
+   matched real FeMe test names by coincidence — lavapipe plausibly
+   doesn't flush-to-zero either (failing the same FTZ-golden-data
+   tests for an unrelated reason) and plausibly doesn't implement the
+   ray-tracing extension either (failing `InlineRT/*` too).
+
+## Why this wasn't caught sooner
+
+H135's own closing note already half-caught this: *"began investigating
+a reported run-to-run flakiness... turned out to be a false alarm: one
+particular invocation was missing `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`."*
+That session confirmed stability once "both are set correctly" but
+didn't find *this* specific mechanism (a var that looks set but holds
+the wrong value), so it silently recurred in however many sessions
+between H135 and now. Nobody thought to double check `vulkaninfo`'s
+`deviceName` because the numbers looked plausible and consistent
+run-to-run.
+
+## The fix for future sessions (mechanical, do this every time)
+
+```bash
+export VK_ICD_FILENAMES=/path/to/feme_icd.json
+export VK_DRIVER_FILES=$VK_ICD_FILENAMES
+vulkaninfo --summary | grep deviceName   # must say "FeMe CPU Vulkan Device"
+```
+
+Never combine into one `export VAR1=x VAR2=$VAR1` line. Always verify
+`deviceName` before trusting any `check-hlsl-feme-vk`/CTS/`offloader`
+result — this check takes 5 seconds and would have caught this
+immediately.
+
+## What I did about it this session
+
+- Reverted the temporary debug print in `CompiledStage.cpp` (served its
+  purpose, not needed as permanent code).
+- Re-triaged the real 54 failures + 1 XPASS by error signature (quick
+  pass, not deep fixes) and reconciled with the existing roadmap: H124d
+  and H124e (already-documented buckets from before this bug crept in)
+  turned out to still be exactly correct and still unfixed. Added new
+  buckets for what wasn't already covered: H124j (`Cross`/`Reflect`/
+  `Distance`/`FindUMsb`/`FindILsb` — no legalization pattern at all,
+  same shape as H124f), H124l (`GroupNonUniformQuadSwap` — no
+  legalization pattern), H124m (`OpArrayLength` — no MLIR SPIR-V dialect
+  op at all, same upstream-gap class as H124d), H124o (push-constant
+  struct GEP index-out-of-bounds, possibly same class as H128/H129/
+  H131/H133's UBO/SSBO fixes but for push constants), H124p
+  (`Mandelbrot.test`'s `feme-cpu-simdize: unsupported divergent call to
+  'llvm.is.fpclass.f32'` — a real, different gap in the exact intrinsic
+  this session's moot FTZ investigation focused on, but in a divergent
+  context). Expanded H124g to list everything still untriaged (~18
+  cases: value-mismatch bugs, texture-pipeline failures, two device-
+  creation `VK_ERROR_VALIDATION_FAILED_EXT` failures).
+- Updated `Roadmap.md`'s H124 top-level row and `VulkanCTSReport.md`
+  with the corrected baseline and full methodology writeup.
+- No roadmap milestone struck through — H124 stays open, now with a
+  much more complete and (this time, actually verified) accurate
+  sub-bucket breakdown.
+
+## Next steps for whoever picks this up
+
+1. **Before doing anything else**: `vulkaninfo --summary | grep
+   deviceName` and confirm `FeMe CPU Vulkan Device`. Every session from
+   now on, every time, not just once at the start.
+2. **H124j** (~1-2 hours): missing GLSL.std.450 legalization for
+   `Cross`/`Reflect`/`Distance`/`FindUMsb`/`FindILsb` (5 cases). Same
+   shape as H124f's already-fixed `Normalize`/`Length`/`IsNan`/`IsInf`
+   — look at that fix first, likely directly extensible.
+3. **H124l** (~1-2 hours): `GroupNonUniformQuadSwap` has no
+   legalization pattern (6 cases, all `WaveOps/QuadReadAcross*`).
+4. **H124o** (~1-2 hours): push-constant struct GEP out-of-bounds (2
+   cases) — check whether it's the same declared-vs-physical
+   member-index remap H128/H129/H131/H133 already fixed for UBO/SSBO.
+5. **H124g's untriaged ~18 cases**: needs `FEME_VULKAN_LOG_CREATION_ERRORS=1`-
+   style fresh triage, especially the 7 `Textures/*` pipeline-creation
+   failures (no specific opcode/error captured yet) and the two
+   `VK_ERROR_VALIDATION_FAILED_EXT` device-creation failures (need
+   `-validation-layer`'s actual message, not just the VkResult code).
+6. **H124d/H124e** (large, unchanged for many sessions, confirmed still
+   real): upstream MLIR SPIR-V derivative ops and CPU
+   divergence-handling gaps, respectively. Still deprioritized/multi-
+   session efforts.
+7. Lower priority, deferred 15+ sessions: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s heap corruption.
+
+No scratch files left in `/tmp` worth keeping this session (the
+`log10dump.txt`/`log10_direct*.txt`/`log10test*` files were all part of
+the now-resolved false trail — safe to ignore/delete).
