@@ -49,19 +49,19 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **File milestone rows for the two bugs above** (~15 min each just to
-   write the row; real fix time unknown, no diagnostic done yet on
-   either). The `spirv_var_N` one especially -- it's been rediscovered
-   and deferred across at least 5 sessions in a row without ever
-   getting a row of its own.
-2. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
-   built or run in any session on record. This is a standing gap, not a
-   quick add-on -- give it a dedicated session.
-3. **Re-triage the roadmap from scratch** for the next H-series pick.
-   With H32/H53/H7w/H7x all closed, the "shaderClipDistance/
-   shaderCullDistance" thread that dominated the last several sessions
-   is fully wound down. Check `Roadmap.md` for the next open P1/P2 row
-   (last known: H62 broken into H63-H68 sub-buckets, ~14-48 cases
-   apiece, each independently assignable).
-4. Clean up `/tmp/h7x_*` scratch files (low priority, not part of the
-   repo).
+1. **H115/H117/H118 together** (~1-2 hours): all three are the same
+   `"JIT session error: Symbols not found"` shape, just on different
+   block/array combinations (`per_patch_block`, `per_patch_block_array`,
+   `per_vertex_block`). Worth an IR-reduction pass (mirror H113's own
+   successful `feme-translate`/`feme-opt` technique) on the *smallest*
+   of the three (`per_patch_block`, H115) first -- a shared root cause
+   likely closes all three at once.
+2. **H119** (~45-60 min): only 6 cases, only `isolines`, only image
+   comparison (no crash, no pipeline error) -- narrower and likely
+   faster than the above. Use H88's own channel-level pixel-reduction
+   technique.
+3. **H116** (~30-60 min, not yet triaged at all): "Invalid input value"
+   is a different error class from the other three -- look at this
+   after, not folded into the JIT-symbol group above.
+4. `/tmp/h52*`, `/tmp/tess_*`, `/tmp/gdbcmds*`, `/tmp/h114*` scratch
+   files not cleaned up (low priority, not part of the repo).
