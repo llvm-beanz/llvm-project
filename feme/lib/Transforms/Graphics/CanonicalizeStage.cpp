@@ -2189,13 +2189,19 @@ MDNode *createLocationDecoration(LLVMContext &Ctx, uint32_t Location) {
 /// One address-space-8 stage-IO store's own patch-vs-vertex frequency, or
 /// `std::nullopt` if \p SI's target cannot be resolved as a stage-IO
 /// global store at all (see `getStageIOGlobal`'s own comment on the three
-/// shapes it resolves). A builtin interface block (e.g. `gl_PerVertex`)
-/// is always an ordinary per-vertex output in practice --
+/// shapes it resolves). (Roadmap H121) An interface block's own members
+/// are checked via `parseSPIRVMemberDecorations` rather than
+/// unconditionally treated as vertex-frequency: GLSL only lets the
+/// `patch` qualifier apply to a whole block, never to one of its members
+/// individually, so every member of a genuine `patch out` block (e.g.
+/// this milestone's own `TheBlock`-shaped multi-member interface block)
+/// carries an identical `Patch` decoration, and checking any one of them
+/// (the first found) reflects the whole block's real frequency. A
+/// builtin interface block (e.g. `gl_PerVertex`) has no `Patch`-decorated
+/// member of its own either way, so this still falls through to the same
+/// vertex-frequency answer the old, unconditional `false` gave it --
 /// `gl_TessLevelInner`/`gl_TessLevelOuter` are plain globals, never
-/// interface-block members -- so conservatively treated as not
-/// patch-frequency rather than teaching this check the per-member
-/// decoration lookup `canonicalizeSPIRVStage`'s own `addElements` lambda
-/// already has.
+/// interface-block members, and so never reach this branch at all.
 std::optional<bool>
 classifyTessControlOutputStoreFrequency(StoreInst &SI, const DataLayout &DL) {
   GlobalVariable *GV = getStageIOGlobal(SI.getPointerOperand(), DL);
@@ -2204,8 +2210,11 @@ classifyTessControlOutputStoreFrequency(StoreInst &SI, const DataLayout &DL) {
   unsigned AddrSpace = 0;
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 8)
     return std::nullopt;
-  if (GV->getMetadata("feme.spirv.MemberDecorations"))
+  if (const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations")) {
+    for (const auto &KV : parseSPIRVMemberDecorations(MemberMD))
+      return isPatchOutputDecoration(KV.second);
     return false;
+  }
   ParsedSPIRVDecorations D =
       parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
   return isPatchOutputDecoration(D);
