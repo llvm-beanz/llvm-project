@@ -43490,3 +43490,67 @@ only reachable in practice via HLSL/`offload-test-suite`'s own
 `check-hlsl-feme-vk` suite). No `VulkanCTSReport.md` Pass/Fail delta from
 this session; `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 unaffected.
+
+## Session: H126 fixed (`WavePrefixSum`/`WavePrefixProduct` `si32` legalization gap)
+
+**What changed.** Added `GroupNonUniformScanPattern<ScanOp>` to
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, the
+`ExclusiveScan` counterpart to H124a's own `GroupNonUniformReducePattern`.
+Root cause: upstream MLIR's own `GroupReducePattern` (left in charge of
+every group operation other than `Reduce`) uses `op.getResult().getType()`
+**raw**, never running it through the real `TypeConverter`, so a SPIR-V
+`si32`/`ui32` result type reaches the `llvm.call`/`llvm.func` it builds
+completely unconverted -- the LLVM dialect rejects this outright (only
+signless `i32` is valid). This is the exact same signedness bug
+`GroupNonUniformReducePattern` already fixed for `Reduce`, just never
+extended to `ExclusiveScan` (`WavePrefixSum`/`WavePrefixProduct`'s own
+SPIR-V shape); H124a's own doc comment had incorrectly claimed upstream's
+pattern "already handles every group operation correctly." The new
+pattern is registered at `FeMeBenefit` for the four op families with a
+matching intrinsic (`IAdd`/`FAdd` -> `llvm.spv.wave.prefix.sum`,
+`IMul`/`FMul` -> `llvm.spv.wave.prefix.product`); both intrinsics, plus
+the rest of the CPU divergence pipeline's support for them
+(`classifyWaveCall`, `isArithmeticReduceOrPrefixKind`, `lowerPrefixReduce`
+in `WaveCalls.cpp`/`WaveLowering.cpp`), already existed from earlier
+work, so this fix was purely the SPIR-V-to-LLVM-dialect legalization
+layer. `InclusiveScan`/`ClusteredReduce` remain unreached by any HLSL
+intrinsic and are left to upstream's own pattern unchanged. New lit
+test: `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-group-nonuniform-scan.mlir`.
+
+**Verification.**
+- Direct IR trace: `feme-translate --import-spirv`/`--spirv-to-llvmir`
+  on a minimal `switch`-gated `WavePrefixSum` reproducer (matching
+  `WavePrefixSum.convergence.test`'s own shape) -- the `si32` error is
+  gone, a real `llvm.spv.wave.prefix.sum` intrinsic call appears, and the
+  result passes cleanly through `feme-cpu-linearize`/`feme-cpu-simdize`.
+- `ninja check-feme`: **3029/3032 passed** (3 unsupported), 0 failed --
+  unchanged before/after this session's fix.
+- `check-hlsl-feme-vk` re-run (664 total): **291 passed, 86 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- up from 289 passed/88 failed.
+  `WavePrefixSum.convergence.test`/`WavePrefixProduct.convergence.test`
+  now pass. No regressions elsewhere.
+- **New gap found while verifying, filed as roadmap H127**:
+  `WavePrefixSum.32.test`/`WavePrefixProduct.32.test` (vector-operand,
+  `int4`/`uint4`/`float4`) still fail with a distinct, unrelated
+  `feme-cpu-simdize` diagnostic ("component decomposition is not yet
+  supported" for a divergent vector value) -- `isVectorOperandReduceKind`
+  (`SIMDize.cpp`, H124a) only covers the nine uniform `WaveActive*`
+  reduce kinds, not the two (per-lane-divergent) prefix-scan kinds, and
+  naively adding them would be unsound without also teaching the
+  decomposition path to handle a per-lane-varying result.
+
+**Feature/extension bits.** No change: this is a SPIR-V-to-LLVM-dialect
+legalization fix in the CPU backend's own code-generation path, not a
+feature/extension gate. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, confirmed unaffected.
+
+**VK-GL-CTS sweep.** Re-ran `dEQP-VK.subgroups.arithmetic.*` (12087
+cases, the closest real `deqp-vk` group to this fix's own code path):
+still 100% `NotSupported` ("Device does not support subgroup arithmetic
+operations", `vktSubgroupsArithmeticTests.cpp:285`) -- unchanged from
+H124h/H125's own session findings (this device does not advertise
+`VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, so no real `deqp-vk` case reaches
+this fix's code path; only reachable in practice via HLSL/
+`offload-test-suite`'s own `check-hlsl-feme-vk` suite). No
+`VulkanCTSReport.md` Pass/Fail delta from this session;
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` unaffected.
