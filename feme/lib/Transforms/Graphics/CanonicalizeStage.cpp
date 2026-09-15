@@ -1472,13 +1472,59 @@ bool isPerVertexArrayMeshOutputGlobal(const GlobalVariable *GV,
 /// mesh entry's own per-vertex/per-primitive output write takes (indexed
 /// by the invocation's own output slot, not a compile-time constant).
 /// Sets \p AddrSpace to \p GV's address space when true.
+///
+/// (Roadmap H117/H118) Excludes a `patch`-decorated global -- mirroring
+/// `isPerVertexArrayInputGlobal`'s own identical `!D.Patch` exclusion --
+/// since a `patch`-qualified, genuinely multi-member `Block`-decorated
+/// interface block wrapped in an outer array (glslang's "array of block
+/// instances" syntax, e.g. `patch out TheBlock {...} tcBlock[2];`) has
+/// the exact same structural shape (an `ArrayType` in address space 7/8)
+/// as a real per-vertex/per-primitive array, but is a fundamentally
+/// different thing: the array dimension selects one of several
+/// independently-captured, non-interpolated *patch* instances, not one of
+/// a stage's own fixed per-vertex/per-primitive slots.
+/// `getDynamicRowIndexedAccess`'s own generic, recursive row-folding
+/// (`collectDynamicRowTerms`) already models this shape correctly (each
+/// array level's own instance index folds into `Row`, exactly like an
+/// ordinary array-of-struct member's own array dimension one level
+/// further in) -- but only for a global this function does *not* also
+/// claim, since `getDynamicRowIndexedAccess` deliberately defers to
+/// `getDynamicVertexIndexedAccess` for every global this function does
+/// match, to avoid double-recognizing the same shape two different ways.
+/// Before this fix, a `patch`-qualified block-array global was wrongly
+/// claimed here instead, threading its own instance index through as a
+/// bogus `Vertex` operand -- a dimension this element's own storage has
+/// no room for -- leaving the block's own backing global still
+/// `external`/unresolved at JIT-link time (`"Symbols not found: [
+/// spirv_var_N ]"`, `dEQP-VK.tessellation.user_defined_io.
+/// per_patch_block_array`/`per_vertex_block`'s own crash).
 bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
                                  unsigned &AddrSpace) {
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
       (AddrSpace != 7 && AddrSpace != 8))
     return false;
-  return isa<ArrayType>(GV->getValueType());
+  if (!isa<ArrayType>(GV->getValueType()))
+    return false;
+  // (Roadmap H117/H118) GLSL's `patch` qualifier only ever applies to a
+  // whole interface block, never to one member individually, so glslang
+  // never emits a `Patch` decoration on the block-array variable itself
+  // (only an ordinary `Location`) -- it instead emits `OpMemberDecorate
+  // ... Patch` on every one of the block *type*'s own members, captured
+  // here the same way `classifyTessControlOutputStoreFrequency` already
+  // reads it (checking the first member reflects the whole block, since
+  // every member of a genuine `patch out` block carries an identical
+  // `Patch` decoration). A plain (non-block) `Patch`-decorated global
+  // still carries its own `Patch` decoration directly, handled by the
+  // fallback below.
+  if (const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations")) {
+    for (const auto &KV : parseSPIRVMemberDecorations(MemberMD))
+      return !KV.second.Patch;
+  }
+  ParsedSPIRVDecorations D =
+      parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+  return !D.Patch;
 }
+
 
 /// (Roadmap H5b/H6b) A geometry entry point's own per-vertex inputs
 /// (`gl_in[]`-shaped: either the `gl_PerVertex` builtin block itself, or a
