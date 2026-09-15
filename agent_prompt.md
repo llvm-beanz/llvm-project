@@ -45,25 +45,24 @@ agent thoughts.
 
 # Request
 
-Can you work the the H-series milestones?
+Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H122 + H119 together** (~1-2 hours): both are isolines-only image
-   comparison failures across sibling block shapes (`per_patch`,
-   `per_vertex`, now `per_patch_block`). Strong chance of a shared root
-   cause in tessellation-coordinate generation or interpolation specific
-   to the isolines domain. Use H88's own channel-level pixel-reduction
-   technique on one representative case first.
-2. **H117/H118** (~1-2 hours, still not touched): `per_patch_block_array`/
-   `per_vertex_block`'s own `"JIT session error: Symbols not found:
-   [ spirv_var_43/31 ]"` -- confirmed **unaffected** by this session's
-   H121 fix (still reproduces identically). Needs its own fresh
-   IR-reduction session (`feme-translate --import-spirv`/`feme-opt
-   -passes=feme-graphics-canonicalize-stage`), same technique H115 used.
-3. **H116** (~45-60 min, still untriaged): `per_patch_array.*`,
-   "Invalid input value in tessellation evaluation shader" -- different
-   error class, look at separately from the two groups above.
-4. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
-   built/run in any session on record (well over a dozen sessions
-   deferring it) -- worth a dedicated session.
+1. **H117/H118** (~1-2 hours, real IR-reduction needed, still untouched
+   across ~4 sessions now): `per_patch_block_array`/`per_vertex_block`'s
+   own `"JIT session error: Symbols not found: [ spirv_var_43/31 ]"`.
+   Confirmed unaffected by both H121's and this session's fixes. Use
+   `feme-translate --import-spirv`/`feme-opt -passes=feme-graphics-
+   canonicalize-stage` (H115's own successful technique) on the real
+   SPIR-V for one of these two cases first.
+2. **H116** (~45-60 min, still untriaged across ~4 sessions): `per_patch_
+   array.*`, "Invalid input value in tessellation evaluation shader" --
+   different error class from H117/H118, look at separately.
+3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** (well over a
+   dozen sessions deferring this now): still never built/run in any
+   session on record. This is a standing gap that keeps getting bumped --
+   worth a dedicated session with no other competing priority, purely to
+   get it building and to see what it reports.
+4. Low priority: no scratch files to clean up right now (this session's
+   own were removed).
