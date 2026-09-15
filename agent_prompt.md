@@ -49,32 +49,20 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Investigate `check-hlsl-feme-vk`'s run-to-run flakiness** (~1-2
-   hours, newly discovered this session, not yet root-caused): re-run
-   the full suite 3+ times back-to-back with no rebuild in between and
-   diff the failing-test lists to confirm this is real (not a one-off
-   fluke from something else on the machine). If confirmed, check
-   whether tests share GPU/descriptor/JIT state that isn't reset
-   between cases — likely somewhere in `OffloadTest`'s own executor,
-   not this repo's `feme` code, but worth confirming before redirecting
-   elsewhere.
-2. **H124e** (~several sessions, large): `feme-cpu-simdize`/
-   `feme-cpu-linearize`/`feme-cpu-wrap-entry` divergence-handling gaps,
-   ~11 of the original 102 `check-hlsl-feme-vk` failures across at
-   least 5 distinct root causes (non-linear-control-flow barrier,
-   divergent-aggregate decomposition, groupshared-global GEP, divergent
-   branch `LinearizePass` missed, multi-exit-check loop, out-of-bounds
-   struct GEP). Needs per-case triage first to confirm which (if any)
-   share a root cause — don't assume one fix covers all 11.
-3. **H124d** (large, deprioritized, unchanged from many sessions ago):
-   needs new upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/
-   `OpFwidth` — skip unless someone wants the upstream-MLIR piece
-   specifically.
-4. **H124g's `layout.test`/`array_of_matrices.test` items**: given the
-   flakiness finding above, don't re-triage either in isolation next
-   session — first resolve item 1, then re-check whether either is a
-   real, stable failure/XPASS at all.
-5. Lower priority, deferred 13+ sessions now: `transform_feedback.
-   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
-   corruption — `valgrind`'s own trace points at
+1. **Triage `check-hlsl-feme-vk`'s 11 stable failures** (~1-2 hours):
+   `HLSLLib/*.32.test` transcendental-function precision (8 cases,
+   likely all one root cause — pick one, reduce it) and
+   `InlineRT/*.test` ray tracing (3 cases, likely one shared root
+   cause too). Neither was investigated this session — new territory.
+2. **H124e** (~several sessions, carried over untouched for a while
+   now): `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps, ~11 of the original 102
+   `check-hlsl-feme-vk` failures across 5+ distinct root causes — needs
+   per-case triage first, don't assume one fix covers all.
+3. **H124d** (large, deprioritized, unchanged for many sessions): new
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` —
+   skip unless someone specifically wants the upstream-MLIR piece.
+4. Lower priority, deferred 14+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption — `valgrind`'s own trace points at
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
