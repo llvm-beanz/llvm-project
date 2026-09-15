@@ -42760,3 +42760,137 @@ re-run (no code path of this session's change touches them).
 canonicalization correctness fix (plus a newly-discovered, not-yet-fixed
 optimizer-pipeline bug). `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, confirmed unaffected.
+
+## Roadmap H120: root cause and fix (`DiamondFlattener` `CycleBoundaryMasks` overwrite)
+
+**Session summary.** Root-caused and fixed the `InstCombine` dominance
+assertion filed as H120 last session (the sole remaining blocker for
+H115/H117/H118's full closure, 27 `dEQP-VK.tessellation.user_defined_io.
+{per_patch_block,per_patch_block_array,per_vertex_block}.*` cases).
+
+**Root cause.** `feme/lib/Transforms/CPU/Linearize.cpp`'s
+`DiamondFlattener::flatten`, at its loop-control-edge early-return check
+(the point where a `flatten` walk stops upon reaching a cycle's own
+boundary block, deferring the cycle body to `LoopLinearizer` and its
+exit block(s) to a later, separate `run()`-discovered root -- see roadmap
+H95a), recorded `CycleBoundaryMasks[Cur] = Masks` unconditionally on
+every visit. A real captured pre-optimizer IR dump of the Hull
+control-point stage (isolated as the smallest reproducer among the 5
+per-stage dumps -- 1 dominance violation via `opt -passes=instcombine`,
+versus 4 in the Domain stage and 10 in the Hull patch-constant stage)
+showed a block (`Flow39` in the dump) that is simultaneously (a) the
+real two-arm `phi`-merge reconvergence point of an *outer*, uniform
+diamond, and (b) its own separate cycle's own boundary block (its own
+terminator decides that cycle's iteration). Two independent `flatten`
+walks both reach and record `CycleBoundaryMasks[Flow39]`:
+1. The enclosing region's own continuous walk (from the function's
+   entry root) correctly recurses into *both* of the outer diamond's
+   arms, builds the real, fully-merged `sideeffect.merge47` `phi` at
+   `Flow39`, then immediately detects `Flow39`'s own loop-control-edge
+   terminator and records this correct, complete value.
+2. A **later**, independent walk starting from a *different*, inner
+   nested cycle's own exit block (queued as a separate `run()` root,
+   since `validate`'s recursion into the outer diamond's one arm
+   containing that inner cycle stopped early at *its* boundary without
+   ever confirming that arm reaches `Flow39`) reaches `Flow39` a second
+   time via only that one arm's own single, incomplete path (with no
+   intervening diamond in between) and **overwrites** the correct
+   recording with this narrower, single-arm-only value
+   (`sideeffect.merge45` in the dump).
+
+`run()`'s mutation loop later seeds a cycle-exit root's `EntryMasks` from
+this now-stale map entry, producing a mask (`%sideeffect.merge45.splat.
+splat`) that does not dominate one of `Flow39`'s own real successors
+(reachable only via `Flow39`, whose own two real predecessors are the
+outer diamond's two arms, not the inner cycle's own boundary) --
+triggering `InstCombine`'s `DT.dominates(BB, UserParent) && "Dominance
+relation broken?"` assertion once it started folding the resulting
+masked instructions.
+
+Root-caused via temporary, env-gated (`FEME_DEBUG_H120`) `errs()` tracing
+added directly at three points in `Linearize.cpp`'s own C++ code (the
+`CycleBoundaryMasks[Cur] = Masks` recording site, the `Roots.push_back`
+discovery site, and the `EntryMasks`/`flatten` call site in `run`'s
+mutation loop) -- far more effective than manually reasoning through the
+real shader's own large, deeply-nested CFG from static IR alone, which a
+prior attempt this session found too error-prone. All three traces (and
+a `CompiledStage.cpp` per-stage pre-optimizer IR dump diagnostic reused
+from the H115/H117/H118 session) were reverted before committing the fix.
+
+**Fix.** Made the `CycleBoundaryMasks[Cur] = Masks` recording
+insert-only-if-absent (`CycleBoundaryMasks.try_emplace(Cur, Masks)`),
+returning the map's now-authoritative value rather than the local walk's
+own `Masks` so a caller consuming `flatten`'s return value never
+disagrees with what a second walk reaching the same block would see.
+"First recording wins" is correct because the first walk to reach a
+given cycle boundary block is *always* the enclosing region's own
+complete, every-arm-merged walk: a nested cycle's own exit root is only
+ever discovered (and so only ever queued in `Roots`) *after* the walk
+that reaches it as a boundary in the first place, so it is strictly
+processed later in `run()`'s mutation loop.
+
+**Regression test.** Added `LinearizeTest.
+PreservesFirstCycleBoundaryMaskWhenOuterMergeIsAlsoALoopBoundary`: an
+outer uniform diamond whose reconvergence point (`merge`) is itself also
+its own cycle's boundary block, with one arm nesting a second, inner
+loop with its own divergent exit, and a `feme.stage.demote` in that arm
+(needed so the two arms' side-effect masks actually differ -- otherwise
+the two recordings this bug conflates happen to coincide and the bug is
+unobservable). Verified this test fails the same way the real CTS case
+did (`verifyModule`'s "Instruction does not dominate all uses!") when
+temporarily reverted to the pre-fix overwrite behavior, and passes with
+the fix in place. Two earlier, simpler synthetic attempts this session
+did *not* reproduce the bug at all (one never even entered the recording
+code path at all, since the whole function had no genuine divergent
+diamond outside a loop's own control edge; the second entered it but
+recorded the same value both times, absent the `demote` narrowing) --
+recorded here so a future session does not have to rediscover this from
+scratch.
+
+**Verification.**
+- `opt -passes=instcombine` on each of the 5 real per-stage pre-optimizer
+  IR dumps (previously 1/4/10 dominance violations in the Hull
+  control-point, Domain, and Hull patch-constant stages respectively):
+  **0 violations in all 5**, confirming the fix's reach is not limited to
+  the single smallest reproducer.
+- The real CTS case
+  (`dEQP-VK.tessellation.user_defined_io.per_patch_block.
+  vertex_io_array_size_implicit.isolines`) no longer crashes: it now runs
+  to completion and fails gracefully at `vk.queueSubmit(...):
+  VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338` (filed as new,
+  narrower roadmap row H121).
+- The full 27-case H115/H117/H118 caselist: **0 crashes** (previously all
+  27 crashed via this same `InstCombine` assertion). `per_patch_block`'s
+  9 cases (H115) now fail gracefully as above; `per_patch_block_array`/
+  `per_vertex_block`'s 18 cases (H117/H118) **still fail with their
+  original `"JIT session error: Symbols not found: [ spirv_var_43/31 ]"`**
+  -- unchanged from before H115's own `collectDynamicRowTerms` fix,
+  meaning that fix did **not** actually cover these two sibling shapes as
+  the prior session's roadmap entry assumed. Corrected H117/H118's own
+  roadmap rows accordingly (no longer treated as closed-by-proxy; need
+  their own fresh IR-reduction session).
+- The broader `dEQP-VK.tessellation.user_defined_io.*` group (54 cases,
+  `--deqp-case='dEQP-VK.tessellation.user_defined_io.*'`): 12/54 pass, 42
+  fail, **0 crashes** of any kind.
+- A `dEQP-VK.tessellation.*` sweep (hundreds of cases) was run as a
+  broader regression sanity check; observed only pre-existing,
+  already-catalogued failure shapes (`spirv.GL.Length` legalization,
+  patch-constant aggregate decomposition, `feme-cpu-wrap-patch-constant`
+  signature-element lookups, image-comparison mismatches) with no new
+  crashes, hangs, or `InstCombine`/dominance-related failures observed
+  before the sweep was stopped early (time-boxed; not run to full
+  completion, but sufficient to rule out broad collateral regressions
+  from this fix).
+- `ninja check-feme`: **3017/3020 passed, 3 unsupported** (unchanged from
+  the H115/H117/H118 session's own baseline).
+- `LinearizeTest`/`FeMeTransformsCPUTests` (470 tests): all pass.
+
+**H116/H119 (unchanged this session).** Both remain open, untouched:
+`per_patch_array.*` still fails with `"Invalid input value in
+tessellation evaluation shader"`; H119's `isolines`-only image-comparison
+failures were not re-run this session.
+
+**Feature/extension bits.** No change: this is an internal
+optimizer-pass (`Linearize.cpp`) correctness fix.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
