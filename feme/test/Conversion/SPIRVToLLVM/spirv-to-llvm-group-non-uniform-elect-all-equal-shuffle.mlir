@@ -110,3 +110,59 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform,
     spirv.ReturnValue %0 : f32
   }
 }
+
+// -----
+
+// Checks that `spirv.GroupNonUniformQuadSwap` (roadmap H124l) converts to
+// the same "compute a target id via `llvm.spv.subgroup.local.invocation.id`
+// xor'ed with a mask, then `llvm.spv.wave.readlane`" shape `shuffle_xor`
+// above uses, but with `Direction`'s own enum value plus one (here,
+// `Horizontal` = 0, so mask = 1) as a compile-time-constant mask instead of
+// a runtime operand.
+
+// CHECK-LABEL: llvm.func @quad_swap_horizontal
+// CHECK: %[[ID:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.local.invocation.id"() : () -> i32
+// CHECK: %[[MASK:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: %[[TARGET:.*]] = llvm.xor %[[ID]], %[[MASK]] : i32
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.readlane"(%arg0, %[[TARGET]]) : (f32, i32) -> f32
+// CHECK: llvm.return %[[RESULT]] : f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformQuad], []> {
+  spirv.func @quad_swap_horizontal(%value : f32) -> f32 "None" {
+    %0 = spirv.GroupNonUniformQuadSwap <Subgroup> <Horizontal> %value : f32
+    spirv.ReturnValue %0 : f32
+  }
+}
+
+// -----
+
+// Checks the `Vertical` direction (mask = 2) and a vector operand.
+
+// CHECK-LABEL: llvm.func @quad_swap_vertical_vector
+// CHECK: %[[ID:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.local.invocation.id"() : () -> i32
+// CHECK: %[[MASK:.*]] = llvm.mlir.constant(2 : i32) : i32
+// CHECK: %[[TARGET:.*]] = llvm.xor %[[ID]], %[[MASK]] : i32
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.readlane"(%arg0, %[[TARGET]]) : (vector<4xf32>, i32) -> vector<4xf32>
+// CHECK: llvm.return %[[RESULT]] : vector<4xf32>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformQuad], []> {
+  spirv.func @quad_swap_vertical_vector(%value : vector<4xf32>) -> vector<4xf32> "None" {
+    %0 = spirv.GroupNonUniformQuadSwap <Subgroup> <Vertical> %value : vector<4xf32>
+    spirv.ReturnValue %0 : vector<4xf32>
+  }
+}
+
+// -----
+
+// Checks the `Diagonal` direction (mask = 3) and an integer operand.
+
+// CHECK-LABEL: llvm.func @quad_swap_diagonal
+// CHECK: %[[ID:.*]] = llvm.call_intrinsic "llvm.spv.subgroup.local.invocation.id"() : () -> i32
+// CHECK: %[[MASK:.*]] = llvm.mlir.constant(3 : i32) : i32
+// CHECK: %[[TARGET:.*]] = llvm.xor %[[ID]], %[[MASK]] : i32
+// CHECK: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.spv.wave.readlane"(%arg0, %[[TARGET]]) : (i32, i32) -> i32
+// CHECK: llvm.return %[[RESULT]] : i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader, GroupNonUniform, GroupNonUniformQuad], []> {
+  spirv.func @quad_swap_diagonal(%value : i32) -> i32 "None" {
+    %0 = spirv.GroupNonUniformQuadSwap <Subgroup> <Diagonal> %value : i32
+    spirv.ReturnValue %0 : i32
+  }
+}
