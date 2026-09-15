@@ -49,19 +49,25 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H115/H117/H118 together** (~1-2 hours): all three are the same
-   `"JIT session error: Symbols not found"` shape, just on different
-   block/array combinations (`per_patch_block`, `per_patch_block_array`,
-   `per_vertex_block`). Worth an IR-reduction pass (mirror H113's own
-   successful `feme-translate`/`feme-opt` technique) on the *smallest*
-   of the three (`per_patch_block`, H115) first -- a shared root cause
-   likely closes all three at once.
-2. **H119** (~45-60 min): only 6 cases, only `isolines`, only image
-   comparison (no crash, no pipeline error) -- narrower and likely
-   faster than the above. Use H88's own channel-level pixel-reduction
-   technique.
-3. **H116** (~30-60 min, not yet triaged at all): "Invalid input value"
-   is a different error class from the other three -- look at this
-   after, not folded into the JIT-symbol group above.
-4. `/tmp/h52*`, `/tmp/tess_*`, `/tmp/gdbcmds*`, `/tmp/h114*` scratch
-   files not cleaned up (low priority, not part of the repo).
+1. **H120** (~1-2 hours, real Linearize/SIMDize investigation): re-capture the
+   crashing IR (steps above), then read `Linearize.cpp`'s own `live.merge`/
+   `sideeffect.merge` phi-construction code (~line 775-845) against the
+   dumped IR's actual CFG shape to find which "Flow" merge case it mishandles
+   for this specific nested-loop-with-array-of-struct-write pattern. This is
+   the highest-leverage single item: closes 27 cases at once (H115+H117+H118).
+2. **H116** (~45-60 min, not touched this session): `per_patch_array.*`,
+   `"Invalid input value in tessellation evaluation shader"` -- re-confirmed
+   still failing (0/3 sampled), different error class from H120, look at it
+   separately.
+3. **H119** (~45-60 min, not touched this session): `per_patch`/`per_vertex`
+   `isolines`-only image comparison failures (6 cases) -- use H88's own
+   channel-level pixel-reduction technique.
+4. **`getDynamicVertexIndexedAccess`** (H92's sibling function) still has the
+   same raw-struct-field-index `Member`-tracking bug my fix corrected in
+   `getDynamicRowIndexedAccess` -- not touched this session since no real CTS
+   case has hit it yet, but worth a proactive fix if H120's own root cause
+   turns out to need it (a per-vertex outer dynamic index combined with an
+   array-of-struct member).
+5. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+   built/run in any session on record (now well over a dozen sessions
+   deferring it) -- worth a dedicated session.
