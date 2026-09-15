@@ -45058,3 +45058,68 @@ scalar/vector/integer operand shapes.
 H124l is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new Vulkan-visible
 capability.
+
+## H124o: push-constant tight-vector member GEP out of bounds
+
+**Bug.** `Feature/PushConstant/{multiple_values_offset,padding}.test`
+both failed compute-pipeline creation with `"'llvm.getelementptr' op
+index 2 indexing a struct is out of bounds"`. Root cause turned out to
+be a *different* bug class from H128/H129/H131/H133's own
+declared-vs-physical member-reordering fixes: `multiple_values_offset
+.test`'s push-constant struct `{uint3 a; uint b;}` (declared offsets
+`[0, 12]`) needs **no** member reordering at all -- its offsets are
+already ascending naturally -- so
+`OffsetStructMemberReorderAccessChainPattern`'s own `NeedsRemap` gate
+declined entirely, letting MLIR's generic, tight-vector-unaware
+`AccessChainPattern` build the GEP instead. The real problem: `a`'s
+`vector<3xi32>` member needed `getTightVectorArrayType`'s marker-struct
+substitution (roadmap H101j) -- its natural, ABI-rounded LLVM vector
+size (16 bytes) overshoots the 12 bytes this struct's own tight,
+no-implicit-padding layout reserves for it -- one extra level of
+struct nesting the generic pattern's forwarded indices don't account
+for, so a vector-component index (`.y`/`.z`, values 1 or 2) tried to
+index straight into the 1-member wrapper struct, out of bounds.
+
+**Fix.** Two parts, in `SPIRVToLLVMPatterns.cpp`:
+- Broadened `OffsetStructMemberReorderAccessChainPattern`'s early-
+  decline gate to also proceed whenever an access reaches past the
+  member selector into *any* offset-decorated struct, not only one
+  that needs reordering -- safe, since `remapNestedStructMemberIndices`
+  is a no-op whenever neither condition actually applies.
+- Added `getStructMemberPhysicalFieldType`, which recovers a struct
+  member's *real* converted LLVM field type from
+  `convertOffsetStructTypeIgnoringDecorations`'s own resulting struct,
+  rather than reconverting the member's bare SPIR-V type in isolation
+  (which cannot see this struct-context-driven substitution -- a
+  standalone `Converter.convertType(vectorType)` call never applies
+  it). Both `OffsetStructMemberReorderAccessChainPattern`'s own
+  first-level member selection and `remapNestedStructMemberIndices`'s
+  loop (covering any deeper struct nesting) now use it to detect a
+  tight-vector-wrapped member and insert the wrapper's own extra `0`
+  index immediately before any vector-component index that follows it.
+
+**New lit test coverage.** Added
+`spirv-to-llvm-push-constant-tight-vector-member.mlir`, covering both
+known member-position shapes: a vector member immediately followed by
+a scalar (`multiple_values_offset.test`'s own shape) and a scalar
+member immediately followed by a vector (`padding.test`'s own shape).
+
+**Verification.**
+- `ninja check-feme`: **3051/3054 passed** (3 unsupported), 0 failed,
+  0 regressions.
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): both named
+  `Feature/PushConstant/{multiple_values_offset,padding}.test` cases
+  now pass. Full suite re-run: **43 -> 41 failed** (of 664), exactly
+  the 2 target cases moved from fail to pass, no regressions.
+- VK-GL-CTS: `dEQP-VK.pipeline.monolithic.push_constant.*` (65 cases,
+  the group most directly exercising push-constant layout in general):
+  50 pass / 9 fail / 6 not-supported. All 9 failures are pre-existing
+  `VK_ERROR_INITIALIZATION_FAILED` cases on `dynamic_index_*`
+  sub-tests -- a different, unrelated pre-existing gap (no vec3/
+  tight-vector-member shape involved), confirming no regression from
+  this fix.
+
+H124o is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new Vulkan-visible
+capability.
