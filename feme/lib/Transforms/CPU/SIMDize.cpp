@@ -379,6 +379,36 @@ bool isNumSubgroupsCall(Intrinsic::ID ID) {
   return ID == Intrinsic::spv_num_subgroups;
 }
 
+/// (roadmap H124a) Whether \p Kind is one of the nine `WaveActive*`
+/// arithmetic-reduce kinds whose operand may itself be a vector (matching
+/// `GroupNonUniformReducePattern`'s own vector-operand support in
+/// `SPIRVToLLVMPatterns.cpp`: every `llvm.spv.wave.reduce.*`/`llvm.spv.
+/// wave.product` intrinsic is `llvm_any_ty`-overloaded, so a `bvec2`-
+/// `bvec4`-shaped `WaveActiveSum`/`Max`/`BitAnd`/... reaches this pass as
+/// a genuine vector-operand call, exactly like `AllEqual`/`ReadLane`
+/// above). Every one of these kinds is always uniform
+/// (`isDivergentWaveCallResult` returns false for all nine), unlike
+/// `ReadLane`'s own call-specific divergence, so `widenWaveCall`'s own
+/// vector-decomposition branch for this case needs no
+/// `UI.isDivergentAtDef` check at all: it always reassembles a uniform
+/// `<N x T>` result.
+bool isVectorOperandReduceKind(WaveCallKind Kind) {
+  switch (Kind) {
+  case WaveCallKind::ActiveSum:
+  case WaveCallKind::ActiveProduct:
+  case WaveCallKind::ActiveMax:
+  case WaveCallKind::ActiveUMax:
+  case WaveCallKind::ActiveMin:
+  case WaveCallKind::ActiveUMin:
+  case WaveCallKind::ActiveBitAnd:
+  case WaveCallKind::ActiveBitOr:
+  case WaveCallKind::ActiveBitXor:
+    return true;
+  default:
+    return false;
+  }
+}
+
 /// Whether \p ID is trivially widenable to a vector-typed overload with the
 /// same, single overloaded type shared by its return and every argument:
 /// `llvm::isTriviallyVectorizable`'s target-independent intrinsics, plus the
@@ -1285,6 +1315,18 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
                 WaveCallKind::ReadLane &&
             UserCI->getArgOperand(0) == &I)
           continue;
+        // (roadmap H124a) A vector-typed `WaveActiveSum`/`Max`/`BitAnd`/
+        // ...'s own operand -- decomposed the same way by `widenWaveCall`'s
+        // own dedicated vector-reduce branch (one per-component reduce
+        // call, reassembled into the always-uniform `<N x T>` result), the
+        // reduce-kind counterpart of the `AllEqual`/`ReadLane` cases above.
+        if (Callee) {
+          std::optional<WaveCallKind> ReduceKind =
+              classifyWaveCall(Callee->getIntrinsicID());
+          if (ReduceKind && isVectorOperandReduceKind(*ReduceKind) &&
+              UserCI->getArgOperand(0) == &I)
+            continue;
+        }
         // Roadmap H6g-b-a-i-a-i-b: an argument of a vector-typed,
         // homogeneous "trivially vectorizable" intrinsic call (see the
         // producer-side check above and `widenVectorElementwise`) -- `I`
@@ -1787,6 +1829,37 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
       Result->takeName(&CI);
       CI.replaceAllUsesWith(Result);
     }
+    ToErase.push_back(&CI);
+    return;
+  }
+
+  // (roadmap H124a) The reduce-kind counterpart of `AllEqual`/`ReadLane`
+  // above: `GroupNonUniformReducePattern` (SPIRVToLLVMPatterns.cpp) hands
+  // a vector operand straight to its matching `llvm.spv.wave.reduce.*`/
+  // `llvm.spv.wave.product` intrinsic unscalarized (every one is
+  // `llvm_any_ty`-overloaded), so a `bvec2`-`bvec4`-shaped
+  // `WaveActiveSum`/`Max`/`BitAnd`/... arrives here as a genuine
+  // vector-operand call. Unlike a gather, a reduction is independent per
+  // component in the opposite sense -- each output component reduces only
+  // its own component across every active lane, not a cross-component
+  // read -- so this decomposes into `N` separate per-component reduce
+  // calls, reassembled into the single, always-uniform `<N x T>` result
+  // `isVectorOperandReduceKind`'s own comment explains every one of these
+  // nine kinds always produces (no `UI.isDivergentAtDef` check needed,
+  // unlike `ReadLane`).
+  if (isVectorOperandReduceKind(Kind) && CI.getType()->isVectorTy()) {
+    SmallVector<Value *, 4> Components =
+        getVectorComponents(CI.getArgOperand(0), Builder);
+    Value *Result = PoisonValue::get(CI.getType());
+    for (auto [Idx, Component] : llvm::enumerate(Components)) {
+      CallInst *ComponentCall =
+          createWaveCall(Builder, Kind, WaveSize, WideMask, Component,
+                         /*WideLaneIndex=*/nullptr, CI.getName());
+      Result = Builder.CreateInsertElement(Result, ComponentCall,
+                                           Builder.getInt32(Idx));
+    }
+    Result->takeName(&CI);
+    CI.replaceAllUsesWith(Result);
     ToErase.push_back(&CI);
     return;
   }
