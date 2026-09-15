@@ -4859,4 +4859,92 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 1u);
 }
 
+/// (Roadmap H118) A Hull entry's own per-invocation `Output` interface
+/// block (e.g. `dEQP-VK.tessellation.user_defined_io.per_vertex_block`'s
+/// own `out PerVertexBlock { vec4 a; float b; } outBlock[];`, indexed by
+/// `gl_InvocationID`, never `Patch`-decorated) is a genuine multi-member
+/// nested struct (`TakeBlockPath` must run, decomposing it into one
+/// `SignatureElement` per real member -- skipping this, this milestone's
+/// own original mistake, silently collapsed every member onto one
+/// shared, wrongly-typed shadow value and crashed
+/// `PromoteMemToReg`/`isAllocaPromotable`'s own assertion) wrapped in an
+/// outer array that is the dynamically-indexed per-invocation dimension
+/// itself -- unlike H117's own `per_patch_block_array` (a `Patch`-
+/// qualified block array, a genuine *static* array of independently
+/// captured instances), this array must NOT fold into `RowCount`
+/// (`BlockArrayCount` stays 0): each member's own `RowCount` stays 1, and
+/// the dynamic invocation index threads through as this store's own
+/// `Vertex` operand instead, exactly like `getDynamicVertexIndexedAccess`'s
+/// own plain (non-block) counterpart already does for a single-member
+/// per-vertex output.
+TEST(CanonicalizeStageTest,
+     ThreadsInvocationIndexIntoMultiMemberHullPerInvocationOutputBlock) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_block = external addrspace(8) global [4 x { <4 x float>, float }], !spirv.Decorations !0, !feme.spirv.MemberDecorations !7
+
+    define void @main(i32 %invocation, <4 x float> %a, float %b) #0 {
+      %pa = getelementptr inbounds [4 x { <4 x float>, float }], ptr addrspace(8) @out_block, i32 0, i32 %invocation, i32 0
+      store <4 x float> %a, ptr addrspace(8) %pa
+      %pb = getelementptr inbounds [4 x { <4 x float>, float }], ptr addrspace(8) @out_block, i32 0, i32 %invocation, i32 1
+      store float %b, ptr addrspace(8) %pb
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="hull" }
+
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 30, i32 0}
+    !3 = !{!2}
+    !4 = !{i32 0, !3}
+    !5 = !{i32 30, i32 1}
+    !6 = !{!5}
+    !7 = !{!4, !8}
+    !8 = !{i32 1, !6}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *InvocationArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Two leaf elements, one per real member -- `TakeBlockPath`'s own
+  // per-member decomposition ran despite the outer array, rather than
+  // silently collapsing both members onto one shared shadow value.
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  // Neither member's own `RowCount` is widened by the outer per-
+  // invocation array (`BlockArrayCount` must stay 0 for this non-`Patch`
+  // shape): the invocation index is a dynamically-indexed `Vertex`
+  // operand, never folded into `Row`.
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_EQ(Sig->Elements[1].RowCount, 1u);
+
+  unsigned SeenStores = 0;
+  std::set<uint64_t> SeenElementIDs;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    SeenElementIDs.insert(
+        cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue());
+    Value *Row = CI->getArgOperand(1);
+    Value *Vertex = CI->getArgOperand(4);
+    // `Row` is this member's own constant 0 (not widened by the array),
+    // and the invocation index threads through as `Vertex` instead.
+    if (auto *RowConst = dyn_cast_or_null<ConstantInt>(Row))
+      EXPECT_EQ(RowConst->getZExtValue(), 0u);
+    else
+      EXPECT_EQ(Row, nullptr);
+    EXPECT_TRUE(usesArgTransitively(Vertex, InvocationArg));
+  }
+  // One store per real member (the `<4 x float>` member's own per-
+  // component splitting still shares its own single `ElementID`).
+  EXPECT_EQ(SeenElementIDs.size(), 2u);
+  EXPECT_GE(SeenStores, 2u);
+}
+
 } // namespace
