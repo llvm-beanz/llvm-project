@@ -82883,3 +82883,91 @@ before you could even see them fail):
    after, not folded into the JIT-symbol group above.
 4. `/tmp/h52*`, `/tmp/tess_*`, `/tmp/gdbcmds*`, `/tmp/h114*` scratch
    files not cleaned up (low priority, not part of the repo).
+
+# Session: H115/H117/H118 real fix lands, new H120 dominance crash found
+
+**Next action:** run `Linearize.cpp`/`SIMDize.cpp` investigation for H120 (see
+"Next steps" below) -- that's the one thing standing between this session's
+fix and 27 fully-closed CTS cases.
+
+## What now works
+
+`CanonicalizeStage.cpp` correctly resolves a `Block`-decorated
+array-of-genuine-multi-member-nested-struct member accessed through one or
+two dynamic (loop-carried) GEP indices per invocation -- e.g.
+`blockSa[gl_InvocationID].z[j]` -- which used to leave an unresolvable
+external symbol (`"Symbols not found: [ spirv_var_N ]"`) at JIT-link time.
+Verified via:
+1. A new unit test (`ThreadsDoublyDynamicIndexIntoArrayOfNestedStructMemberOutputStore`),
+   modeled directly on the real CTS SPIR-V's own GEP shape.
+2. `ninja check-feme`: 3016/3019, 0 failures, up 1 test, no regressions.
+
+Committed as 3 small steps:
+- `721c6a08c22e` -- the core fix (`collectDynamicRowTerms`/`combineDynamicRowTerms`/dead-GEP sweep)
+- `b99fdcde81d9` -- the regression test
+- `6dd311429c74` -- Roadmap.md/VulkanCTSReport.md updates
+
+## What's still broken (new blocker, not caused by this fix's own logic)
+
+Running the real CTS case still crashes `deqp-vk` -- but with a **different**
+error than before. Old: JIT symbol-not-found. New:
+```
+InstructionCombining.cpp:5852: Assertion `DT.dominates(BB, UserParent) &&
+"Dominance relation broken?"' failed.
+```
+during the domain (TES) stage's compile.
+
+**Why this is a distinct bug, not my code:** confirmed via a bare `opt -O2`
+on a dumped pre-`OptimizerPipeline` module (no JIT involved at all) --
+reproduces identically. The dump point is *after* `LinearizePass`/
+`SIMDizePass` already ran. This session's fix makes the underlying
+array-of-struct per-invocation stores properly recognized
+`feme.stage.output.store` calls for the first time -- previously they were
+raw stores `SIMDize` never treated as side-effecting, so this exact
+divergent-control-flow shape never reached `SIMDize`'s own side-effect-mask
+(`live.merge`/`sideeffect.merge` phi) construction before. That construction
+has a latent bug for this shape, around `StructurizeCFG`'s own "Flow"
+reconvergence blocks (see `Linearize.cpp`'s own extensive `Flow`-block
+comments -- it's built directly on top of `StructurizeCFG`'s output).
+
+Filed as **H120** in `Roadmap.md` (P3, depends on H115). This is now the
+sole blocker for H115/H117/H118 (27 cases total).
+
+## How to reproduce H120 fast (saves you the whole diagnostic-dump dance)
+
+The temporary dump points I added and reverted this session -- re-add if you
+pick this up:
+1. In `feme/lib/Target/CPU/CompiledStage.cpp`, right before
+   `OptimizerPipeline().run(Mod, ...)` in `createStage`, add an env-gated
+   dump keyed by a `static int Counter` **and** `Stage` (not just entry
+   name -- every real CTS shader uses `"main"`, so name-only dumps silently
+   overwrite each other across stages; cost real time to catch this).
+2. Run `VK_ICD_FILENAMES=.../feme_icd.json ./deqp-vk --deqp-case='dEQP-VK.tessellation.user_defined_io.per_patch_block.vertex_io_array_size_implicit.isolines'`
+   with the dump env var set.
+3. `opt -O2 -S <dumped Domain-stage file>.ll` reproduces the dominance
+   failure standalone -- no JIT, no gdb needed from here on.
+
+## Next steps
+
+1. **H120** (~1-2 hours, real Linearize/SIMDize investigation): re-capture the
+   crashing IR (steps above), then read `Linearize.cpp`'s own `live.merge`/
+   `sideeffect.merge` phi-construction code (~line 775-845) against the
+   dumped IR's actual CFG shape to find which "Flow" merge case it mishandles
+   for this specific nested-loop-with-array-of-struct-write pattern. This is
+   the highest-leverage single item: closes 27 cases at once (H115+H117+H118).
+2. **H116** (~45-60 min, not touched this session): `per_patch_array.*`,
+   `"Invalid input value in tessellation evaluation shader"` -- re-confirmed
+   still failing (0/3 sampled), different error class from H120, look at it
+   separately.
+3. **H119** (~45-60 min, not touched this session): `per_patch`/`per_vertex`
+   `isolines`-only image comparison failures (6 cases) -- use H88's own
+   channel-level pixel-reduction technique.
+4. **`getDynamicVertexIndexedAccess`** (H92's sibling function) still has the
+   same raw-struct-field-index `Member`-tracking bug my fix corrected in
+   `getDynamicRowIndexedAccess` -- not touched this session since no real CTS
+   case has hit it yet, but worth a proactive fix if H120's own root cause
+   turns out to need it (a per-vertex outer dynamic index combined with an
+   array-of-struct member).
+5. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+   built/run in any session on record (now well over a dozen sessions
+   deferring it) -- worth a dedicated session.
