@@ -49,20 +49,22 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H117/H118** (~1-2 hours, real IR-reduction needed, still untouched
-   across ~4 sessions now): `per_patch_block_array`/`per_vertex_block`'s
-   own `"JIT session error: Symbols not found: [ spirv_var_43/31 ]"`.
-   Confirmed unaffected by both H121's and this session's fixes. Use
-   `feme-translate --import-spirv`/`feme-opt -passes=feme-graphics-
-   canonicalize-stage` (H115's own successful technique) on the real
-   SPIR-V for one of these two cases first.
-2. **H116** (~45-60 min, still untriaged across ~4 sessions): `per_patch_
-   array.*`, "Invalid input value in tessellation evaluation shader" --
-   different error class from H117/H118, look at separately.
-3. **`offload-test-suite`'s `check-hlsl-feme-vk` target** (well over a
+1. **H116** (~45-60 min, still untriaged across ~5 sessions now):
+   `per_patch_array.*` (9 cases), "Invalid input value in tessellation
+   evaluation shader" -- a different error class from H117/H118, never
+   looked at in isolation. Only 9 cases and the last open row in the
+   `user_defined_io` matrix, likely the fastest remaining close.
+2. **`offload-test-suite`'s `check-hlsl-feme-vk` target** (well over a
    dozen sessions deferring this now): still never built/run in any
-   session on record. This is a standing gap that keeps getting bumped --
-   worth a dedicated session with no other competing priority, purely to
-   get it building and to see what it reports.
-4. Low priority: no scratch files to clean up right now (this session's
-   own were removed).
+   session on record. Give it a dedicated session with no competing
+   priority.
+3. **The `transform_feedback.fuzz.random_geometry.all_instance_array.12`
+   pre-existing heap corruption** (~1-2 hours, real bug, now clearly
+   isolated): confirmed pre-existing and unrelated to H117/H118, not
+   fixed this session (out of scope for the H117/H118 task). The
+   `valgrind` trace already points at `buildStageStorage`/`executeDraws`
+   allocating a too-small buffer for this fuzzed multi-member XFB
+   block-array shape -- worth its own roadmap row and a dedicated
+   session, since `valgrind`'s own stack trace is a strong head start.
+4. Low priority: no scratch files left to clean up (this session's own
+   were removed, including a stray `tese.spv`).
