@@ -52,6 +52,7 @@
 #include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
+#include "feme/Transforms/CPU/WaveCalls.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -61,6 +62,7 @@
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -384,6 +386,51 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
           Call->setArgOperand(0, B.CreateAnd(Call->getArgOperand(0),
                                              Masks.Live,
                                              "ballot.pred.masked"));
+        }
+        // (roadmap H124h) `WaveActiveSum`/`Max`/.../`WavePrefixSum`/
+        // `Product`'s own value operand (operand 0) needs exactly the same
+        // "narrow to invocations still active *here*" treatment `Ballot`'s
+        // predicate operand gets immediately above -- but unlike a
+        // predicate, a reduce/scan operand cannot simply be ANDed with
+        // `Masks.Live` (it is not always boolean, and even when it is,
+        // `false` is not every one of these eleven kinds' own identity --
+        // `ActiveBitAnd`'s is all-ones, `ActiveMin`'s is the type's own
+        // max, etc.). Substituting `feme::cpu::getReduceIdentity`'s own
+        // identity element for a masked-off lane instead (matching "Phase
+        // 5"'s own `llvm.vector.reduce.* over select(M, X, identity)`
+        // row -- `feme::cpu::WaveLoweringPass::lowerActiveReduce`/
+        // `lowerPrefixReduce` already select this same way, just over
+        // `FunctionWidener::widenWaveCall`'s own `Env.EntryMask`, which
+        // only ever says "is this invocation real", never "is it still
+        // inside this divergent region") keeps the reduction/scan
+        // associative-identity-correct for every kind. Missing this let a
+        // `WaveActiveSum`/etc. inside a divergent arm (e.g. `tid.x <= 1 ?
+        // WaveActiveSum(v) : 0`) sum over the *whole* wave instead of just
+        // the lanes that actually took that arm -- found reducing the
+        // `WaveActiveSum.int32.test`/`WaveActiveMax.fp32.test`/... family
+        // of CTS failures down to this exact shape.
+        if (std::optional<WaveCallKind> Kind = classifyWaveCall(ID);
+            Kind && isArithmeticReduceOrPrefixKind(*Kind) &&
+            !isKnownConstantMask(Masks.Live)) {
+          IRBuilder<> B(Call);
+          Value *Operand = Call->getArgOperand(0);
+          Type *OperandTy = Operand->getType();
+          // (roadmap H124a) A `bvec2`-`bvec4`-shaped `WaveActiveSum`/
+          // `Max`/... arrives here with a genuine vector-typed operand
+          // (every `llvm.spv.wave.reduce.*`/`.product` intrinsic is
+          // `llvm_any_ty`-overloaded) -- splat the scalar identity
+          // `getReduceIdentity` returns across that same vector shape
+          // rather than the (illegal) bare scalar `select` a vector
+          // condition needs its operands to match.
+          Type *EltTy = OperandTy->isVectorTy()
+                            ? cast<VectorType>(OperandTy)->getElementType()
+                            : OperandTy;
+          Constant *Identity = getReduceIdentity(*Kind, EltTy);
+          if (OperandTy->isVectorTy())
+            Identity = ConstantVector::getSplat(
+                cast<VectorType>(OperandTy)->getElementCount(), Identity);
+          Call->setArgOperand(0, B.CreateSelect(Masks.Live, Operand, Identity,
+                                                "wave.reduce.masked"));
         }
       }
       continue;
