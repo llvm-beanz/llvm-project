@@ -43732,3 +43732,110 @@ does not advertise `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, so no real
 `deqp-vk` case reaches this fix's code path; only reachable in practice
 via HLSL/`offload-test-suite`'s own `check-hlsl-feme-vk` suite). No
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change.
+
+## Session: H124b fixed (`CBuffer`/`Matrix` whole-matrix `spirv.AccessChain` legalization gap), H124i newly filed
+
+**Root cause.** `isMatrixMemberLayoutRepresentable` (`SPIRVToLLVMPatterns.cpp`)
+rejects any `RowMajor`-decorated matrix struct member (any stride) or any
+member whose `MatrixStride` does not exactly match its natural, tightly
+packed size, and `convertOffsetStructTypeIgnoringDecorations` treated
+that rejection as fatal for the *whole containing struct's* own type
+conversion. Since the block's own `spirv.VulkanBuffer` handle base
+pointer is parameterized by that same struct conversion, this cascaded
+into every `spirv.AccessChain` into it failing to legalize identically
+("failed to legalize operation 'spirv.AccessChain' that was explicitly
+marked illegal") regardless of which specific index pattern (whole
+matrix, one row/column, or one scalar element) it actually used.
+
+**Fix.** Added `getPhysicalMatrixMemberType` -- a substituted, packed
+LLVM type (`array<MajorCount x MajorEntryTy>`, `MajorEntryTy` a tightly
+packed `array<MinorCount x T>` optionally padded to `MatrixStride` with
+a trailing byte array, `MajorCount`/`MinorCount` swapped between
+rows/columns for `RowMajor`/`ColMajor`) -- that
+`convertOffsetStructTypeIgnoringDecorations` now retries with instead of
+rejecting outright. Generalized the former `RowMajor`-only,
+exact-stride-only, wrapper-array-only `getRowMajorMatrixAccess`/
+`RowMajorMatrixStorePattern`/`RowMajorMatrixLoadPattern` into
+`getMatrixWholeAccess` plus the same two patterns, covering any
+majorness/stride combination and both the direct-struct-member
+(`cbuffer`/`ConstantBuffer<T>`) and wrapper-array
+(`RWStructuredBuffer<matCxR>`/`StructuredBuffer<matCxR>`, roadmap L83)
+shapes, transposing/padding at the exact point a value crosses the real
+`llvm.store`/`llvm.load` memory boundary.
+
+**Two real bugs found and fixed while implementing this:**
+1. Once the struct itself started converting successfully, upstream
+   MLIR's own generic `spirv::AccessChainPattern` (a lower-benefit
+   fallback pattern) began being tried for the harder, still-unsupported
+   partial-matrix-access shapes (one row/column or scalar element into a
+   non-naturally-representable member) this fix intentionally still
+   declines. That pattern never expects a `spirv.VulkanBuffer`-handle
+   base pointer and blindly built an ill-typed `llvm.getelementptr` from
+   it -- previously masked only because the base pointer itself never
+   converted either, so upstream's pattern would fail the same way for
+   an unrelated reason. Fixed by having `rewriteBlockAccess` consume this
+   declined shape directly (`Op.emitOpError(...)` + replacing with a
+   same-typed `LLVM::PoisonOp`, returning `success()`) instead of
+   `notifyMatchFailure` (which cannot itself prevent the conversion
+   driver from subsequently trying another registered pattern) -- a
+   clear, specific diagnostic and well-formed (if poisoned) IR instead of
+   a confusing downstream verifier crash.
+2. **A real assertion crash, found via this session's own VK-GL-CTS
+   sweep** (`dEQP-VK.ubo.instance_array_basic_type.std140.
+   column_major_mat2.both_comp_access`): the new rejection check
+   (bug 1's fix) re-derived the containing struct type from
+   `Op.getBasePtr().getType()`'s own pointee, which is only ever a plain
+   struct for `BlockAccessChainPattern`'s own base pointer -- for
+   `ArrayedBlockAccessChainPattern` (an instance array of blocks), the
+   base pointer instead points at an *array* of structs, so this `cast`
+   tripped `llvm::cast`'s assertion outright (`isa<To>(Val) &&
+   "cast<Ty>() argument of incompatible type!"`), crashing the whole
+   `deqp-vk` process. Fixed by threading the correct struct type through
+   as an explicit `rewriteBlockAccess` parameter from each of the two
+   call sites (`BlockAccessChainPattern`'s own `PointerType`'s pointee,
+   `ArrayedBlockAccessChainPattern`'s own `ElementPointerType`'s pointee)
+   instead of re-deriving it from `Op.getBasePtr()` inside the shared
+   helper.
+
+Two new lit tests (`spirv-to-llvm-matrix-cbuffer-rowmajor.mlir`,
+`spirv-to-llvm-matrix-cbuffer-colmajor-padded.mlir`) cover the newly
+supported direct-member shapes (unpadded `RowMajor`, padded `ColMajor`)
+the pre-existing `spirv-to-llvm-matrix-rowmajor-buffer-block.mlir`
+(wrapper-array-only) did not; `spirv-to-llvm-matrix-block-invalid.mlir`'s
+two `expected-error` cases updated to match the new, still-correct
+diagnostic text.
+
+**Verification.**
+- `ninja check-feme`: **3040/3043 passed** (3 unsupported), 0 failed --
+  no regressions.
+- `check-hlsl-feme-vk` re-run (664 total): **302 passed, 75 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- up from 297 passed/80 failed.
+  `Feature/CBuffer/Matrix/LayoutKeyword/{matrix_multiply,subscript,
+  swizzle,single_subscript,transpose}.test` (5 cases, all direct
+  `cbuffer` whole-matrix access under an explicit `row_major`/
+  `column_major` HLSL layout keyword) now pass outright; no regressions.
+
+**Newly filed: H124i.** The remaining 10 `Feature/CBuffer/Matrix/
+{MatrixElement,MatrixSubscript,SingleSubscript}/*` failures are a
+genuinely distinct, still-open bug: they compile and run to completion
+with *no* legalization error at all (confirmed reproducing even for an
+already-representable, natural-`ColMajor`-stride member, with no
+`RowMajor`/padding substitution involved whatsoever), but produce wrong
+data -- `mat_cbuffer.f32.test`'s dynamic `M_f2x4[0]`/`M_f2x4[1]` row
+subscripts both read back row 0's own values. Not yet root-caused; filed
+as its own roadmap row (H124i) rather than folded into H124b, since it
+is unrelated to this fix's own whole-struct-type-conversion cascade.
+
+**VK-GL-CTS sweep.** Ran the full `dEQP-VK.ubo.*` group (13,240 cases,
+the closest real `deqp-vk` group to this fix's own std140/std430
+matrix-in-uniform-block code path): **3772 passed, 1915 failed, 7553 not
+supported (mostly `shaderUniformBufferUnsizedArray` not advertised),
+zero crashes** -- confirms the array-of-blocks assertion crash (bug 2
+above), first found via this exact sweep, is fully fixed; the run
+completes cleanly end-to-end where it previously aborted partway
+through. The bulk of the 1915 failures are unrelated to this session's
+own change (std140/std430 layout edge cases across many non-matrix
+types); not fully triaged this session, out of scope for H124b/H124i.
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change:
+this is a `SPIRVToLLVMPatterns.cpp` type-legalization fix, not a
+feature/extension gate.
