@@ -83068,3 +83068,73 @@ closed-by-proxy -- they need their own fresh IR-reduction session.
    repo) -- `/tmp/h120_preopt/pre_opt_2_1_main.ll` specifically is worth
    keeping a copy of if further Linearize/SIMDize work is anticipated,
    since it's a proven, real, minimal (1-violation) reproducer.
+
+# H121 session: patch-constant stage silently dropping user-defined `patch out` block members
+
+**Closed this session: H121.** Filed new, narrower H122.
+
+## What's done, in order
+
+1. Root-caused H121 via `FEME_VULKAN_LOG_CREATION_ERRORS=1` (existing
+   opt-in diagnostic in `Diagnostics.cpp`) -- the real error was
+   `"vkQueueSubmit: patch-constant output -> domain stage patch input:
+   element 0 has no matching producer element"`, not just the generic
+   `VK_ERROR_INITIALIZATION_FAILED` seen before.
+2. Built a minimal glslang reproducer of the real shader's `TheBlock`
+   interface block to confirm SPIR-V's own decoration shape (whole-var
+   `Location` only, no per-member `Location`) and manually verified
+   `CanonicalizeStage.cpp`'s `TakeBlockPath` decomposition logic is
+   correct -- ruled it out as the bug.
+3. Traced the real bug to `classifyTessControlOutputStoreFrequency`:
+   it hard-coded `false` (vertex-frequency) for *any* store into *any*
+   interface-block member, correct for builtin `gl_PerVertex` but wrong
+   for a user-defined `patch out` block (GLSL: `patch` qualifies a whole
+   block, so every member is always `Patch`-decorated). This caused
+   `pruneStageIOStoresByFrequency` to erase the whole block's own store
+   from the split `.patchconstant` phase.
+4. Fixed: check the block's own per-member `Patch` decoration instead of
+   a blanket `false`. One-line-of-logic fix, `feme/lib/Transforms/
+   Graphics/CanonicalizeStage.cpp`.
+5. Added `CanonicalizeStageTest.
+   NoBarrierPatchBlockMemberStoreIsClassifiedAsPatchFrequency` --
+   confirms the block's members survive undropped as `PatchOutput`
+   elements.
+6. `ninja check-feme`: 3018/3021 passed, 3 unsupported (up from
+   3017/3020 -- the +1 is the new test).
+7. Real CTS re-run: `per_patch_block` group 0/9 (crash) -> 6/9 pass;
+   broader `user_defined_io.*` group 12/54 -> 18/54 pass.
+8. Updated `Roadmap.md` (struck H121, filed H122) and
+   `VulkanCTSReport.md` (new session entry). Reviewed feature/extension
+   inventories -- no change needed (internal correctness fix).
+9. Committed in 3 separate commits: fix, test, docs. Cleaned up
+   `/tmp/h121_*` scratch files and the temporary env-gated debug trace
+   in `StageLink.cpp` (reverted before commit).
+
+## New finding: H122
+
+3 of `per_patch_block`'s own 9 cases (all `isolines` topology) still
+fail, but only at image comparison -- no crash, no queueSubmit error.
+This is the *same shape* as the already-catalogued H119
+(`per_patch`/`per_vertex`'s own isolines-only image mismatches). Filed
+as H122, `Depends on` H121.
+
+## Next steps, ranked
+
+1. **H122 + H119 together** (~1-2 hours): both are isolines-only image
+   comparison failures across sibling block shapes (`per_patch`,
+   `per_vertex`, now `per_patch_block`). Strong chance of a shared root
+   cause in tessellation-coordinate generation or interpolation specific
+   to the isolines domain. Use H88's own channel-level pixel-reduction
+   technique on one representative case first.
+2. **H117/H118** (~1-2 hours, still not touched): `per_patch_block_array`/
+   `per_vertex_block`'s own `"JIT session error: Symbols not found:
+   [ spirv_var_43/31 ]"` -- confirmed **unaffected** by this session's
+   H121 fix (still reproduces identically). Needs its own fresh
+   IR-reduction session (`feme-translate --import-spirv`/`feme-opt
+   -passes=feme-graphics-canonicalize-stage`), same technique H115 used.
+3. **H116** (~45-60 min, still untriaged): `per_patch_array.*`,
+   "Invalid input value in tessellation evaluation shader" -- different
+   error class, look at separately from the two groups above.
+4. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
+   built/run in any session on record (well over a dozen sessions
+   deferring it) -- worth a dedicated session.
