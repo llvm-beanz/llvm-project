@@ -82772,3 +82772,114 @@ without this session's fix -- not caused by it):
    apiece, each independently assignable).
 4. Clean up `/tmp/h7x_*` scratch files (low priority, not part of the
    repo).
+
+# Session: filing H114/H115, correcting the offload-test-suite stale claim, and root-causing+fixing H114
+
+## What just got fixed (do this first if picking up mid-session)
+
+H114's crash is fixed and committed. Nothing left to do to finish
+this specific bug. If you're re-entering this session, skip to
+"Recommendation" below.
+
+## What happened, in order
+
+1. **Filed H114/H115** (roadmap rows for two bugs a prior session found
+   but never filed). Doc-only commit.
+2. **Checked the `offload-test-suite`/`check-hlsl-feme-vk` gap** (flagged
+   as "never run" by 6+ prior sessions in a row): it's a **false
+   claim**. `Roadmap.md`'s own §1.11 (rows L1-L96) shows this target has
+   been built and run for many sessions -- just by a different,
+   parallel track (L-series) the H-track sessions never cross-checked.
+   Ran it myself to confirm: 664 discovered, 272 passed. No code work
+   needed here, just correcting the record so future sessions stop
+   re-flagging it.
+3. **Checked H52** (a SIGSEGV blocking `tessellation.*` measurement,
+   flagged as the fallback target if H7x stalled): already fixed, as a
+   side effect of last session's H7x `Tessellator.cpp` change. Confirmed
+   by rebuilding and re-running twice.
+4. **Ran a full `tessellation.*` regression sweep** to make sure nothing
+   else was silently broken: it crashed. On H114's own bug (confirming
+   the row I'd just filed), but also on a **second**, unfiled case in
+   the same family (`vertex_io_array_size_shader_builtin`, not just
+   `_implicit`) -- meaning H114's true scope was bigger than filed.
+5. **Root-caused H114** using temporary `errs()` diagnostics in
+   `CanonicalizeStage.cpp` (no debug symbols in this Release build, so
+   `gdb` alone couldn't get past a bare call stack). Traced it three
+   layers deep:
+   - Symptom: `PromoteMemToReg` asserts on a non-promotable alloca.
+   - Cause: two different-typed stage-IO elements (`int`, `vec4`)
+     collide on the same `(ElementID, Row, Component)` key.
+   - Root cause: a plain (non-`Block`) multi-member struct used as a
+     tessellation `patch out` variable's type gets **zero** decomposition
+     -- `buildMemberDecorationsAttr` (SPIRVToLLVMPatterns.cpp) only
+     attaches per-member metadata when a member has an explicit
+     decoration or the whole struct has an `Offset` (`Block`-only). A
+     plain struct's members have neither.
+6. **Fixed it**: `buildMemberDecorationsAttr` now emits a (possibly
+   decoration-less) per-member entry whenever the struct has more than
+   one member. The consuming code (`TakeBlockPath` in
+   `CanonicalizeStage.cpp`) already had the right fallback logic for
+   "no explicit `Location`" (added for a different bug, H101b) -- it
+   just never used to get called for this shape. One-line-conceptually,
+   several-lines-in-practice fix plus a big explanatory comment.
+7. **Reverted all temporary diagnostics** before committing -- only the
+   real fix landed.
+8. **Verified**: no crash anywhere in the 54-case `user_defined_io`
+   matrix (was crashing on at least 2 of them before). 12/54 now pass
+   outright. `check-feme`: 3014/3017 (0 failures, +1 for the new test).
+   `git stash` A/B confirmed one plausible collateral-damage candidate
+   (`cross_invocation_per_patch_float`, a different multi-member-struct
+   shader) fails identically with and without the fix -- pre-existing,
+   not a regression.
+9. **Filed the newly-visible failures** as their own rows (H116-H119)
+   instead of closing H114 over them, and corrected H115's own scope
+   (was filed as 3 cases, actually 9).
+
+## Wins (visible progress)
+
+- **1 real crash fixed** (H114), with a test that pins the exact broken
+  shape down so it can't silently regress.
+- **2 stale "still broken"/"never run" claims corrected** (H52, the
+  offload-test-suite gap) -- both already fine, no code needed.
+- **2 previously-unfiled bugs given roadmap rows** (H116-H119, plus
+  H115's scope corrected) -- future sessions won't have to
+  rediscover them from scratch.
+- **0 regressions**: `check-feme` clean, CTS sweep clean modulo the
+  newly-visible (previously crash-masked) failures.
+
+## Filed for later (found, not fixed -- explicitly out of scope this session)
+
+All four newly-visible in the `user_defined_io` matrix, unmasked by
+H114's own fix (i.e. these shapes used to crash the whole process
+before you could even see them fail):
+
+1. **H115 (re-scoped, 9 cases)**: `per_patch_block.*`, JIT
+   `spirv_var_21` symbol-not-found at pipeline creation.
+2. **H116 (9 cases)**: `per_patch_array.*`, "Invalid input value in
+   tessellation evaluation shader" at pipeline creation.
+3. **H117 (9 cases)**: `per_patch_block_array.*`, JIT `spirv_var_43`
+   symbol-not-found.
+4. **H118 (9 cases)**: `per_vertex_block.*`, JIT `spirv_var_31`
+   symbol-not-found.
+5. **H119 (6 cases)**: `per_patch`/`per_vertex`, `isolines` topology
+   only, image-comparison mismatch (their `quads`/`triangles` siblings
+   already pass).
+
+## Recommendation
+
+1. **H115/H117/H118 together** (~1-2 hours): all three are the same
+   `"JIT session error: Symbols not found"` shape, just on different
+   block/array combinations (`per_patch_block`, `per_patch_block_array`,
+   `per_vertex_block`). Worth an IR-reduction pass (mirror H113's own
+   successful `feme-translate`/`feme-opt` technique) on the *smallest*
+   of the three (`per_patch_block`, H115) first -- a shared root cause
+   likely closes all three at once.
+2. **H119** (~45-60 min): only 6 cases, only `isolines`, only image
+   comparison (no crash, no pipeline error) -- narrower and likely
+   faster than the above. Use H88's own channel-level pixel-reduction
+   technique.
+3. **H116** (~30-60 min, not yet triaged at all): "Invalid input value"
+   is a different error class from the other three -- look at this
+   after, not folded into the JIT-symbol group above.
+4. `/tmp/h52*`, `/tmp/tess_*`, `/tmp/gdbcmds*`, `/tmp/h114*` scratch
+   files not cleaned up (low priority, not part of the repo).
