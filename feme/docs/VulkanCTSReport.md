@@ -44629,3 +44629,64 @@ layout, not simply left unchanged).
 H133 is struck through on the roadmap. The `dEQP-VK.ubo.*` sweep now
 passes 100% (0 failing cases) for the first time this project has
 measured it.
+
+## Session: H124f -- IsNan/IsInf/GL.Length/GL.Normalize legalization gap fixed
+
+**Root cause.** `spirv.IsNan`, `spirv.IsInf`, `spirv.GL.Length`, and
+`spirv.GL.Normalize` had **no** SPIRVToLLVM conversion pattern at all --
+neither in this file's own `populateSPIRVToLLVMTargetPatterns` nor
+upstream MLIR's own `populateSPIRVToLLVMConversionPatterns` (confirmed
+by grepping both). Only the reverse direction exists upstream:
+`MathToSPIRV.cpp` builds `spirv.IsNan`/`IsInf` *from* `math.isnan`/
+`math.isinf`, not the other way around. This re-scopes the roadmap's
+own prior framing (which assumed only the vector shape was missing,
+mirroring H124a's `GroupNonUniform*` gap) -- both scalar and vector
+operands failed pipeline creation identically with "failed to legalize
+operation ... that was explicitly marked illegal".
+
+**Fix.** Added four new patterns to
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, alongside
+the existing `GLAtan2Pattern`/`GLStepPattern`/`GLFaceForwardPattern`/
+`GLRefractPattern` group (roadmap L7c/L87), reusing the same helpers
+those patterns already established:
+- `IsNanPattern`: `llvm.fcmp uno %x, %x` -- a value is unordered with
+  itself exactly when it is NaN, the same predicate
+  `FComparePattern<spirv::UnorderedOp, ...>` already uses for the
+  two-operand `spirv.Unordered`.
+- `IsInfPattern`: `llvm.intr.fabs(x) == +Inf` (`llvm.fcmp oeq`),
+  folding the sign away first so one compare catches both infinity
+  signs instead of two compares combined with an `or`.
+- `GLLengthPattern`: `sqrt(dot(x, x))`, reusing the existing
+  `createScalarOrVectorDotProduct` helper (shared with `GL.FaceForward`
+  /`GL.Refract`); always produces a scalar result even for a vector
+  operand, per the GLSL.std.450 spec.
+- `GLNormalizePattern`: `x / Length(x)`, reusing the existing
+  `broadcastScalarToShapeOf` helper to broadcast the scalar length back
+  to `x`'s own scalar-or-vector shape before dividing.
+
+All four handle scalar and vector operands generically through these
+existing helpers -- no separate scalar/vector code path needed for any
+of them.
+
+**New lit test.**
+`spirv-to-llvm-gl-length-normalize-isnan-isinf.mlir`: one scalar and
+one vector case per op (8 cases total), verified against real
+`feme-opt` output for the exact LLVM IR shape each pattern produces.
+
+**Verification.**
+- `ninja check-feme`: **3049/3052 passed** (3 unsupported), 0 failed --
+  net +1 test vs. the H133 baseline (3048/3051), from the new lit test;
+  0 regressions.
+- VK-GL-CTS: ran the real CTS groups exercising these four ops --
+  `dEQP-VK.glsl.builtin.function.common.isnan.*`/`isinf.*` (30 cases:
+  16 passed, 0 failed, 14 `NotSupported` for `double`/`longVector`
+  shapes this ICD doesn't advertise) and
+  `dEQP-VK.glsl.builtin.precision.length.*`/`normalize.*` (20 cases: 16
+  passed, 0 failed, 4 `NotSupported` for the same `longVector` reason).
+  Every previously-failing, now-supported case passes outright. Also
+  re-ran the full `dEQP-VK.glsl.builtin.function.common.*` group (81
+  cases: 57 passed, 0 failed, 24 `NotSupported`) to confirm no
+  regressions elsewhere in the same test module.
+
+H124f is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new capability.
