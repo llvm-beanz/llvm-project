@@ -1382,6 +1382,36 @@ hand-built synthetic repro of a bug report's own textual shape
 description is not sufficient evidence of correctness on its own --
 real-CTS re-verification remains essential.
 
+Roadmap H131: the struct-layout narrative above (H6q/H101n/H101m/H101p)
+covered every gap between a struct's declared and physical member order
+*except one*: a member reordering can also leave a genuine *interior*
+byte gap -- between two members that are already physically adjacent,
+where the first's own natural ABI size undershoots the second's declared
+offset -- as opposed to the single *leading* gap (before the first
+physical member) `layOutStructIfOffsetsMatch` had supported since H6q.
+`dEQP-VK.ubo.random.all_out_of_order_offsets.*`'s fuzz-generated shaders
+routinely produce this exact shape, and it failed `spirv.GlobalVariable`
+legalization outright, just as every earlier gap in this narrative did
+before its own fix. Generalized `layOutStructIfOffsetsMatch` with an
+`AllowInteriorPad` parameter (tried only as a last resort, after every
+other existing retry tier has failed, so no struct an earlier tier
+already handles correctly changes shape) and a `PhysicalIndexOut`
+declared-to-physical index map out-parameter, recovered on demand by a
+new `getStructMemberPhysicalIndex` helper rather than threading the map
+through the whole `TypeConverter` registration API. `structHasLeadingOffsetPad`
+is now fully subsumed by this generalization and has been removed.
+`OffsetStructMemberReorderAccessChainPattern` (plain-memory structs) now
+consults the physical-index map directly instead of its own
+`Order`/`HasPad`-only remap logic, and gained a guard declining to fire
+on a Block/Uniform-handle base pointer at all (it could previously build
+an illegal GEP with a `spirv.VulkanBuffer`-typed operand in that case);
+`rewriteBlockAccess` (the separate Block/Uniform-handle rewriter) gained
+its own matching remap of the `llvm.spv.resource.getpointer` index
+operand. Known remaining limitation: a multi-level nested reordered
+struct (a member that is itself a reordered struct, indexed via further
+chained GEP indices after the initial member selector) is not yet
+remapped -- pre-existing, not introduced by this fix.
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

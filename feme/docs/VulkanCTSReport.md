@@ -44085,3 +44085,112 @@ row/column/scalar-element access gap, 418 cases) and H130 (remaining
 untriaged buckets, 156 cases: dominance errors, GEP-pointer-type
 errors, other AccessChain variants, struct-index-out-of-bounds) filed
 as new, not-yet-started rows.
+
+## Roadmap H131: measured impact (struct interior-offset-gap layout fix; H129 investigation continued)
+
+**Symptom investigated.** H129 was filed as a matrix-specific
+`AccessChain` partial-access legalization gap (418 cases). Investigating
+it via a concrete `dEQP-VK.ubo.random.all_out_of_order_offsets.38`
+reproducer showed the *actual* failure for that specific case was not
+matrix-specific at all: the containing struct's own type conversion
+failed outright, well before any `AccessChain` legalization was ever
+reached. Root cause: `layOutStructIfOffsetsMatch`
+(`SPIRVToLLVMPatterns.cpp`) only ever synthesized a padding gap *before*
+the first physically-ordered struct member; it had no support for an
+*interior* gap between two members that are already physically adjacent
+but whose predecessor's own natural ABI size undershoots the successor's
+declared offset. This shape is extremely common in
+`all_out_of_order_offsets` fuzz cases, where declared member order
+routinely differs from physical (byte-offset) order.
+
+**The fix.** Generalized `layOutStructIfOffsetsMatch` with an
+`AllowInteriorPad` parameter (default `false` for all 8 existing call
+sites, preserving their exact prior behavior) and a `PhysicalIndexOut`
+declared-to-physical index map out-parameter, tried only as a very last
+resort (after every other existing retry tier in
+`convertOffsetStructTypeIgnoringDecorations` has already failed) so no
+struct an earlier tier already handles correctly changes shape. Added
+`getStructMemberPhysicalIndex` (cheaply re-runs the same deterministic
+conversion to recover the map, avoiding a costly `TypeConverter`
+registration-API refactor) and wired it into two access-chain rewriters
+that needed it: `OffsetStructMemberReorderAccessChainPattern` (plain,
+non-Block/Uniform-handle structs -- also gained a guard declining to
+fire on a Block/Uniform-handle base pointer at all, fixing a second,
+related bug where it could previously build an illegal GEP with a
+`spirv.VulkanBuffer`-typed operand, matching the "gep-pointer-type"
+34-case bucket H130 had flagged) and `rewriteBlockAccess` (Block/Uniform
+handles, remapping the `llvm.spv.resource.getpointer` index operand).
+
+A regression was caught and fixed during development: the very first
+version of the interior-gap check compared the declared offset against
+the *raw* cursor position, before applying the member's own natural ABI
+alignment -- wrong, since many apparent "gaps" are already closed by
+natural alignment alone. Fixed by computing the aligned cursor first and
+only padding if a gap remains after that.
+
+**New tests.** `feme/test/Conversion/SPIRVToLLVM/
+spirv-to-llvm-struct-interior-gap-reordered.mlir` (plain-struct and
+Block/Uniform-handle cases) and `SPIRVToLLVMTest.
+InteriorOffsetGapInterfaceBlockLegalizes`
+(`feme/unittests/Conversion/SPIRVToLLVM/SPIRVToLLVMTest.cpp`).
+
+**Verification.**
+- `ninja check-feme`: 3043/3046 passed (3 unsupported), 0 failed -- no
+  regressions (was 3041/3044 before adding the 2 new tests).
+- `FeMeConversionSPIRVToLLVMTests`: all 23 unit tests pass (was 22).
+- `dEQP-VK.ubo.random.all_out_of_order_offsets.*` (50 cases): **35
+  passed / 15 failed**. The exact `.38` reproducer case that motivated
+  this investigation still fails, but now with a *different* symptom
+  (`"...is a register-bound resource handle the FeMe CPU target cannot
+  normalize..."`, the pre-existing "cannot normalize" bucket) rather than
+  the fixed struct-conversion failure -- confirming this fix addressed
+  its own real root cause even though this one particular case still has
+  a separate, unrelated blocker.
+- `dEQP-VK.ubo.*` full re-run (13,240 cases):
+  ```
+  cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+  VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+    ./deqp-vk --deqp-case='dEQP-VK.ubo.*' --deqp-shadercache=disable
+  ```
+  **5286 passed / 401 failed / 7553 not supported** -- was 5069
+  passed / 618 failed. A reduction of 217 failing cases.
+
+**Re-triage of the remaining 401 failures**
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1`-driven, methodology per H128):
+- 236 cases: `"failed to legalize operation 'spirv.AccessChain'"` on a
+  Block/Uniform struct whose sole (or leading) member is a
+  fully-representable-layout (natural `MatrixStride`, `ColMajor`)
+  matrix, attempting a dynamic row/column-select access. This is H129's
+  own bucket (previously counted at 418, now 236 -- the delta is very
+  likely cases that were previously *also* hitting this session's own
+  now-fixed struct-layout bug and got double-counted, or were masked
+  entirely by it). **Now the single largest remaining bucket** --
+  re-scoped as the top-priority next-session item.
+- 76 cases: `"operand #0 does not dominate this use"` -- an
+  unrelated, not-yet-investigated dominance bug, count unchanged from
+  the pre-H131 baseline.
+- ~44 cases: `"...is a register-bound resource handle the FeMe CPU
+  target cannot normalize..."` (the generic `UnsupportedOps.cpp`
+  decline), spread thinly across many distinct struct shapes -- not yet
+  reduced to a single common root cause.
+- 16 cases: `'llvm.getelementptr' op index 4 indexing a struct is out
+  of bounds'` -- possibly folds into H129's own root cause once that is
+  fixed, not yet confirmed either way.
+- A handful of other one-off `AccessChain`-illegal variants.
+
+No feature/extension-inventory change: a pure struct-layout/legalization
+fix in the CPU-target SPIR-V-to-LLVM conversion path, not a new Vulkan
+capability.
+
+**Known follow-on limitation (not fixed this session, discovered during
+verification).** A multi-level nested reordered/padded struct (a member
+that is itself a reordered struct, indexed via further chained GEP
+indices after the initial member selector) is not remapped through
+those further indices -- this was already true before this session's own
+fix (previously masked entirely by the whole outer struct's own
+conversion failure), consistent with
+`OffsetStructMemberReorderAccessChainPattern`'s own pre-existing
+documented scoping note. Not yet known to correspond to any of the 401
+still-counted failures on its own; filed only as a documented limitation,
+not a new roadmap row, since no concrete failing case has been pinned to
+it yet.
