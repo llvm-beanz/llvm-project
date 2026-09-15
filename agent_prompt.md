@@ -49,22 +49,24 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H127** (~1-2 hours, real design work, still not started): vector-
-   operand `WavePrefixSum`/`WavePrefixProduct` component-decomposition
-   gap. Read `widenWaveCall`'s vector-decomposition branch in
-   `SIMDize.cpp` (~line 1769); compare against `WaveReadLaneAt`'s own
-   divergent-result handling as a possibly-closer precedent than
-   `isVectorOperandReduceKind`'s uniform-only table.
-2. **H124b** (~1-2 hours, still not started across many sessions):
-   `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
-3. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
-   vector legalization gaps, 8 cases.
-4. **H124d** (now properly scoped, large): needs new upstream MLIR
-   SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` before any
-   feme-side fix is even possible -- likely its own multi-session
-   effort, not a quick win. Deprioritize unless someone wants to take on
-   the upstream-MLIR piece specifically.
-5. Lower priority, deferred 6+ sessions now:
+1. **H124i** (~1-2 hours, real investigation, newly filed this
+   session): dynamic row/scalar-element access into an
+   *already-representable* matrix member produces wrong data (reads
+   back the same row/element regardless of the dynamic index used).
+   Start with `mat_cbuffer.f32.test`'s `M_f2x4[0]`/`M_f2x4[1]` -- both
+   return row 0's data. Trace `rewriteBlockAccess`'s final GEP-building
+   branch (bottom of the function) for this exact shape.
+2. **H124f** (~1 hour, still not started across several sessions):
+   scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector legalization gaps,
+   8 cases.
+3. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
+   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, likely its own
+   multi-session effort.
+4. Lower priority, deferred 7+ sessions now:
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    pre-existing heap corruption -- `valgrind`'s own trace already points
    at `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+5. **Reminder for whoever runs the next VK-GL-CTS sweep**: this
+   session's own `dEQP-VK.ubo.*` full run (13,240 cases, 1915 failed)
+   was not individually triaged -- some of those failures may be
+   quick, high-leverage wins once someone has time to look.
