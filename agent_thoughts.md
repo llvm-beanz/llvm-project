@@ -85058,3 +85058,126 @@ immediately.
 No scratch files left in `/tmp` worth keeping this session (the
 `log10dump.txt`/`log10_direct*.txt`/`log10test*` files were all part of
 the now-resolved false trail — safe to ignore/delete).
+
+# Session: H124o fixed (push-constant tight-vector member GEP), H124q triaged
+
+**Done. H124o closed and verified. `check-hlsl-feme-vk`: 43 -> 41 failed
+(of 664), 0 regressions. `check-feme`: 3051/3054 passed, 0 failed. 5
+commits made. Also broke H124g's 7 `Textures/*` cases into a
+precisely-scoped new row, H124q — not fixed yet, next session's clear
+starting point.**
+
+## What happened, in order
+
+1. **Picked up H124o where the prior session left off**: a real fix
+   had been designed and written (`remapNestedStructMemberIndices` +
+   `OffsetStructMemberReorderAccessChainPattern`, both in
+   `SPIRVToLLVMPatterns.cpp`) but did not actually work — the bug still
+   reproduced identically after rebuilding.
+
+2. **Root-caused why the fix had no effect**: the new code checked
+   whether a struct member's vector type needed
+   `getTightVectorArrayType`'s marker-struct substitution (roadmap
+   H101j) by *standalone* reconverting the bare vector type
+   (`Converter.convertType(VectorTy)`). That substitution is a
+   struct-context-driven retry (does this vector overshoot the room
+   its *enclosing struct's* declared layout leaves for it?), not an
+   intrinsic property of the vector type on its own — a lone
+   `Converter.convertType()` call on the vector in isolation never
+   applies it, so the check always silently found nothing.
+
+3. **Fixed properly**: added `getStructMemberPhysicalFieldType`, which
+   recovers a member's *real* converted LLVM field type by
+   re-converting the *enclosing struct* (via the same
+   `convertOffsetStructTypeIgnoringDecorations` call the physical-index
+   remap already needed) and reading its own resulting field list —
+   this is exactly the type that ends up in the real GEP's `elem_type`,
+   so it correctly reports the tight-vector wrapper when present. Wired
+   this into both `OffsetStructMemberReorderAccessChainPattern`'s own
+   first-level member selection and `remapNestedStructMemberIndices`'s
+   loop (for any deeper nesting), replacing the broken standalone
+   check.
+
+4. **Verified via a fast MLIR-only iteration loop first**
+   (`feme-opt --feme-convert-spirv-to-llvm /tmp/pc.mlir`, a hand-
+   extracted repro of `multiple_values_offset.test`'s own imported
+   SPIR-V) before touching the slower real-driver path — confirmed the
+   GEP now correctly reads `[..., 0, 0, %idx]` (stepping through the
+   marker struct) instead of the old out-of-bounds
+   `[..., 0, %idx]`.
+
+5. **Full verification, all green**: `vulkaninfo --summary` confirmed
+   real FeMe driver first (per standing rule). Both named lit tests
+   (`Feature/PushConstant/{multiple_values_offset,padding}.test`) pass
+   directly. `check-feme`: 3051/3054 passed, 0 failed, 0 regressions.
+   `check-hlsl-feme-vk`: 43 -> 41 failed (exactly the 2 target cases,
+   no other change). `dEQP-VK.pipeline.monolithic.push_constant.*` (65
+   cases): 50 pass/9 fail/6 not-supported — the 9 failures are all
+   pre-existing `VK_ERROR_INITIALIZATION_FAILED` on unrelated
+   `dynamic_index_*` sub-tests (no vec3/tight-vector shape involved),
+   confirming no regression.
+
+6. **New lit test**: `spirv-to-llvm-push-constant-tight-vector-member.mlir`,
+   covering both known member-position shapes (vector-then-scalar,
+   scalar-then-vector).
+
+7. **Moved to H124g's untriaged `Textures/*` bucket** (~30 min): ran
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` against all 7 previously-
+   uncaptured cases (`Array.{CalculateLevelOfDetail,Gather,GatherCmp,
+   GetDimensions}`, `CalculateLevelOfDetail`, `Gather`, `GatherCmp`).
+   All 7 share the *exact same* diagnostic: a plain `Texture2D`/
+   `Texture2DArray` resource handle "cannot normalize" — the same image
+   shape normalizes fine for an ordinary `Sample` (not in this failure
+   list), so the gap is specific to `Gather`/`GatherCmp`/
+   `CalculateLevelOfDetail`/`GetDimensions` themselves. One real root
+   cause, not 7 separate bugs. Filed as new roadmap row H124q with the
+   specific error text and image-type breakdown, so next session can
+   start straight at "why does the resource-normalization pass not
+   recognize these 4 ops" instead of re-discovering this.
+
+## Why the H124o fix needed a second pass (the actual lesson)
+
+The first attempt's own logic was *conceptually* correct (insert an
+extra `0` index when the wrapper is present) but checked for the
+wrapper's presence in the wrong place: reconverting a type fragment
+*outside* the context that actually decides whether the substitution
+applies produces a plausible-looking but always-negative check. When
+a type conversion is context-dependent (here: "does this struct's own
+layout leave enough room"), always derive the "did the substitution
+happen" answer from the *actual converted parent*, never by
+re-deriving it from a re-conversion of the child type alone — this
+class of mistake compiles clean, doesn't crash, and silently no-ops,
+which makes it easy to mistake for "the fix didn't rebuild" rather
+than "the fix's own check is structurally wrong."
+
+## Next steps for whoever picks this up
+
+1. **H124q** (~1-2 hours to start): `Texture2D`/`Texture2DArray`
+   resource handle cannot normalize for `Gather`/`GatherCmp`/
+   `CalculateLevelOfDetail`/`GetDimensions` (7 cases, one shared root
+   cause, full diagnostic already captured — see roadmap row). Start
+   with `Gather.test` (simplest), find the resource-normalization
+   pass's own op-recognition list and check whether these 4 opcodes
+   are simply missing from it.
+2. **H124k** (~1-2 hours, not started, simple/self-contained): missing
+   `PackHalf2x16`/`UnpackHalf2x16` legalization (`Feature/HLSLLib/
+   {f16tof32,f32tof16}.test`, 2 cases) — likely similar shape to
+   H124f/H124j's already-fixed patterns.
+3. **H124p** (~1-2 hours, not started): `feme-cpu-simdize` doesn't
+   handle a divergent call to `llvm.is.fpclass.f32` (`Basic/
+   Mandelbrot.test`, 1 case) — worth investigating together with
+   H124e (same subsystem).
+4. **H124e** (~several sessions, large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps, ~11 of the original 102
+   `check-hlsl-feme-vk` failures across 5+ distinct root causes.
+5. **H124d** (large, deprioritized, unchanged for many sessions): new
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth`.
+6. Lower priority, deferred 16+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+`/tmp/pc.mlir`, `/tmp/pc_out.mlir`, `/tmp/pc_err.txt`, `/tmp/pc_cts.qpa`,
+`/tmp/out.png` (all this session's scratch files, outside the repo)
+have been deleted.
