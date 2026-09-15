@@ -84287,3 +84287,115 @@ Pipeline created" / "Dispatched compute shader".
 
 No scratch files to clean up this session (used only pre-built `.tmp.o`
 files and lit re-runs, nothing written to `/tmp`).
+
+## H128: nested uniform-buffer-array `AccessChain`/GEP legalization gap fixed (1377 fewer `dEQP-VK.ubo.*` failures)
+
+**What just happened:** fixed a one-line-omission bug that was rejecting
+every nested-array UBO member (`uniform Block { uint data[3][4]; }`
+shapes). `dEQP-VK.ubo.*` failures dropped from 1995 to 618 (5069 passing,
+up from 3692) — the single biggest one-commit failure reduction found in
+this project so far. Two commits, both landed:
+1. `[feme] Allow GEPs after getpointer for UniformArray handles (H128)`
+2. `[feme] docs: record H128 fix, file H129/H130 (nested-array UBO + ubo triage)`
+
+**The bug, in one sentence:** `hasOnlySupportedUses`'s `AllowGEPs`
+boolean in `SPIRVResourceLowering.cpp` listed `Storage`/`StorageStruct`/
+`Uniform` but not `UniformArray` — even though that same function's own
+doc comment already said `UniformArray` should share this GEP-chaining
+shape with `Uniform`. A single-level array (`getpointer`'s own index is
+the whole access) never needed a GEP, so nobody noticed until a nested
+array's inner dimension needed one too.
+
+**How I found it (worth remembering for next time):**
+1. `FEME_VULKAN_LOG_CREATION_ERRORS=1` env var (`Diagnostics.cpp`) turns
+   silent `VK_ERROR_INITIALIZATION_FAILED` into the real MLIR/LLVM
+   diagnostic on stderr — essential for triaging any deqp-vk pipeline
+   failure, since the `.qpa` log itself never has the real reason.
+2. `deqp-vk --deqp-log-decompiled-spirv=enable` dumps human-readable
+   SPIR-V disassembly into the `.qpa` log under `<SpirVAssemblySource>`
+   — the only way found so far to recover the *exact* real SPIR-V a
+   specific deqp-vk case compiles (no raw-binary dump option exists).
+3. HTML-unescape that text, `spirv-as` it to a binary, then
+   `feme-translate --import-spirv` + `feme-opt
+   --feme-convert-spirv-to-llvm` reproduces the exact real LLVM IR
+   feme's own pipeline sees — much more reliable than hand-writing a
+   `.mlir` repro and hoping it matches reality (my first hand-written
+   repro was structurally right but didn't reveal the bug, because it
+   never exercised a *used*, only a *declared*, nested array — the real
+   SPIR-V's actual load/GEP sequence was needed to see the shape).
+4. Grouping deqp-vk case names by dotted-path component
+   (`2_level_array`/`3_level_array` = 100% fail, `single_basic_array` =
+   100% pass) pinpointed "nested, not single-level" as the discriminator
+   before any IR-level investigation started.
+
+**Verification:** `FeMeTransformsCPUTests` 471/471 pass (added
+`LowersNestedUniformBufferArrayIndexToStrideMultipliedLoad`). `ninja
+check-feme`: 3041/3044 passed, 3 unsupported, 0 failed. `dEQP-VK.ubo.
+2_level_array.*`/`3_level_array.*`: both went from 0/688 passing to
+688/688 (0 failures). Full `dEQP-VK.ubo.*` (13,240 cases): 1995 → 618
+failures.
+
+**Two new roadmap rows filed while triaging** (not started this
+session):
+- **H129** (~1-2 hours, real investigation): 418 cases, `"failed to
+  legalize operation 'spirv.AccessChain' ... Matrix..."` — sampling
+  shows these are *already representable-layout* (`ColMajor`, natural
+  `MatrixStride`) matrices, so this is a **new, distinct** gap from
+  H124b/H124i (which only ever fixed whole-matrix access): dynamic
+  row/column/scalar-element subscript access into a matrix still hard-
+  declines even when the layout itself needs no fixup. Start by tracing
+  `rewriteBlockAccess`'s partial-matrix-access branch in
+  `SPIRVToLLVMPatterns.cpp` for this exact (representable, not padded)
+  shape — likely a missing legalization case for "layout is fine, only
+  the *access pattern* needs handling," parallel to but separate from
+  H124b/H124i's own padded-layout fix.
+- **H130** (~2-4 hours, needs the same triage recipe as this session's
+  own H128 work, applied fresh post-H128): 618 - 418(H129) = ~200 cases
+  remaining, in four buckets never individually root-caused: 76 cases
+  `"operand #0 does not dominate this use"` (dominance bug), 34 cases
+  `'llvm.getelementptr' op operand #0 must be LLVM pointer type...'`,
+  30 cases other `AccessChain`-illegal variants, 16 cases
+  `'llvm.getelementptr' op index 4 indexing a struct is out of bounds'`.
+  Re-run the full suite fresh after H129 lands first, since bucket
+  membership may shift.
+
+## Suggested next steps, ranked
+
+1. **H129** (~1-2 hours, real investigation, newly filed this session):
+   representable-layout matrix dynamic row/column/scalar-element
+   `AccessChain` gap, 418 cases — see this session's own H128 entry
+   above for the starting point (`rewriteBlockAccess` in
+   `SPIRVToLLVMPatterns.cpp`). Highest priority: same file/area as this
+   session's own fix, momentum carries over, and it's the next-biggest
+   `dEQP-VK.ubo.*` bucket by far.
+2. **H130** (~2-4 hours, needs fresh triage, newly filed this session):
+   the four smaller untriaged `dEQP-VK.ubo.*` buckets (76/34/30/16
+   cases) — re-run `FEME_VULKAN_LOG_CREATION_ERRORS=1` triage fresh
+   after H129 lands, since bucket counts may shift.
+3. **H124f** (~2-4+ hours, larger than previously scoped — checked this
+   session): `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/
+   `spirv.IsInf` on vector operands have **no legalization pattern at
+   all** in this tree (grepped both `feme/lib/Conversion/SPIRVToLLVM/`
+   and upstream `mlir/lib/Conversion/SPIRVToLLVM/` — nothing handles
+   these ops, scalar or vector). This is not a "vector variant of an
+   existing scalar pattern is missing" fix like H124a/H126/H127 turned
+   out to be; it needs new patterns written from scratch for all four
+   ops (scalar forms too, if those are even currently reached some
+   other way — not confirmed). Re-scope before starting: check whether
+   scalar `IsNan`/`IsInf` actually pass today via some other path, or
+   whether this is a bigger gap than the roadmap row currently implies.
+4. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
+   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, still its own
+   multi-session effort — skip unless someone wants the upstream-MLIR
+   piece specifically.
+5. Lower priority, deferred 9+ sessions now: `transform_feedback.fuzz.
+   random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace already points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+Scratch files cleaned up this session: `/tmp/ubo_array_repro.mlir`,
+`/tmp/ubo_array_member_repro.mlir`, `/tmp/ubo_2level_array_repro.mlir`,
+`/tmp/bool2level.*`, and three large `.qpa` logs under
+`/home/dev/dev/VK-GL-CTS/run/` from this session's own investigation
+(kept `ubo_full_h128_regcheck.qpa`, the final regression-check run, for
+reference).
