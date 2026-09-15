@@ -4389,6 +4389,37 @@ getOffsetSortedMemberIndices(mlir::spirv::StructType Type) {
 /// once every other retry (including padUndersizedMembersIfNeeded, which
 /// cannot help a struct whose members are declared out of physical order
 /// in the first place: see its own comment) has already failed.
+
+/// (Roadmap H135) Returns \p Ty's natural ABI alignment *as if* it (and
+/// every aggregate nested inside it) were laid out non-packed, ignoring
+/// whatever `isPacked` an already-built `LLVM::LLVMStructType` actually
+/// carries. `layOutStructIfOffsetsMatch` below always builds its result
+/// packed now (see its own comment), so a nested struct member's own
+/// `mlir::DataLayout::getTypeABIAlignment` degrades to 1 -- LLVM's own
+/// rule for a packed struct's alignment -- even though the *real*,
+/// natural alignment its members would have imposed (had it been built
+/// non-packed, as it always used to be before H135) is exactly what the
+/// gap-detection cursor walk below still needs to decide whether a given
+/// member gap is "natural" (needing no caller opt-in) or a true interior
+/// gap. Without this, embedding any offset-decorated struct as a member
+/// of an *outer* struct silently turns every natural trailing/interior
+/// gap into an apparent "unnatural" one requiring `AllowInteriorPad`,
+/// which this function's very first (unpadded) attempt never sets --
+/// forcing every such case through this function's later retry tiers
+/// instead, changing its members' own converted shapes for no reason.
+uint64_t getNaturalAlignmentIgnoringPacking(mlir::Type Ty,
+                                            mlir::DataLayout &DL) {
+  if (auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(Ty)) {
+    uint64_t Max = 1;
+    for (mlir::Type Member : StructTy.getBody())
+      Max = std::max(Max, getNaturalAlignmentIgnoringPacking(Member, DL));
+    return Max;
+  }
+  if (auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Ty))
+    return getNaturalAlignmentIgnoringPacking(ArrTy.getElementType(), DL);
+  return DL.getTypeABIAlignment(Ty);
+}
+
 mlir::Type layOutStructIfOffsetsMatch(
     mlir::spirv::StructType Type, llvm::ArrayRef<mlir::Type> Members,
     llvm::SmallVectorImpl<unsigned> *PhysicalIndexOut = nullptr,
@@ -4413,7 +4444,7 @@ mlir::Type layOutStructIfOffsetsMatch(
     unsigned Idx = Order[OrderPos];
     mlir::Type Member = Members[Idx];
     uint64_t DeclaredOffset = Type.getMemberOffset(Idx);
-    uint64_t Alignment = DL.getTypeABIAlignment(Member);
+    uint64_t Alignment = getNaturalAlignmentIgnoringPacking(Member, DL);
     // Natural (unpadded) placement first -- matches this function's
     // pre-H129 behavior exactly, and lets a member whose own natural
     // alignment already reaches DeclaredOffset on its own (e.g. a real,
@@ -4426,9 +4457,20 @@ mlir::Type layOutStructIfOffsetsMatch(
     if (NaturalCursor < DeclaredOffset) {
       // A gap before the struct's own physically-first member is always
       // padded (matches this function's pre-H129 behavior exactly); any
-      // later (interior) one only if the caller opted in.
+      // later (interior) one only if the caller opted in. This only
+      // gates gaps *beyond* what Member's own natural alignment would
+      // have reached on its own.
       if (OrderPos != 0 && !AllowInteriorPad)
         return nullptr;
+    }
+    if (Cursor < DeclaredOffset) {
+      // (Roadmap H135) Materialize *every* needed gap explicitly, even
+      // one that merely reaches Member's own natural ABI alignment (the
+      // NaturalCursor == DeclaredOffset case) -- the resulting struct is
+      // always built `isPacked=true` below, so LLVM no longer inserts
+      // this alignment padding implicitly the way a non-packed struct
+      // would; leaving it out here would silently shrink the struct and
+      // misplace every member after this gap.
       uint64_t Gap = DeclaredOffset - Cursor;
       Laid.push_back(mlir::LLVM::LLVMArrayType::get(
           mlir::IntegerType::get(Type.getContext(), 8), Gap));
@@ -4446,8 +4488,23 @@ mlir::Type layOutStructIfOffsetsMatch(
   }
   if (PhysicalIndexOut)
     *PhysicalIndexOut = std::move(PhysicalIndexOf);
+  // (Roadmap H135) Must be `isPacked=true`: every member above was placed
+  // at its own exact declared byte offset (padding any gap explicitly
+  // with a synthetic `[N x i8]` member), so `Cursor`'s final value is
+  // already this struct's true intended size. A non-packed
+  // `LLVMStructType` ignores that and instead appends its own *implicit*
+  // trailing padding to round the whole struct's reported size up to its
+  // largest member's own ABI alignment -- e.g. `{ vector<2xf32>, f32 }`
+  // (8-byte-aligned vector, offsets 0/8, true size 12) silently becomes
+  // 16 bytes. That extra, unwanted padding is invisible for a lone
+  // struct value, but corrupts every *array of this struct*, since an
+  // `!llvm.array<N x T>`'s per-element stride is always exactly
+  // `sizeof(T)`: a `RWStructuredBuffer<B>`-shaped SSBO whose real
+  // `ArrayStride` decoration says 12 would get elements placed 16 bytes
+  // apart instead, reading/writing every element past the first at the
+  // wrong offset.
   return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Laid,
-                                                /*isPacked=*/false);
+                                                /*isPacked=*/true);
 }
 
 /// Returns the LLVM literal struct substituting for a SPIR-V fixed-size
@@ -7583,14 +7640,28 @@ private:
       return Rewriter.notifyMatchFailure(Op, "not an LLVM struct result");
 
     llvm::ArrayRef<mlir::Type> FieldTypes = LLVMStructTy.getBody();
-    if (Adaptor.getConstituents().size() != FieldTypes.size())
+    // (Roadmap H135) FieldTypes may outnumber the declared SPIR-V members:
+    // layOutStructIfOffsetsMatch now always materializes every gap (even a
+    // purely natural-alignment one) as its own synthetic `[N x i8]`
+    // member, since the resulting struct is packed and LLVM no longer
+    // inserts that padding implicitly. CompositeConstruct only ever
+    // supplies one constituent per *declared* SPIR-V member, so map each
+    // declared index to its own physical field index (skipping over any
+    // interleaved pad members) instead of assuming a 1:1 correspondence.
+    if (Adaptor.getConstituents().size() != StructTy.getNumElements())
       return Rewriter.notifyMatchFailure(
           Op, "constituent count does not match struct member count");
 
     mlir::Location Loc = Op.getLoc();
     mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstType);
-    for (auto [Index, Constituent] :
+    for (auto [DeclaredIndex, Constituent] :
          llvm::enumerate(Adaptor.getConstituents())) {
+      unsigned Index = StructTy.hasOffset()
+                           ? getStructMemberPhysicalIndex(
+                                 StructTy, DeclaredIndex, *getTypeConverter())
+                           : static_cast<unsigned>(DeclaredIndex);
+      if (Index >= FieldTypes.size())
+        return Rewriter.notifyMatchFailure(Op, "physical index out of range");
       mlir::Type FieldTy = FieldTypes[Index];
       mlir::Value Field = Constituent;
       if (Field.getType() != FieldTy) {
