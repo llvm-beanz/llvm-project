@@ -49,31 +49,26 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H129** (~2-4 hours, re-scoped, now highest priority): 236 cases,
-   `"failed to legalize operation 'spirv.AccessChain'"` on a
-   fully-representable-layout (`ColMajor`, natural `MatrixStride`)
-   matrix member of a Block/Uniform struct, attempting a dynamic
-   row/column select. Start by reducing one of these 236 cases the
-   same way this session reduced `.38` (`deqp-vk
-   --deqp-log-decompiled-spirv=enable`, re-import via
-   `feme-translate --import-spirv` / `feme-opt
-   --feme-convert-spirv-to-llvm`) to see the exact `spirv.AccessChain`
-   shape hitting "explicitly marked illegal", and check whether an
-   existing whole-matrix-access pattern (H124b/H124i) is close enough
-   to extend, or a new pattern is needed.
-2. **H130** (~2-4 hours, needs fresh triage): the remaining ~165
-   non-H129 cases in the 401-failure set -- 76 dominance errors, ~44
-   "cannot normalize" (spread thin, no single common shape found yet),
-   16 struct-index-out-of-bounds (check first whether this folds into
-   H129 once that's fixed), rest one-offs.
-3. **H124f** (~2-4+ hours, still not started across many sessions):
+1. **H130** (~1-2 hours to start, real triage): 69 cases,
+   `"...is a register-bound resource handle the FeMe CPU target cannot
+   normalize..."` — single common diagnostic, no nested-struct-remap
+   refactor needed. Start with `FEME_VULKAN_LOG_CREATION_ERRORS=1` on
+   a handful of cases to find the first common struct/resource shape.
+2. **The 4-case nested-struct-reorder gap** (~2-3 hours, real design
+   work, described in H131's own closing note and H130's updated row):
+   extend `OffsetStructMemberReorderAccessChainPattern`'s (and
+   `rewriteBlockAccess`'s) declared-to-physical remap to recurse into a
+   second level of struct nesting, not just the first selector past
+   `Selector`.
+3. **H132** (~1 hour, narrow, no known CTS case): fix
+   `isMatrixMemberLayoutRepresentable` to unwrap a wrapper member's
+   array-of-Matrix element type before checking decorations. Low
+   urgency since nothing currently exercises it, but cheap and
+   defensive.
+4. **H124f** (~2-4+ hours, still not started across many sessions):
    `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
-   on vector operands have no legalization pattern at all (confirmed
-   in a prior session, grepped both this tree and upstream MLIR).
-4. **H124d** (large, deprioritized): needs new upstream MLIR SPIR-V
-   dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` -- skip unless someone
-   wants the upstream-MLIR piece specifically.
-5. Lower priority, deferred 10+ sessions now: `transform_feedback.
+   on vector operands have no legalization pattern at all.
+5. Lower priority, deferred 11+ sessions now: `transform_feedback.
    fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
-   corruption -- `valgrind`'s own trace already points at
+   corruption — `valgrind`'s own trace points at
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
