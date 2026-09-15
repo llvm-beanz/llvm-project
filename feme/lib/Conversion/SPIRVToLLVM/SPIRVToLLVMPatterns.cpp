@@ -2529,8 +2529,8 @@ mlir::Attribute buildMemberDecorationTuple(
 mlir::ArrayAttr buildMemberDecorationsAttr(mlir::spirv::StructType Struct) {
   mlir::Builder Builder(Struct.getContext());
   llvm::SmallVector<mlir::Attribute> Members;
-  for (unsigned Index = 0, End = Struct.getNumElements(); Index != End;
-       ++Index) {
+  unsigned NumMembers = Struct.getNumElements();
+  for (unsigned Index = 0; Index != NumMembers; ++Index) {
     llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
         Decorations;
     Struct.getMemberDecorations(Index, Decorations);
@@ -2546,7 +2546,33 @@ mlir::ArrayAttr buildMemberDecorationsAttr(mlir::spirv::StructType Struct) {
                static_cast<int32_t>(mlir::spirv::Decoration::Offset)),
            Builder.getI32IntegerAttr(
                static_cast<int32_t>(Struct.getMemberOffset(Index)))}));
-    if (Tuples.empty())
+    // (Roadmap H114) A plain (non-`Block`) multi-member struct used
+    // directly as a tessellation-control/tessellation-evaluation
+    // `patch`/per-vertex stage-IO variable's type (e.g. `patch out S {
+    // int x; vec4 y; } s;`) carries *no* decoration at all on any member
+    // -- neither `Offset` (that's only ever emitted for a `Block`-
+    // decorated interface block, `Struct.hasOffset()`) nor `Location`
+    // (SPIR-V leaves every member's own location to be derived
+    // sequentially from the whole variable's single `Location`, exactly
+    // like `CanonicalizeStage.cpp`'s own `TakeBlockPath` fallback already
+    // computes for a `Block`'s own undecorated members). Skipping every
+    // such entry (the pre-existing `Tuples.empty()` behavior) left
+    // `Members` empty for the whole struct, so no
+    // `feme.spirv.MemberDecorations` metadata was ever attached and
+    // `CanonicalizeStage.cpp`'s `addElements` fell through to the plain
+    // (single-`SignatureElement`) path -- silently merging every member
+    // into one `(Row=0, Component=0)` shadow slot regardless of type,
+    // tripping `PromoteMem2Reg`'s `isAllocaPromotable` assertion on a
+    // struct whose members' types differ (e.g. `int`/`vec4`) -- found via
+    // `dEQP-VK.tessellation.user_defined_io.per_patch.
+    // vertex_io_array_size_implicit.isolines`. A genuinely single-member
+    // struct is deliberately left alone here (matches
+    // `CanonicalizeStage.cpp`'s own single-member exclusion, roadmap
+    // H101b): there is nothing to decompose when there's only one
+    // member, and always emitting an entry for it would wrongly divert a
+    // real array-of-block-instances shape onto the per-member path
+    // instead of staying on the array-peeling one below it.
+    if (Tuples.empty() && NumMembers <= 1)
       continue;
     Members.push_back(Builder.getArrayAttr(
         {Builder.getI32IntegerAttr(static_cast<int32_t>(Index)),

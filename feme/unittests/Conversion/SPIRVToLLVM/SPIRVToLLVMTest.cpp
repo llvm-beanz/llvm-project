@@ -281,6 +281,41 @@ TEST(SPIRVToLLVMTest,
       << Result;
 }
 
+// (Roadmap H114) A genuinely multi-member struct used directly as a
+// `patch`/per-vertex stage-IO variable's own type -- e.g. a tessellation
+// entry's `patch out S { int x; vec4 y; } s;` -- can carry *neither* an
+// explicit member `Offset` (that's only ever emitted for a `Block`-
+// decorated interface block, unlike this plain, non-`Block` struct) *nor*
+// any per-member `Location` (SPIR-V leaves every member's own location to
+// be derived sequentially from the whole variable's single `Location`
+// instead): every member decoration this test's struct type could
+// contribute is empty. Before this fix, `buildMemberDecorationsAttr`
+// treated that exactly like `UnrecognizedMemberDecorationIsFilteredOut`
+// above's genuinely single-member case, returning a null attribute, so no
+// `feme.spirv.member.decorations` metadata was ever attached and
+// `CanonicalizeStage.cpp`'s `addElements` fell through to its plain,
+// single-`SignatureElement` path -- silently merging this struct's two
+// differently-typed members (`i32`/`vec4`) into one shadow-alloca slot,
+// tripping `PromoteMem2Reg`'s `isAllocaPromotable` assertion downstream --
+// found via `dEQP-VK.tessellation.user_defined_io.per_patch.
+// vertex_io_array_size_implicit.isolines`. A genuinely multi-member
+// struct's own member count alone (regardless of whether any member has a
+// decoration of its own to report) is now enough to synthesize a
+// (possibly decoration-less) entry per member, so the block-decomposition
+// path downstream can still tell this struct's two members apart.
+TEST(SPIRVToLLVMTest,
+     PlainMultiMemberInterfaceBlockWithNoMemberDecorationsStillDecomposes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : "
+      "!spirv.ptr<!spirv.struct<(i32, vector<4xf32>)>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(
+      Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
+      std::string::npos)
+      << Result;
+}
+
 // (Roadmap H101p) A multi-member interface block whose members are
 // *declared* out of ascending-`Offset` order (GLSL's own
 // `all_unordered_and_instance_array` fuzz-test family deliberately emits
