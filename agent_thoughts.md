@@ -84794,3 +84794,143 @@ every future triage session's own bucketing suspect.
 
 All scratch files from this session (`/tmp/h124f*.qpa`, `/tmp/h124f*.diff`,
 `/tmp/feme-vk-full.xml`) have been cleaned up.
+
+# Session: H135 packed-struct trailing/interior-gap layout bug (2 follow-up fixes needed)
+
+**Done. `dEQP-VK.ssbo.*` full sweep: 12,162/12,225 passed, 0 failed (was
+partially broken this session by my own first-attempt fix, now fully
+resolved).** `check-feme`: 3050/3053 passed, 0 failed. 4 commits made.
+
+## What happened, in order
+
+1. **Started investigating reported `check-hlsl-feme-vk` flakiness.**
+   Turned out to be a false alarm — one earlier run was just missing
+   `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`. Confirmed stable (identical
+   failure list) across repeated full-suite re-runs with both set.
+
+2. **That flakiness re-run surfaced a real bug instead**, in
+   `Feature/StructuredBuffer/layout.test`: `layOutStructIfOffsetsMatch`
+   built its output struct with `isPacked=false`. A non-packed LLVM
+   struct silently rounds its own size up to its largest member's ABI
+   alignment (implicit trailing padding) — fine for one struct value,
+   but `!llvm.array<N x StructTy>` has no separate stride field, so
+   this silently corrupted every array of such a struct. This is any
+   `RWStructuredBuffer<B>` SSBO/UBO where `B`'s tight size undershoots
+   its own alignment.
+
+3. **First fix attempt** (isPacked=true + explicit gap materialization)
+   broke 3 existing `check-hlsl-feme-vk` tests
+   (`CBuffer/vectors.test`, `ConstantBufferT/{indexed-ref,vectors}.test`).
+   Root cause: the gap-insertion condition only fired when
+   `NaturalCursor < DeclaredOffset` — but a *natural* alignment-driven
+   gap (`NaturalCursor == DeclaredOffset`) used to be supplied for free
+   by the old implicit padding, and needed materializing too now that
+   packing removed that free lunch. Fixed by keying materialization on
+   `Cursor < DeclaredOffset` instead, while still gating "is this pad
+   *allowed* without `AllowInteriorPad`" on `NaturalCursor` unchanged.
+
+4. **That correction broke a 4th test** the same way, differently: a
+   genuine `spirv.CompositeConstruct` legalization failure in
+   `spirv-to-llvm-composite-construct.mlir`. Its `convertStruct` pattern
+   assumed declared-member-count == physical-field-count, true before
+   this fix (gaps were rare) but false now that natural gaps are
+   materialized too. Fixed by mapping through the existing
+   `getStructMemberPhysicalIndex` helper instead of assuming 1:1.
+
+5. **`check-feme` (3049/3052) and `check-hlsl-feme-vk` (54/664 failed,
+   net -2 from baseline) both went clean.** Ran the full
+   `dEQP-VK.ssbo.*` sweep as a broader sanity check (this struct-layout
+   code path is exercised heavily by SSBO/UBO arrays) and found a
+   **third** regression: 36 cases in
+   `dEQP-VK.ssbo.layout.multi_nested_struct.*`/
+   `unsized_nested_struct_array.*` newly failed. Zero cases were fixed
+   by comparison — a pure regression, not noise.
+
+6. **Root-caused via hand-written MLIR repros** (not the real CTS
+   shader — that hit an unrelated, pre-existing SPIR-V importer bug,
+   `spirv.IAdd` signedness mismatch, blocking direct reproduction).
+   Comparing pre-fix vs. post-fix LLVM IR for the same nested-struct
+   repro showed post-fix took a completely different, wrong path: a
+   "tight-vector array" substitution (pre-existing H101j machinery)
+   fired where it never used to. Traced this to
+   `mlir::DataLayout::getTypeABIAlignment` returning `1` for *any*
+   packed LLVM struct (LLVM's own correct rule) — so once every
+   offset-decorated struct is unconditionally packed, a *nested*
+   struct member's own true natural alignment (e.g. 16, from its own
+   vector members) collapses to 1 from its *outer* struct's point of
+   view. That makes a genuinely natural gap look like a false
+   "interior" gap requiring `AllowInteriorPad` (never set on the
+   struct's first, ordinary conversion attempt), forcing it through
+   several failing retry tiers and landing on the wrong
+   tight-vector-substitution tier.
+
+7. **Fixed with `getNaturalAlignmentIgnoringPacking`**: a small
+   recursive helper that computes a struct/array's natural alignment
+   from its own members, ignoring whatever `isPacked` its
+   already-built LLVM type carries. Swapped in for the one
+   gap-detection alignment computation in
+   `layOutStructIfOffsetsMatch`. Re-ran the repro: matches pre-fix
+   structure exactly (no more spurious tight-vector substitution), just
+   with the gap now correctly explicit instead of implicit.
+
+8. **Full re-verification, all green**: `check-feme` 3050/3053 (0
+   failed, +1 test from the new lit test), `dEQP-VK.ssbo.*` full sweep
+   12,162/12,225 (0 failed — both regressed groups individually
+   re-confirmed at 100%), `check-hlsl-feme-vk` 11 failed (down from
+   baseline; `layout.test` and `particle-life.test` both newly pass,
+   zero other differences).
+
+## A loose end I did NOT chase down
+
+`check-hlsl-feme-vk`'s remaining 11 failures
+(`HLSLLib/{degrees,log,log10,log2,radians,rsqrt,sinh,sqrt}.32.test`,
+`InlineRT/{aabb-procedural,geometry-transform,tlas-array}.test`) are
+**stable and reproducible with or without this session's fix**
+(confirmed via `git stash`) — categories (transcendental-function
+precision, ray tracing) entirely unrelated to struct layout. Left
+untouched. Worth a fresh triage next session since they don't match
+any of the failure lists saved by earlier sessions (`/tmp/prefix_
+baseline.txt` etc.) — possibly the offload-test-suite checkout grew
+new tests since those baselines were captured, or an unrelated
+environment/driver drift. Not urgent, but flag it if it recurs.
+
+## Why this took 3 fix iterations (the actual lesson)
+
+"Always materialize every gap, since we're packed now" sounds like a
+strictly more-correct, monotonic change. It isn't, when older code
+elsewhere (a) assumed a fixed member-count/field-count correspondence
+that gap-rarity used to guarantee by accident, and (b) queries a
+built LLVM type's own reported alignment to make a *different*
+struct's layout decision, not realizing packing had silently zeroed
+that value out. Two genuinely different consumers broke for two
+genuinely different reasons. Moral: a "make X always explicit instead
+of implicit" fix needs a project-wide grep for every place that reads
+the *implicit* property being killed (here: struct field count, and
+struct ABI alignment), not just the one call site whose bug prompted
+the change.
+
+## Next steps for whoever picks this up
+
+1. **Triage `check-hlsl-feme-vk`'s 11 stable failures** (~1-2 hours):
+   `HLSLLib/*.32.test` transcendental-function precision (8 cases,
+   likely all one root cause — pick one, reduce it) and
+   `InlineRT/*.test` ray tracing (3 cases, likely one shared root
+   cause too). Neither was investigated this session — new territory.
+2. **H124e** (~several sessions, carried over untouched for a while
+   now): `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps, ~11 of the original 102
+   `check-hlsl-feme-vk` failures across 5+ distinct root causes — needs
+   per-case triage first, don't assume one fix covers all.
+3. **H124d** (large, deprioritized, unchanged for many sessions): new
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` —
+   skip unless someone specifically wants the upstream-MLIR piece.
+4. Lower priority, deferred 14+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+Scratch files from this session (`/tmp/repro*.mlir`, `/tmp/h135_test*.mlir`,
+`/tmp/ssbo_*.qpa`, `/tmp/*_failures.txt`, `/tmp/mns.qpa`, `/tmp/unsa.qpa`)
+have been left in `/tmp` (outside the repo, not committed) in case the
+InlineRT/HLSLLib triage above wants to reuse the same qpa-parsing
+technique; safe to delete otherwise.
