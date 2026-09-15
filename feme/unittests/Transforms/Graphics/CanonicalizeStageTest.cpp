@@ -2295,6 +2295,90 @@ TEST(
             SignatureSystemValue::TessFactorEdge);
 }
 
+/// (Roadmap H121) `classifyTessControlOutputStoreFrequency`'s own
+/// per-store scan must recognize a store into a user-defined,
+/// `patch`-qualified interface-block member (e.g. GLSL's own `patch out
+/// TheBlock { ... } tcBlock;`, decorated as a genuine multi-member
+/// `feme.spirv.MemberDecorations` block same as `RecognizesInterfaceBlock
+/// PerMemberByteOffsetAccess` above, but with every member's own
+/// decoration list carrying `Patch` too) as patch-frequency, not
+/// unconditionally vertex-frequency. Before this row's own fix, *any*
+/// store into *any* interface-block member (`GV->getMetadata("feme.spirv.
+/// MemberDecorations")` non-null) was hard-coded `false` regardless of
+/// its own `Patch` decoration -- correct for a builtin, always-per-vertex
+/// block like `gl_PerVertex` (which never carries `Patch`), but wrong for
+/// a genuine user-defined `patch out` block, whose every member is always
+/// `Patch`-decorated (GLSL only lets `patch` qualify a whole block, never
+/// one of its members). With only `gl_TessLevelOuter`'s own bare-global
+/// write also patch-frequency, `classifyTessControlOutputs` used to see
+/// this as a "genuine mix" (`SawPatchOutput && SawNonPatchOutput`, when
+/// it is really patch-output-only) and `pruneStageIOStoresByFrequency`
+/// then wrongly erased the whole block's own store from the
+/// `.patchconstant` clone -- producing a `PatchConstant`-direction
+/// `EntrySignature` missing the block's own elements entirely (root cause
+/// of the real `dEQP-VK.tessellation.user_defined_io.per_patch_block.*`
+/// CTS group's own `vkQueueSubmit`-time `VK_ERROR_INITIALIZATION_FAILED`,
+/// `"patch-constant output -> domain stage patch input: element 0 has no
+/// matching producer element"`). Now that the block-member case checks
+/// its own `Patch` decoration same as a bare global does,
+/// `classifyTessControlOutputs` correctly sees this as patch-output-only
+/// (roadmap H4f's "shape (2)"), and the block's own store survives,
+/// undropped, in the `.patchconstant` clone as a real `PatchOutput`
+/// signature element.
+TEST(CanonicalizeStageTest,
+    NoBarrierPatchBlockMemberStoreIsClassifiedAsPatchFrequency) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @tess_outer = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    @tcBlock = external addrspace(8) global { float, float }, !spirv.Decorations !1, !feme.spirv.MemberDecorations !2
+    define void @main() #0 {
+      %tp = getelementptr inbounds [4 x float], ptr addrspace(8) @tess_outer, i32 0, i32 0
+      store float 4.000000e+00, ptr addrspace(8) %tp
+      store float 1.000000e+00, ptr addrspace(8) @tcBlock
+      %bp = getelementptr inbounds nuw i8, ptr addrspace(8) @tcBlock, i64 4
+      store float 2.000000e+00, ptr addrspace(8) %bp
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!3}
+    !1 = !{!4}
+    !2 = !{!5, !6}
+    !3 = !{i32 11, i32 11}
+    !4 = !{i32 30, i32 0}
+    !5 = !{i32 0, !7}
+    !6 = !{i32 1, !8}
+    !7 = !{!9}
+    !8 = !{!9}
+    !9 = !{i32 15}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  // Purely patch-constant (H4f's "shape (2)"): the whole body moves to a
+  // new `.patchconstant` clone, and `main` itself is left an empty,
+  // signature-less control-point phase.
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+  EXPECT_FALSE(dxil::getEntrySignature(*ControlPoint).has_value());
+
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 3u);
+  // `tcBlock`'s own two members both survive, undropped, as ordinary
+  // `PatchOutput` elements -- before this row's own fix, they were wrongly
+  // classified as vertex-frequency and pruned away entirely.
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].Location, 0u);
+  EXPECT_EQ(PCSig->Elements[1].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[1].Location, 1u);
+  // `gl_TessLevelOuter`'s own bare-global write.
+  EXPECT_EQ(PCSig->Elements[2].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[2].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
+}
+
 /// (Roadmap H4a) The real shape a GLSL tessellation-control shader's
 /// SPIR-V compiles to: one entry point writing its per-vertex outputs,
 /// then an `OpControlBarrier`, then the `Patch`-decorated tessellation-
