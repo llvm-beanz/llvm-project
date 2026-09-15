@@ -84399,3 +84399,99 @@ Scratch files cleaned up this session: `/tmp/ubo_array_repro.mlir`,
 `/home/dev/dev/VK-GL-CTS/run/` from this session's own investigation
 (kept `ubo_full_h128_regcheck.qpa`, the final regression-check run, for
 reference).
+
+# Session: H129 investigation → H131 struct interior-offset-gap fix
+
+**Start here:** H129's next-session priority is now the matrix
+`AccessChain` legalization gap (236 cases) -- see item 1 below.
+
+## What shipped this session
+
+1. **H131 (new, closed): struct interior-offset-gap layout bug.**
+   Investigating H129 (filed as "matrix AccessChain legalization gap,
+   418 cases") via a concrete repro
+   (`dEQP-VK.ubo.random.all_out_of_order_offsets.38`) showed the *real*
+   failure for that case wasn't matrix-specific at all: the whole
+   containing struct failed type conversion before any `AccessChain`
+   legalization was even reached. Root cause:
+   `layOutStructIfOffsetsMatch` (`SPIRVToLLVMPatterns.cpp`) only ever
+   padded a gap *before* the first physically-ordered member, never an
+   *interior* gap between two already-adjacent members. Fixed by
+   generalizing it with an `AllowInteriorPad` retry tier (tried last,
+   after every existing tier fails) and a physical-index remap
+   (`getStructMemberPhysicalIndex`) threaded into both access-chain
+   rewriters that needed it. Two related bugs also fixed along the way:
+   a missing guard letting `OffsetStructMemberReorderAccessChainPattern`
+   build illegal GEPs on Block/Uniform handles, and a missing remap in
+   `rewriteBlockAccess` for the same struct shape.
+2. Hit and fixed a self-introduced regression mid-session: my first
+   interior-gap check compared the declared offset against the *raw*
+   cursor, not the *naturally-aligned* one, which broke 2 existing lit
+   tests. Fixed by aligning first, then checking for a remaining gap.
+3. New tests: 1 lit test file (2 `RUN` cases: plain struct, Block/
+   Uniform-handle struct) and 1 gtest unit test.
+4. `check-feme`: 3043/3046 passed, 0 failed, no regressions.
+5. `dEQP-VK.ubo.*` full re-run: **5286 passed / 401 failed** (was
+   5069/618) -- **217 fewer failures**, this project's second-largest
+   one-commit reduction after H128.
+6. Re-triaged the fresh 401-case failure set
+   (`FEME_VULKAN_LOG_CREATION_ERRORS=1`): 236 cases are H129's own
+   matrix-AccessChain-illegal bucket (now the single largest remaining
+   bucket -- re-measured down from 418, likely because some of those
+   were actually this session's own bug, now fixed), 76 dominance
+   errors (unchanged), ~44 "cannot normalize" (unchanged, thinly spread
+   across shapes), 16 struct-index-out-of-bounds (possibly folds into
+   H129), rest one-offs.
+7. Updated `Roadmap.md` (H131 struck through, H129/H130 re-scoped with
+   fresh numbers and H129 promoted to P1), `VulkanCTSReport.md` (new
+   section), and `FeMeVulkanDesign.md` (new H131 paragraph continuing
+   the existing H6q/H101n/H101m/H101p/H101s/H101t struct-layout
+   narrative).
+8. 3 commits: (a) core fix + tests, (b) docs, (c) this file.
+
+## Known limitation NOT fixed this session
+
+A multi-level nested reordered struct (a member that is itself a
+reordered struct, indexed via further chained GEP indices after the
+initial member selector) is not remapped through those further indices.
+Pre-existing (not introduced by this fix), previously masked entirely
+by the outer struct's own conversion failure. Not yet pinned to any of
+the 401 counted failures -- documented as a limitation, not filed as a
+new roadmap row, since there's no concrete failing case pointing at it
+yet.
+
+## Next steps, ranked
+
+1. **H129** (~2-4 hours, re-scoped, now highest priority): 236 cases,
+   `"failed to legalize operation 'spirv.AccessChain'"` on a
+   fully-representable-layout (`ColMajor`, natural `MatrixStride`)
+   matrix member of a Block/Uniform struct, attempting a dynamic
+   row/column select. Start by reducing one of these 236 cases the
+   same way this session reduced `.38` (`deqp-vk
+   --deqp-log-decompiled-spirv=enable`, re-import via
+   `feme-translate --import-spirv` / `feme-opt
+   --feme-convert-spirv-to-llvm`) to see the exact `spirv.AccessChain`
+   shape hitting "explicitly marked illegal", and check whether an
+   existing whole-matrix-access pattern (H124b/H124i) is close enough
+   to extend, or a new pattern is needed.
+2. **H130** (~2-4 hours, needs fresh triage): the remaining ~165
+   non-H129 cases in the 401-failure set -- 76 dominance errors, ~44
+   "cannot normalize" (spread thin, no single common shape found yet),
+   16 struct-index-out-of-bounds (check first whether this folds into
+   H129 once that's fixed), rest one-offs.
+3. **H124f** (~2-4+ hours, still not started across many sessions):
+   `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
+   on vector operands have no legalization pattern at all (confirmed
+   in a prior session, grepped both this tree and upstream MLIR).
+4. **H124d** (large, deprioritized): needs new upstream MLIR SPIR-V
+   dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` -- skip unless someone
+   wants the upstream-MLIR piece specifically.
+5. Lower priority, deferred 10+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption -- `valgrind`'s own trace already points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+Scratch files cleaned up this session: `/tmp/oo38.*`, `/tmp/t1.mlir`,
+`/tmp/t2.mlir`, `/tmp/repro_ccstruct.mlir`, `/tmp/repro_ccstruct2.mlir`,
+`/tmp/before.out`, `/tmp/ubo_h129_full.qpa`, `/tmp/ubo_h129_fails.txt`,
+`/tmp/ubo_h129_fails_verbose.log`.
