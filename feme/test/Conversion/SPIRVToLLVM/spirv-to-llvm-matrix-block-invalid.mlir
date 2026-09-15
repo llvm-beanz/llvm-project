@@ -22,3 +22,30 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %v : vector<4xf32>
   }
 }
+
+// -----
+
+// (Roadmap H132) A column-select access into a `RowMajor` matrix reached
+// through a dxc wrapper's own array (`RWStructuredBuffer<matCxR>`) still
+// declines: MatrixColumnLoadPattern/StorePattern's own getMatrixColumnAccess
+// helper only recognizes the direct (non-wrapper) shape (see its own
+// comment), so rewriteBlockAccess's RowMajor-column-select branch falls
+// through to this decline for a wrapper-shape RowMajor matrix rather than
+// deferring to a pattern that would never actually match it -- correctly
+// failing loudly instead of the silent miscompile this exact shape hit
+// before isMatrixLayoutRepresentable (see spirv-to-llvm-matrix-block-
+// wrapper-partial.mlir's own `ColMajor` case for the shape this fix does
+// support) was factored out to stop misreading the wrapper's own array
+// member as "not a matrix, therefore representable".
+
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @Buf bind(0, 5) : !spirv.ptr<!spirv.struct<type.RWStructuredBuffer.mat4v4float, (!spirv.rtarray<!spirv.matrix<4 x vector<4xf32>>, stride=64> [0, RowMajor, MatrixStride=16]), Block>, StorageBuffer>
+  spirv.func @read_column(%idx : si32, %col : si32) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @Buf : !spirv.ptr<!spirv.struct<type.RWStructuredBuffer.mat4v4float, (!spirv.rtarray<!spirv.matrix<4 x vector<4xf32>>, stride=64> [0, RowMajor, MatrixStride=16]), Block>, StorageBuffer>
+    %c0 = spirv.Constant 0 : si32
+    // expected-error@+1 {{failed to legalize operation 'spirv.AccessChain' that was explicitly marked illegal}}
+    %ac = spirv.AccessChain %0[%c0, %idx, %col] : !spirv.ptr<!spirv.struct<type.RWStructuredBuffer.mat4v4float, (!spirv.rtarray<!spirv.matrix<4 x vector<4xf32>>, stride=64> [0, RowMajor, MatrixStride=16]), Block>, StorageBuffer>, si32, si32, si32 -> !spirv.ptr<vector<4xf32>, StorageBuffer>
+    %v = spirv.Load "StorageBuffer" %ac : vector<4xf32>
+    spirv.ReturnValue %v : vector<4xf32>
+  }
+}
