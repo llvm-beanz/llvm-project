@@ -9124,6 +9124,119 @@ public:
   }
 };
 
+/// Converts `spirv.IsNan` (roadmap H124f): neither this op nor
+/// `spirv.IsInf` below has an upstream MLIR SPIRVToLLVM conversion
+/// pattern at all (only the reverse direction exists upstream --
+/// `MathToSPIRV.cpp` builds `spirv.IsNan`/`IsInf` *from* `math.isnan`/
+/// `math.isinf`, not the other way around). Lowered via the same
+/// `llvm.fcmp uno` (unordered) predicate `FComparePattern<spirv::
+/// UnorderedOp, ...>` already uses for the two-operand `spirv.Unordered`:
+/// comparing any value against itself is unordered exactly when that
+/// value is NaN (IEEE-754's own definition of "unordered"), needing no
+/// separate NaN-specific predicate or intrinsic.
+class IsNanPattern : public mlir::SPIRVToLLVMConversion<mlir::spirv::IsNanOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::IsNanOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::IsNanOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Value X = Adaptor.getOperand();
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FCmpOp>(
+        Op, DstType, mlir::LLVM::FCmpPredicate::uno, X, X);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.IsInf` (roadmap H124f): see `IsNanPattern` above for why
+/// this has no upstream pattern to reuse either. Lowered as
+/// `llvm.intr.fabs(x) == +Inf` (`llvm.fcmp oeq`): folding the sign away
+/// first with `llvm.intr.fabs` avoids needing two compares (one per
+/// infinity sign) combined with an `or`.
+class IsInfPattern : public mlir::SPIRVToLLVMConversion<mlir::spirv::IsInfOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::IsInfOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::IsInfOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getOperand();
+    mlir::Value AbsX =
+        mlir::LLVM::FAbsOp::create(Rewriter, Loc, X.getType(), X);
+    mlir::Value Inf = createSameShapeFPConstant(
+        Rewriter, Loc, X.getType(), std::numeric_limits<double>::infinity());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FCmpOp>(
+        Op, DstType, mlir::LLVM::FCmpPredicate::oeq, AbsX, Inf);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Length` (roadmap H124f) into the GLSL.std.450 spec's
+/// own definition, `sqrt(dot(x, x))`, reusing `createScalarOrVectorDotProduct`
+/// above (the same helper `spirv.GL.FaceForward`/`spirv.GL.Refract` use).
+/// This op has no upstream MLIR conversion pattern at all.
+class GLLengthPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLLengthOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLLengthOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLLengthOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getOperand();
+    mlir::Value Dot = createScalarOrVectorDotProduct(Rewriter, Loc, X, X);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SqrtOp>(Op, DstType, Dot);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Normalize` (roadmap H124f) into the GLSL.std.450
+/// spec's own definition, `x / Length(x)`, reusing the same `sqrt(dot(x,
+/// x))` computation `GLLengthPattern` above uses and
+/// `broadcastScalarToShapeOf` (needed since `Length`'s own result is
+/// always a scalar, but `Normalize`'s result keeps `x`'s own scalar-or-
+/// vector shape) to divide every lane by it. This op has no upstream MLIR
+/// conversion pattern at all either.
+class GLNormalizePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLNormalizeOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLNormalizeOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLNormalizeOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getOperand();
+    mlir::Value Dot = createScalarOrVectorDotProduct(Rewriter, Loc, X, X);
+    mlir::Value Len = mlir::LLVM::SqrtOp::create(Rewriter, Loc, Dot);
+    mlir::Value LenLike = broadcastScalarToShapeOf(Rewriter, Loc, Len, DstType);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FDivOp>(Op, DstType, X, LenLike);
+    return mlir::success();
+  }
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -10245,6 +10358,15 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // "failed to legalize operation ... that was explicitly marked illegal".
   Patterns.add<GLAtan2Pattern, GLStepPattern, GLSmoothStepPattern,
                GLFaceForwardPattern, GLRefractPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  // Roadmap H124f: `spirv.IsNan`/`spirv.IsInf`/`spirv.GL.Normalize`/
+  // `spirv.GL.Length` had no conversion pattern at all before this fix
+  // (neither here nor in upstream's own
+  // `populateSPIRVToLLVMConversionPatterns`, confirmed by grepping both),
+  // failing every one of these HLSL-derived shapes' pipeline creation
+  // with "failed to legalize operation ... that was explicitly marked
+  // illegal".
+  Patterns.add<IsNanPattern, IsInfPattern, GLLengthPattern, GLNormalizePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
