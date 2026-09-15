@@ -84093,3 +84093,106 @@ group doesn't exist.
 
 Cleanup done: removed `/tmp/h127_repro/` (this session's own scratch
 files from the H124d investigation).
+
+# Session: H124b fixed (CBuffer/Matrix whole-matrix AccessChain), H124i newly filed
+
+**Next action for whoever picks this up:** start H124i (below) -- run
+`Feature/CBuffer/Matrix/SingleSubscript/mat_cbuffer.f32.test` under
+`feme-opt` and trace `rewriteBlockAccess`'s ordinary GEP-building path
+(the bottom of the function, past this session's own new rejection
+check) for a natural (already-representable) matrix member; the bug is
+somewhere in how a dynamic row/element index turns into GEP indices.
+
+## What shipped this session
+
+1. **H124b whole-matrix scope: CLOSED.** `CBuffer`/`Matrix`
+   `spirv.AccessChain` used to fail to legalize *at all* for any matrix
+   member decorated `RowMajor` or with a `MatrixStride` not matching its
+   natural size -- regardless of which specific index pattern the
+   access used (whole matrix, one row/column, or one scalar element).
+   Root cause: the struct's own LLVM type conversion failed outright,
+   which the block's `spirv.VulkanBuffer` handle depends on, so the
+   whole base pointer never legalized.
+2. Added a physical-layout substitution (`getPhysicalMatrixMemberType`)
+   so the struct *does* convert now, and generalized the existing
+   (narrow, wrapper-array-only) `RowMajor` load/store patterns into
+   `getMatrixWholeAccess` -- covering any majorness/stride, both the
+   direct-`cbuffer`-member and wrapper-array shapes.
+3. **Two real bugs found and fixed along the way** (not part of the
+   original plan -- found by testing):
+   - Upstream MLIR's own generic `AccessChainPattern` started getting
+     tried as a fallback once the struct converted, building an
+     ill-typed GEP from a `VulkanBuffer` handle it never expected. Fixed
+     by having `rewriteBlockAccess` consume the declined (still
+     out-of-scope) partial-access shape directly with a real error
+     message, instead of a soft `notifyMatchFailure`.
+   - **A real assertion crash**, caught only because this session ran
+     the actual VK-GL-CTS `dEQP-VK.ubo.*` sweep (as the process
+     guidelines require) instead of stopping at `check-hlsl-feme-vk`:
+     `dEQP-VK.ubo.instance_array_basic_type.std140.column_major_mat2.
+     both_comp_access` crashed `deqp-vk` outright on an
+     `llvm::cast` assertion, because the new check assumed
+     `Op.getBasePtr()`'s pointee is always a plain struct -- true for
+     `BlockAccessChainPattern`, false for `ArrayedBlockAccessChainPattern`
+     (an instance array of blocks), whose base pointer is an *array* of
+     structs. This would have shipped a crash if the CTS sweep had been
+     skipped. Fixed by threading the correct struct type through as an
+     explicit parameter instead of re-deriving it.
+4. **Newly filed H124i**: the remaining 10 `Feature/CBuffer/Matrix/
+   {MatrixElement,MatrixSubscript,SingleSubscript}/*` failures are a
+   different, still-open bug -- they compile and run fine (no
+   legalization error) but produce *wrong data*, even for an
+   already-representable (natural stride) matrix member. Confirmed this
+   is unrelated to H124b's own struct-conversion cascade. Not
+   root-caused yet.
+
+## Verification
+
+- `ninja check-feme`: 3040/3043 passed, 3 unsupported, 0 failed.
+- `check-hlsl-feme-vk`: 302 passed (was 297), 75 failed (was 80) --
+  `Feature/CBuffer/Matrix/LayoutKeyword/*` (5 cases) now pass outright.
+- `dEQP-VK.ubo.*` (13,240 cases): completes cleanly end-to-end (0
+  crashes, was crashing partway through before the array-of-blocks
+  fix), 3772 passed / 1915 failed / 7553 not supported -- the failures
+  are a mix of pre-existing, unrelated std140/std430 layout gaps, not
+  triaged individually this session (out of scope).
+- Two new lit tests added; one pre-existing test's `expected-error`
+  text updated to match the new (still-correct) diagnostic.
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: H124b's whole-matrix sub-scope struck through;
+  new `H124i` row filed for the row/element-access gap (kept one
+  lowercase letter deep, per this session's own nesting rule).
+- `feme/docs/VulkanCTSReport.md`: new session section with full
+  root-cause writeup, both bugs found, and verification numbers.
+- No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+  needed -- this is a codegen/legalization fix, not a feature gate.
+
+## Suggested next steps, ranked
+
+1. **H124i** (~1-2 hours, real investigation, newly filed this
+   session): dynamic row/scalar-element access into an
+   *already-representable* matrix member produces wrong data (reads
+   back the same row/element regardless of the dynamic index used).
+   Start with `mat_cbuffer.f32.test`'s `M_f2x4[0]`/`M_f2x4[1]` -- both
+   return row 0's data. Trace `rewriteBlockAccess`'s final GEP-building
+   branch (bottom of the function) for this exact shape.
+2. **H124f** (~1 hour, still not started across several sessions):
+   scalar-only `GLSL.std.450`/`IsNan`/`IsInf` vector legalization gaps,
+   8 cases.
+3. **H124d** (large, needs new upstream MLIR SPIR-V dialect ops for
+   `OpDPdx`/`OpDPdy`/`OpFwidth`): deprioritized, likely its own
+   multi-session effort.
+4. Lower priority, deferred 7+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption -- `valgrind`'s own trace already points
+   at `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+5. **Reminder for whoever runs the next VK-GL-CTS sweep**: this
+   session's own `dEQP-VK.ubo.*` full run (13,240 cases, 1915 failed)
+   was not individually triaged -- some of those failures may be
+   quick, high-leverage wins once someone has time to look.
+
+Cleanup done: removed `/tmp/h124b_replacement.cpp` (this session's own
+scratch splice file) and `/tmp/ubo.qpa` (this session's own CTS-sweep
+log).
