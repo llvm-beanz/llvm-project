@@ -1015,6 +1015,58 @@ public:
   }
 };
 
+/// Converts `spirv.GroupNonUniformQuadSwap` (roadmap H124l, `WaveOps/
+/// QuadReadAcross{X,Y,Diagonal}.32.test`/`.convergence.test`) into the same
+/// "compute a target id, then `llvm.spv.wave.readlane` shuffle to it" shape
+/// `ShuffleXorConversionPattern` above already established for plain
+/// `GroupNonUniformShuffleXor`. A quad swap is exactly a fixed-mask XOR of
+/// the invocation's own subgroup-local id: the spec defines quad index as
+/// `LocalId % 4`, and each of the three `Direction` values only ever swaps
+/// invocations whose quad indices differ in one or both of the low two bits
+/// (`Horizontal` = 0/1 and 2/3 swap, i.e. bit 0 flips; `Vertical` = 0/2 and
+/// 1/3 swap, i.e. bit 1 flips; `Diagonal` = 0/3 and 1/2 swap, i.e. both bits
+/// flip) -- so `Direction`'s own enum value (`Horizontal`=0, `Vertical`=1,
+/// `Diagonal`=2) plus one is exactly the XOR mask needed (1, 2, 3
+/// respectively). Because that mask never sets any bit above bit 1, XOR'ing
+/// it into the *full* subgroup-local id (rather than just the low two bits)
+/// is already safe: it can only move an invocation to another lane within
+/// the same quad, never across quad boundaries, matching `ShuffleXor`'s own
+/// full-id XOR approach exactly, just with a direction-derived compile-time
+/// constant instead of a runtime mask operand. Only `Subgroup` execution
+/// scope is implemented, mirroring every other pattern in this file.
+class QuadSwapConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GroupNonUniformQuadSwapOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GroupNonUniformQuadSwapOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GroupNonUniformQuadSwapOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getExecutionScope() != mlir::spirv::Scope::Subgroup)
+      return Rewriter.notifyMatchFailure(
+          Op, "workgroup-scope quad-swap is not supported");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type I32 = Rewriter.getI32Type();
+    mlir::Value LocalId = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.subgroup.local.invocation.id", I32, {});
+    int32_t Mask = static_cast<int32_t>(Op.getDirection()) + 1;
+    mlir::Value MaskConst =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, Mask);
+    mlir::Value TargetId =
+        mlir::LLVM::XOrOp::create(Rewriter, Loc, LocalId, MaskConst);
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.readlane",
+                                ResultType, {Adaptor.getValue(), TargetId}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.GroupNonUniformBroadcast` (roadmap L89e) directly to
 /// `llvm.spv.wave.readlane`, exactly as `ShuffleConversionPattern` above
 /// does: "Result is the Value of the invocation identified by the id Id"
@@ -10556,6 +10608,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       VoteConversionPattern<mlir::spirv::GroupNonUniformAnyOp>,
       BroadcastConversionPattern, BroadcastFirstConversionPattern,
       ShuffleConversionPattern, ShuffleXorConversionPattern,
+      QuadSwapConversionPattern,
       BallotConversionPattern, InverseBallotConversionPattern,
       BallotBitExtractConversionPattern, BallotBitCountConversionPattern,
       BallotFindLSBConversionPattern, BallotFindMSBConversionPattern,
