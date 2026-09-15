@@ -30,7 +30,9 @@
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <optional>
@@ -40,6 +42,39 @@ using namespace llvm;
 using namespace feme::cpu;
 
 namespace {
+
+/// Whether the environment requests a diagnostic explaining exactly which
+/// use/instruction caused `collectHandles` to decline a function -- unset,
+/// empty, or "0" all mean disabled, matching
+/// `feme::vulkan::creationErrorLoggingEnabled`'s own convention
+/// (Diagnostics.cpp). Added for roadmap H130: before this, the only signal
+/// a declined function produced was `UnsupportedOps.cpp`'s own generic
+/// "cannot normalize" diagnostic on whichever handle happened to be first
+/// in the module -- not necessarily the one whose actual use triggered the
+/// decline (see that diagnostic's own comment) -- leaving no way to find
+/// the real offending instruction without manually re-deriving every one
+/// of this file's own accept/reject branches against the failing IR by
+/// hand. Checked on every call rather than cached, matching
+/// `creationErrorLoggingEnabled`'s own reasoning.
+static bool resourceNormalizationLoggingEnabled() {
+  const char *Env = std::getenv("FEME_CPU_LOG_RESOURCE_NORMALIZATION");
+  return Env && *Env && StringRef(Env) != "0";
+}
+
+/// Prints \p Reason and \p V (if non-null) to `errs()` when
+/// `resourceNormalizationLoggingEnabled()`, identifying which specific use
+/// or instruction caused `collectHandles` (transitively,
+/// `hasOnlySupportedUses`/`hasOnlySupportedPointerUses`) to decline the
+/// enclosing function.
+static void logNormalizationRejection(StringRef Reason,
+                                      const Value *V = nullptr) {
+  if (!resourceNormalizationLoggingEnabled())
+    return;
+  errs() << "FEME_CPU_LOG_RESOURCE_NORMALIZATION: " << Reason;
+  if (V)
+    errs() << ": " << *V;
+  errs() << "\n";
+}
 
 /// Which kind of resource a bound handle wraps.
 ///
@@ -2120,25 +2155,35 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
   for (const User *U : Ptr.users()) {
     if (const auto *LI = dyn_cast<LoadInst>(U)) {
       if (IsTexel ? !isSupportedTexelElementType(LI->getType())
-                  : !isSupportedRawElementType(LI->getType()))
+                  : !isSupportedRawElementType(LI->getType())) {
+        logNormalizationRejection("load of unsupported element type", LI);
         return false;
+      }
       continue;
     }
     if (Writable)
       if (const auto *SI = dyn_cast<StoreInst>(U)) {
-        if (SI->getPointerOperand() != &Ptr)
+        if (SI->getPointerOperand() != &Ptr) {
+          logNormalizationRejection("store where pointer is not the operand",
+                                    SI);
           return false;
+        }
         if (IsTexel
                 ? !isSupportedTexelElementType(SI->getValueOperand()->getType())
-                : !isSupportedRawElementType(SI->getValueOperand()->getType()))
+                : !isSupportedRawElementType(SI->getValueOperand()->getType())) {
+          logNormalizationRejection("store of unsupported element type", SI);
           return false;
+        }
         continue;
       }
     if (Writable) {
       if (const auto *RMW = dyn_cast<AtomicRMWInst>(U)) {
         if (RMW->getPointerOperand() != &Ptr ||
-            !RMW->getValOperand()->getType()->isIntegerTy(32))
+            !RMW->getValOperand()->getType()->isIntegerTy(32)) {
+          logNormalizationRejection(
+              "atomicrmw not a scalar-i32 direct-pointer use", RMW);
           return false;
+        }
         switch (RMW->getOperation()) {
         case AtomicRMWInst::Add:
         case AtomicRMWInst::Sub:
@@ -2152,13 +2197,17 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
         case AtomicRMWInst::Xchg:
           continue;
         default:
+          logNormalizationRejection("atomicrmw unsupported operation", RMW);
           return false;
         }
       }
       if (const auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(U)) {
         if (CmpXchg->getPointerOperand() != &Ptr ||
-            !CmpXchg->getCompareOperand()->getType()->isIntegerTy(32))
+            !CmpXchg->getCompareOperand()->getType()->isIntegerTy(32)) {
+          logNormalizationRejection(
+              "cmpxchg not a scalar-i32 direct-pointer use", CmpXchg);
           return false;
+        }
         // `AtomicCompareExchangePattern` (`SPIRVToLLVMPatterns.cpp`)
         // always follows an `llvm.cmpxchg` with exactly one
         // `extractvalue ..., 0` picking out the old value (SPIR-V's own
@@ -2167,21 +2216,34 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
         // `hasOnlySupportedStorageImageUses`'s own identical check).
         for (const User *CU : CmpXchg->users()) {
           const auto *EV = dyn_cast<ExtractValueInst>(CU);
-          if (!EV || EV->getIndices() != ArrayRef<unsigned>{0})
+          if (!EV || EV->getIndices() != ArrayRef<unsigned>{0}) {
+            logNormalizationRejection(
+                "cmpxchg result used other than by extractvalue 0", CU);
             return false;
+          }
         }
         continue;
       }
     }
     if (AllowGEPs)
       if (const auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
-        if (GEP->getPointerOperand() != &Ptr ||
-            !hasResolvableGEPByteOffset(*GEP, DL) ||
-            !hasOnlySupportedPointerUses(*GEP, Writable, IsTexel, AllowGEPs,
-                                         DL))
+        if (GEP->getPointerOperand() != &Ptr) {
+          logNormalizationRejection(
+              "getelementptr where pointer is not the base operand", GEP);
           return false;
+        }
+        if (!hasResolvableGEPByteOffset(*GEP, DL)) {
+          logNormalizationRejection(
+              "getelementptr with an unresolvable byte offset", GEP);
+          return false;
+        }
+        if (!hasOnlySupportedPointerUses(*GEP, Writable, IsTexel, AllowGEPs,
+                                         DL))
+          return false; // Already logged by the recursive call.
         continue;
       }
+    logNormalizationRejection("pointer used by an unrecognized instruction",
+                             U);
     return false;
   }
   return true;
@@ -2253,13 +2315,21 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);
-    if (!GetPtr || getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer)
+    if (!GetPtr ||
+        getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer) {
+      logNormalizationRejection("handle used other than by getpointer",
+                                &Handle);
       return false;
+    }
     if ((Kind == HandleKind::Uniform || Kind == HandleKind::StorageStruct) &&
-        !isa<ConstantInt>(GetPtr->getArgOperand(1)))
+        !isa<ConstantInt>(GetPtr->getArgOperand(1))) {
+      logNormalizationRejection(
+          "getpointer index is not a compile-time constant", GetPtr);
       return false;
-    if (!hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs, DL))
-      return false;
+    }
+    if (!hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs,
+                                     DL))
+      return false; // Already logged by hasOnlySupportedPointerUses.
   }
   return true;
 }
@@ -2420,47 +2490,63 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
       Classification = classifyStorageImage2DHandle(*CI);
     if (!Classification)
       Classification = classifySamplerHandle(*CI);
-    if (!Classification)
-      return std::nullopt; // Not one of the kinds this pass normalizes.
+    if (!Classification) {
+      logNormalizationRejection(
+          "handle result type is not one of the kinds this pass normalizes",
+          CI);
+      return std::nullopt;
+    }
 
     switch (Classification->Kind) {
     case HandleKind::SampledImage2D:
       if (!hasOnlySupportedImageUses(
               *CI, Classification->TexelElementType->isIntegerTy(32),
-              Classification->Shape))
+              Classification->Shape)) {
+        logNormalizationRejection("unsupported sampled-image-2D use", CI);
         return std::nullopt;
+      }
       break;
     case HandleKind::StorageImage2D:
       if (!hasOnlySupportedStorageImageUses(
               *CI, Classification->TexelElementType->isIntegerTy(32),
-              Classification->Shape))
+              Classification->Shape)) {
+        logNormalizationRejection("unsupported storage-image-2D use", CI);
         return std::nullopt;
+      }
       break;
     case HandleKind::Sampler:
-      if (!hasOnlySupportedSamplerUses(*CI))
+      if (!hasOnlySupportedSamplerUses(*CI)) {
+        logNormalizationRejection("unsupported sampler use", CI);
         return std::nullopt;
+      }
       break;
     default:
       if (!hasOnlySupportedUses(*CI, Classification->Kind))
-        return std::nullopt;
+        return std::nullopt; // Already logged by hasOnlySupportedUses.
       break;
     }
 
     auto *SetC = dyn_cast<ConstantInt>(CI->getArgOperand(0));
     auto *BindingC = dyn_cast<ConstantInt>(CI->getArgOperand(1));
-    if (!SetC || !BindingC)
+    if (!SetC || !BindingC) {
+      logNormalizationRejection("non-constant (set, binding) operand", CI);
       return std::nullopt; // Non-constant binding: not produced today.
+    }
 
     // The array range size, unlike the array index below, must be a
     // compile-time constant: it is part of the (set, binding) identity
     // itself, exactly like DXIL's `handlefrombinding` range-size operand
     // (see `feme::cpu::BoundResourceNormalizationPass::collectBoundHandles`).
     auto *RangeSizeC = dyn_cast<ConstantInt>(CI->getArgOperand(2));
-    if (!RangeSizeC)
+    if (!RangeSizeC) {
+      logNormalizationRejection("non-constant range-size operand", CI);
       return std::nullopt; // Non-constant range size: not produced today.
+    }
     uint32_t RangeSize = static_cast<uint32_t>(RangeSizeC->getZExtValue());
-    if (RangeSize == 0)
+    if (RangeSize == 0) {
+      logNormalizationRejection("unbounded (range size 0) range", CI);
       return std::nullopt; // Unbounded range: see the header comment.
+    }
 
     RangeKey Key{static_cast<uint32_t>(SetC->getZExtValue()),
                  static_cast<uint32_t>(BindingC->getZExtValue()),
