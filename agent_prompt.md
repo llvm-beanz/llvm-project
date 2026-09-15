@@ -49,26 +49,22 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H130** (~1-2 hours to start, real triage): 69 cases,
-   `"...is a register-bound resource handle the FeMe CPU target cannot
-   normalize..."` — single common diagnostic, no nested-struct-remap
-   refactor needed. Start with `FEME_VULKAN_LOG_CREATION_ERRORS=1` on
-   a handful of cases to find the first common struct/resource shape.
-2. **The 4-case nested-struct-reorder gap** (~2-3 hours, real design
-   work, described in H131's own closing note and H130's updated row):
-   extend `OffsetStructMemberReorderAccessChainPattern`'s (and
-   `rewriteBlockAccess`'s) declared-to-physical remap to recurse into a
-   second level of struct nesting, not just the first selector past
-   `Selector`.
-3. **H132** (~1 hour, narrow, no known CTS case): fix
-   `isMatrixMemberLayoutRepresentable` to unwrap a wrapper member's
-   array-of-Matrix element type before checking decorations. Low
-   urgency since nothing currently exercises it, but cheap and
-   defensive.
-4. **H124f** (~2-4+ hours, still not started across many sessions):
+1. **H134** (~1-2 hours, partially triaged this session): array-of-
+   RowMajor-matrices struct member causes `convertUniformBlockType`'s
+   content conversion to silently return null, falling back to a raw
+   pointer handle. Start by instrumenting/stepping through
+   `convertOffsetStructTypeIgnoringDecorations` on a reduced repro of
+   `dEQP-VK.ubo.random.all_shared_buffer.26` (binding 5) — see H134's
+   roadmap row for the exact member shape and methodology.
+2. **H133** (~2-3 hours, real design work, described in H131's own
+   closing note): extend `OffsetStructMemberReorderAccessChainPattern`'s
+   (and `rewriteBlockAccess`'s) declared-to-physical remap to recurse
+   into a second level of struct nesting, not just the first selector
+   past `Selector`. 4 known cases.
+3. **H124f** (~2-4+ hours, still not started across many sessions):
    `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
    on vector operands have no legalization pattern at all.
-5. Lower priority, deferred 11+ sessions now: `transform_feedback.
+4. Lower priority, deferred 12+ sessions now: `transform_feedback.
    fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
    corruption — `valgrind`'s own trace points at
    `buildStageStorage`/`executeDraws` allocating a too-small buffer.
