@@ -43401,3 +43401,43 @@ advertise `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT` at all, so no real
 Pass/Fail delta from this session; `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` unaffected (same gate, not touched by this
 fix).
+
+## Session: H124h fixed (divergent-branch `WaveActive*` reduce masking)
+
+**What changed.** `feme::cpu::LinearizePass::applyStageMasks` now narrows a
+raised `llvm.{dx,spv}.wave.reduce.*`/`.product`/`.prefix.*` intrinsic's
+value operand to `select(Masks.Live, Operand, Identity)` wherever the
+enclosing region's own `Masks.Live` is not the compile-time-constant
+all-active mask, mirroring the masking `WaveActiveBallot`'s own predicate
+operand already got. See `feme/docs/Roadmap.md`'s H124h row for the full
+root-cause writeup.
+
+**Verification.**
+- `ninja check-feme`: **3026/3029 passed** (3 unsupported), 0 failed --
+  unchanged before/after this session's fix.
+- `check-hlsl-feme-vk` re-run (664 total): **286 passed, 91 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- up from 278 passed/99 failed. Every
+  one of `WaveActiveSum.int32/.fp32/.convergence.test`, `WaveActiveMax.
+  fp32/int32.test`, `WaveActiveMin.fp32/int32.test`, `WaveActiveBitXor.
+  int.test` (H124h's own originally-cited cases) now passes, with no
+  regressions elsewhere.
+- **Not fully closed**: `WaveActiveBitXor.convergence.test`'s own
+  divergent-*loop* sub-case (`ExpectedOut5`, each lane iterating a
+  different trip count) still fails -- confirmed a genuinely different
+  code path (`LoopLinearizer`'s own per-iteration masking, not
+  `DiamondFlattener`'s, which this fix's `Masks.Live` threading covers).
+  Filed as roadmap H125.
+
+**Feature/extension bits.** No change: this is a CPU-backend divergence-
+masking bug fix, not a feature/extension gate. `Vulkan14FeatureInventory.
+md`/`VulkanExtensionInventory.md` reviewed, confirmed unaffected.
+
+**VK-GL-CTS sweep.** Re-ran `dEQP-VK.subgroups.arithmetic.*` (12087 cases,
+the closest real `deqp-vk` group to this fix's own code path): still 100%
+`NotSupported` ("Device does not support subgroup arithmetic operations",
+`vktSubgroupsArithmeticTests.cpp:285`) -- unchanged from the prior
+session's own finding (this device does not advertise
+`VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, so no real `deqp-vk` case reaches
+this fix's code path). No `VulkanCTSReport.md` Pass/Fail delta from this
+session; `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+unaffected.
