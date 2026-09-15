@@ -83214,3 +83214,129 @@ Cleaned up all `/tmp/h119_*` scratch files.
    get it building and to see what it reports.
 4. Low priority: no scratch files to clean up right now (this session's
    own were removed).
+
+# H117/H118 session: block-array vs. per-invocation-array disambiguation -- both closed, one XFB regression caught and fixed before it shipped
+
+**Next action if you're picking this up:** read `feme/docs/VulkanCTSReport.md`'s
+new "H117/H118" entry (bottom of file) for full detail. Then start on H116
+(untriaged, "Invalid input value in tessellation evaluation shader", ~45-60
+min) or the long-deferred `offload-test-suite` `check-hlsl-feme-vk` target.
+
+## What happened, in order
+
+1. Picked up mid-debugging (session started with three uncommitted fixes
+   already staged from a prior compaction). Cleaned up ~15+ leftover
+   `TEMP-H117`/`FEME_TEMP_DEBUG_H118`-gated debug prints first.
+2. **H117 root cause**: `isDynamicIndexedArrayGlobal` claimed *any*
+   `ArrayType`-shaped stage-IO global as a dynamic per-vertex array, with
+   no `patch`-qualifier awareness. `per_patch_block_array`'s shape
+   (glslang's "array of block instances" for a `patch`-qualified block)
+   is a *static* array, not dynamic. Fixed via a `feme.spirv.
+   MemberDecorations`-based `Patch` check.
+3. **H118, attempt 1**: fixing H117 made `per_vertex_block` reach
+   `TakeBlockPath` for the first time, tripping a `PromoteMemToReg`
+   assertion. Added `errs()` debug instrumentation, found a single
+   `alloca` getting stores of three *different* types -- a `ShadowValueMap`
+   key collision from an earlier attempt that had disabled per-member
+   decomposition to dodge a different bug.
+4. **H118, attempt 2 (correct)**: always run `TakeBlockPath`'s per-member
+   decomposition; gate only whether the outer array folds into
+   `RowCount` (`BlockArrayCount`) on stage/address-space/Patch. First cut
+   of this heuristic was too broad.
+5. **Ran `check-feme` for the first time this session** (should have been
+   sooner) -- caught 13 real regressions immediately, in previously-
+   passing XFB "array of block instances" unit tests. Iteratively
+   narrowed the heuristic (13 fail -> 6 -> 2 -> 1 -> 0) using the fast
+   unit-test loop, not CTS.
+6. Got to a fully clean state: 92/92 unit tests, check-feme 3019/3022,
+   H117 9/9, H118 9/9. **Then ran a broader sweep before declaring done**
+   (this is the part worth doing every session, not just when asked):
+   `dEQP-VK.transform_feedback.fuzz.*` crashed with a heap corruption on
+   `random_geometry.all_instance_array.12`.
+7. This is where the session got interesting. `git stash`'d the fix,
+   rebuilt baseline, confirmed baseline does NOT crash on `.12` (just
+   fails a mismatch) -- so this looked like a real regression from my
+   own change. `valgrind` pinpointed the actual invalid write: an
+   out-of-bounds write in `buildStageStorage`'s allocation.
+8. Traced it to conflating two *separate*, pre-existing mechanisms for
+   "array of block instances": my new `BlockArrayCount`-folds-into-
+   `RowCount` path (only ever needed for H117's `Patch` case) was also
+   firing for a genuine non-`Patch`, *multi-member* XFB block array,
+   which has its own older, single-member-only `XfbBufferArrayStride`
+   mechanism that doesn't agree with `RowCount`-folding at all. Narrowed
+   the fold condition to `Patch`-only, on both the construction side
+   (`addElements`) and the matching access side
+   (`resolveOffsetWithinElement`, threaded through a new
+   `AllowBlockArrayInstanceFold` parameter).
+9. Rebuilt, reran `.12` -- crash gone, matches baseline's own
+   mismatch-only failure. But a full-suite run then crashed on a
+   *different* case, `.16`. Ran `.16` in isolation: no crash at all, just
+   `NotSupported` -- the earlier abort was `.12`'s own corruption
+   surfacing later on an unrelated allocation, not a second bug.
+10. Re-ran `valgrind` on `.12` alone with the fix in place: **still 91
+    errors**, identical count to the unmodified baseline under the same
+    tool. This confirmed the corruption is pre-existing, not introduced
+    by this session -- my fix genuinely removed the *new* double-fold
+    corruption my own change had briefly introduced, without touching
+    (or needing to touch) this older, separate bug.
+
+## Verified (all real, not assumed)
+
+- New unit test `CanonicalizeStageTest.
+  ThreadsInvocationIndexIntoMultiMemberHullPerInvocationOutputBlock`:
+  Hull, non-`Patch`, genuine multi-member per-invocation output block --
+  asserts 2 real `SignatureElement`s (not collapsed), `RowCount == 1`
+  each (not folded), invocation index threads through as `Vertex`.
+- `FeMeTransformsGraphicsTests`: 93/93 pass (92 pre-existing + 1 new),
+  including every pre-existing XFB "array of block instances" test.
+- `ninja check-feme`: 3019/3022 -> **3020/3023 passed, 3 unsupported, 0
+  failed**.
+- Real CTS: `per_patch_block_array.*` (H117) 9/9, `per_vertex_block.*`
+  (H118) 9/9, full `user_defined_io.*` 54/54 -- closes the last two open
+  rows of that whole 54-case matrix except H116.
+- `transform_feedback.fuzz.random_geometry.all_instance_array.12`: no
+  longer crashes; `.16` (misread as a second crash mid-sweep) confirmed
+  to be an unrelated `NotSupported` case when run in isolation; `.12`'s
+  own remaining mismatch/corruption confirmed pre-existing via a
+  `git stash`-isolated `valgrind` baseline comparison (same 91 errors on
+  unmodified HEAD).
+
+## Committed (5 commits, small and separate)
+
+1. `0d83643` -- H117 fix (`isDynamicIndexedArrayGlobal`)
+2. `7ba514f` -- H118 fix (`TakeBlockPath`/`BlockArrayCount`/
+   `resolveOffsetWithinElement`/`RowTerms`, all interdependent, kept
+   together deliberately -- unit tests only pass with the full set)
+3. `8210db5` -- the new regression unit test
+4. `bd0cc43` -- Roadmap.md (H117/H118 struck through) +
+   VulkanCTSReport.md (new session entry)
+5. (this file's own commit, next)
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, no
+row references H117/H118 -- confirmed no update needed (internal
+correctness fix, no new feature/extension surface).
+
+Cleaned up all `/tmp/h117_*`/`/tmp/h118_*` scratch files and a stray
+`tese.spv` that had landed in the repo root from an earlier CTS run.
+
+## Suggested next steps, ranked
+
+1. **H116** (~45-60 min, still untriaged across ~5 sessions now):
+   `per_patch_array.*` (9 cases), "Invalid input value in tessellation
+   evaluation shader" -- a different error class from H117/H118, never
+   looked at in isolation. Only 9 cases and the last open row in the
+   `user_defined_io` matrix, likely the fastest remaining close.
+2. **`offload-test-suite`'s `check-hlsl-feme-vk` target** (well over a
+   dozen sessions deferring this now): still never built/run in any
+   session on record. Give it a dedicated session with no competing
+   priority.
+3. **The `transform_feedback.fuzz.random_geometry.all_instance_array.12`
+   pre-existing heap corruption** (~1-2 hours, real bug, now clearly
+   isolated): confirmed pre-existing and unrelated to H117/H118, not
+   fixed this session (out of scope for the H117/H118 task). The
+   `valgrind` trace already points at `buildStageStorage`/`executeDraws`
+   allocating a too-small buffer for this fuzzed multi-member XFB
+   block-array shape -- worth its own roadmap row and a dedicated
+   session, since `valgrind`'s own stack trace is a strong head start.
+4. Low priority: no scratch files left to clean up (this session's own
+   were removed, including a stray `tese.spv`).
