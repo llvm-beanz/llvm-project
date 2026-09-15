@@ -2227,9 +2227,29 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   // direct-field *storage* block) already supports; only
   // `HandleKind::Uniform`/`UniformArray`'s always-read-only-ness (`Writable`
   // above) differs, not this shape itself.
+  //
+  // (Roadmap H128) `HandleKind::UniformArray` needs the identical further
+  // `getelementptr` navigation whenever its own declared array is nested
+  // (roadmap F12a's `convertUniformArrayContent` only ever widens the
+  // *outer* dimension into `getpointer`'s own index -- see
+  // `feme::spirv::convertUniformBlockType`'s comment -- any further
+  // dimension, e.g. a real `uniform Block { uint data[3][4]; }`, converts
+  // to an ordinary nested `!llvm.array` the substituted content type
+  // still carries, reachable only through a ordinary GEP after
+  // `getpointer`, the same shape `Uniform`'s own struct-member navigation
+  // already needs). Omitted here previously -- confirmed via a real
+  // `dEQP-VK.ubo.2_level_array`/`3_level_array` reduction that every case
+  // in both groups (a nested-array uniform-block member, 1376 cases
+  // total) failed with `UnsupportedOps.cpp`'s generic "register-bound
+  // resource handle...cannot normalize" diagnostic purely because this
+  // condition rejected the resulting GEP outright, even though
+  // `lowerRawPointerUses` below already lowers such a GEP chain
+  // generically (keyed on the GEP's own resolved offset, not `Kind`) with
+  // no `UniformArray`-specific code needed at all.
   bool AllowGEPs = Kind == HandleKind::Storage ||
                    Kind == HandleKind::StorageStruct ||
-                   Kind == HandleKind::Uniform;
+                   Kind == HandleKind::Uniform ||
+                   Kind == HandleKind::UniformArray;
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);

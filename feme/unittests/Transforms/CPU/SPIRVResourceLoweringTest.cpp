@@ -758,6 +758,47 @@ TEST(SPIRVResourceLoweringTest, LeavesUniformBufferArrayStoreUnchanged) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+// (Roadmap H128) A *nested* uniform buffer array -- e.g. a real
+// `uniform Block { uint data[3][4]; }` (`dEQP-VK.ubo.2_level_array.*`) --
+// converts its outer dimension into `getpointer`'s own index exactly like
+// `LowersUniformBufferArrayDynamicIndexToStrideMultipliedLoad` above, but
+// then needs a further `getelementptr` navigating into the inner
+// dimension, mirroring the real IR `feme-translate --import-spirv` +
+// `feme-opt --feme-convert-spirv-to-llvm` produces for such a shape. This
+// GEP was previously rejected outright (see `hasOnlySupportedUses`'s
+// `AllowGEPs` comment), causing every `2_level_array`/`3_level_array` case
+// to fail with `UnsupportedOps.cpp`'s generic "cannot normalize"
+// diagnostic even though this lowering path handles the GEP generically.
+TEST(SPIRVResourceLoweringTest,
+     LowersNestedUniformBufferArrayIndexToStrideMultipliedLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main(i32 %outer, i32 %inner) {
+      %h = call target("spirv.VulkanBuffer", [0 x [4 x i32]], 2, 0, 16)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 5, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x [4 x i32]], 2, 0, 16) %h, i32 %outer)
+      %elt = getelementptr inbounds [4 x i32], ptr %ptr, i32 0, i32 %inner
+      %v = load i32, ptr %elt
+      ret i32 %v
+    }
+    declare target("spirv.VulkanBuffer", [0 x [4 x i32]], 2, 0, 16)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x [4 x i32]], 2, 0, 16), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // The GEP navigating the inner dimension should have been consumed
+  // (lowered away), not left behind unresolved.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<GetElementPtrInst>(&I));
+}
+
 TEST(SPIRVResourceLoweringTest,
      LeavesConflictingUniformBufferArrayStrideAtSameIdentityUnchanged) {
   // Two handles at the same (set, binding) identity disagreeing about a
