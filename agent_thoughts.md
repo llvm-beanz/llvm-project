@@ -83984,3 +83984,112 @@ per-lane-varying result. Needs real design work, not a one-line fix.
    `executeDraws` allocating a too-small buffer.
 7. Cleanup: `/tmp/h126_repro/` (this session's own scratch files, not
    part of the repo).
+
+# Session: H124c fixed (fp16/int16 resource-load runtime intrinsics), H124d re-scoped
+
+**Start here:** H124c fixed and closed. `check-hlsl-feme-vk` 295 passed/82
+failed (was 291/86), no regressions. `check-feme` 3037/3040, 0 failed. 2
+code+doc commits made. H124d investigated, real scope now understood as
+an upstream-MLIR task (not fixed this session).
+
+## What was picked up and why
+
+Last session's next-steps list ranked H124d first, H124c fifth. Started
+with H124d (~1 hour estimate) since it looked like the fastest win.
+
+## H124d: deprioritized after finding the real scope
+
+Reproduced `fwidth()` -> SPIR-V opcode 209 = `OpFwidth`. Grepped
+`mlir/include/mlir/Dialect/SPIRV/IR/*.td`: **zero** `OpDPdx`/`OpDPdy`/
+`OpFwidth` op definitions exist anywhere upstream, despite the
+`SPIRV_C_DerivativeControl` capability enum already being defined. This
+is not a feme dispatch gap -- it needs brand-new upstream MLIR SPIR-V
+dialect op definitions (tablegen op + verifier + the serializer/
+deserializer support tablegen auto-generates from that), then a new
+feme legalization pattern, and possibly new CPU runtime support. Multi-
+hour, multi-file, touches a different repo's dialect definitions. Not a
+"~1 hour, single missing case" task as the roadmap assumed. Updated the
+roadmap row in place with this finding, moved to H124c instead.
+
+## H124c: the actual fix
+
+`ResourceCalls.cpp`'s name-mangling already handled any element type
+generically (including `f16`/`i16`) -- the SPIR-V-to-LLVM lowering pass
+could already *emit* the calls. Only `FeMeRuntimeCPU.c` was missing the
+actual C function bodies, so the JIT failed at symbol resolution:
+`"Symbols not found: [ feme.cpu.resource.load.raw.v4f16, ... ]"`.
+
+Added 16 new functions (scalar + v2/v3/v4, load + store, for both f16
+and i16), copy-pasting the existing f32/i32 pattern exactly -- including
+the already-established V3-width `__builtin_memcpy`-with-explicit-size
+workaround for Clang's store-widening bug.
+
+## A second bug found for free: the test harness itself
+
+Writing the 8 new `RuntimeCPUTest.cpp` round-trip tests, `V2F16`
+crashed with an LLVM assertion (`CastInst::Create`'s `castIsValid`
+failing) inside the test harness's own `addStoreWrapper` helper -- not
+in the runtime code being tested. Its ABI-coercion-adaptation logic
+only handled "pad an odd-width vector up to a wider one, then bitcast"
+(the shape `<3 x float>` -> `<4 x i32>` needs). `<2 x half>` (4 bytes)
+gets coerced by Clang straight down to a bare `i32` (same size, no
+padding) -- a different shape the old code never considered, so it
+padded anyway and then tried an invalid same-size-vs-wrong-size bitcast.
+Fixed by comparing `DataLayout` bit-widths first and picking the right
+adaptation. Good reminder that a "should be a trivial copy-paste" test
+addition can still surface a real, previously-untested gap in shared
+test infrastructure.
+
+## Verification (all done, nothing deferred)
+
+- `FeMeRuntimeCPUTests` full suite (261 tests): all pass.
+- `check-feme`: 3037/3040 passed, 3 unsupported, 0 failed.
+- `check-hlsl-feme-vk`: 295/664 passed (was 291), 82 failed (was 86).
+  Discovered/unsupported/XFAIL/XPASS counts all unchanged -- clean win,
+  no regressions.
+- VK-GL-CTS: regenerated the caselist (`dEQP-VK-cases.txt` was stale,
+  tessellation-group-only, from some earlier partial export -- same
+  gotcha a prior session already hit and fixed once; needed redoing
+  again this session, worth a permanent note below). Ran
+  `dEQP-VK.spirv_assembly.instruction.compute.16bit_storage.*` (535
+  cases): 100% `NotSupported`, `VK_KHR_16bit_storage` isn't advertised
+  by this ICD. Legitimate zero-payoff result, same shape as H124h/H125/
+  H126's own `deqp-vk` findings.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed,
+  no change (pure CPU-backend runtime-intrinsic addition).
+
+## Note for future sessions: the CTS caselist keeps going stale
+
+This is now the **second** time a session has found
+`/home/dev/dev/VK-GL-CTS/build/.../dEQP-VK-cases.txt` reduced to just
+the `tessellation` group instead of the real ~1GB full list. Whatever
+process leaves that partial file behind isn't part of this session's own
+history -- if a future session hits an empty/near-empty `grep` against
+that file for a group that should definitely exist, regenerate first
+(`deqp-vk --deqp-runmode=txt-caselist`, ~30-60s) before concluding a
+group doesn't exist.
+
+## Next steps, ranked
+
+1. **H127** (~1-2 hours, real design work, still not started): vector-
+   operand `WavePrefixSum`/`WavePrefixProduct` component-decomposition
+   gap. Read `widenWaveCall`'s vector-decomposition branch in
+   `SIMDize.cpp` (~line 1769); compare against `WaveReadLaneAt`'s own
+   divergent-result handling as a possibly-closer precedent than
+   `isVectorOperandReduceKind`'s uniform-only table.
+2. **H124b** (~1-2 hours, still not started across many sessions):
+   `CBuffer`/`Matrix` `spirv.AccessChain` legalization gap, ~10 cases.
+3. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
+   vector legalization gaps, 8 cases.
+4. **H124d** (now properly scoped, large): needs new upstream MLIR
+   SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` before any
+   feme-side fix is even possible -- likely its own multi-session
+   effort, not a quick win. Deprioritize unless someone wants to take on
+   the upstream-MLIR piece specifically.
+5. Lower priority, deferred 6+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption -- `valgrind`'s own trace already points
+   at `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+Cleanup done: removed `/tmp/h127_repro/` (this session's own scratch
+files from the H124d investigation).
