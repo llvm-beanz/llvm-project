@@ -496,6 +496,72 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
   }
 }
 
+/// (Roadmap H125) After if-converting a loop with a divergent exit, an
+/// ordinary loop-carried value (any \p Header `phi` besides the two mask
+/// phis \p LoopLinearizer::makeActivePNPair itself just created --
+/// \p MaskPhis -- which `addLatchIncoming` already merges correctly) that
+/// is still read *after* the loop needs its own value frozen for a lane
+/// that was not really part of this "wide" iteration, exactly the way
+/// `applyStageMasks` already narrows a memory access or a wave reduce's
+/// operand above. Without this, a lane whose own real per-lane trip count
+/// has already been exhausted keeps having its carried value overwritten
+/// by the body's result on every subsequent wide iteration, since the
+/// if-converted body always executes unconditionally for the whole wave
+/// (see the file comment's "Loops with a divergent exit" discussion) --
+/// found reducing `WaveActiveBitXor.convergence.test`'s own
+/// divergent-trip-count loop down to this exact shape, but the gap is
+/// general: it affects any loop-carried value read after the loop exits,
+/// not just a wave reduce's result (confirmed with a second, wave-op-free
+/// repro).
+///
+/// Deliberately scoped to only a phi with a use \p InLoop reports as
+/// outside the loop: a value only ever consumed *inside* the loop body is
+/// already correctly narrowed at each such point of use by
+/// `applyStageMasks` itself (a masked load/store/resource call/wave
+/// reduce operand there already uses whatever the *current* mask is,
+/// which is exactly as correct as this phi's own "current" value would be
+/// -- freezing it too would be redundant), and, more importantly, can
+/// itself be one of this pass's own genuinely-uniform "whole loop" values
+/// (like a trip-count induction variable a separate, uniform latch check
+/// consumes -- see `simdize-loop.ll`'s own `%i`/`loop.cond`, never read
+/// after the loop): unconditionally freezing that kind of phi would
+/// (correctly, but pointlessly, since nothing outside the loop ever
+/// observes it) turn it genuinely divergent, corrupting `UniformityInfo`'s
+/// otherwise-still-accurate uniform classification of whatever *it* feeds
+/// downstream -- exactly the shape that broke `simdize-loop.ll` (and its
+/// two siblings) during this milestone's own development, once this
+/// function stopped scoping itself this way.
+///
+/// \p BodyMask is the mask that was in effect while \p Latch's own
+/// predecessor chain (the loop body) computed each such phi's incoming
+/// value -- i.e., whether this specific wide iteration was a real one for
+/// a given lane.
+static void
+freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
+                        ArrayRef<PHINode *> MaskPhis,
+                        function_ref<bool(const BasicBlock *)> InLoop) {
+  if (isKnownConstantMask(BodyMask))
+    return; // All-active: the unmasked value is already correct.
+  IRBuilder<> B(Latch->getTerminator());
+  for (PHINode &PN : Header->phis()) {
+    if (llvm::is_contained(MaskPhis, &PN))
+      continue;
+    int Idx = PN.getBasicBlockIndex(Latch);
+    if (Idx == -1)
+      continue;
+    Value *NewValue = PN.getIncomingValue(Idx);
+    if (NewValue == &PN)
+      continue; // Already trivially frozen; nothing this iteration changed.
+    bool UsedOutsideLoop = any_of(PN.users(), [&](User *U) {
+      return !InLoop(cast<Instruction>(U)->getParent());
+    });
+    if (!UsedOutsideLoop)
+      continue; // Only ever read inside the loop: nothing to freeze.
+    PN.setIncomingValue(
+        Idx, B.CreateSelect(BodyMask, NewValue, &PN, PN.getName() + ".frozen"));
+  }
+}
+
 /// Whether \p F calls any of the mask-affecting `feme.stage.*`
 /// operations `applyStageMasks` lowers (`discard`/`demote`/`is_helper`/
 /// `output.store`/roadmap R34's `stream.emit`/`stream.cut`/roadmap
@@ -2040,6 +2106,10 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     CondBrInst::Create(Continue, HeaderExit->StayInLoop, ExitBlock,
                        HeaderExit->Br->getIterator());
     HeaderExit->Br->eraseFromParent();
+    freezeLoopCarriedValues(
+        Header, Latch, MasksNext.Live,
+        {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
+        [&](const BasicBlock *BB) { return CI.contains(C, BB); });
     addLatchIncoming(Masks, MasksNext);
     return true;
   }
@@ -2241,6 +2311,10 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     for (auto &[PN, V] : ExitBlockRelayValues)
       if (PN->getBasicBlockIndex(Latch) == -1)
         PN->addIncoming(V, Latch);
+    freezeLoopCarriedValues(
+        Header, Latch, MasksAfterCheck.Live,
+        {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
+        [&](const BasicBlock *BB) { return CI.contains(C, BB); });
     addLatchIncoming(Masks, MasksAfterCheck);
     return true;
   }
@@ -2290,6 +2364,10 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
   }
 
+  freezeLoopCarriedValues(
+      Header, Latch, MasksAtLatch.Live,
+      {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
+      [&](const BasicBlock *BB) { return CI.contains(C, BB); });
   addLatchIncoming(Masks, MasksAfterLatchCheck);
   return true;
 }
