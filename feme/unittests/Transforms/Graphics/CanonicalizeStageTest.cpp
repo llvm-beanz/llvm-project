@@ -4543,4 +4543,116 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(ElementIDs.size(), 3u);
 }
 
+/// (Roadmap H115) An *array* of a genuine multi-member nested struct
+/// (e.g. `S blockSa[2];`, `S = {int x; vec4 y;}`) as a stage-IO block
+/// member -- `dEQP-VK.tessellation.user_defined_io.per_patch_block`'s
+/// own real `S blockSa[2];` shape, confirmed via a standalone
+/// `feme-translate --spirv-to-llvmir` repro of that exact test's own
+/// tessellation-control shader. Before this milestone's fix,
+/// `isGenuineMultiMemberNestedStruct` only recognized a *lone* multi-
+/// member nested struct instance, never one wrapped in an outer array
+/// dimension: the array-of-struct member fell to `getStageIORowShape`
+/// instead, which has no representation for a multi-member struct's own
+/// leaves regardless of array wrapping, and silently collapsed the
+/// *whole* two-instance array -- both instances' own `x` and `y`
+/// members alike -- onto one shared, bogus `ElementID`, differing only
+/// by `Row` (which array instance), mixing every leaf's own distinct
+/// scalar type onto one shadow-alloca slot and tripping
+/// `PromoteMemToReg`'s own `isAllocaPromotable` assertion. Fixed by
+/// generalizing `isGenuineMultiMemberNestedStruct`,
+/// `getStageIOFlattenedRowCount`, `getStageIOLeafElementCount`,
+/// `addStageIOStructMembers` and `resolveOffsetWithinElement`'s own
+/// nested-field resolution (`resolveNestedStageIOField`) to recurse
+/// through any outer array dimension, folding each array instance's own
+/// index into the eventual leaf's own `Row` (scaled by that leaf's own
+/// per-instance `RowCount`) instead.
+TEST(CanonicalizeStageTest,
+    RewritesArrayOfGenuineMultiMemberNestedStructBlockMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global { [2 x { i32, i32 }], float }, !spirv.Decorations !2, !feme.spirv.MemberDecorations !9
+
+    define void @main() #0 {
+      store i32 1, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 0), align 4
+      store i32 2, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 4), align 4
+      store i32 3, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 8), align 4
+      store i32 4, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 12), align 4
+      store float 5.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 16), align 4
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{i32 36, i32 0}
+    !1 = !{i32 37, i32 20}
+    !2 = !{!0, !1}
+    !3 = !{i32 35, i32 0}
+    !4 = !{!3}
+    !5 = !{i32 0, !4}
+    !6 = !{i32 35, i32 16}
+    !7 = !{!6}
+    !8 = !{i32 1, !7}
+    !9 = !{!5, !8}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load/store survives against either the array-of-struct
+  // member's own two real leaf members (`x`/`y`) or the trailing plain
+  // `float` member.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Three elements: `blockSa`'s own `x` (RowCount 2, one row per array
+  // instance) and `y` (RowCount 2), plus the trailing scalar `float`
+  // (RowCount 1) -- not one bogus element for the whole array-of-struct
+  // member.
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+
+  // Collect (ElementID -> {Row: storedValue}) for every output store, so
+  // this test can confirm both that the two array instances of the same
+  // leaf member land on the *same* `ElementID` (differing only by `Row`,
+  // per this member's own `RowCount=2`), and that the two distinct leaf
+  // members (`x`/`y`) never collide onto that same shared `ElementID`
+  // the way the pre-fix bug's single, bogus element did.
+  DenseMap<uint32_t, DenseMap<uint32_t, uint64_t>> ValuesByElementIDAndRow;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    uint32_t ElementID =
+        getStageOpConstantOperand(*CI, /*Offset=*/0).value_or(~0u);
+    uint32_t Row = getStageOpConstantOperand(*CI, /*Offset=*/1).value_or(~0u);
+    uint64_t Value = 0;
+    if (auto *CInt = dyn_cast<ConstantInt>(CI->getArgOperand(3)))
+      Value = CInt->getZExtValue();
+    else if (auto *CFP = dyn_cast<ConstantFP>(CI->getArgOperand(3)))
+      Value = static_cast<uint64_t>(CFP->getValueAPF().convertToFloat());
+    ValuesByElementIDAndRow[ElementID][Row] = Value;
+  }
+  // Exactly 3 distinct `ElementID`s used, each with the right `Row` count
+  // and stored values -- confirms `x`'s own two array instances (values 1
+  // and 3) and `y`'s own two array instances (values 2 and 4) each landed
+  // on their own distinct, non-colliding `ElementID`, and the trailing
+  // scalar `float` (value 5) landed on a third.
+  ASSERT_EQ(ValuesByElementIDAndRow.size(), 3u);
+  SmallVector<SmallVector<uint64_t, 2>, 3> RowValuesByElement;
+  for (const auto &KV : ValuesByElementIDAndRow) {
+    SmallVector<uint64_t, 2> RowValues;
+    for (const auto &RowKV : KV.second)
+      RowValues.push_back(RowKV.second);
+    llvm::sort(RowValues);
+    RowValuesByElement.push_back(std::move(RowValues));
+  }
+  llvm::sort(RowValuesByElement);
+  ASSERT_EQ(RowValuesByElement.size(), 3u);
+  EXPECT_EQ(RowValuesByElement[0], (SmallVector<uint64_t, 2>{1, 3}));
+  EXPECT_EQ(RowValuesByElement[1], (SmallVector<uint64_t, 2>{2, 4}));
+  EXPECT_EQ(RowValuesByElement[2], (SmallVector<uint64_t, 2>{5}));
+}
+
 } // namespace

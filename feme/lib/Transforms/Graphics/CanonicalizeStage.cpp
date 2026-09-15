@@ -774,7 +774,21 @@ StageIORowShape getStageIORowShape(Type *ValueTy) {
 /// `peelSingleMemberStruct`) and a tight-vector marker struct (which
 /// `getStageIORowShape` already recognizes positively as a row's own
 /// component axis, not a genuine aggregate of independent members).
+/// (Roadmap H115) Recurses through any outer `ArrayType` wrapping (e.g.
+/// `S blockSa[2];`, an *array* of a genuine multi-member nested struct --
+/// as opposed to a lone instance) so this array-of-struct shape is
+/// recognized exactly like a lone instance is, everywhere this function
+/// already gates "does this member need per-leaf `SignatureElement`
+/// expansion instead of one flat, opaque row": `getStageIORowShape`
+/// cannot represent a multi-member struct's own leaves as one row
+/// regardless of how many array dimensions wrap it, and previously
+/// silently mis-collapsed it into one bogus row (mixing every leaf's own
+/// distinct scalar type and every array element's own store onto one
+/// shared `ElementID`) instead of ever reaching the per-leaf expansion
+/// path below.
 bool isGenuineMultiMemberNestedStruct(Type *Ty) {
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
+    return isGenuineMultiMemberNestedStruct(ArrTy->getElementType());
   auto *ST = dyn_cast<StructType>(Ty);
   return ST && ST->getNumElements() > 1 && !getTightVectorMarkerInnerType(ST);
 }
@@ -791,13 +805,21 @@ bool isGenuineMultiMemberNestedStruct(Type *Ty) {
 /// `Location`-computing) `addElements` pass can call it before any
 /// `SignatureElement` actually exists yet.
 uint32_t getStageIOFlattenedRowCount(Type *Ty) {
-  if (isGenuineMultiMemberNestedStruct(Ty)) {
-    uint32_t Total = 0;
-    for (Type *FieldTy : cast<StructType>(Ty)->elements())
-      Total += getStageIOFlattenedRowCount(FieldTy);
-    return Total;
-  }
-  return getStageIORowShape(Ty).RowCount;
+  if (!isGenuineMultiMemberNestedStruct(Ty))
+    return getStageIORowShape(Ty).RowCount;
+  // (Roadmap H115) An array of a genuine multi-member nested struct
+  // folds its own array dimension into the total the same way an
+  // ordinary scalar/vector member's own outer array dimension already
+  // does (see `getStageIORowShape`'s own array-peeling loop): each of
+  // the \p Ty array's own instances contributes its element type's own
+  // (recursively computed) flattened row count.
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
+    return static_cast<uint32_t>(ArrTy->getNumElements()) *
+           getStageIOFlattenedRowCount(ArrTy->getElementType());
+  uint32_t Total = 0;
+  for (Type *FieldTy : cast<StructType>(Ty)->elements())
+    Total += getStageIOFlattenedRowCount(FieldTy);
+  return Total;
 }
 
 /// (Roadmap H101t) The number of leaf `SignatureElement`s (and thus the
@@ -812,13 +834,19 @@ uint32_t getStageIOFlattenedRowCount(Type *Ty) {
 /// `ElementID` (unlike every other field, which still contributes
 /// exactly one).
 uint32_t getStageIOLeafElementCount(Type *Ty) {
-  if (isGenuineMultiMemberNestedStruct(Ty)) {
-    uint32_t Total = 0;
-    for (Type *FieldTy : cast<StructType>(Ty)->elements())
-      Total += getStageIOLeafElementCount(FieldTy);
-    return Total;
-  }
-  return 1;
+  if (!isGenuineMultiMemberNestedStruct(Ty))
+    return 1;
+  // (Roadmap H115) An array of a genuine multi-member nested struct
+  // contributes exactly as many leaf `SignatureElement`s as a lone
+  // instance would -- the array dimension is folded into each leaf's
+  // own `RowCount` (see `getStageIOFlattenedRowCount` above), not
+  // multiplied into the leaf *count*.
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
+    return getStageIOLeafElementCount(ArrTy->getElementType());
+  uint32_t Total = 0;
+  for (Type *FieldTy : cast<StructType>(Ty)->elements())
+    Total += getStageIOLeafElementCount(FieldTy);
+  return Total;
 }
 
 /// (Roadmap H101t) Decomposes a genuine multi-member nested-struct
@@ -838,19 +866,52 @@ uint32_t getStageIOLeafElementCount(Type *Ty) {
 /// recomputed locally) so a struct with more than one genuine
 /// multi-member nested-struct field in a row still assigns strictly
 /// increasing `Location`s across all of them.
+///
+/// (Roadmap H115) \p Ty may also be an *array* of a genuine multi-member
+/// nested struct (e.g. `S blockSa[2];`) rather than a lone instance: each
+/// leaf field emitted for one array instance is re-wrapped in the same
+/// outer array dimension before being handed to \p AddElement, so
+/// `addElement`'s own `getStageIORowShape` call folds this array
+/// dimension into that leaf's `RowCount` the same way it already folds
+/// an ordinary scalar/vector member's own outer array dimension --
+/// rather than the whole array-of-struct collapsing onto one bogus,
+/// opaque row (mixing every leaf's own distinct type and every array
+/// instance's own store onto a single shared `ElementID`).
+/// \p NextLocation is corrected for the array multiplier once the
+/// single-instance recursive pass completes, so a following sibling
+/// member still gets a `Location` past every row this array-of-struct
+/// member actually spans.
 void addStageIOStructMembers(
     function_ref<void(GlobalVariable *, unsigned,
                       const ParsedSPIRVDecorations &, Type *)>
         AddElement,
     GlobalVariable *GV, unsigned AddrSpace,
-    const ParsedSPIRVDecorations &BaseD, StructType *ST,
+    const ParsedSPIRVDecorations &BaseD, Type *Ty,
     const DataLayout &DL, uint32_t &NextLocation) {
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    uint32_t LocationBeforeInstance = NextLocation;
+    auto WrappedAddElement = [&](GlobalVariable *WrappedGV,
+                                 unsigned WrappedAddrSpace,
+                                 const ParsedSPIRVDecorations &WrappedD,
+                                 Type *FieldTy) {
+      AddElement(WrappedGV, WrappedAddrSpace, WrappedD,
+                ArrayType::get(FieldTy, ArrTy->getNumElements()));
+    };
+    addStageIOStructMembers(WrappedAddElement, GV, AddrSpace, BaseD,
+                            ArrTy->getElementType(), DL, NextLocation);
+    uint32_t PerInstanceLocationSpan = NextLocation - LocationBeforeInstance;
+    NextLocation = LocationBeforeInstance +
+                   PerInstanceLocationSpan *
+                       static_cast<uint32_t>(ArrTy->getNumElements());
+    return;
+  }
+  auto *ST = cast<StructType>(Ty);
   const StructLayout *SL = DL.getStructLayout(ST);
   for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
     Type *FieldTy = ST->getElementType(I);
     if (isGenuineMultiMemberNestedStruct(FieldTy)) {
-      addStageIOStructMembers(AddElement, GV, AddrSpace, BaseD,
-                              cast<StructType>(FieldTy), DL, NextLocation);
+      addStageIOStructMembers(AddElement, GV, AddrSpace, BaseD, FieldTy, DL,
+                              NextLocation);
       continue;
     }
     ParsedSPIRVDecorations FieldD = BaseD;
@@ -2575,6 +2636,91 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
   return {Row, Component};
 }
 
+/// (Roadmap H101t, extended by H115) The result of descending from a
+/// struct member's own declared type, through zero or more further
+/// levels of genuine multi-member nested-struct/array-of-struct nesting
+/// (see `isGenuineMultiMemberNestedStruct`), down to the genuine leaf
+/// field (a plain scalar/vector/matrix/single-member-wrapper, or a
+/// tight-vector marker) a byte offset actually lands in.
+struct NestedStageIOField {
+  /// This leaf's own starting offset into the enclosing block's own
+  /// `IDs`, relative to whatever base index the caller already
+  /// accounted for (e.g. `LLVMMember`'s own leading siblings).
+  uint32_t IDStart;
+  uint64_t Row;
+  uint64_t Component;
+  /// This leaf's own total `RowCount` accumulated so far (i.e. within
+  /// however many array-of-struct levels have already been folded in
+  /// below the current recursion level) -- needed by an *enclosing*
+  /// array-of-struct level to correctly scale its own instance index
+  /// when combining `Row` (see below), since each leaf field can have a
+  /// different per-instance `RowCount` of its own (e.g. `blockSa`'s own
+  /// `x`/`y` members have `RowCount=1` each per instance, but its `z`
+  /// member -- itself a two-element array -- has `RowCount=2`).
+  uint32_t RowCount;
+};
+
+/// (Roadmap H115) Generalizes the old (roadmap H101t) "genuine
+/// multi-member nested struct directly" recursion to also handle that
+/// same shape wrapped in one or more outer array dimensions (e.g. `S
+/// blockSa[2];`, an *array* of a genuine multi-member nested struct,
+/// rather than a lone instance) -- the shape `addStageIOStructMembers`
+/// above now also expands, folding each array level's own instance index
+/// into the eventual leaf's own `Row` rather than the whole array-of-
+/// struct collapsing onto one bogus, opaque row (mixing every leaf's own
+/// distinct type and every array instance's own store onto a single
+/// shared `ElementID`) the way it did before this milestone.
+///
+/// For an ordinary array-of-struct level, \p Residual is split into
+/// this level's own instance index (\p Residual / one instance's own
+/// `DataLayout` size) and the residual *within* that one instance, and
+/// the recursive result one level down is combined by folding the
+/// instance index into `Row` scaled by that same recursive call's own
+/// *leaf-specific* `RowCount` (`Instance * Inner.RowCount + Inner.Row`)
+/// -- exactly standard row-major multi-dimensional index flattening.
+/// (Using the whole struct's own combined flattened row count here
+/// instead of this one leaf's own -- e.g. `getStageIOFlattenedRowCount`
+/// applied to the whole `ElemTy` -- would double-count every other
+/// sibling leaf's own rows into this one's `Row` value; the leaf-
+/// specific `RowCount` returned by the recursive call itself is the only
+/// correct scale factor.)
+NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
+                                             Type *ValueTy,
+                                             const DataLayout &DL) {
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    if (isGenuineMultiMemberNestedStruct(ArrTy->getElementType())) {
+      Type *ElemTy = ArrTy->getElementType();
+      uint64_t InstanceSize = DL.getTypeAllocSize(ElemTy).getFixedValue();
+      uint64_t Instance = InstanceSize ? Residual / InstanceSize : 0;
+      uint64_t InnerResidual = Residual - Instance * InstanceSize;
+      NestedStageIOField Inner =
+          resolveNestedStageIOField(ElemTy, InnerResidual, ValueTy, DL);
+      return {Inner.IDStart, Instance * Inner.RowCount + Inner.Row,
+              Inner.Component,
+              static_cast<uint32_t>(ArrTy->getNumElements()) * Inner.RowCount};
+    }
+    // An ordinary (non-genuine-multi-member) array member -- not this
+    // shape; fall through to the plain-leaf path below, which already
+    // handles an ordinary array via `resolveRowComponent`'s own
+    // array-peeling loop.
+  } else if (auto *ST = dyn_cast<StructType>(Ty)) {
+    if (isGenuineMultiMemberNestedStruct(ST)) {
+      const StructLayout *SL = DL.getStructLayout(ST);
+      unsigned Member = SL->getElementContainingOffset(Residual);
+      uint32_t IDStart = 0;
+      for (unsigned I = 0; I != Member; ++I)
+        IDStart += getStageIOLeafElementCount(ST->getElementType(I));
+      uint64_t InnerResidual = Residual - SL->getElementOffset(Member);
+      NestedStageIOField Inner = resolveNestedStageIOField(
+          ST->getElementType(Member), InnerResidual, ValueTy, DL);
+      Inner.IDStart += IDStart;
+      return Inner;
+    }
+  }
+  auto [Row, Component] = resolveRowComponent(Ty, Residual, ValueTy, DL);
+  return {0, Row, Component, getStageIORowShape(Ty).RowCount};
+}
+
 /// Resolves \p Ptr -- a load/store's pointer operand -- against \p
 /// ElementIDs (one entry per stage-IO global, one `ElementID` per struct
 /// member for a builtin interface block, a single one for everything
@@ -2693,24 +2839,19 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
     IDStart += getStageIOLeafElementCount(ST->getElementType(I));
   Type *FieldTy = ST->getElementType(LLVMMember);
   uint64_t Residual = ByteOffset - SL->getElementOffset(LLVMMember);
-  // (Roadmap H101t) `FieldTy` may itself be a genuine multi-member
-  // nested struct (case `.2`'s own shape): recurse into its own layout
-  // exactly like this function's own top-level struct handling, sliced
-  // to just its own leaf `IDs` range, until a genuine leaf field (a
-  // plain scalar/vector/matrix/single-member-wrapper, or a tight-vector
-  // marker) is reached.
-  while (isGenuineMultiMemberNestedStruct(FieldTy)) {
-    auto *NestedST = cast<StructType>(FieldTy);
-    const StructLayout *NestedSL = DL.getStructLayout(NestedST);
-    unsigned NestedMember = NestedSL->getElementContainingOffset(Residual);
-    for (unsigned I = 0; I != NestedMember; ++I)
-      IDStart += getStageIOLeafElementCount(NestedST->getElementType(I));
-    Residual -= NestedSL->getElementOffset(NestedMember);
-    FieldTy = NestedST->getElementType(NestedMember);
-  }
-  auto [Row, Component] = resolveRowComponent(FieldTy, Residual, ValueTy, DL);
-  return StageIOAccess{IDs.slice(IDStart, 1), AsConstant(Row),
-                       AsConstant(Component), Vertex, IsOutput};
+  // (Roadmap H101t, extended by H115) `FieldTy` may itself be a genuine
+  // multi-member nested struct (case `.2`'s own shape), or (roadmap
+  // H115) an *array* of one (e.g. `S blockSa[2];`): recurse via
+  // `resolveNestedStageIOField` into its own layout, sliced to just its
+  // own leaf `IDs` range and (for an array-of-struct level) with that
+  // level's own instance index folded into the eventual leaf's own
+  // `Row`, until a genuine leaf field (a plain scalar/vector/matrix/
+  // single-member-wrapper, or a tight-vector marker) is reached.
+  NestedStageIOField Nested =
+      resolveNestedStageIOField(FieldTy, Residual, ValueTy, DL);
+  IDStart += Nested.IDStart;
+  return StageIOAccess{IDs.slice(IDStart, 1), AsConstant(Nested.Row),
+                       AsConstant(Nested.Component), Vertex, IsOutput};
 }
 
 /// (Roadmap H101k) Reproduces `addElements`' own "array of block
@@ -3419,9 +3560,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // per-member decomposition one level deeper.
             if (isGenuineMultiMemberNestedStruct(PM.Ty)) {
               uint32_t NestedLocation = PM.D.Location.value_or(0);
-              addStageIOStructMembers(addElement, GV, AddrSpace, PM.D,
-                                      cast<StructType>(PM.Ty), DL,
-                                      NestedLocation);
+              addStageIOStructMembers(addElement, GV, AddrSpace, PM.D, PM.Ty,
+                                      DL, NestedLocation);
               continue;
             }
             addElement(GV, AddrSpace, PM.D, PM.Ty);
