@@ -3231,12 +3231,11 @@ unsigned getStructMemberPhysicalIndex(mlir::spirv::StructType Struct,
 /// member-selector and forwarded every further index unchanged --
 /// exactly wrong once a member navigated by one of those further
 /// indices is itself a reordered/padded struct.
-bool remapNestedStructMemberIndices(mlir::Type CurrentType,
-                                    mlir::spirv::AccessChainOp Op,
-                                    unsigned StartIndex,
-                                    const mlir::TypeConverter &Converter,
-                                    mlir::ConversionPatternRewriter &Rewriter,
-                                    llvm::SmallVectorImpl<mlir::Value> &Indices);
+bool remapNestedStructMemberIndices(
+    mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
+    const mlir::TypeConverter &Converter,
+    mlir::ConversionPatternRewriter &Rewriter,
+    llvm::SmallVectorImpl<mlir::Value> &Indices);
 
 /// Forward declaration: defined below (alongside
 /// getPhysicalMatrixMemberType, whose own \p IsRowMajor/\p Stride fields
@@ -3519,10 +3518,9 @@ mlir::LogicalResult rewriteBlockAccess(
   // more than one level below Element.Content -- remap every one of
   // those exactly as Selector's own selector already was above.
   llvm::SmallVector<mlir::Value, 4> RemappedIndices(AllIndices.begin(),
-                                                     AllIndices.end());
+                                                    AllIndices.end());
   if (!remapNestedStructMemberIndices(SelectedType, Op, Selector + 1,
-                                      TypeConverter, Rewriter,
-                                      RemappedIndices))
+                                      TypeConverter, Rewriter, RemappedIndices))
     return Rewriter.notifyMatchFailure(
         Op, "nested struct member selector is not a constant");
 
@@ -4047,10 +4045,9 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
 /// (roadmap H133) to reproduce an interior gap its own always-tightened
 /// member list may still need between two declared offsets -- see that
 /// function's own comment.
-mlir::Type layOutStructIfOffsetsMatch(mlir::spirv::StructType Type,
-                                      llvm::ArrayRef<mlir::Type> Members,
-                                      llvm::SmallVectorImpl<unsigned> *PhysicalIndexOut,
-                                      bool AllowInteriorPad);
+mlir::Type layOutStructIfOffsetsMatch(
+    mlir::spirv::StructType Type, llvm::ArrayRef<mlir::Type> Members,
+    llvm::SmallVectorImpl<unsigned> *PhysicalIndexOut, bool AllowInteriorPad);
 
 /// Returns a "tight" (alignment-free) re-conversion of \p MatrixTy --
 /// `!llvm.array<NumColumns x TightColumn>`, where `TightColumn` is
@@ -4183,7 +4180,6 @@ mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
   return layOutStructIfOffsetsMatch(NestedStruct, TightMembers, nullptr,
                                     /*AllowInteriorPad=*/true);
 }
-
 
 /// Pads an already-converted \p Type (an array element, or a struct
 /// member) up to \p TargetSize, by appending a trailing byte-array member
@@ -4629,8 +4625,7 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     if (auto NestedStructTy =
             mlir::dyn_cast<mlir::spirv::StructType>(ElementTy))
       MemberTy = convertOffsetStructTypeIgnoringDecorations(NestedStructTy,
-                                                            Converter,
-                                                            nullptr);
+                                                            Converter, nullptr);
     else
       MemberTy = Converter.convertType(ElementTy);
     if (!MemberTy)
@@ -4941,12 +4936,11 @@ unsigned getStructMemberPhysicalIndex(mlir::spirv::StructType Struct,
 /// at the first matrix/vector/scalar leaf -- no further struct-member
 /// selector is possible past that point -- or once \p Indices is
 /// exhausted.
-bool remapNestedStructMemberIndices(mlir::Type CurrentType,
-                                    mlir::spirv::AccessChainOp Op,
-                                    unsigned StartIndex,
-                                    const mlir::TypeConverter &Converter,
-                                    mlir::ConversionPatternRewriter &Rewriter,
-                                    llvm::SmallVectorImpl<mlir::Value> &Indices) {
+bool remapNestedStructMemberIndices(
+    mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
+    const mlir::TypeConverter &Converter,
+    mlir::ConversionPatternRewriter &Rewriter,
+    llvm::SmallVectorImpl<mlir::Value> &Indices) {
   unsigned Pos = StartIndex;
   while (Pos < Op.getIndices().size()) {
     mlir::Type ElementType;
@@ -4973,8 +4967,7 @@ bool remapNestedStructMemberIndices(mlir::Type CurrentType,
                    mlir::dyn_cast<mlir::spirv::ArrayType>(CurrentType)) {
       ElementType = ArrayTy.getElementType();
     } else if (auto RTArrayTy =
-                   mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(
-                       CurrentType)) {
+                   mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(CurrentType)) {
       ElementType = RTArrayTy.getElementType();
     } else {
       // A matrix/vector/scalar leaf: no further struct-member selector
@@ -5287,9 +5280,8 @@ public:
     llvm::SmallVector<mlir::Value, 4> RemappedTail(Adaptor.getIndices().begin(),
                                                    Adaptor.getIndices().end());
     if (!remapNestedStructMemberIndices(SelectedMemberType, Op,
-                                        MemberIndexPos + 1,
-                                        *getTypeConverter(), Rewriter,
-                                        RemappedTail))
+                                        MemberIndexPos + 1, *getTypeConverter(),
+                                        Rewriter, RemappedTail))
       return Rewriter.notifyMatchFailure(
           Op, "nested struct member selector is not a constant");
     llvm::append_range(
