@@ -42894,3 +42894,94 @@ failures were not re-run this session.
 optimizer-pass (`Linearize.cpp`) correctness fix.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
 confirmed unaffected.
+
+## H121: patch-constant stage silently drops user-defined `patch out` block members
+
+**Root cause.** `dEQP-VK.tessellation.user_defined_io.per_patch_block.*`
+(9 cases) ran to completion after H115/H120's own fixes but failed
+outright at `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED at
+vkCmdUtil.cpp:338`. Setting `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an
+existing, opt-in `feme::vulkan::logCreationFailure` diagnostic,
+`feme/lib/Vulkan/Diagnostics.cpp`) surfaced the real error:
+`"vkQueueSubmit: patch-constant output -> domain stage patch input:
+element 0 has no matching producer element"`. A temporary, env-gated
+trace in `feme::graphics::linkStageElements` (`StageLink.cpp`, reverted
+before commit) dumped both signatures: the Domain stage's own
+`PatchInput` consumer signature had the expected 8 elements (locations
+2/3/4/6/9/10/11/17, one per real member of the shader's `TheBlock`
+interface block, a struct + float array + array-of-struct + trailing
+float); the patch-constant stage's own `PatchOutput` producer signature
+had only 2 ordinary elements plus the 2 tessellation-factor system
+values -- the whole block was missing.
+
+A hand-built minimal glslang reproducer
+(`glslangValidator -H` on a `.tesc`/`.tese` pair modeling `TheBlock`)
+confirmed SPIR-V's own decoration shape: a `patch out` block gets a
+single whole-variable `Location` decoration and per-member `Patch`
+decorations only -- no per-member `Location` at all -- so every member's
+own location must be *computed*, not read directly. Manually re-deriving
+the expected decomposition against `CanonicalizeStage.cpp`'s
+`TakeBlockPath`/`addStageIOStructMembers` logic confirmed it is correct
+(it produces the Domain stage's own correct 8-element signature); the bug
+was elsewhere.
+
+Traced to `classifyTessControlOutputStoreFrequency`
+(`CanonicalizeStage.cpp`), used by `splitBarrierlessTessellationControlEntry`
+to decide which stores belong in the split `.patchconstant` phase versus
+the control-point phase for a tessellation-control entry with no
+`OpControlBarrier` (the common shape a real GLSL TCS compiles to when no
+invocation's own write ever depends on another's). It unconditionally
+treated *any* store into *any* interface-block member
+(`GV->getMetadata("feme.spirv.MemberDecorations")` non-null) as
+vertex-frequency -- correct for a builtin block like `gl_PerVertex`
+(never `Patch`-qualified), but wrong for a genuine user-defined `patch
+out` block, whose every member is always `Patch`-decorated (GLSL only
+lets the `patch` qualifier apply to a whole block, never to one of its
+members individually). With the block's own store misclassified
+alongside the correctly-classified `gl_TessLevelOuter`/`gl_TessLevelInner`
+writes, `classifyTessControlOutputs` saw a "genuine mix" of patch- and
+vertex-frequency writes instead of a purely-patch-constant entry, and
+`pruneStageIOStoresByFrequency` erased the whole block's own store from
+the `.patchconstant` clone -- leaving its own final signature missing
+all 8 block elements.
+
+**Fix.** `classifyTessControlOutputStoreFrequency` now parses the
+block's own per-member decorations (`parseSPIRVMemberDecorations`) and
+checks the real `Patch` decoration, same as it already does for a bare
+(non-block) global, instead of a blanket `false`.
+
+**Verification.**
+- New unit test `CanonicalizeStageTest.
+  NoBarrierPatchBlockMemberStoreIsClassifiedAsPatchFrequency`: a
+  `patch out` block (2 members) alongside a `TessLevelOuter` write, no
+  barrier -- confirms the whole entry is now recognized as
+  patch-constant-only (H4f's "shape (2)") and the block's own two
+  members both survive, undropped, as `PatchOutput` elements in the
+  `.patchconstant` clone.
+- `ninja check-feme`: **3018/3021 passed, 3 unsupported** (up from
+  3017/3020 the H120 session left off at -- the new test above accounts
+  for the +1).
+- Real CTS re-run (`VK_ICD_FILENAMES` pointed at a freshly rebuilt
+  `libfeme_vulkan.so`):
+  - `dEQP-VK.tessellation.user_defined_io.per_patch_block.*` (9 cases):
+    **0/9 -> 6/9 pass**, 3 fail (`isolines` topology only, image
+    comparison, no crash/queueSubmit error of any kind -- filed as new,
+    narrower H122, likely sharing a root cause with the
+    already-catalogued H119).
+  - `dEQP-VK.tessellation.user_defined_io.*` (54 cases): **12/54 ->
+    18/54 pass**, 0 crashes of any kind.
+  - `dEQP-VK.tessellation.user_defined_io.per_patch_block_array.*` /
+    `.per_vertex_block.*` (18 cases, H117/H118): unaffected, still fail
+    with their own pre-existing `"JIT session error: Symbols not found:
+    [ spirv_var_43/31 ]"` -- confirming H121's own fix is scoped to the
+    barrierless-split classification bug only, not a general fix for
+    every tessellation-control block shape.
+  - `dEQP-VK.tessellation.*` (1114 cases, broader sanity sweep): 164
+    pass, 432 fail, 518 not supported -- no new crashes or hangs observed
+    versus the shapes already catalogued in this file.
+
+**Feature/extension bits.** No change: this is an internal
+tessellation-control-splitting correctness fix (which stores belong in
+which split phase), not a new feature or extension.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
