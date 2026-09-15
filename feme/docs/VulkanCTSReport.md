@@ -43654,3 +43654,81 @@ generates from them), then a new SPIR-V-to-LLVM legalization pattern,
 and possibly new CPU runtime support: a multi-hour, multi-file,
 upstream-MLIR-touching task. Roadmap H124d updated in place with this
 finding rather than attempted this session.
+
+## Session: H127 fixed (vector-operand `WavePrefixSum`/`WavePrefixProduct` component decomposition)
+
+**Root cause.** `GroupNonUniformScanPattern` (`SPIRVToLLVMPatterns.cpp`,
+H126) hands a vector operand straight to its matching `llvm.spv.wave.
+prefix.sum`/`.product` intrinsic unscalarized (both are `llvm_any_ty`-
+overloaded, exactly like the reduce intrinsics H124a already handles),
+so a `int4`/`uint4`/`float4`-shaped `WavePrefixSum`/`WavePrefixProduct`
+reaches `feme-cpu-simdize` as a genuine vector-operand call. `feme-cpu-
+simdize`'s own `isVectorOperandReduceKind` (H124a) only covered the nine
+`WaveActive*` reduce kinds -- all always *uniform* across the wave, so
+`widenWaveCall`'s existing vector-decomposition branch for them needs no
+per-lane divergence handling at all -- `WavePrefixSum`/`WavePrefixProduct`
+were never added to that table, since each lane's own prefix genuinely
+differs from every other lane's, and naively reusing the reduce-kind
+branch's "reassemble one uniform `<N x T>` result" logic would silently
+produce a wrong, uniform-looking result.
+
+**Fix.** Added, in `feme/lib/Transforms/CPU/SIMDize.cpp`:
+- `isVectorOperandPrefixScanKind(WaveCallKind)`, true for `PrefixSum`/
+  `PrefixProduct` -- the prefix-scan counterpart of H124a's `isVectorOperandReduceKind`.
+- A new `widenWaveCall` branch (immediately after the existing
+  reduce-kind branch) that decomposes the vector operand into `N`
+  per-component `feme.cpu.wave.prefix_sum`/`.prefix_product` calls via
+  the existing `getVectorComponents` helper -- but unlike the
+  reduce-kind branch, which reassembles the `N` scalar per-component
+  results into a single uniform `<N x T>` vector, this branch leaves the
+  `N` wide, individually-divergent `<W x T>` per-component results
+  decomposed in `WidenedVectorComponents`, mirroring `ReadLane`'s own
+  always-divergent sibling branch -- there is no single uniform value to
+  narrow down to, since a prefix scan's result is always divergent
+  per-lane (`isDivergentWaveCallResult` already returns true for both
+  kinds).
+- Two matching updates to `checkVectorDecompositionSupported`'s helper
+  logic (the pass's own pre-widening validation pass, which rejects any
+  divergent vector value it doesn't yet know how to decompose): one
+  recognizing a vector-operand prefix-scan call's own value operand as a
+  supported *consumer* of a divergent vector (mirroring the existing
+  reduce-kind entry), one recognizing the call's own vector result as a
+  supported divergent-vector *producer* (mirroring the existing
+  `ReadLane` entry) -- without both, the pass's own conservative "do I
+  know how to widen every divergent vector value in this function"
+  pre-check rejects the shape before `widenWaveCall` is ever reached.
+
+New lit test: `feme/test/Transforms/CPU/simdize-wave-prefix-scan-vector.ll`,
+mirroring `simdize-wave-active-reduce-vector.ll`/`simdize-wave-readlane-
+vector.ll`'s own structure -- a minimal `<2 x i32>`-operand
+`llvm.spv.wave.prefix.sum.v2i32` call, `FileCheck`ed for two independent
+per-component `feme.cpu.wave.prefix_sum.i32.v4` calls and no illegal
+nested `<4 x <2 x i32>>` vector type anywhere in the widened output.
+
+**Verification.**
+- `feme-opt` direct IR trace on the new test's own minimal reproducer:
+  confirms the exact expected two-call decomposition, no nested vector
+  type.
+- `FeMeTransformsCPUTests` (470 tests, full suite): all pass.
+- `ninja check-feme`: **3038/3041 passed** (3 unsupported), 0 failed --
+  no regressions.
+- `check-hlsl-feme-vk` re-run (664 total): **297 passed, 80 failed, 260
+  unsupported, 26 XFAIL, 1 XPASS** -- up from 295 passed/82 failed.
+  `WavePrefixSum.32.test`/`WavePrefixProduct.32.test` now pass, no
+  regressions elsewhere.
+
+**Feature/extension bits.** No change: this is a `feme-cpu-simdize`
+CPU-backend codegen fix, not a feature/extension gate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
+
+**VK-GL-CTS sweep.** Ran a sample of `dEQP-VK.subgroups.arithmetic.
+compute.subgroupexclusive{add,mul}_{i,u,f}vec4` (the closest real
+`deqp-vk` group to this fix's own code path -- a vector-operand
+exclusive scan): 100% `NotSupported` (`"Device does not support
+subgroup arithmetic operations"`, `vktSubgroupsArithmeticTests.cpp:285`)
+-- unchanged from H124h/H125/H126's own session findings (this device
+does not advertise `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, so no real
+`deqp-vk` case reaches this fix's code path; only reachable in practice
+via HLSL/`offload-test-suite`'s own `check-hlsl-feme-vk` suite). No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change.
