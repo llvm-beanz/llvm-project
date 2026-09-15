@@ -1626,13 +1626,24 @@ public:
 /// -- only signless `i32` is (roadmap L10, reduced from a real
 /// `offload-test-suite` `WaveOps/WaveActiveSum.convergence.test` case).
 ///
-/// Only the `Reduce` group operation has a matching intrinsic: `Inclusive
-/// Scan`/`ExclusiveScan` (HLSL's `WavePrefixSum`/`WavePrefixProduct`) and
+/// Only the `Reduce` group operation has a matching intrinsic here:
 /// `ClusteredReduce` (unreachable from any HLSL `Wave*` intrinsic today)
-/// are left to upstream's own `GroupReducePattern`, which already
-/// handles every group operation correctly via its raw call's own
-/// runtime `GroupOperation` parameter (not a fix for those cases, so out
-/// of scope for this roadmap entry).
+/// is left to upstream's own `GroupReducePattern` -- correctly, since no
+/// HLSL intrinsic ever produces it. (Roadmap H126) `ExclusiveScan` --
+/// HLSL's `WavePrefixSum`/`WavePrefixProduct` -- is a different story:
+/// upstream's own `GroupReducePattern` was *not* actually a fix for that
+/// case, contrary to this comment's own original (roadmap L10) claim --
+/// it has exactly the same `retTy = op.getResult().getType()` bug
+/// `IntegerGroupNonUniformReducePattern` had for `Reduce`, just never
+/// converting the SPIR-V dialect's own `si32`/`ui32` result type to a
+/// valid LLVM dialect `i32` before handing it to `createSPIRVBuiltinCall`
+/// -- so *every* `WavePrefixSum`/`WavePrefixProduct` call compiled
+/// through SPIR-V import hit dialect conversion's own "'llvm.call' op
+/// result #0 must be LLVM dialect-compatible type, but got 'si32'"
+/// diagnostic at pipeline-creation time, unconditionally (reduced from a
+/// real `offload-test-suite` `WaveOps/WavePrefixSum.convergence.test`
+/// case). See `GroupNonUniformScanPattern` below, the identical fix for
+/// this group operation instead of `Reduce`'s.
 template <typename ReduceOp>
 constexpr llvm::StringLiteral getGroupNonUniformReduceIntrinsicName();
 template <>
@@ -1725,6 +1736,72 @@ public:
         Op, createIntrinsicCall(
                 Rewriter, Op.getLoc(),
                 getGroupNonUniformReduceIntrinsicName<ReduceOp>(), ResultType,
+                {Adaptor.getValue()}));
+    return mlir::success();
+  }
+};
+
+/// (Roadmap H126) The `ExclusiveScan` counterpart to
+/// `GroupNonUniformReducePattern` above -- see that pattern's own comment
+/// and `getGroupNonUniformReduceIntrinsicName`'s for the shared
+/// background (the `si32`/`ui32`-vs-`i32` signedness bug this fixes by
+/// running the result through the real `TypeConverter`, and why using a
+/// real `llvm.spv.wave.prefix.*` intrinsic instead of a raw mangled-name
+/// call matters for `feme-cpu-simdize`/`WaveUniformity` to ever recognize
+/// the call at all). Only registered for the two op families HLSL can
+/// actually produce an `ExclusiveScan` for (`WavePrefixSum`/
+/// `WavePrefixProduct`); `getGroupNonUniformScanIntrinsicName`'s primary
+/// template is deliberately left undefined, so instantiating this
+/// pattern for any other `ReduceOp` is a compile error rather than a
+/// runtime one.
+template <typename ReduceOp>
+constexpr llvm::StringLiteral getGroupNonUniformScanIntrinsicName();
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformScanIntrinsicName<mlir::spirv::GroupNonUniformIAddOp>() {
+  return "llvm.spv.wave.prefix.sum";
+}
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformScanIntrinsicName<mlir::spirv::GroupNonUniformFAddOp>() {
+  return "llvm.spv.wave.prefix.sum";
+}
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformScanIntrinsicName<mlir::spirv::GroupNonUniformIMulOp>() {
+  return "llvm.spv.wave.prefix.product";
+}
+template <>
+constexpr llvm::StringLiteral
+getGroupNonUniformScanIntrinsicName<mlir::spirv::GroupNonUniformFMulOp>() {
+  return "llvm.spv.wave.prefix.product";
+}
+
+template <typename ReduceOp>
+class GroupNonUniformScanPattern
+    : public mlir::SPIRVToLLVMConversion<ReduceOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<ReduceOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(ReduceOp Op, typename ReduceOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Adaptor.getGroupOperation() != mlir::spirv::GroupOperation::ExclusiveScan)
+      return Rewriter.notifyMatchFailure(
+          Op, "only the ExclusiveScan group operation has a matching "
+              "intrinsic here; Reduce/InclusiveScan/ClusteredReduce fall "
+              "back to GroupNonUniformReducePattern/upstream's own "
+              "GroupReducePattern");
+
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getResult().getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(
+                Rewriter, Op.getLoc(),
+                getGroupNonUniformScanIntrinsicName<ReduceOp>(), ResultType,
                 {Adaptor.getValue()}));
     return mlir::success();
   }
@@ -8960,6 +9037,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformBitwiseAndOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformBitwiseOrOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformBitwiseXorOp>,
+      GroupNonUniformScanPattern<mlir::spirv::GroupNonUniformIAddOp>,
+      GroupNonUniformScanPattern<mlir::spirv::GroupNonUniformFAddOp>,
+      GroupNonUniformScanPattern<mlir::spirv::GroupNonUniformIMulOp>,
+      GroupNonUniformScanPattern<mlir::spirv::GroupNonUniformFMulOp>,
       LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
