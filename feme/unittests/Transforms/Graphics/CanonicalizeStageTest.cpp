@@ -4655,4 +4655,124 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(RowValuesByElement[2], (SmallVector<uint64_t, 2>{5}));
 }
 
+/// Whether \p V transitively (through any chain of `zext`/`mul`/`add`)
+/// uses \p Arg as one of its leaf operands -- used below to confirm
+/// `combineDynamicRowTerms`'s own materialized `Row` value genuinely
+/// combines *both* dynamic indices instead of silently dropping one.
+static bool usesArgTransitively(Value *V, Argument *Arg) {
+  if (V == Arg)
+    return true;
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I)
+    return false;
+  for (Value *Op : I->operands())
+    if (usesArgTransitively(Op, Arg))
+      return true;
+  return false;
+}
+
+/// (Roadmap H115/H117/H118) The real shape a `dEQP-VK.tessellation.
+/// user_defined_io.per_patch_block`/`per_patch_block_array`/
+/// `per_vertex_block` tessellation-control shader's own per-invocation
+/// array-of-struct member write takes -- confirmed against a real
+/// `feme-translate`-imported CTS SPIR-V dump (`spirv_var_21`'s own GEP
+/// shape: `getelementptr ..., i32 0, i32 2, i32 %dyn1, i32 2, i32 %dyn2`)
+/// -- a genuine multi-member nested struct (`{ i32, i32, [2 x float] }`)
+/// held in an array (`blockSa`, roadmap H115's own running example),
+/// whose own array-typed member (`z`) is *itself* accessed through a
+/// second, independently dynamic (loop-carried) index: `blockSa[i].z[j]`.
+/// Before this fix, `getDynamicRowIndexedAccess` only ever recognized a
+/// *single* trailing non-constant index with nothing after it (roadmap
+/// H7w's own `gl_ClipDistance[i]` shape) -- neither a further constant
+/// member-select following a dynamic array index, nor a second dynamic
+/// index nested inside *that* member, so this whole access (and, when
+/// the resulting dead `GetElementPtrInst` had no remaining load/store
+/// consumer on some CTS-generated-but-never-taken control-flow path, even
+/// some structurally similar but ultimately-unused ones) fell through to
+/// an unrewritten raw store/dead address computation on the still-
+/// `external` SPIR-V-derived global -- an unresolvable symbol at JIT-link
+/// time (`LLJIT`'s own "Symbols not found: [ spirv_var_N ]"). Fixed by
+/// `collectDynamicRowTerms`, which recursively walks the whole GEP index
+/// sequence (mirroring `resolveNestedStageIOField`'s own compile-time
+/// recursion) and accumulates one (index, multiplier) term per dynamic
+/// index found, later combined by `combineDynamicRowTerms` into a single
+/// flattened `Row` (`j * 1 + i * 2` here, since `z`'s own `RowCount` is 2
+/// and `blockSa` has 2 instances).
+TEST(CanonicalizeStageTest,
+     ThreadsDoublyDynamicIndexIntoArrayOfNestedStructMemberOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global { [2 x { i32, i32, [2 x float] }], float }, !spirv.Decorations !2, !feme.spirv.MemberDecorations !9
+
+    define void @main(i32 %i, i32 %j, float %v) #0 {
+      %p = getelementptr inbounds { [2 x { i32, i32, [2 x float] }], float }, ptr addrspace(8) @block, i32 0, i32 0, i32 %i, i32 2, i32 %j
+      store float %v, ptr addrspace(8) %p
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{i32 36, i32 0}
+    !1 = !{i32 37, i32 20}
+    !2 = !{!0, !1}
+    !3 = !{i32 35, i32 0}
+    !4 = !{!3}
+    !5 = !{i32 0, !4}
+    !6 = !{i32 35, i32 32}
+    !7 = !{!6}
+    !8 = !{i32 1, !7}
+    !9 = !{!5, !8}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+  Argument *JArg = F->getArg(1);
+  Argument *VArg = F->getArg(2);
+
+  // No raw store against `@block` (nor any leftover dead `GEP` into it)
+  // survives -- both this fix's dynamic-row-term combination and its
+  // sibling dead-GEP cleanup sweep matter here. (A `StoreInst` into the
+  // shadow value's own local alloca, roadmap H2e, legitimately remains;
+  // what matters is that its pointer is not `@block` itself.)
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_NE(SI->getPointerOperand()->stripPointerCasts(),
+                M->getGlobalVariable("block"));
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      EXPECT_NE(GEP->getPointerOperand()->stripPointerCasts(),
+                M->getGlobalVariable("block"));
+  }
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Four leaf elements: the array-of-struct member's own `x`/`y`/`z`
+  // (RowCounts 1/1/4 -- `z`'s own inner `[2 x float]` folded together
+  // with `block`'s own 2 array instances), plus the trailing scalar
+  // `float` (RowCount 1).
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+  EXPECT_EQ(Sig->Elements[2].RowCount, 4u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[2].ElementID);
+    // `Row` (operand 1) is neither argument directly -- it is
+    // `combineDynamicRowTerms`'s own materialized `j + i * 2` (or an
+    // equivalent commuted form) -- but it must still transitively use
+    // *both* dynamic indices, not just one.
+    Value *Row = CI->getArgOperand(1);
+    EXPECT_FALSE(isa<Constant>(Row));
+    EXPECT_TRUE(usesArgTransitively(Row, IArg));
+    EXPECT_TRUE(usesArgTransitively(Row, JArg));
+    EXPECT_EQ(CI->getArgOperand(3), VArg);
+  }
+  EXPECT_EQ(SeenStores, 1u);
+}
+
 } // namespace
