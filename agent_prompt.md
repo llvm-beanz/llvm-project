@@ -49,25 +49,25 @@ Can you work the the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H120** (~1-2 hours, real Linearize/SIMDize investigation): re-capture the
-   crashing IR (steps above), then read `Linearize.cpp`'s own `live.merge`/
-   `sideeffect.merge` phi-construction code (~line 775-845) against the
-   dumped IR's actual CFG shape to find which "Flow" merge case it mishandles
-   for this specific nested-loop-with-array-of-struct-write pattern. This is
-   the highest-leverage single item: closes 27 cases at once (H115+H117+H118).
-2. **H116** (~45-60 min, not touched this session): `per_patch_array.*`,
-   `"Invalid input value in tessellation evaluation shader"` -- re-confirmed
-   still failing (0/3 sampled), different error class from H120, look at it
-   separately.
-3. **H119** (~45-60 min, not touched this session): `per_patch`/`per_vertex`
-   `isolines`-only image comparison failures (6 cases) -- use H88's own
-   channel-level pixel-reduction technique.
-4. **`getDynamicVertexIndexedAccess`** (H92's sibling function) still has the
-   same raw-struct-field-index `Member`-tracking bug my fix corrected in
-   `getDynamicRowIndexedAccess` -- not touched this session since no real CTS
-   case has hit it yet, but worth a proactive fix if H120's own root cause
-   turns out to need it (a per-vertex outer dynamic index combined with an
-   array-of-struct member).
+1. **H121** (~30-60 min, not yet triaged): `per_patch_block`'s own 9 cases
+   now run to completion but fail at `vk.queueSubmit(...):
+   VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338`. Start with a
+   validation-layer message or `gdb` backtrace through `feme-vulkan`'s own
+   `vkQueueSubmit` entry point.
+2. **H117/H118** (~1-2 hours, real IR-reduction needed): re-run the same
+   `feme-translate --import-spirv`/`feme-opt -passes=feme-graphics-
+   canonicalize-stage` technique H115 used, but on `per_patch_block_array`/
+   `per_vertex_block`'s own real SPIR-V, since H115's fix does not cover
+   whatever their own `spirv_var_43`/`spirv_var_31` shape actually is.
+3. **H116** (~45-60 min): `per_patch_array.*`, "Invalid input value" --
+   different error class, still not triaged at all.
+4. **H119** (~45-60 min): isolines-only image comparison failures (6
+   cases) -- use H88's own channel-level pixel-reduction technique.
 5. **`offload-test-suite`'s `check-hlsl-feme-vk` target**: still never
-   built/run in any session on record (now well over a dozen sessions
-   deferring it) -- worth a dedicated session.
+   built/run in any session on record (well over a dozen sessions
+   deferring it now) -- worth a dedicated session of its own.
+6. Clean up `/tmp/h120_*` scratch files (low priority, not part of the
+   repo) -- `/tmp/h120_preopt/pre_opt_2_1_main.ll` specifically is worth
+   keeping a copy of if further Linearize/SIMDize work is anticipated,
+   since it's a proven, real, minimal (1-violation) reproducer.
+
