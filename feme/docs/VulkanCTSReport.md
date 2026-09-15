@@ -44926,3 +44926,86 @@ purpose). No roadmap milestone struck through -- H124 remains open, its
 sub-bucket breakdown corrected and substantially expanded instead. No
 feature/extension-inventory change: this session's work was pure
 process-bug discovery and re-triage, no capability changed.
+
+## Session: H124j fixed (GLSL.std.450 Cross/Reflect/Distance/FindUMsb/FindSMsb/FindILsb legalization gap)
+
+**Root cause.** `spirv.GL.Cross`, `spirv.GL.Reflect`, `spirv.GL.Distance`,
+`spirv.GL.FindUMsb`, and `spirv.GL.FindILsb` had **no** SPIRVToLLVM
+conversion pattern at all -- the same "no pattern exists" shape H124f
+found for `Normalize`/`Length`/`IsNan`/`IsInf`, but for a different
+GLSL.std.450 op subset H124f's own fix did not cover.
+
+**Fix.** Added six new patterns to
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`:
+- `GLDistancePattern`: `length(p0 - p1)`, reusing the existing
+  dot-product+sqrt helpers `GLLengthPattern` (H124f) already
+  established.
+- `GLCrossPattern`: genuine per-lane `extractelement`/`fmul`/`fsub`/
+  `insertelement` sequencing. Unlike every other pattern in this file,
+  `Cross` cannot be expressed via a whole-vector op -- each result lane
+  mixes two *different* input-lane pairs (`x[1]*y[2] - y[1]*x[2]`,
+  etc.). Verified lane ordering (0,1,2 = `Component(1,2)`,
+  `Component(2,0)`, `Component(0,1)`) directly against a `feme-opt`
+  dump, matching the GLSL.std.450 spec text.
+- `GLReflectPattern`: `I - 2 * dot(N, I) * N`.
+- `GLFindUMsbPattern`: `31 - ctlz(x, is_zero_poison=false)` -- since
+  LLVM's `ctlz` with `is_zero_poison=false` returns the full bit width
+  (32) for a zero input, `31 - 32 = -1` matches the GLSL.std.450 spec's
+  own "-1 if Value is 0" special case for free, no `select` needed.
+- `GLFindSMsbPattern` (**added mid-session, see re-scope below**):
+  sign-normalizes via `y = x xor ashr(x, 31)` (turning a negative
+  operand into its bitwise complement), then reuses the `FindUMsb`
+  identity on `y` -- this also naturally produces `-1` for both of the
+  spec's special-cased inputs (`Value == 0` and `Value == -1`), since
+  both map to `y == 0`.
+- `GLFindILsbPattern`: `cttz(x, is_zero_poison=false)` with an explicit
+  `icmp eq x, 0` + `select` to `-1` -- unlike `FindUMsb`/`FindSMsb`,
+  `cttz`'s zero-input result (32) has no single-subtraction identity
+  landing on `-1`.
+
+**Re-scope discovered mid-session.** The task's own op list
+(`Cross`/`Reflect`/`Distance`/`FindUMsb`/`FindILsb`, 5 ops) omitted a
+sixth: running `firstbithigh.32.test` (one of the 5 originally-named
+target *tests*, as opposed to ops) failed with a new, previously-unseen
+error -- `"failed to legalize operation 'spirv.GL.FindSMsb'"`. HLSL's
+`firstbithigh` lowers to `spirv.GL.FindUMsb` when called on an `uint`
+operand but to the distinct `spirv.GL.FindSMsb` (opcode 74) when called
+on an `int` operand; the roadmap's own op list had only named the
+unsigned variant. This was found only by actually running the test,
+not by reading the HLSL source or op tablegen definitions ahead of
+time -- a useful precedent: don't assume a roadmap row's own op list is
+complete before running the actual target test.
+
+**New lit test.**
+`spirv-to-llvm-gl-cross-reflect-distance-findmsb-findlsb.mlir`: six
+CHECK-annotated sub-tests (`cross_vector`, `reflect_vector`,
+`distance_vector`, `find_umsb_scalar`, `find_smsb_scalar`,
+`find_ilsb_scalar`), modeled on the H124f test file's structure.
+
+**Verification.**
+- `ninja check-feme`: **3051/3054 passed** (3 unsupported), 0 failed --
+  net +3 tests vs. the prior baseline (3048/3051; the new lit test adds
+  3 discovered test cases via `--split-input-file`'s file/RUN-line
+  accounting), 0 regressions.
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary | grep deviceName`): all 5 originally-named
+  `Feature/HLSLLib/{cross,reflect,distance,firstbithigh,firstbitlow}.32.test`
+  cases pass; none appear in the 49-case failure list from this
+  session's full re-run (328 passed/49 failed/26 XFAIL/260 unsupported/
+  1 XPASS of 664).
+- VK-GL-CTS: `dEQP-VK.glsl.builtin.precision.cross.*` (2/2 passed),
+  `.reflect.*` (8/10 passed, 2 `NotSupported` for `longVector`),
+  `.distance.*` (8/10 passed, 2 `NotSupported`),
+  `dEQP-VK.glsl.builtin.function.integer.findMSB.*compute*` and
+  `.findlsb.*compute*` (16/20 passed each, 4 `NotSupported` each for
+  `longVector`) -- every previously-unreachable, now-supported compute
+  case passes outright. The same `findMSB`/`findlsb` groups' fragment/
+  vertex/geometry/tess-stage cases fail with a pre-existing, unrelated
+  `VK_ERROR_INITIALIZATION_FAILED` at graphics-pipeline creation;
+  confirmed **not** a regression from this session by reproducing the
+  identical failure on an unrelated integer builtin in the same stage
+  (`dEQP-VK.glsl.builtin.function.integer.bitcount.int_highp_fragment`)
+  -- a pre-existing graphics-pipeline gap, out of this session's scope.
+
+H124j is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new capability.
