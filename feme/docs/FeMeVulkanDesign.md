@@ -1485,6 +1485,48 @@ partial matrix access is never declined at all -- a latent, pre-existing
 bug, not introduced this session, with no currently-known real CTS case
 exercising it.
 
+Roadmap H132 (`isMatrixMemberLayoutRepresentable` wrapper-shape gap,
+follow-on to H129 above): the check only ever examined
+`Struct.getElementType(Index)` directly to decide whether a struct
+member is a matrix needing a `RowMajor`/padded-`MatrixStride`
+reinterpretation -- for a `dxc`-wrapper member (`RWStructuredBuffer<
+matCxR>`/`StructuredBuffer<matCxR>`, whose member is an `RTArrayType`-of-
+Matrix, not a Matrix directly), this always saw the wrapper's array type
+and short-circuited to "representable" regardless of the real matrix's
+decorations, silently letting a wrapper-shape RowMajor/padded-ColMajor
+partial access fall through to the ordinary (wrong) generic GEP path.
+Fixed by splitting the function: a new `isMatrixLayoutRepresentable`
+holds the original decoration-inspecting body and takes the *already-
+resolved* matrix element type as a parameter, while
+`isMatrixMemberLayoutRepresentable` becomes a thin wrapper preserving its
+exact original (wrapper-blind) behavior for its one remaining caller
+(`convertOffsetStructTypeIgnoringDecorations`, deliberately left
+unfixed -- see below). `rewriteBlockAccess`'s own matrix-partial-access
+branch, which had already unwrapped `SelectedType` to the real
+`MatrixType` before this check (via its existing `RuntimeArrayType`-
+unwrapping logic for wrapper shapes), now calls the new function
+directly. Since `ElementPtr` there already points at the matrix's own
+base address regardless of wrapper nesting, this one-line call-site
+change is sufficient to make ColMajor-padded column-select and
+RowMajor/ColMajor scalar-element wrapper-shape access *work correctly*
+(not just decline) -- confirmed against real `feme-opt` output in two new
+positive lit tests. RowMajor wrapper-shape column-select still correctly
+declines today (`MatrixColumnLoadPattern`/`StorePattern`'s own
+`getMatrixColumnAccess` helper still only recognizes the non-wrapper
+shape -- an intentional, separately-tracked follow-on), now via a loud
+"failed to legalize" diagnostic instead of a silent miscompile, confirmed
+with a new negative test. **Deliberately left unfixed**: the general
+struct-type-conversion call site (`convertOffsetStructTypeIgnoringDecorations`)
+still cannot detect a wrapper-shape non-representable matrix, since doing
+so would require constructing a substituted array-of-physical-matrix type
+there and risks destabilizing `RowMajorMatrixLoadPattern`/`StorePattern`'s
+own already-correct, independent whole-matrix reinterpretation
+(`getMatrixWholeAccess`) -- judged high-risk/low-reward given no known
+real CTS case exercises this shape. `check-feme`: 3046/3049 passed (3
+unsupported), 0 failed. VK-GL-CTS: full `dEQP-VK.ubo.*` sweep re-run, no
+regressions (no measurable count change expected, since no known real
+case exercises this exact wrapper-partial-access shape).
+
 Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
 entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
 pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,

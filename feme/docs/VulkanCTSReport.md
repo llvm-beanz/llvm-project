@@ -44300,3 +44300,78 @@ through to the ordinary, wrong generic GEP path -- a latent,
 pre-existing, silent-miscompile bug, not introduced this session. No
 real `dEQP-VK.ubo.*` case is currently known to exercise this shape
 (confirmed: none of the 236 real H129 failures were wrapper-shape).
+
+## Roadmap H132 fixed (`isMatrixMemberLayoutRepresentable` wrapper-shape blind spot)
+
+**Baseline reconfirmation.** Before applying any change, re-ran the full
+`dEQP-VK.ubo.*` sweep (13,240 cases) to confirm no environment drift
+since the prior session's H129 closing numbers: **5614 passed / 73
+failed**, identical to the prior session exactly. Saved as
+`/tmp/h130_full.log`/`.qpa` for the post-fix diff below.
+
+**The fix.** As flagged in H129's own closing note (see above),
+`isMatrixMemberLayoutRepresentable` only ever inspected
+`Struct.getElementType(Index)` directly to decide whether a struct
+member needs a `RowMajor`/padded-`MatrixStride` reinterpretation before
+declining/deferring partial (column-select or scalar-element) access to
+it. For a `dxc`-wrapper member (`RWStructuredBuffer<matCxR>`/
+`StructuredBuffer<matCxR>`, whose member is an `RTArrayType`-of-Matrix,
+not a Matrix directly), this always saw the wrapper's array type and
+short-circuited to "representable", regardless of the real matrix's
+actual decorations -- silently letting a wrapper-shape RowMajor/padded-
+ColMajor partial access fall through to the ordinary, wrong generic GEP
+path.
+
+Split the function in two: a new `isMatrixLayoutRepresentable` holds
+the original decoration-inspecting body and takes the *already-
+resolved* matrix element type as a parameter (rather than re-deriving it
+from the struct), while `isMatrixMemberLayoutRepresentable` becomes a
+thin wrapper preserving its exact original (wrapper-blind) behavior for
+its one remaining real caller, `convertOffsetStructTypeIgnoringDecorations`
+(deliberately left unfixed -- see below). `rewriteBlockAccess`'s own
+matrix-partial-access branch, which had already unwrapped `SelectedType`
+to the real `MatrixType` (via its existing `RuntimeArrayType`-unwrapping
+logic for wrapper shapes) before this check, now calls the new function
+directly with that already-resolved type.
+
+Because `rewriteBlockAccess`'s `ElementPtr` (computed via
+`llvm.spv.resource.getpointer`) already points at the matrix's own base
+address regardless of wrapper nesting -- the wrapper's dummy selector
+index is already consumed earlier, before `GetPointerIndex` is computed
+-- this one-line call-site change turned out to be sufficient to make
+*all* of ColMajor-padded column-select and RowMajor/ColMajor
+scalar-element wrapper-shape access work *correctly* (not merely safely
+decline), confirmed against real `feme-opt` output in two new lit test
+cases (`spirv-to-llvm-matrix-block-wrapper-partial.mlir`). RowMajor
+wrapper-shape column-select still correctly declines today (
+`MatrixColumnLoadPattern`/`StorePattern`'s own `getMatrixColumnAccess`
+helper still only recognizes the non-wrapper shape -- an intentional,
+separately-tracked follow-on, not part of this fix's scope), now via a
+loud `"failed to legalize operation 'spirv.AccessChain'"` diagnostic
+instead of the prior silent miscompile, confirmed with a new negative
+test appended to `spirv-to-llvm-matrix-block-invalid.mlir`.
+
+**Deliberately left unfixed:** the general struct-type-conversion call
+site (`convertOffsetStructTypeIgnoringDecorations`) still cannot detect
+a wrapper-shape non-representable matrix, since fixing it there would
+require constructing a substituted array-of-physical-matrix type and
+risks destabilizing `RowMajorMatrixLoadPattern`/`StorePattern`'s own
+already-correct, independent whole-matrix reinterpretation
+(`getMatrixWholeAccess`) -- judged high-risk/low-reward given no known
+real CTS case exercises this shape.
+
+**Verification.**
+- `ninja check-feme`: **3046/3049 passed** (3 unsupported), 0 failed --
+  net +1 test vs. the H129 baseline (3045/3048), from the two new
+  positive lit test cases; 0 regressions.
+- VK-GL-CTS: re-ran the full `dEQP-VK.ubo.*` sweep (13,240 cases) with
+  the fix applied: **5614 passed / 73 failed**, identical counts to the
+  pre-fix baseline. A case-by-case diff of the two runs' exact failing
+  case names (not just counts) confirms the **same 73 cases fail in
+  both runs, with zero additions and zero removals** -- exactly as
+  expected, since no known real `dEQP-VK.ubo.*` case exercises the
+  wrapper-shape partial-access gap this fix closes.
+
+No roadmap milestone bucket count changes as a result of this fix (it
+closes a latent defensive gap, not a currently-measured CTS failure
+bucket); H132 is struck through on the roadmap.
