@@ -9308,6 +9308,236 @@ public:
   }
 };
 
+/// Converts `spirv.GL.Distance` (roadmap H124j) into the GLSL.std.450
+/// spec's own definition, `Length(p0 - p1)`, reusing the same
+/// `sqrt(dot(x, x))` computation `GLLengthPattern` above uses. This op
+/// has no upstream MLIR conversion pattern at all.
+class GLDistancePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLDistanceOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLDistanceOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLDistanceOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value P0 = Adaptor.getP0();
+    mlir::Value P1 = Adaptor.getP1();
+    mlir::Value Diff = mlir::LLVM::FSubOp::create(Rewriter, Loc, P0, P1);
+    mlir::Value Dot = createScalarOrVectorDotProduct(Rewriter, Loc, Diff, Diff);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SqrtOp>(Op, DstType, Dot);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Cross` (roadmap H124j) into the GLSL.std.450 spec's
+/// own literal per-component definition (`SPIRVGLOps.td`'s own
+/// description): a fixed-size (always-3-component) vector built one lane
+/// at a time via `llvm.extractelement`/`llvm.insertelement`, mirroring
+/// `ExpectConversionPattern`'s own per-lane vector-expansion shape above.
+/// Unlike every dot-product-based pattern in this file, `Cross` cannot be
+/// expressed as a handful of whole-vector ops: each result lane mixes two
+/// *different* pairs of input lanes, so per-lane extraction is
+/// unavoidable. This op has no upstream MLIR conversion pattern at all.
+class GLCrossPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLCrossOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLCrossOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLCrossOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    auto DstVecType = mlir::dyn_cast_or_null<mlir::VectorType>(DstType);
+    if (!DstVecType || DstVecType.getNumElements() != 3)
+      return Rewriter.notifyMatchFailure(
+          Op, "Cross is only defined for 3-component vectors (as the "
+              "GLSL.std.450 spec requires)");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getLhs();
+    mlir::Value Y = Adaptor.getRhs();
+    auto Extract = [&](mlir::Value Vec, int64_t Index) {
+      mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(),
+          Rewriter.getI64IntegerAttr(Index));
+      return mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vec,
+                                                  IndexValue);
+    };
+    auto Component = [&](int64_t A, int64_t B) {
+      mlir::Value XaYb = mlir::LLVM::FMulOp::create(Rewriter, Loc,
+                                                    Extract(X, A), Extract(Y, B));
+      mlir::Value YaXb = mlir::LLVM::FMulOp::create(Rewriter, Loc,
+                                                    Extract(Y, A), Extract(X, B));
+      return mlir::LLVM::FSubOp::create(Rewriter, Loc, XaYb, YaXb);
+    };
+
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstVecType);
+    std::array<mlir::Value, 3> Lanes = {Component(1, 2), Component(2, 0),
+                                        Component(0, 1)};
+    for (int64_t I = 0; I != 3; ++I) {
+      mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                   Lanes[I], IndexValue);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Reflect` (roadmap H124j) into the GLSL.std.450 spec's
+/// own literal definition, `I - 2 * dot(N, I) * N`, reusing
+/// `createScalarOrVectorDotProduct`/`broadcastScalarToShapeOf` the same
+/// way `GLFaceForwardPattern`/`GLRefractPattern` above do. This op has no
+/// upstream MLIR conversion pattern at all.
+class GLReflectPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLReflectOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLReflectOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLReflectOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value I = Adaptor.getLhs();
+    mlir::Value N = Adaptor.getRhs();
+    mlir::Value Dot = createScalarOrVectorDotProduct(Rewriter, Loc, N, I);
+    mlir::Value Two = createSameShapeFPConstant(Rewriter, Loc, Dot.getType(), 2.0);
+    mlir::Value TwoDot = mlir::LLVM::FMulOp::create(Rewriter, Loc, Two, Dot);
+    mlir::Value TwoDotLike =
+        broadcastScalarToShapeOf(Rewriter, Loc, TwoDot, DstType);
+    mlir::Value TwoDotN =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, TwoDotLike, N);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FSubOp>(Op, DstType, I, TwoDotN);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.FindUMsb` (roadmap H124j) into `31 -
+/// llvm.ctlz(Value, is_zero_poison=false)`: for a zero operand,
+/// `is_zero_poison=false` makes `ctlz` return the full 32-bit width
+/// rather than being undefined, so `31 - 32 = -1` already matches the
+/// GLSL.std.450 spec's own "if Value is 0, the result is -1" text with
+/// no separate `Value == 0` select needed -- unlike `GLFindILsbPattern`
+/// below, whose analogous `cttz`-based computation does not have this
+/// same fortunate arithmetic identity. This instruction is spec-limited
+/// to 32-bit-wide components (`SPIRVGLOps.td`'s own text), matching this
+/// pattern's fixed `31` constant. This op has no upstream MLIR conversion
+/// pattern at all.
+class GLFindUMsbPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLFindUMsbOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLFindUMsbOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLFindUMsbOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Value = Adaptor.getOperand();
+    mlir::Value Clz = mlir::LLVM::CountLeadingZerosOp::create(
+        Rewriter, Loc, DstType, Value, /*isZeroPoison=*/false);
+    mlir::Value ThirtyOne = createBitFieldConstant(Rewriter, Loc, DstType, 31);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SubOp>(Op, DstType, ThirtyOne, Clz);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.FindSMsb` (roadmap H124j, HLSL `firstbithigh` on a
+/// *signed* integer operand -- `dxc` emits this op rather than
+/// `GLFindUMsb` whenever the HLSL source operand type is signed) using
+/// the standard "sign-normalize via XOR" identity: `Y = Value XOR
+/// AShr(Value, 31)` is `Value` unchanged for a non-negative operand, or
+/// `~Value` (bitwise complement) for a negative one. That turns "first
+/// 0-bit from the top of a negative number" into "first 1-bit from the
+/// top of its complement", i.e. exactly `GLFindUMsbPattern`'s own `31 -
+/// ctlz` computation applied to `Y` instead of `Value` directly --
+/// reusing that same identity also reproduces the GLSL.std.450 spec's
+/// two zero-result cases for free: `Value == 0` gives `Y == 0` (`AShr` of
+/// a non-negative 0 is 0), and `Value == -1` (all-ones) gives `Y == 0`
+/// too (`AShr(-1, 31)` is all-ones, XOR of two equal all-ones values is
+/// 0), both already mapping to `31 - ctlz(0) = 31 - 32 = -1` with no
+/// separate select. This op has no upstream MLIR conversion pattern at
+/// all.
+class GLFindSMsbPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLFindSMsbOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLFindSMsbOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLFindSMsbOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Value = Adaptor.getOperand();
+    mlir::Value ThirtyOneShift =
+        createBitFieldConstant(Rewriter, Loc, DstType, 31);
+    mlir::Value SignMask =
+        mlir::LLVM::AShrOp::create(Rewriter, Loc, Value, ThirtyOneShift);
+    mlir::Value Y = mlir::LLVM::XOrOp::create(Rewriter, Loc, Value, SignMask);
+    mlir::Value Clz = mlir::LLVM::CountLeadingZerosOp::create(
+        Rewriter, Loc, DstType, Y, /*isZeroPoison=*/false);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SubOp>(Op, DstType, ThirtyOneShift,
+                                                   Clz);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.FindILsb` (roadmap H124j) into `llvm.cttz(Value,
+/// is_zero_poison=false)`, selecting `-1` for a zero operand explicitly
+/// (unlike `GLFindUMsbPattern` above, `cttz`'s own zero-input width
+/// result, 32, has no equivalent one-subtraction identity that lands on
+/// -1, so this needs an explicit `Value == 0` compare-and-select instead
+/// of relying on the intrinsic's own zero-input behavior). This op has no
+/// upstream MLIR conversion pattern at all.
+class GLFindILsbPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLFindILsbOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLFindILsbOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLFindILsbOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Value = Adaptor.getOperand();
+    mlir::Value Ctz = mlir::LLVM::CountTrailingZerosOp::create(
+        Rewriter, Loc, DstType, Value, /*isZeroPoison=*/false);
+    mlir::Value Zero = createBitFieldConstant(Rewriter, Loc, DstType, 0);
+    mlir::Value NegOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
+    mlir::Value IsZero = mlir::LLVM::ICmpOp::create(
+        Rewriter, Loc, getBoolTypeLike(DstType), mlir::LLVM::ICmpPredicate::eq,
+        Value, Zero);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SelectOp>(Op, DstType, IsZero,
+                                                      NegOne, Ctz);
+    return mlir::success();
+  }
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -10438,6 +10668,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // with "failed to legalize operation ... that was explicitly marked
   // illegal".
   Patterns.add<IsNanPattern, IsInfPattern, GLLengthPattern, GLNormalizePattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  // `spirv.GL.{Cross,Reflect,Distance,FindUMsb,FindSMsb,FindILsb}`
+  // (roadmap H124j): the same "no conversion pattern at all" gap H124f
+  // fixed above for `Normalize`/`Length`/`IsNan`/`IsInf`, for a different
+  // GLSL.std.450 op subset that fix did not cover. `FindSMsb` was not in
+  // H124j's original scope (HLSL `firstbithigh` on an unsigned operand
+  // lowers to `FindUMsb`) but turned out needed too once
+  // `firstbithigh.32.test`'s own *signed* operand case was tried against
+  // the `FindUMsb`-only fix and still failed.
+  Patterns.add<GLDistancePattern, GLCrossPattern, GLReflectPattern,
+               GLFindUMsbPattern, GLFindSMsbPattern, GLFindILsbPattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
