@@ -853,4 +853,100 @@ TEST(LinearizeTest, LinearizesLoopWithTwoRelayHopsToDivergentExit) {
   EXPECT_TRUE(FoundMaskAny);
 }
 
+// Roadmap H120: distilled from a real captured pre-`feme-cpu-linearize` IR
+// dump of `dEQP-VK.tessellation.user_defined_io.per_patch_block.*`'s Hull
+// control-point stage (see agent_thoughts.md's "H120 session" entry for
+// the full trace this was root-caused from). `merge` below plays the real
+// crash's own `Flow39` block's exact double role: it is simultaneously
+// (a) the real two-arm merge point of the *outer*, uniform `%u` diamond
+// (its own `%sideeffect.merge` phi must merge both `armT`'s and `armF`'s
+// arms), and (b) a cycle boundary in its own right (it branches back to
+// `entry`, its own cycle's header, so its own conditional branch is a
+// loop-control edge `validate` stops at -- see `isLoopControlEdge`).
+// `armT`'s own arm additionally nests a *second*, inner loop (`loop`)
+// with its own divergent exit (`%break.cond`, thread-ID-dependent) whose
+// own `CycleBoundaryMasks` recording at `loop`'s own boundary predates --
+// and, before this fix, stomped on -- `merge`'s. `armT`'s own
+// `feme.stage.demote` is essential, not incidental: without it, both arms
+// leave the side-effect mask an untouched constant, so the two
+// (correct-vs-stale) recordings this bug conflates happen to coincide and
+// the bug is unobservable; with it, `armT`'s own path narrows the mask
+// while `armF`'s does not, so the outer diamond's real two-arm merge (at
+// `merge`) is a genuine, non-trivial `phi` distinct from `loop`'s own
+// single-arm-only value.
+//
+// Before this fix: `run`'s discovery pass adds `loop.exit` as its own
+// late root (since `validate`'s recursion into `armT` stops early right
+// at `loop`'s own boundary, never itself confirming that arm reaches
+// `merge`); flattening that root walks straight through `loop.exit` into
+// `merge` a *second* time with no intervening diamond, and previously
+// *overwrote* `CycleBoundaryMasks[merge]` -- recorded correctly the first
+// time, by the outer diamond's own continuous walk, as the real two-arm
+// merge `phi` -- with this second walk's own narrower, single-arm-only
+// value (the mask in effect when `loop`'s own boundary, not `merge`'s own
+// two real predecessors, was reached). `final`'s own masked resource call
+// (reachable only via `merge`) then got seeded with that stale,
+// non-dominating value instead, producing exactly the same `InstCombine`
+// "Dominance relation broken?"/`verifyModule` "Instruction does not
+// dominate all uses!" failure the real CTS case hit (confirmed by
+// temporarily reverting this fix and re-running this exact test: it
+// fails the same way without it). The `try_emplace`-style "first
+// recording wins" fix below makes `merge`'s own later, single-arm
+// re-visit a no-op instead.
+TEST(LinearizeTest,
+     PreservesFirstCycleBoundaryMaskWhenOuterMergeIsAlsoALoopBoundary) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n, ptr %buf) #0 {
+    preheader:
+      br label %entry
+    entry:
+      %outer.i = phi i32 [0, %preheader], [%outer.inc, %merge]
+      %u = icmp sgt i32 %n, 0
+      br i1 %u, label %armT, label %armF
+    armT:
+      call void @feme.stage.demote(i1 %u)
+      br label %loop
+    loop:
+      %i = phi i32 [0, %armT], [%inc, %loop]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %inc = add i32 %i, 1
+      %break.cond = icmp eq i32 %tid, %inc
+      br i1 %break.cond, label %loop.exit, label %loop
+    loop.exit:
+      br label %merge
+    armF:
+      br label %merge
+    merge:
+      %outer.inc = add i32 %outer.i, 1
+      %outer.cond = icmp slt i32 %outer.inc, %n
+      br i1 %outer.cond, label %entry, label %final
+    final:
+      %tid2 = call i32 @llvm.dx.thread.id(i32 0)
+      %divarm = icmp eq i32 %tid2, 0
+      br i1 %divarm, label %final.t, label %final.f
+    final.t:
+      br label %final.merge
+    final.f:
+      br label %final.merge
+    final.merge:
+      call void @feme.cpu.resource.store.raw.i32(ptr %buf, i32 %n, i32 0, i64 0, i32 %outer.inc, i1 true)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.stage.demote(i1)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  // Must not crash the process, and the resulting IR must remain valid
+  // SSA (every operand dominating its use) -- before this fix, `final`'s
+  // masked resource-call operand referenced a value only valid on one of
+  // `merge`'s two real incoming edges, which `verifyModule` catches as a
+  // broken dominance relation.
+  run(*M);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace
