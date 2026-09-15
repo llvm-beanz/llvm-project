@@ -3076,7 +3076,31 @@ public:
     auto It = Resources.find(Op.getVariable());
     if (It == Resources.end())
       return Rewriter.notifyMatchFailure(Op, "not a resource variable");
-    if (It->second.Count != 1) {
+    // (Roadmap H130) Whether this variable is arrayed at all is a
+    // structural property of its own declared type -- an `ArrayType`/
+    // `RuntimeArrayType` pointee -- not something `It->second.Count`'s
+    // *value* can answer alone: a real single-element array (e.g. `T
+    // blocks[1];`, one of `dEQP-VK.ubo.random.basic_instance_arrays`'s own
+    // randomly-sized cases) still declares an array pointee, and
+    // `getArrayedBlockCount`/`getArrayedResourceCount`
+    // (populateSPIRVToLLVMTargetTypeConversions's own resource-collection
+    // loop) correctly records its real length -- 1 -- as `Count`, exactly
+    // like a genuinely non-arrayed variable's `Count` defaults to 1 too.
+    // The old `It->second.Count != 1` check could not tell these two cases
+    // apart and built a single, non-arrayed handle directly from this
+    // op's own (array-typed) pointer type instead of erasing it for
+    // ArrayedBlockAccessChainPattern/ResourceArrayAccessChainPattern to
+    // handle -- `getTypeConverter()->convertType` below cannot produce a
+    // real `spirv.VulkanBuffer` handle for an array-of-`StructType`/
+    // array-of-resource pointee at all, and silently falls back to a raw
+    // `ptr`, surfacing later as `UnsupportedOps.cpp`'s own generic "cannot
+    // normalize" diagnostic on a handle that may not even be the one whose
+    // actual access triggered the failure (see that diagnostic's own
+    // comment).
+    mlir::Type Pointee =
+        mlir::cast<mlir::spirv::PointerType>(Op.getType()).getPointeeType();
+    if (mlir::isa<mlir::spirv::ArrayType, mlir::spirv::RuntimeArrayType>(
+            Pointee)) {
       Rewriter.eraseOp(Op);
       return mlir::success();
     }
@@ -3562,12 +3586,34 @@ public:
     if (!AddrOf)
       return Rewriter.notifyMatchFailure(Op, "base is not a variable address");
     auto It = Resources.find(AddrOf.getVariable());
-    if (It == Resources.end() || It->second.Count <= 1)
-      return Rewriter.notifyMatchFailure(Op, "not an arrayed block");
+    if (It == Resources.end())
+      return Rewriter.notifyMatchFailure(Op, "not a resource");
 
+    // (Roadmap H130) Whether this variable is an array of block instances
+    // at all is a structural property of its own declared type -- an
+    // `spirv::ArrayType` pointee -- not something `It->second.Count`'s
+    // *value* can answer on its own: a real `T blocks[1];` (a legal, if
+    // unusual, single-element instance array -- e.g. one of
+    // `dEQP-VK.ubo.random.basic_instance_arrays`'s own randomly-sized
+    // cases) still declares an `OpTypeArray`, and `getArrayedBlockCount`
+    // (populateSPIRVToLLVMTargetTypeConversions's own resource-collection
+    // loop) correctly records its real length -- 1 -- as `Count`, exactly
+    // like a genuinely non-arrayed block's `Count` defaults to 1 too. The
+    // old `It->second.Count <= 1` guard could not tell these two cases
+    // apart and silently declined the arrayed one, falling through to the
+    // ordinary (non-arrayed) `spirv::PointerType` conversion further down
+    // in this file, which cannot handle an `ArrayType`-of-`StructType`
+    // pointee at all and silently produces a raw `ptr` handle instead of a
+    // `spirv.VulkanBuffer` one -- surfacing many bindings/instructions
+    // later as `UnsupportedOps.cpp`'s own generic "cannot normalize"
+    // diagnostic, on a handle that may not even be the one whose actual
+    // access triggered the failure (see that diagnostic's own comment).
     auto PointerType = mlir::cast<mlir::spirv::PointerType>(AddrOf.getType());
     auto Array =
-        mlir::cast<mlir::spirv::ArrayType>(PointerType.getPointeeType());
+        mlir::dyn_cast<mlir::spirv::ArrayType>(PointerType.getPointeeType());
+    if (!Array)
+      return Rewriter.notifyMatchFailure(Op, "not an arrayed block");
+
     auto ElementPointerType = mlir::spirv::PointerType::get(
         Array.getElementType(), PointerType.getStorageClass());
 
@@ -3661,9 +3707,17 @@ public:
     if (!AddrOf)
       return Rewriter.notifyMatchFailure(Op, "base is not a variable address");
     auto It = Resources.find(AddrOf.getVariable());
-    if (It == Resources.end() || It->second.Count == 1)
-      return Rewriter.notifyMatchFailure(Op, "not an arrayed resource");
+    if (It == Resources.end())
+      return Rewriter.notifyMatchFailure(Op, "not a resource");
 
+    // (Roadmap H130) Do not gate on `It->second.Count == 1` here: a real
+    // `Texture2D Tex[1];`/`RWBuffer<T> Buf[1];` (a legal, if unusual,
+    // single-element resource array) is still an array structurally,
+    // and `getArrayedResourceCount` immediately below already answers
+    // that question correctly and structurally (an `ArrayType`/
+    // `RuntimeArrayType` pointee) -- see
+    // ArrayedBlockAccessChainPattern's own identical fix, immediately
+    // above, for the analogous array-of-*blocks* bug this mirrors.
     auto PointerType = mlir::cast<mlir::spirv::PointerType>(AddrOf.getType());
     std::optional<uint32_t> ArrayedCount =
         getArrayedResourceCount(PointerType);
