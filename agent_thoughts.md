@@ -83696,3 +83696,125 @@ other divergent-region ops already use, e.g. `feme.cpu.masked.store.*`).
    correctly with dependency wiring intact.
 10. No scratch files to clean up this session (recovery work used only
     file views and edits, nothing written to `/tmp`).
+
+# H124h fixed: divergent-branch WaveActive* reduce masking (H125 filed for the loop case)
+
+## What happened
+
+1. Built a minimal HLSL reproducer (`tid.x <= 1 ? WaveActiveSum(v.x) :
+   0`) and traced it by hand through every compiler phase
+   (`feme-translate --import-spirv` → `feme-opt
+   --feme-convert-spirv-to-llvm` → `--spirv-to-llvmir` →
+   `feme-cpu-prepare`/`-lower-spirv-resources`/`-lower-resources` →
+   `feme-cpu-linearize` → `feme-cpu-simdize`) to pin down exactly where
+   the wrong mask enters the pipeline.
+2. Confirmed at the `feme-cpu-simdize` output: the widened reduce call
+   used `%wave_entry_mask` (the whole 4-lane wave, always "all active")
+   instead of a mask reflecting which lanes actually took the `if`'s
+   branch.
+3. Compared against a correctly-masked resource store in the same
+   trace (`resource.mask = wave_sideeffect_mask AND
+   sideeffect.merge7.wide`) -- proved the masking *infrastructure*
+   already exists and works; the gap was specifically that reduce calls
+   never got threaded into it.
+4. Found the reason: `feme::cpu::LinearizePass::applyStageMasks`
+   already narrows a masked store's value and `WaveActiveBallot`'s own
+   predicate operand by the current block's `Masks.Live`/
+   `Masks.SideEffect` -- but never even looked at a raised
+   `llvm.{dx,spv}.wave.reduce.*`/`.product`/`.prefix.*` intrinsic at
+   all. `FunctionWidener::widenWaveCall` (`SIMDize.cpp`) downstream had
+   nothing narrower to use than `Env.EntryMask`.
+5. Fixed it the same way `WaveActiveBallot`'s predicate operand is
+   masked, but via `select(Masks.Live, Operand, Identity)` instead of a
+   plain `and` -- a reduce/scan operand is not always boolean, and even
+   a boolean `false` is not every kind's own identity (`ActiveBitAnd`'s
+   is all-ones, `ActiveMin`'s is the type's own max, etc.). Moved
+   `classifyWaveCall` (SIMDize.cpp) and `getReduceIdentity`
+   (WaveLowering.cpp) out of their file-local anonymous namespaces into
+   shared `feme::cpu` functions in `WaveCalls.h`/`.cpp` so
+   `Linearize.cpp` -- which runs *before* either of those passes --
+   could reuse both, rather than duplicating the logic a third time.
+6. Added 3 new lit tests under `feme/test/Transforms/CPU/Linearize/`:
+   the basic branch-gated-sum case, a non-zero-identity case
+   (`ActiveBitAnd`), and a vector-operand case (mirroring roadmap
+   H124a's own vector-decomposition shape).
+
+## Verification
+
+- `ninja check-feme`: **3026/3029 passed** (3 unsupported), 0 failed --
+  unchanged before/after.
+- `check-hlsl-feme-vk` full run (664 total): **286 passed, 91 failed,
+  260 unsupported, 26 XFAIL, 1 XPASS** -- was 278 passed/99 failed.
+  Every one of H124h's originally-cited cases now passes:
+  `WaveActiveSum.int32/.fp32/.convergence.test`, `WaveActiveMax.
+  fp32/int32.test`, `WaveActiveMin.fp32/int32.test`,
+  `WaveActiveBitXor.int.test`. 0 regressions.
+- `dEQP-VK.subgroups.arithmetic.*` (12087 cases): re-ran, still 100%
+  `NotSupported` -- unchanged, this device still doesn't advertise
+  `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT` (unrelated to this fix).
+
+## Committed (4 commits, small and separate)
+
+1. `e5f54bcca11d` -- pure refactor: `classifyWaveCall`/
+   `getReduceIdentity` moved to shared `WaveCalls.h`/`.cpp`, no
+   behavior change.
+2. `571a49ab7098` -- the actual `Linearize.cpp` masking fix + 3 new
+   lit tests.
+3. `bf13cc14f120` -- `Roadmap.md` (H124h struck through with the fix
+   summary, H125 filed for the residual).
+4. `1cd909030f15` -- `VulkanCTSReport.md` writeup + CTS sweep result.
+
+## Not done this session (now H125, new)
+
+**Divergent-*loop* `WaveActive*`/`WavePrefix*` reduce masking gap.**
+`WaveActiveBitXor.convergence.test` exercises 5 different shapes in one
+file (plain divergent branch, reconverged, uniform loop, divergent
+loop where each of the 4 lanes iterates a different number of times);
+this session's fix made 4 of the 5 (`ExpectedOut1`-`4`) pass, but
+`ExpectedOut5` (the divergent-loop case) still fails. This confirmed
+the residual bug is a genuinely different code path:
+`LoopLinearizer`'s own per-iteration masking (the roadmap H72 comment's
+`active.live`/`makeActivePNPair` naming), not `DiamondFlattener`'s
+`Masks.Live` this session's fix threads through. Not investigated
+further this session -- filed as a fresh top-level H125 (not nested
+under H124h, per the "no more than one lowercase letter deep" rule).
+
+## Suggested next steps, ranked
+
+1. **H125** (~1-2 hours, real investigation, newly filed this session):
+   the divergent-loop reduce-masking gap above -- highest priority
+   since it's the direct continuation of this session's own work, and
+   the reproducer already exists
+   (`offload-test-suite/test/WaveOps/WaveActiveBitXor.convergence.
+   test`'s own `ExpectedOut5`/`Out5` shader body, no new repro needed).
+   Start by tracing that exact shader through `feme-cpu-linearize`
+   (mirroring this session's own `feme-translate`/`feme-opt` chaining
+   recipe) to see what `LoopLinearizer` computes for `Masks.Live` inside
+   the loop body, and whether `applyStageMasks`'s new masking code (this
+   session's own fix) is even reached there with a non-constant mask.
+2. **H124d** (~1 hour): `"unhandled opcode 209"` (derivative family),
+   ~7 cases, still not started across 3+ sessions now.
+3. **H124c** (~1 hour, narrow/mechanical): missing fp16 vector
+   resource-load runtime intrinsics, ~2 cases.
+4. **H124b** (~1-2 hours): `CBuffer`/`Matrix` `spirv.AccessChain`
+   legalization gap, ~10 cases.
+5. **H124f** (~1 hour): scalar-only `GLSL.std.450`/`IsNan`/`IsInf`
+   vector legalization gaps, 8 cases (`isnan_mat.test` confirmed still
+   failing this session with exactly this signature).
+6. **H124e** (~2-4+ hours, not one bug): CPU divergence-handling
+   cluster, ~11 cases, needs per-case triage first.
+7. **`WaveActiveBitAnd.convergence.test`/`WaveActiveBitOr.convergence.
+   test`/`WaveActiveMax.test`** (no numeric suffix): confirmed still
+   failing this session but were **not** part of H124h's own cited
+   list -- likely distinct pre-existing bugs (possibly folding into
+   H124e or H124f, not yet confirmed which). Worth a quick triage pass
+   before assuming they're H125 duplicates.
+8. **H124g** (low priority): confirm `layout.test`'s `FileCheck`
+   mismatch is real; consider removing `array_of_matrices.test`'s stale
+   `XFAIL: DXC` upstream (in `offload-test-suite`, not this repo).
+9. **Still fully pending, now deferred 4+ sessions**:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption -- `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+10. Clean up `/tmp/h124h_repro/` (this session's own scratch files, low
+    priority, not part of the repo).
