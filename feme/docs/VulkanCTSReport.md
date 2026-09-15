@@ -42671,3 +42671,92 @@ the whole `deqp-vk` process before this fix; **zero** do now. Of the 54:
 canonicalization correctness fix, not a feature or extension gate.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
 confirmed unaffected.
+
+## Roadmap H115/H117/H118: root cause and fix (`spirv_var_N` JIT symbol errors) -- real fix lands, new H120 dominance crash exposed
+
+**Root cause.** A real extracted-CTS-SPIR-V IR reduction (`feme-translate
+--import-spirv` / `feme-opt -passes=feme-graphics-canonicalize-stage`
+against a `dEQP-VK.tessellation.user_defined_io.per_patch_block` shader's
+own real SPIR-V dump) confirmed all three rows share one root cause: a
+`Block`-decorated array-of-genuine-multi-member-nested-struct stage-IO
+member (`blockSa[2]` of `struct S { int; vec4; float[2]; }`) accessed
+through one or two genuinely non-constant (dynamic) GEP indices per
+invocation -- e.g. `blockSa[gl_InvocationID].z[j]`, where `gl_InvocationID`
+selects which `blockSa` instance and a second, independently loop-carried
+`j` selects a row within that instance's own `z` member (itself a
+two-element array). Neither `getDynamicRowIndexedAccess` (only ever
+modeled a single trailing non-constant index, roadmap H7w's
+`gl_ClipDistance[i]` shape) nor `getDynamicVertexIndexedAccess` (H92's
+sibling, same gap, not fixed this session) could resolve this shape,
+leaving the access an unrewritten raw store/dead address computation on a
+still-`external` SPIR-V-derived global -- an unresolvable symbol at
+JIT-link time (`"Symbols not found: [ spirv_var_N ]"`).
+
+**Fix.** `CanonicalizeStage.cpp` gained a new recursive
+`collectDynamicRowTerms` helper (mirroring `resolveNestedStageIOField`'s
+own compile-time recursion, but over a GEP's own index sequence) that
+walks every index in the GEP and accumulates one `(Value*, multiplier)`
+term per genuinely dynamic index found, where `multiplier` is that
+index's own leaf-specific `RowCount`; `combineDynamicRowTerms` then
+materializes the final flattened `Row` from these terms via `zext`/`mul`/
+`add` IR at the one call site (`resolveStageIOAccess`'s rewrite path) that
+actually needs a `Value*`, keeping the pure-discovery path
+(`getStageIOGlobal`) free of any `IRBuilder` dependency. A second, related
+gap was also fixed: a post-rewrite sweep now erases any
+`GetElementPtrInst` left with no uses at all (not just ones immediately
+following a successful load/store rewrite) that still addresses a
+stage-IO global -- real CTS SPIR-V contains dead per-invocation address
+computations, from unreachable-in-practice control-flow paths, that the
+prior `EraseIfNowDead` lambda never visited, so they kept referencing the
+same never-defined external global at JIT-link time even after every
+genuine load/store was fixed.
+
+**Regression check.** New unit test
+`CanonicalizeStageTest.ThreadsDoublyDynamicIndexIntoArrayOfNestedStructMemberOutputStore`
+(models the exact `blockSa[i].z[j]` shape from the real CTS SPIR-V dump,
+confirming both dynamic indices are threaded into one combined `Row` and
+neither the raw store nor any dead `GEP` against the original global
+survives). `ninja check-feme`: 3016/3019 pass (3 pre-existing
+unsupported, 0 failures) -- up one test from the new regression test, no
+regressions from the prior 3015/3018 baseline.
+
+**Real CTS run: new blocker found, not yet closed.** Running the actual
+`dEQP-VK.tessellation.user_defined_io.per_patch_block.vertex_io_array_size_implicit.isolines`
+case (and, identically, the whole 27-case H115/H117/H118 caselist) still
+crashes `deqp-vk` -- but with a **different** symptom than before: an
+`InstCombine` dominance assertion (`DT.dominates(BB, UserParent) &&
+"Dominance relation broken?"`, `InstructionCombining.cpp:5852`), confirmed
+via `gdb` backtrace to originate from `feme::OptimizerPipeline::run` ->
+`InstCombinePass`, during the domain (TES) stage's own compilation. A
+sequence of increasingly precise temporary (reverted before commit)
+module-dump diagnostics isolated the crash to IR captured immediately
+before `OptimizerPipeline().run()` -- i.e. **after** `LinearizePass`/
+`SIMDizePass` have already run on the module. Feeding the dumped Hull
+(both phases) and Domain stage modules through a bare `opt -O2` (no JIT
+involved at all) reproduces the identical dominance failure in isolation,
+confirming this is not a JIT-specific or `CanonicalizeStage`-specific bug:
+it is a **latent bug in `SIMDizePass`/`LinearizePass`'s own side-effect-
+mask (`live.merge`/`sideeffect.merge` `phi`) construction** around
+`StructurizeCFG`'s "Flow" reconvergence blocks, for the specific
+divergent-control-flow shape these array-of-struct per-invocation writes
+now produce -- newly *reachable* only because this session's fix makes
+the underlying stores properly recognized `feme.stage.output.store` calls
+(previously left as raw stores `SIMDize` never recognized as
+side-effecting at all, so this code path was never exercised for this
+shape before). Filed as new roadmap row **H120** (P3, depends on H115) --
+the sole remaining blocker for H115/H117/H118's full closure (27 cases).
+Not yet root-caused; needs a focused `Linearize.cpp`/`SIMDize.cpp`
+investigation starting from the already-captured, already-reproducing
+dumped IR (not preserved past this session -- easily re-captured via the
+same temporary dump-point technique, documented in `agent_thoughts.md`).
+
+**H116/H119 (unchanged this session).** Both remain open, untouched:
+`per_patch_array.*` still fails with `"Invalid input value in
+tessellation evaluation shader"` (re-confirmed this session, 0/3 sampled
+cases pass); `H119`'s `isolines`-only image-comparison failures were not
+re-run (no code path of this session's change touches them).
+
+**Feature/extension bits.** No change: this is an internal IR-
+canonicalization correctness fix (plus a newly-discovered, not-yet-fixed
+optimizer-pipeline bug). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, confirmed unaffected.
