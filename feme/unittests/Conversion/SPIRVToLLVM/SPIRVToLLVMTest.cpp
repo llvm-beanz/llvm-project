@@ -411,6 +411,41 @@ TEST(SPIRVToLLVMTest, NestedMultiMemberStructInterfaceBlockLegalizes) {
       << Result;
 }
 
+// (Roadmap H129) A multi-member interface block whose members are
+// declared out of physical (ascending-offset) order AND whose
+// physically-first member's own natural size undershoots the byte gap to
+// its physically-second member -- an *interior* gap, as opposed to a
+// *leading* one before the first physical member -- used to fail
+// `spirv.GlobalVariable` legalization outright:
+// layOutStructIfOffsetsMatch only ever synthesized a pad *before* the
+// first physically-ordered member (structHasLeadingOffsetPad's shape),
+// never one *between* two already-physically-adjacent members. Real
+// `dEQP-VK.ubo.random.all_out_of_order_offsets.*` fuzz cases routinely
+// declare a struct shaped exactly like this one. This is distinct from
+// OutOfOrderOffsetInterfaceBlockLegalizes above (H101p), which covers
+// reordering alone with no gap to fill. layOutStructIfOffsetsMatch now
+// accepts an `AllowInteriorPad` retry tier (tried only after every other
+// existing retry has already failed) that synthesizes the missing
+// interior pad, and OffsetStructMemberReorderAccessChainPattern's own
+// member-selecting access-chain rewrite consults the resulting
+// declared-to-physical index map (via getStructMemberPhysicalIndex)
+// instead of the reordering-only Order/HasPad logic H101p introduced.
+TEST(SPIRVToLLVMTest, InteriorOffsetGapInterfaceBlockLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : "
+      "!spirv.ptr<!spirv.struct<(f32 [16], i32 [0]), Block>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  // The physically-first (lowest-offset) member is the `i32` declared
+  // second; its own 4-byte natural size leaves a 12-byte interior gap
+  // before the `f32` declared first, which its own 4-byte alignment can
+  // never reach unaided, so an explicit pad must be synthesized between
+  // them.
+  EXPECT_NE(Result.find("!llvm.struct<(i32, array<12 x i8>, f32)>"),
+            std::string::npos)
+      << Result;
+}
+
 /// Builds a one-`llvm.mlir.global` `mlir::ModuleOp` carrying
 /// getStageIODecorationsAttrName() with \p Decorations (each inner
 /// `ArrayRef<int32_t>` one `(decoration, arg...)` tuple), the shape
