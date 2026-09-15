@@ -42985,3 +42985,103 @@ tessellation-control-splitting correctness fix (which stores belong in
 which split phase), not a new feature or extension.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
 confirmed unaffected.
+
+## H119/H122: root cause and fix (isoline-domain output primitive misclassified as a triangle)
+
+**Root cause.** `dEQP-VK.tessellation.user_defined_io.{per_patch,
+per_vertex,per_patch_block}.vertex_io_array_size_*.isolines` (9 cases
+combined: H119's 6 + H122's 3) ran to completion with no crash and no
+pipeline-creation error, but failed image comparison. A channel-level
+pixel reduction (mirroring H88's own closing technique: `deqp-vk -n
+<case> --deqp-log-images=enable`, then base64-decoding the `Result`/
+`Reference`/`ErrorMask` PNGs embedded in the `.qpa` log and diffing them
+with PIL) on one representative case
+(`per_patch.vertex_io_array_size_implicit.isolines`) showed the
+`Result` image was **entirely black** at all 65536 pixels -- not a
+subtle mismatch, but zero rasterized primitives at all, versus a
+`Reference` image with 768 pixels of solid green forming 5 horizontal
+isoline strips.
+
+Tracing FeMe's isoline pipeline (`Tessellator.cpp`'s `tessellateIsoline`,
+`Executor.cpp`'s line-rasterization path) found both structurally
+correct; `tessellateIsoline`'s own line-index-generation loop is
+unconditionally guarded by `if (OutputPrimitive != TessOutputPrimitive::
+Line) continue;`, which is correct in isolation. The bug was upstream:
+reading the real CTS test source
+(`vktTessellationUserDefinedIO.cpp`) to reconstruct the exact TCS/TES
+GLSL these cases compile, then building a minimal glslang reproducer
+(`layout(isolines) in;` TES, `glslangValidator -H`) revealed that
+**glslang always emits a `VertexOrderCw`/`VertexOrderCcw` execution
+mode for every tessellation-evaluation entry point, regardless of
+domain**, even though vertex order is spec-meaningless for the isoline
+domain (only `Triangles`/`Quads` domains give it meaning).
+
+In `ConvertSPIRVToLLVMPass.cpp`, the execution-mode-collection switch
+wrote `VertexOrderCw`/`VertexOrderCcw` (and `PointMode`) directly into
+the shared `EntryPointInfo::TessOutputPrimitive` field -- the same field
+the post-loop isoline-default fixup only filled in `if (!Info.
+TessOutputPrimitive)`. Since SPIR-V's execution-mode ops for one entry
+point can appear in any order, and glslang always emits the spurious
+vertex-order mode for isoline shaders, `TessOutputPrimitive` was always
+already set to `TriangleCcw`/`TriangleCw` by the time the fixup ran, so
+the fixup's own isoline-default-to-`Line` branch never fired. Every
+isoline-domain shader in practice therefore had its output primitive
+misclassified as a triangle, and `tessellateIsoline`'s `!= Line` guard
+silently discarded every line index it would otherwise have produced --
+a real, fully-rendered-but-invisible failure (patches with vertex
+positions computed but no connecting primitive indices at all).
+
+**Fix.** `ConvertSPIRVToLLVMPass.cpp`'s `EntryPointInfo` now tracks
+`TessVertexOrder` (`std::optional<TessOutputPrimitive>`) and
+`TessPointMode` (`bool`) as their own dedicated fields, populated
+directly from the `PointMode`/`VertexOrderCw`/`VertexOrderCcw`
+execution-mode cases instead of writing into `TessOutputPrimitive`.
+The post-loop fixup now unconditionally computes the final
+`TessOutputPrimitive` from `TessDomain`/`TessPointMode`/
+`TessVertexOrder` in one place: for an `Isoline` domain, it is always
+`TessPointMode ? Point : Line` (vertex order is never consulted); for
+`Triangle`/`Quad` domains, it is `TessPointMode ? Point :
+TessVertexOrder` (preserving prior behavior for the domains where
+vertex order is meaningful).
+
+**Verification.**
+- New unit test `GraphicsPipelineTest.
+  IsolineDomainOutputsLineDespiteVertexOrderMode`: a new
+  `TessEvalIsolineWithVertexOrderSource` MLIR-spirv literal declaring
+  `Isolines`+`SpacingEqual`+`VertexOrderCcw` together (mirroring the
+  real glslang-emitted shape) asserts the merged
+  `Executor.getTessellationState().OutputPrimitive ==
+  TessOutputPrimitive::Line`. Confirmed to **fail** without the fix
+  (`OutputPrimitive` resolves to `TriangleCcw`) via a temporary
+  `git stash` of the fix, and pass with it restored.
+- `ninja check-feme`: **3019/3022 passed, 3 unsupported** (up from
+  3018/3021 -- the new test above accounts for the +1, no regressions).
+- Real CTS re-run (`VK_ICD_FILENAMES` pointed at a freshly rebuilt
+  `libfeme_vulkan.so`):
+  - The `per_patch.vertex_io_array_size_implicit.isolines` repro case:
+    `Fail (Image comparison failed)` -> `Pass (OK)`.
+  - `dEQP-VK.tessellation.user_defined_io.*` (54 cases): **18/54 ->
+    27/54 pass** -- exactly the expected +9 (H119's 6 + H122's 3). The
+    remaining 27 failures are confirmed to be exactly H116's 9 cases
+    (`per_patch_array.*`, "Invalid input value", untriaged, unaffected)
+    plus H117/H118's 18 cases (`per_patch_block_array.*`/
+    `per_vertex_block.*`, `spirv_var_43`/`spirv_var_31` JIT errors,
+    unaffected) -- no new failures.
+  - `dEQP-VK.tessellation.*` (1114 cases, broader sanity sweep): **164
+    -> 181 pass** (+17), 432 -> 415 fail (-17), 518 not supported
+    unchanged. The extra +8 beyond `user_defined_io.*`'s own +9 are
+    `dEQP-VK.tessellation.misc_draw.isolines_*` (6 cases: equal/
+    fractional-even/fractional-odd spacing, each with a `_draw` and
+    `_draw_indirect` variant) and
+    `dEQP-VK.tessellation.geometry_interaction.passthrough.*isolines*`
+    (2 cases) -- the same bug affecting every isoline-domain shader
+    across the whole tessellation test group, not only the
+    `user_defined_io` row it was originally filed under. No new
+    crashes or hangs observed.
+
+**Feature/extension bits.** No change: this is an internal
+SPIR-V-execution-mode-collection correctness fix (isoline domains never
+had a real `TessOutputPrimitive::Line` in practice before this fix), not
+a new feature or extension surface.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed,
+confirmed unaffected.
