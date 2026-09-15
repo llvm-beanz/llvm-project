@@ -615,4 +615,86 @@ TEST(SPIRVToLLVMTest, AttachStageIOMemberDecorationsIgnoresMissingGlobals) {
   feme::spirv::attachStageIOMemberDecorations(MemberDecorations, LLVMModule);
 }
 
+/// Builds a `spirv.module` with two `spirv.GlobalVariableOp`s sharing both
+/// \p Name and \p Set / \p Binding -- the shape observed from DXC's own
+/// bindless-heap (`ResourceDescriptorHeap`/`SamplerDescriptorHeap`) codegen,
+/// where more than one `OpVariable` can carry an identical `OpName` and
+/// descriptor-set/binding pair. MLIR's SPIR-V deserializer builds such ops
+/// directly via `OpBuilder` without re-verifying symbol uniqueness
+/// afterward, so this constructs the same (otherwise ill-formed) shape the
+/// same way, bypassing the parser's own verifier.
+mlir::OwningOpRef<mlir::spirv::ModuleOp>
+buildDuplicateHeapGlobals(mlir::MLIRContext &Ctx, llvm::StringRef Name,
+                          uint32_t Set, uint32_t Binding) {
+  Ctx.loadDialect<mlir::spirv::SPIRVDialect>();
+  Ctx.loadDialect<mlir::LLVM::LLVMDialect>();
+  mlir::OpBuilder Builder(&Ctx);
+  auto Loc = mlir::UnknownLoc::get(&Ctx);
+  auto Module = mlir::spirv::ModuleOp::create(
+      Builder, Loc, mlir::spirv::AddressingModel::Logical,
+      mlir::spirv::MemoryModel::GLSL450);
+  Builder.setInsertionPointToStart(Module.getBody());
+
+  auto SamplerTy = mlir::spirv::SamplerType::get(&Ctx);
+  auto ArrayTy = mlir::spirv::RuntimeArrayType::get(SamplerTy);
+  auto PointerTy = mlir::spirv::PointerType::get(
+      ArrayTy, mlir::spirv::StorageClass::UniformConstant);
+
+  for (unsigned I = 0; I != 2; ++I) {
+    auto Global = mlir::spirv::GlobalVariableOp::create(
+        Builder, Loc, mlir::TypeAttr::get(PointerTy),
+        Builder.getStringAttr(Name), mlir::FlatSymbolRefAttr());
+    Global.setDescriptorSetAttr(Builder.getI32IntegerAttr(Set));
+    Global.setBindingAttr(Builder.getI32IntegerAttr(Binding));
+  }
+
+  auto EntryFn = mlir::spirv::FuncOp::create(
+      Builder, Loc, "entry",
+      Builder.getType<mlir::FunctionType>(
+          llvm::ArrayRef<mlir::Type>(), llvm::ArrayRef<mlir::Type>()),
+      mlir::spirv::FunctionControl::None);
+  EntryFn.addEntryBlock();
+  Builder.setInsertionPointToEnd(&EntryFn.getBody().front());
+  mlir::spirv::ReturnOp::create(Builder, Loc);
+  Builder.setInsertionPointToEnd(Module.getBody());
+  mlir::spirv::EntryPointOp::create(Builder, Loc,
+                                    mlir::spirv::ExecutionModel::GLCompute,
+                                    llvm::StringRef("entry"),
+                                    Builder.getArrayAttr({}));
+
+  return mlir::OwningOpRef<mlir::spirv::ModuleOp>(Module);
+}
+
+// DXC can emit two `spirv.GlobalVariableOp`s for the same bindless
+// descriptor heap (identical `OpName`, `DescriptorSet`, and `Binding`), and
+// MLIR's own SPIR-V deserializer does not de-duplicate them, so
+// `prepareResourceVariables` must not try to define two colliding
+// `<name>.str` LLVM globals for them -- it should recognize the second
+// declaration as the same heap and reuse the first one's name-global.
+TEST(SPIRVToLLVMTest, PrepareResourceVariablesDedupesDuplicateHeapGlobals) {
+  mlir::MLIRContext Ctx;
+  mlir::OwningOpRef<mlir::spirv::ModuleOp> Module =
+      buildDuplicateHeapGlobals(Ctx, "SamplerDescriptorHeap", /*Set=*/0,
+                                /*Binding=*/3);
+
+  feme::spirv::ResourceInfoMap Resources =
+      feme::spirv::prepareResourceVariables(*Module);
+
+  ASSERT_TRUE(Resources.count("SamplerDescriptorHeap"));
+  const feme::spirv::ResourceInfo &Info =
+      Resources["SamplerDescriptorHeap"];
+  EXPECT_EQ(Info.DescriptorSet, 0u);
+  EXPECT_EQ(Info.Binding, 3u);
+
+  // Only one name-global should have been created for the pair, and it
+  // must be a real, unique symbol in the module (no ".str" suffix
+  // collision from the second, duplicate declaration).
+  unsigned NameGlobalCount = 0;
+  for (auto NameGlobal : Module->getOps<mlir::LLVM::GlobalOp>()) {
+    EXPECT_EQ(NameGlobal.getSymName(), Info.NameSymbol);
+    ++NameGlobalCount;
+  }
+  EXPECT_EQ(NameGlobalCount, 1u);
+}
+
 } // namespace

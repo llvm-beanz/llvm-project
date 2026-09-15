@@ -8753,6 +8753,19 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
   mlir::OpBuilder Builder(Module.getContext());
   Builder.setInsertionPointToStart(Module.getBody());
 
+  // Some producers (observed from DXC for `ResourceDescriptorHeap`/
+  // `SamplerDescriptorHeap` bindless-heap accesses) emit more than one
+  // `spirv.GlobalVariableOp` for what is really the same descriptor-heap
+  // binding: every such duplicate shares the same `OpName` (so MLIR's own
+  // SPIR-V deserializer can hand back more than one op with an identical,
+  // non-unique `sym_name`) and the same `(DescriptorSet, Binding)` pair.
+  // Track the name-global already created for each `(Set, Binding)` pair so
+  // a second occurrence reuses it instead of trying to define another LLVM
+  // global with the same (now colliding) name -- `Table` only reflects the
+  // SPIR-V module's symbols as of its construction above, so it cannot see
+  // the LLVM globals this loop itself creates.
+  llvm::DenseMap<std::pair<uint32_t, uint32_t>, std::string> HeapNameGlobals;
+
   for (auto Global : Module.getOps<mlir::spirv::GlobalVariableOp>()) {
     auto PointerType =
         mlir::dyn_cast<mlir::spirv::PointerType>(Global.getType());
@@ -8774,6 +8787,17 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
       continue;
 
     llvm::StringRef SymName = Global.getSymName();
+
+    auto HeapKey = std::make_pair(*Set, *Binding);
+    auto HeapIt = HeapNameGlobals.find(HeapKey);
+    if (HeapIt != HeapNameGlobals.end()) {
+      // A duplicate declaration of the same descriptor-heap binding: reuse
+      // the name-global already created for it instead of defining another
+      // one under a colliding name.
+      Resources[SymName] = {*Set, *Binding, HeapIt->second, Count};
+      continue;
+    }
+
     std::string NameSymbol = (SymName + ".str").str();
     for (unsigned Suffix = 0; Table.lookup(NameSymbol); ++Suffix)
       NameSymbol = (SymName + ".str." + llvm::Twine(Suffix)).str();
@@ -8786,6 +8810,7 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
         mlir::LLVM::LLVMArrayType::get(Builder.getI8Type(), Contents.size()),
         /*isConstant=*/true, mlir::LLVM::Linkage::Private, NameSymbol,
         Builder.getStringAttr(Contents));
+    HeapNameGlobals[HeapKey] = NameSymbol;
     Resources[SymName] = {*Set, *Binding, NameSymbol, Count};
   }
   return Resources;
