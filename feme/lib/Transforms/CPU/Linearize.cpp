@@ -703,11 +703,37 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
         Br && isInCycle(Cur) &&
         (isLoopControlEdge(Cur, Br->getSuccessor(0)) ||
          isLoopControlEdge(Cur, Br->getSuccessor(1)))) {
-      // Roadmap H95a: record the real mask reaching this cycle's boundary
-      // here, so `run` can seed that cycle's exit-block root(s) with it
-      // below instead of assuming every lane unconditionally reaches them.
-      CycleBoundaryMasks[Cur] = Masks;
-      return Masks;
+      // Roadmap H120: this exact cycle boundary block can be reached (and
+      // hence recorded here) by more than one distinct `flatten` walk --
+      // e.g. once as part of an *enclosing* uniform diamond's own
+      // recursive arm walk (whose `validate` call stopped early right
+      // here, at a nested cycle, without ever confirming that arm reaches
+      // its own reconvergence point -- see `validate`'s identical early
+      // return just above), and again, separately, when that nested
+      // cycle's own exit block is later flattened as its own root (see
+      // `run`) and that walk's continuation happens to reach this same
+      // outer boundary block a second time via a single, incomplete path
+      // (one arm only) rather than the enclosing diamond's own properly
+      // two-arm-merged mask. Whichever walk reaches `Cur` *first* -- by
+      // `run`'s own root-processing order, always the enclosing region's
+      // complete, every-arm-merged walk, since a nested cycle's own exit
+      // root is only ever discovered (and so only ever queued) *after*
+      // the walk that reaches it as a boundary in the first place -- is
+      // the correct, authoritative one; a later walk reaching the same
+      // `Cur` through only one of several structural paths must not
+      // clobber it, or a genuine two-predecessor merge like this one can
+      // end up seeded with a mask that provably does not dominate one of
+      // `Cur`'s own real successors (this row's own crash: an
+      // `InstCombine` "Dominance relation broken?" assertion on exactly
+      // this shape, confirmed via temporary tracing that the second,
+      // narrower recording was silently overwriting the first, correct
+      // one here). Return whichever `MaskPair` is now authoritative for
+      // `Cur` (the freshly-inserted one, or the pre-existing one this
+      // walk must defer to) rather than this walk's own possibly-stale
+      // local `Masks`, so a caller using this return value (e.g. as one
+      // arm's `TExit`/`FExit` of an *enclosing* diamond) never observes a
+      // different answer than a second walk reaching the same `Cur` would.
+      return CycleBoundaryMasks.try_emplace(Cur, Masks).first->second;
     }
 
     applyStageMasks(*Cur, Masks, &MaskedLoadResults);
