@@ -84495,3 +84495,95 @@ Scratch files cleaned up this session: `/tmp/oo38.*`, `/tmp/t1.mlir`,
 `/tmp/t2.mlir`, `/tmp/repro_ccstruct.mlir`, `/tmp/repro_ccstruct2.mlir`,
 `/tmp/before.out`, `/tmp/ubo_h129_full.qpa`, `/tmp/ubo_h129_fails.txt`,
 `/tmp/ubo_h129_fails_verbose.log`.
+
+# Session: H129 fixed (matrix column-select/scalar-element AccessChain)
+
+**Done this session.** H129 closed. `dEQP-VK.ubo.*` full sweep:
+401 -> 73 failing cases (5286 -> 5614 passing). Zero regressions
+(confirmed by a full 13,240-case pass/fail diff). 3 commits made.
+
+## What happened, in order
+
+1. Picked up mid-investigation: prior session already classified the
+   236 H129 failures as "column-select" (`matrix[col]`, 3-operand
+   AccessChain), split 168 RowMajor / 68 ColMajor.
+2. Fixed ColMajor column-select (single GEP, `member_base +
+   col*Stride`) and RowMajor column-select (new
+   `MatrixColumnLoadPattern`/`MatrixColumnStorePattern`, gather/scatter
+   per row) inside `rewriteBlockAccess`.
+3. Ran the full CTS sweep to measure impact: **no change** (still
+   401 failing). Investigation showed the same 236 shader files *also*
+   use scalar-element access (`matrix[col][row]`, 4-operand
+   AccessChain) elsewhere in the same shader — fixing column-select
+   alone never unblocked any test end-to-end.
+4. Fixed scalar-element access too (turned out simpler than
+   column-select for both majors: one GEP through a physical
+   `array<MajorCount x MajorEntryTy>` type, col/row swapped by
+   majorness). Resolved entirely inline, no new pattern needed.
+5. Rebuilt, ran `check-feme`: 3045/3048 passed, 0 failed.
+6. Ran the full CTS sweep again: **5614 passed / 73 failed** (was
+   5286/401) — 328 net new passes, zero remaining "failed to
+   legalize" errors.
+7. Investigated a suspected regression (4 cases with new
+   `llvm.getelementptr` errors). **Diffed the full 13,240-case
+   pass/fail list between the column-select-only run and the final
+   run**: 0 regressions, 328 improvements. The 4 GEP-error cases were
+   already failing, with the identical error, in *both* runs — false
+   alarm from an earlier, incomplete spot-check. Root cause: they hit
+   H131's own already-documented "multi-level nested reordered struct"
+   limitation, just never reached until H129 unblocked the rest of
+   their shaders.
+8. Classified all 73 remaining failures by full-body log parse (not
+   just a short lookback): 69 "cannot normalize" resource-binding
+   cases, 4 nested-struct-reorder-gap cases (folds into H131's known
+   limitation, not new).
+9. Found (not fixed) a new latent bug while scoping the "invalid" lit
+   test: `isMatrixMemberLayoutRepresentable` never unwraps a
+   `dxc`-wrapper member's array-of-Matrix element type, so a
+   wrapper-shape RowMajor/padded partial matrix access is silently
+   never declined. No known real CTS case hits it. Filed as **H132**.
+10. Updated `Roadmap.md` (H129 struck through, H130 re-scoped with the
+    real final numbers, H132 filed), `FeMeVulkanDesign.md` (new H129
+    design narrative), `VulkanCTSReport.md` (full session report).
+11. 3 commits: (a) core fix in `SPIRVToLLVMPatterns.cpp`, (b) lit
+    tests, (c) docs.
+
+## Lesson worth keeping
+
+A spot-check of a handful of cases ("did test X pass before? does it
+pass now?") is not enough to confirm or deny a regression — it found a
+false positive here. A full before/after diff across every case in the
+sweep is cheap (a few seconds of Python over the two log files) and
+gives a definitive answer. Do this by default before reporting any
+suspected regression from a CTS-scale run.
+
+## Next steps, ranked
+
+1. **H130** (~1-2 hours to start, real triage): 69 cases,
+   `"...is a register-bound resource handle the FeMe CPU target cannot
+   normalize..."` — single common diagnostic, no nested-struct-remap
+   refactor needed. Start with `FEME_VULKAN_LOG_CREATION_ERRORS=1` on
+   a handful of cases to find the first common struct/resource shape.
+2. **The 4-case nested-struct-reorder gap** (~2-3 hours, real design
+   work, described in H131's own closing note and H130's updated row):
+   extend `OffsetStructMemberReorderAccessChainPattern`'s (and
+   `rewriteBlockAccess`'s) declared-to-physical remap to recurse into a
+   second level of struct nesting, not just the first selector past
+   `Selector`.
+3. **H132** (~1 hour, narrow, no known CTS case): fix
+   `isMatrixMemberLayoutRepresentable` to unwrap a wrapper member's
+   array-of-Matrix element type before checking decorations. Low
+   urgency since nothing currently exercises it, but cheap and
+   defensive.
+4. **H124f** (~2-4+ hours, still not started across many sessions):
+   `spirv.GL.Normalize`/`spirv.GL.Length`/`spirv.IsNan`/`spirv.IsInf`
+   on vector operands have no legalization pattern at all.
+5. Lower priority, deferred 11+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+Scratch files from this session, not yet cleaned up:
+`/tmp/h129_regress*.log`, `/tmp/h129_regress*.qpa`,
+`/tmp/h129_case47_*.{spvasm,mlir,spv}`, `/tmp/ubo_full_h129_fix*.log`,
+`/tmp/ubo_full_h129_fix*.qpa`.
