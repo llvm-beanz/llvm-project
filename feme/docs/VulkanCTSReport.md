@@ -43839,3 +43839,114 @@ types); not fully triaged this session, out of scope for H124b/H124i.
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change:
 this is a `SPIRVToLLVMPatterns.cpp` type-legalization fix, not a
 feature/extension gate.
+
+## Session: H124i retracted -- root cause was a regression in H124b's own poison-hack fix
+
+**H124i was misdiagnosed.** The prior session filed H124i as a
+genuinely distinct bug (dynamic row/scalar-element `spirv.AccessChain`
+into a `cbuffer` matrix member reading back the wrong data, e.g.
+`mat_cbuffer.f32.test`'s `M_f2x4[0]`/`M_f2x4[1]` both returning row 0's
+values). Investigating it this session found it is not independent at
+all: it is H124b's own declined "partial access into a non-naturally-
+representable matrix member" shape (the exact scope H124b's own commit
+message says it "intentionally still declines"), now silently
+miscompiling instead of hard-failing, because H124b's own fix for a
+different problem broke the failure path.
+
+**The regression.** H124b's `rewriteBlockAccess` rejection for this
+shape used:
+```cpp
+Op.emitOpError("partial access ... is not yet supported");
+Rewriter.replaceOpWithNewOp<mlir::LLVM::PoisonOp>(Op, ResultType);
+return mlir::success();
+```
+`emitOpError` only emits a diagnostic -- it does not itself fail the
+enclosing conversion pattern. Returning `mlir::success()` tells MLIR's
+dialect conversion driver the op converted successfully (to poison), so
+`applyPartialConversion`/`applyFullConversion` for the *whole module*
+reports success despite the printed error text. A real shader hitting
+this declined shape therefore compiled, its pipeline was created, and
+it ran to completion with a poison value silently substituted for every
+declined access -- worse than the pre-H124b behavior (a hard, loud
+`"failed to legalize operation 'spirv.AccessChain' that was explicitly
+marked illegal"` compile failure, never producing a working-but-wrong
+pipeline at all). Confirmed directly: re-running `mat_cbuffer.f32.test`
+against the pre-fix build printed 9 `emitOpError` diagnostics to stderr
+(2 for `M_f2x4`, 3 for `M_f3x2`, 4 for `M_f4x2`) yet still logged
+"Compute Pipeline created" / "Dispatched compute shader" / "Executed
+compute command buffer" -- the diagnostics were purely cosmetic.
+
+**Why the poison-hack existed in the first place.** H124b's own commit
+message explains it was needed because, once the containing struct type
+started converting successfully, upstream MLIR's generic
+`spirv::AccessChainPattern` (`mlir/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVM.cpp`) became reachable as a lower-benefit fallback for this
+exact declined shape, and (never expecting a `spirv.VulkanBuffer`-handle
+base pointer) blindly built an ill-typed `llvm.getelementptr` from it --
+previously masked only because the base pointer itself never converted
+either. A plain `notifyMatchFailure` from `rewriteBlockAccess` alone was
+not enough to prevent that broken fallback from being tried next.
+
+**The real fix: close the fallback gap directly, instead of consuming
+the op.** Added a guard to upstream's own `AccessChainPattern::
+matchAndRewrite` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`):
+decline via `notifyMatchFailure` whenever the (already-converted) base
+operand is not a genuine `LLVM::LLVMPointerType`. This is the correct,
+minimal fix for the actual gap that motivated the poison-hack -- with
+this guard in place, upstream's fallback pattern now correctly declines
+the same `spirv.VulkanBuffer`-handle-typed base pointer instead of
+building a broken GEP from it. `rewriteBlockAccess` could then revert
+its own rejection to a plain `Rewriter.notifyMatchFailure(...)`, exactly
+mirroring every other declined shape in this function. With *no*
+pattern left willing to legalize the op, MLIR's dialect conversion
+driver itself now correctly reports the standard hard failure
+(`"failed to legalize operation 'spirv.AccessChain' that was explicitly
+marked illegal"`) -- restoring the pre-H124b, safe, loud behavior, while
+still keeping H124b's own real fix (whole-matrix access) intact.
+`spirv-to-llvm-matrix-block-invalid.mlir`'s two `expected-error` cases
+reverted to match this restored diagnostic text.
+
+Note this file (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) is
+not pristine upstream in this tree -- prior feme sessions have already
+made targeted, well-justified fixes to it directly (e.g. zero-index
+`spirv.AccessChain` crash fix, signed/unsigned `SNegate`/`Not` source
+fix), so extending it further here for the same reason is consistent
+with established practice, not a new precedent.
+
+**Verification.**
+- `feme-opt --feme-convert-spirv-to-llvm --verify-diagnostics
+  --split-input-file spirv-to-llvm-matrix-block-invalid.mlir`: both
+  cases now correctly produce `"failed to legalize operation
+  'spirv.AccessChain' that was explicitly marked illegal"`.
+- `ninja check-feme`: **3040/3043 passed** (3 unsupported), 0 failed --
+  no regressions from the upstream `AccessChainPattern` guard (broadly
+  used across SPIR-V-to-LLVM conversion, not feme-specific).
+- Re-ran all 10 `Feature/CBuffer/Matrix/{MatrixElement,MatrixSubscript,
+  SingleSubscript}/*` cases individually: all 10 now hard-fail at
+  pipeline creation (`VkResult = -3`, `"failed to legalize operation
+  'spirv.AccessChain'..."`) instead of silently succeeding with poison
+  data -- the safe, correct outcome for a still-unimplemented capability
+  gap. `check-hlsl-feme-vk` full re-run (664 total): 302 passed, 75
+  failed, 260 unsupported, 26 XFAIL, 1 XPASS -- unchanged pass/fail
+  counts from before this session's fix (these 10 cases were already
+  counted `Failed` by `check-hlsl-feme-vk`'s own buffer-comparison
+  check; what changed is *why* they fail, not whether they're counted
+  as failing).
+- `dEQP-VK.ubo.*` full re-run (13,240 cases): 3692 passed, 1995 failed,
+  7553 not supported, zero crashes. No occurrence of the new
+  `"explicitly marked illegal"` diagnostic anywhere in this run's own
+  log, confirming this fix does not touch any currently-exercised
+  `dEQP-VK.ubo.*` code path. The failed-case count (1995) differs
+  slightly from the previous session's own untriaged sweep (1915) but
+  is very likely pre-existing variance/flakiness in that still-untriaged
+  1915-case bucket, not a regression from this session's change --
+  still flagged as an open item for whoever next triages that bucket.
+  No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change:
+  this is a `SPIRVToLLVMPatterns.cpp`/`SPIRVToLLVM.cpp` correctness fix,
+  not a feature/extension gate.
+
+**Roadmap.** H124i retracted (struck through, folded back into H124b's
+own row, which now documents both the original whole-matrix fix and
+this session's regression/fix in one place) rather than kept as an
+independent milestone, since it was never actually a distinct,
+unscoped gap.
