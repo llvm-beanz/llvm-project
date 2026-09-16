@@ -4511,6 +4511,7 @@ def SPIRV_OC_OpCopyMemory                     : I32EnumAttrCase<"OpCopyMemory", 
 def SPIRV_OC_OpAccessChain                    : I32EnumAttrCase<"OpAccessChain", 65>;
 def SPIRV_OC_OpInBoundsAccessChain            : I32EnumAttrCase<"OpInBoundsAccessChain", 66>;
 def SPIRV_OC_OpPtrAccessChain                 : I32EnumAttrCase<"OpPtrAccessChain", 67>;
+def SPIRV_OC_OpArrayLength                    : I32EnumAttrCase<"OpArrayLength", 68>;
 def SPIRV_OC_OpInBoundsPtrAccessChain         : I32EnumAttrCase<"OpInBoundsPtrAccessChain", 70>;
 def SPIRV_OC_OpDecorate                       : I32EnumAttrCase<"OpDecorate", 71>;
 def SPIRV_OC_OpMemberDecorate                 : I32EnumAttrCase<"OpMemberDecorate", 72>;
@@ -4772,6 +4773,7 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpImageTexelPointer,
       SPIRV_OC_OpLoad, SPIRV_OC_OpStore, SPIRV_OC_OpCopyMemory,
       SPIRV_OC_OpAccessChain, SPIRV_OC_OpInBoundsAccessChain, SPIRV_OC_OpPtrAccessChain,
+      SPIRV_OC_OpArrayLength,
       SPIRV_OC_OpInBoundsPtrAccessChain, SPIRV_OC_OpDecorate,
       SPIRV_OC_OpMemberDecorate, SPIRV_OC_OpVectorExtractDynamic,
       SPIRV_OC_OpVectorInsertDynamic, SPIRV_OC_OpVectorShuffle,

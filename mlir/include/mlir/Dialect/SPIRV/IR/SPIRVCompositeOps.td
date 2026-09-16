@@ -337,4 +337,45 @@ def SPIRV_VectorShuffleOp : SPIRV_Op<"VectorShuffle", [
 
 // -----
 
+def SPIRV_ArrayLengthOp : SPIRV_Op<"ArrayLength", []> {
+  let summary = "Length of a run-time array.";
+
+  let description = [{
+    Result Type must be an OpTypeInt with 32-bit Width and 0 Signedness.
+
+    Structure must be an object of type OpTypePointer whose Pointee Type is
+    OpTypeStruct, and that pointer must point to the base of a structure
+    containing a member that is a run-time array.
+
+    Array member is a Literal, a member number of Structure that must have
+    a type OpTypeRuntimeArray.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.ArrayLength %structure[1] :
+      !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$structure,
+    I32Attr:$array_member
+  );
+
+  let results = (outs
+    SPIRV_Int32:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $structure `[` $array_member `]` `:` type($structure)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// -----
+
 #endif // MLIR_DIALECT_SPIRV_IR_COMPOSITE_OPS

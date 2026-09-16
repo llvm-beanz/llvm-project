@@ -388,3 +388,47 @@ func.func @vector_shuffle_extra_selector(%vector1: vector<4xf32>, %vector2: vect
   %0 = spirv.VectorShuffle [1: i32, 7: i32, 5: i32] %vector1, %vector2 : vector<4xf32>, vector<2xf32> -> vector<3xf32>
   return %0: vector<3xf32>
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.ArrayLength
+//===----------------------------------------------------------------------===//
+
+func.func @array_length(%arg0 : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>) -> i32 {
+  // CHECK: %{{.+}} = spirv.ArrayLength %{{.+}}[1] : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>
+  %0 = spirv.ArrayLength %arg0[1] : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>
+  return %0 : i32
+}
+
+// -----
+
+func.func @array_length_non_pointer(%arg0 : !spirv.struct<(f32, !spirv.rtarray<f32>)>) -> i32 {
+  // expected-error @+1 {{op operand #0 must be any SPIR-V pointer type}}
+  %0 = "spirv.ArrayLength"(%arg0) {array_member = 1 : i32} : (!spirv.struct<(f32, !spirv.rtarray<f32>)>) -> i32
+  return %0 : i32
+}
+
+// -----
+
+func.func @array_length_non_struct_pointee(%arg0 : !spirv.ptr<f32, StorageBuffer>) -> i32 {
+  // expected-error @+1 {{expected structure pointee type for structure, but provided}}
+  %0 = spirv.ArrayLength %arg0[0] : !spirv.ptr<f32, StorageBuffer>
+  return %0 : i32
+}
+
+// -----
+
+func.func @array_length_out_of_bounds(%arg0 : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>) -> i32 {
+  // expected-error @+1 {{array member must be a valid member of the structure, but 2 is out of bounds for a structure with 2 member(s)}}
+  %0 = spirv.ArrayLength %arg0[2] : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>
+  return %0 : i32
+}
+
+// -----
+
+func.func @array_length_non_runtime_array_member(%arg0 : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>) -> i32 {
+  // expected-error @+1 {{array member 0 must be a run-time array, but has type 'f32'}}
+  %0 = spirv.ArrayLength %arg0[0] : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>)>, StorageBuffer>
+  return %0 : i32
+}

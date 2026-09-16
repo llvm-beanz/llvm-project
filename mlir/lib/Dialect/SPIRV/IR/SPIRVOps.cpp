@@ -2039,6 +2039,36 @@ LogicalResult spirv::VectorShuffleOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.ArrayLength
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::ArrayLengthOp::verify() {
+  // The `structure` operand is already constrained to `SPIRV_AnyPtr` by ODS,
+  // so `cast` (rather than `dyn_cast`) is safe here.
+  auto ptrType = cast<spirv::PointerType>(getStructure().getType());
+
+  auto structType = dyn_cast<spirv::StructType>(ptrType.getPointeeType());
+  if (!structType)
+    return emitOpError(
+              "expected structure pointee type for structure, but provided ")
+           << ptrType.getPointeeType();
+
+  uint32_t memberIndex = getArrayMember();
+  if (memberIndex >= structType.getNumElements())
+    return emitOpError("array member must be a valid member of the "
+                       "structure, but ")
+           << memberIndex << " is out of bounds for a structure with "
+           << structType.getNumElements() << " member(s)";
+
+  if (!isa<spirv::RuntimeArrayType>(structType.getElementType(memberIndex)))
+    return emitOpError("array member ")
+           << memberIndex << " must be a run-time array, but has type "
+           << structType.getElementType(memberIndex);
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.SpecConstantComposite
 //===----------------------------------------------------------------------===//
 

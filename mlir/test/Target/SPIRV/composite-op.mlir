@@ -31,4 +31,9 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
     %0 = spirv.VectorShuffle [1: i32, 3: i32, 0xffffffff: i32] %vector1, %vector2 : vector<4xf32>, vector<2xf32> -> vector<3xf32>
     spirv.ReturnValue %0: vector<3xf32>
   }
+  spirv.func @array_length(%arg0 : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>), Block>, StorageBuffer>) -> i32 "None" {
+    // CHECK: %{{.+}} = spirv.ArrayLength %{{.+}}[1] : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>), Block>, StorageBuffer>
+    %0 = spirv.ArrayLength %arg0[1] : !spirv.ptr<!spirv.struct<(f32, !spirv.rtarray<f32>), Block>, StorageBuffer>
+    spirv.ReturnValue %0: i32
+  }
 }
