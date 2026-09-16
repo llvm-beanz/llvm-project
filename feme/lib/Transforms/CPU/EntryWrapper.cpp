@@ -907,12 +907,22 @@ struct WavePersistentValue {
   /// before the loop begins (at \c SeedInsertBefore).
   Constant *InitialValue;
   /// The phi's own backedge value, stored back into the wave's slot right
-  /// after it is computed. Every use of \c HeaderPhi is required to
-  /// precede this, so no reload can observe the next iteration's value.
+  /// after it is computed. Every use of \c HeaderPhi is required either
+  /// to precede this or to share its barrier region (roadmap H163), so
+  /// the region-top reload each use gets can never observe the next
+  /// iteration's value.
   Instruction *NextValue;
   /// Where the once-per-wave seeding store goes -- the terminator of the
   /// loop's own prefix chain, which runs once per wave before the loop.
   Instruction *SeedInsertBefore;
+  /// The loop body's own region chain, and the post-loop (suffix) chain.
+  /// A use's reload goes at the top of its own barrier region *within
+  /// whichever of these two chains contains it* (roadmap H163) -- the
+  /// wave body's blocks span the prefix, loop and suffix chains, but each
+  /// is outlined separately, so a region top has to be found within the
+  /// use's own chain rather than across all of them.
+  ArrayRef<BasicBlock *> LoopOrder;
+  ArrayRef<BasicBlock *> ExitOrder;
 };
 
 /// Spills every SSA value in \p Order that is live across one of
@@ -938,13 +948,23 @@ bool spillValuesLiveAcrossBarriers(
     Function *&WaveBody, ArrayRef<BasicBlock *> Order,
     ArrayRef<CallInst *> Barriers,
     const DenseMap<Instruction *, unsigned> &IndexOf, StructType *&SpillTyOut,
-    ArrayRef<WavePersistentValue> Persistent = {}) {
+    ArrayRef<WavePersistentValue> Persistent = {},
+    ArrayRef<unsigned> ExtraBoundaries = {}) {
   SpillTyOut = nullptr;
   SmallSetVector<Instruction *, 4> SpilledDefs;
   SmallVector<std::tuple<Instruction *, Instruction *, unsigned>, 8>
       SpilledUses;
-  for (CallInst *Barrier : Barriers) {
-    unsigned BarrierIdx = IndexOf.lookup(Barrier);
+  // Roadmap H163: a region boundary is not always a barrier. A loop's
+  // prefix, body and suffix chains are outlined into separate region
+  // functions whether or not a barrier separates them, so a value
+  // crossing one of those chain boundaries has to be spilled exactly like
+  // one crossing a barrier. \p ExtraBoundaries carries each such
+  // boundary's own \p IndexOf position.
+  SmallVector<unsigned, 4> BoundaryIdxs(ExtraBoundaries.begin(),
+                                        ExtraBoundaries.end());
+  for (CallInst *Barrier : Barriers)
+    BoundaryIdxs.push_back(IndexOf.lookup(Barrier));
+  for (unsigned BarrierIdx : BoundaryIdxs) {
     for (BasicBlock *BB : Order) {
       for (Instruction &I : *BB) {
         if (IndexOf.lookup(&I) <= BarrierIdx)
@@ -1045,6 +1065,36 @@ bool spillValuesLiveAcrossBarriers(
         buildFieldPtr(Seed, P.HeaderPhi, P.HeaderPhi->getName() + ".init");
     Seed.CreateStore(P.InitialValue, SeedField);
 
+    // Roadmap H163: the reload goes at the top of the use's own barrier
+    // region rather than at the use itself. A use may legitimately sit
+    // *after* the recurrence's own store below (the classic "compare the
+    // old accumulator against the newly loaded value" idiom real DXC
+    // output produces), and only a reload hoisted ahead of that store
+    // still observes this iteration's value. Every use is guaranteed
+    // (`matchLoopShape`) to be either before the recurrence or in the
+    // very same barrier region as it, so a region-top reload always
+    // dominates the use and always precedes the store.
+    auto RegionTop = [&](Instruction *Ref) -> Instruction * {
+      ArrayRef<BasicBlock *> Chain = is_contained(P.ExitOrder, Ref->getParent())
+                                         ? P.ExitOrder
+                                         : P.LoopOrder;
+      Instruction *Last = nullptr;
+      for (BasicBlock *BB : Chain) {
+        for (Instruction &I : *BB) {
+          if (BB == Ref->getParent() && !I.comesBefore(Ref))
+            break;
+          if (auto *CI = dyn_cast<CallInst>(&I))
+            if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+                Matched && Matched->GroupSync)
+              Last = &I;
+        }
+        if (BB == Ref->getParent())
+          break;
+      }
+      return Last ? Last->getNextNode()
+                  : &*Chain.front()->getFirstNonPHIOrDbg();
+    };
+
     SmallVector<Use *, 8> Uses;
     for (Use &U : P.HeaderPhi->uses())
       if (auto *UI = dyn_cast<Instruction>(U.getUser());
@@ -1052,10 +1102,10 @@ bool spillValuesLiveAcrossBarriers(
         Uses.push_back(&U);
     for (Use *U : Uses) {
       auto *User = cast<Instruction>(U->getUser());
-      Instruction *InsertPt = User;
+      Instruction *Ref = User;
       if (auto *UserPN = dyn_cast<PHINode>(User))
-        InsertPt = UserPN->getIncomingBlock(*U)->getTerminator();
-      IRBuilder<> Builder(InsertPt);
+        Ref = UserPN->getIncomingBlock(*U)->getTerminator();
+      IRBuilder<> Builder(RegionTop(Ref));
       Value *Field = buildFieldPtr(Builder, P.HeaderPhi,
                                    P.HeaderPhi->getName() + ".reload");
       U->set(Builder.CreateLoad(P.HeaderPhi->getType(), Field,
@@ -1556,6 +1606,34 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
       return std::nullopt;
     return std::distance(RegionOrder.begin(), It);
   };
+  // Walked here, before the recurrence checks below, because a
+  // wave-persistent induction may legitimately be read after the loop
+  // (roadmap H163) and that check needs to know which blocks make up the
+  // post-loop chain.
+  BasicBlock *SuffixEnd = walkLinearChain(Shape.ExitBlock, Shape.SuffixOrder);
+  if (!SuffixEnd || !isa<ReturnInst>(SuffixEnd->getTerminator()))
+    return std::nullopt;
+  Shape.SuffixOrder.push_back(SuffixEnd);
+
+  // True if a group-sync barrier lies strictly between \p A and \p B,
+  // which must be in region order (`PrecedesInRegions(A, B)`).
+  auto hasBarrierBetween = [&](Instruction *A, Instruction *B) {
+    unsigned RA = *RegionRank(A), RB = *RegionRank(B);
+    for (unsigned R = RA; R <= RB; ++R)
+      for (Instruction &I : *RegionOrder[R]) {
+        if (R == RA && !A->comesBefore(&I))
+          continue;
+        if (R == RB && !I.comesBefore(B))
+          continue;
+        auto *CI = dyn_cast<CallInst>(&I);
+        if (!CI)
+          continue;
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync)
+          return true;
+      }
+    return false;
+  };
   auto PrecedesInRegions = [&](Instruction *A, Instruction *B) {
     std::optional<unsigned> RA = RegionRank(A);
     std::optional<unsigned> RB = RegionRank(B);
@@ -1584,7 +1662,27 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
       return std::nullopt;
     if (any_of(Ind.HeaderPhi->users(), [&](User *U) {
           auto *UI = dyn_cast<Instruction>(U);
-          return !UI || (UI != NextInst && !PrecedesInRegions(UI, NextInst));
+          if (!UI)
+            return true;
+          if (UI == NextInst || PrecedesInRegions(UI, NextInst))
+            return false;
+          // Roadmap H163: a read after the loop has finished is always
+          // fine -- the slot then holds exactly the value the header phi
+          // would have on the exiting edge (the last iteration's
+          // store-back, or the seeded initial value if the body never
+          // ran), and the post-loop chain gets its own region-top reload
+          // just like any in-loop use.
+          if (is_contained(Shape.SuffixOrder, UI->getParent()))
+            return false;
+          // Roadmap H163: a use *after* the recurrence is still fine as
+          // long as no group-sync barrier separates the two, because the
+          // reload it gets is hoisted to the top of its own barrier
+          // region -- ahead of the recurrence's store
+          // (`spillValuesLiveAcrossBarriers`). Across a barrier that no
+          // longer holds: the two land in different region functions, so
+          // the later one's reload would observe the stored next value.
+          return !PrecedesInRegions(NextInst, UI) ||
+                 hasBarrierBetween(NextInst, UI);
         }))
       return std::nullopt;
     Ind.IsWavePersistent = true;
@@ -1598,11 +1696,6 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     if (!Ind.InitialValue)
       return std::nullopt; // Only a compile-time-constant start is supported.
   }
-
-  BasicBlock *SuffixEnd = walkLinearChain(Shape.ExitBlock, Shape.SuffixOrder);
-  if (!SuffixEnd || !isa<ReturnInst>(SuffixEnd->getTerminator()))
-    return std::nullopt;
-  Shape.SuffixOrder.push_back(SuffixEnd);
 
   // Every block of `F` must belong to exactly one region: otherwise some
   // other block reaches this shape from elsewhere (a second predecessor
@@ -1973,7 +2066,8 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
         {Ind.HeaderPhi, Ind.InitialValue,
          cast<Instruction>(
              Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch)),
-         Shape.PrefixOrder.back()->getTerminator()});
+         Shape.PrefixOrder.back()->getTerminator(), WaveRegionOrder,
+         Shape.SuffixOrder});
 
   // Give the body chain's uses of each header induction phi their own
   // trailing `loopvarN` parameter (see the file comment's "Barriers inside
@@ -2070,9 +2164,18 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   IndexChain(Shape.PrefixOrder);
   IndexChain(WaveRegionOrder);
   IndexChain(Shape.SuffixOrder);
+  // Roadmap H163: the prefix/loop/suffix chain boundaries are region
+  // boundaries in their own right -- each chain is outlined separately --
+  // so a value crossing one needs spilling even with no barrier there.
+  SmallVector<unsigned, 2> ChainBoundaries;
+  if (!Shape.PrefixOrder.empty())
+    ChainBoundaries.push_back(
+        IndexOf[Shape.PrefixOrder.back()->getTerminator()]);
+  if (!WaveRegionOrder.empty())
+    ChainBoundaries.push_back(IndexOf[WaveRegionOrder.back()->getTerminator()]);
   StructType *SpillTy = nullptr;
   if (!spillValuesLiveAcrossBarriers(WaveBody, SpillOrder, Barriers, IndexOf,
-                                     SpillTy, Persistent))
+                                     SpillTy, Persistent, ChainBoundaries))
     return nullptr;
 
   // Every wave-persistent induction now reads and writes its own per-wave

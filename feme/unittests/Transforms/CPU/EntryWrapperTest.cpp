@@ -1006,14 +1006,15 @@ TEST(EntryWrapperTest, SplitsFlowMergeLoopWithWavePersistentRecurrence) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-// Roadmap H159(b) (feme/docs/Roadmap.md): the wave-persistent induction
-// path threads a per-lane loop-carried value through one per-wave slot,
-// which holds exactly one value at a time -- so a use of the induction
-// positioned *after* its own recurrence has been stored back would read
-// the next iteration's value instead of this one's. That ordering
-// requirement is checked, so this shape (`%late` reads `%acc` after
-// `%acc.next` computes it) must be declined rather than miscompiled.
-TEST(EntryWrapperTest, FlowMergeLoopWithLateWavePersistentUseIsDiagnosed) {
+// Roadmap H163 (feme/docs/Roadmap.md): a use of a wave-persistent
+// induction that comes *after* its own recurrence is still legal, as
+// long as no group-sync barrier separates the two -- the reload every
+// use gets is hoisted to the top of its own barrier region, ahead of the
+// recurrence's store-back, so it still observes this iteration's value.
+// This is exactly the shape real DXC output produces for the
+// `Interlocked*` tests ("compare the old accumulator against the value
+// the atomic just returned").
+TEST(EntryWrapperTest, SplitsFlowMergeLoopWithLateWavePersistentUse) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -1027,6 +1028,68 @@ TEST(EntryWrapperTest, FlowMergeLoopWithLateWavePersistentUseIsDiagnosed) {
     flow:
       %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
       %acc.next = add i32 %acc, %tid
+      %late = mul i32 %acc, 3
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  ASSERT_TRUE(M->getFunction("feme_cpu_entry_main"));
+  Function *Body0 = M->getFunction("main.body0");
+  ASSERT_TRUE(Body0);
+
+  // The single reload is hoisted to the top of the region, ahead of both
+  // the late use and the recurrence's own store-back.
+  LoadInst *Reload = nullptr;
+  StoreInst *Carry = nullptr;
+  for (Instruction &I : instructions(*Body0)) {
+    if (auto *LI = dyn_cast<LoadInst>(&I);
+        LI && LI->getName().starts_with("acc."))
+      Reload = LI;
+    if (auto *SI = dyn_cast<StoreInst>(&I);
+        SI && SI->getPointerOperand()->getName().starts_with("acc."))
+      Carry = SI;
+  }
+  ASSERT_TRUE(Reload);
+  ASSERT_TRUE(Carry);
+  EXPECT_TRUE(Reload->comesBefore(Carry));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap H163 (feme/docs/Roadmap.md): the same late use, but with a
+// group-sync barrier between the recurrence and the use. The two now
+// land in *different* region functions, so the later one's own region-top
+// reload would observe the value already stored back -- the next
+// iteration's. That shape must still be declined rather than
+// miscompiled.
+TEST(EntryWrapperTest,
+     FlowMergeLoopWithWavePersistentUseAcrossBarrierIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %acc = phi i32 [ 0, %entry ], [ %acc.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %acc.next = add i32 %acc, %tid
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
       %late = mul i32 %acc, 3
       call void @llvm.dx.group.memory.barrier.with.group.sync()
       %i.next = add i32 %i, 1
