@@ -776,6 +776,133 @@ TEST(EntryWrapperTest, SplitsFlowMergeLoopWithHeaderDerivedValue) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap H154 (feme/docs/Roadmap.md): like
+// `SplitsFlowMergeLoopWithHeaderDerivedValue` above, but with a genuine
+// (non-collapsed) extra body block (`mid`) preceding the barrier-
+// containing latch block (`flow`) -- i.e. `Shape.BodyOrder` is already
+// non-empty for an ordinary reason before the latch-splitting logic even
+// runs. `matchLoopShape`'s `LatchSplitAfter` gating must key off "does
+// `Shape.Latch` contain a barrier", not "is `Shape.BodyOrder` empty" (the
+// latter would previously not even attempt a split here, and decline via
+// `isPureClosedChain` finding the barrier's own side effect), so this
+// must still succeed, appending `flow`'s own barrier-and-earlier half as
+// a second `BodyOrder` entry alongside `mid`.
+TEST(EntryWrapperTest, SplitsFlowMergeLoopWithNonEmptyBodyBeforeLatchBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %mid, label %after
+    mid:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      br label %flow
+    flow:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(M->getFunction("main"));
+  // `mid` and `flow`'s own barrier-and-earlier half are two separate
+  // `BodyOrder` entries.
+  EXPECT_TRUE(M->getFunction("main.body0"));
+  EXPECT_TRUE(M->getFunction("main.body1"));
+
+  bool FoundFence = false;
+  unsigned NumWaveLoopHeaders = 0;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName().starts_with("wave.loop.header"))
+      ++NumWaveLoopHeaders;
+    for (Instruction &I : BB)
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+  }
+  // 4 wave loops total: `mid` and `flow`'s barrier-and-earlier half are
+  // two `BodyOrder` regions, plus the fresh post-barrier `Latch` tail;
+  // the (trivial) prefix and suffix chains don't need their own wave
+  // loop since `SIMDizePass` already fully widens their simple scalar
+  // content without further per-wave iteration.
+  EXPECT_EQ(NumWaveLoopHeaders, 4u);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+
+// block itself ends in a uniform `CondBr` forming a "safe diamond" (both
+// arms barrier-free, reconverging at the collapsed barrier+latch block)
+// instead of an unconditional branch straight into it. This is currently
+// declined, not accepted: unlike `isLinearChain`'s own identical-looking
+// diamond case for the non-loop straight-line path, a diamond inside
+// `matchLoopShape`'s own `Shape.BodyOrder` cannot yet be outlined --
+// `outlineChainAtBarriers`/`rebuildSplitChainOrder` (used to split a
+// `BodyOrder` region at its own barriers) assume every block in the
+// chain but the last ends in an `UncondBrInst`, and hit a `cast<>`
+// assertion failure when handed a block that instead ends in the
+// diamond's own `CondBr`. Naively reusing `matchSafeDiamond` here (as an
+// earlier revision of this fix did) let `matchLoopShape` accept this
+// shape but then crashed `EntryWrapperPass` outright when it reached
+// outlining -- a strictly worse outcome than today's clean decline. See
+// the H154 follow-up entry in `feme/docs/Roadmap.md`: supporting this
+// shape needs `outlineChainAtBarriers` itself extended to outline a
+// region with internal (non-barrier) branches, not just `matchLoopShape`
+// tolerating one while walking the shape.
+TEST(EntryWrapperTest, FlowMergeLoopWithMidBodySafeDiamondIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %body, label %after
+    body:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %cond2 = icmp ugt i32 %i, 0
+      br i1 %cond2, label %then, label %flow
+    then:
+      %tmp = add i32 %gid, 1
+      br label %flow
+    flow:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap H155 (feme/docs/Roadmap.md): a "Flow-merge loop" (see
 // `SplitsFlowMergeLoopWithHeaderDerivedValue` above) with a *second*
 // header phi (`%acc`) whose own recurrence (`%acc.next`) is computed in
