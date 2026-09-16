@@ -1213,6 +1213,54 @@ TEST(SIMDizeTest, WidensGroupSharedDivergentIndexToVectorGEPAndGather) {
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap H168: a raw, unmasked groupshared `store` whose *address* is
+// uniform but whose *value* is divergent (e.g.
+// `groupshared int Shared; Shared = ThreadID;`, every lane racing to write
+// its own value to the identical fixed address) reaches
+// `FunctionWidener::widenGroupSharedStore` because `UniformityInfo` marks
+// the store itself divergent, tracking the more divergent of its two
+// operands. A uniform pointer is never entered into `Widened` (there is
+// nothing divergent about it for `widenGroupSharedGEP` to widen), so
+// looking it up directly (as a `load`'s always-divergent pointer safely
+// can) previously returned null, and `CreateMaskedScatter` crashed
+// dereferencing it -- discovered as a detour, not the target of
+// investigation, across at least two separate sessions constructing
+// loop-body unit tests for other milestones (worked around each time by
+// substituting a load for the store). Fixed by routing the pointer
+// through `getWidened`, which broadcasts a uniform pointer into a
+// `<W x ptr>` splat instead.
+TEST(SIMDizeTest, WidensGroupSharedStoreWithUniformAddressAndDivergentValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      store i32 %tid, ptr addrspace(3) @shared, align 4
+      ret void
+    }
+    @shared = internal addrspace(3) global i32 undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundScatter = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() ==
+              Intrinsic::masked_scatter)
+        FoundScatter = true;
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
+  }
+  EXPECT_TRUE(FoundScatter);
+}
+
 // Roadmap step R23's "access through a getelementptr" shape: an
 // `atomicrmw` always scalarizes (see `ScalarizesAtomicRMWFallback` above),
 // even when its groupshared address is uniform (a compile-time-constant

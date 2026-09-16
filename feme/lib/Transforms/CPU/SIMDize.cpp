@@ -3214,8 +3214,21 @@ void FunctionWidener::widenGroupSharedStore(StoreInst &SI,
                                             IRBuilder<> &Builder) {
   // See `widenGroupSharedLoad` above: a real scatter is correct for a raw,
   // divergent-address groupshared `store` for the same reason a real
-  // gather is for a `load`.
-  Value *WidePtr = Widened.lookup(SI.getPointerOperand());
+  // gather is for a `load`. Unlike a `load`, though, this store can reach
+  // here with a *uniform* pointer and only a divergent *value* (e.g.
+  // `groupshared int Shared; Shared = ThreadID;`, every lane racing to
+  // write its own value to the same fixed address) -- `SI`'s divergence
+  // tracks the more divergent of its two operands, not its pointer alone.
+  // A uniform pointer is never widened by `widenGroupSharedGEP` (there is
+  // nothing divergent about it to widen), so looking it up in `Widened`
+  // directly (as a `load`'s always-divergent pointer safely can) returned
+  // null here, and `CreateMaskedScatter` crashed dereferencing it.
+  // `getWidened` handles both cases uniformly: it returns the already-
+  // widened vector for a genuinely divergent pointer, or broadcasts a
+  // uniform one into a `<W x ptr>` splat (every lane's clone pointing at
+  // the identical address, exactly matching the raw, unwidened program's
+  // own last-writer-wins race) otherwise.
+  Value *WidePtr = getWidened(SI.getPointerOperand(), Builder);
   Value *WideVal = getWidened(SI.getValueOperand(), Builder);
 
   Builder.CreateMaskedScatter(WideVal, WidePtr, SI.getAlign(),
