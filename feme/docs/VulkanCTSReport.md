@@ -45895,4 +45895,60 @@ the pre-existing `widenVectorSelect`) that fixes it.
 H142 is struck through on the roadmap as fixed (filed and closed in
 the same session).
 
+### H143: groupshared `cmpxchg` aggregate-value SIMDize gap, plus a shared divergent-address `extractelement` leaf-recognition gap
+
+Found this session via a real-`dxc`/`feme-opt --feme-convert-spirv-to-llvm`
+IR-level reduction of `Feature/HLSLLib/InterlockedCompareExchange.32.test`
+(the prior session's own suggested next step): a groupshared `cmpxchg`
+(`InterlockedCompareExchange`/`InterlockedCompareStore`'s own lowered
+form) has an intrinsically aggregate `{T, i1}` result, which
+`checkAggregateValueSupported` had never accepted as a producer shape
+(confirmed a deliberate, already-documented exclusion, distinct from
+H142's `select` shape). Fixing that alone uncovered a second, deeper,
+pre-existing bug shared by `InterlockedExchange.32.test`/
+`InterlockedXor.32.test` too: `GroupShared.cpp`'s
+`rewriteGroupSharedGlobals` canonicalization pass never recognized an
+`ExtractElementInst` as a valid link between a genuinely divergent
+(vector-of-pointers) `getelementptr` and a per-lane scalar
+`atomicrmw`/`cmpxchg` clone -- meaning a divergent-address groupshared
+`atomicrmw` (not just this session's new `cmpxchg` case) was already
+silently broken before this session, just never exercised by the
+existing unit test (which only covered a uniform/constant-index GEP).
+See the roadmap's own H143 entry for the full root-cause narrative and
+the fix (`widenGroupSharedAtomicCmpXchg` in `SIMDize.cpp`; the
+`ExtractElementInst`-leaf recognition in both `rewriteGroupSharedGlobals`
+and `retargetGroupSharedProducer` in `GroupShared.cpp`).
+
+**Verification.**
+- `ninja check-feme`: **3086/3089 passed** (3 unsupported), 0 failed,
+  +2 new unit tests (`SIMDizeTest.WidensGroupSharedAtomicCmpXchg`,
+  `SIMDizeTest.WidensGroupSharedAtomicRMWThroughDivergentGEP`), 0
+  regressions.
+- `check-hlsl-feme-vk`: `Feature/HLSLLib/InterlockedXor.32.test` now
+  passes outright (confirmed individually via `offloader`, matches its
+  own full-lit-run result). `InterlockedCompareExchange.32.test`/
+  `InterlockedCompareStore.32.test`/`InterlockedExchange.32.test` all
+  progress past `feme-cpu-simdize`/`GroupShared` entirely but now hit
+  the same already-known, already-tracked H124e `feme-cpu-wrap-entry`
+  "barrier inside non-linear control flow" diagnostic
+  `InterlockedAdd.32.test` already had -- confirmed (not assumed) via
+  individual `offloader` re-runs of all 4 names side by side. Full-suite
+  failure count drops from 25 to **24** (of 664; the same 1
+  unexpectedly-passing `Feature/PushConstant/array_of_matrices.test`
+  remains unchanged, still not investigated). The separate
+  `.resources.32.test` variants are unaffected (different, resource-heap
+  runtime-call code path, not raw `cmpxchg`/`atomicrmw` -- a distinct,
+  not-yet-triaged bug family).
+- No native Vulkan CTS spot-check this session: this is a CPU-backend
+  divergence-handling fix specific to groupshared atomics, not a change
+  with an obvious, narrowly-scoped `dEQP-VK.*` group to target; the
+  `check-hlsl-feme-vk` full-suite re-run above is this fix's own
+  regression check.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a
+  CPU-backend SIMDization correctness fix, not a feature/extension-
+  support change.
+
+H143 is struck through on the roadmap as fixed (filed and closed in
+the same session).
+
 
