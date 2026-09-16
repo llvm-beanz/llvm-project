@@ -335,6 +335,129 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(NumStores, 4u);
 }
 
+// Roadmap H138: `<4 x i64>` (32 bytes) exceeds this target's 16-byte
+// direct-value-ABI threshold (roadmap H137's own closing note), so
+// `lowerRawStore` must decompose it into two `v2i64` stores rather than
+// ever mangling a call name for the whole 4-wide vector -- see that
+// function's own comment for why calling a hypothetical `v4i64` helper
+// directly would silently produce wrong results instead of a safe link
+// failure.
+TEST(SPIRVResourceLoweringTest, LowersV4I64RawStoreToTwoV2I64Stores) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx, <4 x i64> %v) {
+      %h = call target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 1) %h, i32 %idx)
+      store <4 x i64> %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned NumV2I64Stores = 0;
+  unsigned NumOtherStores = 0;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction()) {
+        StringRef Name = Callee->getName();
+        if (!Name.starts_with("feme.cpu.resource.store.raw"))
+          continue;
+        if (Name == "feme.cpu.resource.store.raw.v2i64")
+          ++NumV2I64Stores;
+        else
+          ++NumOtherStores;
+      }
+  EXPECT_EQ(NumV2I64Stores, 2u);
+  EXPECT_EQ(NumOtherStores, 0u);
+}
+
+// Roadmap H138: the odd-width sibling of the test above -- `<3 x i64>`
+// (24 bytes) still exceeds the 16-byte threshold, decomposing into one
+// `v2i64` store for the first two elements and one scalar `i64` store for
+// the trailing element.
+TEST(SPIRVResourceLoweringTest, LowersV3I64RawStoreToV2I64AndScalarI64Store) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx, <3 x i64> %v) {
+      %h = call target("spirv.VulkanBuffer", [0 x <3 x i64>], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <3 x i64>], 12, 1) %h, i32 %idx)
+      store <3 x i64> %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x <3 x i64>], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <3 x i64>], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned NumV2I64Stores = 0;
+  unsigned NumI64Stores = 0;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction()) {
+        StringRef Name = Callee->getName();
+        if (Name == "feme.cpu.resource.store.raw.v2i64")
+          ++NumV2I64Stores;
+        else if (Name == "feme.cpu.resource.store.raw.i64")
+          ++NumI64Stores;
+      }
+  EXPECT_EQ(NumV2I64Stores, 1u);
+  EXPECT_EQ(NumI64Stores, 1u);
+}
+
+// Roadmap H138: the load-side mirror of the two tests above -- `<4 x i64>`
+// decomposes into two `v2i64` loads, reassembled with `insertelement`
+// rather than a single `v4i64` call.
+TEST(SPIRVResourceLoweringTest, LowersV4I64RawLoadToTwoV2I64Loads) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i64> @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 0) %h, i32 %idx)
+      %v = load <4 x i64>, ptr %ptr
+      ret <4 x i64> %v
+    }
+    declare target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <4 x i64>], 12, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned NumV2I64Loads = 0;
+  unsigned NumOtherLoads = 0;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction()) {
+        StringRef Name = Callee->getName();
+        if (!Name.starts_with("feme.cpu.resource.load.raw"))
+          continue;
+        if (Name == "feme.cpu.resource.load.raw.v2i64")
+          ++NumV2I64Loads;
+        else
+          ++NumOtherLoads;
+      }
+  EXPECT_EQ(NumV2I64Loads, 2u);
+  EXPECT_EQ(NumOtherLoads, 0u);
+}
+
 // Roadmap H6g-b-a-i-a-i: glslang can spell a storage buffer block directly
 // as a fixed-layout struct whose members are fixed-size arrays/vectors,
 // rather than `dxc`'s one-member runtime-array wrapper. Once

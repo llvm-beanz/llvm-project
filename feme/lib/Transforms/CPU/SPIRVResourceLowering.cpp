@@ -2807,6 +2807,11 @@ Value *computePointerOffset(IRBuilderBase &Builder,
 /// layer. Recurses for a field/element that is itself an aggregate
 /// (`hasOnlySupportedUses`'s own `isSupportedRawElementType` check already
 /// guarantees every leaf reached this way is a supported scalar/vector).
+///
+/// (roadmap H138) A `<3 x i64>`/`<4 x i64>` leaf (24/32 bytes) is handled
+/// as its own decomposition tier, split into 2-wide (and, for the odd
+/// `<3 x i64>` case, one trailing scalar) chunks reassembled with
+/// `insertelement` -- see this tier's own comment below for why.
 Value *lowerRawLoad(IRBuilderBase &Builder, const ResourceCallEnv &Env,
                     Value *DescriptorIndex, Value *Offset, Value *Mask,
                     Type *Ty, const DataLayout &DL, const Twine &Name) {
@@ -2835,13 +2840,51 @@ Value *lowerRawLoad(IRBuilderBase &Builder, const ResourceCallEnv &Env,
     }
     return Result;
   }
+  // (roadmap H138) `feme/runtime/CPU/FeMeRuntimeCPU.c` only defines
+  // `feme.cpu.resource.load.raw.{i64,v2i64}` (both <=16 bytes, this
+  // target's own direct-value-ABI threshold, per roadmap H137's own
+  // closing note) -- never `v3i64`/`v4i64` (24/32 bytes), which Clang
+  // would compile with an indirect (`sret`-return) calling convention this
+  // call-building code's "logical, uncoerced" `FunctionType` does not
+  // match, risking a silently wrong (not merely absent) result rather
+  // than a safe link failure. Decompose into the already-ABI-safe
+  // `v2i64`/scalar-`i64` primitives instead, exactly the same "split an
+  // unsupported leaf into supported sub-pieces" shape the struct/array
+  // tiers above already use.
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    Type *ElemTy = VecTy->getElementType();
+    unsigned NumElts = VecTy->getNumElements();
+    if (ElemTy->isIntegerTy(64) && NumElts > 2) {
+      uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+      Type *V2Ty = FixedVectorType::get(ElemTy, 2);
+      Value *Result = PoisonValue::get(VecTy);
+      for (unsigned Base = 0; Base != NumElts;) {
+        unsigned ChunkElts = NumElts - Base >= 2 ? 2 : 1;
+        Value *ChunkOffset = Builder.CreateAdd(
+            Offset, ConstantInt::get(Offset->getType(), Base * ElemSize));
+        Value *Chunk =
+            lowerRawLoad(Builder, Env, DescriptorIndex, ChunkOffset, Mask,
+                         ChunkElts == 2 ? V2Ty : ElemTy, DL, "");
+        for (unsigned I = 0; I != ChunkElts; ++I) {
+          Value *Elem =
+              ChunkElts == 2 ? Builder.CreateExtractElement(Chunk, I) : Chunk;
+          Result = Builder.CreateInsertElement(Result, Elem, Base + I);
+        }
+        Base += ChunkElts;
+      }
+      return Result;
+    }
+  }
   return createRawLoad(Builder, Env, DescriptorIndex, Offset, Mask, Ty, Name);
 }
 
 /// The store-side mirror of `lowerRawLoad` above: one canonical
 /// `feme.cpu.resource.store.raw.*` call per leaf scalar/vector field or
 /// element, each split off \p Val with `extractvalue`, rather than one
-/// call mangled for the aggregate type itself.
+/// call mangled for the aggregate type itself. (roadmap H138) A
+/// `<3 x i64>`/`<4 x i64>` leaf is decomposed the same way `lowerRawLoad`
+/// decomposes it, splitting \p Val's own elements out with
+/// `extractelement` instead of `insertelement`.
 void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
                    Value *DescriptorIndex, Value *Offset, Value *Val,
                    Value *Mask, const DataLayout &DL) {
@@ -2866,6 +2909,31 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
       lowerRawStore(Builder, Env, DescriptorIndex, ElemOffset, Elem, Mask, DL);
     }
     return;
+  }
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Val->getType())) {
+    Type *ElemTy = VecTy->getElementType();
+    unsigned NumElts = VecTy->getNumElements();
+    if (ElemTy->isIntegerTy(64) && NumElts > 2) {
+      uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+      for (unsigned Base = 0; Base != NumElts;) {
+        unsigned ChunkElts = NumElts - Base >= 2 ? 2 : 1;
+        Value *ChunkOffset = Builder.CreateAdd(
+            Offset, ConstantInt::get(Offset->getType(), Base * ElemSize));
+        Value *Chunk;
+        if (ChunkElts == 2) {
+          Chunk = PoisonValue::get(FixedVectorType::get(ElemTy, 2));
+          for (unsigned I = 0; I != 2; ++I)
+            Chunk = Builder.CreateInsertElement(
+                Chunk, Builder.CreateExtractElement(Val, Base + I), I);
+        } else {
+          Chunk = Builder.CreateExtractElement(Val, Base);
+        }
+        lowerRawStore(Builder, Env, DescriptorIndex, ChunkOffset, Chunk, Mask,
+                      DL);
+        Base += ChunkElts;
+      }
+      return;
+    }
   }
   createRawStore(Builder, Env, DescriptorIndex, Offset, Val, Mask);
 }
