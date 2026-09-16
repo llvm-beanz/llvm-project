@@ -86316,3 +86316,55 @@ attempted this session -- estimated half a day).
 6. **`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`/`WaveIsFirstLane.test`/`ComponentAccumulationDataRace.test`/`GroupMemoryBarrierWithGroupSync.test`/`matrix.test`/`inc_counter_array_imm_idx.test`**: still individually untriaged, carried over many sessions. Don't assume any two share a cause without checking -- this bit prior sessions repeatedly.
 7. **`shaderImageGatherExtended`**: large, multi-session capability gap (FeMe's gather is `ConstOffset`-only), carried over many sessions, still not filed as its own roadmap row.
 8. Lower priority, deferred 25+ sessions: `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s pre-existing heap corruption (valgrind points at `buildStageStorage`/`executeDraws`).
+
+# Session: H144 (TypedBuffer GetDimensions) fixed, .resources.32.test triaged
+
+**Next action for the next session**: read the "H124e wrap-entry" item below first -- it's the single highest-payoff item now (2 more confirmed cases this session, 7 total). Start by reading `feme-cpu-wrap-entry`'s region-splitting pass (`feme/lib/Transforms/CPU/`, search for "barrier inside non-linear control flow") to understand its current straight-line/single-loop-only model before attempting a fix. ~15 minutes to orient, likely a full session to actually fix.
+
+## What shipped this session (1 real bug fixed, 1 `check-hlsl-feme-vk` failure closed outright)
+
+1. `Feature/TypedBuffer/GetDimensions.test`: confirmed via `spirv-dis` this hits a **distinct** bug from `ByteAddressBuffer`/`StructuredBuffer/GetDimensions.test` (which genuinely are H124m's `OpArrayLength` gap) -- `Buffer<T>`/`RWBuffer<T>::GetDimensions()` lowers to `OpImageQuerySize` (already has MLIR support), but the CPU backend's `SPIRVResourceLowering.cpp` only ever recognized the `.xy`/`.xyz` (image-shaped) `GetDimensions` variants, never the `.x` (typed-buffer-shaped) one. Filed and closed as **H144**: new `ResourceCallKind::GetDimensionsTyped` call family, new runtime helper `femeCpuResourceGetDimensionsTypedI32`, new `isGetDimensions1Intrinsic` + `hasOnlySupportedUses`/`lowerAccesses` wiring for `TexelStorage`/`TexelUniform` handles.
+2. Corrected H124m's own roadmap row, which had (incorrectly) attributed all 3 `GetDimensions.test` cases to the same `OpArrayLength` gap -- narrowed to the 2 it actually covers.
+
+## Confirmed win
+
+`Feature/TypedBuffer/GetDimensions.test` now passes outright. `check-hlsl-feme-vk`: **24 -> 23** failures (of 664).
+
+## Confirmed, not assumed: `.resources.32.test` triage (this session's 2nd task)
+
+Individually triaged all 4 `InterlockedAdd`/`CompareExchange`/`CompareStore`/`Exchange.resources.32.test` failures via `offloader` + `FEME_VULKAN_LOG_CREATION_ERRORS=1` -- confirmed they do **not** all share one root cause:
+
+- `InterlockedAdd.resources.32.test` / `InterlockedCompareStore.resources.32.test`: same `feme-cpu-wrap-entry` "barrier inside non-linear control flow" diagnostic as the already-tracked `.32.test` group (H124e). **+2 confirmed cases for H124e's wrap-entry bucket** (now 7, up from 5).
+- `InterlockedCompareExchange.resources.32.test`: a **distinct** `feme-cpu-simdize` "divergent branch; the divergence transform did not remove it" diagnostic.
+- `InterlockedExchange.resources.32.test`: a **distinct** `feme-cpu-linearize` "loop has more than one divergent exit check" diagnostic -- this confirms (not just suspects, per a much-earlier prompt's flag) that this diagnostic shape is real and does occur, as a 2nd case alongside whatever the 1st already-tracked case was.
+
+Recorded all of this in H124e's own roadmap row so its case inventory stays accurate. No code fix attempted for any of these 3 diagnostic shapes this session -- wrap-entry region-splitting is a substantial pass-design change, not a small patch.
+
+## Verification (per standing process)
+
+- `vulkaninfo --summary | grep deviceName`: confirmed `FeMe CPU Vulkan Device` at session start.
+- `ninja check-feme`: 3087/3090 passed (3 unsupported), 0 failed, +6 new unit tests (`ResourceCallsTest.CreateGetDimensionsTypedTakesNoOffset`, `SPIRVResourceLoweringTest.LowersUniformTexelBufferGetDimensionsToTypedCall`, 4 `RuntimeCPUTest.GetDimensionsTyped*`), 0 regressions.
+- `ninja check-hlsl-feme-vk`: 23 failures (down from 24), confirmed via a fresh full run at the final commit.
+- Native VK-GL-CTS: no dedicated group exercises a typed/texel buffer's `imageSize()`/`textureSize()` the way this HLSL-only codegen path does (same precedent as H124s) -- instead ran `dEQP-VK.image.load_store.*` (3446 cases, the broadest group touching the same handle-classification code path this session's change touched) as a regression check: 2346/2346 supported cases passed, 0 failed, 0 regressions.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: `OpImageQuerySize` was already advertised via the `.xy`/`.xyz` variants; this closes an implementation gap for one further operand shape, not a new feature/extension.
+- `feme/docs/Roadmap.md`: H144 filed and struck through as fixed in the same session; H124m corrected; H124e's case count updated with this session's 2 new confirmed wrap-entry cases and 2 new confirmed distinct-diagnostic cases.
+
+## Commits (5, each independently buildable/testable)
+
+1. `FeMeRuntimeCPU.c` runtime helper + its 4 unit tests.
+2. `ResourceCalls.h`/`ResourceCalls.cpp` plumbing + its unit test.
+3. `SPIRVResourceLowering.cpp` wiring + its unit test.
+4. Roadmap.md / VulkanCTSReport.md doc updates (H144 closed, H124m corrected).
+5. Roadmap.md update recording the `.resources.32.test` triage findings under H124e.
+
+(This file is committed separately, as its own 6th commit, per standing instructions.)
+
+## Still-open work, ranked
+
+1. **H124e wrap-entry bucket** (now 7 confirmed cases, up from 5 -- highest payoff, unfixed for many sessions): `feme-cpu-wrap-entry`'s region-splitting pass only supports "a straight-line wave body or a single uniform loop" -- a barrier inside any other non-linear control flow shape is rejected outright. Fixing this could close up to 6 failures at once (`InterlockedAdd`/`CompareExchange`/`CompareStore`/`Exchange.32.test`, `InterlockedAdd`/`CompareStore.resources.32.test`). Likely a full session on its own -- region-splitting pass design work is harder than the SIMDize-level fixes recent sessions made.
+2. **`InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize` divergent-branch gap** (newly confirmed this session, not yet triaged further): "the divergence transform (LinearizePass) did not remove it, or produced a shape this pass cannot widen" -- needs an IR-level reduction (via `feme-opt --feme-convert-spirv-to-llvm`) to find the exact unsupported shape, same methodology H143 used.
+3. **`InterlockedExchange.resources.32.test`'s `feme-cpu-linearize` multi-exit-loop gap** (newly confirmed this session as real, not yet fixed): "loop has more than one divergent exit check" -- also needs an IR-level reduction before attempting a fix.
+4. **`Ddx*`/`ddy_fine`/`fwidth.test` group (5 failures)**: still suspected to trace to H124d's missing upstream MLIR `OpDPdx`/`OpDPdy`/`OpFwidth` SPIR-V dialect ops, still not individually confirmed across sessions. Large, deprioritized.
+5. **`dyn-res-uav-counter.test`**: real, narrow bug, address-space mismatch in UAV-counter + `ResourceDescriptorHeap` combo. ~1-2 hours, carried over 4+ sessions untouched.
+
+Lower priority, not in the top 5 but still open: `feme.cpu.resource.store.raw.i8` runtime gap (filed but not fixed, ~1 hour); `WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`/`WaveIsFirstLane.test`/`ComponentAccumulationDataRace.test`/`GroupMemoryBarrierWithGroupSync.test`/`matrix.test`/`inc_counter_array_imm_idx.test` (still individually untriaged); `shaderImageGatherExtended` (large, still not filed as its own roadmap row); `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap corruption (deferred 26+ sessions).
