@@ -86556,3 +86556,68 @@ Pick one:
 - **Full session**: attempt H124e(a)'s actual design work (highest
   payoff — up to 8 cases at once — but also the largest, least-scoped
   remaining item).
+
+# Session: H148 fixed (push-constant RowMajor matrix scalar access), H147 split
+
+**Env check:** `FeMe CPU Vulkan Device` confirmed via `vulkaninfo --summary`.
+
+**Wins this session:**
+1. `Feature/PushConstant/matrix.test` now passes (was silently returning
+   wrong data — `[1,2,3,4]` instead of `[1,3,2,4]`).
+2. `Feature/PushConstant/array_of_matrices.test` also now passes as a
+   side effect (same code path, array-of-matrices variant).
+3. `check-hlsl-feme-vk` failure count: 21 -> **20** (of 664).
+4. `ninja check-feme`: 3096/3099 passed, 0 failed, +1 new lit test.
+5. Native CTS regression check (4,662 push-constant/row-major/col-major
+   cases): byte-identical pass/fail lists pre- and post-fix. No
+   regression.
+
+**What was wrong:** `OffsetStructMemberReorderAccessChainPattern` (push
+constants and other non-Block structs) never reordered a `RowMajor`
+matrix's column/row scalar-element indices, unlike the already-working
+`Block`-backed (UBO/SSBO) path. First fix attempt (inside
+`remapNestedStructMemberIndices`'s loop) built clean but was dead code —
+a matrix that's the struct's *direct* member is the loop's very first
+`CurrentType`, so its own struct-member branch never re-fires. Real fix:
+call the new `adjustMatrixScalarElementIndices` helper directly from
+`OffsetStructMemberReorderAccessChainPattern`'s own body when the
+selected member is itself a matrix. Confirmed via `git stash`/rebuild
+that the new lit test fails without the fix and passes with it.
+
+**Commits (3, in order):**
+1. `[FeMe] Fix RowMajor push-constant matrix scalar-element access chain (H148)`
+   — the fix + new lit test `spirv-to-llvm-matrix-pushconstant-scalar.mlir`.
+2. `[FeMe] Roadmap: strike H147, file H148 (fixed) and H147a (remaining)`.
+3. `[FeMe] VulkanCTSReport: document H148 push-constant matrix fix + CTS regression check`.
+
+**Roadmap changes:** H147 struck through (split, not simply closed) —
+H148 (this fix, closed) + H147a (new, the 3 leftover untriaged cases:
+`WaveIsFirstLane.test`/`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`,
+confirmed this session to NOT share `matrix.test`'s cause).
+
+**Design doc:** no update needed — this was a bugfix inside already-
+documented `RowMajor`/push-constant behavior, not a deviation from it.
+
+**Feature/extension inventories:** no update needed — internal SPIR-V-
+to-LLVM correctness fix, no new Vulkan feature or extension surface.
+
+**Next steps, ranked by payoff:**
+1. **~1-2 hours, still untouched:** reduce
+   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
+   divergent-branch gap to its exact IR shape via `feme-opt
+   --feme-convert-spirv-to-llvm`, before attempting a fix.
+2. **~1-2 hours, still untouched:** same for
+   `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   multi-exit-loop gap.
+3. **~30-60 min each, x3 (H147a):** individually triage
+   `WaveIsFirstLane.test`/`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`
+   — reproduce standalone via `offloader`, dump actual vs. expected
+   values. Confirmed this session these do NOT share H148's matrix-
+   addressing cause; each needs its own from-scratch look.
+4. **Full session, highest payoff (8 cases at once), least scoped:**
+   attempt H124e's actual wrap-entry region-splitting design work.
+5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
