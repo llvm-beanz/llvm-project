@@ -48,6 +48,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/Scalar/JumpThreading.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Threading.h"
@@ -423,6 +424,40 @@ Expected<PipelineResult> runPipeline(Module &M,
     if (Error E = runAndCheck("widening", SIMDizePass(Opts.WaveSize)))
       return std::move(E);
     if (Error E = runAndCheck("lowering waves for", WaveLoweringPass()))
+      return std::move(E);
+    // Roadmap H124e(a): every DXC/SPIR-V-Tools-structurized loop with a
+    // barrier in its body is emitted as a rotated "guard" loop, whose own
+    // per-iteration continue-vs-exit decision (and the header's own
+    // immediate-exit case) both route through one shared structured-CFG
+    // merge block, rather than the header's body chain branching directly
+    // back to the header. `feme::cpu::EntryWrapperPass`'s `matchLoopShape`
+    // only recognizes a *direct* backedge -- this merge-block indirection
+    // is purely an LLVM/SPIR-V CFG-canonicalization artifact (the merge
+    // block's own branch condition is, in the simplest cases, a compile-
+    // time-constant per predecessor edge, not a genuine additional runtime
+    // test), so a generic, off-the-shelf `JumpThreadingPass` run here
+    // (which threads through exactly this "branch on a phi with constant
+    // incoming values" pattern) eliminates the merge block entirely
+    // before `EntryWrapperPass` ever sees it for those simpler cases,
+    // canonicalizing the loop back down to the plain direct-backedge (or
+    // barrier-and-recurrence-collapsed single-latch-block) shape
+    // `matchLoopShape` already supports. **Confirmed this session this
+    // does NOT hold for every real DXC-produced case**: e.g.
+    // `Feature/HLSLLib/InterlockedExchange.32.test`'s own post-jump-
+    // threading dump still has its `Flow1._crit_edge` merge block intact
+    // (a real, un-eliminated `CondBrInst`), most likely because its loop
+    // body's own extra uniform branch (the source's `if` guarding the
+    // atomic op) makes the merge phi's incoming values non-constant on
+    // at least one edge JumpThreadingPass would need to be constant --
+    // this pass only helps the subset of H124e's wrap-entry bucket whose
+    // loop body has no such extra branch, not the bucket as a whole. See
+    // `EntryWrapper.cpp`'s own `matchLoopShape` doc comment for the
+    // narrower shape this alone does not close either (a barrier-and-
+    // recurrence-collapsed single latch block whose own prefix/suffix
+    // chain contains a barrier of its own).
+    if (Error E = runAndCheck(
+            "simplifying loop-merge control flow for",
+            createModuleToFunctionPassAdaptor(JumpThreadingPass())))
       return std::move(E);
     switch (Opts.Stage) {
     case feme::ShaderStage::Compute:
