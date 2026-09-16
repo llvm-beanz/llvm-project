@@ -87576,3 +87576,163 @@ breakdown now in the roadmap row.
    further FeMe-side action needed, any fix belongs in that other repo.
 6. **Do not re-attempt H150** -- confirmed a prior session it's not a
    FeMe-side bug at all.
+
+# H158/H163: five of the eight `Interlocked*` cases now pass
+
+**Next action if you pick this up:** open roadmap H164 and re-dump
+`InterlockedCompareExchange.32.test` with
+`FEME_DUMP_IR=1 ./bin/offloader <...>/Output/InterlockedCompareExchange.32.test.tmp/pipeline.yaml <...>.tmp.o`.
+That is the one remaining case where the compiler now succeeds and the
+*shader* crashes, and it is the highest-value unknown left.
+
+## What now works
+
+- `Interlocked` offload filter: **10 passed / 8 failed -> 15 passed / 3 failed.**
+- Whole `feme-vk` suite: **16 failures -> 11.** No regressions.
+- `check-feme`: 3,117 passed (was 3,111). 505 `FeMeTransformsCPUTests`.
+- `dEQP-VK.compute.pipeline.*`: 647 / 36 / 19,819 -- byte-identical to baseline.
+
+Newly passing: `InterlockedAdd.32`, `InterlockedExchange.32`,
+`InterlockedCompareExchange.resources.32`, `InterlockedCompareStore.32`,
+`InterlockedCompareStore.resources.32`.
+
+## The device check
+
+`VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json
+vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`.
+Run without the explicit variable first and it reported
+`llvmpipe (LLVM 21.1.8, 128 bits)` -- the system default is Mesa. Every
+Vulkan invocation in this session exported it.
+
+## The one thing worth remembering from this session
+
+I started by implementing what the previous session recommended (H159's
+two-part fix). It landed, it was correct, and it closed **zero** tests.
+So did H158, the next-most-likely candidate. Two milestones, both
+well-designed, both right, both predicted to close these cases, both not
+closing them.
+
+The reason is that every triage of these cases -- across at least three
+sessions -- had been done against a *reconstruction* of the IR: the HLSL
+read by eye, or a standalone `dxc` + `feme-opt` run. Neither reproduces
+what `feme::cpu::runPipeline` actually builds in memory from the test's
+SPIR-V. The previous session's specific conclusion (that a surviving
+`Flow1._crit_edge` merge block blocked all 8 cases) turned out to be
+based on a block *name*. The block is the loop's plain
+single-predecessor latch; it inherited the structurizer's name and
+nothing more. `JumpThreadingPass` had done its job all along.
+
+Two lines fixed this permanently:
+
+```cpp
+if (::getenv("FEME_DUMP_IR"))
+  M.print(errs(), nullptr);
+```
+
+placed immediately before the wrapping stage, plus running `offloader`
+directly on the artifacts lit had already generated. Within about ten
+minutes of having a real dump I had the actual blockers, and they were
+four unrelated things, none of which was the thing everyone had been
+chasing. The hook and the recipe are now committed and documented in
+`feme/.instructions.md`; a previous session had explicitly flagged
+"no way to dump this IR" as an unsolved problem.
+
+The lesson generalizes past this project: when two carefully-reasoned
+fixes in a row fail to move a number, the next move is not a third fix.
+It is to go look at the actual input.
+
+## What the four real fixes were
+
+Numbered in the order I found and landed them, each its own commit with
+its own unit test:
+
+1. **Region-top reloads (H163a).** A wave-persistent induction's reload
+   sat at its use. H159 therefore had to decline any use appearing after
+   the recurrence's store-back -- the slot would already hold the next
+   iteration's value. Reloading at the *top of the use's own barrier
+   region* makes such a use correct, so the guard narrows to "separated
+   from the recurrence by a barrier". A use in the post-loop suffix
+   chain is always safe: the slot then holds exactly what the header phi
+   would carry on the exiting edge. This alone closed
+   `InterlockedExchange.32.test`.
+
+2. **Non-barrier chain boundaries (H163b).** Debugging (1) produced
+   `Referring to an instruction in another function!` for values defined
+   in the prefix and used in the loop. Root cause: a wave body's prefix,
+   loop and suffix chains are outlined into *separate functions*, so a
+   chain boundary is a region boundary even with no barrier on it, and
+   the spilling code only knew about barriers. It now takes a list of
+   boundary indices with those two added. I went through two wrong
+   designs first (`Order.front()`, then a single `LoopRegionStart`
+   field) before landing on per-chain `ArrayRef`s.
+
+3. **Stranded scalar recurrences (H163c).** Once H159 outlines the
+   latch, a genuinely uniform trip counter living in it is neither
+   usable by the wrapper nor eligible to be wave-persistent (the header
+   reads it). It is now *cloned* into the wrapper's own latch, guarded
+   by: non-phi, non-terminator, side-effect-free, reads no memory,
+   operands only constants / allowed header phis / other clonable
+   instructions. Its operands must be snapshotted *before* the
+   `loopvarN` rewriting, which redirects the original at its region's
+   argument -- I hit `Referring to an argument in another function!`
+   learning that. Closed `InterlockedAdd.32` and both
+   `InterlockedCompareStore` cases.
+
+4. **General barrier-free regions (H158, generalized in H163d).** The
+   chain walk handled one hard-coded shape, a safe diamond. DXC emits a
+   multi-level merge for a run of source-level `if`s. The walk now
+   matches any acyclic, barrier-free, single-entry single-exit region.
+   The safety argument never depended on the internal shape: with no
+   barrier inside, the region always lands whole inside one region
+   function, so the existing linear block-moving logic already handles
+   it. One guard is essential -- a "diamond" whose arms reconverge at
+   the loop *header* is the loop's own closing branch, not a mid-body
+   diamond, and missing that crashed
+   `SplitsBarrierFreeLoopWithNestedCondBr` in `eraseFromParent`.
+
+## Honest accounting of what is left
+
+All three remaining `Interlocked*` failures have *different* root
+causes, which is why I split them into three roadmap rows rather than
+leaving one bucket:
+
+- **H164** `InterlockedCompareExchange.32` -- now compiles clean and
+  segfaults in the JIT'd shader (exit -11, empty stack dump). This is a
+  change in failure *mode*, not a regression, and the region match that
+  enabled it is independently unit-tested on synthetic IR of exactly
+  this shape, so the bug is very likely downstream. Three hypotheses are
+  written up in the roadmap row; the one I would check first is the
+  spilled `<4 x ptr>` groupshared lane-pointer vector being reloaded in a
+  region its store does not dominate.
+- **H165** `InterlockedExchange.resources.32` -- fails a whole pass
+  earlier, in `feme-cpu-linearize`, on a loop-internal branch that does
+  not reach the loop's exit. Structurally the same shape H158 taught the
+  *wrapping* stage about. Worth checking whether the linearizer's
+  restriction is still needed at all.
+- **H166** `InterlockedAdd.resources.32` -- compiles and runs, returns
+  0x40 where 0x100 is expected. Exactly 1/4 at wave size 4: a typed
+  resource (`RWTexture2D`) atomic executing once per wave instead of
+  once per lane. The `RWStructuredBuffer` sibling passes, so it is
+  specific to the texture atomic path in `SIMDize`. Nothing to do with
+  the loop wrapper.
+
+Also: I renumbered this session's work from H160 to **H163** partway
+through, because H160 was already taken by an unrelated `OpArrayLength`
+row. If you see "H160" in a stale note, it means H163.
+
+## Suggested next steps, ranked
+
+1. **H166 first, not H164.** It is the smallest and best-understood:
+   one atomic being scalarized where its sibling is widened, with a
+   passing sibling to diff against. Probably an afternoon.
+2. **H165 second.** Also bounded, and it may turn out to be a stale
+   restriction that can simply be lifted now that the wrapping stage
+   handles the shape.
+3. **H164 last.** Open-ended: a crash in generated code with no usable
+   stack. Budget a day or more, and start by hand-editing the `feme-opt`
+   output rather than reaching for a debugger.
+4. Separately, `SIMDizePass::widenGroupSharedStore` crashes in
+   `CreateMaskedScatter` for a groupshared *store* inside a loop body. I
+   worked around it in unit tests by using a load instead. Pre-existing
+   and unrelated, but it has now cost two sessions a detour and deserves
+   its own row.
