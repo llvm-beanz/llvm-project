@@ -53,11 +53,11 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~2-4 hours, well-scoped, most promising next target:** H156 —
-   `feme-cpu-linearize`'s "empty diamond arm"/"internal branch does not
-   reach the loop's exit block" gap for a divergent branch mixed with
-   barriers in a loop's prefix (or body). Start with
-   `WaveOps/GroupMemoryBarrierWithGroupSync.test`'s own reduced IR (already
-   captured this session via the standard `dxc`+`feme-translate`+`feme-opt`
-   repro recipe) to see exactly which of `LinearizePass`'s two diagnostics
-   fires first.
+1. **~2-4 hours, best next target, now precisely scoped:** H154 -- teach
+   `matchLoopShape` in `feme-cpu-wrap-entry` to recognize the `Flow`-style
+   structured-CFG merge-block shape (`JumpThreading` produces this for
+   `InterlockedAdd`/`InterlockedCompareExchange`/`InterlockedCompareStore`/
+   `InterlockedExchange` `.32.test`/`.resources.32.test`, all 8 remaining
+   cases in this bucket, confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   -- all fail with wrap-entry's own genuine "barrier inside non-linear
+   control flow" diagnostic, no other bug hiding underneath this time).
