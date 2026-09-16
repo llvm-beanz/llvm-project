@@ -45775,3 +45775,82 @@ validation loop earlier in the same function).
 
 H139 is struck through on the roadmap as fixed (filed and closed in
 the same session).
+
+## H140/H141: fresh `check-hlsl-feme-vk` re-triage -- `spec_const_32_bits.test`/`nested.test` fixed
+
+**Context.** This session individually triaged the previous session's
+28-`check-hlsl-feme-vk`-failure list one test at a time, running `dxc`
++ `offloader -debug-layer -adapter-regex="FeMe"` directly (with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) rather than through `llvm-lit`,
+per the standing instruction that the env var doesn't surface through
+lit's own capture. Two of the triaged failures were root-caused and
+fixed; see H140/H141 on the roadmap for each fix's own detail.
+
+### H140: `Feature/SpecializationConstant/spec_const_32_bits.test`'s boolean spec constant
+
+Two bugs, one in `offload-test-suite` (`parseSpecializationConstant`'s
+`DataFormat::Bool` case used a 1-byte `VkSpecializationMapEntry::size`
+instead of the spec-mandated `sizeof(VkBool32)` == 4), one in FeMe
+itself (`SpecializationPatch.cpp` never handled
+`OpSpecConstantTrue`/`OpSpecConstantFalse`, SPIR-V's only
+`OpTypeBool`-typed spec-constant encoding). See the roadmap's own H140
+entry for the full root-cause/fix narrative.
+
+**Verification.**
+- `ninja check-feme`: **3084/3087 passed** (3 unsupported), 0 failed,
+  +3 new unit tests, 0 regressions.
+- `check-hlsl-feme-vk`: `spec_const_32_bits.test` now passes.
+- **Native Vulkan CTS spot-check** (confirmed active via
+  `vulkaninfo --summary`), since the FeMe-side fix is real driver code
+  exercised by *any* Vulkan application, not just the HLSL test
+  harness: `dEQP-VK.*spec_constant*` (11,400 cases): 1506 passed / 647
+  failed / 9247 not supported. Every `*.bool`/`*.bool_packed` boolean
+  scalar spec-constant case across every pipeline-construction variant
+  (`monolithic`/`fast_linked_library`/`pipeline_library`) and every
+  shader stage passes outright -- confirmed via a direct grep of the
+  full case list for no `bool`-named case among the 647 failures. The
+  647 failures are pre-existing, unrelated gaps in composite
+  (`struct`/`array`/`matrix`)-typed spec-constant support, entirely
+  unaffected by this fix (no baseline exists yet for this specific
+  subset to diff against; noted here as a spot-check confirming no
+  regression in the boolean case specifically, not a full before/after
+  comparison of the composite-type gaps).
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a
+  specialization-constant-patching correctness fix, not a
+  feature/extension-support change.
+
+### H141: `Feature/ConstantBufferT/nested.test`'s silent SPIR-V deserialize failure
+
+A deeply-nested (3-level) HLSL `ConstantBuffer` struct with an
+array-of-struct middle member causes DXC to emit two distinct
+`OpTypeStruct` `<id>`s sharing the same debug name (`OpName`) -- one
+`Uniform`-layout copy, one `StorageBuffer`-layout copy. Upstream MLIR's
+SPIR-V deserializer resolves both to the same "identified" struct type
+(keyed purely by that name string) and silently fails (no diagnostic
+at all) when the second, differently-laid-out body collides with the
+first. See the roadmap's own H141 entry for the full bisection/root-
+cause narrative and the new `disambiguateDuplicateStructNames`
+FeMe-local raw-word preprocessing pass that fixes it.
+
+**Verification.**
+- `ninja check-feme`: **3084/3087 passed** (3 unsupported), 0 failed,
+  +1 new unit test, 0 regressions.
+- `check-hlsl-feme-vk`: `nested.test` now passes; combined with H140,
+  full-suite failure count drops from 28 to 26 (of 664; 1
+  unexpectedly-passing `Feature/PushConstant/array_of_matrices.test`
+  unchanged, not yet investigated).
+- **Vulkan CTS spot-check**: `dEQP-VK.ssbo.layout.random.nested_structs*`
+  (100 cases): 31 passed / 37 failed / 32 not supported. The 37
+  failures are a distinct, pre-existing, unrelated gap -- a JIT
+  "Symbols not found: [ feme.cpu.resource.store.raw.i8 ]" error (no
+  `i8`-element raw-resource-store runtime entry point exists), not the
+  struct-name-collision bug this fix addresses; noted here as a new,
+  not-yet-filed finding for a future session rather than chased down
+  in this one (out of this session's scope).
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a
+  SPIR-V-import correctness fix, not a feature/extension-support
+  change.
+
+H140 and H141 are struck through on the roadmap as fixed (both filed
+and closed in the same session).
+
