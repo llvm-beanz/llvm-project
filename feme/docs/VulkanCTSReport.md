@@ -45331,3 +45331,55 @@ own one-FileCheck-case-per-op structure.
 H124k is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new Vulkan-visible
 capability.
+
+## H124s: `Array2D` storage-image `GetDimensions` legalization gap fixed
+
+**Bug.** `Feature/Textures/Array.GetDimensions.test` (1 case) failed
+pipeline creation. Per-resource isolation (compiling each of the
+test's several resource declarations individually against the same
+pipeline, rather than trusting the "unsupported raised operation"
+diagnostic's own named handle) found the real, distinct cause: the
+diagnostic named an unrelated `Texture2DArray` bystander in the same
+function, while the actual rejected handle was
+`RWTexture2DArray::GetDimensions(Width, Height, Elements)` (no
+explicit mip argument). `spirv-dis` confirmed this HLSL overload lowers
+to the bare `OpImageQuerySize` opcode (`v3uint` result, no Lod operand)
+-- unlike a *sampled* `Texture2DArray`'s identical-looking overload,
+which Clang's own HLSL codegen always lowers to `OpImageQuerySizeLod`
+with an explicit `Lod = 0` instead (already supported by the prior
+`QuerySizeLod2DArray` builder). A storage image has no mip-chain
+concept to select a level from at all, hence the different opcode.
+
+**Fix.** Added `isGetDimensions3Intrinsic` (recognizing
+`llvm.spv.resource.getdimensions.xyz`) and widened
+`hasOnlySupportedStorageImageUses` to accept it for `Array2D`. Codegen
+reuses the existing `QuerySizeLod2DArray` runtime call with a
+synthesized constant `Lod = 0` -- a storage image has exactly one mip
+level, so its formula for that level is identical to the sampled
+image's own mip-0 query.
+
+**New test coverage.**
+`spirv-resource-lowering-image-getdimensions-array2d.ll` (lit),
+mirroring `spirv-resource-lowering-image-getdimensions.ll`'s own
+structure for the new `v3uint`/`getdimensions.xyz` shape.
+
+**Verification.**
+- `ninja check-feme`: **3067/3070 passed** (3 unsupported), 0 failed,
+  0 regressions (+1 new lit test over the H124k edition's 3066/3069).
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): `Feature/Textures/Array.GetDimensions.test`
+  now passes. Full suite: **343 passed / 34 failed** (of 664), up from
+  342/35 -- exactly the 1 target case moved from fail to pass, no
+  regressions.
+- VK-GL-CTS: no directly-analogous test group exists -- GLSL's own
+  `imageSize()` against an array image apparently never reaches this
+  exact HLSL-only DXC codegen shape (`dEQP-VK-cases.xml` was searched
+  for `query_size`/`imagesize`/`texturesize`-named groups; none matched
+  a compute-shader storage-array-image no-Lod query). Ran
+  `dEQP-VK.image.load_store.with_format.2d_array.*` (**156/156 Pass**)
+  as a broad regression check on the `Array2D` storage-image code path
+  this change touches -- no regressions.
+
+H124s is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new Vulkan-visible
+capability.
