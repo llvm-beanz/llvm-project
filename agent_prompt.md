@@ -53,25 +53,15 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~30-45 min: individually re-confirm which of H124e's 7 wrap-entry
-   cases actually share the exact 3-phi/nested-branch/2-barrier shape**
-   found this session (only `InterlockedAdd.32.test` was directly
-   inspected) — don't assume the other 6 match without checking, this
-   project has been burned by that assumption before.
-2. **~1-2 hours, still untouched: `InterlockedCompareExchange.resources.32.test`'s
-   `feme-cpu-simdize` divergent-branch gap** — needs an IR-level
-   reduction via `feme-opt --feme-convert-spirv-to-llvm` before any fix
-   attempt, same methodology as this session's H124e dump.
-3. **~1-2 hours, still untouched: `InterlockedExchange.resources.32.test`'s
-   `feme-cpu-linearize` multi-exit-loop gap** — same, needs its own
-   IR-level reduction first.
-4. **Large, deprioritized: H124d** — upstream MLIR SPIR-V dialect
-   `OpDPdx`/`OpDPdy`/`OpFwidth` ops, likely root cause of the
-   `DdxCoarse`/`DdyCoarse`/`ddx_fine`/`ddy_fine`/`fwidth.test` group (5
-   failures) — still not individually confirmed across many sessions now.
-5. **Large, not yet filed as its own roadmap row: `shaderImageGatherExtended`**
-   — FeMe's gather is `ConstOffset`-only, blocks every
-   `dEQP-VK.glsl.texture_gather.*` CTS case. File the row before starting.
-6. **Lowest priority, deferred 26+ sessions: `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s**
-   pre-existing heap corruption (valgrind points at
-   `buildStageStorage`/`executeDraws`).
+- **~1-2 hours**: reduce `InterlockedCompareExchange.resources.32.test`'s
+  `feme-cpu-simdize` divergent-branch gap to its exact IR shape via
+  `feme-opt --feme-convert-spirv-to-llvm`, before attempting a fix.
+- **~1-2 hours**: same for `InterlockedExchange.resources.32.test`'s
+  `feme-cpu-linearize` multi-exit-loop gap.
+- **~30-60 min each, x4**: individually triage H147's 4
+  functional-correctness bugs (reproduce standalone via `offloader`, dump
+  actual vs. expected values) — cheapest way to find another tractable,
+  well-scoped fix like H146.
+- **Full session**: attempt H124e(a)'s actual design work (highest
+  payoff — up to 8 cases at once — but also the largest, least-scoped
+  remaining item).
