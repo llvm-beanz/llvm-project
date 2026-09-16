@@ -85484,3 +85484,112 @@ run — worth remembering: when a shape already has *sample* support, its
 `/tmp/h124r/`, `/tmp/h124r_cube_out.ll`, `/tmp/gcf.diff`,
 `/tmp/cube_gather_cts.qpa` (all this session's scratch files, outside
 the repo) have been deleted.
+
+# Session: H124k / H124s / H124t (PackHalf2x16, Array2D GetDimensions, Array2D CalculateLevelOfDetail)
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` first, per standing rule.
+
+## What shipped, in order
+
+1. **H124k** — `spirv.GL.PackHalf2x16`/`UnpackHalf2x16` had zero MLIR
+   legalization pattern. Added `GLPackHalf2x16Pattern`/
+   `GLUnpackHalf2x16Pattern` in `SPIRVToLLVMPatterns.cpp` (per-lane
+   `fptrunc`/`bitcast`/`zext`/`shl`/`or` and the reverse). New lit test.
+   Fixes `Feature/HLSLLib/{f16tof32,f32tof16}.test`. Real CTS win:
+   `dEQP-VK.glsl.builtin.function.pack_unpack.{packhalf2x16,
+   unpackhalf2x16}_compute` both now Pass (genuinely unblocked, not
+   feature-gated).
+2. **H124s** — `RWTexture2DArray::GetDimensions(w,h,elements)` (no mip)
+   lowers to a bare `OpImageQuerySize` (`v3uint`, no Lod) that
+   `hasOnlySupportedStorageImageUses` didn't recognize at all. Added
+   `isGetDimensions3Intrinsic`, widened the storage-image shape gate to
+   `Array2D`, reused the existing `QuerySizeLod2DArray` runtime call with
+   a synthesized `Lod = 0` (no new runtime entry point needed — a
+   storage image has exactly one mip level). New lit test. Fixes
+   `Feature/Textures/Array.GetDimensions.test`.
+3. **H124t** — `Texture2DArray::CalculateLevelOfDetail` lowers to
+   `OpImageQueryLod`, scoped to `Plain2D` only before this session.
+   Confirmed via `spirv-dis` the coordinate is always 2 components even
+   for `Array2D` (no slice argument in the HLSL signature at all).
+   Widened the shape gate, reused `QueryLod2D`'s runtime call/formula
+   unchanged. Fixed a now-stale unit test that asserted the old
+   (unrealizable) 3-component-coordinate rejection case, added a new
+   `Plain1D` negative test in its place. Real CTS win: `dEQP-VK.glsl.
+   texture_functions.query.texturequerylod.{sampler2darray_float,
+   _fixed,shadow}_*` (15 cases) now Pass — the remaining 10 `{i,u}
+   sampler2darray_*` cases in the same glob still correctly fail
+   (integer-channel images were never legal for this op in the first
+   place, same as `Plain2D`).
+
+Each fix: its own implementation commit + its own test commit + its own
+roadmap strikethrough commit + its own `VulkanCTSReport.md` entry commit.
+`check-feme` went 3066→3067→3068 (of a growing total 3069→3070→3071),
+0 failures throughout. `check-hlsl-feme-vk` went 342→343→344 passed (of
+664), exactly 1 case per fix moved fail→pass each time, 0 regressions.
+
+## Two gotchas worth remembering
+
+- **The `offloader` binary does not link the ICD.** Rebuilding
+  `feme-opt`/`offloader` after a `SPIRVResourceLowering.cpp` change is
+  not enough — the actual driver code lives in the separately-linked
+  `lib/libfeme_vulkan.so` (loaded at runtime via `VK_ICD_FILENAMES`).
+  Always `ninja libfeme_vulkan.so` too, or a fix will silently appear
+  not to work even though it compiled cleanly. Lost ~15 minutes to this
+  mid-session before catching it via `ninja -v`'s own build-step
+  ordering.
+- **A sampled image and a storage image can look identical in HLSL but
+  lower to different opcodes for the "same" method.** `Texture2DArray::
+  GetDimensions(w,h,elements)` (sampled, no mip) emits
+  `OpImageQuerySizeLod` with an explicit `Lod=0` (Clang's HLSL codegen
+  always synthesizes it for a *sampled* image); `RWTexture2DArray::
+  GetDimensions(w,h,elements)` (storage) emits the bare, Lod-less
+  `OpImageQuerySize` instead — a storage image has no mip chain to pick
+  a level from. When triaging a "should just work like the sampled
+  case" bug, check `spirv-dis` on both before assuming they share a
+  code path.
+
+## Suggested next steps
+
+1. **H124u** (~1-2 hours, filed a few sessions back, still open):
+   `CalculateLevelOfDetail` against a `Cube`/`CubeArray` handle — the
+   `hasOnlySupportedImageUses`/`isQueryLodIntrinsic` gate this session
+   widened to `Array2D` still excludes `Cube`/`CubeArray` entirely.
+   Unlike `Array2D`'s 2-component coordinate, a cube's own LOD query
+   coordinate is a 3-component direction vector (not yet confirmed via
+   `spirv-dis` — check that first), and the LOD formula itself needs
+   `femeRTComputeCubeUVDerivatives`-style face selection, not a bare
+   reuse of `QueryLod2D`. Look at `femeRTPlanImplicitLod`/
+   `femeRTComputeUnclampedQueryLod`'s own existing Cube-aware code paths
+   (used by ordinary Cube sampling) for the pattern to mirror.
+2. **H124k/H124q/H124r/H124s/H124t are now what remains of H124q's
+   original 7-case bucket, all closed.** Re-run
+   `check-hlsl-feme-vk`'s full failure list fresh (33 failures now) and
+   re-bucket by root cause — several of the 33 look like fully separate,
+   unstarted issues (`InterlockedAdd/CompareExchange/CompareStore/
+   Exchange/Xor.32.test`, `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/
+   fwidth.test`, `WaveActiveMax.test`, `Mandelbrot.test`) — don't assume
+   any two share a cause without individually triaging first.
+3. **H124p** (~1-2 hours, not started, carried over 3+ sessions):
+   `feme-cpu-simdize` doesn't handle a divergent call to
+   `llvm.is.fpclass.f32` (`Basic/Mandelbrot.test`, 1 case) — worth
+   pairing with H124e (same subsystem).
+4. **H124e** (~several sessions, large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps — needs per-case triage first, don't assume
+   one fix covers all.
+5. **H124d** (large, deprioritized, unchanged for many sessions):
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth`.
+6. **`shaderImageGatherExtended`** (large, noted 2 sessions back, not
+   yet filed as its own roadmap row): blocks every `dEQP-VK.glsl.
+   texture_gather.*` CTS case regardless of shape/offset. FeMe's own
+   gather is `ConstOffset`-only, never true per-invocation dynamic
+   offset — advertising this feature honestly is itself a real,
+   separate, likely-multi-session capability addition. File a roadmap
+   row before starting.
+7. Lower priority, deferred 19+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at `buildStageStorage`/
+   `executeDraws` allocating a too-small buffer.
+
+No scratch files left outside the repo this session (all `/tmp/h124*`
+directories and `.qpa` logs cleaned up before this commit).
