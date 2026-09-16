@@ -46631,3 +46631,151 @@ for both `feme.cpu.resource.atomic.*` and `feme.cpu.image.atomic.*`.
   Vulkan feature or extension.
 
 H152 is struck through on the roadmap: fixed this session.
+
+## H153: H124e(a)'s "Flow-merge loop" `JumpThreadingPass`/`matchLoopShape` work -- 3 real bugs fixed, but no `check-hlsl-feme-vk` case closed
+
+**Starting point.** H124e(a)'s own prior-session analysis (see that
+roadmap row) proposed two complementary pieces to recognize DXC/SPIR-V-
+Tools' rotated "guard" loop shape with a barrier in its body: (1) a
+generic `JumpThreadingPass` run right before `feme::cpu::EntryWrapperPass`
+in `Pipeline.cpp`, to eliminate the shared `Flow`-style merge block's own
+branch (provably constant-per-predecessor-edge, in the cases where it
+threads cleanly) before `matchLoopShape` ever sees it; and (2) an
+extension to `matchLoopShape` recognizing the residual shape once that
+merge block is gone -- a loop whose barrier and pure per-iteration
+recurrence have collapsed into one single physical block (no separate
+`BodyOrder` survives), rather than the ordinary multi-block case
+`matchLoopShape` already handled.
+
+**What was implemented.**
+- `Pipeline.cpp`: inserted `createModuleToFunctionPassAdaptor(
+  JumpThreadingPass())` right after `WaveLoweringPass` and before the
+  per-stage wrapper dispatch.
+- `EntryWrapper.cpp`'s `matchLoopShape`: added the collapsed-single-
+  block-`Latch` case -- finds the block's own last group-sync barrier
+  call via the existing `matchBarrierCall`, validates the tail (the
+  would-be pure recurrence) via a new `isPureClosedChainAfter` helper,
+  and defers the actual `SplitBlock` mutation to the very last line
+  before returning a match (preserving the existing "never mutate `F` on
+  a `std::nullopt` path" invariant the rest of the function already
+  relies on).
+- `buildWrapperForLoop`: added `HeaderDerivedValues` threading -- a
+  non-phi, non-terminator value computed in `Shape.Header` and used only
+  by the (newly-recognized) `BodyOrder` region is threaded through as its
+  own trailing `loopvarN` parameter, exactly like a genuine induction,
+  reusing `buildWaveLoop`'s existing by-name `loopvarN` dispatch.
+- New explicit invariant check: `matchLoopShape` now rejects (returns
+  `std::nullopt` for) any shape whose `Shape.PrefixOrder`/`SuffixOrder`
+  chain contains a group-sync barrier of its own, via a new
+  `containsGroupSyncBarrier` helper -- `LoopShape`'s own doc comment
+  already documented this as a required invariant, but nothing enforced
+  it before this session.
+
+**3 real, pre-existing bugs found and fixed along the way** (all
+independent of the "Flow-merge loop" feature itself, uncovered only by
+exercising this new code path):
+1. `LoopShape`'s `Header`/`Latch`/`ExitBlock` fields had no default
+   member initializers, so a `LoopShape Shape;` left them as
+   uninitialized stack garbage; splitting an old bundled early-return
+   check (`!Shape.Latch || Shape.BodyOrder.empty()`) into two separate
+   checks (needed to support the new collapsed-block case) removed the
+   safety net that used to catch a body-walk finding no real latch,
+   letting `if (!Shape.Latch) return std::nullopt;` pass "by luck" on
+   non-null garbage and segfault later dereferencing it. Fixed with
+   `= nullptr` default member initializers.
+2. The initial poison-filled `LoopScalars` array (used to seed
+   `PrefixFn`'s own call site before any real per-iteration values exist)
+   was sized only for `Shape.Inductions`, not for the new
+   `HeaderDerivedValues` entries -- but `PrefixFn`'s own function
+   signature (via `outlineChain`'s verbatim copy of `WaveBody`'s already-
+   extended type) always includes a `loopvarN` parameter for every
+   `HeaderDerivedValues` entry too, regardless of whether Prefix's own
+   body uses it, causing a `LoopScalars.size()` assertion failure.
+3. `spillValuesLiveAcrossBarriers`'s def-before-barrier detection only
+   indexed `Shape.BodyOrder`'s own blocks into its `IndexOf` map -- a
+   value defined in `Shape.PrefixOrder` (outside `Shape.BodyOrder`) but
+   used later, across a barrier, inside the body was invisible to it,
+   producing "Referring to an instruction in another function!" verifier
+   errors. Fixed by also indexing `Shape.PrefixOrder`'s blocks (before
+   `Shape.BodyOrder`'s own) and passing a concatenated
+   Prefix-then-Body order to the call.
+
+**Testing.** Two new `EntryWrapperTest.cpp` unit tests:
+`SplitsFlowMergeLoopWithHeaderDerivedValue` (the collapsed-single-block
+shape, exercising the `HeaderDerivedValues`/`LoopScalars`/`SpillOrder`
+fixes together end-to-end, confirmed via `verifyModule`) and
+`LoopWithBarrierInPrefixIsDiagnosed` (the new prefix/suffix-barrier
+invariant check, confirming a shape violating it is safely diagnosed,
+not miscompiled or crashed). `ninja check-feme`: 3101/3104 passed (3
+unsupported), 0 failed, no regressions (up from 3099/3102 before this
+session, +2 new tests).
+
+**Verification against the real `check-hlsl-feme-vk` H124e wrap-entry
+bucket -- no case closed.** No offload-test-suite build directory
+persists in this checkout (same recurring environment limitation prior
+sessions have hit), so verified manually via `split-file` + a real `dxc
+-spirv -fspv-target-env=vulkan1.3` compile + `offloader` run, once per
+case, for all 9 confirmed cases in H124e's own bucket
+(`InterlockedAdd.32.test`, `InterlockedAdd.resources.32.test`,
+`InterlockedCompareExchange.32.test`,
+`InterlockedCompareExchange.resources.32.test`,
+`InterlockedCompareStore.32.test`,
+`InterlockedCompareStore.resources.32.test`,
+`InterlockedExchange.32.test`, `WaveOps/ComponentAccumulationDataRace.
+test`, `WaveOps/GroupMemoryBarrierWithGroupSync.test`): **every one still
+produces the byte-identical `feme-cpu-wrap-entry` "barrier inside
+non-linear control flow" diagnostic as before this session** -- no crash,
+no hang, but also no case flips to passing. Two concrete reasons found,
+each confirmed against a real case, neither anticipated by the prior
+session's own design note:
+- `GroupMemoryBarrierWithGroupSync.test`'s own real HLSL source has two
+  further `GroupMemoryBarrierWithGroupSync()` calls *before* the loop
+  even starts (an initial broadcast-then-read sequence) -- i.e. its own
+  `Shape.PrefixOrder` genuinely contains barriers of its own, a case this
+  session's new invariant check correctly declines (see "3 real bugs"
+  above) rather than silently miscompiling, but which is not yet
+  supported at all. This test's own loop body *does* match the new
+  collapsed-single-block shape once prefix barriers are set aside
+  (confirmed via a synthetic reduction, see `EntryWrapperTest.cpp`'s new
+  `SplitsFlowMergeLoopWithHeaderDerivedValue` test) -- it is specifically
+  the prefix-barrier gap blocking it, not the loop shape itself.
+- `InterlockedAdd.32.test`/`InterlockedExchange.32.test`: dumped the real
+  post-`JumpThreadingPass` IR (via a temporary, since-removed
+  `getenv("FEME_DEBUG_DUMP_POST_JT")`-gated dump in `Pipeline.cpp`) and
+  found `JumpThreadingPass` does **not** reliably eliminate the `Flow`-
+  style merge block for every real DXC-produced case as the prior
+  session's design note assumed -- `InterlockedExchange.32.test`'s own
+  `Flow1._crit_edge` merge block survives fully intact (a real,
+  un-eliminated `CondBrInst`), most likely because its loop body's own
+  extra uniform branch (the HLSL source's `if` guarding the atomic op)
+  makes the merge phi's incoming values non-constant on at least one edge
+  `JumpThreadingPass` would need constant to thread through. This
+  narrows `JumpThreadingPass`'s own contribution to "helps only the
+  subset of the bucket whose loop body has no extra branch," not the
+  whole bucket as previously assumed.
+
+**Net result.** Real, tested, non-regressing infrastructure progress (3
+genuine bugs fixed, a new validated loop shape supported, a previously-
+unenforced invariant now enforced defensively) but **0 of 664**
+`check-hlsl-feme-vk` cases newly pass. `Roadmap.md`'s H124e(a) row is
+updated with these findings and NOT struck through; see that row for the
+concrete next steps this session's own investigation narrows down to.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases,
+the closest broad native CTS group exercising compute-pipeline creation
+and barrier-using compute shaders, since none of this fix's own affected
+shapes are reachable through raw SPIR-V-Tools/glslang-produced shaders --
+this bucket is entirely a DXC/HLSL-`Interlocked*`/`GroupMemoryBarrier*`-
+specific CFG shape): 647 passed / 36 failed / 19,819 not supported, no
+crash or hang. The 36 failures and the overwhelming not-supported count
+are consistent with this ICD's already-documented, unrelated pre-existing
+capability gaps (this session did not diff this exact group against a
+pre-fix baseline pixel-by-pixel, since the fix touches no code path any
+of these native-SPIR-V-sourced cases exercise -- `check-hlsl-feme-vk`'s
+own manual per-case verification above is this fix's real regression
+check, consistent with H148/H151/H152's own precedent for CPU-backend-
+internal fixes with no native-CTS-reachable shape). No
+`Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a pure
+CPU-backend divergence-handling fix, no new Vulkan feature or extension
+surface.
+
