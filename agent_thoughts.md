@@ -85362,3 +85362,125 @@ other check for that shape already covers the real cases."
 `/tmp/agc_manual`, `/tmp/gather_manual`, `/tmp/gather_array_cases.txt`,
 `/tmp/gather-array-cts*.qpa`, `/tmp/gather-2d-cts.qpa`, `/tmp/x.qpa`
 (all this session's scratch files, outside the repo) have been deleted.
+
+# Session: H124r (Gather/GatherCmp against TextureCube handles)
+
+Fixed: `Feature/Textures/Gather.test`/`GatherCmp.test` now pass under
+`check-hlsl-feme-vk`. `check-feme`: 3065/3068 passed, 0 failed.
+
+## What happened, in order
+
+1. Confirmed FeMe driver active (`vulkaninfo --summary | grep
+   deviceName` → `FeMe CPU Vulkan Device`), per standing rule.
+2. Triaged H124r's 3 cases with `FEME_VULKAN_LOG_CREATION_ERRORS=1` via
+   manual `dxc -spirv`/`offloader` repro (this session started from a
+   prior session's own triage already in progress). Confirmed: all 3
+   are the "innocent bystander" pattern — the reported handle is a
+   co-resident `Texture2D`, the real culprit is the `TextureCube`.
+3. Root cause: `isGatherCmpIntrinsic`/`isGatherIntrinsic`/
+   `isQueryLodIntrinsic` in `SPIRVResourceLowering.cpp` only accepted
+   `Plain2D`/`Array2D`, never `Cube`.
+4. Implemented `Cube` gather support (`Gather`/`GatherCmp` only, not
+   `QueryLod`/`CalculateLevelOfDetail` — that needs real LOD/derivative
+   math, scoped out): `ImageCallKind::GatherCube`/`GatherCmpCube`
+   plumbing, `SPIRVResourceLowering.cpp` shape-gate + codegen dispatch,
+   `femeCpuImageGather{Cmp,}CubeV4F32` runtime functions reusing the
+   existing `femeRTSelectCubeFace` helper (already used by `SampleCube`)
+   for face/UV resolution, then the identical `Plain2D` gather footprint
+   logic addressed at `Layer=CF.Face`.
+5. Wrote and ran a manual `feme-opt`+FileCheck lit test before writing
+   full unit tests — confirmed lowering worked before investing in the
+   bigger test suite.
+6. Wrote unit tests: 2 matcher tests (`ImageCallsTest.cpp`), 2 lowering
+   tests (`SPIRVResourceLoweringTest.cpp`, replacing 2 now-stale
+   negative "leaves Cube gather unlowered" tests), 2 runtime
+   face-isolation tests (`ImageSamplingTest.cpp`). **All passed on the
+   first try** — the `femeRTSelectCubeFace` reuse made this almost a
+   pure copy-paste of the existing `Array2D` gather runtime logic.
+7. Applied `git-clang-format` (not whole-file `clang-format -i` — this
+   matters, see prior sessions' hard lesson), rebuilt everything clean.
+8. Ran full `check-feme` (3065/3068 passed, 0 failed) and full
+   `check-hlsl-feme-vk` (340 passed / 37 failed, up from 338/39 baseline
+   — confirmed `Gather.test`/`GatherCmp.test` moved fail→pass, no
+   regressions).
+9. Ran VK-GL-CTS `dEQP-VK.glsl.texture_gather.compute.basic.cube.*` (134
+   cases): all `NotSupported` due to `shaderImageGatherExtended` not
+   being advertised — same pre-existing gap H124q's own report already
+   documented for `2d`/`2d_array`. Confirmed no inventory change needed.
+10. Updated `Roadmap.md` (struck through H124r's Gather/GatherCmp slice,
+    filed new H124u for the remaining `CalculateLevelOfDetail` Cube
+    case), `VulkanCTSReport.md` (new entry), `Design.md` (updated the
+    stale gather-support status note that still said Cube/Array2D were
+    fully unimplemented).
+11. Committed in 6 separate small commits: (a) `ImageCallKind` plumbing,
+    (b) `SPIRVResourceLowering.cpp`, (c) runtime functions, (d) tests,
+    (e) roadmap, (f) CTS report, (g) Design.md.
+
+## Why this was fast (~1 session, as estimated)
+
+`femeRTSelectCubeFace` already existed and does 100% of the hard math
+(face selection, UV resolution) — this task was "swap `femeRTSample
+FilteredCube`'s per-pixel bilinear-filter logic for the existing
+`Plain2D` gather's 4-corner-fetch logic, same face/UV inputs." No new
+math had to be derived. This is why every new test passed on the first
+run — worth remembering: when a shape already has *sample* support, its
+*gather* support is often a near-mechanical port, not a new design.
+
+## What's NOT done / explicit scope cuts
+
+- `CalculateLevelOfDetail.test` (Cube `QueryLod`) — filed as new roadmap
+  row H124u. Needs `femeRTComputeCubeUVDerivatives` (exists, unused
+  today outside doc references) feeding `femeRTPlanImplicitLod`/
+  `femeRTComputeUnclampedQueryLod`. Real, separate design work, ~1-2
+  hours estimated, not started.
+- Seamless cross-face-edge gather blending — deliberately NOT
+  implemented (unlike `SampleCube`'s own spec-mandated remap). A gather
+  straddling a face edge clamps to that face's own edge texel instead.
+  No known test exercises this; flagged in code comments as a known,
+  deliberate scope limit, not a silent gap.
+- `CubeArray` gather — never triaged this session, no known failing
+  case names it. Not filed as its own row; low priority until a real
+  repro surfaces.
+
+## Suggested next steps
+
+1. **H124u** (~1-2 hours, filed this session): `CalculateLevelOfDetail`
+   Cube `QueryLod` — the leftover piece of this session's own work.
+   Start with `femeRTComputeCubeUVDerivatives`'s existing (but unused)
+   signature and `femeRTPlanImplicitLod`/`femeRTComputeUnclampedQueryLod`
+   as the target composition.
+2. **H124s** (~1 hour, not triaged): `Array.GetDimensions.test` — needs
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` to confirm `OpImageQuerySize(Lod)`
+   against `Array2D` is missing from the resource-normalization op list.
+3. **H124t** (~1 hour, not triaged): `Array.CalculateLevelOfDetail.test`
+   — same as H124s but for `OpImageQueryLod`.
+4. **H124k** (~1-2 hours, not started, simple/self-contained): missing
+   `PackHalf2x16`/`UnpackHalf2x16` legalization (2 cases) — same shape
+   as H124f/H124j/H124q/H124r's already-fixed patterns; likely the
+   fastest remaining item in the queue.
+5. **H124p** (~1-2 hours, not started): `feme-cpu-simdize` doesn't
+   handle a divergent call to `llvm.is.fpclass.f32` (1 case) — pair with
+   H124e (same subsystem).
+6. **H124e** (~several sessions, large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps, ~11 of the original 102
+   `check-hlsl-feme-vk` failures across 5+ distinct root causes — needs
+   per-case triage first, don't assume one fix covers all.
+7. **H124d** (large, deprioritized, unchanged for many sessions):
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth`.
+8. **`shaderImageGatherExtended`** (large, noted last session, not
+   filed as a roadmap row yet): blocks *every* `dEQP-VK.glsl.
+   texture_gather.*` CTS case (2d/2d_array/cube all confirmed this and
+   last session) regardless of shape or offset. FeMe's own gather is
+   `ConstOffset`-only, never true per-invocation dynamic offset, so
+   honestly advertising this feature is itself a real, separate,
+   likely-multi-session capability addition — worth a deliberate
+   roadmap filing before starting.
+9. Lower priority, deferred 18+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+`/tmp/h124r/`, `/tmp/h124r_cube_out.ll`, `/tmp/gcf.diff`,
+`/tmp/cube_gather_cts.qpa` (all this session's scratch files, outside
+the repo) have been deleted.
