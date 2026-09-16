@@ -53,9 +53,11 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~2-3 hours, now precisely scoped, best next target:** implement H155
-   (prefix/suffix own-barrier splitting) — generalize `splitLoopBodyAtBarriers`
-   (or a sibling) to also outline a barrier-containing prefix/suffix chain into
-   N region functions, mirroring what `Shape.BodyOrder` already gets. This
-   alone is expected to close `WaveOps/GroupMemoryBarrierWithGroupSync.test`
-   outright, since its loop-body shape is already confirmed supported.
+1. **~2-4 hours, well-scoped, most promising next target:** H156 —
+   `feme-cpu-linearize`'s "empty diamond arm"/"internal branch does not
+   reach the loop's exit block" gap for a divergent branch mixed with
+   barriers in a loop's prefix (or body). Start with
+   `WaveOps/GroupMemoryBarrierWithGroupSync.test`'s own reduced IR (already
+   captured this session via the standard `dxc`+`feme-translate`+`feme-opt`
+   repro recipe) to see exactly which of `LinearizePass`'s two diagnostics
+   fires first.
