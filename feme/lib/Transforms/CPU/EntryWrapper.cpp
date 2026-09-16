@@ -1166,9 +1166,11 @@ struct LoopInduction {
 /// this function's group-sync barrier(s), that reaches a latch block
 /// whose non-terminator instructions are a pure, side-effect-free
 /// recurrence over the header's own phis (and constants) feeding back into
-/// them; and linear prefix/suffix chains (from the function's entry to the
-/// header, and from the loop's exit block to a `ret`) that may themselves
-/// contain group-sync barriers (roadmap H155: split by
+/// them (or, roadmap H159(a), a latch that is itself wave-lane-specific,
+/// outlined per-wave like a body block instead of cloned -- see
+/// `LoopShape::LatchIsWaveRegion`); and linear prefix/suffix chains (from the
+/// function's entry to the header, and from the loop's exit block to a `ret`)
+/// that may themselves contain group-sync barriers (roadmap H155: split by
 /// `outlineChainAtBarriers` exactly like `BodyOrder`, each running its own
 /// per-wave loop with a fence between consecutive regions -- see
 /// `buildWrapperForLoop`). Every block of the function belongs to exactly
@@ -1195,6 +1197,15 @@ struct LoopShape {
   SmallVector<BasicBlock *, 4> BodyOrder;
   SmallVector<BasicBlock *, 4> SuffixOrder;
   SmallVector<LoopInduction, 2> Inductions;
+  /// Roadmap H159(a): whether `Latch` must itself be outlined into a
+  /// per-wave region (appended to `BodyOrder`'s own regions, running
+  /// inside the wrapper's scalar loop body) rather than cloned into the
+  /// wrapper as ordinary once-per-iteration scalar code, because it
+  /// contains wave-lane-specific code -- side effects, or references to
+  /// per-lane values that simply do not exist in the wrapper's own
+  /// group-wide scalar latch block. When set, no induction's recurrence
+  /// may be defined in `Latch` (see `matchLoopShape`).
+  bool LatchIsWaveRegion = false;
 };
 
 /// Walks from \p Start following only single-successor unconditional
@@ -1395,10 +1406,17 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
   }
   if (LatchSplitAfter) {
     if (!isPureClosedChainAfter(Shape.Latch, LatchSplitAfter, HeaderPhis))
-      return std::nullopt;
+      Shape.LatchIsWaveRegion = true;
   } else if (!isPureClosedChain({Shape.Latch}, HeaderPhis)) {
-    return std::nullopt;
+    Shape.LatchIsWaveRegion = true;
   }
+  // Roadmap H159(a): a latch holding wave-lane-specific code is outlined
+  // whole, exactly like any `BodyOrder` entry, so the split that would
+  // otherwise separate its pure recurrence tail serves no purpose --
+  // `outlineChainAtBarriers` splits the region at its own barriers on its
+  // own anyway.
+  if (Shape.LatchIsWaveRegion)
+    LatchSplitAfter = nullptr;
 
   // Verify every induction's own recurrence value -- the value fed back
   // into its header phi along the loop's backedge -- is provably safe to
@@ -1414,12 +1432,25 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
   // instructions *within* the examined region's own operands, not this
   // (the header phi's incoming edge itself, which is not one of that
   // region's own instructions).
+  //
+  // When `Shape.Latch` is itself outlined (roadmap H159(a)) none of its
+  // instructions reach the wrapper either, so only a constant or a value
+  // the header's own clone already provides can drive the recurrence.
+  // Threading a genuinely per-lane recurrence across the backedge is
+  // H159(b), still unimplemented.
   for (LoopInduction &Ind : Shape.Inductions) {
     Value *NextVal = Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch);
     if (isa<Constant>(NextVal))
       continue;
     auto *NextInst = dyn_cast<Instruction>(NextVal);
-    if (!NextInst || NextInst->getParent() != Shape.Latch)
+    if (!NextInst)
+      return std::nullopt;
+    if (Shape.LatchIsWaveRegion) {
+      if (NextInst->getParent() != Shape.Header)
+        return std::nullopt;
+      continue;
+    }
+    if (NextInst->getParent() != Shape.Latch)
       return std::nullopt;
     if (LatchSplitAfter && !LatchSplitAfter->comesBefore(NextInst))
       return std::nullopt; // Recurrence lives in the barrier-containing
@@ -1739,6 +1770,11 @@ splitLoopBodyAtBarriers(Function &WaveBody, ArrayRef<BasicBlock *> BodyOrder,
 /// `buildWaveLoop`, with a fence between consecutive regions of the same
 /// chain. Returns nullptr (having emitted a diagnostic) if a region's
 /// cross-barrier liveness is not one this milestone's spilling supports.
+/// Roadmap H159(a): a latch that is itself wave-lane-specific
+/// (`LoopShape::LatchIsWaveRegion`) is instead outlined as the body
+/// chain's own last region rather than cloned, in which case every
+/// induction's recurrence comes from the header's clone (or is a
+/// constant).
 Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
                               unsigned WaveSize, uint32_t GroupSizeTotal,
                               uint32_t WavesPerGroup) {
@@ -1748,6 +1784,27 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   Function *WaveBody = &WaveBodyIn;
   Module &M = *WaveBody->getParent();
   LLVMContext &Ctx = M.getContext();
+
+  // Roadmap H159(a): the loop's per-wave region chain is `Shape.BodyOrder`
+  // plus, when the latch holds wave-lane-specific code, `Shape.Latch`
+  // itself -- the one set of blocks outlined out of `WaveBody` and run
+  // once per wave inside the wrapper's own scalar loop body, as opposed
+  // to the header (and, otherwise, the latch) cloned into the wrapper as
+  // once-per-iteration scalar code.
+  SmallVector<BasicBlock *, 8> WaveRegionOrder(Shape.BodyOrder.begin(),
+                                               Shape.BodyOrder.end());
+  if (Shape.LatchIsWaveRegion)
+    WaveRegionOrder.push_back(Shape.Latch);
+  auto IsInWaveRegion = [&](BasicBlock *BB) {
+    return is_contained(WaveRegionOrder, BB);
+  };
+
+  // Each induction's recurrence value must be read before any outlining
+  // moves `Shape.Latch` (and so invalidates walking the header phi's
+  // incoming blocks) into its own region function.
+  SmallVector<Value *, 2> NextValues;
+  for (LoopInduction &Ind : Shape.Inductions)
+    NextValues.push_back(Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch));
 
   // Give the body chain's uses of each header induction phi their own
   // trailing `loopvarN` parameter (see the file comment's "Barriers inside
@@ -1759,7 +1816,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     SmallVector<Use *, 4> UsesInBody;
     for (Use &U : Ind.HeaderPhi->uses())
       if (auto *UI = dyn_cast<Instruction>(U.getUser());
-          UI && is_contained(Shape.BodyOrder, UI->getParent()))
+          UI && IsInWaveRegion(UI->getParent()))
         UsesInBody.push_back(&U);
 
     auto AppendResult = appendTrailingParam(*WaveBody, Ind.HeaderPhi->getType(),
@@ -1791,7 +1848,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
       continue;
     if (any_of(I.uses(), [&](Use &U) {
           auto *UI = dyn_cast<Instruction>(U.getUser());
-          return UI && is_contained(Shape.BodyOrder, UI->getParent());
+          return UI && IsInWaveRegion(UI->getParent());
         }))
       HeaderDerivedValues.push_back(&I);
   }
@@ -1800,7 +1857,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     SmallVector<Use *, 4> UsesInBody;
     for (Use &U : HV->uses())
       if (auto *UI = dyn_cast<Instruction>(U.getUser());
-          UI && is_contained(Shape.BodyOrder, UI->getParent()))
+          UI && IsInWaveRegion(UI->getParent()))
         UsesInBody.push_back(&U);
 
     auto AppendResult =
@@ -1842,7 +1899,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     }
   };
   IndexChain(Shape.PrefixOrder);
-  IndexChain(Shape.BodyOrder);
+  IndexChain(WaveRegionOrder);
   IndexChain(Shape.SuffixOrder);
   StructType *SpillTy = nullptr;
   if (!spillValuesLiveAcrossBarriers(WaveBody, SpillOrder, Barriers, IndexOf,
@@ -1856,8 +1913,12 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
           : outlineChainAtBarriers(*WaveBody, Shape.PrefixOrder, Shape.Header,
                                    ".prefix", PrefixBoundaries);
   SmallVector<RegionBoundary, 4> Boundaries;
+  // An outlined latch (roadmap H159(a)) is just this chain's own last
+  // entry; the chain then runs right up to the loop's backedge, so the
+  // walk stops before `Shape.Header` rather than before `Shape.Latch`.
   SmallVector<Function *, 4> BodyRegions = splitLoopBodyAtBarriers(
-      *WaveBody, Shape.BodyOrder, Shape.Latch, Boundaries);
+      *WaveBody, WaveRegionOrder,
+      Shape.LatchIsWaveRegion ? Shape.Header : Shape.Latch, Boundaries);
   SmallVector<RegionBoundary, 4> SuffixBoundaries;
   SmallVector<Function *, 4> SuffixRegions = outlineChainAtBarriers(
       *WaveBody, Shape.SuffixOrder, nullptr, ".suffix", SuffixBoundaries);
@@ -1982,25 +2043,30 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   IRBuilder<>(BodyPred).CreateBr(LoopLatchBB);
 
   // Clone the latch's pure recurrence the same way as the header's
-  // condition above, then close the wrapper's own backedge.
+  // condition above, then close the wrapper's own backedge. An outlined
+  // latch (roadmap H159(a)) has already run as this loop's last per-wave
+  // region instead, and contributes nothing to clone here.
   IRBuilder<> LoopLatch(LoopLatchBB);
-  for (Instruction &I : *Shape.Latch) {
-    if (I.isTerminator())
-      continue;
-    Instruction *Clone = I.clone();
-    RemapInstruction(Clone, HeaderMap, RF_IgnoreMissingLocals);
-    LoopLatch.Insert(Clone);
-    HeaderMap[&I] = Clone;
-  }
+  if (!Shape.LatchIsWaveRegion)
+    for (Instruction &I : *Shape.Latch) {
+      if (I.isTerminator())
+        continue;
+      Instruction *Clone = I.clone();
+      RemapInstruction(Clone, HeaderMap, RF_IgnoreMissingLocals);
+      LoopLatch.Insert(Clone);
+      HeaderMap[&I] = Clone;
+    }
   LoopLatch.CreateBr(LoopHeaderBB);
-  for (auto [Ind, NewPhi] : llvm::zip(Shape.Inductions, WrapperPhis)) {
-    Value *NextVal = Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch);
-    // `NextVal` is either a `Constant` (used as-is) or an instruction this
-    // loop's clone above already has a mapping for (a `PHINode` is also an
-    // `Instruction`, so this covers the rare "another header phi feeds
-    // this one directly" case too).
+  for (auto [NextValIn, NewPhi] : llvm::zip(NextValues, WrapperPhis)) {
+    // `NextValIn` is either a `Constant` (used as-is) or an instruction
+    // cloned into the wrapper above -- from the latch, or (when the latch
+    // is outlined) from the header, `matchLoopShape` having verified as
+    // much. A `PHINode` is also an `Instruction`, so this covers the rare
+    // "another header phi feeds this one directly" case too.
+    Value *NextVal = NextValIn;
     if (auto *NextInst = dyn_cast<Instruction>(NextVal))
       NextVal = HeaderMap[NextInst];
+    assert(NextVal && "recurrence value not available in the wrapper");
     NewPhi->addIncoming(NextVal, LoopLatchBB);
   }
 

@@ -948,6 +948,88 @@ TEST(EntryWrapperTest, FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap H159(a) (feme/docs/Roadmap.md): a "Flow-merge loop" whose latch
+// tail is *not* a pure scalar recurrence -- it references `%gid`, a value
+// defined in the latch's own pre-barrier (per-wave, SIMD-widened) half,
+// which simply does not exist in the wrapper's group-wide scalar latch
+// block. Rather than declining the shape, `matchLoopShape` must mark the
+// latch `LatchIsWaveRegion` and `buildWrapperForLoop` must outline it as
+// the loop body's own last per-wave region instead of cloning it. The
+// induction's recurrence (`%i.next`) lives in the header here, so it is
+// still available to the wrapper's own scalar loop without any
+// wave-persistent spilling (that is H159(b)).
+TEST(EntryWrapperTest, SplitsFlowMergeLoopWithWaveSpecificLatch) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %i.next = add i32 %i, 1
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %gid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
+      %val = load i32, ptr addrspace(3) %ptr
+      %use = add i32 %val, %gid
+      %use2 = mul i32 %use, %i
+      br label %header
+    after:
+      ret void
+    }
+    @shared = internal addrspace(3) global [4 x i32] undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(M->getFunction("main"));
+  // The latch is outlined as this loop's own second body region, right
+  // alongside its pre-barrier half -- not cloned into the wrapper.
+  Function *Body0 = M->getFunction("main.body0");
+  Function *Body1 = M->getFunction("main.body1");
+  ASSERT_TRUE(Body0);
+  ASSERT_TRUE(Body1);
+
+  // The outlined latch still reads the induction (directly, or via the
+  // header-local splat `feme::cpu::SIMDizePass` derives from it), so
+  // those uses must have been rewritten to one of the region's own
+  // trailing `loopvarN` parameters -- a value defined in a function it no
+  // longer belongs to would not survive verification.
+  bool UsesLoopVar = false;
+  for (Argument &A : Body1->args())
+    if (A.getName().starts_with("loopvar") && !A.use_empty())
+      UsesLoopVar = true;
+  EXPECT_TRUE(UsesLoopVar);
+
+  // Nothing of the latch survives in the wrapper itself: its own
+  // `loop.latch` block holds only the backedge branch.
+  BasicBlock *LatchBB = nullptr;
+  for (BasicBlock &BB : *Wrapper)
+    if (BB.getName() == "loop.latch")
+      LatchBB = &BB;
+  ASSERT_TRUE(LatchBB);
+  EXPECT_EQ(LatchBB->size(), 1u);
+
+  bool FoundFence = false;
+  for (Instruction &I : instructions(*Wrapper))
+    if (isa<FenceInst>(&I))
+      FoundFence = true;
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap H94b (feme/docs/Roadmap.md): a barrier-free loop (roadmap H72)
 // whose real closing decision is reached one level deeper than the arm's
 // own final branch -- the shape `feme::cpu::SIMDizePass`'s widening of a
