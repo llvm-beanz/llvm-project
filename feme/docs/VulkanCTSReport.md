@@ -46779,3 +46779,128 @@ internal fixes with no native-CTS-reachable shape). No
 CPU-backend divergence-handling fix, no new Vulkan feature or extension
 surface.
 
+
+## H155: `LoopShape` prefix/suffix chains can now contain their own barriers; found H156's real blocker; fixed a pre-existing collapsed-latch crash
+
+**Goal.** H153's own new `containsGroupSyncBarrier` invariant check
+correctly *declined* (rather than miscompiled) a `LoopShape` whose
+`Shape.PrefixOrder`/`SuffixOrder` chain contained a group-sync barrier of
+its own, but nothing implemented actual support for that shape yet. This
+session generalized `feme-cpu-wrap-entry`'s barrier-splitting to cover it,
+hoping to close `WaveOps/GroupMemoryBarrierWithGroupSync.test` (whose real
+HLSL issues two `GroupMemoryBarrierWithGroupSync()` calls before its loop
+even starts).
+
+**What was implemented.**
+- Extracted a shared `outlineChainAtBarriers` helper (with a
+  `rebuildSplitChainOrder` sub-helper) from the near-duplicate logic
+  previously split between `splitLoopBodyAtBarriers` and
+  `splitArmAtBarriers`. `splitLoopBodyAtBarriers` now delegates entirely;
+  `splitArmAtBarriers` keeps its own inline spilling/diagnosis but
+  delegates the splitting/outlining tail to the shared helper.
+- Removed the H153-added `containsGroupSyncBarrier` decline check in
+  `matchLoopShape`.
+- Generalized `buildWrapperForLoop`: a new `IndexChain` lambda indexes and
+  collects barriers from `Shape.PrefixOrder`, `Shape.BodyOrder`, *and*
+  `Shape.SuffixOrder` (previously only `BodyOrder` collected barriers);
+  `Shape.PrefixOrder`/`Shape.SuffixOrder` are now each split into one or
+  more region functions via `outlineChainAtBarriers` (previously a single
+  `outlineChain` call each); the wrapper-construction loop over each
+  chain's regions inserts a fence between consecutive regions, mirroring
+  the pre-existing `BodyRegions` handling.
+- Verified manually via hand-written `.ll` reductions run through
+  `feme-opt --llvm -passes=...` that a barrier-only-in-prefix shape and a
+  barrier-only-in-suffix shape both now correctly split into
+  `main.prefixN`/`main.suffixN` region functions wired together with
+  fences.
+
+**Tests.** Updated `entry-wrapper-barrier-in-loop.ll` for the new
+always-suffixed `main.prefixN`/`main.suffixN` naming (previously
+unsuffixed for the single-region case). Rewrote
+`LoopWithBarrierInPrefixIsDiagnosed` into `LoopWithBarrierInPrefixIsSplit`
+(now expects the wrapper to be produced, with `main.prefix0`/
+`main.prefix1`/`main.body0`/`main.suffix0` all present) and added
+`LoopWithBarrierInSuffixIsSplit`, the symmetric case for the suffix chain.
+`ninja check-feme`: 3102/3102 passed (before the crash-fix's own new
+test below), 0 failed.
+
+**Important finding: this does NOT close `GroupMemoryBarrierWithGroupSync.test`.**
+Re-running `ninja check-hlsl-feme-vk` afterward showed it *still* fails.
+Standalone reduction (`dxc -spirv ...` &rarr; `feme-translate
+--import-spirv --spirv-to-llvmir` &rarr; the real CPU pass pipeline via
+`feme-opt --llvm -passes='feme-cpu-fold-spirv-builtins,feme-cpu-prepare,
+feme-cpu-normalize-bound-resources,feme-cpu-lower-root-constants,
+feme-cpu-lower-spirv-resources,feme-cpu-lower-spirv-push-constants,
+feme-cpu-lower-resources,feme-cpu-linearize,feme-cpu-simdize,
+feme-cpu-lower-wave,function(jump-threading),feme-cpu-wrap-entry'`)
+showed its real HLSL source has genuine **divergent branches**
+(`if (ThreadID.x == 511) Counter = 1;`, and others) interleaved with its
+prefix barriers -- not merely "a barrier sitting in an otherwise-linear
+prefix chain," the shape H155 actually targeted. It fails one stage
+*earlier*, at `feme-cpu-linearize` itself ("an empty diamond arm ... not
+yet supported" / "loop ... has an internal branch ... that does not
+reach the loop's exit block") -- `matchLoopShape` (H155's own scope) is
+never even reached. This is squarely back in H124e(a)'s previously-known
+but not-yet-attempted "nested-divergent-branch-in-loop-body" scope, just
+manifesting in the loop's *prefix* rather than its body. Broken out as a
+new roadmap row, H156, rather than re-attempting H155 for this test
+again in a future session.
+
+**A separate, pre-existing crash found and fixed along the way.** While
+verifying H155's generalization against real `check-hlsl-feme-vk` cases
+(specifically `Feature/HLSLLib/InterlockedExchange.32.test`), removing
+the `containsGroupSyncBarrier` decline exposed a previously-unreachable
+bug: in the H124e(a) "collapsed single latch block" case, `matchLoopShape`
+only validated that the block's *tail* (after its last barrier) was a
+pure closed recurrence over the header phis -- it never validated that
+*every* header phi's own Latch-incoming value was actually defined in
+that tail, as opposed to the barrier-containing body portion that gets
+outlined into its own separate function. `InterlockedExchange.32.test`'s
+loop has 3 header phis (a genuine induction plus two accumulators,
+`Mono`/`Prev`); the two accumulators' own recurrence values are computed
+in the body portion, not the latch tail. Since that body portion's
+instructions are never cloned into the wrapper's own `HeaderMap` (they
+live in a separately-outlined function instead), `HeaderMap[NextInst]`
+returned `nullptr`, later crashing `PHINode::addIncoming` inside
+`buildWrapperForLoop`. This bug is **pre-existing**, not introduced by
+H155's own Prefix/Suffix logic -- it was previously masked because this
+exact test's `Prefix` *also* had a barrier, which the (now-removed) H153
+`containsGroupSyncBarrier` check declined earlier, before ever reaching
+this deeper, separately-broken code path.
+
+**The fix.** Added a validation loop in `matchLoopShape`, right after the
+existing `isPureClosedChain`/`isPureClosedChainAfter` checks: for every
+`LoopInduction`, its Latch-incoming value must be either a `Constant`, or
+an `Instruction` whose parent block is `Shape.Latch` and (in the
+collapsed-single-block case) occurs strictly after `LatchSplitAfter` --
+declining the match (`std::nullopt`) instead of crashing otherwise. New
+unit test `FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed` covers
+this exact shape (two header phis, one with its recurrence computed
+before the loop's own barrier). `ninja check-feme`: 3103/3103 passed (0
+failed) with this test included.
+
+**Verification against `check-hlsl-feme-vk`** (664 total tests, `FeMe CPU
+Vulkan Device` confirmed via `vulkaninfo --summary`): 18 failed, exactly
+matching the pre-existing baseline before this session's changes (same
+list: `Feature/ByteAddressBuffer/GetDimensions.test`,
+`Feature/StructuredBuffer/GetDimensions.test`, the H124e-bucket
+`InterlockedAdd`/`InterlockedCompareExchange`/`InterlockedCompareStore`/
+`InterlockedExchange` `.32.test`/`.resources.32.test` cases,
+`Graphics/DdxCoarse.test`/`DdyCoarse.test`/`ddx_fine.test`/
+`ddy_fine.test`/`fwidth.test` (H124d), `WaveOps/
+ComponentAccumulationDataRace.test`, `WaveOps/
+GroupMemoryBarrierWithGroupSync.test` (H156, see above), and
+`WaveOps/WaveActiveMax.test` (H150, confirmed not FeMe-side)). Critically,
+`InterlockedExchange.32.test` and friends now **cleanly fail** (a normal
+declined-shape diagnostic) instead of crashing -- confirming the fix. 0
+new closures, 0 new regressions. (One `Feature/PushConstant/
+array_of_matrices.test` "Unexpectedly Passed" was also observed on this
+run; not investigated further, likely unrelated pre-existing flakiness
+in that test's own expected-failure annotation rather than anything this
+session's changes touched.)
+
+**No Vulkan feature/extension inventory changes**: this session's work
+is entirely internal to the CPU divergence-handling backend
+(`EntryWrapper.cpp`); no new Vulkan features or extensions were
+exposed, so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+are unchanged.
