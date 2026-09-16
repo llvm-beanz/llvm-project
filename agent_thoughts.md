@@ -87736,3 +87736,88 @@ row. If you see "H160" in a stale note, it means H163.
    worked around it in unit tests by using a load instead. Pre-existing
    and unrelated, but it has now cost two sessions a detour and deserves
    its own row.
+
+# Session: H165 fixed (loop-body diamond linearization); found real H167 blocker one stage later; added H168 tracking row
+
+## Do this first (2 min)
+
+`vulkaninfo --summary | grep deviceName` -- confirmed `FeMe CPU Vulkan
+Device` at session start (with the corrected two-separate-`export`
+pattern below).
+
+## What's done
+
+1. **H165 fixed and committed** (`Linearize.cpp`, `LinearizeTest.cpp`,
+   `loop-body-diamond.ll`): `DiamondFlattener::flattenLoopBodyDiamond`
+   closes the diagnosed `feme-cpu-linearize` gap -- a divergent diamond
+   reconverging strictly inside a loop body (not at the loop's own exit
+   or latch) now linearizes instead of hitting "internal branch... does
+   not reach the loop's exit block". Confirmed via a new unit test and
+   lit test, plus `check-feme` (3120/3123, 3 unsupported, no failures).
+2. **`InterlockedExchange.resources.32.test` still does not pass** --
+   H165 changes its failure *mode* (linearize -> simdize) but not its
+   overall pass/fail. See H167 below for why. `check-hlsl-feme-vk` stays
+   at 10 failures (of 664), no regressions, same pre-existing XPASS.
+3. **H167 found and documented** (new roadmap row, not yet fixed): a
+   real, separate uniformity-classification disagreement between
+   `DiamondFlattener` (which correctly leaves a branch un-flattened
+   because it knows, via its own `CondTainted`/`MaskedLoadResults`
+   reasoning, that the branch is genuinely uniform despite reading a
+   value derived from a tainted mask) and `SIMDizePass`'s own
+   freshly-computed `UniformityInfo` (which has no visibility into that
+   reasoning and conservatively misclassifies the same branch as
+   divergent). Confirmed this reproduces even *before* H165's own code
+   runs -- not a regression from H165, only newly exposed by it.
+4. **H168 added** (new roadmap row): the `SIMDizePass::widenGroupSharedStore`
+   `CreateMaskedScatter` crash for a groupshared store inside a loop
+   body, previously worked around ad hoc (substituting a load) across at
+   least two sessions without ever getting its own tracked row.
+5. Native Vulkan CTS spot-check (`dEQP-VK.compute.pipeline.*`, 20,502
+   cases): **647 passed / 36 failed / 19,819 not supported**,
+   byte-identical to baseline -- no regression, no feature/extension
+   inventory change needed (CPU-backend-only fix, no new Vulkan surface).
+6. Committed in 3 steps: code+tests, roadmap doc, CTS report.
+
+## A real environment gotcha worth remembering
+
+`export VK_ICD_FILENAMES=x VK_DRIVER_FILES=$VK_ICD_FILENAMES` in one
+statement silently uses the **old** value of `VK_ICD_FILENAMES` for the
+right-hand side (standard bash word-expansion-before-assignment
+behavior) -- this left `VK_DRIVER_FILES` pointing at the system default
+`llvmpipe` ICD for a chunk of an earlier session, producing at least one
+false "pass" result that had to be re-verified. **Always use two
+separate `export` statements**, both with literal paths, going forward.
+`ninja check-hlsl-feme-vk` itself was never affected (it uses `cmake -E
+env` with correctly separate assignments) -- only manual/ad hoc
+`vulkaninfo`/`llvm-lit` invocations are at risk.
+
+## Suggested next steps, ranked
+
+1. **H167, best next target now, ~half a day to a day.** Three
+   candidate fixes are already sketched in the roadmap row: (a) have
+   `LinearizePass` mark "known-uniform-despite-syntax" values/branches
+   with metadata `SIMDizePass` can consume; (b) teach `SIMDizePass`'s own
+   uniformity analysis the same masked-load taint-safety reasoning
+   `DiamondFlattener` already has; (c) have `DiamondFlattener`
+   conservatively flatten any branch reading a tainted-fed masked load
+   even when its own condition isn't flagged, trading a little masking
+   overhead for guaranteed downstream agreement. (c) is probably the
+   smallest, safest first attempt -- try it first before (a)/(b)'s
+   larger cross-pass plumbing.
+2. **H164, unbounded, budget a day+.** `InterlockedCompareExchange.32.test`
+   segfaults inside JIT'd code with an empty stack. Start by hand-editing
+   `feme-opt` output, not a debugger -- three hypotheses already listed
+   in the roadmap row (uninitialized spilled lane-pointer slot, a
+   `poison` artifact from `OpAtomicCompareExchange`'s result struct, or a
+   barrier-split prefix region entered with the wrong wave mask).
+3. **H168, not urgent but real, ~an afternoon once picked up.** No repro
+   reduced yet -- first step is exactly that: reduce one of the two
+   prior incidental repros to a standalone `feme-opt -passes=feme-cpu-simdize`
+   case and confirm it reproduces in isolation before touching
+   `CreateMaskedScatter`.
+4. **`ByteAddressBuffer`/`StructuredBuffer` `GetDimensions.test`** (H160):
+   real, well-scoped, but a genuine upstream MLIR SPIR-V dialect gap
+   (`OpArrayLength` has no op at all) -- comparable in size to H124d's
+   own upstream gap. Not urgent, but the smallest-blast-radius way to
+   shrink the failure count by 2 without touching `feme` pass code at
+   all, if someone wants an upstream-MLIR-flavored session instead.
