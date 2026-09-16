@@ -29,6 +29,15 @@ enum : uint32_t {
   OpDecorate = 71,
 };
 
+// The `OpSpecConstantTrue`/`OpSpecConstantFalse` opcodes SpecializationPatch.cpp's
+// own "Pass 3" rewrites in place -- SPIR-V's only `OpTypeBool`-typed
+// spec-constant encoding, which carries no literal-value operand at all
+// (the boolean value *is* the opcode).
+enum : uint32_t {
+  OpSpecConstantTrue = 48,
+  OpSpecConstantFalse = 49,
+};
+
 constexpr uint32_t DecorationSpecId = 1;
 
 /// Builds a well-formed SPIR-V binary word stream incrementally: a 5-word
@@ -57,6 +66,12 @@ public:
 
   void addConstant(uint32_t ResultId, uint32_t Value, uint32_t TypeId = 1) {
     addInstruction(OpConstant, {TypeId, ResultId, Value});
+  }
+
+  void addSpecConstantBool(uint32_t ResultId, bool Value,
+                           uint32_t TypeId = 2) {
+    addInstruction(Value ? OpSpecConstantTrue : OpSpecConstantFalse,
+                   {TypeId, ResultId});
   }
 
   SmallVector<uint32_t, 32> Words;
@@ -167,6 +182,59 @@ TEST(SpecializationPatch, EmptyOverridesIsNoOp) {
 
   ModuleBuilder Expected = Builder;
   patchSpecializationConstants(Builder.Words, /*Overrides=*/{});
+  EXPECT_EQ(Builder.Words, Expected.Words);
+}
+
+// A boolean specialization constant is encoded as `OpSpecConstantFalse`/
+// `OpSpecConstantTrue` -- SPIR-V's only `OpTypeBool`-typed spec-constant
+// form, with no literal-value operand of its own (the boolean value *is*
+// the opcode) -- so a matching override must rewrite the instruction's own
+// opcode word in place, per the offload-test-suite `VkBool32`-sized
+// `DataFormat::Bool` map entry convention (nonzero selects
+// `OpSpecConstantTrue`).
+TEST(SpecializationPatch, OverwritesMatchingBoolSpecConstantToTrue) {
+  ModuleBuilder Builder;
+  Builder.addSpecConstantBool(/*ResultId=*/20, /*Value=*/false);
+  Builder.addSpecId(/*TargetId=*/20, /*SpecId=*/0);
+
+  SpecializationOverride Override{/*ConstantID=*/0, /*Value=*/1};
+  patchSpecializationConstants(Builder.Words, Override);
+
+  ModuleBuilder Expected;
+  Expected.addSpecConstantBool(/*ResultId=*/20, /*Value=*/true);
+  Expected.addSpecId(/*TargetId=*/20, /*SpecId=*/0);
+  EXPECT_EQ(Builder.Words, Expected.Words);
+}
+
+// The same rewrite in the opposite direction: a module-declared `true`
+// default overridden to `false`.
+TEST(SpecializationPatch, OverwritesMatchingBoolSpecConstantToFalse) {
+  ModuleBuilder Builder;
+  Builder.addSpecConstantBool(/*ResultId=*/20, /*Value=*/true);
+  Builder.addSpecId(/*TargetId=*/20, /*SpecId=*/0);
+
+  SpecializationOverride Override{/*ConstantID=*/0, /*Value=*/0};
+  patchSpecializationConstants(Builder.Words, Override);
+
+  ModuleBuilder Expected;
+  Expected.addSpecConstantBool(/*ResultId=*/20, /*Value=*/false);
+  Expected.addSpecId(/*TargetId=*/20, /*SpecId=*/0);
+  EXPECT_EQ(Builder.Words, Expected.Words);
+}
+
+// A boolean specialization constant with no matching override is left at
+// its own module-declared default opcode.
+TEST(SpecializationPatch, LeavesUnmatchedBoolSpecConstantAtDefault) {
+  ModuleBuilder Builder;
+  Builder.addSpecConstantBool(/*ResultId=*/20, /*Value=*/false);
+  Builder.addSpecId(/*TargetId=*/20, /*SpecId=*/0);
+
+  SpecializationOverride Override{/*ConstantID=*/7, /*Value=*/1};
+  patchSpecializationConstants(Builder.Words, Override);
+
+  ModuleBuilder Expected;
+  Expected.addSpecConstantBool(/*ResultId=*/20, /*Value=*/false);
+  Expected.addSpecId(/*TargetId=*/20, /*SpecId=*/0);
   EXPECT_EQ(Builder.Words, Expected.Words);
 }
 

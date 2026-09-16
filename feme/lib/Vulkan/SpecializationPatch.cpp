@@ -21,6 +21,8 @@ namespace {
 // SpecializationPatch.h's own file comment for why this operates on raw
 // words at all).
 enum : uint32_t {
+  OpSpecConstantTrue = 48,
+  OpSpecConstantFalse = 49,
   OpSpecConstant = 50,
   OpDecorate = 71,
 };
@@ -29,17 +31,25 @@ enum : uint32_t {
   DecorationSpecId = 1,
 };
 
-/// One decoded instruction: its opcode and a *mutable* view of its operand
-/// words (excluding the leading `(wordCount << 16) | opcode` word). Unlike
+/// One decoded instruction: its opcode, a *mutable* view of its operand
+/// words (excluding the leading `(wordCount << 16) | opcode` word), and a
+/// *mutable* reference to that leading header word itself. Unlike
 /// GroupSize.cpp's own read-only `Instruction`, this scanner needs to write
-/// back into an `OpSpecConstant`'s own literal-value operand, so `Operands`
-/// is a `MutableArrayRef` here. Duplicated rather than shared with
-/// GroupSize.cpp's own decoder, mirroring that file's own established
+/// back into an `OpSpecConstant`'s own literal-value operand -- or, for a
+/// boolean spec constant, to rewrite the header word's own low 16 bits,
+/// since `OpSpecConstantTrue`/`OpSpecConstantFalse` (SPIR-V's only
+/// `OpTypeBool`-typed spec-constant encoding) carry no literal-value
+/// operand at all, just a Result Type and a Result <id> -- the boolean
+/// value is the opcode itself, so overriding one requires swapping True
+/// for False (or vice versa) in place. `Operands`/`Header` are therefore
+/// both `MutableArrayRef`/reference here. Duplicated rather than shared
+/// with GroupSize.cpp's own decoder, mirroring that file's own established
 /// "each raw-word scanner stays self-contained" convention (see
 /// `resolveComputeDerivativeGroupMode`'s comment there).
 struct Instruction {
   uint32_t Opcode;
   MutableArrayRef<uint32_t> Operands;
+  uint32_t *Header;
 };
 
 /// Splits \p Words (the module body, after the 5-word header) into
@@ -56,7 +66,8 @@ decodeInstructions(MutableArrayRef<uint32_t> Words) {
     uint32_t Opcode = Header & 0xFFFFu;
     if (WordCount == 0 || I + WordCount > Words.size())
       break;
-    Result.push_back(Instruction{Opcode, Words.slice(I + 1, WordCount - 1)});
+    Result.push_back(
+        Instruction{Opcode, Words.slice(I + 1, WordCount - 1), &Words[I]});
     I += WordCount;
   }
   return Result;
@@ -99,6 +110,32 @@ void feme::vulkan::patchSpecializationConstants(
     for (const SpecializationOverride &Override : Overrides)
       if (Override.ConstantID == SpecIdIt->second) {
         Insn.Operands[2] = Override.Value;
+        break;
+      }
+  }
+
+  // Pass 3: a boolean spec constant is encoded as `OpSpecConstantTrue`/
+  // `OpSpecConstantFalse` (layout `ResultType, Result`, no literal-value
+  // operand at all -- the boolean value *is* the opcode), so overriding one
+  // means rewriting the header word's own opcode field in place rather than
+  // an operand. The override's `Value` is treated as a `VkBool32` (matching
+  // the offloader's own `VkSpecializationMapEntry::size` for `DataFormat::
+  // Bool`, see `parseSpecializationConstant` in offload-test-suite):
+  // nonzero selects `OpSpecConstantTrue`, zero selects `OpSpecConstantFalse`.
+  for (Instruction &Insn : Instructions) {
+    if ((Insn.Opcode != OpSpecConstantTrue &&
+         Insn.Opcode != OpSpecConstantFalse) ||
+        Insn.Operands.size() < 2)
+      continue;
+    auto SpecIdIt = SpecIds.find(Insn.Operands[1]);
+    if (SpecIdIt == SpecIds.end())
+      continue;
+    for (const SpecializationOverride &Override : Overrides)
+      if (Override.ConstantID == SpecIdIt->second) {
+        uint32_t WordCount = *Insn.Header >> 16;
+        uint32_t NewOpcode =
+            Override.Value != 0 ? OpSpecConstantTrue : OpSpecConstantFalse;
+        *Insn.Header = (WordCount << 16) | NewOpcode;
         break;
       }
   }
