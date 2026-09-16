@@ -4032,6 +4032,77 @@ mlir::Type getPhysicalMatrixMemberType(mlir::spirv::MatrixType MatrixTy,
   return mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
 }
 
+/// Reorders/pads the two scalar-element indices at \p Indices[InsertPos]
+/// (column) and \p Indices[InsertPos + 1] (row) -- SPIR-V's own
+/// `spirv.AccessChain` index order into a matrix is always [column, row]
+/// regardless of physical `RowMajor`/`ColMajor` storage, per the
+/// "column-first" comment on rewriteBlockAccess's own scalar-element
+/// case above -- into the addressing order \p Struct's member \p Index's
+/// own physical substitution (getPhysicalMatrixMemberType, used whenever
+/// isMatrixLayoutRepresentable rejects the member's ordinary conversion)
+/// actually needs: `RowMajor`'s own major (physically contiguous) axis is
+/// the row, so its major-entry-selecting index must be the row, not the
+/// column an unmodified access chain would otherwise place there;
+/// `ColMajor`'s major axis is already the column, so no reordering is
+/// needed there, only the same padding insertion (`RowMajor` needs it
+/// too, if \p Struct's own `MatrixStride` is wider than one physical
+/// major entry's natural, tightly-packed size -- real HLSL cbuffer/
+/// push-constant packing reserves a whole 16-byte register regardless of
+/// a row's/column's own true element count).
+///
+/// This performs, on the *raw index values themselves* rather than by
+/// building a whole replacement `llvm.getelementptr`, exactly the same
+/// reordering/padding rewriteBlockAccess's own scalar-element case
+/// (`Selector + 3`, above) already applies when a matrix member is
+/// reached through a `spirv.VulkanBuffer`-handle base pointer -- this is
+/// its counterpart for a matrix member reached through an ordinary,
+/// already-fully-converted LLVM struct base pointer instead (a push
+/// constant, in the first case this fixed -- roadmap H148), since
+/// `remapNestedStructMemberIndices` builds its own GEP indices list
+/// directly rather than deferring the whole access to a dedicated
+/// pattern the way a block/uniform-handle base pointer's own matrix
+/// access does.
+///
+/// Returns false (\p Indices left unchanged) if \p Index has no
+/// `MatrixStride` decoration at all (a malformed module) or \p MatrixTy's
+/// own element type fails to convert.
+bool adjustMatrixScalarElementIndices(
+    mlir::spirv::StructType Struct, unsigned Index,
+    mlir::spirv::MatrixType MatrixTy, const mlir::TypeConverter &Converter,
+    unsigned InsertPos, mlir::Location Loc,
+    mlir::ConversionPatternRewriter &Rewriter,
+    llvm::SmallVectorImpl<mlir::Value> &Indices) {
+  std::optional<MatrixMemberLayout> Layout = getMatrixMemberLayout(Struct, Index);
+  if (!Layout)
+    return false;
+  mlir::Type ScalarTy = Converter.convertType(MatrixTy.getElementType());
+  if (!ScalarTy)
+    return false;
+  mlir::DataLayout DL;
+  int64_t MinorCount =
+      Layout->IsRowMajor ? MatrixTy.getNumColumns() : MatrixTy.getNumRows();
+  uint64_t ElemSize = DL.getTypeSize(ScalarTy);
+  uint64_t NaturalMinorBytes = static_cast<uint64_t>(MinorCount) * ElemSize;
+  bool NeedsPad = Layout->Stride != NaturalMinorBytes;
+
+  mlir::Value ColIdx = Indices[InsertPos];
+  mlir::Value RowIdx = Indices[InsertPos + 1];
+  mlir::Value MajorIdx = Layout->IsRowMajor ? RowIdx : ColIdx;
+  mlir::Value MinorIdx = Layout->IsRowMajor ? ColIdx : RowIdx;
+  Indices[InsertPos] = MajorIdx;
+  if (NeedsPad) {
+    mlir::Type LLVMIndexType = MinorIdx.getType();
+    mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, LLVMIndexType,
+        Rewriter.getIntegerAttr(LLVMIndexType, 0));
+    Indices[InsertPos + 1] = Zero;
+    Indices.insert(Indices.begin() + InsertPos + 2, MinorIdx);
+  } else {
+    Indices[InsertPos + 1] = MinorIdx;
+  }
+  return true;
+}
+
 /// (Roadmap H101j) Name prefix `getTightVectorArrayType`'s own marker
 /// struct (see its comment) uses, mirrored by
 /// `CanonicalizeStage.cpp`'s own `isTightVectorMarkerStruct` -- kept as a
@@ -5186,6 +5257,27 @@ bool remapNestedStructMemberIndices(
                 Rewriter.getIntegerAttr(LLVMIndexType, 0));
             Indices.insert(Indices.begin() + Pos + 1, Zero);
           }
+        } else if (auto MatrixTy =
+                       mlir::dyn_cast<mlir::spirv::MatrixType>(ElementType)) {
+          // (Roadmap H148) `Declared`'s own member may itself be a matrix
+          // reached by a further *scalar-element* access (a column index
+          // at Pos + 1, a row index at Pos + 2, and nothing past that --
+          // a matrix is always a leaf, so this is the only shape that can
+          // still be navigated here) whose own physical layout
+          // (getPhysicalMatrixMemberType) transposes and/or pads its
+          // ordinary, logical column-vector-array conversion -- exactly
+          // when isMatrixLayoutRepresentable would reject it. An
+          // unmodified access chain forwards its two matrix indices in
+          // SPIR-V's own fixed [column, row] order regardless of that
+          // substitution's own addressing order, silently reading/
+          // writing the wrong bytes whenever the two differ (`RowMajor`,
+          // or a `MatrixStride` wider than one physical major entry's own
+          // natural size) -- see adjustMatrixScalarElementIndices's own
+          // comment.
+          if (Pos + 3 == Op.getIndices().size())
+            adjustMatrixScalarElementIndices(StructTy, Declared, MatrixTy,
+                                              Converter, Pos + 1, Op.getLoc(),
+                                              Rewriter, Indices);
         }
       }
     } else if (auto ArrayTy =
@@ -5529,12 +5621,36 @@ public:
       if (PhysicalFieldTy && getTightVectorMarkerInnerType(PhysicalFieldTy))
         Indices.push_back(Zero);
     }
+    // (Roadmap H148) \p MemberIndex's own member may itself be a matrix
+    // reached by a further *scalar-element* access (a column index then a
+    // row index, and nothing past that -- see
+    // adjustMatrixScalarElementIndices's own comment for why an
+    // unmodified access chain gets this wrong whenever the member's own
+    // declared layout is `RowMajor` or pads between rows/columns).
+    // Unlike the vector/nested-struct cases below, this is handled
+    // directly here rather than by remapNestedStructMemberIndices: a
+    // matrix is always this function's own first \p CurrentType (it
+    // starts one index past the member selector this pattern itself just
+    // remapped), so remapNestedStructMemberIndices's own in-loop matrix
+    // handling (added for a matrix reached one level deeper, through a
+    // further nested struct) never actually runs for this, the common,
+    // shape.
+    //
     // (Roadmap H133) Any further index may itself select into a member of
     // a further reordered/padded struct, nested more than one level below
     // \p StructTy -- remap every one of those exactly as \p MemberIndex's
     // own selector was above.
     llvm::SmallVector<mlir::Value, 4> RemappedTail(Adaptor.getIndices().begin(),
                                                    Adaptor.getIndices().end());
+    if (auto MatrixTy =
+            mlir::dyn_cast<mlir::spirv::MatrixType>(SelectedMemberType)) {
+      if (StructTy.hasOffset() &&
+          Op.getIndices().size() == MemberIndexPos + 3)
+        adjustMatrixScalarElementIndices(
+            StructTy, static_cast<unsigned>(*MemberIndex), MatrixTy,
+            *getTypeConverter(), MemberIndexPos + 1, Loc, Rewriter,
+            RemappedTail);
+    }
     if (!remapNestedStructMemberIndices(SelectedMemberType, Op,
                                         MemberIndexPos + 1, *getTypeConverter(),
                                         Rewriter, RemappedTail))
