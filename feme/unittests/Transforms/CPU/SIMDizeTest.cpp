@@ -1205,6 +1205,56 @@ TEST(SIMDizeTest, WidensGroupSharedAtomicRMWThroughUniformGEP) {
     EXPECT_TRUE(isa<AtomicRMWInst>(U));
 }
 
+// Unlike `WidensGroupSharedAtomicRMWThroughUniformGEP` above, a *divergent*
+// (per-lane, `%tid`-indexed) groupshared `atomicrmw` address widens its
+// `getelementptr` into a genuine vector-of-pointers
+// (`FunctionWidener::widenGroupSharedGEP`); since neither `atomicrmw` nor
+// `cmpxchg` has a real vector-of-pointers gather/scatter form the way a
+// `load`/`store` does, `widenGroupSharedAtomicRMW` extracts a scalar
+// pointer per lane via `extractelement` before cloning each lane's
+// `atomicrmw` -- `rewriteGroupSharedGlobals` must recognize that
+// `extractelement` link as a valid leaf-adjacent shape (rather than
+// diagnosing "feeds a nested getelementptr or another unsupported user").
+TEST(SIMDizeTest, WidensGroupSharedAtomicRMWThroughDivergentGEP) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 %tid
+      %old = atomicrmw add ptr addrspace(3) %ptr, i32 1 monotonic
+      ret void
+    }
+    @shared = internal addrspace(3) global [4 x i32] undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned AtomicRMWCount = 0;
+  unsigned ExtractElementCount = 0;
+  bool FoundVectorGEP = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      FoundVectorGEP |= GEP->getType()->isVectorTy();
+    if (isa<ExtractElementInst>(&I))
+      ++ExtractElementCount;
+    if (isa<AtomicRMWInst>(&I))
+      ++AtomicRMWCount;
+    // `@shared`'s address space must be canonicalized away entirely, not
+    // just left divergent.
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
+  }
+  EXPECT_TRUE(FoundVectorGEP);
+  EXPECT_EQ(ExtractElementCount, 4u);
+  EXPECT_EQ(AtomicRMWCount, 4u);
+}
+
 // Roadmap step R23's "masked store at a uniform address" shape: a `store`
 // masked by `feme::cpu::LinearizePass` into a `feme.cpu.masked.store` call
 // widens (`FunctionWidener::widenMaskedStore`) into a real

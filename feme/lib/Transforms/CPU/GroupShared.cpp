@@ -354,6 +354,24 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
       NestedGEP->eraseFromParent();
       continue;
     }
+    if (auto *EE = dyn_cast<ExtractElementInst>(Usr)) {
+      // A per-lane scalar address `widenGroupSharedAtomicRMW`/
+      // `widenGroupSharedAtomicCmpXchg` extract out of a genuinely
+      // divergent vector-of-pointers address (see
+      // `rewriteGroupSharedGlobals`'s own validation comment above) --
+      // like `NestedGEP` just above, `EE`'s own cached result type
+      // depends on its vector operand's element type (here, the pointer
+      // address space `NewProducer`'s own flat/addrspace(0) rebuild
+      // changes from `OldProducer`'s addrspace(3)), so it must be rebuilt
+      // rather than mutated with a plain `U.set()` the way a `load`/
+      // `store`/`atomicrmw`/`cmpxchg`'s own pointer operand below can be.
+      IRBuilder<> EEBuilder(EE);
+      Value *NewEE = EEBuilder.CreateExtractElement(
+          NewProducer, EE->getIndexOperand(), EE->getName());
+      retargetGroupSharedProducer(EE, NewEE);
+      EE->eraseFromParent();
+      continue;
+    }
     if (isa<LoadInst>(Usr) || isa<StoreInst>(Usr) || isa<AtomicRMWInst>(Usr) ||
         isa<AtomicCmpXchgInst>(Usr)) {
       U.set(NewProducer);
@@ -485,6 +503,20 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(GEPUser);
               NestedGEP && GEP->getType()->isVectorTy() &&
               llvm::all_of(NestedGEP->users(), isSupportedGroupSharedLeafUser))
+            continue;
+          // A per-lane `extractelement` off `GEP` -- the scalar address
+          // `FunctionWidener::widenGroupSharedAtomicRMW`/
+          // `widenGroupSharedAtomicCmpXchg` extract, one per lane, out of
+          // a genuinely divergent (already-widened vector-of-pointers)
+          // address, since neither `atomicrmw` nor `cmpxchg` (unlike a
+          // `load`/`store`) has a real vector-of-pointers gather/scatter
+          // form to widen into directly -- is supported too, as long as
+          // every one of the `extractelement`'s own users is an ordinary
+          // scalar leaf access (in practice always a per-lane
+          // `atomicrmw`/`cmpxchg` clone).
+          if (auto *EE = dyn_cast<ExtractElementInst>(GEPUser);
+              EE && GEP->getType()->isVectorTy() &&
+              llvm::all_of(EE->users(), isSupportedGroupSharedLeafUser))
             continue;
           Ctx.emitError(
               "feme-cpu-simdize: groupshared global '" + GV->getName() +
