@@ -9703,6 +9703,115 @@ public:
   }
 };
 
+/// Converts `spirv.GL.PackHalf2x16` (roadmap H124k, HLSL's `f32tof16`)
+/// into the GLSL.std.450 spec's own literal definition: convert each of
+/// the input `vector<2xf32>`'s two lanes to 16-bit float, reinterpret
+/// each as a 16-bit integer, then pack lane 0 into the result's 16
+/// least-significant bits and lane 1 into its 16 most-significant bits.
+/// Lowered as `zext(bitcast(fptrunc(lane0))) | (zext(bitcast(fptrunc(
+/// lane1))) << 16)` -- `fptrunc`'s own IEEE round-to-nearest-even
+/// behavior on an out-of-range or subnormal `f32` input matches the spec
+/// text's "converting to 16-bit float" step exactly, so no separate
+/// clamping is needed. This op has no upstream MLIR conversion pattern
+/// at all.
+class GLPackHalf2x16Pattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLPackHalf2x16Op> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLPackHalf2x16Op>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLPackHalf2x16Op Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Operand = Adaptor.getOperand();
+    mlir::Type F16Ty = Rewriter.getF16Type();
+    mlir::Type I16Ty = Rewriter.getI16Type();
+    auto packLane = [&](int64_t Index) {
+      mlir::Value IndexValue =
+          mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI64Type(),
+                                         Rewriter.getI64IntegerAttr(Index));
+      mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, Operand, IndexValue);
+      mlir::Value Half =
+          mlir::LLVM::FPTruncOp::create(Rewriter, Loc, F16Ty, Lane);
+      mlir::Value Bits =
+          mlir::LLVM::BitcastOp::create(Rewriter, Loc, I16Ty, Half);
+      return mlir::LLVM::ZExtOp::create(Rewriter, Loc, DstType, Bits);
+    };
+    mlir::Value Low = packLane(0);
+    mlir::Value High = packLane(1);
+    mlir::Value Sixteen = createBitFieldConstant(Rewriter, Loc, DstType, 16);
+    mlir::Value HighShifted =
+        mlir::LLVM::ShlOp::create(Rewriter, Loc, High, Sixteen);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::OrOp>(Op, DstType, Low,
+                                                  HighShifted);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.UnpackHalf2x16` (roadmap H124k, HLSL's `f16tof32`)
+/// into the GLSL.std.450 spec's own literal definition: the reverse of
+/// `GLPackHalf2x16Pattern` above -- split the input `i32` into its 16
+/// least-significant bits (lane 0) and 16 most-significant bits (lane 1),
+/// reinterpret each 16-bit piece as a 16-bit float, then convert each to
+/// `f32`. `llvm.trunc` on the unshifted value already discards the
+/// unwanted high bits for lane 0, so no separate mask is needed; lane 1
+/// needs an `lshr` by 16 first. This op has no upstream MLIR conversion
+/// pattern at all.
+class GLUnpackHalf2x16Pattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLUnpackHalf2x16Op> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLUnpackHalf2x16Op>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLUnpackHalf2x16Op Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    auto DstVecType = mlir::dyn_cast_or_null<mlir::VectorType>(DstType);
+    if (!DstVecType || DstVecType.getNumElements() != 2)
+      return Rewriter.notifyMatchFailure(
+          Op, "UnpackHalf2x16 always produces a 2-component vector (per "
+              "the GLSL.std.450 spec)");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Operand = Adaptor.getOperand();
+    mlir::Type SrcType = Operand.getType();
+    mlir::Type F16Ty = Rewriter.getF16Type();
+    mlir::Type I16Ty = Rewriter.getI16Type();
+    mlir::Type F32Ty = DstVecType.getElementType();
+    mlir::Value Sixteen = createBitFieldConstant(Rewriter, Loc, SrcType, 16);
+    mlir::Value HighBits =
+        mlir::LLVM::LShrOp::create(Rewriter, Loc, Operand, Sixteen);
+    auto unpackLane = [&](mlir::Value Bits32) {
+      mlir::Value Bits16 =
+          mlir::LLVM::TruncOp::create(Rewriter, Loc, I16Ty, Bits32);
+      mlir::Value Half =
+          mlir::LLVM::BitcastOp::create(Rewriter, Loc, F16Ty, Bits16);
+      return mlir::LLVM::FPExtOp::create(Rewriter, Loc, F32Ty, Half);
+    };
+    mlir::Value LowLane = unpackLane(Operand);
+    mlir::Value HighLane = unpackLane(HighBits);
+
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstVecType);
+    std::array<mlir::Value, 2> Lanes = {LowLane, HighLane};
+    for (int64_t I = 0; I != 2; ++I) {
+      mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                   Lanes[I], IndexValue);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -10845,6 +10954,11 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // the `FindUMsb`-only fix and still failed.
   Patterns.add<GLDistancePattern, GLCrossPattern, GLReflectPattern,
                GLFindUMsbPattern, GLFindSMsbPattern, GLFindILsbPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  // `spirv.GL.{Pack,Unpack}Half2x16` (roadmap H124k, HLSL's
+  // `f32tof16`/`f16tof32`): the same "no conversion pattern at all" gap
+  // H124f/H124j fixed above, for a different GLSL.std.450 op pair.
+  Patterns.add<GLPackHalf2x16Pattern, GLUnpackHalf2x16Pattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
