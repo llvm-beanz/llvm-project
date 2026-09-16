@@ -86272,3 +86272,47 @@ attempted this session -- estimated half a day).
 8. Lower priority, deferred 24+ sessions now:
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    pre-existing heap corruption.
+
+# Session: H143 (groupshared cmpxchg aggregate + extractelement leaf gaps) fixed
+
+**Next action for the next session**: run `Feature/ByteAddressBuffer/GetDimensions.test`/`Feature/StructuredBuffer/GetDimensions.test`/`Feature/TypedBuffer/GetDimensions.test` through `offloader` directly with `FEME_VULKAN_LOG_CREATION_ERRORS=1` to confirm (not assume) they share H124m's `OpArrayLength` root cause before touching anything. ~15 minutes.
+
+## What shipped this session (2 real bugs fixed, 1 `check-hlsl-feme-vk` failure closed outright)
+
+1. `InterlockedCompareExchange.32.test`/`InterlockedCompareStore.32.test` (H93's prior-session task): reduced to exact IR shape, found `checkAggregateValueSupported` rejected a groupshared `cmpxchg`'s intrinsically-aggregate `{T, i1}` result outright. Fixed with new `widenGroupSharedAtomicCmpXchg` (`SIMDize.cpp`).
+2. That fix alone still didn't unblock the test -- it hit a **second, pre-existing bug**: `GroupShared.cpp` never recognized `ExtractElementInst` as a valid link between a divergent vector-of-pointers GEP and a per-lane scalar atomic. This bug **predates this session** -- it also silently broke any genuinely divergent-address groupshared `atomicrmw`, not just the new cmpxchg case. Fixed both validation and retargeting loops in `GroupShared.cpp`.
+
+## Confirmed win
+
+`InterlockedXor.32.test` now passes outright. `check-hlsl-feme-vk`: **25 -> 24** failures (of 664).
+
+## Confirmed, not assumed
+
+`InterlockedCompareExchange.32.test`/`InterlockedCompareStore.32.test`/`InterlockedExchange.32.test` all now get past `feme-cpu-simdize`/`GroupShared` cleanly -- but hit the *same* diagnostic `InterlockedAdd.32.test` already had: `feme-cpu-wrap-entry`'s "barrier inside non-linear control flow" error (H124e bucket). Verified this by re-running all 4 names side by side via `offloader` directly, not by assuming they'd match. This is real, useful information: **fixing H124e's wrap-entry/region-splitting gap would likely close 4 of the remaining 24 failures at once** (`InterlockedAdd`/`CompareExchange`/`CompareStore`/`Exchange.32.test`), not just 1.
+
+## Verification (per standing process)
+
+- `vulkaninfo --summary | grep deviceName`: confirmed `FeMe CPU Vulkan Device` at session start.
+- `ninja check-feme`: 3087/3090 passed (3 unsupported), 0 failed, +2 new unit tests, 0 regressions.
+- `ninja check-hlsl-feme-vk`: 24 failures (down from 25), confirmed via a fresh full run at the final commit.
+- No native VK-GL-CTS spot-check this session: this is a CPU-backend divergence-handling fix with no obvious narrow `dEQP-VK.*` group to target (same reasoning as H142's own entry) -- the `check-hlsl-feme-vk` full-suite re-run is this fix's own regression check. `VulkanCTSReport.md` updated with the H143 section anyway, per standing instructions.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change needed: pure correctness fix, not a feature/extension-support change.
+- `feme/docs/Roadmap.md`: H143 filed and struck through as fixed in the same session.
+
+## Commits (4, each independently buildable/testable)
+
+1. `SIMDize.cpp` cmpxchg-widening fix + its unit test.
+2. `GroupShared.cpp` extractelement-leaf fix + its unit test.
+3. Roadmap.md / VulkanCTSReport.md doc updates.
+4. This file.
+
+## Still-open work, ranked (unchanged root causes from prior sessions unless noted)
+
+1. **H124e** (large, unchanged for many sessions, now with 1 new confirmed data point): `feme-cpu-wrap-entry`'s "barrier inside non-linear control flow" error. Confirmed this session to be the *exact same* diagnostic blocking `InterlockedAdd/CompareExchange/CompareStore/Exchange.32.test` (4 failures, not fewer) -- worth prioritizing next given the multi-test payoff. Unknown effort, likely a full session on its own (region-splitting/wrap-entry pass work is inherently harder than the SIMDize-level fixes this session made).
+2. **The `.resources.32.test` variants** (`InterlockedAdd`/`CompareExchange`/`CompareStore`/`Exchange.resources.32.test`, 4 failures): confirmed this session to be a **separate, not-yet-triaged bug family** -- they use the resource-heap `feme.cpu.resource.atomic.*` runtime-call path, not raw `cmpxchg`/`atomicrmw`, so this session's fix does not touch them. Not yet triaged at all. ~30-60 min to at least get a diagnostic via `offloader` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+3. **`GetDimensions.test` x4** (`ByteAddressBuffer`/`StructuredBuffer`/`TypedBuffer`): suspected (not confirmed) to share H124m's `OpArrayLength` gap, already on the roadmap as deprioritized. See "next action" above.
+4. **`dyn-res-uav-counter.test`**: real, narrow bug, address-space mismatch in UAV-counter + `ResourceDescriptorHeap` combo. ~1-2 hours, carried over 3+ sessions untouched.
+5. **`Ddx*`/`ddy_fine`/`fwidth.test` group (5 failures)**: still suspected to trace to H124d's missing upstream MLIR `OpDPdx`/`OpDPdy`/`OpFwidth` SPIR-V dialect ops, still not individually confirmed. Large, deprioritized.
+6. **`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`/`WaveIsFirstLane.test`/`ComponentAccumulationDataRace.test`/`GroupMemoryBarrierWithGroupSync.test`/`matrix.test`/`inc_counter_array_imm_idx.test`**: still individually untriaged, carried over many sessions. Don't assume any two share a cause without checking -- this bit prior sessions repeatedly.
+7. **`shaderImageGatherExtended`**: large, multi-session capability gap (FeMe's gather is `ConstOffset`-only), carried over many sessions, still not filed as its own roadmap row.
+8. Lower priority, deferred 25+ sessions: `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s pre-existing heap corruption (valgrind points at `buildStageStorage`/`executeDraws`).
