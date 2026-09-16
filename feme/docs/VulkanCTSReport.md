@@ -45554,3 +45554,101 @@ constant, and that the module still verifies.
 H124p is struck through on the roadmap. No feature/extension-inventory
 change: a pure `feme-cpu-simdize`-internal correctness fix exposing no
 new Vulkan-visible capability.
+
+## Fresh `check-hlsl-feme-vk` re-triage (31 failures); H136/H137 fixed
+
+Per this session's task, individually re-confirmed every one of the 31
+remaining `check-hlsl-feme-vk` failures (rather than assuming shared
+root causes across similarly-named tests, per this session's explicit
+instructions) using `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus targeted
+`llvm-lit -sv` runs. Bucketed into ~10 root-cause groups spanning
+device-creation validation errors, divergent-aggregate decomposition,
+groupshared nested-GEP, missing `OpArrayLength` support, missing i64
+runtime symbols, and several distinct `WaveOps`/derivative-opcode
+gaps -- full per-case breakdown recorded in `Roadmap.md`'s H124g row
+and its children (H124m, H136, H137/H138).
+
+### H136: `robustBufferAccessUpdateAfterBind` property mismatch fixed
+
+**Symptom.** `Bugs/UAV-Sequental-Consistency.yaml` and
+`Tools/Offloader/BufferFormats.test` both failed at **device creation**
+(not pipeline creation -- a different failure class from every other
+`check-hlsl-feme-vk` row), with
+`VK_ERROR_VALIDATION_FAILED_EXT`/`VUID-VkDeviceCreateInfo-robustBufferAccess-10247`.
+
+**Root cause.** FeMe unconditionally advertises `robustBufferAccess =
+VK_TRUE` (software bounds-checking is a mandatory, non-optional part of
+the CPU backend) and also advertises several
+`descriptorBinding*UpdateAfterBind` buffer features as `VK_TRUE`, but
+left `robustBufferAccessUpdateAfterBind = VK_FALSE` in both the
+promoted `VkPhysicalDeviceVulkan12Properties` and the pre-promotion
+`VkPhysicalDeviceDescriptorIndexingPropertiesEXT` struct. Per the VUID
+above, this specific combination makes any `vkCreateDevice` call that
+enables every advertised feature illegal.
+
+**Fix.** Flipped both copies of `robustBufferAccessUpdateAfterBind` to
+`VK_TRUE` in `feme/lib/Vulkan/EntryPoints.cpp` -- truthful, not just
+permissive, since FeMe's bounds-checked descriptor load/store path is
+identical regardless of binding mode. New unit test
+`PhysicalDeviceInfoTest.RobustBufferAccessUpdateAfterBindIsTrueAndMatchesDescriptorIndexingProperties`
+confirms both structs report `VK_TRUE` and agree with each other (the
+existing `dEQP-VK.api.info.vulkan1p2.property_extensions_consistency`
+CTS case depends on this agreement).
+
+**Verification.**
+- `ninja check-feme`: **3071/3074 passed** (3 unsupported), 0 failed,
+  0 regressions (+1 new unit test).
+- `check-hlsl-feme-vk` (FeMe driver confirmed via `vulkaninfo
+  --summary`): both target cases now pass; full suite failure count
+  drops from 31 to **29**.
+- No feature/extension-inventory change: this is a corrected property
+  value for an already-advertised feature combination, not a new
+  capability.
+
+### H137: `feme.cpu.resource.{load,store}.raw.{i64,v2i64}` runtime helpers added (partial)
+
+**Symptom.** Any HLSL shader performing a raw 64-bit-typed buffer
+load/store (e.g. `WaveOps/WaveActiveAllEqual.int64.test`) failed to
+link at JIT time with a "symbols not found" error.
+
+**Root cause.** `feme/runtime/CPU/FeMeRuntimeCPU.c` hand-defines
+`feme.cpu.resource.load.raw.*`/`.store.raw.*` C functions (each with an
+explicit `asm()` symbol label) for i32/f32/f16/i16 scalar and vector
+element types, but never defined any i64 variant at all -- confirmed
+the mangling logic itself (`mangleResourceCallName`) was never the gap;
+the function bodies simply didn't exist.
+
+**Fix (partial).** Added scalar `i64` and `v2i64` (16 bytes) load/store
+functions, mirroring the existing i32/f32 shape exactly, plus two new
+unit tests (`RuntimeCPUTest.RawLoadStoreRoundTripI64`/
+`RawLoadStoreRoundTripV2I64`).
+
+**Deliberately not added: `v3i64`/`v4i64`.** Verified via `llvm-dis` on
+compiled bitcode that this host's AArch64 ABI coerces any vector type
+over 16 bytes to an *indirect* calling convention (`sret` return
+pointer, `dereferenceable(N)` argument pointer) -- the first vector
+width this runtime has ever needed above 16 bytes (every existing
+i32/f32/f16/i16 2/3/4-wide vector is ≤16 bytes, all direct-value ABI).
+The production caller (`ResourceLoweringPass`) builds call sites using
+each function's "logical, uncoerced" type, which only happens to match
+Clang's real compiled signature for every *existing* function. Adding
+`v3i64`/`v4i64` without first teaching `ResourceLoweringPass` to be
+ABI-aware for large vectors would link a declaration/definition pair
+with mismatched types for the same symbol -- confirmed empirically (no
+crash, but silently wrong values) when first attempted, then reverted.
+Filed as **H138**, explicit follow-on scope.
+
+**Verification.**
+- `ninja check-feme`: **3073/3076 passed** (3 unsupported), 0 failed,
+  0 regressions (+2 new unit tests).
+- `check-hlsl-feme-vk`: `WaveActiveAllEqual.int64.test` still fails
+  (now for the narrower `v3i64`/`v4i64`-only reason above); no case
+  count change from this fix alone. Full suite: **29 failures**
+  (unchanged from H136's result, since this fix's own target case
+  isn't yet fully resolved).
+- No feature/extension-inventory change: this is a CPU-backend-internal
+  runtime completeness fix, not a new advertised Vulkan capability.
+
+H136 is struck through on the roadmap; H137 remains open (tracked
+against its own row) with H138 filed as its explicit `v3i64`/`v4i64`
+follow-on.
