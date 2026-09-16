@@ -47449,3 +47449,57 @@ failed / 19,819 not supported** -- byte-identical to the established
 baseline, confirming no regression. No `Vulkan14FeatureInventory` /
 `VulkanExtensionInventory` change: this is a CPU-backend correctness fix
 only, adding no Vulkan feature or extension surface.
+
+## H168: `widenGroupSharedStore` dereferenced a null `WidePtr` for a uniform-address, divergent-value groupshared store
+
+**Device check.** `vulkaninfo --summary | grep deviceName` confirmed
+`FeMe CPU Vulkan Device` before starting.
+
+**Symptom.** `SIMDizePass::widenGroupSharedStore` crashed in
+`CreateMaskedScatter`, discovered as a detour (not the target of
+investigation) across at least two prior sessions constructing loop-body
+unit tests for other milestones, worked around each time by substituting
+a load for the store.
+
+**Root cause.** Confirmed via a standalone, non-loop
+`feme-opt -passes=feme-cpu-simdize -feme-cpu-wave-size=4` reduction (the
+crash is not specific to a loop body at all): `widenGroupSharedStore`
+looked up its store's pointer operand directly in the `Widened` map,
+assuming -- correctly for a `load`, whose divergence tracks its pointer
+alone, see `widenGroupSharedLoad` -- that a divergent store's pointer was
+always already widened. But a store's own divergence tracks the more
+divergent of its pointer *and* value operands: a uniform-address,
+divergent-value store (e.g. `groupshared int Shared; Shared = ThreadID;`,
+every lane racing to write its own value to the identical fixed address)
+is divergent overall even though its uniform pointer was never entered
+into `Widened` (there is nothing divergent about it for
+`widenGroupSharedGEP` to widen), so the lookup returned null and
+`CreateMaskedScatter` crashed dereferencing it.
+
+**Fix.** Routed the pointer operand through `getWidened` instead of a
+direct `Widened` lookup: `getWidened` returns the already-widened vector
+for a genuinely divergent pointer, or broadcasts a uniform one into a
+`<W x ptr>` splat otherwise (every lane's clone pointing at the identical
+address, exactly matching the raw, unwidened program's own
+last-writer-wins race).
+
+**Unit/lit coverage.** New standalone lit reduction
+(`simdize-groupshared-uniform-address-divergent-value-store.ll`) and a
+new `SIMDizeTest.WidensGroupSharedStoreWithUniformAddressAndDivergentValue`
+unit test, both confirming a real `llvm.masked.scatter` with a splatted
+pointer is produced instead of crashing.
+
+**`check-hlsl-feme-vk`.** Unchanged at 8 failures (of 664) -- this bug
+was never the direct cause of any of the suite's own failing cases, only
+a latent crash risk for any real shader hitting this shape. No
+regressions.
+
+**Unit/lit coverage.** `ninja check-feme`: 3,125 passed / 0 failed / 3
+unsupported (+2 new test cases vs. the H164 baseline).
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: **647 passed / 36
+failed / 19,819 not supported** -- byte-identical to the established
+baseline, confirming no regression. No `Vulkan14FeatureInventory` /
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+only, adding no Vulkan feature or extension surface.
