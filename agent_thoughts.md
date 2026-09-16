@@ -86792,3 +86792,109 @@ the full regression suite, not just the target test, before calling a
    heap corruption.
 6. **Do not re-attempt H150** -- confirmed a prior session it's not a
    FeMe-side bug at all.
+
+# Session: H152 fixed (resource/image atomic calls misclassified uniform); InterlockedExchange.resources.32.test connected to H124e(a)
+
+Environment check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+Vulkan Device`, confirmed.
+
+## What's done
+
+H152 is fixed, tested, and documented.
+`InterlockedCompareExchange.resources.32.test` no longer hits its own
+`feme-cpu-simdize` divergent-branch bug -- it now hits the already-known
+H124e wrap-entry gap instead. `check-hlsl-feme-vk` failure count is
+unchanged (still 18/664): this is a real fix, but the test needs H124e's
+own still-open design work before it can fully pass.
+
+Root cause: `feme::cpu::WaveTTIImpl::getValueUniformity`
+(`WaveUniformity.cpp`) had no `NeverUniform` case for the resource-heap
+atomic call family (`feme.cpu.resource.atomic.*`/
+`feme.cpu.image.atomic.*`), unlike the existing ones for
+`feme.cpu.masked.atomicrmw.*` (L41) and plain `AtomicRMWInst` (L43) --
+same bug class, one call family later. A call with all-uniform operands
+(a compile-time-constant compare/exchange value) was wrongly classified
+uniform even though its result is genuinely per-lane divergent
+(sequential dispatch: each lane observes a different prior memory
+state). That left a real consumer branch un-flattened by
+`DiamondFlattener`, which believed it was already uniform.
+
+Fix: same `NeverUniform` classification `feme.cpu.masked.atomicrmw.*`
+already had, added for both `feme.cpu.resource.atomic.*` and
+`feme.cpu.image.atomic.*`.
+
+## Triage before the fix (30 min, per last session's suggestion #3)
+
+Re-ran all 4 `.resources.32.test` variants directly. Confirmed 2
+(`InterlockedAdd`/`InterlockedCompareStore`) were already correctly
+tracked under H124e; the other 2 were the two already-known separate
+gaps (last session's suggestions #1/#2). No new bucket -- picked #1.
+
+## Bonus: connected InterlockedExchange.resources.32.test to H124e(a) (no fix, just triage)
+
+Reduced this test's own `feme-cpu-linearize` "internal branch ... does
+not reach the loop's exit block" error via the IR pipeline. Found the
+identical shape H124e(a) already documented: a loop body with a
+genuinely divergent branch (now correctly `NeverUniform` thanks to
+H152) that has **two barriers nested inside its own arms** --
+`LoopLinearizer`'s single-divergent-check-plus-uniform-passthrough model
+was never built for this, matching `DiamondFlattener`'s own explicit
+refusal to flatten anything inside a loop body at all. Very likely the
+*same* design gap as H124e(a), surfacing one pass earlier. Did not
+attempt a fix -- same large scope already estimated as "likely a full
+session on its own." Documented in the roadmap so the connection
+doesn't need re-deriving from scratch next time.
+
+## Commits (5, each separate)
+
+1. `57867902e609` -- the WaveUniformity.cpp fix + 2 new unit tests
+2. `c01f38fb4a98` -- Roadmap.md: add H152, update H124e's bucket count
+3. `1ee69c39cd6d` -- VulkanCTSReport.md: new H152 section
+4. `5e5921eaec63` -- Roadmap.md: connect InterlockedExchange.resources.32.test to H124e(a)
+5. this commit -- agent_thoughts.md
+
+## Verification done
+
+- `ninja check-feme`: 3099/3102 passed (3 unsupported), 0 failed, +2 new
+  tests, no regressions.
+- `check-hlsl-feme-vk`: 18/664 failing (unchanged count -- test moved
+  buckets, didn't start passing outright).
+- Native Vulkan CTS: A/B (temporary `git show` of the pre-fix file,
+  rebuild, restore) against the full 6,209-case
+  `vk-default/image/atomic-operations.txt` list -- byte-identical totals
+  (216 passed / 1,104 failed / 4,889 not supported) both runs. The
+  1,104+4,889 non-passing cases are a pre-existing, unrelated
+  `spirv.AtomicIIncrement`-on-images legalization gap, not touched by
+  this fix.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change needed
+  (confirmed) -- pure internal CPU-backend correctness fix.
+
+## Suggested next steps
+
+1. **Full session, highest payoff (9 cases at once), largest scope,
+   still untouched across many sessions:** H124e(a)'s two-part design
+   work (loop-carried-value spilling generalization + nested-divergent-
+   branch-in-loop-body support in `matchLoopShape`/`EntryWrapper.cpp`).
+   This session's own triage strongly suggests fixing this would *also*
+   close `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   gap (likely the same underlying shape in `LoopLinearizer`, not just
+   `EntryWrapper`) -- check both `Linearize.cpp`'s `LoopLinearizer` and
+   `EntryWrapper.cpp` together, not just the latter.
+2. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
+3. **Do not re-attempt H150** -- confirmed a prior session it's not a
+   FeMe-side bug at all.
+4. **No other separately-scoped small bugs found this session** -- the
+   remaining 18 `check-hlsl-feme-vk` failures are now down to: H124e's
+   9-case wrap-entry bucket (item 1 above), the 5-case `Ddx*`/`ddy_fine`/
+   `fwidth` group (H124d), and 4 smaller not-yet-individually-triaged
+   items (`ByteAddressBuffer/GetDimensions.test`,
+   `StructuredBuffer/GetDimensions.test`, `WaveOps/WaveActiveMax.test`
+   [H150, confirmed not fixable], `WaveOps/GroupMemoryBarrierWithGroupSync.test`
+   [in the H124e bucket]). A future session with less time than a full
+   H124e(a) push could triage `ByteAddressBuffer`/`StructuredBuffer`
+   `GetDimensions.test` instead -- neither has been individually looked
+   at yet.
