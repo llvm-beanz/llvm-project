@@ -732,4 +732,47 @@ TEST(SPIRVToLLVMTest, PrepareResourceVariablesDedupesDuplicateHeapGlobals) {
   EXPECT_EQ(NameGlobalCount, 1u);
 }
 
+// (Roadmap H145) `ResourceDescriptorHeap[Index]` on a block-backed
+// resource (`RWStructuredBuffer<T>`/`StructuredBuffer<T>`/
+// `ByteAddressBuffer`/`ConstantBuffer<T>`) lowers to an *unbounded*
+// `spirv.rtarray` of a `Block`-decorated struct, not the bounded
+// `spirv.array` `getArrayedBlockCount`/`ArrayedBlockAccessChainPattern`
+// previously required -- `prepareResourceVariables` fell through both of
+// its arrayed-count checks (`getArrayedBlockCount` only recognized a
+// bounded array; `getArrayedResourceCount` requires an opaque-resource,
+// not a block, element) and skipped the variable entirely, and the access
+// chain itself fell to a generic pattern that built an ordinary
+// `llvm.getelementptr`-based address whose address space disagreed with
+// the block's own global -- surfacing as `'llvm.mlir.addressof' op
+// pointer address space must match address space of the referenced global
+// or alias` at pipeline-creation time (`dyn-res-uav-counter.test` and
+// every other `ResourceDescriptorHeap`-indexed `RWStructuredBuffer`/
+// `StructuredBuffer` access, found via that test's own triage). Both
+// helpers, and `ArrayedBlockAccessChainPattern`, now accept a
+// `spirv.rtarray` pointee identically to a `spirv.array` one.
+TEST(SPIRVToLLVMTest, UnboundedArrayedBlockConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "RuntimeDescriptorArray], [SPV_EXT_descriptor_indexing]> { "
+      "spirv.GlobalVariable @heap bind(0, 0) : "
+      "!spirv.ptr<!spirv.rtarray<!spirv.struct<(!spirv.rtarray<f32, "
+      "stride=4> [0]), Block>>, StorageBuffer> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%heap = spirv.mlir.addressof @heap : "
+      "!spirv.ptr<!spirv.rtarray<!spirv.struct<(!spirv.rtarray<f32, "
+      "stride=4> [0]), Block>>, StorageBuffer> "
+      "%idx = spirv.Constant 4 : i32 "
+      "%zero = spirv.Constant 0 : i32 "
+      "%elt = spirv.Constant 0 : i32 "
+      "%ptr = spirv.AccessChain %heap[%idx, %zero, %elt] : "
+      "!spirv.ptr<!spirv.rtarray<!spirv.struct<(!spirv.rtarray<f32, "
+      "stride=4> [0]), Block>>, StorageBuffer>, i32, i32, i32 -> "
+      "!spirv.ptr<f32, StorageBuffer> "
+      "%val = spirv.Load \"StorageBuffer\" %ptr : f32 "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+}
+
 } // namespace

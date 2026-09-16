@@ -283,17 +283,36 @@ bool isUniformBlockPointer(mlir::spirv::PointerType Type) {
 /// descriptors, each its own storage/uniform buffer block instance -- or
 /// `std::nullopt` if it is not an array of blocks at all (an ordinary,
 /// non-arrayed block, an array of some other resource kind, or not a
-/// resource at all).
+/// resource at all). As `getArrayedResourceCount` below does for an array
+/// of opaque resources, this covers both a compile-time `spirv.array`
+/// (returning its own real element count) and a `spirv.rtarray` -- an
+/// *unbounded* array of blocks, the shape `ResourceDescriptorHeap[Index]`
+/// produces for any block-backed resource (`RWStructuredBuffer<T>`,
+/// `StructuredBuffer<T>`, `ByteAddressBuffer`, `ConstantBuffer<T>`, ...)
+/// indexed dynamically rather than through a fixed register -- returning
+/// `0`, this map's own reserved sentinel for "unbounded" (see
+/// `getArrayedResourceCount`'s own comment on that sentinel, which applies
+/// identically here).
 std::optional<uint32_t> getArrayedBlockCount(mlir::spirv::PointerType Type) {
-  auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(Type.getPointeeType());
-  if (!Array)
+  mlir::Type Pointee = Type.getPointeeType();
+  mlir::Type ElementType;
+  uint32_t Count;
+  if (auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(Pointee)) {
+    ElementType = Array.getElementType();
+    Count = Array.getNumElements();
+  } else if (auto RTArray =
+                 mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Pointee)) {
+    ElementType = RTArray.getElementType();
+    Count = 0;
+  } else {
     return std::nullopt;
-  auto ElementPointerType = mlir::spirv::PointerType::get(
-      Array.getElementType(), Type.getStorageClass());
+  }
+  auto ElementPointerType =
+      mlir::spirv::PointerType::get(ElementType, Type.getStorageClass());
   if (!isBufferBlockPointer(ElementPointerType) &&
       !isUniformBlockPointer(ElementPointerType))
     return std::nullopt;
-  return Array.getNumElements();
+  return Count;
 }
 
 /// (Roadmap L12a) Returns the descriptor count of \p Type if it is an
@@ -3691,14 +3710,29 @@ public:
     // later as `UnsupportedOps.cpp`'s own generic "cannot normalize"
     // diagnostic, on a handle that may not even be the one whose actual
     // access triggered the failure (see that diagnostic's own comment).
+    //
+    // (Roadmap H145) A `spirv.rtarray` pointee -- an *unbounded* array of
+    // blocks, the shape `ResourceDescriptorHeap[Index]` produces for any
+    // block-backed resource (`RWStructuredBuffer<T>`/`StructuredBuffer<T>`/
+    // `ByteAddressBuffer`/`ConstantBuffer<T>`, ...) indexed dynamically --
+    // is handled identically to a bounded `spirv.array` here: both simply
+    // need their own element type to build the per-descriptor handle from,
+    // same as `getArrayedBlockCount` (whose own match this pattern must
+    // stay consistent with -- see `prepareResourceVariables`, which is
+    // what actually populates `Resources` in the first place) already
+    // treats them.
     auto PointerType = mlir::cast<mlir::spirv::PointerType>(AddrOf.getType());
-    auto Array =
-        mlir::dyn_cast<mlir::spirv::ArrayType>(PointerType.getPointeeType());
-    if (!Array)
+    mlir::Type Pointee = PointerType.getPointeeType();
+    mlir::Type ElementType;
+    if (auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(Pointee))
+      ElementType = Array.getElementType();
+    else if (auto RTArray = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Pointee))
+      ElementType = RTArray.getElementType();
+    else
       return Rewriter.notifyMatchFailure(Op, "not an arrayed block");
 
     auto ElementPointerType = mlir::spirv::PointerType::get(
-        Array.getElementType(), PointerType.getStorageClass());
+        ElementType, PointerType.getStorageClass());
 
     std::optional<BlockElement> Element =
         getBufferBlockElement(ElementPointerType);
