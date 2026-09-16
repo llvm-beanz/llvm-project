@@ -3412,12 +3412,25 @@ mlir::LogicalResult rewriteBlockAccess(
   // whatever its element type), or the constant member index the
   // non-array (direct struct-content) branch already has to read anyway.
   unsigned MatrixDecorationMemberIndex = 0;
+  // (Roadmap H151) Whether SelectedType was reached by indexing into
+  // Element.Content as an array (either shape below), as opposed to
+  // selecting a member of Element.Content directly as a struct -- the
+  // wrapper+nested-struct-member matrix column-select branch further
+  // below only applies to the former: a directly-Struct Element.Content
+  // whose own selected member happens to itself be a struct (e.g.
+  // spirv-to-llvm-nested-struct-reorder.mlir's own non-wrapper, non-array
+  // `!inner`-typed member) is a different, already-handled shape (see the
+  // H133 remapNestedStructMemberIndices fallthrough below), not this
+  // session's array-wrapped one.
+  bool SelectedTypeIsArrayElement = false;
   if (auto Array =
           mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Element.Content)) {
     SelectedType = Array.getElementType();
+    SelectedTypeIsArrayElement = true;
   } else if (auto FixedArray =
                  mlir::dyn_cast<mlir::spirv::ArrayType>(Element.Content)) {
     SelectedType = FixedArray.getElementType();
+    SelectedTypeIsArrayElement = true;
   } else {
     std::optional<uint64_t> MemberIndex =
         getConstantMemberIndex(Op.getIndices()[Selector]);
@@ -3582,6 +3595,83 @@ mlir::LogicalResult rewriteBlockAccess(
               "declared RowMajor/MatrixStride layout is not yet "
               "supported");
     }
+  }
+
+  // (Roadmap H151) SelectedType may itself be a struct one level inside
+  // Element.Content (e.g. `StructuredBuffer<struct { matCxR m; }>`, the
+  // shape `WaveOps/WaveReadLaneAt.mtx.test` reduces to: a dxc wrapper's
+  // runtime array of a single-matrix-member struct), with the next index
+  // selecting a `RowMajor`/non-natural-`MatrixStride` matrix member of
+  // it, and exactly one further index (a column select, `matrix[col]`)
+  // after that -- the exact same shape the matrix-is-SelectedType branch
+  // just above handles, just one struct-member level deeper. Before this
+  // fix, neither that branch (SelectedType itself isn't a matrix here)
+  // nor remapNestedStructMemberIndices below (whose own matrix handling,
+  // added for H148, only covers a further *scalar*-element access, two
+  // indices past the member selector, not a column select's one) ever
+  // recognized this shape at all, so it silently fell through to an
+  // ordinary, unconditional GEP treating the matrix as its own natural,
+  // untransposed, unpadded column-major array -- exactly wrong for a
+  // `RowMajor` member, and any member whose `MatrixStride` needs padding.
+  if (SelectedTypeIsArrayElement) {
+  if (auto NestedStruct = mlir::dyn_cast<mlir::spirv::StructType>(SelectedType)) {
+    if (AllIndices.size() == Selector + 3) {
+      if (std::optional<uint64_t> NestedMemberIndex =
+              getConstantMemberIndex(Op.getIndices()[Selector + 1])) {
+        unsigned NestedIdx = static_cast<unsigned>(*NestedMemberIndex);
+        if (NestedIdx < NestedStruct.getNumElements()) {
+          if (auto NestedMatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
+                  NestedStruct.getElementType(NestedIdx))) {
+            mlir::Type NestedElementType =
+                TypeConverter.convertType(NestedMatrixTy);
+            if (!NestedElementType)
+              return Rewriter.notifyMatchFailure(Op,
+                                                 "type conversion failed");
+            if (!isMatrixLayoutRepresentable(NestedStruct, NestedIdx,
+                                             NestedElementType)) {
+              std::optional<MatrixMemberLayout> NestedLayout =
+                  getMatrixMemberLayout(NestedStruct, NestedIdx);
+              if (!NestedLayout)
+                return Rewriter.notifyMatchFailure(
+                    Op, "matrix member has no MatrixStride decoration");
+              // Navigate from ElementPtr (Element.Content's own selected
+              // array entry, whatever wrapper/array indexing already
+              // reached it) down to this nested matrix member's own base
+              // address -- an ordinary GEP through ElementType
+              // (SelectedType's own already-converted physical type),
+              // exactly like the fallthrough path below would build,
+              // just stopping one index short of the column select.
+              llvm::SmallVector<mlir::LLVM::GEPArg, 2> MemberIndices;
+              MemberIndices.push_back(0);
+              MemberIndices.push_back(static_cast<int32_t>(NestedIdx));
+              mlir::Value MemberPtr = mlir::LLVM::GEPOp::create(
+                  Rewriter, Loc, ResultType, ElementType, ElementPtr,
+                  MemberIndices, mlir::LLVM::GEPNoWrapFlags::inbounds);
+              if (!NestedLayout->IsRowMajor) {
+                mlir::Type ByteTy =
+                    mlir::IntegerType::get(Rewriter.getContext(), 8);
+                auto StrideBlockTy = mlir::LLVM::LLVMArrayType::get(
+                    ByteTy, NestedLayout->Stride);
+                mlir::Value ColumnPtr = mlir::LLVM::GEPOp::create(
+                    Rewriter, Loc, ResultType, StrideBlockTy, MemberPtr,
+                    llvm::ArrayRef<mlir::LLVM::GEPArg>{
+                        AllIndices[Selector + 2]},
+                    mlir::LLVM::GEPNoWrapFlags::inbounds);
+                Rewriter.replaceOp(Op, ColumnPtr);
+                return mlir::success();
+              }
+              // RowMajor: defer to MatrixColumnLoadPattern/
+              // MatrixColumnStorePattern, exactly like the direct-shape
+              // case above -- getMatrixColumnAccess now also recognizes
+              // this one-level-nested wrapper shape.
+              Rewriter.replaceOp(Op, MemberPtr);
+              return mlir::success();
+            }
+          }
+        }
+      }
+    }
+  }
   }
 
   // (Roadmap H133) SelectedType's own further indices may themselves
@@ -8799,21 +8889,60 @@ public:
 /// pattern's own OpAdaptor exposes only the Load/Store op's own operands
 /// (the pointer/value), not this defining AccessChain's own index list.
 ///
-/// Restricted to the direct (`cbuffer`/`ConstantBuffer<T>`) struct-member
-/// shape (`Element.HasWrapper == false`) -- the only shape any of this
-/// roadmap entry's own 236 real `dEQP-VK.ubo.*` failures exercised;
-/// extending to the wrapper (`RWStructuredBuffer<matCxR>`) shape is
-/// deferred until a real case needs it.
+/// (Roadmap H151) Originally restricted to the direct
+/// (`cbuffer`/`ConstantBuffer<T>`) struct-member shape
+/// (`Element.HasWrapper == false`) -- the only shape roadmap H129's own
+/// 236 real `dEQP-VK.ubo.*` failures exercised, with extending to the
+/// wrapper (`RWStructuredBuffer<matCxR>`/`StructuredBuffer<matCxR>`)
+/// shape deferred until a real case needed it. `WaveOps/
+/// WaveReadLaneAt.mtx.test`'s `StructuredBuffer<MatrixStruct>` (a
+/// single-`RowMajor`-matrix-member struct, itself reached through the
+/// wrapper's own runtime array) is exactly that real case: this now
+/// additionally recognizes that one-level-deeper shape (an array-wrapped
+/// struct whose sole further index selects a `RowMajor` matrix member),
+/// matched by getMatrixColumnAccessShape below.
 struct MatrixColumnAccess {
   mlir::spirv::MatrixType MatrixTy;
   MatrixMemberLayout Layout;
   mlir::Value ColumnIndex;
 };
 
-/// Returns \p Op's own MatrixColumnAccess facts if it matches that shape,
-/// or `std::nullopt` otherwise (not a block access, a wrapper-shape
-/// access, not exactly a member-plus-column-index AccessChain, the member
-/// isn't a matrix, or it isn't `RowMajor`).
+/// Resolves the struct actually declaring a candidate matrix member for
+/// getMatrixColumnAccess below, and the position within \p Op's own index
+/// list where that member's selector sits, for either shape it matches:
+/// the direct (`Element.HasWrapper == false`) struct-content shape (the
+/// member selector is `Op`'s own first real index, right after
+/// `Element.HasWrapper`'s own leading dummy, if any), or the
+/// array-wrapped shape (`Element.Content` a `spirv.rtarray`/`spirv.array`
+/// of struct, reached through one further dynamic array index before the
+/// member selector). Returns `std::nullopt` for any other shape (a
+/// directly-matrix `Element.Content`, already covered by
+/// rewriteBlockAccess's own top-level matrix branch and never a
+/// `MatrixColumnAccess` candidate at all, or an array of anything but a
+/// struct).
+std::optional<std::pair<mlir::spirv::StructType, unsigned>>
+getMatrixColumnAccessShape(const BlockElement &Element, unsigned Selector) {
+  if (auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Element.Content))
+    return std::make_pair(Struct, Selector);
+  mlir::Type ArrayElementType;
+  if (auto Array =
+          mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Element.Content))
+    ArrayElementType = Array.getElementType();
+  else if (auto FixedArray =
+               mlir::dyn_cast<mlir::spirv::ArrayType>(Element.Content))
+    ArrayElementType = FixedArray.getElementType();
+  else
+    return std::nullopt;
+  if (auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(ArrayElementType))
+    return std::make_pair(Struct, Selector + 1);
+  return std::nullopt;
+}
+
+/// Returns \p Op's own MatrixColumnAccess facts if it matches either shape
+/// getMatrixColumnAccessShape resolves, or `std::nullopt` otherwise (not a
+/// block access, not exactly a member-plus-column-index AccessChain past
+/// whichever shape's own member-selector position, the member isn't a
+/// matrix, or it isn't `RowMajor`).
 std::optional<MatrixColumnAccess>
 getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
   auto PointerType =
@@ -8823,13 +8952,18 @@ getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
   std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
   if (!Element)
     Element = getUniformBlockElement(PointerType);
-  if (!Element || Element->HasWrapper)
+  if (!Element)
     return std::nullopt;
-  auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Element->Content);
-  if (!Struct || Op.getIndices().size() != 2)
+  unsigned Selector = Element->HasWrapper ? 1 : 0;
+  std::optional<std::pair<mlir::spirv::StructType, unsigned>> Shape =
+      getMatrixColumnAccessShape(*Element, Selector);
+  if (!Shape)
+    return std::nullopt;
+  auto [Struct, MemberSelectorPos] = *Shape;
+  if (Op.getIndices().size() != MemberSelectorPos + 2)
     return std::nullopt;
   std::optional<uint64_t> MemberIndex =
-      getConstantMemberIndex(Op.getIndices()[0]);
+      getConstantMemberIndex(Op.getIndices()[MemberSelectorPos]);
   if (!MemberIndex)
     return std::nullopt;
   auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
@@ -8840,7 +8974,8 @@ getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
       getMatrixMemberLayout(Struct, static_cast<unsigned>(*MemberIndex));
   if (!Layout || !Layout->IsRowMajor)
     return std::nullopt;
-  return MatrixColumnAccess{MatrixTy, *Layout, Op.getIndices()[1]};
+  return MatrixColumnAccess{MatrixTy, *Layout,
+                            Op.getIndices()[MemberSelectorPos + 1]};
 }
 
 /// Builds the `!llvm.array<NumRows x MajorEntryTy>` physical member type
