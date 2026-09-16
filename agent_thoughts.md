@@ -87215,3 +87215,99 @@ backup of the original `.a` and restore it before the final verification build
    showed "Unexpectedly Passed" this session's `check-hlsl-feme-vk` run —
    likely flaky/stale expected-failure annotation, unrelated to this
    session's changes; worth a quick look if seen again.
+
+# Session: H157 -- found the real bug hiding behind H155/H156 (2025 session)
+
+**Next action if you're picking this up:** implement H154 (the Flow-merge
+CFG matcher in `feme-cpu-wrap-entry`) -- it's now the sole, confirmed,
+real blocker for the remaining `Interlocked*.32.test`/`.resources.32.test`
+cases. ~2-4 hours.
+
+## What happened, in order
+
+1. Started re-reducing `WaveOps/GroupMemoryBarrierWithGroupSync.test` to
+   confirm the prior session's H156 hypothesis (`feme-cpu-linearize`
+   can't handle a divergent branch in a loop prefix/body).
+2. The standalone `feme-opt` pipeline repro came back clean. No
+   linearize error. No wrap-entry error. Full wrapper produced. H156's
+   premise was wrong.
+3. Ran the *real* test anyway -- still failed, but with `VkResult = -3`
+   and nothing on stderr. Re-ran with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` and got the actual message:
+   `entry point 'main' did not survive the CPU pipeline`.
+4. That error comes from `CompiledStage.cpp`, not `Linearize.cpp` or
+   `EntryWrapper.cpp` at all. Traced it: `CompiledStage::createStage`
+   looks up `Mod.getFunction(EntryName)` (i.e. a function still named
+   "main") *after* the pipeline runs, to read `GroupSize` off it.
+5. `EntryWrapperPass` only keeps a function named "main" alive for two
+   of its four output shapes (no-barrier, straight-line-barrier).
+   `buildWrapperForLoop`/`buildWrapperForBranch` always
+   `eraseFromParent()` the original function once wrapped -- by design,
+   none of their outlined regions need to keep the old name. So this
+   check was **guaranteed to fail for every loop/branch-shape wrap,
+   success or not.**
+
+## Why this matters more than it looks
+
+This is very likely the actual reason H124e/H153/H155 kept reporting "0
+of N cases flip to passing" across multiple sessions, despite the
+`matchLoopShape`/`buildWrapperForLoop` unit tests all being correct.
+Everyone (including me, until this session) was checking correctness
+with `feme-opt` standalone pipeline reductions, which never exercise
+`CompiledStage.cpp`'s own post-pipeline bookkeeping. A green `feme-opt`
+repro was being treated as "should now pass the real test" -- it wasn't
+sufficient. **If you're debugging a wrap-entry-shape case in the
+future: check `FEME_VULKAN_LOG_CREATION_ERRORS=1`'s actual message
+before assuming a standalone `feme-opt` success means the fix should
+have worked.**
+
+## The fix (small, already committed)
+
+- Moved `GroupSize` computation to read from `**Entry` (pre-pipeline
+  function pointer) instead of a post-pipeline `Mod.getFunction(EntryName)`
+  lookup -- same pattern already used for `SideEffectFlags`/`Signature`.
+- Replaced the broken survival check with one that checks
+  `Mod.getFunction(WrapperName)` instead (the actual thing the JIT looks
+  up later).
+- Added `CompiledStageTest.LoopWithBarrierSurvivesCompiledStageCreation`:
+  compiles + *invokes* a loop-with-barrier shader through the real
+  `CompiledStage::create` path end to end.
+
+## Wins, concretely
+
+- `WaveOps/GroupMemoryBarrierWithGroupSync.test`: now **passes**.
+- `WaveOps/ComponentAccumulationDataRace.test`: now **passes**.
+- `check-hlsl-feme-vk`: 18 -> 16 failures.
+- `check-feme`: 3104/3104, 0 failed (includes the new regression test).
+- Native `dEQP-VK.compute.pipeline.*` CTS: 647/36/19,819, unchanged from
+  H153/H155's own baseline -- no regression.
+- Roadmap: H157 added and struck through (done). H156 struck through as
+  falsified (its premise was wrong, but it's resolved anyway -- see
+  H157). H155's row annotated to point at H157 for the real reason its
+  target test is now closed.
+
+## What's left (in priority order)
+
+1. **~2-4 hours, best next target, now precisely scoped:** H154 -- teach
+   `matchLoopShape` in `feme-cpu-wrap-entry` to recognize the `Flow`-style
+   structured-CFG merge-block shape (`JumpThreading` produces this for
+   `InterlockedAdd`/`InterlockedCompareExchange`/`InterlockedCompareStore`/
+   `InterlockedExchange` `.32.test`/`.resources.32.test`, all 8 remaining
+   cases in this bucket, confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   -- all fail with wrap-entry's own genuine "barrier inside non-linear
+   control flow" diagnostic, no other bug hiding underneath this time).
+2. **~1 hour, worth doing once H154 lands:** re-audit `CompiledStage.cpp`
+   (and any Vertex/Fragment/Mesh/Task-stage equivalent) for other places
+   that might assume a function's pre-pipeline name/identity survives its
+   own wrapping pass -- this session only fixed the `GroupSize` lookup;
+   there could be a sibling bug in a stage I haven't looked at as closely.
+3. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap
+   corruption.
+4. **Do not re-attempt H150** -- confirmed a prior session it's not a
+   FeMe-side bug at all.
+5. **Not yet individually triaged, quick wins possible:**
+   `ByteAddressBuffer/GetDimensions.test`,
+   `StructuredBuffer/GetDimensions.test` -- neither looked at yet.
