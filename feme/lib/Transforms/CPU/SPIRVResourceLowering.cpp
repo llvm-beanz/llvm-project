@@ -1770,24 +1770,30 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L7d: `spirv.ImageDrefGather` (HLSL's `Texture2D::GatherCmp()`),
-    // scoped to `Plain2D` only for now, mirroring `isQueryLodIntrinsic`'s
-    // own identical `Plain2D`-only initial scope just below (`Cube`/
-    // `CubeArray`/`Array2D` counterparts -- all legal per the op's own
-    // SPIR-V type constraints -- remain unstarted follow-on work, no real
-    // repro having reached them yet). Its own fixed `(image, sampler,
-    // coord, dref, offset)` operand shape lets it reuse `DrefSampleDrefIdx`/
-    // `getDrefSampleOffsetIdx(false)` from the plain `spv_resource_samplecmp`
-    // family above, but its result is always a full `<4 x float>` (roadmap
-    // L7d's own filing text), never a scalar the way every
-    // `isDrefSampleIntrinsic` case's own result is, so it cannot share
-    // that branch's own `!CI->getType()->isFloatTy()` rejection, and needs
-    // `isV4F32` instead.
+    // Roadmap L7d/H124q: `spirv.ImageDrefGather` (HLSL's
+    // `Texture2D::GatherCmp()`/`Texture2DArray::GatherCmp()`), scoped to
+    // `Plain2D`/`Array2D` only for now (`Cube`/`CubeArray` counterparts --
+    // legal per the op's own SPIR-V type constraints -- remain unstarted
+    // follow-on work, no real repro having reached them yet). Its own
+    // fixed `(image, sampler, coord, dref, offset)` operand shape lets it
+    // reuse `DrefSampleDrefIdx`/`getDrefSampleOffsetIdx(false)` from the
+    // plain `spv_resource_samplecmp` family above, but its result is
+    // always a full `<4 x float>` (roadmap L7d's own filing text), never
+    // a scalar the way every `isDrefSampleIntrinsic` case's own result
+    // is, so it cannot share that branch's own
+    // `!CI->getType()->isFloatTy()` rejection, and needs `isV4F32`
+    // instead. `SampleCoordWidth` is already 3 for `Array2D` (this
+    // function's own initial per-shape table above), so `isCoordN`
+    // widens automatically; `AllowArray2D` stays `false` in
+    // `isSupportedOffset` below since no real case yet needs a nonzero
+    // `Array2D` gather offset (a zero one -- the only overload any real
+    // test uses -- is always accepted regardless of that flag).
     if (isGatherCmpIntrinsic(*CI)) {
-      if (IsInteger || Shape != ImageShape::Plain2D)
+      if (IsInteger ||
+          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D))
         return false; // No filtered/dref/gather sample over an integer
-                       // format; Cube/CubeArray/Array2D remain unstarted
-                       // follow-on work (roadmap L7d).
+                      // format; Cube/CubeArray remain unstarted
+                      // follow-on work (roadmap L7d).
       if (CI->getArgOperand(0) != &Handle)
         return false;
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
@@ -1800,23 +1806,25 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L7g: `spirv.ImageGather` (HLSL's
-    // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`), scoped to `Plain2D`,
-    // non-integer only for now -- identical initial scope to
-    // `isGatherCmpIntrinsic`'s own `Plain2D`-only restriction just above
-    // (`Cube`/`CubeArray`/`Array2D` counterparts, and an integer-format
-    // image, all legal per the op's own SPIR-V type constraints, remain
-    // unstarted follow-on work, no real repro having reached them yet).
-    // Its own fixed `(image, sampler, coord, component, offset)` operand
-    // shape is identical to `isGatherCmpIntrinsic`'s own, except the
-    // `DrefSampleDrefIdx` position holds an integer component selector
-    // rather than a float `Dref`, so it needs its own
-    // `isCoordN(..., /*Float=*/false)`-style integer check there instead.
+    // Roadmap L7g/H124q: `spirv.ImageGather` (HLSL's
+    // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`/`Texture2DArray::
+    // Gather{,Red,Green,Blue,Alpha}()`), scoped to `Plain2D`/`Array2D`,
+    // non-integer only for now -- identical scope to
+    // `isGatherCmpIntrinsic`'s own just above (`Cube`/`CubeArray`, and an
+    // integer-format image, all legal per the op's own SPIR-V type
+    // constraints, remain unstarted follow-on work, no real repro having
+    // reached them yet). Its own fixed `(image, sampler, coord,
+    // component, offset)` operand shape is identical to
+    // `isGatherCmpIntrinsic`'s own, except the `DrefSampleDrefIdx`
+    // position holds an integer component selector rather than a float
+    // `Dref`, so it needs its own `isCoordN(..., /*Float=*/false)`-style
+    // integer check there instead.
     if (isGatherIntrinsic(*CI)) {
-      if (IsInteger || Shape != ImageShape::Plain2D)
+      if (IsInteger ||
+          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D))
         return false; // No gather over an integer format; Cube/
-                       // CubeArray/Array2D remain unstarted follow-on
-                       // work (roadmap L7g).
+                      // CubeArray remain unstarted follow-on work
+                      // (roadmap L7g).
       if (CI->getArgOperand(0) != &Handle)
         return false;
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
@@ -3844,21 +3852,26 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L7d: `spirv.ImageDrefGather` (HLSL's
-      // `Texture2D::GatherCmp()`), `hasOnlySupportedImageUses` already
-      // restricting this to `Plain2D`, non-integer. Reuses
+      // Roadmap L7d/H124q: `spirv.ImageDrefGather` (HLSL's
+      // `Texture2D::GatherCmp()`/`Texture2DArray::GatherCmp()`),
+      // `hasOnlySupportedImageUses` already restricting this to
+      // `Plain2D`/`Array2D`, non-integer. Reuses
       // `femeRTComputeBilinearSupport` -- the exact four address-mode-
       // resolved texel corners an ordinary bilinear *sample* would blend
       // between are, by construction, the same four texels a gather at
       // the identical coordinate must return one component from each of
       // (SPIR-V/Vulkan's own fixed gather footprint), just without
-      // actually blending them -- so `createGatherCmp2D` below threads
-      // `U`/`V`/`OffsetX`/`OffsetY` straight through to
-      // `femeCpuImageGatherCmp2DV4F32`, which itself calls that same
-      // runtime helper internally. Unlike every `isDrefSampleIntrinsic`
-      // case above, there is no `Lod`/`Bias`/`Grad`/`MinLod` operand to
-      // extract at all -- a gather instruction always operates at mip
-      // level 0 per the SPIR-V spec, with no way to request otherwise.
+      // actually blending them -- so `createGatherCmp2D`/
+      // `createGatherCmpArray2D` below thread `U`/`V`/(`ArrayLayer`)/
+      // `OffsetX`/`OffsetY` straight through to
+      // `femeCpuImageGatherCmp2DV4F32`/`femeCpuImageGatherCmpArray2DV4F32`,
+      // which themselves call that same runtime helper internally. Unlike
+      // every `isDrefSampleIntrinsic` case above, there is no `Lod`/
+      // `Bias`/`Grad`/`MinLod` operand to extract at all -- a gather
+      // instruction always operates at mip level 0 per the SPIR-V spec,
+      // with no way to request otherwise. `Array2D`'s own coordinate is
+      // 3-wide (`U`, `V`, `ArrayLayer`, mirroring `Sample2DArray`'s own
+      // convention), unlike `Plain2D`'s 2-wide one.
       if (isGatherCmpIntrinsic(*CI)) {
         if (CI->getArgOperand(0) != Handle)
           continue;
@@ -3872,22 +3885,33 @@ void lowerImageAccesses(
         Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
         Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-        CallInst *NewCall =
-            createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
-                              Dref, OffsetX, OffsetY, Mask, CI->getName());
+        CallInst *NewCall;
+        if (Shape == ImageShape::Array2D) {
+          Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createGatherCmpArray2D(
+              Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer, Dref,
+              OffsetX, OffsetY, Mask, CI->getName());
+        } else {
+          NewCall =
+              createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                                Dref, OffsetX, OffsetY, Mask, CI->getName());
+        }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
       }
 
-      // Roadmap L7g: `spirv.ImageGather` (HLSL's
-      // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`), `hasOnlySupported
-      // ImageUses` already restricting this to `Plain2D`, non-integer.
+      // Roadmap L7g/H124q: `spirv.ImageGather` (HLSL's
+      // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`/`Texture2DArray::
+      // Gather{,Red,Green,Blue,Alpha}()`), `hasOnlySupportedImageUses`
+      // already restricting this to `Plain2D`/`Array2D`, non-integer.
       // Structurally identical to the `isGatherCmpIntrinsic` case just
       // above (same bilinear-footprint reuse, same lack of a `Lod`/
-      // `Bias`/`Grad`/`MinLod` operand), but threads the integer
-      // component selector through to `createGather2D`/
-      // `femeCpuImageGather2DV4F32` in place of a float `Dref`.
+      // `Bias`/`Grad`/`MinLod` operand, same `Array2D` 3-wide-coordinate
+      // handling), but threads the integer component selector through to
+      // `createGather2D`/`createGatherArray2D`/
+      // `femeCpuImageGather2DV4F32`/`femeCpuImageGatherArray2DV4F32` in
+      // place of a float `Dref`.
       if (isGatherIntrinsic(*CI)) {
         if (CI->getArgOperand(0) != Handle)
           continue;
@@ -3901,9 +3925,17 @@ void lowerImageAccesses(
         Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
         Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-        CallInst *NewCall =
-            createGather2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
-                          Component, OffsetX, OffsetY, Mask, CI->getName());
+        CallInst *NewCall;
+        if (Shape == ImageShape::Array2D) {
+          Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createGatherArray2D(Builder, Env, ImageIndex, SamplerIndex,
+                                        C0, C1, ArrayLayer, Component, OffsetX,
+                                        OffsetY, Mask, CI->getName());
+        } else {
+          NewCall =
+              createGather2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                             Component, OffsetX, OffsetY, Mask, CI->getName());
+        }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
