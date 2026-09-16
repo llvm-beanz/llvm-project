@@ -87821,3 +87821,38 @@ env` with correctly separate assignments) -- only manual/ad hoc
    own upstream gap. Not urgent, but the smallest-blast-radius way to
    shrink the failure count by 2 without touching `feme` pass code at
    all, if someone wants an upstream-MLIR-flavored session instead.
+
+# Session: H164 fixed (AtomicCmpXchgInst never classified NeverUniform) and H168 fixed (widenGroupSharedStore null WidePtr crash)
+
+**Wins this session:**
+1. `InterlockedCompareExchange.32.test` now passes end-to-end (H164 closed). This also closes H162's whole 8-case Interlocked tracking row: **8 of 8 now pass**.
+2. `SIMDizePass::widenGroupSharedStore`'s null-pointer `CreateMaskedScatter` crash fixed (H168 closed) -- this had cost two prior sessions a detour, worked around each time by substituting a load for the store in unit tests.
+3. `check-hlsl-feme-vk`: **9 -> 8 failures**, no regressions.
+4. `check-feme`: 3125/3128 passed, 0 failed, 3 unsupported (+6 new tests this session).
+5. Native `dEQP-VK.compute.pipeline.*` CTS spot-check: 647/36/19,819, byte-identical to baseline both times (after H164, after H168) -- no regressions, no feature/extension inventory changes needed (both fixes are CPU-backend-internal correctness fixes, no new Vulkan surface).
+
+**What H164 actually was.** Not any of its own three standing hypotheses turned out to be the root cause -- hypothesis (2) ("an apparent SPIR-V-import artifact") was on the right track but the real bug was one level deeper and more fundamental: `WaveTTIImpl::getValueUniformity` already special-cased a plain `AtomicRMWInst` as `NeverUniform` (roadmap L43) but never gave its `AtomicCmpXchgInst` sibling the same treatment. A branch on an `extractvalue` of a `cmpxchg`'s result was wrongly classified uniform, escaped `DiamondFlattener`, got rejected by `SIMDizePass` one stage later, and the erased scalar `cmpxchg`'s remaining uses got replaced with `poison` -- a branch condition provably `poison`, which is why the crash was a JIT segfault with no stack, not a compile-time diagnostic. Confirmed directly in a real `FEME_DUMP_IR` dump (`%53 = extractvalue { i32, i1 } poison, 0` feeding an `icmp`). Fix was a two-line addition mirroring the existing `AtomicRMWInst` case, once the actual cause was found.
+
+**What H168 actually was.** Also simpler than it looked once reproduced standalone: not loop-body-specific at all (a non-loop, single-block repro crashes identically). `widenGroupSharedStore` assumed (correctly for a `load`) that a divergent store's pointer operand was always already in the `Widened` map. But a store's divergence tracks its pointer *and* value operands together -- a uniform-address, divergent-value store (`groupshared int Shared; Shared = ThreadID;`) is divergent even though its uniform pointer was never widened, so the direct `Widened.lookup` returned null and `CreateMaskedScatter` dereferenced it. Fix: route the pointer through `getWidened` instead, which already knows how to broadcast a uniform value into a splat.
+
+**Process note, again:** both root causes were found fast once reproduced against either the real `offloader`/lit pipeline (H164, via `FEME_DUMP_IR`) or a minimal standalone `feme-opt` reduction (H168, via `-passes=feme-cpu-simdize`) -- neither took anywhere near the "day or more"/multi-session budget the roadmap had set aside for them. The lesson from H167's own session (hand-reconstructed IR can diverge from the real pipeline) held again: getting a *precise*, real repro before touching any hypothesis paid off both times.
+
+**Commits this session** (6 total, each focused):
+1. H164 code fix + `uniformity.ll` case + `Linearize/atomiccmpxchg-guarded-branch-divergent.ll` lit test
+2. Roadmap: strike through H164 and H162
+3. VulkanCTSReport: add H164 section
+4. H168 code fix + standalone lit reduction + `SIMDizeTest` unit test
+5. Roadmap: strike through H168
+6. VulkanCTSReport: add H168 section
+
+**Remaining `check-hlsl-feme-vk` failures (8, unchanged by this session except the drop from 9):**
+1. `Feature/ByteAddressBuffer/GetDimensions.test`, `Feature/StructuredBuffer/GetDimensions.test` -- H160, tracked, genuine upstream MLIR gap (`OpArrayLength` has no SPIR-V dialect op at all). Comparable in scope to H124d's own upstream `OpDPdx`/`OpDPdy`/`OpFwidth` gap: needs a new `.td` op, `Deserializer.cpp`/`Serializer.cpp` support, and a new `SPIRVToLLVMPatterns.cpp` conversion pattern. Not attempted this session, budget a day+ if picked up.
+2. `Graphics/DdxCoarse.test`, `Graphics/DdyCoarse.test`, `Graphics/ddx_fine.test`, `Graphics/ddy_fine.test`, `Graphics/fwidth.test` -- H124d, same upstream-MLIR-gap family as H160 (missing `OpDPdx`/`OpDPdy`/`OpFwidth` SPIR-V dialect ops). Not attempted this session.
+3. `WaveOps/WaveActiveMax.test` -- **newly looked at this session, not fixed, not fully triaged.** The failure is a `-debug-layer`-mode `FileCheck` mismatch: the `NegInfs` case (a buffer of all `-inf` values) produces `Data: [ -inf, -inf, -inf, -inf ]` but the test's plain `CHECK-NEXT` (used with no platform-specific check-prefix passed to `FileCheck`) expects `Data: [ 0, 0, 0, 0 ]`. Two open questions before this can be triaged further, neither answered this session: (a) whether `TID.x % 8` indexing a 4-element buffer with 32 threads is itself an out-of-bounds-access bug in the *test source* (`offload-test-suite`, not `feme`) unrelated to any real driver bug; (b) whether SPIR-V's own "`-INF` is the identity for `OpGroupNonUniformFMax`, ignore any lane whose value is `-INF`" semantics genuinely implies an all-`-INF` input should reduce to `0` for some undefined-value convention, or whether the expected `[0,0,0,0]` line is itself wrong/stale in the upstream test. Needs a `FEME_DUMP_IR`-style trace of exactly what our `WaveActiveMax` lowering does for this input before guessing at a fix.
+
+**Suggested next steps, ranked:**
+1. **~15 minutes, cheap diagnostic, do first if picking this back up:** confirm whether `WaveActiveMax.test`'s `TID.x % 8`-into-4-element-buffer shape is a pre-existing `offload-test-suite` test bug (check git blame/history on that file, or just try changing the modulus locally and see whether the CHECK lines suddenly match) before spending real time on it as a `feme` bug.
+2. **~1-2 days, real payoff (closes 2 failures), not urgent:** H160 -- add `spirv.ArrayLength` to the SPIR-V dialect (`SPIRVOps.td`), plus (de)serializer and conversion-pattern support. See H160's own roadmap row for the exact plan; check whether the existing `RWBuffer<T>::GetDimensions()` bound-resource metadata path can be reused for the new op's lowering before inventing new plumbing.
+3. **~half a day, real payoff (closes up to 5 failures), not urgent, upstream-MLIR-flavored:** H124d -- same shape as H160 but for `OpDPdx`/`OpDPdy`/`OpFwidth` (opcodes 207-215). Needs new SPIR-V dialect derivative ops plus CPU-backend screen-space-derivative (quad/2x2-lane-grouping) semantics, which the CPU SIMD renderer does not currently implement at all -- larger than H160 for that reason.
+
+**Cleanup done:** removed `/tmp/h167/`, `/tmp/cts-h167.qpa`/`.log`, `/tmp/h164/`, `/tmp/h168/`, `/tmp/cts-h164.qpa`/`.log`, `/tmp/cts-h168.qpa`/`.log` scratch files before ending the session.
