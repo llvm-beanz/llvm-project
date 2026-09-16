@@ -1035,11 +1035,12 @@ bool isQueryLodIntrinsic(const CallInst &CI, bool &Unclamped) {
 /// plain 2D image's mip-0 `(Width, Height)` extent query -- GLSL's own
 /// `imageSize()`/`textureSize()` against a `sampler2D`/`image2D` with no
 /// explicit LOD argument (SPIR-V `OpImageQuerySize`). Scoped to this one
-/// variant only -- `.x`/the mip-count-returning `.levels.*`/the
+/// variant only -- the mip-count-returning `.levels.*`/the
 /// multisample-count-returning `.ms.*` variants (every other `ImageShape`'s
-/// own `GetDimensions` counterpart) remain unstarted follow-on work. See
-/// `isGetDimensions3Intrinsic` immediately below for the 3-component
-/// `.xyz` sibling.
+/// own `GetDimensions` counterpart) remain unstarted follow-on work; see
+/// `isGetDimensions1Intrinsic` below for the `.x` (typed-buffer element
+/// count) sibling and `isGetDimensions3Intrinsic` immediately below for the
+/// 3-component `.xyz` sibling.
 bool isGetDimensionsIntrinsic(const CallInst &CI) {
   return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_xy;
 }
@@ -1059,6 +1060,20 @@ bool isGetDimensionsIntrinsic(const CallInst &CI) {
 /// overload remains unstarted follow-on work.
 bool isGetDimensions3Intrinsic(const CallInst &CI) {
   return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_xyz;
+}
+
+/// Whether \p CI is `llvm.spv.resource.getdimensions.x` (roadmap H144): a
+/// typed buffer's own (`Buffer<T>`/`RWBuffer<T>`, SPIR-V `Dim::Buffer`)
+/// element-count query -- `OpImageQuerySize` against a 1-component-result
+/// image handle. Unlike `isGetDimensionsIntrinsic`/`isGetDimensions3Intrinsic`
+/// above (both scoped to an ordinary 2D/array-2D image handle classified
+/// by `classifySampledImage2DHandle`/`classifyStorageImage2DHandle`), this
+/// is the one `GetDimensions` shape a `classifyTexelBufferHandle` handle
+/// (`HandleKind::TexelStorage`/`TexelUniform`) itself can produce -- a
+/// texel buffer has no width/height/mip concept, only a flat element
+/// count, matching the single scalar `.x` result width.
+bool isGetDimensions1Intrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_x;
 }
 
 /// Whether \p CI's callee is a `SPIRVImporter.cpp`-synthesized magic-named
@@ -2376,6 +2391,19 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
                    Kind == HandleKind::UniformArray;
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
+    // (Roadmap H144) A typed buffer's own bare `getdimensions.x` call is
+    // not a `getpointer`-mediated access at all -- it addresses no
+    // element, just reads the descriptor's own element count -- so it is
+    // modeled directly on the handle itself rather than requiring the
+    // usual `getpointer` indirection every other access shape goes
+    // through. `lowerAccesses` below has the matching special-case branch
+    // that lowers it to `createGetDimensionsTyped` without ever computing
+    // an `ElementIndex`/`Offset`.
+    if (IsTexel) {
+      if (const auto *DimsCI = dyn_cast<CallInst>(U);
+          DimsCI && isGetDimensions1Intrinsic(*DimsCI))
+        continue;
+    }
     const auto *GetPtr = dyn_cast<CallInst>(U);
     if (!GetPtr ||
         getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer) {
@@ -3098,6 +3126,22 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
   bool IsTexel = isTexelHandleKind(BH.Kind);
 
   for (User *U : llvm::make_early_inc_range(BH.Handle->users())) {
+    // (Roadmap H144) A bare `getdimensions.x` call on the handle itself --
+    // see `hasOnlySupportedUses`'s matching special-case comment -- reads
+    // no element, so it bypasses the `getpointer`-mediated rewriting below
+    // entirely: lower it directly to `createGetDimensionsTyped` and move
+    // on to the handle's next user.
+    if (IsTexel) {
+      if (auto *DimsCI = dyn_cast<CallInst>(U);
+          DimsCI && isGetDimensions1Intrinsic(*DimsCI)) {
+        IRBuilder<> Builder(DimsCI);
+        CallInst *Dims = createGetDimensionsTyped(
+            Builder, Env, DescriptorIndex, Mask, DimsCI->getName());
+        DimsCI->replaceAllUsesWith(Dims);
+        DimsCI->eraseFromParent();
+        continue;
+      }
+    }
     auto *GetPtr = cast<CallInst>(U);
     Value *ElementIndex = nullptr;
     Value *Offset = nullptr;

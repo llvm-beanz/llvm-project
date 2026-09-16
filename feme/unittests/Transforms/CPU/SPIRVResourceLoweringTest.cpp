@@ -1060,6 +1060,37 @@ TEST(SPIRVResourceLoweringTest, LowersUniformTexelBufferToTypedLoadOnly) {
   EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
 }
 
+TEST(SPIRVResourceLoweringTest,
+    LowersUniformTexelBufferGetDimensionsToTypedCall) {
+  // Roadmap H144: `Buffer<T>::GetDimensions(uint)` on a uniform (read-only)
+  // texel buffer lowers to a bare `llvm.spv.resource.getdimensions.x` call
+  // directly on the handle -- no `getpointer` indirection at all, unlike
+  // every load/store shape the tests above cover -- and should rewrite to
+  // `feme.cpu.resource.getdimensions.typed.i32`, with the handle itself
+  // erased same as any other fully-lowered access.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %h = call target("spirv.Image", i32, 5, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dim = call i32 @llvm.spv.resource.getdimensions.x(
+          target("spirv.Image", i32, 5, 0, 0, 0, 1, 0) %h)
+      ret i32 %dim
+    }
+    declare target("spirv.Image", i32, 5, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare i32 @llvm.spv.resource.getdimensions.x(target("spirv.Image", i32, 5, 0, 0, 0, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      hasResourceTypedCall(*F, "feme.cpu.resource.getdimensions.typed"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
 TEST(SPIRVResourceLoweringTest, LowersIntegerStorageTexelBufferToV4I32Calls) {
   // (V4) A `<4 x i32>` texel element -- the R32G32B32A32_UINT/_SINT
   // identity-format shape `isSupportedTexelElementType` accepts alongside
