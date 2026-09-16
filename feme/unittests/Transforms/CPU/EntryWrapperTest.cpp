@@ -903,17 +903,20 @@ TEST(EntryWrapperTest, FlowMergeLoopWithMidBodySafeDiamondIsDiagnosed) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-// Roadmap H155 (feme/docs/Roadmap.md): a "Flow-merge loop" (see
+// Roadmap H159(b) (feme/docs/Roadmap.md): a "Flow-merge loop" (see
 // `SplitsFlowMergeLoopWithHeaderDerivedValue` above) with a *second*
 // header phi (`%acc`) whose own recurrence (`%acc.next`) is computed in
 // the collapsed block's barrier-and-earlier half -- i.e. it ends up
 // inside the outlined `BodyOrder` region, not the fresh post-barrier
-// `Latch` tail. Outlining that body into its own function means its
-// instructions are never cloned into the wrapper's own `HeaderMap`, so
-// wiring `%acc`'s header phi from a `Latch`-only `HeaderMap` lookup would
-// previously read a null value and crash `PHINode::addIncoming`. This
-// shape must now be declined instead of crashing.
-TEST(EntryWrapperTest, FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed) {
+// `Latch` tail, so its value is never available to the wrapper's own
+// cloned scalar loop at all. `%acc` must therefore be recognized as a
+// wave-persistent induction: seeded into its own per-wave spill slot once
+// by the loop's prefix region, reloaded at its use inside the body
+// region, and stored back right after its recurrence -- the spill array
+// is allocated outside the wrapper's loop, so the slot carries the value
+// across the loop's own backedge. `%i` stays an ordinary scalar
+// induction driving the wrapper's trip count.
+TEST(EntryWrapperTest, SplitsFlowMergeLoopWithWavePersistentRecurrence) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -925,15 +928,103 @@ TEST(EntryWrapperTest, FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed) {
       %cmp = icmp ult i32 %i, 4
       br i1 %cmp, label %flow, label %after
     flow:
-      %gid = call i32 @llvm.dx.group.id(i32 0)
-      %acc.next = add i32 %acc, %gid
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %acc.next = add i32 %acc, %tid
       call void @llvm.dx.group.memory.barrier.with.group.sync()
       %i.next = add i32 %i, 1
       br label %header
     after:
       ret void
     }
-    declare i32 @llvm.dx.group.id(i32)
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(M->getFunction("main"));
+
+  // Only `%i` is an ordinary induction, so exactly one `loopvarN`
+  // parameter is threaded through: `%acc` needs none.
+  Function *Body0 = M->getFunction("main.body0");
+  ASSERT_TRUE(Body0);
+  unsigned NumLoopVars = 0;
+  for (Argument &A : Body0->args())
+    if (A.getName().starts_with("loopvar"))
+      ++NumLoopVars;
+  EXPECT_EQ(NumLoopVars, 1u);
+
+  // The prefix region seeds the slot once per wave; the body region
+  // reloads it and stores the recurrence back into it. `%acc` is per-lane
+  // once widened, so the slot's own type is the widened vector type.
+  Function *Prefix0 = M->getFunction("main.prefix0");
+  ASSERT_TRUE(Prefix0);
+  unsigned NumSeedStores = 0;
+  for (Instruction &I : instructions(*Prefix0))
+    if (isa<StoreInst>(&I))
+      ++NumSeedStores;
+  EXPECT_EQ(NumSeedStores, 1u);
+
+  bool FoundReload = false;
+  bool FoundCarryStore = false;
+  for (Instruction &I : instructions(*Body0)) {
+    if (auto *LI = dyn_cast<LoadInst>(&I);
+        LI && LI->getName().starts_with("acc."))
+      FoundReload = true;
+    if (auto *SI = dyn_cast<StoreInst>(&I);
+        SI && SI->getPointerOperand()->getName().starts_with("acc."))
+      FoundCarryStore = true;
+  }
+  EXPECT_TRUE(FoundReload);
+  EXPECT_TRUE(FoundCarryStore);
+
+  // The wrapper's own scalar loop keeps a single phi, for `%i` alone.
+  BasicBlock *HeaderBB = nullptr;
+  for (BasicBlock &BB : *Wrapper)
+    if (BB.getName() == "loop.header")
+      HeaderBB = &BB;
+  ASSERT_TRUE(HeaderBB);
+  EXPECT_EQ(std::distance(HeaderBB->phis().begin(), HeaderBB->phis().end()), 1);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap H159(b) (feme/docs/Roadmap.md): the wave-persistent induction
+// path threads a per-lane loop-carried value through one per-wave slot,
+// which holds exactly one value at a time -- so a use of the induction
+// positioned *after* its own recurrence has been stored back would read
+// the next iteration's value instead of this one's. That ordering
+// requirement is checked, so this shape (`%late` reads `%acc` after
+// `%acc.next` computes it) must be declined rather than miscompiled.
+TEST(EntryWrapperTest, FlowMergeLoopWithLateWavePersistentUseIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %acc = phi i32 [ 0, %entry ], [ %acc.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %acc.next = add i32 %acc, %tid
+      %late = mul i32 %acc, 3
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id.in.group(i32)
     declare void @llvm.dx.group.memory.barrier.with.group.sync()
     attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
   )");

@@ -891,6 +891,30 @@ struct RegionBoundary {
   BarrierMemoryScope MemoryScope;
 };
 
+/// One genuinely per-lane loop induction whose recurrence is computed
+/// inside a per-wave region, and so cannot be cloned into the wrapper's
+/// own group-wide scalar loop the way an ordinary scalar induction is
+/// (roadmap H159(b)). Such a value instead lives in the same
+/// `[WavesPerGroup x SpillTy]` per-wave context array
+/// `spillValuesLiveAcrossBarriers` already builds for values live across
+/// a barrier: that array is allocated once outside the wrapper's loop, so
+/// a slot in it persists across the loop's own backedge for free.
+struct WavePersistentValue {
+  /// The loop header's own phi, replaced by a reload at each of its uses
+  /// inside a per-wave region.
+  PHINode *HeaderPhi;
+  /// The value the phi starts at, stored into every wave's slot once
+  /// before the loop begins (at \c SeedInsertBefore).
+  Constant *InitialValue;
+  /// The phi's own backedge value, stored back into the wave's slot right
+  /// after it is computed. Every use of \c HeaderPhi is required to
+  /// precede this, so no reload can observe the next iteration's value.
+  Instruction *NextValue;
+  /// Where the once-per-wave seeding store goes -- the terminator of the
+  /// loop's own prefix chain, which runs once per wave before the loop.
+  Instruction *SeedInsertBefore;
+};
+
 /// Spills every SSA value in \p Order that is live across one of
 /// \p Barriers (defined before it, used strictly after -- see "Values
 /// live across a barrier" in the file comment above) into a per-wave
@@ -905,10 +929,16 @@ struct RegionBoundary {
 /// phi must stay grouped with any others at the top of its block. Returns
 /// false (having emitted a diagnostic, leaving \p WaveBody unmodified) if a
 /// live value's shape is not one this milestone's spilling supports.
+///
+/// Each of \p Persistent additionally gets its own slot in the same
+/// per-wave context array, seeded once before the loop and threaded
+/// across the loop's own backedge (roadmap H159(b)); see
+/// `WavePersistentValue`.
 bool spillValuesLiveAcrossBarriers(
     Function *&WaveBody, ArrayRef<BasicBlock *> Order,
     ArrayRef<CallInst *> Barriers,
-    const DenseMap<Instruction *, unsigned> &IndexOf, StructType *&SpillTyOut) {
+    const DenseMap<Instruction *, unsigned> &IndexOf, StructType *&SpillTyOut,
+    ArrayRef<WavePersistentValue> Persistent = {}) {
   SpillTyOut = nullptr;
   SmallSetVector<Instruction *, 4> SpilledDefs;
   SmallVector<std::tuple<Instruction *, Instruction *, unsigned>, 8>
@@ -933,7 +963,7 @@ bool spillValuesLiveAcrossBarriers(
     }
   }
 
-  if (SpilledDefs.empty())
+  if (SpilledDefs.empty() && Persistent.empty())
     return true;
 
   LLVMContext &Ctx = WaveBody->getContext();
@@ -942,6 +972,14 @@ bool spillValuesLiveAcrossBarriers(
   for (Instruction *Def : SpilledDefs) {
     FieldOf[Def] = FieldTypes.size();
     FieldTypes.push_back(Def->getType());
+  }
+  // A wave-persistent induction's header phi lives outside \p Order
+  // entirely (in the loop header, which is cloned into the wrapper rather
+  // than outlined), so it can never also be one of `SpilledDefs` above --
+  // it simply gets the next field of the very same context struct.
+  for (const WavePersistentValue &P : Persistent) {
+    FieldOf[P.HeaderPhi] = FieldTypes.size();
+    FieldTypes.push_back(P.HeaderPhi->getType());
   }
   auto *SpillTy = StructType::create(
       Ctx, FieldTypes, (WaveBody->getName() + ".barrier_spill").str());
@@ -994,6 +1032,44 @@ bool spillValuesLiveAcrossBarriers(
     Value *Reloaded = Builder.CreateLoad(Def->getType(), Field,
                                          Def->getName() + ".reload.val");
     User->setOperand(OperandNo, Reloaded);
+  }
+
+  // Roadmap H159(b): thread each per-lane induction through its own slot
+  // of the same array -- seeded once per wave ahead of the loop, reloaded
+  // at every use inside a region, and stored back right after its
+  // recurrence is computed, so the next iteration's reload picks it up.
+  SmallPtrSet<BasicBlock *, 8> OrderSet(Order.begin(), Order.end());
+  for (const WavePersistentValue &P : Persistent) {
+    IRBuilder<> Seed(P.SeedInsertBefore);
+    Value *SeedField =
+        buildFieldPtr(Seed, P.HeaderPhi, P.HeaderPhi->getName() + ".init");
+    Seed.CreateStore(P.InitialValue, SeedField);
+
+    SmallVector<Use *, 8> Uses;
+    for (Use &U : P.HeaderPhi->uses())
+      if (auto *UI = dyn_cast<Instruction>(U.getUser());
+          UI && OrderSet.contains(UI->getParent()))
+        Uses.push_back(&U);
+    for (Use *U : Uses) {
+      auto *User = cast<Instruction>(U->getUser());
+      Instruction *InsertPt = User;
+      if (auto *UserPN = dyn_cast<PHINode>(User))
+        InsertPt = UserPN->getIncomingBlock(*U)->getTerminator();
+      IRBuilder<> Builder(InsertPt);
+      Value *Field = buildFieldPtr(Builder, P.HeaderPhi,
+                                   P.HeaderPhi->getName() + ".reload");
+      U->set(Builder.CreateLoad(P.HeaderPhi->getType(), Field,
+                                P.HeaderPhi->getName() + ".reload.val"));
+    }
+
+    Instruction *StoreAt =
+        isa<PHINode>(P.NextValue)
+            ? &*P.NextValue->getParent()->getFirstNonPHIOrDbg()
+            : P.NextValue->getNextNode();
+    IRBuilder<> Builder(StoreAt);
+    Value *Field =
+        buildFieldPtr(Builder, P.HeaderPhi, P.HeaderPhi->getName() + ".carry");
+    Builder.CreateStore(P.NextValue, Field);
   }
   return true;
 }
@@ -1156,6 +1232,14 @@ splitAtGroupSyncBarriers(Function *&WaveBody,
 struct LoopInduction {
   PHINode *HeaderPhi;
   Constant *InitialValue;
+  /// Roadmap H159(b): whether this induction is genuinely per-lane -- its
+  /// recurrence is computed inside a per-wave region, so it cannot drive a
+  /// cloned scalar phi in the wrapper and is threaded through the per-wave
+  /// spill array across the loop's own backedge instead (see
+  /// `WavePersistentValue`). Such an induction is never referenced by the
+  /// header itself, and so never takes part in the loop's own uniform
+  /// trip-count condition.
+  bool IsWavePersistent = false;
 };
 
 /// The natural, header-tested loop shape this milestone's region splitting
@@ -1438,6 +1522,39 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
   // the header's own clone already provides can drive the recurrence.
   // Threading a genuinely per-lane recurrence across the backedge is
   // H159(b), still unimplemented.
+  //
+  // Roadmap H159(b): a recurrence computed inside a per-wave region is
+  // still supported, but only as a genuinely per-lane
+  // ("wave-persistent") induction threaded through the per-wave spill
+  // array instead of a cloned scalar phi -- which additionally requires
+  // that the header never reads the induction itself (a per-lane value
+  // could not drive the loop's own uniform scalar trip-count condition
+  // anyway), and that every use of it inside a region precedes its own
+  // recurrence, so no reload can observe the next iteration's value.
+  //
+  // `Shape.BodyOrder` plus `Shape.Latch` is the region chain in program
+  // order here, whether or not the latch is later split in two: both
+  // halves of a split latch stay in the same relative order, so
+  // `comesBefore` within the unsplit block answers the same question.
+  SmallVector<BasicBlock *, 8> RegionOrder(Shape.BodyOrder.begin(),
+                                           Shape.BodyOrder.end());
+  RegionOrder.push_back(Shape.Latch);
+  auto RegionRank = [&](Instruction *I) -> std::optional<unsigned> {
+    auto It = find(RegionOrder, I->getParent());
+    if (It == RegionOrder.end())
+      return std::nullopt;
+    return std::distance(RegionOrder.begin(), It);
+  };
+  auto PrecedesInRegions = [&](Instruction *A, Instruction *B) {
+    std::optional<unsigned> RA = RegionRank(A);
+    std::optional<unsigned> RB = RegionRank(B);
+    if (!RA || !RB)
+      return false;
+    if (*RA != *RB)
+      return *RA < *RB;
+    return A->comesBefore(B);
+  };
+
   for (LoopInduction &Ind : Shape.Inductions) {
     Value *NextVal = Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch);
     if (isa<Constant>(NextVal))
@@ -1445,17 +1562,21 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     auto *NextInst = dyn_cast<Instruction>(NextVal);
     if (!NextInst)
       return std::nullopt;
-    if (Shape.LatchIsWaveRegion) {
-      if (NextInst->getParent() != Shape.Header)
-        return std::nullopt;
-      continue;
-    }
-    if (NextInst->getParent() != Shape.Latch)
+    if (NextInst->getParent() == Shape.Header)
+      continue; // Cloned into the wrapper along with the rest of the header.
+    if (!Shape.LatchIsWaveRegion && NextInst->getParent() == Shape.Latch &&
+        (!LatchSplitAfter || LatchSplitAfter->comesBefore(NextInst)))
+      continue; // The pure recurrence tail, cloned into the wrapper.
+
+    // Everything else is computed inside a per-wave region.
+    if (!RegionRank(NextInst))
       return std::nullopt;
-    if (LatchSplitAfter && !LatchSplitAfter->comesBefore(NextInst))
-      return std::nullopt; // Recurrence lives in the barrier-containing
-                            // portion that becomes a new `BodyOrder`
-                            // entry, not the tail that becomes `Latch`.
+    if (any_of(Ind.HeaderPhi->users(), [&](User *U) {
+          auto *UI = dyn_cast<Instruction>(U);
+          return !UI || (UI != NextInst && !PrecedesInRegions(UI, NextInst));
+        }))
+      return std::nullopt;
+    Ind.IsWavePersistent = true;
   }
 
   for (LoopInduction &Ind : Shape.Inductions) {
@@ -1799,12 +1920,32 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     return is_contained(WaveRegionOrder, BB);
   };
 
+  // Roadmap H159(b): split the loop's inductions into the ordinary scalar
+  // ones -- cloned into the wrapper as its own scalar loop phis, and
+  // passed into each region by `loopvarN` parameter -- and the genuinely
+  // per-lane ones, which instead live in a slot of the per-wave spill
+  // array across the loop's backedge (see `WavePersistentValue`) and so
+  // need neither a wrapper phi nor a `loopvarN` parameter.
+  SmallVector<LoopInduction, 2> ScalarInductions;
+  SmallVector<LoopInduction, 2> PersistentInductions;
+  for (const LoopInduction &Ind : Shape.Inductions)
+    (Ind.IsWavePersistent ? PersistentInductions : ScalarInductions)
+        .push_back(Ind);
+
   // Each induction's recurrence value must be read before any outlining
   // moves `Shape.Latch` (and so invalidates walking the header phi's
   // incoming blocks) into its own region function.
   SmallVector<Value *, 2> NextValues;
-  for (LoopInduction &Ind : Shape.Inductions)
+  for (LoopInduction &Ind : ScalarInductions)
     NextValues.push_back(Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch));
+  SmallVector<WavePersistentValue, 2> Persistent;
+  assert(PersistentInductions.empty() || !Shape.PrefixOrder.empty());
+  for (LoopInduction &Ind : PersistentInductions)
+    Persistent.push_back(
+        {Ind.HeaderPhi, Ind.InitialValue,
+         cast<Instruction>(
+             Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch)),
+         Shape.PrefixOrder.back()->getTerminator()});
 
   // Give the body chain's uses of each header induction phi their own
   // trailing `loopvarN` parameter (see the file comment's "Barriers inside
@@ -1812,7 +1953,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // function, since `Shape.Header` is cloned into the wrapper, not
   // outlined.
   SmallVector<unsigned, 2> LoopVarArgNo;
-  for (auto [N, Ind] : llvm::enumerate(Shape.Inductions)) {
+  for (auto [N, Ind] : llvm::enumerate(ScalarInductions)) {
     SmallVector<Use *, 4> UsesInBody;
     for (Use &U : Ind.HeaderPhi->uses())
       if (auto *UI = dyn_cast<Instruction>(U.getUser());
@@ -1853,7 +1994,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
       HeaderDerivedValues.push_back(&I);
   }
   for (auto [M, HV] : llvm::enumerate(HeaderDerivedValues)) {
-    unsigned N = Shape.Inductions.size() + M;
+    unsigned N = ScalarInductions.size() + M;
     SmallVector<Use *, 4> UsesInBody;
     for (Use &U : HV->uses())
       if (auto *UI = dyn_cast<Instruction>(U.getUser());
@@ -1903,8 +2044,18 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   IndexChain(Shape.SuffixOrder);
   StructType *SpillTy = nullptr;
   if (!spillValuesLiveAcrossBarriers(WaveBody, SpillOrder, Barriers, IndexOf,
-                                     SpillTy))
+                                     SpillTy, Persistent))
     return nullptr;
+
+  // Every wave-persistent induction now reads and writes its own per-wave
+  // slot instead of the header phi, which no region references any more:
+  // drop it before outlining moves its incoming value out of this
+  // function entirely.
+  for (LoopInduction &Ind : PersistentInductions) {
+    Ind.HeaderPhi->replaceAllUsesWith(
+        PoisonValue::get(Ind.HeaderPhi->getType()));
+    Ind.HeaderPhi->eraseFromParent();
+  }
 
   SmallVector<RegionBoundary, 4> PrefixBoundaries;
   SmallVector<Function *, 4> PrefixRegions =
@@ -1952,7 +2103,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // carries a `loopvarN` parameter for each `HeaderDerivedValues` entry
   // too, even though its own body never references one.
   SmallVector<Value *, 2> LoopScalars;
-  for (LoopInduction &Ind : Shape.Inductions)
+  for (LoopInduction &Ind : ScalarInductions)
     LoopScalars.push_back(PoisonValue::get(Ind.HeaderPhi->getType()));
   for (Instruction *HV : HeaderDerivedValues)
     LoopScalars.push_back(PoisonValue::get(HV->getType()));
@@ -1983,7 +2134,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // per wave.
   IRBuilder<> LoopHeader(LoopHeaderBB);
   SmallVector<PHINode *, 2> WrapperPhis;
-  for (auto [N, Ind] : llvm::enumerate(Shape.Inductions)) {
+  for (auto [N, Ind] : llvm::enumerate(ScalarInductions)) {
     PHINode *NewPhi =
         LoopHeader.CreatePHI(Ind.HeaderPhi->getType(), 2, "loopvar" + Twine(N));
     NewPhi->addIncoming(Ind.InitialValue, Pred);
@@ -1991,7 +2142,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     LoopScalars[N] = NewPhi;
   }
   ValueToValueMapTy HeaderMap;
-  for (auto [Ind, NewPhi] : llvm::zip(Shape.Inductions, WrapperPhis))
+  for (auto [Ind, NewPhi] : llvm::zip(ScalarInductions, WrapperPhis))
     HeaderMap[Ind.HeaderPhi] = NewPhi;
   Instruction *ClonedCond = nullptr;
   for (Instruction &I : *Shape.Header) {
@@ -2010,7 +2161,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // ahead of `LoopBodyBB`, so the plain cloned `Instruction*` already
   // dominates every body region's own call site.
   for (auto [M, HV] : llvm::enumerate(HeaderDerivedValues))
-    LoopScalars[Shape.Inductions.size() + M] = HeaderMap[HV];
+    LoopScalars[ScalarInductions.size() + M] = HeaderMap[HV];
   auto *HeaderBr = cast<CondBrInst>(Shape.Header->getTerminator());
   Value *Cond = ClonedCond
                     ? static_cast<Value *>(ClonedCond)
