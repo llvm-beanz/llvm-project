@@ -87431,3 +87431,148 @@ accepting a shape is necessary but not sufficient.**
    `StructuredBuffer/GetDimensions.test` -- neither looked at yet.
 6. **Do not re-attempt H150** -- confirmed a prior session it's not a
    FeMe-side bug at all.
+
+# Session: H159 deeply re-scoped (no code change); H160 (OpArrayLength) found and triaged
+
+## tl;dr
+
+No functional code changed this session. Both things I looked at
+turned out to be *bigger than they looked from the outside* -- correctly
+identifying that up front and documenting it precisely felt like the
+actual valuable output, rather than rushing a risky half-fix (this
+project has already had to revert one of those recently). Two docs
+commits: H159's design corrected/expanded, and a brand-new roadmap row
+(H160) for a shared root cause behind two previously-unlooked-at test
+failures.
+
+## What I did
+
+1. **Confirmed environment** (every-session check):
+   `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Good.
+
+2. **Re-opened H159** (last session's #1 suggested next step: "spill a
+   per-lane value across the loop's own iteration boundary"). Built
+   fresh standalone repros for both `InterlockedAdd.32.test` and
+   `InterlockedExchange.32.test` (the usual `dxc` -> `feme-translate` ->
+   `feme-opt` pipeline, `feme-cpu-wrap-entry` omitted so I could see the
+   pre-wrap shape) and traced every loop-header phi's recurrence back to
+   its defining instruction and every operand in its chain.
+
+   Found: it's not "spill one value", it's **two separable problems**.
+   `InterlockedAdd.32.test`'s loop has 3 genuinely per-lane
+   (SIMD-widened, `<4 x i32>`) recurrences, and even the one whose own
+   defining instruction is textually inside the post-barrier `Latch`
+   split still transitively depends on a value physically defined
+   *before* the barrier (in what becomes the outlined `BodyOrder`
+   region). `matchLoopShape`'s existing `isPureClosedChainAfter` check
+   correctly, safely declines all three -- no crash risk here, it's just
+   doing its job. But the *reason* it declines is structural: `Shape.Latch`
+   today is always cloned directly into the wrapper's own scalar,
+   group-wide `LoopLatchBB` -- and this per-lane recurrence's own code
+   references wave-lane context (masks, per-lane gather results) that
+   simply doesn't exist in that scalar scope. Every previously-supported
+   case's `Latch` happened to be genuinely uniform, so this was never
+   exercised before.
+
+   So the real fix needs: (1) `Shape.Latch` becoming *conditionally
+   outlinable* into one more per-wave region (like `BodyOrder` already
+   is), and only then (2) a spill/reload of each per-lane induction
+   through the existing per-wave spill array (which conveniently already
+   persists across loop iterations with zero new storage). Rewrote
+   H159's roadmap row with this full picture and a recommended
+   incremental order (do (1) alone first, against a synthetic "Latch has
+   wave-code but no actual cross-split dependency" case, before touching
+   spilling at all).
+
+   Deliberately **did not implement any of this**. It's a multi-day,
+   correctness-critical rework of `buildWrapperForLoop`'s core assumption
+   about what Latch is. Rushing it risks a silent miscompilation, not
+   just a diagnosed decline -- exactly the class of mistake a very recent
+   session had to walk back after a much smaller change.
+
+3. **Triaged the two long-unlooked-at `GetDimensions.test` cases**
+   (`ByteAddressBuffer`/`StructuredBuffer`), flagged by two previous
+   sessions in a row as "not yet individually looked at". Ran both
+   directly against the real driver with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`. Both hit the *identical*
+   diagnostic: `error: unhandled opcode 68` (`OpArrayLength`) ->
+   `failed to deserialize SPIR-V module`. One shared root cause, not two
+   separate bugs.
+
+   Checked upstream MLIR's SPIR-V dialect directly (`Deserializer.cpp`,
+   the dialect's own `.td` definitions): there is **no `ArrayLengthOp` at
+   all**. `OpArrayLength` (the *dynamic*, runtime-array-length-querying
+   instruction DXC emits for any `.GetDimensions()` on a
+   `ByteAddressBuffer`/`StructuredBuffer`-family resource) has zero
+   representation anywhere in this MLIR version -- not a FeMe-side bug,
+   a genuine upstream gap. Added as new roadmap row **H160** with the
+   concrete three-part plan to close it (new dialect op, (de)serializer
+   support, a `SPIRVToLLVMPatterns.cpp` conversion pattern) -- comparable
+   in size to H124d's own `OpDPdx`/`OpDPdy`/`OpFwidth` gap. Not attempted
+   this session given the scope.
+
+## Why no code shipped this session
+
+Both leads, once actually traced to the bottom, turned out to be
+"real feature work", not "small bug fix": H159 needs a structural
+change to how the loop wrapper treats its own latch block; H160 needs a
+new op in an upstream MLIR dialect plus a full (de)serialization and
+lowering round-trip. Given the project's established preference for
+small, safely-tested, revertable changes (and the very real precedent
+of a recent session reverting a much smaller half-fix after finding it
+crashed), I chose to scope both precisely rather than force a partial
+implementation into a single session. This felt like the right call,
+but flagging it plainly in case a different tradeoff is wanted: a
+partial H159 first-slice (just the Latch-outlining half, no spilling)
+*could* be attempted standalone in a future session per the recommended
+breakdown now in the roadmap row.
+
+## Verification
+
+- No code touched -> `ninja check-feme`/`check-hlsl-feme-vk` not
+  re-run this session (nothing to regress). `VulkanCTSReport.md` and
+  the feature/extension inventories left untouched for the same reason.
+- Both roadmap-doc commits are additive/clarifying only.
+
+## Commits (2, in order)
+
+1. `feme/docs/Roadmap.md`: H159 row rewritten with the deeper
+   Latch-outlining finding and a recommended incremental breakdown.
+2. `feme/docs/Roadmap.md`: new H160 row for the `OpArrayLength` gap
+   behind both `GetDimensions.test` failures.
+
+## What's left (in priority order)
+
+1. **Multi-day, largest single lever, now precisely designed:** H159's
+   two-part fix -- (a) teach `buildWrapperForLoop` to conditionally
+   outline `Shape.Latch` into a per-wave region instead of always
+   cloning it, when it contains wave-specific code; (b) thread each
+   per-lane ("wave-persistent") induction through the existing per-wave
+   spill array across the loop's own backedge. Recommended order: (a)
+   alone first, unit-tested against a synthetic case with no
+   cross-split dependency, before adding (b). Likely closes
+   `InterlockedAdd.32.test`/`InterlockedExchange.32.test` and probably
+   their `.resources.32.test` siblings.
+2. **Comparable in size to H124d, now precisely scoped (H160):** add
+   `spirv.ArrayLength` to upstream MLIR's SPIR-V dialect (op def +
+   deserializer/serializer + a new `SPIRVToLLVMPatterns.cpp` lowering).
+   Closes `ByteAddressBuffer/GetDimensions.test` and
+   `StructuredBuffer/GetDimensions.test` in one shot once done -- check
+   first whether the existing `RWBuffer<T>::GetDimensions()` lowering
+   path (which already works) can be partly reused for the runtime
+   buffer-descriptor metadata this needs.
+3. **Half a day, still needed before re-attempting H154's diamond
+   tolerance:** H158 -- generalize `outlineChainAtBarriers`/
+   `rebuildSplitChainOrder` for a chain with internal, non-barrier
+   branches.
+4. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
+5. **`array_of_matrices.test`'s "Unexpectedly Passed"** -- already
+   thoroughly root-caused by earlier sessions (an unrelated, stale
+   upstream `XFAIL: DXC` in `offload-test-suite`, not a FeMe bug); no
+   further FeMe-side action needed, any fix belongs in that other repo.
+6. **Do not re-attempt H150** -- confirmed a prior session it's not a
+   FeMe-side bug at all.
