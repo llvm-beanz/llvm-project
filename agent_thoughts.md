@@ -85181,3 +85181,184 @@ than "the fix's own check is structurally wrong."
 `/tmp/pc.mlir`, `/tmp/pc_out.mlir`, `/tmp/pc_err.txt`, `/tmp/pc_cts.qpa`,
 `/tmp/out.png` (all this session's scratch files, outside the repo)
 have been deleted.
+
+# Session: H124q's Array2D Gather/GatherCmp slice fixed (2 of 7 cases), recovered from a clang-format mishap mid-session
+
+**Done. `Array.Gather.test`/`Array.GatherCmp.test` now pass under
+`check-hlsl-feme-vk`: 40 -> 39 failed (of 664), 0 regressions.
+`check-feme`: 3060/3063 passed, 0 failed. 6 commits made. Remaining 5 of
+H124q's original 7 cases broken into H124r/H124s/H124t, precisely
+scoped for next session.**
+
+## What happened, in order
+
+1. **Root-caused H124q's shared diagnostic**: all 7 `Feature/
+   Textures/*` failures share one message ("register-bound resource
+   handle... cannot normalize"), traced to `hasOnlySupportedImageUses`'s
+   `isGatherCmpIntrinsic`/`isGatherIntrinsic` branches in
+   `SPIRVResourceLowering.cpp` being scoped to `Plain2D` only. Confirmed
+   3 of the 7 (`Gather.test`, `GatherCmp.test`, likely
+   `CalculateLevelOfDetail.test`) are "innocent bystander" diagnostics:
+   the actually-rejected handle is a co-resident `TextureCube` in the
+   same test function, not the `Texture2D` the message names (this
+   pass rejects every handle in a function once any one handle in it
+   fails to normalize). Scoped this session's real fix to just the
+   `Array2D`-shaped `Gather`/`GatherCmp` slice (2 of 7), since it reuses
+   the already-proven `femeRTRoundClampLayer` array-layer pattern with
+   no new face-selection math needed.
+
+2. **Implemented the fix**: added `GatherCmpArray2D`/`GatherArray2D` to
+   `ImageCallKind` (enum, builders, matcher) in `ImageCalls.h`/`.cpp`;
+   widened the shape gate in `SPIRVResourceLowering.cpp`; added the
+   codegen dispatch (extract a 3rd `ArrayLayer` coordinate component,
+   branch on `Shape`); added two new runtime functions in
+   `FeMeRuntimeCPU.c` mirroring the existing `Plain2D` gather runtime
+   functions.
+
+3. **Hit a build error, fixed it**: the two new runtime C functions
+   initially landed *before* `femeRTRoundClampLayer`'s own (`static`)
+   definition in `FeMeRuntimeCPU.c` — undeclared-function build error.
+   Moved the block to just before `femeCpuImageSample2DArrayV4F32`
+   (right after `femeRTRoundClampLayer`'s definition), the same spot
+   the existing array-sample function already sits.
+
+4. **Wrote and ran full test coverage, all green**: new lit test
+   (`spirv-resource-lowering-image-gather-array2d.ll`), matcher/builder
+   round-trip unit tests (`ImageCallsTest.cpp`), IR-lowering unit tests
+   (`SPIRVResourceLoweringTest.cpp`), and runtime layer-isolation tests
+   (`ImageSamplingTest.cpp`, proving a gather at layer 0 never leaks
+   layer 1's texels or vice versa). `check-feme`: 3059/3062 passed, 0
+   failed.
+
+5. **Ran `clang-format -i` directly on all 7 changed files per
+   `feme/.instructions.md`'s formatting rule — this reformatted each
+   file in its entirety** (1000+ line diffs per file), not just the new
+   lines: large stretches of this codebase's existing style don't
+   match clang-format's defaults, so whole-file formatting cascades
+   into massive unrelated reflow. Recognized this immediately as wrong,
+   reverted all 7 files via `git checkout --` (the new lit test, being
+   untracked, was unaffected), and **redid every edit from scratch**
+   using the `edit` tool, working from the well-documented plan already
+   in hand from step 2-3 above.
+
+6. **Applied formatting correctly the second time**: used
+   `git-clang-format -f HEAD -- <files>` (diff-scoped, not whole-file)
+   instead — produced a small, sane diff (~580 lines across 7 files,
+   matching the actual size of the new code), confirmed no functional
+   change by rebuilding and rerunning every targeted test.
+
+7. **Real-world verification surfaced a second gap `Array.Gather.test`
+   alone didn't exercise**: `check-hlsl-feme-vk` still failed
+   `Array.GatherCmp.test` after the shape-gate fix, with the *same*
+   diagnostic. Manually re-ran the offloader binary directly (lit's own
+   env-var passthrough didn't surface
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`'s output through `-sv`) and
+   found the real cause: `Array.GatherCmp.test`'s own `int2(1, 0)`
+   -offset overload hit `isSupportedOffset`'s `AllowArray2D=false`
+   default, which unconditionally rejects any nonzero `Array2D` gather
+   offset regardless of the shape gate already being widened. Flipped
+   `AllowArray2D` to `true` at both `isGatherCmpIntrinsic`/
+   `isGatherIntrinsic`'s call sites (the codegen dispatch already
+   extracted `OffsetX`/`OffsetY` generically, so no further change
+   there), added a matching nonzero-offset unit test, reran
+   `check-feme`/`check-hlsl-feme-vk` — both green, 0 regressions.
+
+8. **Tried to validate against VK-GL-CTS's own `dEQP-VK.glsl.
+   texture_gather.*` group — every case (`Plain2D` and `Array2D`
+   alike, offset or not) reports `NotSupported: shaderImageGatherExtended`**,
+   confirmed pre-existing and unrelated (FeMe advertises no support for
+   that feature at all, already correctly recorded in
+   `Vulkan14FeatureInventory.md` before this session). Documented this
+   in `VulkanCTSReport.md` instead of silently skipping CTS
+   verification — `check-hlsl-feme-vk` remains the real proof this fix
+   works end to end.
+
+9. **Updated the roadmap**: struck through H124q's `Array2D` slice
+   (2 of 7 cases), broke the remaining 5 into H124r (`Cube`-shaped
+   `Gather`/`GatherCmp`/`CalculateLevelOfDetail`, including the 2
+   confirmed bystander cases), H124s (`Array.GetDimensions.test`), and
+   H124t (`Array.CalculateLevelOfDetail.test`) — none nested past one
+   lowercase letter under H124.
+
+## The actual lesson: `clang-format -i` on a whole file is not safe here
+
+This codebase's real style diverges from clang-format's defaults in
+enough places that running the formatter on an entire file — even one
+with only a handful of genuinely new lines — reformats unrelated
+pre-existing code wholesale. `git-clang-format <commit> -- <files>`
+(diff-scoped against a base commit) is the safe tool: it only touches
+lines the working tree actually changed relative to that commit. Use
+`git-clang-format`, never bare `clang-format -i`, on this repo from now
+on. Recovery when this happens: `git checkout -- <files>` discards a
+bad whole-file reformat cleanly as long as the actual edits are
+well-documented enough to redo (they were, here, from this same
+session's own earlier planning) — but redoing costs real time, so
+avoiding the mistake in the first place is much cheaper.
+
+## A second lesson: a shape-gate widening and its offset-support flag are two separate gaps
+
+`hasOnlySupportedImageUses` gates gather intrinsics on both a shape
+check *and* a separate `isSupportedOffset(..., AllowArray2D=...)` call
+— widening the shape check alone was not sufficient, because the
+offset-support flag defaults conservatively (`false`) independently of
+shape. `Array.Gather.test`'s own zero-offset overload passed after only
+the first fix, masking that the second flag still needed flipping until
+`Array.GatherCmp.test`'s real nonzero-offset overload exposed it. When
+widening a shape gate for any future intrinsic here, check every
+adjacent gating flag (offset support, coordinate width, result type)
+separately — don't assume "the shape check passing" implies "every
+other check for that shape already covers the real cases."
+
+## Next steps for whoever picks this up
+
+1. **H124r** (~1-2 hours, real triage): `Gather`/`GatherCmp` against
+   `Cube`-shaped handles (3 cases: `Gather.test`, `GatherCmp.test`,
+   `CalculateLevelOfDetail.test`). The first two are confirmed this
+   session to be "innocent bystander" diagnostics — the actual
+   rejected handle in both is a co-resident `TextureCube` in the same
+   test function, not the `Texture2D` the error message names.
+   `CalculateLevelOfDetail.test`'s own failure mode is not yet
+   re-confirmed to be the same pattern. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` (run the `offloader` binary
+   directly, not through `llvm-lit -sv` — the env var didn't surface
+   through lit's own capture this session) on each of the 3, confirm
+   which handle each diagnostic really names, then widen the shape gate
+   to `Cube`/`CubeArray` with face-selection math analogous to the
+   existing `Sample`-family `Cube` support.
+2. **H124s** (~1 hour, not triaged): `Array.GetDimensions.test` — needs
+   its own `FEME_VULKAN_LOG_CREATION_ERRORS=1` run to confirm whether
+   `OpImageQuerySize(Lod)` against `Array2D` is simply missing from the
+   resource-normalization pass's op list.
+3. **H124t** (~1 hour, not triaged): `Array.CalculateLevelOfDetail.test`
+   — same as H124s but for `OpImageQueryLod`.
+4. **H124k** (~1-2 hours, not started, simple/self-contained): missing
+   `PackHalf2x16`/`UnpackHalf2x16` legalization (`Feature/HLSLLib/
+   {f16tof32,f32tof16}.test`, 2 cases) — likely similar shape to
+   H124f/H124j/H124q's already-fixed patterns.
+5. **H124p** (~1-2 hours, not started): `feme-cpu-simdize` doesn't
+   handle a divergent call to `llvm.is.fpclass.f32` (`Basic/
+   Mandelbrot.test`, 1 case) — worth investigating together with
+   H124e (same subsystem).
+6. **H124e** (~several sessions, large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps, ~11 of the original 102
+   `check-hlsl-feme-vk` failures across 5+ distinct root causes.
+7. **H124d** (large, deprioritized, unchanged for many sessions): new
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth`.
+8. **`shaderImageGatherExtended`** (large, newly noted this session, not
+   filed as a roadmap row yet): FeMe advertises no support for this
+   feature at all, which blocks *every* `dEQP-VK.glsl.texture_gather.*`
+   CTS case from running against FeMe regardless of shape or offset.
+   FeMe's own gather implementation is `ConstOffset`-only (never a true
+   per-invocation dynamic offset), so honestly advertising this feature
+   would itself be a real, separate, likely-multi-session capability
+   addition — worth a deliberate roadmap filing before starting, not a
+   quick flip.
+9. Lower priority, deferred 17+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+`/tmp/agc_manual`, `/tmp/gather_manual`, `/tmp/gather_array_cases.txt`,
+`/tmp/gather-array-cts*.qpa`, `/tmp/gather-2d-cts.qpa`, `/tmp/x.qpa`
+(all this session's scratch files, outside the repo) have been deleted.
