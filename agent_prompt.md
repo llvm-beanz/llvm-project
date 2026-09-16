@@ -53,28 +53,30 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours, still untouched (carried over many sessions):** reduce
-   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
-   divergent-branch gap to its exact IR shape via `feme-opt
-   --feme-convert-spirv-to-llvm`, before attempting a fix.
-2. **~1-2 hours, still untouched (carried over many sessions):** same
-   for `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
-   multi-exit-loop gap.
-3. **~30-60 min, not yet started:** triage the 4 `.resources.32.test`
-   variants together (`InterlockedAdd`/`CompareExchange`/`CompareStore`/
-   `Exchange`) -- they all use the resource-heap
-   `feme.cpu.resource.atomic.*` runtime-call path, a separate family from
-   the plain `cmpxchg`/`atomicrmw` H124e bucket. Get a diagnostic via
-   `offloader` + `FEME_VULKAN_LOG_CREATION_ERRORS=1` for each first.
-4. **Full session, highest payoff (up to 8 cases at once), largest
-   scope, still untouched across many sessions:** H124e's wrap-entry
-   region-splitting design work (`feme-cpu-wrap-entry` only supports "a
-   straight-line wave body or a single uniform loop" -- rejects a barrier
-   inside any other non-linear control flow shape).
-5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+1. **Full session, highest payoff (9 cases at once), largest scope,
+   still untouched across many sessions:** H124e(a)'s two-part design
+   work (loop-carried-value spilling generalization + nested-divergent-
+   branch-in-loop-body support in `matchLoopShape`/`EntryWrapper.cpp`).
+   This session's own triage strongly suggests fixing this would *also*
+   close `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   gap (likely the same underlying shape in `LoopLinearizer`, not just
+   `EntryWrapper`) -- check both `Linearize.cpp`'s `LoopLinearizer` and
+   `EntryWrapper.cpp` together, not just the latter.
+2. **Large, deprioritized many sessions now:** H124d (upstream MLIR
    SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
    `dyn-res-uav-counter.test`'s address-space mismatch,
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    heap corruption.
-6. **Do not re-attempt H150** -- confirmed a prior session it's not a
+3. **Do not re-attempt H150** -- confirmed a prior session it's not a
    FeMe-side bug at all.
+4. **No other separately-scoped small bugs found this session** -- the
+   remaining 18 `check-hlsl-feme-vk` failures are now down to: H124e's
+   9-case wrap-entry bucket (item 1 above), the 5-case `Ddx*`/`ddy_fine`/
+   `fwidth` group (H124d), and 4 smaller not-yet-individually-triaged
+   items (`ByteAddressBuffer/GetDimensions.test`,
+   `StructuredBuffer/GetDimensions.test`, `WaveOps/WaveActiveMax.test`
+   [H150, confirmed not fixable], `WaveOps/GroupMemoryBarrierWithGroupSync.test`
+   [in the H124e bucket]). A future session with less time than a full
+   H124e(a) push could triage `ByteAddressBuffer`/`StructuredBuffer`
+   `GetDimensions.test` instead -- neither has been individually looked
+   at yet.
