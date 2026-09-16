@@ -3640,6 +3640,31 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
     Function *Callee = CI->getCalledFunction();
     Intrinsic::ID ID =
         Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
+    // Roadmap H124p: `llvm.is.fpclass.fN(float, i32 immarg)` is not
+    // "Homogeneous" below -- its result is `i1`, not the same type as its
+    // first (float) argument -- so it needs its own dedicated case rather
+    // than falling out of that generic same-type check. Its own vector
+    // overload (`LLVMScalarOrSameVectorWidth<0, i1>` in `Intrinsics.td`)
+    // is mangled on argument 0's type, not the result's, and its second
+    // (test-mask) argument is always a scalar immediate, never widened --
+    // both unlike every other intrinsic this function widens above, whose
+    // overloaded type is shared by the result and every argument alike.
+    // Reduced from a real `Basic/Mandelbrot.test` failure, where the
+    // per-pixel-varying escape-iteration loop's own `isnan`/`isinf`-style
+    // check on a divergent float compiles down to exactly this call.
+    if (ID == Intrinsic::is_fpclass) {
+      Type *WideArgTy =
+          FixedVectorType::get(CI->getArgOperand(0)->getType(), WaveSize);
+      Function *WideCallee =
+          Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideArgTy});
+      Value *NewCall = Builder.CreateCall(
+          WideCallee,
+          {getWidened(CI->getArgOperand(0), Builder), CI->getArgOperand(1)},
+          I.getName() + ".wide");
+      Widened[&I] = NewCall;
+      ToErase.push_back(&I);
+      return;
+    }
     bool Homogeneous = ID != Intrinsic::not_intrinsic &&
                        llvm::all_of(CI->args(), [&](const Value *Arg) {
                          return Arg->getType() == I.getType();

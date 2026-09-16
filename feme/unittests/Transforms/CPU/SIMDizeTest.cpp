@@ -319,6 +319,54 @@ TEST(SIMDizeTest, DiagnosesUnsupportedDivergentCall) {
       << "actual diagnostic: " << ErrorMessage;
 }
 
+// Roadmap H124p: `llvm.is.fpclass.f32(float, i32 immarg)` over a divergent
+// float -- the shape `isnan()`/`isinf()`-style HLSL checks lower to, and
+// exactly what `Basic/Mandelbrot.test`'s own per-pixel-varying
+// escape-iteration loop reduces to -- has its own dedicated widening case,
+// distinct from the ordinary "same overloaded type shared by result and
+// every argument" homogeneous-intrinsic rule every other math libcall
+// (`llvm.sqrt.fN`, `llvm.dx.frac.fN`, ...) uses, since its own result
+// (`i1`) is never the same type as its first (float) argument.
+TEST(SIMDizeTest, WidensDivergentIsFPClassCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %f = sitofp i32 %tid to float
+      %isnan = call i1 @llvm.is.fpclass.f32(float %f, i32 3)
+      %r = zext i1 %isnan to i32
+      store i32 %r, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i1 @llvm.is.fpclass.f32(float, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideIsFPClass = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (CI->getCalledFunction()->getIntrinsicID() != Intrinsic::is_fpclass)
+      continue;
+    FoundWideIsFPClass = true;
+    // Argument 0 (the float being tested) widens to a real `<W x float>`
+    // vector; argument 1 (the test-mask immarg) stays a scalar constant,
+    // never widened, mirroring the intrinsic's own vector overload shape.
+    EXPECT_TRUE(CI->getArgOperand(0)->getType()->isVectorTy());
+    EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(1)));
+    EXPECT_TRUE(CI->getType()->isVectorTy());
+  }
+  EXPECT_TRUE(FoundWideIsFPClass);
+}
+
 // (Roadmap H7z) A divergent (per-lane) value of aggregate type -- e.g. an
 // ordinary array-typed `load` through a divergent address -- has no
 // per-lane component-decomposition support in this pass at all (unlike a
