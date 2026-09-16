@@ -85819,3 +85819,156 @@ time in this project's history this exact mistake has happened.
 
 All `/tmp/triage`, `/tmp/cts_*.qpa`, `/tmp/api_*.txt` scratch files
 cleaned up before this commit.
+
+# Session: H138/H139 closed (v3i64/v4i64 decomposition + vkCreateDevice feature validation)
+
+**Confirmed FeMe active**: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device` (via explicit `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`
+pointing at `build2/tools/feme/tools/feme-vulkan/feme_icd.json`).
+
+## What I did, in order
+
+1. Built and ran the 3 `SPIRVResourceLoweringTest.cpp` unit tests a
+   prior session wrote but never compiled (H138 v3i64/v4i64
+   decomposition) — all 3 passed first try, plus the full 484-test
+   `FeMeTransformsCPUTests` suite, 0 regressions.
+2. `git-clang-format`'d and committed **H139** (vkCreateDevice feature
+   validation) as its own commit — `EntryPoints.cpp` +
+   `EntryPointsTest.cpp`, 4 new tests, all passing.
+3. `git-clang-format`'d and committed **H138** (v3i64/v4i64 raw
+   resource decomposition) as its own commit —
+   `SPIRVResourceLowering.cpp` + its test file, 3 new tests, all
+   passing. (Hit a bash quoting bug committing this one: an embedded
+   `"..."` inside the double-quoted `-m` string truncated the message
+   and the rest got tokenized as bogus pathspecs. Fixed by writing the
+   message to a file and using `git commit -F`. **Lesson for next
+   time: always use `-F <file>` for any commit message containing a
+   quoted phrase, don't risk the inline `-m "..."` quoting.**)
+4. Struck through H138 on the roadmap with a closing narrative; added
+   and immediately struck through a new H139 row (filed and closed in
+   the same session — first time that's happened this project).
+   Committed the roadmap edit separately.
+5. Appended H138/H139 sections to `VulkanCTSReport.md`, including a
+   fresh `dEQP-VK.api.device_init.*` re-run (250 cases): **239
+   passed / 0 failed / 11 not supported** — up from 231/8/11 before
+   H139. All 8 originally-failing
+   `create_device_unsupported_features.*` sub-cases now pass; the 11
+   "not supported" cases are pre-existing/unrelated
+   (`VK_EXT_global_priority*`, protected memory, queue-priority
+   contention) and unchanged in count. Committed separately.
+6. Confirmed no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+   changes needed for either fix (both are internal correctness fixes,
+   not new advertised capabilities) — noted explicitly in the CTS
+   report per standing instructions.
+7. Ran the full `check-feme` target fresh: **3080/3083 passed** (3
+   unsupported), 0 failed. Ran the full `check-hlsl-feme-vk` target
+   fresh: **349 passed / 28 failed / 260 unsupported / 26 expectedly
+   failed / 1 unexpectedly passed** (of 664).
+
+## Wins this session
+
+- H138 and H139 are both **closed** on the roadmap, each verified via
+  `check-feme`, `check-hlsl-feme-vk`, and (for H139) a live VK-GL-CTS
+  re-run.
+- `check-hlsl-feme-vk` failure count: 29 → **28** (WaveActiveAllEqual.int64
+  now passes).
+- `dEQP-VK.api.device_init.*`: 8 failures → **0** failures.
+
+## Re-triage: the 28 remaining `check-hlsl-feme-vk` failures (fresh names, this session)
+
+Several prior sessions kept re-suggesting the same handful of names
+without confirming they're still current. Here is the **full, fresh**
+list from this session's own run, unfiltered — some of these are new
+names not seen in any prior session's suggested-next-steps list, so
+don't assume the old bucket guesses still apply:
+
+```
+Feature/PushConstant/matrix.test
+Feature/HLSLLib/InterlockedExchange.32.test
+Feature/HLSLLib/InterlockedExchange.resources.32.test
+Feature/TypedBuffer/GetDimensions.test
+WaveOps/WaveReadLaneAt.mtx.test
+Graphics/VertexShaderResourceCube.test
+Feature/StructuredBuffer/inc_counter_array_imm_idx.test
+Feature/HLSLLib/InterlockedCompareStore.resources.32.test
+WaveOps/WaveActiveMax.test
+Graphics/fwidth.test
+Feature/HLSLLib/InterlockedCompareStore.32.test
+Feature/HLSLLib/InterlockedCompareExchange.32.test
+Feature/HLSLLib/InterlockedCompareExchange.resources.32.test
+Feature/HLSLLib/InterlockedAdd.resources.32.test
+Feature/DynamicResources/dyn-res-uav-counter.test
+Graphics/DdxCoarse.test
+Feature/WaveOps/WaveIsFirstLane.test
+Graphics/DdyCoarse.test
+Graphics/ddy_fine.test
+Feature/HLSLLib/InterlockedAdd.32.test
+Feature/HLSLLib/InterlockedXor.32.test
+Feature/SpecializationConstant/spec_const_32_bits.test
+Graphics/ddx_fine.test
+Feature/ConstantBufferT/nested.test
+Feature/ByteAddressBuffer/GetDimensions.test
+WaveOps/ComponentAccumulationDataRace.test
+WaveOps/GroupMemoryBarrierWithGroupSync.test
+Feature/StructuredBuffer/GetDimensions.test
+```
+
+Only 28 lines but I count `matrix.test`, `inc_counter_array_imm_idx.test`,
+`spec_const_32_bits.test`, `ConstantBufferT/nested.test`,
+`ComponentAccumulationDataRace.test`,
+`GroupMemoryBarrierWithGroupSync.test`, `VertexShaderResourceCube.test`,
+and `dyn-res-uav-counter.test` as names **not present** in any of the
+last several sessions' own suggested-next-steps lists — either newly
+regressed/exposed, or simply never individually triaged before despite
+being in the failing set the whole time. **None of these 28 were
+individually root-caused this session** — this list is only a fresh,
+confirmed inventory, not a triage.
+
+Also noted: `Feature/PushConstant/array_of_matrices.test` showed
+**Unexpectedly Passed** this run (marked `XFAIL` in the test suite but
+actually passing now) — worth a quick look to confirm it's a genuine
+fix (maybe a side effect of H138/H139, or of an earlier session's
+work) rather than flakiness, and to remove its `XFAIL` marker if so.
+
+## Suggested next steps (ranked, my best guess at effort)
+
+1. **~1 hour: individually triage the 28 failures above with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`, one at a time, via the
+   `offloader` binary directly (not `llvm-lit -sv` — the env var
+   doesn't surface through lit's own capture).** Don't assume any two
+   share a root cause without checking — this project has been burned
+   by that assumption repeatedly (see every prior session's
+   `InterlockedAdd`/`Ddx*` groupings that turned out wrong or
+   incomplete). Start with the 8 names not seen in any prior list
+   (above) since they're totally unknown quantities.
+2. **~10 minutes: confirm `Feature/PushConstant/array_of_matrices.test`'s
+   unexpected pass** — run it standalone, check whether it's stable
+   across 2-3 repeats, then remove its `XFAIL` annotation if genuine.
+3. **H124e** (large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps. The `InterlockedExchange.resources.32.test`
+   failure this session shows a *new* diagnostic shape worth checking
+   against this bucket: `"loop at '' has more than one divergent exit
+   check ('' and ''); unsupported (roadmap milestone 6 deviation)"` —
+   may or may not be the same root cause as the rest of H124e's
+   already-tracked cases; don't assume, verify first.
+4. **H124d** (large, deprioritized): upstream MLIR SPIR-V dialect ops
+   for `OpDPdx`/`OpDPdy`/`OpFwidth` — likely still the root cause
+   behind `DdxCoarse`/`DdyCoarse`/`ddx_fine`/`ddy_fine`/`fwidth.test`
+   above; confirm the connection during step 1's triage pass rather
+   than assuming it.
+5. **`shaderImageGatherExtended`** (large, carried over many sessions,
+   still not filed as its own roadmap row): blocks every
+   `dEQP-VK.glsl.texture_gather.*` CTS case. FeMe's own gather is
+   `ConstOffset`-only, never true per-invocation dynamic offset —
+   advertising this feature honestly is itself a real, separate,
+   likely-multi-session capability addition. File a roadmap row before
+   starting.
+6. Lower priority, deferred 22+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption — `valgrind`'s own trace points at
+   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+
+Scratch files cleaned up before this commit: `/tmp/h138_commit_msg.txt`,
+`/tmp/api_devinit_caselist.txt`, `/tmp/cts_h139_recheck*.qpa`,
+`/tmp/cts_h139_out.txt`, `/tmp/1789527521915-*.txt`.
