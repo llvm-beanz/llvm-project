@@ -46031,3 +46031,74 @@ H144 is struck through on the roadmap as fixed (filed and closed in the
 same session).
 
 
+
+## H145: `ResourceDescriptorHeap[Index]` on block-backed resources fails pipeline creation
+
+**Investigation.** Picked up the prior session's suggested next step
+(`Feature/DynamicResources/dyn-res-uav-counter.test`'s address-space
+mismatch, carried over 4+ sessions untouched). Running the test standalone
+via `offloader`+`FEME_VULKAN_LOG_CREATION_ERRORS=1` reproduced:
+`"error: 'llvm.mlir.addressof' op pointer address space must match address
+space of the referenced global or alias"` at `vkCreateComputePipelines`
+time. A minimal repro dropping the UAV-counter code entirely (just
+`RWStructuredBuffer<float> Buf = ResourceDescriptorHeap[Index]; float a =
+Buf[ID.x];`) reproduced the identical failure, as did a second minimal
+repro using `StructuredBuffer<float>` (SRV) instead of `RWStructuredBuffer`
+-- confirming this is not specific to `IncrementCounter`/UAV counters at
+all, but a foundational gap in *any* dynamically-indexed block-backed
+resource access through the bindless heap.
+
+**Root cause.** `SPIRVToLLVMPatterns.cpp`'s `prepareResourceVariables`
+never created a `ResourceInfoMap` entry for `ResourceDescriptorHeap`'s own
+global at all: its collection loop tries `getArrayedBlockCount` (only ever
+recognized a *bounded* `spirv.array` pointee, `T blocks[N]`) then
+`getArrayedResourceCount` (recognizes an *unbounded* `spirv.rtarray`
+pointee too, but requires the array's element to itself be an opaque
+resource pointer -- image/sampler -- which a `Block`-decorated buffer
+struct is not). Both fail for `ResourceDescriptorHeap`'s actual SPIR-V
+shape (confirmed via `spirv-dis`: `%_ptr_StorageBuffer__runtimearr_...`, an
+unbounded runtime array of a `Block`-decorated struct), so the variable
+was silently skipped, and its access chain fell through to a generic
+fallback pattern that built an ill-typed address instead.
+
+**Fix.** Extended `getArrayedBlockCount` to accept an unbounded
+`spirv.rtarray` pointee identically to a bounded `spirv.array` one
+(returning `0`, the same "unbounded" sentinel `getArrayedResourceCount`
+already used), and extended `ArrayedBlockAccessChainPattern` the same way.
+
+**Verification.**
+- `ninja check-feme`: 3094/3097 passed (3 unsupported), 0 failed, +1 new
+  unit test (`SPIRVToLLVMTest.UnboundedArrayedBlockConvertsInsteadOfFailing`,
+  an end-to-end `spirv.module` -> LLVM-dialect conversion of the exact
+  `spirv.rtarray<spirv.struct<(spirv.rtarray<f32>), Block>>` shape DXC
+  emits; confirmed via a manual A/B rebuild to genuinely fail with the
+  identical diagnostic without the fix and pass with it restored), 0
+  regressions.
+- `check-hlsl-feme-vk`: `Feature/DynamicResources/dyn-res-uav-counter.test`
+  now passes (confirmed individually via `llvm-lit -v` on the single test,
+  and via the full-suite re-run). Failure count drops from 23 to **22** (of
+  664).
+- Native Vulkan CTS: no `dEQP-VK.*` group exercises this exact HLSL-only
+  bindless-descriptor-heap shape. `dEQP-VK.descriptor_indexing.*` (the
+  closest native analogue, GLSL's own `nonuniformEXT`-indexed descriptor
+  arrays) is 100% `NotSupported` on this device regardless
+  (`shaderStorageBufferArrayNonUniformIndexing`/
+  `shaderStorageTexelBufferArrayNonUniformIndexing` are not advertised), so
+  it cannot serve as a regression check either way. Instead ran a direct
+  A/B comparison of `dEQP-VK.ssbo.*` (12,225 cases) against the pre-fix and
+  post-fix `libfeme_vulkan.so` (built both, swapped the binary in place,
+  re-ran the full sweep against each): **byte-identical totals both times**
+  (2232 passed / 1010 failed / 8983 not supported) -- confirming this fix
+  touches only the previously-entirely-unhandled bindless-heap-of-blocks
+  path, with no effect on GLSL's own (unrelated) SSBO code paths.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change:
+  `ResourceDescriptorHeap` itself was already advertised as working (for
+  opaque resources/`ConstantBuffer`, confirmed by the pre-existing, still-
+  passing `dyn-res-cvb-srv-uav.test`/`dyn-res-texture-sampler.test`); this
+  closes the same already-advertised capability's block-backed-resource
+  gap, not a new Vulkan feature or extension.
+
+H145 is struck through on the roadmap as fixed (filed and closed in the
+same session). H124e's own row was also updated this session with a
+deeper (not-yet-fixed) finding from an unrelated investigation into its
+wrap-entry bucket -- see the roadmap's new H124e(a) sub-row.
