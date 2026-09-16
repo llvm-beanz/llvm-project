@@ -46240,3 +46240,18 @@ row, H147, was filed for the 4 remaining functional/runtime-correctness
 bugs, explicitly flagged as a distinct bucket from every pipeline-creation
 -failure row, not yet triaged, and not to be assumed to share a cause with
 each other or with H146.
+
+**Native Vulkan CTS regression check (H146).** Ran a targeted A/B
+comparison (pre-fix vs. post-fix `libfeme_vulkan.so`, via a temporary
+`git checkout <pre-H146-commit> -- SIMDize.cpp` + rebuild, then restored)
+against the two case lists most likely to exercise the touched
+`widenResourceCall` atomic path: `dEQP-VK.compute.*.*atomic*` (19 cases,
+from `vk-default/compute.txt`) and the full `dEQP-VK.image.atomic_operations.*`
+group (6209 cases, `vk-default/image/atomic-operations.txt`). Both produced
+byte-identical totals pre-fix and post-fix (compute: 7 passed / 0 failed /
+12 not supported; image atomic-operations: 216 passed / 1104 failed / 4889
+not supported, the 1104 failures a large pre-existing, unrelated gap in
+image-format-tiling support, not a regression from this session) --
+confirming H146's fix, scoped to the HLSL-only `feme.cpu.resource.atomic.*`
+call-widening path, has no effect on GLSL's native atomic code paths this
+CTS subset exercises.
