@@ -1344,7 +1344,11 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
       Body.push_back(Cur);
       auto *Br = dyn_cast<UncondBrInst>(Cur->getTerminator());
       if (!Br)
-        break; // Something other than a straight chain: not this shape.
+        break; // Not a straight chain: not this shape (a mid-body
+               // diamond is not yet supported here -- see the H154
+               // follow-up entry in `feme/docs/Roadmap.md`: outlining a
+               // `BodyOrder` region with internal branches is not yet
+               // supported by `outlineChainAtBarriers`).
       if (Br->getSuccessor(0) == H) {
         Latch = Cur;
         break;
@@ -1361,33 +1365,35 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
   if (!Shape.Latch)
     return std::nullopt; // No matching backedge found: not this shape.
 
-  // Roadmap H124e(a): the body's barrier(s) and the loop's own pure
-  // recurrence may have collapsed into one single physical block (`Latch`
-  // itself, with `Shape.BodyOrder` empty) -- typically because a
-  // preceding `JumpThreadingPass` run already eliminated the SPIR-V
-  // structurizer's own loop-merge block (see this function's own doc
-  // comment). If `Shape.Latch` contains a group-sync barrier, split it
-  // right after that barrier's *last* occurrence: everything up to and
-  // including it becomes this loop's own final `BodyOrder` entry (still
-  // free to contain arbitrary per-wave side effects, exactly like any
-  // other `BodyOrder` block), and only the remaining tail is checked
-  // below as the loop's own pure recurrence, matching the ordinary
-  // multi-block case's own check just below. No mutation happens unless
-  // every other check below also succeeds -- this function must leave
-  // \p F untouched on any `std::nullopt` return, since its caller falls
-  // back to `matchBranchShape`/`splitAtGroupSyncBarriers` on the
-  // original, unmodified \p F otherwise.
+  // Roadmap H124e(a)/H154: `Shape.Latch` may itself contain the loop's
+  // own group-sync barrier(s), whether or not `Shape.BodyOrder` is empty
+  // -- both a fully collapsed single body+latch block (`BodyOrder`
+  // empty, typically because a preceding `JumpThreadingPass` run already
+  // eliminated the SPIR-V structurizer's own loop-merge block) and a
+  // `BodyOrder` already populated by an ordinary earlier body block (not
+  // a diamond -- see H158 in `feme/docs/Roadmap.md` for why a mid-body
+  // "safe diamond" isn't tolerated here yet) whose own successor happens
+  // to be this same barrier-containing block. Either way, if
+  // `Shape.Latch` contains a barrier, split it right after that
+  // barrier's *last* occurrence: everything up to and including it
+  // becomes this loop's own final `BodyOrder` entry (still free to
+  // contain arbitrary per-wave side effects, exactly like any other
+  // `BodyOrder` block), and only the remaining tail is checked below as
+  // the loop's own pure recurrence, matching the ordinary case's own
+  // check just below. No mutation happens unless every other check below
+  // also succeeds -- this function must leave \p F untouched on any
+  // `std::nullopt` return, since its caller falls back to
+  // `matchBranchShape`/`splitAtGroupSyncBarriers` on the original,
+  // unmodified \p F otherwise.
   Instruction *LatchSplitAfter = nullptr;
-  if (Shape.BodyOrder.empty()) {
-    for (Instruction &I : *Shape.Latch) {
-      if (auto *CI = dyn_cast<CallInst>(&I)) {
-        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
-            Matched && Matched->GroupSync)
-          LatchSplitAfter = CI;
-      }
+  for (Instruction &I : *Shape.Latch) {
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+          Matched && Matched->GroupSync)
+        LatchSplitAfter = CI;
     }
-    if (!LatchSplitAfter)
-      return std::nullopt; // No separate region block, or shape mismatch.
+  }
+  if (LatchSplitAfter) {
     if (!isPureClosedChainAfter(Shape.Latch, LatchSplitAfter, HeaderPhis))
       return std::nullopt;
   } else if (!isPureClosedChain({Shape.Latch}, HeaderPhis)) {
