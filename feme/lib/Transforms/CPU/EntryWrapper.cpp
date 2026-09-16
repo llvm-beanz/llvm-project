@@ -1437,18 +1437,29 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     BasicBlock *Latch = nullptr;
     while (Visited.insert(Cur).second) {
       Body.push_back(Cur);
-      auto *Br = dyn_cast<UncondBrInst>(Cur->getTerminator());
-      if (!Br)
-        break; // Not a straight chain: not this shape (a mid-body
-               // diamond is not yet supported here -- see the H154
-               // follow-up entry in `feme/docs/Roadmap.md`: outlining a
-               // `BodyOrder` region with internal branches is not yet
-               // supported by `outlineChainAtBarriers`).
-      if (Br->getSuccessor(0) == H) {
-        Latch = Cur;
-        break;
+      if (auto *Br = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
+        if (Br->getSuccessor(0) == H) {
+          Latch = Cur;
+          break;
+        }
+        Cur = Br->getSuccessor(0);
+        continue;
       }
-      Cur = Br->getSuccessor(0);
+      // Roadmap H158: a uniform mid-body "safe diamond" -- both arms
+      // barrier-free, reconverging at one common merge block -- is part
+      // of the body chain, exactly as `isLinearChain` already treats the
+      // identical shape on the non-loop straight-line path. It never
+      // needs a region split of its own, and (since H158)
+      // `outlineChainAtBarriers` can outline a region containing one.
+      BasicBlock *Merge = matchSafeDiamond(Cur, Visited, Body);
+      // A "diamond" reconverging at the header itself is really the
+      // loop's own closing branch, not a mid-body diamond -- that is the
+      // barrier-free-loop shape `isLinearChain`'s own
+      // `walkBarrierFreeArm` handles, so decline here and let the caller
+      // fall back to it.
+      if (!Merge || Merge == H)
+        break; // Not a shape this milestone supports.
+      Cur = Merge;
     }
     if (!Latch)
       continue;
@@ -1797,15 +1808,32 @@ Function *outlineChain(Function &WaveBody, ArrayRef<BasicBlock *> Chain,
 SmallVector<BasicBlock *, 8> rebuildSplitChainOrder(BasicBlock *Start,
                                                     BasicBlock *StopBefore) {
   SmallVector<BasicBlock *, 8> Order;
+  SmallPtrSet<BasicBlock *, 8> Visited;
   BasicBlock *Cur = Start;
   while (true) {
     Order.push_back(Cur);
+    Visited.insert(Cur);
     if (isa<ReturnInst>(Cur->getTerminator()))
       break;
-    auto *Br = cast<UncondBrInst>(Cur->getTerminator());
-    if (Br->getSuccessor(0) == StopBefore)
+    if (auto *Br = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
+      if (Br->getSuccessor(0) == StopBefore)
+        break;
+      Cur = Br->getSuccessor(0);
+      continue;
+    }
+    // Roadmap H158: the chain may contain a uniform "safe diamond" of its
+    // own (`matchSafeDiamond`, the same shape `isLinearChain` and
+    // `matchLoopShape` already recognize while establishing the chain).
+    // Both its arms are barrier-free by construction, so the whole
+    // diamond always lands inside whichever single region contains it --
+    // it just has to be walked through here, with both arms' blocks
+    // appended in turn, rather than assumed away as an unconditional
+    // branch.
+    BasicBlock *Merge = matchSafeDiamond(Cur, Visited, Order);
+    assert(Merge && "chain shape not established by its own matcher");
+    if (Merge == StopBefore)
       break;
-    Cur = Br->getSuccessor(0);
+    Cur = Merge;
   }
   return Order;
 }
