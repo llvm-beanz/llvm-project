@@ -53,30 +53,40 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Re-triage `check-hlsl-feme-vk`'s remaining 31 failures fresh** —
-   the last several sessions kept re-suggesting the same names
-   (`InterlockedAdd/CompareExchange/CompareStore/Exchange/Xor.32.test`,
-   `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/fwidth.test`,
-   `WaveActiveMax.test`) without anyone individually confirming their
-   root causes — don't assume any two share a cause without checking.
-   ~1 hour to bucket, unknown effort to fix each bucket.
-2. **H124e** (~several sessions, large, unchanged for many sessions):
+1. **H138** (~1-2 hours, filed this session): teach
+   `ResourceLoweringPass` to be ABI-aware for `v3i64`/`v4i64` raw
+   resource access (indirect/`sret` calling convention), or decompose a
+   3/4-wide i64 raw access into 2 calls against the already-safe
+   `v2i64`/scalar primitives from H137. Finishes
+   `WaveActiveAllEqual.int64.test`.
+2. **The 8 `dEQP-VK.api.device_init.create_device_unsupported_features.*`
+   CTS failures** found via this session's spot-check (not yet
+   triaged at all -- brand new finding, not previously tracked): worth
+   a `FEME_VULKAN_LOG_CREATION_ERRORS=1` pass to see if any share H136's
+   own root-cause shape or are something else entirely. Not yet filed
+   as a roadmap row.
+3. **`WaveOps/WaveActiveMax.test`'s NegInfs mismatch** (unresolved,
+   carried over 2+ sessions): expects `[0,0,0,0]` for an all-`-inf`
+   input, FeMe produces the more IEEE-correct `[-inf,-inf,-inf,-inf]`.
+   `getReduceIdentity` is correct; may be a DXC/real-hardware quirk
+   baked into the CTS golden values rather than a FeMe bug -- needs a
+   `spirv-dis`-level dig that hasn't happened yet.
+4. **`WaveOps/WaveReadLaneAt.mtx.test`** (transpose bug, not yet
+   triaged) and **`WaveOps/WaveIsFirstLane.test`** (semantics gap, not
+   yet triaged) -- both flagged in this session's bucketing pass but
+   not individually root-caused yet.
+5. **H124e** (~several sessions, large, unchanged for many sessions):
    `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
-   divergence-handling gaps — needs the same per-case triage as above;
-   may overlap with several of the `WaveOps/*` failures.
-3. **H124d** (large, deprioritized, unchanged for many sessions):
-   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` —
-   likely the root cause behind `DdxCoarse`/`DdyCoarse`/`ddx_fine`/
-   `ddy_fine`/`fwidth.test` above; worth confirming that connection
-   before starting either separately.
-4. **`shaderImageGatherExtended`** (large, noted several sessions back,
-   still not filed as its own roadmap row): blocks every `dEQP-VK.glsl.
-   texture_gather.*` CTS case regardless of shape/offset. FeMe's own
-   gather is `ConstOffset`-only, never true per-invocation dynamic
-   offset — advertising this feature honestly is itself a real,
-   separate, likely-multi-session capability addition. File a roadmap
-   row before starting.
-5. Lower priority, deferred 20+ sessions now: `transform_feedback.
+   divergence-handling gaps -- may overlap with several of the
+   `WaveOps/*` items above; still needs per-case triage, don't assume
+   shared cause.
+6. **`shaderImageGatherExtended`** (large, carried over several
+   sessions, still not filed as its own roadmap row): blocks every
+   `dEQP-VK.glsl.texture_gather.*` CTS case. FeMe's gather is
+   `ConstOffset`-only -- advertising this honestly is a real, separate,
+   multi-session capability addition. File a roadmap row before
+   starting.
+7. Lower priority, deferred 21+ sessions now: `transform_feedback.
    fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
-   corruption — `valgrind`'s own trace points at `buildStageStorage`/
+   corruption -- `valgrind`'s own trace points at `buildStageStorage`/
    `executeDraws` allocating a too-small buffer.
