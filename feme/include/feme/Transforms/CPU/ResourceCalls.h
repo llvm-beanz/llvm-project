@@ -149,6 +149,24 @@ enum class ResourceCallKind : uint8_t {
   /// always the pre-op value either way, matching
   /// `OpAtomicCompareExchange`'s own result semantics.
   AtomicCompareExchangeRaw,
+  /// `feme.cpu.resource.getdimensions.typed.i32` (roadmap H144): a typed
+  /// buffer's own (`Buffer<T>`/`RWBuffer<T>`) `GetDimensions(out uint
+  /// numElements)` -- SPIR-V `OpImageQuerySize` against a `Dim::Buffer`
+  /// image handle (`feme::spirv::ImageQuerySizePattern`'s `.x`-width
+  /// branch), unlike every other kind above (all keyed by a per-element
+  /// index/byte offset into an already-bound resource). Takes no offset
+  /// and no stored value -- only the leading (heap, heap_count,
+  /// descriptor_index) operands plus the trailing mask, always returning
+  /// `i32` regardless of the buffer's own declared element type (unlike
+  /// `LoadTyped`'s `ElementType`-typed result) -- `getOrInsertResourceCall`/
+  /// `createCall`'s shared operand-building logic special-cases this one
+  /// kind to omit the offset parameter both kinds otherwise always carry.
+  /// Deliberately left out of `matchResourceCall`'s own `AllKinds` list:
+  /// no known CTS case calls `GetDimensions` on a typed buffer from
+  /// inside divergent control flow yet, so `Linearize.cpp`/`SIMDize.cpp`'s
+  /// own per-lane-masking machinery (which `matchResourceCall` feeds) has
+  /// no real case to handle today -- widen this scope if one is found.
+  GetDimensionsTyped,
 };
 
 /// Returns whether \p Kind reads or writes through the resource.
@@ -245,6 +263,17 @@ llvm::CallInst *createTypedStore(llvm::IRBuilderBase &Builder,
                                  llvm::Value *DescriptorIndex,
                                  llvm::Value *ElementIndex,
                                  llvm::Value *StoredValue, llvm::Value *Mask);
+
+/// Builds a `feme.cpu.resource.getdimensions.typed.i32` call (roadmap
+/// H144): a typed buffer's own element count through descriptor
+/// \p DescriptorIndex -- see `ResourceCallKind::GetDimensionsTyped`'s own
+/// doc for why this takes no element index/offset, unlike every other
+/// `create*` builder above.
+llvm::CallInst *createGetDimensionsTyped(llvm::IRBuilderBase &Builder,
+                                         const ResourceCallEnv &Env,
+                                         llvm::Value *DescriptorIndex,
+                                         llvm::Value *Mask,
+                                         const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.resource.load.raw.*` call reading a value of type
 /// \p ElementType at \p ByteOffset through descriptor \p DescriptorIndex.

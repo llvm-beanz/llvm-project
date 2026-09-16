@@ -77,6 +77,8 @@ StringRef getNamePrefix(ResourceCallKind Kind) {
     return "feme.cpu.resource.atomic.exchange.raw.";
   case ResourceCallKind::AtomicCompareExchangeRaw:
     return "feme.cpu.resource.atomic.compare_exchange.raw.";
+  case ResourceCallKind::GetDimensionsTyped:
+    return "feme.cpu.resource.getdimensions.typed.";
   }
   llvm_unreachable("unhandled ResourceCallKind");
 }
@@ -104,7 +106,8 @@ void appendScalarMangling(raw_ostream &OS, Type *Ty) {
 
 bool feme::cpu::isLoad(ResourceCallKind Kind) {
   return Kind == ResourceCallKind::LoadTyped ||
-         Kind == ResourceCallKind::LoadRaw;
+         Kind == ResourceCallKind::LoadRaw ||
+         Kind == ResourceCallKind::GetDimensionsTyped;
 }
 
 bool feme::cpu::isAtomic(ResourceCallKind Kind) {
@@ -136,6 +139,7 @@ bool feme::cpu::isAtomic(ResourceCallKind Kind) {
   case ResourceCallKind::StoreTyped:
   case ResourceCallKind::LoadRaw:
   case ResourceCallKind::StoreRaw:
+  case ResourceCallKind::GetDimensionsTyped:
     return false;
   }
   llvm_unreachable("unhandled ResourceCallKind");
@@ -169,13 +173,17 @@ Function *feme::cpu::getOrInsertResourceCall(Module &M, ResourceCallKind Kind,
   Type *I1Ty = Type::getInt1Ty(Ctx);
 
   // Every call shares the leading (heap, heap_count, descriptor_index,
-  // offset) operands; loads return `ElementType` with no trailing value
+  // offset) operands -- except `GetDimensionsTyped` (roadmap H144), which
+  // takes no element index/byte offset at all, since it addresses no
+  // particular element; loads return `ElementType` with no trailing value
   // operand, an ordinary store instead takes it as a trailing value operand
   // ahead of the mask (see "Lowering"), and an atomic (roadmap H8w/H8x)
   // takes it too but *also* returns `ElementType` (the pre-op value) --
   // `isCompareExchange(Kind)` alone takes a second, leading comparator
   // operand ahead of the value.
-  SmallVector<Type *, 6> Params = {PtrTy, I32Ty, I32Ty, I64Ty};
+  SmallVector<Type *, 6> Params = {PtrTy, I32Ty, I32Ty};
+  if (Kind != ResourceCallKind::GetDimensionsTyped)
+    Params.push_back(I64Ty);
   Type *RetTy = Type::getVoidTy(Ctx);
   if (isLoad(Kind)) {
     RetTy = ElementType;
@@ -224,7 +232,9 @@ static CallInst *createCall(IRBuilderBase &Builder, ResourceCallKind Kind,
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertResourceCall(*M, Kind, ElementType);
   SmallVector<Value *, 7> Args = {Env.ResourceHeap, Env.ResourceHeapCount,
-                                  DescriptorIndex, Offset};
+                                  DescriptorIndex};
+  if (Kind != ResourceCallKind::GetDimensionsTyped)
+    Args.push_back(Offset);
   if (isCompareExchange(Kind))
     Args.push_back(Comparator);
   if (!isLoad(Kind))
@@ -251,6 +261,16 @@ CallInst *feme::cpu::createTypedStore(IRBuilderBase &Builder,
   return createCall(Builder, ResourceCallKind::StoreTyped, Env, DescriptorIndex,
                     ElementIndex, /*Comparator=*/nullptr, StoredValue, Mask,
                     StoredValue->getType(), "");
+}
+
+CallInst *feme::cpu::createGetDimensionsTyped(IRBuilderBase &Builder,
+                                              const ResourceCallEnv &Env,
+                                              Value *DescriptorIndex,
+                                              Value *Mask, const Twine &Name) {
+  Type *I32Ty = Type::getInt32Ty(Builder.getContext());
+  return createCall(Builder, ResourceCallKind::GetDimensionsTyped, Env,
+                    DescriptorIndex, /*Offset=*/nullptr, /*Comparator=*/nullptr,
+                    /*StoredValue=*/nullptr, Mask, I32Ty, Name);
 }
 
 CallInst *feme::cpu::createRawLoad(IRBuilderBase &Builder,

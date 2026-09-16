@@ -108,6 +108,32 @@ TEST_F(ResourceCallsTest, CreateTypedStoreRoundTrips) {
   EXPECT_EQ(Matched->ElementType, Val->getType());
 }
 
+TEST_F(ResourceCallsTest, CreateGetDimensionsTypedTakesNoOffset) {
+  // Roadmap H144: unlike every `create*` builder above, this one takes no
+  // element index/byte offset at all -- a typed buffer's own element count
+  // has nothing to index into -- so its callee's own signature should have
+  // 4 parameters (heap, heap_count, descriptor_index, mask), not the usual
+  // 5 (...offset...) a load/store shares. Deliberately not run back through
+  // `matchResourceCall`: `GetDimensionsTyped` is intentionally left out of
+  // its `AllKinds` list for now (see the enum's own doc comment), since no
+  // known CTS case needs it recognized under divergent control flow yet.
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  Value *DescIdx = Builder.getInt32(0);
+  Value *Mask = Builder.getTrue();
+
+  CallInst *CI = createGetDimensionsTyped(Builder, Env, DescIdx, Mask);
+  ASSERT_TRUE(CI);
+  EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.cpu.resource.getdimensions.typed.i32");
+  EXPECT_EQ(CI->arg_size(), 4u);
+  EXPECT_EQ(CI->getArgOperand(0), Env.ResourceHeap);
+  EXPECT_EQ(CI->getArgOperand(1), Env.ResourceHeapCount);
+  EXPECT_EQ(CI->getArgOperand(2), DescIdx);
+  EXPECT_EQ(CI->getArgOperand(3), Mask);
+}
+
 TEST_F(ResourceCallsTest, CreateRawLoadAndStoreRoundTrip) {
   IRBuilder<> Builder(BB);
   ResourceCallEnv Env = makeEnv(Builder);
