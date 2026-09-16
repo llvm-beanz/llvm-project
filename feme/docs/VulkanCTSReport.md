@@ -46541,3 +46541,93 @@ a single naive contiguous load.
   `StorageBuffer`/SSBO support, not a new Vulkan feature or extension.
 
 H151 is struck through on the roadmap: fixed this session.
+
+## H152: resource/image-heap atomic calls misclassified uniform, fixed
+
+**Environment check (every session, per standing instruction):**
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
+(confirmed with `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set via two separate
+`export` statements).
+
+**Baseline.** `git log`/`git status` confirmed a clean tree at the prior
+(H151) session's own closing commit. `ninja check-feme`: 3099/3102
+passed (3 unsupported), 0 failed, matching that session's own closing
+state exactly.
+
+**Triage.** Re-ran all 4 `Feature/HLSLLib/*.resources.32.test` variants
+directly via `llvm-lit` to decide where to spend this session's effort
+(the prior session's own suggested next step #3): confirmed 2 of the 4
+(`InterlockedAdd`/`InterlockedCompareStore.resources.32.test`) were
+already correctly tracked under H124e's wrap-entry bucket, and the other
+2 (`InterlockedCompareExchange`/`InterlockedExchange.resources.32.test`)
+were the two already-known, already separately-tracked `feme-cpu-simdize`/
+`feme-cpu-linearize` gaps (the prior session's own suggestions #1/#2).
+No new bucket found; picked #1 (`InterlockedCompareExchange.resources.32.
+test`'s `feme-cpu-simdize` gap) to pursue first.
+
+**Root cause.** Built a standalone repro (`dxc`-compiled `.spv`, then
+`feme-translate --import-spirv --no-implicit-module --spirv-to-llvmir`)
+and ran it through the CPU pass pipeline (`feme-opt --llvm -passes=...`,
+the exact ordering read from `Target/CPU/Pipeline.cpp`) to reproduce the
+identical `feme-cpu-simdize` "divergent branch `LinearizePass` did not
+remove" diagnostic the real `offloader` run hits. Dumping IR after just
+`feme-cpu-linearize` and manually tracing it found the divergent branch
+surviving in a short-circuit `&&`-chain built from the direct result of
+`feme.cpu.resource.atomic.compare_exchange.raw.i32` -- `feme::cpu::
+WaveTTIImpl::getValueUniformity` (`Analysis/CPU/WaveUniformity.cpp`) had
+no `NeverUniform` special case for this call family (nor its
+`feme.cpu.image.atomic.*` sibling), unlike the existing ones for
+`feme.cpu.masked.atomicrmw.*` (L41) and a plain `AtomicRMWInst` (L43) --
+the exact same bug class, one call family later. A call site whose every
+operand is uniform (this test's own compile-time-constant compare/
+exchange values) was wrongly classified uniform by the generic
+operand-driven `Default` rule, even though the call's own result is
+genuinely per-lane divergent (dispatch is sequential, so each lane's real
+atomic op observes whatever the resource held at that lane's own turn) --
+leaving a real, later consumer branch unflattened by `LinearizePass`'s
+`DiamondFlattener`, which believed it was already uniform.
+
+**Fix.** Added the identical `NeverUniform` classification
+`feme.cpu.masked.atomicrmw.*` already had, matched by call-name prefix,
+for both `feme.cpu.resource.atomic.*` and `feme.cpu.image.atomic.*`.
+
+**Testing.** New unit tests in `test/Analysis/CPU/uniformity.ll`:
+`resource_atomic_compare_exchange_is_divergent`,
+`image_atomic_exchange_is_divergent`.
+
+**Verification.**
+- The IR-level reduction's `feme-cpu-simdize` diagnostic is gone after
+  the fix; the same reduction now progresses to the already-tracked
+  H124e `feme-cpu-wrap-entry` "barrier inside non-linear control flow"
+  diagnostic instead, confirmed identically against the real
+  `offloader`/`llvm-lit` run of `InterlockedCompareExchange.resources.32.
+  test` itself.
+- `ninja check-feme`: 3099/3102 passed (3 unsupported), 0 failed, no
+  regressions.
+- `check-hlsl-feme-vk`: still 18/664 failing (unchanged count -- this
+  test moved from its own single-case simdize bucket into H124e's
+  still-open wrap-entry bucket, now 9 confirmed cases up from 8, rather
+  than starting to pass outright). Real forward progress, not a full fix.
+- **Native Vulkan CTS regression check.** Ran a targeted A/B comparison
+  (pre-fix vs. post-fix `libfeme_vulkan.so`, via a temporary `git show`
+  of the pre-fix revision of just the touched file, rebuild, restore)
+  against the full 6,209-case `vk-default/image/atomic-operations.txt`
+  list -- the CTS surface most likely to exercise atomic-call uniformity
+  classification. Produced byte-identical totals (216 passed / 1,104
+  failed / 4,889 not supported, both runs); the 4,889 `NotSupported` and
+  1,104 `Fail` cases are a pre-existing, unrelated legalization gap
+  (`spirv.AtomicIIncrement`/etc on image storage, failing before this
+  pass ever runs -- an already-tracked gap adjacent to
+  `shaderImageGatherExtended`'s own image-support limitations, not
+  touched by this fix) -- confirming no regression. No native CTS case
+  currently exercises the specific "uniform-operand resource-heap atomic
+  feeding a divergent branch" shape this fix targets (that shape is
+  dxc/HLSL-`Interlocked*`-specific), so this fix's own effect is
+  confirmed only via the offload-test-suite case above, consistent with
+  H148/H151's own equivalent note for their own CPU-backend-internal
+  fixes.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: an
+  internal CPU-backend uniformity-analysis correctness fix, not a new
+  Vulkan feature or extension.
+
+H152 is struck through on the roadmap: fixed this session.
