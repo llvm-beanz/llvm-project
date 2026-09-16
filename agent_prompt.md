@@ -53,29 +53,25 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H124e wrap-entry bucket** (now 7 confirmed cases, up from 5 -- highest
-   payoff, unfixed for many sessions): `feme-cpu-wrap-entry`'s region-splitting
-   pass only supports "a straight-line wave body or a single uniform loop" -- a
-   barrier inside any other non-linear control flow shape is rejected outright.
-   Fixing this could close up to 6 failures at once
-   (`InterlockedAdd`/`CompareExchange`/`CompareStore`/`Exchange.32.test`,
-   `InterlockedAdd`/`CompareStore.resources.32.test`). Likely a full session on
-   its own -- region-splitting pass design work is harder than the SIMDize-level
-   fixes recent sessions made.
-2. **`InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
-   divergent-branch gap** (newly confirmed this session, not yet triaged
-   further): "the divergence transform (LinearizePass) did not remove it, or
-   produced a shape this pass cannot widen" -- needs an IR-level reduction (via
-   `feme-opt --feme-convert-spirv-to-llvm`) to find the exact unsupported shape,
-   same methodology H143 used.
-3. **`InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
-   multi-exit-loop gap** (newly confirmed this session as real, not yet fixed):
-   "loop has more than one divergent exit check" -- also needs an IR-level
-   reduction before attempting a fix.
-4. **`Ddx*`/`ddy_fine`/`fwidth.test` group (5 failures)**: still suspected to
-   trace to H124d's missing upstream MLIR `OpDPdx`/`OpDPdy`/`OpFwidth` SPIR-V
-   dialect ops, still not individually confirmed across sessions. Large,
-   deprioritized.
-5. **`dyn-res-uav-counter.test`**: real, narrow bug, address-space mismatch in
-   UAV-counter + `ResourceDescriptorHeap` combo. ~1-2 hours, carried over 4+
-   sessions untouched.
+1. **~30-45 min: individually re-confirm which of H124e's 7 wrap-entry
+   cases actually share the exact 3-phi/nested-branch/2-barrier shape**
+   found this session (only `InterlockedAdd.32.test` was directly
+   inspected) — don't assume the other 6 match without checking, this
+   project has been burned by that assumption before.
+2. **~1-2 hours, still untouched: `InterlockedCompareExchange.resources.32.test`'s
+   `feme-cpu-simdize` divergent-branch gap** — needs an IR-level
+   reduction via `feme-opt --feme-convert-spirv-to-llvm` before any fix
+   attempt, same methodology as this session's H124e dump.
+3. **~1-2 hours, still untouched: `InterlockedExchange.resources.32.test`'s
+   `feme-cpu-linearize` multi-exit-loop gap** — same, needs its own
+   IR-level reduction first.
+4. **Large, deprioritized: H124d** — upstream MLIR SPIR-V dialect
+   `OpDPdx`/`OpDPdy`/`OpFwidth` ops, likely root cause of the
+   `DdxCoarse`/`DdyCoarse`/`ddx_fine`/`ddy_fine`/`fwidth.test` group (5
+   failures) — still not individually confirmed across many sessions now.
+5. **Large, not yet filed as its own roadmap row: `shaderImageGatherExtended`**
+   — FeMe's gather is `ConstOffset`-only, blocks every
+   `dEQP-VK.glsl.texture_gather.*` CTS case. File the row before starting.
+6. **Lowest priority, deferred 26+ sessions: `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s**
+   pre-existing heap corruption (valgrind points at
+   `buildStageStorage`/`executeDraws`).
