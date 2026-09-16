@@ -45383,3 +45383,59 @@ structure for the new `v3uint`/`getdimensions.xyz` shape.
 H124s is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new Vulkan-visible
 capability.
+
+## H124t: `Array2D` `OpImageQueryLod` (`CalculateLevelOfDetail`) legalization gap fixed
+
+**Bug.** `Feature/Textures/Array.CalculateLevelOfDetail.test` (1 case)
+failed pipeline creation. Unlike H124s's own bystander-diagnostic
+gotcha, `FEME_VULKAN_LOG_CREATION_ERRORS=1` confirmed the named
+`sampled Array2D` handle *is* the real cause here:
+`hasOnlySupportedImageUses`'s own `isQueryLodIntrinsic` branch
+(`OpImageQueryLod`, HLSL's `CalculateLevelOfDetail`/
+`CalculateLevelOfDetailUnclamped`) was scoped to `Plain2D` only.
+
+**Fix.** Widened the shape gate to accept `Array2D` too. Confirmed via
+a real `spirv-dis` dump that `Texture2DArray::CalculateLevelOfDetail`'s
+own `OpImageQueryLod` coordinate is always exactly 2 components
+(`%v2float`), never 3, regardless of shape -- the HLSL overload itself
+takes no slice argument at all (the array dimension plays no part in
+the LOD computation) -- so the fix uses a fixed coordinate width of 2
+rather than reusing the per-shape `SampleCoordWidth` an ordinary
+sample would need. Codegen reuses the existing `QueryLod2D` runtime
+call and formula completely unchanged: `femeCpuImageQueryLod2DV2F32`
+already only reads the bound image descriptor's width/height, never
+its array-layer count, so no new runtime entry point was needed at
+all.
+
+**Updated test coverage.** The now-stale `LeavesAnArrayedQueryLodHandle
+Alone` unit test asserted the *old*, incorrect behavior using an
+unrealizable `<3 x float>` coordinate for an `Array2D` handle (real
+codegen never produces that shape) -- converted into a positive
+`LowersArray2DQueryLodToImageQueryLodSharingPlain2DFormula` test, and
+added a new `LeavesAPlain1DQueryLodHandleAlone` negative test to keep
+covering the "a still-unsupported shape is left entirely alone"
+contract.
+
+**Verification.**
+- `ninja check-feme`: **3068/3071 passed** (3 unsupported), 0 failed,
+  0 regressions.
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): `Feature/Textures/Array.
+  CalculateLevelOfDetail.test` now passes. Full suite: **344 passed /
+  33 failed** (of 664), up from 343/34 -- exactly the 1 target case
+  moved from fail to pass, no regressions.
+- VK-GL-CTS: `dEQP-VK.glsl.texture_functions.query.texturequerylod.
+  {sampler2darray_float,sampler2darray_fixed,sampler2darrayshadow}_*`
+  (15 cases, the real float/fixed/shadow-channel `Array2D`
+  `textureQueryLod()` CTS coverage) all now **Pass** -- a genuine,
+  unblocked CTS win (this exact GLSL builtin lowers through the same
+  `OpImageQueryLod` opcode this fix widens). The remaining 10
+  `{i,u}sampler2darray_*` cases in the same `*2darray*` glob still
+  correctly fail: SPIR-V never legalizes `OpImageQueryLod` against an
+  integer-channel image at all, the same pre-existing `IsInteger`
+  rejection `Plain2D`'s own already-supported case has always applied
+  -- confirmed not a regression from this change.
+
+H124t is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new Vulkan-visible
+capability.
