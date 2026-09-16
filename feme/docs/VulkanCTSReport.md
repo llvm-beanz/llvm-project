@@ -45676,3 +45676,102 @@ scope of the two landed fixes (a property-value correction and an
 additive CPU-runtime symbol set); the two device-creation cases these
 fixes were meant to unblock are confirmed passing via
 `check-hlsl-feme-vk` itself (see above).
+
+### H138: `v3i64`/`v4i64` raw resource load/store decomposed into `v2i64`/scalar `i64` (closes H137's follow-on)
+
+**Symptom.** `WaveOps/WaveActiveAllEqual.int64.test` still failed after
+H137 landed scalar `i64`/`v2i64` runtime primitives -- the test's own
+4-wide `int64_t4` case needed a `v4i64` (32 bytes) raw load/store,
+which H137 deliberately left unimplemented (see above).
+
+**Fix.** Rather than teach `ResourceLoweringPass`'s call-building code
+(`getOrInsertResourceCall`, `ResourceCalls.cpp`) to be ABI-aware for a
+`>16`-byte vector (the riskier option H137's own note considered),
+`lowerRawLoad`/`lowerRawStore` (`SPIRVResourceLowering.cpp`) now
+decompose a `<3/4 x i64>` leaf into 2-wide `v2i64` chunks (plus a
+trailing scalar `i64` chunk for the odd `<3 x i64>` case) *before* the
+call-building step is ever reached, reusing the same
+`insertvalue`/`extractvalue`-based reassembly pattern those two
+functions already use for struct/array aggregates. `getOrInsertResourceCall`
+therefore never sees a `>16`-byte vector type at all, and no ABI-aware
+call codegen was needed.
+
+**Verification.**
+- `ninja check-feme`: **3077/3080 passed** (3 unsupported), 0 failed,
+  0 regressions (+3 new unit tests:
+  `LowersV4I64RawStoreToTwoV2I64Stores`,
+  `LowersV3I64RawStoreToV2I64AndScalarI64Store`,
+  `LowersV4I64RawLoadToTwoV2I64Loads`).
+- `check-hlsl-feme-vk` (FeMe driver confirmed via `vulkaninfo
+  --summary`): `WaveActiveAllEqual.int64.test` now passes; full suite
+  failure count drops from **29 to 28** (of 664).
+- No feature/extension-inventory change: a pure CPU-backend
+  resource-lowering completeness fix, not a new advertised Vulkan
+  capability.
+
+H138 is struck through on the roadmap as fixed.
+
+### H139: `vkCreateDevice` now rejects requests enabling unsupported features
+
+**Symptom.** The 8 `dEQP-VK.api.device_init.create_device_unsupported_features.*`
+CTS failures noted (but not yet root-caused) by a prior session's
+spot-check: `core`, `mesh_shader_features_ext`,
+`primitives_generated_query_features_ext`,
+`transform_feedback_features_ext`, `vulkan11_features`,
+`vulkan12_features`, `vulkan13_features`, `vulkan14_features`.
+
+**Root cause.** `vkCreateDevice` never validated a requested feature
+against what this ICD actually supports -- neither the legacy
+`pEnabledFeatures` pointer, a chained `VkPhysicalDeviceFeatures2`'s own
+`.features` member, nor any 1.1/1.2/1.3/1.4-promoted or extension
+feature structure was checked. Forcibly enabling an unsupported bit
+(e.g. `fullDrawIndexUint32`, `storageBuffer16BitAccess`) therefore
+silently succeeded instead of returning `VK_ERROR_FEATURE_NOT_PRESENT`
+per spec. Confirmed via code inspection that no such validation
+existed anywhere in `vkCreateDevice`.
+
+**Fix.** Added `hasUnsupportedEnabledFeature`, a generic
+`VkBool32`-array comparison reusable across any
+`VkPhysicalDeviceXFeatures` structure (each follows Vulkan's own
+layout convention: a bare `VkBool32` sequence, or one following an
+`sType`/`pNext` header). Reuses the existing `fillFeatures2Chain` query
+logic (already purely static/device-independent -- takes only a
+`pNext` pointer, no device-state dependency) to compute "truthfully
+supported" ground truth for comparison, avoiding any duplicated logic
+between query and validation paths. Scoped to exactly the 8 structures
+a full `dEQP-VK.api.device_init.*` CTS sweep (250 cases) found
+unvalidated: the plain `VkPhysicalDeviceFeatures` (both the legacy
+`pEnabledFeatures` path and the chained `VkPhysicalDeviceFeatures2`
+path), `VkPhysicalDeviceVulkan{11,12,13,14}Features`,
+`VkPhysicalDeviceMeshShaderFeaturesEXT`,
+`VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT`,
+`VkPhysicalDeviceTransformFeedbackFeaturesEXT`. Every other structure
+`fillFeatures2Chain` recognizes either reports all `VK_TRUE` already
+(nothing to validate) or is gated behind an extension name this ICD
+doesn't advertise (already rejected by the pre-existing extension-name
+validation loop earlier in the same function).
+
+**Verification.**
+- `ninja check-feme`: **3077/3080 passed** (3 unsupported), 0 failed,
+  0 regressions (+4 new unit tests:
+  `CreateDeviceRejectsUnsupportedLegacyPEnabledFeatures`,
+  `CreateDeviceRejectsUnsupportedChainedFeatures2`,
+  `CreateDeviceRejectsUnsupportedVulkan11Features`,
+  `CreateDeviceAcceptsOnlySupportedVulkan11Features`).
+- `check-hlsl-feme-vk`: unaffected (still 28 failures -- this fix is
+  Vulkan-API-level, not shader-codegen-level).
+- `dEQP-VK.api.device_init.*` (250 cases, re-run directly against the
+  FeMe driver, confirmed via `vulkaninfo --summary`): **239 passed / 0
+  failed / 11 not supported** -- up from 231 passed / **8 failed** / 11
+  not supported before this fix. All 8 previously-failing
+  `create_device_unsupported_features.*` sub-cases now pass; the 11
+  "not supported" cases are pre-existing, unrelated
+  (`VK_EXT_global_priority`/`VK_EXT_global_priority_query`/protected
+  memory/queue-priority-contention reasons), and unchanged in count
+  before and after.
+- No feature/extension-inventory change: this corrects *enforcement*
+  of already-declared support levels; it does not change what FeMe
+  advertises via `vkGetPhysicalDeviceFeatures2` or its extension list.
+
+H139 is struck through on the roadmap as fixed (filed and closed in
+the same session).
