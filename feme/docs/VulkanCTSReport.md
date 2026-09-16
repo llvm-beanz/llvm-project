@@ -47382,3 +47382,70 @@ failed / 19,819 not supported** -- byte-identical to the established
 baseline, confirming no regression. No `Vulkan14FeatureInventory` /
 `VulkanExtensionInventory` change: this is a CPU-backend correctness fix
 only, adding no Vulkan feature or extension surface.
+
+## H164: a plain `AtomicCmpXchgInst` was never classified `NeverUniform`, so its branch consumer degraded to `poison` and segfaulted
+
+**Device check.** `vulkaninfo --summary | grep deviceName` confirmed
+`FeMe CPU Vulkan Device` before starting.
+
+**Symptom.** `Feature/HLSLLib/InterlockedCompareExchange.32.test`
+compiled and wrapped cleanly (per H163(d)'s own fix), but `offloader`
+crashed executing the JIT'd shader: exit -11 (SIGSEGV), with an empty
+stack dump ("PLEASE submit a bug report...", but no frames -- a crash
+inside JIT-generated code, not the compiler itself).
+
+**Root cause.** Confirmed via a real `FEME_DUMP_IR` dump of the test's
+own lit-generated artifacts (not a hand-reconstructed repro):
+`feme::cpu::WaveTTIImpl::getValueUniformity`
+(`Analysis/CPU/WaveUniformity.cpp`) already special-cased a plain,
+not-yet-lowered `AtomicRMWInst` as `NeverUniform` (roadmap L43, added
+for a real CTS mesh-shader "allocate a unique output slot" pattern), but
+never gave its `AtomicCmpXchgInst` sibling (HLSL's
+groupshared-destination `InterlockedCompareExchange`) the identical
+treatment -- it fell through to the generic operand-driven `Default`
+rule and was wrongly classified uniform whenever its own pointer and
+compare/new-value operands were, exactly the case for this test's own
+`InterlockedCompareExchange(MatchInt, -5, 42, OrigMatchInt)` shape. This
+let a real, load-bearing branch on an `extractvalue` of the `cmpxchg`'s
+`{ iN, i1 }` result -- this test's own short-circuit
+`(OrigMatchInt == -5 || OrigMatchInt == 42) && ...` chain -- escape
+`DiamondFlattener` unflattened. `SIMDizePass`'s own,
+separately-recomputed uniformity analysis then correctly rejected the
+branch as divergent, but by then the scalar `cmpxchg` had already been
+widened away into per-lane vector form, so `FunctionWidener::widen`'s
+"sever remaining uses of an erased instruction" fallback substituted
+`poison` for every remaining `extractvalue` of it -- confirmed directly
+in the dump: `%53 = extractvalue { i32, i1 } poison, 0` feeding
+`%81 = icmp eq i32 %53, -5`, a branch condition that is therefore
+provably `poison` -- undefined behaviour that manifested as a JIT
+segfault rather than a compile-time diagnostic.
+
+**Fix.** Added the identical `NeverUniform` classification for
+`isa<AtomicCmpXchgInst>(V)` immediately beside the existing
+`AtomicRMWInst` case in `getValueUniformity`, with a comment explaining
+the H164 rationale.
+
+**Unit/lit coverage.** New `uniformity.ll` case
+(`atomic_cmpxchg_is_divergent`) confirming the classification directly,
+and a new Linearize-level lit test
+(`Linearize/atomiccmpxchg-guarded-branch-divergent.ll`) mirroring the
+existing `atomicrmw-guarded-branch-divergent.ll` end-to-end
+"`DiamondFlattener` actually flattens the branch" check for the
+`cmpxchg` shape.
+
+**`check-hlsl-feme-vk`.** `InterlockedCompareExchange.32.test` now
+passes completely, end to end. The suite goes from 9 failures to **8**
+(of 664), with every other pre-existing failure unchanged -- no
+regressions, and the same pre-existing unrelated XPASS
+(`Feature/PushConstant/array_of_matrices`). This also closes H162's
+tracking row: all 8 of 8 `Interlocked*.32.test` cases now pass.
+
+**Unit/lit coverage.** `ninja check-feme`: 3,123 passed / 0 failed / 3
+unsupported (+3 new test cases vs. the H167 baseline).
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: **647 passed / 36
+failed / 19,819 not supported** -- byte-identical to the established
+baseline, confirming no regression. No `Vulkan14FeatureInventory` /
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+only, adding no Vulkan feature or extension surface.
