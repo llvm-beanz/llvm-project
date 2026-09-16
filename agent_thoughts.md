@@ -86368,3 +86368,88 @@ Recorded all of this in H124e's own roadmap row so its case inventory stays accu
 5. **`dyn-res-uav-counter.test`**: real, narrow bug, address-space mismatch in UAV-counter + `ResourceDescriptorHeap` combo. ~1-2 hours, carried over 4+ sessions untouched.
 
 Lower priority, not in the top 5 but still open: `feme.cpu.resource.store.raw.i8` runtime gap (filed but not fixed, ~1 hour); `WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`/`WaveIsFirstLane.test`/`ComponentAccumulationDataRace.test`/`GroupMemoryBarrierWithGroupSync.test`/`matrix.test`/`inc_counter_array_imm_idx.test` (still individually untriaged); `shaderImageGatherExtended` (large, still not filed as its own roadmap row); `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap corruption (deferred 26+ sessions).
+
+# Session: H145 (ResourceDescriptorHeap block-backed resources) fixed; H124e wrap-entry scope corrected upward
+
+**Do first, every session**: `vulkaninfo --summary | grep deviceName` →
+confirmed `FeMe CPU Vulkan Device` at session start.
+
+## What shipped this session
+
+1. Fixed `Feature/DynamicResources/dyn-res-uav-counter.test` (H145,
+   carried over 4+ sessions untouched). Root cause: `ResourceDescriptorHeap[Index]`
+   into any *block-backed* resource (`RWStructuredBuffer`/`StructuredBuffer`/
+   `ByteAddressBuffer`/`ConstantBuffer`) was never recognized by
+   `SPIRVToLLVMPatterns.cpp`'s resource-array detection at all — the fix
+   is a small, symmetric extension of `getArrayedBlockCount` and
+   `ArrayedBlockAccessChainPattern` to also accept an unbounded
+   `spirv.rtarray` pointee, not just a bounded `spirv.array` one.
+2. Added a genuine regression test (`SPIRVToLLVMTest.UnboundedArrayedBlockConvertsInsteadOfFailing`)
+   — confirmed via stash/rebuild that it fails without the fix, passes with it.
+3. `check-feme`: 3094/3097 passed (3 unsupported), 0 failed, +1 test.
+4. `check-hlsl-feme-vk`: failures 23 → **22** (of 664).
+5. `dEQP-VK.ssbo.*` A/B binary comparison (12,225 cases): byte-identical
+   before/after (2232/1010/8983) — zero regression, used because no
+   native CTS group exercises this HLSL-only bindless-heap shape.
+6. Updated `Roadmap.md` (new closed H145 row) and `VulkanCTSReport.md`
+   (new dated entry). No `Vulkan14FeatureInventory`/`VulkanExtensionInventory`
+   change needed — this is a correctness fix for an already-advertised
+   capability, not new feature/extension surface.
+7. Committed in 3 separate commits: code+test, Roadmap.md, VulkanCTSReport.md.
+
+## Important correction to prior sessions' own estimates: H124e is bigger than believed
+
+Before landing H145, this session first spent real time on H124e (the
+wrap-entry "barrier inside non-linear control flow" bucket, prior
+session's own #1 priority — 7 failures). Added a temporary debug dump to
+`EntryWrapper.cpp` (reverted, not shipped) and inspected the actual
+post-`feme-cpu-simdize`/`feme-cpu-linearize` IR for `InterlockedAdd.32.test`.
+
+**Finding**: the loop is not "a barrier inside a uniform loop with a
+non-scalar induction" (prior estimate). It has:
+- Three vector-typed (`<4 x i32>`) per-lane loop-carried phis
+  (`Mono`/`Prev`/`PrevOrig`), not one scalar induction.
+- A nested divergent `if`/`else` *inside* the loop body itself, already
+  reconverged by `LinearizePass` into `Flow`/`Flow._crit_edge` blocks.
+- **Two** separate barriers per iteration, not one.
+
+None of `matchLoopShape`/`buildWrapperForLoop`'s existing machinery was
+designed for this. A real fix needs two independent, substantial pieces:
+(a) a new loop-carried-value spill mechanism (generalizing
+`spillValuesLiveAcrossBarriers`, which only spans one region's barriers,
+to span the loop backedge too), and (b) nested-branch-inside-loop-body
+support (recursively reusing `matchBranchShape` inside `buildWrapperForLoop`).
+
+**I did not attempt this fix.** Recorded it as roadmap sub-row H124e(a)
+with the corrected (larger) scope instead of risking a half-done
+implementation. This is genuinely multiple sessions of design work, not
+"a full session" as previously written.
+
+## Suggested next steps (priority order)
+
+1. **~30-45 min: individually re-confirm which of H124e's 7 wrap-entry
+   cases actually share the exact 3-phi/nested-branch/2-barrier shape**
+   found this session (only `InterlockedAdd.32.test` was directly
+   inspected) — don't assume the other 6 match without checking, this
+   project has been burned by that assumption before.
+2. **~1-2 hours, still untouched: `InterlockedCompareExchange.resources.32.test`'s
+   `feme-cpu-simdize` divergent-branch gap** — needs an IR-level
+   reduction via `feme-opt --feme-convert-spirv-to-llvm` before any fix
+   attempt, same methodology as this session's H124e dump.
+3. **~1-2 hours, still untouched: `InterlockedExchange.resources.32.test`'s
+   `feme-cpu-linearize` multi-exit-loop gap** — same, needs its own
+   IR-level reduction first.
+4. **Large, deprioritized: H124d** — upstream MLIR SPIR-V dialect
+   `OpDPdx`/`OpDPdy`/`OpFwidth` ops, likely root cause of the
+   `DdxCoarse`/`DdyCoarse`/`ddx_fine`/`ddy_fine`/`fwidth.test` group (5
+   failures) — still not individually confirmed across many sessions now.
+5. **Large, not yet filed as its own roadmap row: `shaderImageGatherExtended`**
+   — FeMe's gather is `ConstOffset`-only, blocks every
+   `dEQP-VK.glsl.texture_gather.*` CTS case. File the row before starting.
+6. **Lowest priority, deferred 26+ sessions: `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s**
+   pre-existing heap corruption (valgrind points at
+   `buildStageStorage`/`executeDraws`).
+
+**Next action right now**: pick item 1 above (re-confirm the 7 H124e
+cases individually) — it's the cheapest way to know whether tackling
+H124e(a)'s design work pays off for 1 case or 7.
