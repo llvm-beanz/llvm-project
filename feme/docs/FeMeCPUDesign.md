@@ -876,6 +876,27 @@ the first two's own remaining narrowings):
   recurrence is stored straight back. Since a slot holds one value at a
   time, every use of such an induction must precede its own recurrence;
   a shape reading it afterwards is diagnosed rather than mis-compiled.
+  Roadmap H163 relaxed that last restriction and filled in three gaps it
+  exposed. A wave-persistent induction is reloaded at the *top of the
+  use's own barrier region* rather than at the use itself, so a use that
+  follows the recurrence textually still observes this iteration's value;
+  what must be diagnosed is therefore narrower -- a use separated from
+  the recurrence by a group-sync barrier -- and a use in the loop's
+  post-loop suffix chain is always safe, since the slot then holds
+  exactly the value the header phi would carry on the exiting edge. A
+  wave body's prefix, loop and suffix chains are outlined into separate
+  functions, so a chain boundary is a region boundary even with no
+  barrier on it, and the cross-barrier spilling is driven by a list of
+  boundaries that includes those two alongside the barriers. Finally,
+  outlining the latch can strand a genuinely uniform scalar recurrence
+  (a trip counter) inside a per-wave region, where it is neither usable
+  by the wrapper nor eligible to be wave-persistent, since the header
+  reads it; such a recurrence is instead *cloned* into the wrapper's own
+  latch, which is sound exactly when it is side-effect-free, reads no
+  memory, and depends only on constants and the loop's own header phis.
+  Its operands are snapshotted before the outlined regions' parameter
+  rewriting redirects the original copy at its region's argument.
+
   A barrier inside a uniform two-way *branch* (as opposed to a loop) is
   recognized by `feme::cpu::matchBranchShape` and split by
   `feme::cpu::buildWrapperForBranch` the same way: the branch's own
@@ -903,7 +924,22 @@ the first two's own remaining narrowings):
   `feme::cpu::isLinearChain`'s own `walkBarrierFreeArm` recognizes this
   "safe diamond" shape and keeps it inside its region rather than
   declining outright on any surviving conditional branch, the way it did
-  before this roadmap step.
+  before this roadmap step. Roadmap H158 extended the same treatment to a
+  diamond inside a loop *body*, and H163 generalized the shape itself:
+  `feme::cpu::matchBarrierFreeRegion` matches any acyclic, barrier-free,
+  single-entry single-exit region, absorbing blocks in topological order
+  and stopping when exactly one block with all predecessors in-region
+  remains, which is what DXC emits for a run of source-level `if`s. The
+  reasoning that makes this safe is the same in every case and does not
+  depend on the region's internal shape: with no barrier anywhere inside
+  it, such a region can only ever land whole inside one region function,
+  so it never needs to be split and the existing linear block-moving
+  logic already handles it once the walk's order includes every block. A
+  backedge, a non-branch terminator, or a barrier declines the match, so
+  that property continues to hold. The one non-obvious guard is that a
+  "diamond" inside a loop whose two arms reconverge at the loop *header*
+  is really the loop's own closing branch, not a mid-body diamond, and
+  must be left to the barrier-free-loop path.
 - **A wave body carrying a parameter this pass cannot supply is
   diagnosed, not `llvm_unreachable`'d.** A shader entry point takes no
   parameters of its own -- its inputs arrive through stage-IO or resource
