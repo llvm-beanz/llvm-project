@@ -87311,3 +87311,123 @@ have worked.**
 5. **Not yet individually triaged, quick wins possible:**
    `ByteAddressBuffer/GetDimensions.test`,
    `StructuredBuffer/GetDimensions.test` -- neither looked at yet.
+
+# Session: H154 re-triage -- real gap found, but found unsafe to close alone; discovered a real outlineChainAtBarriers crash
+
+## Bottom line
+
+0 `check-hlsl-feme-vk` cases closed this session. Found H154's prior
+characterization of the bug (a `PreLatch`/`M` CFG pattern) was wrong,
+found the *actual* gap, attempted a fix, and reverted it after it
+crashed `EntryWrapperPass` -- a strictly worse outcome than the
+pre-existing clean decline. Kept the safe parts (a pure refactor + an
+independently-tested generalization), added 3 unit tests, corrected the
+roadmap, ran full verification (`check-feme`, `check-hlsl-feme-vk`,
+native CTS spot-check). All committed in 5 small commits.
+
+## What actually happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+   Vulkan Device` (env vars exported first, every session requirement).
+2. Re-did the `dxc`+`feme-translate`+`feme-opt` reduction on
+   `InterlockedAdd.32.test`/`InterlockedExchange.32.test` from scratch,
+   not trusting the prior session's `PreLatch`/`M` write-up. Neither
+   test actually has that shape.
+3. Found the real shapes: `InterlockedAdd.32.test` has a uniform
+   mid-body "safe diamond" (both arms barrier-free) right before the
+   barrier-containing latch; both tests' loop recurrence depends on a
+   per-lane value computed *inside* what would be the outlined barrier
+   region (a diamond-merge bookkeeping phi for Add, the recurrence
+   itself for Exchange).
+4. Extracted `isLinearChain`'s "safe diamond" logic into a shared
+   `matchSafeDiamond` helper (pure refactor, 21/21 tests unchanged) --
+   this part is real and kept.
+5. Taught `matchLoopShape` to also try `matchSafeDiamond`, and
+   generalized the `LatchSplitAfter` split condition from
+   "`BodyOrder` empty" to "does `Latch` contain a barrier". Rebuilt,
+   ran the standalone `InterlockedAdd.32.test` repro again through
+   `feme-opt` -- it still failed, but now at a *different* point
+   (isPureClosedChainAfter declining the diamond-merge phi feeding the
+   recurrence), confirming the per-lane-recurrence gap is real and
+   separate from the diamond-shape gap.
+6. Wrote a positive unit test for the diamond-tolerant match. It
+   **crashed**: `cast<UncondBrInst>` assertion failure in
+   `outlineChainAtBarriers`/`rebuildSplitChainOrder`, which assumes
+   every chain block but the last ends in a plain unconditional branch
+   -- the diamond's own internal conditional branch breaks that
+   assumption when the chain actually gets outlined into a region
+   function.
+7. Reverted the diamond-tolerant part of `matchLoopShape` (kept the
+   `matchSafeDiamond` extraction and the `LatchSplitAfter`
+   generalization, which don't by themselves introduce any non-linear
+   `BodyOrder` chain and are independently safe). Rewrote the unit test
+   as a negative test locking in today's correct decline. Added a
+   second positive test for the `LatchSplitAfter` generalization on its
+   own (an ordinary multi-block body, no diamond, with a
+   barrier-containing latch) -- passes.
+
+## Why this matters
+
+A partial fix that makes `matchLoopShape` *accept* a shape it can't
+safely *outline* is worse than declining: it turns a clean compile-time
+error into an assertion crash (or, in a non-assert build, silent
+miscompilation risk). Catching this before it shipped is the actual
+value of this session, even though no CTS case closes. **If you're
+tempted to make `matchLoopShape`'s body-walk tolerate more CFG shapes
+in the future: check that `outlineChainAtBarriers` can actually outline
+the resulting `BodyOrder` region first (see H158) -- `matchLoopShape`
+accepting a shape is necessary but not sufficient.**
+
+## Verification
+
+- `EntryWrapperTest.*`: 23/23 pass (up from 21 -- 2 new tests).
+- `ninja check-feme`: 3106/3109 passed, 3 unsupported, 0 failed.
+- `ninja check-hlsl-feme-vk`: 16/664 failing, **unchanged** from before
+  this session. Noticed one unrelated pre-existing "Unexpectedly
+  Passed": `Feature/PushConstant/array_of_matrices.test` (its `XFAIL`
+  no longer reproduces) -- not touched by this session's changes, flagging
+  for a future session.
+- Native `dEQP-VK.compute.pipeline.*`: 647/36/19,819, byte-identical to
+  the established baseline -- no regression.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` changes
+  (pure CPU-backend internal-matcher work).
+
+## Commits (5, in order)
+
+1. `matchSafeDiamond` extraction from `isLinearChain` (pure refactor).
+2. `matchLoopShape`'s `LatchSplitAfter` generalization.
+3. New `EntryWrapperTest.cpp` coverage (2 tests).
+4. `Roadmap.md`: corrected H154, added H158/H159.
+5. `VulkanCTSReport.md`: this session's writeup.
+
+## What's left (in priority order)
+
+1. **~1-2 days, largest single lever, not yet designed:** H159 -- spill
+   a per-lane value computed inside a barrier region to per-wave-
+   persistent memory, read back at the start of the *next loop
+   iteration's* own outlined region invocation (not just across a
+   single barrier crossing within one iteration, which
+   `spillValuesLiveAcrossBarriers` already handles). This is the
+   deepest blocker and likely closes both `InterlockedAdd.32.test` and
+   `InterlockedExchange.32.test` (and probably their `.resources.32.test`
+   siblings) once done -- worth doing before H158, since H158 alone
+   still wouldn't close either real test.
+2. **~half a day, needed before re-attempting H154's diamond tolerance,
+   not yet designed:** H158 -- generalize `outlineChainAtBarriers`/
+   `rebuildSplitChainOrder` to outline a chain containing internal,
+   non-barrier branches (a CFG subgraph, not just a linear block list).
+3. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
+4. **~30 min, not yet started:** investigate
+   `Feature/PushConstant/array_of_matrices.test`'s "Unexpectedly
+   Passed" result (noticed this session, unrelated to this session's
+   changes) -- if it now genuinely passes, lift its `XFAIL` marker in
+   offload-test-suite.
+5. **Not yet individually triaged, quick wins possible:**
+   `ByteAddressBuffer/GetDimensions.test`,
+   `StructuredBuffer/GetDimensions.test` -- neither looked at yet.
+6. **Do not re-attempt H150** -- confirmed a prior session it's not a
+   FeMe-side bug at all.
