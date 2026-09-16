@@ -45652,3 +45652,27 @@ Filed as **H138**, explicit follow-on scope.
 H136 is struck through on the roadmap; H137 remains open (tracked
 against its own row) with H138 filed as its explicit `v3i64`/`v4i64`
 follow-on.
+
+### Post-fix VK-GL-CTS spot-checks
+
+Ran two targeted VK-GL-CTS groups directly against the FeMe driver
+(confirmed active via `vulkaninfo --summary`) after landing H136/H137:
+
+- `dEQP-VK.api.info.vulkan1p2.property_extensions_consistency`
+  (the exact case this fix's own promoted/pre-promotion struct
+  agreement depends on): **1/1 passed**.
+- `dEQP-VK.api.device_init.*` (250 cases, the group containing both
+  ordinary and unsupported-feature device-creation paths): **231
+  passed / 8 failed / 11 not supported**. The 8 failures are all
+  `create_device_unsupported_features.*` sub-cases (e.g.
+  `transform_feedback_features_ext`, `vulkan14_features`) unrelated to
+  `robustBufferAccessUpdateAfterBind`/`descriptorBinding*UpdateAfterBind`
+  -- not investigated further this session, pre-existing and outside
+  this session's scope; no evidence tying them to this session's
+  changes.
+
+A full from-scratch CTS sweep was not re-run this session given the
+scope of the two landed fixes (a property-value correction and an
+additive CPU-runtime symbol set); the two device-creation cases these
+fixes were meant to unblock are confirmed passing via
+`check-hlsl-feme-vk` itself (see above).
