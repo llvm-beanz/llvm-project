@@ -45510,3 +45510,47 @@ documents.
 H124u is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new Vulkan-visible
 capability.
+
+## H124p: `feme-cpu-simdize` divergent `llvm.is.fpclass` call widening fixed
+
+**Bug.** `Basic/Mandelbrot.test`'s per-pixel-varying escape-iteration
+loop compiles its own `isnan()`/`isinf()`-style check down to a
+divergent call to `llvm.is.fpclass.f32(float, i32 immarg)`.
+`feme-cpu-simdize`'s `widenElementwise` only recognized a "homogeneous"
+intrinsic call -- one whose overloaded type is shared by its result and
+every argument alike (the shape `llvm.sqrt.fN`/`llvm.dx.frac.fN`/...
+all take) -- so `is.fpclass`, whose result (`i1`) never matches its
+first (float) argument's type, fell through to the generic "unsupported
+divergent call" diagnostic and rejected the whole pipeline.
+
+**Fix.** Added a dedicated `Intrinsic::is_fpclass` case to
+`widenElementwise`: its own vector overload
+(`LLVMScalarOrSameVectorWidth<0, i1>` in `Intrinsics.td`) is mangled on
+argument 0's (float) type, not the result's, and its second (test-mask)
+argument is always a scalar immediate, never widened -- both unlike
+every other intrinsic this function widens, whose overloaded type is
+shared by the result and every argument alike.
+
+**New test coverage.** `WidensDivergentIsFPClassCall` (unit test,
+`SIMDizeTest.cpp`) confirms a divergent `is.fpclass` call's first
+argument widens to a real vector while its second stays a scalar
+constant, and that the module still verifies.
+
+**Verification.**
+- `ninja check-feme`: **3069/3072 passed** (3 unsupported), 0 failed,
+  0 regressions (up by exactly the 1 new unit test).
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): `Basic/Mandelbrot.test` now passes. Full
+  suite: **345 passed / 32 failed -> 346 passed / 31 failed** (of 664),
+  exactly the 1 target case moved from fail to pass, no regressions.
+- VK-GL-CTS: no directly-named CTS case exercises this exact
+  per-pixel-divergent-control-flow `is.fpclass` shape (a targeted search
+  of `dEQP-VK.glsl.builtin.function.common.isnan*`/`isinf*` found no
+  matching cases in this checkout) -- this fix is an internal
+  `feme-cpu-simdize` codegen-correctness fix validated directly via
+  `check-hlsl-feme-vk`'s own `Mandelbrot.test`, the concrete failure
+  that surfaced it, rather than a named CTS group.
+
+H124p is struck through on the roadmap. No feature/extension-inventory
+change: a pure `feme-cpu-simdize`-internal correctness fix exposing no
+new Vulkan-visible capability.
