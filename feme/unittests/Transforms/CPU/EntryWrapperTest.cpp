@@ -298,16 +298,13 @@ TEST(EntryWrapperTest, BranchMergePhiIsDiagnosed) {
   EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
 }
 
-// Roadmap H124e(a)'s own follow-on gap (feme/docs/Roadmap.md, real-world
-// case `WaveOps/GroupMemoryBarrierWithGroupSync.test`): `LoopShape`'s own
-// doc comment requires its `PrefixOrder`/`SuffixOrder` chains to contain
-// no barrier of their own -- a barrier sitting in the prefix, before the
-// loop even starts, is declined rather than silently folded into the
-// loop's own single wave region (which would drop that barrier's
-// synchronization semantics). Since the whole function is a loop (not a
-// straight-line chain either), `splitAtGroupSyncBarriers` cannot match it
-// as a fallback, so this is diagnosed rather than wrapped.
-TEST(EntryWrapperTest, LoopWithBarrierInPrefixIsDiagnosed) {
+// Roadmap H155 (feme/docs/Roadmap.md, real-world case
+// `WaveOps/GroupMemoryBarrierWithGroupSync.test`): a barrier sitting in the
+// loop's own prefix chain, before the loop even starts, is now split into
+// its own region(s) exactly like `Shape.BodyOrder`, rather than declined --
+// `main.prefix0`/`main.prefix1` are each run as their own per-wave loop,
+// with a fence between them, before the wrapper's scalar loop begins.
+TEST(EntryWrapperTest, LoopWithBarrierInPrefixIsSplit) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -335,7 +332,55 @@ TEST(EntryWrapperTest, LoopWithBarrierInPrefixIsDiagnosed) {
   WaveLoweringPass().run(*M, MAM);
   EntryWrapperPass().run(*M, MAM);
 
-  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
+  ASSERT_TRUE(M->getFunction("feme_cpu_entry_main"));
+  EXPECT_TRUE(M->getFunction("main.prefix0"));
+  EXPECT_TRUE(M->getFunction("main.prefix1"));
+  EXPECT_TRUE(M->getFunction("main.body0"));
+  EXPECT_TRUE(M->getFunction("main.suffix0"));
+}
+
+// Roadmap H155: a barrier sitting in the loop's own suffix chain, after the
+// loop's own exit, is likewise split into its own region(s) rather than
+// declined -- `main.suffix0`/`main.suffix1` are each run as their own
+// per-wave loop, with a fence between them, after the wrapper's scalar
+// loop ends.
+TEST(EntryWrapperTest, LoopWithBarrierInSuffixIsSplit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %doubled = mul i32 %gid, 2
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  ASSERT_TRUE(M->getFunction("feme_cpu_entry_main"));
+  EXPECT_TRUE(M->getFunction("main.prefix0"));
+  EXPECT_TRUE(M->getFunction("main.body0"));
+  EXPECT_TRUE(M->getFunction("main.body1"));
+  EXPECT_TRUE(M->getFunction("main.suffix0"));
+  EXPECT_TRUE(M->getFunction("main.suffix1"));
 }
 
 // Roadmap L45 (feme/docs/Roadmap.md): a uniform two-way branch whose arms
@@ -728,6 +773,51 @@ TEST(EntryWrapperTest, SplitsFlowMergeLoopWithHeaderDerivedValue) {
   // with the (trivial) prefix and suffix chains, that's 4 wave loops.
   EXPECT_EQ(NumWaveLoopHeaders, 4u);
   EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap H155 (feme/docs/Roadmap.md): a "Flow-merge loop" (see
+// `SplitsFlowMergeLoopWithHeaderDerivedValue` above) with a *second*
+// header phi (`%acc`) whose own recurrence (`%acc.next`) is computed in
+// the collapsed block's barrier-and-earlier half -- i.e. it ends up
+// inside the outlined `BodyOrder` region, not the fresh post-barrier
+// `Latch` tail. Outlining that body into its own function means its
+// instructions are never cloned into the wrapper's own `HeaderMap`, so
+// wiring `%acc`'s header phi from a `Latch`-only `HeaderMap` lookup would
+// previously read a null value and crash `PHINode::addIncoming`. This
+// shape must now be declined instead of crashing.
+TEST(EntryWrapperTest, FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %acc = phi i32 [ 0, %entry ], [ %acc.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %acc.next = add i32 %acc, %gid
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 

@@ -24,11 +24,11 @@
 ; CHECK: %doubled = mul i32 %sum.reload.val, 2
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
-; CHECK: br label %wave.loop.header
-; CHECK: wave.loop.exit:
+; CHECK: br label %wave.loop.header.prefix0
+; CHECK: wave.loop.exit.prefix0:
 ; CHECK-NEXT: br label %loop.header
 ; CHECK: loop.header:
-; CHECK-NEXT: %loopvar0 = phi i32 [ 2, %wave.loop.exit ], [ %[[NEXT:[0-9]+]], %loop.latch ]
+; CHECK-NEXT: %loopvar0 = phi i32 [ 2, %wave.loop.exit.prefix0 ], [ %[[NEXT:[0-9]+]], %loop.latch ]
 ; CHECK-NEXT: %[[COND:[0-9]+]] = icmp ugt i32 %loopvar0, 0
 ; CHECK-NEXT: br i1 %[[COND]], label %loop.body.iter, label %loop.exit
 ; CHECK: loop.body.iter:
@@ -42,7 +42,7 @@
 ; CHECK: call void @main.body1(
 ; CHECK: wave.loop.exit.body1:
 ; CHECK-NEXT: br label %loop.latch
-; CHECK: call void @main.suffix(
+; CHECK: call void @main.suffix0(
 define void @main() #0 {
 entry:
   br label %loop.header
