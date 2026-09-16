@@ -45280,3 +45280,54 @@ H124r is struck through (2 of 3 cases) on the roadmap; the remaining
 feature/extension-inventory change: a pure legalization-gap fix exposing
 no new Vulkan-visible capability (FeMe already declared no `shaderImage
 GatherExtended` support before or after this fix).
+
+## H124k: `PackHalf2x16`/`UnpackHalf2x16` legalization gap fixed
+
+**Bug.** `Feature/HLSLLib/{f16tof32,f32tof16}.test` (2 cases) both
+failed pipeline creation: `"failed to legalize operation
+'spirv.GL.UnpackHalf2x16'/'spirv.GL.PackHalf2x16' ... that was
+explicitly marked illegal"`. Neither op had a conversion pattern
+anywhere (confirmed by grepping both this file's own
+`populateSPIRVToLLVMTargetPatterns` and upstream MLIR's own
+`populateSPIRVToLLVMConversionPatterns`) -- the same "no pattern at
+all" shape as the prior H124f/H124j/H124r fixes, for a different
+GLSL.std.450 op pair.
+
+**Fix.** Added `GLPackHalf2x16Pattern`/`GLUnpackHalf2x16Pattern` in
+`SPIRVToLLVMPatterns.cpp`, converting the GLSL.std.450 spec's own
+literal definitions:
+- `PackHalf2x16`: `fptrunc` each of the input `vector<2xf32>`'s two
+  lanes to `f16`, `bitcast` each to `i16`, `zext` to `i32`, then pack
+  lane 0 into the result's low 16 bits and lane 1 (`shl` by 16) into
+  its high 16 bits.
+- `UnpackHalf2x16`: the reverse -- `trunc` the input `i32` for the low
+  16 bits, `lshr` by 16 then `trunc` for the high 16 bits, `bitcast`
+  each 16-bit piece to `f16`, `fpext` each to `f32`, then pack into a
+  `vector<2xf32>` result via `poison`+`insertelement` (mirroring
+  `GLCrossPattern`'s own vector-construction idiom from the H124j fix).
+
+**New test coverage.** `spirv-to-llvm-gl-pack-unpack-half2x16.mlir`
+(lit), mirroring `spirv-to-llvm-gl-length-normalize-isnan-isinf.mlir`'s
+own one-FileCheck-case-per-op structure.
+
+**Verification.**
+- `ninja check-feme`: **3066/3069 passed** (3 unsupported), 0 failed,
+  0 regressions (up from the prior H124r edition's 3065/3068 by this
+  session's 1 new lit test).
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): both `Feature/HLSLLib/{f16tof32,f32tof16}.
+  test` now pass (verified individually via `llvm-lit -sv`, and via a
+  full suite re-run). Full suite re-run: **37 -> 35 failed** (of 664),
+  exactly the 2 target cases moved from fail to pass, no regressions.
+- VK-GL-CTS: `dEQP-VK.glsl.builtin.function.pack_unpack.
+  {packhalf2x16_compute,unpackhalf2x16_compute}` (the two directly
+  exercising these ops) both now **Pass** against FeMe -- unlike
+  H124q/H124r's own gather-family fixes, this fix is *not* blocked by
+  any missing feature/extension, so it is a genuine, real CTS-visible
+  improvement (previously these 2 cases could not even be attempted
+  against FeMe, since pipeline creation itself failed before dEQP's
+  own frame-comparison step ran).
+
+H124k is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new Vulkan-visible
+capability.
