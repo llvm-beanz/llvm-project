@@ -47332,3 +47332,53 @@ failed / 19,819 not supported** -- byte-identical to the established
 baseline, confirming no regression. No `Vulkan14FeatureInventory` /
 `VulkanExtensionInventory` change: this is a CPU-backend correctness fix
 only, adding no Vulkan feature or extension surface.
+
+## H167: `feme-cpu-simdize`'s fresh `UniformityInfo` had no visibility into `DiamondFlattener`'s own masked-load taint tracking
+
+**Device check.** Two separate `export` statements:
+`export VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json`
+then `export VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json`.
+`vulkaninfo --summary | grep deviceName` reports `FeMe CPU Vulkan Device`.
+
+**Root cause.** `InterlockedExchange.resources.32.test`'s post-loop,
+single-invocation verification region reads a value via an
+already-masked `feme.cpu.resource.load.raw.i32` call (the shape
+`feme::cpu::ResourceLoweringPass` leaves behind). `DiamondFlattener`'s
+own `applyStageMasks` rewrites that call's `Mask` operand from a
+constant `true` to the block's real, non-constant mask -- but,
+unlike a plain `load`, which it *converts* into a new masked call and
+records into `MaskedLoadResults`, an already-masked call is merely
+rewritten in place, so nothing records it. `dependsOnTaintedValue` only
+consulted `MaskedLoadResults`, so a later branch built from that call's
+result kept its real, un-flattened shape (correctly uniform by the
+once-computed `UniformityInfo`'s own reckoning). One stage later,
+`feme-cpu-simdize` computes its own fresh `UniformityInfo` with no
+visibility into any of `DiamondFlattener`'s masking, and (correctly, from
+a pure syntactic-dataflow view, given the call's now-non-constant mask
+operand) misclassifies the same still-uniform branch as divergent.
+
+**Fix.** Added `isMaskDependentLoadResult()`: recognizes any load-kind
+`feme.cpu.resource.*`/`feme.cpu.image.*`/`feme.cpu.masked.load.*` call
+whose `Mask` operand is not a compile-time constant, folded into
+`dependsOnTaintedValue`'s own walk as a new base case (atomics and
+stores excluded -- an atomic's result has its own uniformity story via
+H146/H166, and a store has no result). New unit test
+`LinearizeTest.FlattensNestedDiamondWhoseConditionDependsOnMaskedResourceCall`
+and `Linearize/nested-diamond-condition-from-masked-resource-call.ll`,
+mirroring the existing plain-`load` case this generalizes.
+
+**`check-hlsl-feme-vk`.** `InterlockedExchange.resources.32.test` now
+passes completely, end to end. The suite goes from 10 failures to **9**
+(of 664), with every other pre-existing failure unchanged -- no
+regressions, and the same pre-existing unrelated XPASS
+(`Feature/PushConstant/array_of_matrices`).
+
+**Unit/lit coverage.** `ninja check-feme`: 3,122 passed / 0 failed / 3
+unsupported (+2 new test cases).
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: **647 passed / 36
+failed / 19,819 not supported** -- byte-identical to the established
+baseline, confirming no regression. No `Vulkan14FeatureInventory` /
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+only, adding no Vulkan feature or extension surface.
