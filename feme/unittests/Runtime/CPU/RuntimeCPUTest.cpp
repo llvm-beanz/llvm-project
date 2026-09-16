@@ -1095,6 +1095,77 @@ TEST_F(RuntimeCPUTest, RawLoadStoreRoundTrip) {
   EXPECT_EQ(Result, 42);
 }
 
+// Regression test for roadmap H137: an HLSL `int64_t`/`uint64_t` raw or
+// structured-buffer element (e.g. `WaveOps/WaveActiveAllEqual.int64.test`'s
+// own `StructuredBuffer<int64_t>` input) mangles to
+// `feme.cpu.resource.load.raw.i64`/`.store.raw.i64` (`mangleResourceCallName`
+// already handled the mangling generically for any integer bit width), but
+// until this milestone the CPU runtime never defined the `i64`-element
+// helpers -- so any such load/store hit a late JIT "Symbols not found"
+// failure. Verify the new scalar `.i64` helpers round-trip a full 64-bit
+// value (not truncated to 32 bits).
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripI64) {
+  int64_t Storage = 0;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper =
+      addStoreWrapper("test_raw_store_i64", "feme.cpu.resource.store.raw.i64",
+                      Type::getInt64Ty(Ctx));
+  Function *LoadWrapper =
+      addLoadWrapper("test_raw_load_i64", "feme.cpu.resource.load.raw.i64");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  // A value whose high 32 bits are non-zero and differ from its low 32
+  // bits, so a latent truncate-to-`i32` bug would be caught.
+  int64_t ToStore = 0x1122334455667788LL;
+  Store(Heap, 1, 0, 0, &ToStore, true);
+  EXPECT_EQ(Storage, ToStore);
+
+  int64_t Result = 0;
+  Load(Heap, 1, 0, 0, true, &Result);
+  EXPECT_EQ(Result, ToStore);
+}
+
+// The `.v2i64` sibling of `RawLoadStoreRoundTripI64` above -- same H127
+// gap, for an HLSL `int64_t2`-typed raw/structured-buffer element.
+// `.v3i64`/`.v4i64` are not exercised here: see the `FemeRTv2i64` comment
+// in FeMeRuntimeCPU.c for why they are not yet defined.
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripV2I64) {
+  int64_t Storage[2] = {0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_raw_store_v2i64", "feme.cpu.resource.store.raw.v2i64",
+      FixedVectorType::get(Type::getInt64Ty(Ctx), 2));
+  Function *LoadWrapper =
+      addLoadWrapper("test_raw_load_v2i64", "feme.cpu.resource.load.raw.v2i64");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int64_t ToStore[2] = {0x1122334455667788LL, -2};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  for (int I = 0; I < 2; ++I)
+    EXPECT_EQ(Storage[I], ToStore[I]);
+
+  int64_t Result[2] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  for (int I = 0; I < 2; ++I)
+    EXPECT_EQ(Result[I], ToStore[I]);
+}
+
 TEST_F(RuntimeCPUTest, StructuredBufferKindIsAccepted) {
   // The raw-family calls accept both `Kind::Raw` (ByteAddressBuffer) and
   // `Kind::Structured` (StructuredBuffer) -- see "Descriptor heaps".
