@@ -47002,3 +47002,94 @@ not supported, no crash or hang -- byte-identical to H153's/H155's own
 prior runs, confirming no regression. No `Vulkan14FeatureInventory`/
 `VulkanExtensionInventory` change: a pure CPU-backend host-side
 bookkeeping fix, no new Vulkan feature or extension surface.
+
+## H154 re-triage: mid-body safe-diamond gap found real but unsafe to close alone; outlineChainAtBarriers crash discovered
+
+**Goal.** Continue H124e(a)'s remaining `InterlockedAdd`/`InterlockedCompareExchange`/
+`InterlockedCompareStore`/`InterlockedExchange` `.32.test`/`.resources.32.test`
+wrap-entry bucket, following up on H154's prior-session row (which
+characterized the gap as a `PreLatch`/`M` structured-CFG merge pattern).
+
+**FeMe CPU Vulkan Device confirmed** via `vulkaninfo --summary | grep
+deviceName` (`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` exported first).
+
+**Re-triage findings.** A fresh, from-scratch `dxc`+`feme-translate`+`feme-opt`
+IR-level reduction of both `InterlockedAdd.32.test` and
+`InterlockedExchange.32.test` found neither test matches the `PreLatch`/`M`
+shape H154's prior row described -- that characterization was carried over
+from H124e(a)'s own design note without being re-verified against these
+tests' actual real shapes. The real gaps, confirmed this session:
+
+- `InterlockedAdd.32.test`: the loop body contains a genuinely uniform
+  mid-body "safe diamond" (a `CondBr` on the loop's own scalar counter,
+  both arms barrier-free, reconverging at the barrier-containing latch) --
+  `matchLoopShape` had no notion of a diamond at all inside a loop body,
+  even though `isLinearChain` already had an identical concept for its own
+  non-loop straight-line path.
+- Both `InterlockedAdd.32.test` and `InterlockedExchange.32.test`'s loop
+  recurrence depends on a genuinely per-lane (SIMD-widened) value computed
+  *inside* what would become the outlined barrier region -- for
+  `InterlockedAdd.32.test`, the diamond's own reconvergence bookkeeping
+  phis (mask/liveness, not part of any `LoopInduction`) feed the masked-
+  gather computing the next loop-carried value; for
+  `InterlockedExchange.32.test`, the per-lane recurrence itself is computed
+  between two barriers in the same collapsed block.
+
+**Attempted fix and the crash it found.** Extracted `isLinearChain`'s
+"safe diamond" matching into a new shared `matchSafeDiamond` helper (a
+pure, tested, behavior-preserving refactor -- kept), then taught
+`matchLoopShape`'s body-walk to also try it, and generalized the
+`LatchSplitAfter` gating from "`Shape.BodyOrder` empty" to "does
+`Shape.Latch` contain a barrier" (kept -- independently safe and tested,
+see below). With the diamond tolerance in place, `matchLoopShape` did
+correctly accept `InterlockedAdd.32.test`'s real shape -- but
+`EntryWrapperPass` then **crashed** (`cast<UncondBrInst>` assertion
+failure in `outlineChainAtBarriers`/`rebuildSplitChainOrder`, called from
+`buildWrapperForLoop`) instead of producing a wrapper or a clean decline.
+Root cause: `rebuildSplitChainOrder` assumes every block in a chain but
+the last ends in a plain `UncondBrInst`, an assumption the diamond's own
+internal `CondBr` breaks. This is a strictly worse outcome than a clean
+decline (a silent crash risk, not just a missed optimization), so the
+diamond-tolerant `matchLoopShape` change was reverted. A new regression
+test, `FlowMergeLoopWithMidBodySafeDiamondIsDiagnosed`, locks in today's
+correct-decline behavior for this shape.
+
+**What was kept.** The `matchSafeDiamond` extraction (pure refactor,
+verified via the full `EntryWrapperTest.*` suite both before and after),
+and the `LatchSplitAfter` generalization (independently safe on its own --
+it does not by itself introduce any non-linear `BodyOrder` chain, since
+the diamond tolerance that could do that was reverted). New regression
+test `SplitsFlowMergeLoopWithNonEmptyBodyBeforeLatchBarrier` validates the
+generalization: a loop with an ordinary (non-diamond) extra body block
+before a barrier-containing latch, previously always declined via
+`isPureClosedChain` finding the barrier's own side effect, now correctly
+splits and wraps.
+
+**Tests.** `ninja check-feme`: 3106/3109 passed (3 unsupported), 0 failed
+-- includes 23/23 `EntryWrapperTest.*` (up from 21, the 2 new tests above).
+
+**Verification against `check-hlsl-feme-vk`.** Still 16/664 failing,
+unchanged from H157's own baseline -- **0 cases close this session**. The
+same 16 failures as before, including the full `Interlocked*`
+`.32.test`/`.resources.32.test` bucket (9 cases), the `Ddx*`/`ddy_fine`/
+`fwidth` group (5 cases, H124d), `ByteAddressBuffer`/`StructuredBuffer`
+`GetDimensions.test` (2 cases, not yet individually triaged), and
+`WaveOps/WaveActiveMax.test` (H150, confirmed not fixable). One
+pre-existing, unrelated `Feature/PushConstant/array_of_matrices.test`
+"Unexpectedly Passed" (`XFAIL` no longer reproducing) was also observed,
+untouched by this session's own changes -- noted for a future session to
+investigate whether its `XFAIL` marker should be lifted.
+
+**Roadmap update.** H154's row rewritten with these findings (correcting
+its prior `PreLatch`/`M` characterization); H158 (generalize
+`outlineChainAtBarriers` to outline a chain with internal, non-barrier
+branches) and H159 (the deeper per-lane loop-carried-value spilling gap,
+needed for both `InterlockedAdd.32.test` and `InterlockedExchange.32.test`
+regardless of H158) added as new top-level rows.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases):
+647 passed / 36 failed / 19,819 not supported -- byte-identical to the
+established baseline, confirming no regression. No
+`Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a pure
+CPU-backend internal-matcher investigation, no new Vulkan feature or
+extension surface, and ultimately no case closed.
