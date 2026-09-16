@@ -1006,6 +1006,111 @@ TEST(EntryWrapperTest, SplitsFlowMergeLoopWithWavePersistentRecurrence) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap H163 (feme/docs/Roadmap.md): a loop whose latch is outlined
+// whole (H159(a)) leaves the loop's own trip counter recurrence inside
+// that outlined region, where the wrapper's scalar loop cannot see it.
+// It depends on nothing but constants and the header's own phis, though,
+// so it is simply cloned into the wrapper's latch, exactly as the
+// header's condition already is -- rather than declining the shape (or
+// mistaking a plain trip counter for per-lane state, which the header
+// itself reads and so could never be).
+TEST(EntryWrapperTest, SplitsFlowMergeLoopWithStrandedScalarRecurrence) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %gid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %tail = add i32 %gid, 1
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+
+  // The trip counter stays an ordinary scalar induction: one wrapper phi,
+  // and its `add` cloned into the wrapper's own scalar latch.
+  BasicBlock *LatchBB = nullptr;
+  for (BasicBlock &BB : *Wrapper)
+    if (BB.getName() == "loop.latch")
+      LatchBB = &BB;
+  ASSERT_TRUE(LatchBB);
+  bool FoundAdd = false;
+  for (Instruction &I : *LatchBB)
+    if (I.getOpcode() == Instruction::Add)
+      FoundAdd = true;
+  EXPECT_TRUE(FoundAdd);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap H163 (feme/docs/Roadmap.md): a loop's prefix, body and suffix
+// chains are outlined into separate region functions whether or not a
+// barrier separates them, so a value computed before the loop and read
+// inside it crosses a region boundary just as surely as one crossing a
+// barrier -- and must be spilled to the per-wave context array the same
+// way, rather than left as a cross-function reference.
+TEST(EntryWrapperTest, SpillsPreLoopValueUsedInsideLoopBody) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %pre = mul i32 %gid, 3
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %x = add i32 %pre, %i
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  ASSERT_TRUE(M->getFunction("feme_cpu_entry_main"));
+  Function *Prefix0 = M->getFunction("main.prefix0");
+  Function *Body0 = M->getFunction("main.body0");
+  ASSERT_TRUE(Prefix0);
+  ASSERT_TRUE(Body0);
+  EXPECT_TRUE(any_of(instructions(*Prefix0),
+                     [](Instruction &I) { return isa<StoreInst>(&I); }));
+  EXPECT_TRUE(any_of(instructions(*Body0),
+                     [](Instruction &I) { return isa<LoadInst>(&I); }));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap H163 (feme/docs/Roadmap.md): a use of a wave-persistent
 // induction that comes *after* its own recurrence is still legal, as
 // long as no group-sync barrier separates the two -- the reload every

@@ -1340,6 +1340,16 @@ struct LoopShape {
   /// group-wide scalar latch block. When set, no induction's recurrence
   /// may be defined in `Latch` (see `matchLoopShape`).
   bool LatchIsWaveRegion = false;
+
+  /// Pure scalar instructions to clone into the wrapper's own scalar
+  /// latch, in dependency order (roadmap H163). An induction's recurrence
+  /// is normally either a constant or an instruction in the wrapper-cloned
+  /// latch tail, but a loop whose latch is outlined whole
+  /// (\c LatchIsWaveRegion) keeps its trip counter's own `add` inside that
+  /// outlined region. Such a recurrence depends on nothing but constants
+  /// and the header's own phis, so it can simply be cloned into the
+  /// wrapper alongside the header's condition instead.
+  SmallVector<Instruction *, 4> ClonedRecurrences;
 };
 
 /// Walks from \p Start following only single-successor unconditional
@@ -1443,6 +1453,44 @@ bool isPureClosedChainAfter(BasicBlock *BB, Instruction *SplitAfter,
       return false;
     }
   }
+  return true;
+}
+
+/// Collects \p I and every instruction it transitively depends on into
+/// \p Out, in dependency order, if all of them are pure scalar
+/// computations over nothing but constants and \p AllowedPhis -- i.e. if
+/// \p I can simply be cloned into the wrapper's own scalar loop
+/// (roadmap H163), exactly like the loop header's condition already is,
+/// even though it physically lives in a per-wave region. Returns false
+/// (leaving \p Out as it found it) otherwise.
+bool collectClonableScalarRecurrence(Instruction *I,
+                                     ArrayRef<PHINode *> AllowedPhis,
+                                     SmallVectorImpl<Instruction *> &Out) {
+  if (is_contained(Out, I))
+    return true;
+  size_t Mark = Out.size();
+  auto Fail = [&] {
+    Out.truncate(Mark);
+    return false;
+  };
+  if (isa<PHINode>(I) || I->isTerminator() || I->mayHaveSideEffects() ||
+      I->mayReadFromMemory())
+    return Fail();
+  for (Value *Op : I->operands()) {
+    if (isa<Constant>(Op))
+      continue;
+    auto *OpI = dyn_cast<Instruction>(Op);
+    if (!OpI)
+      return Fail();
+    if (auto *PN = dyn_cast<PHINode>(OpI)) {
+      if (is_contained(AllowedPhis, PN))
+        continue;
+      return Fail();
+    }
+    if (!collectClonableScalarRecurrence(OpI, AllowedPhis, Out))
+      return Fail();
+  }
+  Out.push_back(I);
   return true;
 }
 
@@ -1660,6 +1708,15 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     // Everything else is computed inside a per-wave region.
     if (!RegionRank(NextInst))
       return std::nullopt;
+    // Roadmap H163: a pure scalar recurrence over nothing but constants
+    // and the header's own phis (the loop trip counter's own `add`, left
+    // inside an outlined latch by H159(a)) is simply cloned into the
+    // wrapper instead, exactly like the header's condition -- it is not
+    // per-lane state at all, and the header itself may legitimately read
+    // it.
+    if (collectClonableScalarRecurrence(NextInst, HeaderPhis,
+                                        Shape.ClonedRecurrences))
+      continue;
     if (any_of(Ind.HeaderPhi->users(), [&](User *U) {
           auto *UI = dyn_cast<Instruction>(U);
           if (!UI)
@@ -2059,6 +2116,17 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   SmallVector<Value *, 2> NextValues;
   for (LoopInduction &Ind : ScalarInductions)
     NextValues.push_back(Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch));
+  // Roadmap H163: a stranded scalar recurrence is cloned into the
+  // wrapper's own latch far below, but its operands must be snapshotted
+  // here -- the `loopvarN` rewriting just below replaces its uses of the
+  // header's phis with the region function's own arguments (leaving the
+  // original, now dead, copy behind in the outlined region), which the
+  // wrapper-side clone must not inherit.
+  SmallVector<SmallVector<Value *, 4>, 4> ClonedRecurrenceOperands;
+  for (Instruction *I : Shape.ClonedRecurrences)
+    ClonedRecurrenceOperands.emplace_back(I->operand_values().begin(),
+                                          I->operand_values().end());
+
   SmallVector<WavePersistentValue, 2> Persistent;
   assert(PersistentInductions.empty() || !Shape.PrefixOrder.empty());
   for (LoopInduction &Ind : PersistentInductions)
@@ -2329,6 +2397,18 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // latch (roadmap H159(a)) has already run as this loop's last per-wave
   // region instead, and contributes nothing to clone here.
   IRBuilder<> LoopLatch(LoopLatchBB);
+  // Roadmap H163: a pure scalar recurrence stranded inside a per-wave
+  // region is cloned here instead, in dependency order.
+  for (auto [Idx, I] : llvm::enumerate(Shape.ClonedRecurrences)) {
+    Instruction *Clone = I->clone();
+    for (auto [OpNo, Op] : llvm::enumerate(ClonedRecurrenceOperands[Idx])) {
+      auto It = HeaderMap.find(Op);
+      Clone->setOperand(
+          OpNo, It != HeaderMap.end() ? static_cast<Value *>(It->second) : Op);
+    }
+    LoopLatch.Insert(Clone);
+    HeaderMap[I] = Clone;
+  }
   if (!Shape.LatchIsWaveRegion)
     for (Instruction &I : *Shape.Latch) {
       if (I.isTerminator())
