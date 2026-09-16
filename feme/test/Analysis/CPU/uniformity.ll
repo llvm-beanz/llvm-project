@@ -277,3 +277,66 @@ exit:
   ret void
 }
 @g2 = global i32 0
+
+; Roadmap H152: `feme.cpu.resource.atomic.*`/`feme.cpu.image.atomic.*` --
+; the resource-heap runtime-call family `feme::cpu::SPIRVResourceLoweringPass`
+; emits for every `RWStructuredBuffer`/`RWByteAddressBuffer`/`RWBuffer`/
+; `RWTexture*`-destination `InterlockedAdd`/`InterlockedCompareExchange`/etc,
+; as opposed to a groupshared destination's plain `AtomicRMWInst` --
+; needs the exact same `NeverUniform` treatment as `atomicrmw_is_divergent`/
+; `masked_atomicrmw_is_divergent` above, for the identical reason: dispatch
+; is sequential, so each lane's own real atomic op observes whatever the
+; resource holds at that lane's own turn, not one shared answer every lane
+; agrees on, regardless of how uniform this call's own operands (heap
+; handle, binding, offset, compare/exchange values) happen to be. Before
+; this fix, a call site whose every operand was uniform (exactly this
+; case, and the shape `Feature/HLSLLib/InterlockedCompareExchange.
+; resources.32.test` hits) fell through to `Default` (uniform, since
+; every operand is), leaving a real, load-bearing consumer branch (part
+; of that test's own short-circuit `&&`-chain) wrongly classified uniform
+; too, so `feme::cpu::DiamondFlattener` never attempted to flatten it,
+; leaving the genuine divergent branch in place for `feme::cpu::
+; SIMDizePass` to reject later as an unremoved divergent branch.
+; CHECK-LABEL: WaveUniformityInfo for function 'resource_atomic_compare_exchange_is_divergent':
+define void @resource_atomic_compare_exchange_is_divergent() {
+  ; CHECK: DIVERGENT:{{.*}}%old = call i32 @feme.cpu.resource.atomic.compare_exchange.raw.i32
+  %old = call i32 @feme.cpu.resource.atomic.compare_exchange.raw.i32(ptr @heap, i32 0, i32 4, i32 10, i32 0)
+  ; CHECK: DIVERGENT:{{.*}}%cond = icmp
+  %cond = icmp eq i32 %old, 9
+  ; CHECK: DIVERGENT:{{.*}}br i1 %cond
+  br i1 %cond, label %if_true, label %if_false
+
+if_true:
+  br label %exit
+
+if_false:
+  br label %exit
+
+exit:
+  ret void
+}
+@heap = global ptr null
+declare i32 @feme.cpu.resource.atomic.compare_exchange.raw.i32(ptr, i32, i32, i32, i32)
+
+; The `feme.cpu.image.atomic.*` sibling family (texture/image-destination
+; atomics) needs the identical treatment, for the same reason.
+; CHECK-LABEL: WaveUniformityInfo for function 'image_atomic_exchange_is_divergent':
+define void @image_atomic_exchange_is_divergent() {
+  ; CHECK: DIVERGENT:{{.*}}%old = call i32 @feme.cpu.image.atomic.exchange.2d.i32
+  %old = call i32 @feme.cpu.image.atomic.exchange.2d.i32(ptr @imgheap, i32 0, i32 0, i32 0, i32 5)
+  ; CHECK: DIVERGENT:{{.*}}%cond = icmp
+  %cond = icmp eq i32 %old, 9
+  ; CHECK: DIVERGENT:{{.*}}br i1 %cond
+  br i1 %cond, label %if_true, label %if_false
+
+if_true:
+  br label %exit
+
+if_false:
+  br label %exit
+
+exit:
+  ret void
+}
+@imgheap = global ptr null
+declare i32 @feme.cpu.image.atomic.exchange.2d.i32(ptr, i32, i32, i32, i32)

@@ -72,6 +72,38 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
         Callee->getName().starts_with("feme.cpu.masked.atomicrmw."))
       return ValueUniformity::NeverUniform;
 
+    // (Roadmap H152) The resource-heap atomic runtime-call family
+    // (`feme.cpu.resource.atomic.*.{raw,typed}.*`/
+    // `feme.cpu.image.atomic.*.*`, emitted by `feme::cpu::
+    // SPIRVResourceLoweringPass` for every `RWStructuredBuffer`/
+    // `RWByteAddressBuffer`/`RWBuffer`/`RWTexture*`-destination
+    // `InterlockedAdd`/`InterlockedCompareExchange`/etc, as opposed to a
+    // groupshared destination's plain `AtomicRMWInst`/
+    // `AtomicCmpXchgInst`) needs the exact same `NeverUniform` treatment
+    // as `feme.cpu.masked.atomicrmw.*`/`AtomicRMWInst` above, for the
+    // identical reason: dispatch is sequential, so each lane's own real
+    // atomic op observes whatever the resource holds at that lane's own
+    // turn, not one shared answer every lane agrees on, regardless of how
+    // uniform this call's own operands (heap handle, binding, offset,
+    // compare/exchange values) happen to be. Found via
+    // `Feature/HLSLLib/InterlockedCompareExchange.resources.32.test`:
+    // left at the generic operand-driven `Default` rule, a call whose
+    // every operand is uniform (a compile-time-constant compare/exchange
+    // value, exactly this test's own `InterlockedCompareExchange(SBufU[1],
+    // 10u, 0u, OrigSBufU)` shape) was wrongly classified uniform, so
+    // `feme::cpu::DiamondFlattener` left a real, later branch on this
+    // call's result (part of a short-circuit `&&`-chain building
+    // `OutOrig`) un-flattened, believing (wrongly) it was already
+    // uniform -- surfacing only later as `feme-cpu-simdize`'s own,
+    // separately-recomputed uniformity analysis correctly flagged that
+    // same branch as genuinely divergent, with no real value to widen it
+    // into (the branch itself, not just one consumer, having escaped
+    // linearization).
+    if (Callee &&
+        (Callee->getName().starts_with("feme.cpu.resource.atomic.") ||
+         Callee->getName().starts_with("feme.cpu.image.atomic.")))
+      return ValueUniformity::NeverUniform;
+
     StageOpKind Kind;
     if (Callee && feme::isStageOpCall(*CI, &Kind)) {
       switch (Kind) {
