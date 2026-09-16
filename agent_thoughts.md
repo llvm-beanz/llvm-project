@@ -86453,3 +86453,106 @@ implementation. This is genuinely multiple sessions of design work, not
 **Next action right now**: pick item 1 above (re-confirm the 7 H124e
 cases individually) — it's the cheapest way to know whether tackling
 H124e(a)'s design work pays off for 1 case or 7.
+
+# Session: H124e re-triaged (8 confirmed cases, up from 7), H124d/H124m opcodes confirmed, H146 fixed
+
+**Env check (every session, per standing instruction)**: `vulkaninfo
+--summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed.
+
+**Start state**: `check-feme` 3094/3097 passed, 0 failed. `check-hlsl-feme-vk`
+22 failures (of 664), 1 unexpected pass (`array_of_matrices.test`, still
+untouched, still flaky-only-in-full-suite).
+
+**What actually shipped this session**: one real bug fixed (H146), plus a
+much more accurate map of the remaining ~21 failures than any prior
+session had (see "Wins" below).
+
+## Wins (visible, working now)
+
+1. **`inc_counter_array_imm_idx.test` now passes.** Root cause: a uniform
+   (compile-time-constant-operand) `feme.cpu.resource.atomic.*` call
+   (e.g. `Out[0].IncrementCounter()`) was left as a single scalar call
+   instead of one-per-lane, undercounting the result by the wave's lane
+   count (`[1,2,3,4]` instead of `[4,8,12,16]`). Fixed in
+   `feme/lib/Transforms/CPU/SIMDize.cpp`'s `widenResourceCall` by gating
+   the uniform-operand early-return on `!isAtomic(...)`. New regression
+   test `SIMDizeTest.ScalarizesUniformAtomicResourceCall`, confirmed to
+   fail without the fix. `check-feme`: 3095/3098, 0 failed.
+   `check-hlsl-feme-vk`: 22 -> **21** failures.
+2. **H124e's wrap-entry bucket corrected: 8 cases, not 7** — all 8
+   individually re-confirmed via a new triage script that parses each
+   test's real `# RUN:` lines (not guessed), rather than assumed by name
+   similarity: `InterlockedAdd.32.test`, `InterlockedAdd.resources.32.test`,
+   `InterlockedCompareExchange.32.test`, `InterlockedCompareStore.32.test`,
+   `InterlockedCompareStore.resources.32.test`, `InterlockedExchange.32.test`,
+   `ComponentAccumulationDataRace.test`, `GroupMemoryBarrierWithGroupSync.test`.
+3. **H124d (derivative opcodes) and H124m (`OpArrayLength`) upgraded from
+   "suspected" to "confirmed"** — every prior session hedged this with
+   "likely"/"suspected"; this session confirmed the exact opcode number
+   for each of the 7 affected tests and confirmed (via `grep`) that none
+   of these opcodes exist anywhere in upstream MLIR's SPIR-V dialect.
+   Both remain large, deprioritized, multi-session efforts — this
+   session did NOT attempt either, just nailed down the evidence.
+4. **New H147 bucket filed**: 4 functional/runtime-correctness bugs
+   (`matrix.test`, `WaveIsFirstLane.test`, `WaveActiveMax.test`,
+   `WaveReadLaneAt.mtx.test`) that were previously either unconfirmed or
+   loosely lumped in — these are NOT pipeline-creation failures, they
+   compile and run fine but produce wrong output. Genuinely different
+   failure class, not yet triaged at all.
+5. **Native Vulkan CTS regression check**: A/B'd pre-fix vs. post-fix
+   `libfeme_vulkan.so` against `dEQP-VK.compute.*.*atomic*` (19 cases) and
+   the full `dEQP-VK.image.atomic_operations.*` group (6209 cases) —
+   byte-identical totals both times, confirming H146 only touches the
+   HLSL resource-atomic-call path, no effect on GLSL's own atomics.
+
+All committed in 5 small commits (fix+test, roadmap, CTS report, CTS
+regression-check addendum, this file).
+
+## What did NOT get done this session (be honest about it)
+
+- Did not attempt H124e(a)'s actual design work (loop-carried-value
+  spilling + nested-branch-in-loop-body support in
+  `feme/lib/Transforms/CPU/EntryWrapper.cpp`) — still estimated as a full
+  session on its own, now with a confirmed 8-case payoff if closed.
+- Did not attempt `InterlockedCompareExchange.resources.32.test`'s
+  `feme-cpu-simdize` divergent-branch gap or
+  `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+  multi-exit-loop gap — both still need their own IR-level reduction
+  (`feme-opt --feme-convert-spirv-to-llvm`) before any fix attempt.
+- Did not triage any of H147's 4 functional-correctness bugs beyond
+  confirming they exist and are distinct from pipeline-creation failures.
+- Did not attempt H124d/H124m (upstream MLIR SPIR-V dialect work) — both
+  still correctly deprioritized as large, multi-session efforts.
+- `Graphics/VertexShaderResourceCube.test` still not individually
+  triaged — do not assume it shares H124d's derivative-opcode cause.
+- Did not touch `array_of_matrices.test`'s flaky unexpected-pass.
+- Did not touch the `transform_feedback.fuzz.random_geometry` heap
+  corruption (now deferred 27+ sessions).
+
+## Reusable tool from this session
+
+`/tmp/h124e_triage/triage2.sh` — parses a test's actual `# RUN:` lines
+(handles `%t`/`%dxc_target`/`%offloader`/`FileCheck %s` substitution the
+same way `lit.cfg.py` does, strips CRLF, uses real
+`-spirv -fspv-target-env=vulkan1.3` dxc flags and `--api=vk` for
+`offloader`). Not committed (scratch tool, lives only in `/tmp`), but the
+next session should recreate it rather than falling back to ad hoc
+one-off `split-file`/`dxc`/`offloader` invocations — it is meaningfully
+more reliable and was the reason this session could correct several
+prior sessions' case counts.
+
+## Next action right now
+
+Pick one:
+- **~1-2 hours**: reduce `InterlockedCompareExchange.resources.32.test`'s
+  `feme-cpu-simdize` divergent-branch gap to its exact IR shape via
+  `feme-opt --feme-convert-spirv-to-llvm`, before attempting a fix.
+- **~1-2 hours**: same for `InterlockedExchange.resources.32.test`'s
+  `feme-cpu-linearize` multi-exit-loop gap.
+- **~30-60 min each, x4**: individually triage H147's 4
+  functional-correctness bugs (reproduce standalone via `offloader`, dump
+  actual vs. expected values) — cheapest way to find another tractable,
+  well-scoped fix like H146.
+- **Full session**: attempt H124e(a)'s actual design work (highest
+  payoff — up to 8 cases at once — but also the largest, least-scoped
+  remaining item).
