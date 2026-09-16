@@ -298,6 +298,46 @@ TEST(EntryWrapperTest, BranchMergePhiIsDiagnosed) {
   EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
 }
 
+// Roadmap H124e(a)'s own follow-on gap (feme/docs/Roadmap.md, real-world
+// case `WaveOps/GroupMemoryBarrierWithGroupSync.test`): `LoopShape`'s own
+// doc comment requires its `PrefixOrder`/`SuffixOrder` chains to contain
+// no barrier of their own -- a barrier sitting in the prefix, before the
+// loop even starts, is declined rather than silently folded into the
+// loop's own single wave region (which would drop that barrier's
+// synchronization semantics). Since the whole function is a loop (not a
+// straight-line chain either), `splitAtGroupSyncBarriers` cannot match it
+// as a fallback, so this is diagnosed rather than wrapped.
+TEST(EntryWrapperTest, LoopWithBarrierInPrefixIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
+}
+
 // Roadmap L45 (feme/docs/Roadmap.md): a uniform two-way branch whose arms
 // are each barrier-free and reconverge at a merge block with its own phi
 // -- entirely outside every `..._with_group_sync` barrier's own region --
@@ -608,6 +648,84 @@ TEST(EntryWrapperTest, SplitsBarrierInsideUniformLoop) {
   // A single barrier splits the loop body into 2 regions (before/after);
   // the (trivial) prefix and suffix chains each get their own wave loop
   // too, for 4 total.
+  EXPECT_EQ(NumWaveLoopHeaders, 4u);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap H124e(a) (feme/docs/Roadmap.md): a "Flow-merge loop" whose
+// structured-control-flow latch collapsed into the same physical block as
+// its own barrier region (no separate `BodyOrder` block survives a
+// preceding `JumpThreadingPass` run) -- `matchLoopShape` must split that
+// one block right after its barrier's last occurrence into a `BodyOrder`
+// entry (`flow`'s own barrier-and-earlier half) and a fresh pure-
+// recurrence `Latch` (its tail), rather than declining the shape
+// outright. `%hv` (computed in `header`, used only in the barrier-and-
+// earlier half of `flow`) exercises `HeaderDerivedValues` threading: it
+// must be passed through as its own `loopvarN` trailing parameter, not
+// just the genuine induction `%i`.
+TEST(EntryWrapperTest, SplitsFlowMergeLoopWithHeaderDerivedValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %hv = xor i32 %i, 1
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %use = add i32 %hv, %gid
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(M->getFunction("main"));
+  Function *Body0 = M->getFunction("main.body0");
+  ASSERT_TRUE(Body0);
+
+  // `%i` (loopvar0) is the genuine induction; `%hv` (loopvar1) is the
+  // extra `HeaderDerivedValues` entry this shape specifically exercises
+  // -- it must show up as its own trailing `loopvarN` parameter on the
+  // outlined barrier region, not just the induction.
+  bool FoundHeaderDerivedParam = false;
+  for (Argument &A : Body0->args())
+    if (A.getName() == "loopvar1")
+      FoundHeaderDerivedParam = true;
+  EXPECT_TRUE(FoundHeaderDerivedParam);
+
+  bool FoundFence = false;
+  unsigned NumWaveLoopHeaders = 0;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName().starts_with("wave.loop.header"))
+      ++NumWaveLoopHeaders;
+    for (Instruction &I : BB) {
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+    }
+  }
+  // `%i` (loopvar0) is the genuine induction; `%hv` (loopvar1) is the
+  // extra `HeaderDerivedValues` entry this shape specifically exercises.
+  // The collapsed block splits into a `BodyOrder` entry (before the
+  // barrier) and a fresh `Latch` (the pure-recurrence tail); together
+  // with the (trivial) prefix and suffix chains, that's 4 wave loops.
   EXPECT_EQ(NumWaveLoopHeaders, 4u);
   EXPECT_TRUE(FoundFence);
   EXPECT_FALSE(verifyModule(*M, &errs()));

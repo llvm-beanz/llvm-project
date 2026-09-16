@@ -571,6 +571,7 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       unsigned N;
       bool Failed =
           Arg.getName().drop_front(strlen("loopvar")).getAsInteger(10, N);
+      if (Failed || N >= LoopScalars.size())
       assert(!Failed && N < LoopScalars.size());
       (void)Failed;
       CallArgs.push_back(LoopScalars[N]);
@@ -1138,10 +1139,22 @@ struct LoopInduction {
 /// header, and from the loop's exit block to a `ret`) that contain no
 /// barrier of their own. Every block of the function belongs to exactly
 /// one of these four regions.
+///
+/// Roadmap H124e(a): a body chain whose barrier(s) and pure recurrence
+/// collapse into one single physical block (the block reached from the
+/// header's body successor is itself the one whose own unconditional
+/// branch targets the header directly) is also supported: `matchLoopShape`
+/// splits that single block into its own trailing `BodyOrder` entry (up to
+/// and including the last barrier) and `Latch` (the remaining pure
+/// tail) once every other check has already passed. This shape is common
+/// once a `feme::cpu::EntryWrapperPass`-preceding `JumpThreadingPass` run
+/// (see `feme::cpu::runPipeline`, `feme/lib/Target/CPU/Pipeline.cpp`) has
+/// already collapsed the SPIR-V structurizer's own loop-merge block into
+/// the loop body proper.
 struct LoopShape {
-  BasicBlock *Header;
-  BasicBlock *Latch;
-  BasicBlock *ExitBlock;
+  BasicBlock *Header = nullptr;
+  BasicBlock *Latch = nullptr;
+  BasicBlock *ExitBlock = nullptr;
   SmallVector<BasicBlock *, 4> PrefixOrder;
   /// The header's body successor .. the block just before `Latch`
   /// (exclusive of `Latch` itself -- see `matchLoopShape`'s doc comment).
@@ -1218,6 +1231,59 @@ bool isPureClosedChain(ArrayRef<BasicBlock *> Blocks,
   return true;
 }
 
+/// The same "pure, closed scalar recurrence" check `isPureClosedChain`
+/// performs (see its doc comment), but over only the instructions of a
+/// single block \p BB strictly after \p SplitAfter (exclusive), rather
+/// than the whole block -- used when a loop's body and latch have
+/// collapsed into one physical block (see `matchLoopShape`'s "a
+/// barrier-and-recurrence-collapsed single latch block" case): unlike
+/// `isPureClosedChain`, no instruction at or before \p SplitAfter is ever
+/// considered "local" here, so a tail instruction referencing one is
+/// correctly rejected as impure, exactly as it would be if that earlier
+/// instruction lived in a separate, non-latch block instead.
+bool isPureClosedChainAfter(BasicBlock *BB, Instruction *SplitAfter,
+                           ArrayRef<PHINode *> AllowedPhis) {
+  SmallPtrSet<Instruction *, 8> Local;
+  for (auto It = std::next(SplitAfter->getIterator()), End = BB->end();
+       It != End && !It->isTerminator(); ++It)
+    Local.insert(&*It);
+  for (auto It = std::next(SplitAfter->getIterator()), End = BB->end();
+       It != End && !It->isTerminator(); ++It) {
+    Instruction &I = *It;
+    if (isa<PHINode>(I))
+      continue;
+    if (I.mayHaveSideEffects())
+      return false;
+    for (Value *Op : I.operands()) {
+      if (isa<Constant>(Op))
+        continue;
+      if (auto *OpI = dyn_cast<Instruction>(Op); OpI && Local.contains(OpI))
+        continue;
+      if (auto *PN = dyn_cast<PHINode>(Op); PN && is_contained(AllowedPhis, PN))
+        continue;
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Whether any block in \p Blocks contains a `..._with_group_sync` barrier
+/// call -- `LoopShape`'s own doc comment requires its `PrefixOrder`/
+/// `SuffixOrder` chains to contain none of their own (splitting a barrier
+/// inside either is not yet supported by this milestone; only `BodyOrder`/
+/// `Latch` may contain one), so `matchLoopShape` uses this to enforce that
+/// invariant explicitly rather than silently miscompiling a shape that
+/// violates it.
+bool containsGroupSyncBarrier(ArrayRef<BasicBlock *> Blocks) {
+  for (BasicBlock *BB : Blocks)
+    for (Instruction &I : *BB)
+      if (auto *CI = dyn_cast<CallInst>(&I))
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync)
+          return true;
+  return false;
+}
+
 /// Recognizes \p F's shape as the header-tested loop `LoopShape` describes
 /// (see its doc comment), or `std::nullopt` if it is not -- without
 /// emitting any diagnostic: an unrecognized shape here just means the
@@ -1275,11 +1341,41 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     Shape.ExitBlock = ExitCandidate;
     break;
   }
-  if (!Shape.Latch || Shape.BodyOrder.empty())
-    return std::nullopt; // No separate region block, or shape mismatch.
+  if (!Shape.Latch)
+    return std::nullopt; // No matching backedge found: not this shape.
 
-  if (!isPureClosedChain({Shape.Latch}, HeaderPhis))
+  // Roadmap H124e(a): the body's barrier(s) and the loop's own pure
+  // recurrence may have collapsed into one single physical block (`Latch`
+  // itself, with `Shape.BodyOrder` empty) -- typically because a
+  // preceding `JumpThreadingPass` run already eliminated the SPIR-V
+  // structurizer's own loop-merge block (see this function's own doc
+  // comment). If `Shape.Latch` contains a group-sync barrier, split it
+  // right after that barrier's *last* occurrence: everything up to and
+  // including it becomes this loop's own final `BodyOrder` entry (still
+  // free to contain arbitrary per-wave side effects, exactly like any
+  // other `BodyOrder` block), and only the remaining tail is checked
+  // below as the loop's own pure recurrence, matching the ordinary
+  // multi-block case's own check just below. No mutation happens unless
+  // every other check below also succeeds -- this function must leave
+  // \p F untouched on any `std::nullopt` return, since its caller falls
+  // back to `matchBranchShape`/`splitAtGroupSyncBarriers` on the
+  // original, unmodified \p F otherwise.
+  Instruction *LatchSplitAfter = nullptr;
+  if (Shape.BodyOrder.empty()) {
+    for (Instruction &I : *Shape.Latch) {
+      if (auto *CI = dyn_cast<CallInst>(&I)) {
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync)
+          LatchSplitAfter = CI;
+      }
+    }
+    if (!LatchSplitAfter)
+      return std::nullopt; // No separate region block, or shape mismatch.
+    if (!isPureClosedChainAfter(Shape.Latch, LatchSplitAfter, HeaderPhis))
+      return std::nullopt;
+  } else if (!isPureClosedChain({Shape.Latch}, HeaderPhis)) {
     return std::nullopt;
+  }
 
   for (LoopInduction &Ind : Shape.Inductions) {
     Value *Initial = Ind.HeaderPhi->getIncomingValueForBlock(
@@ -1295,6 +1391,16 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     return std::nullopt;
   Shape.SuffixOrder.push_back(SuffixEnd);
 
+  // `LoopShape`'s own doc comment requires the prefix/suffix chains to
+  // contain no barrier of their own -- splitting one inside either is not
+  // yet supported by this milestone (roadmap H124e(a) follow-on). Without
+  // this check, a barrier hiding in the prefix/suffix would silently be
+  // folded into that region's own single wave loop instead of getting its
+  // own synchronization boundary, miscompiling the barrier's semantics.
+  if (containsGroupSyncBarrier(Shape.PrefixOrder) ||
+      containsGroupSyncBarrier(Shape.SuffixOrder))
+    return std::nullopt;
+
   // Every block of `F` must belong to exactly one region: otherwise some
   // other block reaches this shape from elsewhere (a second predecessor
   // this match didn't account for), which is not a shape this milestone
@@ -1304,6 +1410,21 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
                    Shape.SuffixOrder.size();
   if (Covered != F.size())
     return std::nullopt;
+
+  // Every check above has now passed, so this match is final: physically
+  // split the collapsed single block (see above) into its own `BodyOrder`
+  // entry and `Latch`, the one remaining mutation this function performs
+  // (deferred this late so every earlier `std::nullopt` return above
+  // still leaves \p F completely untouched). `Shape.Latch`'s own identity
+  // does not survive this split -- it becomes the new `BodyOrder` entry,
+  // while the freshly split-off tail block becomes the new `Shape.Latch`.
+  if (LatchSplitAfter) {
+    BasicBlock *OldLatch = Shape.Latch;
+    BasicBlock *NewLatch = SplitBlock(OldLatch, LatchSplitAfter->getNextNode(),
+                                      static_cast<DominatorTree *>(nullptr));
+    Shape.BodyOrder.push_back(OldLatch);
+    Shape.Latch = NewLatch;
+  }
 
   return Shape;
 }
@@ -1572,6 +1693,46 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     for (Use *U : UsesInBody)
       U->set(NewArg);
   }
+
+  // Roadmap H124e(a): the body chain may also directly reference some
+  // OTHER (non-phi) instruction still local to `Shape.Header` -- e.g. a
+  // `feme::cpu::SIMDizePass`-inserted per-iteration "splat" of an
+  // induction variable, computed once in the header and reused unchanged
+  // by the barrier region(s) -- previously untested, since a loop whose
+  // body chain referenced a header-local value like this never
+  // successfully matched `matchLoopShape` at all until this milestone's
+  // collapsed-single-block-latch case started recognizing this shape.
+  // `Shape.Header` is cloned (not outlined) exactly like its own phis
+  // above, so give each such value the same trailing-parameter treatment,
+  // continuing the same `loopvarN` numbering right after the real
+  // inductions -- `buildWaveLoop`'s own by-name dispatch already threads
+  // any `loopvarN` parameter through `LoopScalars` without needing to
+  // know the difference between a genuine induction and one of these.
+  SmallVector<Instruction *, 2> HeaderDerivedValues;
+  for (Instruction &I : *Shape.Header) {
+    if (isa<PHINode>(I) || I.isTerminator())
+      continue;
+    if (any_of(I.uses(), [&](Use &U) {
+          auto *UI = dyn_cast<Instruction>(U.getUser());
+          return UI && is_contained(Shape.BodyOrder, UI->getParent());
+        }))
+      HeaderDerivedValues.push_back(&I);
+  }
+  for (auto [M, HV] : llvm::enumerate(HeaderDerivedValues)) {
+    unsigned N = Shape.Inductions.size() + M;
+    SmallVector<Use *, 4> UsesInBody;
+    for (Use &U : HV->uses())
+      if (auto *UI = dyn_cast<Instruction>(U.getUser());
+          UI && is_contained(Shape.BodyOrder, UI->getParent()))
+        UsesInBody.push_back(&U);
+
+    auto AppendResult =
+        appendTrailingParam(*WaveBody, HV->getType(), "loopvar" + Twine(N));
+    WaveBody = AppendResult.first;
+    Argument *NewArg = AppendResult.second;
+    for (Use *U : UsesInBody)
+      U->set(NewArg);
+  }
   // Refresh `Shape`'s pointers: `appendTrailingParam` moved every
   // instruction/block into a new function unchanged, so only `WaveBody`
   // itself (and the header/latch phi/instruction identities, unaffected by
@@ -1581,7 +1742,22 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   SmallVector<CallInst *, 4> Barriers;
   DenseMap<Instruction *, unsigned> IndexOf;
   unsigned Idx = 0;
+  // `Shape.PrefixOrder`'s own blocks never contain a barrier (that's what
+  // makes them "prefix"), but a value they define -- e.g. a wave-invariant
+  // computation hoisted ahead of the loop -- can still be *used* inside
+  // `Shape.BodyOrder`, after one of its barriers. Index them here too (with
+  // indices that precede every `Shape.BodyOrder` index below), so
+  // `spillValuesLiveAcrossBarriers`'s own def-before-barrier check below
+  // recognizes such a value as needing to be spilled, exactly like the
+  // straight-line (non-loop) path's `splitAtGroupSyncBarriers` already does
+  // by indexing its whole linear chain in one pass.
+  SmallVector<BasicBlock *, 8> SpillOrder(Shape.PrefixOrder.begin(),
+                                          Shape.PrefixOrder.end());
+  for (BasicBlock *BB : Shape.PrefixOrder)
+    for (Instruction &I : *BB)
+      IndexOf[&I] = Idx++;
   for (BasicBlock *BB : Shape.BodyOrder) {
+    SpillOrder.push_back(BB);
     for (Instruction &I : *BB) {
       IndexOf[&I] = Idx++;
       if (auto *CI = dyn_cast<CallInst>(&I))
@@ -1591,8 +1767,8 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     }
   }
   StructType *SpillTy = nullptr;
-  if (!spillValuesLiveAcrossBarriers(WaveBody, Shape.BodyOrder, Barriers,
-                                     IndexOf, SpillTy))
+  if (!spillValuesLiveAcrossBarriers(WaveBody, SpillOrder, Barriers, IndexOf,
+                                     SpillTy))
     return nullptr;
 
   Function *PrefixFn = Shape.PrefixOrder.empty()
@@ -1627,10 +1803,17 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
 
   // The prefix region's own wave loop runs before the wrapper's scalar
   // loop phi(s) exist; it never actually reads its `loopvarN` parameter
-  // (only the loop body does), so a poison placeholder is safe there.
+  // (only the loop body does), so a poison placeholder is safe there --
+  // needed for every `loopvarN` slot, not just the genuine inductions:
+  // `outlineChain` always copies `WaveBody`'s *current* (already fully
+  // extended) function type verbatim, so `PrefixFn` itself carries a
+  // `loopvarN` parameter for each `HeaderDerivedValues` entry too, even
+  // though its own body never references one.
   SmallVector<Value *, 2> LoopScalars;
   for (LoopInduction &Ind : Shape.Inductions)
     LoopScalars.push_back(PoisonValue::get(Ind.HeaderPhi->getType()));
+  for (Instruction *HV : HeaderDerivedValues)
+    LoopScalars.push_back(PoisonValue::get(HV->getType()));
 
   BasicBlock *Pred = EntryBB;
   if (PrefixFn)
@@ -1669,6 +1852,14 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     HeaderMap[&I] = Clone;
     ClonedCond = Clone;
   }
+  // Overwrite each `HeaderDerivedValues` entry's placeholder (reserved
+  // above) with its own cloned wrapper-side value: unlike a genuine
+  // induction, no phi is needed here at all -- `LoopHeaderBB` itself
+  // re-executes (and so recomputes this value fresh) every iteration,
+  // ahead of `LoopBodyBB`, so the plain cloned `Instruction*` already
+  // dominates every body region's own call site.
+  for (auto [M, HV] : llvm::enumerate(HeaderDerivedValues))
+    LoopScalars[Shape.Inductions.size() + M] = HeaderMap[HV];
   auto *HeaderBr = cast<CondBrInst>(Shape.Header->getTerminator());
   Value *Cond = ClonedCond
                     ? static_cast<Value *>(ClonedCond)
@@ -2073,12 +2264,14 @@ Function *buildWrapper(Function &WaveBodyIn) {
         return Matched && Matched->GroupSync;
       });
   if (HasGroupSyncBarrier) {
-    if (std::optional<LoopShape> Shape = matchLoopShape(*WaveBody))
+    if (std::optional<LoopShape> Shape = matchLoopShape(*WaveBody)) {
       return buildWrapperForLoop(*WaveBody, *Shape, WaveSize, GroupSizeTotal,
                                  WavesPerGroup);
-    if (std::optional<BranchShape> Shape = matchBranchShape(*WaveBody))
+    }
+    if (std::optional<BranchShape> Shape = matchBranchShape(*WaveBody)) {
       return buildWrapperForBranch(*WaveBody, *Shape, WaveSize, GroupSizeTotal,
                                    WavesPerGroup);
+    }
     std::optional<SmallVector<Function *, 4>> Split =
         splitAtGroupSyncBarriers(WaveBody, Boundaries, SpillTy);
     if (!Split)
