@@ -45854,3 +45854,45 @@ FeMe-local raw-word preprocessing pass that fixes it.
 H140 and H141 are struck through on the roadmap as fixed (both filed
 and closed in the same session).
 
+### H142: `Graphics/VertexShaderResourceCube.test`'s aggregate-`select` SIMDize gap
+
+Found this session via a new multi-shader-pipeline triage script
+(`run_test_multi.sh`, extending the prior session's single-shader
+`run_test2.sh` to handle a real vertex+pixel pipeline test, matching
+this test's own `# RUN:` lines). The vertex shader assigns a whole
+`float4x4 localToWorld` local wholesale (not field-by-field) along
+each arm of a divergent `SV_VertexID`-based `if`/`else`; once
+`mem2reg` promotes it to a single aggregate-typed `phi`,
+`feme::cpu::LinearizePass` rewrites that `phi` into a single
+aggregate-typed `select` -- a producer shape `SIMDize.cpp`'s
+`checkAggregateValueSupported` never anticipated, since every
+previously-triaged real case scalarized each field into its own
+scalar `select` before rebuilding the struct via `insertvalue`. See
+the roadmap's own H142 entry for the full root-cause narrative and
+the new `widenAggregateSelect` function (the aggregate analogue of
+the pre-existing `widenVectorSelect`) that fixes it.
+
+**Verification.**
+- `ninja check-feme`: **3085/3088 passed** (3 unsupported), 0 failed,
+  +1 new unit test (`SIMDizeTest.DecomposesAggregateSelect`), 0
+  regressions.
+- `check-hlsl-feme-vk`: `Graphics/VertexShaderResourceCube.test` now
+  passes (confirmed individually, both the compile/run and its
+  `imgdiff` golden-image comparison); full-suite failure count drops
+  from 26 to **25** (of 664; the same 1 unexpectedly-passing
+  `Feature/PushConstant/array_of_matrices.test` from H140/H141 remains
+  unchanged, not yet investigated this session either).
+- No native Vulkan CTS spot-check this session: this is a CPU-backend
+  divergence-handling fix specific to a whole-aggregate value merged
+  across a branch (a shape triggered by this exact vertex-shader
+  idiom), not a change with an obvious, narrowly-scoped `dEQP-VK.*`
+  group to target; the `check-hlsl-feme-vk` full-suite re-run above is
+  this fix's own regression check.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a
+  CPU-backend SIMDization correctness fix, not a feature/extension-
+  support change.
+
+H142 is struck through on the roadmap as fixed (filed and closed in
+the same session).
+
+
