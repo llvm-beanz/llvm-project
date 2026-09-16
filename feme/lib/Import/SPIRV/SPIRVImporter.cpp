@@ -19,6 +19,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
@@ -36,6 +37,7 @@ constexpr uint32_t kOpExtInstImport = 11;
 constexpr uint32_t kOpExtInst = 12;
 constexpr uint32_t kOpTypeFloat = 22;
 constexpr uint32_t kOpTypeVector = 23;
+constexpr uint32_t kOpTypeStruct = 30;
 constexpr uint32_t kOpTypeFunction = 33;
 constexpr uint32_t kOpFunction = 54;
 constexpr uint32_t kOpFunctionParameter = 55;
@@ -163,6 +165,116 @@ stripNonSemanticExtInst(llvm::ArrayRef<uint32_t> Words) {
                                 NonSemanticSetIds.count(Words[I + 3]);
     if (!IsNonSemanticImport && !IsNonSemanticExtInst)
       Result.append(Words.begin() + I, Words.begin() + I + WordCount);
+    I += WordCount;
+  }
+  return Result;
+}
+
+/// `mlir::spirv::Deserializer::processStructType` treats any `OpTypeStruct`
+/// with an `OpName` debug string as an "identified" (named) struct type,
+/// looked up and de-duplicated purely by that name string via
+/// `spirv::StructType::getIdentified` -- with no scoping per distinct
+/// SPIR-V <id> at all. A source-level HLSL struct nested at least three
+/// `ConstantBuffer`/plain-struct levels deep needs two genuinely different
+/// physical layouts for the same struct (one `ArrayStride`-16 Uniform-side
+/// body, one `ArrayStride`-4 StorageBuffer-side body, say) -- DXC emits
+/// both as separate `OpTypeStruct` <id>s, but names both with the same
+/// plain source-level identifier (e.g. two distinct <id>s both named
+/// "Z"). The deserializer then resolves both to the very same identified
+/// `spirv::StructType` object and calls `trySetBody` on it twice with
+/// disagreeing member layouts; `StructType::trySetBody` correctly refuses
+/// to redefine an identified type's body a second time with different
+/// content, but `processStructType` propagates that failure via a bare
+/// `return failure();`, with no call to `emitError` first -- so this
+/// entire class of module is rejected with zero diagnostic text at all
+/// (confirmed via a direct `mlir-translate --deserialize-spirv` trace on a
+/// minimized repro; `spirv-val` accepts the same module as valid SPIR-V,
+/// so this is a deserializer-side gap, not a malformed-input one).
+///
+/// Rather than patch upstream MLIR's identified-struct-type table to be
+/// <id>-scoped instead of name-scoped (a correct but much larger change,
+/// deferred per roadmap H124d/H124m's own "large upstream-MLIR op/dialect
+/// gap" precedent), this renames every `OpName` targeting an `OpTypeStruct`
+/// <id> beyond the first one seen for a given name, appending that <id>'s
+/// own numeric value as a suffix -- guaranteed unique, and semantically a
+/// no-op, since `OpName`/`OpMemberName` are debug info only and never
+/// participate in a module's real semantics. The renamed <id> then takes
+/// `processStructType`'s `structIdentifier.empty()` literal/anonymous-
+/// struct path instead of the identified-type path, sidestepping the
+/// `trySetBody` collision entirely. Returns a copy of \p Words with those
+/// `OpName` strings rewritten, or \p Words itself (unmodified) if no
+/// struct name collision is present -- the common case.
+llvm::SmallVector<uint32_t>
+disambiguateDuplicateStructNames(llvm::ArrayRef<uint32_t> Words) {
+  if (Words.size() <= kSPIRVHeaderWords)
+    return llvm::SmallVector<uint32_t>(Words);
+
+  // First pass: find every `OpTypeStruct` result <id>.
+  llvm::DenseSet<uint32_t> StructIds;
+  for (size_t I = kSPIRVHeaderWords; I < Words.size();) {
+    uint32_t WordCount = Words[I] >> 16;
+    uint32_t Opcode = Words[I] & 0xffff;
+    if (WordCount == 0 || I + WordCount > Words.size())
+      break;
+    if (Opcode == kOpTypeStruct && WordCount >= 2)
+      StructIds.insert(Words[I + 1]);
+    I += WordCount;
+  }
+
+  if (StructIds.empty())
+    return llvm::SmallVector<uint32_t>(Words);
+
+  // Second pass: for every `OpName` targeting one of those <id>s, record
+  // which struct <id>s share the same name string, in first-seen order.
+  llvm::StringMap<llvm::SmallVector<uint32_t, 2>> StructIdsByName;
+  for (size_t I = kSPIRVHeaderWords; I < Words.size();) {
+    uint32_t WordCount = Words[I] >> 16;
+    uint32_t Opcode = Words[I] & 0xffff;
+    if (WordCount == 0 || I + WordCount > Words.size())
+      break;
+    if (Opcode == kOpName && WordCount >= 3 && StructIds.count(Words[I + 1])) {
+      unsigned NameIndex = static_cast<unsigned>(I + 2);
+      std::string Name = decodeLiteralString(Words, NameIndex);
+      StructIdsByName[Name].push_back(Words[I + 1]);
+    }
+    I += WordCount;
+  }
+
+  llvm::DenseSet<uint32_t> IdsToRename;
+  for (auto &Entry : StructIdsByName)
+    for (uint32_t Id : llvm::drop_begin(Entry.second, 1))
+      IdsToRename.insert(Id);
+
+  if (IdsToRename.empty())
+    return llvm::SmallVector<uint32_t>(Words);
+
+  // Third pass: rebuild the module, rewriting every `OpName` (and its
+  // matching `OpMemberName`, which shares its target-struct <id> as its
+  // own operand 0) that targets a to-be-renamed <id> with a
+  // guaranteed-unique "<original>.<id>" name.
+  llvm::SmallVector<uint32_t> Result(Words.begin(),
+                                     Words.begin() + kSPIRVHeaderWords);
+  for (size_t I = kSPIRVHeaderWords; I < Words.size();) {
+    uint32_t WordCount = Words[I] >> 16;
+    uint32_t Opcode = Words[I] & 0xffff;
+    if (WordCount == 0 || I + WordCount > Words.size()) {
+      Result.append(Words.begin() + I, Words.end());
+      break;
+    }
+    if (Opcode == kOpName && WordCount >= 3 &&
+        IdsToRename.count(Words[I + 1])) {
+      unsigned NameIndex = static_cast<unsigned>(I + 2);
+      std::string Name = decodeLiteralString(Words, NameIndex);
+      std::string Renamed = (Name + "." + llvm::Twine(Words[I + 1])).str();
+      size_t OpStart = Result.size();
+      Result.push_back(0); // Opcode/word-count patched in below.
+      Result.push_back(Words[I + 1]);
+      unsigned NameWords = appendLiteralString(Result, Renamed);
+      Result[OpStart] =
+          ((static_cast<uint32_t>(2 + NameWords)) << 16) | kOpName;
+    } else {
+      Result.append(Words.begin() + I, Words.begin() + I + WordCount);
+    }
     I += WordCount;
   }
   return Result;
@@ -795,6 +907,7 @@ llvm::Expected<Module> SPIRVImporter::import(llvm::MemoryBufferRef Buffer,
   llvm::SmallVector<uint32_t> Filtered = stripNonSemanticExtInst(RawWords);
   Filtered = lowerProjectiveImageSamples(Filtered);
   Filtered = lowerImageQueryOpcodes(Filtered);
+  Filtered = disambiguateDuplicateStructNames(Filtered);
   llvm::ArrayRef<uint32_t> Binary = Filtered;
 
   mlir::spirv::DeserializationOptions DeserOpts;

@@ -748,4 +748,81 @@ TEST(SPIRVImporterTest, LowersImageQuerySamples) {
   EXPECT_EQ(CallCount, 1u);
 }
 
+/// A minimal `void main()` module with two distinct `OpTypeStruct` <id>s,
+/// each named "Z" via its own `OpName` (but with different member lists,
+/// so the two are not merely duplicate declarations of an identical
+/// type) -- exactly the shape a sufficiently deeply-nested HLSL
+/// `ConstantBuffer` struct compiles to (see `Feature/ConstantBufferT/
+/// nested.test`, bug https://github.com/llvm/llvm-project/issues/180600):
+/// DXC must emit one Uniform-layout copy and one StorageBuffer-layout copy
+/// of the same source-level struct once it can no longer flatten the
+/// struct into its enclosing cbuffer wrapper, and both copies keep the
+/// same plain source-level debug name. MLIR's deserializer resolves an
+/// `OpName`-carrying `OpTypeStruct` to an "identified" `spirv::StructType`
+/// keyed purely by that name string (see `processStructType` in
+/// `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`), so without
+/// `disambiguateDuplicateStructNames`'s rewrite, the second struct's
+/// `trySetBody` call collides with the first's and fails -- silently, with
+/// no diagnostic at all -- rather than merely being treated as two
+/// distinct types.
+std::vector<uint32_t> buildDuplicateNamedStructModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t I32 = B.nextId();
+  uint32_t StructA = B.nextId();
+  uint32_t StructB = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*Vertex=*/0, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  {
+    std::vector<uint32_t> Operands{StructA};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("Z"));
+    B.emit(/*OpName=*/5, Operands);
+  }
+  {
+    std::vector<uint32_t> Operands{StructB};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("Z"));
+    B.emit(/*OpName=*/5, Operands);
+  }
+  B.emit(/*OpTypeInt=*/21, {I32, 32, /*Signed=*/1});
+  // `%StructA = OpTypeStruct %I32` -- one `i32` member.
+  B.emit(/*OpTypeStruct=*/30, {StructA, I32});
+  // `%StructB = OpTypeStruct %I32 %I32` -- two `i32` members: a genuinely
+  // different body from `%StructA`'s, despite sharing its debug name.
+  B.emit(/*OpTypeStruct=*/30, {StructB, I32, I32});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
+TEST(SPIRVImporterTest, DisambiguatesDuplicateStructNames) {
+  Context Ctx;
+  SPIRVImporter Importer;
+  std::vector<uint32_t> Words = buildDuplicateNamedStructModule();
+  llvm::Expected<Module> Result = Importer.import(
+      llvm::MemoryBufferRef(
+          llvm::StringRef(reinterpret_cast<const char *>(Words.data()),
+                          Words.size() * sizeof(uint32_t)),
+          "spirv-test"),
+      ImportOptions{}, Ctx);
+  // Without `disambiguateDuplicateStructNames`, this fails: MLIR's
+  // deserializer resolves both `OpTypeStruct`s to the same identified
+  // `spirv::StructType` (keyed by the shared "Z" name) and the second
+  // `trySetBody` call -- since the member lists genuinely differ --
+  // fails, silently, with no diagnostic (see this test's own comment).
+  EXPECT_THAT_EXPECTED(Result, llvm::Succeeded());
+}
+
 } // namespace
