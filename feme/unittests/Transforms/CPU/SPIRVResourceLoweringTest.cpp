@@ -3469,6 +3469,46 @@ TEST(SPIRVResourceLoweringTest, LowersGatherCmpArray2DToImageGatherCmpArray2D) {
   EXPECT_TRUE(cast<ConstantInt>(GatherCmp->getArgOperand(12))->isOne());
 }
 
+TEST(SPIRVResourceLoweringTest,
+     LowersGatherCmpArray2DConstOffsetToImageGatherCmpArray2DWithOffset) {
+  // Roadmap H124q: unlike the Plain2D-only-tested precedent originally
+  // assumed sufficient, a real `deqp-vk`-independent case
+  // (`Feature/Textures/Array.GatherCmp.test`'s own `int2(1, 0)`-offset
+  // overload) needs a genuine nonzero `Array2D` `ConstOffset` to lower
+  // correctly rather than being rejected outright -- confirms
+  // `isSupportedOffset`'s `AllowArray2D` must be `true` for this
+  // intrinsic, mirroring `LowersGatherCmpConstOffsetToImageGatherCmpWith
+  // Offset`'s own identical `Plain2D` proof.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.gather.cmp(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <2 x i32> <i32 1, i32 0>)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *GatherCmp =
+      findImageCall(*F, "feme.cpu.image.gathercmp.array2d.v4f32");
+  ASSERT_TRUE(GatherCmp);
+  EXPECT_TRUE(cast<ConstantInt>(GatherCmp->getArgOperand(10))->isOne());
+  EXPECT_TRUE(cast<ConstantInt>(GatherCmp->getArgOperand(11))->isZero());
+}
+
 TEST(SPIRVResourceLoweringTest, LowersGatherToImageGather) {
   // Roadmap L7g: a `spv_resource_gather` against `Plain2D` with a zero
   // offset lowers to `feme.cpu.image.gather.2d.v4f32`, mirroring

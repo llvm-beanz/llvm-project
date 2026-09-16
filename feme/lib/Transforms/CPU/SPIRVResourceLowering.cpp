@@ -1784,10 +1784,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // `!CI->getType()->isFloatTy()` rejection, and needs `isV4F32`
     // instead. `SampleCoordWidth` is already 3 for `Array2D` (this
     // function's own initial per-shape table above), so `isCoordN`
-    // widens automatically; `AllowArray2D` stays `false` in
-    // `isSupportedOffset` below since no real case yet needs a nonzero
-    // `Array2D` gather offset (a zero one -- the only overload any real
-    // test uses -- is always accepted regardless of that flag).
+    // widens automatically; `AllowArray2D` is `true` in `isSupportedOffset`
+    // below since a real case (`Array.GatherCmp.test`'s own
+    // `int2(1, 0)`-offset overload) needs a genuine nonzero `Array2D`
+    // gather offset, not just the always-accepted zero one.
     if (isGatherCmpIntrinsic(*CI)) {
       if (IsInteger ||
           (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D))
@@ -1799,7 +1799,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
-                             Shape, /*AllowArray2D=*/false,
+                             Shape, /*AllowArray2D=*/true,
                              /*AllowPlain1DArray1D=*/false) ||
           !isV4F32(CI->getType()))
         return false;
@@ -1818,7 +1818,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // `isGatherCmpIntrinsic`'s own, except the `DrefSampleDrefIdx`
     // position holds an integer component selector rather than a float
     // `Dref`, so it needs its own `isCoordN(..., /*Float=*/false)`-style
-    // integer check there instead.
+    // integer check there instead. `AllowArray2D` is `true` here too,
+    // mirroring `isGatherCmpIntrinsic`'s own identical widening just
+    // above, for consistency even though no real `Array.Gather.test`
+    // overload currently exercises a nonzero offset.
     if (isGatherIntrinsic(*CI)) {
       if (IsInteger ||
           (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D))
@@ -1830,7 +1833,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isIntegerTy() ||
           !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
-                             Shape, /*AllowArray2D=*/false,
+                             Shape, /*AllowArray2D=*/true,
                              /*AllowPlain1DArray1D=*/false) ||
           !isV4F32(CI->getType()))
         return false;
