@@ -2349,6 +2349,51 @@ TEST(SIMDizeTest, ReplicatesUniformStoreIntoEveryLaneOfAMaskedAllocaArray) {
   EXPECT_TRUE(FoundGather);
 }
 
+TEST(SIMDizeTest, ScalarizesUniformAtomicResourceCall) {
+  // Roadmap H146: `Out[0].IncrementCounter()` and similar
+  // fully-compile-time-uniform `feme.cpu.resource.atomic.*` calls (a
+  // constant descriptor index, byte offset, and stored value, called
+  // unconditionally by every lane) must still execute once per active
+  // lane -- exactly like a groupshared `atomicrmw` (see
+  // `ScalarizesAtomicRMWFallback` above) -- rather than being left as a
+  // single scalar call the way an idempotent uniform load/store safely
+  // can be. Before this fix, `widenResourceCall`'s own uniformity check
+  // did not distinguish an atomic call from a load/store, so a uniform
+  // atomic call was left completely unwidened, undercounting its effect
+  // by a factor of the wave's own active-lane count.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+      %r = call i32 @feme.cpu.resource.atomic.add.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i32 1,
+          i1 true)
+      ret void
+    }
+    declare i32 @feme.cpu.resource.atomic.add.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Every lane must get its own clone of the atomic call -- four total,
+  // not one -- even though the call's own operands (descriptor index,
+  // offset, stored value) are all compile-time constants and thus
+  // classified uniform.
+  unsigned AtomicCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() ==
+            "feme.cpu.resource.atomic.add.raw.i32")
+      ++AtomicCallCount;
+  }
+  EXPECT_EQ(AtomicCallCount, 4u);
+}
+
 } // namespace
 
 

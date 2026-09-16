@@ -2245,8 +2245,23 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
                       Widened.count(Matched.Offset) || StoredValueDivergent ||
                       Widened.count(Matched.Mask) ||
                       (Matched.Comparator && Widened.count(Matched.Comparator));
-  if (!AnyDivergent)
-    return; // Every operand is uniform: leave the scalar call as-is.
+  // An `Atomic*Typed`/`Atomic*Raw` resource call's effect accumulates
+  // across lanes exactly like a groupshared `atomicrmw` does (see the
+  // "always scalarize an atomicrmw" comment in `widenInstruction` below,
+  // and `widenGroupSharedAtomicRMW`'s own identical reasoning): running it
+  // once instead of once per active lane silently undercounts, even when
+  // every operand -- descriptor index, offset, stored value -- is itself
+  // uniform. Unlike an idempotent uniform load/store (every lane
+  // reading/writing the identical value, so one execution and `W` give the
+  // same final result), this call must never take the early-return below
+  // (roadmap H146: `Out[0].IncrementCounter()`, called unconditionally by
+  // every lane with a compile-time-constant array index and thus fully
+  // uniform by every operand's own value, was otherwise executed exactly
+  // once for the whole wave instead of once per lane, undercounting the
+  // final counter value by a factor of the active lane count).
+  if (!AnyDivergent && !isAtomic(Matched.Kind))
+    return; // Every operand is uniform and this call isn't atomic: leave
+             // the scalar call as-is.
 
   // Scalarize: call the same scalar callee once per lane, feeding it that
   // lane's extracted operand values, ANDing the wave's entry mask with this
