@@ -6071,25 +6071,63 @@ TEST(SPIRVResourceLoweringTest,
   }
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAnArrayedQueryLodHandleAlone) {
-  // Roadmap L52e deliberately scopes `OpImageQueryLod` support to
-  // `Plain2D` only -- `Array2D` (and every other shape) is left entirely
-  // unlowered, the same honest all-or-nothing contract every other
-  // unsupported shape gets (`collectHandles` declines the whole
-  // function).
+TEST(SPIRVResourceLoweringTest,
+     LowersArray2DQueryLodToImageQueryLodSharingPlain2DFormula) {
+  // Roadmap H124t: `Array2D`'s own `CalculateLevelOfDetail` (an
+  // `OpImageQueryLod` against a `Texture2DArray`) -- unlike an ordinary
+  // sample, this op's own coordinate is always exactly 2 components even
+  // against an arrayed handle (`Texture2DArray::CalculateLevelOfDetail`'s
+  // own HLSL signature takes no slice argument at all -- confirmed via a
+  // real `spirv-dis` dump, `%v2float` regardless of shape -- the array
+  // dimension plays no part in the LOD computation), so this reuses
+  // `QueryLod2D`'s own runtime call and formula unchanged, dispatching on
+  // shape the same way `LowersQueryLodToImageQueryLodWithZeroDerivativesOut
+  // sideFragment` above already covers for `Plain2D`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define float @main(<3 x float> %coord) {
+    define float @main(<2 x float> %coord) {
       %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %level = call float @llvm.spv.resource.calculate.lod(
           target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <3 x float> %coord)
+          target("spirv.Sampler") %samp, <2 x float> %coord)
       ret float %level
     }
     declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAPlain1DQueryLodHandleAlone) {
+  // Roadmap L52e/H124t deliberately scope `OpImageQueryLod` support to
+  // `Plain2D`/`Array2D` -- `Plain1D` (and every other still-unwidened
+  // shape) is left entirely unlowered, the same honest all-or-nothing
+  // contract every other unsupported shape gets (`collectHandles`
+  // declines the whole function).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(float %coord) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
         @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
     declare target("spirv.Sampler")
         @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
