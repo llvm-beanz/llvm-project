@@ -47171,3 +47171,72 @@ baseline, confirming no regression. A wider `dEQP-VK.compute.*` sweep
 `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: this is a
 CPU-backend loop-wrapper change only, adding no Vulkan feature or
 extension surface and closing no case on its own.
+
+## H158/H163: closing five of the eight `Interlocked*` cases
+
+**Device check.** `VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json
+vulkaninfo --summary | grep deviceName` reports `FeMe CPU Vulkan Device`.
+Without the explicit `VK_ICD_FILENAMES`, this container still selects
+Mesa's `llvmpipe`, so every measurement below exports it.
+
+**The previous session's triage was wrong, and the reason is worth
+recording.** It concluded that all 8 `Feature/HLSLLib/Interlocked*`
+failures were gated on a surviving structured-CFG merge block, on the
+evidence that a block named `Flow1._crit_edge` is still present when
+`feme-cpu-wrap-entry` declines. That evidence was an artifact of never
+having looked at the real IR: every prior triage of these cases (across
+at least three sessions) reconstructed the CFG by hand from the HLSL, or
+from a standalone `dxc` + `feme-opt` run, neither of which reproduces
+what `feme::cpu::runPipeline` actually builds in memory from the test's
+SPIR-V. Adding a two-line `FEME_DUMP_IR` hook to `runPipeline` and
+running `offloader` directly on the artifacts lit had already generated
+settled it in minutes: the pre-wrapper `JumpThreadingPass` run *does*
+collapse the merge-block indirection in every one of these shaders. The
+surviving block is the loop's plain single-predecessor latch, which
+merely inherited the structurizer's name. Roadmap H161 is withdrawn, and
+`Pipeline.cpp`'s `JumpThreadingPass` comment, which asserted the same
+wrong conclusion in its own words, is corrected. The hook and the recipe
+for capturing a dump are now documented in `feme/.instructions.md`; this
+is the tooling gap a previous session flagged as unsolved.
+
+**What actually gated the cases**, once the dumps were readable, was four
+unrelated things, each fixed and unit-tested separately (roadmap H158 and
+H163): a loop body containing a mid-body safe diamond; a wave-persistent
+induction reloaded at its use rather than at the top of its barrier
+region; prefix/loop/suffix chain boundaries not being treated as region
+boundaries for spilling, even though each chain is outlined separately; a
+uniform scalar trip counter stranded inside an outlined latch; and a
+prefix containing a multi-level uniform-branch nest rather than a plain
+diamond. See the H163 row for the details of each.
+
+**`check-hlsl-feme-vk`.** The `Interlocked` filter goes from 10 passed / 8
+failed to **15 passed / 3 failed** (4 XFAIL unchanged). Newly passing:
+`InterlockedAdd.32`, `InterlockedExchange.32`,
+`InterlockedCompareExchange.resources.32`, `InterlockedCompareStore.32`,
+`InterlockedCompareStore.resources.32`. The suite as a whole goes from 16
+failures to **11**, with the other 8 pre-existing failures
+(`*/GetDimensions.test`, the `Graphics/dd[xy]*`/`fwidth` derivative
+cases, `WaveOps/WaveActiveMax.test`) unchanged -- no regressions, and one
+unrelated pre-existing XPASS (`Feature/PushConstant/array_of_matrices`).
+
+**The 3 remaining cases have three different root causes**, now
+individually triaged and broken out as H164/H165/H166 rather than left in
+one bucket: `InterlockedCompareExchange.32` now compiles clean but
+segfaults inside the JIT'd shader (a change in failure mode, not a
+regression); `InterlockedExchange.resources.32` never reaches the
+wrapping stage at all, failing in `feme-cpu-linearize` on a loop-internal
+branch that does not reach the loop's exit; and
+`InterlockedAdd.resources.32` compiles *and* runs, but returns 0x40 where
+0x100 is expected -- exactly 1/4 at wave size 4, i.e. a typed-resource
+atomic executing once per wave instead of once per lane, which is a
+SIMDize-side bug with nothing to do with the loop wrapper.
+
+**Unit/lit coverage.** `ninja check-feme`: 3,117 passed / 0 failed / 3
+unsupported (was 3,111), including 505 `FeMeTransformsCPUTests`.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: **647 passed / 36
+failed / 19,819 not supported** -- byte-identical to the established
+baseline, confirming no regression. No `Vulkan14FeatureInventory` /
+`VulkanExtensionInventory` change: this is a CPU-backend change only,
+adding no Vulkan feature or extension surface.
