@@ -45123,3 +45123,77 @@ member immediately followed by a vector (`padding.test`'s own shape).
 H124o is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new Vulkan-visible
 capability.
+
+## H124q: `Array2D` `Gather`/`GatherCmp` resource-normalization gap fixed
+
+**Bug.** `Feature/Textures/{Array.Gather,Array.GatherCmp}.test` (2 of 7
+cases sharing a single `FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic
+across all of H124q's original filing) both failed compute-pipeline
+creation: `"'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_
+1_2_1_0_1_0t' is a register-bound resource handle the FeMe CPU target
+cannot normalize..."`. Root cause: `hasOnlySupportedImageUses`'s
+`isGatherCmpIntrinsic`/`isGatherIntrinsic` branches in
+`SPIRVResourceLowering.cpp` only accepted `Plain2D`-shaped handles, so
+any `Texture2DArray::Gather()`/`GatherCmp()` unconditionally failed
+normalization, in turn blocking the whole containing function's every
+handle from lowering (this pass's own documented all-or-nothing
+per-function behavior).
+
+**Fix.** Two parts, in `SPIRVResourceLowering.cpp`:
+- Widened `isGatherCmpIntrinsic`/`isGatherIntrinsic`'s shape check to
+  accept `Array2D` in addition to `Plain2D` (`SampleCoordWidth` is
+  already 3-wide for `Array2D` via this function's existing per-shape
+  table, so no further coordinate-width change was needed). Added
+  `GatherCmpArray2D`/`GatherArray2D` to `ImageCallKind`
+  (`ImageCalls.h`/`.cpp`) with matching builders/matchers, and two new
+  runtime functions in `FeMeRuntimeCPU.c` threading an `ArrayLayer`
+  coordinate (rounded/clamped via the existing `femeRTRoundClampLayer`
+  helper, mirroring `femeCpuImageSample2DArrayV4F32`'s own precedent)
+  into each texel fetch.
+- A second, initially-missed gap: `Array.GatherCmp.test`'s own
+  `int2(1, 0)`-offset overload still failed after the shape-gate fix
+  above, since `isSupportedOffset`'s `AllowArray2D` parameter defaulted
+  to `false` for both intrinsics, rejecting any nonzero `Array2D`
+  gather offset outright. Flipped both call sites to `AllowArray2D=
+  true` (the codegen dispatch already extracted `OffsetX`/`OffsetY`
+  generically regardless of the offset vector's width, so no further
+  change was needed there).
+
+**New test coverage.** `spirv-resource-lowering-image-gather-array2d.ll`
+(lit), `ImageCallsTest.cpp` (`MatchesGatherCmpArray2DCall`/
+`MatchesGatherArray2DCall`), `SPIRVResourceLoweringTest.cpp`
+(`LowersGatherCmpArray2DToImageGatherCmpArray2D`/
+`LowersGatherArray2DToImageGatherArray2D`/
+`LowersGatherCmpArray2DConstOffsetToImageGatherCmpArray2DWithOffset`),
+`ImageSamplingTest.cpp` (`GatherCmpArray2DIsolatesNamedLayer`/
+`GatherArray2DIsolatesNamedLayer`, proving the gathered footprint is
+read from the requested array layer only).
+
+**Verification.**
+- `ninja check-feme`: **3060/3063 passed** (3 unsupported), 0 failed,
+  0 regressions.
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): both `Feature/Textures/{Array.Gather,
+  Array.GatherCmp}.test` now pass. Full suite re-run: **40 -> 39
+  failed** (of 664), exactly the 2 target cases moved from fail to
+  pass, no regressions.
+- VK-GL-CTS: `dEQP-VK.glsl.texture_gather.compute.basic.{2d,2d_array}.*`
+  (the group most directly exercising `OpImageGather`/
+  `OpImageDrefGather`) is **not currently exercisable against FeMe at
+  all** -- every case in this group (both `Plain2D`/`Array2D`, with or
+  without a real gather offset) reports `NotSupported (Requested core
+  feature is not supported: shaderImageGatherExtended)`, confirmed to
+  be a pre-existing, unrelated gap (FeMe does not currently advertise
+  `shaderImageGatherExtended` at all, for any shape), not a regression
+  or side effect of this fix. Advertising that feature accurately would
+  itself be a larger, separate follow-on item (FeMe's own gather
+  support is currently `ConstOffset`-only, never a true per-invocation
+  dynamic offset, which is what `shaderImageGatherExtended` actually
+  promises) -- out of scope for this session, not filed as a roadmap
+  row yet.
+
+H124q is struck through (partially, 2 of 7 cases) on the roadmap; the
+remaining 5 cases are broken out into new rows H124r/H124s/H124t. No
+feature/extension-inventory change: a pure legalization-gap fix
+exposing no new Vulkan-visible capability (FeMe already declared no
+`shaderImageGatherExtended` support before or after this fix).
