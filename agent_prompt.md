@@ -53,41 +53,34 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours: extend the triage script(s) to handle multi-shader
-   pipelines** (vertex+fragment, vertex+geometry+fragment, etc. --
-   whatever each test's own `# RUN:` lines actually declare), then use
-   it to triage `Graphics/VertexShaderResourceCube.test`.
-2. **~1-2 hours, real bug, narrow scope**: root-cause and fix
+1. **~1-2 hours: reduce `InterlockedCompareExchange.32.test`'s aggregate-value
+   bug to its exact minimal IR shape** (lower the imported SPIR-V dialect to
+   LLVM IR via `feme-opt --feme-convert-spirv-to-llvm`, find the actual
+   `cmpxchg`/aggregate-consuming instruction) before filing a roadmap row.
+   Likely a 4th producer shape SIMDize needs (a `cmpxchg` result pair, or an
+   `extractvalue` chain off one) -- don't assume it shares H142's exact fix
+   shape without checking.
+2. **~30 min: file roadmap rows for the InterlockedExchange/Xor groupshared-GEP
+   pair** and the InterlockedAdd wrap-entry barrier case, both already-known
+   H124e bucket members, so the bucket's own case count stays accurate.
+3. **~30 min-1 hour: continue triaging the remaining ~20 of the 25
+   `check-hlsl-feme-vk` failures** individually (`DdxCoarse`/`DdyCoarse`/
+   `ddx_fine`/`ddy_fine`/`fwidth.test`, `WaveActiveMax.test`,
+   `WaveReadLaneAt.mtx.test`, `WaveIsFirstLane.test`,
+   `ComponentAccumulationDataRace.test`, `GroupMemoryBarrierWithGroupSync.test`,
+   the 4 `GetDimensions.test` variants, `dyn-res-uav-counter.test`,
+   `inc_counter_array_imm_idx.test`, `matrix.test`) -- still don't assume any
+   two share a cause.
+4. **~1-2 hours, real bug, narrow scope** (carried over): root-cause and fix
    `Feature/DynamicResources/dyn-res-uav-counter.test`'s address-space
-   mismatch in the UAV-counter + `ResourceDescriptorHeap` combination.
-3. **~30 min-1 hour: continue individually triaging the remaining ~22
-   of the 26 `check-hlsl-feme-vk` failures**, one at a time, via
-   `run_test2.sh` (real `dxc`, matches the actual `check-hlsl-feme-vk`
-   target -- see the methodology-trap note above for why this
-   matters) -- still don't assume any two share a root cause without
-   checking (`InterlockedAdd/CompareExchange/CompareStore/Exchange/Xor.32.test`,
-   `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/fwidth.test`, `WaveActiveMax.test`,
-   `Feature/*/GetDimensions.test` (matches H124m, `OpArrayLength` gap,
-   already on the roadmap as deprioritized) are all still individually
-   unconfirmed this session).
-4. **~1 hour: file a roadmap row for the new
-   `feme.cpu.resource.store.raw.i8` runtime gap** found via this
-   session's `dEQP-VK.ssbo.layout.random.nested_structs*` spot-check,
-   then fix it -- likely a small, self-contained addition mirroring
-   H137's own `i64`/`v2i64` pattern in `FeMeRuntimeCPU.c`.
-5. **~half a day: investigate `array_of_matrices.test`'s flaky
-   unexpected-pass** (full-suite-only, not reproducible standalone) --
-   don't remove its `XFAIL` until this is understood; likely needs
-   `valgrind`/an uninitialized-read detector run inside the exact
-   worker-parallel `llvm-lit` invocation the full suite uses.
-6. **H124e** (large, unchanged for many sessions):
-   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
-   divergence-handling gaps -- still needs per-case triage, don't
-   assume shared cause with any of the above.
-7. **`shaderImageGatherExtended`** (large, carried over many sessions,
-   still not filed as its own roadmap row): blocks every
-   `dEQP-VK.glsl.texture_gather.*` CTS case. File a roadmap row before
-   starting.
-8. Lower priority, deferred 23+ sessions now:
+   mismatch.
+5. **~1 hour** (carried over): file + fix the `feme.cpu.resource.store.raw.i8`
+   runtime gap found via `dEQP-VK.ssbo.layout.random.nested_structs*`.
+6. **H124d** (large, deprioritized): upstream MLIR SPIR-V `OpDPdx`/`OpDPdy`/
+   `OpFwidth` -- likely the root cause behind the `Ddx*`/`ddy_fine`/`fwidth`
+   group above; confirm during step 3's triage rather than assuming.
+7. **`shaderImageGatherExtended`** (large, still not filed as its own roadmap
+   row): blocks every `dEQP-VK.glsl.texture_gather.*` case.
+8. Lower priority, deferred 24+ sessions now:
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    pre-existing heap corruption.
