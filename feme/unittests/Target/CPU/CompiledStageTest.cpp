@@ -241,6 +241,95 @@ TEST(CompiledStageTest,
   EXPECT_EQ(Artifact.GroupSharedAlign, ExpectedAlign);
 }
 
+// A uniform loop with a group-sync barrier in its body -- the
+// `feme::cpu::EntryWrapperPass` "LoopShape" path (`buildWrapperForLoop`),
+// which (unlike the no-barrier and straight-line-barrier paths) always
+// erases the original wave-body function once wrapped, since none of its
+// own outlined prefix/body/suffix regions are obligated to keep that
+// function's identity.
+constexpr char LoopWithBarrierShaderIR[] = R"(
+  @shared = internal addrspace(3) global [4 x i32] undef
+  define void @main() #0 {
+  entry:
+    br label %header
+  header:
+    %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+    %cmp = icmp ult i32 %i, 4
+    br i1 %cmp, label %flow, label %after
+  flow:
+    %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 %i
+    store i32 %i, ptr addrspace(3) %ptr
+    call void @llvm.dx.group.memory.barrier.with.group.sync()
+    %i.next = add i32 %i, 1
+    br label %header
+  after:
+    %h = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32 0)
+    %ptr3 = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 3
+    %val = load i32, ptr addrspace(3) %ptr3
+    call void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0) %h, i32 0, i32 poison, i32 %val)
+    ret void
+  }
+  declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap(i32)
+  declare void @llvm.dx.resource.store.rawbuffer.i32(
+      target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+  declare void @llvm.dx.group.memory.barrier.with.group.sync()
+  attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+)";
+
+// Regression test for a `CompiledStage::createStage` bug found while
+// implementing roadmap H155: `GroupSize` (and, before this fix, an
+// outright "entry point 'main' did not survive the CPU pipeline" error)
+// used to be read from a post-pipeline `Mod.getFunction(EntryName)`
+// lookup, which silently assumed a function literally named `EntryName`
+// always survives `feme::cpu::EntryWrapperPass`. That only holds for its
+// no-barrier and straight-line-barrier paths; its `LoopShape`/
+// `BranchShape` paths always erase the original function once wrapped
+// (see `LoopWithBarrierShaderIR`'s own comment above), so this exact
+// shape used to fail `CompiledStage::create` outright even though
+// `EntryWrapperPass` itself wrapped it correctly -- this masked every
+// otherwise-fixed loop-with-barrier case in the H124e/H124e(a)/H155
+// roadmap bucket behind a completely unrelated failure one layer up the
+// stack. `GroupSize` is now read from the entry point before the
+// pipeline runs, matching how `SideEffectFlags`/`Signature` already do.
+TEST(CompiledStageTest, LoopWithBarrierSurvivesCompiledStageCreation) {
+  Context Ctx;
+  SMDiagnostic Err;
+  auto LLVMMod =
+      parseAssemblyString(LoopWithBarrierShaderIR, Err, Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << Err.getMessage().str();
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+  StageCompileOptions Opts;
+  Opts.Stage = ShaderStage::Compute;
+  Opts.WaveSize = 4;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      CompiledStage::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  EXPECT_EQ((*Stage)->getGroupSize(), (std::array<uint32_t, 3>{4, 1, 1}));
+
+  std::vector<int32_t> Buffer(1, -1);
+  FemeDescriptor Desc{};
+  Desc.Data = Buffer.data();
+  Desc.SizeInBytes = Buffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  DispatchResources Resources;
+  Resources.ResourceHeap = ArrayRef<FemeDescriptor>(&Desc, 1);
+  PreparedDispatch Prepared = PreparedDispatch::create(
+      (*Stage)->getResourceInfo(), Resources, {1, 1, 1});
+
+  ASSERT_THAT_ERROR(
+      (*Stage)->invokeGroup(Prepared, {0, 0, 0}, /*GroupShared=*/{}),
+      Succeeded());
+  // The loop stores each of `I`'s 4 iterations (`0`..`3`) into `@shared`
+  // at its own index, so index 3's own final value is `3`.
+  EXPECT_EQ(Buffer[0], 3);
+}
+
 constexpr char VertexShaderIR[] = R"(
   define void @vs_main() #0 {
     %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)

@@ -208,6 +208,22 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
       feme::dxil::getEntrySignature(**Entry).value_or(EntrySignature{});
   std::vector<uint8_t> Signature = serializeSignature(Sig);
 
+  // Read before running the pipeline, not after: `hlsl.numthreads` is a
+  // stable function attribute set at SPIR-V-translation time, entirely
+  // unaffected by anything the pipeline itself does downstream, exactly
+  // like `SideEffectFlags`/`Signature` above -- unlike those, this used to
+  // be (incorrectly) read from a post-pipeline `Mod.getFunction(EntryName)`
+  // lookup instead, which silently assumed a function literally named
+  // `EntryName` (e.g. "main") always survives the pipeline. That
+  // assumption only holds for `feme::cpu::EntryWrapperPass`'s no-barrier
+  // and straight-line-barrier paths (which happen to reuse the original
+  // `Function`'s identity for their own final region); its loop-shape and
+  // branch-shape paths (`buildWrapperForLoop`/`buildWrapperForBranch`)
+  // unconditionally erase the original function once wrapped, since none
+  // of their own outlined regions are obligated to keep its name. Reading
+  // this here instead avoids that dependency entirely.
+  std::array<uint32_t, 3> GroupSize = getDeclaredGroupSize(**Entry);
+
   unsigned WaveSize = 1;
   if (!Reference) {
     Expected<unsigned> ResolvedWaveSize = resolveWaveSize(
@@ -280,13 +296,22 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     WrapperName = std::move(Result->WrapperName);
   }
 
-  Function *WaveBody = Mod.getFunction(EntryName);
-  if (!WaveBody)
+  // Verify the actual JIT target (`WrapperName`, looked up below) exists,
+  // not `EntryName` -- see the `GroupSize` comment above: a function
+  // literally named `EntryName` is not guaranteed to survive a successful
+  // wrap at all (`feme::cpu::EntryWrapperPass`'s loop-shape and
+  // branch-shape paths always consume/erase it), so checking for it here
+  // would reject some legitimately-wrapped modules. `runPipeline`/the
+  // `Reference` path above already return an `Error` for every diagnosed
+  // failure mode; this is a defensive check for the (not otherwise
+  // expected) case where neither path errored but also didn't produce the
+  // wrapper it claims to have.
+  if (!Mod.getFunction(WrapperName))
     return createStringError(
         inconvertibleErrorCode(),
-        "entry point '%s' did not survive the CPU pipeline", EntryName.c_str());
+        "feme-cpu pipeline did not produce wrapper '%s' for entry point '%s'",
+        WrapperName.c_str(), EntryName.c_str());
 
-  std::array<uint32_t, 3> GroupSize = getDeclaredGroupSize(*WaveBody);
   std::optional<ResourceInfo> Info = ResourceInfo::fromModule(Mod, EntryName);
   ResourceInfo ResolvedInfo = Info.value_or([&] {
     ResourceInfo Default;
