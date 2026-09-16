@@ -7992,6 +7992,136 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
                                 CF.Face, ClampedLod);
 }
 
+// `feme.cpu.image.gathercmp.cube.v4f32` (roadmap H124r): `TextureCube`
+// depth-comparison gather -- SPIR-V's `OpImageDrefGather`, HLSL's
+// `TextureCube::GatherCmp()`. Structurally identical to
+// `femeCpuImageGatherCmp2DV4F32` (same fixed bilinear "footprint" via
+// `femeRTComputeBilinearSupport`, same fixed result ordering, same
+// mip-level-0-only restriction), except the direction vector
+// `(DirX, DirY, DirZ)` is first resolved to a face and face-local
+// `(U, V)` coordinate by `femeRTSelectCubeFace` (the same helper
+// `femeCpuImageSampleCubeV4F32` above uses), and that face is addressed
+// as the fetch's own `Layer` (mirroring how `femeCpuImageSampleCubeV4F32`
+// threads `CF.Face` into `femeRTSampleFilteredCube`'s own `Layer`
+// parameter). Address mode is unconditionally forced to `ClampToEdge`
+// (`Samp.AddressU`/`Samp.AddressV`), matching
+// `femeCpuImageSampleCubeV4F32`'s own identical forcing: a cube face has
+// no "next" face along a U/V axis to wrap or mirror into, and (unlike
+// that function's own seamless-edge-blending `femeRTSampleFilteredCube`
+// path) a discrete gather footprint that straddles a face edge is left
+// simply clamped to that face's own edge texel, since no real
+// `offload-test-suite`/CTS case yet exercises a face-edge-straddling
+// cube gather to motivate the same cross-face remap
+// `femeRTSampleFilteredCube` implements for a blended sample.
+FemeRTv4f32 femeCpuImageGatherCmpCubeV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float Dref,
+    _Bool Mask) asm("feme.cpu.image.gathercmp.cube.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpCubeV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float Dref, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) ||
+      Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  Samp.AddressU = 2; // ClampToEdge -- see comment above.
+  Samp.AddressV = 2;
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img.Format);
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 Result;
+  Result[0] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0], IsFixedPointDepth);
+  Result[1] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T11[0], IsFixedPointDepth);
+  Result[2] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0], IsFixedPointDepth);
+  Result[3] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0], IsFixedPointDepth);
+  return Result;
+}
+
+// `feme.cpu.image.gather.cube.v4f32` (roadmap H124r): `TextureCube`
+// non-depth-comparison gather -- SPIR-V's `OpImageGather`, HLSL's
+// `TextureCube::Gather{,Red,Green,Blue,Alpha}()`. Structurally identical
+// to `femeCpuImageGatherCmpCubeV4F32` above (same face-selection/
+// footprint/result ordering/mip-level-0-only restriction), but each
+// result component is one of the four sampled texel's own `Component`
+// channel (0=R, 1=G, 2=B, 3=A), never a depth comparison -- mirroring
+// `femeCpuImageGather2DV4F32`'s own relationship to
+// `femeCpuImageGatherCmp2DV4F32`.
+FemeRTv4f32 femeCpuImageGatherCubeV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, int32_t Component,
+    _Bool Mask) asm("feme.cpu.image.gather.cube.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCubeV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, int32_t Component, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) ||
+      Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageGatherCmpCubeV4F32.
+  Samp.AddressV = 2;
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 Result;
+  Result[0] = T01[Chan];
+  Result[1] = T11[Chan];
+  Result[2] = T10[Chan];
+  Result[3] = T00[Chan];
+  return Result;
+}
+
 // `feme.cpu.image.sample.cubearray.v4f32` (roadmap H7b-a): the
 // `TextureCubeArray` counterpart of `feme.cpu.image.sample.cube.v4f32`
 // above, adding `ArrayLayer` (SPIR-V's own arrayed-cube coordinate
