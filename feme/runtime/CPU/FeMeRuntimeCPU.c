@@ -1042,6 +1042,38 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   femeRTPackImageTexelI32(Desc.Format, Ptr, Value);
 }
 
+// `feme.cpu.resource.getdimensions.typed.i32` (roadmap H144): `Buffer<T>`/
+// `RWBuffer<T>`'s (a typed buffer's own, format-based) `GetDimensions(out
+// uint numElements)` -- SPIR-V `OpImageQuerySize` against a `Dim::Buffer`
+// image handle (`feme::spirv::ImageQuerySizePattern`'s `.x`-width branch,
+// SPIRVToLLVMPatterns.cpp), unlike `femeCpuImageGetDimensions2DV2I32`'s own
+// counterpart for an ordinary 2D texture. A typed buffer's descriptor
+// carries no separate "element count" field of its own (unlike
+// `FemeRTImageDescriptor::Width`/`Height`) -- its declared byte range
+// (`SizeInBytes`, set from the `VkBufferView`'s own range at bind time)
+// divided by the per-format texel size (`femeRTImageFormatElementSize`,
+// the same table `femeCpuResourceLoadTypedV4F32`/`V4I32` above already
+// share) gives the element count directly. An unbound handle (`!Data`)
+// or an inactive lane reads as `0`, mirroring
+// `femeCpuImageGetDimensions2DV2I32`'s own all-zero convention; no bounds
+// check applies (this reads only descriptor metadata, never `Data`
+// itself, so there is nothing to bounds-check against).
+uint32_t femeCpuResourceGetDimensionsTypedI32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    _Bool Mask) asm("feme.cpu.resource.getdimensions.typed.i32");
+
+__attribute__((always_inline)) uint32_t femeCpuResourceGetDimensionsTypedI32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  if (!Mask || !Desc.Data)
+    return 0;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    return 0;
+  return (uint32_t)(Desc.SizeInBytes / ElemSize);
+}
+
 //--- Raw/structured-buffer views ----------------------------------------------
 
 // `feme.cpu.resource.load.raw.i32`/`.f32`: read a scalar through a bindless

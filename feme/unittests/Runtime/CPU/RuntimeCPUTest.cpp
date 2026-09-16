@@ -181,6 +181,13 @@ protected:
 
   using LoadFn = void (*)(void *, uint32_t, uint32_t, uint64_t, bool, void *);
   using StoreFn = void (*)(void *, uint32_t, uint32_t, uint64_t, void *, bool);
+  // `feme.cpu.resource.getdimensions.typed.i32` (roadmap H144) takes no
+  // element index/byte offset at all -- see `ResourceCallKind
+  // ::GetDimensionsTyped`'s own doc comment -- so, unlike every load/store
+  // above, its host-callable signature needs no wrapper to sidestep a
+  // vector-ABI question: it is already plain scalars throughout, safe to
+  // resolve and call directly.
+  using GetDimensionsFn = uint32_t (*)(void *, uint32_t, uint32_t, bool);
 
   /// MCJIT compiles the whole module the first time any function's address
   /// is resolved, so a test needing more than one wrapper (see
@@ -205,6 +212,12 @@ protected:
 
   StoreFn getStoreWrapper(StringRef Name, StringRef Callee, Type *ValueTy) {
     return resolve<StoreFn>(addStoreWrapper(Name, Callee, ValueTy));
+  }
+
+  GetDimensionsFn getGetDimensionsFn(StringRef Callee) {
+    Function *Target = getRuntimeFunction(*M, Callee);
+    assert(Target && "runtime function not found in libFeMeRuntimeCPU bitcode");
+    return resolve<GetDimensionsFn>(Target);
   }
 };
 
@@ -1045,6 +1058,66 @@ TEST_F(RuntimeCPUTest, TypedStoreV2I32DroppedWithoutUavFlag) {
   int32_t ToStore[2] = {9, 9};
   Store(Heap, 1, 0, 0, ToStore, true);
   EXPECT_EQ(Storage[0], 3);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsTypedReturnsElementCount) {
+  // Roadmap H144: `Buffer<int4>`'s own `A.GetDimensions(dim)` -- a 4-wide
+  // typed element format over a buffer sized for 3 elements.
+  int32_t Storage[3][4] = {};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  GetDimensionsFn GetDimensions =
+      getGetDimensionsFn("feme.cpu.resource.getdimensions.typed.i32");
+  ASSERT_TRUE(GetDimensions);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, true), 3u);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsTypedScalarFormatCountsWholeElements) {
+  // `RWBuffer<float>`'s own `B.GetDimensions(dim)` -- a scalar (1-wide)
+  // typed element format over a buffer sized for 5 elements.
+  float Storage[5] = {};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  GetDimensionsFn GetDimensions =
+      getGetDimensionsFn("feme.cpu.resource.getdimensions.typed.i32");
+  ASSERT_TRUE(GetDimensions);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, true), 5u);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsTypedInactiveMaskReadsZero) {
+  float Storage[5] = {};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  GetDimensionsFn GetDimensions =
+      getGetDimensionsFn("feme.cpu.resource.getdimensions.typed.i32");
+  ASSERT_TRUE(GetDimensions);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, false), 0u);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsTypedOutOfRangeIndexReadsZeroWithoutTouchingHeap) {
+  // `femeRTLoadDescriptor` returns an all-zero `Loaded` (`Data = nullptr`)
+  // for `DescriptorIndex >= HeapCount` without ever reading `Heap`'s own
+  // memory -- pass a null heap pointer to prove that path is really taken,
+  // mirroring `TypedLoadOutOfBoundsIndexReadsZeroWithoutTouchingHeap` above.
+  GetDimensionsFn GetDimensions =
+      getGetDimensionsFn("feme.cpu.resource.getdimensions.typed.i32");
+  ASSERT_TRUE(GetDimensions);
+  EXPECT_EQ(GetDimensions(/*Heap=*/nullptr, /*HeapCount=*/0,
+                          /*DescriptorIndex=*/0, /*Mask=*/true),
+            0u);
 }
 
 TEST_F(RuntimeCPUTest, TrustedFlagSkipsOffsetCheck) {
