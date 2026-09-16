@@ -3393,24 +3393,24 @@ TEST(SPIRVResourceLoweringTest,
             -1);
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAGatherCmpAgainstCubeUnchanged) {
-  // Roadmap L7d/H124q: `Cube`/`CubeArray` gather shapes remain unstarted
-  // follow-on work (`hasOnlySupportedImageUses`'s own `isGatherCmp
-  // Intrinsic` branch is scoped to `Plain2D`/`Array2D` only, no real
-  // repro having reached `Cube`/`CubeArray` yet) -- a `gather.cmp`
-  // against `Cube` is left entirely unlowered, matching
-  // `LeavesASampleCmpCubeWithNonzeroOffsetAlone`'s own identical "leave
-  // the whole handle unlowered" contract for an unsupported shape.
+TEST(SPIRVResourceLoweringTest, LowersGatherCmpCubeToImageGatherCmpCube) {
+  // Roadmap H124r: a `Cube`-shaped `gather.cmp` now lowers to
+  // `feme.cpu.image.gathercmp.cube.v4f32`, taking the 3-component
+  // direction vector coordinate straight through (mirroring `SampleCube`'s
+  // own convention) and no offset operand at all -- SPIR-V forbids
+  // `ConstOffset` against `Dim::Cube` outright, so the intrinsic's own
+  // always-zero offset operand is simply discarded rather than threaded
+  // through the way `Array2D`'s real `offset_x`/`offset_y` are.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define <4 x float> @main(<3 x float> %coord, float %dref) {
+    define <4 x float> @main(<3 x float> %dir, float %dref) {
       %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call <4 x float> @llvm.spv.resource.gather.cmp(
           target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <3 x float> %coord,
+          target("spirv.Sampler") %samp, <3 x float> %dir,
           float %dref, <3 x i32> zeroinitializer)
       ret <4 x float> %r
     }
@@ -3424,8 +3424,14 @@ TEST(SPIRVResourceLoweringTest, LeavesAGatherCmpAgainstCubeUnchanged) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.gathercmp.2d.v4f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *GatherCmp =
+      findImageCall(*F, "feme.cpu.image.gathercmp.cube.v4f32");
+  ASSERT_TRUE(GatherCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, dref, mask).
+  ASSERT_EQ(GatherCmp->arg_size(), 11u);
+  EXPECT_EQ(GatherCmp->getArgOperand(9)->getName(), "dref");
+  EXPECT_TRUE(cast<ConstantInt>(GatherCmp->getArgOperand(10))->isOne());
 }
 
 TEST(SPIRVResourceLoweringTest, LowersGatherCmpArray2DToImageGatherCmpArray2D) {
@@ -3585,23 +3591,21 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(cast<ConstantInt>(Gather->getArgOperand(10))->getSExtValue(), -1);
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAGatherAgainstCubeUnchanged) {
-  // Roadmap L7g/H124q: `Cube`/`CubeArray` gather shapes remain unstarted
-  // follow-on work (`hasOnlySupportedImageUses`'s own `isGatherIntrinsic`
-  // branch is scoped to `Plain2D`/`Array2D` only, mirroring
-  // `LeavesAGatherCmpAgainstCubeUnchanged`'s own identical precedent for
-  // the depth-comparison sibling intrinsic) -- a `gather` against `Cube`
-  // is left entirely unlowered.
+TEST(SPIRVResourceLoweringTest, LowersGatherCubeToImageGatherCube) {
+  // Roadmap H124r: the `Gather` counterpart of
+  // `LowersGatherCmpCubeToImageGatherCmpCube` above -- same direction-
+  // vector coordinate and lack of an offset operand, but threads an
+  // integer `%component` selector through in place of a float `%dref`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define <4 x float> @main(<3 x float> %coord, i32 %component) {
+    define <4 x float> @main(<3 x float> %dir, i32 %component) {
       %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call <4 x float> @llvm.spv.resource.gather(
           target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <3 x float> %coord,
+          target("spirv.Sampler") %samp, <3 x float> %dir,
           i32 %component, <3 x i32> zeroinitializer)
       ret <4 x float> %r
     }
@@ -3615,8 +3619,13 @@ TEST(SPIRVResourceLoweringTest, LeavesAGatherAgainstCubeUnchanged) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.gather.2d.v4f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Gather = findImageCall(*F, "feme.cpu.image.gather.cube.v4f32");
+  ASSERT_TRUE(Gather);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, component, mask).
+  ASSERT_EQ(Gather->arg_size(), 11u);
+  EXPECT_EQ(Gather->getArgOperand(9)->getName(), "component");
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(10))->isOne());
 }
 
 TEST(SPIRVResourceLoweringTest, LowersGatherArray2DToImageGatherArray2D) {

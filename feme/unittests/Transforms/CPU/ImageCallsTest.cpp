@@ -1047,4 +1047,74 @@ TEST_F(ImageCallsTest, MatchesGatherArray2DCall) {
       cast<FixedVectorType>(CI->getType())->getElementType()->isFloatTy());
 }
 
+// `createGatherCmpCube`'s own `feme.cpu.image.gathercmp.cube.v4f32` call
+// (roadmap H124r): the `Cube` counterpart of `ImageCallKind::
+// GatherCmpArray2D`, taking a 3-component direction vector in place of
+// `(U, V, ArrayLayer)` and no offset operand at all.
+TEST_F(ImageCallsTest, MatchesGatherCmpCubeCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGatherCmpCube(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 1.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.25), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GatherCmpCube);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 1.0));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->W, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->Dref, ConstantFP::get(Builder.getFloatTy(), 0.25));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isFloatTy());
+}
+
+// `createGatherCube`'s own `feme.cpu.image.gather.cube.v4f32` call
+// (roadmap H124r): the `Cube` counterpart of `ImageCallKind::
+// GatherArray2D`, mirroring `GatherCmpCube`'s own direction-vector
+// coordinate and lack of an offset operand.
+TEST_F(ImageCallsTest, MatchesGatherCubeCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createGatherCube(Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+                       ConstantFP::get(Builder.getFloatTy(), 1.0),
+                       ConstantFP::get(Builder.getFloatTy(), 0.0),
+                       ConstantFP::get(Builder.getFloatTy(), 0.0),
+                       Builder.getInt32(1), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GatherCube);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 1.0));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->W, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->Component, Builder.getInt32(1));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isFloatTy());
+}
+
 } // namespace
