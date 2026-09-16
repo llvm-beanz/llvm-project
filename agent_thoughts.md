@@ -86146,3 +86146,129 @@ Scratch files cleaned up before this commit: `/tmp/triage/min1`,
 under `/tmp/triage/` (kept only the reusable `run_test.sh`/
 `run_test2.sh`/`run_test3.sh` scripts, and `/tmp/spec_const_cts*.qpa`/
 `/tmp/nested_cts.qpa` CTS spot-check logs, all outside the repo).
+
+# Session: H142 (aggregate select in SIMDize) + InterlockedX 32-bit re-triage
+
+**Confirmed FeMe device active** (`vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`) before starting, as required every session.
+
+## Win: H142 fixed, `check-hlsl-feme-vk` down to 25 failures
+
+Followed the prior session's suggested next step #1: extended the
+single-shader triage script into `run_test_multi.sh` (handles a real
+vertex+pixel pipeline, not just one `%dxc_target` line), then used it on
+`Graphics/VertexShaderResourceCube.test`. That surfaced a real,
+previously-unconfirmed bug:
+
+```
+error: feme-cpu-simdize: function 'main' has a divergent value '.linearized1'
+of aggregate type; component decomposition is not yet supported for this
+producer (only an insertvalue chain or a nested sub-aggregate extractvalue...)
+```
+
+Root cause: the vertex shader assigns a whole `float4x4 localToWorld` local
+wholesale (not field-by-field) in each arm of a divergent `if`/`else` on
+`SV_VertexID`. `mem2reg` promotes that straight to one aggregate-typed
+`phi`; `LinearizePass` always rewrites a `phi` into a `select` (regardless
+of type), so this produces a whole-aggregate-typed `select` --
+`SIMDize.cpp`'s `checkAggregateValueSupported` never anticipated that
+shape (every prior real case scalarized field-by-field into `insertvalue`
+first).
+
+**Fix** (`SIMDize.cpp`): added `widenAggregateSelect`, the aggregate
+analogue of the existing `widenVectorSelect` -- decomposes the true/false
+operands via `getAggregateComponents`, builds one `select` per flattened
+leaf. Simpler than the vector case since an aggregate-typed `select`'s
+condition is always scalar `i1` (LLVM doesn't allow a vector condition
+paired with aggregate operands). Extended `checkAggregateValueSupported`
+to accept `SelectInst` as a producer and a `select`'s true/false operand as
+a consumer. Corrected the stale comment block that claimed an
+aggregate-typed `phi`/whole-aggregate merge could never happen.
+
+New unit test: `SIMDizeTest.DecomposesAggregateSelect`.
+
+**Verification:**
+- `check-feme`: 3085/3088 passed (3 unsupported), 0 failed, +1 test, 0 regressions.
+- `check-hlsl-feme-vk`: `VertexShaderResourceCube.test` now passes
+  (confirmed standalone, including its `imgdiff` golden-image check).
+  Full-suite failures: **26 -> 25** (of 664).
+- No CTS feature/extension inventory change (pure CPU-backend correctness fix).
+
+Filed and closed as **H142** on the roadmap; new section in
+`VulkanCTSReport.md`.
+
+Committed in 2 steps:
+1. `[feme] Support divergent aggregate-typed select in feme-cpu-simdize (H142)` -- code + unit test.
+2. `[feme] Document H142 in Roadmap.md and VulkanCTSReport.md` -- docs.
+
+## Triage: the 5 `InterlockedX.32.test` cases are 3 separate bugs, not 1
+
+Per the standing "don't assume a shared cause" warning (burned repeatedly
+in past sessions), ran each of `InterlockedAdd`/`CompareExchange`/
+`CompareStore`/`Exchange`/`Xor.32.test` individually through `offloader`
+directly (not `llvm-lit`, so `FEME_VULKAN_LOG_CREATION_ERRORS=1` actually
+surfaces). Result -- confirmed 3 distinct root causes:
+
+1. **`InterlockedAdd.32.test`**: `feme-cpu-wrap-entry: ... barrier inside
+   non-linear control flow ...` (roadmap milestone 9, the existing
+   region-splitting gap -- part of H124e's bucket).
+2. **`InterlockedCompareExchange.32.test` / `InterlockedCompareStore.32.test`**:
+   `feme-cpu-simdize: ... divergent value '' of aggregate type ...` --
+   **not** fixed by H142 (confirmed still fails after today's fix, since
+   the anonymous `''`-named value here is not a `select`; likely a
+   `cmpxchg` `{T, i1}` result pair used directly, a 4th producer shape not
+   yet supported). Did not fully reduce this one to its exact IR shape
+   this session -- ran out of budget partway through inspecting the
+   imported SPIR-V dialect (had not yet lowered it to LLVM IR to find the
+   actual `cmpxchg`/`extractvalue` pattern).
+3. **`InterlockedExchange.32.test` / `InterlockedXor.32.test`**: `feme-cpu-simdize:
+   groupshared global '...' feeds a nested getelementptr or another
+   unsupported user ...` (a different, already-documented groupshared-GEP
+   gap, also part of H124e's bucket).
+
+Not yet filed as separate roadmap rows (ran out of session time to reduce
+each to an exact minimal-IR repro first, which is this project's own
+standing bar for filing).
+
+## Quick check: `array_of_matrices.test`'s unexpected pass
+
+Ran it standalone 3x -- passed all 3 times, consistent with its
+"Unexpectedly Passed" status in this session's own full `check-hlsl-feme-vk`
+run. No flakiness observed this session. Left the `XFAIL` in place per the
+prior session's caution (full understanding needs a `valgrind`/uninitialized-
+read run under the actual worker-parallel `llvm-lit` invocation, not
+attempted this session -- estimated half a day).
+
+## Next steps (in priority order)
+
+1. **~1-2 hours: reduce `InterlockedCompareExchange.32.test`'s aggregate-value
+   bug to its exact minimal IR shape** (lower the imported SPIR-V dialect to
+   LLVM IR via `feme-opt --feme-convert-spirv-to-llvm`, find the actual
+   `cmpxchg`/aggregate-consuming instruction) before filing a roadmap row.
+   Likely a 4th producer shape SIMDize needs (a `cmpxchg` result pair, or an
+   `extractvalue` chain off one) -- don't assume it shares H142's exact fix
+   shape without checking.
+2. **~30 min: file roadmap rows for the InterlockedExchange/Xor groupshared-GEP
+   pair** and the InterlockedAdd wrap-entry barrier case, both already-known
+   H124e bucket members, so the bucket's own case count stays accurate.
+3. **~30 min-1 hour: continue triaging the remaining ~20 of the 25
+   `check-hlsl-feme-vk` failures** individually (`DdxCoarse`/`DdyCoarse`/
+   `ddx_fine`/`ddy_fine`/`fwidth.test`, `WaveActiveMax.test`,
+   `WaveReadLaneAt.mtx.test`, `WaveIsFirstLane.test`,
+   `ComponentAccumulationDataRace.test`, `GroupMemoryBarrierWithGroupSync.test`,
+   the 4 `GetDimensions.test` variants, `dyn-res-uav-counter.test`,
+   `inc_counter_array_imm_idx.test`, `matrix.test`) -- still don't assume any
+   two share a cause.
+4. **~1-2 hours, real bug, narrow scope** (carried over): root-cause and fix
+   `Feature/DynamicResources/dyn-res-uav-counter.test`'s address-space
+   mismatch.
+5. **~1 hour** (carried over): file + fix the `feme.cpu.resource.store.raw.i8`
+   runtime gap found via `dEQP-VK.ssbo.layout.random.nested_structs*`.
+6. **H124d** (large, deprioritized): upstream MLIR SPIR-V `OpDPdx`/`OpDPdy`/
+   `OpFwidth` -- likely the root cause behind the `Ddx*`/`ddy_fine`/`fwidth`
+   group above; confirm during step 3's triage rather than assuming.
+7. **`shaderImageGatherExtended`** (large, still not filed as its own roadmap
+   row): blocks every `dEQP-VK.glsl.texture_gather.*` case.
+8. Lower priority, deferred 24+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption.
