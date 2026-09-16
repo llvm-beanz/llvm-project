@@ -53,34 +53,37 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours: reduce `InterlockedCompareExchange.32.test`'s aggregate-value
-   bug to its exact minimal IR shape** (lower the imported SPIR-V dialect to
-   LLVM IR via `feme-opt --feme-convert-spirv-to-llvm`, find the actual
-   `cmpxchg`/aggregate-consuming instruction) before filing a roadmap row.
-   Likely a 4th producer shape SIMDize needs (a `cmpxchg` result pair, or an
-   `extractvalue` chain off one) -- don't assume it shares H142's exact fix
-   shape without checking.
-2. **~30 min: file roadmap rows for the InterlockedExchange/Xor groupshared-GEP
-   pair** and the InterlockedAdd wrap-entry barrier case, both already-known
-   H124e bucket members, so the bucket's own case count stays accurate.
-3. **~30 min-1 hour: continue triaging the remaining ~20 of the 25
-   `check-hlsl-feme-vk` failures** individually (`DdxCoarse`/`DdyCoarse`/
-   `ddx_fine`/`ddy_fine`/`fwidth.test`, `WaveActiveMax.test`,
-   `WaveReadLaneAt.mtx.test`, `WaveIsFirstLane.test`,
-   `ComponentAccumulationDataRace.test`, `GroupMemoryBarrierWithGroupSync.test`,
-   the 4 `GetDimensions.test` variants, `dyn-res-uav-counter.test`,
-   `inc_counter_array_imm_idx.test`, `matrix.test`) -- still don't assume any
-   two share a cause.
-4. **~1-2 hours, real bug, narrow scope** (carried over): root-cause and fix
-   `Feature/DynamicResources/dyn-res-uav-counter.test`'s address-space
-   mismatch.
-5. **~1 hour** (carried over): file + fix the `feme.cpu.resource.store.raw.i8`
-   runtime gap found via `dEQP-VK.ssbo.layout.random.nested_structs*`.
-6. **H124d** (large, deprioritized): upstream MLIR SPIR-V `OpDPdx`/`OpDPdy`/
-   `OpFwidth` -- likely the root cause behind the `Ddx*`/`ddy_fine`/`fwidth`
-   group above; confirm during step 3's triage rather than assuming.
-7. **`shaderImageGatherExtended`** (large, still not filed as its own roadmap
-   row): blocks every `dEQP-VK.glsl.texture_gather.*` case.
-8. Lower priority, deferred 24+ sessions now:
+1. **H124e** (large, unchanged for many sessions, now with 1 new confirmed data
+   point): `feme-cpu-wrap-entry`'s "barrier inside non-linear control flow"
+   error. Confirmed this session to be the *exact same* diagnostic blocking
+   `InterlockedAdd/CompareExchange/CompareStore/Exchange.32.test` (4 failures,
+   not fewer) -- worth prioritizing next given the multi-test payoff. Unknown
+   effort, likely a full session on its own (region-splitting/wrap-entry pass
+   work is inherently harder than the SIMDize-level fixes this session made).
+2. **The `.resources.32.test` variants**
+   (`InterlockedAdd`/`CompareExchange`/`CompareStore`/`Exchange.resources.32.test`,
+   4 failures): confirmed this session to be a **separate, not-yet-triaged bug
+   family** -- they use the resource-heap `feme.cpu.resource.atomic.*`
+   runtime-call path, not raw `cmpxchg`/`atomicrmw`, so this session's fix does
+   not touch them. Not yet triaged at all. ~30-60 min to at least get a
+   diagnostic via `offloader` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+3. **`GetDimensions.test` x4**
+   (`ByteAddressBuffer`/`StructuredBuffer`/`TypedBuffer`): suspected (not
+   confirmed) to share H124m's `OpArrayLength` gap, already on the roadmap as
+   deprioritized. See "next action" above.
+4. **`dyn-res-uav-counter.test`**: real, narrow bug, address-space mismatch in
+   UAV-counter + `ResourceDescriptorHeap` combo. ~1-2 hours, carried over 3+
+   sessions untouched.
+5. **`Ddx*`/`ddy_fine`/`fwidth.test` group (5 failures)**: still suspected to
+   trace to H124d's missing upstream MLIR `OpDPdx`/`OpDPdy`/`OpFwidth` SPIR-V
+   dialect ops, still not individually confirmed. Large, deprioritized.
+6. **`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`/`WaveIsFirstLane.test`/`ComponentAccumulationDataRace.test`/`GroupMemoryBarrierWithGroupSync.test`/`matrix.test`/`inc_counter_array_imm_idx.test`**:
+   still individually untriaged, carried over many sessions. Don't assume any
+   two share a cause without checking -- this bit prior sessions repeatedly.
+7. **`shaderImageGatherExtended`**: large, multi-session capability gap (FeMe's
+   gather is `ConstOffset`-only), carried over many sessions, still not filed as
+   its own roadmap row.
+8. Lower priority, deferred 25+ sessions:
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
-   pre-existing heap corruption.
+   pre-existing heap corruption (valgrind points at
+   `buildStageStorage`/`executeDraws`).
