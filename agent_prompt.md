@@ -53,11 +53,13 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~2-4 hours, best next target, now precisely scoped:** H154 -- teach
-   `matchLoopShape` in `feme-cpu-wrap-entry` to recognize the `Flow`-style
-   structured-CFG merge-block shape (`JumpThreading` produces this for
-   `InterlockedAdd`/`InterlockedCompareExchange`/`InterlockedCompareStore`/
-   `InterlockedExchange` `.32.test`/`.resources.32.test`, all 8 remaining
-   cases in this bucket, confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
-   -- all fail with wrap-entry's own genuine "barrier inside non-linear
-   control flow" diagnostic, no other bug hiding underneath this time).
+1. **~1-2 days, largest single lever, not yet designed:** H159 -- spill
+   a per-lane value computed inside a barrier region to per-wave-
+   persistent memory, read back at the start of the *next loop
+   iteration's* own outlined region invocation (not just across a
+   single barrier crossing within one iteration, which
+   `spillValuesLiveAcrossBarriers` already handles). This is the
+   deepest blocker and likely closes both `InterlockedAdd.32.test` and
+   `InterlockedExchange.32.test` (and probably their `.resources.32.test`
+   siblings) once done -- worth doing before H158, since H158 alone
+   still wouldn't close either real test.
