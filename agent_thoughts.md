@@ -87004,3 +87004,124 @@ the refined analysis instead of rushing an implementation.
    `dyn-res-uav-counter.test`'s address-space mismatch,
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap corruption.
 5. **Do not re-attempt H150** — confirmed a prior session it's not a FeMe-side bug.
+
+# Session: H153 - H124e(a)'s "Flow-merge loop" implementation attempt
+
+## Start here
+
+Vulkan device check first (every session, per standing instructions):
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed.
+
+**Bottom line: real infrastructure progress, 0 new `check-hlsl-feme-vk` passes.**
+3 genuine pre-existing bugs found and fixed, a new loop shape now recognized
+and unit-tested, but every one of H124e's 9 wrap-entry-bucket cases still hits
+the same diagnostic as before this session. Not a wasted session — the two
+reasons why are now individually confirmed and split into scoped follow-ups
+(H154, H155) — but this row is NOT struck through on the roadmap.
+
+## What shipped (3 commits, all in `cbieneman/feme`)
+
+1. `Pipeline.cpp`: inserted `JumpThreadingPass` before `EntryWrapperPass`, per
+   H124e(a)'s own prior design.
+2. `EntryWrapper.cpp` + `EntryWrapperTest.cpp`: `matchLoopShape` now recognizes
+   a loop whose barrier + recurrence collapsed into one block (no separate
+   `BodyOrder`); `HeaderDerivedValues` threading for header-computed values used
+   in the body; a new `containsGroupSyncBarrier` invariant check on prefix/
+   suffix. Along the way, fixed 3 real bugs (see below). 2 new unit tests.
+3. `Roadmap.md` + `VulkanCTSReport.md`: documented the findings honestly (see
+   below), added H154/H155 as new top-level follow-on rows.
+
+## The 3 bugs found (all independent of the "Flow-merge" feature itself)
+
+1. **`LoopShape::Header`/`Latch`/`ExitBlock` had no default initializers.**
+   A failed body-walk left `Shape.Latch` as uninitialized stack garbage; an
+   earlier this-session edit had split a bundled safety check
+   (`!Shape.Latch || Shape.BodyOrder.empty()`) into two separate checks to
+   support the new collapsed-block case, accidentally removing the net that
+   used to catch this. Fixed with `= nullptr` member initializers. **Lesson:**
+   when splitting a bundled early-return check to add a new case, verify each
+   half is independently safe, not just correct when combined.
+2. **`LoopScalars` array under-sized before `PrefixFn` creation.** `PrefixFn`'s
+   signature (copied verbatim from `WaveBody`'s already-extended type) always
+   has a `loopvarN` parameter for every `HeaderDerivedValues` entry, even if
+   Prefix's own body never uses one — but the initial array was only sized for
+   `Shape.Inductions`. Assertion failure until fixed.
+3. **`spillValuesLiveAcrossBarriers` blind to prefix-defined values.** Its
+   `IndexOf` map only covered `Shape.BodyOrder`'s own blocks; a value computed
+   in `Shape.PrefixOrder`, used later across a barrier in the body, was
+   invisible to it → "Referring to an instruction in another function!"
+   verifier crash. Fixed by also indexing `Shape.PrefixOrder` and passing a
+   concatenated Prefix-then-Body order.
+
+**Debugging technique used for bug 3 in a release/-O2 build:** compile just
+that one TU with `-O0 -g` standalone (exact flags from
+`ninja -t commands <target.o>`, swap `-O3`→`-O0`, add `-g`), `ar d`/`ar q` the
+resulting `.o` into the static lib, touch the `.a`, relink via
+`ninja bin/<tool>`. Gives full gdb symbols without a full rebuild. Keep a `cp`
+backup of the original `.a` and restore it before the final verification build
+— don't ship a debug object accidentally.
+
+## Why 0 cases actually flip (the two real reasons, both confirmed)
+
+1. **`JumpThreadingPass` doesn't reliably eliminate the `Flow` merge block.**
+   Dumped the real post-pass IR for `InterlockedExchange.32.test` (temporary
+   `getenv("FEME_DEBUG_DUMP_POST_JT")`-gated `errs() << M` in `Pipeline.cpp`,
+   removed before committing): its own `Flow1._crit_edge` block survives fully
+   intact — a real, un-eliminated `CondBrInst`. Likely cause: its loop body's
+   own extra uniform branch (the HLSL `if` guarding the atomic) makes the merge
+   phi's incoming values non-constant on at least one edge JumpThreading needs
+   constant. This falsifies the prior session's assumption that JT always
+   collapses this shape — it's real but narrower.
+2. **`GroupMemoryBarrierWithGroupSync.test`'s prefix has its own barriers.**
+   Its real HLSL issues two `GroupMemoryBarrierWithGroupSync()` calls *before*
+   the loop even starts. `matchLoopShape`'s own doc comment already required
+   prefix/suffix to be barrier-free, but nothing enforced it — this session
+   added the check (declining safely) rather than fixing the actual gap
+   (splitting prefix at its own barriers, same as `Shape.BodyOrder` already
+   gets). This test's **loop body shape alone** is confirmed now-supported
+   (see `SplitsFlowMergeLoopWithHeaderDerivedValue`) — it's specifically the
+   prefix-barrier gap blocking it, isolated and scoped as H155.
+
+## Verification
+
+- `ninja check-feme`: 3101/3104 passed (3 unsupported), 0 failed — up from
+  3099/3102 before this session (+2 new tests, 0 regressions).
+- All 9 confirmed H124e wrap-entry cases individually re-verified via
+  `split-file` + real `dxc -spirv -fspv-target-env=vulkan1.3` + `offloader`
+  (no offload-test-suite build persists in this checkout, same recurring
+  limitation prior sessions hit): **0 of 9 flip to passing**, all still the
+  same clean diagnostic (no crash, no hang — that in itself is the safety win:
+  before this session's fixes, an intermediate/buggy version of this same
+  work produced a hard segfault on `InterlockedAdd.32.test` instead of a
+  diagnostic; that's fixed and stays fixed).
+- `dEQP-VK.compute.pipeline.*` (20,502 cases) spot-check: 647 passed / 36
+  failed / 19,819 not supported, no crash or hang — consistent with pre-existing,
+  unrelated gaps (this fix's own shape is HLSL/DXC-`Interlocked*`-specific, not
+  reachable through native SPIR-V-sourced CTS cases).
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: pure
+  CPU-backend internal fix.
+
+## Suggested next steps
+
+1. **~2-3 hours, now precisely scoped, best next target:** implement H155
+   (prefix/suffix own-barrier splitting) — generalize `splitLoopBodyAtBarriers`
+   (or a sibling) to also outline a barrier-containing prefix/suffix chain into
+   N region functions, mirroring what `Shape.BodyOrder` already gets. This
+   alone is expected to close `WaveOps/GroupMemoryBarrierWithGroupSync.test`
+   outright, since its loop-body shape is already confirmed supported.
+2. **~3-4 hours, larger, higher payoff (up to 8 remaining cases):** implement
+   H154 (the actual `PreLatch`/`M` `Flow`-merge CFG matcher H124e(a)'s own
+   prior design called for) — needed for cases like `InterlockedExchange.32.
+   test`/`InterlockedAdd.32.test` where `JumpThreadingPass` doesn't thread the
+   merge block away. Start with `InterlockedExchange.32.test` (confirmed this
+   session to hit exactly this gap, not the H155 prefix-barrier gap).
+3. **Still untouched (carried over many sessions):**
+   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
+   divergent-branch gap.
+4. **Large, deprioritized many sessions now:** H124d (upstream MLIR SPIR-V
+   `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap
+   corruption.
+5. **Do not re-attempt H150** — confirmed a prior session it's not a FeMe-side
+   bug at all.
