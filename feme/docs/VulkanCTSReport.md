@@ -46443,3 +46443,101 @@ share `WaveIsFirstLane.test`'s cause (a pre-existing code comment near
 the arithmetic-reduce/prefix narrowing logic already references
 `WaveActiveMax.fp32.test` as fixed by that narrowing, since `ActiveMax`
 is already in the narrowed set -- a different code path entirely).
+
+## H151: `WaveReadLaneAt.mtx.test`'s wrapper+struct `RowMajor` matrix column-select gap fixed
+
+**Environment check (every session, per standing instruction):**
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
+(confirmed with `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set via two separate
+`export` statements).
+
+**Baseline.** `ninja check-feme`: 3098/3101 passed (3 unsupported), 0
+failed, matching the prior (H150) session's own closing state exactly.
+
+**Root cause.** Reproduced `WaveOps/WaveReadLaneAt.mtx.test` standalone
+via a hand-written `dxc`-compiled repro (`OutMatrix[TID.x] =
+WaveReadLaneAt(InMatrix[0].matrixData[TID.x], TID.x)` against a
+`StructuredBuffer<MatrixStruct>` where `struct MatrixStruct { float4x4
+matrixData; }`) and traced it via `spirv-dis` + manual
+`SPIRVToLLVMPatterns.cpp` reading (not yet a full IR-level reduction at
+first, then confirmed with one via `feme-opt
+--feme-convert-spirv-to-llvm`). The test's own "stored in column-major
+format" comment describes the *logical* HLSL view, not the actual
+physical SPIR-V decoration: `dxc` actually decorates this matrix member
+**`RowMajor`**, `MatrixStride=16`.
+
+The generated `spirv.AccessChain` is a 4-index chain (`[wrapper-dummy,
+dynamic-array-index, matrixData-member-select, column-select]`) --
+`StructuredBuffer<MatrixStruct>` is a dxc "wrapper" struct (a `Block`
+with one member, a `RuntimeArrayType` of `MatrixStruct`), so
+`rewriteBlockAccess`'s own `SelectedType` at the matrix-member-select
+point is `MatrixStruct` (a struct), not the matrix itself -- its
+top-level `isa<MatrixType>(SelectedType)` branch (which already
+correctly handles both non-natural-stride `ColMajor` and `RowMajor`
+column-selects for the *direct* struct-member shape, e.g.
+`cbuffer`/`ConstantBuffer<T>`) never fires for this one-level-deeper
+shape at all. `remapNestedStructMemberIndices`'s existing (H148-added)
+matrix handling only recognizes a further *scalar*-element access (two
+indices past the member selector, `M[c][r]`), not a column-select's one
+(`M[i]` alone) -- so this exact shape fell through, uncaught, to an
+ordinary GEP treating the matrix as its own natural, untransposed,
+unpadded column-major array, silently reading the buffer's raw
+contiguous bytes instead of the correct strided/gathered values.
+
+**Fix.** Added a new branch in `rewriteBlockAccess`, gated on
+`SelectedType` being reached *through an array* (as opposed to a direct
+struct-content member -- distinguishing this shape from the unrelated,
+already-handled non-wrapper nested-struct-reorder shape
+`spirv-to-llvm-nested-struct-reorder.mlir` exercises) and being itself a
+struct whose one further index selects a non-representable-layout matrix
+member, with exactly one further column-select index. Builds a GEP to
+the matrix member's own base address, then either applies a
+byte-stride-aware GEP directly (padded `ColMajor`) or defers to
+`MatrixColumnLoadPattern`/`MatrixColumnStorePattern` (`RowMajor`),
+mirroring the existing direct-shape logic already just above it in the
+same function. Also extended `getMatrixColumnAccess` (previously
+hardcoded to the direct, non-wrapper, exactly-2-index shape) to
+recognize this new deferred wrapper+nested-struct shape too.
+
+**Testing.** New unit test
+`spirv-to-llvm-matrix-wrapper-struct-column.mlir`, confirmed to produce
+the correct 4-row RowMajor gather (four separate `getelementptr [0, N,
+%col]` + `load` + `insertelement` steps, one per matrix row) rather than
+a single naive contiguous load.
+
+**Verification.**
+- `ninja check-feme`: 3099/3102 passed (3 unsupported), 0 failed, +1 new
+  test, no regressions (an earlier draft of this fix's own branch
+  condition briefly regressed `spirv-to-llvm-nested-struct-reorder.mlir`
+  by conflating its own unrelated direct-struct-member nested-struct
+  shape with this fix's array-wrapped one; caught and fixed by adding the
+  `SelectedTypeIsArrayElement` guard before final verification).
+- `check-hlsl-feme-vk`: `WaveOps/WaveReadLaneAt.mtx.test` now passes;
+  failure count drops from 19 to **18** (of 664).
+  `Feature/PushConstant/array_of_matrices.test` remains separately
+  `Unexpectedly Passed` (a pre-existing, unrelated `offload-test-suite`
+  `XFAIL` staleness -- confirmed via a pre-fix rebuild that it already
+  unexpectedly passes without this session's fix at all).
+- **Native Vulkan CTS regression check.** Ran a targeted A/B comparison
+  (pre-fix vs. post-fix `libfeme_vulkan.so`, via a temporary
+  `git checkout`/rebuild of just the touched file, then restored)
+  against a 4,212-case list built from every `row_major`/`col_major` case
+  in `vk-default/ubo.txt` (1,728) and `vk-default/ssbo.txt` (2,484) --
+  the same case list H148 used, the CTS surface most likely to exercise
+  the shared `Block`-backed matrix-layout machinery this fix touches.
+  Produced byte-identical totals (1,430 passed / 586 failed / 2,196 not
+  supported, both runs) and a byte-identical per-case pass/fail list
+  (`CasePath`+`StatusCode` pairs diffed directly from each run's own
+  `.qpa` log) -- confirming no regression. None of GLSL's own
+  `dEQP-VK.ubo.*`/`dEQP-VK.ssbo.*` cases happen to exercise the exact
+  dxc-specific "array-wrapped struct containing a matrix" shape this fix
+  targets (GLSL's own SSBO/UBO matrix members are declared directly in
+  the block, not through an intervening single-matrix-member struct
+  reached via a runtime array), so this fix's own effect is confirmed
+  only via the offload-test-suite case above, not independently via
+  native CTS -- consistent with H148's own equivalent note.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a pure
+  SPIR-V-to-LLVM access-chain correctness fix inside already-advertised
+  `StorageBuffer`/SSBO support, not a new Vulkan feature or extension.
+
+H151 is struck through on the roadmap: fixed this session.
