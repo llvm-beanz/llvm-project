@@ -86705,3 +86705,90 @@ a GEP swap). Estimated a full session on its own. Filed as H151, P3.
    heap corruption.
 6. **Do not re-attempt H150** -- confirmed this session it's not a
    FeMe-side bug at all.
+
+# Session: H151 fixed (WaveReadLaneAt.mtx.test's wrapper+struct RowMajor matrix column-select gap)
+
+Environment check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+Vulkan Device`, confirmed.
+
+## What's done
+
+H151 is fixed, tested, and documented. `WaveOps/WaveReadLaneAt.mtx.test`
+now passes. `check-hlsl-feme-vk` failures: 19 -> **18** (of 664).
+
+Root cause: `StructuredBuffer<MatrixStruct>` (dxc wrapper's runtime array
+of a single-`RowMajor`-matrix-member struct) column-select access
+(`matrixData[i]`, no further scalar index) was one level of struct
+nesting deeper than any shape `rewriteBlockAccess`'s top-level matrix
+branch or `remapNestedStructMemberIndices`'s H148-added matrix handling
+recognized -- it silently fell through to a naive contiguous-byte GEP.
+
+Fix: new branch in `rewriteBlockAccess` (`SPIRVToLLVMPatterns.cpp`)
+recognizing this exact shape (array-wrapped struct, one index selecting
+a non-representable-layout matrix member, one further column-select
+index), mirroring the existing direct-shape logic. Extended
+`getMatrixColumnAccess` to recognize the new deferred wrapper+nested-
+struct shape too.
+
+**Bug caught before it shipped**: my first draft of the new branch
+matched on `SelectedType` being a struct, with no check for *how* it was
+reached -- it accidentally also fired on
+`spirv-to-llvm-nested-struct-reorder.mlir`'s unrelated direct (non-array)
+nested-struct shape, breaking that pre-existing test. Caught by running
+full `check-feme` before committing. Fixed by adding a
+`SelectedTypeIsArrayElement` guard so the new branch only applies when
+reached through an array, not a direct struct member. Lesson: always run
+the full regression suite, not just the target test, before calling a
+"shared helper" fix done.
+
+## Commits (4, each separate)
+
+1. `acac12c52455` -- the fix + new unit test
+   (`spirv-to-llvm-matrix-wrapper-struct-column.mlir`)
+2. `6af90b676d95` -- Roadmap.md: strike through H151
+3. `0c5051fdb5f8` -- VulkanCTSReport.md: new H151 section
+4. this commit -- agent_thoughts.md
+
+## Verification done
+
+- `ninja check-feme`: 3099/3102 passed (3 unsupported), 0 failed, +1 new
+  test, no regressions.
+- `check-hlsl-feme-vk`: 18/664 failing (down from 19).
+- Native Vulkan CTS: A/B (git checkout of just the touched file,
+  rebuild, restore) against the same 4,212-case `row_major`/`col_major`
+  `ubo.txt`+`ssbo.txt` list H148 used -- byte-identical totals (1,430
+  passed / 586 failed / 2,196 not supported) and byte-identical per-case
+  pass/fail list both runs. Expected: GLSL's own UBO/SSBO matrix members
+  don't use dxc's array-wrapped-struct shape, so this fix's effect isn't
+  independently visible in native CTS, only via offload-test-suite.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change needed
+  (confirmed, not assumed) -- pure internal correctness fix, no new
+  Vulkan feature/extension surface.
+
+## Suggested next steps
+
+1. **~1-2 hours, still untouched (carried over many sessions):** reduce
+   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
+   divergent-branch gap to its exact IR shape via `feme-opt
+   --feme-convert-spirv-to-llvm`, before attempting a fix.
+2. **~1-2 hours, still untouched (carried over many sessions):** same
+   for `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   multi-exit-loop gap.
+3. **~30-60 min, not yet started:** triage the 4 `.resources.32.test`
+   variants together (`InterlockedAdd`/`CompareExchange`/`CompareStore`/
+   `Exchange`) -- they all use the resource-heap
+   `feme.cpu.resource.atomic.*` runtime-call path, a separate family from
+   the plain `cmpxchg`/`atomicrmw` H124e bucket. Get a diagnostic via
+   `offloader` + `FEME_VULKAN_LOG_CREATION_ERRORS=1` for each first.
+4. **Full session, highest payoff (up to 8 cases at once), largest
+   scope, still untouched across many sessions:** H124e's wrap-entry
+   region-splitting design work (`feme-cpu-wrap-entry` only supports "a
+   straight-line wave body or a single uniform loop" -- rejects a barrier
+   inside any other non-linear control flow shape).
+5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
+6. **Do not re-attempt H150** -- confirmed a prior session it's not a
+   FeMe-side bug at all.
