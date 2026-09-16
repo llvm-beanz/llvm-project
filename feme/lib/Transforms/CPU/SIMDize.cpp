@@ -799,6 +799,7 @@ private:
   void widenExtractValue(ExtractValueInst &EV, IRBuilder<> &Builder);
   void widenShuffleVector(ShuffleVectorInst &SV, IRBuilder<> &Builder);
   void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
+  void widenAggregateSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenVectorToScalarBitCast(BitCastInst &BC, IRBuilder<> &Builder);
   void widenScalarToVectorBitCast(BitCastInst &BC, IRBuilder<> &Builder);
@@ -949,14 +950,20 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // `HSPatchConstants` struct field holding a whole `<4 x float>` position,
   // confirmed by reducing that real failure down to its exact IR shape --
   // see `isSupportedAggregateLeafType`'s own comment for why a vector leaf
-  // flattens to `N` component slots rather than one); an aggregate-typed
-  // `phi` remains unsupported (no real case has needed one yet: unlike a
-  // vector value reconciled across a uniform control-flow diamond,
-  // `feme::cpu::LinearizePass` fully scalarizes every field of a divergent
-  // aggregate reassignment, e.g. `packed.test`'s own `TailState` field,
-  // into a plain scalar `select` before ever rebuilding the struct itself,
-  // so the struct/array value is always freshly built via `insertvalue` in
-  // the merge block, never merged via a struct-typed `phi` directly).
+  // flattens to `N` component slots rather than one). An aggregate-typed
+  // `phi` never itself reaches this pass -- `feme::cpu::LinearizePass`
+  // always rewrites one into a `select` before this pass ever runs (see
+  // `Linearize.cpp`'s own per-`phi` merge-block rewrite) -- but that
+  // `select` is not always itself scalarized field-by-field first: when
+  // `mem2reg` promotes a whole locally-declared aggregate variable
+  // straight to a single aggregate-typed `phi` (rather than splitting it
+  // into one scalar `phi` per field, e.g. because a matrix-typed local is
+  // reassigned as one whole value along each arm of a divergent branch,
+  // confirmed by reducing a real `Graphics/VertexShaderResourceCube.test`
+  // failure down to its exact IR shape), `LinearizePass` produces a single
+  // aggregate-typed `select` instead -- `widenAggregateSelect` decomposes
+  // it exactly like `widenVectorSelect` does for a vector-typed one, one
+  // per-leaf `select` per flattened component.
   //
   // Verify every divergent vector or aggregate value matches one of these
   // producer shapes, and every use of one matches one of the consumer
@@ -1376,15 +1383,25 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 /// inside `checkVectorDecompositionSupported` above (see that function's
 /// own file comment for the full picture, roadmap milestone L21): verifies
 /// that the divergent, aggregate-typed \p I is one of the two supported
-/// producer shapes (an `insertvalue` or a nested sub-aggregate
-/// `extractvalue`, both requiring every leaf `isSupportedAggregateLeafType`
-/// reaches to be a genuine scalar or a whole `FixedVectorType`, roadmap
-/// L27) and that every use of it is one of the three supported consumer
-/// shapes (another `insertvalue`'s aggregate-base or inserted-value
-/// operand, or an `extractvalue`'s aggregate operand).
+/// producer shapes (an `insertvalue`, a nested sub-aggregate
+/// `extractvalue`, or a `select` -- the shape `feme::cpu::LinearizePass`
+/// produces when `mem2reg` promotes a locally-declared aggregate variable
+/// (e.g. a `float4x4` local reassigned along both arms of a divergent
+/// `if`/`else`) straight to a single aggregate-typed `phi`, rather than
+/// scalarizing every field into its own scalar `phi`/`select` first --
+/// confirmed by reducing a real `Graphics/VertexShaderResourceCube.test`
+/// failure (a per-vertex `float4x4 localToWorld` assigned a whole matrix
+/// value along each arm of a divergent `SV_VertexID`-based branch) down to
+/// its exact IR shape; all three producer shapes require every leaf
+/// `isSupportedAggregateLeafType` reaches to be a genuine scalar or a
+/// whole `FixedVectorType`, roadmap L27) and that every use of it is one
+/// of the supported consumer shapes (another `insertvalue`'s aggregate-
+/// base or inserted-value operand, an `extractvalue`'s aggregate operand,
+/// or a `select`'s true/false operand).
 bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
   bool IsSupportedProducer = false;
-  if (isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I))
+  if (isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I) ||
+      isa<SelectInst>(&I))
     IsSupportedProducer = isSupportedAggregateLeafType(I.getType());
 
   if (!IsSupportedProducer) {
@@ -1392,10 +1409,10 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         "feme-cpu-simdize: function '" + OldF->getName() +
         "' has a divergent value '" + I.getName() +
         "' of aggregate type; component decomposition is not yet supported "
-        "for this producer (only an insertvalue chain or a nested "
-        "sub-aggregate extractvalue, over a struct/array whose every leaf "
-        "is a genuine scalar or a whole fixed vector, is supported) "
-        "(roadmap milestone 7/L21/L27 deviation)");
+        "for this producer (only an insertvalue chain, a nested "
+        "sub-aggregate extractvalue, or a select, over a struct/array whose "
+        "every leaf is a genuine scalar or a whole fixed vector, is "
+        "supported) (roadmap milestone 7/L21/L27 deviation)");
     return false;
   }
 
@@ -1406,16 +1423,20 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         continue;
     if (isa<ExtractValueInst>(U))
       continue;
+    if (auto *UserSel = dyn_cast<SelectInst>(U))
+      if (UserSel->getTrueValue() == &I || UserSel->getFalseValue() == &I)
+        continue;
     Ctx.emitError(
         "feme-cpu-simdize: function '" + OldF->getName() +
         "' has a divergent aggregate value '" + I.getName() +
-        "' used outside a supported insertvalue/extractvalue pattern; "
-        "component decomposition is not yet supported for this use "
-        "(roadmap milestone 7/L21 deviation)");
+        "' used outside a supported insertvalue/extractvalue/select "
+        "pattern; component decomposition is not yet supported for this "
+        "use (roadmap milestone 7/L21 deviation)");
     return false;
   }
   return true;
 }
+
 
 void FunctionWidener::collectMaskedAllocas() {
   // (Roadmap L84) Runs once, before any widening, over the *old* function's
@@ -3318,6 +3339,34 @@ void FunctionWidener::widenExtractValue(ExtractValueInst &EV,
   ToErase.push_back(&EV);
 }
 
+void FunctionWidener::widenAggregateSelect(SelectInst &SI,
+                                           IRBuilder<> &Builder) {
+  // The aggregate analogue of `widenVectorSelect` (roadmap L21/L27,
+  // extended to a `select` producer): unlike a vector-typed `select`,
+  // whose condition may itself be a per-lane `<N x i1>` vector, LLVM IR
+  // requires an aggregate-typed `select`'s condition to be a scalar `i1`
+  // (there is no per-leaf condition shape to decompose), so only the
+  // single-`WideCond`-broadcast case applies here. Build one real `select`
+  // per flattened leaf component (`getAggregateComponents` on both the
+  // true and false operands), mirroring `widenVectorSelect`'s own
+  // per-component loop exactly.
+  Value *WideCond = getWidened(SI.getCondition(), Builder);
+
+  SmallVector<Value *, 8> TrueComponents =
+      getAggregateComponents(SI.getTrueValue(), Builder);
+  SmallVector<Value *, 8> FalseComponents =
+      getAggregateComponents(SI.getFalseValue(), Builder);
+
+  SmallVector<Value *, 8> Components;
+  for (unsigned I = 0, E = TrueComponents.size(); I != E; ++I)
+    Components.push_back(Builder.CreateSelect(
+        WideCond, TrueComponents[I], FalseComponents[I],
+        SI.getName() + ".wide" + Twine(I)));
+
+  WidenedAggregateComponents[&SI] = std::move(Components);
+  ToErase.push_back(&SI);
+}
+
 void FunctionWidener::widenShuffleVector(ShuffleVectorInst &SV,
                                          IRBuilder<> &Builder) {
   // "A shuffle ... becomes selects across the components" ("Vectors become
@@ -4010,6 +4059,12 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
   if (auto *VSel = dyn_cast<SelectInst>(&I); VSel && I.getType()->isVectorTy()) {
     widenVectorSelect(*VSel, Builder);
+    return true;
+  }
+
+  if (auto *ASel = dyn_cast<SelectInst>(&I);
+      ASel && I.getType()->isAggregateType()) {
+    widenAggregateSelect(*ASel, Builder);
     return true;
   }
 

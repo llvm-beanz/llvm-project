@@ -497,6 +497,92 @@ TEST(SIMDizeTest, DecomposesInsertValueChainIntoResourceStore) {
   EXPECT_EQ(StoreCallCount, 3u * 4u);
 }
 
+// (Roadmap L21/L27, `FunctionWidener::widenAggregateSelect`) A whole
+// aggregate-typed value merged across a divergent `if`/`else` diamond as a
+// single `select` (rather than scalarized field-by-field into a plain
+// scalar `select` before the struct/array is rebuilt) -- the exact shape
+// `feme::cpu::LinearizePass` produces when `mem2reg` promotes a whole
+// locally-declared aggregate variable straight to one aggregate-typed
+// `phi`, reduced from a real `Graphics/VertexShaderResourceCube.test`
+// failure where a per-vertex `float4x4 localToWorld` local is reassigned a
+// whole matrix value along each arm of a divergent `SV_VertexID`-based
+// branch -- now decomposes into one `select` per flattened scalar leaf
+// (`WidenedAggregateComponents`) instead of `checkAggregateValueSupported`
+// bailing on an unsupported producer shape.
+TEST(SIMDizeTest, DecomposesAggregateSelect) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %cond = icmp ult i32 %tid, 2
+      %off = zext i32 %tid to i64
+      %e0 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i1 true)
+      %off1 = add i64 %off, 4
+      %e1 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, i1 true)
+      %off2 = add i64 %off, 8
+      %f0 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off2, i1 true)
+      %off3 = add i64 %off, 12
+      %f1 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off3, i1 true)
+
+      %ta = insertvalue [2 x i32] poison, i32 %e0, 0
+      %tb = insertvalue [2 x i32] %ta, i32 %e1, 1
+
+      %fa = insertvalue [2 x i32] poison, i32 %f0, 0
+      %fb = insertvalue [2 x i32] %fa, i32 %f1, 1
+
+      %sel = select i1 %cond, [2 x i32] %tb, [2 x i32] %fb
+
+      %r0 = extractvalue [2 x i32] %sel, 0
+      %r1 = extractvalue [2 x i32] %sel, 1
+
+      call void @feme.cpu.resource.store.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i32 %r0, i1 true)
+      call void @feme.cpu.resource.store.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, i32 %r1, i1 true)
+      ret void
+    }
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Decomposition never builds an illegal `<4 x [2 x i32]>` select, and
+  // every per-lane scalarized store's own value operand stays a genuine
+  // scalar `i32` (never a nested vector or an aggregate).
+  unsigned StoreCallCount = 0, LoadCallCount = 0, WideSelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isAggregateType());
+    if (auto *SI = dyn_cast<SelectInst>(&I))
+      if (SI->getType() == FixedVectorType::get(Type::getInt32Ty(Ctx), 4))
+        ++WideSelectCount;
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    StringRef Name = CI->getCalledFunction()->getName();
+    if (Name == "feme.cpu.resource.store.raw.i32") {
+      ++StoreCallCount;
+      EXPECT_TRUE(CI->getArgOperand(4)->getType()->isIntegerTy(32));
+    } else if (Name == "feme.cpu.resource.load.raw.i32") {
+      ++LoadCallCount;
+    }
+  }
+  EXPECT_EQ(LoadCallCount, 4u * 4u);
+  EXPECT_EQ(StoreCallCount, 2u * 4u);
+  // One wide (SIMD-width) `select` per flattened leaf: 2 leaves.
+  EXPECT_EQ(WideSelectCount, 2u);
+}
+
 // Roadmap L27: a divergent, whole *vector*-typed value inserted as a single
 // struct-field leaf via `insertvalue` (rather than each scalar component
 // individually, the only shape roadmap L21 supported), then read back out
