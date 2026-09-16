@@ -86898,3 +86898,109 @@ doesn't need re-deriving from scratch next time.
    H124e(a) push could triage `ByteAddressBuffer`/`StructuredBuffer`
    `GetDimensions.test` instead -- neither has been individually looked
    at yet.
+
+# Session: H124e(a) root-cause narrowed to Flow-merge loop shape (no code fix this session)
+
+## What I did
+
+- Confirmed environment: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. ✅
+- Confirmed clean baseline at `f9188b505d1b`, ran `ninja check-feme`: 3099/3102 passed
+  (3 unsupported), 0 failed — no drift from the previous session's H152 fix.
+- Took on the previous session's #1 suggested next step: attempt H124e(a)'s actual
+  design work (the wrap-entry `matchLoopShape` gap affecting up to 9 confirmed cases).
+- Read `EntryWrapper.cpp`'s file doc comment and `matchLoopShape`/`LoopShape`/
+  `isPureClosedChain`/`walkLinearChain` in full.
+- Built two standalone IR-level repros (`feme-opt --feme-convert-spirv-to-llvm`,
+  then the CPU pipeline up to but not including `feme-cpu-wrap-entry`):
+  - `InterlockedAdd.32.test` (the smallest case in the 9-case bucket).
+  - `WaveOps/GroupMemoryBarrierWithGroupSync.test` (much simpler — one barrier per
+    iteration, no extra inner branch).
+- Manually traced both control-flow graphs block-by-block against the HLSL source.
+
+## What I found
+
+The previous session's own H124e(a) characterization ("loop body contains a divergent
+branch reconverged into a Flow block, plus **two** barriers per iteration") was
+**subtly wrong in an important way**, and the real gap is narrower and more mechanical:
+
+- The "two barriers per iteration" claim was wrong — one barrier is the loop's own
+  per-iteration barrier; the *other* "barrier" I re-traced this session turned out to
+  be in the **suffix region after the loop entirely** (source: `OutMono[GTID.x] = Mono;
+  GroupMemoryBarrierWithGroupSync();` right after the `for` loop), not a second
+  per-iteration barrier at all.
+- The actual gap: DXC/SPIR-V-Tools structurizes every `for` loop as a **rotated loop
+  with a guard** — the header tests the trip count both as a pre-loop guard and,
+  effectively, again after each iteration — and SPIR-V's mandatory merge-block
+  requirement means the loop's own backedge-vs-exit decision AND the guard's
+  immediate-exit case both route through **one shared `Flow`-style merge block**,
+  not directly back to the header. `matchLoopShape` currently requires the body
+  chain to end in a **direct** unconditional backedge to the header, and the other
+  header successor to be the exit block reached via a straight chain — it has no
+  notion of "both routed through one shared merge block whose own branch condition
+  is fully determined (a compile-time-known constant) by which edge was taken."
+- This shape isn't from an actual extra runtime branch or divergence at all — the
+  `Flow` block's `br` is 100% predictable per predecessor edge. It's essentially
+  "which edge did we arrive from," re-encoded as a boolean and immediately branched
+  on, purely as an LLVM/SPIR-V CFG-canonicalization artifact (the loop's live-out
+  values need one shared phi-merge point).
+- I believe (not yet individually re-confirmed across all 9 cases, only 2 traced)
+  this shape is **universal** to essentially every DXC-compiled loop-with-barrier,
+  not a rare/exotic case — meaning fixing `matchLoopShape` to recognize it would
+  likely close **most or all** of H124e's 9-case bucket at once, not just narrow
+  cases. This is a much better payoff-to-scope ratio than the previous two-part
+  "loop-carried-value spilling + nested-branch-support" characterization implied.
+- `InterlockedAdd.32.test` also has a genuine additional **uniform** inner branch
+  in its loop body (`if (I > 0 && ...)`'s `I>0` half) — but I believe this is just
+  an ordinary uniform `if` that `matchBranchShape`/`DiamondFlattener` already know
+  how to handle, once nested inside a correctly-recognized loop body. Not a separate
+  new gap, but not proven either.
+
+## Why I didn't implement a fix this session
+
+I scoped out the concrete implementation (see the rewritten H124e(a) roadmap row for
+the full recipe): extend `matchLoopShape` to try a second match when the direct-backedge
+model fails, recognizing the shared-Flow-merge pattern, and extend `buildWrapperForLoop`'s
+backedge-value threading to handle one extra level of indirection (the header phi's
+per-iteration next-value now lives at the `Flow` merge block, not at the direct latch).
+
+This is now well-scoped, but it's still a genuine CFG-transform correctness change,
+and a wrong implementation here risks **silently incorrect wrapper output** (subtly
+wrong compute results) rather than just a diagnosed compile failure — a much worse
+failure mode. Implementing, unit-testing, and CTS-regression-verifying this properly
+felt like more than I could responsibly do thoroughly in this session, so I documented
+the refined analysis instead of rushing an implementation.
+
+## What I changed
+
+- `feme/docs/Roadmap.md`: rewrote H124e(a)'s row with the corrected, narrower,
+  more actionable root-cause analysis and a concrete implementation recipe.
+- No functional code changes. No CTS re-run needed (nothing changed that could
+  affect runtime behavior) — `check-feme` was only re-confirmed clean at the start.
+- Cleaned up scratch dirs `/tmp/h124ea/`, `/tmp/h124e_gsync/`.
+
+## Suggested next steps
+
+1. **Full session, now much better scoped than before:** implement the
+   `matchLoopShape`/`buildWrapperForLoop` "Flow-merge loop" extension described in
+   the rewritten H124e(a) roadmap row. Start with `WaveOps/GroupMemoryBarrierWithGroupSync.test`
+   (simplest repro — one barrier, no extra inner branch) as the first target;
+   validate with a new `EntryWrapperTest.cpp` unit test before trying
+   `InterlockedAdd.32.test`'s slightly more complex shape (extra uniform `I>0`
+   branch in the loop body).
+2. **After any implementation:** individually re-confirm which of the remaining
+   7 wrap-entry-bucket cases actually match the same Flow-merge shape (only 2 of
+   9 traced this session) — don't assume all 9 close from one fix without checking.
+3. **Still untouched (carried over many sessions):** `InterlockedCompareExchange.resources.32.test`'s
+   `feme-cpu-simdize` divergent-branch gap and `InterlockedExchange.resources.32.test`'s
+   `feme-cpu-linearize` multi-exit-loop gap — the latter is already suspected (by
+   the prior session) to share this same Flow-merge root cause, one pass earlier
+   in `LoopLinearizer` rather than `EntryWrapper`; worth re-checking once the
+   `EntryWrapper` fix lands, since it may close automatically or need the same
+   pattern ported to `LoopLinearizer`.
+4. **Large, deprioritized many sessions now:** H124d (upstream MLIR SPIR-V
+   `OpDPdx`/`OpDPdy`/`OpFwidth`), H124m (`OpArrayLength`, confirmed via direct
+   triage this session's predecessor to be a real, separately-large gap — not a
+   viable smaller fallback), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap corruption.
+5. **Do not re-attempt H150** — confirmed a prior session it's not a FeMe-side bug.
