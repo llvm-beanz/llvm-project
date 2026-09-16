@@ -53,32 +53,20 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H167, best next target now, ~half a day to a day.** Three
-   candidate fixes are already sketched in the roadmap row: (a) have
-   `LinearizePass` mark "known-uniform-despite-syntax" values/branches
-   with metadata `SIMDizePass` can consume; (b) teach `SIMDizePass`'s own
-   uniformity analysis the same masked-load taint-safety reasoning
-   `DiamondFlattener` already has; (c) have `DiamondFlattener`
-   conservatively flatten any branch reading a tainted-fed masked load
-   even when its own condition isn't flagged, trading a little masking
-   overhead for guaranteed downstream agreement. (c) is probably the
-   smallest, safest first attempt -- try it first before (a)/(b)'s
-   larger cross-pass plumbing.
-2. **H164, unbounded, budget a day+.** `InterlockedCompareExchange.32.test`
-   segfaults inside JIT'd code with an empty stack. Start by hand-editing
-   `feme-opt` output, not a debugger -- three hypotheses already listed
-   in the roadmap row (uninitialized spilled lane-pointer slot, a
-   `poison` artifact from `OpAtomicCompareExchange`'s result struct, or a
-   barrier-split prefix region entered with the wrong wave mask).
-3. **H168, not urgent but real, ~an afternoon once picked up.** No repro
-   reduced yet -- first step is exactly that: reduce one of the two
-   prior incidental repros to a standalone `feme-opt -passes=feme-cpu-simdize`
-   case and confirm it reproduces in isolation before touching
-   `CreateMaskedScatter`.
-4. **`ByteAddressBuffer`/`StructuredBuffer` `GetDimensions.test`** (H160):
-   real, well-scoped, but a genuine upstream MLIR SPIR-V dialect gap
-   (`OpArrayLength` has no op at all) -- comparable in size to H124d's
-   own upstream gap. Not urgent, but the smallest-blast-radius way to
-   shrink the failure count by 2 without touching `feme` pass code at
-   all, if someone wants an upstream-MLIR-flavored session instead.
-
+1. **~15 minutes, cheap diagnostic, do first if picking this back up:** confirm
+   whether `WaveActiveMax.test`'s `TID.x % 8`-into-4-element-buffer shape is a
+   pre-existing `offload-test-suite` test bug (check git blame/history on that
+   file, or just try changing the modulus locally and see whether the CHECK
+   lines suddenly match) before spending real time on it as a `feme` bug.
+2. **~1-2 days, real payoff (closes 2 failures), not urgent:** H160 -- add
+   `spirv.ArrayLength` to the SPIR-V dialect (`SPIRVOps.td`), plus
+   (de)serializer and conversion-pattern support. See H160's own roadmap row for
+   the exact plan; check whether the existing `RWBuffer<T>::GetDimensions()`
+   bound-resource metadata path can be reused for the new op's lowering before
+   inventing new plumbing.
+3. **~half a day, real payoff (closes up to 5 failures), not urgent,
+   upstream-MLIR-flavored:** H124d -- same shape as H160 but for
+   `OpDPdx`/`OpDPdy`/`OpFwidth` (opcodes 207-215). Needs new SPIR-V dialect
+   derivative ops plus CPU-backend screen-space-derivative
+   (quad/2x2-lane-grouping) semantics, which the CPU SIMD renderer does not
+   currently implement at all -- larger than H160 for that reason.
