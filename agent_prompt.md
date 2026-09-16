@@ -53,10 +53,9 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Full session, now much better scoped than before:** implement the
-   `matchLoopShape`/`buildWrapperForLoop` "Flow-merge loop" extension described in
-   the rewritten H124e(a) roadmap row. Start with `WaveOps/GroupMemoryBarrierWithGroupSync.test`
-   (simplest repro — one barrier, no extra inner branch) as the first target;
-   validate with a new `EntryWrapperTest.cpp` unit test before trying
-   `InterlockedAdd.32.test`'s slightly more complex shape (extra uniform `I>0`
-   branch in the loop body).
+1. **~2-3 hours, now precisely scoped, best next target:** implement H155
+   (prefix/suffix own-barrier splitting) — generalize `splitLoopBodyAtBarriers`
+   (or a sibling) to also outline a barrier-containing prefix/suffix chain into
+   N region functions, mirroring what `Shape.BodyOrder` already gets. This
+   alone is expected to close `WaveOps/GroupMemoryBarrierWithGroupSync.test`
+   outright, since its loop-body shape is already confirmed supported.
