@@ -33,13 +33,18 @@ define void @main() #0 {
   ret void
 }
 
-; A storage-image atomic every lane performs identically -- same handle,
-; same coordinate, same value -- was already correct before this and stays
-; a single scalar call: there is nothing to widen.
+; Roadmap H166: a storage-image atomic every lane performs identically --
+; same handle, same coordinate, same value, all compile-time constants --
+; must still execute once per active lane, exactly like a resource-heap
+; atomic (`ScalarizesUniformAtomicResourceCall`, roadmap H146) or a
+; groupshared `atomicrmw`: leaving it as a single scalar call undercounts
+; its effect by a factor of the wave's own active-lane count. Before this
+; fix, `widenImageCall`'s early-return took no account of
+; `MatchedImageCall::AtomicValue`, so a fully-uniform atomic call was left
+; completely unwidened.
 
 ; CHECK-LABEL: define void @uniform_atomic(
-; CHECK: call i32 @feme.cpu.image.atomic.add.2d.i32(
-; CHECK-NOT: call i32 @feme.cpu.image.atomic.add.2d.i32(
+; CHECK-COUNT-4: call i32 @feme.cpu.image.atomic.add.2d.i32(ptr %image_heap, i32 %image_heap_count, i32 1, i32 0, i32 0, i32 1, i1 {{.*}})
 define void @uniform_atomic() #0 {
   %img = call target("spirv.Image", i32, 1, 0, 0, 0, 2, 0)
       @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 1, i32 1, i32 0, ptr null)

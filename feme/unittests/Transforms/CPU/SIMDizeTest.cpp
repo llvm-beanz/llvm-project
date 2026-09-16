@@ -2446,6 +2446,50 @@ TEST(SIMDizeTest, ScalarizesUniformAtomicResourceCall) {
   EXPECT_EQ(AtomicCallCount, 4u);
 }
 
+TEST(SIMDizeTest, ScalarizesUniformImageAtomicCall) {
+  // Roadmap H166: a storage-image atomic every lane performs identically
+  // (a compile-time-constant descriptor index, coordinate, and stored
+  // value, called unconditionally by every lane) must still execute once
+  // per active lane -- exactly like a uniform resource-heap atomic
+  // (`ScalarizesUniformAtomicResourceCall` above, roadmap H146) -- rather
+  // than being left as a single scalar call. Before this fix,
+  // `widenImageCall`'s early-return took no account of
+  // `MatchedImageCall::AtomicValue`, so a uniform image atomic
+  // (`InterlockedAdd(Tex2D[uint2(0, 0)], 1u)`) was left completely
+  // unwidened, undercounting its effect by a factor of the wave's own
+  // active-lane count.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %image_heap, i32 %image_heap_count) #0 {
+      %r = call i32 @feme.cpu.image.atomic.add.2d.i32(
+          ptr %image_heap, i32 %image_heap_count, i32 0, i32 0, i32 0, i32 1,
+          i1 true)
+      ret void
+    }
+    declare i32 @feme.cpu.image.atomic.add.2d.i32(ptr, i32, i32, i32, i32, i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Every lane must get its own clone of the atomic call -- four total,
+  // not one -- even though the call's own operands (descriptor index,
+  // coordinate, stored value) are all compile-time constants and thus
+  // classified uniform.
+  unsigned AtomicCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() == "feme.cpu.image.atomic.add.2d.i32")
+      ++AtomicCallCount;
+  }
+  EXPECT_EQ(AtomicCallCount, 4u);
+}
+
 } // namespace
 
 

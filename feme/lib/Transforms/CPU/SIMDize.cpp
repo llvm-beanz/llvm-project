@@ -2443,7 +2443,17 @@ void FunctionWidener::widenImageCall(CallInst &CI,
       continue;
     AnyDivergent |= Widened.count(CI.getArgOperand(I)) != 0;
   }
-  if (!AnyDivergent)
+  // (Roadmap H166) An image atomic's effect accumulates across lanes
+  // exactly like a resource-heap atomic does (see `widenResourceCall`'s own
+  // identical `isAtomic(Matched.Kind)` override, added for roadmap H146):
+  // running it once instead of once per active lane silently undercounts,
+  // even when every coordinate/value operand is itself uniform.
+  // `InterlockedAdd(Tex2D[uint2(0, 0)], 1u)`, called unconditionally by
+  // every lane with a compile-time-constant coordinate and thus fully
+  // uniform by every operand's own value, was otherwise executed exactly
+  // once for the whole wave instead of once per lane, undercounting by a
+  // factor of the active lane count.
+  if (!AnyDivergent && !Matched.AtomicValue)
     return; // A uniform sample/store: leave the scalar call as-is.
 
   SmallVector<Value *, 12> WideArgs(MaskIdx, nullptr);
