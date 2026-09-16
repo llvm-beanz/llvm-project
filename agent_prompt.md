@@ -53,22 +53,22 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours, still untouched:** reduce
+1. **~1-2 hours, real bug, now well-scoped: H151** (`WaveReadLaneAt.mtx.test`).
+   Start with `feme-opt --feme-convert-spirv-to-llvm` on the reduced
+   shader to confirm whether DXC's SPIR-V reaches `rewriteBlockAccess`'s
+   declined case directly or some other, not-yet-identified path first.
+2. **~1-2 hours, still untouched (carried over many sessions):** reduce
    `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
-   divergent-branch gap to its exact IR shape via `feme-opt
-   --feme-convert-spirv-to-llvm`, before attempting a fix.
-2. **~1-2 hours, still untouched:** same for
-   `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   divergent-branch gap to its exact IR shape.
+3. **~1-2 hours, still untouched (carried over many sessions):** same
+   for `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
    multi-exit-loop gap.
-3. **~30-60 min each, x3 (H147a):** individually triage
-   `WaveIsFirstLane.test`/`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`
-   — reproduce standalone via `offloader`, dump actual vs. expected
-   values. Confirmed this session these do NOT share H148's matrix-
-   addressing cause; each needs its own from-scratch look.
-4. **Full session, highest payoff (8 cases at once), least scoped:**
-   attempt H124e's actual wrap-entry region-splitting design work.
+4. **Full session, highest payoff (up to 8 cases at once), largest
+   scope:** H124e's wrap-entry region-splitting design work.
 5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
    SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
    `dyn-res-uav-counter.test`'s address-space mismatch,
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    heap corruption.
+6. **Do not re-attempt H150** -- confirmed this session it's not a
+   FeMe-side bug at all.
