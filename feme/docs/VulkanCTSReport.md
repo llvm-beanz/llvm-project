@@ -46904,3 +46904,13 @@ is entirely internal to the CPU divergence-handling backend
 (`EntryWrapper.cpp`); no new Vulkan features or extensions were
 exposed, so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 are unchanged.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases,
+same broad group used for H153's own CPU-backend-internal fix, since
+none of H155's affected shapes -- `Interlocked*`/`GroupMemoryBarrier*`
+DXC/HLSL-specific CFG shapes -- are reachable through raw
+SPIR-V-Tools/glslang-produced shaders): 647 passed / 36 failed / 19,819
+not supported, no crash or hang -- **byte-identical to H153's own prior
+run**, confirming no regression. No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: a pure CPU-backend divergence-handling
+fix, no new Vulkan feature or extension surface.
