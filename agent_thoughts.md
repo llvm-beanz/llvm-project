@@ -85972,3 +85972,177 @@ work) rather than flakiness, and to remove its `XFAIL` marker if so.
 Scratch files cleaned up before this commit: `/tmp/h138_commit_msg.txt`,
 `/tmp/api_devinit_caselist.txt`, `/tmp/cts_h139_recheck*.qpa`,
 `/tmp/cts_h139_out.txt`, `/tmp/1789527521915-*.txt`.
+
+# Session: real-`dxc`-based individual triage of the fresh 28-failure list -- H140/H141 fixed
+
+**vulkaninfo check**: confirmed `FeMe CPU Vulkan Device` at session start
+(and again immediately before this session's first Vulkan CTS run, per
+the now-standing per-session instruction).
+
+## What got fixed this session
+
+1. **H140** -- `Feature/SpecializationConstant/spec_const_32_bits.test`'s
+   `OutBool` case. Two separate real bugs, one per repo:
+   - `offload-test-suite`'s `parseSpecializationConstant`
+     (`lib/API/VK/Device.cpp`) used `Entry.size = sizeof(bool)` (1 byte)
+     for a `DataFormat::Bool` specialization override, when the Vulkan
+     spec requires `sizeof(VkBool32)` (4 bytes). FeMe's own
+     `buildSpecializationOverrides` only reads a `uint32_t` override
+     value `if (Entry.size >= sizeof(uint32_t))`, so the too-small size
+     silently produced a zero override with **no diagnostic at all**.
+   - FeMe's own `patchSpecializationConstants`
+     (`feme/lib/Vulkan/SpecializationPatch.cpp`) never handled
+     `OpSpecConstantTrue`/`OpSpecConstantFalse` -- SPIR-V's actual
+     (confirmed via `spirv-dis`) encoding for a boolean spec constant,
+     which carries no literal-value operand at all (the boolean value
+     *is* the opcode).
+   - Fixed both. New tests in both repos.
+2. **H141** -- `Feature/ConstantBufferT/nested.test`'s silent
+   `"failed to deserialize SPIR-V module"` with zero diagnostic text
+   even under `FEME_VULKAN_LOG_CREATION_ERRORS=1`. Root-caused (see
+   "How I found it" below) to an **upstream MLIR deserializer gap**:
+   `processStructType` resolves any `OpName`-carrying `OpTypeStruct`
+   to an "identified" `spirv::StructType` keyed purely by the debug
+   name string, with no per-`<id>` scoping. A 3-level-deep HLSL struct
+   nest with an array-of-struct middle member makes DXC emit two
+   distinct `OpTypeStruct` `<id>`s (one Uniform-layout, one
+   StorageBuffer-layout) both named identically -- the second
+   `trySetBody` call collides and fails, silently (`processStructType`
+   never calls `emitError`). Fixed with a new FeMe-local raw-word pass,
+   `disambiguateDuplicateStructNames` (`SPIRVImporter.cpp`), rather than
+   patching upstream MLIR -- renames every colliding `OpName` after the
+   first to a unique `"<name>.<id>"`, routing the later struct through
+   the anonymous/literal-struct path instead.
+
+Both confirmed via the real `check-hlsl-feme-vk` suite (the `feme-vk`
+lit config, which substitutes `/usr/local/bin/dxc` for `%dxc_target`,
+**not** `clang-dxc`): failure count dropped from 28 to 26 (of 664).
+`check-feme`: 3084/3087 passed (3 unsupported), 0 failed, +4 new unit
+tests total, 0 regressions.
+
+## A methodology trap I fell into and got back out of
+
+Early this session I re-triaged `nested.test` using
+`/usr/local/bin/dxc` directly (bypassing `llvm-lit`, per the standing
+instruction that `FEME_VULKAN_LOG_CREATION_ERRORS` doesn't surface
+through lit's capture) -- and found and fixed the deserializer bug
+above. Good so far. But when I went to *verify* the fix against the
+real `check-hlsl-feme-vk` target, I first ran it against the
+**`clang-feme-vk`** lit suite by mistake (there are *two* FeMe suites:
+`feme-vk`, using real `dxc`, and `clang-feme-vk`, using `clang-dxc` --
+both produce a `check-hlsl-<suite>` ninja target, and I grabbed the
+wrong one). Under `clang-dxc`, this same test crashes for a completely
+different reason (an abort inside
+`SPIRVLegalizePointerCastImpl::gepByteOffset`, clang's own SPIR-V
+backend legalization pass) -- and *that* variant is already correctly
+`XFAIL`'d in the test file itself for exactly this reason. For a
+minute I thought my fix hadn't helped at all.
+
+**The actual `check-hlsl-feme-vk` ninja target's CMake source is**
+`add_offloadtest_gpu_suite(feme-vk FeMe ICD ...)` (not
+`clang-feme-vk`) -- confirmed via
+`grep -n "add_offloadtest_gpu_suite" test/CMakeLists.txt` and
+`lit.site.cfg.py`'s own `config.offloadtest_test_clang = False` /
+`config.offloadtest_dxc = "/usr/local/bin/dxc"` for that suite
+specifically. Once I ran it against the *correct* suite, `nested.test`
+passed cleanly.
+
+**Lesson for future sessions, and for anyone else's triage scripts**:
+if a fix doesn't seem to land, check *which* lit suite (`feme-vk` vs
+`clang-feme-vk`, or the plain `vk`/`clang-vk` non-FeMe siblings) you're
+actually comparing against before concluding the fix is wrong. My
+`run_test2.sh`/`run_test3.sh` scripts in `/tmp/triage/` both exist now
+-- `run_test2.sh` uses real `dxc` (matches `check-hlsl-feme-vk`),
+`run_test3.sh` uses `clang-dxc` (matches `check-hlsl-clang-feme-vk`,
+if that ever needs triaging separately). Neither is checked into the
+repo; recreate them from this note if the `/tmp` copies are gone.
+
+## Also found, not fixed, not yet filed as a roadmap row
+
+- **`array_of_matrices.test`'s "Unexpectedly Passed" is flaky, not a
+  real fix.** Running it standalone 3x via `llvm-lit` gave
+  "Expectedly Failed" every time, but the full `check-hlsl-feme-vk`
+  suite run (same binaries, no rebuild in between) gave "Unexpectedly
+  Passed" both times I ran the full suite this session. Something
+  about running inside the full suite (parallelism? memory state left
+  over from an earlier test in the same worker?) changes this test's
+  outcome. **Do not remove its `XFAIL` marker** -- it is not a genuine
+  fix, and CI would immediately see it flip back to XFAIL-as-expected
+  on some runs. Worth a dedicated investigation session: is this
+  memory-content-dependent (uninitialized read that happens to differ
+  based on what ran before it in the same process), or an actual
+  race?
+- **`dEQP-VK.ssbo.layout.random.nested_structs*` CTS spot-check found a
+  new, unrelated, unfiled bug**: 37/100 cases fail with
+  `JIT session error: Symbols not found: [ feme.cpu.resource.store.raw.i8 ]`
+  -- there is no `i8`-element raw-resource-store CPU runtime entry
+  point at all (compare H137's own `i64`/`v2i64` gap, same shape, but
+  for `i8`). Not triaged further, not filed as a roadmap row yet.
+- **`Feature/DynamicResources/dyn-res-uav-counter.test`** (one of the
+  26 remaining `check-hlsl-feme-vk` failures): fails with
+  `"'llvm.mlir.addressof' op pointer address space must match address
+  space of the referenced global or alias"` during
+  `vkCreateComputePipelines`'s SPIR-V-to-LLVM conversion. Uses
+  `ResourceDescriptorHeap[Index]` (bindless dynamic resource indexing)
+  to get a `RWStructuredBuffer` *with* a UAV counter attached --
+  narrower than plain dynamic-resource indexing (which presumably
+  already works elsewhere), likely specific to how the UAV-counter's
+  own backing global variable's address space is threaded through the
+  dynamic-heap-indexing lowering path. Not triaged past this first
+  error message.
+- **`Graphics/VertexShaderResourceCube.test`**: my triage scripts
+  (`run_test2.sh`/`run_test3.sh`) only compile *one* shader stage and
+  cannot triage this test standalone -- it needs a vertex *and* a
+  fragment/pixel shader compiled together
+  (`"Pipeline description expects 2 shader(s) 1 provided"` is a
+  **script limitation**, not a real FeMe bug report). Needs a
+  multi-shader-aware triage script, or triaging through `llvm-lit -sv`
+  directly for this one (accepting that
+  `FEME_VULKAN_LOG_CREATION_ERRORS` won't surface) as a first pass.
+
+## Suggested next steps (ranked, my best guess at effort)
+
+1. **~1-2 hours: extend the triage script(s) to handle multi-shader
+   pipelines** (vertex+fragment, vertex+geometry+fragment, etc. --
+   whatever each test's own `# RUN:` lines actually declare), then use
+   it to triage `Graphics/VertexShaderResourceCube.test`.
+2. **~1-2 hours, real bug, narrow scope**: root-cause and fix
+   `Feature/DynamicResources/dyn-res-uav-counter.test`'s address-space
+   mismatch in the UAV-counter + `ResourceDescriptorHeap` combination.
+3. **~30 min-1 hour: continue individually triaging the remaining ~22
+   of the 26 `check-hlsl-feme-vk` failures**, one at a time, via
+   `run_test2.sh` (real `dxc`, matches the actual `check-hlsl-feme-vk`
+   target -- see the methodology-trap note above for why this
+   matters) -- still don't assume any two share a root cause without
+   checking (`InterlockedAdd/CompareExchange/CompareStore/Exchange/Xor.32.test`,
+   `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/fwidth.test`, `WaveActiveMax.test`,
+   `Feature/*/GetDimensions.test` (matches H124m, `OpArrayLength` gap,
+   already on the roadmap as deprioritized) are all still individually
+   unconfirmed this session).
+4. **~1 hour: file a roadmap row for the new
+   `feme.cpu.resource.store.raw.i8` runtime gap** found via this
+   session's `dEQP-VK.ssbo.layout.random.nested_structs*` spot-check,
+   then fix it -- likely a small, self-contained addition mirroring
+   H137's own `i64`/`v2i64` pattern in `FeMeRuntimeCPU.c`.
+5. **~half a day: investigate `array_of_matrices.test`'s flaky
+   unexpected-pass** (full-suite-only, not reproducible standalone) --
+   don't remove its `XFAIL` until this is understood; likely needs
+   `valgrind`/an uninitialized-read detector run inside the exact
+   worker-parallel `llvm-lit` invocation the full suite uses.
+6. **H124e** (large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps -- still needs per-case triage, don't
+   assume shared cause with any of the above.
+7. **`shaderImageGatherExtended`** (large, carried over many sessions,
+   still not filed as its own roadmap row): blocks every
+   `dEQP-VK.glsl.texture_gather.*` CTS case. File a roadmap row before
+   starting.
+8. Lower priority, deferred 23+ sessions now:
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   pre-existing heap corruption.
+
+Scratch files cleaned up before this commit: `/tmp/triage/min1`,
+`min2`, `min3`, `bisect_*`, and all per-test-name output directories
+under `/tmp/triage/` (kept only the reusable `run_test.sh`/
+`run_test2.sh`/`run_test3.sh` scripts, and `/tmp/spec_const_cts*.qpa`/
+`/tmp/nested_cts.qpa` CTS spot-check logs, all outside the repo).
