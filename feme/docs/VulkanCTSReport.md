@@ -45439,3 +45439,74 @@ contract.
 H124t is struck through on the roadmap. No feature/extension-inventory
 change: a pure legalization-gap fix exposing no new Vulkan-visible
 capability.
+
+## H124u: `Cube` `OpImageQueryLod` (`CalculateLevelOfDetail`) legalization gap fixed
+
+**Bug.** `Feature/Textures/CalculateLevelOfDetail.test` exercises both
+`Texture2D::CalculateLevelOfDetail` and `TextureCube::
+CalculateLevelOfDetail` in one shader. The `Texture2D` half already
+passed (via `QueryLod2D`, H124t's own `Array2D` widening), but
+`hasOnlySupportedImageUses`'s `isQueryLodIntrinsic` branch was still
+scoped to `Plain2D`/`Array2D` only, so the `TextureCube` calls in the
+same function made the whole shader's pipeline creation fail
+(`vkCreateGraphicsPipelines` returning `VK_ERROR_INITIALIZATION_FAILED`)
+-- the project's established all-or-nothing-per-function contract.
+
+**Fix.** Unlike `Array2D`'s 2-component coordinate (which shares
+`QueryLod2D`'s formula unchanged), a real `spirv-dis` dump confirmed a
+`Cube` handle's own `OpImageQueryLod` coordinate is instead a
+3-component direction vector, with no face-local UV until face
+selection happens at runtime. Added a new `ImageCallKind::QueryLodCube`
+(wired through all four sites the enum requires: `getImageCallName`,
+`getOrInsertImageCall`'s function-type construction, `matchImageCall`'s
+`AllKinds` lookup table and operand-extraction switch, plus a new
+`createQueryLodCube` builder) carrying the raw direction vector and its
+own 6 screen-space derivative components. `hasOnlySupportedImageUses`
+now accepts `Cube` with a coordinate width of 3. The codegen dispatch
+site synthesizes real (Fragment stage) or zero (otherwise)
+direction-vector derivatives via the existing
+`getOrSynthesizeSampleCubeDerivatives` helper (the same one
+`SampleCube`'s own implicit-LOD path already uses) and calls
+`createQueryLodCube`. The new runtime entry point,
+`femeCpuImageQueryLodCubeV2F32`, composes the existing
+`femeRTSelectCubeFace` + `femeRTComputeCubeUVDerivatives` helpers (the
+same composition `femeRTComputeCubeClampedLod` already demonstrates for
+an ordinary Cube sample) to turn the direction vector and its
+derivatives into face-local UV derivatives, then hands those to the
+same `femeRTComputeUnclampedQueryLod`/`femeRTComputeClampedQueryLevel`
+pair `femeCpuImageQueryLod2DV2F32` already uses unmodified.
+
+**New test coverage.** `LowersCubeQueryLodToImageQueryLodCubeWithDirect
+ionVector` (unit test, `SPIRVResourceLoweringTest.cpp`) confirms a
+`Cube`-shaped handle (`dim=3`, 3-component coordinate) lowers to a
+`feme.cpu.image.querylod.cube.v2f32` call with the expected 16-operand
+shape. `LeavesAPlain1DQueryLodHandleAlone`'s own doc comment updated to
+note `Cube` is no longer one of the deliberately unsupported shapes it
+documents.
+
+**Verification.**
+- `ninja check-feme`: **3068/3071 passed** (3 unsupported), 0 failed,
+  0 regressions (unit test count unchanged since the new test replaces
+  no removed coverage -- it's additive within the same test binary).
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): `Feature/Textures/CalculateLevelOfDetail.
+  test` now passes in full (both its `Texture2D` and `TextureCube`
+  halves). Full suite: **344 passed / 33 failed -> 345 passed / 32
+  failed** (of 664), exactly the 1 target case moved from fail to pass,
+  no regressions. (One unrelated, pre-existing, already-documented
+  upstream `offload-test-suite` `XFAIL` staleness flake,
+  `Feature/PushConstant/array_of_matrices.test`, continues to report
+  `Unexpectedly Passed` independent of this change.)
+- VK-GL-CTS: `dEQP-VK.glsl.texture_functions.query.texturequerylod.
+  samplercube_{fixed,float}_*` (10 cases, the real float/fixed-channel
+  `Cube` `textureQueryLod()` CTS coverage) all now **Pass** -- a
+  genuine, unblocked CTS win (this exact GLSL builtin lowers through the
+  same `OpImageQueryLod` opcode this fix widens). `samplercubearray_*`
+  (`CubeArray`, out of scope for this fix) and `*shadow*`
+  (depth-comparison, also out of scope) still correctly fail with
+  `VK_ERROR_INITIALIZATION_FAILED` -- confirmed not a regression, since
+  neither shape/mode is claimed supported by this change.
+
+H124u is struck through on the roadmap. No feature/extension-inventory
+change: a pure legalization-gap fix exposing no new Vulkan-visible
+capability.
