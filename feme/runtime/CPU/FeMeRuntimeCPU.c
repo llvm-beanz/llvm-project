@@ -6808,6 +6808,114 @@ femeRTRoundClampLayer(uint32_t Count, float Value) {
   return Layer >= Count ? Count - 1 : Layer;
 }
 
+// `feme.cpu.image.gathercmp.array2d.v4f32` (roadmap H124q): the
+// `Array2D` counterpart of `femeCpuImageGatherCmp2DV4F32` above --
+// identical fixed bilinear footprint/result ordering/mip-level-0-only
+// restriction, except `ArrayLayer` (SPIR-V's own arrayed-gather
+// coordinate, a float rounded to nearest and clamped to a valid layer by
+// `femeRTRoundClampLayer`, mirroring `femeCpuImageSample2DArrayV4F32`'s
+// own precedent) is threaded into each `femeRTFetchTexel2D` call's own
+// `Layer` argument in place of a hard-coded `0`.
+FemeRTv4f32 femeCpuImageGatherCmpArray2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, float Dref, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) asm("feme.cpu.image.gathercmp.array2d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpArray2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, float Dref, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img.Format);
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y0,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y0,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y1,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y1,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 Result;
+  Result[0] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0], IsFixedPointDepth);
+  Result[1] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T11[0], IsFixedPointDepth);
+  Result[2] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0], IsFixedPointDepth);
+  Result[3] =
+      femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0], IsFixedPointDepth);
+  return Result;
+}
+
+// `feme.cpu.image.gather.array2d.v4f32` (roadmap H124q): the `Array2D`
+// counterpart of `femeCpuImageGather2DV4F32` above, adding `ArrayLayer`
+// the same way `femeCpuImageGatherCmpArray2DV4F32` does to
+// `femeCpuImageGatherCmp2DV4F32`.
+FemeRTv4f32 femeCpuImageGatherArray2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, int32_t Component, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) asm("feme.cpu.image.gather.array2d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherArray2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, int32_t Component, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y0,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y0,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY0,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y1,
+                                       /*Sample=*/0, S.BorderX0 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y1,
+                                       /*Sample=*/0, S.BorderX1 || S.BorderY1,
+                                       Samp.BorderColor);
+  FemeRTv4f32 Result;
+  Result[0] = T01[Chan];
+  Result[1] = T11[Chan];
+  Result[2] = T10[Chan];
+  Result[3] = T00[Chan];
+  return Result;
+}
+
 // `feme.cpu.image.sample.2darray.v4f32` (roadmap H7b-a): the
 // `Texture2DArray` counterpart of `feme.cpu.image.sample.2d.v4f32` above
 // -- identical (U, V) filtering (roadmap L60(a): now including
