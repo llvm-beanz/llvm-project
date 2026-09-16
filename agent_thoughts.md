@@ -87125,3 +87125,93 @@ backup of the original `.a` and restore it before the final verification build
    corruption.
 5. **Do not re-attempt H150** — confirmed a prior session it's not a FeMe-side
    bug at all.
+
+# Session: H155 implemented (prefix/suffix barrier splitting); found real H156 blocker; fixed a pre-existing crash
+
+**Confirmed at session start:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`.
+
+## What got done
+
+1. **H155 implemented.** `feme-cpu-wrap-entry`'s `matchLoopShape`/
+   `buildWrapperForLoop` now split a `LoopShape`'s `Shape.PrefixOrder`/
+   `Shape.SuffixOrder` chain at its own group-sync barrier(s) exactly like
+   `Shape.BodyOrder` already did — pulled the near-duplicate splitting logic
+   (previously copy-pasted between `splitLoopBodyAtBarriers` and
+   `splitArmAtBarriers`) into one shared `outlineChainAtBarriers` helper, then
+   removed the H153-added `containsGroupSyncBarrier` decline check and wired
+   `buildWrapperForLoop` to loop over N prefix/suffix region functions (with a
+   fence between consecutive ones) instead of exactly one.
+2. **Bad news, confirmed via standalone repro:** this does NOT close
+   `WaveOps/GroupMemoryBarrierWithGroupSync.test`. Its real HLSL mixes
+   *divergent branches* (`if (ThreadID.x == 511) ...`) with its prefix
+   barriers, not just "a barrier in an otherwise-linear prefix chain." It
+   fails one stage earlier, at `feme-cpu-linearize` ("empty diamond arm" /
+   "internal branch does not reach the loop's exit block") — `matchLoopShape`
+   is never even reached. Broken out as new roadmap row **H156** (parent
+   H124e(a), no extra letter-nesting).
+3. **Found and fixed a separate, pre-existing crash.** Removing the
+   `containsGroupSyncBarrier` check exposed a bug that predates this session:
+   in the H124e(a) collapsed-single-latch-block case, a header phi's own
+   recurrence can be computed in the barrier-containing body portion (which
+   gets outlined into its own function) rather than the split-off `Latch`
+   tail — `HeaderMap` lookup for it silently returned null, crashing
+   `PHINode::addIncoming`. Hit this on real
+   `Feature/HLSLLib/InterlockedExchange.32.test` (3 header phis: a genuine
+   induction plus two accumulators, only one of which lived in the tail).
+   Added a `matchLoopShape` validation that declines this shape instead of
+   crashing.
+
+## Verification
+
+- `ninja check-feme`: 3103/3103 passed, 0 failed (includes 2 rewritten tests
+  + 2 new ones: `LoopWithBarrierInPrefixIsSplit`,
+  `LoopWithBarrierInSuffixIsSplit`, `FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed`).
+- `ninja check-hlsl-feme-vk`: 18 failed, **identical to the pre-existing
+  baseline** — same test list, 0 new closures, 0 new regressions.
+  `InterlockedExchange.32.test`/friends confirmed to now cleanly fail
+  (declined shape) instead of crashing.
+- `dEQP-VK.compute.pipeline.*` (20,502 cases): 647 passed / 36 failed /
+  19,819 not supported — byte-identical to H153's own prior run of the same
+  group, no crash/hang, no regression.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: purely
+  internal CPU-backend divergence-handling work.
+
+## Commits this session
+
+1. `[feme] H155: split loop prefix/suffix chains at their own barriers` —
+   the shared-helper refactor, the H155 generalization, the crash fix, and
+   all test updates together (kept as one commit since the test updates only
+   pass against the new implementation, and the crash-fix depends on the
+   decline-removal being in place).
+2. `[feme] docs: H155 strike-through + new H156 row; VulkanCTSReport update`
+3. `[feme] docs: record H155's native Vulkan CTS spot-check`
+
+## Suggested next steps
+
+1. **~2-4 hours, well-scoped, most promising next target:** H156 —
+   `feme-cpu-linearize`'s "empty diamond arm"/"internal branch does not
+   reach the loop's exit block" gap for a divergent branch mixed with
+   barriers in a loop's prefix (or body). Start with
+   `WaveOps/GroupMemoryBarrierWithGroupSync.test`'s own reduced IR (already
+   captured this session via the standard `dxc`+`feme-translate`+`feme-opt`
+   repro recipe) to see exactly which of `LinearizePass`'s two diagnostics
+   fires first.
+2. **~3-4 hours, larger, highest remaining payoff (up to 8 cases):** H154 —
+   the `PreLatch`/`M` `Flow`-merge CFG matcher `JumpThreadingPass` can't
+   always thread away. Start with `InterlockedExchange.32.test` (confirmed
+   to hit exactly this gap).
+3. **Still untouched (carried over many sessions):**
+   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
+   divergent-branch gap.
+4. **Large, deprioritized many sessions now:** H124d (upstream MLIR SPIR-V
+   `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s heap
+   corruption.
+5. **Do not re-attempt H150** — confirmed a prior session it's not a
+   FeMe-side bug at all.
+6. **Minor, not investigated:** `Feature/PushConstant/array_of_matrices.test`
+   showed "Unexpectedly Passed" this session's `check-hlsl-feme-vk` run —
+   likely flaky/stale expected-failure annotation, unrelated to this
+   session's changes; worth a quick look if seen again.
