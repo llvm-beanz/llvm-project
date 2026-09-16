@@ -1866,22 +1866,29 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L52e: `OpImageQueryLod`'s own two intrinsic halves
-    // (`calculate.lod`/`calculate.lod.unclamped`), scoped to `Plain2D`
-    // only for now -- `Array2D`/`Cube`/`CubeArray`/`Plain1D`/`Array1D`/
-    // `Plain3D` counterparts remain unstarted follow-on work, mirroring
-    // this same narrowing's precedent (e.g. roadmap L46's own initial
-    // `Plain2D`-only depth-comparison-sample scope, later widened by
-    // L48). An integer-channel image is rejected the same way an
-    // ordinary/dref sample is above -- SPIR-V never legalizes
-    // `OpImageQueryLod` against one either.
+    // Roadmap L52e/H124t: `OpImageQueryLod`'s own two intrinsic halves
+    // (`calculate.lod`/`calculate.lod.unclamped`), scoped to `Plain2D`/
+    // `Array2D` -- `Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D`
+    // counterparts remain unstarted follow-on work, mirroring this same
+    // narrowing's precedent (e.g. roadmap L46's own initial `Plain2D`-only
+    // depth-comparison-sample scope, later widened by L48). An
+    // integer-channel image is rejected the same way an ordinary/dref
+    // sample is above -- SPIR-V never legalizes `OpImageQueryLod` against
+    // one either. Unlike an ordinary sample, `OpImageQueryLod`'s own
+    // coordinate is always exactly 2 components even against an
+    // `Array2D` handle (`Texture2DArray::CalculateLevelOfDetail`'s own
+    // HLSL signature has no slice argument at all -- confirmed via
+    // `spirv-dis`, `%v2float` regardless of shape -- the array dimension
+    // plays no part in the LOD computation), so this uses a fixed width
+    // of 2 rather than `SampleCoordWidth`'s own per-shape value.
     bool Unclamped = false;
     if (isQueryLodIntrinsic(*CI, Unclamped)) {
-      if (IsInteger || Shape != ImageShape::Plain2D)
+      if (IsInteger ||
+          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D))
         return false;
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
+      if (!isCoordN(CI->getArgOperand(2), 2, /*Float=*/true) ||
           !CI->getType()->isFloatTy())
         return false;
       continue;
