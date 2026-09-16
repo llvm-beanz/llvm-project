@@ -85593,3 +85593,96 @@ roadmap strikethrough commit + its own `VulkanCTSReport.md` entry commit.
 
 No scratch files left outside the repo this session (all `/tmp/h124*`
 directories and `.qpa` logs cleaned up before this commit).
+
+# Session: H124u (Cube QueryLod) + H124p (is.fpclass simdize) fixed
+
+Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` before starting, per standing instructions.
+
+## What's done
+
+1. **H124u**: `TextureCube::CalculateLevelOfDetail` (`OpImageQueryLod`
+   against a `Cube` handle) now legalizes. `Feature/Textures/
+   CalculateLevelOfDetail.test` was failing as a whole shader because
+   its `TextureCube` half was unsupported, even though its `Texture2D`
+   half already worked (H124t). Confirmed via real `spirv-dis` the
+   Cube coordinate is a 3-component direction vector, not a face-local
+   2D UV — so this needed a new `ImageCallKind::QueryLodCube` (wired
+   through 4 sites: `getImageCallName`, `getOrInsertImageCall`,
+   `matchImageCall`'s `AllKinds` table + operand-extraction switch, plus
+   a new `createQueryLodCube` builder), a new `hasOnlySupportedImageUses`
+   branch (coordinate width 3 instead of 2), and a new runtime function
+   `femeCpuImageQueryLodCubeV2F32` composing existing
+   `femeRTSelectCubeFace` + `femeRTComputeCubeUVDerivatives` helpers
+   before feeding the existing `femeRTComputeUnclampedQueryLod`/
+   `femeRTComputeClampedQueryLevel` pair.
+2. **H124p**: `feme-cpu-simdize`'s divergent-call widening didn't
+   recognize `llvm.is.fpclass.fN` because its result type (`i1`) never
+   matches its own float argument's type — the same-type check every
+   other "homogeneous" math intrinsic (`llvm.sqrt.fN`, etc.) relies on.
+   Gave it its own case: widen argument 0 to a vector, leave the
+   test-mask immarg scalar. Fixed `Basic/Mandelbrot.test`.
+
+## Numbers
+
+- `ninja check-feme`: **3069/3072 passed**, 3 unsupported, 0 failed (up
+  by 2 new unit tests, no regressions).
+- `check-hlsl-feme-vk`: **344/33 -> 346/31** (of 664) across both
+  fixes, 0 regressions. (1 unrelated, pre-existing, already-documented
+  upstream `offload-test-suite` XFAIL staleness flake,
+  `array_of_matrices.test`, continues reporting `Unexpectedly Passed`
+  independent of either fix.)
+- VK-GL-CTS: `dEQP-VK.glsl.texture_functions.query.texturequerylod.
+  samplercube_{fixed,float}_*` (10 cases) now **Pass** for H124u.
+  H124p has no directly-named CTS case (internal codegen fix, validated
+  via `check-hlsl-feme-vk`'s own `Mandelbrot.test` instead).
+- Roadmap: H124u and H124p both struck through. `VulkanCTSReport.md` has
+  matching `## H124u`/`## H124p` sections. No feature/extension
+  inventory change for either (internal legalization/codegen fixes,
+  no new Vulkan-visible capability).
+
+## 6 commits this session
+
+1. `[feme][H124u] Add QueryLodCube image call kind`
+2. `[feme][H124u] Widen OpImageQueryLod to Cube handles`
+3. `[feme][H124u] Update roadmap and Vulkan CTS report`
+4. `[feme][H124p] Widen divergent llvm.is.fpclass calls in feme-cpu-simdize`
+5. `[feme][H124p] Update roadmap and Vulkan CTS report`
+6. This `agent_thoughts.md` commit (next)
+
+(Note: commit 1 above ended up also carrying the new
+`SPIRVResourceLoweringTest.cpp` unit test — a `git add`/`git
+clang-format` staging mixup mid-session, not a deliberate grouping
+choice. Not worth unwinding after the fact.)
+
+## Suggested next steps
+
+1. **Re-triage `check-hlsl-feme-vk`'s remaining 31 failures fresh** —
+   the last several sessions kept re-suggesting the same names
+   (`InterlockedAdd/CompareExchange/CompareStore/Exchange/Xor.32.test`,
+   `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/fwidth.test`,
+   `WaveActiveMax.test`) without anyone individually confirming their
+   root causes — don't assume any two share a cause without checking.
+   ~1 hour to bucket, unknown effort to fix each bucket.
+2. **H124e** (~several sessions, large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps — needs the same per-case triage as above;
+   may overlap with several of the `WaveOps/*` failures.
+3. **H124d** (large, deprioritized, unchanged for many sessions):
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` —
+   likely the root cause behind `DdxCoarse`/`DdyCoarse`/`ddx_fine`/
+   `ddy_fine`/`fwidth.test` above; worth confirming that connection
+   before starting either separately.
+4. **`shaderImageGatherExtended`** (large, noted several sessions back,
+   still not filed as its own roadmap row): blocks every `dEQP-VK.glsl.
+   texture_gather.*` CTS case regardless of shape/offset. FeMe's own
+   gather is `ConstOffset`-only, never true per-invocation dynamic
+   offset — advertising this feature honestly is itself a real,
+   separate, likely-multi-session capability addition. File a roadmap
+   row before starting.
+5. Lower priority, deferred 20+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption — `valgrind`'s own trace points at `buildStageStorage`/
+   `executeDraws` allocating a too-small buffer.
+
+All `/tmp/h124*` scratch files cleaned up before this commit.
