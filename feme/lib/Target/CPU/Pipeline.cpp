@@ -441,24 +441,29 @@ Expected<PipelineResult> runPipeline(Module &M,
     // before `EntryWrapperPass` ever sees it for those simpler cases,
     // canonicalizing the loop back down to the plain direct-backedge (or
     // barrier-and-recurrence-collapsed single-latch-block) shape
-    // `matchLoopShape` already supports. **Confirmed this session this
-    // does NOT hold for every real DXC-produced case**: e.g.
-    // `Feature/HLSLLib/InterlockedExchange.32.test`'s own post-jump-
-    // threading dump still has its `Flow1._crit_edge` merge block intact
-    // (a real, un-eliminated `CondBrInst`), most likely because its loop
-    // body's own extra uniform branch (the source's `if` guarding the
-    // atomic op) makes the merge phi's incoming values non-constant on
-    // at least one edge JumpThreadingPass would need to be constant --
-    // this pass only helps the subset of H124e's wrap-entry bucket whose
-    // loop body has no such extra branch, not the bucket as a whole. See
-    // `EntryWrapper.cpp`'s own `matchLoopShape` doc comment for the
-    // narrower shape this alone does not close either (a barrier-and-
-    // recurrence-collapsed single latch block whose own prefix/suffix
-    // chain contains a barrier of its own).
+    // `matchLoopShape` already supports. (An earlier revision of this
+    // comment claimed this threading does *not* fire for
+    // `Feature/HLSLLib/InterlockedExchange.32.test`, on the evidence
+    // that a `Flow1._crit_edge` block survives into the wrapping stage.
+    // Dumping the real post-threading module -- see `FEME_DUMP_IR`
+    // below -- disproved that: the surviving block is the loop's plain
+    // *latch*, which merely inherited the structurizer's name; the
+    // merge-block indirection itself is gone. Roadmap H163 records what
+    // actually blocked those tests.)
     if (Error E = runAndCheck(
             "simplifying loop-merge control flow for",
             createModuleToFunctionPassAdaptor(JumpThreadingPass())))
       return std::move(E);
+    // Debug aid: with `FEME_DUMP_IR` set in the environment, print the
+    // module to stderr at exactly this point. This is the last moment at
+    // which the shader is still one self-contained function, before the
+    // wrapping stage outlines it into per-region functions, so it is the
+    // input `feme::cpu::EntryWrapperPass` actually sees. Piping the dump
+    // into `feme-opt --llvm -passes=feme-cpu-wrap-entry` reproduces a
+    // whole-pipeline wrapping failure in isolation, without rebuilding
+    // the ICD; `feme/.instructions.md` records the full recipe.
+    if (::getenv("FEME_DUMP_IR"))
+      M.print(errs(), nullptr);
     switch (Opts.Stage) {
     case feme::ShaderStage::Compute:
       if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
