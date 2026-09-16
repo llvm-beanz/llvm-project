@@ -2198,6 +2198,106 @@ void fillFeatures2Chain(void *pNext) {
   }
 }
 
+/// Returns true if any `VkBool32` field in `[HeaderBytes, TotalBytes)` of
+/// `Requested` is `VK_TRUE` while the same field in `Supported` is
+/// `VK_FALSE` (roadmap H139, found by this session's VK-GL-CTS
+/// `dEQP-VK.api.device_init.create_device_unsupported_features.*` spot
+/// check: `vkCreateDevice` never validated a requested feature against
+/// what this ICD actually supports, so forcibly enabling an unsupported
+/// feature bit silently succeeded instead of failing with
+/// `VK_ERROR_FEATURE_NOT_PRESENT` per spec). Every
+/// `VkPhysicalDeviceXFeatures` structure this ICD recognizes is, per the
+/// Vulkan spec's own naming convention, always laid out as either a bare
+/// sequence of `VkBool32` fields (the plain `VkPhysicalDeviceFeatures`
+/// structure, which has no `sType`/`pNext` of its own -- `HeaderBytes ==
+/// 0`) or that same sequence following an `sType`/`pNext` header matching
+/// `VkBaseOutStructure` (`HeaderBytes == sizeof(VkBaseOutStructure)`).
+bool hasUnsupportedEnabledFeature(const void *Requested, const void *Supported,
+                                  size_t HeaderBytes, size_t TotalBytes) {
+  auto *ReqBits = reinterpret_cast<const VkBool32 *>(
+      static_cast<const char *>(Requested) + HeaderBytes);
+  auto *SupBits = reinterpret_cast<const VkBool32 *>(
+      static_cast<const char *>(Supported) + HeaderBytes);
+  size_t NumBits = (TotalBytes - HeaderBytes) / sizeof(VkBool32);
+  for (size_t I = 0; I != NumBits; ++I)
+    if (ReqBits[I] && !SupBits[I])
+      return true;
+  return false;
+}
+
+/// Returns true if `pCreateInfo` enables any feature bit this ICD does not
+/// actually support -- either through the legacy `pEnabledFeatures`
+/// pointer, a chained `VkPhysicalDeviceFeatures2`'s own `features` member,
+/// or one of the extension/1.{1,2,3,4}-promoted feature structures this
+/// session's VK-GL-CTS spot check found unvalidated (roadmap H139).
+///
+/// **Deliberately scoped to only these structures, not every one
+/// `fillFeatures2Chain` recognizes**: every other recognized structure's
+/// fields are either all `VK_TRUE` (nothing to validate: this ICD reports
+/// full support already) or gated behind an extension name this ICD does
+/// not advertise at all (already rejected earlier in `vkCreateDevice`'s
+/// own extension-name loop) -- confirmed by this session's full
+/// `dEQP-VK.api.device_init.create_device_unsupported_features.*` sweep,
+/// where exactly these 8 sub-cases (of ~200) failed. Extending this list
+/// is safe and mechanical if a future structure gains a real `VK_FALSE`
+/// field that is also reachable without an unsupported extension name.
+bool hasUnsupportedEnabledFeature(const PhysicalDeviceInfo &Info,
+                                  const VkDeviceCreateInfo *pCreateInfo) {
+  if (pCreateInfo->pEnabledFeatures &&
+      hasUnsupportedEnabledFeature(pCreateInfo->pEnabledFeatures,
+                                   &Info.Features, 0,
+                                   sizeof(VkPhysicalDeviceFeatures)))
+    return true;
+
+  for (auto *Base = static_cast<const VkBaseInStructure *>(pCreateInfo->pNext);
+       Base; Base = Base->pNext) {
+    switch (Base->sType) {
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2: {
+      auto *F2 = reinterpret_cast<const VkPhysicalDeviceFeatures2 *>(Base);
+      if (hasUnsupportedEnabledFeature(&F2->features, &Info.Features, 0,
+                                       sizeof(VkPhysicalDeviceFeatures)))
+        return true;
+      break;
+    }
+#define FEME_VALIDATE_FEATURE_STRUCT(Type, StructureTypeEnum)                  \
+  case StructureTypeEnum: {                                                    \
+    Type Supported{};                                                          \
+    Supported.sType = StructureTypeEnum;                                       \
+    fillFeatures2Chain(&Supported);                                            \
+    if (hasUnsupportedEnabledFeature(                                          \
+            Base, &Supported, sizeof(VkBaseOutStructure), sizeof(Supported)))  \
+      return true;                                                             \
+    break;                                                                     \
+  }
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDeviceVulkan11Features,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES)
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDeviceVulkan12Features,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDeviceVulkan13Features,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDeviceVulkan14Features,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDeviceMeshShaderFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT)
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT)
+      FEME_VALIDATE_FEATURE_STRUCT(
+          VkPhysicalDeviceTransformFeedbackFeaturesEXT,
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT)
+#undef FEME_VALIDATE_FEATURE_STRUCT
+    default:
+      break;
+    }
+  }
+  return false;
+}
+
 /// Fills a queue family's `VkQueueFamilyGlobalPriorityProperties` chain
 /// entry (roadmap F1, `VK_KHR_global_priority`/`globalPriorityQuery`): this
 /// ICD has one worker pool with no real OS-level scheduling priority (see
@@ -2602,6 +2702,14 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
   }
 
   PhysicalDevice *Physical = fromHandle<PhysicalDevice>(physicalDevice);
+
+  // (roadmap H139) Reject any request to enable a feature bit this ICD
+  // does not actually support -- see `hasUnsupportedEnabledFeature`'s own
+  // comment for why this check is scoped to exactly the structures this
+  // session's VK-GL-CTS spot check found were not already validated.
+  if (hasUnsupportedEnabledFeature(Physical->getInfo(), pCreateInfo))
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+
   Allocator Alloc(pAllocator);
   Device *Obj =
       Alloc.create<Device>(VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, *Physical, Alloc);

@@ -571,4 +571,95 @@ TEST_F(EntryPointsTest, GetDeviceGroupPeerMemoryFeaturesReportsNone) {
   vkDestroyDevice(Device, nullptr);
 }
 
+/// Roadmap H139: `vkCreateDevice` used to never validate a requested
+/// feature against what this ICD actually supports, so forcibly enabling
+/// an unsupported feature (via the legacy `pEnabledFeatures` pointer, a
+/// chained `VkPhysicalDeviceFeatures2`, or a 1.{1,2,3,4}-promoted/
+/// extension feature structure) silently succeeded instead of failing
+/// with `VK_ERROR_FEATURE_NOT_PRESENT` per spec -- found by a VK-GL-CTS
+/// `dEQP-VK.api.device_init.create_device_unsupported_features.*` spot
+/// check. `fullDrawIndexUint32` is never set `VK_TRUE`
+/// (`PhysicalDeviceInfo.cpp`), making it a stable "known unsupported"
+/// probe bit for the plain `VkPhysicalDeviceFeatures` structure.
+TEST_F(EntryPointsTest, CreateDeviceRejectsUnsupportedLegacyPEnabledFeatures) {
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 0;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+  VkPhysicalDeviceFeatures Requested{};
+  Requested.fullDrawIndexUint32 = VK_TRUE;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.queueCreateInfoCount = 1;
+  DevInfo.pQueueCreateInfos = &QueueInfo;
+  DevInfo.pEnabledFeatures = &Requested;
+  VkDevice Device = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
+            VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
+/// Same probe bit, via a chained `VkPhysicalDeviceFeatures2` instead of
+/// the legacy `pEnabledFeatures` pointer -- the two are validated by
+/// separate code paths in `hasUnsupportedEnabledFeature`.
+TEST_F(EntryPointsTest, CreateDeviceRejectsUnsupportedChainedFeatures2) {
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 0;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+  VkPhysicalDeviceFeatures2 Requested{};
+  Requested.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Requested.features.fullDrawIndexUint32 = VK_TRUE;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.queueCreateInfoCount = 1;
+  DevInfo.pQueueCreateInfos = &QueueInfo;
+  DevInfo.pNext = &Requested;
+  VkDevice Device = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
+            VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
+/// `storageBuffer16BitAccess` stays `VK_FALSE` in
+/// `VkPhysicalDeviceVulkan11Features` (`EntryPoints.cpp`'s
+/// `fillFeatures2Chain`), making it a stable probe bit for the
+/// 1.1-promoted feature structure specifically.
+TEST_F(EntryPointsTest, CreateDeviceRejectsUnsupportedVulkan11Features) {
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 0;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+  VkPhysicalDeviceVulkan11Features Requested{};
+  Requested.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+  Requested.storageBuffer16BitAccess = VK_TRUE;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.queueCreateInfoCount = 1;
+  DevInfo.pQueueCreateInfos = &QueueInfo;
+  DevInfo.pNext = &Requested;
+  VkDevice Device = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
+            VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
+/// Requesting only already-supported feature bits must still succeed --
+/// confirms the new validation isn't simply rejecting every chained
+/// feature structure outright.
+TEST_F(EntryPointsTest, CreateDeviceAcceptsOnlySupportedVulkan11Features) {
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 0;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+  VkPhysicalDeviceVulkan11Features Requested{};
+  Requested.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+  Requested.multiview = VK_TRUE;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.queueCreateInfoCount = 1;
+  DevInfo.pQueueCreateInfos = &QueueInfo;
+  DevInfo.pNext = &Requested;
+  VkDevice Device = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+  vkDestroyDevice(Device, nullptr);
+}
+
 } // namespace
