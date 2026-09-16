@@ -46255,3 +46255,96 @@ image-format-tiling support, not a regression from this session) --
 confirming H146's fix, scoped to the HLSL-only `feme.cpu.resource.atomic.*`
 call-widening path, has no effect on GLSL's native atomic code paths this
 CTS subset exercises.
+
+## H147 individual triage + H148: push-constant `RowMajor` matrix scalar-access fixed
+
+**Environment check (every session, per standing instruction):**
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
+(confirmed with `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set via two separate
+`export` statements).
+
+**Baseline.** `ninja check-feme`: 3095/3098 passed (3 unsupported), 0
+failed, matching the prior session's own closing state exactly.
+
+**Picked up the prior session's suggested next step**: individually
+triage H147's 4 bucketed functional-correctness bugs, starting with
+`Feature/PushConstant/matrix.test`. Reproduced it standalone (real `dxc`
++ `offloader --api=vk -adapter-regex=FeMe`): actual output `[1, 2, 3, 4]`
+against an expected `[1, 3, 2, 4]` (a `float2x2` push-constant, all four
+elements read back) -- confirmed via hand arithmetic against the
+disassembled SPIR-V's own `RowMajor`/`MatrixStride=8` decoration that the
+expected output is the one a correct `RowMajor`-aware major/minor swap
+produces, so this is a real bug, not a bad test expectation.
+
+**Root cause.** `OffsetStructMemberReorderAccessChainPattern` (the
+pattern legalizing a non-`Block`/non-resource-handle struct's own access
+chain, e.g. a push constant) forwarded a matrix member's own
+column/row scalar-element indices completely unchanged -- unlike
+`rewriteBlockAccess`'s own long-working equivalent logic for a `Block`-
+backed (UBO/SSBO) matrix, which has always correctly reordered them.
+`getPhysicalMatrixMemberType`'s own type substitution (giving the
+matrix's physical LLVM type its correct, row-major-transposed shape) was
+already correct and shared by both paths; only the *index order* into
+that already-correct type was wrong for the push-constant path
+specifically. A first fix attempt (adding matrix-handling inside
+`remapNestedStructMemberIndices`'s own struct-member loop) built cleanly
+but had no effect -- confirmed via `feme-opt --feme-convert-spirv-to-llvm`
+dumps that the generated `llvm.getelementptr` still forwarded the
+unswapped order -- because that helper's matrix branch only fires for a
+matrix discovered one level *inside* a further nested struct member,
+never for a matrix that is itself the directly selected member (the
+common, and for a single-member push-constant struct, only possible
+shape): `OffsetStructMemberReorderAccessChainPattern` itself already
+consumes the struct's own member selector before ever calling
+`remapNestedStructMemberIndices`, so that function's `CurrentType` is
+already the matrix on entry, never re-entering its own struct-member
+branch.
+
+**Fix.** Added `adjustMatrixScalarElementIndices` (mirroring
+`rewriteBlockAccess`'s own proven-correct scalar-element
+reordering/padding logic) and call it directly from
+`OffsetStructMemberReorderAccessChainPattern`'s own body whenever its
+selected member is itself a `spirv::MatrixType`, instead of relying on
+`remapNestedStructMemberIndices`'s in-loop branch (kept, harmlessly, for
+the hypothetical deeper-nested case).
+
+**Testing.** New lit test
+`spirv-to-llvm-matrix-pushconstant-scalar.mlir` (two cases, mirroring
+`spirv-to-llvm-matrix-block-scalar.mlir`'s own two-case structure: a
+`RowMajor`, natural-stride case and a `ColMajor`, padded-stride case),
+confirmed via `git stash`/rebuild/re-run to fail (unswapped GEP indices)
+without the fix and pass with it.
+
+**Verification.**
+- `ninja check-feme`: 3096/3099 passed (3 unsupported), 0 failed, +1 new
+  test, no regressions.
+- `check-hlsl-feme-vk`: `Feature/PushConstant/matrix.test` now passes;
+  failure count drops from 21 to **20** (of 664).
+  `Feature/PushConstant/array_of_matrices.test` (an array-of-matrices
+  variant of the identical scalar-element shape) also now passes, though
+  it was already separately reported `Unexpectedly Passed` against an
+  unrelated, pre-existing upstream `offload-test-suite` `XFAIL: DXC`
+  staleness (see roadmap H124g's own note on this same test), so its own
+  pass/fail bucket does not change in this run's totals.
+- **Native Vulkan CTS regression check (H148).** Ran a targeted A/B
+  comparison (pre-fix vs. post-fix `libfeme_vulkan.so`, via a temporary
+  `git stash`/rebuild, then restored) against a 4,662-case list built from
+  `vk-default/binding-model.txt`'s `push_constant` cases (450) plus every
+  `row_major`/`col_major` case in `vk-default/ubo.txt` (1,728) and
+  `vk-default/ssbo.txt` (2,484) -- the CTS surface most likely to exercise
+  either the touched push-constant path or the shared, untouched
+  `Block`-backed matrix-layout machinery. Produced byte-identical totals
+  and a byte-identical per-case pass/fail list pre-fix and post-fix
+  (1,430 passed / 586 failed / 2,646 not supported, both runs) --
+  confirming this fix has no effect on native GLSL/SPIR-V-assembly CTS
+  cases (none of which happen to exercise a `PushConstant`-storage-class
+  matrix at all) and no regression to the pre-existing, shared
+  `Block`-backed matrix-layout logic.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a pure
+  SPIR-V-to-LLVM access-chain correctness fix inside already-advertised
+  push-constant support, not a new Vulkan feature or extension.
+
+H147 is struck through on the roadmap: split into H148 (fixed, this
+session) and H147a (the remaining 3 untriaged cases,
+`WaveIsFirstLane.test`/`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`,
+confirmed this session to *not* share `matrix.test`'s cause).
