@@ -53,17 +53,32 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H166 first, not H164.** It is the smallest and best-understood:
-   one atomic being scalarized where its sibling is widened, with a
-   passing sibling to diff against. Probably an afternoon.
-2. **H165 second.** Also bounded, and it may turn out to be a stale
-   restriction that can simply be lifted now that the wrapping stage
-   handles the shape.
-3. **H164 last.** Open-ended: a crash in generated code with no usable
-   stack. Budget a day or more, and start by hand-editing the `feme-opt`
-   output rather than reaching for a debugger.
-4. Separately, `SIMDizePass::widenGroupSharedStore` crashes in
-   `CreateMaskedScatter` for a groupshared *store* inside a loop body. I
-   worked around it in unit tests by using a load instead. Pre-existing
-   and unrelated, but it has now cost two sessions a detour and deserves
-   its own row.
+1. **H167, best next target now, ~half a day to a day.** Three
+   candidate fixes are already sketched in the roadmap row: (a) have
+   `LinearizePass` mark "known-uniform-despite-syntax" values/branches
+   with metadata `SIMDizePass` can consume; (b) teach `SIMDizePass`'s own
+   uniformity analysis the same masked-load taint-safety reasoning
+   `DiamondFlattener` already has; (c) have `DiamondFlattener`
+   conservatively flatten any branch reading a tainted-fed masked load
+   even when its own condition isn't flagged, trading a little masking
+   overhead for guaranteed downstream agreement. (c) is probably the
+   smallest, safest first attempt -- try it first before (a)/(b)'s
+   larger cross-pass plumbing.
+2. **H164, unbounded, budget a day+.** `InterlockedCompareExchange.32.test`
+   segfaults inside JIT'd code with an empty stack. Start by hand-editing
+   `feme-opt` output, not a debugger -- three hypotheses already listed
+   in the roadmap row (uninitialized spilled lane-pointer slot, a
+   `poison` artifact from `OpAtomicCompareExchange`'s result struct, or a
+   barrier-split prefix region entered with the wrong wave mask).
+3. **H168, not urgent but real, ~an afternoon once picked up.** No repro
+   reduced yet -- first step is exactly that: reduce one of the two
+   prior incidental repros to a standalone `feme-opt -passes=feme-cpu-simdize`
+   case and confirm it reproduces in isolation before touching
+   `CreateMaskedScatter`.
+4. **`ByteAddressBuffer`/`StructuredBuffer` `GetDimensions.test`** (H160):
+   real, well-scoped, but a genuine upstream MLIR SPIR-V dialect gap
+   (`OpArrayLength` has no op at all) -- comparable in size to H124d's
+   own upstream gap. Not urgent, but the smallest-blast-radius way to
+   shrink the failure count by 2 without touching `feme` pass code at
+   all, if someone wants an upstream-MLIR-flavored session instead.
+
