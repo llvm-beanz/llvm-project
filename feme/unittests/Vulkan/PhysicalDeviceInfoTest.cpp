@@ -509,6 +509,35 @@ TEST_F(PhysicalDeviceProperties2Test,
             DriverProps.conformanceVersion.patch);
 }
 
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    RobustBufferAccessUpdateAfterBindIsTrueAndMatchesDescriptorIndexingProperties) {
+  // Roadmap H136: `robustBufferAccess` is unconditional, software
+  // bounds-checked descriptor access (see the `Info.Features.
+  // robustBufferAccess` comment in PhysicalDeviceInfo.cpp) that applies
+  // identically whether a descriptor was bound normally or via
+  // update-after-bind, so this device can honestly advertise
+  // `robustBufferAccessUpdateAfterBind = VK_TRUE`. Leaving it `VK_FALSE`
+  // while also advertising both `robustBufferAccess` and any
+  // `descriptorBinding*UpdateAfterBind` feature made any device-creation
+  // request enabling every advertised feature illegal per
+  // `VUID-VkDeviceCreateInfo-robustBufferAccess-10247`.
+  VkPhysicalDeviceDescriptorIndexingPropertiesEXT DescIndexProps{};
+  DescIndexProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT;
+  VkPhysicalDeviceVulkan12Properties Props12{};
+  Props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+  DescIndexProps.pNext = &Props12;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &DescIndexProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(DescIndexProps.robustBufferAccessUpdateAfterBind, VK_TRUE);
+  EXPECT_EQ(Props12.robustBufferAccessUpdateAfterBind, VK_TRUE);
+}
+
 TEST(PhysicalDeviceInfo, IsDeterministic) {
   PhysicalDeviceInfo A = computePhysicalDeviceInfo();
   PhysicalDeviceInfo B = computePhysicalDeviceInfo();

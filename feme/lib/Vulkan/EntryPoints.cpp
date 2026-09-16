@@ -421,7 +421,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->shaderStorageBufferArrayNonUniformIndexingNative = VK_FALSE;
       Props12->shaderStorageImageArrayNonUniformIndexingNative = VK_FALSE;
       Props12->shaderInputAttachmentArrayNonUniformIndexingNative = VK_FALSE;
-      Props12->robustBufferAccessUpdateAfterBind = VK_FALSE;
+      // (roadmap H136) `robustBufferAccess` is unconditional, software
+      // bounds-checked descriptor access with no per-pipeline opt-out (see
+      // the `Info.Features.robustBufferAccess` comment in
+      // PhysicalDeviceInfo.cpp) -- the same bounds-checked load/store path
+      // is used regardless of whether the descriptor was bound normally or
+      // via update-after-bind, so combining `robustBufferAccess` with any
+      // `descriptorBinding*UpdateAfterBind` feature is genuinely safe here.
+      // Leaving this `VK_FALSE` while advertising both features `VK_TRUE`
+      // makes any device-creation request that enables all advertised
+      // features illegal per `VUID-VkDeviceCreateInfo-robustBufferAccess-
+      // 10247`.
+      Props12->robustBufferAccessUpdateAfterBind = VK_TRUE;
       Props12->quadDivergentImplicitLod = VK_FALSE;
       Props12->maxPerStageDescriptorUpdateAfterBindSamplers = 16;
       Props12->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 12;
@@ -483,7 +494,9 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props->shaderStorageBufferArrayNonUniformIndexingNative = VK_FALSE;
       Props->shaderStorageImageArrayNonUniformIndexingNative = VK_FALSE;
       Props->shaderInputAttachmentArrayNonUniformIndexingNative = VK_FALSE;
-      Props->robustBufferAccessUpdateAfterBind = VK_FALSE;
+      // See the matching `Props12->robustBufferAccessUpdateAfterBind`
+      // comment above -- this pre-promotion struct must agree exactly.
+      Props->robustBufferAccessUpdateAfterBind = VK_TRUE;
       Props->quadDivergentImplicitLod = VK_FALSE;
       Props->maxPerStageDescriptorUpdateAfterBindSamplers = 16;
       Props->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 12;
