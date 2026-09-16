@@ -86621,3 +86621,87 @@ to-LLVM correctness fix, no new Vulkan feature or extension surface.
    `dyn-res-uav-counter.test`'s address-space mismatch,
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    heap corruption.
+
+# Session: H149 fixed (WaveIsFirstLane divergent-region masking); H150/H151 triaged
+
+**Done this session (3 commits, all green):**
+1. Fixed `WaveIsFirstLane()` giving wrong answers inside a divergent
+   switch/branch (H149). `check-hlsl-feme-vk` failures: 20 -> **19**.
+2. Triaged `WaveActiveMax.test` (H150): not a FeMe bug -- a
+   host-wave-size-dependent test artifact. No fix possible/needed.
+3. Triaged `WaveReadLaneAt.mtx.test` (H151): real bug, root cause
+   identified, not yet fixed (needs a full session).
+
+**Verification already run, no need to repeat:**
+- `ninja check-feme`: 3098/3101 passed, 0 failed, +2 new unit tests.
+- `check-hlsl-feme-vk`: 19 failures (of 664), down from 20.
+- Native CTS A/B (`dEQP-VK.subgroups.basic.*.subgroupelect*`, 12 cases):
+  byte-identical pre/post fix, no regression. `Vulkan14FeatureInventory`/
+  `VulkanExtensionInventory`: confirmed no change needed (internal
+  CPU-backend correctness fix only).
+
+## H149: the fix, in one paragraph
+
+`WaveIsFirstLane()` always compared against the wave's whole original
+entry mask, not the actual lanes still active in whatever divergent
+switch/branch arm the call sits in -- so a lane that's the *only* lane
+in its own arm wrongly said "I'm not first." Every other wave op with
+this same "need the region's real active-lane mask" concern
+(`Ballot`, the reduce/prefix family) already gets this from
+`LinearizePass` rewriting a real operand on the call -- but
+`WaveIsFirstLane`'s underlying LLVM intrinsic takes **zero operands**,
+so there was nothing to rewrite. Fixed by carrying the mask sideways
+instead: `LinearizePass` attaches it as a new `"feme.divergence.mask"`
+operand bundle, and `SIMDize.cpp` reads it back off the bundle. New
+tests: `LinearizeTest.AttachesDivergenceMaskBundleToIsFirstLaneUnderDivergentBranch`,
+`SIMDizeTest.NarrowsIsFirstLaneMaskWithDivergenceMaskBundle`.
+
+## H150: not every failing test is a FeMe bug
+
+`WaveActiveMax.test`'s `NegInfs` case expects `0`, FeMe gives `-inf`.
+Traced it all the way down: this test only produces `0` if the actual
+GPU/driver's subgroup size is >= 8, because it relies on an
+out-of-bounds buffer read (robustness-zeroed) getting mixed into the
+*same* wave reduction as an in-bounds `-inf` read. FeMe's own
+documented wave-size policy (`max(4, HostVectorBits/32)`) resolves to
+4 on this session's ARM64/NEON host -- too small to ever cause that
+mixing, so the reduction correctly returns its own identity (`-inf`).
+This is a test that's only portable to hosts with wide-enough vector
+registers, not a FeMe defect. Filed as H150, priority P4, explicitly
+marked "not a FeMe bug" so nobody re-attempts a fix here.
+
+## H151: found the shape, didn't fix it yet
+
+`WaveReadLaneAt.mtx.test` reads a `ColMajor`-stored matrix's row as a
+vector (`matrixData[TID.x]`, no further scalar index) and gets raw
+contiguous bytes instead of the strided per-column gather that layout
+needs. `rewriteBlockAccess` (the code H148 fixed for the *scalar*
+`M[r][c]` case) has an explicit comment declining exactly this
+"row-select without a further index" shape, calling it unobserved in
+any prior CTS case -- this `offload-test-suite` case is the first to
+actually hit it. Needs an IR-level reduction (`feme-opt
+--feme-convert-spirv-to-llvm`) to nail down exactly where DXC's SPIR-V
+reaches this, then new strided-gather-into-vector codegen (bigger than
+a GEP swap). Estimated a full session on its own. Filed as H151, P3.
+
+## Suggested next steps
+
+1. **~1-2 hours, real bug, now well-scoped: H151** (`WaveReadLaneAt.mtx.test`).
+   Start with `feme-opt --feme-convert-spirv-to-llvm` on the reduced
+   shader to confirm whether DXC's SPIR-V reaches `rewriteBlockAccess`'s
+   declined case directly or some other, not-yet-identified path first.
+2. **~1-2 hours, still untouched (carried over many sessions):** reduce
+   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
+   divergent-branch gap to its exact IR shape.
+3. **~1-2 hours, still untouched (carried over many sessions):** same
+   for `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   multi-exit-loop gap.
+4. **Full session, highest payoff (up to 8 cases at once), largest
+   scope:** H124e's wrap-entry region-splitting design work.
+5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
+6. **Do not re-attempt H150** -- confirmed this session it's not a
+   FeMe-side bug at all.
