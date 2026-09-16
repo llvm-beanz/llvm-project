@@ -53,30 +53,10 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Full session, highest payoff (9 cases at once), largest scope,
-   still untouched across many sessions:** H124e(a)'s two-part design
-   work (loop-carried-value spilling generalization + nested-divergent-
-   branch-in-loop-body support in `matchLoopShape`/`EntryWrapper.cpp`).
-   This session's own triage strongly suggests fixing this would *also*
-   close `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
-   gap (likely the same underlying shape in `LoopLinearizer`, not just
-   `EntryWrapper`) -- check both `Linearize.cpp`'s `LoopLinearizer` and
-   `EntryWrapper.cpp` together, not just the latter.
-2. **Large, deprioritized many sessions now:** H124d (upstream MLIR
-   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
-   `dyn-res-uav-counter.test`'s address-space mismatch,
-   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
-   heap corruption.
-3. **Do not re-attempt H150** -- confirmed a prior session it's not a
-   FeMe-side bug at all.
-4. **No other separately-scoped small bugs found this session** -- the
-   remaining 18 `check-hlsl-feme-vk` failures are now down to: H124e's
-   9-case wrap-entry bucket (item 1 above), the 5-case `Ddx*`/`ddy_fine`/
-   `fwidth` group (H124d), and 4 smaller not-yet-individually-triaged
-   items (`ByteAddressBuffer/GetDimensions.test`,
-   `StructuredBuffer/GetDimensions.test`, `WaveOps/WaveActiveMax.test`
-   [H150, confirmed not fixable], `WaveOps/GroupMemoryBarrierWithGroupSync.test`
-   [in the H124e bucket]). A future session with less time than a full
-   H124e(a) push could triage `ByteAddressBuffer`/`StructuredBuffer`
-   `GetDimensions.test` instead -- neither has been individually looked
-   at yet.
+1. **Full session, now much better scoped than before:** implement the
+   `matchLoopShape`/`buildWrapperForLoop` "Flow-merge loop" extension described in
+   the rewritten H124e(a) roadmap row. Start with `WaveOps/GroupMemoryBarrierWithGroupSync.test`
+   (simplest repro — one barrier, no extra inner branch) as the first target;
+   validate with a new `EntryWrapperTest.cpp` unit test before trying
+   `InterlockedAdd.32.test`'s slightly more complex shape (extra uniform `I>0`
+   branch in the loop body).
