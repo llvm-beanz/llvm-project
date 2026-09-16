@@ -858,6 +858,24 @@ the first two's own remaining narrowings):
   side-effect-free scalar recurrence -- e.g. a stride-halving reduction's
   own induction variable) are cloned directly into the wrapper as an
   ordinary scalar loop, run once per iteration rather than once per wave.
+  Two deviations from that "pure scalar recurrence" model are supported
+  (roadmap H159), because a real DXC-compiled loop body routinely mixes
+  uniform iteration bookkeeping with genuinely per-lane state:
+  a latch containing wave-lane-specific code (a groupshared access, a
+  mask, a value defined in the loop's own barrier region) is *outlined*
+  as the loop body's own last per-wave region instead of being cloned
+  (`LoopShape::LatchIsWaveRegion`); and a header phi whose recurrence is
+  computed inside one of those per-wave regions -- a per-lane value that
+  could never drive the loop's uniform scalar trip-count condition
+  anyway -- is carried in its own slot of the `[WavesPerGroup x SpillTy]`
+  per-wave spill array instead of a cloned scalar phi
+  (`feme::cpu::WavePersistentValue`). That array is allocated in the
+  wrapper's entry block, outside the scalar loop, so a slot in it already
+  persists across the loop's backedge: the loop's prefix region seeds it
+  once per wave, each use inside a region becomes a reload, and the
+  recurrence is stored straight back. Since a slot holds one value at a
+  time, every use of such an induction must precede its own recurrence;
+  a shape reading it afterwards is diagnosed rather than mis-compiled.
   A barrier inside a uniform two-way *branch* (as opposed to a loop) is
   recognized by `feme::cpu::matchBranchShape` and split by
   `feme::cpu::buildWrapperForBranch` the same way: the branch's own
