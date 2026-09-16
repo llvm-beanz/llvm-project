@@ -45197,3 +45197,86 @@ remaining 5 cases are broken out into new rows H124r/H124s/H124t. No
 feature/extension-inventory change: a pure legalization-gap fix
 exposing no new Vulkan-visible capability (FeMe already declared no
 `shaderImageGatherExtended` support before or after this fix).
+
+## H124r: `Gather`/`GatherCmp` against `Cube`-shaped handles fixed
+
+**Bug.** `Feature/Textures/{Gather,GatherCmp,CalculateLevelOfDetail}.test`
+(3 of H124q's original 7 cases) all failed compute-pipeline creation with
+a diagnostic naming handle type `Image_f32_1_2_0_0_1_0` (`Dim=1`, i.e.
+`Plain2D`) -- which looked, at first glance, like the same `Plain2D`
+gather gap H124q's own precedent had already closed. Manual `dxc -spirv
+-fspv-target-env=vulkan1.3`/`offloader` repro of all three (with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) confirmed this diagnostic is
+misleading: each test function also declares a co-resident `TextureCube`
+handle, and `hasOnlySupportedImageUses`'s all-or-nothing per-function
+behavior means the real unsupported handle (the `TextureCube`) blocks
+normalization of *every* handle in the function, including the already-
+supported `Texture2D`/`Tex` that happens to get named in the reported
+diagnostic -- an "innocent bystander" pattern already documented for
+prior rows. Root cause, confirmed by code inspection: `isGatherCmp
+Intrinsic`/`isGatherIntrinsic`/`isQueryLodIntrinsic` in
+`SPIRVResourceLowering.cpp` were all scoped to `Plain2D`/`Array2D` only,
+with `Cube` unsupported for all three.
+
+**Fix.** Scoped to `Gather`/`GatherCmp` Cube only this session (2 of 3
+cases; `CalculateLevelOfDetail`'s `QueryLod` Cube counterpart needs real
+LOD/derivative math and is broken out into new roadmap row H124u). In
+`SPIRVResourceLowering.cpp`: widened `isGatherCmpIntrinsic`/
+`isGatherIntrinsic`'s shape gate to accept `Cube` in addition to
+`Plain2D`/`Array2D`, and widened the codegen dispatch to extract a
+3-component direction vector (no offset -- SPIR-V forbids `ConstOffset`
+against `Dim::Cube` outright, and HLSL's `TextureCube::Gather{,Cmp}()`
+has no offset overload) when `Shape == ImageShape::Cube`. Added
+`GatherCmpCube`/`GatherCube` to `ImageCallKind` (`ImageCalls.h`/`.cpp`)
+with matching builders/matchers, and two new runtime functions in
+`FeMeRuntimeCPU.c` (`femeCpuImageGather{Cmp,}CubeV4F32`) that reuse
+`femeRTSelectCubeFace`'s existing face/UV-resolution math (already used
+by `femeCpuImageSampleCubeV4F32`) to resolve a face index and face-local
+`(U, V)` coordinate, then run the identical `Plain2D` gather footprint
+logic (`femeRTComputeBilinearSupport`/`femeRTFetchTexel2D`) addressed at
+`Layer=CF.Face`. Both new functions force `Samp.AddressU`/`AddressV = 2`
+(ClampToEdge), mirroring `femeCpuImageSampleCubeV4F32`'s own identical
+forcing. Deliberately does not implement seamless cross-face-edge gather
+blending (unlike `SampleCube`'s own spec-mandated remap): a gather
+footprint straddling a face edge is left clamped to that face's own edge
+texel -- no known `offload-test-suite`/CTS case yet exercises this.
+
+**New test coverage.** `spirv-resource-lowering-image-gather-cube.ll`
+(lit), `ImageCallsTest.cpp` (`MatchesGatherCmpCubeCall`/
+`MatchesGatherCubeCall`), `SPIRVResourceLoweringTest.cpp`
+(`LowersGatherCmpCubeToImageGatherCmpCube`/
+`LowersGatherCubeToImageGatherCube`, replacing the now-stale `LeavesA
+{GatherCmp,Gather}AgainstCubeUnchanged` negative tests), `ImageSampling
+Test.cpp` (`GatherCmpCubeIsolatesNamedFace`/`GatherCubeIsolatesNamedFace`,
+proving a gather at one cube face never leaks another face's own texels
+-- a pure `(+X, 0, 0)`/`(-X, 0, 0)` direction lands exactly on face 0/
+face 1's own center, mirroring `Gather{Cmp,}Array2DIsolatesNamedLayer`'s
+own `(0.5, 0.5)` coordinate).
+
+**Verification.**
+- `ninja check-feme`: **3065/3068 passed** (3 unsupported), 0 failed,
+  0 regressions (up from the prior edition's 3060/3063 by this session's
+  5 new tests: 2 `ImageCallsTest`, 2 `SPIRVResourceLoweringTest`
+  replacing 2 stale ones net +0, 2 `ImageSamplingTest`, 1 new lit test;
+  net +5 discovered tests).
+- Real-world (`check-hlsl-feme-vk`, FeMe driver confirmed via
+  `vulkaninfo --summary`): both `Feature/Textures/{Gather,GatherCmp}.test`
+  now pass (confirmed individually via `llvm-lit -sv`, and via a full
+  suite re-run). Full suite re-run: **39 -> 37 failed** (of 664), exactly
+  the 2 target cases moved from fail to pass, no regressions.
+  `CalculateLevelOfDetail.test` still fails as expected (out of this
+  session's scope, tracked as H124u).
+- VK-GL-CTS: `dEQP-VK.glsl.texture_gather.compute.basic.cube.*` (134
+  cases) is **not currently exercisable against FeMe at all** -- every
+  case reports `NotSupported (Requested core feature is not supported:
+  shaderImageGatherExtended)`, the identical pre-existing gap H124q's
+  own edition already documented for the `2d`/`2d_array` sub-groups.
+  Confirmed unrelated to (and not fixed or worsened by) this session's
+  change: FeMe still does not advertise `shaderImageGatherExtended` for
+  any shape, before or after this fix.
+
+H124r is struck through (2 of 3 cases) on the roadmap; the remaining
+`CalculateLevelOfDetail` Cube case is broken out into new row H124u. No
+feature/extension-inventory change: a pure legalization-gap fix exposing
+no new Vulkan-visible capability (FeMe already declared no `shaderImage
+GatherExtended` support before or after this fix).
