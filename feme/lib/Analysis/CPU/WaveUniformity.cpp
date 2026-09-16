@@ -154,6 +154,31 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   if (isa<AtomicRMWInst>(V))
     return ValueUniformity::NeverUniform;
 
+  // Roadmap H164: a plain, not-yet-lowered `llvm::AtomicCmpXchgInst`
+  // (HLSL's groupshared-destination `InterlockedCompareExchange`, still in
+  // its raw two-result-struct form at the point this analysis runs) needs
+  // the exact same `NeverUniform` treatment as the plain `AtomicRMWInst`
+  // case immediately above, and for the identical reason: dispatch is
+  // sequential, so each lane's own real compare-exchange observes whatever
+  // the destination holds at that lane's own turn, not one shared answer
+  // every lane agrees on -- regardless of how uniform this instruction's
+  // own operands (pointer, compare value, new value) happen to be. Left
+  // unhandled, a real `Feature/HLSLLib/InterlockedCompareExchange.32.test`
+  // shape -- a short-circuit `||`/`&&` chain branching on an
+  // `extractvalue` of this instruction's `{ iN, i1 }` result (e.g.
+  // `OrigMatchInt == -5 || OrigMatchInt == 42`) -- was wrongly classified
+  // uniform by the generic operand-driven rule, so `feme::cpu::
+  // DiamondFlattener` never flattened the real, per-lane-divergent branch;
+  // `feme::cpu::SIMDizePass`'s own, separately-recomputed uniformity
+  // analysis then correctly rejected it as divergent with no widened value
+  // to give it, and `FunctionWidener::widen`'s "sever remaining uses of an
+  // erased instruction" fallback silently substituted `poison` for every
+  // `extractvalue` of the (by-then-erased) scalar `cmpxchg`, so the branch
+  // condition became provably `poison` -- undefined behaviour that
+  // surfaced as a JIT-compiled stage segfaulting with no usable stack.
+  if (isa<AtomicCmpXchgInst>(V))
+    return ValueUniformity::NeverUniform;
+
   const auto *II = dyn_cast<IntrinsicInst>(V);
   if (!II)
     return ValueUniformity::Default;

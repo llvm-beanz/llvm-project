@@ -340,3 +340,45 @@ exit:
 }
 @imgheap = global ptr null
 declare i32 @feme.cpu.image.atomic.exchange.2d.i32(ptr, i32, i32, i32, i32)
+
+; Roadmap H164: a plain, not-yet-lowered `AtomicCmpXchgInst` (HLSL's
+; groupshared-destination `InterlockedCompareExchange`, still in its raw
+; `{ iN, i1 }`-result form at the point this analysis runs) needs the exact
+; same `NeverUniform` treatment as `atomicrmw_is_divergent` above, for the
+; identical reason: dispatch is sequential, so each lane's own real
+; compare-exchange observes whatever the destination holds at that lane's
+; own turn, not one shared answer every lane agrees on -- regardless of how
+; uniform this instruction's own operands (pointer, compare value, new
+; value) happen to be. Before this fix, a plain `cmpxchg` fell through to
+; `Default` (uniform, since every operand is), leaving a real, load-bearing
+; consumer branch on an `extractvalue` of its result -- e.g. a real
+; `Feature/HLSLLib/InterlockedCompareExchange.32.test` short-circuit
+; `||`/`&&` chain -- wrongly classified uniform too, so `feme::cpu::
+; DiamondFlattener` never attempted to flatten it, leaving the genuine
+; divergent branch in place for `feme::cpu::SIMDizePass`'s own,
+; separately-recomputed uniformity analysis to correctly reject later with
+; no widened value to give it -- substituting `poison` for the erased
+; scalar `cmpxchg`'s remaining uses and making the branch condition
+; provably `poison`, undefined behaviour that surfaced as a JIT-compiled
+; stage segfaulting with no usable stack.
+; CHECK-LABEL: WaveUniformityInfo for function 'atomic_cmpxchg_is_divergent':
+define void @atomic_cmpxchg_is_divergent() {
+  ; CHECK: DIVERGENT:{{.*}}%old = cmpxchg ptr @g3, i32 0, i32 1
+  %old = cmpxchg ptr @g3, i32 0, i32 1 seq_cst seq_cst
+  ; CHECK: DIVERGENT:{{.*}}%oldval = extractvalue { i32, i1 } %old, 0
+  %oldval = extractvalue { i32, i1 } %old, 0
+  ; CHECK: DIVERGENT:{{.*}}%cond = icmp
+  %cond = icmp eq i32 %oldval, 0
+  ; CHECK: DIVERGENT:{{.*}}br i1 %cond
+  br i1 %cond, label %if_true, label %if_false
+
+if_true:
+  br label %exit
+
+if_false:
+  br label %exit
+
+exit:
+  ret void
+}
+@g3 = global i32 0
