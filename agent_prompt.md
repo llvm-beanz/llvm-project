@@ -53,39 +53,41 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1 hour: individually triage the 28 failures above with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1`, one at a time, via the
-   `offloader` binary directly (not `llvm-lit -sv` — the env var
-   doesn't surface through lit's own capture).** Don't assume any two
-   share a root cause without checking — this project has been burned
-   by that assumption repeatedly (see every prior session's
-   `InterlockedAdd`/`Ddx*` groupings that turned out wrong or
-   incomplete). Start with the 8 names not seen in any prior list
-   (above) since they're totally unknown quantities.
-2. **~10 minutes: confirm `Feature/PushConstant/array_of_matrices.test`'s
-   unexpected pass** — run it standalone, check whether it's stable
-   across 2-3 repeats, then remove its `XFAIL` annotation if genuine.
-3. **H124e** (large, unchanged for many sessions):
+1. **~1-2 hours: extend the triage script(s) to handle multi-shader
+   pipelines** (vertex+fragment, vertex+geometry+fragment, etc. --
+   whatever each test's own `# RUN:` lines actually declare), then use
+   it to triage `Graphics/VertexShaderResourceCube.test`.
+2. **~1-2 hours, real bug, narrow scope**: root-cause and fix
+   `Feature/DynamicResources/dyn-res-uav-counter.test`'s address-space
+   mismatch in the UAV-counter + `ResourceDescriptorHeap` combination.
+3. **~30 min-1 hour: continue individually triaging the remaining ~22
+   of the 26 `check-hlsl-feme-vk` failures**, one at a time, via
+   `run_test2.sh` (real `dxc`, matches the actual `check-hlsl-feme-vk`
+   target -- see the methodology-trap note above for why this
+   matters) -- still don't assume any two share a root cause without
+   checking (`InterlockedAdd/CompareExchange/CompareStore/Exchange/Xor.32.test`,
+   `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/fwidth.test`, `WaveActiveMax.test`,
+   `Feature/*/GetDimensions.test` (matches H124m, `OpArrayLength` gap,
+   already on the roadmap as deprioritized) are all still individually
+   unconfirmed this session).
+4. **~1 hour: file a roadmap row for the new
+   `feme.cpu.resource.store.raw.i8` runtime gap** found via this
+   session's `dEQP-VK.ssbo.layout.random.nested_structs*` spot-check,
+   then fix it -- likely a small, self-contained addition mirroring
+   H137's own `i64`/`v2i64` pattern in `FeMeRuntimeCPU.c`.
+5. **~half a day: investigate `array_of_matrices.test`'s flaky
+   unexpected-pass** (full-suite-only, not reproducible standalone) --
+   don't remove its `XFAIL` until this is understood; likely needs
+   `valgrind`/an uninitialized-read detector run inside the exact
+   worker-parallel `llvm-lit` invocation the full suite uses.
+6. **H124e** (large, unchanged for many sessions):
    `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
-   divergence-handling gaps. The `InterlockedExchange.resources.32.test`
-   failure this session shows a *new* diagnostic shape worth checking
-   against this bucket: `"loop at '' has more than one divergent exit
-   check ('' and ''); unsupported (roadmap milestone 6 deviation)"` —
-   may or may not be the same root cause as the rest of H124e's
-   already-tracked cases; don't assume, verify first.
-4. **H124d** (large, deprioritized): upstream MLIR SPIR-V dialect ops
-   for `OpDPdx`/`OpDPdy`/`OpFwidth` — likely still the root cause
-   behind `DdxCoarse`/`DdyCoarse`/`ddx_fine`/`ddy_fine`/`fwidth.test`
-   above; confirm the connection during step 1's triage pass rather
-   than assuming it.
-5. **`shaderImageGatherExtended`** (large, carried over many sessions,
+   divergence-handling gaps -- still needs per-case triage, don't
+   assume shared cause with any of the above.
+7. **`shaderImageGatherExtended`** (large, carried over many sessions,
    still not filed as its own roadmap row): blocks every
-   `dEQP-VK.glsl.texture_gather.*` CTS case. FeMe's own gather is
-   `ConstOffset`-only, never true per-invocation dynamic offset —
-   advertising this feature honestly is itself a real, separate,
-   likely-multi-session capability addition. File a roadmap row before
+   `dEQP-VK.glsl.texture_gather.*` CTS case. File a roadmap row before
    starting.
-6. Lower priority, deferred 22+ sessions now:
+8. Lower priority, deferred 23+ sessions now:
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
-   pre-existing heap corruption — `valgrind`'s own trace points at
-   `buildStageStorage`/`executeDraws` allocating a too-small buffer.
+   pre-existing heap corruption.
