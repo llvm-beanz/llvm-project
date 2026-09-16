@@ -53,15 +53,22 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-- **~1-2 hours**: reduce `InterlockedCompareExchange.resources.32.test`'s
-  `feme-cpu-simdize` divergent-branch gap to its exact IR shape via
-  `feme-opt --feme-convert-spirv-to-llvm`, before attempting a fix.
-- **~1-2 hours**: same for `InterlockedExchange.resources.32.test`'s
-  `feme-cpu-linearize` multi-exit-loop gap.
-- **~30-60 min each, x4**: individually triage H147's 4
-  functional-correctness bugs (reproduce standalone via `offloader`, dump
-  actual vs. expected values) — cheapest way to find another tractable,
-  well-scoped fix like H146.
-- **Full session**: attempt H124e(a)'s actual design work (highest
-  payoff — up to 8 cases at once — but also the largest, least-scoped
-  remaining item).
+1. **~1-2 hours, still untouched:** reduce
+   `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
+   divergent-branch gap to its exact IR shape via `feme-opt
+   --feme-convert-spirv-to-llvm`, before attempting a fix.
+2. **~1-2 hours, still untouched:** same for
+   `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
+   multi-exit-loop gap.
+3. **~30-60 min each, x3 (H147a):** individually triage
+   `WaveIsFirstLane.test`/`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`
+   — reproduce standalone via `offloader`, dump actual vs. expected
+   values. Confirmed this session these do NOT share H148's matrix-
+   addressing cause; each needs its own from-scratch look.
+4. **Full session, highest payoff (8 cases at once), least scoped:**
+   attempt H124e's actual wrap-entry region-splitting design work.
+5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
+   SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
+   `dyn-res-uav-counter.test`'s address-space mismatch,
+   `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
+   heap corruption.
