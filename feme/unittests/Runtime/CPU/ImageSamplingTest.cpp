@@ -193,6 +193,20 @@ using GatherFn = void (*)(const FemeImageDescriptor *, uint32_t,
                           const FemeSamplerDescriptor *, uint32_t, uint32_t,
                           uint32_t, float, float, int32_t, int32_t, int32_t,
                           bool, void *);
+/// `feme.cpu.image.gathercmp.array2d.v4f32`'s own operand shape (roadmap
+/// H124q): the `Array2D` counterpart of `GatherCmpFn` above, adding an
+/// `ArrayLayer` (`float`) operand right after `V`.
+using GatherCmpArray2DFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                    const FemeSamplerDescriptor *, uint32_t,
+                                    uint32_t, uint32_t, float, float, float,
+                                    float, int32_t, int32_t, bool, void *);
+/// `feme.cpu.image.gather.array2d.v4f32`'s own operand shape (roadmap
+/// H124q): the `Array2D` counterpart of `GatherFn` above, adding an
+/// `ArrayLayer` (`float`) operand right after `V`.
+using GatherArray2DFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                 const FemeSamplerDescriptor *, uint32_t,
+                                 uint32_t, uint32_t, float, float, float,
+                                 int32_t, int32_t, int32_t, bool, void *);
 /// Roadmap L52a: the ordinary (non-comparison) `Texture1D` counterpart of
 /// `SampleFn` -- a single `U` coordinate, no `ConstOffset` (mirroring
 /// `SampleArrayFn`'s own simpler scope, see `ImageCallKind::Sample1D`'s
@@ -1814,6 +1828,95 @@ TEST_F(ImageSamplingTest, GatherNonzeroOffsetShiftsFetchedFootprint) {
      0, true, Offset);
   EXPECT_FLOAT_EQ(Offset[2], 0.9f); // T(X1,Y0) == texel 2.
   EXPECT_FLOAT_EQ(Offset[3], 0.6f); // T(X0,Y0) == texel 1.
+}
+
+TEST_F(ImageSamplingTest, GatherCmpArray2DIsolatesNamedLayer) {
+  // Roadmap H124q: `feme.cpu.image.gathercmp.array2d.v4f32` must gather
+  // its 2x2 depth-comparison footprint from the requested `ArrayLayer`
+  // only, never blending or mixing in a different layer's own texels --
+  // mirroring `Sample2DArrayReadsRequestedLayer`'s own identical "isolate
+  // the layer" proof technique, layered on top of
+  // `GatherCmpReturnsFourTexelsInDrefGatherOrder`'s own per-corner
+  // pass/fail comparison setup. Layer 0's depth values are the same ones
+  // `GatherCmpReturnsFourTexelsInDrefGatherOrder` uses; layer 1's are
+  // deliberately the *opposite* pass/fail pattern, so reading the wrong
+  // layer flips every corner's own result.
+  float Storage[2][2][2][4] = {
+      {{{0.4f, 0, 0, 0}, {0.6f, 0, 0, 0}}, {{0.3f, 0, 0, 0}, {0.7f, 0, 0, 0}}},
+      {{{0.9f, 0, 0, 0}, {0.1f, 0, 0, 0}}, {{0.8f, 0, 0, 0}, {0.2f, 0, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2DArray(Storage, sizeof(Storage), 2, 2, 2,
+                                             ResourceFormat::R32G32B32A32_FLOAT,
+                                             Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCmpArray2DFn Fn = resolve<GatherCmpArray2DFn>(addWrapper(
+      "gathercmp_array2d", "feme.cpu.image.gathercmp.array2d.v4f32"));
+  // Layer 0: Ref (0.5) <= Texel: T(X0,Y0)=0.4 fails, T(X1,Y0)=0.6 passes,
+  // T(X0,Y1)=0.3 fails, T(X1,Y1)=0.7 passes.
+  float Layer0[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.0f, 0.5f,
+     0, 0, true, Layer0);
+  EXPECT_FLOAT_EQ(Layer0[0], 0.0f); // C(X0,Y1)
+  EXPECT_FLOAT_EQ(Layer0[1], 1.0f); // C(X1,Y1)
+  EXPECT_FLOAT_EQ(Layer0[2], 1.0f); // C(X1,Y0)
+  EXPECT_FLOAT_EQ(Layer0[3], 0.0f); // C(X0,Y0)
+  // Layer 1: Ref (0.5) <= Texel: T(X0,Y0)=0.9 passes, T(X1,Y0)=0.1
+  // fails, T(X0,Y1)=0.8 passes, T(X1,Y1)=0.2 fails -- every corner
+  // flipped relative to layer 0.
+  float Layer1[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/1.0f, 0.5f,
+     0, 0, true, Layer1);
+  EXPECT_FLOAT_EQ(Layer1[0], 1.0f); // C(X0,Y1)
+  EXPECT_FLOAT_EQ(Layer1[1], 0.0f); // C(X1,Y1)
+  EXPECT_FLOAT_EQ(Layer1[2], 0.0f); // C(X1,Y0)
+  EXPECT_FLOAT_EQ(Layer1[3], 1.0f); // C(X0,Y0)
+}
+
+TEST_F(ImageSamplingTest, GatherArray2DIsolatesNamedLayer) {
+  // Roadmap H124q: the non-comparison `Gather` counterpart of
+  // `GatherCmpArray2DIsolatesNamedLayer` above -- same two-layer setup
+  // and same "every corner differs between layers" proof technique, but
+  // gathering a plain green-channel `Component` rather than comparing
+  // against a `Dref`.
+  float Storage[2][2][2][4] = {{{{9.0f, 0.4f, 0, 0}, {9.0f, 0.6f, 0, 0}},
+                                {{9.0f, 0.3f, 0, 0}, {9.0f, 0.7f, 0, 0}}},
+                               {{{9.0f, 0.1f, 0, 0}, {9.0f, 0.9f, 0, 0}},
+                                {{9.0f, 0.2f, 0, 0}, {9.0f, 0.8f, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 2,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherArray2DFn Fn = resolve<GatherArray2DFn>(
+      addWrapper("gather_array2d", "feme.cpu.image.gather.array2d.v4f32"));
+  // Layer 0, component 1 (green): T(X0,Y0)=0.4, T(X1,Y0)=0.6,
+  // T(X0,Y1)=0.3, T(X1,Y1)=0.7.
+  float Layer0[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.0f,
+     /*Component=*/1, 0, 0, true, Layer0);
+  EXPECT_FLOAT_EQ(Layer0[0], 0.3f); // T(X0,Y1)
+  EXPECT_FLOAT_EQ(Layer0[1], 0.7f); // T(X1,Y1)
+  EXPECT_FLOAT_EQ(Layer0[2], 0.6f); // T(X1,Y0)
+  EXPECT_FLOAT_EQ(Layer0[3], 0.4f); // T(X0,Y0)
+  // Layer 1, component 1 (green): T(X0,Y0)=0.1, T(X1,Y0)=0.9,
+  // T(X0,Y1)=0.2, T(X1,Y1)=0.8 -- every corner differs from layer 0.
+  float Layer1[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/1.0f,
+     /*Component=*/1, 0, 0, true, Layer1);
+  EXPECT_FLOAT_EQ(Layer1[0], 0.2f); // T(X0,Y1)
+  EXPECT_FLOAT_EQ(Layer1[1], 0.8f); // T(X1,Y1)
+  EXPECT_FLOAT_EQ(Layer1[2], 0.9f); // T(X1,Y0)
+  EXPECT_FLOAT_EQ(Layer1[3], 0.1f); // T(X0,Y0)
 }
 
 TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {

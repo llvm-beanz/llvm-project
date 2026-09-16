@@ -974,4 +974,77 @@ TEST_F(ImageCallsTest, MatchesSample2DI32Call) {
   EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
 }
 
+// `createGatherCmpArray2D`'s own `feme.cpu.image.gathercmp.array2d.v4f32`
+// call (roadmap H124q): the `Array2D` counterpart of
+// `ImageCallKind::GatherCmp2D`, with an extra `ArrayLayer` operand.
+TEST_F(ImageCallsTest, MatchesGatherCmpArray2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGatherCmpArray2D(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 2.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.25), Builder.getInt32(0),
+      Builder.getInt32(0), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GatherCmpArray2D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->ArrayLayer, ConstantFP::get(Builder.getFloatTy(), 2.0));
+  EXPECT_EQ(Matched->Dref, ConstantFP::get(Builder.getFloatTy(), 0.25));
+  EXPECT_EQ(Matched->OffsetX, Builder.getInt32(0));
+  EXPECT_EQ(Matched->OffsetY, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isFloatTy());
+}
+
+// `createGatherArray2D`'s own `feme.cpu.image.gather.array2d.v4f32` call
+// (roadmap H124q): the `Array2D` counterpart of `ImageCallKind::Gather2D`,
+// with an extra `ArrayLayer` operand.
+TEST_F(ImageCallsTest, MatchesGatherArray2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGatherArray2D(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 2.0), Builder.getInt32(1),
+      Builder.getInt32(0), Builder.getInt32(0), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GatherArray2D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->ArrayLayer, ConstantFP::get(Builder.getFloatTy(), 2.0));
+  EXPECT_EQ(Matched->Component, Builder.getInt32(1));
+  EXPECT_EQ(Matched->OffsetX, Builder.getInt32(0));
+  EXPECT_EQ(Matched->OffsetY, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isFloatTy());
+}
+
 } // namespace
