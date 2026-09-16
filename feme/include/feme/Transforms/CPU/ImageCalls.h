@@ -577,6 +577,18 @@ enum class ImageCallKind : uint8_t {
   /// from each of the four texels, rather than comparing each texel's
   /// depth component against a `Dref` reference value.
   Gather2D,
+  /// `feme.cpu.image.gathercmp.array2d.v4f32` (roadmap H124q): the
+  /// `Texture2DArray` counterpart of `GatherCmp2D` above -- identical
+  /// fixed bilinear footprint/result ordering/mip-level-0-only
+  /// restriction, plus `ArrayLayer` (SPIR-V's own arrayed-gather
+  /// coordinate convention: a float, rounded to nearest and clamped to a
+  /// valid layer, mirroring `Sample2DArray`'s own identical `ArrayLayer`
+  /// operand).
+  GatherCmpArray2D,
+  /// `feme.cpu.image.gather.array2d.v4f32` (roadmap H124q): the
+  /// `Texture2DArray` counterpart of `Gather2D` above, adding
+  /// `ArrayLayer` the same way `GatherCmpArray2D` does to `GatherCmp2D`.
+  GatherArray2D,
   /// `feme.cpu.image.sample.2d.v4i32` (roadmap H109): a `Plain2D` nearest-
   /// filtered sample against an integer-channel (`usampler2D`/
   /// `isampler2D`) sampled image, returning `<4 x i32>` instead of
@@ -900,6 +912,30 @@ createGather2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
               llvm::Value *U, llvm::Value *V, llvm::Value *Component,
               llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *Mask,
               const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gathercmp.array2d.v4f32` call (roadmap
+/// H124q): the `Array2D` counterpart of `createGatherCmp2D` above, adding
+/// \p ArrayLayer (a float array-layer coordinate, mirroring
+/// `createSample2DArray`'s own identical operand) right after \p V.
+llvm::CallInst *
+createGatherCmpArray2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                       llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                       llvm::Value *U, llvm::Value *V, llvm::Value *ArrayLayer,
+                       llvm::Value *Dref, llvm::Value *OffsetX,
+                       llvm::Value *OffsetY, llvm::Value *Mask,
+                       const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gather.array2d.v4f32` call (roadmap H124q):
+/// the `Array2D` counterpart of `createGather2D` above, adding
+/// \p ArrayLayer the same way `createGatherCmpArray2D` does to
+/// `createGatherCmp2D`.
+llvm::CallInst *
+createGatherArray2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                    llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                    llvm::Value *U, llvm::Value *V, llvm::Value *ArrayLayer,
+                    llvm::Value *Component, llvm::Value *OffsetX,
+                    llvm::Value *OffsetY, llvm::Value *Mask,
+                    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
 /// selects which sample of a multisampled image to read; pass a constant
