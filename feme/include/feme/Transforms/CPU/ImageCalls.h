@@ -608,6 +608,23 @@ enum class ImageCallKind : uint8_t {
   /// ext.synchronization.transfer_to_{mesh,task}.sampled_image.*`, this
   /// kind's own motivating case) needs no offset but a future one might.
   Sample2DI32,
+  /// `feme.cpu.image.gathercmp.cube.v4f32` (roadmap H124r): the
+  /// `TextureCube` counterpart of `GatherCmp2D` above -- a 3-component
+  /// direction-vector coordinate (`U`/`V`/`W` standing for the vector's
+  /// X/Y/Z, mirroring `SampleCube`'s own convention) resolved to a face
+  /// plus 2D UV by the runtime's own "major axis" algorithm
+  /// (`femeRTSelectCubeFace`), then gathered from that face using the
+  /// identical fixed bilinear footprint/result ordering `GatherCmp2D`
+  /// uses. No `OffsetX`/`OffsetY` operand at all, unlike `GatherCmp2D`:
+  /// SPIR-V forbids `ConstOffset` against `Dim::Cube` outright (see
+  /// `isSupportedOffset`'s own comment), and HLSL's own
+  /// `TextureCube::GatherCmp()` has no offset overload to begin with.
+  GatherCmpCube,
+  /// `feme.cpu.image.gather.cube.v4f32` (roadmap H124r): the
+  /// `TextureCube` counterpart of `Gather2D` above, mirroring
+  /// `GatherCmpCube`'s own direction-vector coordinate and lack of an
+  /// offset operand.
+  GatherCube,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -936,6 +953,32 @@ createGatherArray2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                     llvm::Value *Component, llvm::Value *OffsetX,
                     llvm::Value *OffsetY, llvm::Value *Mask,
                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gathercmp.cube.v4f32` call (roadmap H124r):
+/// the `TextureCube` counterpart of `createGatherCmp2D` above, taking a
+/// 3-component direction vector \p DirX/\p DirY/\p DirZ (mirroring
+/// `createSampleCube`'s own convention) in place of \p U/\p V, and no
+/// \p OffsetX/\p OffsetY parameter at all -- SPIR-V forbids `ConstOffset`
+/// against `Dim::Cube` outright, so there is no offset overload to
+/// support.
+llvm::CallInst *
+createGatherCmpCube(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                    llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                    llvm::Value *DirX, llvm::Value *DirY, llvm::Value *DirZ,
+                    llvm::Value *Dref, llvm::Value *Mask,
+                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gather.cube.v4f32` call (roadmap H124r): the
+/// `TextureCube` counterpart of `createGather2D` above, mirroring
+/// `createGatherCmpCube`'s own direction-vector coordinate and lack of an
+/// offset parameter.
+llvm::CallInst *createGatherCube(llvm::IRBuilderBase &Builder,
+                                 const ImageCallEnv &Env,
+                                 llvm::Value *ImageIndex,
+                                 llvm::Value *SamplerIndex, llvm::Value *DirX,
+                                 llvm::Value *DirY, llvm::Value *DirZ,
+                                 llvm::Value *Component, llvm::Value *Mask,
+                                 const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
 /// selects which sample of a multisampled image to read; pass a constant
