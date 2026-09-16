@@ -46102,3 +46102,141 @@ H145 is struck through on the roadmap as fixed (filed and closed in the
 same session). H124e's own row was also updated this session with a
 deeper (not-yet-fixed) finding from an unrelated investigation into its
 wrap-entry bucket -- see the roadmap's new H124e(a) sub-row.
+
+## H124e re-triage (8 confirmed wrap-entry cases) + H124d/H124m opcode confirmation + H146: uniform-atomic resource-call scalarization fixed
+
+**Environment check (every session, per standing instruction):**
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
+(confirmed with `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set via two separate
+`export` statements, per H124's own documented pitfall).
+
+**Baseline.** `ninja check-feme`: 3094/3097 passed (3 unsupported), 0
+failed -- clean, matching the prior session's own closing state.
+`check-hlsl-feme-vk`: 22 failures (of 664), 1 unexpectedly-passed
+(`array_of_matrices.test`, a pre-existing, not-yet-understood flake still
+carrying its own `XFAIL`, untouched this session).
+
+**Methodology.** Built a new, reusable triage script
+(`/tmp/h124e_triage/triage2.sh`, not committed -- a scratch tool) that
+parses each failing test's own `# RUN:` lines directly (rather than
+guessing the dxc target/stage the way ad hoc prior-session scripts did),
+substituting `%t`, `%dxc_target` (the real `dxc -spirv
+-fspv-target-env=vulkan1.3`, matching the actual `feme-vk` lit config, not
+`clang-dxc`), `%offloader` (`offloader --api=vk -adapter-regex=FeMe`), and
+`FileCheck %s` (`build2/bin/FileCheck <file>`, not relying on `FileCheck`
+being on `PATH`), then evaluates the substituted lines with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` set. Handled several script bugs along
+the way: `split-file` needs a non-existent output subdirectory (not `.`);
+`offloader` defaults to the DirectX API without `--api=vk`; some test
+files have CRLF line endings in their `# RUN:` section, leaving a literal
+`\r` that broke substituted file-path arguments (fixed via `tr -d '\r'`).
+Ran this across all 22 failing tests for a clean, individually-confirmed
+diagnostic per test (no assumptions from test-name similarity).
+
+**Findings, all individually confirmed (not assumed):**
+
+- **H124e's wrap-entry bucket is 8 cases, not 7**:
+  `Feature/HLSLLib/InterlockedAdd.32.test`, `InterlockedAdd.resources.32.test`,
+  `InterlockedCompareExchange.32.test`, `InterlockedCompareStore.32.test`,
+  `InterlockedCompareStore.resources.32.test`, `InterlockedExchange.32.test`,
+  `WaveOps/ComponentAccumulationDataRace.test`,
+  `WaveOps/GroupMemoryBarrierWithGroupSync.test` all produce the
+  byte-identical `feme-cpu-wrap-entry` "barrier inside non-linear control
+  flow" diagnostic.
+- **`InterlockedCompareExchange.resources.32.test`** and
+  **`InterlockedExchange.resources.32.test`** are each confirmed
+  single-case buckets with their own distinct diagnostics
+  (`feme-cpu-simdize` divergent-branch, `feme-cpu-linearize`
+  multi-exit-loop, respectively) -- not fixed this session.
+- **H124d's derivative-opcode hypothesis is now definitively confirmed**,
+  not merely suspected: `fwidth.test`/`ddx_fine.test`/`ddy_fine.test`/
+  `DdxCoarse.test`/`DdyCoarse.test` each fail with `"unhandled opcode
+  <N>"` where `<N>` exactly matches that test's own SPIR-V derivative
+  instruction (209/210/211/213/214 = `OpFwidth`/`OpDPdxFine`/`OpDPdyFine`/
+  `OpDPdxCoarse`/`OpDPdyCoarse`, confirmed against
+  `DirectXShaderCompiler/external/SPIRV-Headers/include/spirv/1.2/spirv.h`),
+  and none of the 9 total derivative opcodes exist anywhere in upstream
+  MLIR's SPIR-V dialect (confirmed via `grep`, zero matches in
+  `mlir/include/mlir/Dialect/SPIRV/`).
+- **H124m's `OpArrayLength` hypothesis is similarly confirmed**:
+  `Feature/{ByteAddressBuffer,StructuredBuffer}/GetDimensions.test` both
+  fail with `"unhandled opcode 68"` = `OpArrayLength`, also entirely
+  absent from MLIR's SPIR-V dialect. Additionally confirmed this session
+  that fixing it would *also* need new runtime buffer-size plumbing that
+  does not currently exist in FeMe's CPU-backend ABI (no
+  `feme.cpu.resource.*` size/length helper in `FeMeRuntimeCPU.c`, no
+  size-tracking mechanism in `SPIRVToLLVMPatterns.cpp` for
+  `robustBufferAccess`-style bounds) -- making this at least as large an
+  effort as H124d, not a one-op addition.
+- **5 previously-miscategorized functional/runtime-correctness bugs**
+  (pipeline creation succeeds, shader runs to completion, but produces
+  wrong output -- a genuinely different failure class from every other
+  bucket above): `Feature/PushConstant/matrix.test`,
+  `Feature/WaveOps/WaveIsFirstLane.test`, `WaveOps/WaveActiveMax.test`,
+  `WaveOps/WaveReadLaneAt.mtx.test`,
+  `Feature/StructuredBuffer/inc_counter_array_imm_idx.test` (the last one
+  investigated and fixed this session, see below; the other 4 filed as a
+  new, distinct roadmap bucket, H147, needing individual triage).
+
+**Bug found and fixed: `inc_counter_array_imm_idx.test`'s uniform-atomic
+undercounting (roadmap H146).**
+
+Actual output was `Counters: [1, 2, 3, 4]` vs. expected `[4, 8, 12, 16]`
+-- each value exactly `1/(lane count)` of expected. `spirv-dis` on the
+compiled shader confirmed `IncrementCounter()` lowers to plain
+`OpAtomicIAdd` with a constant `%int_1` addend -- a genuinely uniform
+atomic (constant array index, constant addend) called unconditionally by
+every lane, with no divergence at all.
+
+**Root cause.** `FunctionWidener::widenResourceCall`
+(`feme/lib/Transforms/CPU/SIMDize.cpp`) took an unconditional early
+return for any resource call whose operands were all uniform ("every
+operand is uniform: leave the scalar call as-is"), correct for an
+idempotent uniform load/store but wrong for an atomic: an atomic's effect
+accumulates per lane exactly like a groupshared `atomicrmw` does (already
+handled correctly by `widenGroupSharedAtomicRMW`, whose own file comment
+already documents "an atomicrmw always needs scalarization even when
+uniform" -- see roadmap R2/`histogram.hlsl`). That established fix,
+however, lives in a wholly separate code path (raw LLVM
+`AtomicRMWInst`/`AtomicCmpXchgInst`) from `feme.cpu.resource.atomic.*`
+**calls** (matched via `matchResourceCall`, widened via
+`widenResourceCall`), and had never been extended to cover it -- a strong
+instance of "two similar-looking code paths do not automatically share a
+fix," this project's own repeated lesson.
+
+**Fix.** Gated the early-return on `!isAtomic(Matched.Kind)`
+(`isAtomic` already existed in `ResourceCalls.cpp`, no new classification
+logic needed): a fully-uniform atomic call is now always scalarized, one
+call per lane, exactly like the groupshared case. Safe because
+`getWidened()` checks the `Widened` map before falling back to a uniform
+broadcast, so any later consumer transparently picks up the forced
+per-lane result regardless of what `UniformityInfo` itself concluded
+about the call's own operands.
+
+**Testing.** Added `SIMDizeTest.ScalarizesUniformAtomicResourceCall`: a
+minimal IR module with a `feme.cpu.resource.atomic.add.raw.i32` call
+whose descriptor index/offset/value/mask are all compile-time constants,
+inside a 4-lane (`hlsl.numthreads`="4,1,1") compute entry; asserts the
+widened function contains 4 (not 1) calls to the atomic callee. Confirmed
+via `git stash`/rebuild/re-run that the test genuinely fails (1 call, not
+4) without the fix, and passes again once restored.
+
+**Verification.**
+- `ninja check-feme`: 3095/3098 passed (3 unsupported), 0 failed, +1 new
+  test, no regressions.
+- `check-hlsl-feme-vk`: `Feature/StructuredBuffer/inc_counter_array_imm_idx.test`
+  now passes; failure count drops from 22 to **21** (of 664), no new
+  failures introduced.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: this is
+  a pure CPU-backend SIMDize correctness fix, not a new Vulkan feature or
+  extension.
+
+H146 is struck through on the roadmap as fixed. H124e's row was corrected
+to reflect the 8-case wrap-entry bucket (up from 7, all 8 individually
+re-confirmed rather than assumed by name similarity). H124d's and H124m's
+rows were upgraded from "suspected"/"likely" language to "confirmed this
+session" language with the exact per-test opcode evidence. A new roadmap
+row, H147, was filed for the 4 remaining functional/runtime-correctness
+bugs, explicitly flagged as a distinct bucket from every pipeline-creation
+-failure row, not yet triaged, and not to be assumed to share a cause with
+each other or with H146.
