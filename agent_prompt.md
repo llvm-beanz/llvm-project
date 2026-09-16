@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: 3e3ed1ca-e8e0-43ee-a165-5cdf3bba2524
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -53,13 +52,13 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 days, largest single lever, not yet designed:** H159 -- spill
-   a per-lane value computed inside a barrier region to per-wave-
-   persistent memory, read back at the start of the *next loop
-   iteration's* own outlined region invocation (not just across a
-   single barrier crossing within one iteration, which
-   `spillValuesLiveAcrossBarriers` already handles). This is the
-   deepest blocker and likely closes both `InterlockedAdd.32.test` and
-   `InterlockedExchange.32.test` (and probably their `.resources.32.test`
-   siblings) once done -- worth doing before H158, since H158 alone
-   still wouldn't close either real test.
+1. **Multi-day, largest single lever, now precisely designed:** H159's
+   two-part fix -- (a) teach `buildWrapperForLoop` to conditionally
+   outline `Shape.Latch` into a per-wave region instead of always
+   cloning it, when it contains wave-specific code; (b) thread each
+   per-lane ("wave-persistent") induction through the existing per-wave
+   spill array across the loop's own backedge. Recommended order: (a)
+   alone first, unit-tested against a synthetic case with no
+   cross-split dependency, before adding (b). Likely closes
+   `InterlockedAdd.32.test`/`InterlockedExchange.32.test` and probably
+   their `.resources.32.test` siblings.
