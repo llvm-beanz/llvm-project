@@ -76,6 +76,8 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
+#include <optional>
+
 using namespace llvm;
 using namespace feme::cpu;
 
@@ -648,6 +650,27 @@ public:
   /// diagnosed and leaves \p F untouched (returns false).
   bool run();
 
+  /// Attempts to flatten a single divergent diamond -- \p Start's own
+  /// two-way branch and its reconvergence point (computed via
+  /// `immediatePostDom`) -- as an ordinary, unconditionally-live diamond
+  /// (a constant-true `MaskPair`), exactly as `run()` would flatten any
+  /// diamond outside a loop. Used by `LoopLinearizer` (roadmap H165) for a
+  /// divergent branch found inside a loop body that turns out to have no
+  /// bearing on the loop's own iteration decision: both its arms, and its
+  /// reconvergence point, must stay strictly inside the loop body, never
+  /// crossing one of the loop's own control edges (see
+  /// `isLoopControlEdge`) -- checked by requiring `validate` to reach the
+  /// reconvergence point cleanly, with `CycleBoundaryBlocks` left empty,
+  /// rather than stopping early at such an edge the way it tolerates for
+  /// its own, unrelated whole-function walk. Silently returns
+  /// `std::nullopt`, emitting no diagnostic, when \p Start does not have
+  /// this shape (e.g. an arm reaches the loop's own header, latch, or
+  /// exit block, or the shape is otherwise unsupported) -- the caller is
+  /// expected to fall back to its own, more specific diagnostic in that
+  /// case. On success, returns the diamond's own (now-flattened)
+  /// reconvergence block.
+  std::optional<BasicBlock *> flattenLoopBodyDiamond(BasicBlock *Start);
+
 private:
   Function &F;
   DominatorTree &DT;
@@ -705,8 +728,12 @@ private:
   /// the loop computed, as in a Mandelbrot-style escape-time loop followed
   /// by a palette lookup -- still gets its own chance at validation instead
   /// of being silently left unvisited just because it happens to follow a
-  /// loop.
-  bool validate(BasicBlock *Start, BasicBlock *End);
+  /// loop. When \p Quiet is set (see `flattenLoopBodyDiamond`), every
+  /// would-be diagnostic is suppressed and this simply returns false
+  /// instead -- used when a failure here is an ordinary "not this shape"
+  /// result for a different, later check to try instead, not a genuine
+  /// compile error.
+  bool validate(BasicBlock *Start, BasicBlock *End, bool Quiet = false);
 
   /// Mutates the region \p validate already approved, threading \p Masks
   /// (the live/side-effect mask pair describing whether -- and how -- the
@@ -760,14 +787,16 @@ private:
   SmallPtrSet<Value *, 16> MaskedLoadResults;
 };
 
-bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
+bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
+                                bool Quiet) {
   BasicBlock *Cur = Start;
   while (Cur != End) {
     Instruction *Term = Cur->getTerminator();
     if (isa<ReturnInst>(Term)) {
       if (End != nullptr) {
-        diagnose(F, "early return under a divergent branch is not yet "
-                    "supported (roadmap milestone 6 deviation)");
+        if (!Quiet)
+          diagnose(F, "early return under a divergent branch is not yet "
+                      "supported (roadmap milestone 6 deviation)");
         return false;
       }
       return true;
@@ -780,8 +809,10 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
 
     auto *Br = dyn_cast<CondBrInst>(Term);
     if (!Br) {
-      diagnose(F, "unsupported terminator '" + Twine(Term->getOpcodeName()) +
-                      "' in a linearizable region");
+      if (!Quiet)
+        diagnose(F, "unsupported terminator '" +
+                        Twine(Term->getOpcodeName()) +
+                        "' in a linearizable region");
       return false;
     }
 
@@ -796,30 +827,55 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
 
     BasicBlock *R = immediatePostDom(Cur);
     if (!R) {
-      diagnose(F, "divergent branch in '" + Cur->getName() +
-                      "' has no reconvergence point");
+      if (!Quiet)
+        diagnose(F, "divergent branch in '" + Cur->getName() +
+                        "' has no reconvergence point");
       return false;
     }
     if (T == R || Fsucc == R) {
-      diagnose(F, "an empty diamond arm (in '" + Cur->getName() +
-                      "') is not yet supported (roadmap milestone 6 "
-                      "deviation)");
+      if (!Quiet)
+        diagnose(F, "an empty diamond arm (in '" + Cur->getName() +
+                        "') is not yet supported (roadmap milestone 6 "
+                        "deviation)");
       return false;
     }
     // The reconvergence block must have exactly the two predecessors this
     // rewrite expects to redirect/select between; anything else is a merge
     // shape this milestone does not generalize to yet.
     if (!R->hasNPredecessors(2)) {
-      diagnose(F, "reconvergence block '" + R->getName() +
-                      "' does not have exactly two predecessors");
+      if (!Quiet)
+        diagnose(F, "reconvergence block '" + R->getName() +
+                        "' does not have exactly two predecessors");
       return false;
     }
 
-    if (!validate(T, R) || !validate(Fsucc, R))
+    if (!validate(T, R, Quiet) || !validate(Fsucc, R, Quiet))
       return false;
     Cur = R;
   }
   return true;
+}
+
+std::optional<BasicBlock *>
+DiamondFlattener::flattenLoopBodyDiamond(BasicBlock *Start) {
+  if (!isa<CondBrInst>(Start->getTerminator()))
+    return std::nullopt;
+  BasicBlock *R = immediatePostDom(Start);
+  if (!R)
+    return std::nullopt;
+  // A clean `validate` that never records a cycle-boundary block means
+  // both arms genuinely reconverge at `R` without crossing a loop control
+  // edge -- exactly the "safe, ordinary diamond" shape this method exists
+  // to flatten. If it instead stopped early at such an edge (returning
+  // true anyway; see `validate`'s own comment), that is NOT this shape:
+  // treat it the same as an outright validation failure.
+  CycleBoundaryBlocks.clear();
+  if (!validate(Start, R, /*Quiet=*/true) || !CycleBoundaryBlocks.empty())
+    return std::nullopt;
+  MaskPair AllActive{ConstantInt::getTrue(F.getContext()),
+                     ConstantInt::getTrue(F.getContext())};
+  flatten(Start, R, AllActive, /*RedirectTo=*/R);
+  return R;
 }
 
 MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
@@ -1133,8 +1189,9 @@ bool DiamondFlattener::run() {
 /// really branching away.
 class LoopLinearizer {
 public:
-  LoopLinearizer(Function &F, CycleInfo &CI, UniformityInfo &UI)
-      : F(F), CI(CI), UI(UI) {}
+  LoopLinearizer(Function &F, DominatorTree &DT, PostDominatorTree &PDT,
+                CycleInfo &CI, UniformityInfo &UI)
+      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI) {}
 
   /// Validates and linearizes every leaf cycle in \p F matching the shape
   /// this pass supports. Returns whether \p F was changed.
@@ -1142,6 +1199,8 @@ public:
 
 private:
   Function &F;
+  DominatorTree &DT;
+  PostDominatorTree &PDT;
   CycleInfo &CI;
 
   /// Roadmap L40: computed once, before any cycle in \p F is linearized
@@ -2148,6 +2207,49 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     return true;
   }
 
+  // Roadmap H165: a divergent internal branch that has no bearing on the
+  // loop's own iteration decision at all -- i.e. it does not even match
+  // `matchExitCheckWithRelay` -- is an ordinary diamond that happens to
+  // reconverge before reaching the loop's header, latch, or exit block,
+  // the same shape `feme::cpu::DiamondFlattener` already flattens outside
+  // a loop. Flatten each one found up front (to a fixed point: flattening
+  // one can turn what looked like a second `OtherCondBrBlocks` entry into
+  // an ordinary uniform pass-through, though the common case is exactly
+  // one), leaving only this cycle's own genuine divergent exit check (if
+  // any) for the classification below -- this is what closes
+  // `InterlockedExchange.resources.32.test`'s own two-diamond
+  // monotonicity loop: one diamond, gated on an atomic's per-lane result,
+  // is genuinely divergent and reconverges mid-body (flattened here); the
+  // other, deeper in the same body, is a plain post-barrier uniform load
+  // comparison already tolerated by the "leave alone" path below.
+  {
+    DiamondFlattener DF(F, DT, PDT, CI, UI);
+    bool FlattenedAny = true;
+    while (FlattenedAny) {
+      FlattenedAny = false;
+      for (BasicBlock &BB : F) {
+        if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
+          continue;
+        auto *CondBr = dyn_cast<CondBrInst>(BB.getTerminator());
+        if (!CondBr || PeeledFrom.contains(&BB) ||
+            !UI.isDivergentTerminator(CondBr))
+          continue;
+        // Whether `BB` is a genuine exit check (one arm reaches
+        // `ExitBlock`, possibly via a relay chain) is `flattenLoopBodyDiamond`'s
+        // own concern to rule out already -- it requires *both* arms to
+        // reconverge without crossing a loop control edge at all (see its
+        // own comment), which a real exit check's own arm toward
+        // `ExitBlock` always violates. No need to duplicate that check
+        // with `matchExitCheckWithRelay` here first.
+        if (DF.flattenLoopBodyDiamond(&BB)) {
+          FlattenedAny = true;
+          break; // The scan below is stale the moment any block's
+                 // terminator changes; restart it.
+        }
+      }
+    }
+  }
+
   std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
   std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
   bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
@@ -2452,10 +2554,11 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     // that cycle's own already-mutated `CycleInfo`, is unsound (it
     // previously crashed on a real, nested-loop shader).
     DominatorTree DT2(F);
+    PostDominatorTree PDT2(F);
     CycleInfo CI2;
     CI2.compute(F);
     UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
-    bool CycleChanged = LoopLinearizer(F, CI2, UI2).run();
+    bool CycleChanged = LoopLinearizer(F, DT2, PDT2, CI2, UI2).run();
     // Roadmap H94b: eliminating a loop's divergent exit `CondBr` in favor
     // of an unconditional fall-through plus a mask computation (this
     // pass's whole point) can leave one of that `CondBr`'s own successors

@@ -523,6 +523,69 @@ TEST(LinearizeTest, LeavesUniformLoopUnchanged) {
                    CI->getCalledFunction()->getName() == "feme.cpu.mask.any");
 }
 
+// Roadmap H165: a divergent branch inside a loop body whose arms reconverge
+// strictly *inside* the loop body (not at the loop's own exit block) --
+// structurally the same "mid-body diamond" shape H158 taught the entry
+// wrapper to outline, one pass earlier. Before H165, `LoopLinearizer` had no
+// path for this: its only handling of an internal divergent branch was one
+// that relayed into the loop's own exit check
+// (`matchExitCheckWithRelay`), so this shape hit its "internal branch...
+// does not reach the loop's exit block" diagnostic. `DiamondFlattener`'s new
+// `flattenLoopBodyDiamond` recognizes it instead: the branch's immediate
+// post-dominator validates with an empty `CycleBoundaryBlocks` (neither arm
+// crosses a loop control edge), so it is flattened in place like an ordinary
+// diamond, leaving the loop's own separate, uniform exit check untouched.
+TEST(LinearizeTest, FlattensLoopBodyDiamond) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n) #0 {
+    entry:
+      br label %loop
+    loop:
+      %i = phi i32 [0, %entry], [%inc, %merge]
+      %v = phi i32 [0, %entry], [%v.merge, %merge]
+      br label %body
+    body:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %cond = icmp eq i32 %tid, 0
+      br i1 %cond, label %then, label %else
+    then:
+      %a = add i32 %v, 1
+      br label %merge
+    else:
+      %b = add i32 %v, 2
+      br label %merge
+    merge:
+      %v.merge = phi i32 [%a, %then], [%b, %else]
+      %inc = add i32 %i, 1
+      %loop.cond = icmp slt i32 %inc, %n
+      br i1 %loop.cond, label %loop, label %exit
+    exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  // The mid-body diamond's own branch should be gone (flattened into a
+  // select), while the loop's own exit check remains a real branch.
+  unsigned NumCondBr = 0;
+  bool FoundSelect = false;
+  for (Instruction &I : instructions(F)) {
+    if (isa<CondBrInst>(I))
+      ++NumCondBr;
+    if (isa<SelectInst>(I))
+      FoundSelect = true;
+  }
+  EXPECT_EQ(NumCondBr, 1u);
+  EXPECT_TRUE(FoundSelect);
+}
+
 // Roadmap R27: `feme.stage.discard` narrows both the live and side-effect
 // masks going forward, even with no divergent branch at all in the
 // function -- see `hasStageMaskOps`'s comment for why an unconditional
