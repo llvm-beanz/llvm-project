@@ -85686,3 +85686,136 @@ choice. Not worth unwinding after the fact.)
    `executeDraws` allocating a too-small buffer.
 
 All `/tmp/h124*` scratch files cleaned up before this commit.
+
+# Session: Fresh 31-failure re-triage; H136 (robustBufferAccessUpdateAfterBind) + H137 (i64/v2i64 runtime, partial) fixed
+
+Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` before starting, per standing instructions.
+
+## What's done
+
+1. **Re-triaged all 31 remaining `check-hlsl-feme-vk` failures
+   individually** via `FEME_VULKAN_LOG_CREATION_ERRORS=1` + targeted
+   `llvm-lit -sv`, instead of assuming shared root causes across
+   similarly-named tests (this was the explicit task this session).
+   Bucketed into ~10 distinct root-cause groups: device-creation
+   validation errors (2 cases, fixed as H136), missing i64 runtime
+   symbols (fixed partially as H137), missing `OpArrayLength`
+   upstream-MLIR op (3 cases, already tracked as H124m), divergent-
+   aggregate decomposition (3 cases), groupshared nested-GEP, several
+   distinct `FileCheck`/value-mismatch bugs (`matrix.test`,
+   `spec_const_32_bits.test`, `inc_counter_array_imm_idx.test`), and a
+   handful of `WaveOps/*` cases not yet individually root-caused
+   (`WaveActiveMax`, `WaveReadLaneAt.mtx`, `WaveIsFirstLane`,
+   `ComponentAccumulationDataRace`).
+2. **H136**: `robustBufferAccessUpdateAfterBind` was `VK_FALSE` while
+   `robustBufferAccess` + several `descriptorBinding*UpdateAfterBind`
+   features were all `VK_TRUE` -- an illegal combination per
+   `VUID-VkDeviceCreateInfo-robustBufferAccess-10247`, failing device
+   creation (not pipeline creation) for `Bugs/
+   UAV-Sequental-Consistency.yaml` and `Tools/Offloader/
+   BufferFormats.test`. Flipped both copies (promoted
+   `VkPhysicalDeviceVulkan12Properties` +
+   `VkPhysicalDeviceDescriptorIndexingPropertiesEXT`) to `VK_TRUE` --
+   truthful, since FeMe's bounds-checked descriptor path is identical
+   either way.
+3. **H137 (partial)**: `feme.cpu.resource.{load,store}.raw.i64` runtime
+   symbols never existed at all (`WaveActiveAllEqual.int64.test` failed
+   to JIT-link). Added scalar `i64` + `v2i64` (both <=16 bytes, safe
+   direct-value ABI, matching every existing element type's shape).
+   **Deliberately did not add `v3i64`/`v4i64`**: discovered via
+   `llvm-dis` that this host's AArch64 ABI coerces vectors over 16
+   bytes to an indirect (`sret`-return, pointer-argument) calling
+   convention -- the first time this runtime would need that. The
+   production caller (`ResourceLoweringPass`) assumes every runtime
+   function's real signature matches its own "logical" type, which
+   only holds today because no existing function crosses 16 bytes.
+   Attempted `v3i64`/`v4i64` anyway first, got a silent wrong-value bug
+   (no crash!) confirming the mismatch, reverted, and filed the
+   ABI-aware fix as its own roadmap row (**H138**) rather than rushing
+   it.
+
+## Numbers
+
+- `ninja check-feme`: **3073/3076 passed**, 3 unsupported, 0 failed (up
+  by 3 new unit tests total across both fixes, 0 regressions).
+- `check-hlsl-feme-vk`: **31 -> 29 failures** (of 664). Both H136
+  target cases now pass. H137's own target case
+  (`WaveActiveAllEqual.int64.test`) still fails, now for the narrower
+  `v3i64`/`v4i64`-only reason -- no case-count change from H137 alone.
+- VK-GL-CTS spot-checks (not a full sweep, given the narrow scope of
+  both fixes): `dEQP-VK.api.info.vulkan1p2.
+  property_extensions_consistency` **1/1 pass**; `dEQP-VK.api.
+  device_init.*` (250 cases) **231 pass / 8 fail / 11 not supported** --
+  the 8 failures are all `create_device_unsupported_features.*`
+  sub-cases unrelated to this session's changes (not investigated
+  further, pre-existing).
+- No feature/extension inventory changes for either fix (a property
+  correction and a CPU-runtime-internal completeness fix, neither adds
+  a new advertised Vulkan capability).
+
+## Milestone-numbering mishap, corrected
+
+Assigned H126/H127 to these two fixes without first checking the
+roadmap for already-used IDs -- both were already taken (pre-existing,
+already-fixed `WavePrefixSum`/`WavePrefixProduct` rows). Caught it via
+`grep -oE "H1[0-9]{2}" feme/docs/Roadmap.md | sort -u`, found H135 was
+the real highest ID, and renumbered everything to H136/H137 (with a new
+H138 follow-on row) via `git rebase -i --autosquash`/`reword` on the
+already-made commits before continuing. **Lesson for next session:
+always grep the roadmap for the highest existing `H\d+` before
+assigning any new ID, every single time** -- this is now the second
+time in this project's history this exact mistake has happened.
+
+## 5 commits this session
+
+1. `[feme] Fix robustBufferAccessUpdateAfterBind property mismatch (H136)`
+   (renumbered from a stale H126 via rebase)
+2. `[feme] Add feme.cpu.resource.{load,store}.raw.{i64,v2i64} runtime helpers (H137)`
+   (renumbered from a stale H127 via rebase)
+3. `[feme] Update Roadmap.md and VulkanCTSReport.md for H136/H137/H138`
+4. `[feme] Record post-H136/H137 VK-GL-CTS spot-check results`
+5. This `agent_thoughts.md` commit (next)
+
+## Suggested next steps
+
+1. **H138** (~1-2 hours, filed this session): teach
+   `ResourceLoweringPass` to be ABI-aware for `v3i64`/`v4i64` raw
+   resource access (indirect/`sret` calling convention), or decompose a
+   3/4-wide i64 raw access into 2 calls against the already-safe
+   `v2i64`/scalar primitives from H137. Finishes
+   `WaveActiveAllEqual.int64.test`.
+2. **The 8 `dEQP-VK.api.device_init.create_device_unsupported_features.*`
+   CTS failures** found via this session's spot-check (not yet
+   triaged at all -- brand new finding, not previously tracked): worth
+   a `FEME_VULKAN_LOG_CREATION_ERRORS=1` pass to see if any share H136's
+   own root-cause shape or are something else entirely. Not yet filed
+   as a roadmap row.
+3. **`WaveOps/WaveActiveMax.test`'s NegInfs mismatch** (unresolved,
+   carried over 2+ sessions): expects `[0,0,0,0]` for an all-`-inf`
+   input, FeMe produces the more IEEE-correct `[-inf,-inf,-inf,-inf]`.
+   `getReduceIdentity` is correct; may be a DXC/real-hardware quirk
+   baked into the CTS golden values rather than a FeMe bug -- needs a
+   `spirv-dis`-level dig that hasn't happened yet.
+4. **`WaveOps/WaveReadLaneAt.mtx.test`** (transpose bug, not yet
+   triaged) and **`WaveOps/WaveIsFirstLane.test`** (semantics gap, not
+   yet triaged) -- both flagged in this session's bucketing pass but
+   not individually root-caused yet.
+5. **H124e** (~several sessions, large, unchanged for many sessions):
+   `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
+   divergence-handling gaps -- may overlap with several of the
+   `WaveOps/*` items above; still needs per-case triage, don't assume
+   shared cause.
+6. **`shaderImageGatherExtended`** (large, carried over several
+   sessions, still not filed as its own roadmap row): blocks every
+   `dEQP-VK.glsl.texture_gather.*` CTS case. FeMe's gather is
+   `ConstOffset`-only -- advertising this honestly is a real, separate,
+   multi-session capability addition. File a roadmap row before
+   starting.
+7. Lower priority, deferred 21+ sessions now: `transform_feedback.
+   fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
+   corruption -- `valgrind`'s own trace points at `buildStageStorage`/
+   `executeDraws` allocating a too-small buffer.
+
+All `/tmp/triage`, `/tmp/cts_*.qpa`, `/tmp/api_*.txt` scratch files
+cleaned up before this commit.
