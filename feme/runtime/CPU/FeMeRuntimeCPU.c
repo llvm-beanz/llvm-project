@@ -7976,23 +7976,25 @@ __attribute__((always_inline)) FemeRTv2f32 femeCpuImageQueryLodCubeV2F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
-  if (!Img.Data || !(Img.Flags & 1u) || Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+  if (!Img.Data || !(Img.Flags & 1u) ||
+      Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
 
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
-  FemeRTCubeUVDerivatives D = femeRTComputeCubeUVDerivatives(
-      CF.Face, CF.RawMajor, DDirXdX, DDirXdY, DDirYdX, DDirYdY, DDirZdX,
-      DDirZdY);
+  FemeRTCubeUVDerivatives D =
+      femeRTComputeCubeUVDerivatives(CF.Face, CF.RawMajor, DDirXdX, DDirXdY,
+                                     DDirYdX, DDirYdY, DDirZdX, DDirZdY);
   float UnclampedLod =
       femeRTComputeUnclampedQueryLod(&Img, D.DUdX, D.DUdY, D.DVdX, D.DVdY);
   // Same `-infinity` no-op `InstructionMinLod`/zero `InstructionBias`
   // convention `femeCpuImageQueryLod2DV2F32` uses -- see its own doc.
-  float ClampedLod = femeRTComputeClampedLod(UnclampedLod,
-                                             /*UseExplicitLod=*/1, &Samp,
-                                             /*InstructionMinLod=*/-__builtin_inff(),
-                                             /*InstructionBias=*/0.0f);
+  float ClampedLod =
+      femeRTComputeClampedLod(UnclampedLod,
+                              /*UseExplicitLod=*/1, &Samp,
+                              /*InstructionMinLod=*/-__builtin_inff(),
+                              /*InstructionBias=*/0.0f);
   float ClampedLevel = femeRTComputeClampedQueryLevel(&Img, &Samp, ClampedLod);
   return (FemeRTv2f32){ClampedLevel, UnclampedLod};
 }

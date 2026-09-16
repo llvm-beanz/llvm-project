@@ -1889,9 +1889,9 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // own per-shape value.
     bool Unclamped = false;
     if (isQueryLodIntrinsic(*CI, Unclamped)) {
-      if (IsInteger || (Shape != ImageShape::Plain2D &&
-                        Shape != ImageShape::Array2D &&
-                        Shape != ImageShape::Cube))
+      if (IsInteger ||
+          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
+           Shape != ImageShape::Cube))
         return false;
       if (CI->getArgOperand(0) != &Handle)
         return false;
