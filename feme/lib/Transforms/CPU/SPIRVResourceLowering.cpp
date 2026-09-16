@@ -1035,11 +1035,30 @@ bool isQueryLodIntrinsic(const CallInst &CI, bool &Unclamped) {
 /// plain 2D image's mip-0 `(Width, Height)` extent query -- GLSL's own
 /// `imageSize()`/`textureSize()` against a `sampler2D`/`image2D` with no
 /// explicit LOD argument (SPIR-V `OpImageQuerySize`). Scoped to this one
-/// variant only -- `.x`/`.xyz`/the mip-count-returning `.levels.*`/the
+/// variant only -- `.x`/the mip-count-returning `.levels.*`/the
 /// multisample-count-returning `.ms.*` variants (every other `ImageShape`'s
-/// own `GetDimensions` counterpart) remain unstarted follow-on work.
+/// own `GetDimensions` counterpart) remain unstarted follow-on work. See
+/// `isGetDimensions3Intrinsic` immediately below for the 3-component
+/// `.xyz` sibling.
 bool isGetDimensionsIntrinsic(const CallInst &CI) {
   return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_xy;
+}
+
+/// Whether \p CI is `llvm.spv.resource.getdimensions.xyz` (roadmap H124s):
+/// a storage image's own mip-0 `(Width, Height, Elements)` extent query
+/// (SPIR-V `OpImageQuerySize`, `v3uint` result, no explicit LOD operand) --
+/// the `RWTexture2DArray::GetDimensions(Width, Height, Elements)` overload.
+/// A *sampled* `Texture2DArray`'s identical-looking no-mip-argument
+/// `GetDimensions` overload lowers differently (Clang's own HLSL codegen
+/// always synthesizes an explicit `Lod = 0` for a sampled image, emitting
+/// `OpImageQuerySizeLod` instead, see `isQuerySizeLodCall`) -- a storage
+/// image has no mip-chain concept to select a level from at all, so its
+/// codegen emits the bare, Lod-less `OpImageQuerySize` opcode here
+/// instead. Scoped to `Array2D` only (the one shape `H124s`'s own CTS
+/// case exercises) -- `Plain3D`'s analogous `RWTexture3D::GetDimensions`
+/// overload remains unstarted follow-on work.
+bool isGetDimensions3Intrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_xyz;
 }
 
 /// Whether \p CI's callee is a `SPIRVImporter.cpp`-synthesized magic-named
@@ -1973,6 +1992,16 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     // identical check for why this is scoped to `Plain2D` only.
     if (isGetDimensionsIntrinsic(*CI)) {
       if (Shape != ImageShape::Plain2D)
+        return false;
+      continue;
+    }
+
+    // Roadmap H124s: an `Array2D` storage image's own Lod-less
+    // `OpImageQuerySize` (`isGetDimensions3Intrinsic`) -- see its own doc
+    // for why a storage image's `GetDimensions` lowers to this bare
+    // 3-component opcode rather than `OpImageQuerySizeLod`.
+    if (isGetDimensions3Intrinsic(*CI)) {
+      if (Shape != ImageShape::Array2D)
         return false;
       continue;
     }
@@ -4033,6 +4062,22 @@ void lowerImageAccesses(
         IRBuilder<> Builder(CI);
         CallInst *NewCall = createGetDimensions2D(Builder, Env, ImageIndex,
                                                   Mask, "getdimensions2d");
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap H124s: `OpImageQuerySize` against an `Array2D` storage
+      // image (`isGetDimensions3Intrinsic`, `hasOnlySupportedStorageImageUses`
+      // already restricted this branch to `Array2D`) -- reuses
+      // `QuerySizeLod2DArray`'s own runtime call with a synthesized
+      // constant `Lod = 0`, since a storage image has exactly one mip
+      // level and its formula for that level is otherwise identical.
+      if (isGetDimensions3Intrinsic(*CI)) {
+        IRBuilder<> Builder(CI);
+        Value *ZeroLod = Builder.getInt32(0);
+        CallInst *NewCall = createQuerySizeLod2DArray(
+            Builder, Env, ImageIndex, ZeroLod, Mask, "getdimensions2darray");
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
