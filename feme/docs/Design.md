@@ -809,12 +809,20 @@ What is still missing is breadth rather than a structural gap:
   from, plus `SPIRVResourceLowering.cpp`/CPU-runtime lowering to a new
   `feme.cpu.image.gathercmp.2d.v4f32` helper reusing the existing bilinear-
   footprint helper), verified end-to-end against
-  `Vk.SampledTexture2D.GatherCmp.test.yaml`; the non-`Plain2D` shapes
-  (`Cube`/`CubeArray`/`Array2D`) and the non-depth-comparison
-  `spirv.ImageGather`/`OpImageGather` (opcode 96, which has **no MLIR
-  dialect support upstream at all** -- a materially larger gap than an
-  ordinary legalization-pattern one) remain unimplemented, tracked as
-  roadmap L7h/L7g respectively.
+  `Vk.SampledTexture2D.GatherCmp.test.yaml`. **Roadmap H124q/H124r have
+  since widened this to `Array2D` and `Cube`** (`isGatherCmpIntrinsic`/
+  `isGatherIntrinsic`'s shape gate in `SPIRVResourceLowering.cpp`, plus
+  `GatherCmpArray2D`/`GatherArray2D`/`GatherCmpCube`/`GatherCube`
+  `ImageCallKind`s and their own CPU-runtime helpers); `CubeArray` and
+  `Cube`'s own `QueryLod` counterpart (tracked as roadmap H124u) remain
+  unimplemented. The non-depth-comparison `spirv.ImageGather`/
+  `OpImageGather` (opcode 96, which has **no MLIR dialect support upstream
+  at all** -- a materially larger gap than an ordinary legalization-pattern
+  one) remains unimplemented for MLIR-level SPIR-V input, tracked as
+  roadmap L7g -- but is separately reachable, and already handled, via the
+  LLVM-SPIR-V-backend-selected `llvm.spv.resource.gather` intrinsic path
+  `SPIRVResourceLowering.cpp` lowers directly (the same path
+  `GatherArray2D`/`GatherCube` above use).
 
 Roadmap step V3 closed what used to be a second bullet here,
 **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`):
