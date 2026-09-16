@@ -47093,3 +47093,81 @@ established baseline, confirming no regression. No
 `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a pure
 CPU-backend internal-matcher investigation, no new Vulkan feature or
 extension surface, and ultimately no case closed.
+
+## H159: loop wrapper can now outline a wave-specific latch and carry per-lane inductions across the backedge
+
+**What landed.** Both parts of H159's own recommended breakdown, as two
+separate, individually tested commits.
+
+(a) `feme::cpu::LoopShape::LatchIsWaveRegion`. `matchLoopShape` used to
+decline any "barriers inside a uniform loop" shape whose latch was not a
+pure, side-effect-free scalar recurrence, because
+`buildWrapperForLoop` unconditionally *clones* the latch into the
+wrapper's group-wide scalar loop -- where wave-lane context (masks,
+groupshared addresses, per-lane values defined in the loop's own barrier
+region) simply does not exist. Such a latch is now appended to the loop's
+own per-wave region chain and outlined by `splitLoopBodyAtBarriers`
+instead (walking to `Shape.Header` rather than `Shape.Latch`), with its
+uses of the header's phis and header-derived values getting exactly the
+same `loopvarN` trailing-parameter treatment every other body region
+already gets, and with the latch joining the cross-barrier spill index.
+
+(b) `feme::cpu::WavePersistentValue`. A header phi whose recurrence is
+computed inside one of those per-wave regions -- a genuinely per-lane
+value, which could never drive the loop's uniform scalar trip-count
+condition anyway -- is now carried in its own field of the same
+`[WavesPerGroup x SpillTy]` per-wave array `spillValuesLiveAcrossBarriers`
+already builds. That array is allocated in the wrapper's entry block,
+outside the scalar loop, so a slot in it already persists across the
+loop's own backedge with no new storage: the loop's prefix chain seeds it
+once per wave, every use inside a region becomes a reload, and the
+recurrence is stored straight back. Such an induction takes neither a
+wrapper phi nor a `loopvarN` parameter. Two guards keep this from turning
+a clean decline into a silent miscompile: the header must never read the
+induction, and (since one slot holds one value at a time) every use of it
+must precede its own recurrence.
+
+**Tests.** `EntryWrapperTest.SplitsFlowMergeLoopWithWaveSpecificLatch`,
+`...WithWavePersistentRecurrence` and
+`FlowMergeLoopWithLateWavePersistentUseIsDiagnosed`, plus
+`feme/test/Transforms/CPU/entry-wrapper-loop-wave-specific-latch.ll` and
+`...-wave-persistent-induction.ll` covering the same two shapes end to
+end through widening, wave lowering and wrapper building. The previously
+*declining* `FlowMergeLoopWithBodyComputedRecurrenceIsDiagnosed` case is
+exactly what (b) makes legal, so it became the positive
+`...WithWavePersistentRecurrence` test. `check-feme` clean: 3,108 passed.
+
+**Finding: H159 was not what gated the `Interlocked*` cases.** Re-running
+the 8 `Feature/HLSLLib/Interlocked{Add,Exchange,CompareExchange,
+CompareStore}{,.resources}.32.test` cases against the freshly rebuilt ICD
+(`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json
+llvm-lit --filter Interlocked tools/OffloadTest/test/feme-vk`) shows all 8
+still failing, with the identical pre-change diagnostic -- and, crucially,
+failing *before* reaching any of the above: `matchLoopShape`'s backedge
+walk never matches the loop at all, because the SPIR-V structurizer's own
+loop-merge block survives. `feme::cpu::runPipeline`'s own
+`JumpThreadingPass` comment already predicted exactly this for exactly
+these shaders: threading only collapses the merge block when its phi's
+incoming values are constant per edge, which stops holding the moment the
+loop body has an extra uniform branch of its own -- and every one of these
+shaders has one (the source `if` guarding the atomic op). H159 was
+therefore a necessary but not sufficient step, and the prior session's
+"likely closes `InterlockedAdd.32.test`/`InterlockedExchange.32.test`"
+prediction was wrong about the ordering of the remaining blockers, not
+about the gap itself.
+
+**Roadmap update.** H159 struck through (both parts implemented). New
+rows: H161 (the `PreLatch`/`M` merge-block CFG matcher -- the actual first
+failure for all 8 cases) and H162 (an end-to-end tracking row for those 8
+cases across H161, H158 and H159). `FeMeCPUDesign.md`'s own "region
+splitting supports ... a single uniform loop" deviation paragraph updated
+to describe the two new latch/induction behaviours.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: 647 passed / 36
+failed / 19,819 not supported -- byte-identical to the established
+baseline, confirming no regression. A wider `dEQP-VK.compute.*` sweep
+(61,460 cases) likewise shows the same 36 failures. No
+`Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: this is a
+CPU-backend loop-wrapper change only, adding no Vulkan feature or
+extension surface and closing no case on its own.
