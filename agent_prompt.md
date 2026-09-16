@@ -1,5 +1,6 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
+resume: 3e3ed1ca-e8e0-43ee-a165-5cdf3bba2524
 ---
 # Initial Guidelines
 
@@ -52,13 +53,17 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **Multi-day, largest single lever, now precisely designed:** H159's
-   two-part fix -- (a) teach `buildWrapperForLoop` to conditionally
-   outline `Shape.Latch` into a per-wave region instead of always
-   cloning it, when it contains wave-specific code; (b) thread each
-   per-lane ("wave-persistent") induction through the existing per-wave
-   spill array across the loop's own backedge. Recommended order: (a)
-   alone first, unit-tested against a synthetic case with no
-   cross-split dependency, before adding (b). Likely closes
-   `InterlockedAdd.32.test`/`InterlockedExchange.32.test` and probably
-   their `.resources.32.test` siblings.
+1. **H166 first, not H164.** It is the smallest and best-understood:
+   one atomic being scalarized where its sibling is widened, with a
+   passing sibling to diff against. Probably an afternoon.
+2. **H165 second.** Also bounded, and it may turn out to be a stale
+   restriction that can simply be lifted now that the wrapping stage
+   handles the shape.
+3. **H164 last.** Open-ended: a crash in generated code with no usable
+   stack. Budget a day or more, and start by hand-editing the `feme-opt`
+   output rather than reaching for a debugger.
+4. Separately, `SIMDizePass::widenGroupSharedStore` crashes in
+   `CreateMaskedScatter` for a groupshared *store* inside a loop body. I
+   worked around it in unit tests by using a load instead. Pre-existing
+   and unrelated, but it has now cost two sessions a detour and deserves
+   its own row.
