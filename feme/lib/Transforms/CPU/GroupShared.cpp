@@ -54,10 +54,12 @@ std::optional<unsigned> getGatherScatterPtrOperandNo(const CallInst *CI) {
 }
 
 /// Returns whether \p U is a groupshared access this pass knows how to
-/// retarget directly: a plain `load`/`store`/`atomicrmw`, or a gather/
-/// scatter call's pointer argument (see `getGatherScatterPtrOperandNo`).
+/// retarget directly: a plain `load`/`store`/`atomicrmw`/`cmpxchg`, or a
+/// gather/scatter call's pointer argument (see
+/// `getGatherScatterPtrOperandNo`).
 bool isSupportedGroupSharedLeafUser(const User *U) {
-  if (isa<LoadInst>(U) || isa<StoreInst>(U) || isa<AtomicRMWInst>(U))
+  if (isa<LoadInst>(U) || isa<StoreInst>(U) || isa<AtomicRMWInst>(U) ||
+      isa<AtomicCmpXchgInst>(U))
     return true;
   const auto *CI = dyn_cast<CallInst>(U);
   return CI && getGatherScatterPtrOperandNo(CI).has_value();
@@ -352,7 +354,8 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
       NestedGEP->eraseFromParent();
       continue;
     }
-    if (isa<LoadInst>(Usr) || isa<StoreInst>(Usr) || isa<AtomicRMWInst>(Usr)) {
+    if (isa<LoadInst>(Usr) || isa<StoreInst>(Usr) || isa<AtomicRMWInst>(Usr) ||
+        isa<AtomicCmpXchgInst>(Usr)) {
       U.set(NewProducer);
       continue;
     }

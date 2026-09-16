@@ -790,6 +790,8 @@ private:
   void widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder);
   void widenGroupSharedStore(StoreInst &SI, IRBuilder<> &Builder);
   void widenGroupSharedAtomicRMW(AtomicRMWInst &RMW, IRBuilder<> &Builder);
+  void widenGroupSharedAtomicCmpXchg(AtomicCmpXchgInst &CmpXchg,
+                                     IRBuilder<> &Builder);
   void widenMaskedAlloca(AllocaInst &AI, IRBuilder<> &Builder);
   void widenMaskedAllocaGEP(GetElementPtrInst &GEP, IRBuilder<> &Builder);
   void widenMaskedAllocaStore(StoreInst &SI, IRBuilder<> &Builder);
@@ -1382,9 +1384,9 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 /// The aggregate analogue of the vector-specific producer/consumer checks
 /// inside `checkVectorDecompositionSupported` above (see that function's
 /// own file comment for the full picture, roadmap milestone L21): verifies
-/// that the divergent, aggregate-typed \p I is one of the two supported
+/// that the divergent, aggregate-typed \p I is one of the four supported
 /// producer shapes (an `insertvalue`, a nested sub-aggregate
-/// `extractvalue`, or a `select` -- the shape `feme::cpu::LinearizePass`
+/// `extractvalue`, a `select` -- the shape `feme::cpu::LinearizePass`
 /// produces when `mem2reg` promotes a locally-declared aggregate variable
 /// (e.g. a `float4x4` local reassigned along both arms of a divergent
 /// `if`/`else`) straight to a single aggregate-typed `phi`, rather than
@@ -1392,7 +1394,12 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 /// confirmed by reducing a real `Graphics/VertexShaderResourceCube.test`
 /// failure (a per-vertex `float4x4 localToWorld` assigned a whole matrix
 /// value along each arm of a divergent `SV_VertexID`-based branch) down to
-/// its exact IR shape; all three producer shapes require every leaf
+/// its exact IR shape; or an `AtomicCmpXchgInst` -- HLSL's
+/// `InterlockedCompareExchange`/`InterlockedCompareStore` always lower to
+/// a `cmpxchg` whose own `{T, i1}` result type is aggregate regardless of
+/// address uniformity, confirmed by reducing a real
+/// `Feature/HLSLLib/InterlockedCompareExchange.32.test` failure down to
+/// its exact IR shape -- all four producer shapes require every leaf
 /// `isSupportedAggregateLeafType` reaches to be a genuine scalar or a
 /// whole `FixedVectorType`, roadmap L27) and that every use of it is one
 /// of the supported consumer shapes (another `insertvalue`'s aggregate-
@@ -1403,6 +1410,17 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
   if (isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I) ||
       isa<SelectInst>(&I))
     IsSupportedProducer = isSupportedAggregateLeafType(I.getType());
+  else if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(&I))
+    // Only a groupshared-address `cmpxchg` has widening support today
+    // (`widenGroupSharedAtomicCmpXchg`); a resource-heap
+    // `InterlockedCompareExchange` never reaches this pass as a raw
+    // `cmpxchg` at all (it lowers to a `feme.cpu.resource.atomic.*`
+    // runtime call instead, handled by `widenMaskedAtomicRMW`'s own
+    // machinery), so no other pointer address space has a real case to
+    // support yet.
+    IsSupportedProducer =
+        isGroupSharedPointerType(CmpXchg->getPointerOperand()->getType()) &&
+        isSupportedAggregateLeafType(I.getType());
 
   if (!IsSupportedProducer) {
     Ctx.emitError(
@@ -1410,9 +1428,10 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         "' has a divergent value '" + I.getName() +
         "' of aggregate type; component decomposition is not yet supported "
         "for this producer (only an insertvalue chain, a nested "
-        "sub-aggregate extractvalue, or a select, over a struct/array whose "
-        "every leaf is a genuine scalar or a whole fixed vector, is "
-        "supported) (roadmap milestone 7/L21/L27 deviation)");
+        "sub-aggregate extractvalue, a select, or a cmpxchg, over a "
+        "struct/array whose every leaf is a genuine scalar or a whole "
+        "fixed vector, is supported) (roadmap milestone 7/L21/L27 "
+        "deviation)");
     return false;
   }
 
@@ -3207,6 +3226,55 @@ void FunctionWidener::widenGroupSharedAtomicRMW(AtomicRMWInst &RMW,
   ToErase.push_back(&RMW);
 }
 
+void FunctionWidener::widenGroupSharedAtomicCmpXchg(AtomicCmpXchgInst &CmpXchg,
+                                                    IRBuilder<> &Builder) {
+  // The aggregate-result analogue of `widenGroupSharedAtomicRMW` above --
+  // same reasoning applies verbatim (a `cmpxchg` always executes once per
+  // lane, and reusing a uniform pointer operand directly per lane instead
+  // of `getWidened`'s broadcast-then-extract avoids rebuilding a real
+  // `getelementptr` unnecessarily) -- but a `cmpxchg`'s own `{T, i1}`
+  // result is aggregate, not scalar, so each lane's clone is decomposed
+  // into its two leaf components (`extractvalue ... 0`/`1`) and stored in
+  // `WidenedAggregateComponents` instead of collected into one `Widened`
+  // vector, mirroring `widenAggregateSelect`/`widenInsertValue`'s own
+  // per-leaf storage convention.
+  Value *Ptr = CmpXchg.getPointerOperand();
+  bool PtrDivergent = Widened.count(Ptr) != 0;
+  Value *WidePtr = PtrDivergent ? Widened[Ptr] : nullptr;
+  Value *WideCmp = getWidened(CmpXchg.getCompareOperand(), Builder);
+  Value *WideNew = getWidened(CmpXchg.getNewValOperand(), Builder);
+
+  Type *ValueTy = CmpXchg.getCompareOperand()->getType();
+  Value *ValueResult =
+      PoisonValue::get(FixedVectorType::get(ValueTy, WaveSize));
+  Value *SuccessResult =
+      PoisonValue::get(FixedVectorType::get(Builder.getInt1Ty(), WaveSize));
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LanePtr = PtrDivergent
+                         ? Builder.CreateExtractElement(
+                               WidePtr, Builder.getInt32(Lane), "lane.ptr")
+                         : Ptr;
+    Value *LaneCmp = Builder.CreateExtractElement(
+        WideCmp, Builder.getInt32(Lane), "lane.cmp");
+    Value *LaneNew = Builder.CreateExtractElement(
+        WideNew, Builder.getInt32(Lane), "lane.new");
+    Instruction *Clone = CmpXchg.clone();
+    Clone->setOperand(0, LanePtr);
+    Clone->setOperand(1, LaneCmp);
+    Clone->setOperand(2, LaneNew);
+    Builder.Insert(Clone, CmpXchg.getName() + ".lane");
+    Value *LaneValue = Builder.CreateExtractValue(Clone, 0, "lane.value");
+    Value *LaneSuccess = Builder.CreateExtractValue(Clone, 1, "lane.success");
+    ValueResult = Builder.CreateInsertElement(ValueResult, LaneValue,
+                                              Builder.getInt32(Lane));
+    SuccessResult = Builder.CreateInsertElement(SuccessResult, LaneSuccess,
+                                                Builder.getInt32(Lane));
+  }
+
+  WidenedAggregateComponents[&CmpXchg] = {ValueResult, SuccessResult};
+  ToErase.push_back(&CmpXchg);
+}
+
 void FunctionWidener::widenInsertElement(InsertElementInst &IE,
                                          IRBuilder<> &Builder) {
   // Decompose a divergent `insertelement` into its widened per-component
@@ -3950,15 +4018,26 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   // (`widenGroupSharedAtomicRMW`), which reuses a uniform address directly
   // per lane instead of `widenElementwise`'s generic broadcast-then-
   // extract (roadmap step R23; see that function's comment).
-  // `AtomicCmpXchgInst` is not included here: its `{T, i1}` aggregate
-  // result already has no widening support regardless of uniformity (see
-  // `checkVectorDecompositionSupported`), so forcing it through the
-  // generic vector-result fallback below would fail differently instead.
+  // `AtomicCmpXchgInst` is handled by its own dedicated branch just below
+  // (its `{T, i1}` aggregate result is never a fit for this scalar/vector
+  // `AtomicRMWInst` path, groupshared or not).
   if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
     if (isGroupSharedPointerType(RMW->getPointerOperand()->getType()))
       widenGroupSharedAtomicRMW(*RMW, Builder);
     else
       widenElementwise(I, Builder);
+    return true;
+  }
+
+  // See `widenGroupSharedAtomicCmpXchg`'s own comment: a groupshared
+  // `cmpxchg`, like a groupshared `atomicrmw` above, always executes once
+  // per lane and is scalarized directly rather than routed through the
+  // generic elementwise fallback (which has no aggregate-result support).
+  // A resource-heap `InterlockedCompareExchange` never reaches this pass
+  // as a raw `cmpxchg` at all -- see `checkAggregateValueSupported`'s own
+  // comment -- so no other address space has a real case to support yet.
+  if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(&I)) {
+    widenGroupSharedAtomicCmpXchg(*CmpXchg, Builder);
     return true;
   }
 

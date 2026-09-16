@@ -583,6 +583,54 @@ TEST(SIMDizeTest, DecomposesAggregateSelect) {
   EXPECT_EQ(WideSelectCount, 2u);
 }
 
+// (Roadmap L21, `FunctionWidener::widenGroupSharedAtomicCmpXchg`) A
+// groupshared `cmpxchg` (HLSL's `InterlockedCompareExchange` on a
+// `groupshared` variable) always produces an aggregate `{T, i1}` result
+// regardless of address uniformity -- reduced from a real
+// `Feature/HLSLLib/InterlockedCompareExchange.32.test` failure, where
+// `checkAggregateValueSupported` used to reject the `cmpxchg` itself as
+// an unsupported producer of a divergent aggregate value. Mirrors
+// `WidensGroupSharedAtomicRMWThroughUniformGEP` above but through a
+// `cmpxchg`, whose own `{T, i1}` result is read back apart by a pair of
+// `extractvalue`s.
+TEST(SIMDizeTest, WidensGroupSharedAtomicCmpXchg) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %pair = cmpxchg ptr addrspace(3) @shared, i32 %tid, i32 42 seq_cst seq_cst
+      %val = extractvalue { i32, i1 } %pair, 0
+      %ok = extractvalue { i32, i1 } %pair, 1
+      ret void
+    }
+    @shared = internal addrspace(3) global i32 undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Every per-lane clone stays a genuine scalar `cmpxchg` over `i32` (a
+  // single lane's own `{i32, i1}` result is ordinary, legal LLVM IR --
+  // unlike a *widened*, SIMD-width aggregate, which never appears: no
+  // instruction's type is ever `<4 x {i32, i1}>` or any other
+  // vector-of-aggregate shape).
+  unsigned CmpXchgCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isAggregateType());
+    if (auto *CX = dyn_cast<AtomicCmpXchgInst>(&I)) {
+      ++CmpXchgCount;
+      EXPECT_TRUE(CX->getCompareOperand()->getType()->isIntegerTy(32));
+    }
+  }
+  EXPECT_EQ(CmpXchgCount, 4u);
+}
+
 // Roadmap L27: a divergent, whole *vector*-typed value inserted as a single
 // struct-field leaf via `insertvalue` (rather than each scalar component
 // individually, the only shape roadmap L21 supported), then read back out
