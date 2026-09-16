@@ -1006,6 +1006,109 @@ TEST(EntryWrapperTest, SplitsFlowMergeLoopWithWavePersistentRecurrence) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap H163 (feme/docs/Roadmap.md): the chain before (or after) a
+// loop may contain an arbitrary barrier-free nest of uniform branches
+// reconverging at one exit block -- a multi-level merge, not the plain
+// diamond `matchSafeDiamond` recognizes, which is what DXC emits for a
+// run of source-level `if`s. With no barrier anywhere inside it, such a
+// region can only ever land entirely inside one region function, so it
+// is part of the chain rather than a reason to decline the shape.
+TEST(EntryWrapperTest, SplitsLoopWithBarrierFreeBranchNestBeforeIt) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %c0 = icmp eq i32 %gid, 0
+      br i1 %c0, label %a, label %b
+    a:
+      %av = add i32 %gid, 1
+      br label %m1
+    b:
+      %c1 = icmp eq i32 %gid, 1
+      br i1 %c1, label %m1, label %m2
+    m1:
+      %p1 = phi i32 [ %av, %a ], [ 7, %b ]
+      br label %m2
+    m2:
+      %p2 = phi i32 [ %p1, %m1 ], [ 0, %b ]
+      br label %header
+    header:
+      %i = phi i32 [ 0, %m2 ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %x = add i32 %p2, %i
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  ASSERT_TRUE(M->getFunction("feme_cpu_entry_main"));
+  // The whole nest is outlined into the loop's single prefix region.
+  Function *Prefix0 = M->getFunction("main.prefix0");
+  ASSERT_TRUE(Prefix0);
+  EXPECT_EQ(Prefix0->size(), 5u);
+  EXPECT_FALSE(M->getFunction("main.prefix1"));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap H163 (feme/docs/Roadmap.md): the same nest, but with a
+// group-sync barrier inside one of its arms. The region would then have
+// to be split across two region functions along a path that does not
+// exist in every execution, which is not a shape this milestone
+// supports, so the loop match must decline rather than mis-outline it.
+TEST(EntryWrapperTest, LoopWithBarrierInBranchNestBeforeItIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %c0 = icmp eq i32 %gid, 0
+      br i1 %c0, label %a, label %m2
+    a:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      br label %m2
+    m2:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %m2 ], [ %i.next, %flow ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap H163 (feme/docs/Roadmap.md): a loop whose latch is outlined
 // whole (H159(a)) leaves the loop's own trip counter recurrence inside
 // that outlined region, where the wrapper's scalar loop cannot see it.

@@ -761,6 +761,75 @@ BasicBlock *matchSafeDiamond(BasicBlock *BB,
   return TrueMerge;
 }
 
+/// Tries to match \p BB's own terminator as the entry to a barrier-free
+/// single-entry/single-exit region: an arbitrary acyclic nest of uniform
+/// branches, none of whose blocks contains a group-sync barrier, all
+/// reconverging at one common exit block (roadmap H163). This is the
+/// general form of `matchSafeDiamond` -- real DXC output routinely emits
+/// a chain of source-level `if`s as a multi-level merge that is not a
+/// plain diamond -- and it is accepted for exactly the same reason: with
+/// no barrier anywhere inside, such a region can only ever land entirely
+/// inside whichever single region function contains it, so it never needs
+/// a split of its own. On success, every block but \p BB and the exit
+/// block is appended to \p Order (and registered in \p Visited) and the
+/// exit block is returned; returns nullptr (leaving \p Order and
+/// \p Visited untouched) otherwise.
+BasicBlock *matchBarrierFreeRegion(BasicBlock *BB,
+                                   SmallPtrSetImpl<BasicBlock *> &Visited,
+                                   SmallVectorImpl<BasicBlock *> &Order) {
+  if (!isa<CondBrInst>(BB->getTerminator()))
+    return nullptr;
+  SmallVector<BasicBlock *, 8> Local;
+  SmallPtrSet<BasicBlock *, 8> InRegion;
+  InRegion.insert(BB);
+  SetVector<BasicBlock *> Pending;
+  for (BasicBlock *S : successors(BB))
+    Pending.insert(S);
+  auto AllPredsInRegion = [&](BasicBlock *C) {
+    return all_of(predecessors(C),
+                  [&](BasicBlock *P) { return InRegion.contains(P); });
+  };
+  // Bounded so a pathological CFG cannot make this walk quadratic-ish on
+  // every failed match attempt; well beyond any structurizer output.
+  for (unsigned Step = 0; Step != 64; ++Step) {
+    if (Pending.size() == 1 && AllPredsInRegion(Pending.front())) {
+      BasicBlock *Exit = Pending.front();
+      if (Visited.contains(Exit))
+        return nullptr;
+      for (BasicBlock *B : Local)
+        if (!Visited.insert(B).second)
+          return nullptr; // Reachable from outside this region too.
+      Order.append(Local.begin(), Local.end());
+      return Exit;
+    }
+    BasicBlock *Next = nullptr;
+    for (BasicBlock *C : Pending)
+      if (AllPredsInRegion(C)) {
+        Next = C;
+        break;
+      }
+    if (!Next || Visited.contains(Next))
+      return nullptr;
+    for (Instruction &I : *Next)
+      if (auto *CI = dyn_cast<CallInst>(&I))
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync)
+          return nullptr;
+    Instruction *Term = Next->getTerminator();
+    if (!isa<UncondBrInst>(Term) && !isa<CondBrInst>(Term))
+      return nullptr;
+    Pending.remove(Next);
+    Local.push_back(Next);
+    InRegion.insert(Next);
+    for (BasicBlock *S : successors(Next)) {
+      if (InRegion.contains(S))
+        return nullptr; // A backedge: this is a loop, not an acyclic region.
+      Pending.insert(S);
+    }
+  }
+  return nullptr;
+}
+
 /// Whether \p F's control flow is a single straight chain from its entry
 /// block to a `ret`, filling \p Order with its blocks in that order if
 /// so -- with two exceptions: a uniform two-way branch whose arms are
@@ -1366,11 +1435,22 @@ BasicBlock *walkLinearChain(BasicBlock *Start,
     if (!Visited.insert(BB).second)
       return nullptr;
     Instruction *Term = BB->getTerminator();
-    auto *Br = dyn_cast<UncondBrInst>(Term);
-    if (!Br)
-      return BB;
+    if (auto *Br = dyn_cast<UncondBrInst>(Term)) {
+      Order.push_back(BB);
+      BB = Br->getSuccessor(0);
+      continue;
+    }
+    // Roadmap H163: a barrier-free nest of uniform branches reconverging
+    // at one exit block is part of this chain -- it can never need a
+    // region split of its own. Anything else (in particular a loop
+    // header, whose backedge this match rejects) ends the chain here.
     Order.push_back(BB);
-    BB = Br->getSuccessor(0);
+    BasicBlock *Exit = matchBarrierFreeRegion(BB, Visited, Order);
+    if (!Exit) {
+      Order.pop_back();
+      return BB;
+    }
+    BB = Exit;
   }
 }
 
@@ -1980,6 +2060,8 @@ SmallVector<BasicBlock *, 8> rebuildSplitChainOrder(BasicBlock *Start,
     // appended in turn, rather than assumed away as an unconditional
     // branch.
     BasicBlock *Merge = matchSafeDiamond(Cur, Visited, Order);
+    if (!Merge)
+      Merge = matchBarrierFreeRegion(Cur, Visited, Order);
     assert(Merge && "chain shape not established by its own matcher");
     if (Merge == StopBefore)
       break;
