@@ -418,10 +418,31 @@ enum class ImageCallKind : uint8_t {
   /// would produce, so real derivatives are always required (never zero
   /// constants, unlike `Sample2D`'s `ExplicitLod`-gated case) for every
   /// caller in the one stage (`Fragment`) this instruction is ever legal
-  /// from. Scoped to `Plain2D` only for now -- `Array2D`/`Cube`/
-  /// `CubeArray`/`Plain1D`/`Array1D`/`Plain3D` counterparts remain
-  /// unstarted follow-on work.
+  /// from. Scoped to `Plain2D`/`Array2D` (roadmap H124t reuses this same
+  /// entry point for `Array2D`, whose own `CalculateLevelOfDetail` has an
+  /// identical 2-component coordinate and formula) -- `Cube`/`CubeArray`
+  /// (see `QueryLodCube` immediately below)/`Plain1D`/`Array1D`/
+  /// `Plain3D` counterparts remain unstarted follow-on work.
   QueryLod2D,
+  /// `feme.cpu.image.querylod.cube.v2f32` (roadmap H124u): `Cube`'s own
+  /// counterpart of `OpImageQueryLod` (HLSL's `TextureCube::
+  /// CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`). Unlike
+  /// `QueryLod2D`'s own `(DUdX, DUdY, DVdX, DVdY)` operand pair, a cube's
+  /// own direction-vector coordinate has no `(U, V)` of its own until a
+  /// face is selected -- this entry point instead takes the caller's raw
+  /// screen-space derivatives of the direction vector's three components
+  /// (`DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY`,
+  /// synthesized the same way `getOrSynthesizeSampleCubeDerivatives`
+  /// already does for an ordinary implicit-LOD cube sample) plus the
+  /// direction vector itself (`DirX`/`DirY`/`DirZ`, needed to select
+  /// which face's own per-face sign/axis convention
+  /// `femeRTComputeCubeUVDerivatives` should remap those raw derivatives
+  /// through) -- see `femeCpuImageQueryLodCubeV2F32`'s own doc
+  /// (`FeMeRuntimeCPU.c`) for the exact face-selection-then-remap
+  /// pipeline. The `<2 x float>` result's own lane convention is
+  /// otherwise identical to `QueryLod2D`'s (lane 0 clamped level, lane 1
+  /// raw unclamped LOD).
+  QueryLodCube,
   /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a
   /// real `Bias`/`MinLodClamp` pair by roadmap L67(a) and real `Grad`
   /// support by roadmap L67(b)): the volumetric counterpart of
@@ -1335,6 +1356,20 @@ llvm::CallInst *createQueryLod2D(llvm::IRBuilderBase &Builder,
                                  llvm::Value *DUdY, llvm::Value *DVdX,
                                  llvm::Value *DVdY, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.querylod.cube.v2f32` call (roadmap H124u):
+/// see `ImageCallKind::QueryLodCube`'s own doc for its `<2 x float>`
+/// result shape and its operand list's own rationale (a direction vector
+/// plus its own raw screen-space derivatives, rather than `QueryLod2D`'s
+/// already-face-local `(DUdX, DUdY, DVdX, DVdY)` pair).
+llvm::CallInst *
+createQueryLodCube(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                   llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                   llvm::Value *DirX, llvm::Value *DirY, llvm::Value *DirZ,
+                   llvm::Value *DDirXdX, llvm::Value *DDirXdY,
+                   llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+                   llvm::Value *DDirZdX, llvm::Value *DDirZdY,
+                   llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.3d.v4f32` call (roadmap L66(a),
 /// extended with a real \p Bias/\p MinLodClamp pair by roadmap L67(a) and

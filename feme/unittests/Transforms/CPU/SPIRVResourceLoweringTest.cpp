@@ -6109,12 +6109,54 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+TEST(SPIRVResourceLoweringTest,
+     LowersCubeQueryLodToImageQueryLodCubeWithDirectionVector) {
+  // Roadmap H124u: `Cube`'s own `CalculateLevelOfDetail` (an
+  // `OpImageQueryLod` against a `TextureCube`) -- unlike `Plain2D`/
+  // `Array2D` above, this op's own coordinate is a 3-component direction
+  // vector (confirmed via a real `spirv-dis` dump, `%v3float`, since
+  // there is no face-local 2D UV until face selection happens at
+  // runtime), so this lowers to a distinct
+  // `feme.cpu.image.querylod.cube.v2f32` call carrying the raw
+  // direction vector `(DirX, DirY, DirZ)` plus its own 6 direction-vector
+  // derivative components, rather than reusing `QueryLod2D`'s call.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *QueryLod = findImageCall(*F, "feme.cpu.image.querylod.cube.v2f32");
+  ASSERT_TRUE(QueryLod);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, mask) -- 16 operands total.
+  EXPECT_EQ(QueryLod->arg_size(), 16u);
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 TEST(SPIRVResourceLoweringTest, LeavesAPlain1DQueryLodHandleAlone) {
-  // Roadmap L52e/H124t deliberately scope `OpImageQueryLod` support to
-  // `Plain2D`/`Array2D` -- `Plain1D` (and every other still-unwidened
-  // shape) is left entirely unlowered, the same honest all-or-nothing
-  // contract every other unsupported shape gets (`collectHandles`
-  // declines the whole function).
+  // Roadmap L52e/H124t/H124u deliberately scope `OpImageQueryLod` support
+  // to `Plain2D`/`Array2D`/`Cube` -- `Plain1D` (and every other
+  // still-unwidened shape) is left entirely unlowered, the same honest
+  // all-or-nothing contract every other unsupported shape gets
+  // (`collectHandles` declines the whole function).
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(float %coord) {

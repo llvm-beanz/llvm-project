@@ -1866,29 +1866,37 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L52e/H124t: `OpImageQueryLod`'s own two intrinsic halves
-    // (`calculate.lod`/`calculate.lod.unclamped`), scoped to `Plain2D`/
-    // `Array2D` -- `Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D`
-    // counterparts remain unstarted follow-on work, mirroring this same
-    // narrowing's precedent (e.g. roadmap L46's own initial `Plain2D`-only
-    // depth-comparison-sample scope, later widened by L48). An
-    // integer-channel image is rejected the same way an ordinary/dref
-    // sample is above -- SPIR-V never legalizes `OpImageQueryLod` against
-    // one either. Unlike an ordinary sample, `OpImageQueryLod`'s own
-    // coordinate is always exactly 2 components even against an
-    // `Array2D` handle (`Texture2DArray::CalculateLevelOfDetail`'s own
-    // HLSL signature has no slice argument at all -- confirmed via
-    // `spirv-dis`, `%v2float` regardless of shape -- the array dimension
-    // plays no part in the LOD computation), so this uses a fixed width
-    // of 2 rather than `SampleCoordWidth`'s own per-shape value.
+    // Roadmap L52e/H124t/H124u: `OpImageQueryLod`'s own two intrinsic
+    // halves (`calculate.lod`/`calculate.lod.unclamped`), scoped to
+    // `Plain2D`/`Array2D`/`Cube` -- `CubeArray`/`Plain1D`/`Array1D`/
+    // `Plain3D` counterparts remain unstarted follow-on work, mirroring
+    // this same narrowing's precedent (e.g. roadmap L46's own initial
+    // `Plain2D`-only depth-comparison-sample scope, later widened by
+    // L48). An integer-channel image is rejected the same way an
+    // ordinary/dref sample is above -- SPIR-V never legalizes
+    // `OpImageQueryLod` against one either. Unlike an ordinary sample,
+    // `OpImageQueryLod`'s own coordinate is always exactly 2 components
+    // against a `Plain2D`/`Array2D` handle (`Texture2DArray::
+    // CalculateLevelOfDetail`'s own HLSL signature has no slice argument
+    // at all -- confirmed via `spirv-dis`, `%v2float` regardless of
+    // shape -- the array dimension plays no part in the LOD computation),
+    // but a `Cube` handle's own coordinate is instead a 3-component
+    // direction vector (`TextureCube::CalculateLevelOfDetail`'s own
+    // `%v3float` coordinate -- also confirmed via `spirv-dis`, since
+    // there is no 2D face-local UV until face selection happens inside
+    // the runtime function itself), so this uses a fixed width of 2 for
+    // `Plain2D`/`Array2D` but 3 for `Cube`, rather than `SampleCoordWidth`'s
+    // own per-shape value.
     bool Unclamped = false;
     if (isQueryLodIntrinsic(*CI, Unclamped)) {
-      if (IsInteger ||
-          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D))
+      if (IsInteger || (Shape != ImageShape::Plain2D &&
+                        Shape != ImageShape::Array2D &&
+                        Shape != ImageShape::Cube))
         return false;
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (!isCoordN(CI->getArgOperand(2), 2, /*Float=*/true) ||
+      unsigned QueryLodCoordWidth = Shape == ImageShape::Cube ? 3 : 2;
+      if (!isCoordN(CI->getArgOperand(2), QueryLodCoordWidth, /*Float=*/true) ||
           !CI->getType()->isFloatTy())
         return false;
       continue;
@@ -4043,11 +4051,32 @@ void lowerImageAccesses(
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
         Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
-        SampleDerivatives D = getOrSynthesizeSample2DDerivatives(
-            Builder, *CI->getFunction(), C0, C1);
-        CallInst *NewCall =
-            createQueryLod2D(Builder, Env, ImageIndex, SamplerIndex, D.DUdX,
-                             D.DUdY, D.DVdX, D.DVdY, Mask, "querylod2d");
+        CallInst *NewCall;
+        if (Shape == ImageShape::Cube) {
+          // Roadmap H124u: a `Cube` handle's own `OpImageQueryLod`
+          // coordinate is the 3-component direction vector itself (see
+          // `hasOnlySupportedImageUses`'s own doc above) -- mirroring
+          // `SampleCube`'s own implicit-LOD derivative synthesis, this
+          // unconditionally synthesizes real (Fragment stage) or zero
+          // (otherwise) derivatives via `getOrSynthesizeSampleCube
+          // Derivatives`, then hands both the raw direction vector and
+          // those derivatives to `createQueryLodCube`, which defers face
+          // selection and face-local UV-derivative remapping to the
+          // runtime function itself (`femeCpuImageQueryLodCubeV2F32`).
+          Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          CubeDirectionDerivatives CD = getOrSynthesizeSampleCubeDerivatives(
+              Builder, *CI->getFunction(), C0, C1, C2);
+          NewCall = createQueryLodCube(Builder, Env, ImageIndex, SamplerIndex,
+                                       C0, C1, C2, CD.DDirXdX, CD.DDirXdY,
+                                       CD.DDirYdX, CD.DDirYdY, CD.DDirZdX,
+                                       CD.DDirZdY, Mask, "querylodcube");
+        } else {
+          SampleDerivatives D = getOrSynthesizeSample2DDerivatives(
+              Builder, *CI->getFunction(), C0, C1);
+          NewCall =
+              createQueryLod2D(Builder, Env, ImageIndex, SamplerIndex, D.DUdX,
+                               D.DUdY, D.DVdX, D.DVdY, Mask, "querylod2d");
+        }
         // Lane 0 is the clamped level (`calculate.lod`), lane 1 the raw
         // unclamped LOD (`calculate.lod.unclamped`) -- mirroring
         // `ImageQueryLodPattern`'s own lane convention.

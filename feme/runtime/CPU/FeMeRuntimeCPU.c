@@ -7938,6 +7938,65 @@ femeRTComputeCubeClampedLod(const FemeRTImageDescriptor *Img,
       .ClampedLod;
 }
 
+// `feme.cpu.image.querylod.cube.v2f32` (roadmap H124u): `Cube`'s own
+// counterpart of `femeCpuImageQueryLod2DV2F32` above -- HLSL's
+// `TextureCube::CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`
+// (`OpImageQueryLod` against a `Cube`-shaped handle). Unlike `QueryLod2D`,
+// there is no face-local `(U, V)` derivative pair to consult directly:
+// the caller only has the direction vector `(DirX, DirY, DirZ)` and its
+// own raw screen-space derivatives, so this first selects the cube face
+// the direction vector lands on (`femeRTSelectCubeFace`, the same helper
+// `femeCpuImageSampleCubeV4F32` uses), then remaps those raw derivatives
+// into that face's own `(U, V)` derivative pair
+// (`femeRTComputeCubeUVDerivatives`, mirroring
+// `femeRTComputeCubeClampedLod`'s own implicit-LOD branch above) before
+// handing them to the same `femeRTComputeUnclampedQueryLod`/
+// `femeRTComputeClampedQueryLevel` pair `QueryLod2D` already uses
+// unmodified -- a cube face's own UV derivatives measure minification
+// exactly the same way a plain 2D image's do once face selection has
+// picked out which single face's texel grid is actually being sampled.
+// The `<2 x float>` result's own lane convention (lane 0 clamped level,
+// lane 1 raw unclamped LOD) is identical to `QueryLod2D`'s.
+FemeRTv2f32 femeCpuImageQueryLodCubeV2F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY,
+    _Bool Mask) asm("feme.cpu.image.querylod.cube.v2f32");
+
+__attribute__((always_inline)) FemeRTv2f32 femeCpuImageQueryLodCubeV2F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, _Bool Mask) {
+  FemeRTv2f32 Zero = {0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) || Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  FemeRTCubeUVDerivatives D = femeRTComputeCubeUVDerivatives(
+      CF.Face, CF.RawMajor, DDirXdX, DDirXdY, DDirYdX, DDirYdY, DDirZdX,
+      DDirZdY);
+  float UnclampedLod =
+      femeRTComputeUnclampedQueryLod(&Img, D.DUdX, D.DUdY, D.DVdX, D.DVdY);
+  // Same `-infinity` no-op `InstructionMinLod`/zero `InstructionBias`
+  // convention `femeCpuImageQueryLod2DV2F32` uses -- see its own doc.
+  float ClampedLod = femeRTComputeClampedLod(UnclampedLod,
+                                             /*UseExplicitLod=*/1, &Samp,
+                                             /*InstructionMinLod=*/-__builtin_inff(),
+                                             /*InstructionBias=*/0.0f);
+  float ClampedLevel = femeRTComputeClampedQueryLevel(&Img, &Samp, ClampedLod);
+  return (FemeRTv2f32){ClampedLevel, UnclampedLod};
+}
+
 // `feme.cpu.image.sample.cube.v4f32` (roadmap H7b-a): samples a
 // `TextureCube` sampled image at direction vector `(DirX, DirY, DirZ)`,
 // converted to a face index (addressed as `femeRTSamplePoint2D`/
