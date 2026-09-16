@@ -47291,3 +47291,44 @@ failed / 19,819 not supported** -- byte-identical to the established
 baseline, confirming no regression. No `Vulkan14FeatureInventory` /
 `VulkanExtensionInventory` change: this is a CPU-backend correctness fix
 only, adding no Vulkan feature or extension surface.
+
+## H165: linearize a divergent diamond reconverging inside a loop body (test still blocked by H167, new)
+
+**Device check.** Two separate `export` statements (not a combined
+`export A=x B=$A`, which silently leaves `VK_DRIVER_FILES` at its stale
+default -- see this session's own agent_thoughts.md for the full
+writeup): `export VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json`
+then `export VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json`.
+`vulkaninfo --summary | grep deviceName` reports `FeMe CPU Vulkan Device`.
+
+**Root cause and fix.** See the `H165` roadmap row and the commit itself
+for the full design: `DiamondFlattener::flattenLoopBodyDiamond` closes the
+originally-diagnosed `feme-cpu-linearize` gap for a divergent diamond
+whose arms reconverge strictly inside a loop body (not at the loop's own
+exit or latch). `feme-cpu-linearize` now succeeds with no diagnostic on
+`InterlockedExchange.resources.32.test`'s repro IR, where it previously
+failed outright with "internal branch... does not reach the loop's exit
+block".
+
+**`check-hlsl-feme-vk`.** The test's failure *mode* changes (from
+`feme-cpu-linearize` to `feme-cpu-simdize`), but it still does not pass:
+a separate, pre-existing gap is exposed one stage later, confirmed
+present even before this fix's own code runs (a direct IR dump right
+after `DiamondFlattener::run()`, before `LoopLinearizer`, already shows
+the same unflattened shape) -- see the new `H167` roadmap row for the
+full trace. The suite's overall failure count is unchanged at **10** (of
+664), with every other pre-existing failure unchanged and no
+regressions, and the same pre-existing unrelated XPASS
+(`Feature/PushConstant/array_of_matrices`).
+
+**Unit/lit coverage.** `ninja check-feme`: 3,120 passed / 0 failed / 3
+unsupported (+2 new lit/unit-test cases:
+`LinearizeTest.FlattensLoopBodyDiamond` and
+`Linearize/loop-body-diamond.ll`).
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: **647 passed / 36
+failed / 19,819 not supported** -- byte-identical to the established
+baseline, confirming no regression. No `Vulkan14FeatureInventory` /
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+only, adding no Vulkan feature or extension surface.
