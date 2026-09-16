@@ -46914,3 +46914,91 @@ not supported, no crash or hang -- **byte-identical to H153's own prior
 run**, confirming no regression. No `Vulkan14FeatureInventory`/
 `VulkanExtensionInventory` change: a pure CPU-backend divergence-handling
 fix, no new Vulkan feature or extension surface.
+
+## H157: `CompiledStage::createStage` silently discarding successfully-wrapped loop/branch shapes -- real root cause behind H155's "no closure" finding
+
+**Starting point.** H155's own session closed by implementing prefix/
+suffix barrier splitting and confirming (via a standalone `feme-opt
+--passes=...` pipeline reduction) that it did NOT close `WaveOps/
+GroupMemoryBarrierWithGroupSync.test`, hypothesizing the real blocker was
+a `feme-cpu-linearize` divergent-branch gap (roadmap H156). This session
+re-reduced the same test from scratch to confirm that hypothesis before
+attempting a fix.
+
+**The hypothesis was wrong.** Running the exact same standalone
+`feme-opt` pipeline (`feme-cpu-fold-spirv-builtins` through
+`feme-cpu-wrap-entry`) on the real HLSL source produced a clean,
+fully-wrapped `feme_cpu_entry_main` -- no `feme-cpu-linearize` error, no
+`feme-cpu-wrap-entry` error, `main.prefix0`/`main.prefix1`/`main.prefix2`/
+`main.body0`/`main.body1`/`main.suffix0` all present, exactly as H155's
+own implementation should produce. Yet the real `offloader`/Vulkan
+runtime path still failed with `VkResult = -3` and no diagnostic on
+stderr. Running with `FEME_VULKAN_LOG_CREATION_ERRORS=1` revealed the
+actual message: `entry point 'main' did not survive the CPU pipeline` --
+a completely different error, coming from `feme::cpu::CompiledStage::
+createStage` (`CompiledStage.cpp`), not `Linearize.cpp`/`EntryWrapper.cpp`
+at all.
+
+**Root cause.** `CompiledStage.cpp` reads `GroupSize` from a
+*post-pipeline* `Mod.getFunction(EntryName)` lookup (`EntryName` being the
+shader's original entry name, "main"), silently assuming a function
+literally named `EntryName` always survives `feme::cpu::EntryWrapperPass`.
+That assumption is true for `EntryWrapperPass`'s no-barrier path
+(`Regions.push_back(WaveBody)`, no rename) and its straight-line-barrier
+path (`splitAtGroupSyncBarriers`, which reuses `WaveBody`'s own identity
+for its last region) -- but `buildWrapperForLoop`/`buildWrapperForBranch`
+(the `LoopShape`/`BranchShape` paths H153/H155 both work in) always call
+`WaveBody->eraseFromParent()` unconditionally once wrapped, since none of
+their own outlined prefix/body/suffix regions are obligated to keep the
+original function's name. `Mod.getFunction(EntryName)` therefore returns
+`nullptr` for **every** successfully-wrapped loop/branch shape, and
+`CompiledStage.cpp` reports a spurious "did not survive" error regardless
+of whether `EntryWrapperPass` actually succeeded. This had been silently
+masking every real fix to the H124e/H124e(a)/H153/H155 wrap-entry bucket
+at the runtime layer, one level above where all of that work was actually
+happening -- explaining the repeated "0 of N cases flip to passing"
+findings across several prior sessions' otherwise-correct `matchLoopShape`
+work.
+
+**The fix.** `GroupSize` is now read from the entry point's own
+`hlsl.numthreads` function attribute *before* the pipeline runs
+(`getDeclaredGroupSize(**Entry)`), mirroring how `SideEffectFlags`/
+`Signature` are already computed pre-pipeline just above it in the same
+function -- this attribute is a stable property of the shader, entirely
+unaffected by anything the pipeline itself does downstream. The
+post-pipeline survival check is changed to verify `Mod.getFunction(
+WrapperName)` instead (the actual JIT lookup target used just below it),
+which correctly reflects what the rest of the function actually depends
+on.
+
+**Tests.** New `CompiledStageTest.LoopWithBarrierSurvivesCompiledStageCreation`:
+compiles and *invokes* (not just IR-checks) a `numthreads(4,1,1)` compute
+shader with a uniform loop containing a group-sync barrier through the
+real `CompiledStage::create` + `invokeGroup` path -- this shape exercises
+`buildWrapperForLoop`'s unconditional `WaveBody->eraseFromParent()` end to
+end. Asserts `CompiledStage::create` succeeds (previously failed
+outright), `getGroupSize()` correctly reports `{4, 1, 1}` (previously
+would never even be reached), and the loop's actual output value is
+correct. `ninja check-feme`: 3104/3104 passed, 0 failed.
+
+**Verification against `check-hlsl-feme-vk`** (`FeMe CPU Vulkan Device`
+confirmed via `vulkaninfo --summary`): 16 failed, down from 18 -- 2 cases
+newly closed: `WaveOps/GroupMemoryBarrierWithGroupSync.test` and `WaveOps/
+ComponentAccumulationDataRace.test`. The remaining H124e(a) wrap-entry
+cases (`InterlockedAdd`/`InterlockedCompareExchange`/
+`InterlockedCompareStore`/`InterlockedExchange` `.32.test`/
+`.resources.32.test`) still fail with `feme-cpu-wrap-entry`'s own genuine
+"barrier inside non-linear control flow" diagnostic -- confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` this is H154's still-open `Flow`-merge
+CFG-matcher gap, a real and separate remaining blocker this fix does not
+touch. 0 new regressions.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases,
+same group used for H153's and H155's own runs, for the same reason --
+this fix's own affected shape is HLSL/DXC-`Interlocked*`/
+`GroupMemoryBarrier*`-specific, not reachable through raw
+SPIR-V-Tools/glslang-produced shaders): 647 passed / 36 failed / 19,819
+not supported, no crash or hang -- byte-identical to H153's/H155's own
+prior runs, confirming no regression. No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: a pure CPU-backend host-side
+bookkeeping fix, no new Vulkan feature or extension surface.
