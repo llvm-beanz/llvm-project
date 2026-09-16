@@ -367,6 +367,58 @@ TEST(SIMDizeTest, WidensDivergentIsFPClassCall) {
   EXPECT_TRUE(FoundWideIsFPClass);
 }
 
+// Roadmap H149: `feme::cpu::LinearizePass` attaches a divergent region's own
+// live mask to a `WaveIsFirstLane`/`llvm.dx.wave.is.first.lane` call as a
+// `"feme.divergence.mask"` operand bundle (see LinearizeTest.cpp's own test
+// of that side), since the intrinsic has no operand of its own to narrow.
+// Confirm `FunctionWidener::widenWaveCall` ANDs that bundle's widened value
+// into the resulting `feme.cpu.wave.is_first_lane` runtime call's mask,
+// instead of leaving it at the wave's whole, unnarrowed `EntryMask` --
+// otherwise a lane that is the sole active lane of its own divergent region
+// (but not the wave's lowest-numbered lane overall) wrongly reports
+// `WaveIsFirstLane() == false`, exactly as `Feature/WaveOps/
+// WaveIsFirstLane.test` (offload-test-suite issue #681) reduces to.
+TEST(SIMDizeTest, NarrowsIsFirstLaneMaskWithDivergenceMaskBundle) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %cond = icmp eq i32 %tid, 0
+      %first = call i1 @llvm.dx.wave.is.first.lane() [ "feme.divergence.mask"(i1 %cond) ]
+      %r = zext i1 %first to i32
+      store i32 %r, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i1 @llvm.dx.wave.is.first.lane()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  CallInst *WideIsFirstLane = nullptr;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName().starts_with(
+            "feme.cpu.wave.is_first_lane"))
+      WideIsFirstLane = CI;
+  }
+  ASSERT_TRUE(WideIsFirstLane)
+      << "expected a widened feme.cpu.wave.is_first_lane runtime call";
+
+  // The mask argument should be a fresh `and`, not `Env.EntryMask` used
+  // directly -- confirming the bundle's value actually got folded in
+  // rather than silently ignored.
+  auto *Mask = dyn_cast<BinaryOperator>(WideIsFirstLane->getArgOperand(0));
+  ASSERT_TRUE(Mask);
+  EXPECT_EQ(Mask->getOpcode(), Instruction::And);
+}
+
 // (Roadmap H7z) A divergent (per-lane) value of aggregate type -- e.g. an
 // ordinary array-typed `load` through a divergent address -- has no
 // per-lane component-decomposition support in this pass at all (unlike a

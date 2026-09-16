@@ -432,6 +432,40 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
           Call->setArgOperand(0, B.CreateSelect(Masks.Live, Operand, Identity,
                                                 "wave.reduce.masked"));
         }
+        // (roadmap H149) `WaveIsFirstLane`/`subgroupElect` needs exactly
+        // the same "narrow to invocations still active *here*" treatment
+        // `Ballot`'s predicate and a reduce's value operand get above --
+        // but unlike either of those, `int_dx_wave_is_first_lane`/
+        // `int_spv_wave_is_first_lane` are fixed-arity, zero-operand
+        // intrinsics: there is no existing operand on the call itself to
+        // narrow. Missing this let a `WaveIsFirstLane()` inside a
+        // divergent arm (e.g. a `switch`'s `default` clause only one lane
+        // actually reaches) report "first" relative to the *whole* wave's
+        // original entry mask instead of just the invocations that
+        // reached this specific arm, so a lone active lane there was
+        // never recognized as first -- found reducing
+        // `Feature/WaveOps/WaveIsFirstLane.test`'s own silent-wrong-data
+        // failure down to this exact shape. Since the intrinsic's own
+        // arity cannot grow, attach `Masks.Live` as a
+        // `"feme.divergence.mask"` operand bundle instead -- a genuine
+        // SSA use, so it is remapped/widened later exactly like any other
+        // operand -- for `FunctionWidener::widenWaveCall` to AND into
+        // `Env.EntryMask` once widened.
+        if ((ID == Intrinsic::dx_wave_is_first_lane ||
+             ID == Intrinsic::spv_wave_is_first_lane) &&
+            !isKnownConstantMask(Masks.Live)) {
+          OperandBundleDef DivergenceMask("feme.divergence.mask",
+                                          ArrayRef<Value *>(Masks.Live));
+          CallInst *NewCall = CallInst::Create(
+              Call->getFunctionType(), Call->getCalledOperand(),
+              ArrayRef<Value *>{}, ArrayRef<OperandBundleDef>(DivergenceMask),
+              "", Call->getIterator());
+          NewCall->setCallingConv(Call->getCallingConv());
+          NewCall->setAttributes(Call->getAttributes());
+          NewCall->takeName(Call);
+          Call->replaceAllUsesWith(NewCall);
+          Call->eraseFromParent();
+        }
       }
       continue;
     }

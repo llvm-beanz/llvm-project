@@ -16,6 +16,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -397,6 +398,63 @@ TEST(LinearizeTest, MasksImageStoreCallUnderDivergentBranch) {
            "feme::cpu::SPIRVResourceLoweringPass left it as";
   }
   EXPECT_TRUE(FoundMaskedCall);
+}
+
+// Roadmap H149: `WaveIsFirstLane()`'s underlying `llvm.dx.wave.is.first.lane`/
+// `llvm.spv.wave.is.first.lane` intrinsics take zero operands, unlike every
+// other maskless-consuming wave call this pass already narrows (`Ballot`'s
+// predicate, the arithmetic-reduce/prefix kinds' value operand) -- there is
+// nothing on the call itself to rewrite. Confirm `LinearizePass` instead
+// attaches the divergent region's own live mask as a `"feme.divergence.mask"`
+// operand bundle so `feme::cpu::SIMDize.cpp`'s `widenWaveCall` can still find
+// it later (this exact gap made lanes 2 and 3 -- each the sole active lane in
+// its own switch arm -- wrongly report `WaveIsFirstLane() == false`, per
+// `Feature/WaveOps/WaveIsFirstLane.test`'s reduction of offload-test-suite
+// issue #681).
+TEST(LinearizeTest, AttachesDivergenceMaskBundleToIsFirstLaneUnderDivergentBranch) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t, label %f
+    t:
+      %first = call i1 @llvm.dx.wave.is.first.lane()
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i1 @llvm.dx.wave.is.first.lane()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundCall = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getIntrinsicID() !=
+            Intrinsic::dx_wave_is_first_lane)
+      continue;
+    FoundCall = true;
+    auto Bundle = CI->getOperandBundle("feme.divergence.mask");
+    ASSERT_TRUE(Bundle.has_value())
+        << "WaveIsFirstLane under a divergent branch should carry the "
+           "region's live mask as an operand bundle, since the intrinsic "
+           "itself has no operand to narrow";
+    EXPECT_FALSE(isa<Constant>(Bundle->Inputs[0]))
+        << "the attached mask should have been rewritten away from a "
+           "compile-time constant, reflecting the real divergent-branch "
+           "condition";
+  }
+  EXPECT_TRUE(FoundCall);
 }
 
 TEST(LinearizeTest, LinearizesLoopWithDivergentExit) {
