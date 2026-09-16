@@ -53,22 +53,28 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours, real bug, now well-scoped: H151** (`WaveReadLaneAt.mtx.test`).
-   Start with `feme-opt --feme-convert-spirv-to-llvm` on the reduced
-   shader to confirm whether DXC's SPIR-V reaches `rewriteBlockAccess`'s
-   declined case directly or some other, not-yet-identified path first.
-2. **~1-2 hours, still untouched (carried over many sessions):** reduce
+1. **~1-2 hours, still untouched (carried over many sessions):** reduce
    `InterlockedCompareExchange.resources.32.test`'s `feme-cpu-simdize`
-   divergent-branch gap to its exact IR shape.
-3. **~1-2 hours, still untouched (carried over many sessions):** same
+   divergent-branch gap to its exact IR shape via `feme-opt
+   --feme-convert-spirv-to-llvm`, before attempting a fix.
+2. **~1-2 hours, still untouched (carried over many sessions):** same
    for `InterlockedExchange.resources.32.test`'s `feme-cpu-linearize`
    multi-exit-loop gap.
+3. **~30-60 min, not yet started:** triage the 4 `.resources.32.test`
+   variants together (`InterlockedAdd`/`CompareExchange`/`CompareStore`/
+   `Exchange`) -- they all use the resource-heap
+   `feme.cpu.resource.atomic.*` runtime-call path, a separate family from
+   the plain `cmpxchg`/`atomicrmw` H124e bucket. Get a diagnostic via
+   `offloader` + `FEME_VULKAN_LOG_CREATION_ERRORS=1` for each first.
 4. **Full session, highest payoff (up to 8 cases at once), largest
-   scope:** H124e's wrap-entry region-splitting design work.
+   scope, still untouched across many sessions:** H124e's wrap-entry
+   region-splitting design work (`feme-cpu-wrap-entry` only supports "a
+   straight-line wave body or a single uniform loop" -- rejects a barrier
+   inside any other non-linear control flow shape).
 5. **Large, deprioritized many sessions now:** H124d (upstream MLIR
    SPIR-V `OpDPdx`/`OpDPdy`/`OpFwidth`), `shaderImageGatherExtended`,
    `dyn-res-uav-counter.test`'s address-space mismatch,
    `transform_feedback.fuzz.random_geometry.all_instance_array.12`'s
    heap corruption.
-6. **Do not re-attempt H150** -- confirmed this session it's not a
+6. **Do not re-attempt H150** -- confirmed a prior session it's not a
    FeMe-side bug at all.
