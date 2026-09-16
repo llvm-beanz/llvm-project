@@ -45951,4 +45951,83 @@ and `retargetGroupSharedProducer` in `GroupShared.cpp`).
 H143 is struck through on the roadmap as fixed (filed and closed in
 the same session).
 
+### H144: `Feature/TypedBuffer/GetDimensions.test`'s distinct `OpImageQuerySize` gap (not H124m's `OpArrayLength`)
+
+Found this session via individual `offloader`+`FEME_VULKAN_LOG_CREATION_ERRORS=1`
+triage of the 3 `GetDimensions.test` failures the prior session's own
+suggested next steps listed: `Feature/ByteAddressBuffer/GetDimensions.test`
+and `Feature/StructuredBuffer/GetDimensions.test` both genuinely hit
+H124m's already-tracked `"unhandled opcode 68"` (`OpArrayLength`) gap, but
+`Feature/TypedBuffer/GetDimensions.test` fails with an entirely different
+diagnostic -- `"unsupported raised operation: ... is a register-bound
+resource handle the FeMe CPU target cannot normalize..."` -- meaning
+H124m's own row, which previously (incorrectly) attributed all 3 cases to
+the same opcode-68 gap, was factually wrong for this one.
+
+Root-caused via `spirv-dis`: `Buffer<int4>`/`RWBuffer<float>`'s own
+`GetDimensions()` lowers to `OpImageQuerySize` (opcode 104,
+`llvm.spv.resource.getdimensions.x`), which *does* already have MLIR
+SPIR-V dialect support and a working `SPIRVToLLVMPatterns.cpp` conversion
+pattern -- the real gap is one level deeper, in the CPU backend's
+`SPIRVResourceLowering.cpp`: `isGetDimensionsIntrinsic`/
+`isGetDimensions3Intrinsic` only ever recognized the `.xy`/`.xyz`
+(image-shaped) variants, with no `.x` (1-component) predicate at all, and
+a typed buffer's own handle classification (`classifyTexelBufferHandle`,
+`HandleKind::TexelStorage`/`TexelUniform`) is a wholly separate code path
+from an ordinary 2D/array image handle's, so the pre-existing `.xy`/`.xyz`
+support could never have reached it either way.
+
+**Fix.** Added `ResourceCallKind::GetDimensionsTyped`, a new
+`feme.cpu.resource.getdimensions.typed.*` call family -- deliberately the
+only kind taking no element index/byte offset (special-cased in both
+`getOrInsertResourceCall` and `createCall`), and deliberately left out of
+`matchResourceCall`'s `AllKinds` list for now, since no known CTS case
+calls typed-buffer `GetDimensions` under divergent control flow (narrow
+scoping matching the project's established convention, e.g. H137's own
+i64/v2i64-only scoping). Implemented the new runtime helper
+`femeCpuResourceGetDimensionsTypedI32` (`FeMeRuntimeCPU.c`): computes
+`SizeInBytes / femeRTImageFormatElementSize(Format)` entirely from the
+descriptor's own existing fields -- no new `FemeDescriptor` field needed.
+Added `isGetDimensions1Intrinsic` and wired `hasOnlySupportedUses`/
+`lowerAccesses` (`SPIRVResourceLowering.cpp`) to accept a bare
+`getdimensions.x` call directly on a `TexelStorage`/`TexelUniform` handle,
+bypassing the usual `getpointer`-mediated per-user rewriting every other
+access shape goes through (since this one addresses no particular
+element, just reads descriptor metadata).
+
+New unit tests: `ResourceCallsTest.CreateGetDimensionsTypedTakesNoOffset`,
+`SPIRVResourceLoweringTest.LowersUniformTexelBufferGetDimensionsToTypedCall`,
+and four `RuntimeCPUTest.GetDimensionsTyped*` cases (4-wide format, scalar
+format, inactive mask, out-of-range index).
+
+**Verification.**
+- `ninja check-feme`: 3090/3090 tests discovered, 3087 passed (3
+  unsupported), 0 failed, +6 new unit tests, 0 regressions.
+- `check-hlsl-feme-vk`: `Feature/TypedBuffer/GetDimensions.test` now
+  passes (confirmed individually via `llvm-lit -sv` on the single test,
+  and via the full-suite re-run). Failure count drops from 24 to **23**
+  (of 664; `ByteAddressBuffer`/`StructuredBuffer/GetDimensions.test`
+  remain failing, correctly still attributed to H124m).
+- Native Vulkan CTS: no dedicated group directly exercises a typed/texel
+  buffer's `imageSize()`/`textureSize()` query the way this HLSL-only
+  `GetDimensions()` codegen path does (GLSL rarely queries a texel
+  buffer's size this way, and the mustpass list has no matching case
+  names) -- mirroring H124s's own precedent for an HLSL-only codegen
+  shape with no directly-analogous GLSL test group. Instead ran
+  `dEQP-VK.image.load_store.*` (3446 cases; the broadest existing group
+  exercising the same `classifyTexelBufferHandle`/`hasOnlySupportedUses`/
+  `lowerAccesses` code paths this session's change touched) as a
+  regression check: **2346/2346 supported cases passed** (1100 not
+  supported, unchanged from before this session's change), 0 failed, 0
+  regressions.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change:
+  `OpImageQuerySize` against a typed-buffer handle was already advertised
+  as supported (via the pre-existing `.xy`/`.xyz` image-shaped variants);
+  this closes a CPU-backend implementation gap for one further operand
+  shape of an already-advertised opcode, not a new Vulkan feature or
+  extension.
+
+H144 is struck through on the roadmap as fixed (filed and closed in the
+same session).
+
 
