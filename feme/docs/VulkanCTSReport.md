@@ -46348,3 +46348,98 @@ H147 is struck through on the roadmap: split into H148 (fixed, this
 session) and H147a (the remaining 3 untriaged cases,
 `WaveIsFirstLane.test`/`WaveActiveMax.test`/`WaveReadLaneAt.mtx.test`,
 confirmed this session to *not* share `matrix.test`'s cause).
+
+## H149: `WaveIsFirstLane()` divergent-region masking gap fixed
+
+**Environment check (every session, per standing instruction):**
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
+(confirmed with `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set via two separate
+`export` statements).
+
+**Baseline.** `ninja check-feme`: 3096/3099 passed (3 unsupported), 0
+failed, matching the prior (H147/H148) session's own closing state
+exactly.
+
+**Picked up the prior session's suggested next step**: individually
+triage H147a's remaining 3 cases, starting with
+`Feature/WaveOps/WaveIsFirstLane.test`. Reproduced it standalone (real
+`dxc` + `offloader --api=vk -adapter-regex=FeMe`): a 4-lane compute
+shader's `switch(value[threadID.x])` with `value = [0, 0, 1, 2]` --
+lanes {0,1} take case 0, lane 2 alone takes `default`, lane 3 alone
+takes case 2, each branch calling `WaveIsFirstLane()`, then a final
+uniform `WaveIsFirstLane()` for all lanes. Actual output
+`[1, 0, 0, 0, 1, 0, 0, 0]` against an expected `[1, 0, 1, 1, 1, 0, 0,
+0]` -- lanes 2 and 3 (each the sole active lane in its own switch arm)
+wrongly reported `WaveIsFirstLane() == false` -- exactly matching a
+pre-existing comment in the test file referencing `offload-test-suite`
+issue #681, confirming this is a real, reproducible bug, not a bad test
+expectation.
+
+**Root cause.** `feme::cpu::FunctionWidener::widenWaveCall`
+(`SIMDize.cpp`) always widened `IsFirstLane`'s mask from `Env.EntryMask`
+alone (the whole SIMDized function's own fixed entry-mask argument,
+representing "is this lane part of the wave's original active set at
+all"), with no per-divergent-region narrowing. Every other
+maskless-consuming wave op this pass already narrows for exactly this
+concern (`Ballot`'s predicate operand, the arithmetic-reduce/prefix
+kinds' value operand, both narrowed by `feme::cpu::LinearizePass` in
+`Linearize.cpp` via its own `Masks.Live` tracking) has a real operand for
+that narrowing logic to rewrite -- but `WaveIsFirstLane`'s underlying
+`llvm.dx.wave.is.first.lane`/`llvm.spv.wave.is.first.lane` intrinsics are
+genuinely zero-operand (confirmed via `IntrinsicsDirectX.td`/
+`IntrinsicsSPIRV.td`), so there was nothing on the call for that
+narrowing logic to ever act on. This is exactly why no prior session's
+fix touched this case.
+
+**Fix.** Since the intrinsic's arity can't grow, attached the divergent
+region's own `Masks.Live` value to the call as a new
+`"feme.divergence.mask"` LLVM operand bundle in `Linearize.cpp` (a
+standard mechanism for attaching extra SSA-value data to a fixed-arity
+call without changing its type/ABI; no prior precedent in this codebase,
+but a real `Use` that RAUW/widening already handle correctly). Then
+`SIMDize.cpp`'s `widenWaveCall` reads the bundle (if present) off the
+original, unwidened call, widens its value via the existing
+`getWidened()` helper, and ANDs it into `WideMask` alongside
+`Env.EntryMask`.
+
+**Testing.** New unit tests
+`LinearizeTest.AttachesDivergenceMaskBundleToIsFirstLaneUnderDivergentBranch`
+and `SIMDizeTest.NarrowsIsFirstLaneMaskWithDivergenceMaskBundle`, each
+confirmed via `git stash`/rebuild/re-run to fail without the fix (no
+bundle attached; the widened mask stays plain `Env.EntryMask` with no
+`and`) and pass with it.
+
+**Verification.**
+- `ninja check-feme`: 3098/3101 passed (3 unsupported), 0 failed, +2 new
+  tests, no regressions.
+- `check-hlsl-feme-vk`: `Feature/WaveOps/WaveIsFirstLane.test` now
+  passes; failure count drops from 20 to **19** (of 664).
+- **Native Vulkan CTS regression check.** Ran a targeted A/B comparison
+  (pre-fix vs. post-fix `libfeme_vulkan.so`, via a temporary `git
+  stash`/rebuild, then restored) against all 12
+  `dEQP-VK.subgroups.basic.*.subgroupelect*` cases (`subgroupElect` being
+  GLSL/SPIR-V's own equivalent of `WaveIsFirstLane`) -- byte-identical
+  results pre-fix and post-fix in both runs: 2 passed
+  (`compute.subgroupelect`, `compute.subgroupelect_requiredsubgroupsize`)
+  and 10 not supported (every `framebuffer`/`graphics`/`mesh`/
+  `ray_tracing` variant, gated behind this ICD's own
+  `VK_SUBGROUP_FEATURE_BASIC_BIT`-only `supportedOperations` and/or
+  per-stage subgroup-support advertisement, already tracked separately --
+  see `Vulkan14FeatureInventory.md`'s F2 audit note). No regression;
+  the 2 executed `compute` cases don't happen to exercise the exact
+  narrow-mask-needed switch/branch shape this fix targets (CTS's own
+  `subgroupElect` compute test does not structure its control flow the
+  same way `Feature/WaveOps/WaveIsFirstLane.test` does), so this fix's
+  own effect is confirmed only via the offload-test-suite case above, not
+  independently via native CTS.
+- No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change: a pure
+  `feme-cpu-linearize`/`feme-cpu-simdize` CPU-backend correctness fix,
+  not a new Vulkan feature or extension.
+
+H147a is updated on the roadmap: `WaveIsFirstLane.test`'s case is split
+out and fixed as H149 (this session); `WaveActiveMax.test`/
+`WaveReadLaneAt.mtx.test` remain open, confirmed this session to *not*
+share `WaveIsFirstLane.test`'s cause (a pre-existing code comment near
+the arithmetic-reduce/prefix narrowing logic already references
+`WaveActiveMax.fp32.test` as fixed by that narrowing, since `ActiveMax`
+is already in the narrowed set -- a different code path entirely).
