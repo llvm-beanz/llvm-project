@@ -47240,3 +47240,54 @@ failed / 19,819 not supported** -- byte-identical to the established
 baseline, confirming no regression. No `Vulkan14FeatureInventory` /
 `VulkanExtensionInventory` change: this is a CPU-backend change only,
 adding no Vulkan feature or extension surface.
+
+## H166: uniform typed-resource/image atomics were undercounted by the wave's active-lane count
+
+**Device check.** `VK_ICD_FILENAMES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json
+vulkaninfo --summary | grep deviceName` reports `FeMe CPU Vulkan Device`.
+Without the explicit `VK_ICD_FILENAMES`, this container still selects
+Mesa's `llvmpipe`, so every measurement below exports it.
+
+**Root cause.** Reproduced `InterlockedAdd.resources.32.test` directly
+against the real driver (`FEME_VULKAN_LOG_CREATION_ERRORS=1`), confirming
+its own `ExpectedTex2D` mismatch: `0x40` (64) where `0x100` (256) is
+expected, exactly 1/4 at wave size 4. `FEME_DUMP_IR`'s pre-wrapper dump
+showed every buffer-resource `InterlockedAdd` in the same shader
+scalarized into four per-lane `feme.cpu.resource.atomic.*` calls, each
+with its own `%lane.maskN`, while the single `RWTexture2D` atomic
+(`feme.cpu.image.atomic.add.2d.i32`) was left as one call with a
+constant `i1 true` mask. `SIMDizePass::widenImageCall`'s
+"every operand is uniform" early-return took no account of
+`MatchedImageCall::AtomicValue`, unlike `widenResourceCall`'s own
+identical check (already excluding atomics via `isAtomic(Matched.Kind)`,
+fixed for the same reason in roadmap H146's `Out[0].IncrementCounter()`
+undercount). `InterlockedAdd(Tex2D[uint2(0, 0)], 1u)`'s descriptor
+index, coordinate, and stored value are all compile-time constants, so
+the atomic ran once for the whole wave instead of once per active lane.
+
+**Fix.** Added the same override to `widenImageCall`, keyed off
+`Matched.AtomicValue` (already relied on by the function's own per-lane
+mask selection immediately below, for the identical "an atomic is always
+a real side effect" reason). `simdize-image-atomic-scalarize.ll`'s own
+`uniform_atomic` case had encoded the buggy behavior as its expected
+output (a comment literally read "there is nothing to widen") and is
+corrected to expect 4 scalarized calls; a new unit test,
+`SIMDizeTest.ScalarizesUniformImageAtomicCall`, mirrors H146's own
+`ScalarizesUniformAtomicResourceCall` for the image-call path.
+
+**`check-hlsl-feme-vk`.** `InterlockedAdd.resources.32.test` now passes.
+The suite goes from 11 failures to **10**, with every other
+pre-existing failure (H164, H165, `*/GetDimensions.test`, the
+`Graphics/dd[xy]*`/`fwidth` derivative cases, `WaveOps/WaveActiveMax.test`)
+unchanged -- no regressions, and one unrelated pre-existing XPASS
+(`Feature/PushConstant/array_of_matrices`).
+
+**Unit/lit coverage.** `ninja check-feme`: 3,118 passed / 0 failed / 3
+unsupported (+1 new lit-test case over the H158/H163 baseline).
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502 cases),
+against a from-scratch-rebuilt `libfeme_vulkan.so`: **647 passed / 36
+failed / 19,819 not supported** -- byte-identical to the established
+baseline, confirming no regression. No `Vulkan14FeatureInventory` /
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+only, adding no Vulkan feature or extension surface.
