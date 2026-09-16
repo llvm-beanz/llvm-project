@@ -197,6 +197,41 @@ static bool isKnownConstantMask(Value *V) {
   return isa<Constant>(lookThroughTrivialPhi(V));
 }
 
+/// (Roadmap H167) Whether \p CI is a call already carrying a per-lane
+/// "read the real value only where active" mask from an *earlier* pass --
+/// `feme::cpu::ResourceLoweringPass`'s `feme.cpu.resource.load.{typed,raw}`
+/// or `feme::cpu::SPIRVResourceLoweringPass`'s `feme.cpu.image.load.*` --
+/// whose \p Mask operand is not a compile-time-known constant. Unlike the
+/// plain `load`s `applyStageMasks`'s own `MaskedLoads` tracks (see
+/// `dependsOnTaintedValue`'s doc), these calls are already in their masked
+/// form by the time `DiamondFlattener` ever runs: `UniformityInfo` is
+/// computed once, before this pass does anything, against a module where
+/// the call already exists exactly like this, and its own generic
+/// operand-driven uniformity rule sees a non-constant mask operand and
+/// (correctly, for that isolated call) may still call the *result*
+/// uniform if every other operand is uniform -- even though a masked-off
+/// lane really does read back an unrelated passthru value, exactly the
+/// same per-lane-varying-result concern `applyStageMasks`'s own masked
+/// loads have. A store/atomic kind is excluded: its own result (the
+/// pre-op memory value, for an atomic) already has its own, separate
+/// uniformity story (see roadmap H146/H166), and a store has no result at
+/// all. Found reducing `InterlockedExchange.resources.32.test`'s own
+/// post-loop, single-invocation (`if (GTID.x == 0)`) verification reads,
+/// each guarded by a mask derived from that same invocation-index check,
+/// where `feme::cpu::SIMDizePass`'s own fresh `UniformityInfo` (computed
+/// with no visibility into this reasoning) went on to misclassify a
+/// uniform branch built from one as divergent.
+static bool isMaskDependentLoadResult(const CallInst *CI) {
+  if (std::optional<MatchedMaskedMemOp> M = matchMaskedLoad(*CI))
+    return !isKnownConstantMask(M->Mask);
+  if (std::optional<MatchedResourceCall> M = matchResourceCall(*CI))
+    return isLoad(M->Kind) && M->Mask && !isKnownConstantMask(M->Mask);
+  if (std::optional<MatchedImageCall> M = matchImageCall(*CI))
+    return M->Mask && !M->Texel && !M->AtomicValue &&
+           !isKnownConstantMask(M->Mask);
+  return false;
+}
+
 /// (Roadmap H75) Whether \p V is, or transitively depends (through any
 /// chain of instruction operands, including `phi` incoming values) on, one
 /// of the masked-load results \p Tainted collects -- see `applyStageMasks`'s
@@ -204,12 +239,17 @@ static bool isKnownConstantMask(Value *V) {
 /// `UniformityInfo`, computed once before any masking happens, cannot see
 /// that a masked load's result is now per-lane-varying (a masked-off lane
 /// reads the passthru, not the real value), so a later branch's condition
-/// built from it can be misclassified uniform. Bounded by \p Visited so a
-/// cyclic def-use chain (a `phi` reachable from itself) terminates rather
-/// than looping forever; deliberately conservative (a `false` positive here
-/// only costs `DiamondFlattener::flatten` an extra `select` instead of a
-/// real branch+`phi`, never unsound -- see `flatten`'s own comment where
-/// this is used).
+/// built from it can be misclassified uniform. Also treats any call
+/// `isMaskDependentLoadResult` recognizes as tainted directly, on the fly
+/// (roadmap H167), for the identical reason -- these calls are already in
+/// their masked form before this pass ever runs, so there is no
+/// `applyStageMasks` rewrite to record them into \p Tainted the way a
+/// plain `load` gets recorded. Bounded by \p Visited so a cyclic def-use
+/// chain (a `phi` reachable from itself) terminates rather than looping
+/// forever; deliberately conservative (a `false` positive here only costs
+/// `DiamondFlattener::flatten` an extra `select` instead of a real
+/// branch+`phi`, never unsound -- see `flatten`'s own comment where this
+/// is used).
 static bool dependsOnTaintedValue(Value *V,
                                   const SmallPtrSetImpl<Value *> &Tainted,
                                   SmallPtrSetImpl<Value *> &Visited) {
@@ -218,11 +258,15 @@ static bool dependsOnTaintedValue(Value *V,
   auto *I = dyn_cast<Instruction>(V);
   if (!I || !Visited.insert(V).second)
     return false;
+  if (auto *CI = dyn_cast<CallInst>(I))
+    if (isMaskDependentLoadResult(CI))
+      return true;
   for (Value *Op : I->operands())
     if (dependsOnTaintedValue(Op, Tainted, Visited))
       return true;
   return false;
 }
+
 
 /// Shared between `DiamondFlattener` (a divergent arm's masks) and
 /// `LoopLinearizer` (a loop iteration's "active" masks) below. A given

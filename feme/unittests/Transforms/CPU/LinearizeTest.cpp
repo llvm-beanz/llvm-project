@@ -172,7 +172,75 @@ TEST(LinearizeTest, FlattensNestedDiamondWhoseConditionDependsOnMaskedLoad) {
   EXPECT_TRUE(FoundMaskedLoad);
 }
 
-// Roadmap H89a: a divergent diamond's own reconvergence-block `phi` may
+// Roadmap H167: the same shape as
+// `FlattensNestedDiamondWhoseConditionDependsOnMaskedLoad` immediately
+// above, but for a value read via an already-masked `feme.cpu.resource.*`
+// call (the shape `feme::cpu::ResourceLoweringPass` leaves behind) rather
+// than a plain `load` this pass itself converts. `t`'s own resource call
+// starts with a constant `true` mask and is rewritten in place to the
+// block's real, non-constant mask -- but unlike a plain `load`, that
+// rewrite is not recorded into `MaskedLoadResults`, since it was never a
+// plain `load` to begin with. Before this fix, `dependsOnTaintedValue`
+// only consulted that recorded set, so the inner branch built from the
+// call's result (now genuinely per-lane-varying) kept its real,
+// unflattened shape, since `UniformityInfo` -- computed once, before any
+// masking happens -- still calls it uniform. Reduced from
+// `InterlockedExchange.resources.32.test`'s own post-loop, single-
+// invocation verification reads (roadmap H165's own closing session
+// found this hiding one stage later, in `feme::cpu::SIMDizePass`).
+TEST(LinearizeTest, FlattensNestedDiamondWhoseConditionDependsOnMaskedResourceCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %heap, i32 %heap_count, i32 %desc) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c1 = icmp eq i32 %tid, 0
+      br i1 %c1, label %t, label %f
+    t:
+      %v = call i32 @feme.cpu.resource.load.raw.i32(ptr %heap, i32 %heap_count, i32 %desc, i64 0, i1 true)
+      %c2 = icmp eq i32 %v, 32
+      br i1 %c2, label %inner.t, label %inner.f
+    inner.t:
+      %x1 = add i32 %tid, 10
+      br label %outer.end
+    inner.f:
+      %x2 = add i32 %tid, 20
+      br label %outer.end
+    outer.end:
+      %inner.v = phi i32 [%x1, %inner.t], [%x2, %inner.f]
+      br label %end
+    f:
+      br label %end
+    end:
+      %v2 = phi i32 [%inner.v, %outer.end], [0, %f]
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundNonConstantResourceMask = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *Br = dyn_cast<CondBrInst>(&I))
+      ADD_FAILURE() << "no conditional branch should survive: "
+                    << Br->getCondition()->getName();
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName() == "feme.cpu.resource.load.raw.i32")
+          if (!isa<Constant>(CI->getArgOperand(4)))
+            FoundNonConstantResourceMask = true;
+  }
+  EXPECT_TRUE(FoundNonConstantResourceMask);
+}
+
+
 // merge a value one arm never actually produces (represented as `poison`
 // on that arm, exactly the shape `StructurizeCFG`/`UnifyLoopExits` leave
 // an enclosing uniform loop's own counter in when it merely reconverges
