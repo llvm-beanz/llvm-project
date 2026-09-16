@@ -53,43 +53,30 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H124u** (~1-2 hours, filed a few sessions back, still open):
-   `CalculateLevelOfDetail` against a `Cube`/`CubeArray` handle — the
-   `hasOnlySupportedImageUses`/`isQueryLodIntrinsic` gate this session
-   widened to `Array2D` still excludes `Cube`/`CubeArray` entirely.
-   Unlike `Array2D`'s 2-component coordinate, a cube's own LOD query
-   coordinate is a 3-component direction vector (not yet confirmed via
-   `spirv-dis` — check that first), and the LOD formula itself needs
-   `femeRTComputeCubeUVDerivatives`-style face selection, not a bare
-   reuse of `QueryLod2D`. Look at `femeRTPlanImplicitLod`/
-   `femeRTComputeUnclampedQueryLod`'s own existing Cube-aware code paths
-   (used by ordinary Cube sampling) for the pattern to mirror.
-2. **H124k/H124q/H124r/H124s/H124t are now what remains of H124q's
-   original 7-case bucket, all closed.** Re-run
-   `check-hlsl-feme-vk`'s full failure list fresh (33 failures now) and
-   re-bucket by root cause — several of the 33 look like fully separate,
-   unstarted issues (`InterlockedAdd/CompareExchange/CompareStore/
-   Exchange/Xor.32.test`, `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/
-   fwidth.test`, `WaveActiveMax.test`, `Mandelbrot.test`) — don't assume
-   any two share a cause without individually triaging first.
-3. **H124p** (~1-2 hours, not started, carried over 3+ sessions):
-   `feme-cpu-simdize` doesn't handle a divergent call to
-   `llvm.is.fpclass.f32` (`Basic/Mandelbrot.test`, 1 case) — worth
-   pairing with H124e (same subsystem).
-4. **H124e** (~several sessions, large, unchanged for many sessions):
+1. **Re-triage `check-hlsl-feme-vk`'s remaining 31 failures fresh** —
+   the last several sessions kept re-suggesting the same names
+   (`InterlockedAdd/CompareExchange/CompareStore/Exchange/Xor.32.test`,
+   `DdxCoarse/DdyCoarse/ddx_fine/ddy_fine/fwidth.test`,
+   `WaveActiveMax.test`) without anyone individually confirming their
+   root causes — don't assume any two share a cause without checking.
+   ~1 hour to bucket, unknown effort to fix each bucket.
+2. **H124e** (~several sessions, large, unchanged for many sessions):
    `feme-cpu-simdize`/`feme-cpu-linearize`/`feme-cpu-wrap-entry`
-   divergence-handling gaps — needs per-case triage first, don't assume
-   one fix covers all.
-5. **H124d** (large, deprioritized, unchanged for many sessions):
-   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth`.
-6. **`shaderImageGatherExtended`** (large, noted 2 sessions back, not
-   yet filed as its own roadmap row): blocks every `dEQP-VK.glsl.
+   divergence-handling gaps — needs the same per-case triage as above;
+   may overlap with several of the `WaveOps/*` failures.
+3. **H124d** (large, deprioritized, unchanged for many sessions):
+   upstream MLIR SPIR-V dialect ops for `OpDPdx`/`OpDPdy`/`OpFwidth` —
+   likely the root cause behind `DdxCoarse`/`DdyCoarse`/`ddx_fine`/
+   `ddy_fine`/`fwidth.test` above; worth confirming that connection
+   before starting either separately.
+4. **`shaderImageGatherExtended`** (large, noted several sessions back,
+   still not filed as its own roadmap row): blocks every `dEQP-VK.glsl.
    texture_gather.*` CTS case regardless of shape/offset. FeMe's own
    gather is `ConstOffset`-only, never true per-invocation dynamic
    offset — advertising this feature honestly is itself a real,
    separate, likely-multi-session capability addition. File a roadmap
    row before starting.
-7. Lower priority, deferred 19+ sessions now: `transform_feedback.
+5. Lower priority, deferred 20+ sessions now: `transform_feedback.
    fuzz.random_geometry.all_instance_array.12`'s pre-existing heap
    corruption — `valgrind`'s own trace points at `buildStageStorage`/
    `executeDraws` allocating a too-small buffer.
