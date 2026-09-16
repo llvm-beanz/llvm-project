@@ -722,6 +722,45 @@ BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
   }
 }
 
+/// Tries to match \p BB's own terminator as the header of a "safe
+/// diamond": a uniform two-way `CondBr` whose two successors are each the
+/// entry to their own barrier-free straight chain (`walkBarrierFreeArm`),
+/// both reconverging at one common, not-yet-\p Visited merge block. On
+/// success, both arms' blocks are appended to \p Order (and registered in
+/// \p Visited) and the merge block is returned; returns nullptr (leaving
+/// \p Order and \p Visited untouched) if \p BB's terminator is not a
+/// `CondBr`, or the diamond does not reconverge this safely -- shared by
+/// `isLinearChain`'s own identical "roadmap L45" case and
+/// `matchLoopShape`'s body-chain walk (roadmap H154), since a diamond
+/// like this can never itself need a region split -- it can only ever
+/// land entirely inside whichever single region contains it, whether
+/// that region is a whole straight-line function or one loop's own body
+/// chain.
+BasicBlock *matchSafeDiamond(BasicBlock *BB,
+                             SmallPtrSetImpl<BasicBlock *> &Visited,
+                             SmallVectorImpl<BasicBlock *> &Order) {
+  auto *CondBr = dyn_cast<CondBrInst>(BB->getTerminator());
+  if (!CondBr)
+    return nullptr;
+  BasicBlock *Succ0 = CondBr->getSuccessor(0);
+  BasicBlock *Succ1 = CondBr->getSuccessor(1);
+  SmallVector<BasicBlock *, 4> TrueOrder, FalseOrder;
+  BasicBlock *TrueMerge = walkBarrierFreeArm(Succ0, Visited, TrueOrder);
+  BasicBlock *FalseMerge = walkBarrierFreeArm(Succ1, Visited, FalseOrder);
+  if (!TrueMerge || !FalseMerge || TrueMerge != FalseMerge ||
+      Visited.contains(TrueMerge))
+    return nullptr; // Not a safe diamond: let the caller fall back.
+  for (BasicBlock *Arm : TrueOrder)
+    if (!Visited.insert(Arm).second)
+      return nullptr; // An arm block reachable from elsewhere too.
+  for (BasicBlock *Arm : FalseOrder)
+    if (!Visited.insert(Arm).second)
+      return nullptr;
+  Order.append(TrueOrder.begin(), TrueOrder.end());
+  Order.append(FalseOrder.begin(), FalseOrder.end());
+  return TrueMerge;
+}
+
 /// Whether \p F's control flow is a single straight chain from its entry
 /// block to a `ret`, filling \p Order with its blocks in that order if
 /// so -- with two exceptions: a uniform two-way branch whose arms are
@@ -828,21 +867,13 @@ bool isLinearChain(Function &F, SmallVectorImpl<BasicBlock *> &Order) {
     }
 
     {
-      SmallVector<BasicBlock *, 4> TrueOrder, FalseOrder;
-      BasicBlock *TrueMerge = walkBarrierFreeArm(Succ0, Visited, TrueOrder);
-      BasicBlock *FalseMerge = walkBarrierFreeArm(Succ1, Visited, FalseOrder);
-      if (!TrueMerge || !FalseMerge || TrueMerge != FalseMerge ||
-          Visited.contains(TrueMerge))
+      size_t OrderSizeBefore = Order.size();
+      BasicBlock *Merge = matchSafeDiamond(BB, Visited, Order);
+      if (!Merge)
         return false; // Not a safe diamond: fall back to diagnosing.
-      for (BasicBlock *Arm : TrueOrder)
-        if (!Visited.insert(Arm).second)
-          return false; // An arm block reachable from elsewhere too.
-      for (BasicBlock *Arm : FalseOrder)
-        if (!Visited.insert(Arm).second)
-          return false;
-      Order.append(TrueOrder.begin(), TrueOrder.end());
-      Order.append(FalseOrder.begin(), FalseOrder.end());
-      BB = TrueMerge;
+      for (size_t I = OrderSizeBefore, E = Order.size(); I != E; ++I)
+        OrderIndex[Order[I]] = I;
+      BB = Merge;
     }
   ContinueOuterWalk:;
   }
