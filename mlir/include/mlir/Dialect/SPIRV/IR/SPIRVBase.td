@@ -4636,6 +4636,8 @@ def SPIRV_OC_OpDPdyCoarse                     : I32EnumAttrCase<"OpDPdyCoarse", 
 def SPIRV_OC_OpFwidthCoarse                   : I32EnumAttrCase<"OpFwidthCoarse", 215>;
 def SPIRV_OC_OpEmitVertex                     : I32EnumAttrCase<"OpEmitVertex", 218>;
 def SPIRV_OC_OpEndPrimitive                   : I32EnumAttrCase<"OpEndPrimitive", 219>;
+def SPIRV_OC_OpEmitStreamVertex                : I32EnumAttrCase<"OpEmitStreamVertex", 220>;
+def SPIRV_OC_OpEndStreamPrimitive             : I32EnumAttrCase<"OpEndStreamPrimitive", 221>;
 def SPIRV_OC_OpControlBarrier                 : I32EnumAttrCase<"OpControlBarrier", 224>;
 def SPIRV_OC_OpMemoryBarrier                  : I32EnumAttrCase<"OpMemoryBarrier", 225>;
 def SPIRV_OC_OpAtomicLoad                     : I32EnumAttrCase<"OpAtomicLoad", 227>;
@@ -4831,7 +4833,9 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpDPdx, SPIRV_OC_OpDPdy, SPIRV_OC_OpFwidth,
       SPIRV_OC_OpDPdxFine, SPIRV_OC_OpDPdyFine, SPIRV_OC_OpFwidthFine,
       SPIRV_OC_OpDPdxCoarse, SPIRV_OC_OpDPdyCoarse, SPIRV_OC_OpFwidthCoarse,
-      SPIRV_OC_OpEmitVertex, SPIRV_OC_OpEndPrimitive, SPIRV_OC_OpControlBarrier,
+      SPIRV_OC_OpEmitVertex, SPIRV_OC_OpEndPrimitive,
+      SPIRV_OC_OpEmitStreamVertex, SPIRV_OC_OpEndStreamPrimitive,
+      SPIRV_OC_OpControlBarrier,
       SPIRV_OC_OpMemoryBarrier, SPIRV_OC_OpAtomicLoad, SPIRV_OC_OpAtomicStore,
       SPIRV_OC_OpAtomicExchange,
       SPIRV_OC_OpAtomicCompareExchange, SPIRV_OC_OpAtomicCompareExchangeWeak,

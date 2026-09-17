@@ -270,6 +270,26 @@ func.func @end_primitive() -> () {
   return
 }
 
+// CHECK-LABEL: emit_stream_vertex
+func.func @emit_stream_vertex() -> () {
+  %0 = spirv.Constant 0 : i32
+  // CHECK: min version: v1.0
+  // CHECK: max version: v1.6
+  // CHECK: capabilities: [ [GeometryStreams] ]
+  spirv.EmitStreamVertex %0 : i32
+  return
+}
+
+// CHECK-LABEL: end_stream_primitive
+func.func @end_stream_primitive() -> () {
+  %0 = spirv.Constant 0 : i32
+  // CHECK: min version: v1.0
+  // CHECK: max version: v1.6
+  // CHECK: capabilities: [ [GeometryStreams] ]
+  spirv.EndStreamPrimitive %0 : i32
+  return
+}
+
 //===----------------------------------------------------------------------===//
 // Mesh ops
 //===----------------------------------------------------------------------===//

@@ -19,3 +19,25 @@ func.func @end_primitive() {
   spirv.EndPrimitive
   spirv.Return
 }
+
+//===----------------------------------------------------------------------===//
+// spirv.EmitStreamVertex
+//===----------------------------------------------------------------------===//
+
+func.func @emit_stream_vertex() {
+  %0 = spirv.Constant 0 : i32
+  // CHECK: spirv.EmitStreamVertex %{{.*}} : i32
+  spirv.EmitStreamVertex %0 : i32
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.EndStreamPrimitive
+//===----------------------------------------------------------------------===//
+
+func.func @end_stream_primitive() {
+  %0 = spirv.Constant 0 : i32
+  // CHECK: spirv.EndStreamPrimitive %{{.*}} : i32
+  spirv.EndStreamPrimitive %0 : i32
+  spirv.Return
+}
