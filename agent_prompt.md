@@ -55,15 +55,14 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Start L94(j).** Reduce the smallest failing case in that bucket —
-   likely `vector_length.out_vec4_in_vec4_member_of_array_of_structures_
-   vert_tesc_out_tese_in_frag` (the plain non-`Block` variant, to isolate
-   the per-control-point-array interaction from the block-decomposition
-   machinery already fixed this session). Rough estimate: half a day —
-   likely needs threading `RowCountIsVertexArray`'s outer-dimension folding
-   through `addStageIOStructMembers`'s own per-leaf `RowCount` widening
-   (roadmap H115), rather than a new code path.
-2. **Re-run the broader `pipeline_library.interface_matching.*` sweep**
-   beyond just `vector_length.*` (the prior session's sweep stopped at 688
-   cases on the now-fixed crash; a full re-sweep hasn't been done yet this
-   session) to confirm no further crashes remain in that larger group.
+1. **Pick a new CTS group entirely.** The `interface_matching.*` sweep's
+   468 not-supported cases are a different kind of gap (unadvertised
+   feature/format support, not a bug) — worth a quick triage to see if
+   any are cheap wins (e.g. a missing format or feature flag) versus
+   genuinely out of scope for now. Rough estimate: 30–60 minutes to
+   triage, more to fix depending on what's found.
+2. **Broaden the sweep beyond `pipeline_library.interface_matching.*`**
+   to a wider `dEQP-VK.pipeline.*` or a different top-level group
+   entirely, using the same reduce-first methodology this milestone
+   series has used throughout. Rough estimate: a session to sweep plus
+   however long the first reduction takes.
