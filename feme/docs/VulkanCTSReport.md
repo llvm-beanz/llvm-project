@@ -196,11 +196,13 @@ timeouts remain under L92.
 The first deterministic
 `pipeline_library.extended_dynamic_state.mesh_shader` recovery case,
 `dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.mesh_shader.after_pipelines.depth_bias_disable`,
-reproduces an immediate `deqp-vk` segmentation fault after starting. Its
-debugger backtrace ends at a null call from CTS's `setDynamicStates`: FeMe
-advertises Vulkan 1.4 but has no device dispatch entry for the promoted
-`vkCmdSetDepthBiasEnable` command. This is tracked as L94(a), separate from
-broader pipeline behavior.
+formerly reproduced an immediate `deqp-vk` segmentation fault after starting.
+L94(a) added the missing Vulkan 1.3 promoted `vkCmdSetDepthBiasEnable` device
+dispatch, recording, and dynamic-raster-state resolution. The same case now
+completes and reports an ordinary image mismatch instead of terminating, so
+the remaining failure belongs to broader pipeline correctness rather than a
+missing command path. This implementation changes no advertised feature or
+extension, so both Vulkan inventories remain current.
 
 ## Dominant ordinary failures
 
