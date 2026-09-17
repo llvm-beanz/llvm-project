@@ -231,6 +231,23 @@ The static input-assembly value remains used only when the state is not
 dynamic, while the recorded per-draw value is resolved otherwise. This changes
 no advertised feature or extension, so both Vulkan inventories remain current.
 
+After the capability-gated `two_draws_static.vertex_input_*` and viewport
+cases, the first abnormal result in deterministic order was
+`dEQP-VK.pipeline.pipeline_library.framebuffer_attachment.no_attachments`.
+The four point primitives were each expanded into two synthetic screen
+triangles, and the fallback fragment `PrimitiveID` counter advanced for each
+triangle instead of each logical point. The shader consequently observed IDs
+`0,2,4,6`; its `imageStore` index modulo four wrote only texels 0 and 2. L94(e)
+now resolves the ID once before clipping or point/line expansion, resets the
+fallback sequence for every direct draw instance, and carries the result
+through every generated triangle. The pipeline-library, fast-linked-library,
+and monolithic single-sample cases all pass with the rebuilt explicit ICD and
+`--deqp-shadercache=disable`. The immediately following
+`pipeline_library.framebuffer_attachment.no_attachments_ms` case still fails
+graphics-pipeline construction with `VK_ERROR_INITIALIZATION_FAILED` and is
+tracked separately as L94(f). This implementation changes no advertised
+feature or extension, so both Vulkan inventories remain current.
+
 ## Dominant ordinary failures
 
 The largest result signatures are:
