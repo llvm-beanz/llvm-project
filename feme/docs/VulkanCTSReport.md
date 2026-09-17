@@ -48039,3 +48039,92 @@ standalone investigation).
 
 **Feature/extension inventories.** No change: no bug, no fix, no new
 feature/extension surface touched.
+
+## H170 bucket 2: `in_function` helper-function stage-IO fix
+
+**Root cause.** `dEQP-VK.glsl.derivate.*.in_function.*` (72 cases, a
+derivative call made from inside a helper function rather than
+directly in `main`) failed deterministically with `JIT session error:
+Symbols not found: [ spirv_var_13 ]` (or `spirv_var_14`, etc.) at
+`vkCreateGraphicsPipelines` time. `FEME_DUMP_IR=1` confirmed the exact
+shape: a helper function's own raw `load ptr addrspace(7)
+@spirv_var_N` (a direct read of a module-scope SPIR-V `Input` global,
+the shape GLSL/glslang produces but `dxc`'s own HLSL lowering never
+does, since it always fully inlines a helper before this pipeline ever
+sees it) survived, entirely unconverted, all the way through
+`feme::cpu::InlineHelperFunctionsPass`'s later inlining into `main`,
+reaching the CPU JIT as a genuinely external, never-defined symbol.
+`canonicalizeSPIRVStage`'s stage-IO discovery/rewrite walk had only
+ever covered its own entry-point `Function` argument's own
+instructions, never a reachable, not-yet-inlined helper's.
+
+**A significant environment pitfall was found and fixed along the
+way** (see agent_thoughts.md for the full account): a combined shell
+command of the form `export VK_ICD_FILENAMES=path
+VK_DRIVER_FILES=$VK_ICD_FILENAMES` expands `$VK_ICD_FILENAMES` using
+its value from *before* the same command runs (empty in a fresh
+shell), silently falling back to a pre-existing system default
+(`/usr/share/vulkan/icd.d/lvp_icd.json`, i.e. **llvmpipe**, not FeMe).
+Several earlier attempts to reproduce this bug across this and
+possibly prior sessions were actually run against llvmpipe -- a
+correct, mature implementation -- rather than FeMe, producing
+plausible-looking but meaningless "passes" and "can't reproduce"
+results that fed a false "this bug is flaky" narrative. Once the two
+env vars were set via **separate** `export` statements and
+`vulkaninfo --summary | grep deviceName` was used to positively
+confirm `FeMe CPU Vulkan Device` before every test run, the bucket's
+own true baseline turned out to be a total, deterministic 72/72
+failure -- not rare or flaky at all.
+
+**Fix.** `canonicalizeSPIRVStage` (`CanonicalizeStage.cpp`) now walks
+every function transitively reachable from the entry point via
+ordinary (not-yet-inlined) direct calls -- stopping at another
+recognized entry point or a declaration -- for both the stage-IO
+discovery pass and the actual load/store rewrite, rather than only the
+entry's own instructions. `ShadowValueMap` (which places its own
+`Output`-direction read-back shadow allocas in *its* function's entry
+block) is now constructed once per function in that set instead of
+once for the entry alone, since reusing the entry's own map for a
+helper's instructions would place the alloca in the wrong function --
+invalid IR `verifyModule` would reject outright.
+
+An earlier fix attempt -- reordering
+`feme::cpu::InlineHelperFunctionsPass` to run before
+`CanonicalizeStagePass`/`ValidateStagePass` in
+`feme::cpu::runPipeline`, so helpers would already be inlined by the
+time stage-IO canonicalization ran -- was tried first and abandoned:
+per-case testing of all 72 `in_function` cases individually (to avoid
+one crash blocking the rest) showed 0 passed, 8 failed a plain image
+comparison, and **64 segfaulted** in JIT-compiled code (confirmed via
+`gdb`, `SIGSEGV` in unnamed/no-symbol generated code, `verifyModule`
+clean immediately after the reorder's own new inlining step -- the
+miscompile, whatever it was, came from some later pass implicitly
+depending on the old ordering). This was a severe regression, not a
+partial fix, and was reverted in favor of the more surgical,
+pass-internal walk described above.
+
+**Unit test.** New
+`CanonicalizeStageTest.RewritesSPIRVStageIOInNonEntryHelperFunction`,
+mirroring the existing
+`RewritesSPIRVDiscardInNonEntryHelperFunction` test's precedent for
+the analogous H101a discard-in-helper gap. `check-feme`: 3143/3146
+passed (3 unsupported, +1 test vs. the prior 3142/3145 baseline), no
+regressions.
+
+**Native Vulkan CTS check.** `dEQP-VK.glsl.derivate.*.in_function.*`
+(72 cases, tested individually per-case against the verified real
+FeMe device): **72/72 pass**, 0 crashes (previously 72/72 fail with
+the JIT-link error). Re-ran the originally-failing
+`dEQP-VK.glsl.derivate.dfdx.in_function.vec4_highp` case 3 times in a
+row to confirm determinism: pass, pass, pass. Full
+`dEQP-VK.glsl.derivate.*` sweep (1,674 cases): **1317 passed / 51
+failed / 306 not-supported** -- zero of the 51 remaining failures are
+`in_function` cases (all are pre-existing H170 bucket 1/H172
+`fbo_float`/`texture.float` work, unrelated to this fix; see those
+sections above). `check-hlsl-feme-vk`: unchanged (376 pass / 260
+unsupported / 26 XFAIL / 1 pre-existing `array_of_matrices.test` XPASS
+flake, no regressions).
+
+**Feature/extension inventories.** No change: this is a compiler-
+internal stage-IO canonicalization fix, no new Vulkan
+feature/extension surface touched.
