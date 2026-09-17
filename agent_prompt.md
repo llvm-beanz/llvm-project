@@ -53,12 +53,7 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours, do first, cheapest:** H172 -- the new `dfdy`-heavy
-   image-comparison pattern this fix exposed. Quad-shuffle masks in
-   `WaveLowering.cpp` are already ruled out (structurally correct).
-   Start with a channel-level pixel reduction (H88's own technique) on
-   `dfdy.fbo_float.float_highp` to see actual-vs-expected framebuffer
-   content -- that should immediately show whether it's a Y-axis
-   orientation bug or something else. The `dfdx`-only-fails-at-
-   vec3/vec4 vs. `dfdy`-fails-at-every-width asymmetry is a real clue,
-   not yet explained.
+1. **H170 bucket 2** (`in_function` subcases): `JIT session error:
+   Symbols not found: [ spirv_var_13 ]` when a derivative call happens
+   inside a helper function rather than `main` directly. ~Half a day.
+   Reduce to a standalone `dxc`+`feme-opt` repro first.
