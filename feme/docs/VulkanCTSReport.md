@@ -795,3 +795,75 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.interface_matching.decoration_mismatch.*" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L99: `matNx3` composite-construct/indexing rendering bug (spec_constant sweep)
+
+## Outcome
+
+**Reduced and scoped, not fixed.** Broadened the CTS sweep beyond
+`pipeline_library.interface_matching.*` to a fresh top-level group,
+`pipeline_library.spec_constant.*` (per this milestone series' own
+"broaden the sweep" next-step). Reduction target:
+`dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.
+composite.matrix.mat2x3`.
+
+## Investigation
+
+Full `pipeline_library.spec_constant.*` sweep (1170 cases): 455 pass,
+200 fail, 515 not-supported. Categorized the 200 failures:
+
+- 115 "Values did not match" -- `composite.matrix.*`/`composite.struct.*`
+  rendering-correctness failures.
+- 45 `spirv.VectorExtractDynamic` "failed to legalize" pipeline-creation
+  failures (a dynamically-indexed-vector-with-spec-constant-index gap,
+  not yet reduced).
+- 10 `OpTypeArray count ... must come from a constant` pipeline-creation
+  failures (an array-size-from-spec-constant-expression gap, not yet
+  reduced).
+- ~30 "GEP into vector with non-byte-addressable element type"
+  pipeline-creation failures (not yet reduced).
+
+Reduced the largest bucket to `composite.matrix.mat2x3`, confirmed
+reproducible standalone (`Fail (Values did not match)`, 1/1 in
+isolation). Swept every `composite.matrix.*` case across all 5 graphics
+stages (vertex, fragment, geometry, tess_control, tess_eval) and found
+an exact, consistent pattern:
+
+| Matrix | Column shape | Result |
+|---|---|---|
+| `mat2`, `mat2x4`, `mat3x2`, `mat3x4`, `mat4`, `mat4x2` | 2 or 4 rows | Pass |
+| `mat2x3`, `mat3`, `mat4x3` | **3 rows (`vec3` column)** | **Fail** |
+
+This holds identically in every one of the 5 stages checked (15/18
+matching cases seen so far all follow this rule). The failure is
+independent of column count and shader stage -- the only common factor
+is a 3-component (`vec3`) column vector.
+
+`SPIRVToLLVMPatterns.cpp`'s `convertMatrix`/`CompositeConstructOp`
+handling, and the file's existing "tight vector array" substitution
+machinery (`getTightVectorArrayType`, roadmap H101j -- built specifically
+to reconcile a `vec3`'s native LLVM vector representation with its
+tightly-packed in-memory layout elsewhere in this file), are the most
+likely defect location. Confirming this needs comparing the actual
+SPIR-V/LLVM IR for a passing `mat2` case against the failing `mat2x3`
+case's own construction and `m[i][j]` indexing sequence side by side --
+not attempted this session, given the size of that subsystem and the
+time already spent on this milestone series' other work.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` before and during this investigation.
+- No code changed this session for L99 -- reduction/scoping only, so no
+  `check-feme`/CTS re-run was needed.
+
+No advertised Vulkan feature or extension changed.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.composite.matrix.mat2x3" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
