@@ -5007,6 +5007,163 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(RowValuesByElement[1], (SmallVector<uint64_t, 3>{20, 21, 22}));
 }
 
+/// (Roadmap L94(j)) A per-vertex-arrayed `Input` (`RowCountIsVertexArray`,
+/// `isPerVertexArrayInputGlobal` true here since this is a Domain-stage
+/// `Input`) wrapping a genuine multi-member nested struct's own inner
+/// array -- e.g. a Domain-stage `in struct {float dummy; vec4 v;}
+/// testStructArray[][3];` reading a Hull-stage per-control-point `Output`
+/// of that same shape, `dEQP-VK.pipeline.pipeline_library.
+/// interface_matching.vector_length.*member_of_array_of_structures_vert_
+/// tesc_out_tese_in_frag`'s own consuming side. `StageIOGlobalVariable
+/// Pattern` only peels *one* outer `ArrayType` level before checking for a
+/// `StructType`, so this doubly-arrayed shape never gets `feme.spirv.
+/// MemberDecorations` metadata attached at all (unlike `RewritesSingle
+/// MemberBlockArrayOfGenuineMultiMemberNestedStruct`'s own singly-arrayed
+/// shape, above) -- it falls to `addElements`' plain (non-block) path
+/// instead, which already decomposed this same struct-array content via
+/// `addStageIOStructMembers` (this milestone's own preceding session,
+/// L94(i)) but deliberately excluded the `RowCountIsVertexArray` case
+/// rather than risk an under-tested interaction, leaving it on a single,
+/// opaque `addElement` call that undersized/mistyped the element (a
+/// rendering mismatch, not a crash). Fixed by removing that exclusion and
+/// forwarding `RowCountIsVertexArray` through to every leaf `addElement`
+/// call `addStageIOStructMembers` makes, via a new `AddDecomposedElement`
+/// wrapper lambda (`addStageIOStructMembers`'s own generic `AddElement`
+/// callback signature has no room for this flag, silently defaulting it
+/// to `false` otherwise).
+TEST(CanonicalizeStageTest,
+     ThreadsRowCountIsVertexArrayThroughPlainPathStructArrayDecomposition) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @testStructArray = external addrspace(7) global [1 x [3 x { float, <4 x float> }]], !spirv.Decorations !0
+    define <4 x float> @main(i32 %i) #0 {
+      %p = getelementptr inbounds [1 x [3 x { float, <4 x float> }]], ptr addrspace(7) @testStructArray, i32 0, i32 %i, i32 2, i32 1
+      %v = load <4 x float>, ptr addrspace(7) %p
+      ret <4 x float> %v
+    }
+    attributes #0 = { "feme.shader.stage"="domain" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load survives against either of `testStructArray`'s two real
+  // leaf members (`dummy`/`variableInStruct`).
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Two elements -- `dummy` and `variableInStruct` -- not one bogus,
+  // undersized element for the whole array-of-struct member.
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  for (const SignatureElement &Elt : Sig->Elements) {
+    // Each leaf's own inner array extent (3) is its real `RowCount`,
+    // independent of the outer per-vertex dimension `%i` addresses.
+    EXPECT_EQ(Elt.RowCount, 3u);
+    // Both leaves inherit this element's own `RowCountIsVertexArray`,
+    // not the wrapper lambda's silently-defaulted `false`.
+    EXPECT_TRUE(Elt.RowCountIsVertexArray);
+  }
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    // The inner array's own constant index (2) becomes `Row`; the outer
+    // per-vertex dimension's own (here, dynamic) index threads through as
+    // `Vertex` instead.
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 2u);
+    EXPECT_EQ(CI->getArgOperand(3), F->getArg(0));
+  }
+  EXPECT_EQ(SeenLoads, 4u);
+}
+
+/// (Roadmap L94(j)) An ordinary, non-`Block`, non-`Patch`
+/// genuine multi-member nested struct array declared directly as a whole
+/// stage-IO variable's own type -- e.g. a Fragment-stage `in flat struct
+/// {float dummy; vec4 v;} testStructArray[3];`, `dEQP-VK.pipeline.
+/// pipeline_library.interface_matching.vector_length.*member_of_array_of_
+/// structures_vert_tesc_tese_out_frag_in`'s own consuming side. Unlike the
+/// doubly-arrayed shape above, this shape's single array level *does* get
+/// `feme.spirv.MemberDecorations` metadata attached (`StageIOGlobal
+/// VariablePattern`'s own one-level peel exposes the `StructType`
+/// directly), routing it through `TakeBlockPath` instead of the plain
+/// path. `TakeBlockPath`'s `BlockArrayCount` fold previously applied only
+/// to a `Patch`-qualified block array, leaving this shape's
+/// `BlockArrayCount` at 0 -- undersizing every leaf's own `RowCount` to 1
+/// regardless of the real array extent (3 here), surfaced as `Validate
+/// Stage.cpp`'s own "row N is out of range for element M" once a load
+/// indexed a non-zero array element. Fixed by also folding
+/// `BlockArrayCount` for this shape, distinguished from a genuine
+/// per-vertex/per-invocation dynamically-indexed array (which must stay
+/// unfolded, see `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMember
+/// Load`/`ThreadsInvocationIndexIntoMultiMemberHullPerInvocationOutput
+/// Block`/`FoldsConstantVertexIndexIntoInterfaceBlockArrayMemberVertex
+/// Operand`, all still passing unchanged) by combining `Stage`-based
+/// per-vertex/per-invocation recognition with a scan of this global's own
+/// actual accesses for a non-constant outer array index.
+TEST(CanonicalizeStageTest,
+     FoldsOrdinaryArrayOfGenuineMultiMemberNestedStructIntoBlockArrayCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @testStructArray = external addrspace(7) global [3 x { float, <4 x float> }], !feme.spirv.MemberDecorations !6
+
+    define <4 x float> @main() #0 {
+      %p = getelementptr inbounds [3 x { float, <4 x float> }], ptr addrspace(7) @testStructArray, i32 0, i32 2, i32 1
+      %v = load <4 x float>, ptr addrspace(7) %p
+      ret <4 x float> %v
+    }
+
+    attributes #0 = { "feme.shader.stage"="fragment" }
+
+    !0 = !{i32 30, i32 0}
+    !1 = !{!0}
+    !2 = !{i32 0, !1}
+    !3 = !{i32 30, i32 1}
+    !4 = !{!3}
+    !5 = !{i32 1, !4}
+    !6 = !{!2, !5}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  for (const SignatureElement &Elt : Sig->Elements) {
+    // Each leaf's own `RowCount` now reflects the real array extent (3),
+    // not the pre-fix bug's undersized 1.
+    EXPECT_EQ(Elt.RowCount, 3u);
+    // This ordinary array isn't a per-vertex/per-invocation dynamic one,
+    // so it's never marked as such.
+    EXPECT_FALSE(Elt.RowCountIsVertexArray);
+  }
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    // The array's own constant index (2) folds into `Row`, exactly the
+    // way any other array member's own `RowCount`-widened index would --
+    // not into a bogus `Vertex` operand this shape has no use for.
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 2u);
+  }
+  EXPECT_EQ(SeenLoads, 4u);
+}
+
 /// Whether \p V transitively (through any chain of `zext`/`mul`/`add`)
 /// uses \p Arg as one of its leaf operands -- used below to confirm
 /// `combineDynamicRowTerms`'s own materialized `Row` value genuinely
