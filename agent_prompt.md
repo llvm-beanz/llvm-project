@@ -55,15 +55,18 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Start L94(h).** Reduce
-   `pipeline_library.interface_matching.shader_layout_component_matching.
-   vert_tesc_tese_frag.loose_var.float32.multiple_locations.
-   scalar_scalar_scalar_scalar` (first case in that family from the batch
-   log). Read how SPIR-V's `Component` decoration packs a sub-`Location`
-   offset onto an interface variable, find where the importer currently
-   drops unrecognized decorations, and decide where component offset fits
-   in the existing interface-matching model before writing code. Rough
-   estimate: half a day, since it's new decoration support, not a
-   one-line guard like L94(g).
-
-Please be sure to record your thoughts and next steps!
+1. **Start L94(i), part 1.** Reduce
+   `vector_length.out_ivec3_in_ivec2_loose_variable_vert_out_frag_in` (or
+   the first failing case in that family). Check whether feme's interface
+   matching rejects a vector-length mismatch outright instead of truncating
+   per Vulkan's rule that a consumer may read only the leading components
+   of a wider producer output. Rough estimate: an hour or two, likely a
+   similar shape to L94(h)'s Component fix (relaxing an equality check in
+   `StageLink.cpp`/`GraphicsPipeline.cpp`'s matching, not a decoration gap).
+2. **Then L94(i), part 2.** Once part 1's fix lands, re-run the
+   `member_of_array_of_structures_in_block` crash case in isolation under
+   `gdb`/ASan — the heap corruption may be a symptom of the same
+   vector-length-mismatch code path (writing past the end of a shorter
+   consumer's storage) rather than a separate bug, so fixing part 1 first
+   might fix or at least change part 2's signature before investigating it
+   standalone.
