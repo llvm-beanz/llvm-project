@@ -53,10 +53,12 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~half a day, well-scoped:** H170 bucket 1 --
-   `fbo_float`/`texture.float` scalar-float subcases fail with
-   `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`. Check
-   `feme::vulkan::PhysicalDevice`'s supported-format table for
-   floating-point color-attachment formats first -- if genuinely
-   unsupported, this likely has a wider blast radius across the CTS
-   than just the derivative test group.
+1. **~1-2 hours, do first, cheapest:** H172 -- the new `dfdy`-heavy
+   image-comparison pattern this fix exposed. Quad-shuffle masks in
+   `WaveLowering.cpp` are already ruled out (structurally correct).
+   Start with a channel-level pixel reduction (H88's own technique) on
+   `dfdy.fbo_float.float_highp` to see actual-vs-expected framebuffer
+   content -- that should immediately show whether it's a Y-axis
+   orientation bug or something else. The `dfdx`-only-fails-at-
+   vec3/vec4 vs. `dfdy`-fails-at-every-width asymmetry is a real clue,
+   not yet explained.
