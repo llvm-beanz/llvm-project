@@ -6793,6 +6793,116 @@ public:
   }
 };
 
+/// Roadmap H124d: maps each plain (non-`fwidth`) derivative op directly onto
+/// its already-existing matching `llvm.spv.ddx`/`.ddy`/`.ddx.fine`/
+/// `.ddy.fine`/`.ddx.coarse`/`.ddy.coarse` intrinsic -- these 6 intrinsics
+/// (`IntrinsicsSPIRV.td`) were already fully consumed downstream by
+/// `feme::graphics::CanonicalizeStagePass`'s own
+/// `rewriteSPIRVDiscardAndDerivativeIntrinsics` before this pattern existed
+/// (nothing previously produced them, since the upstream MLIR SPIR-V dialect
+/// had no op to import opcodes 207/208/210/211/213/214 into in the first
+/// place), so this pattern needs no new CPU-backend work at all.
+template <typename DerivativeOp>
+constexpr llvm::StringLiteral getDerivativeIntrinsicName();
+template <>
+constexpr llvm::StringLiteral
+getDerivativeIntrinsicName<mlir::spirv::DPdxOp>() {
+  return "llvm.spv.ddx";
+}
+template <>
+constexpr llvm::StringLiteral
+getDerivativeIntrinsicName<mlir::spirv::DPdyOp>() {
+  return "llvm.spv.ddy";
+}
+template <>
+constexpr llvm::StringLiteral
+getDerivativeIntrinsicName<mlir::spirv::DPdxFineOp>() {
+  return "llvm.spv.ddx.fine";
+}
+template <>
+constexpr llvm::StringLiteral
+getDerivativeIntrinsicName<mlir::spirv::DPdyFineOp>() {
+  return "llvm.spv.ddy.fine";
+}
+template <>
+constexpr llvm::StringLiteral
+getDerivativeIntrinsicName<mlir::spirv::DPdxCoarseOp>() {
+  return "llvm.spv.ddx.coarse";
+}
+template <>
+constexpr llvm::StringLiteral
+getDerivativeIntrinsicName<mlir::spirv::DPdyCoarseOp>() {
+  return "llvm.spv.ddy.coarse";
+}
+
+template <typename DerivativeOp>
+class DerivativeConversionPattern
+    : public mlir::SPIRVToLLVMConversion<DerivativeOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<DerivativeOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(DerivativeOp Op, typename DerivativeOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Op.getLoc(),
+                                getDerivativeIntrinsicName<DerivativeOp>(),
+                                ResultType, Adaptor.getP()));
+    return mlir::success();
+  }
+};
+
+/// Roadmap H124d: unlike `OpDPdx`/`OpDPdy` and their Fine/Coarse siblings,
+/// `OpFwidth`/`OpFwidthFine`/`OpFwidthCoarse` are deliberately *not* modeled
+/// as their own canonical `feme.stage.derivative.*` operation
+/// (`FeMeGraphicsDesign.md`): "`fwidth` and its variants are not canonical
+/// operations; they are expressed as absolute values and a sum of the
+/// coarse or fine derivative operations above." So rather than inventing a
+/// new LLVM intrinsic (there is only a single, precision-less
+/// `int_spv_fwidth`, with no Fine/Coarse sibling to mirror this op family's
+/// own three-way split), this pattern expands directly at the MLIR
+/// conversion layer into `fabs(ddx) + fabs(ddy)`, using the matching
+/// fine/coarse derivative intrinsic pair -- reusing
+/// `DerivativeConversionPattern`'s own already-consumed intrinsics rather
+/// than adding a fourth, unconsumed one. `OpFwidth` itself (implicit
+/// precision) maps to the *fine* pair, matching
+/// `CanonicalizeStage.cpp`'s own existing convention of never coarsening
+/// precision the source did not explicitly ask for.
+template <typename FwidthOp, typename DPdxOp, typename DPdyOp>
+class FwidthConversionPattern
+    : public mlir::SPIRVToLLVMConversion<FwidthOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<FwidthOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(FwidthOp Op, typename FwidthOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Ddx =
+        createIntrinsicCall(Rewriter, Loc, getDerivativeIntrinsicName<DPdxOp>(),
+                            ResultType, Adaptor.getP());
+    mlir::Value Ddy =
+        createIntrinsicCall(Rewriter, Loc, getDerivativeIntrinsicName<DPdyOp>(),
+                            ResultType, Adaptor.getP());
+    mlir::Value AbsDdx =
+        mlir::LLVM::FAbsOp::create(Rewriter, Loc, ResultType, Ddx);
+    mlir::Value AbsDdy =
+        mlir::LLVM::FAbsOp::create(Rewriter, Loc, ResultType, Ddy);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FAddOp>(Op, ResultType, AbsDdx,
+                                                    AbsDdy);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Image`, which extracts the image handle back out of a
 /// combined `!spirv.sampled_image` value (e.g. so it can feed an
 /// `spirv.ImageFetch`/`spirv.ImageQuerySize`, both of which -- unlike an
@@ -11171,6 +11281,20 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
       ImageTexelPointerPattern, ImageWritePattern, KillConversionPattern,
       ArrayLengthPattern,
+      DerivativeConversionPattern<mlir::spirv::DPdxOp>,
+      DerivativeConversionPattern<mlir::spirv::DPdyOp>,
+      DerivativeConversionPattern<mlir::spirv::DPdxFineOp>,
+      DerivativeConversionPattern<mlir::spirv::DPdyFineOp>,
+      DerivativeConversionPattern<mlir::spirv::DPdxCoarseOp>,
+      DerivativeConversionPattern<mlir::spirv::DPdyCoarseOp>,
+      FwidthConversionPattern<mlir::spirv::FwidthOp, mlir::spirv::DPdxFineOp,
+                              mlir::spirv::DPdyFineOp>,
+      FwidthConversionPattern<mlir::spirv::FwidthFineOp,
+                              mlir::spirv::DPdxFineOp,
+                              mlir::spirv::DPdyFineOp>,
+      FwidthConversionPattern<mlir::spirv::FwidthCoarseOp,
+                              mlir::spirv::DPdxCoarseOp,
+                              mlir::spirv::DPdyCoarseOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformFAddOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
