@@ -48,6 +48,9 @@ agent thoughts.
 confirm `FeMe CPU Vulkan Device`. Every session from now on, every time, not
 just once at the start.
 
+**Always**: Add thoughts and next steps to the end of the agent_thoughts.md
+file, even if you don't take any other action.
+
 # Request
 
 Can you continue the work on feme? The last agent's suggested next steps are:
@@ -55,3 +58,6 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 1. **Continue L94 recovery in order.** Start with the next non-unsupported
    `pipeline_library.extended_dynamic_state.mesh_shader.two_draws_dynamic`
    case and reduce only a reproduced abnormal result.
+
+The last session ended without recording thoughts or next steps. If L94 is
+complete please mark it off on the roadmap and suggest the next step.
