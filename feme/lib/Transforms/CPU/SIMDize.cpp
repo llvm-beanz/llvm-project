@@ -795,6 +795,7 @@ private:
   void widenMaskedAlloca(AllocaInst &AI, IRBuilder<> &Builder);
   void widenMaskedAllocaGEP(GetElementPtrInst &GEP, IRBuilder<> &Builder);
   void widenMaskedAllocaStore(StoreInst &SI, IRBuilder<> &Builder);
+  void widenMaskedAllocaLoad(LoadInst &LI, IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
   void widenInsertValue(InsertValueInst &IV, IRBuilder<> &Builder);
@@ -1469,16 +1470,41 @@ void FunctionWidener::collectMaskedAllocas() {
   // cannot see that a memory location's *value* was written divergently
   // just because its *address* is uniform.
   for (Instruction &I : instructions(*OldF)) {
-    auto *CI = dyn_cast<CallInst>(&I);
-    if (!CI)
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI);
+      if (!Matched)
+        Matched = matchMaskedStore(*CI);
+      if (Matched) {
+        if (AllocaInst *AI = getUnderlyingAlloca(Matched->Ptr))
+          MaskedAllocas.insert(AI);
+      }
       continue;
-    std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI);
-    if (!Matched)
-      Matched = matchMaskedStore(*CI);
-    if (!Matched)
-      continue;
-    if (AllocaInst *AI = getUnderlyingAlloca(Matched->Ptr))
-      MaskedAllocas.insert(AI);
+    }
+    // (Roadmap H170) An *unmasked* store -- one `feme::cpu::LinearizePass`
+    // left as a plain `store` because it runs under uniform control flow
+    // (e.g. an unconditional `intermediateStore = v_coord;` at the very
+    // top of a shader, before any divergent branch) -- can still write a
+    // genuinely per-lane-different *value* through a uniform *address*,
+    // exactly like the masked-store-call case just above. The masked-
+    // store-call scan alone can never discover this, since no masked-
+    // store call was ever created for it (`Masks.SideEffect` was a known
+    // constant mask at that program point). `UI.isDivergentAtDef` sees
+    // straight through the address's own uniformity: for a `store`, which
+    // has no result of its own, it reflects whether the *value* operand
+    // is divergent. Found reducing `dEQP-VK.glsl.derivate.dfdx.
+    // private_store.*`'s own full-black-framebuffer failure to this exact
+    // shape: a per-invocation `feme.stage.input.load` result stored,
+    // unconditionally, into one address shared by every lane, silently
+    // collapsing every lane's own write down to whichever lane's write
+    // `widenScalarizedFallback`'s naive per-lane replay happened to run
+    // last -- then broadcasting that one surviving lane's value back out
+    // to every lane on the next (also uniform-address) read.
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (SI->isSimple() && UI.isDivergentAtDef(SI)) {
+        if (AllocaInst *AI = getUnderlyingAlloca(SI->getPointerOperand()))
+          MaskedAllocas.insert(AI);
+      }
+    }
   }
 }
 
@@ -3142,6 +3168,68 @@ void FunctionWidener::widenMaskedAllocaStore(StoreInst &SI,
   ToErase.push_back(&SI);
 }
 
+void FunctionWidener::widenMaskedAllocaLoad(LoadInst &LI,
+                                            IRBuilder<> &Builder) {
+  // (Roadmap H170) The dual of `widenMaskedAllocaStore` above: `LI` reads
+  // a `MaskedAllocas` base but is itself neither a masked-load call
+  // `collectMaskedAllocas` scanned for nor a divergent-at-def instruction
+  // the ordinary uniformity gate would otherwise widen -- e.g. an
+  // unconditional `res = intermediateStore;` read straight back after an
+  // equally-unconditional, but per-lane-divergent-*value*, store into the
+  // very same local a moment earlier (found reducing `dEQP-VK.glsl.
+  // derivate.dfdx.private_store.*`'s own full-black-framebuffer failure
+  // to this exact shape). Left alone, the ordinary "uniform: leave it
+  // exactly as it is" path would read only lane 0's own now-real per-lane
+  // copy and broadcast that single value to every lane, instead of
+  // reading each lane's own value back -- the same "only one lane's data
+  // survives" failure `widenMaskedAllocaStore`'s own comment already
+  // documents for the write side. The fix: actually read once per lane,
+  // from that lane's own real address, exactly as if this load's own
+  // governing mask had been the (all-true) entry mask throughout.
+  Value *WideBase = Widened.lookup(LI.getPointerOperand());
+  assert(WideBase && "a MaskedAllocas base pointer must already be widened "
+                     "by the time a load through it is reached, since "
+                     "reverse post-order visits a def before any use in "
+                     "the same acyclic block");
+
+  Type *ValTy = LI.getType();
+  if (auto *VecTy = dyn_cast<FixedVectorType>(ValTy)) {
+    SmallVector<Value *, 4> Components(
+        VecTy->getNumElements(),
+        PoisonValue::get(FixedVectorType::get(VecTy->getElementType(),
+                                              WaveSize)));
+    for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+      Value *LanePtr = Builder.CreateExtractElement(
+          WideBase, Builder.getInt32(Lane),
+          LI.getName() + ".lane" + Twine(Lane));
+      Value *LaneVector = Builder.CreateAlignedLoad(ValTy, LanePtr,
+                                                    LI.getAlign(),
+                                                    LI.isVolatile());
+      for (unsigned Component = 0, End = VecTy->getNumElements();
+           Component != End; ++Component) {
+        Value *LaneScalar = Builder.CreateExtractElement(
+            LaneVector, Builder.getInt32(Component));
+        Components[Component] = Builder.CreateInsertElement(
+            Components[Component], LaneScalar, Builder.getInt32(Lane));
+      }
+    }
+    WidenedVectorComponents[&LI] = std::move(Components);
+    ToErase.push_back(&LI);
+    return;
+  }
+
+  Value *Wide = PoisonValue::get(FixedVectorType::get(ValTy, WaveSize));
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LanePtr = Builder.CreateExtractElement(
+        WideBase, Builder.getInt32(Lane), LI.getName() + ".lane" + Twine(Lane));
+    Value *LaneVal = Builder.CreateAlignedLoad(ValTy, LanePtr, LI.getAlign(),
+                                               LI.isVolatile());
+    Wide = Builder.CreateInsertElement(Wide, LaneVal, Builder.getInt32(Lane));
+  }
+  Widened[&LI] = Wide;
+  ToErase.push_back(&LI);
+}
+
 void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
   // A raw `load` from a divergent groupshared address -- one
   // `feme::cpu::LinearizePass` never masked into a `feme.cpu.masked.load`
@@ -4129,6 +4217,22 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
         !isGroupSharedPointerType(SI->getPointerOperandType()) &&
         MaskedAllocas.contains(getUnderlyingAlloca(SI->getPointerOperand()))) {
       widenMaskedAllocaStore(*SI, Builder);
+      return true;
+    }
+  }
+  // (Roadmap H170) The load-side dual of the store case just above: an
+  // unconditional, *not itself* masked, read of a `MaskedAllocas` base
+  // (e.g. `res = intermediateStore;` read back straight after an equally
+  // unconditional, per-lane-divergent-valued store into the very same
+  // local) must likewise run once per lane, from that lane's own
+  // now-separate storage, rather than falling through to the ordinary
+  // uniformity gate below, which would read only lane 0's copy and
+  // broadcast it -- see `widenMaskedAllocaLoad`'s own comment.
+  if (auto *LI = dyn_cast<LoadInst>(&I)) {
+    if (LI->isSimple() &&
+        !isGroupSharedPointerType(LI->getPointerOperandType()) &&
+        MaskedAllocas.contains(getUnderlyingAlloca(LI->getPointerOperand()))) {
+      widenMaskedAllocaLoad(*LI, Builder);
       return true;
     }
   }
