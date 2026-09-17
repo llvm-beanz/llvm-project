@@ -51,16 +51,18 @@ just once at the start.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Eliminate the pipeline recovery tail.** Reduce the 5,653 unrun cases,
-   starting with `pipeline_library.extended_dynamic_state.mesh_shader`
-   (1,013), `fast_linked_library.extended_dynamic_state.mesh_shader` (918),
-   and `pipeline_library.graphics_library.independent_sets_random` (720).
-2. **Profile the seven non-subgroup compile-time long poles.** Sample them in
-   the optimizer/backend and assign each to L89, L92, or a new root cause
-   before changing code.
-3. **Reduce current process terminations by group.** Start with the single
-   `spirv_assembly` case, then the three `api` cases; keep crash fixes separate
-   from ordinary CTS correctness failures.
-4. **Implement continuous measurement.** Land roadmap D4/G1/G2 so full-run
-   recovery, per-case result reconciliation, and expected failures stop being
-   session-local scripts.
+1. **G2(a):** Run the bounded 54-group recovery process through
+   `vk_cts_reconcile.py` and commit its exact `Fail` case list with CTS and
+   FeMe revision provenance. Do not include crashes, timeouts, or unrun
+   cases.
+2. **G2(b):** Add a CI job that rebuilds the assertion-enabled ICD, generates
+   the full case list, retains all QPAs, and fails on reconciliation errors,
+   unrun cases, or newly unexpected failures.
+3. **L94:** Use the resulting deterministic recovery order to reduce
+   `pipeline_library.extended_dynamic_state.mesh_shader` before changing
+   broader pipeline behavior.
+
+As an added note, we have no infrastructure to run a CI job, so building CI is
+not presently actionable. Creating scripts and other tools that can be run
+manually or documenting agent skills are useful, and those assets can live under
+the feme project.
