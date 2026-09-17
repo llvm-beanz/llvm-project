@@ -89695,3 +89695,85 @@ group at 0 fail/0 crash, there's no obvious next reduction target left in
    entirely, using the same reduce-first methodology this milestone
    series has used throughout. Rough estimate: a session to sweep plus
    however long the first reduction takes.
+
+# L97: interpolation-decoration property triage and fix
+
+Next action if picking this back up: run L98's own float16/float64
+scoping investigation first (see Next steps below) — it's the only open
+thread left from this session.
+
+## What happened
+
+Picked up L94(j)'s own next-step ask: triage the
+`pipeline_library.interface_matching.*` sweep's 468 `NotSupported`
+cases for cheap wins vs. genuine gaps. Reused the prior session's saved
+`/tmp/interface_matching_sweep.log` rather than re-sweeping from scratch.
+
+1. Bucketed the 468 cases: 324 on
+   `graphicsPipelineLibraryIndependentInterpolationDecoration`, 112 on
+   16-bit floats, 32 on double-precision floats.
+2. Read the CTS source for the 324-case bucket
+   (`vktPipelineInterfaceMatchingTests.cpp`): it's a rendering-
+   correctness test gated on this property only for non-monolithic
+   construction, not a validation-error test.
+3. Confirmed via a real `deqp-vk` run that feme's own `EntryPoints.cpp`
+   hardcoded this property `VK_FALSE` with a stale "not implemented"
+   comment — but feme's pipeline-library "link" is always a full
+   recompile (roadmap H29c), so there's structurally no gap this
+   property is meant to guard against here. Proved it by running the
+   identical case under both `monolithic` and `pipeline_library`
+   construction and seeing it pass both ways already, even before any
+   code change.
+4. Flipped the property to `VK_TRUE`. Rebuilt, re-ran CTS.
+5. Updated the one affected unit test
+   (`PhysicalDeviceInfoTest.cpp`) to match.
+6. Confirmed the remaining 144 `NotSupported` cases (float16/float64)
+   are genuine gaps — `shaderFloat16`/`storageInputOutput16` report
+   `VK_FALSE`, `shaderFloat64` isn't mentioned at all. Filed as L98
+   rather than attempted this session.
+7. Caught and fixed a milestone-numbering slip mid-session: first
+   drafted this fix as "L96," but `Roadmap.md` already had an L96 entry
+   (a different, still-open crash bug). Confirmed via grep the L-series
+   is contiguous through L96, so renumbered everything to **L97** and
+   amended the already-made commit before it went any further.
+
+## Wins (all verified, not just claimed)
+
+- `decoration_mismatch.*` pipeline-library family: **360/360 pass, 0
+  not-supported** (was 0 pass / 360 not-supported).
+- Full `pipeline_library.interface_matching.*` (1589 cases): **1445
+  pass** (up from 1121), 144 not-supported (float16/64, tracked
+  separately as L98), **0 fail**.
+- `check-feme`: 3168 passed, 3 unsupported, 0 failed — no regressions.
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`,
+  confirmed at session start and re-confirmed after the final rebuild.
+
+## Commits this session
+
+1. `b7a4b81385a2` — `[feme] L97: advertise
+   graphicsPipelineLibraryIndependentInterpolationDecoration` (property
+   flip + test update; this is an amend of an earlier "L96"-labeled
+   commit, corrected before the session ended).
+2. `be9e4ca123b7` — `[feme] L97: close out roadmap, file L98 for
+   float16/float64 gaps`.
+3. `5f6c06d28f1d` — `[feme] L97: document CTS investigation in
+   VulkanCTSReport.md`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed — `VK_EXT_graphics_pipeline_library` was already listed as
+advertised; this is a within-extension property correction only.
+
+## Next steps
+
+1. **Scope L98 (float16/float64 stage-IO support).** Start by checking
+   whether `shaderFloat16`/`shaderFloat64` have *any* existing plumbing
+   anywhere else in feme's SPIR-V import or CPU-execution pipeline (a
+   16-bit float ALU type and a 64-bit double ALU type are both a much
+   bigger scope than a property flip). Rough estimate: 30–60 minutes
+   just to figure out how big this actually is, before any real
+   estimate for the fix itself is possible.
+2. **If L98 turns out too large for one session, broaden the sweep
+   instead** to a different `dEQP-VK.pipeline.*` group or a new
+   top-level CTS group entirely, using the same reduce-first
+   methodology used throughout this milestone series. Rough estimate:
+   a session to sweep plus however long the first reduction takes.
