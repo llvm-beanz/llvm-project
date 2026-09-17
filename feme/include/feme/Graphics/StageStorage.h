@@ -164,11 +164,20 @@ const SignatureElement *findElement(const EntrySignature &Sig,
                                     SignatureSystemValue SysVal);
 
 /// The first non-system-value \p Direction element of \p Sig at
-/// \p Location/\p Index, or null if it declares none.
+/// \p Location/\p Index whose own `FirstComponent` is \p Component, or
+/// null if it declares none. (Roadmap L94(h)) SPIR-V's `Component`
+/// decoration lets multiple otherwise-unrelated interface variables share
+/// one `Location`, each occupying its own disjoint sub-range of that
+/// location's four components (e.g. two `vec2`s, one at `Component=0`
+/// and another at `Component=2`) -- matching by `Location`/`Index` alone,
+/// as before this milestone, could therefore find the wrong one of
+/// several same-`Location` elements, or silently link two elements that
+/// merely share a `Location` but occupy different components.
 const SignatureElement *findElementByLocation(const EntrySignature &Sig,
                                               SignatureDirection Direction,
                                               uint32_t Location,
-                                              uint32_t Index = 0);
+                                              uint32_t Index = 0,
+                                              uint32_t Component = 0);
 
 } // namespace feme::graphics
 

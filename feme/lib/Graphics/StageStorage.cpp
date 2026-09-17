@@ -203,11 +203,13 @@ const SignatureElement *findElement(const EntrySignature &Sig,
 const SignatureElement *findElementByLocation(const EntrySignature &Sig,
                                               SignatureDirection Direction,
                                               uint32_t Location,
-                                              uint32_t Index) {
+                                              uint32_t Index,
+                                              uint32_t Component) {
   for (const SignatureElement &Elt : Sig.Elements)
     if (Elt.Direction == Direction &&
         Elt.SystemValue == SignatureSystemValue::None &&
-        Elt.Location == Location && Elt.Index == Index)
+        Elt.Location == Location && Elt.Index == Index &&
+        Elt.FirstComponent == Component)
       return &Elt;
   return nullptr;
 }

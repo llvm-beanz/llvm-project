@@ -63,6 +63,46 @@ TEST(StageLinkTest, LinksByLocationNotByElementID) {
   EXPECT_EQ((*Links)[1].DestElementID, 1u);
 }
 
+// (Roadmap L94(h)) SPIR-V's `Component` decoration lets several loose
+// varyings share one `Location`, each in its own disjoint sub-range of
+// components (e.g. two `vec2`s at `Location=0`, one at `Component=0` and
+// the other at `Component=2`). Before this fix, `findProducer` matched
+// only by `Location`/`Index`, so it always found whichever same-`Location`
+// producer element happened to come first, ignoring `Component` entirely
+// -- silently linking the wrong pair of elements whenever more than one
+// producer element shared a consumer's `Location`.
+TEST(StageLinkTest, LinksByLocationAndComponentWhenBothArePacked) {
+  EntrySignature Producer;
+  SignatureElement LowHalf =
+      makeElement(9, SignatureDirection::Output, 0, /*ComponentCount=*/2);
+  SignatureElement HighHalf =
+      makeElement(7, SignatureDirection::Output, 0, /*ComponentCount=*/2);
+  HighHalf.FirstComponent = 2;
+  Producer.Elements = {LowHalf, HighHalf};
+
+  EntrySignature Consumer;
+  SignatureElement ConsumerLow =
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/2);
+  SignatureElement ConsumerHigh =
+      makeElement(1, SignatureDirection::Input, 0, /*ComponentCount=*/2);
+  ConsumerHigh.FirstComponent = 2;
+  Consumer.Elements = {ConsumerLow, ConsumerHigh};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "producer output -> consumer input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 2u);
+  // Component 0's consumer (element 0) must link against component 0's
+  // producer (element 9), not component 2's (element 7).
+  EXPECT_EQ((*Links)[0].SourceElementID, 9u);
+  EXPECT_EQ((*Links)[0].DestElementID, 0u);
+  // Component 2's consumer (element 1) must link against component 2's
+  // producer (element 7).
+  EXPECT_EQ((*Links)[1].SourceElementID, 7u);
+  EXPECT_EQ((*Links)[1].DestElementID, 1u);
+}
+
 TEST(StageLinkTest, LinksSystemValuesBySystemValue) {
   EntrySignature Producer;
   SignatureElement Factor =

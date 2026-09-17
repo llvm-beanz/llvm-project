@@ -489,6 +489,17 @@ struct LinkedVarying {
   uint32_t RowCount;
   SignatureComponentType ComponentType;
   SignatureInterpolationMode Interpolation;
+  /// (Roadmap L94(h)) The producer/consumer elements' own `FirstComponent`
+  /// (SPIR-V's `Component` decoration): `StageStorage::readRaw`/`writeRaw`
+  /// address a component by its absolute index within the whole
+  /// `Location` (0-3), not relative to the element's own sub-range, so a
+  /// local varying index `C` in `[0, ComponentCount)` below must be
+  /// offset by the matching side's own `FirstComponent` before reading/
+  /// writing -- otherwise a `Component`-packed varying (one that does not
+  /// start at component 0) silently reads/writes the wrong lanes of its
+  /// stage's storage.
+  uint32_t SourceFirstComponent = 0;
+  uint32_t DestFirstComponent = 0;
 };
 
 /// One post-vertex-shader vertex: clip-space position plus every linked
@@ -1994,7 +2005,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "to link against a vertex output",
                                FSIn.ElementID);
     const SignatureElement *VSOut = findElementByLocation(
-        RasterSig, SignatureDirection::Output, *FSIn.Location);
+        RasterSig, SignatureDirection::Output, *FSIn.Location, /*Index=*/0,
+        FSIn.FirstComponent);
     // (roadmap H108) It is legal Vulkan for the last pre-rasterization
     // stage to never write a `Location` that the fragment stage reads --
     // e.g. `dEQP-VK.mesh_shader.ext.synchronization.mesh_to_frag.*.
@@ -2024,7 +2036,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "count or type",
                                *FSIn.Location);
     Varyings.push_back({VSOut->ElementID, FSIn.ElementID, FSIn.ComponentCount,
-                        FSIn.RowCount, FSIn.ComponentType, FSIn.Interpolation});
+                        FSIn.RowCount, FSIn.ComponentType, FSIn.Interpolation,
+                        VSOut->FirstComponent, FSIn.FirstComponent});
   }
 
   // One `SV_TargetN` fragment output per color attachment (roadmap R33's
@@ -2444,8 +2457,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       for (const LinkedVarying &LV : Varyings)
         for (uint32_t Row = 0; Row != LV.RowCount; ++Row)
           for (uint32_t C = 0; C != LV.ComponentCount; ++C)
-            V.Varyings.push_back(
-                RasterOut->readRaw(LV.VSElementID, C, Flat, Row));
+            V.Varyings.push_back(RasterOut->readRaw(
+                LV.VSElementID, LV.SourceFirstComponent + C, Flat, Row));
       return V;
     };
 
@@ -3480,7 +3493,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   } else {
                     Bits = Tri.Varyings[0][Idx];
                   }
-                  FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits, Row);
+                  FSInput->writeRaw(LV.FSElementID, LV.DestFirstComponent + C,
+                                    Invocation, Bits, Row);
                 }
               }
             }

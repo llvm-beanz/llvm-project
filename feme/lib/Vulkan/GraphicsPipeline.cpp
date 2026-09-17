@@ -574,11 +574,12 @@ findSystemValue(const feme::EntrySignature &Sig, feme::SignatureDirection Dir,
 
 const feme::SignatureElement *findLocation(const feme::EntrySignature &Sig,
                                            feme::SignatureDirection Dir,
-                                           uint32_t Location) {
+                                           uint32_t Location,
+                                           uint32_t Component = 0) {
   for (const feme::SignatureElement &Elt : Sig.Elements)
     if (Elt.Direction == Dir &&
         Elt.SystemValue == feme::SignatureSystemValue::None && Elt.Location &&
-        *Elt.Location == Location)
+        *Elt.Location == Location && Elt.FirstComponent == Component)
       return &Elt;
   return nullptr;
 }
@@ -725,7 +726,8 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                                    "to link against a vertex output",
                                    FSIn.ElementID);
         const feme::SignatureElement *VSOut = findLocation(
-            PositionSig, feme::SignatureDirection::Output, *FSIn.Location);
+            PositionSig, feme::SignatureDirection::Output, *FSIn.Location,
+            FSIn.FirstComponent);
         if (!VSOut)
           return createStringError(inconvertibleErrorCode(),
                                    "fragment input location %u has no matching "

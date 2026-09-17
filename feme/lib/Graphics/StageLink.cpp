@@ -27,7 +27,7 @@ const SignatureElement *findProducer(const EntrySignature &Sig,
   if (!Consumer.Location)
     return nullptr;
   return findElementByLocation(Sig, ProducerDir, *Consumer.Location,
-                               Consumer.Index);
+                               Consumer.Index, Consumer.FirstComponent);
 }
 
 /// (Roadmap H9b) \p Elt's own real per-vertex-invocation row shape, for
