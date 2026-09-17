@@ -14,6 +14,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 
 using namespace llvm;
 using namespace feme::cpu;
@@ -56,6 +57,44 @@ bool hasNarrowVectorArrayPaddingGap(ArrayType *Ty, const DataLayout &DL) {
   return getTightSize(VecTy, DL) != DL.getTypeAllocSize(VecTy);
 }
 
+/// Whether \p GV has at least one *other* user (besides its own aggregate
+/// init store, which this pass is about to rewrite) that already reads
+/// one of its elements through a tightly packed byte offset -- i.e. a
+/// `getelementptr i8, ptr @GV, i64 <N>` rather than an ordinary,
+/// natural-ABI-strided `getelementptr [inner array type], ptr @GV, ...`.
+/// H69's own local mesh-scratch-array scenario (`uint3 idx[2]`, copied
+/// element-by-element into `gl_PrimitiveTriangleIndicesEXT` by
+/// `feme::cpu::MeshOutputWrapperPass`, which computes both that copy's
+/// source and destination addresses using the very same tightly packed
+/// convention its destination -- a genuinely tight stage-IO output array
+/// -- requires) is the only *actual* pattern this pass has ever been
+/// confirmed to fix: this global's *only* other users are exactly such
+/// tight `i8`-GEPs. A `spirv.MatrixType`-turned-`!llvm.array<N x vecM>`
+/// global (roadmap L99), by contrast, is read back through `m[i][j]`
+/// indexing lowered by MLIR upstream's own generic, natural-ABI-strided
+/// `AccessChainOp` conversion -- so rewriting *its* init store to a tight
+/// offset would only introduce the very "write one layout, read a
+/// different one" corruption this pass exists to fix, not avoid it. This
+/// check makes that distinction directly, from the real users this
+/// particular global actually has, rather than assuming every
+/// `Private`/`Function`-storage narrow-vector-array global is read back
+/// the same way.
+bool hasTightGEPUser(GlobalVariable &GV) {
+  for (User *U : GV.users()) {
+    // A GEP into a global constant reference (as opposed to a real,
+    // in-function `getelementptr` instruction) usually appears as a
+    // `ConstantExpr` folded directly into whatever instruction uses it
+    // (e.g. `load <3 x i32>, ptr getelementptr (i8, ptr @g, i64 12)`) --
+    // `GEPOperator` matches both that and a real `GetElementPtrInst`
+    // uniformly, so this check catches either shape.
+    auto *GEP = dyn_cast<GEPOperator>(U);
+    if (GEP && GEP->getSourceElementType()->isIntegerTy(8) &&
+        GEP->getPointerOperand() == &GV)
+      return true;
+  }
+  return false;
+}
+
 } // namespace
 
 PreservedAnalyses LocalNarrowVectorArrayInitPass::run(Module &M,
@@ -72,6 +111,14 @@ PreservedAnalyses LocalNarrowVectorArrayInitPass::run(Module &M,
       continue;
     auto *ArrTy = dyn_cast<ArrayType>(GV.getValueType());
     if (!ArrTy || !hasNarrowVectorArrayPaddingGap(ArrTy, DL))
+      continue;
+    // Only rewrite the init store if some other access to this exact
+    // global already reads it back through a tight offset -- see
+    // `hasTightGEPUser`'s own comment for why a global read back through
+    // an ordinary, natural-ABI-strided `getelementptr` instead (e.g. a
+    // `spirv.MatrixType`-turned array of columns, roadmap L99) must be
+    // left alone, not "fixed" into disagreeing with its own real readers.
+    if (!hasTightGEPUser(GV))
       continue;
 
     for (User *U : make_early_inc_range(GV.users())) {

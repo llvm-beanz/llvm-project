@@ -54,6 +54,21 @@
 // pass a case `feme::cpu::getPackedMeshElementSize`'s own callers still
 // need read as tightly packed.
 //
+// Roadmap L99: the address-space guard alone is not enough. A
+// `spirv.MatrixType`-turned array of columns (a plain, `Private`-storage
+// module-scope global, e.g. `mat2x3 m0 = ...`, address space 0 just like
+// this pass's own H69 target) shares the exact same
+// array-of-narrow-vector shape, but is read back element-wise (`m[i][j]`)
+// through MLIR upstream's own generic, natural-ABI-strided `AccessChainOp`
+// conversion -- never through the tight, `i8`-offset-GEP convention this
+// pass's own H69 fix assumed every reader used. Rewriting *that* global's
+// init store into a tight-offset one would therefore introduce the exact
+// "write one layout, read a different one" corruption this pass exists to
+// prevent, not avoid it. So this pass additionally requires at least one
+// of the global's own *other* users to already be a tight (`i8`-element)
+// GEP before it rewrites the init store at all -- see `hasTightGEPUser`'s
+// own comment in the `.cpp` file.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_LOCALNARROWVECTORARRAYINIT_H

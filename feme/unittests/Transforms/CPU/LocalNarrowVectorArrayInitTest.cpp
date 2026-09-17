@@ -111,6 +111,38 @@ TEST(LocalNarrowVectorArrayInitTest, IgnoresNonPrivateAddressSpace) {
   EXPECT_EQ(NumStores, 1u);
 }
 
+// Roadmap L99: a `spirv.MatrixType`-turned array of columns (e.g. a
+// `mat2x3`'s `!llvm.array<2 x <3 x float>>`) is read back by `m[i][j]`
+// indexing lowered into an ordinary, natural-ABI-strided `getelementptr`
+// -- never a tight `i8`-offset GEP -- so this pass must leave its
+// aggregate init store alone: rewriting it into a tight-offset store
+// would make it disagree with every real read, the exact corruption this
+// pass exists to prevent, not cause.
+TEST(LocalNarrowVectorArrayInitTest, IgnoresGlobalWithOnlyNaturalGEPReaders) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @spirv_var_10 = private global [2 x <3 x float>] undef
+
+    define float @main(i32 %col, i32 %row) {
+      store [2 x <3 x float>] [<3 x float> <float 1.0, float 2.0, float 3.0>, <3 x float> <float 4.0, float 5.0, float 6.0>], ptr @spirv_var_10, align 4
+      %p = getelementptr [2 x <3 x float>], ptr @spirv_var_10, i32 0, i32 %col, i32 %row
+      %v = load float, ptr %p, align 4
+      ret float %v
+    }
+  )");
+  ASSERT_TRUE(M);
+
+  PreservedAnalyses PA = runPass(*M);
+  EXPECT_TRUE(PA.areAllPreserved());
+
+  Function *F = M->getFunction("main");
+  unsigned NumStores = 0;
+  for (Instruction &I : instructions(F))
+    if (isa<StoreInst>(&I))
+      ++NumStores;
+  EXPECT_EQ(NumStores, 1u);
+}
+
 // A local array whose element type has no ABI-padding gap at all (a
 // 4-wide, already-power-of-2 vector) needs no fixup: an ordinary
 // aggregate store already agrees with every tightly packed offset into
