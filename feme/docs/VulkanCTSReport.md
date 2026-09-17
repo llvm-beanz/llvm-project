@@ -464,3 +464,121 @@ run with `--deqp-shadercache=disable`, preserve each process log/QPA file, and
 resume from the first case after the last started case. Treat a nonzero exit as
 a test result until the log proves that the process terminated before writing
 that result.
+
+# L94(i): vector-length narrowing rejection and array-of-struct block crash
+
+## Outcome
+
+**Two independent gaps found while sweeping the broader
+`pipeline_library.interface_matching.*` group after L94(h), both fixed.**
+Reduction targets: `vector_length.
+out_ivec3_in_ivec2_loose_variable_vert_out_frag_in` (part 1) and
+`vector_length.
+out_ivec3_in_ivec2_member_of_array_of_structures_in_block_vert_out_frag_in`
+(part 2).
+
+## Investigation and change
+
+### Part 1: consumer-narrower-than-producer vector-length rejection
+
+The `vector_length.*` family intentionally mismatches a producer's and a
+consumer's vector length (e.g. a vertex-stage `ivec3` output feeding a
+fragment-stage `ivec2` input). `VK_KHR_maintenance4` (already implemented
+in feme as core, roadmap E4) explicitly permits this: a consumer may
+declare *fewer* vector components than its producer and read only the
+leading ones; only a consumer requesting *more* components than its
+producer supplies is an error. `FEME_VULKAN_LOG_CREATION_ERRORS=1` turned
+the bare `VK_ERROR_INITIALIZATION_FAILED` into the real diagnostic,
+`"vertex output and fragment input at location 0 disagree on component
+count/type"`.
+
+Three independent call sites each did an exact `ComponentCount` equality
+check rather than this asymmetric one: `StageLink.cpp`'s
+`linkStageElements` (general cross-stage linker), `GraphicsPipeline.cpp`'s
+`validateStageInterfaces` (pipeline-creation-time vertex/fragment check),
+and `Executor.cpp`'s own runtime fragment-varying-linking loop. All three
+were relaxed from `!=` to `>` (consumer wider than producer remains an
+error; consumer narrower is now accepted). The actual component copy/read
+loops already used the *consumer's* (smaller) `ComponentCount` as their
+loop bound, so no other change was needed to read/write only the leading
+components correctly.
+
+### Part 2: `member_of_array_of_structures_in_block` heap corruption
+
+A single-member `Block`-decorated interface variable (e.g. `struct
+TestStruct { vec4 a; ivecN b; }; layout(location=0) out block { TestStruct
+s[3]; } blk;`) whose one real member is itself an array of a genuine
+multi-member nested struct crashed `deqp-vk` with a glibc `corrupted size
+vs. prev_size while consolidating` heap-corruption abort.
+`TakeBlockPath` (the existing multi-member-block decomposition) only
+triggers when the *top-level* block declares more than one member, so
+this single-member case fell to the plain `addElement` path instead,
+where `getStageIORowShape` ran out of single-member wrappers and array
+levels to peel once it reached `TestStruct` itself (2 real members) and
+silently treated the whole member as one opaque scalar `ComponentCount=1`
+leaf, undersizing the `SignatureElement` relative to what the compiled
+stores actually wrote.
+
+Fixed on both sides in `CanonicalizeStage.cpp`:
+
+- Construction (`addElements`' plain path): after peeling the outer
+  single-member-block wrapper via `peelSingleMemberStruct`, recognize
+  when the recovered content is a genuine multi-member nested struct
+  (array-wrapped or not) via `isGenuineMultiMemberNestedStruct`, and
+  route it through the already-existing `addStageIOStructMembers`
+  instead of a single `addElement` call.
+- Access resolution (`resolveOffsetWithinElement`): added a dispatch
+  branch recognizing this same peeled shape and resolving through the
+  existing `resolveNestedStageIOField` helper directly (no block-instance
+  folding to undo first, unlike `AllowBlockArrayInstanceFold`'s
+  `Patch`-array-of-block-instances case).
+
+The construction-side fix deliberately excludes `RowCountIsVertexArray`/
+`XfbBufferArrayStride` cases -- combining this array-of-struct shape with
+a per-vertex/per-control-point-arrayed stage-IO dimension is a narrower,
+separate gap, split out as roadmap L94(j).
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` against the rebuilt, assertions-enabled, ccache-backed ICD.
+- `StageLinkTest.AcceptsAConsumerNarrowerThanItsProducer`,
+  `GraphicsPipelineTest.AcceptsFragmentInputNarrowerThanVertexOutput`, and
+  `CanonicalizeStageTest.
+  RewritesSingleMemberBlockArrayOfGenuineMultiMemberNestedStruct` each
+  confirmed to fail without their corresponding fix (stash/rebuild/test/
+  unstash cycle).
+- `ninja -C build2 check-feme`: 3,166 passed; 3 unsupported; 0 failed.
+- `vector_length.*loose_variable*` (162 cases): 162 pass, 0 fail (part 1
+  fully fixed for this shape).
+- `vector_length.*member_of_array_of_structures_in_block*` (162 cases):
+  72 pass, 90 fail, **0 crash** (part 2 fixed the crash; a rendering-
+  correctness gap remains for tesc/geom-per-vertex-array combinations,
+  tracked as L94(j)).
+- Full `vector_length.*` (972 cases): 720 pass, 252 fail, 0 not-supported,
+  **0 crash** (was crashing part-way through a larger sweep before this
+  session; the prior session's sweep of the broader
+  `interface_matching.*` group stopped after 688 cases on this exact
+  crash).
+- The 252 `vector_length.*` failures break down as 90
+  `member_of_array_of_structures_in_block` cases (tesc/geom per-vertex-
+  arrayed-input combinations) and 18 sibling non-`Block`
+  `member_of_array_of_structures` cases (`vert_tesc_out_tese_in_frag`),
+  confirmed via an `out_vec4_in_vec4` case (a same-length pairing, no
+  vector-length mismatch at all) to be unrelated to part 1's scope -- a
+  pre-existing struct/array-modeling gap this family happens to expose,
+  filed as L94(j).
+
+No advertised Vulkan feature or extension changed, so
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
+current.
+
+## Reproduction
+
+```console
+ninja -C build2 check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.interface_matching.vector_length.*" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
