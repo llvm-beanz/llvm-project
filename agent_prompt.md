@@ -52,6 +52,6 @@ just once at the start.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Continue L94 recovery in deterministic order.** Reduce the next
-   completed abnormal pipeline case; keep each root cause and its CTS
-   reproduction separate from this graphics-pipeline-library state fix.
+1. **Continue L94 recovery in order.** Start with the next non-unsupported
+   `pipeline_library.extended_dynamic_state.mesh_shader.two_draws_dynamic`
+   case and reduce only a reproduced abnormal result.
