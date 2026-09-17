@@ -15,7 +15,7 @@ own implementation decisions.
 - Device: `FeMe CPU Vulkan Device`
 - Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`
-- `check-feme`: 3,146 passed, 3 unsupported, 0 failed
+- `check-feme`: 3,147 passed, 3 unsupported, 0 failed
 - Registry used by the inventories: `VK_HEADER_VERSION` 358
 
 The inventory audit performed with this run reports 87 of 150 Vulkan
@@ -60,6 +60,23 @@ derived from per-case log records rather than the process exit code. A case is:
   long poles classified explicitly under roadmap L92.
 - **Unrun** only when no result was produced before the bounded recovery budget
   was exhausted.
+
+## G2(a) reconciled failure baseline
+
+The retained QPAs were reconciled independently for all 54 groups with
+`vk_cts_reconcile.py --write-failures`. The checked-in result is
+[`test/Vulkan/Inputs/vk-cts-expected-failures.txt`](../test/Vulkan/Inputs/vk-cts-expected-failures.txt):
+160,248 completed `Fail` cases in generated case-list order. Its comments
+record the FeMe source revision (`aa5742ca7ed1`), CTS revision, case-list
+size, and payload SHA-256
+(`29fcc2ce64beaf59b02cbaafe424ecc8232645d7cd9175b1368a5d58cdf19127`).
+
+The QPA-complete map contains 3,237,254 results and 7,115 cases without a
+completed QPA record. The latter comprises the reported crashes, timeouts,
+and recovery tail, plus 645 records counted in the earlier log-derived
+headline but lacking a matching completed QPA record. They are intentionally
+absent from the baseline: G2 must never convert a process termination or an
+incomplete result into an expected ordinary failure.
 
 ## Headline
 
@@ -175,6 +192,15 @@ tail. Its older nine-group inventory was re-triaged: `geometry`, `glsl`,
 `image`, `rasterization`, `synchronization`, `synchronization2`, and
 `tessellation` now finish without process termination. The 567 wide-subgroup
 timeouts remain under L92.
+
+The first deterministic
+`pipeline_library.extended_dynamic_state.mesh_shader` recovery case,
+`dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.mesh_shader.after_pipelines.depth_bias_disable`,
+reproduces an immediate `deqp-vk` segmentation fault after starting. Its
+debugger backtrace ends at a null call from CTS's `setDynamicStates`: FeMe
+advertises Vulkan 1.4 but has no device dispatch entry for the promoted
+`vkCmdSetDepthBiasEnable` command. This is tracked as L94(a), separate from
+broader pipeline behavior.
 
 ## Dominant ordinary failures
 
