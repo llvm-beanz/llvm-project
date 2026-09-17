@@ -88479,3 +88479,107 @@ regression check every subsequent session has been skipping.
 
 **Cleanup done:** removed `/tmp/h172/` (qpa logs, IR dumps, decoded
 PNG) before ending the session.
+
+# Session: H170 bucket 2 closed -- helper-function stage-IO fix, plus a costly `export A=x B=$A` environment bug found
+
+**Confirmed working:** `dEQP-VK.glsl.derivate.*.in_function.*` (72
+cases) passes **72/72**, 0 crashes (was 72/72 fail before this
+session). Try it: two SEPARATE `export` lines (see gotcha below), then
+`vulkaninfo --summary | grep deviceName` (confirm `FeMe CPU Vulkan
+Device`), then `deqp-vk -n dEQP-VK.glsl.derivate.dfdx.in_function.vec4_highp`
+-- passes now, was `JIT session error: Symbols not found: [ spirv_var_14 ]`.
+
+**The whole session in one line:** found and fixed the real bug
+(`canonicalizeSPIRVStage` never processed a GLSL helper function's own
+stage-IO loads/stores), but only after discovering my own shell
+commands had been silently testing llvmpipe instead of FeMe for a good
+chunk of this and probably prior sessions.
+
+**The environment bug, since it will bite again if not internalized:**
+```
+export VK_ICD_FILENAMES=/path/to/feme_icd.json VK_DRIVER_FILES=$VK_ICD_FILENAMES
+```
+looks like it sets both to the same file. It does not. Bash expands
+`$VK_ICD_FILENAMES` using its value from *before* this command runs
+(empty in a fresh shell) -- so `VK_DRIVER_FILES` silently falls back to
+whatever it already was in the environment, which here was
+`/usr/share/vulkan/icd.d/lvp_icd.json` (**llvmpipe**, a real, correct
+Vulkan implementation -- so nothing looked obviously wrong, tests just
+"passed" or "couldn't reproduce" for no visible reason). Fix: always
+use two separate `export` lines. Then always confirm with
+`vulkaninfo --summary | grep deviceName` before trusting any test
+result -- not just once at session start, every single time a fresh
+shell might have run this pattern.
+
+**What I actually did, in order:**
+1. Picked up mid-investigation (checkpoint had already root-caused the
+   bug: `canonicalizeSPIRVStage` only walks the entry function's own
+   instructions, never a reachable, not-yet-inlined GLSL helper's).
+2. Re-tried the previous session's own fix attempt (reordering
+   `InlineHelperFunctionsPass` to run before
+   `CanonicalizeStagePass`/`ValidateStagePass`): rebuilt, tested all 72
+   `in_function` cases individually (one process per case, so a crash
+   in one doesn't block the rest). Result: **0 passed, 8 failed image
+   comparison, 64 segfaulted** in JIT-compiled code. Far worse than the
+   original bug. Abandoned this approach for good -- root cause of
+   *that* regression unclear (`verifyModule` clean right after the
+   reorder's own inlining step, so it's some later pass's implicit
+   ordering assumption breaking, not simple IR malformation).
+3. Reverted the reorder. Implemented the safer, surgical fix instead:
+   added `collectReachableHelperFunctions` (a small call-graph walk
+   from the entry, stopping at another entry point or a declaration)
+   to `CanonicalizeStage.cpp`, then extended both the stage-IO
+   discovery loop and the actual rewrite loop (including
+   `ShadowValueMap`, which must be constructed per-function since it
+   places allocas in that function's own entry block) to cover every
+   function in that set, not just the entry.
+4. Rebuilt, re-verified FeMe via `vulkaninfo`, tested all 72 cases
+   individually: 72/72 pass, 0 crashes. Re-ran the original failing
+   case 3x to confirm determinism (not just luck).
+5. Ran the full `dEQP-VK.glsl.derivate.*` sweep (1,674 cases): 1317
+   pass / 51 fail / 306 not-supported -- zero `in_function` failures
+   remain; the 51 are all pre-existing H170-bucket-1/H172 work.
+6. Added `CanonicalizeStageTest.RewritesSPIRVStageIOInNonEntryHelperFunction`
+   (mirrors the existing H101a discard-in-helper test's precedent).
+   `check-feme`: 3143/3146 (3 unsupported), no regressions.
+   `check-hlsl-feme-vk`: unchanged (376 pass, 1 pre-existing XPASS
+   flake), no regressions.
+7. Updated `Roadmap.md` (bucket 2 closed; since all 3 of H170's
+   buckets are now closed, struck through the H170 row itself) and
+   `VulkanCTSReport.md` (new section with root cause, the abandoned
+   reorder attempt, the actual fix, before/after numbers).
+
+**2 commits:** the `CanonicalizeStage.cpp` fix + unit test (one
+commit), then the `Roadmap.md`/`VulkanCTSReport.md` doc updates
+(second commit). No feature/extension inventory changes -- this is a
+compiler-internal fix, no new Vulkan surface.
+
+**Lesson worth repeating:** a combined `export A=x B=$A` is a silent
+trap in bash -- it does not do what it visually appears to do. If any
+future session sees inexplicable "flaky" or "can't reproduce" CTS
+behavior, check the actual shell commands used to set
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` for this exact pattern before
+spending real time on the "bug" itself.
+
+**Still open, not touched this session:**
+1. **`check-hlsl-feme-vk` build directory status** -- flagged in a
+   previous session's own notes as needing a from-scratch setup; this
+   session found it already configured and working (376/260/26/1), so
+   this may already be resolved, but worth a quick double-check next
+   session since the prior note said otherwise.
+2. From further back, still not started: **H167** (loop-body diamond
+   taint tracking, ~half a day, 3 candidate fixes already sketched),
+   **H164** (`InterlockedCompareExchange` JIT segfault, unbounded/a
+   day+), **H168** (masked-scatter gap, needs a reduced repro first,
+   ~an afternoon).
+3. **`array_of_matrices.test` XPASS flake** in `check-hlsl-feme-vk`:
+   low priority, unaddressed across 7+ sessions now.
+
+**Next action, concretely:** pick up H167 (loop-body diamond taint
+tracking) -- it already has 3 candidate fixes sketched in its own
+roadmap row from a prior session, so the design work is mostly done;
+~half a day to implement and verify against CTS.
+
+**Cleanup done:** removed all `/tmp/h170b2_*`, `/tmp/onecase.log`,
+`/tmp/rerun*.log`, `/tmp/crash1.log`, `/tmp/derivate_full.*` scratch
+files before ending the session.
