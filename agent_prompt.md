@@ -53,14 +53,16 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1 day, real payoff, well-scoped:** H173 -- write a real
-   multi-stream GLSL/HLSL geometry shader test (stream > 0,
-   `EmitStreamVertex`/`EndStreamPrimitive`), run it through the full
-   `feme-vk` pipeline to confirm actual per-stream output correctness
-   (not just the conversion-pattern-level lit coverage this session
-   added), then flip `geometryStreams`/
-   `transformFeedbackRasterizationStreamSelect`/
-   `primitivesGeneratedQueryWithNonZeroStreams` to `VK_TRUE` and raise
-   `maxTransformFeedbackStreams` above its current spec-floor `1`.
-   Finish with a `dEQP-VK.transform_feedback.*` CTS re-run to confirm
-   the predicted new pass count.
+1. **~1-2 days, the real remaining work, well-scoped in H173(b)'s own
+   roadmap row:** `Executor.cpp`'s transform-feedback capture only
+   ever captures the single `RasterizationStream`-selected stream --
+   real `geometryStreams` semantics need independent, simultaneous
+   per-stream XFB capture (a shader can emit to several streams in one
+   invocation, each targeting its own bound buffer, regardless of
+   which stream rasterization happens to select). Design and implement
+   that in `Executor.cpp` first -- H173(a)'s `SignatureElement::Stream`
+   reflection is necessary groundwork, not sufficient. Then raise
+   `maxTransformFeedbackStreams` (CTS's own `usedStreamId` needs ≥15),
+   flip the three feature bits in `EntryPoints.cpp`, and run a real
+   `dEQP-VK.transform_feedback.*`/`primitives_generated_query.*` CTS
+   sweep to confirm the predicted new pass count.
