@@ -48128,3 +48128,61 @@ flake, no regressions).
 **Feature/extension inventories.** No change: this is a compiler-
 internal stage-IO canonicalization fix, no new Vulkan
 feature/extension surface touched.
+
+## Session: closing the entire H124 `check-hlsl-feme-vk` family, plus H39/H137/H154 (all follow-ons already fixed)
+
+**`check-hlsl-feme-vk` is now fully clean.** A fresh `llvm-lit -v
+feme-vk` run confirms: 377/663 passed, 260 unsupported, 26
+expected-fail, **0 unexpected results** -- the first fully clean run
+recorded in this document's own history. This is a documentation
+catch-up, not a new fix: every case tracked under the H124 umbrella
+(and its many sub-rows: H124e, H124e(a), H124g, H124n, H137, H150's
+sibling H154) had already been independently fixed by unattributed
+intervening sessions, but the Roadmap's own rows were never updated to
+reflect it. Re-verified every named repro individually via targeted
+`llvm-lit --filter` re-runs (not just the aggregate count) before
+striking each row through -- see `Roadmap.md`'s own H124/H124e/
+H124e(a)/H124g/H124n/H137/H154 rows for the full per-case breakdown.
+Only H150 (`WaveActiveMax.test`'s `NegInfs` sub-case) remains open,
+already fully documented as a host-wave-size-dependent test artifact,
+not a FeMe bug.
+
+## H39: `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive` added to MLIR's SPIR-V dialect
+
+**What was blocking this.** H21e (multi-stream geometry-shader
+transform-feedback capture) had already implemented feme's own full
+ABI/wrapper/host-replay/rasterization-selection support, but could
+never be exercised end-to-end: MLIR's SPIR-V dialect had no
+`OpEmitStreamVertex`/`OpEndStreamPrimitive` (opcodes 220/221) support
+at all, confirmed via a real IR reduction (`"unhandled opcode 220"`).
+
+**Fix.** Added `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive` to
+`SPIRVPrimitiveOps.td`, mirroring the existing `spirv.EmitVertex`/
+`spirv.EndPrimitive` shape plus a scalar-integer `stream` operand,
+gated on the already-defined `GeometryStreams` capability. Following
+the same "mlir-tblgen's generic (de)serialization already handles a
+plain-operand, no-result op" precedent H160 (`spirv.ArrayLength`)
+established, **zero manual (de)serialization code was needed** --
+confirmed via a real `mlir-translate --test-spirv-roundtrip` round
+trip. Added `EmitStreamVertexConversionPattern`/
+`EndStreamPrimitiveConversionPattern` (`SPIRVToLLVMPatterns.cpp`),
+threading the op's own real `stream` operand into the existing
+`feme.stage.stream.emit`/`feme.stage.stream.cut` intrinsics instead of
+a hardcoded `0` -- no runtime changes needed, since
+`feme::cpu::lowerGeometryStreamEmit`/`Cut` (H21e) already supports an
+arbitrary compile-time-constant stream per lane.
+
+**Verification.** `check-feme`: 3143/3146 passed (3 unsupported), 0
+failed. `check-hlsl-feme-vk`: 377/663 passed, 0 unexpected results,
+unchanged (no existing `offload-test-suite` case exercises multi-stream
+geometry shaders yet, so this closes an upstream gap without moving
+any current test's pass/fail status). A targeted, full (no
+caselist-file restriction) `dEQP-VK.transform_feedback.*` re-run (all
+133,719 cases) confirms **0 Failed** (116,313 passed / 17,406 not
+supported/warnings) -- no regression from the new dialect ops, which
+remain unreachable by any current CTS case since `geometryStreams`
+itself stays `VK_FALSE` (see H173, split out for that follow-on).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed this session -- no device-visible feature or extension surface
+changed (the new SPIR-V dialect ops and conversion patterns are
+internal-only until H173's own feature-bit flip lands).
