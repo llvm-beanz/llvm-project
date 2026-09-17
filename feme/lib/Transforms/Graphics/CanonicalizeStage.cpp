@@ -3471,6 +3471,53 @@ bool rewriteSPIRVDiscardAndDerivativeIntrinsics(Function &F) {
   return Changed;
 }
 
+/// (Roadmap H170) Every non-entry, non-declaration function transitively
+/// reachable from \p Entry's own direct/indirect calls: a GLSL/glslang-
+/// sourced helper function `feme::cpu::InlineHelperFunctionsPass` has not
+/// yet inlined away when `canonicalizeSPIRVStage` (below) runs (it runs
+/// *before* that pass -- see this pipeline's own ordering comment in
+/// `feme::cpu::runPipeline`, Pipeline.cpp), which -- unlike an HLSL/DXIL-
+/// sourced entry, always fully inlined by `dxc` well before this pipeline
+/// ever sees it -- can itself directly reference a module-scope `Input`/
+/// `Output`-storage-class global (GLSL has no notion of passing such a
+/// variable "by value" the way `dxc` lowers an HLSL derivative helper's
+/// parameter; it simply names the global directly from inside the
+/// callee). Without this, `canonicalizeSPIRVStage`'s own single-function
+/// walk over \p Entry's instructions never sees such a helper's own direct
+/// load/store at all, leaving it a raw, never-converted access to a
+/// SPIR-V-derived global with no definition anywhere -- surviving,
+/// unconverted, straight through `InlineHelperFunctionsPass`'s later
+/// inlining to reach the CPU JIT as a truly external symbol: `JIT session
+/// error: Symbols not found: [ spirv_varN ]` at `vkCreateGraphicsPipelines`
+/// time (confirmed via `dEQP-VK.glsl.derivate.dfdx.in_function.
+/// vec4_highp`, whose helper function reads its `in` varying directly).
+/// A depth-first walk of direct call sites, stopping at any recognized
+/// entry point (`getShaderStage` -- this milestone assumes a helper is
+/// only ever reachable from one real entry per compiled module, the only
+/// shape GLSL's own module-scope-global-capturing helpers can take in
+/// practice) or a declaration (an external function has no body of its
+/// own to scan), and never revisiting the same callee twice (`Seen`
+/// guards both correctness for a mutually-recursive-looking call graph a
+/// real shader never has and pointless repeat work for a helper called
+/// from more than one site).
+void collectReachableHelperFunctions(Function &Entry,
+                                     SmallVectorImpl<Function *> &Helpers) {
+  SmallPtrSet<Function *, 8> Seen;
+  SmallVector<Function *, 8> WorkList{&Entry};
+  while (!WorkList.empty()) {
+    Function *Cur = WorkList.pop_back_val();
+    for (Instruction &I : instructions(Cur)) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+      if (!Callee || Callee->isDeclaration() || isShaderEntryPoint(*Callee) ||
+          !Seen.insert(Callee).second)
+        continue;
+      Helpers.push_back(Callee);
+      WorkList.push_back(Callee);
+    }
+  }
+}
+
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
 /// `Input`/`Output` interface-variable loads/stores (address space 7/8,
 /// see `isSPIRVStageIOGlobal`) into `feme.stage.input.load`/
@@ -3487,6 +3534,20 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                             SPIRVCanonicalPhase Phase) {
   bool Changed = false;
 
+  // (Roadmap H170) A GLSL/glslang-sourced entry's own helper function(s)
+  // -- unlike an HLSL/DXIL-sourced entry, always fully inlined by `dxc`
+  // well before this pipeline ever sees it -- can themselves directly
+  // reference a module-scope stage-IO global; every function below
+  // (`F` plus any such reachable helper) is walked for discovery and,
+  // further down, for the actual load/store rewrite, so a helper's own
+  // direct access is converted here rather than surviving, raw, into
+  // `feme::cpu::InlineHelperFunctionsPass`'s later inlining (see
+  // `collectReachableHelperFunctions`'s own comment for the full story).
+  SmallVector<Function *, 4> Helpers;
+  collectReachableHelperFunctions(F, Helpers);
+  SmallVector<Function *, 4> Functions{&F};
+  Functions.append(Helpers.begin(), Helpers.end());
+
   // Discover this entry's stage-IO globals in two passes -- inputs, then
   // outputs -- so their assigned `ElementID`s land in the same
   // inputs-before-outputs order `feme::dxil::convertEntrySignature` already
@@ -3495,19 +3556,21 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   SmallVector<GlobalVariable *> InputGlobals, OutputGlobals;
   DenseSet<GlobalVariable *> Seen;
   const DataLayout &DL = F.getParent()->getDataLayout();
-  for (Instruction &I : instructions(F)) {
-    GlobalVariable *GV = nullptr;
-    if (auto *LI = dyn_cast<LoadInst>(&I))
-      GV = getStageIOGlobal(LI->getPointerOperand(), DL);
-    else if (auto *SI = dyn_cast<StoreInst>(&I))
-      GV = getStageIOGlobal(SI->getPointerOperand(), DL);
-    unsigned AddrSpace = 0;
-    if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
-      continue;
-    ParsedSPIRVDecorations D =
-        parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-    SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
-    (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
+  for (Function *Fn : Functions) {
+    for (Instruction &I : instructions(Fn)) {
+      GlobalVariable *GV = nullptr;
+      if (auto *LI = dyn_cast<LoadInst>(&I))
+        GV = getStageIOGlobal(LI->getPointerOperand(), DL);
+      else if (auto *SI = dyn_cast<StoreInst>(&I))
+        GV = getStageIOGlobal(SI->getPointerOperand(), DL);
+      unsigned AddrSpace = 0;
+      if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
+        continue;
+      ParsedSPIRVDecorations D =
+          parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+      SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
+      (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
+    }
   }
 
   DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
@@ -3742,7 +3805,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // imperfect) behavior for it rather than introducing a new crash.
         // A single-member struct whose one member *is* `BuiltIn`-decorated
         // (e.g. a `gl_PerVertex`-shaped block carrying only `gl_Position`,
-        // as `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`
+        // as
+        // `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`
         // exercises) still needs this branch -- only it maps `SystemValue`
         // from a member's own `BuiltIn`, never the plain path -- so the
         // single-member exclusion above only applies when there's no
@@ -4215,7 +4279,6 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // `OutputGlobalSet` lets `resolveStageIOAccess` tell the two apart.
   DenseSet<GlobalVariable *> OutputGlobalSet(OutputGlobals.begin(),
                                              OutputGlobals.end());
-  ShadowValueMap ShadowValues(F, Sig);
 
   // (Roadmap H7w) Every successful rewrite below erases the load/store it
   // replaces, but not the `GetElementPtrInst` that computed its pointer
@@ -4235,205 +4298,219 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       RecursivelyDeleteTriviallyDeadInstructions(I);
   };
 
-  for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
-    IRBuilder<> B(&I);
-    Value *Zero = B.getInt32(0);
-    if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      Value *Ptr = LI->getPointerOperand();
-      std::optional<StageIOAccess> Access =
-          resolveStageIOAccess(B, Ptr, LI->getType(), DL, ElementIDs,
-                               OutputGlobalSet, Stage);
-      if (!Access) {
-        // (Roadmap L30) A mesh entry's bounded payload read -- the
-        // load-side counterpart of the task entry's own payload write
-        // fallback below -- an ordinary load through a (possibly GEP'd)
-        // address-space-14 global resolves no `StageIOAccess` either, for
-        // the same reason (it is raw task-defined memory, not a signature
-        // element). `getStageIOBaseAndOffset` still recovers its constant
-        // byte offset, letting it canonicalize into
-        // `feme.stage.task.payload.load` by that offset directly, rather
-        // than being left an unrewritten raw load referencing a SPIR-V-
-        // derived global name feme's own host runtime never defines (the
-        // JIT-link failure this fixes). (Roadmap L39)
-        // `loadTaskPayloadValue` fully decomposes a struct/array/vector-
-        // typed read (e.g. a `float3`/`float4` payload member) into one
-        // scalar load per leaf first, matching every other `feme.stage.*`
-        // call's scalar-only operand/result convention -- see its own
-        // comment for why. (Roadmap L47) A payload read through one
-        // dynamically-indexed array member (e.g.
-        // `payload.branch[gl_LocalInvocationIndex]`) resolves no constant
-        // offset either -- `getTaskPayloadDynamicOffsetAccess` recognizes
-        // that one additional shape instead, computing a real dynamic
-        // byte-offset `Value*` in its place.
-        if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
-          if (isTaskPayloadGlobal(BaseAndOffset->first)) {
+  // (Roadmap H170) The actual load/store rewrite -- and its own
+  // `ShadowValueMap`/dead-GEP sweep/`PromoteMemToReg` cleanup -- runs once
+  // per function in `Functions` (the entry, plus any reachable helper):
+  // unlike `ElementIDs`/`OutputGlobalSet`/`Sig` (module-/entry-wide state
+  // shared across every function), `ShadowValueMap` places its own shadow
+  // allocas in *its* function's entry block (see its own comment), so a
+  // helper's own `Output` read-back must get one scoped to the helper
+  // itself -- reusing the entry's own `ShadowValueMap` for a helper's
+  // instructions would leave a helper-local load/store referencing an
+  // alloca that lives in a wholly different function, invalid IR
+  // `verifyModule` would reject outright.
+  for (Function *Fn : Functions) {
+    ShadowValueMap ShadowValues(*Fn, Sig);
+
+    for (Instruction &I : llvm::make_early_inc_range(instructions(Fn))) {
+      IRBuilder<> B(&I);
+      Value *Zero = B.getInt32(0);
+      if (auto *LI = dyn_cast<LoadInst>(&I)) {
+        Value *Ptr = LI->getPointerOperand();
+        std::optional<StageIOAccess> Access = resolveStageIOAccess(
+            B, Ptr, LI->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
+        if (!Access) {
+          // (Roadmap L30) A mesh entry's bounded payload read -- the
+          // load-side counterpart of the task entry's own payload write
+          // fallback below -- an ordinary load through a (possibly GEP'd)
+          // address-space-14 global resolves no `StageIOAccess` either, for
+          // the same reason (it is raw task-defined memory, not a signature
+          // element). `getStageIOBaseAndOffset` still recovers its constant
+          // byte offset, letting it canonicalize into
+          // `feme.stage.task.payload.load` by that offset directly, rather
+          // than being left an unrewritten raw load referencing a SPIR-V-
+          // derived global name feme's own host runtime never defines (the
+          // JIT-link failure this fixes). (Roadmap L39)
+          // `loadTaskPayloadValue` fully decomposes a struct/array/vector-
+          // typed read (e.g. a `float3`/`float4` payload member) into one
+          // scalar load per leaf first, matching every other `feme.stage.*`
+          // call's scalar-only operand/result convention -- see its own
+          // comment for why. (Roadmap L47) A payload read through one
+          // dynamically-indexed array member (e.g.
+          // `payload.branch[gl_LocalInvocationIndex]`) resolves no constant
+          // offset either -- `getTaskPayloadDynamicOffsetAccess` recognizes
+          // that one additional shape instead, computing a real dynamic
+          // byte-offset `Value*` in its place.
+          if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
+            if (isTaskPayloadGlobal(BaseAndOffset->first)) {
+              Value *New = loadTaskPayloadValue(
+                  B, LI->getType(), B.getInt32(BaseAndOffset->second), DL);
+              LI->replaceAllUsesWith(New);
+              LI->eraseFromParent();
+              EraseIfNowDead(Ptr);
+              Changed = true;
+            }
+          } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
             Value *New =
-                loadTaskPayloadValue(B, LI->getType(),
-                                     B.getInt32(BaseAndOffset->second), DL);
+                loadTaskPayloadValue(B, LI->getType(), Dyn->second, DL);
             LI->replaceAllUsesWith(New);
             LI->eraseFromParent();
             EraseIfNowDead(Ptr);
             Changed = true;
           }
-        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
-          Value *New = loadTaskPayloadValue(B, LI->getType(), Dyn->second, DL);
-          LI->replaceAllUsesWith(New);
-          LI->eraseFromParent();
-          EraseIfNowDead(Ptr);
-          Changed = true;
+          continue;
         }
-        continue;
-      }
-      // A scalar interface variable is one `feme.stage.input.load`; a
-      // vector/matrix/single-member-struct-wrapped one is decomposed one
-      // scalar at a time and rebuilt with `insertelement`/`insertvalue`,
-      // matching both the `feme.stage.*` family's own per-(row, component)
-      // operands and the scalar shape DXIL's `loadInput` always produces --
-      // and, in turn, what `feme::cpu::SIMDizePass` widens (a whole
-      // divergent aggregate/vector value has no widened form there). A
-      // builtin interface block routes each of its own members through
-      // its own `ElementID` first (roadmap H2d). See
-      // `loadStageIOBlockValue`/`loadStageIOValue`/`getStageIORowShape`'s
-      // shared type recursion. An `Output`-direction load (roadmap H2e) is
-      // a read-back rather than a genuine input, so it is routed through
-      // `ShadowValues` instead.
-      Value *Row = Access->Row ? Access->Row : Zero;
-      Value *Component = Access->Component ? Access->Component : Zero;
-      // (Roadmap H5b) A dynamically-indexed `gl_in[i]`-shaped access
-      // threads its own vertex index through as the `Vertex` operand in
-      // place of the ordinary constant `Zero` every other stage-IO access
-      // uses.
-      Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
-      Value *New = loadStageIOBlockValue(
-          B, LI->getType(), Access->ElementIDs, Row, Component, Vertex,
-          LI->getName(), Access->IsOutput ? &ShadowValues : nullptr);
-      LI->replaceAllUsesWith(New);
-      LI->eraseFromParent();
-      EraseIfNowDead(Ptr);
-      Changed = true;
-    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      Value *Ptr = SI->getPointerOperand();
-      Value *Val = SI->getValueOperand();
-      std::optional<StageIOAccess> Access = resolveStageIOAccess(
-          B, Ptr, Val->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
-      if (!Access) {
-        // (Roadmap H6i) A task entry's bounded payload write -- an
-        // ordinary store through a (possibly GEP'd) address-space-14
-        // global, `TaskPayloadGlobalVariablePattern`'s own import shape
-        // (roadmap H6h) -- resolves no `StageIOAccess` at all (it is raw
-        // task-defined memory, not a signature element), so it falls
-        // through to here instead. `getStageIOBaseAndOffset` (already
-        // generic over any address space) still recovers its constant
-        // byte offset, letting it canonicalize into
-        // `feme.stage.task.payload.store` by that offset directly, rather
-        // than being left an unrewritten raw store the way a genuinely
-        // unresolvable stage-IO access is. (Roadmap L39)
-        // `storeTaskPayloadValue` fully decomposes a struct/array/vector-
-        // typed write (e.g. a `float3`/`float4` payload member) into one
-        // scalar store per leaf first, matching every other
-        // `feme.stage.*` call's scalar-only operand/result convention --
-        // see its own comment for why. (Roadmap L47) A payload write
-        // through one dynamically-indexed array member (e.g.
-        // `payload.branch[gl_LocalInvocationIndex] = ...`) resolves no
-        // constant offset either -- `getTaskPayloadDynamicOffsetAccess`
-        // recognizes that one additional shape instead, computing a real
-        // dynamic byte-offset `Value*` in its place. This is the exact
-        // shape that used to leave the raw `addrspace(14)` store on the
-        // imported global entirely unconverted, surviving all the way to
-        // JIT link time as an unresolved external symbol reference.
-        if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
-          if (isTaskPayloadGlobal(BaseAndOffset->first)) {
-            storeTaskPayloadValue(B, Val, Val->getType(),
-                                  B.getInt32(BaseAndOffset->second), DL);
+        // A scalar interface variable is one `feme.stage.input.load`; a
+        // vector/matrix/single-member-struct-wrapped one is decomposed one
+        // scalar at a time and rebuilt with `insertelement`/`insertvalue`,
+        // matching both the `feme.stage.*` family's own per-(row, component)
+        // operands and the scalar shape DXIL's `loadInput` always produces --
+        // and, in turn, what `feme::cpu::SIMDizePass` widens (a whole
+        // divergent aggregate/vector value has no widened form there). A
+        // builtin interface block routes each of its own members through
+        // its own `ElementID` first (roadmap H2d). See
+        // `loadStageIOBlockValue`/`loadStageIOValue`/`getStageIORowShape`'s
+        // shared type recursion. An `Output`-direction load (roadmap H2e) is
+        // a read-back rather than a genuine input, so it is routed through
+        // `ShadowValues` instead.
+        Value *Row = Access->Row ? Access->Row : Zero;
+        Value *Component = Access->Component ? Access->Component : Zero;
+        // (Roadmap H5b) A dynamically-indexed `gl_in[i]`-shaped access
+        // threads its own vertex index through as the `Vertex` operand in
+        // place of the ordinary constant `Zero` every other stage-IO access
+        // uses.
+        Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
+        Value *New = loadStageIOBlockValue(
+            B, LI->getType(), Access->ElementIDs, Row, Component, Vertex,
+            LI->getName(), Access->IsOutput ? &ShadowValues : nullptr);
+        LI->replaceAllUsesWith(New);
+        LI->eraseFromParent();
+        EraseIfNowDead(Ptr);
+        Changed = true;
+      } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+        Value *Ptr = SI->getPointerOperand();
+        Value *Val = SI->getValueOperand();
+        std::optional<StageIOAccess> Access = resolveStageIOAccess(
+            B, Ptr, Val->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
+        if (!Access) {
+          // (Roadmap H6i) A task entry's bounded payload write -- an
+          // ordinary store through a (possibly GEP'd) address-space-14
+          // global, `TaskPayloadGlobalVariablePattern`'s own import shape
+          // (roadmap H6h) -- resolves no `StageIOAccess` at all (it is raw
+          // task-defined memory, not a signature element), so it falls
+          // through to here instead. `getStageIOBaseAndOffset` (already
+          // generic over any address space) still recovers its constant
+          // byte offset, letting it canonicalize into
+          // `feme.stage.task.payload.store` by that offset directly, rather
+          // than being left an unrewritten raw store the way a genuinely
+          // unresolvable stage-IO access is. (Roadmap L39)
+          // `storeTaskPayloadValue` fully decomposes a struct/array/vector-
+          // typed write (e.g. a `float3`/`float4` payload member) into one
+          // scalar store per leaf first, matching every other
+          // `feme.stage.*` call's scalar-only operand/result convention --
+          // see its own comment for why. (Roadmap L47) A payload write
+          // through one dynamically-indexed array member (e.g.
+          // `payload.branch[gl_LocalInvocationIndex] = ...`) resolves no
+          // constant offset either -- `getTaskPayloadDynamicOffsetAccess`
+          // recognizes that one additional shape instead, computing a real
+          // dynamic byte-offset `Value*` in its place. This is the exact
+          // shape that used to leave the raw `addrspace(14)` store on the
+          // imported global entirely unconverted, surviving all the way to
+          // JIT link time as an unresolved external symbol reference.
+          if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
+            if (isTaskPayloadGlobal(BaseAndOffset->first)) {
+              storeTaskPayloadValue(B, Val, Val->getType(),
+                                    B.getInt32(BaseAndOffset->second), DL);
+              SI->eraseFromParent();
+              EraseIfNowDead(Ptr);
+              Changed = true;
+            }
+          } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
+            storeTaskPayloadValue(B, Val, Val->getType(), Dyn->second, DL);
             SI->eraseFromParent();
             EraseIfNowDead(Ptr);
             Changed = true;
           }
-        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
-          storeTaskPayloadValue(B, Val, Val->getType(), Dyn->second, DL);
-          SI->eraseFromParent();
-          EraseIfNowDead(Ptr);
-          Changed = true;
+          continue;
         }
-        continue;
+        Value *Row = Access->Row ? Access->Row : Zero;
+        Value *Component = Access->Component ? Access->Component : Zero;
+        // (Roadmap L24) A `SignatureSystemValue::Position` output (`gl_
+        // Position`/`SV_POSITION`) is stored as-is here, with no compensating
+        // Y negation: `feme::graphics::Executor::executeDraws`'s viewport
+        // transform (`projectVertex`) already implements the Vulkan-spec
+        // NDC-to-window-space mapping directly (roadmap L24's own fix), so
+        // every producer's raw clip-space Y reaches it unmodified. This pass
+        // used to negate a single-element (but, inconsistently, not a
+        // whole-`gl_PerVertex`-block) Position store here to compensate for
+        // `projectVertex`'s own extra, erroneous flip -- a real `offloader`
+        // re-run of `Graphics/QuadDomainTessellation.test` (a genuine
+        // per-element domain-stage `SV_POSITION` store, unlike most simple
+        // vertex shaders' whole-`gl_PerVertex`-block `return o;` idiom, which
+        // this negation never actually reached) confirmed that compensating
+        // negation is itself now the bug, doubly wrong once `projectVertex`'s
+        // own flip is corrected.
+        // Every store this pass resolves is to an `Output`-direction global
+        // (an `Input` one is never written to in SPIR-V); also tracking it
+        // through `ShadowValues` (roadmap H2e) lets a later read-back of the
+        // same element resolve to it.
+        // (Roadmap H6b) A dynamically-indexed mesh-entry per-vertex/
+        // per-primitive `Output`-array store (`getDynamicVertexIndexedAccess`'s
+        // own store-side counterpart to H5b's `Input`-side one) threads its
+        // own per-vertex/per-primitive index through as the `Vertex` operand
+        // the same way the load path above already does, in place of the
+        // ordinary constant `Zero` every other stage-IO store still uses.
+        Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
+        storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
+                               Component, Vertex, &ShadowValues);
+        SI->eraseFromParent();
+        EraseIfNowDead(Ptr);
+        Changed = true;
       }
-      Value *Row = Access->Row ? Access->Row : Zero;
-      Value *Component = Access->Component ? Access->Component : Zero;
-      // (Roadmap L24) A `SignatureSystemValue::Position` output (`gl_
-      // Position`/`SV_POSITION`) is stored as-is here, with no compensating
-      // Y negation: `feme::graphics::Executor::executeDraws`'s viewport
-      // transform (`projectVertex`) already implements the Vulkan-spec
-      // NDC-to-window-space mapping directly (roadmap L24's own fix), so
-      // every producer's raw clip-space Y reaches it unmodified. This pass
-      // used to negate a single-element (but, inconsistently, not a
-      // whole-`gl_PerVertex`-block) Position store here to compensate for
-      // `projectVertex`'s own extra, erroneous flip -- a real `offloader`
-      // re-run of `Graphics/QuadDomainTessellation.test` (a genuine
-      // per-element domain-stage `SV_POSITION` store, unlike most simple
-      // vertex shaders' whole-`gl_PerVertex`-block `return o;` idiom, which
-      // this negation never actually reached) confirmed that compensating
-      // negation is itself now the bug, doubly wrong once `projectVertex`'s
-      // own flip is corrected.
-      // Every store this pass resolves is to an `Output`-direction global
-      // (an `Input` one is never written to in SPIR-V); also tracking it
-      // through `ShadowValues` (roadmap H2e) lets a later read-back of the
-      // same element resolve to it.
-      // (Roadmap H6b) A dynamically-indexed mesh-entry per-vertex/
-      // per-primitive `Output`-array store (`getDynamicVertexIndexedAccess`'s
-      // own store-side counterpart to H5b's `Input`-side one) threads its
-      // own per-vertex/per-primitive index through as the `Vertex` operand
-      // the same way the load path above already does, in place of the
-      // ordinary constant `Zero` every other stage-IO store still uses.
-      Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
-      storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
-                             Component, Vertex, &ShadowValues);
-      SI->eraseFromParent();
-      EraseIfNowDead(Ptr);
+    }
+
+    // (Roadmap H115/H117/H118) A `GetElementPtrInst` addressing a stage-IO
+    // global that never had a load/store consumer at all -- e.g. a real
+    // compiled tessellation-control shader's own dead per-invocation address
+    // computation into a `Block` member on some unreachable-in-practice (but
+    // not dead-code-eliminated by the SPIR-V producer) control-flow path --
+    // is never visited by the loop above (which only ever calls
+    // `EraseIfNowDead` on a load/store's own pointer operand immediately
+    // after successfully rewriting that exact load/store), so it survives
+    // as a genuinely unused instruction that still references the same
+    // never-actually-defined SPIR-V-derived global at JIT-link time,
+    // surfacing as a raw `"Symbols not found: [ spirv_varN ]"` link failure
+    // with no compile-time diagnostic at all -- exactly the shape a real
+    // `dEQP-VK.tessellation.user_defined_io.per_patch_block` (and sibling
+    // `per_patch_block_array`/`per_vertex_block`) case's own array-of-struct
+    // `Block` member compiled into. Sweep once more for any such GEP left
+    // with no uses at all once every load/store above has been rewritten.
+    for (Instruction &I : llvm::make_early_inc_range(instructions(Fn))) {
+      auto *GEP = dyn_cast<GetElementPtrInst>(&I);
+      if (!GEP || !GEP->use_empty())
+        continue;
+      unsigned AddrSpace = 0;
+      if (isSPIRVStageIOGlobal(
+              dyn_cast<GlobalVariable>(GEP->getPointerOperand()), AddrSpace)) {
+        GEP->eraseFromParent();
+        Changed = true;
+      }
+    }
+
+    // Every read-back load above still points at its own leaf's shadow
+    // alloca; `PromoteMemToReg` resolves each to the dominance-correct
+    // reaching store now that every instruction has been rewritten,
+    // inserting a `phi` for any real control-flow join the source's own
+    // read-modify-write straddles (e.g. `gl_Position.y += 1.0f` guarded by an
+    // `if`) -- exactly the SSA construction a compiler's own `mem2reg` does
+    // for a local variable, which a linear "last stored value" scan could
+    // not do correctly in general.
+    if (!ShadowValues.empty()) {
+      DominatorTree DT(*Fn);
+      SmallVector<AllocaInst *, 8> Allocas = ShadowValues.takeAllocas();
+      PromoteMemToReg(Allocas, DT);
       Changed = true;
     }
-  }
-
-  // (Roadmap H115/H117/H118) A `GetElementPtrInst` addressing a stage-IO
-  // global that never had a load/store consumer at all -- e.g. a real
-  // compiled tessellation-control shader's own dead per-invocation address
-  // computation into a `Block` member on some unreachable-in-practice (but
-  // not dead-code-eliminated by the SPIR-V producer) control-flow path --
-  // is never visited by the loop above (which only ever calls
-  // `EraseIfNowDead` on a load/store's own pointer operand immediately
-  // after successfully rewriting that exact load/store), so it survives
-  // as a genuinely unused instruction that still references the same
-  // never-actually-defined SPIR-V-derived global at JIT-link time,
-  // surfacing as a raw `"Symbols not found: [ spirv_varN ]"` link failure
-  // with no compile-time diagnostic at all -- exactly the shape a real
-  // `dEQP-VK.tessellation.user_defined_io.per_patch_block` (and sibling
-  // `per_patch_block_array`/`per_vertex_block`) case's own array-of-struct
-  // `Block` member compiled into. Sweep once more for any such GEP left
-  // with no uses at all once every load/store above has been rewritten.
-  for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
-    auto *GEP = dyn_cast<GetElementPtrInst>(&I);
-    if (!GEP || !GEP->use_empty())
-      continue;
-    unsigned AddrSpace = 0;
-    if (isSPIRVStageIOGlobal(
-            dyn_cast<GlobalVariable>(GEP->getPointerOperand()), AddrSpace)) {
-      GEP->eraseFromParent();
-      Changed = true;
-    }
-  }
-
-  // Every read-back load above still points at its own leaf's shadow
-  // alloca; `PromoteMemToReg` resolves each to the dominance-correct
-  // reaching store now that every instruction has been rewritten,
-  // inserting a `phi` for any real control-flow join the source's own
-  // read-modify-write straddles (e.g. `gl_Position.y += 1.0f` guarded by an
-  // `if`) -- exactly the SSA construction a compiler's own `mem2reg` does
-  // for a local variable, which a linear "last stored value" scan could
-  // not do correctly in general.
-  if (!ShadowValues.empty()) {
-    DominatorTree DT(F);
-    SmallVector<AllocaInst *, 8> Allocas = ShadowValues.takeAllocas();
-    PromoteMemToReg(Allocas, DT);
-    Changed = true;
   }
 
   Changed |= rewriteSPIRVDiscardAndDerivativeIntrinsics(F);

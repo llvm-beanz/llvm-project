@@ -208,6 +208,66 @@ TEST(CanonicalizeStageTest, RewritesSPIRVDiscardInNonEntryHelperFunction) {
   EXPECT_TRUE(SawDiscard);
 }
 
+/// (roadmap H170) A GLSL/glslang-sourced helper function -- reached from a
+/// fragment entry point via an ordinary, not-yet-inlined `call`, the same
+/// shape `RewritesSPIRVDiscardInNonEntryHelperFunction` above exercises for
+/// `llvm.spv.discard` -- can itself directly load a module-scope `Input`
+/// global (GLSL has no notion of passing such a variable "by value" the
+/// way `dxc` always lowers an HLSL derivative helper's own parameter, so a
+/// glslang-compiled helper simply names the global directly). Before this
+/// fix, `canonicalizeSPIRVStage`'s discovery/rewrite walk only ever
+/// covered its own `F` argument (the entry point), never a reachable
+/// helper's instructions, so `@helper`'s own raw `load ptr addrspace(7)
+/// @in_var` survived unconverted straight through
+/// `feme::cpu::InlineHelperFunctionsPass`'s later inlining into `@main`,
+/// reaching the CPU JIT as a genuinely external, never-defined symbol --
+/// `JIT session error: Symbols not found: [ spirv_varN ]` at
+/// `vkCreateGraphicsPipelines` time. This is exactly the shape every
+/// `dEQP-VK.glsl.derivate.*.in_function.*` case's own helper-function-
+/// wrapped `dFdx`/`dFdy`/`fwidth` call takes.
+TEST(CanonicalizeStageTest, RewritesSPIRVStageIOInNonEntryHelperFunction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_var = external addrspace(7) constant float, !spirv.Decorations !0
+    @out_var = external addrspace(8) global float, !spirv.Decorations !1
+    define float @helper() {
+      %v = load float, ptr addrspace(7) @in_var
+      ret float %v
+    }
+    define void @main() #0 {
+      %r = call float @helper()
+      store float %r, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 30, i32 2}
+    !3 = !{i32 30, i32 5}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *Helper = M->getFunction("helper");
+  ASSERT_TRUE(Helper);
+  bool SawLoad = false;
+  for (Instruction &I : instructions(Helper)) {
+    EXPECT_FALSE(isa<LoadInst>(&I) &&
+                 cast<LoadInst>(&I)->getPointerOperand() ==
+                     M->getNamedValue("in_var"));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (CI && isStageOpCall(*CI, &Kind) && Kind == StageOpKind::InputLoad)
+      SawLoad = true;
+  }
+  EXPECT_TRUE(SawLoad);
+  // The entry's own `feme.signature` metadata (built from the helper's
+  // discovered stage-IO global, since `main` itself never directly loads
+  // or stores one) is still attached, matching the ordinary same-function
+  // case's own behavior.
+  Function *Main = M->getFunction("main");
+  EXPECT_TRUE(Main->getMetadata("feme.signature"));
+}
+
 /// A non-builtin SPIR-V `Input`/`Output` global's load/store rewrites to
 /// `feme.stage.input.load`/`output.store`, and an `EntrySignature` is
 /// attached recording its `Location`.
