@@ -1939,12 +1939,17 @@ TEST_F(PhysicalDeviceProperties2Test,
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(GplFeatures.graphicsPipelineLibrary, VK_TRUE);
 
-  // `graphicsPipelineLibraryFastLinking`/
-  // `graphicsPipelineLibraryIndependentInterpolationDecoration` stay
-  // false: this CPU-emulated ICD's own "link" is a full
-  // `compileGraphicsPipeline` recompile of the merged state, not a
-  // genuinely cheaper path, and no interpolation-decoration-independence
-  // work landed alongside H29c's own state merge.
+  // `graphicsPipelineLibraryFastLinking` stays false: this CPU-emulated
+  // ICD's own "link" is a full `compileGraphicsPipeline` recompile of the
+  // merged state, not a genuinely cheaper path.
+  // (Roadmap L97) `graphicsPipelineLibraryIndependentInterpolationDecoration`
+  // is VK_TRUE: since that same full-recompile "link" always sees every
+  // linked stage's own SPIR-V module together before computing any
+  // `SignatureElement`'s interpolation mode, a mismatched Flat/
+  // NoPerspective decoration between independently-compiled
+  // pipeline-library stages behaves identically to the same mismatch in
+  // a monolithic pipeline -- there is no code path here that could regress
+  // by depending on which construction type produced the pipeline.
   VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT GplProps{};
   GplProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
 
@@ -1954,7 +1959,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
   EXPECT_EQ(GplProps.graphicsPipelineLibraryFastLinking, VK_FALSE);
   EXPECT_EQ(GplProps.graphicsPipelineLibraryIndependentInterpolationDecoration,
-            VK_FALSE);
+            VK_TRUE);
 
   bool FoundGpl = false;
   bool FoundPipelineLibrary = false;

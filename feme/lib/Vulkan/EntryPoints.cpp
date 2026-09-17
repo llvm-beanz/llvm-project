@@ -1250,16 +1250,33 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // the merged state (`synthesizeLinkedGraphicsPipelineCreateInfo` in
     // GraphicsPipeline.cpp), not a genuinely cheaper path, so promising a
     // fast-link guarantee would be false.
-    // `graphicsPipelineLibraryIndependentInterpolationDecoration` stays
-    // false too: nothing about interpolation-decoration independence
-    // across linked shader stages was implemented alongside H29c's own
-    // state merge.
+    // (roadmap L97) `graphicsPipelineLibraryIndependentInterpolationDecoration`
+    // is now VK_TRUE: this property promises that mismatched Flat/
+    // NoPerspective interpolation decorations between independently-
+    // compiled pipeline-library stages (e.g. a vertex-output `Location`
+    // with no decoration linked against a fragment-input at the same
+    // `Location` decorated `flat`) still behave exactly as the
+    // corresponding monolithic pipeline would. Since H29c's own "link" is
+    // a full `compileGraphicsPipeline` recompile of the merged state
+    // (`synthesizeLinkedGraphicsPipelineCreateInfo`), not a genuinely
+    // separate per-library-stage compilation, every SPIR-V module's own
+    // interpolation decorations are always visible together at the point
+    // `CanonicalizeStage.cpp` computes each `SignatureElement`'s
+    // `Interpolation` mode -- there is no code path in this ICD that
+    // treats a pipeline-library-constructed pipeline any differently from
+    // a monolithic one here. Confirmed via `dEQP-VK.pipeline.
+    // {pipeline_library,monolithic}.interface_matching.decoration_
+    // mismatch.out_flat_in_none_loose_variable_vert_out_frag_in`, which
+    // rendered identically (and passed) under both construction types
+    // even before this property was set true (the monolithic variant was
+    // never gated on it), and by the newly-supported `decoration_
+    // mismatch.*` pipeline-library family now passing in full.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT: {
       auto *GplProps = reinterpret_cast<
           VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *>(Base);
       GplProps->graphicsPipelineLibraryFastLinking = VK_FALSE;
       GplProps->graphicsPipelineLibraryIndependentInterpolationDecoration =
-          VK_FALSE;
+          VK_TRUE;
       break;
     }
     // (roadmap L69) `VK_KHR_compute_shader_derivatives`'s own properties
