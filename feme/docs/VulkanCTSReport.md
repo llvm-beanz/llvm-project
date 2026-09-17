@@ -47624,3 +47624,101 @@ shaders call GLSL's `.length()` on an SSBO runtime array (e.g.
 **Feature/extension inventories.** No `Vulkan14FeatureInventory`/
 `VulkanExtensionInventory` change: `OpArrayLength` is core SPIR-V
 functionality, not gated by any optional feature or extension.
+
+## H124d: SPIR-V derivative-instruction support added (`OpDPdx`/`OpDPdy`/`OpFwidth`, opcodes 207-215)
+
+**Device check.** `vulkaninfo --summary | grep deviceName` confirmed
+`FeMe CPU Vulkan Device` before starting.
+
+**Symptom.** `Graphics/{fwidth,ddx_fine,ddy_fine,DdxCoarse,DdyCoarse}.test`
+all failed at shader-module creation with `error: unhandled opcode <N>`,
+where `<N>` is one of the SPIR-V "Derivative Instructions" opcodes
+(207=`OpDPdx`, 208=`OpDPdy`, 209=`OpFwidth`, 210=`OpDPdxFine`,
+211=`OpDPdyFine`, 212=`OpFwidthFine`, 213=`OpDPdxCoarse`,
+214=`OpDPdyCoarse`, 215=`OpFwidthCoarse`), which DXC emits for any
+`ddx`/`ddy`/`ddx_fine`/`ddy_fine`/`ddx_coarse`/`ddy_coarse`/`fwidth` call
+in a pixel shader.
+
+**Root cause.** Upstream MLIR's SPIR-V dialect had no op definitions for
+any of these 9 opcodes at all -- a genuine upstream gap, not a FeMe-side
+import/lowering bug, and (unlike H160's `OpArrayLength`) an entire
+instruction class rather than a single opcode.
+
+**Fix.** Same three-layer shape as H160, but this time all 6 of the
+non-`Fwidth`-variant `llvm.spv.ddx`/`.ddy`/etc. LLVM intrinsics already
+existed upstream (`IntrinsicsSPIRV.td`) and were already fully consumed
+downstream by `feme::graphics::CanonicalizeStagePass`, so the fix was
+narrower than the original "budget a day+, needs new CPU-backend
+quad-lane semantics" estimate implied:
+
+1. **Upstream MLIR** (new `mlir/include/mlir/Dialect/SPIRV/IR/
+   SPIRVDerivativeOps.td`): added all 9 ops (`spirv.DPdx`/`DPdy`/
+   `Fwidth`/`DPdxFine`/`DPdyFine`/`FwidthFine`/`DPdxCoarse`/`DPdyCoarse`/
+   `FwidthCoarse`) via a shared `SPIRV_DerivativeOp` base class (a
+   scalar-or-vector-of-float unary op with
+   `AllTypesMatch<["p", "result"]>`, mirroring `SPIRV_ArithmeticUnaryOp`'s
+   shape), plus the missing opcode enum cases in the clean 205-218 gap.
+   mlir-tblgen's existing (de)serialization generator handled the new
+   ops fully generically -- confirmed via a real `dxc`-compiled SPIR-V
+   binary round-tripped through `mlir-translate --deserialize-spirv` and
+   `feme-translate --import-spirv`, with **zero** manual
+   `Serializer.cpp`/`Deserializer.cpp` code needed, exactly like H160's
+   own precedent. New MLIR lit tests (`mlir/test/Dialect/SPIRV/IR/
+   derivative-ops.mlir`, `mlir/test/Target/SPIRV/derivative-ops.mlir`);
+   full `mlir/test/{Dialect,Target}/SPIRV` suites (140 tests) confirmed
+   passing with no regressions.
+2. **SPIR-V-to-LLVM conversion** (`feme/lib/Conversion/SPIRVToLLVM/
+   SPIRVToLLVMPatterns.cpp`): `DerivativeConversionPattern` maps each of
+   the 6 plain ops directly onto its already-existing matching
+   `llvm.spv.ddx`/`.ddy`/`.ddx.fine`/`.ddy.fine`/`.ddx.coarse`/
+   `.ddy.coarse` intrinsic. `FwidthConversionPattern` handles the 3
+   `Fwidth*` ops by expanding directly to `fabs(ddx) + fabs(ddy)` using
+   the matching fine/coarse intrinsic pair, per `FeMeGraphicsDesign.md`'s
+   own stated "fwidth is not a canonical stage operation" intent --
+   needing no new LLVM intrinsic and no `CanonicalizeStage.cpp` changes
+   at all, since the sub-expressions route through the same,
+   already-consumed `ddx`/`ddy` intrinsics. `spirv.Fwidth` itself
+   (implicit precision) uses the *fine* pair, matching
+   `CanonicalizeStage.cpp`'s own existing convention of never coarsening
+   precision the source did not ask for. New lit test
+   (`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-derivative.mlir`);
+   full `feme/test/Conversion/SPIRVToLLVM` suite (101 tests) confirmed
+   passing with no regressions.
+3. **CPU-backend fragment-shader derivative lowering**: already existed
+   in full via the pre-existing `feme.stage.derivative.{x,y}.{fine,
+   coarse}` canonical-op family and `CanonicalizeStagePass`'s own
+   consumer of the `llvm.spv.ddx`/etc. intrinsics -- **no new CPU-backend
+   codegen was needed at all**. This is the single biggest scope
+   reduction from the original estimate: the "quad/2x2-lane-grouping"
+   concern was already solved by prior work, and this milestone only
+   needed to supply the missing upstream import/legalization plumbing
+   feeding into it.
+
+**`check-hlsl-feme-vk`.** All 5 target tests
+(`Graphics/{fwidth,ddx_fine,ddy_fine,DdxCoarse,DdyCoarse}.test`) confirmed
+passing individually via `llvm-lit -v`. Full run: 376 passed, 26
+expectedly failed (263 unsupported), 1 pre-existing unrelated XPASS
+(`Feature/PushConstant/array_of_matrices.test`, already documented in
+H160's own edition) -- no regressions. `check-feme`: 3128 passed, 3
+unsupported, 0 failed -- no regressions.
+
+**Native Vulkan CTS check.** `dEQP-VK.glsl.derivate.*` (1,674 cases, the
+first-ever run of this group against FeMe -- it could not build at all
+before this fix): **285 passed / 1083 failed / 306 not supported**.
+Zero cases fail with an "unhandled opcode" diagnostic, confirming the
+derivative-opcode import/lowering gap itself is fully closed. Of the
+1,083 failures: 999 fail with `feme-cpu-simdize`'s own pre-existing
+"divergent vector value ... component decomposition is not yet
+supported" diagnostic (roadmap milestone 7, unrelated to derivatives --
+this test group's own vector-typed subcases, e.g. `vec2_highp`/
+`vec3_mediump`, simply exercise that gap, while scalar-`float` subcases
+of the same shader pattern pass, e.g.
+`dEQP-VK.glsl.derivate.fwidthfine.uniform_switch.float_highp`). The
+remaining 84 failures are 3 further pre-existing, unrelated gaps, newly
+surfaced and not yet triaged -- filed as H170.
+
+**Feature/extension inventories.** No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: the `DerivativeControl` capability is
+core SPIR-V functionality (already present in the dialect's own
+capability enum before this session), not gated by any optional
+Vulkan feature or extension.
