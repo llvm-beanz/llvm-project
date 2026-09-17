@@ -89049,3 +89049,44 @@ CTS run. The payload is generated in case-list order and has SHA-256
 1. **Implement L94(a).** Add `vkCmdSetDepthBiasEnable` to generated device
    dispatch, command recording, and per-draw dynamic state; cover it with a
    Vulkan unit test and rerun the exact reduced CTS case.
+
+# L94(a) promoted dynamic depth-bias-enable dispatch
+
+## Outcome
+
+L94(a) is complete. `vkCmdSetDepthBiasEnable` now resolves through the
+generated device dispatch table, records into a command buffer, replays into
+the dynamic graphics snapshot, and controls the existing
+`RasterState::DepthBiasEnable` path per draw.
+
+## Decisions and evidence
+
+1. **Fix the null dispatch, not broad pipeline behavior.** The first
+   deterministic mesh recovery case crashed in CTS `setDynamicStates` through
+   a null function pointer. The missing core Vulkan 1.3 command was the
+   smallest proven cause.
+2. **Keep enable separate from parameters.** `VK_DYNAMIC_STATE_DEPTH_BIAS`
+   already controls the three bias parameters. The new
+   `VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE` bit independently controls whether
+   depth bias applies, matching Vulkan's separate commands and existing
+   static raster state.
+3. **Test each boundary.** Focused unit tests cover proc-address lookup,
+   command recording, and per-draw pipeline resolution. The full
+   `check-feme` suite also rebuilds all translation, runtime, and Vulkan
+   dependencies with assertions enabled and ccache configured.
+
+## Validation
+
+- The focused Vulkan unit tests passed.
+- `ninja -C build2 check-feme`: 3,150 passed; 3 unsupported.
+- The explicit build-tree ICD reports `FeMe CPU Vulkan Device`.
+- The exact CTS recovery case no longer crashes. It completes with an
+  ordinary image mismatch, establishing that the remaining issue is pipeline
+  correctness rather than a missing entrypoint.
+
+## Suggested next step
+
+1. **Reduce the image mismatch.** Capture the exact output/expected images
+   from `pipeline_library.extended_dynamic_state.mesh_shader.after_pipelines.depth_bias_disable`
+   and isolate whether the remaining difference is mesh stage output, depth
+   bias application, or graphics-pipeline-library state merge.
