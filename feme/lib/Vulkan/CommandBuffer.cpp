@@ -1301,9 +1301,8 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   std::vector<uint8_t> UniformTexel;
   if (Kind == AttachmentKind::Color) {
     UniformTexel.resize(*ElemSize);
-    std::array<double, 4> Color{
-        View.ClearValue.color.float32[0], View.ClearValue.color.float32[1],
-        View.ClearValue.color.float32[2], View.ClearValue.color.float32[3]};
+    std::array<double, 4> Color =
+        unpackClearColorValue(Attachment->Format, View.ClearValue.color);
     if (Error E = feme::graphics::packClearColor(Attachment->Format, Color,
                                                  UniformTexel))
       return E;

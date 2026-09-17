@@ -28,10 +28,31 @@
 
 #include <vulkan/vulkan_core.h>
 
+#include <array>
+
 namespace feme::vulkan {
 
 class Buffer;
 class Image;
+
+/// (Roadmap H170) Reads \p Color as `feme::graphics::packClearColor`'s own
+/// per-component-double convention expects: `.float32` for every non-
+/// integer \p Format (matching `VkClearColorValue`'s documented "any
+/// non-integer format" rule), or `.uint32`/`.int32` (by \p Format's own
+/// signedness, `isUnsignedIntegerColorAttachmentFormat`) for one of
+/// `isIntegerColorAttachmentFormat`'s real integer color-attachment
+/// formats -- a raw reference value, not a normalized fraction, matching
+/// `readFragmentColorInt`'s (Executor.cpp) identical convention for
+/// reading one back out of a fragment shader.
+///
+/// Every one of this file's/`CommandBuffer.cpp`'s clear-color call sites
+/// used to read `.float32` unconditionally, silently reinterpreting an
+/// integer clear value's raw bits as if they were an IEEE-754 float
+/// whenever the target attachment was one of `isIntegerColorAttachmentFormat`'s
+/// formats -- correct only for an all-zero clear value by coincidence
+/// (`0u`/`0.0f` share a bit pattern), wrong for any other value.
+std::array<double, 4> unpackClearColorValue(feme::cpu::ResourceFormat Format,
+                                            const VkClearColorValue &Color);
 
 /// (V5) One `VkBufferImageCopy`-shaped region's byte copy between \p Img's
 /// own packed subresource layout and a flat host memory region starting at

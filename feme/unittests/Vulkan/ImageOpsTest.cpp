@@ -105,6 +105,32 @@ TEST_F(ImageOpsTest, ClearsWholeColorImage) {
   vkDestroyImage(Device, Img, nullptr);
 }
 
+// (Roadmap H170) Clearing an integer-format color image must read
+// `VkClearColorValue::uint32`, not `::float32` -- the two union members
+// overlap in memory, so reading the wrong one silently reinterprets raw
+// integer bits as an IEEE-754 float for any non-zero clear value. Found
+// via a real CTS run of `dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*`,
+// which clears an `R32_UINT`-shaped attachment with a non-zero reference
+// value.
+TEST_F(ImageOpsTest, ClearsIntegerFormatColorImageUsingUint32) {
+  VkImage Img = createImage(2, 2, VK_FORMAT_R32_UINT);
+  VkClearColorValue Color{};
+  Color.uint32[0] = 12345;
+  VkImageSubresourceRange Range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  ASSERT_FALSE(runClearColorImage(fromHandle<Image>(Img), Color, Range));
+  for (uint32_t Y = 0; Y != 2; ++Y)
+    for (uint32_t X = 0; X != 2; ++X) {
+      const void *Ptr =
+          fromHandle<Image>(Img)->texelPointer(0, 0, X, Y, 0, 0);
+      uint32_t Value = 0;
+      std::memcpy(&Value, Ptr, sizeof(Value));
+      EXPECT_EQ(Value, 12345u);
+    }
+
+  vkDestroyImage(Device, Img, nullptr);
+}
+
 TEST_F(ImageOpsTest, RejectsOutOfRangeClearSubresource) {
   VkImage Img = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
   VkClearColorValue Color{};

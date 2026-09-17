@@ -27,6 +27,24 @@
 using namespace feme::vulkan;
 using namespace llvm;
 
+std::array<double, 4>
+feme::vulkan::unpackClearColorValue(feme::cpu::ResourceFormat Format,
+                                    const VkClearColorValue &Color) {
+  if (feme::cpu::isIntegerColorAttachmentFormat(Format)) {
+    if (feme::cpu::isUnsignedIntegerColorAttachmentFormat(Format))
+      return {static_cast<double>(Color.uint32[0]),
+              static_cast<double>(Color.uint32[1]),
+              static_cast<double>(Color.uint32[2]),
+              static_cast<double>(Color.uint32[3])};
+    return {static_cast<double>(Color.int32[0]),
+            static_cast<double>(Color.int32[1]),
+            static_cast<double>(Color.int32[2]),
+            static_cast<double>(Color.int32[3])};
+  }
+  return {Color.float32[0], Color.float32[1], Color.float32[2],
+         Color.float32[3]};
+}
+
 namespace {
 
 /// Packs \p Color into one texel of \p Format, or fails for a format the
@@ -96,9 +114,8 @@ Error clearColorImageRanges(Image *Img, const VkClearColorValue &Color,
   if (!Img || !Img->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "the cleared image is not bound to memory");
-  Expected<std::vector<uint8_t>> Texel = packTexel(
-      Img->format(), {Color.float32[0], Color.float32[1], Color.float32[2],
-                      Color.float32[3]});
+  Expected<std::vector<uint8_t>> Texel =
+      packTexel(Img->format(), unpackClearColorValue(Img->format(), Color));
   if (!Texel)
     return Texel.takeError();
 
@@ -545,10 +562,8 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
       if (!View)
         return View.takeError();
       Expected<std::vector<uint8_t>> Texel = packTexel(
-          View->Format, {Clear.clearValue.color.float32[0],
-                        Clear.clearValue.color.float32[1],
-                        Clear.clearValue.color.float32[2],
-                        Clear.clearValue.color.float32[3]});
+          View->Format,
+          unpackClearColorValue(View->Format, Clear.clearValue.color));
       if (!Texel)
         return Texel.takeError();
       if (Error E = clearAttachmentRects(
