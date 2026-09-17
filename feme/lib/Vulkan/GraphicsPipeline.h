@@ -560,11 +560,11 @@ struct GraphicsPipelineLibraryStage {
 /// owns `PreRasterizationStages`/`ViewportState`/`RasterizationState`/
 /// `TessellationState`; `FRAGMENT_SHADER_BIT` owns `FragmentStage`/
 /// `DepthStencilState`; `FRAGMENT_OUTPUT_INTERFACE_BIT` owns
-/// `ColorBlendState`. `MultisampleState`/`Layout`/`RenderPass`/`Subpass`
-/// are each shared by more than one part per that same table, so they are
-/// simply captured whenever the owning `VkGraphicsPipelineCreateInfo`
-/// itself provided them, independent of which single-purpose fields above
-/// were populated.
+/// `ColorBlendState`. `DynamicStates`/`MultisampleState`/`Layout`/
+/// `RenderPass`/`Subpass` are each shared by more than one part per that
+/// same table, so they are simply captured whenever the owning
+/// `VkGraphicsPipelineCreateInfo` itself provided them, independent of
+/// which single-purpose fields above were populated.
 ///
 /// Nested `pNext` chains (e.g. a rasterization state's own line/stream
 /// extension structs) are deliberately not chased here: every `pNext` in
@@ -576,6 +576,10 @@ struct GraphicsPipelineLibraryState {
   VkPipelineLayout Layout = VK_NULL_HANDLE;
   VkRenderPass RenderPass = VK_NULL_HANDLE;
   uint32_t Subpass = 0;
+  /// The dynamic states named by `pDynamicState`. A linked pipeline unions
+  /// the lists from every library because these states are shared pipeline
+  /// state, not owned by one graphics-pipeline-library part.
+  std::vector<VkDynamicState> DynamicStates;
 
   /// Every non-fragment stage this library part declares (vertex,
   /// tessellation control/evaluation, geometry, task, mesh); populated

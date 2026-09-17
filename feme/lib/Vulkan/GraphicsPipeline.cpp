@@ -2653,6 +2653,9 @@ static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
     Out.RenderPass = Child.RenderPass;
     Out.Subpass = Child.Subpass;
   }
+  for (VkDynamicState State : Child.DynamicStates)
+    if (llvm::find(Out.DynamicStates, State) == Out.DynamicStates.end())
+      Out.DynamicStates.push_back(State);
 
   const VkGraphicsPipelineLibraryFlagsEXT New = Child.Flags & ~Out.Flags;
   if (New & VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT) {
@@ -2697,6 +2700,9 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
   Out.Layout = CreateInfo.layout;
   Out.RenderPass = CreateInfo.renderPass;
   Out.Subpass = CreateInfo.subpass;
+  if (const auto *DS = CreateInfo.pDynamicState)
+    Out.DynamicStates.assign(DS->pDynamicStates,
+                             DS->pDynamicStates + DS->dynamicStateCount);
 
   if (Flags & VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT) {
     if (const auto *VI = CreateInfo.pVertexInputState) {
@@ -2840,6 +2846,8 @@ namespace {
 /// `Stages` element's `pSpecializationInfo` already points to.
 struct LinkedPipelineStorage {
   SmallVector<VkPipelineShaderStageCreateInfo, 4> Stages;
+  SmallVector<VkDynamicState, 8> DynamicStates;
+  VkPipelineDynamicStateCreateInfo DynamicStateInfo{};
   std::deque<VkSpecializationInfo> SpecInfos;
   /// (roadmap H29i) One entry per linked stage that used H29d's own
   /// inline-shader-module path; `std::deque` for the same
@@ -2974,11 +2982,32 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
   Result.layout = CreateInfo.layout;
   Result.renderPass = CreateInfo.renderPass;
   Result.subpass = CreateInfo.subpass;
+  auto addDynamicStates = [&](const VkPipelineDynamicStateCreateInfo *Info) {
+    if (!Info)
+      return;
+    for (uint32_t I = 0; I != Info->dynamicStateCount; ++I)
+      if (llvm::find(Storage.DynamicStates, Info->pDynamicStates[I]) ==
+          Storage.DynamicStates.end())
+        Storage.DynamicStates.push_back(Info->pDynamicStates[I]);
+  };
+  addDynamicStates(CreateInfo.pDynamicState);
   for (const GraphicsPipelineLibrary *Lib : Libraries) {
     if (!Result.layout)
       Result.layout = Lib->state().Layout;
     if (!Result.renderPass)
       Result.renderPass = Lib->state().RenderPass;
+    for (VkDynamicState State : Lib->state().DynamicStates)
+      if (llvm::find(Storage.DynamicStates, State) ==
+          Storage.DynamicStates.end())
+        Storage.DynamicStates.push_back(State);
+  }
+  if (!Storage.DynamicStates.empty()) {
+    Storage.DynamicStateInfo.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    Storage.DynamicStateInfo.dynamicStateCount =
+        static_cast<uint32_t>(Storage.DynamicStates.size());
+    Storage.DynamicStateInfo.pDynamicStates = Storage.DynamicStates.data();
+    Result.pDynamicState = &Storage.DynamicStateInfo;
   }
 
   // Vertex input interface.
