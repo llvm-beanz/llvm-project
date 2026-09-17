@@ -88203,3 +88203,117 @@ is filed as H171 for a future session.
 **Cleanup done:** removed all `/tmp/private_store*`, `/tmp/repro*.ll`,
 `/tmp/derivate_full.qpa`, `/tmp/x.qpa`, `/tmp/compute_pipeline_regress.qpa`
 scratch files before ending the session.
+
+# Session: H171 fixed -- vector-typed derivative/quad-read decomposition
+
+**Start here next session:** H170's two remaining buckets (queueSubmit
+float-format failures, and `in_function` JIT-link failures) -- see
+ranked list below.
+
+## What broke and why (H171)
+
+`dEQP-VK.glsl.derivate.*.private_store.{vec2,vec3,vec4}_{highp,mediump}`
+(30 cases) failed pipeline creation with a clean `feme-cpu-simdize`
+diagnostic: "divergent vector value ... component decomposition is not
+yet supported." Newly surfaced by last session's H170 fix (which only
+widened *storage*, not the vector *value* itself once reloaded).
+
+Root cause, found via a new debug technique (see below): GLSL's
+`dFdx(vec2)` compiles to a genuinely vector-typed
+`feme.stage.derivative.x.fine.v2f32` call. `SIMDizePass`'s generic
+stage-op widening assumed every stage op's result is scalar (true for
+input/output/interpolate/subpass/task-payload ops, false for
+derivatives and quad-reads, which pass their operand type straight
+through). Naive widening would have built an illegal `<W x <2 x
+float>>` nested vector; instead, the preflight check correctly (if
+unhelpfully) rejected the shape outright since it never recognized a
+stage-op call as a valid vector-typed producer or consumer at all.
+
+## The fix
+
+Two-part, both in `SIMDize.cpp`:
+1. `checkVectorDecompositionSupported` now accepts a
+   `Derivative*`/`QuadRead` stage-op call as a supported vector-typed
+   producer and consumer.
+2. `widenStageOp` decomposes a vector-typed call into `N` independent
+   per-component wide calls -- exactly the same transform
+   `widenVectorElementwise` already does for ordinary arithmetic, safe
+   here because derivative/quad-read semantics are genuinely
+   component-wise independent.
+
+`WaveLoweringPass` needed zero changes -- it already treats any
+`WaveSize`-sized vector operand generically and has no notion of
+"components," so it lowers each decomposed call exactly like any
+naturally-scalar one.
+
+## New debugging technique worth remembering
+
+`FEME_DUMP_IR=1`'s existing dump point is *after* `SIMDizePass`
+succeeds -- useless for debugging a `SIMDizePass` failure itself, since
+`runAndCheck` returns early before reaching it. I added a **temporary**
+env-gated dump immediately before the `SIMDizePass` call to capture the
+actual failing input IR, used it to find the exact vector-typed call
+shape, then **reverted it** before committing (not kept permanently --
+undecided whether it's worth proposing as a permanent addition
+alongside `FEME_DUMP_IR` in a future session).
+
+Also reused: extracting real pre-pass IR and feeding it directly into
+`feme-opt --llvm -passes=<stage>` iterates far faster than a full
+rebuild-ICD + rerun-CTS loop for any `SIMDize`-level bug.
+
+## Verification (all green, no regressions)
+
+- 3 new lit tests: `simdize-vector-derivative.ll`,
+  `simdize-vector-quad-read.ll`, `wave-lowering-vector-derivative.ll`.
+- `check-feme`: 3134/3137 passed (3 unsupported), no regressions.
+- Native CTS: all 30 target cases fail -> pass.
+- Broader `dEQP-VK.glsl.derivate.*` sweep (1,674 cases): 285 -> 1,080
+  passed (+795), 1,083 -> 288 failed (-795). All 288 remaining failures
+  are pre-existing, already-documented, unrelated gaps (queueSubmit
+  format failures, `VK_SUBGROUP_FEATURE_QUAD_BIT` not-supported gate)
+  -- zero involve vector decomposition any more. **The H171 failure
+  class is fully closed**, not just its `private_store` subcase.
+- `dEQP-VK.compute.pipeline.*` (20,502 cases): unchanged at 654/29.
+- `check-hlsl-feme-vk`: unchanged, 376 passed / 1 pre-existing
+  `array_of_matrices.test` XPASS flake.
+
+## Honest accounting of what is left
+
+- H170's other two buckets (queueSubmit float-format failures,
+  `in_function` JIT-link failures): untouched, still open.
+- Did not specifically hunt for other CTS cases outside the derivative
+  test group that might hit the same vector-stage-op shape (e.g. any
+  future quad-read use elsewhere) -- the fix is general, but I only
+  measured its effect on `dEQP-VK.glsl.derivate.*`.
+- `QuadRead`'s vector-decomposition path is now exercised only by a
+  synthetic lit test, not (yet, as far as this session confirmed) by
+  any real CTS case -- worth confirming with a `dEQP-VK.subgroups.quad.*`
+  sweep in a future session if one wants real-world coverage beyond the
+  lit test.
+
+## Suggested next steps, ranked
+
+1. **~half a day, well-scoped:** H170 bucket 1 --
+   `fbo_float`/`texture.float` scalar-float subcases fail with
+   `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`. Check
+   `feme::vulkan::PhysicalDevice`'s supported-format table for
+   floating-point color-attachment formats first -- if genuinely
+   unsupported, this likely has a wider blast radius across the CTS
+   than just the derivative test group.
+2. **~a few hours:** H170 bucket 2 -- `in_function` subcases fail with
+   `JIT session error: Symbols not found: [ spirv_var_13 ]` (a
+   global-variable-linking gap when a builtin is called from inside a
+   helper function rather than `main` directly). Reduce to a standalone
+   `dxc`+`feme-opt` repro before touching JIT linkage code.
+3. **~half a day:** H154 -- `matchLoopShape` still can't represent a
+   real `Flow`-style structured-CFG merge-block shape after
+   `JumpThreadingPass` runs. See its own roadmap row for the exact
+   shape.
+4. **Low priority, observed across 5+ sessions now:** the
+   `array_of_matrices.test` XPASS flake in `check-hlsl-feme-vk`. A
+   15-minute check of its `XFAIL:` lit-config lines would likely let it
+   finally be removed from every future session's "noted but not
+   investigated" list.
+
+**Cleanup done:** removed `/tmp/h171_*` scratch files (dump logs,
+extracted `.ll` repros, `.qpa` result files) before ending the session.
