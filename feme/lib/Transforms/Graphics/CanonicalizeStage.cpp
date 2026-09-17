@@ -4420,12 +4420,43 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // `TakeBlockPath`'s per-member loop above) is reused unchanged: it
         // already understands the array-of-struct wrapping this shape's
         // own outer `[3 x TestStruct]` dimension needs (Roadmap H115).
+        //
+        // (Roadmap L94(j)) This decomposition also applies when
+        // `RowCountIsVertexArray` is set (e.g. a Domain-stage `Input`
+        // reading a Hull-stage per-control-point `Output` array of this
+        // same genuine multi-member struct shape,
+        // `dEQP-VK.pipeline.pipeline_library.interface_matching.
+        // vector_length.out_vec4_in_vec4_member_of_array_of_structures_
+        // vert_tesc_out_tese_in_frag`'s own consuming side) -- excluding
+        // it here (this guard's own original condition) instead fell
+        // through to the single opaque `addElement` call below,
+        // undersizing/mistyping this element the same way excluding
+        // `XfbBufferArrayStride != 0` does. `addStageIOStructMembers`'s
+        // own generic `AddElement` callback signature has no room for
+        // either flag, silently defaulting every leaf it adds to
+        // `RowCountIsVertexArray=false`/`XfbBufferArrayStride=0` -- wrong
+        // for this element's own leaves, which must each inherit this
+        // whole element's own values for both (the two are mutually
+        // exclusive by construction, so at most one is ever non-default
+        // for a given element). `AddDecomposedElement` below forwards
+        // both through to every leaf `addElement` call in place of the
+        // bare `addElement` reference `TakeBlockPath`'s own call above
+        // gets away with passing directly (its own leaves are never
+        // vertex-array/XFB-array elements to begin with).
         Type *PeeledContent = peelSingleMemberStruct(ValueTy);
-        if (!RowCountIsVertexArray && XfbBufferArrayStride == 0 &&
+        if (XfbBufferArrayStride == 0 &&
             isGenuineMultiMemberNestedStruct(PeeledContent)) {
           uint32_t NestedLocation = D.Location.value_or(0);
-          addStageIOStructMembers(addElement, GV, AddrSpace, D, PeeledContent,
-                                  GV->getDataLayout(), NestedLocation);
+          auto AddDecomposedElement =
+              [&](GlobalVariable *EltGV, unsigned EltAddrSpace,
+                  const ParsedSPIRVDecorations &EltD, Type *EltTy) {
+                addElement(EltGV, EltAddrSpace, EltD, EltTy,
+                           /*RowCountIsVertexArray=*/RowCountIsVertexArray,
+                           /*XfbBufferArrayStride=*/0);
+              };
+          addStageIOStructMembers(AddDecomposedElement, GV, AddrSpace, D,
+                                  PeeledContent, GV->getDataLayout(),
+                                  NestedLocation);
         } else {
           addElement(GV, AddrSpace, D, ValueTy,
                      /*RowCountIsVertexArray=*/RowCountIsVertexArray,
