@@ -1,5 +1,5 @@
 ---
-model: gpt-5.6-sol
+model: gpt-5.6-terra
 ---
 # Initial Guidelines
 
@@ -7,7 +7,8 @@ Please make sure that your changes are appropriately tested with unit tests
 covering each phase of translation in the compiler, and that your changes
 conform to the [LLVM Coding Standards](llvm/docs/CodingStandards.rst).
 
-Also please review the feme/.instructions.md file.
+Also please review the feme/.instructions.md file, and the environment-wide
+agent skills at /home/dev/.agents/skills.
 
 When you build and test ensure that you are using object file caching, and
 building with assertions enabled. Also build and test the `check-feme` target
@@ -48,8 +49,18 @@ just once at the start.
 
 # Request
 
-Can you perform a full run of the Vulkan CTS, re-triage all the milestones on
-the roadmap and update the VulkanCTS report.
+Can you continue the work on feme? The last agent's suggested next steps are:
 
-In particular when re-triaging the milestones in the roadmap sort incomplete
-milestones toward the bottom of the tables even if that puts numbers out of order.
+1. **Eliminate the pipeline recovery tail.** Reduce the 5,653 unrun cases,
+   starting with `pipeline_library.extended_dynamic_state.mesh_shader`
+   (1,013), `fast_linked_library.extended_dynamic_state.mesh_shader` (918),
+   and `pipeline_library.graphics_library.independent_sets_random` (720).
+2. **Profile the seven non-subgroup compile-time long poles.** Sample them in
+   the optimizer/backend and assign each to L89, L92, or a new root cause
+   before changing code.
+3. **Reduce current process terminations by group.** Start with the single
+   `spirv_assembly` case, then the three `api` cases; keep crash fixes separate
+   from ordinary CTS correctness failures.
+4. **Implement continuous measurement.** Land roadmap D4/G1/G2 so full-run
+   recovery, per-case result reconciliation, and expected failures stop being
+   session-local scripts.
