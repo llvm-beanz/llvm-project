@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 52e661a0-b284-45ee-892f-3073721ca338
 ---
 # Initial Guidelines
 
@@ -64,3 +65,5 @@ Can you continue the work on feme? The last agent's suggested next steps are:
    in the existing interface-matching model before writing code. Rough
    estimate: half a day, since it's new decoration support, not a
    one-line guard like L94(g).
+
+Please be sure to record your thoughts and next steps!
