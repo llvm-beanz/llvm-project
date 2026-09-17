@@ -233,6 +233,10 @@ enum DynamicStateBits : uint32_t {
   // controls the existing depth-bias rasterization path independently of
   // `VK_DYNAMIC_STATE_DEPTH_BIAS`, which supplies its three parameters.
   DynamicStateDepthBiasEnable = 1u << 20,
+  // `VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE` (core Vulkan 1.3)
+  // controls the existing rasterizer-discard path independently of the
+  // pipeline's static `VkPipelineRasterizationStateCreateInfo` value.
+  DynamicStateRasterizerDiscardEnable = 1u << 21,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -290,6 +294,8 @@ struct DynamicGraphicsState {
   uint16_t StipplePattern = 0xFFFF;
   /// (roadmap L94(a)) `vkCmdSetDepthBiasEnable`'s payload.
   bool DepthBiasEnable = false;
+  /// `vkCmdSetRasterizerDiscardEnable`'s payload.
+  bool RasterizerDiscardEnable = false;
   /// (roadmap H7d) `vkCmdSetDepthBias`'s 3-float payload.
   float DepthBiasConstantFactor = 0.0f;
   float DepthBiasClamp = 0.0f;

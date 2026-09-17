@@ -246,6 +246,7 @@ vkCmdSetDepthWriteEnableEXT
 vkCmdSetDepthCompareOpEXT
 vkCmdSetDepthBoundsTestEnableEXT
 vkCmdSetDepthBiasEnable
+vkCmdSetRasterizerDiscardEnable
 vkCmdSetStencilTestEnableEXT
 vkCmdSetStencilOpEXT
 vkCmdDraw

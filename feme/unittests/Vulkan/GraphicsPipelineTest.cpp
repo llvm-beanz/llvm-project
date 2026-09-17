@@ -1027,13 +1027,9 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   VkShaderModule Fragment = createModule(FragmentSource);
   VkPipeline Pipe = VK_NULL_HANDLE;
 
-  // (roadmap H35/H74) `rasterizerDiscardEnable` is implemented now (see
-  // `TranslatesRasterizerDiscardState` below); only its
-  // `VK_EXT_extended_dynamic_state2` dynamic counterpart
-  // (`VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE`) remains unimplemented,
-  // since `mapDynamicState` (GraphicsPipeline.cpp) has no case for it yet.
+  // `VK_DYNAMIC_STATE_LOGIC_OP_EXT` has no static or dynamic implementation.
   VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
-  VkDynamicState Unsupported = VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE;
+  VkDynamicState Unsupported = VK_DYNAMIC_STATE_LOGIC_OP_EXT;
   VkPipelineDynamicStateCreateInfo DynamicInfo{};
   DynamicInfo.dynamicStateCount = 1;
   DynamicInfo.pDynamicStates = &Unsupported;
@@ -1076,6 +1072,34 @@ TEST_F(GraphicsPipelineTest, TranslatesRasterizerDiscardState) {
   feme::graphics::GraphicsPipeline Executor =
       Graphics->buildExecutorPipeline(Dynamic);
   EXPECT_TRUE(Executor.getRasterState().DiscardEnable);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+TEST_F(GraphicsPipelineTest, DynamicRasterizerDiscardOverridesStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.rasterizerDiscardEnable = VK_TRUE;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState DynamicState;
+  DynamicState.RasterizerDiscardEnable = false;
+  EXPECT_FALSE(Graphics->buildExecutorPipeline(DynamicState)
+                   .getRasterState()
+                   .DiscardEnable);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -1622,8 +1646,9 @@ TEST_F(GraphicsPipelineTest, DynamicDepthBiasEnableOverridesStaticState) {
   auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
   DynamicGraphicsState DynState;
   DynState.DepthBiasEnable = true;
-  EXPECT_TRUE(
-      Graphics->buildExecutorPipeline(DynState).getRasterState().DepthBiasEnable);
+  EXPECT_TRUE(Graphics->buildExecutorPipeline(DynState)
+                  .getRasterState()
+                  .DepthBiasEnable);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -2201,7 +2226,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 /// own declared attachments, with a fragment stage that only ever declares
 /// an output for the locations *some* draw plans to use.
 TEST_F(GraphicsPipelineTest,
-      AcceptsFragmentStageNotWritingEveryColorAttachmentLocation) {
+       AcceptsFragmentStageNotWritingEveryColorAttachmentLocation) {
   VkShaderModule Vertex = createModule(VertexSource);
   // Declares only a location-0 output; a real (`R8G8B8A8_UNORM`) location-1
   // color attachment below has no matching fragment output at all.
@@ -2975,7 +3000,8 @@ TEST_F(GraphicsPipelineTest, IsolineDomainOutputsLineDespiteVertexOrderMode) {
 /// output shape this row's own named repros hit -- still merges a
 /// complete `TessellationState`, falling back to the control entry's own
 /// domain shape since the evaluation entry's is incomplete.
-TEST_F(GraphicsPipelineTest, AcceptsTessellationDomainShapeDeclaredOnControlEntry) {
+TEST_F(GraphicsPipelineTest,
+       AcceptsTessellationDomainShapeDeclaredOnControlEntry) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule TessControl = createModule(TessControlWithDomainShapeSource);
   VkShaderModule TessEval = createModule(TessEvalTrianglesOnlySource);
@@ -3014,7 +3040,8 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationDomainShapeDeclaredOnControlEntr
 /// rejected -- the merge introduced for this row's real DXC shape must
 /// not silently accept a genuinely malformed module missing tessellation
 /// state entirely.
-TEST_F(GraphicsPipelineTest, RejectsTessellationPipelineWithNoDomainShapeAnywhere) {
+TEST_F(GraphicsPipelineTest,
+       RejectsTessellationPipelineWithNoDomainShapeAnywhere) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule TessControl = createModule(TessControlSource);
   VkShaderModule TessEval = createModule(TessEvalTrianglesOnlySource);
@@ -4346,7 +4373,8 @@ TEST_F(GraphicsPipelineTest, LinksDynamicDepthBiasEnableState) {
 
   VkPipeline Handle = VK_NULL_HANDLE;
   ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
-  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  auto *Graphics =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
   DynamicGraphicsState DynamicState;
   DynamicState.DepthBiasEnable = false;
   EXPECT_FALSE(Graphics->buildExecutorPipeline(DynamicState)

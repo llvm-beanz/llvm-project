@@ -87,6 +87,10 @@ TEST(ProcAddr, DeviceProcAddrResolvesDepthBiasEnable) {
   EXPECT_NE(getDeviceProcAddr("vkCmdSetDepthBiasEnable"), nullptr);
 }
 
+TEST(ProcAddr, DeviceProcAddrResolvesRasterizerDiscardEnable) {
+  EXPECT_NE(getDeviceProcAddr("vkCmdSetRasterizerDiscardEnable"), nullptr);
+}
+
 // Roadmap H21b: `VK_EXT_transform_feedback`'s six commands are registered
 // in `SUPPORTED_EXTENSIONS`/`ImplementedEntrypoints.txt` so the dispatch
 // table carries real function pointers for them, even though the
