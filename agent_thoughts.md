@@ -89005,3 +89005,47 @@ listed in the original case-list order for recovery.
 3. **L94:** Use the resulting deterministic recovery order to reduce
    `pipeline_library.extended_dynamic_state.mesh_shader` before changing
    broader pipeline behavior.
+
+# G2(a) reconciliation baseline and L94(a) reduction
+
+## Outcome
+
+G2(a) is complete. `feme/test/Vulkan/Inputs/vk-cts-expected-failures.txt`
+contains exactly 160,248 completed `Fail` cases from the retained 54-group
+CTS run. The payload is generated in case-list order and has SHA-256
+`29fcc2ce64beaf59b02cbaafe424ecc8232645d7cd9175b1368a5d58cdf19127`.
+
+## Decisions and evidence
+
+1. **Use completed QPA records only.** `--write-failures` now writes a
+   reviewed baseline directly from the reconciler's complete records. It
+   excludes all 7,115 cases without a complete QPA record, so crashes,
+   timeouts, and unrun cases cannot become expected failures.
+2. **Keep provenance with the generated data.** The baseline names FeMe
+   `aa5742ca7ed1`, CTS
+   `880f31a2bd9cd0659f84f3f80dafd07f2e693f6d`, the 3,244,369-case input,
+   and the payload hash. This makes later reconciliation failures
+   attributable to a concrete run.
+3. **Defer CI honestly.** No CI infrastructure exists. G2(b) remains open,
+   but the manually runnable, assertion-enabled, ccache-backed reconciliation
+   path is ready for a future job to use.
+4. **Reduce before broadening behavior.** The first deterministic mesh
+   recovery case crashes immediately in CTS `setDynamicStates` through a null
+   function pointer. FeMe advertises Vulkan 1.4 but does not dispatch the
+   promoted `vkCmdSetDepthBiasEnable` command. This is L94(a), not evidence
+   for changing unrelated pipeline behavior.
+
+## Validation
+
+- `ninja -C build2 check-feme`: 3,147 passed; 3 unsupported.
+- The explicit build-tree ICD reports `FeMe CPU Vulkan Device`.
+- `dEQP-VK.api.info.vulkan1p2.features` passes with
+  `--deqp-shadercache=disable`.
+- The first L94 recovery case reproduces the null-call segmentation fault
+  under `gdb`; it is neither a timeout nor a stale-ICD result.
+
+## Suggested next step
+
+1. **Implement L94(a).** Add `vkCmdSetDepthBiasEnable` to generated device
+   dispatch, command recording, and per-draw dynamic state; cover it with a
+   Vulkan unit test and rerun the exact reduced CTS case.
