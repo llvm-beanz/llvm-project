@@ -88948,3 +88948,60 @@ decisions, pitfalls, and ranked next actions.
 4. **Implement continuous measurement.** Land roadmap D4/G1/G2 so full-run
    recovery, per-case result reconciliation, and expected failures stop being
    session-local scripts.
+
+# Continuous crash-tolerant Vulkan CTS measurement
+
+## Outcome
+
+Roadmap D4 and G1 are complete in commit `5704dcf716f5`. The new
+`feme/utils/vk_cts_reconcile.py` turns retained CTS QPA output into a
+deterministic per-case reconciliation report. A process that dies while a
+case is running no longer gets mistaken for a complete result: only records
+closed by `#endTestCaseResult` count, and all missing requested cases are
+listed in the original case-list order for recovery.
+
+## Decisions
+
+1. **Use QPA, not process exit status.** `deqp-vk` returns nonzero for
+   ordinary test failures, and a crashed process can leave a partial result
+   file. The QPA record boundary is the narrow source of truth that separates
+   completed test results from an interrupted case.
+2. **Reject ambiguous data.** The tool rejects contradictory statuses for a
+   retried case, duplicate case names in the requested list, QPA results that
+   do not belong to that list, and expected-failure entries that do not name
+   a requested case. Selecting an arbitrary result or accepting a misspelled
+   expectation would conceal exactly the regressions this measurement exists
+   to detect.
+3. **Compare status maps.** With `--baseline-qpa`, the report names every
+   changed case and includes unrun-to-result and result-to-unrun transitions.
+   Aggregate counts cannot expose these changes when different cases swap
+   statuses.
+4. **Keep the G2 boundary explicit.** The tool accepts an expected-failure
+   list now, but a full 54-group baseline cannot responsibly be invented from
+   aggregate report counts. Roadmap G2 therefore remains open and is split
+   into one baseline-generation action and one bounded, artifact-retaining CI
+   job.
+
+## Validation
+
+- `ninja -C build2 check-feme`: 3,147 passed; 3 unsupported.
+- `python3 -m py_compile feme/utils/vk_cts_reconcile.py` and the lit fixture
+  cover completed results, interrupted records, baseline status changes,
+  allowed failures, conflicting retries, and invalid expected-failure input.
+- With `VK_DRIVER_FILES` set to the build-tree manifest,
+  `vulkaninfo --summary | grep deviceName` reported `FeMe CPU Vulkan Device`.
+- The CTS checkout's real
+  `dEQP-VK.api.info.vulkan1p2.features` case passed after the final change.
+
+## Suggested next steps
+
+1. **G2(a):** Run the bounded 54-group recovery process through
+   `vk_cts_reconcile.py` and commit its exact `Fail` case list with CTS and
+   FeMe revision provenance. Do not include crashes, timeouts, or unrun
+   cases.
+2. **G2(b):** Add a CI job that rebuilds the assertion-enabled ICD, generates
+   the full case list, retains all QPAs, and fails on reconciliation errors,
+   unrun cases, or newly unexpected failures.
+3. **L94:** Use the resulting deterministic recovery order to reduce
+   `pipeline_library.extended_dynamic_state.mesh_shader` before changing
+   broader pipeline behavior.
