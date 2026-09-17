@@ -88874,3 +88874,77 @@ these are regressions -- they're newly-visible pre-existing gaps):**
    heap-corruption family (`all_instance_array`/`all_missing`/others) --
    `valgrind`-driven, cross multiple sub-buckets, has resisted several
    prior sessions' spot-fixes.
+
+# Full Vulkan CTS re-triage and inventory refresh
+
+## Outcome
+
+This session completed a fresh traversal of all 3,244,369 Vulkan CTS cases
+across all 54 top-level groups. The final accounting is 3,238,716 measured
+(99.8258%): 507,559 Pass, 160,461 Fail, 2,569,827 NotSupported, 43
+QualityWarning, 9 InternalError, 243 Crashed, and 574 TimedOut. The remaining
+5,653 Unrun cases are all in `pipeline`, after bounded recovery exhausted its
+retry budget.
+
+The current report and roadmap re-triage are committed as `f52508d575e0`.
+The feature/extension manifest audit and regenerated inventories are committed
+separately as `e7c884c84462`.
+
+## Decisions and evidence
+
+- **Do not trust the system-default ICD.** The mandatory first
+  `vulkaninfo --summary | grep deviceName` selected llvmpipe. Every trusted
+  command therefore used
+  `VK_DRIVER_FILES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`,
+  which reported `FeMe CPU Vulkan Device`.
+- **Keep CTS processes bounded.** A long-lived `deqp-vk` process is not a
+  reliable unit of measurement for this driver. The run used 1,800-case
+  batches, six concurrent workers, per-attempt logs/QPA files, and bounded
+  recovery. This turned the prior report's 20.99% unmeasured tail into 0.1742%.
+- **Disable the CTS shader cache.** Every invocation used
+  `--deqp-shadercache=disable`; resumed use of a shared `shadercache.bin` had
+  previously produced false crash cascades.
+- **Parse case records, not exit status.** `deqp-vk` exits nonzero for ordinary
+  test failures. A batch is complete only when every started case has a
+  recorded result. Multiline `Fail (` records also require parsing the first
+  result line without assuming its closing parenthesis is on that line.
+- **Separate timeouts from crashes.** Seven cases exceeded the 20-minute
+  process ceiling (four `graphicsfuzz`, three `pipeline`), while 567 known
+  `_requiredsubgroupsize128` cases were classified as compile-time timeouts.
+  They are roadmap L93/L92 performance work, not evidence of runtime crashes.
+- **Re-triage from current evidence.** Roadmap L94 now lists the seven groups
+  with current process terminations instead of retaining the stale nine-group
+  merge-verification list. Previously listed `geometry`, `glsl`, `image`,
+  `rasterization`, `synchronization`, `synchronization2`, and `tessellation`
+  now complete without a process termination.
+- **Treat inventory manifests as source data.** The generated prose had
+  drifted behind implemented source. The audit added 34 implemented core
+  features and five advertised extensions to the manifests, then regenerated
+  both inventories from VK-GL-CTS's `VK_HEADER_VERSION` 358 registry.
+
+The complete raw logs, case lists, recovery records, summary CSV, and
+failure-signature counts are retained under:
+
+```text
+/home/dev/.copilot/session-state/bd579bac-c81f-4cf0-aa8e-98fd61973963/files/cts-aa5742ca7ed1
+```
+
+The requested `i-have-adhd` skill was not available in this environment. This
+entry follows its intended scannable style instead: outcome first, explicit
+decisions, pitfalls, and ranked next actions.
+
+## Suggested next steps
+
+1. **Eliminate the pipeline recovery tail.** Reduce the 5,653 unrun cases,
+   starting with `pipeline_library.extended_dynamic_state.mesh_shader`
+   (1,013), `fast_linked_library.extended_dynamic_state.mesh_shader` (918),
+   and `pipeline_library.graphics_library.independent_sets_random` (720).
+2. **Profile the seven non-subgroup compile-time long poles.** Sample them in
+   the optimizer/backend and assign each to L89, L92, or a new root cause
+   before changing code.
+3. **Reduce current process terminations by group.** Start with the single
+   `spirv_assembly` case, then the three `api` cases; keep crash fixes separate
+   from ordinary CTS correctness failures.
+4. **Implement continuous measurement.** Land roadmap D4/G1/G2 so full-run
+   recovery, per-case result reconciliation, and expected failures stop being
+   session-local scripts.
