@@ -87955,3 +87955,131 @@ the gotcha documented two sessions ago).
 **Cleanup done:** removed `/tmp/arraylength.mlir`, `/tmp/arraylength.spv`,
 `/tmp/gd.hlsl`, `/tmp/gd.spv`, `/tmp/h160_cts.qpa`, `/tmp/h160_failed.txt`
 scratch files before ending the session.
+
+# Session: H124d closed -- SPIR-V derivative-instruction support
+
+**Device check done:** `vulkaninfo --summary | grep deviceName` confirmed
+`FeMe CPU Vulkan Device` at session start.
+
+**Next action if you're picking this up:** run `check-hlsl-feme-vk -v`
+fresh to get the current failure list, then start on H170 (see below) --
+`dEQP-VK.glsl.derivate.dfdx.private_store.float_highp` first, since it's
+the cheapest of the 3 new gaps to triage.
+
+## What got done
+
+1. **H124d closed.** Added all 9 SPIR-V derivative ops (`OpDPdx`/`OpDPdy`/
+   `OpFwidth` + their Fine/Coarse variants, opcodes 207-215) to upstream
+   MLIR's SPIR-V dialect (`SPIRVDerivativeOps.td`, a shared
+   `SPIRV_DerivativeOp` base class mirroring `SPIRV_ArithmeticUnaryOp`).
+   mlir-tblgen's own (de)serialization generator handled all 9 fully
+   generically -- confirmed via a real `dxc`-compiled SPIR-V binary
+   round-tripped through `mlir-translate`/`feme-translate --import-spirv`
+   -- **zero** manual `Serializer.cpp`/`Deserializer.cpp` code, exactly
+   like H160's own precedent.
+2. **The scope turned out much smaller than the last session's own
+   estimate.** That estimate worried the CPU backend had "no existing
+   concept of quad/2x2-lane-grouping at all" for fragment-shader
+   derivatives. Turned out **it already did** -- the
+   `feme.stage.derivative.{x,y}.{fine,coarse}` canonical-op family and
+   `CanonicalizeStagePass`'s consumer of `llvm.spv.ddx`/etc. intrinsics
+   were already fully built (for reasons unrelated to this milestone).
+   All that was actually missing was the upstream MLIR import plumbing
+   feeding into that existing machinery. **Zero new CPU-backend codegen
+   needed.** This is the second session in a row (after H160) where
+   checking what already exists before assuming "needs a new subsystem"
+   cut the real work by more than half.
+3. Added `DerivativeConversionPattern`/`FwidthConversionPattern`
+   (`SPIRVToLLVMPatterns.cpp`): the 6 plain ops map directly onto their
+   already-existing matching `llvm.spv.ddx`/`.ddy`/etc. intrinsics (no
+   new intrinsics needed at all -- these 6 existed upstream, unused,
+   before this session). The 3 `Fwidth*` ops expand to
+   `fabs(ddx) + fabs(ddy)` directly at the conversion layer, per
+   `FeMeGraphicsDesign.md`'s own explicit "fwidth is not canonical"
+   design intent -- so `CanonicalizeStage.cpp`'s own missing `fwidth`
+   handling (flagged as a gap at the start of this session) never
+   needed fixing either: the expansion happens one layer earlier, using
+   intrinsics that layer already consumes.
+4. **`check-hlsl-feme-vk`**: all 5 target tests
+   (`Graphics/{fwidth,ddx_fine,ddy_fine,DdxCoarse,DdyCoarse}.test`)
+   confirmed passing individually. Full run: 376 passed, 26 expectedly
+   failed, 1 pre-existing unrelated XPASS (`array_of_matrices.test`,
+   already documented, still not root-caused -- see next steps below).
+   No regressions.
+5. **`check-feme`**: 3128/3131 passed, 0 failed, 3 unsupported. No
+   regressions.
+6. **Native `dEQP-VK.glsl.derivate.*` CTS spot-check** (1,674 cases,
+   first-ever run against FeMe -- this group could not build at all
+   before this fix): 285 passed / 1083 failed / 306 not supported. Zero
+   "unhandled opcode" failures -- confirms the derivative-import gap is
+   fully closed. Of the 1083 failures, 999 are the pre-existing,
+   unrelated `feme-cpu-simdize` "divergent vector value" limitation
+   (roadmap milestone 7 -- scalar-`float` subcases of the same shaders
+   pass; only vector-typed subcases hit it). The other 84 are 3 new,
+   not-yet-triaged gaps -- filed as **H170**.
+7. No `Vulkan14FeatureInventory`/`VulkanExtensionInventory` change:
+   `DerivativeControl` is core SPIR-V, not gated by an optional
+   feature/extension (verified this was already true before this
+   session, not newly true).
+8. Committed in 4 small steps: MLIR dialect ops + lit tests,
+   SPIRVToLLVM conversion patterns + lit test, Roadmap.md +
+   VulkanCTSReport.md update (struck H124d, filed H170), this file.
+
+## H170 (new, not yet triaged) -- 3 unrelated gaps found while CTS-checking H124d
+
+Found while spot-checking `dEQP-VK.glsl.derivate.*` after H124d. None of
+these are derivative-import/lowering bugs -- they're pre-existing,
+cross-cutting GLSL-fragment-shader gaps this test group's own subcase
+matrix happens to exercise:
+
+1. **`*.fbo_float.*`/`*.texture.float.*`** (scalar-float subcases) fail
+   with `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`. Looks
+   like a missing/unsupported floating-point framebuffer-attachment
+   format, not anything derivative-specific.
+2. **`*.in_function.*`** fails with `JIT session error: Symbols not
+   found: [ spirv_var_13 ]`. Looks like a global-variable-linking gap
+   when a builtin call happens inside a helper function rather than
+   `main` directly.
+3. **`*.private_store.*`** (scalar-float subcases) fails with a bare
+   "Image comparison failed", no diagnostic at all. This is the one
+   worth checking **first** -- it's the only bucket of the three that
+   reaches real pixel output, so it's the cheapest to either confirm as
+   a real derivative-math bug or rule out.
+
+## Suggested next steps, ranked
+
+1. **~1-2 hours, cheapest, do first:** H170's bucket 3
+   (`private_store` image-comparison mismatch). Mirror H88's own
+   channel-level pixel-reduction technique to determine whether the
+   private-variable-store path itself is broken (unrelated to
+   derivatives) or whether the derivative math produces subtly wrong
+   values in this one specific code shape. Compare against the
+   `in_function`/`fbo_float` buckets' own passing scalar cases first --
+   if plain `dfdx.private_store.float_highp` (no fwidth, no vector) still
+   fails while `dfdx.fbo_float.float_highp` fails for an unrelated
+   reason (queueSubmit), that narrows it fast.
+2. **~half a day, real payoff if confirmed unrelated to derivatives:**
+   H170's bucket 1 (float framebuffer format). Check
+   `feme::vulkan::PhysicalDevice`'s own supported-format table for
+   `VK_FORMAT_R32_SFLOAT`/`VK_FORMAT_R32G32B32A32_SFLOAT` as a color
+   attachment -- if genuinely unsupported, this could also explain
+   other float-framebuffer failures across the wider CTS surface, not
+   just this test group, so worth checking blast radius before fixing.
+3. **~a few hours, narrower payoff:** H170's bucket 2 (in-function JIT
+   symbol resolution). Reduce to a standalone `dxc`+`feme-opt` repro of
+   a GLSL-style helper-function call before touching the JIT linkage
+   code, since "spirv_var_13" being unresolved smells like a
+   file-scope/global-variable name not surviving into the JIT'd
+   function's own module the way it does when everything is inlined
+   into `main`.
+4. **Still not done, low priority:** the `array_of_matrices.test` XPASS
+   has now been observed across at least 4 sessions without ever being
+   looked at directly. Its own `XFAIL: Clang`/`XFAIL: DXC` lines are
+   almost certainly just stale conditions that never match under the
+   `feme-vk` target's lit config -- a 15-minute check would confirm
+   this and let it finally be removed from every future session's
+   "noted but not investigated" list.
+
+**Cleanup done:** removed all `/tmp/h124d*`, `/tmp/deriv_test*.mlir`,
+`/tmp/deriv_test2.spv`, `/tmp/derivate*.log`, `/tmp/derivate.qpa` scratch
+files before ending the session.
