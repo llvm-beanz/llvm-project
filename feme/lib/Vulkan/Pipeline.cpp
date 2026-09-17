@@ -310,9 +310,11 @@ void patchUnboundedResourceRanges(llvm::Module &M,
 
       uint64_t Set = SetC->getZExtValue();
       uint32_t Binding = static_cast<uint32_t>(BindingC->getZExtValue());
-      if (Set >= SetLayouts.size())
-        continue; // Layout does not declare this set: leave unpatched,
-                  // `validateBoundRanges` reports the real error later.
+      if (Set >= SetLayouts.size() || !SetLayouts[Set])
+        continue; // Layout does not declare this set, or declares it as
+                  // unused (`VK_NULL_HANDLE`, see PipelineLayout's own
+                  // comment): leave unpatched, `validateBoundRanges` reports
+                  // the real error later.
       const DescriptorSetLayoutBinding *Decl =
           SetLayouts[Set]->find(Binding);
       if (!Decl || Decl->Count == 0)
@@ -488,6 +490,12 @@ Error validateBoundRanges(const feme::cpu::ResourceInfo &Info,
       return createStringError(inconvertibleErrorCode(),
                                "shader binds descriptor set %u, which "
                                "VkPipelineLayout does not declare",
+                               Range.Space);
+    if (!SetLayouts[Range.Space])
+      return createStringError(inconvertibleErrorCode(),
+                               "shader binds descriptor set %u, whose "
+                               "VkPipelineLayout declares it unused "
+                               "(VK_NULL_HANDLE layout)",
                                Range.Space);
     const DescriptorSetLayoutBinding *Binding =
         SetLayouts[Range.Space]->find(Range.BaseRegister);

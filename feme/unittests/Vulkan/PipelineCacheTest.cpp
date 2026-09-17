@@ -643,6 +643,34 @@ TEST_F(PipelineCacheTest, RealFailureOutranksPipelineCompileRequired) {
   EXPECT_EQ(Pipelines[1], VK_NULL_HANDLE);
 }
 
+/// Roadmap L94(g): `VK_EXT_graphics_pipeline_library`'s independent-sets
+/// feature allows an unused descriptor set's layout to be `VK_NULL_HANDLE`
+/// (`VkPipelineLayoutCreateInfo::pSetLayouts[I]`), which `fromHandle` maps
+/// to a `nullptr` `DescriptorSetLayout *`. `computeGraphicsPipelineCacheKey`
+/// previously dereferenced every set layout unconditionally, so hashing a
+/// layout with such an unused set crashed rather than treating it as
+/// contributing no bindings.
+TEST_F(PipelineCacheTest, ComputePipelineCacheKeyToleratesNullSetLayout) {
+  VkDescriptorSetLayout SetLayouts[] = {VK_NULL_HANDLE};
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = SetLayouts;
+  VkPipelineLayout LayoutWithNullSet = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &LayoutWithNullSet),
+      VK_SUCCESS);
+
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  CreateInfo.layout = LayoutWithNullSet;
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyPipelineLayout(Device, LayoutWithNullSet, nullptr);
+}
+
 } // namespace
 
 namespace {

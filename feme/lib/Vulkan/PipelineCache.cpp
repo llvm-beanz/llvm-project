@@ -44,6 +44,11 @@ void hashSetLayoutsAndPushConstants(
     SHA256 &Hash, ArrayRef<const DescriptorSetLayout *> SetLayouts,
     ArrayRef<VkPushConstantRange> PushConstantRanges) {
   for (const DescriptorSetLayout *Layout : SetLayouts) {
+    // `VK_EXT_graphics_pipeline_library`'s independent-sets feature allows an
+    // unused set's layout to be `VK_NULL_HANDLE`, which `fromHandle` maps to
+    // `nullptr` here; it contributes no bindings to the pipeline's identity.
+    if (!Layout)
+      continue;
     for (const DescriptorSetLayoutBinding &Binding : Layout->bindings()) {
       Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Binding),
                            sizeof(Binding.Binding)));
