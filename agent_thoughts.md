@@ -89349,3 +89349,71 @@ pass without broadening advertised Vulkan support.
 
 1. Continue L94 recovery in deterministic order with the next non-unsupported
    completed pipeline case, reducing only a reproduced abnormal result.
+
+# L94(g): null descriptor set layout crash
+
+Confirmed device at session start: `FeMe CPU Vulkan Device`. Good.
+
+## What's done (about 45 minutes)
+
+1. Rebuilt `libfeme_vulkan.so` from scratch before trusting anything (the
+   instructions file's own warning about stale-`.so` false alarms).
+2. Ran the next deterministic case after L94(f)
+   (`pipeline_library.framebuffer_attachment.resolve_input_same_attachment`)
+   — passed already, no action needed.
+3. Batched the next 1,800 cases. Segfault partway through, inside
+   `always_null_set_layout.set_0_unused_fast_lib`.
+4. `gdb -batch -ex run -ex bt` pinned it to
+   `hashSetLayoutsAndPushConstants` in `PipelineCache.cpp`: null-deref on a
+   `DescriptorSetLayout*` that is legitimately null (`VK_NULL_HANDLE` set
+   layout, valid per `VK_EXT_graphics_pipeline_library`'s independent sets).
+5. Fixed the null-skip there, plus two sibling call sites
+   (`patchUnboundedResourceRanges`, `validateBoundRanges` in `Pipeline.cpp`)
+   with the identical latent bug, since they're the same feature surface.
+6. Added `PipelineCacheTest.ComputePipelineCacheKeyToleratesNullSetLayout`.
+7. `git clang-format --diff HEAD` came back clean (zero reformatting) once I
+   hand-matched existing style instead of running plain `clang-format -i` on
+   whole files — that first attempt reordered unrelated includes and
+   rewrapped untouched lines, so I reverted and redid it by hand.
+
+## Verified
+
+- `FeMeVulkanTests`: 707/707 pass.
+- `ninja -C build2 check-feme`: 3,160 passed, 3 unsupported (was 3,159).
+- All 44 `always_null_set_layout.*` CTS cases pass against the rebuilt
+  explicit FeMe ICD (`--deqp-shadercache=disable`).
+- Re-ran the same 1,800-case batch that crashed: now completes clean (668
+  pass / 181 fail / 950 not-supported / 1 warning), no crash.
+
+## Two commits
+
+1. `[feme] L94(g): tolerate VK_NULL_HANDLE descriptor set layouts` — the
+   code fix + test.
+2. `[feme] docs: record L94(g) fix and add L94(h) breakdown` — Roadmap.md
+   strikethrough + VulkanCTSReport.md section + new L94(h) entry.
+
+No advertised Vulkan feature/extension changed, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` untouched — this
+was a pure crash fix, not new capability.
+
+## What I did NOT do, and why
+
+The re-run's next failure signature is `error: unhandled Decoration :
+'Component` across 181 `interface_matching.shader_layout_component_matching.*`
+cases. That's a missing SPIR-V decoration in the importer, not a single
+reproducible pipeline bug — a whole new small feature, not a reduction. Filed
+it as roadmap **L94(h)** instead of starting it cold at the end of this
+session.
+
+## Next step
+
+1. **Start L94(h).** Reduce
+   `pipeline_library.interface_matching.shader_layout_component_matching.
+   vert_tesc_tese_frag.loose_var.float32.multiple_locations.
+   scalar_scalar_scalar_scalar` (first case in that family from the batch
+   log). Read how SPIR-V's `Component` decoration packs a sub-`Location`
+   offset onto an interface variable, find where the importer currently
+   drops unrecognized decorations, and decide where component offset fits
+   in the existing interface-matching model before writing code. Rough
+   estimate: half a day, since it's new decoration support, not a
+   one-line guard like L94(g).
