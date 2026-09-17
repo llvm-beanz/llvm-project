@@ -23,6 +23,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Graphics/ImageFixture.h"
+#include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
@@ -278,10 +279,22 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // `R16_UINT`/`_SINT` above already established for their own
     // otherwise-sampling-bridge-only siblings.
     return FormatInfo{1, 1, false};
+  case ResourceFormat::R8_UINT:
+  case ResourceFormat::R8_SINT:
+    // (Roadmap H170) A real integer color-attachment format, same
+    // rationale as `R16_UINT`/`_SINT` above -- needed since
+    // `getFixtureFormatElementSize` reaches this table even though
+    // `packClearColor`/`unpackColor` have their own dedicated `if`-block.
+    return FormatInfo{1, 1, false};
   case ResourceFormat::R8G8_UNORM:
   case ResourceFormat::R8G8_SNORM:
     // (Roadmap H98a) The two-channel sibling of `R8_UNORM`/`_SNORM`
     // above, same rationale.
+    return FormatInfo{2, 1, false};
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
+    // (Roadmap H170) The two-channel sibling of `R8_UINT`/`_SINT` above,
+    // same rationale.
     return FormatInfo{2, 1, false};
   case ResourceFormat::R16_FLOAT:
     // (Roadmap H99a) A real color-attachment format, unlike its
@@ -649,6 +662,50 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H170) `R8_UINT`/`R8_SINT`: same raw-integer-reference-value
+  // convention as `R16_UINT`/`_SINT` above, one byte per component --
+  // needs its own branch here (rather than the generic
+  // `isIntegerColorAttachmentFormat` catch-all further below) because a
+  // single-component format's `FormatInfo` (`getFormatInfo` above) has
+  // only 1 `Components`, not the 4-element `Clear` array every clear
+  // color (`VkClearColorValue`) actually arrives as.
+  if (Format == ResourceFormat::R8_UINT ||
+      Format == ResourceFormat::R8_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    if (Format == ResourceFormat::R8_SINT) {
+      int8_t V = static_cast<int8_t>(std::clamp(Clear[0], -128.0, 127.0));
+      memcpy(Texel.data(), &V, 1);
+    } else {
+      uint8_t V = static_cast<uint8_t>(std::clamp(Clear[0], 0.0, 255.0));
+      memcpy(Texel.data(), &V, 1);
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H170) `R8G8_UINT`/`R8G8_SINT`: the two-channel sibling of
+  // `R8_UINT`/`_SINT` above, same rationale and convention.
+  if (Format == ResourceFormat::R8G8_UINT ||
+      Format == ResourceFormat::R8G8_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R8G8_SINT;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int8_t V = static_cast<int8_t>(std::clamp(Clear[I], -128.0, 127.0));
+        memcpy(Texel.data() + I, &V, 1);
+      } else {
+        uint8_t V = static_cast<uint8_t>(std::clamp(Clear[I], 0.0, 255.0));
+        memcpy(Texel.data() + I, &V, 1);
+      }
+    }
+    return Error::success();
+  }
+
   // (Roadmap H8p) `R16G16_UINT`/`R16G16_SINT`: the two-channel sibling of
   // `R16_UINT`/`_SINT` above, same raw-integer convention.
   if (Format == ResourceFormat::R16G16_UINT ||
@@ -963,6 +1020,55 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H170) `R16G16B16A16_{UINT,SINT}`/`R32G32B32A32_{UINT,SINT}`:
+  // two of the remaining `isIntegerColorAttachmentFormat`'s (RuntimeABI.h)
+  // real integer color-attachment formats without their own dedicated
+  // branch above (`R16_{UINT,SINT}`/`R16G16_{UINT,SINT}`/
+  // `R8G8B8A8_{UINT,SINT}`/`R32_{UINT,SINT}`/`R32G32_{UINT,SINT}`/
+  // `R10G10B10A2_UINT` all already have one) -- same
+  // raw-integer-reference-value convention as those, clamped to each
+  // component's own width/signedness range rather than wrapping or
+  // invoking UB on an out-of-range `double`. `R8_{UINT,SINT}`/
+  // `R8G8_{UINT,SINT}` need their own earlier branch instead (below,
+  // alongside `R16_UINT`/`_SINT`), since their single/two-component
+  // `FormatInfo` shape does not match the 4-component `Clear` array every
+  // other integer format's clear color arrives as. Found via a real CTS
+  // run: `dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*` clears a
+  // `R32G32B32A32_UINT` attachment (deqp's own "RGBA32UI, since FP
+  // rendertargets are not in core spec" `fbo_float` comment) and hit this
+  // function's fallback "not yet supported" error, failing
+  // `vkQueueSubmit` with `VK_ERROR_INITIALIZATION_FAILED` before a single
+  // pixel was ever rendered.
+  if (Format == ResourceFormat::R16G16B16A16_UINT ||
+      Format == ResourceFormat::R16G16B16A16_SINT ||
+      Format == ResourceFormat::R32G32B32A32_UINT ||
+      Format == ResourceFormat::R32G32B32A32_SINT) {
+    bool Signed = !isUnsignedIntegerColorAttachmentFormat(Format);
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      if (Signed) {
+        double Lo = Info->ComponentBytes == 2 ? -32768.0 : -2147483648.0;
+        double Hi = Info->ComponentBytes == 2 ? 32767.0 : 2147483647.0;
+        if (Info->ComponentBytes == 2) {
+          auto V = static_cast<int16_t>(std::clamp(Clear[I], Lo, Hi));
+          memcpy(Texel.data() + I * 2, &V, 2);
+        } else {
+          auto V = static_cast<int32_t>(std::clamp(Clear[I], Lo, Hi));
+          memcpy(Texel.data() + I * 4, &V, 4);
+        }
+      } else {
+        double Hi = Info->ComponentBytes == 2 ? 65535.0 : 4294967295.0;
+        if (Info->ComponentBytes == 2) {
+          auto V = static_cast<uint16_t>(std::clamp(Clear[I], 0.0, Hi));
+          memcpy(Texel.data() + I * 2, &V, 2);
+        } else {
+          auto V = static_cast<uint32_t>(std::clamp(Clear[I], 0.0, Hi));
+          memcpy(Texel.data() + I * 4, &V, 4);
+        }
+      }
+    }
+    return Error::success();
+  }
+
   return createStringError(inconvertibleErrorCode(),
                            "attachment clear color is not yet supported "
                            "for this format");
@@ -1237,6 +1343,56 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     return Error::success();
   }
 
+  // (Roadmap H170) `R8_UINT`/`R8_SINT`: the inverse of `packClearColor`'s
+  // own raw-integer special case above -- same convention as
+  // `R16_UINT`/`_SINT` above, one byte wide.
+  if (Format == ResourceFormat::R8_UINT ||
+      Format == ResourceFormat::R8_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    if (Format == ResourceFormat::R8_SINT) {
+      int8_t V;
+      memcpy(&V, Texel.data(), 1);
+      Out[0] = V;
+    } else {
+      uint8_t V;
+      memcpy(&V, Texel.data(), 1);
+      Out[0] = V;
+    }
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H170) `R8G8_UINT`/`R8G8_SINT`: the two-channel sibling of
+  // `R8_UINT`/`_SINT` above, same rationale and convention.
+  if (Format == ResourceFormat::R8G8_UINT ||
+      Format == ResourceFormat::R8G8_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R8G8_SINT;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int8_t V;
+        memcpy(&V, Texel.data() + I, 1);
+        Out[I] = V;
+      } else {
+        uint8_t V;
+        memcpy(&V, Texel.data() + I, 1);
+        Out[I] = V;
+      }
+    }
+    Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
   // (Roadmap H8p) `R8G8B8A8_UINT`/`R8G8B8A8_SINT`: same raw-integer
   // convention as `R16_UINT`/`_SINT` above, one byte per component.
   if (Format == ResourceFormat::R8G8B8A8_UINT ||
@@ -1478,6 +1634,54 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
       float F;
       memcpy(&F, Texel.data() + I * Info->ComponentBytes, Info->ComponentBytes);
       Out[I] = F;
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H170) The inverse of `packClearColor`'s own identical
+  // integer-format branch above, for the same still-missing formats
+  // (`R16G16B16A16_{UINT,SINT}`/`R32G32B32A32_{UINT,SINT}` -- `R8_{UINT,
+  // SINT}`/`R8G8_{UINT,SINT}` have their own earlier branch above,
+  // alongside `R16_UINT`/`_SINT`, for the same `Out.size()` mismatch
+  // reason `packClearColor`'s own comment there explains): read each
+  // component's raw bit pattern for its own width/signedness back out as
+  // a plain reference numeric value, no scaling.
+  if (Format == ResourceFormat::R16G16B16A16_UINT ||
+      Format == ResourceFormat::R16G16B16A16_SINT ||
+      Format == ResourceFormat::R32G32B32A32_UINT ||
+      Format == ResourceFormat::R32G32B32A32_SINT) {
+    bool Signed = !isUnsignedIntegerColorAttachmentFormat(Format);
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      switch (Info->ComponentBytes) {
+      case 2: {
+        if (Signed) {
+          int16_t V;
+          memcpy(&V, Texel.data() + I * 2, 2);
+          Out[I] = V;
+        } else {
+          uint16_t V;
+          memcpy(&V, Texel.data() + I * 2, 2);
+          Out[I] = V;
+        }
+        break;
+      }
+      case 4: {
+        if (Signed) {
+          int32_t V;
+          memcpy(&V, Texel.data() + I * 4, 4);
+          Out[I] = V;
+        } else {
+          uint32_t V;
+          memcpy(&V, Texel.data() + I * 4, 4);
+          Out[I] = V;
+        }
+        break;
+      }
+      default:
+        return createStringError(inconvertibleErrorCode(),
+                                 "unexpected integer component width %u",
+                                 Info->ComponentBytes);
+      }
     }
     return Error::success();
   }

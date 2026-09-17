@@ -1279,5 +1279,147 @@ TEST(ImageFixtureTest, RoundTripsE5B9G9R9UfloatFixtureFormat) {
   EXPECT_EQ(Printed, Text);
 }
 
+// (Roadmap H170) `R8_UINT`/`R8_SINT`/`R8G8_UINT`/`R8G8_SINT`/
+// `R16G16B16A16_UINT`/`R16G16B16A16_SINT`/`R32G32B32A32_UINT`/
+// `R32G32B32A32_SINT`: the four remaining `isIntegerColorAttachmentFormat`
+// (RuntimeABI.h) formats that had no `packClearColor`/`unpackColor` case at
+// all before this row -- found via a real CTS run of
+// `dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*`, which clears an
+// `R32G32B32A32_UINT` attachment and failed `vkQueueSubmit` with
+// `VK_ERROR_INITIALIZATION_FAILED` ("attachment clear color is not yet
+// supported for this format") before this fix.
+TEST(ImageFixtureTest, PacksAndUnpacksR8Uint) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R8_UINT, {255.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 255.0);
+
+  // Out-of-range values clamp rather than wrap or truncate, matching
+  // every other integer format's own established convention (e.g.
+  // `PacksAndUnpacksR16Uint` above).
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R8_UINT, {70000.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 255.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR8SintNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R8_SINT, {-100.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -100.0);
+
+  // Out-of-range values clamp to the signed 8-bit range.
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R8_SINT, {-1000.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -128.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8Uint) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8_UINT,
+                                   {12.0, 250.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 12.0);
+  EXPECT_EQ(Unpacked[1], 250.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16B16A16Uint) {
+  std::array<uint8_t, 8> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16B16A16_UINT,
+                                   {65535.0, 1234.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R16G16B16A16_UINT, Texel,
+                                Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], 65535.0);
+  EXPECT_EQ(Unpacked[1], 1234.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16B16A16SintNegative) {
+  std::array<uint8_t, 8> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16B16A16_SINT,
+                                   {-32768.0, -1.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R16G16B16A16_SINT, Texel,
+                                Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], -32768.0);
+  EXPECT_EQ(Unpacked[1], -1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32B32A32Uint) {
+  // The exact shape `dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*`
+  // clears (deqp's own "RGBA32UI, since FP rendertargets are not in core
+  // spec" `fbo_float` comment): a real CTS run hit
+  // `VK_ERROR_INITIALIZATION_FAILED` at `vkQueueSubmit` on this format
+  // before this fix, because `packClearColor` had no case for it at all.
+  std::array<uint8_t, 16> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32G32B32A32_UINT,
+                     {4294967295.0, 0.0, 0.0, 1.0}, Texel),
+      Succeeded());
+  uint32_t V;
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_EQ(V, 4294967295u);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R32G32B32A32_UINT, Texel,
+                                Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], 4294967295.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+
+  // Out-of-range values clamp rather than wrap.
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32G32B32A32_UINT,
+                     {5000000000.0, 0.0, 0.0, 1.0}, Texel),
+      Succeeded());
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_EQ(V, 4294967295u);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR32G32B32A32SintNegative) {
+  std::array<uint8_t, 16> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R32G32B32A32_SINT,
+                     {-2147483648.0, -1.0, 0.0, 1.0}, Texel),
+      Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R32G32B32A32_SINT, Texel,
+                                Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], -2147483648.0);
+  EXPECT_EQ(Unpacked[1], -1.0);
+}
+
 } // namespace
 
