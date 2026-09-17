@@ -704,3 +704,94 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.interface_matching.*" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L97: `graphicsPipelineLibraryIndependentInterpolationDecoration` triage and fix
+
+## Outcome
+
+**Fixed.** Split out of L94(j)'s own closing session's next-step ask to
+triage the `pipeline_library.interface_matching.*` sweep's 468
+`NotSupported` cases for cheap wins versus genuine feature gaps.
+
+## Investigation and change
+
+Categorized the 468 `NotSupported` cases (via the saved sweep log from
+the prior session): 324 blocked on
+`graphicsPipelineLibraryIndependentInterpolationDecoration` (the
+`decoration_mismatch.*` family, testing `Flat`/`NoPerspective`
+interpolation-decoration mismatches between producer/consumer stages),
+112 on 16-bit floats, 32 on double-precision floats.
+
+The CTS `DECORATION_MISMATCH` test type
+(`vktPipelineInterfaceMatchingTests.cpp`) is a rendering-correctness
+test, not a validation-error test: it renders values chosen to produce
+the same result regardless of interpolation mode, so the only thing
+being checked is whether the implementation still computes the right
+answer despite the mismatch. The CTS gates this family behind
+`graphicsPipelineLibraryIndependentInterpolationDecoration` only for
+non-monolithic pipeline-construction types, because an implementation
+*could* legitimately fail to propagate per-stage interpolation
+decorations correctly when pipeline-library stages are compiled
+independently.
+
+`EntryPoints.cpp` reported this property `VK_FALSE` with no
+implementation work behind that value. But this ICD's own graphics-
+pipeline-library "link" is always a full `compileGraphicsPipeline`
+recompile of the merged pipeline state
+(`synthesizeLinkedGraphicsPipelineCreateInfo`, roadmap H29c), never a
+genuinely independent per-stage compilation -- every linked stage's own
+SPIR-V interpolation decorations are always visible together at the
+point `CanonicalizeStage.cpp` computes each `SignatureElement`'s
+`Interpolation` mode. There is no code path in this ICD that could
+behave differently for a pipeline-library-constructed pipeline than for
+the equivalent monolithic one w.r.t. interpolation decoration --
+confirmed directly by running the same
+`decoration_mismatch.out_flat_in_none_loose_variable_vert_out_frag_in`
+case under both `pipeline_library` and `monolithic` construction types
+and observing identical passing behavior even before this change (the
+monolithic variant is never gated on this property at all).
+
+Fixed by flipping `graphicsPipelineLibraryIndependentInterpolationDecoration`
+to `VK_TRUE` in `EntryPoints.cpp`. The sibling
+`graphicsPipelineLibraryFastLinking` property remains `VK_FALSE`
+(unchanged): that property promises the link step is cheaper than a full
+recompile, which is false for this ICD, so it correctly stays `VK_FALSE`.
+
+The remaining 144 `NotSupported` cases (112 16-bit float, 32
+double-precision float) were confirmed to be genuine, unimplemented
+feature gaps: `EntryPoints.cpp` reports `shaderFloat16` and
+`storageInputOutput16` both `VK_FALSE`, and doesn't mention
+`shaderFloat64` at all (defaults `VK_FALSE`). Filed as roadmap L98
+rather than attempted this session -- a materially larger scope than a
+property-flip fix.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` against the rebuilt, assertions-enabled, ccache-backed ICD.
+- `FeMeVulkanTests --gtest_filter="*GraphicsPipelineLibrary*"`: 3/3 pass
+  (including the updated
+  `PhysicalDeviceProperties2Test.GraphicsPipelineLibraryIsImplementedAndAdvertised`).
+- `ninja -C build2 check-feme`: 3,168 passed; 3 unsupported; 0 failed
+  (same totals as the L94(j) session's close -- no regressions).
+- `decoration_mismatch.*` pipeline-library family (360 cases): **360
+  pass, 0 not-supported, 0 fail** (was 0 pass / 360 not-supported before
+  this fix).
+- Full `pipeline_library.interface_matching.*` group (1589 cases):
+  **1445 pass** (up from 1121), **144 not-supported** (the remaining
+  16-bit/64-bit float gaps, tracked as L98), **0 fail, 0 crash**.
+
+No advertised extension changed (`VK_EXT_graphics_pipeline_library` was
+already listed as advertised); this is a within-extension property
+correction, so `Vulkan14FeatureInventory.md` and
+`VulkanExtensionInventory.md` remain current.
+
+## Reproduction
+
+```console
+ninja -C build2 check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.interface_matching.decoration_mismatch.*" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
