@@ -89243,3 +89243,64 @@ cases run after L94(d) pass, including all six topology variants.
 1. **Continue L94 recovery in order.** Resume after the
    `two_draws_static.vertex_input_*` capability-gated cases and reduce the
    first reproduced abnormal pipeline result.
+
+# L94(e): preserve logical primitive IDs through raster expansion
+
+## Outcome
+
+**The first abnormal case after the capability-gated vertex-input and viewport
+cases now passes.**
+
+`dEQP-VK.pipeline.pipeline_library.framebuffer_attachment.no_attachments`
+previously produced an image mismatch. The pipeline-library,
+fast-linked-library, and monolithic variants now pass against the rebuilt
+FeMe ICD with shader caching disabled.
+
+## Investigation
+
+1. Confirmed the explicit build-tree ICD reports `FeMe CPU Vulkan Device`.
+   The assertions-enabled `build2` tree uses `ccache` as its compiler
+   launcher.
+2. Continued the generated pipeline case list in order. The viewport cases
+   correctly returned `NotSupported`; the following 42 framebuffer-attachment
+   cases passed before `no_attachments` became the first abnormal result.
+3. Decoded the CTS image and read the test shader. Four point primitives use
+   `gl_PrimitiveID % 4` to write four storage-image texels, but FeMe wrote only
+   texels 0 and 2.
+4. Reduced the cause to the software rasterizer: every logical point expands
+   into two `ScreenTriangle` objects, and the fallback primitive counter
+   advanced inside the triangle helper. The fragment shader therefore observed
+   IDs `0,2,4,6`, not `0,1,2,3`.
+
+## Change
+
+1. Resolve the fallback or shader-authored primitive ID once in
+   `PrimitiveState`, before clipping and point/line expansion.
+2. Copy that resolved ID into every generated screen triangle.
+3. Reset direct-draw fallback IDs at each instance boundary, as required by
+   Vulkan. Independent review caught that the pre-existing shared counter also
+   spanned instances; the regression test now uses two overlapping instances
+   so the second must observe IDs `0,1,2,3` again.
+4. Added `ExecutorTest.PointExpansionPreservesLogicalPrimitiveIDs`.
+
+No design change was needed. No advertised Vulkan feature or extension changed,
+so `Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
+current.
+
+## Validation
+
+- Focused primitive-ID executor tests pass.
+- `ninja -C build2 check-feme`: 3,158 passed; 3 unsupported.
+- The rebuilt explicit ICD passes the pipeline-library,
+  fast-linked-library, and monolithic single-sample CTS cases with
+  `--deqp-shadercache=disable`.
+- The immediately following
+  `pipeline_library.framebuffer_attachment.no_attachments_ms` case still
+  fails graphics-pipeline creation with `VK_ERROR_INITIALIZATION_FAILED`; it
+  is recorded separately as L94(f), not conflated with this fix.
+
+## Suggested next step
+
+1. **Reduce L94(f).** Start at
+   `pipeline_library.framebuffer_attachment.no_attachments_ms` and identify why
+   the four-sample no-color-attachment pipeline is rejected before drawing.
