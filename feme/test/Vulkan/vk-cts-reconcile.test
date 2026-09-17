@@ -1,0 +1,54 @@
+// vk_cts_reconcile.py (roadmap D4/G1) must derive results from complete QPA
+// records rather than process exit codes: the current QPA's unfinished final
+// record is unrun, and each completed status is compared to the baseline's
+// per-case result instead of aggregate totals.
+//
+// RUN: %python %S/../../utils/vk_cts_reconcile.py \
+// RUN:   --case-list %S/Inputs/vk-cts-reconcile-cases.txt \
+// RUN:   --qpa %S/Inputs/vk-cts-reconcile-current.qpa \
+// RUN:   --baseline-qpa %S/Inputs/vk-cts-reconcile-baseline.qpa \
+// RUN:   --expected-failures %S/Inputs/vk-cts-reconcile-expected-failures.txt \
+// RUN:   -o %t.report
+// RUN: FileCheck %s < %t.report
+//
+// CHECK: Total cases: 4
+// CHECK: Completed cases: 3
+// CHECK: Unrun cases: 1
+// CHECK: Changed cases: 3
+// CHECK: Unexpected failures: 0
+// CHECK: Result counts:
+// CHECK-DAG:   Fail: 1
+// CHECK-DAG:   NotSupported: 1
+// CHECK-DAG:   Pass: 1
+// CHECK: Unrun case names:
+// CHECK-NEXT:   dEQP-VK.pipeline.delta
+// CHECK: Changed case names:
+// CHECK-DAG:   dEQP-VK.api.beta: Pass -> Fail
+// CHECK-DAG:   dEQP-VK.pipeline.gamma: Unrun -> NotSupported
+// CHECK-DAG:   dEQP-VK.pipeline.delta: NotSupported -> Unrun
+
+// Contradictory completed attempts are a data error, not a hidden last-write
+// wins choice. The file is derived by changing beta's status in the current
+// fixture, so it covers duplicate-case reconciliation without another opaque
+// binary QPA fixture.
+//
+// RUN: sed 's/StatusCode="Fail"/StatusCode="Pass"/' \
+// RUN:   %S/Inputs/vk-cts-reconcile-current.qpa > %t.conflict.qpa
+// RUN: not %python %S/../../utils/vk_cts_reconcile.py \
+// RUN:   --case-list %S/Inputs/vk-cts-reconcile-cases.txt \
+// RUN:   --qpa %S/Inputs/vk-cts-reconcile-current.qpa --qpa %t.conflict.qpa \
+// RUN:   2>&1 | FileCheck --check-prefix=CONFLICT %s
+//
+// CONFLICT: conflicting statuses Fail and Pass
+
+// An expected-failure list is a checked-in baseline input, so a typo must be
+// rejected instead of becoming a silently unused expectation.
+//
+// RUN: echo dEQP-VK.typo > %t.bad-expected.txt
+// RUN: not %python %S/../../utils/vk_cts_reconcile.py \
+// RUN:   --case-list %S/Inputs/vk-cts-reconcile-cases.txt \
+// RUN:   --qpa %S/Inputs/vk-cts-reconcile-current.qpa \
+// RUN:   --expected-failures %t.bad-expected.txt 2>&1 \
+// RUN:   | FileCheck --check-prefix=BAD-EXPECTED %s
+//
+// BAD-EXPECTED: expected failure(s) are not in --case-list: dEQP-VK.typo

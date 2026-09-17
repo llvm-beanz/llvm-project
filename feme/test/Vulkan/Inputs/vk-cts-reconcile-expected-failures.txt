@@ -1,0 +1,2 @@
+# This test's intentional current failure is accepted.
+dEQP-VK.api.beta

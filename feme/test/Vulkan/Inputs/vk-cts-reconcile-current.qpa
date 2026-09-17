@@ -1,0 +1,19 @@
+#beginSession
+#beginTestCaseResult dEQP-VK.api.alpha
+<TestCaseResult>
+ <Result StatusCode="Pass">Pass</Result>
+</TestCaseResult>
+#endTestCaseResult
+#beginTestCaseResult dEQP-VK.api.beta
+<TestCaseResult>
+ <Result StatusCode="Fail">Fail</Result>
+</TestCaseResult>
+#endTestCaseResult
+#beginTestCaseResult dEQP-VK.pipeline.gamma
+<TestCaseResult>
+ <Result StatusCode="NotSupported">Not supported</Result>
+</TestCaseResult>
+#endTestCaseResult
+#beginTestCaseResult dEQP-VK.pipeline.delta
+<TestCaseResult>
+ <Result StatusCode="Pass">This incomplete record must not count</Result>

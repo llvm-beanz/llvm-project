@@ -1,0 +1,6 @@
+# The case list is deliberately ordered: the report's unrun list must retain
+# the requested recovery order, not an incidental QPA traversal order.
+dEQP-VK.api.alpha
+dEQP-VK.api.beta
+dEQP-VK.pipeline.gamma
+dEQP-VK.pipeline.delta

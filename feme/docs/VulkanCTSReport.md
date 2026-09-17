@@ -41,6 +41,15 @@ Interrupted batches resumed after the last started case, with up to nine
 attempts. A final six-worker recovery pass retried every remaining case with a
 20-minute process timeout.
 
+Roadmap D4 now makes this recovery accounting reproducible:
+`feme/utils/vk_cts_reconcile.py` reads all QPA files for a run and accepts a
+complete result only when its `#endTestCaseResult` marker is present. Given the
+generated case list, it reports unrun cases in recovery order, rejects
+contradictory retries, and compares the current per-case result map with a
+baseline map. It also accepts an expected-failure case list, so G2's future
+full-run job can distinguish ordinary known failures from regressions without
+masking crashes, timeouts, or missing results.
+
 `deqp-vk` returns nonzero when an ordinary test fails, so completion was
 derived from per-case log records rather than the process exit code. A case is:
 
