@@ -3930,16 +3930,10 @@ TEST(ExecutorTest, MultisampleResolveAveragesPerPixelCoverage) {
   EXPECT_EQ(ResolveStorage[3 * 4], 0);        // pixel 3 black
 }
 
-// Roadmap H7f: `sampleShadingEnable`. A fragment shader that reads
-// `SV_SampleIndex` (element 0, no location -- a pure system value) and
-// writes `SampleIndex / 3.0` into its red channel: with sample shading
-// enabled and no resolve attachment bound, each of a fully-covered pixel's
-// 4 raw MSAA samples must show a distinct red value matching its own
-// sample index, proving the fragment stage really ran once per sample
-// rather than once per pixel with its single result broadcast to every
-// sample (the pre-H7f/`SampleShadingEnable == false` behavior, still
-// covered by `MultisampleResolveAveragesPerPixelCoverage` above, which
-// only ever observes one shaded value per pixel after resolve).
+// A fragment shader that reads `SV_SampleIndex` (element 0, no location -- a
+// pure system value) and writes `SampleIndex / 3.0` into its red channel. Its
+// sample-index input requires a separate invocation for every covered sample,
+// even when `sampleShadingEnable` is false.
 constexpr char SampleIndexFragmentShaderIR[] = R"(
   define void @fs_sampleindex() #0 {
     %sidx = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
@@ -3956,7 +3950,7 @@ constexpr char SampleIndexFragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
-TEST(ExecutorTest, SampleShadingEnableInvokesFragmentOncePerSample) {
+TEST(ExecutorTest, SampleIndexForcesFragmentInvocationPerSample) {
   Context Ctx;
   EntrySignature VSSig;
   VSSig.Elements = {
@@ -3990,7 +3984,7 @@ TEST(ExecutorTest, SampleShadingEnableInvokesFragmentOncePerSample) {
       StencilState{}, std::vector<BlendState>{BlendState{}},
       /*LogicOpEnable=*/false, LogicOp::Copy,
       std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
-      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/true);
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false);
 
   constexpr uint32_t Samples = 4;
   std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);

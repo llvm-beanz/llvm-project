@@ -2503,6 +2503,40 @@ TEST_F(GraphicsPipelineTest, AcceptsMultisampledZeroColorRenderPass) {
   vkDestroyRenderPass(Device, DepthOnlyPass, nullptr);
 }
 
+/// A subpass with no attachments at all has no attachment sample count to
+/// validate against. Its multisample pipeline must use rasterizationSamples,
+/// matching the no-attachment Vulkan limit this ICD advertises.
+TEST_F(GraphicsPipelineTest, AcceptsMultisampledNoAttachmentRenderPass) {
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass NoAttachmentPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &NoAttachmentPass),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = NoAttachmentPass;
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
+                ->sampleCount(),
+            4u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyRenderPass(Device, NoAttachmentPass, nullptr);
+}
+
 /// Roadmap H2j: a depth-only pipeline may omit the fragment stage from
 /// `pStages` entirely -- distinct from `AcceptsZeroColorAttachments` above
 /// (whose fragment stage is present but merely writes no color output) --

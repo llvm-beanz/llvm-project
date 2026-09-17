@@ -935,6 +935,14 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
         Targets.SampleCount =
             Pass.attachments()[Subpass.DepthStencilAttachment].SampleCount;
     }
+    // A subpass with neither color nor depth/stencil attachments has no
+    // attachment sample count to derive. Its pipeline's rasterization sample
+    // count is therefore the only applicable count, as it is for dynamic
+    // rendering below.
+    if (!AnyColorSampleCount && !Targets.DepthStencil &&
+        CreateInfo.pMultisampleState)
+      Targets.SampleCount = static_cast<uint32_t>(
+          CreateInfo.pMultisampleState->rasterizationSamples);
     return Targets;
   }
 
