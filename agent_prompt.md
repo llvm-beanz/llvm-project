@@ -53,7 +53,8 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **H170 bucket 2** (`in_function` subcases): `JIT session error:
-   Symbols not found: [ spirv_var_13 ]` when a derivative call happens
-   inside a helper function rather than `main` directly. ~Half a day.
-   Reduce to a standalone `dxc`+`feme-opt` repro first.
+1. **`check-hlsl-feme-vk` build directory status** -- flagged in a
+   previous session's own notes as needing a from-scratch setup; this
+   session found it already configured and working (376/260/26/1), so
+   this may already be resolved, but worth a quick double-check next
+   session since the prior note said otherwise.
