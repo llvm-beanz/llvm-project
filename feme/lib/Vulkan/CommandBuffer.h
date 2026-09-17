@@ -113,6 +113,7 @@ struct RecordedCommand {
     SetDepthWriteEnable,
     SetDepthCompareOp,
     SetDepthBoundsTestEnable,
+    SetDepthBiasEnable,
     SetStencilTestEnable,
     SetStencilOp,
     SetPrimitiveTopology,
@@ -291,11 +292,12 @@ struct RecordedCommand {
   /// `SetStencil*` above.
   VkCullModeFlags CullModeValue = VK_CULL_MODE_NONE;
   VkFrontFace FrontFaceValue = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  /// (roadmap C4c) `SetDepthTestEnable`/`SetDepthWriteEnable`/
-  /// `SetDepthBoundsTestEnable`: `vkCmdSetDepthTestEnableEXT`/
-  /// `vkCmdSetDepthWriteEnableEXT`/`vkCmdSetDepthBoundsTestEnableEXT`'s
-  /// boolean payload (`Bool32Value`, shared across the three since only
-  /// one is ever meaningful per recorded command). `SetDepthCompareOp`:
+  /// (roadmap C4c/L94(a)) `SetDepthTestEnable`/`SetDepthWriteEnable`/
+  /// `SetDepthBoundsTestEnable`/`SetDepthBiasEnable`:
+  /// `vkCmdSetDepthTestEnableEXT`/`vkCmdSetDepthWriteEnableEXT`/
+  /// `vkCmdSetDepthBoundsTestEnableEXT`/`vkCmdSetDepthBiasEnable`'s boolean
+  /// payload (`Bool32Value`, shared since only one is ever meaningful per
+  /// recorded command). `SetDepthCompareOp`:
   /// `vkCmdSetDepthCompareOpEXT`'s raw `VkCompareOp` (`DepthCompareOpValue`,
   /// mapped through the same `mapCompareOp` the static path uses when this
   /// command replays into `Gfx.Dynamic`).
@@ -749,9 +751,10 @@ public:
     Cmd.FrontFaceValue = Front;
     Commands.push_back(Cmd);
   }
-  /// (roadmap C4c) `vkCmdSetDepthTestEnableEXT`/`vkCmdSetDepthWriteEnableEXT`/
-  /// `vkCmdSetDepthBoundsTestEnableEXT`, sharing one boolean-payload record
-  /// shape distinguished only by \p Op.
+  /// (roadmap C4c/L94(a)) `vkCmdSetDepthTestEnableEXT`/
+  /// `vkCmdSetDepthWriteEnableEXT`/`vkCmdSetDepthBoundsTestEnableEXT`/
+  /// `vkCmdSetDepthBiasEnable`, sharing one boolean-payload record shape
+  /// distinguished only by \p Op.
   void setDepthBool(RecordedCommand::Kind Op, VkBool32 Value) {
     RecordedCommand Cmd;
     Cmd.Op = Op;

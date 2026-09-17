@@ -347,6 +347,8 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateDepthBias;
   case VK_DYNAMIC_STATE_DEPTH_BOUNDS:
     return DynamicStateDepthBounds;
+  case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE:
+    return DynamicStateDepthBiasEnable;
   default:
     return std::nullopt;
   }
@@ -1102,7 +1104,8 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   // feature bit (core-1.0 functionality); only a nonzero `depthBiasClamp`
   // is gated by the `depthBiasClamp` feature, and this ICD accepts that
   // unconditionally too, for the same reason as `DepthClampEnable` above.
-  Out.Raster.DepthBiasEnable = Info->depthBiasEnable != VK_FALSE;
+  if ((Out.DynamicStates & DynamicStateDepthBiasEnable) == 0)
+    Out.Raster.DepthBiasEnable = Info->depthBiasEnable != VK_FALSE;
   if (Info->depthBiasEnable &&
       (Out.DynamicStates & DynamicStateDepthBias) == 0) {
     Out.Raster.DepthBiasConstantFactor = Info->depthBiasConstantFactor;
@@ -3152,6 +3155,8 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     ResolvedRaster.StippleFactor = Dynamic.StippleFactor;
     ResolvedRaster.StipplePattern = Dynamic.StipplePattern;
   }
+  if (isDynamic(DynamicStateDepthBiasEnable))
+    ResolvedRaster.DepthBiasEnable = Dynamic.DepthBiasEnable;
   // (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BIAS`: like `LineWidth` above,
   // this is `RasterState::DepthBiasEnable`'s own static path made dynamic,
   // not a new feature.

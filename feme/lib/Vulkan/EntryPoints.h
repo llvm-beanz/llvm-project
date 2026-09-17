@@ -710,6 +710,8 @@ vkCmdSetDepthCompareOpEXT(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
                                 VkBool32 depthBoundsTestEnable);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBiasEnable(
+    VkCommandBuffer commandBuffer, VkBool32 depthBiasEnable);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetStencilTestEnableEXT(VkCommandBuffer commandBuffer,
                             VkBool32 stencilTestEnable);

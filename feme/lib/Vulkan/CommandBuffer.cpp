@@ -2843,6 +2843,9 @@ Error executeCommandsInto(
     case RecordedCommand::Kind::SetDepthBoundsTestEnable:
       Gfx.Dynamic.DepthBoundsTestEnable = Cmd.Bool32Value != VK_FALSE;
       break;
+    case RecordedCommand::Kind::SetDepthBiasEnable:
+      Gfx.Dynamic.DepthBiasEnable = Cmd.Bool32Value != VK_FALSE;
+      break;
     case RecordedCommand::Kind::SetStencilTestEnable:
       Gfx.Dynamic.StencilTestEnable = Cmd.Bool32Value != VK_FALSE;
       break;
@@ -4154,6 +4157,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBoundsTestEnableEXT(
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBool(RecordedCommand::Kind::SetDepthBoundsTestEnable,
                      depthBoundsTestEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBiasEnable(
+    VkCommandBuffer commandBuffer, VkBool32 depthBiasEnable) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthBool(RecordedCommand::Kind::SetDepthBiasEnable,
+                     depthBiasEnable);
 }
 
 // (roadmap C4c) `vkCmdSetStencilTestEnableEXT`/`vkCmdSetStencilOpEXT`: the

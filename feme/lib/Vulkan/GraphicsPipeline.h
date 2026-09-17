@@ -229,6 +229,10 @@ enum DynamicStateBits : uint32_t {
   // ever toggles the test on/off) -- a pipeline may declare either, both,
   // or neither independently.
   DynamicStateDepthBounds = 1u << 19,
+  // (roadmap L94(a)) `VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE` (core Vulkan 1.3)
+  // controls the existing depth-bias rasterization path independently of
+  // `VK_DYNAMIC_STATE_DEPTH_BIAS`, which supplies its three parameters.
+  DynamicStateDepthBiasEnable = 1u << 20,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -284,6 +288,8 @@ struct DynamicGraphicsState {
   /// (roadmap F5) `vkCmdSetLineStippleKHR`'s payload.
   uint32_t StippleFactor = 1;
   uint16_t StipplePattern = 0xFFFF;
+  /// (roadmap L94(a)) `vkCmdSetDepthBiasEnable`'s payload.
+  bool DepthBiasEnable = false;
   /// (roadmap H7d) `vkCmdSetDepthBias`'s 3-float payload.
   float DepthBiasConstantFactor = 0.0f;
   float DepthBiasClamp = 0.0f;

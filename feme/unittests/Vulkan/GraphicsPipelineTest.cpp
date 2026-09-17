@@ -1603,6 +1603,33 @@ TEST_F(GraphicsPipelineTest, DynamicDepthBiasOverridesStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+TEST_F(GraphicsPipelineTest, DynamicDepthBiasEnableOverridesStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.depthBiasEnable = VK_FALSE;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState DynState;
+  DynState.DepthBiasEnable = true;
+  EXPECT_TRUE(
+      Graphics->buildExecutorPipeline(DynState).getRasterState().DepthBiasEnable);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H7d) `depthBounds`: a pipeline may enable
 /// `depthBoundsTestEnable` with static `min`/`maxDepthBounds`, which
 /// `translateDepthStencilState` now accepts (instead of unconditionally

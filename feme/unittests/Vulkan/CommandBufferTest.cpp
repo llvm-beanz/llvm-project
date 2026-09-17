@@ -470,6 +470,20 @@ TEST_F(CommandBufferTest, RecordAndExecuteDispatch) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
 }
 
+TEST_F(CommandBufferTest, RecordDepthBiasEnable) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdSetDepthBiasEnable(CmdBuf, VK_TRUE);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_EQ(Recorded->commands().size(), 1u);
+  EXPECT_EQ(Recorded->commands().front().Op,
+            RecordedCommand::Kind::SetDepthBiasEnable);
+  EXPECT_EQ(Recorded->commands().front().Bool32Value, VK_TRUE);
+}
+
 TEST_F(CommandBufferTest, DispatchBaseOffsetsGroupID) {
   VkCommandBuffer CmdBuf = allocateCommandBuffer();
   VkCommandBufferBeginInfo BeginInfo{};
