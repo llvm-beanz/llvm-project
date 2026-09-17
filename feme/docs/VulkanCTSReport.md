@@ -285,6 +285,57 @@ No advertised Vulkan feature or extension changed, so
 `Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
 current.
 
+# L94(g): null descriptor set layout crash in the pipeline cache key
+
+## Outcome
+
+**All 44 `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.
+always_null_set_layout.*` cases now pass.**
+
+Continuing the deterministic pipeline-case order after L94(f), a fresh
+1,800-case batch starting at
+`pipeline_library.framebuffer_attachment.resolve_input_same_attachment`
+(itself already passing) segfaulted partway through on the first
+`always_null_set_layout` case.
+
+## Investigation and change
+
+1. `VK_EXT_graphics_pipeline_library`'s independent-sets feature lets an
+   unused descriptor set's layout be `VK_NULL_HANDLE` in
+   `VkPipelineLayoutCreateInfo::pSetLayouts`. `fromHandle` maps that to a
+   null `DescriptorSetLayout *`, which `vkCreatePipelineLayout` stores
+   as-is in `PipelineLayout`'s set-layout list.
+2. `hashSetLayoutsAndPushConstants`, used by
+   `computeGraphicsPipelineCacheKey` for every graphics-pipeline creation,
+   dereferenced each set layout unconditionally to walk its bindings,
+   crashing on the null entry. It now skips a null layout: an unused set
+   contributes no bindings to the pipeline's identity.
+3. `patchUnboundedResourceRanges` and `validateBoundRanges` index a
+   `PipelineLayout`'s set layouts the same way and had the same latent
+   null-dereference for a shader that (invalidly) binds through an unused
+   set. Both are now guarded, the latter by reporting the same descriptor-
+   mismatch error it already reports for an out-of-range set index.
+4. Added `PipelineCacheTest.ComputePipelineCacheKeyToleratesNullSetLayout`.
+
+## Validation
+
+- The rebuilt assertions-enabled, ccache-backed explicit FeMe ICD (confirmed
+  via `vulkaninfo --summary | grep deviceName` reporting `FeMe CPU Vulkan
+  Device`) passes all 44 exact CTS cases with `--deqp-shadercache=disable`.
+- Focused `PipelineCacheTest` unit test passes; the full `FeMeVulkanTests`
+  suite (707 tests) passes.
+- `ninja -C build2 check-feme`: 3,160 passed; 3 unsupported.
+- Re-running the same 1,800-case batch that previously segfaulted now
+  completes cleanly (668 passed, 181 failed, 950 not supported, 1 warning);
+  the next reproducible signature, `error: unhandled Decoration : 'Component`
+  on 181 `interface_matching.shader_layout_component_matching.*` cases, is
+  recorded as roadmap L94(h) rather than fixed here, since it is a missing
+  SPIR-V decoration, not a single reproducible pipeline bug.
+
+No advertised Vulkan feature or extension changed, so
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
+current.
+
 ## Dominant ordinary failures
 
 The largest result signatures are:
