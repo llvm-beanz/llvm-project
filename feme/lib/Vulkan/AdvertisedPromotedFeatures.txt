@@ -20,6 +20,31 @@ robustBufferAccess
 # dualSrcBlend: roadmap C4e -- an Index=1 fragment output reaches
 # executeDraws' VK_BLEND_FACTOR_SRC1_* handling.
 dualSrcBlend
+# Roadmap H7/H8: these core feature bits are backed by the graphics
+# pipeline, image-format, and CPU-runtime implementations cited in
+# Vulkan14FeatureInventory.md.
+imageCubeArray
+sampleRateShading
+fillModeNonSolid
+depthClamp
+depthBiasClamp
+depthBounds
+wideLines
+largePoints
+alphaToOne
+pipelineStatisticsQuery
+vertexPipelineStoresAndAtomics
+fragmentStoresAndAtomics
+shaderStorageImageMultisample
+shaderStorageImageExtendedFormats
+shaderStorageImageReadWithoutFormat
+shaderStorageImageWriteWithoutFormat
+shaderClipDistance
+shaderCullDistance
+samplerAnisotropy
+shaderResourceMinLod
+textureCompressionETC2
+textureCompressionBC
 # textureCompressionASTC_LDR: roadmap E20/E22 -- Format.h/Image.{h,cpp}/
 # ASTCDecode.h recognize, lay out and decode LDR ASTC data, and the
 # copy/blit/resolve paths address such an image a block at a time.
@@ -70,6 +95,7 @@ drawIndirectFirstInstance
 # (RenderPass.cpp), and CommandBuffer.cpp's runDraw runs one draw per set
 # view bit, writing that bit's own attachment array layer.
 multiview
+multiviewGeometryShader
 #
 # --- Core Vulkan 1.2 (VkPhysicalDeviceVulkan12Features): roadmap C6,
 # --- plus timelineSemaphore from V3.
@@ -97,6 +123,20 @@ timelineSemaphore
 # required" promise to be moot against.
 shaderOutputViewportIndex
 shaderOutputLayer
+# Roadmap L12: dynamic texel-buffer indexing and the descriptor binding
+# behaviors below are implemented and reported consistently by both the
+# aggregate Vulkan 1.2 and dedicated descriptor-indexing feature structs.
+shaderUniformTexelBufferArrayDynamicIndexing
+shaderStorageTexelBufferArrayDynamicIndexing
+descriptorBindingUniformBufferUpdateAfterBind
+descriptorBindingSampledImageUpdateAfterBind
+descriptorBindingStorageBufferUpdateAfterBind
+descriptorBindingUniformTexelBufferUpdateAfterBind
+descriptorBindingStorageTexelBufferUpdateAfterBind
+descriptorBindingUpdateUnusedWhilePending
+descriptorBindingPartiallyBound
+descriptorBindingVariableDescriptorCount
+runtimeDescriptorArray
 #
 # --- Core Vulkan 1.3 (VkPhysicalDeviceVulkan13Features).
 #
