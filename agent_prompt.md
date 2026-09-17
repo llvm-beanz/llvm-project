@@ -55,18 +55,15 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Start L94(i), part 1.** Reduce
-   `vector_length.out_ivec3_in_ivec2_loose_variable_vert_out_frag_in` (or
-   the first failing case in that family). Check whether feme's interface
-   matching rejects a vector-length mismatch outright instead of truncating
-   per Vulkan's rule that a consumer may read only the leading components
-   of a wider producer output. Rough estimate: an hour or two, likely a
-   similar shape to L94(h)'s Component fix (relaxing an equality check in
-   `StageLink.cpp`/`GraphicsPipeline.cpp`'s matching, not a decoration gap).
-2. **Then L94(i), part 2.** Once part 1's fix lands, re-run the
-   `member_of_array_of_structures_in_block` crash case in isolation under
-   `gdb`/ASan — the heap corruption may be a symptom of the same
-   vector-length-mismatch code path (writing past the end of a shorter
-   consumer's storage) rather than a separate bug, so fixing part 1 first
-   might fix or at least change part 2's signature before investigating it
-   standalone.
+1. **Start L94(j).** Reduce the smallest failing case in that bucket —
+   likely `vector_length.out_vec4_in_vec4_member_of_array_of_structures_
+   vert_tesc_out_tese_in_frag` (the plain non-`Block` variant, to isolate
+   the per-control-point-array interaction from the block-decomposition
+   machinery already fixed this session). Rough estimate: half a day —
+   likely needs threading `RowCountIsVertexArray`'s outer-dimension folding
+   through `addStageIOStructMembers`'s own per-leaf `RowCount` widening
+   (roadmap H115), rather than a new code path.
+2. **Re-run the broader `pipeline_library.interface_matching.*` sweep**
+   beyond just `vector_length.*` (the prior session's sweep stopped at 688
+   cases on the now-fixed crash; a full re-sweep hasn't been done yet this
+   session) to confirm no further crashes remain in that larger group.
