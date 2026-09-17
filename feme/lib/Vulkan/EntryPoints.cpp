@@ -1200,29 +1200,38 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       MeshShader->prefersCompactPrimitiveOutput = VK_FALSE;
       break;
     }
-    // (roadmap H21c) `VK_EXT_transform_feedback`'s own properties struct.
-    // `maxTransformFeedbackStreams` is 1 (matching `geometryStreams ==
-    // VK_FALSE` above -- the spec requires exactly 1 when that bit is
-    // unset), `maxTransformFeedbackBuffers`/every size/stride limit below
-    // is each set to its own Vulkan-spec-mandated minimum: this
-    // implementation enforces none of them itself (`CommandBuffer.cpp`'s
+    // (roadmap H21c/H173(b)) `VK_EXT_transform_feedback`'s own properties
+    // struct. `maxTransformFeedbackStreams` is 16 -- every stream with an
+    // `XfbBuffer`-tagged element now captures independently and
+    // simultaneously (`Executor.cpp`'s `flattenStream`/per-stream capture
+    // loop, roadmap H173(b)), so this is no longer clamped to the
+    // single-stream spec floor; 16 covers VK-GL-CTS's own
+    // `TEST_TYPE_MULTISTREAMS` `usedStreamId` values (up to 14).
+    // `maxTransformFeedbackBuffers`/every size/stride limit below is each
+    // set to its own Vulkan-spec-mandated minimum: this implementation
+    // enforces none of them itself (`CommandBuffer.cpp`'s
     // `GraphicsState::XfbBuffers` grows to fit any binding index/buffer
     // size/stride a real caller uses), so the spec floor is the only
     // truthful, always-honored answer, exactly like
     // `VK_KHR_shader_integer_dot_product`'s own "supported but not
     // accelerated" precedent above. `transformFeedbackQueries` (the
     // dedicated `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT` query type)
-    // and `transformFeedbackStreamsLinesTriangles`/
-    // `transformFeedbackRasterizationStreamSelect` (both meaningless with
-    // only one stream) are all unimplemented, so all three stay false;
-    // `transformFeedbackDraw` (`vkCmdDrawIndirectByteCountEXT`) is real
-    // and already tested (`DrawIndirectByteCountComputesVertexCount
-    // FromCounterBuffer`, DrawTest.cpp), so it is true.
+    // and `transformFeedbackStreamsLinesTriangles` are still unimplemented
+    // and stay false; `transformFeedbackRasterizationStreamSelect` is now
+    // true -- `GraphicsPipeline.cpp` already parses
+    // `VkPipelineRasterizationStateStreamCreateInfoEXT` and `Executor.cpp`
+    // honors `RasterState::RasterizationStream` when selecting which
+    // stream's own records reach the rasterizer (roadmap H21e), and
+    // independently captures every other XFB-tagged stream regardless
+    // (roadmap H173(b)). `transformFeedbackDraw`
+    // (`vkCmdDrawIndirectByteCountEXT`) is real and already tested
+    // (`DrawIndirectByteCountComputesVertexCount FromCounterBuffer`,
+    // DrawTest.cpp), so it is true.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT: {
       auto *XfbProps =
           reinterpret_cast<VkPhysicalDeviceTransformFeedbackPropertiesEXT *>(
               Base);
-      XfbProps->maxTransformFeedbackStreams = 1;
+      XfbProps->maxTransformFeedbackStreams = 16;
       XfbProps->maxTransformFeedbackBuffers = 4;
       XfbProps->maxTransformFeedbackBufferSize = 1u << 27;
       XfbProps->maxTransformFeedbackStreamDataSize = 512;
@@ -1230,7 +1239,7 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       XfbProps->maxTransformFeedbackBufferDataStride = 512;
       XfbProps->transformFeedbackQueries = VK_FALSE;
       XfbProps->transformFeedbackStreamsLinesTriangles = VK_FALSE;
-      XfbProps->transformFeedbackRasterizationStreamSelect = VK_FALSE;
+      XfbProps->transformFeedbackRasterizationStreamSelect = VK_TRUE;
       XfbProps->transformFeedbackDraw = VK_TRUE;
       break;
     }
@@ -2122,26 +2131,26 @@ void fillFeatures2Chain(void *pNext) {
       Features->meshShaderQueries = VK_FALSE;
       break;
     }
-    // (roadmap H21c) `VK_EXT_transform_feedback`'s own feature struct:
-    // real single-stream, vertex-shader-only capture now exists
+    // (roadmap H21c/H173(b)) `VK_EXT_transform_feedback`'s own feature
+    // struct: real single-stream, vertex-shader-only capture now exists
     // (Executor.cpp's "Transform feedback capture", CommandBuffer.cpp's
     // `EndTransformFeedback`), so `transformFeedback` is true; multiple
-    // simultaneous output streams (a geometry stage's own
-    // `VkPipelineRasterizationStateStreamCreateInfoEXT`-selected stream,
-    // roadmap H21e) do not capture yet, so `geometryStreams` stays false
-    // -- mirroring `meshShader`'s own "advertise the wiring this
-    // implementation actually has, not the whole extension at once"
-    // precedent just above.
+    // simultaneous output streams (every stream with its own
+    // `XfbBuffer`-tagged element, captured independently regardless of
+    // `VkPipelineRasterizationStateStreamCreateInfoEXT`'s own
+    // rasterization-only stream selection) now also capture correctly
+    // (`Executor.cpp`'s `flattenStream`/per-stream capture loop, roadmap
+    // H173(b)), so `geometryStreams` is now true too.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceTransformFeedbackFeaturesEXT *>(
               Base);
       Features->transformFeedback = VK_TRUE;
-      Features->geometryStreams = VK_FALSE;
+      Features->geometryStreams = VK_TRUE;
       break;
     }
-    // (roadmap H21d) `VK_EXT_primitives_generated_query`'s own feature
-    // struct: the query type counts the same quantity as `CLIPPING_
+    // (roadmap H21d/H173(b)) `VK_EXT_primitives_generated_query`'s own
+    // feature struct: the query type counts the same quantity as `CLIPPING_
     // INVOCATIONS_BIT` (`QueryPool.h`'s file comment), which this ICD
     // already computes honestly for every draw shape, so
     // `primitivesGeneratedQuery` is true. `primitivesGeneratedQueryWith
@@ -2149,14 +2158,18 @@ void fillFeatures2Chain(void *pNext) {
     // itself is not implemented yet (roadmap H21g -- any pipeline
     // requesting it is rejected outright at pipeline-creation time, so no
     // query could ever observe the distinction this bit exists to cover).
-    // `primitivesGeneratedQueryWithNonZeroStreams` mirrors `geometryStreams`
-    // above (both false -- multi-stream capture is roadmap H21e).
+    // `primitivesGeneratedQueryWithNonZeroStreams` is now true, mirroring
+    // `geometryStreams` above -- `Executor.cpp`'s own
+    // `GeometryShaderPrimitives`/`ClippingInvocations` accounting already
+    // counts every emitted primitive regardless of which stream
+    // rasterization selects, so a non-zero-stream primitives-generated
+    // query already reads a real, correct count.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
       auto *Features = reinterpret_cast<
           VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT *>(Base);
       Features->primitivesGeneratedQuery = VK_TRUE;
       Features->primitivesGeneratedQueryWithRasterizerDiscard = VK_FALSE;
-      Features->primitivesGeneratedQueryWithNonZeroStreams = VK_FALSE;
+      Features->primitivesGeneratedQueryWithNonZeroStreams = VK_TRUE;
       break;
     }
     // (roadmap H29b/H29c) `VK_EXT_graphics_pipeline_library`'s own feature
