@@ -3853,8 +3853,68 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // same (pre-existing, imperfect) handling it had before this
             // milestone -- fixing it a proper `XfbBufferArrayStride`-like
             // mechanism for the multi-member case is out of scope here.
+            //
+            // (Roadmap L94(j)) A fourth shape needs the same fold, not
+            // covered by any of the three above: an *ordinary*, entirely
+            // undecorated-beyond-`Location` genuine multi-member struct
+            // array declared directly as a whole stage-IO variable's own
+            // type -- no `Block`/`Patch` (not a block at all -- glslang
+            // emits this for a plain `layout(location=0) in/out struct {
+            // float dummy; vec4 v; } testStructArray[3];`, `dEQP-VK.
+            // pipeline.pipeline_library.interface_matching.vector_length.
+            // *member_of_array_of_structures.*`'s own non-`_in_block`
+            // shape's Fragment/Vertex-side declaration), no `XfbBuffer`,
+            // and not a per-vertex/per-primitive dynamically-indexed
+            // array either. Every stage-IO global lives in address space
+            // 7 (`Input`) or 8 (`Output`) regardless of stage
+            // (`isSPIRVStageIOGlobal`'s own contract), so telling this
+            // ordinary shape apart from a genuine per-vertex/per-
+            // invocation block needs two complementary checks, not one:
+            // `isPerVertexArrayInputGlobal`'s/`isPerVertexArrayMeshOutputGlobal`'s/
+            // this same `PerInvocationOutputArray` condition (below)'s
+            // own `Stage`-based recognition of every *real* per-vertex/
+            // per-invocation shape this compiler emits (Hull/Domain/
+            // Geometry `Input`, Hull/Mesh `Output`) -- covering even a
+            // compile-time-*constant* vertex index into one of those
+            // (`FoldsConstantVertexIndexIntoInterfaceBlockArrayMemberVertexOperand`'s
+            // own `gl_in[2]`-shaped access, a real, valid GLSL pattern
+            // that must still resolve through the `Vertex` operand,
+            // never folded into `Row`) -- *and* a scan of `GV`'s own
+            // actual accesses for a non-constant outer array index, to
+            // also catch a unit test that tags a synthetic per-vertex-
+            // shaped global with an unrelated `Stage` purely to exercise
+            // this resolution logic in isolation
+            // (`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`'s
+            // own `"vertex"`-tagged `gl_in[]`-shaped global). Before this
+            // fix, this ordinary shape's outer array dimension was
+            // silently dropped entirely (`BlockArrayCount` left at 0,
+            // `AddBlockElement` leaving each leaf's own type unwrapped),
+            // undersizing every leaf's own `RowCount` to 1 instead of the
+            // real array extent -- surfaced as `ValidateStage.cpp`'s own
+            // "row N is out of range for element M" once a later
+            // store/load actually indexed a non-zero array element.
+            unsigned ProbeAddrSpace = AddrSpace;
+            ParsedSPIRVDecorations ProbeD =
+                parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+            bool IsPerVertexDynamicShape =
+                isPerVertexArrayInputGlobal(GV, ProbeAddrSpace, Stage) ||
+                isPerVertexArrayMeshOutputGlobal(GV, ProbeAddrSpace, Stage) ||
+                (Stage == ShaderStage::Hull && AddrSpace == 8 && !ProbeD.Patch);
+            bool HasDynamicOuterIndex = false;
+            for (const User *U : GV->users()) {
+              const auto *GEP = dyn_cast<GetElementPtrInst>(U);
+              if (!GEP || GEP->getNumIndices() < 2)
+                continue;
+              if (!isa<ConstantInt>(GEP->getOperand(2))) {
+                HasDynamicOuterIndex = true;
+                break;
+              }
+            }
+            bool FoldOrdinaryArray = !ArrayMembersArePatch &&
+                                     !IsPerVertexDynamicShape &&
+                                     !HasDynamicOuterIndex && !ProbeD.XfbBuffer;
             PeekedBlockTy = ArrTy->getElementType();
-            if (ArrayMembersArePatch)
+            if (ArrayMembersArePatch || FoldOrdinaryArray)
               BlockArrayCount = static_cast<uint32_t>(ArrTy->getNumElements());
           }
         }
