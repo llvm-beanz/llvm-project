@@ -1513,6 +1513,53 @@ TEST(CanonicalizeStageTest, RewritesSPIRVMatrixInputLoadOneRowAtATime) {
     EXPECT_FALSE(isa<LoadInst>(&I));
 }
 
+/// (Roadmap L94(h)) SPIR-V's `Component` decoration (`i32 31`) packs a
+/// sub-`Location` offset onto an interface variable that shares its
+/// `Location` with other, otherwise-unrelated variables. A plain,
+/// whole-variable access -- `resolveOffsetWithinElement`'s `ValueTy ==
+/// ElemTy` case, which never peels into a sub-range and so never computes
+/// its own `Access->Component` -- must still seed the emitted
+/// `feme.stage.input.load`'s `Component` operand from the element's own
+/// `FirstComponent` rather than always 0: before this fix, every such
+/// access silently addressed component 0 of `StageStorage` regardless of
+/// its own declared `Component`, corrupting any variable not itself
+/// declared at component 0 (this test's own `Component=2` scalar).
+TEST(CanonicalizeStageTest, SeedsWholeVariableComponentFromFirstComponent) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_var = external addrspace(7) constant float, !spirv.Decorations !0
+    define float @main() #0 {
+      %v = load float, ptr addrspace(7) @in_var
+      ret float %v
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!1, !2}
+    !1 = !{i32 30, i32 1}
+    !2 = !{i32 31, i32 2}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].FirstComponent, 2u);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Component.has_value());
+    EXPECT_EQ(*Component, 2u);
+  }
+  EXPECT_EQ(SeenLoads, 1u);
+}
+
 /// (Roadmap H5b) A geometry entry point's own per-vertex inputs
 /// (`gl_in[]`-shaped) are read via `gl_in[i]` for a loop-carried, genuinely
 /// non-constant `i` -- unlike a matrix's `Row` dimension

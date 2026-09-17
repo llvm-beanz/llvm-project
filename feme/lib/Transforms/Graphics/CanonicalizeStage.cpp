@@ -1198,8 +1198,20 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
   } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
     Value *New = PoisonValue::get(VecTy);
     for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C) {
+      // (Roadmap L94(h)) Combine (`Component + C`), rather than discard
+      // an incoming non-zero base `Component` outright the way
+      // overwriting it with a bare `B.getInt32(C)` always did before --
+      // mirrors `CombinedRow`'s own fix just above for the analogous
+      // array-nesting case. A whole-vector access at a non-zero
+      // `FirstComponent` (SPIR-V's `Component` decoration) reaches here
+      // with `Component` already seeded to that base (see
+      // `resolveElementBaseComponent`), so decomposing it one component
+      // at a time must still land on the variable's own real components,
+      // not silently restart from 0.
+      Value *CombinedComponent =
+          Component ? B.CreateAdd(Component, B.getInt32(C)) : B.getInt32(C);
       Value *Elt = loadStageIOValue(B, VecTy->getElementType(), ElementID, Row,
-                                    B.getInt32(C), Zero, Name, Shadow);
+                                    CombinedComponent, Zero, Name, Shadow);
       New = B.CreateInsertElement(New, Elt, C);
     }
     return New;
@@ -1252,10 +1264,16 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
     }
     return;
   } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
-    for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C)
+    for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C) {
+      // (Roadmap L94(h)) See `loadStageIOValue`'s own mirrored comment:
+      // combine, rather than overwrite, an incoming non-zero base
+      // `Component`.
+      Value *CombinedComponent =
+          Component ? B.CreateAdd(Component, B.getInt32(C)) : B.getInt32(C);
       storeStageIOValue(B, B.CreateExtractElement(Val, C),
-                        VecTy->getElementType(), ElementID, Row, B.getInt32(C),
-                        Zero, Shadow);
+                        VecTy->getElementType(), ElementID, Row,
+                        CombinedComponent, Zero, Shadow);
+    }
     return;
   }
   // (Roadmap H6m) The store-side mirror of `loadStageIOValue`'s own `i1`
@@ -1271,6 +1289,28 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
   createStageOutputStore(B, ElementID, Row, Component, StoredVal, Zero);
   if (Shadow)
     B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty, B));
+}
+
+/// (Roadmap L94(h)) \p MemberIDs' own base `Component` (SPIR-V's
+/// `Component` decoration, `SignatureElement::FirstComponent`), for a
+/// whole-variable stage-IO access that carries no `Access->Component` of
+/// its own (i.e. `resolveOffsetWithinElement`'s `ValueTy == ElemTy` case,
+/// which never needs to peel into a sub-range and so never computes one).
+/// Before this helper, every such access's `Component` operand defaulted
+/// to a plain `Zero` regardless of the element's own `FirstComponent`,
+/// silently addressing component 0 of `StageStorage` even for a
+/// `Component`-packed variable declared to start at, say, component 2 --
+/// this is a single-member (non-block) access only (a builtin interface
+/// block's own per-member elements are never `Component`-packed), so
+/// returns 0 for any multi-member \p MemberIDs.
+uint32_t resolveElementBaseComponent(const EntrySignature &Sig,
+                                     ArrayRef<uint32_t> MemberIDs) {
+  if (MemberIDs.size() != 1)
+    return 0;
+  for (const SignatureElement &Elt : Sig.Elements)
+    if (Elt.ElementID == MemberIDs[0])
+      return Elt.FirstComponent;
+  return 0;
 }
 
 /// (Roadmap H2d) The entry point into `loadStageIOValue`'s per-(struct
@@ -4389,7 +4429,16 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // a read-back rather than a genuine input, so it is routed through
         // `ShadowValues` instead.
         Value *Row = Access->Row ? Access->Row : Zero;
-        Value *Component = Access->Component ? Access->Component : Zero;
+        // (Roadmap L94(h)) `Access->Component` is only ever set when
+        // `resolveOffsetWithinElement` peels into a sub-range of the
+        // element (e.g. one row of a matrix or vector); a whole-variable
+        // access carries none, but must still seed its own `FirstComponent`
+        // (SPIR-V's `Component` decoration) rather than assuming 0 -- see
+        // `resolveElementBaseComponent`'s own comment.
+        Value *Component = Access->Component
+                               ? Access->Component
+                               : B.getInt32(resolveElementBaseComponent(
+                                     Sig, Access->ElementIDs));
         // (Roadmap H5b) A dynamically-indexed `gl_in[i]`-shaped access
         // threads its own vertex index through as the `Vertex` operand in
         // place of the ordinary constant `Zero` every other stage-IO access
@@ -4449,7 +4498,11 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           continue;
         }
         Value *Row = Access->Row ? Access->Row : Zero;
-        Value *Component = Access->Component ? Access->Component : Zero;
+        // (Roadmap L94(h)) See the load-side mirror of this above.
+        Value *Component = Access->Component
+                               ? Access->Component
+                               : B.getInt32(resolveElementBaseComponent(
+                                     Sig, Access->ElementIDs));
         // (Roadmap L24) A `SignatureSystemValue::Position` output (`gl_
         // Position`/`SV_POSITION`) is stored as-is here, with no compensating
         // Y negation: `feme::graphics::Executor::executeDraws`'s viewport
