@@ -4088,20 +4088,24 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           }
           continue;
         }
-        // (Roadmap H5f) A plain (non-block) per-vertex-arrayed `Input`
-        // global's whole declared type -- including its outer per-vertex
-        // array dimension -- still becomes this element's `RowCount` via
-        // `getStageIORowShape` below, exactly as before H5b; `Elt.
-        // RowCountIsVertexArray` marks that dimension as a per-vertex
-        // array's own extent rather than a real matrix's row count, so a
-        // consumer can tell the two apart regardless of whether the
-        // shader's own index into it happens to be constant (folded into
-        // `Row` by `resolveOffsetWithinElement`) or dynamic (`Vertex`).
-        // Nothing downstream ever links an `Input` element's `RowCount`
-        // against another stage's, so leaving the array dimension folded
-        // in (rather than peeled off, as a builtin block's own member is
-        // above) is harmless here.
+        // (Roadmap H5f/L94(h)) A plain (non-block) per-vertex-arrayed
+        // `Input` global's outer per-vertex array dimension is peeled off
+        // (see this function's own `RowCountIsVertexArray` peeling, below)
+        // before `getStageIORowShape` computes this element's `RowCount`:
+        // `Elt.RowCountIsVertexArray` marks that this element's real
+        // per-vertex value is addressed separately, through the `Vertex`
+        // operand (`resolveOffsetWithinElement`'s own threading, whether
+        // constant-folded the way H5b originally read or genuinely
+        // dynamic), rather than folded into `RowCount` as one more row.
+        // `RowCount` here is therefore always this element's own real
+        // (per-vertex) shape, matching what a cross-stage link
+        // (`StageLink.cpp`'s `linkStageElements`) compares it against --
+        // unlike H5b's original design, where a genuinely arrayed
+        // per-vertex varying's real array extent got silently folded
+        // together with the per-vertex dimension into one combined
+        // `RowCount`, only correct by coincidence for an unarrayed one.
         //
+
         // (Roadmap H6j) A mesh entry's own plain per-vertex/per-primitive
         // `Output` global (e.g. a user-defined `PerVertexEXT`/
         // `PerPrimitiveEXT` varying such as `layout(location=0) out vec4
@@ -4163,6 +4167,31 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         Type *ValueTy = GV->getValueType();
         bool RowCountIsVertexArray =
             isPerVertexArrayInputGlobal(GV, UnusedAddrSpace, Stage);
+        // (Roadmap L94(h)) Peel exactly the outer per-vertex array
+        // dimension off \p ValueTy here, before `getStageIORowShape`
+        // (inside `addElement`, below) folds every remaining array
+        // dimension into `RowCount`: that outer dimension is already
+        // addressed separately, as `feme.stage.input.load`/`.store`'s own
+        // `Vertex` operand (`resolveOffsetWithinElement`'s
+        // `getDynamicVertexIndexedAccess` path, roadmap H5b) and
+        // `StageStorage::readRaw`/`writeRaw`'s own `Invocation` parameter,
+        // not as one more `Row`. Before this peel, an ordinary per-vertex
+        // scalar/vector/matrix varying's `RowCount` still came out
+        // correct by coincidence (`StageLink.cpp`'s `effectiveRowCount`
+        // simply flattened any per-vertex-arrayed consumer down to `1`,
+        // which happened to already equal that varying's own real row
+        // count), but a genuinely arrayed one -- e.g. `layout(location=1)
+        // in float looseVar[3];`, one of `dEQP-VK.pipeline.
+        // pipeline_library.interface_matching.shader_layout_component_
+        // matching.*.multiple_locations.*`'s own shapes -- got its real
+        // 3-row shape folded together with the outer per-vertex dimension
+        // into a bogus combined `RowCount` (e.g. 32 (patch control
+        // points) * 3 = 96), which then disagreed with its producer's own
+        // genuine, unfolded `RowCount` (3) at `vkQueueSubmit` time
+        // ("disagree on component/row count or type").
+        if (RowCountIsVertexArray)
+          if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
+            ValueTy = ArrTy->getElementType();
         // (Roadmap H101g) `PeekedST`/`MemberMD` (computed above, before
         // `TakeBlockPath` was checked false) being non-null means `GV`'s
         // whole value type is a single-member, non-`BuiltIn` `Block`-

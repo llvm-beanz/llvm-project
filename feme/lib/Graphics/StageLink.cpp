@@ -30,30 +30,28 @@ const SignatureElement *findProducer(const EntrySignature &Sig,
                                Consumer.Index, Consumer.FirstComponent);
 }
 
-/// (Roadmap H9b) \p Elt's own real per-vertex-invocation row shape, for
-/// comparing/linking against another stage's element: `RowCount` alone
-/// conflates two structurally-identical shapes `CanonicalizeStage.cpp`'s
-/// `addElements` can produce for an `Input`-direction element (see
-/// `SignatureElement::RowCountIsVertexArray`'s own comment) -- a real
-/// matrix's row count (meaningful across a cross-stage link, e.g. an
-/// `mat3` varying), or a geometry/hull/domain entry's own per-vertex
-/// array extent (e.g. 3 for a triangle's `gl_in[]`), which is not: that
-/// dimension is a genuinely different attribute-copy semantics
-/// (`feme::graphics::executeDraws`'s own per-vertex expansion into
-/// separate producer invocations via `copyLinkedElements`'s
-/// `SourceInvocations` remapping, mirrored by `PatchPipeline.cpp`'s own
-/// per-control-point remapping -- see `copyLinkedElements`'s own file
-/// comment), not a same-invocation multi-row copy. Every producer this
-/// element could ever link against (an ordinary, unarrayed vertex/domain
-/// stage output) describes only the single vertex its own invocation
-/// produced, i.e. `RowCount == 1` in this same sense, so folding a
-/// per-vertex array's own extent into the comparison/copy below wrongly
-/// disagrees with that producer's genuine `RowCount == 1` -- exactly the
-/// `vkQueueSubmit`-time "disagree on component/row count or type"
-/// mismatch this row fixes.
-uint32_t effectiveRowCount(const SignatureElement &Elt) {
-  return Elt.RowCountIsVertexArray ? 1 : Elt.RowCount;
-}
+/// (Roadmap H9b/L94(h)) \p Elt's own real per-vertex-invocation row shape,
+/// for comparing/linking against another stage's element. Before L94(h),
+/// `CanonicalizeStage.cpp`'s `addElements` folded a per-vertex-arrayed
+/// `Input` element's own outer per-vertex array dimension directly into
+/// `RowCount` (leaving `RowCountIsVertexArray` as the only way to tell
+/// that dimension apart from a real matrix's row count), so this function
+/// unconditionally folded it back down to `1` before comparing/copying --
+/// correct only by coincidence, since every ordinary per-vertex varying's
+/// own real (per-vertex) shape happened to already be a single row.
+/// L94(h) fixed the actual bug at its source instead: `addElements` now
+/// peels that same per-vertex dimension off before computing `RowCount`
+/// at all (mirroring how `resolveOffsetWithinElement`'s own
+/// `Vertex`-threading path, and `StageStorage::readRaw`/`writeRaw`'s
+/// separate `Invocation` parameter, already address it apart from `Row`),
+/// so `RowCount` is always this element's own real per-vertex shape now
+/// -- including a genuinely arrayed one, e.g. `RowCount == 3` for
+/// `layout(location=1) in float looseVar[3];` -- needing no folding here
+/// at all. `RowCountIsVertexArray` remains meaningful only as a "this
+/// element's own per-invocation copies come from `copyLinkedElements`'s
+/// own `SourceInvocations` remapping, not a same-invocation multi-row
+/// copy" marker, nothing this function itself still needs to special-case.
+uint32_t effectiveRowCount(const SignatureElement &Elt) { return Elt.RowCount; }
 
 } // namespace
 

@@ -1614,16 +1614,20 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoInputLoad) {
   std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
   ASSERT_TRUE(Sig.has_value());
   ASSERT_EQ(Sig->Elements.size(), 1u);
-  // Unchanged from the ordinary (constant-index) matrix-row case: the
-  // per-vertex array dimension still becomes `RowCount` in the signature
-  // (`getStageIORowShape`'s own type-driven shape computation, untouched
-  // by this milestone) -- H5b only changes which *operand*
-  // (`feme.stage.input.load`'s `Vertex`, not `Row`) a *dynamically*
-  // indexed access threads that dimension's own index through as.
-  EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
+  // (Roadmap L94(h)) Before this milestone, the per-vertex array
+  // dimension itself became `RowCount` (`getStageIORowShape`'s own
+  // type-driven shape computation) even though H5b already threaded a
+  // dynamically-indexed access's own index through `feme.stage.input.
+  // load`'s `Vertex` operand, not `Row` -- conflating this element's real
+  // (per-vertex) shape, a plain `<4 x float>` with no genuine inner array
+  // of its own, with the outer per-vertex dimension `Vertex` already
+  // addresses separately. L94(h) peels that outer dimension off before
+  // computing `RowCount`, so this element's `RowCount` now correctly
+  // reflects only its own real, unarrayed shape.
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
   EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
-  // (Roadmap H5f) The signature marks that `RowCount` as a per-vertex
-  // array's own extent, not a real matrix's row count.
+  // (Roadmap H5f) The signature marks that this element is a per-vertex
+  // array's own real (per-vertex) value, not a real matrix's row count.
   EXPECT_TRUE(Sig->Elements[0].RowCountIsVertexArray);
 
   unsigned SeenLoads = 0;
@@ -1840,7 +1844,12 @@ TEST(CanonicalizeStageTest, FoldsConstantVertexIndexIntoVertexOperand) {
   std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
   ASSERT_TRUE(Sig.has_value());
   ASSERT_EQ(Sig->Elements.size(), 1u);
-  EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
+  // (Roadmap L94(h)) See `ThreadsDynamicVertexIndexIntoInputLoad`'s own
+  // updated comment: `RowCount` now reflects only this element's real
+  // (per-vertex) shape, with the outer per-vertex dimension peeled off
+  // before it's computed, regardless of whether the shader's own index
+  // into that dimension is constant (this test) or dynamic.
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
   EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
   EXPECT_TRUE(Sig->Elements[0].RowCountIsVertexArray);
 

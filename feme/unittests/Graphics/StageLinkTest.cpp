@@ -176,20 +176,19 @@ TEST(StageLinkTest, RejectsARowCountMismatchWhenNeitherSideIsAVertexArray) {
   ASSERT_THAT_ERROR(Links.takeError(), Failed());
 }
 
-// (Roadmap H9b) The real gap: a geometry (or hull/domain) entry's own
-// plain per-vertex-arrayed varying input -- `layout(location=0) in vec4
-// in_color[];`, folded by `CanonicalizeStage.cpp`'s `addElements` into
-// `RowCount == 3` (a triangle's own vertex count) with
-// `RowCountIsVertexArray` set, per roadmap H5f -- must still link
-// successfully against the vertex stage's own plain, unarrayed `vec4`
-// output at the same location (`RowCount == 1`): the two describe the
-// same single-vertex attribute, linked once per assembled primitive's own
-// vertex (`feme::graphics::executeDraws`'s own per-vertex expansion into
-// separate producer invocations, not a same-invocation multi-row copy).
-// Before this row's fix, comparing the two `RowCount`s directly (3 vs 1)
-// always disagreed for a real vertex+geometry pipeline, i.e. this exact
-// shape reproduces the `vkQueueSubmit`-time "disagree on component/row
-// count or type" diagnostic end to end.
+// (Roadmap H9b/L94(h)) A geometry (or hull/domain) entry's own plain
+// per-vertex-arrayed varying input -- `layout(location=0) in vec4
+// in_color[];` -- must still link successfully against the vertex
+// stage's own plain, unarrayed `vec4` output at the same location: the
+// two describe the same single-vertex attribute, linked once per
+// assembled primitive's own vertex (`feme::graphics::executeDraws`'s own
+// per-vertex expansion into separate producer invocations, not a
+// same-invocation multi-row copy). `CanonicalizeStage.cpp`'s
+// `addElements` (L94(h)) peels the per-vertex array dimension off before
+// computing `RowCount`, so this consumer element's own `RowCount` is
+// already the real, single-vertex shape (1) here, matching the
+// producer's -- `RowCountIsVertexArray` alone must not additionally
+// block (or otherwise affect) an ordinary link like this one.
 TEST(StageLinkTest,
      LinksAGeometryPerVertexArrayInputAgainstAnUnarrayedProducer) {
   EntrySignature Producer;
@@ -199,7 +198,7 @@ TEST(StageLinkTest,
   EntrySignature Consumer;
   SignatureElement GeomInColor =
       makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/4);
-  GeomInColor.RowCount = 3;
+  GeomInColor.RowCount = 1;
   GeomInColor.RowCountIsVertexArray = true;
   Consumer.Elements = {GeomInColor};
 
@@ -210,20 +209,55 @@ TEST(StageLinkTest,
   ASSERT_EQ(Links->size(), 1u);
   EXPECT_EQ((*Links)[0].SourceElementID, 6u);
   EXPECT_EQ((*Links)[0].DestElementID, 0u);
-  // The link's own `RowCount` is the real, single-vertex shape (1), not
-  // the consumer's folded per-vertex-array extent (3): `copyLinkedElements`
-  // must not walk 3 "rows" out of a producer whose own storage only ever
-  // has 1.
   EXPECT_EQ((*Links)[0].RowCount, 1u);
 }
 
+// (Roadmap L94(h)) The case `LinksAGeometryPerVertexArrayInputAgainstAn
+// UnarrayedProducer` above could not previously represent: a geometry
+// entry's own per-vertex-arrayed input that is *also* a genuine,
+// independently-meaningful array within each vertex (SPIR-V's own
+// consecutive-`Location` array packing, e.g. `layout(location=1) in
+// float loose[3];`, one of `dEQP-VK.pipeline.pipeline_library.
+// interface_matching.shader_layout_component_matching.*.
+// multiple_locations.*`'s own shapes). Before L94(h)'s peeling fix, this
+// consumer's own real 3-row array extent was folded together with the
+// outer per-vertex dimension into one combined `RowCount` (here, 3 times
+// however many vertices the per-vertex array itself spanned), which then
+// disagreed with the producer's own genuine, unfolded `RowCount == 3` --
+// a `vkQueueSubmit`-time "disagree on component/row count or type".
+// After the fix, both sides' `RowCount` already agree (3), with no
+// folding needed on this function's part at all.
+TEST(StageLinkTest,
+     LinksAGeometryPerVertexArrayInputWithAGenuineArrayExtent) {
+  EntrySignature Producer;
+  SignatureElement VertexOutLoose =
+      makeElement(6, SignatureDirection::Output, 1, /*ComponentCount=*/1);
+  VertexOutLoose.RowCount = 3;
+  Producer.Elements = {VertexOutLoose};
+
+  EntrySignature Consumer;
+  SignatureElement GeomInLoose =
+      makeElement(0, SignatureDirection::Input, 1, /*ComponentCount=*/1);
+  GeomInLoose.RowCount = 3;
+  GeomInLoose.RowCountIsVertexArray = true;
+  Consumer.Elements = {GeomInLoose};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "vertex/domain stage output -> geometry stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+  EXPECT_EQ((*Links)[0].RowCount, 3u);
+}
+
 // End-to-end companion to the above: confirms `copyLinkedElements` (given
-// the peeled `RowCount == 1` the previous test checked) actually copies
-// the right scalars for each of a triangle's 3 vertices, each sourced
-// from its own separate vertex-stage invocation via `SourceInvocations`
-// -- exactly `feme::graphics::executeDraws`'s own geometry-input
-// expansion (one storage "invocation" per (primitive, vertex-in-primitive)
-// pair, not a `Row`-indexed walk within one).
+// the already-real `RowCount == 1` a per-vertex-arrayed consumer element
+// now carries directly) actually copies the right scalars for each of a
+// triangle's 3 vertices, each sourced from its own separate vertex-stage
+// invocation via `SourceInvocations` -- exactly `feme::graphics::
+// executeDraws`'s own geometry-input expansion (one storage "invocation"
+// per (primitive, vertex-in-primitive) pair, not a `Row`-indexed walk
+// within one).
 TEST(StageLinkTest, CopiesLinkedGeometryPerVertexArrayInput) {
   EntrySignature Producer;
   Producer.Elements = {
@@ -232,7 +266,7 @@ TEST(StageLinkTest, CopiesLinkedGeometryPerVertexArrayInput) {
   EntrySignature Consumer;
   SignatureElement GeomInColor =
       makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/1);
-  GeomInColor.RowCount = 3;
+  GeomInColor.RowCount = 1;
   GeomInColor.RowCountIsVertexArray = true;
   Consumer.Elements = {GeomInColor};
 
@@ -261,6 +295,7 @@ TEST(StageLinkTest, CopiesLinkedGeometryPerVertexArrayInput) {
   EXPECT_FLOAT_EQ(To->readFloat(0, 0, 1), 11.0f);
   EXPECT_FLOAT_EQ(To->readFloat(0, 0, 2), 12.0f);
 }
+
 
 TEST(StageLinkTest, HonorsAConsumerFilter) {
   EntrySignature Producer;
