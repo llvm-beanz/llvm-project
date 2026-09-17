@@ -1,6 +1,5 @@
 ---
-model: gpt-5.6-terra
-resume: 43c1ff2f-f199-452e-bc9a-5d9fe09189c1
+model: claude-5-sonnet
 ---
 # Initial Guidelines
 
@@ -49,12 +48,11 @@ confirm `FeMe CPU Vulkan Device`. Every session from now on, every time, not
 just once at the start.
 
 **Always**: Add thoughts and next steps to the end of the agent_thoughts.md
-file, even if you don't take any other action.
+file.
 
 # Request
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Reduce L94(f).** Start at
-   `pipeline_library.framebuffer_attachment.no_attachments_ms` and identify why
-   the four-sample no-color-attachment pipeline is rejected before drawing.
+1. Continue L94 recovery in deterministic order with the next non-unsupported
+   completed pipeline case, reducing only a reproduced abnormal result.
