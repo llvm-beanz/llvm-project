@@ -582,3 +582,125 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.interface_matching.vector_length.*" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L94(j): array-of-struct combined with a per-vertex/per-invocation stage-IO dimension
+
+## Outcome
+
+**Two independent gaps, split out of L94(i)'s own closing session, both
+fixed.** Reduction targets: `vector_length.
+out_vec4_in_vec4_member_of_array_of_structures_vert_tesc_out_tese_in_frag`
+(gap 1) and `vector_length.
+out_vec4_in_vec4_member_of_array_of_structures_vert_tesc_tese_out_frag_in`
+(gap 2, discovered while sweeping the broader family after fixing gap 1).
+
+## Investigation and change
+
+`StageIOGlobalVariablePattern` (the MLIR importer) only peels *one* outer
+`ArrayType` level before checking whether the remaining type is a
+`StructType`, to decide whether to attach `feme.spirv.MemberDecorations`
+metadata to a stage-IO global. This means two structurally similar CTS
+shapes -- differing only in whether there's an extra per-vertex array
+level wrapping the genuine array-of-struct -- take entirely different
+code paths through `CanonicalizeStage.cpp`'s `addElements`, each with its
+own independent correctness gap.
+
+### Gap 1: doubly-arrayed shape on the plain (non-block) path
+
+A Hull-stage `Output`/Domain-stage `Input` per-control-point array
+wrapping an inner genuine array-of-struct (e.g. tesc's `layout(location=0)
+out struct {float dummy; vec4 v;} testStructArray[][3];`, LLVM type `[1 x
+[3 x {float, vec4}]]`) has *two* nested array levels, so the importer's
+one-level peel never exposes a bare `StructType`, and `MemberMD` is never
+attached. `addElements`' plain path already decomposed a single-member
+wrapper's genuine multi-member nested struct content via
+`addStageIOStructMembers` (L94(i)'s own fix), but deliberately excluded
+the `RowCountIsVertexArray` case (the tesc/tese per-control-point-arrayed
+consuming side) rather than risk an under-tested interaction --
+`isPerVertexArrayInputGlobal` applies to this Domain-stage-input global,
+so it fell to a single opaque `addElement` call, undersizing/mistyping
+the element (a rendering mismatch, not a crash or pipeline-creation
+error).
+
+Fixed by removing the `!RowCountIsVertexArray` exclusion and adding a new
+`AddDecomposedElement` wrapper lambda that forwards this element's own
+`RowCountIsVertexArray` (and always-0 `XfbBufferArrayStride`, mutually
+exclusive by construction) through to every leaf `addElement` call
+`addStageIOStructMembers` makes -- its generic 4-argument `AddElement`
+callback signature has no room for either flag, previously silently
+defaulting both to `false`/`0`.
+
+### Gap 2: singly-arrayed shape on `TakeBlockPath`
+
+An ordinary, non-`Block`, non-`Patch`, non-`XfbBuffer` array-of-struct
+declared directly as a whole stage-IO variable's own type (e.g. a
+fragment shader's plain `layout(location=0) in flat struct {float dummy;
+vec4 v;} testStructArray[3];`, a *single* array level) *does* get
+`MemberMD` attached (the importer's one-level peel exposes the
+`StructType` directly), routing it through `TakeBlockPath` instead of the
+plain path. `TakeBlockPath`'s `BlockArrayCount` mechanism (added for
+roadmap H117/H118) only folded the outer array dimension into each leaf
+member's own widened `RowCount` when the array was `patch`-qualified;
+every other shape (including this one) left `BlockArrayCount` at 0,
+undersizing every leaf's own `RowCount` to 1 regardless of the real array
+extent -- surfaced as `feme-graphics-validate-stage`'s own "row N is out
+of range for element M" pipeline-creation-time validation failure once a
+store/load indexed a non-zero array element.
+
+Distinguishing this ordinary shape from a genuine per-vertex/per-
+invocation dynamically-indexed array can't rely on `Stage`/`AddrSpace`
+alone: every stage-IO global lives in address space 7 (`Input`) or 8
+(`Output`) regardless of stage (`isSPIRVStageIOGlobal`'s own contract),
+and several existing unit tests deliberately tag a synthetic per-vertex-
+shaped global with an unrelated `Stage` purely to exercise the resolution
+mechanism in isolation. The fix combines the existing `Stage`-based
+per-vertex/per-invocation recognition
+(`isPerVertexArrayInputGlobal`/`isPerVertexArrayMeshOutputGlobal`, plus
+the Hull-per-invocation-`Output` condition `PerInvocationOutputArray`
+already uses) with a scan of the global's own actual accesses for a
+non-constant outer array index (catching the synthetic-stage unit tests
+that the `Stage`-based checks alone don't cover), folding `BlockArrayCount`
+whenever neither signals a genuine per-vertex/per-invocation shape and the
+array isn't XFB-captured (a genuine, non-`Patch` XFB "array of block
+instances" has its own separate, pre-existing, imperfect handling that a
+first attempt at this fix wrongly conflated with `BlockArrayCount`,
+regressing a `transform_feedback` CTS case discovered via the same
+stash/rebuild/retest cycle used throughout this investigation -- reverted
+before landing).
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` against the rebuilt, assertions-enabled, ccache-backed ICD, both
+  before starting and again after the final rebuild.
+- `ninja -C build2 check-feme`: 3,166 passed; 3 unsupported; 0 failed (all
+  97 `FeMeTransformsGraphicsTests` cases pass, including the two existing
+  tests -- `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`,
+  `ThreadsInvocationIndexIntoMultiMemberHullPerInvocationOutputBlock` --
+  and the two more -- `FoldsConstantVertexIndexIntoInterfaceBlockArray
+  MemberVertexOperand`,
+  `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore` --
+  that an initial, less-precise discriminator for gap 2 regressed before
+  landing the combined `Stage`-plus-usage-scan check above).
+- Both reduction targets pass individually after their respective fix.
+- `vector_length.*member_of_array_of_structures*` (324 cases): 324 pass,
+  0 fail (up from 180/324 at this milestone's start, itself up from the
+  L94(i)-session baseline).
+- Full `vector_length.*` (972 cases): **972 pass, 0 fail** (up from
+  720/972 at the L94(i) session's close).
+- Full `pipeline_library.interface_matching.*` group (1589 cases): 1121
+  pass, 468 not-supported, **0 fail, 0 crash**.
+
+No advertised Vulkan feature or extension changed, so
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
+current.
+
+## Reproduction
+
+```console
+ninja -C build2 check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.interface_matching.*" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
