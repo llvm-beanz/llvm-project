@@ -6,7 +6,7 @@ own implementation decisions.
 
 ## Scope and provenance
 
-- FeMe source revision under test: `8c4f7a365b05`
+- FeMe source revision under test: `c885e8b3c93b`
 - Documentation/inventory revision: `e7c884c84462`
 - VK-GL-CTS revision: `880f31a2bd9cd0659f84f3f80dafd07f2e693f6d`
   (`vulkan-cts-1.4.6.2-525-g880f31a2`)
@@ -15,7 +15,7 @@ own implementation decisions.
 - Device: `FeMe CPU Vulkan Device`
 - Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`
-- `check-feme`: 3,151 passed, 3 unsupported, 0 failed
+- `check-feme`: 3,154 passed, 3 unsupported, 0 failed
 - Registry used by the inventories: `VK_HEADER_VERSION` 358
 
 The inventory audit performed with this run reports 87 of 150 Vulkan
@@ -208,6 +208,18 @@ failed identically. L94(b) fixed this by deep-copying
 reconstructing its de-duplicated union when linking, so the linked pipeline
 preserves `VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE`. This implementation changes no
 advertised feature or extension, so both Vulkan inventories remain current.
+
+The next executable case in the same deterministic recovery order,
+`dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.mesh_shader.two_draws_dynamic.disable_raster`,
+initially failed pipeline creation with `VK_ERROR_INITIALIZATION_FAILED`.
+L94(c) added the Vulkan 1.3 promoted
+`VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE` and
+`vkCmdSetRasterizerDiscardEnable` path. The existing static rasterizer-discard
+implementation now defers its pipeline value when dynamic, and applies the
+recorded per-draw value instead. Both the `disable_raster` reproduction and
+its `enable_raster` counterpart pass with the explicit build-tree ICD and
+`--deqp-shadercache=disable`. This implementation changes no advertised
+feature or extension, so both Vulkan inventories remain current.
 
 ## Dominant ordinary failures
 
