@@ -88583,3 +88583,120 @@ roadmap row from a prior session, so the design work is mostly done;
 **Cleanup done:** removed all `/tmp/h170b2_*`, `/tmp/onecase.log`,
 `/tmp/rerun*.log`, `/tmp/crash1.log`, `/tmp/derivate_full.*` scratch
 files before ending the session.
+
+# Session: closed the entire H124 `check-hlsl-feme-vk` family (documentation only) + shipped H39's `spirv.EmitStreamVertex`/`EndStreamPrimitive`
+
+**Confirmed working:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device` (checked first, as required every session).
+`check-hlsl-feme-vk`: 377/663 passed, 260 unsupported, 26 expected-fail,
+**0 unexpected results** -- first fully clean run ever recorded.
+`check-feme`: 3143/3146 passed, 0 failed. `dEQP-VK.transform_feedback.*`
+(133,719 cases, full sweep, no caselist restriction): 0 Failed.
+
+**The whole session in one line:** almost the entire remaining
+`check-hlsl-feme-vk` failure backlog (H124 and 6 of its sub-rows) had
+already been fixed by unattributed intervening sessions and just never
+got their Roadmap rows updated -- then, once that was cleared out, did
+one real piece of new work: added the two missing SPIR-V dialect ops
+(`OpEmitStreamVertex`/`OpEndStreamPrimitive`) that were the last thing
+blocking H21e's already-finished multi-stream geometry-shader support.
+
+**What I actually did, in order:**
+
+1. Confirmed `check-hlsl-feme-vk` build/target still fine (prior
+   session's own doubt was resolved last session already).
+2. Re-triaged every open H124-family row by running its own named test
+   cases directly via `llvm-lit --filter`, not trusting old counts:
+   H124n, H154, H137, H124e(a), H124e, H124g, and H124 itself (the
+   umbrella row) all turned out to already pass. Struck through all 7
+   rows, each with the specific re-verification evidence, in 2
+   commits.
+3. Surveyed the remaining ~34 open H-rows for anything else
+   well-scoped. Found H39 (`spirv.EmitStreamVertex`/`EndStreamPrimitive`
+   missing from MLIR's SPIR-V dialect) -- same shape as H160
+   (`spirv.ArrayLength`, closed a prior session), and its blocking
+   effect on H21e (already fully implemented, just waiting on this)
+   was concretely documented.
+4. Added the two ops to `SPIRVPrimitiveOps.td` (mirroring
+   `spirv.EmitVertex`/`spirv.EndPrimitive` plus a `stream` operand),
+   the two new opcode enum cases + registration in `SPIRVBase.td`.
+   Confirmed -- same as H160 -- that mlir-tblgen's generic
+   (de)serialization needs zero manual code for this shape: a real
+   `mlir-translate --test-spirv-roundtrip` round trip passes with no
+   `Deserializer.cpp`/`Serializer.cpp` changes.
+5. Added MLIR lit coverage (`primitive-ops.mlir`, `availability.mlir`,
+   `Target/SPIRV/primitive-ops.mlir`) -- one mistake here: forgot
+   `--split-input-file` on the roundtrip test's own RUN line, MLIR
+   refused a file with 2 top-level modules until fixed.
+6. Added `EmitStreamVertexConversionPattern`/
+   `EndStreamPrimitiveConversionPattern` to feme's own
+   `SPIRVToLLVMPatterns.cpp`, converting the new ops into the same
+   `feme.stage.stream.emit`/`.cut` intrinsics `EmitVertex`/
+   `EndPrimitive`'s own patterns already target, just threading the
+   real `stream` operand instead of a hardcoded `0`. Checked
+   `GeometryWrapper.cpp`'s `lowerGeometryStreamEmit` first: it already
+   requires (and gets) a compile-time-constant stream value per lane,
+   so no runtime change was needed at all.
+7. New lit test in `spirv-to-llvm-geometry-stream.mlir` -- one mistake
+   here too: my first edit accidentally deleted the existing
+   `emit_three` test body while inserting the new one; caught it by
+   re-running the full file's lit test and seeing a `CHECK-LABEL`
+   mismatch, restored it.
+8. Rebuilt, re-ran `check-feme` (clean) and `check-hlsl-feme-vk`
+   (unchanged -- expected, since no existing test exercises multi-stream
+   geometry shaders yet). Ran a real, full `dEQP-VK.transform_feedback.*`
+   sweep (no caselist restriction): 0 Failed, confirming the new,
+   currently-unreachable ops introduce no regression.
+9. Deliberately did NOT flip `geometryStreams`/
+   `transformFeedbackRasterizationStreamSelect`/
+   `primitivesGeneratedQueryWithNonZeroStreams` to `VK_TRUE` this
+   session -- that needs its own real multi-stream-geometry-shader
+   end-to-end test plus a dedicated CTS sweep, not a same-session
+   rush. Filed as new row **H173**.
+10. Updated `Roadmap.md` (7 H124-family rows + H39 closed, H173 added),
+    `VulkanCTSReport.md` (2 new sections), and
+    `VulkanExtensionInventory.md` (2 stale rows found and fixed along
+    the way -- `VK_EXT_transform_feedback`/`VK_EXT_primitives_generated_query`
+    still said H21d "not yet implemented" and pointed at H21e as the
+    live blocker, both long since closed).
+
+**6 commits total:** (1) H124n+H154 roadmap closures, (2) H124-family
+umbrella closure, (3) MLIR SPIR-V dialect op addition, (4) feme
+conversion-pattern addition, (5) H39 roadmap closure + H173 split-off,
+(6) VulkanCTSReport.md + VulkanExtensionInventory.md doc updates.
+
+**Lesson worth repeating (this is now the 3rd+ session to hit this):**
+before spending real time on any Roadmap row that says "not yet
+started" or "confirmed failing," re-run its own named test case
+directly first. A large fraction of this project's remaining backlog
+turns out to already be fixed as a side effect of unrelated work,
+un-attributed and un-tracked. Grepping for `~~H<N>~~` alone is not
+enough -- some rows (like H124e(a)/H154) are *intentionally* left
+unstruck even after their own follow-on work is done, with prose
+explaining why, so the row's own body needs a real read, not just a
+strikethrough check.
+
+**Next steps, ranked:**
+
+1. **~1 day, real payoff, well-scoped:** H173 -- write a real
+   multi-stream GLSL/HLSL geometry shader test (stream > 0,
+   `EmitStreamVertex`/`EndStreamPrimitive`), run it through the full
+   `feme-vk` pipeline to confirm actual per-stream output correctness
+   (not just the conversion-pattern-level lit coverage this session
+   added), then flip `geometryStreams`/
+   `transformFeedbackRasterizationStreamSelect`/
+   `primitivesGeneratedQueryWithNonZeroStreams` to `VK_TRUE` and raise
+   `maxTransformFeedbackStreams` above its current spec-floor `1`.
+   Finish with a `dEQP-VK.transform_feedback.*` CTS re-run to confirm
+   the predicted new pass count.
+2. **Large, multi-day, pick one:** the remaining ~34 open H-rows are
+   all large feature-scope items (H33-H68's dynamic-rendering/format/
+   pipeline-library/sparse-resources/protected-memory/tessellation
+   gaps, H19f's format breadth). None of these are quick "re-verify and
+   close" wins the way this session's H124 family turned out to be --
+   budget real multi-day time before picking one up.
+3. **~15 minutes, do first next time regardless of which of the above
+   is picked:** re-run `check-hlsl-feme-vk`/`check-feme` fresh before
+   trusting this session's own "0 unexpected results"/"3143/3146"
+   numbers are still accurate -- they can and do drift session to
+   session exactly like this session's own starting backlog did.
