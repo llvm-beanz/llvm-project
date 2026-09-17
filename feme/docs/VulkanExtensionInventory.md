@@ -286,7 +286,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_EXT_present_timing` | Not implemented |  |
 | `VK_EXT_primitive_restart_index` | Not implemented |  |
 | `VK_EXT_primitive_topology_list_restart` | Not implemented |  |
-| `VK_EXT_primitives_generated_query` | Advertised | roadmap H21d: real primitive-count query semantics reusing the existing pipeline-statistics `QueryPool` infrastructure; `primitivesGeneratedQuery` feature `VK_TRUE`, `primitivesGeneratedQueryWithRasterizerDiscard`/`WithNonZeroStreams` stay `VK_FALSE` (blocked on roadmap H21g/H21e respectively) |
+| `VK_EXT_primitives_generated_query` | Advertised | roadmap H21d: real primitive-count query semantics reusing the existing pipeline-statistics `QueryPool` infrastructure; `primitivesGeneratedQuery` feature `VK_TRUE`, `primitivesGeneratedQueryWithRasterizerDiscard` stays `VK_FALSE` (blocked on roadmap H21g), `WithNonZeroStreams` stays `VK_FALSE` (blocked on roadmap H173, multi-stream end-to-end validation; H21e/H39 -- the ABI/wrapper support and MLIR dialect-op blocker -- are both closed) |
 | `VK_EXT_private_data` | Advertised |  |
 | `VK_EXT_provoking_vertex` | Not implemented |  |
 | `VK_EXT_queue_family_foreign` | Not implemented |  |
@@ -326,7 +326,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_EXT_texture_compression_astc_3d` | Not implemented |  |
 | `VK_EXT_texture_compression_astc_hdr` | Planned (in scope, not implemented) | roadmap E21: HDR block formats and decodeASTCBlockHDR exist, but no copy/blit/sampling path consumes one, so the feature bit stays false (E22's own closing note) |
 | `VK_EXT_tooling_info` | Advertised |  |
-| `VK_EXT_transform_feedback` | Advertised (single-stream, vertex-shader-only capture; no queries) | roadmap H21c: real vertex-shader-output capture to bound XFB buffers, `transformFeedback`/`transformFeedbackDraw` features `VK_TRUE`, `geometryStreams` `VK_FALSE` (H21e); `primitives_generated_query` not yet implemented (H21d) |
+| `VK_EXT_transform_feedback` | Advertised (single-stream capture, including from a geometry stage; `primitives_generated_query` implemented) | roadmap H21c: real vertex-shader-output capture to bound XFB buffers; H21e: geometry-stage output capture, `RasterizationStream` selection; `transformFeedback`/`transformFeedbackDraw`/`primitivesGeneratedQuery` features `VK_TRUE`; `geometryStreams`/`transformFeedbackRasterizationStreamSelect`/`primitivesGeneratedQueryWithNonZeroStreams` stay `VK_FALSE` pending H173 (multi-stream end-to-end validation; H39's own MLIR dialect-op blocker is now closed) |
 | `VK_EXT_validation_cache` | Not implemented |  |
 | `VK_EXT_validation_features` | Not implemented |  |
 | `VK_EXT_validation_flags` | Not implemented |  |
