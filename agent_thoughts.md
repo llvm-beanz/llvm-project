@@ -89090,3 +89090,42 @@ the dynamic graphics snapshot, and controls the existing
    from `pipeline_library.extended_dynamic_state.mesh_shader.after_pipelines.depth_bias_disable`
    and isolate whether the remaining difference is mesh stage output, depth
    bias application, or graphics-pipeline-library state merge.
+
+# L94(b) graphics-pipeline-library dynamic-state preservation
+
+## Outcome
+
+The first deterministic L94 mesh recovery case now passes:
+`dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.mesh_shader.after_pipelines.depth_bias_disable`.
+
+## Decisions and evidence
+
+1. **Use the logged attachment data to reduce the fault.**
+   `--deqp-log-images=enable` showed that color passed, while every one of the
+   64x64 depth pixels was wrong. The observed depth was the static biased
+   value (0.75), not the requested dynamically-disabled-bias value (0.5).
+   This ruled out mesh output before changing pipeline code.
+2. **Compare construction modes before changing rasterization.** The
+   monolithic mesh variant passed; `fast_linked_library` and
+   `pipeline_library` failed identically. The failure was therefore
+   graphics-pipeline-library state synthesis, not depth-bias math or mesh
+   execution.
+3. **Retain the original Vulkan state representation.** Library capture had
+   omitted `VkGraphicsPipelineCreateInfo::pDynamicState` entirely. The fix
+   deep-copies state names, retains them through nested library folding, and
+   reconstructs the de-duplicated union for the final synthesized create
+   info. This uses the existing library-state ownership model rather than a
+   depth-bias-specific workaround.
+
+## Validation
+
+- `GraphicsPipelineTest.LinksDynamicDepthBiasEnableState` passes.
+- `ninja -C build2 check-feme` passes: 3,151 passed, 3 unsupported.
+- The explicit assertion-enabled FeMe ICD passes the exact CTS case with
+  `--deqp-shadercache=disable`.
+
+## Suggested next step
+
+1. **Continue L94 recovery in deterministic order.** Reduce the next
+   completed abnormal pipeline case; keep each root cause and its CTS
+   reproduction separate from this graphics-pipeline-library state fix.
