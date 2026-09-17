@@ -89208,3 +89208,38 @@ case now passes. Its prior failure was pipeline creation returning
 1. **Continue L94 recovery in order.** Resume after
    `two_draws_static.prim_restart_enable`; probe the first non-unsupported
    static primitive/topology case and reduce only a reproduced abnormal result.
+
+# L94 primitive and topology recovery pass
+
+## Outcome
+
+No new reduction target was found. The retained static primitive and topology
+cases run after L94(d) pass, including all six topology variants.
+
+## Decisions and evidence
+
+1. **Keep capability gates distinct from failures.** Provoking vertex,
+   rasterization stream, representative-fragment test, and tessellation-domain
+   origin correctly return `NotSupported` because they require unadvertised
+   `VK_EXT_extended_dynamic_state3` features.
+2. **Validate the supported state boundary.** The 54 static stencil-state
+   cases, both stencil-test cases, three vertex-stride cases, and six line,
+   triangle, patch, and geometry topology cases all pass with the fresh FeMe
+   ICD.
+3. **Do not widen support based on skipped coverage.** The following
+   `vertex_input_float16` case correctly requires the unadvertised
+   `vertexInputDynamicState` feature. No feature bit or extension inventory
+   change is justified.
+
+## Validation
+
+- Explicit ICD check reports `FeMe CPU Vulkan Device`.
+- Exact CTS cases and bounded families above pass with
+  `--deqp-shadercache=disable`.
+- `ninja -C build2 check-feme` passes: 3,157 passed, 3 unsupported.
+
+## Suggested next step
+
+1. **Continue L94 recovery in order.** Resume after the
+   `two_draws_static.vertex_input_*` capability-gated cases and reduce the
+   first reproduced abnormal pipeline result.
