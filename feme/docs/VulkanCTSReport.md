@@ -6,7 +6,7 @@ own implementation decisions.
 
 ## Scope and provenance
 
-- FeMe source revision under test: `c885e8b3c93b`
+- FeMe source revision under test: `ac4590b42fb8`
 - Documentation/inventory revision: `e7c884c84462`
 - VK-GL-CTS revision: `880f31a2bd9cd0659f84f3f80dafd07f2e693f6d`
   (`vulkan-cts-1.4.6.2-525-g880f31a2`)
@@ -15,7 +15,7 @@ own implementation decisions.
 - Device: `FeMe CPU Vulkan Device`
 - Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`
-- `check-feme`: 3,154 passed, 3 unsupported, 0 failed
+- `check-feme`: 3,157 passed, 3 unsupported, 0 failed
 - Registry used by the inventories: `VK_HEADER_VERSION` 358
 
 The inventory audit performed with this run reports 87 of 150 Vulkan
@@ -220,6 +220,16 @@ recorded per-draw value instead. Both the `disable_raster` reproduction and
 its `enable_raster` counterpart pass with the explicit build-tree ICD and
 `--deqp-shadercache=disable`. This implementation changes no advertised
 feature or extension, so both Vulkan inventories remain current.
+
+L94(d) added the remaining promoted Vulkan 1.3
+`VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE` and
+`vkCmdSetPrimitiveRestartEnable` path. The deterministic
+`dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.two_draws_static.prim_restart_enable`
+case previously failed pipeline creation with `VK_ERROR_INITIALIZATION_FAILED`;
+it now passes with the explicit build-tree ICD and `--deqp-shadercache=disable`.
+The static input-assembly value remains used only when the state is not
+dynamic, while the recorded per-draw value is resolved otherwise. This changes
+no advertised feature or extension, so both Vulkan inventories remain current.
 
 ## Dominant ordinary failures
 
