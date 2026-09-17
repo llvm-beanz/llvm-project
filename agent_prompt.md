@@ -53,13 +53,12 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~1-2 hours, cheapest, do first:** H170's bucket 3
-   (`private_store` image-comparison mismatch). Mirror H88's own
-   channel-level pixel-reduction technique to determine whether the
-   private-variable-store path itself is broken (unrelated to
-   derivatives) or whether the derivative math produces subtly wrong
-   values in this one specific code shape. Compare against the
-   `in_function`/`fbo_float` buckets' own passing scalar cases first --
-   if plain `dfdx.private_store.float_highp` (no fwidth, no vector) still
-   fails while `dfdx.fbo_float.float_highp` fails for an unrelated
-   reason (queueSubmit), that narrows it fast.
+1. **~half a day, real payoff, well-scoped:** H171 -- the vector-value
+   decomposition gap. Two candidate approaches already noted in its own
+   roadmap row: extend `widenMaskedAllocaLoad`'s existing vector-type
+   support further downstream into `widenInstruction`'s vector-value-use
+   dispatch, or add a new dedicated pattern to the "supported ... pattern"
+   list `SIMDizePass` already checks against. Start by hand-tracing one
+   `vec2_highp` case's IR the same way this session traced the scalar
+   one, to see exactly which use of the reloaded vector value trips the
+   rejection.
