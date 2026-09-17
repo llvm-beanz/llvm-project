@@ -381,6 +381,7 @@ LogicalResult Serializer::processDecorationAttr(Location loc, uint32_t resultID,
   case spirv::Decoration::Offset:
   case spirv::Decoration::XfbBuffer:
   case spirv::Decoration::XfbStride:
+  case spirv::Decoration::Stream:
   case spirv::Decoration::InputAttachmentIndex:
     if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
       args.push_back(intAttr.getValue().getZExtValue());

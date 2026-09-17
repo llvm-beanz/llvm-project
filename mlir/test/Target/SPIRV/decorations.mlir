@@ -117,6 +117,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Transfo
 
 // -----
 
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Geometry, GeometryStreams], []> {
+  // CHECK: stream = 1
+  spirv.GlobalVariable @var {stream = 1 : i32} : !spirv.ptr<vector<4xf32>, Output>
+}
+
+// -----
+
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
   // CHECK: linkage_attributes = #spirv.linkage_attributes<linkage_name = "outSideGlobalVar1", linkage_type = <Import>>
   spirv.GlobalVariable @var1 {
