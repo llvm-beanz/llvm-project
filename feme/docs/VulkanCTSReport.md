@@ -47799,3 +47799,77 @@ pre-existing `Feature/PushConstant/array_of_matrices.test` XPASS flake
 `VulkanExtensionInventory` change: this is a CPU-backend correctness
 fix for existing core SPIR-V `Private`-storage-class semantics, not a
 new feature or extension.
+
+## H171: vector-typed derivative/quad-read decomposition fix
+
+**Root cause.** `SIMDizePass::FunctionWidener::widenStageOp` unconditionally
+widened every `feme.stage.*` call's result via
+`FixedVectorType::get(CI.getType(), WaveSize)`. That is correct for
+`InputLoad`/`OutputStore`/`InterpolateAt*`/`SubpassLoad`/`TaskPayloadLoad`,
+whose results are always scalar (DXIL-style per-component addressing), but
+`Derivative{X,Y}{Fine,Coarse}`/`QuadRead` pass their operand's type straight
+through as their own result type (`feme/lib/Core/StageOps.cpp`), so a GLSL
+`dFdx(vec2)` reaches `SIMDize` as a genuinely vector-typed
+(`<2 x float>`) stage-op call -- naive widening would build an illegal
+nested `<W x <2 x float>>` vector. Separately,
+`checkVectorDecompositionSupported`'s preflight producer/consumer checks
+never recognized a stage-op call as a valid vector-typed producer or
+consumer at all, so the bug surfaced as a clean, self-diagnosing rejection
+rather than a crash or miscompile.
+
+**Fix (2 parts, `SIMDize.cpp`).**
+1. `checkVectorDecompositionSupported` now accepts a `Derivative*`/
+   `QuadRead` stage-op call as both a supported vector-typed *producer*
+   (its own result) and *consumer* (a vector-typed value used as such a
+   call's argument) -- deliberately not extended to other vector-capable
+   `StageOpKind`s like a hypothetical vector `TaskPayloadLoad`, which would
+   need genuine per-component address arithmetic not yet audited.
+2. `widenStageOp` decomposes a vector-typed call into `N` independent
+   per-component wide stage-op calls, mirroring `widenVectorElementwise`'s
+   existing decomposition pattern -- safe because both derivative and
+   quad-read semantics are genuinely component-wise independent (GLSL/HLSL
+   define `dFdx`/`dFdy`/`fwidth` of a vector per-component; a quad-read
+   gathers the same source lane for every component). `QuadRead`'s
+   constant `Dir` operand is shared unchanged across every per-component
+   call (via the pre-existing `getWidened` broadcast-caching path), while
+   `Derivative*`'s single vector operand is decomposed via
+   `getVectorComponents`.
+
+`WaveLoweringPass::lowerDerivative`/`lowerQuadRead` needed **no changes** --
+they already generically expect a `WaveSize`-sized vector operand (via
+`getStageWaveSize`) and have no concept of "components" at all, so each of
+the `N` decomposed calls lowers exactly as any naturally-scalar derivative/
+quad-read call always has.
+
+**Unit tests.** 3 new lit tests: `simdize-vector-derivative.ll`
+(`SIMDize`-only, confirms two independent per-component wide derivative
+calls with no illegal nested-vector type), `simdize-vector-quad-read.ll`
+(same, for `QuadRead`, confirming the shared `Dir` operand is preserved
+correctly), `wave-lowering-vector-derivative.ll` (end-to-end through
+`feme-cpu-simdize,feme-cpu-lower-wave`, confirming both per-component
+calls lower to independent quad-shuffle sequences with zero leftover
+`feme.stage.derivative`/`feme.stage.quad.read` declarations). `check-feme`:
+3134/3137 passed (3 unsupported, as before), no regressions.
+
+**Native Vulkan CTS check.** All 30 originally-failing
+`dEQP-VK.glsl.derivate.{dfdx,dfdy,fwidth,fwidthcoarse,fwidthfine}.
+private_store.{vec2,vec3,vec4}_{highp,mediump}` cases: fail -> pass
+(30/30). Broader `dEQP-VK.glsl.derivate.*` sweep (1,674 cases, full
+regression check): 285 -> 1,080 passed (+795), 1,083 -> 288 failed
+(-795), 306 not-supported unchanged. The remaining 288 failures are all
+pre-existing, already-documented gaps -- 72 + 216 =
+`VK_ERROR_INITIALIZATION_FAILED` pipeline-creation/queue-submit failures,
+216 + 72 = `NotSupported` cases gated on `VK_SUBGROUP_FEATURE_QUAD_BIT`
+(counted separately from the 288 fails above; see raw qpa breakdown) --
+zero of the 288 failures involve the vector-decomposition diagnostic any
+more, confirming the H171 class of failure is fully closed, not merely its
+`private_store` subcase. Regression sweep: `dEQP-VK.compute.pipeline.*`
+(20,502 cases) unchanged at 654 passed / 29 failed (matches the
+established baseline exactly); `check-hlsl-feme-vk`: 376 passed, 1
+pre-existing `Feature/PushConstant/array_of_matrices.test` XPASS flake
+(already documented in prior sessions), no regressions.
+
+**Feature/extension inventories.** No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+for existing core SPIR-V derivative/quad-read semantics, not a new
+feature or extension.
