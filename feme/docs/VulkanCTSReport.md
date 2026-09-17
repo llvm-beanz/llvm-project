@@ -47722,3 +47722,80 @@ surfaced and not yet triaged -- filed as H170.
 core SPIR-V functionality (already present in the dialect's own
 capability enum before this session), not gated by any optional
 Vulkan feature or extension.
+
+## H170 bucket 3: `private_store` scalar-float image-comparison fix
+
+**Root cause.** `FEME_DUMP_IR=1` against `deqp-vk` for
+`dEQP-VK.glsl.derivate.dfdx.private_store.float_highp` showed a SPIR-V
+`Private`-storage global (GLSL's file-scope `intermediateStore`
+variable) written via 4 sequential `extractelement`+`store` pairs, one
+per SIMD lane, all targeting the *same* shared scalar address, then
+read back via an `llvm.masked.gather` from 4 *identical* pointer
+copies. `SIMDizePass`'s `FunctionWidener::collectMaskedAllocas()` only
+recognized an `AllocaInst` as needing real per-lane storage
+(`MaskedAllocas`) when reached via a `feme.cpu.masked.load/store` call
+-- something `LinearizePass` only emits inside genuinely divergent
+control flow. A plain (unmasked) store of a divergent *value* under
+*uniform* control flow (e.g. `intermediateStore = v_coord;` at the top
+of a shader, no branch involved) was never recognized, regardless of
+whether the address is a local `alloca` or a module-scope
+`GlobalVariable` -- every lane's write silently overwrote the last,
+and only the last lane's value survived, later broadcast to all lanes
+on read. A full miscompile, matching the "entire framebuffer black"
+qpa symptom exactly, not a subtle derivative-math error.
+
+**Fix (3 parts).**
+1. `collectMaskedAllocas` (`SIMDize.cpp`) extended to also flag any
+   `AllocaInst` reached by a plain `StoreInst` whose value is
+   `UI.isDivergentAtDef` -- fixes the store side for local allocas.
+2. New `FunctionWidener::widenMaskedAllocaLoad` (`SIMDize.cpp`) handles
+   the symmetric read-side gap: a plain (unmasked) `load` of a
+   `MaskedAllocas`-flagged base now reads each lane's own per-lane
+   address individually and reassembles a proper per-lane result,
+   instead of reading lane 0 once and broadcasting.
+3. New module pass `LocalizePrivateGlobalsPass`
+   (`feme/lib/Transforms/CPU/LocalizePrivateGlobals.cpp`) converts
+   eligible SPIR-V `Private`-storage globals (address-space-0,
+   non-constant, scalar/fixed-vector-typed, used by exactly one
+   function) into a real local `alloca` at that function's entry
+   before `LinearizePass`/`SIMDizePass` run, since parts 1/2 alone only
+   ever recognize an `AllocaInst`, never a module-scope
+   `GlobalVariable`; wired into `Pipeline.cpp`'s `Normalize` sequence
+   right after `LocalNarrowVectorArrayInitPass()`, and registered as
+   `feme-cpu-localize-private-globals` in `feme-opt.cpp` for
+   lit-testability.
+
+Deliberately scoped to scalar/fixed-vector-*storage* only (matching
+`LocalNarrowVectorArrayInitPass`'s own array/struct-only scope, so the
+two passes don't overlap) -- the *value*-side vector-widening gap this
+scoping leaves behind is real and newly surfaced; see H171 below.
+
+**Unit tests.** 3 new lit tests added: `simdize-masked-alloca-uniform-
+store-divergent-value.ll` (parts 1+2, local-alloca shape),
+`localize-private-globals.ll` (part 3 in isolation: scalar-no-init,
+scalar-with-init, constant-global-excluded, multi-function-shared-
+global-excluded, array-typed-global-excluded), `localize-private-
+globals-simdize.ll` (end-to-end, all three passes chained).
+`check-feme`: 3131/3134 passed (3 unsupported, as before), no
+regressions.
+
+**Native Vulkan CTS check.** `dEQP-VK.glsl.derivate.dfdx.private_store.
+float_highp` (the originally-reported case): fail -> pass. Broader
+`dEQP-VK.glsl.derivate.{dfdx,dfdy,fwidth}.private_store.*` sweep: the
+`float_highp`/`float_mediump` scalar subcase of each of the 3 derivative
+functions (6 cases total) goes from fail to pass; the `vec2/vec3/
+vec4_{highp,mediump}` subcases of the same bucket (and of
+`fwidthcoarse`/`fwidthfine`, sharing the same shader pattern) continue
+to fail, but now with a clean, self-diagnosing `feme-cpu-simdize`
+rejection (`"divergent vector value ... component decomposition is not
+yet supported"`) rather than a silent miscompile -- filed as a new,
+narrower gap, H171. Regression sweep: `dEQP-VK.compute.pipeline.*`
+(20,502 cases) unchanged at 654 passed / 29 failed (matches the
+established baseline exactly); `check-hlsl-feme-vk`: 376 passed, 1
+pre-existing `Feature/PushConstant/array_of_matrices.test` XPASS flake
+(already documented in prior sessions), no regressions.
+
+**Feature/extension inventories.** No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: this is a CPU-backend correctness
+fix for existing core SPIR-V `Private`-storage-class semantics, not a
+new feature or extension.
