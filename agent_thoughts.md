@@ -88778,3 +88778,99 @@ strikethrough check.
 3. **Large, multi-day, still on the shelf:** the ~34 open H33-H68
    dynamic-rendering/format/pipeline-library/sparse-resources/
    protected-memory/tessellation rows -- none are quick wins.
+
+# Session: H173(b) -- independent, simultaneous per-geometry-stream XFB capture
+
+**Do first if resuming this exact thread:** nothing left undone here --
+this row is closed. If picking a next task, go straight to H173(c)
+below (smallest, best-isolated).
+
+**What now works.** `dEQP-VK.transform_feedback.simple.multistreams_
+{1,3,6,14}` -- real GLSL geometry shaders emitting to two streams with
+two different `xfb_buffer` indices in the same shader -- go from
+`NotSupported` to **4/4 Pass**. Try it: rebuild `libfeme_vulkan.so`,
+point `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` at it, run `deqp-vk
+--deqp-case='dEQP-VK.transform_feedback.simple.multistreams_*'`.
+
+**The bug.** `Executor.cpp`'s geometry-stage XFB capture already
+computed every stream's own output elements and ran the geometry stage
+producing every stream's emitted vertices -- but only ever flattened
+and captured the single `RasterizationStream`-selected stream. Every
+other stream's own `XfbBuffer`-tagged elements were silently dropped.
+Confirmed via VK-GL-CTS's own `TEST_TYPE_MULTISTREAMS` GLSL generator
+that real Vulkan semantics need simultaneous, independent capture of
+every XFB-tagged stream, not just the rasterized one.
+
+**The fix, 3 pieces:**
+1. Refactored the existing single-stream flattening block into a
+   `flattenStream` lambda, reused unchanged for the rasterized stream.
+2. Added a loop capturing every *other* stream with an `XfbBuffer`-
+   tagged element independently.
+3. Raised `maxTransformFeedbackStreams` 1 → 16, flipped
+   `geometryStreams`/`transformFeedbackRasterizationStreamSelect`/
+   `primitivesGeneratedQueryWithNonZeroStreams` to `VK_TRUE` in
+   `EntryPoints.cpp`.
+
+**Verification (all done):**
+- New unit test `ExecutorTest.CapturesTransformFeedbackFromEvery
+  StreamIndependently`: 110/110 `ExecutorTest` cases pass (was 109).
+- `check-feme`: 3146/3149 passed (3 unsupported), 0 failed.
+- CTS `simple.*` (7899 cases): 140 passed / 197 failed / 7553 not
+  supported (was 135/188/7576) -- +5 pass, +9 fail, all newly
+  *exposed* (not caused-by) gaps, see below.
+- Isolated a scary-looking heap-corruption crash
+  (`all_instance_array.12`, then `.61`, then `all_missing.48`) that hit
+  during the full unfiltered sweep: `git checkout` the pre-H173(b)
+  commit for just `Executor.cpp`/`EntryPoints.cpp`, rebuild, re-run the
+  same case in isolation -- **crashes identically at baseline too**.
+  Pre-existing, not a regression. (This is the same
+  `fuzz.random_geometry.*` family this file's own history already
+  tracks going back several sessions -- still not root-caused, still
+  out of scope for a single session, still worth a dedicated future
+  pass if anyone wants to `valgrind` the whole bucket properly.)
+
+**New gaps this flip exposed (all previously `NotSupported`, so none of
+these are regressions -- they're newly-visible pre-existing gaps):**
+
+1. **~1 day, do first, smallest/best-isolated:** H173(c) --
+   `streams_N`/`streams_clipdistance_N`/`streams_culldistance_N` (16
+   cases) fail image comparison. These use **point-input** geometry
+   shaders (`layout(points) in;`) emitting entirely to one non-zero
+   stream -- a shape neither `RasterizationStreamSelectsGeometryOutput
+   FromANonzeroStream` nor the new multi-stream test covers (both use
+   triangle input). Start with `FEME_DUMP_IR` on `streams_1` to see if
+   the bug is in point-input geometry-stage assembly itself or in
+   `RasterizationStream` selection's interaction with it.
+2. **~1 day, well-isolated:** H173(d) -- `multistreams_same_location_N`
+   (4 cases) fails at pipeline creation: `error: unhandled Decoration :
+   'Component'`. Unrelated to capture/rasterization -- feme's SPIR-V
+   importer just doesn't handle the `Component` decoration yet. Add it
+   to `CanonicalizeStage.cpp`'s decoration switch, mirroring `Location`/
+   `Stream`/`XfbBuffer`.
+3. **Not worth doing on purpose:** H173(e) -- `_ptsz` variants stay
+   `NotSupported` for an unrelated reason
+   (`shaderTessellationAndGeometryPointSize` unimplemented). Just
+   documented so nobody re-discovers this by accident.
+4. **Setup task, not code:** this session had no working
+   `offload-test-suite` build directory (`/home/dev/dev/
+   offload-test-suite` has no `build/` at all -- a prior session's note
+   that it was "already configured and working" no longer holds; either
+   it was cleaned between sessions or was never actually persisted).
+   Setting it up needs a full `cmake -C .../HLSL.cmake -C
+   .../OffloadTest.cmake` reconfigure of `build2`, which is a
+   from-scratch, possibly multi-hour job -- did not attempt this
+   session given the size of the rest of the work. If check-hlsl-feme-vk
+   coverage matters for the next session, budget real time for this
+   specifically, separate from whatever H-row is picked.
+
+**Ranked next steps:**
+1. **~1 day:** H173(c), point-input-geometry stream rendering bug (do
+   this one first).
+2. **~1 day:** H173(d), `Component` decoration import gap.
+3. **~2-4 hours, one-time setup cost:** rebuild the `offload-test-suite`
+   build directory from scratch so `check-hlsl-feme-vk` can run again.
+4. **Open-ended, not scoped, don't start without dedicating a whole
+   session:** properly root-cause the `fuzz.random_geometry.*`
+   heap-corruption family (`all_instance_array`/`all_missing`/others) --
+   `valgrind`-driven, cross multiple sub-buckets, has resisted several
+   prior sessions' spot-fixes.
