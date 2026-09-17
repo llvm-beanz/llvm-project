@@ -14,6 +14,7 @@ add_feme_library(FeMeTransformsCPU
   InlineHelperFunctions.cpp
   Linearize.cpp
   LocalNarrowVectorArrayInit.cpp
+  LocalizePrivateGlobals.cpp
   MaskIntrinsics.cpp
   MeshOutputWrapper.cpp
   PatchConstantWrapper.cpp

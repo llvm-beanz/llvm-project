@@ -19,6 +19,7 @@
 #include "feme/Transforms/CPU/InlineHelperFunctions.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/LocalNarrowVectorArrayInit.h"
+#include "feme/Transforms/CPU/LocalizePrivateGlobals.h"
 #include "feme/Transforms/CPU/MeshOutputWrapper.h"
 #include "feme/Transforms/CPU/PatchConstantWrapper.h"
 #include "feme/Transforms/CPU/Prepare.h"
@@ -348,6 +349,18 @@ Expected<PipelineResult> runPipeline(Module &M,
     // one of that array's later elements avoids ever observing the
     // corrupted data such a mismatch produces.
     Normalize.addPass(LocalNarrowVectorArrayInitPass());
+    // (roadmap H170) A SPIR-V-sourced module-scope `Private`-storage
+    // global (e.g. a GLSL file-scope local variable) is per-invocation
+    // storage, but is never eligible for SROA/mem2reg's own alloca-only
+    // promotion and has no widening rule of its own in
+    // `feme::cpu::SIMDizePass` -- only a real local variable's `alloca`
+    // does (see `feme::cpu::LocalizePrivateGlobalsPass`'s header comment
+    // for the full story of the resulting "every lane shares one scalar
+    // address" bug this fixes). Running this before `feme::cpu::
+    // LinearizePass`/`SIMDizePass` lets the now-local `alloca` flow
+    // through their own existing, already-correct per-lane widening
+    // machinery instead.
+    Normalize.addPass(LocalizePrivateGlobalsPass());
     // A SPIR-V-sourced module's builtin (thread/group ID) access always
     // materializes the whole 3-component vector before extracting the one
     // lane actually used (see `feme::cpu::SPIRVBuiltinFoldingPass`'s header
