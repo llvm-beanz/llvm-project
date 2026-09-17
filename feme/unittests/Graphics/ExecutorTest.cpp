@@ -7318,6 +7318,151 @@ buildTwoStreamGeometryPipeline(Context &Ctx, uint32_t AttachmentSize,
   return Pipeline;
 }
 
+// (Roadmap H173(b)) Real `VK_EXT_transform_feedback`/`geometryStreams`
+// semantics capture *every* stream a geometry entry point emits to that
+// carries an `XfbBuffer`-tagged element, simultaneously and
+// independently of whichever single stream `RasterizationStream` selects
+// for rasterization (VK-GL-CTS's own `TEST_TYPE_MULTISTREAMS` geometry
+// shader captures stream 0 to `xfb_buffer=0` and a non-zero stream to
+// `xfb_buffer=1` in the same shader). This reuses
+// `TwoStreamGeometryShaderIR`'s own two-stream shape (stream 0's decoy
+// element, stream 1's position+color), tagging *both* streams' non-
+// position elements as `XfbBuffer`-captured, with rasterization
+// selecting only stream 1 -- so a pre-H173(b) build only ever captured
+// buffer 1 (the rasterized stream) and silently dropped buffer 0
+// (stream 0's own decoy element), even though stream 0 was never
+// rasterized at all.
+TEST(ExecutorTest, CapturesTransformFeedbackFromEveryStreamIndependently) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement StreamZeroDecoy =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/1);
+  StreamZeroDecoy.Stream = 0;
+  StreamZeroDecoy.XfbBuffer = 0;
+  StreamZeroDecoy.XfbOffset = 0;
+  StreamZeroDecoy.XfbStride = 16;
+  SignatureElement StreamOnePosition = makeElement(
+      1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+      SignatureSystemValue::Position);
+  StreamOnePosition.Stream = 1;
+  SignatureElement StreamOneColor =
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/0);
+  StreamOneColor.Stream = 1;
+  StreamOneColor.XfbBuffer = 1;
+  StreamOneColor.XfbOffset = 0;
+  StreamOneColor.XfbStride = 16;
+  EntrySignature GSSig;
+  GSSig.Elements = {StreamZeroDecoy, StreamOnePosition, StreamOneColor};
+  Expected<std::shared_ptr<CompiledStage>> GS = compileStage(
+      Ctx, TwoStreamGeometryShaderIR, "gs_main", GSSig, ShaderStage::Geometry);
+  ASSERT_THAT_EXPECTED(GS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.RasterizationStream = 1;
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList, Raster,
+      DepthState{}, BlendMode::Replace, /*SampleCount=*/1,
+      std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  std::vector<VertexAttribute> VtxAttributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      VtxAttributes}};
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+
+  // Stream 0 emits 3 decoy vertices, stream 1 emits 3 real (position +
+  // color) vertices -- both streams need their own 48-byte buffer.
+  std::array<uint8_t, 48> Stream0XfbStorage{};
+  uint64_t Stream0CapturedBytes = 0;
+  std::array<uint8_t, 48> Stream1XfbStorage{};
+  uint64_t Stream1CapturedBytes = 0;
+  std::array<PreparedDraw::XfbCaptureBuffer, 2> XfbBuffers = {
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(Stream0XfbStorage),
+                                     &Stream0CapturedBytes},
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(Stream1XfbStorage),
+                                     &Stream1CapturedBytes}};
+  Draw.XfbBuffers = XfbBuffers;
+
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Stream 0's own decoy element -- captured even though rasterization
+  // only ever consumes stream 1's records.
+  EXPECT_EQ(Stream0CapturedBytes, 48u);
+  for (uint32_t V = 0; V != 3; ++V) {
+    float Captured[4];
+    std::memcpy(Captured, Stream0XfbStorage.data() + V * 16,
+               sizeof(Captured));
+    EXPECT_FLOAT_EQ(Captured[0], 9.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[1], 9.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[2], 9.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[3], 9.0f) << "vertex " << V;
+  }
+
+  // Stream 1's own color element -- the rasterized stream, unaffected by
+  // the new independent-capture loop also running for stream 0.
+  EXPECT_EQ(Stream1CapturedBytes, 48u);
+  for (uint32_t V = 0; V != 3; ++V) {
+    float Captured[4];
+    std::memcpy(Captured, Stream1XfbStorage.data() + V * 16,
+               sizeof(Captured));
+    EXPECT_FLOAT_EQ(Captured[0], 0.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[1], 1.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[2], 0.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[3], 1.0f) << "vertex " << V;
+  }
+}
+
 TEST(ExecutorTest, RasterizationStreamSelectsGeometryOutputFromANonzeroStream) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildTwoStreamGeometryPipeline(

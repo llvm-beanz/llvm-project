@@ -4986,27 +4986,41 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // Rasterization consumes whichever stream
       // `RasterizationStream` names, not always stream 0, and only that
       // stream's own output elements are meaningful in each record (see
-      // `GSOutputElementsByStream`'s own comment above).
+      // `GSOutputElementsByStream`'s own comment above). (Roadmap H173(b))
+      // Factored into a lambda since transform-feedback capture below
+      // needs the exact same per-stream flattening for every stream that
+      // captures to an XFB buffer, not only whichever one
+      // `RasterizationStream` names.
+      auto flattenStream =
+          [&](uint32_t Stream) -> Expected<StageStorage> {
+        llvm::ArrayRef<StreamVertex> Verts = Combined.getVertices(Stream);
+        const SmallVector<const SignatureElement *, 4> &StreamElements =
+            GSOutputElementsByStream[Stream];
+        Expected<StageStorage> Flat = buildStageStorage(
+            *GSSig, SignatureDirection::Output,
+            static_cast<uint32_t>(Verts.size()));
+        if (!Flat)
+          return Flat.takeError();
+        StageStorage Result = std::move(*Flat);
+        for (uint32_t Slot = 0; Slot != Verts.size(); ++Slot) {
+          const StreamVertex &Vtx = Verts[Slot];
+          uint32_t Cursor = 0;
+          for (const SignatureElement *Elt : StreamElements)
+            for (uint32_t Row = 0; Row != Elt->RowCount; ++Row)
+              for (uint32_t Comp = 0; Comp != Elt->ComponentCount; ++Comp)
+                Result.writeFloat(Elt->ElementID, Elt->FirstComponent + Comp,
+                                  Slot, Vtx[Cursor++], Row);
+        }
+        return std::move(Result);
+      };
       llvm::ArrayRef<StreamVertex> MergedVerts =
           Combined.getVertices(RasterizationStream);
       const SmallVector<const SignatureElement *, 4> &RasterOutputElements =
           GSOutputElementsByStream[RasterizationStream];
-      Expected<StageStorage> Flat =
-          buildStageStorage(*GSSig, SignatureDirection::Output,
-                            static_cast<uint32_t>(MergedVerts.size()));
-      if (!Flat)
-        return Flat.takeError();
-      GeomStreamOutput = std::move(*Flat);
-      for (uint32_t Slot = 0; Slot != MergedVerts.size(); ++Slot) {
-        const StreamVertex &Vtx = MergedVerts[Slot];
-        uint32_t Cursor = 0;
-        for (const SignatureElement *Elt : RasterOutputElements)
-          for (uint32_t Row = 0; Row != Elt->RowCount; ++Row)
-            for (uint32_t Comp = 0; Comp != Elt->ComponentCount; ++Comp)
-              GeomStreamOutput.writeFloat(Elt->ElementID,
-                                          Elt->FirstComponent + Comp, Slot,
-                                          Vtx[Cursor++], Row);
-      }
+      Expected<StageStorage> RasterFlat = flattenStream(RasterizationStream);
+      if (!RasterFlat)
+        return RasterFlat.takeError();
+      GeomStreamOutput = std::move(*RasterFlat);
 
       // Rebuilds the primitive lists rasterization consumes from the
       // merged stream's own strips: `Points` needs none (the point
@@ -5048,17 +5062,45 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       RasterOut = &GeomStreamOutput;
 
       // --- Transform feedback capture from the geometry stage (roadmap
-      // H21e). ---
+      // H21e/H173(b)). ---
       //
-      // Captures the merged, `RasterizationStream`-selected stream's own
-      // output (the same `RasterOutputElements`/`MergedVerts` rasterization
-      // itself just consumed above), reusing roadmap H21c's own
-      // `captureTransformFeedback` helper.
+      // Real `VK_EXT_transform_feedback`/`geometryStreams` semantics
+      // capture *every* stream a shader emits to that carries an
+      // `XfbBuffer`-tagged element, simultaneously and independently of
+      // whichever single stream `RasterizationStream` selects for
+      // rasterization (confirmed against VK-GL-CTS's own
+      // `TEST_TYPE_MULTISTREAMS` geometry shader, which captures stream 0
+      // to `xfb_buffer=0` and its own non-zero stream to `xfb_buffer=1`
+      // in the same invocation) -- unlike the pre-H173(b) shape here,
+      // which only ever captured the rasterized stream's own output,
+      // silently dropping every other stream's own XFB-tagged elements.
+      // `RasterizationStream`'s own already-flattened `GeomStreamOutput`
+      // is reused rather than re-flattened a second time.
       if (!Draw.XfbBuffers.empty())
-        captureTransformFeedback(RasterOutputElements, GeomStreamOutput,
-                                 static_cast<uint32_t>(MergedVerts.size()),
-                                 Draw);
+        for (const auto &Entry : GSOutputElementsByStream) {
+          uint32_t Stream = Entry.first;
+          const SmallVector<const SignatureElement *, 4> &StreamElements =
+              Entry.second;
+          if (!llvm::any_of(StreamElements, [](const SignatureElement *Elt) {
+                return Elt->XfbBuffer.has_value();
+              }))
+            continue;
+          if (Stream == RasterizationStream) {
+            captureTransformFeedback(
+                RasterOutputElements, GeomStreamOutput,
+                static_cast<uint32_t>(MergedVerts.size()), Draw);
+            continue;
+          }
+          Expected<StageStorage> StreamOutput = flattenStream(Stream);
+          if (!StreamOutput)
+            return StreamOutput.takeError();
+          captureTransformFeedback(
+              StreamElements, *StreamOutput,
+              static_cast<uint32_t>(Combined.getVertices(Stream).size()),
+              Draw);
+        }
     }
+
 
     if (Error E = RasterizePrimitives(*RasterOut, AbsTriIndices, AbsLineIndices,
                                       RasterClass))
