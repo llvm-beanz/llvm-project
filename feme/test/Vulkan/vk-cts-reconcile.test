@@ -8,8 +8,9 @@
 // RUN:   --qpa %S/Inputs/vk-cts-reconcile-current.qpa \
 // RUN:   --baseline-qpa %S/Inputs/vk-cts-reconcile-baseline.qpa \
 // RUN:   --expected-failures %S/Inputs/vk-cts-reconcile-expected-failures.txt \
-// RUN:   -o %t.report
+// RUN:   --write-failures %t.failures -o %t.report
 // RUN: FileCheck %s < %t.report
+// RUN: FileCheck --check-prefix=FAILURES %s < %t.failures
 //
 // CHECK: Total cases: 4
 // CHECK: Completed cases: 3
@@ -26,6 +27,9 @@
 // CHECK-DAG:   dEQP-VK.api.beta: Pass -> Fail
 // CHECK-DAG:   dEQP-VK.pipeline.gamma: Unrun -> NotSupported
 // CHECK-DAG:   dEQP-VK.pipeline.delta: NotSupported -> Unrun
+
+// FAILURES: dEQP-VK.api.beta
+// FAILURES-NOT: dEQP-VK.pipeline.delta
 
 // Contradictory completed attempts are a data error, not a hidden last-write
 // wins choice. The file is derived by changing beta's status in the current

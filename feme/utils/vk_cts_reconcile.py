@@ -16,7 +16,7 @@
 Usage:
   vk_cts_reconcile.py --case-list cases.txt --qpa attempt-0.qpa [--qpa ...]
       [--baseline-qpa baseline.qpa ...] [--expected-failures failures.txt]
-      [-o report.txt]
+      [--write-failures failures.txt] [-o report.txt]
 
 Each `--qpa` may be repeated. A QPA record only counts after its matching
 `#endTestCaseResult` marker, so a process that stops mid-case leaves that case
@@ -28,6 +28,10 @@ silently selecting one attempt.
 `--expected-failures` is a plain list of case names whose `Fail` result is
 expected; an unexpected failure is reported separately. Blank lines and `#`
 comments in input lists are ignored.
+
+`--write-failures` writes the current run's complete `Fail` case list in the
+input case-list order. This output can be used as a reviewed expected-failure
+baseline for a later run.
 """
 
 import argparse
@@ -141,6 +145,13 @@ def format_report(cases, results, baseline, expected_failures):
     return "\n".join(lines) + "\n"
 
 
+def write_failures(path, cases, results):
+    with open(path, "w", encoding="utf-8") as file:
+        for case_name in cases:
+            if results.get(case_name) == "Fail":
+                file.write(case_name + "\n")
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case-list", required=True,
@@ -151,6 +162,8 @@ def main(argv):
                         help="QPA result file from the baseline run")
     parser.add_argument("--expected-failures",
                         help="case names whose Fail result is expected")
+    parser.add_argument("--write-failures",
+                        help="write current Fail case names in case-list order")
     parser.add_argument("-o", "--output",
                         help="write the reconciliation report here")
     args = parser.parse_args(argv)
@@ -173,6 +186,8 @@ def main(argv):
             file.write(report)
     else:
         print(report, end="")
+    if args.write_failures:
+        write_failures(args.write_failures, cases, results)
     return 0
 
 
