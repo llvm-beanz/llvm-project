@@ -9081,6 +9081,78 @@ constexpr char PrimitiveIDPassthroughFragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+TEST(ExecutorTest, PointExpansionPreservesLogicalPrimitiveIDs) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement PrimitiveID =
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PrimitiveID);
+  PrimitiveID.ComponentType = SignatureComponentType::UInt;
+  SignatureElement Color =
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/0);
+  Color.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {PrimitiveID, Color};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, PrimitiveIDPassthroughFragmentShaderIR, "fs_main",
+                   FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> AttachmentFormats = {
+      {cpu::ResourceFormat::R32_UINT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PointList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(AttachmentFormats));
+
+  std::vector<float> VertexData = {
+      -0.75f, 0.25f, 0.0f,  0.0f, 0.0f,  0.0f,  0.0f, -0.25f, 0.25f, 0.0f,
+      0.0f,   0.0f,  0.0f,  0.0f, 0.25f, 0.25f, 0.0f, 0.0f,   0.0f,  0.0f,
+      0.0f,   0.75f, 0.25f, 0.0f, 0.0f,  0.0f,  0.0f, 0.0f,
+  };
+  std::array<VertexAttribute, 2> Attributes = {
+      VertexAttribute{0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  std::array<uint32_t, 16> Storage;
+  Storage.fill(~0u);
+  AttachmentView Attachment{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(Storage.data()),
+                      Storage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32_UINT, 4, 4};
+  std::array<AttachmentView, 1> Attachments = {Attachment};
+  std::array<DrawCommand, 1> Draws = {
+      DrawCommand{/*VertexCount=*/4, /*InstanceCount=*/2}};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // The second instance overwrites the same four pixels and must observe
+  // PrimitiveID values reset to 0..3, not values continuing at 4..7.
+  for (uint32_t X = 0; X != 4; ++X)
+    EXPECT_EQ(Storage[2 * 4 + X], X);
+}
+
 TEST(ExecutorTest, FragmentPrimitiveIDPrefersAMeshEntrysAuthoredValue) {
   Context Ctx;
   SignatureElement PosElt =

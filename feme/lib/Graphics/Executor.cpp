@@ -2351,8 +2351,6 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                  PrimitiveTopology::LineStripWithAdjacency) {
     RasterClass = RasterPrimitiveClass::Line;
   }
-  uint32_t PrimitiveCounter = 0;
-
   // (roadmap H6e) Shared by every pre-rasterization stage chain -- vertex,
   // tessellation, geometry, and now mesh: clips, viewport-transforms,
   // culls, bins into tiles and rasterizes \p AbsTriIndices/\p
@@ -2381,8 +2379,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           // entry's own `gl_PrimitivePointIndicesEXT` can legally violate
           // that assumption (multiple point primitives naming the same
           // vertex), so its caller below always passes real indices.
-          llvm::ArrayRef<uint32_t> AbsPointIndices = {}) -> Error {
+          llvm::ArrayRef<uint32_t> AbsPointIndices = {},
+          // Vulkan resets fallback PrimitiveID values for every instance.
+          // A zero period means this batch has no known instance boundary.
+          uint32_t FallbackPrimitiveIDPeriod = 0) -> Error {
     const StageStorage *RasterOut = &RasterOutRef;
+    uint32_t PrimitiveCounter = 0;
+    auto nextFallbackPrimitiveID = [&]() {
+      uint32_t ID = PrimitiveCounter++;
+      if (FallbackPrimitiveIDPeriod != 0 &&
+          PrimitiveCounter == FallbackPrimitiveIDPeriod)
+        PrimitiveCounter = 0;
+      return ID;
+    };
 
     // (roadmap H9) `CLIPPING_INVOCATIONS`: one per primitive entering
     // this shared clip/rasterize path, regardless of which
@@ -2457,13 +2466,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // ::ViewportIndex`, mirroring how `TargetLayer` above is already
       // carried through for `gl_Layer`/`SV_RenderTargetArrayIndex`.
       uint32_t ViewportIndex = 0;
-      // (Roadmap H93b) The last pre-rasterization stage's own authored
-      // `gl_PrimitiveID` output, when it has one (a mesh or geometry
-      // entry may write it; a plain vertex shader cannot). `nullopt`
-      // means no stage wrote it, in which case `PrimitiveCounter`'s own
-      // raster-order fallback below applies instead -- see
-      // `VSPrimitiveIDOut`'s own comment.
-      std::optional<uint32_t> AuthoredPrimitiveID;
+      // The logical primitive's ID, resolved before clipping or point/line
+      // expansion so every synthetic triangle keeps the same value.
+      uint32_t PrimitiveID = 0;
       // (Roadmap H106) `true` when a mesh entry's own authored
       // `gl_CullPrimitiveEXT` output requested this primitive be
       // discarded; see `VSCullPrimitiveOut`'s own comment.
@@ -2471,6 +2476,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     };
     auto resolvePrimitiveState =
         [&](uint32_t Invocation) -> std::optional<PrimitiveState> {
+      uint32_t FallbackPrimitiveID =
+          VSPrimitiveIDOut ? 0 : nextFallbackPrimitiveID();
       int32_t RequestedViewport = 0;
       if (VSViewportOut)
         RequestedViewport =
@@ -2510,9 +2517,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // primitive's own vertices \p Invocation names.
       std::optional<uint32_t> AuthoredPrimitiveID;
       if (VSPrimitiveIDOut)
-        AuthoredPrimitiveID = RasterOut->readRaw(
-            VSPrimitiveIDOut->ElementID, VSPrimitiveIDOut->FirstComponent,
-            Invocation);
+        AuthoredPrimitiveID =
+            RasterOut->readRaw(VSPrimitiveIDOut->ElementID,
+                               VSPrimitiveIDOut->FirstComponent, Invocation);
+      uint32_t PrimitiveID =
+          AuthoredPrimitiveID ? *AuthoredPrimitiveID : FallbackPrimitiveID;
 
       // (Roadmap H106) Same replication argument as `AuthoredPrimitiveID`
       // just above: `unflattenMeshPrimitiveRow` already replicated
@@ -2532,7 +2541,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                             &Draw.Scissors[*ScissorIndex],
                             *Layer,
                             *ViewportIndex,
-                            AuthoredPrimitiveID,
+                            PrimitiveID,
                             Culled};
     };
 
@@ -2667,16 +2676,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // before decomposing it, using its own real winding, so the
       // synthetic sub-primitives below never need a second cull test.
       ST.FrontFacing = true;
-      // (Roadmap H93b) Prefer the last pre-rasterization stage's own
-      // authored `gl_PrimitiveID` (e.g. a mesh entry's `PrimitiveIndices`-
-      // adjacent per-primitive write) over the raster-order fallback --
-      // see `PrimitiveState::AuthoredPrimitiveID`'s own comment. The
-      // ternary's short-circuiting matters here: `PrimitiveCounter` must
-      // not advance at all when an authored value is used, or a later
-      // primitive with no authored value of its own would skip an ID.
-      ST.PrimitiveID = Primitive.AuthoredPrimitiveID
-                          ? *Primitive.AuthoredPrimitiveID
-                          : PrimitiveCounter++;
+      ST.PrimitiveID = Primitive.PrimitiveID;
       ST.TargetLayer = Primitive.TargetLayer;
       ST.ViewportIndex = Primitive.ViewportIndex;
       ST.ScissorMinX = std::max<int32_t>(0, Primitive.Scissor->X);
@@ -2995,12 +2995,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         for (unsigned K = 0; K != 3; ++K)
           ST.Varyings[K] = VaryingBits->data() + K * Stride;
         ST.FrontFacing = FrontFacing;
-        // (Roadmap H93b) See the identical `pushQuadTriangle` logic above
-        // for why this must be a short-circuiting ternary, not
-        // `value_or`.
-        ST.PrimitiveID = Primitive->AuthoredPrimitiveID
-                            ? *Primitive->AuthoredPrimitiveID
-                            : PrimitiveCounter++;
+        ST.PrimitiveID = Primitive->PrimitiveID;
         ST.TargetLayer = Primitive->TargetLayer;
         ST.ViewportIndex = Primitive->ViewportIndex;
         ST.ScissorMinX = std::max<int32_t>(0, Primitive->Scissor->X);
@@ -5102,8 +5097,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     }
 
 
-    if (Error E = RasterizePrimitives(*RasterOut, AbsTriIndices, AbsLineIndices,
-                                      RasterClass))
+    uint32_t FallbackPrimitiveIDPeriod = 0;
+    if (!TessLink && !GSSig) {
+      if (RasterClass == RasterPrimitiveClass::Point)
+        FallbackPrimitiveIDPeriod = PerInstance;
+      else if (RasterClass == RasterPrimitiveClass::Line)
+        FallbackPrimitiveIDPeriod = static_cast<uint32_t>(LineIndices.size());
+      else
+        FallbackPrimitiveIDPeriod = static_cast<uint32_t>(TriIndices.size());
+    }
+    if (Error E = RasterizePrimitives(
+            *RasterOut, AbsTriIndices, AbsLineIndices, RasterClass,
+            /*AbsPointIndices=*/{}, FallbackPrimitiveIDPeriod))
       return E;
   }
 
