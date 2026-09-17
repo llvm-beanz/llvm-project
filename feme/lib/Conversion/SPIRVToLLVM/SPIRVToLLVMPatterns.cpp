@@ -6750,6 +6750,49 @@ public:
   }
 };
 
+/// Converts `spirv.ArrayLength` (roadmap H160) into the
+/// `llvm.spv.resource.getarraylength` intrinsic against the storage-buffer
+/// handle `Adaptor.getStructure()` already is (see
+/// `ResourceAddressOfPattern`: a `spirv.mlir.addressof` of a `StorageBuffer`
+/// resource variable converts directly to a
+/// `llvm.spv.resource.handlefrombinding` call, exactly like the image
+/// handle `ImageQuerySizePattern` above reads `Adaptor.getImage()` from).
+/// `feme::cpu::SPIRVResourceLoweringPass` recognizes this intrinsic on a
+/// `HandleKind::Storage`/`StorageStruct` handle later and rewrites it to the
+/// CPU runtime's own `feme.cpu.resource.getdimensions.raw.i32` call.
+///
+/// DXC/glslang only ever emit `OpArrayLength` with member index 0 against a
+/// `StructuredBuffer`/`ByteAddressBuffer`'s own SPIR-V representation: a
+/// storage-buffer block whose sole member is the runtime array itself (see
+/// `HandleKind::Storage`'s own doc) -- so a nonzero member index here would
+/// mean either a shape this pattern does not yet support (a runtime array
+/// nested alongside other fields in the same block) or a malformed module;
+/// either way, decline rather than silently mis-lower it.
+class ArrayLengthPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ArrayLengthOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ArrayLengthOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ArrayLengthOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getArrayMember() != 0)
+      return Rewriter.notifyMatchFailure(
+          Op, "only a leading (member 0) runtime array is supported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Op.getLoc(),
+                                "llvm.spv.resource.getarraylength", ResultType,
+                                Adaptor.getStructure()));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Image`, which extracts the image handle back out of a
 /// combined `!spirv.sampled_image` value (e.g. so it can feed an
 /// `spirv.ImageFetch`/`spirv.ImageQuerySize`, both of which -- unlike an
@@ -11127,6 +11170,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ImageSampleExplicitLodPattern, ImageSampleGradPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
       ImageTexelPointerPattern, ImageWritePattern, KillConversionPattern,
+      ArrayLengthPattern,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformFAddOp>,
       GroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
