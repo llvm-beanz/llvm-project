@@ -53,20 +53,18 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~15 minutes, cheap diagnostic, do first if picking this back up:** confirm
-   whether `WaveActiveMax.test`'s `TID.x % 8`-into-4-element-buffer shape is a
-   pre-existing `offload-test-suite` test bug (check git blame/history on that
-   file, or just try changing the modulus locally and see whether the CHECK
-   lines suddenly match) before spending real time on it as a `feme` bug.
-2. **~1-2 days, real payoff (closes 2 failures), not urgent:** H160 -- add
-   `spirv.ArrayLength` to the SPIR-V dialect (`SPIRVOps.td`), plus
-   (de)serializer and conversion-pattern support. See H160's own roadmap row for
-   the exact plan; check whether the existing `RWBuffer<T>::GetDimensions()`
-   bound-resource metadata path can be reused for the new op's lowering before
-   inventing new plumbing.
-3. **~half a day, real payoff (closes up to 5 failures), not urgent,
-   upstream-MLIR-flavored:** H124d -- same shape as H160 but for
-   `OpDPdx`/`OpDPdy`/`OpFwidth` (opcodes 207-215). Needs new SPIR-V dialect
-   derivative ops plus CPU-backend screen-space-derivative
-   (quad/2x2-lane-grouping) semantics, which the CPU SIMD renderer does not
-   currently implement at all -- larger than H160 for that reason.
+1. **~half a day to a day, real payoff (closes up to 5 failures),
+   biggest lever left, not urgent:** H124d -- `OpDPdx`/`OpDPdy`/
+   `OpFwidth` (opcodes 207-215) have the same "missing upstream MLIR
+   SPIR-V dialect op" shape H160 just closed, so the dialect-op half
+   should go about as fast (a `.td` op per opcode, or one op with a
+   `Coarse`/`Fine`/plain variant attribute -- check whether
+   mlir-tblgen's generic (de)serialization support extends this far
+   before assuming manual work is needed, the same check that saved
+   most of H160's own budget). The real size difference from H160 is
+   entirely on the CPU-backend side: these need genuine screen-space
+   derivative semantics (quad/2x2-lane-grouping), which the CPU SIMD
+   renderer has **no existing concept of at all** -- not a small
+   special-case mirror of an existing pattern the way H160's
+   `getdimensions.x` precedent was. Budget real design time for that
+   half specifically, not just the dialect-op half.
