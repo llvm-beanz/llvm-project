@@ -7310,6 +7310,170 @@ TEST_F(DrawTest, GeometryStageLayerOutputRoutesToANonMultiviewLayer) {
   vkFreeMemory(Device, LayeredMemory, nullptr);
 }
 
+/// (Roadmap H173) A real, genuinely-imported SPIR-V multi-stream geometry
+/// entry point: stream 0 emits a degenerate decoy triangle (a plain,
+/// `Location`-only varying with no `Position`, so it can never be
+/// rasterized), while stream 1 -- decorated `Stream` (29) on each of its
+/// own output variables, and reached via `spirv.EmitStreamVertex`/
+/// `spirv.EndStreamPrimitive` (roadmap H39, the MLIR SPIR-V dialect ops
+/// themselves) rather than the plain single-stream `spirv.EmitVertex`/
+/// `spirv.EndPrimitive` -- emits a real full-viewport green triangle.
+/// Unlike `ExecutorTest.cpp`'s own `TwoStreamGeometryShaderIR`/
+/// `buildTwoStreamGeometryPipeline` (roadmap H21e), which construct the
+/// post-`SPIRVToLLVM`-conversion LLVM IR directly (deliberately
+/// sidestepping the SPIR-V dialect, whose `EmitStreamVertex`/
+/// `EndStreamPrimitive` ops and `Stream` decoration plumbing did not exist
+/// yet when H21e was written), this module is real SPIR-V, assembled by
+/// `createModule`/`assembleSPIRV` and imported through the actual
+/// `feme-convert-spirv-to-llvm` conversion pass and
+/// `CanonicalizeStagePass`'s own `Stream`-decoration reflection -- the
+/// "real ... test ... run through the full feme-vk pipeline" roadmap H173
+/// itself calls for, closing the gap `buildTwoStreamGeometryPipeline`'s
+/// own comment called out ("a real, CTS-driven multi-stream signature ...
+/// can never actually reach this code").
+constexpr llvm::StringLiteral TwoStreamGeometrySource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [GeometryStreams], []> {
+  spirv.GlobalVariable @decoy {location = 1 : i32} : !spirv.ptr<f32, Output>
+  spirv.GlobalVariable @out_pos built_in("Position") {stream = 1 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @out_color {location = 0 : i32, stream = 1 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %s0 = spirv.Constant 0 : i32
+    %s1 = spirv.Constant 1 : i32
+    %nine = spirv.Constant 9.0 : f32
+    %decoyp = spirv.mlir.addressof @decoy : !spirv.ptr<f32, Output>
+    spirv.Store "Output" %decoyp, %nine : f32
+    spirv.EmitStreamVertex %s0 : i32
+    spirv.EmitStreamVertex %s0 : i32
+    spirv.EmitStreamVertex %s0 : i32
+    spirv.EndStreamPrimitive %s0 : i32
+
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    %colorp = spirv.mlir.addressof @out_color : !spirv.ptr<vector<4xf32>, Output>
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %green = spirv.Constant dense<[0.0, 1.0, 0.0, 1.0]> : vector<4xf32>
+
+    %p0 = spirv.CompositeConstruct %neg1, %neg1, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p0 : vector<4xf32>
+    spirv.Store "Output" %colorp, %green : vector<4xf32>
+    spirv.EmitStreamVertex %s1 : i32
+
+    %p1 = spirv.CompositeConstruct %three, %neg1, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p1 : vector<4xf32>
+    spirv.Store "Output" %colorp, %green : vector<4xf32>
+    spirv.EmitStreamVertex %s1 : i32
+
+    %p2 = spirv.CompositeConstruct %neg1, %three, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p2 : vector<4xf32>
+    spirv.Store "Output" %colorp, %green : vector<4xf32>
+    spirv.EmitStreamVertex %s1 : i32
+    spirv.EndStreamPrimitive %s1 : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "Geometry" @main, @decoy, @out_pos, @out_color
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "OutputTriangleStrip"
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
+/// (Roadmap H173) Real, real-SPIR-V-imported counterpart of
+/// `ExecutorTest.cpp`'s `RasterizationStreamSelectsGeometryOutputFrom
+/// ANonzeroStream`: `VkPipelineRasterizationStateStreamCreateInfoEXT`
+/// selects stream 1 for rasterization, so only stream 1's own real
+/// full-viewport green triangle -- never stream 0's colorless, unlinked
+/// decoy -- reaches the framebuffer.
+TEST_F(DrawTest, RealSPIRVRasterizationStreamSelectsNonzeroStreamOutput) {
+  VkShaderModule VertexModule = createModule(EmptyVertexSource);
+  VkShaderModule GeometryModule = createModule(TwoStreamGeometrySource);
+  VkShaderModule FragmentModule = createModule(PassthroughColorFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[3]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = VertexModule;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+  Stages[1].module = GeometryModule;
+  Stages[1].pName = "main";
+  Stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[2].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[2].module = FragmentModule;
+  Stages[2].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateStreamCreateInfoEXT StreamState{};
+  StreamState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT;
+  StreamState.rasterizationStream = 1;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.pNext = &StreamState;
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo PipeInfo{};
+  PipeInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  PipeInfo.stageCount = 3;
+  PipeInfo.pStages = Stages;
+  PipeInfo.pVertexInputState = &VertexInput;
+  PipeInfo.pInputAssemblyState = &InputAssembly;
+  PipeInfo.pViewportState = &ViewportState;
+  PipeInfo.pRasterizationState = &Raster;
+  PipeInfo.pMultisampleState = &Multisample;
+  PipeInfo.pColorBlendState = &Blend;
+  PipeInfo.layout = Layout;
+  PipeInfo.renderPass = Pass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &PipeInfo,
+                                      nullptr, &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Solid green: stream 1's own color, at stream 1's own (viewport-
+  // covering) position -- stream 0's decoy triangle (degenerate,
+  // colorless, and unreachable through `findElement`'s own `Position`
+  // lookup since only stream 1 declares it) never reaches the rasterizer.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, FragmentModule, nullptr);
+  vkDestroyShaderModule(Device, GeometryModule, nullptr);
+  vkDestroyShaderModule(Device, VertexModule, nullptr);
+}
+
 /// (Roadmap H9b) A vertex stage with a plain (non-arrayed) `vec4` output
 /// varying at location 0 -- exactly `vktQueryPoolStatisticsTests.cpp`'s
 /// own `out vec4 out_color` -- paired with `ForwardsPerVertexColorInput
