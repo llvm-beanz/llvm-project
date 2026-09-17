@@ -2557,6 +2557,16 @@ mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
   addIntDecoration(35, Op->getAttr("offset"));
   addIntDecoration(36, Op->getAttr("xfb_buffer"));
   addIntDecoration(37, Op->getAttr("xfb_stride"));
+  // (Roadmap H173) `Stream` (code 29, `VK_EXT_transform_feedback`'s
+  // `geometryStreams` feature): a geometry entry point's own per-output
+  // stream assignment, read the same "plain attribute, MLIR's own
+  // deserializer naming" way as `xfb_buffer`/`xfb_stride` above, since
+  // MLIR's SPIR-V dialect does not special-case `Stream` either
+  // (`Deserializer.cpp` stores it as a plain `IntegerAttr` named
+  // `stream`, exactly like `xfb_buffer`). Forwarded unconditionally, with
+  // no feature-bit gate, mirroring the XFB decorations' own precedent:
+  // this pattern lowers whatever decorations a module already carries.
+  addIntDecoration(29, Op->getAttr("stream"));
 
   for (const StageIODecoration &Flag : StageIOFlagDecorations)
     if (Op->hasAttr(Flag.AttrName))

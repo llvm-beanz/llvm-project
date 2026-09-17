@@ -81,6 +81,22 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// (Roadmap H173) `VK_EXT_transform_feedback`'s `geometryStreams`
+// feature -- a geometry entry point's own `Stream` decoration (29),
+// paired with `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive`
+// (roadmap H39) -- is read exactly like `xfb_buffer`/`xfb_stride` above
+// (a plain attribute, not an ODS-special-cased one) and folds into the
+// same `feme.spirv.decorations` attribute as code 29, so
+// `CanonicalizeStagePass` can recover it into `SignatureElement::Stream`.
+
+// CHECK: feme.spirv.decorations = {{\[}}[30 : i32, 1 : i32], [29 : i32, 1 : i32]{{\]}}
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [GeometryStreams], []> {
+  spirv.GlobalVariable @out_var {location = 1 : i32, stream = 1 : i32}
+      : !spirv.ptr<vector<4xf32>, Output>
+}
+
+// -----
+
 // A builtin `Input` variable still converts through BuiltInAddressOfPattern
 // (the `llvm.spv.*` intrinsic), never through the ordinary-memory stage-IO
 // path above, since the two are mutually exclusive on the same variable.
