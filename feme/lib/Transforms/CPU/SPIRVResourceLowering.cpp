@@ -1076,6 +1076,27 @@ bool isGetDimensions1Intrinsic(const CallInst &CI) {
   return getIntrinsicID(&CI) == Intrinsic::spv_resource_getdimensions_x;
 }
 
+/// Whether \p CI is `llvm.spv.resource.getarraylength` (roadmap H160): a
+/// storage-buffer runtime array's own element-count query -- SPIR-V's
+/// `OpArrayLength`, converted by `ArrayLengthPattern`
+/// (SPIRVToLLVMPatterns.cpp) from `spirv.ArrayLength`. Like
+/// `isGetDimensions1Intrinsic`'s texel-buffer bare `getdimensions.x` call
+/// above, this addresses no element -- it just reads the descriptor's own
+/// byte size divided by the handle's already-tracked `BoundHandle::Stride`
+/// -- so it is likewise modeled directly on the handle itself rather than
+/// requiring the usual `getpointer` indirection. Confirmed via a real
+/// `dxc -spirv` reduction of `ByteAddressBuffer::GetDimensions()` (which
+/// returns a *byte* count, unlike `StructuredBuffer<T>::GetDimensions()`'s
+/// element count) that `dxc`'s own codegen already emits an explicit
+/// `OpIMul` by the element size (4, for `ByteAddressBuffer`'s `uint`
+/// runtime-array element) after `OpArrayLength` itself -- so this
+/// intrinsic's own raw element-count semantics need no further
+/// byte/element distinction here; scaling, if any, is already baked into
+/// the SPIR-V the frontend emits.
+bool isGetArrayLengthIntrinsic(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::spv_resource_getarraylength;
+}
+
 /// Whether \p CI's callee is a `SPIRVImporter.cpp`-synthesized magic-named
 /// external function whose own name begins with \p Prefix -- the
 /// recognition mechanism roadmap L72(d)'s own `lowerImageQueryOpcodes`
@@ -2404,6 +2425,19 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
           DimsCI && isGetDimensions1Intrinsic(*DimsCI))
         continue;
     }
+    // (Roadmap H160) A storage buffer's own bare `getarraylength` call is
+    // likewise not a `getpointer`-mediated access -- see
+    // `isGetArrayLengthIntrinsic`'s comment. Scoped to `HandleKind::Storage`
+    // only (the one-member runtime-array wrapper `StructuredBuffer`/
+    // `ByteAddressBuffer` classify as) -- `StorageStruct`'s own direct-field
+    // struct block has no single well-defined element `Stride` the way
+    // `Storage` already tracks, and neither `dxc` nor glslang is known to
+    // emit `OpArrayLength` against that shape.
+    if (Kind == HandleKind::Storage) {
+      if (const auto *LenCI = dyn_cast<CallInst>(U);
+          LenCI && isGetArrayLengthIntrinsic(*LenCI))
+        continue;
+    }
     const auto *GetPtr = dyn_cast<CallInst>(U);
     if (!GetPtr ||
         getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer) {
@@ -3139,6 +3173,23 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
             Builder, Env, DescriptorIndex, Mask, DimsCI->getName());
         DimsCI->replaceAllUsesWith(Dims);
         DimsCI->eraseFromParent();
+        continue;
+      }
+    }
+    // (Roadmap H160) A storage buffer's own bare `getarraylength` call --
+    // see `hasOnlySupportedUses`'s matching special-case comment -- reads
+    // no element either: lower it directly to `createGetDimensionsRaw`,
+    // dividing the descriptor's own byte size by this handle's already-
+    // known element `Stride`, and move on to the handle's next user.
+    if (BH.Kind == HandleKind::Storage) {
+      if (auto *LenCI = dyn_cast<CallInst>(U);
+          LenCI && isGetArrayLengthIntrinsic(*LenCI)) {
+        IRBuilder<> Builder(LenCI);
+        Value *Stride = ConstantInt::get(I64Ty, BH.Stride);
+        CallInst *Len = createGetDimensionsRaw(
+            Builder, Env, DescriptorIndex, Stride, Mask, LenCI->getName());
+        LenCI->replaceAllUsesWith(Len);
+        LenCI->eraseFromParent();
         continue;
       }
     }
