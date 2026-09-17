@@ -952,7 +952,7 @@ public:
   /// `VkDrawMeshTasksIndirectCommandEXT` structures from \p IndirectBuffer
   /// at \p Offset with \p Stride, mirroring `drawIndirect`'s own shape.
   void drawMeshTasksIndirect(Buffer *IndirectBuf, uint64_t Offset,
-                             uint32_t DrawCount, uint32_t Stride) {
+                            uint32_t DrawCount, uint32_t Stride) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::DrawMeshTasksIndirect;
     Cmd.IndirectBuffer = IndirectBuf;
@@ -966,8 +966,8 @@ public:
   /// read from \p CountBuf at \p CountOffset (a single `uint32_t`,
   /// clamped to \p MaxDrawCount) rather than supplied directly.
   void drawMeshTasksIndirectCount(Buffer *IndirectBuf, uint64_t Offset,
-                                  Buffer *CountBuf, uint64_t CountOffset,
-                                  uint32_t MaxDrawCount, uint32_t Stride) {
+                                 Buffer *CountBuf, uint64_t CountOffset,
+                                 uint32_t MaxDrawCount, uint32_t Stride) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::DrawMeshTasksIndirectCount;
     Cmd.IndirectBuffer = IndirectBuf;

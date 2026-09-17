@@ -154,14 +154,16 @@ VKAPI_ATTR void VKAPI_CALL
 vkGetDeviceMemoryCommitment(VkDevice device, VkDeviceMemory memory,
                             VkDeviceSize *pCommittedMemoryInBytes);
 // (roadmap F14) VK_KHR_map_memory2: pNext-extensible map/unmap wrappers.
-VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory2(
-    VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo, void **ppData);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkMapMemory2(VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo,
+            void **ppData);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo *pMemoryUnmapInfo);
 // See Memory.cpp's own comment above these two: the loader cannot reach
 // the core names above for a caller using a pre-1.4 `usedApiVersion`.
-VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory2KHR(
-    VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo, void **ppData);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkMapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
+                void **ppData);
 VKAPI_ATTR VkResult VKAPI_CALL vkUnmapMemory2KHR(
     VkDevice device, const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo);
 
@@ -383,16 +385,19 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSet(
     VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
     VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet *pDescriptorWrites);
-VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate(
-    VkCommandBuffer commandBuffer,
-    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout, uint32_t set, const void *pData);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushDescriptorSetWithTemplate(VkCommandBuffer commandBuffer,
+                                   VkDescriptorUpdateTemplate
+                                       descriptorUpdateTemplate,
+                                   VkPipelineLayout layout, uint32_t set,
+                                   const void *pData);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
                         const VkPushDescriptorSetInfo *pPushDescriptorSetInfo);
 VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(
-    VkCommandBuffer commandBuffer, const VkPushDescriptorSetWithTemplateInfo
-                                       *pPushDescriptorSetWithTemplateInfo);
+    VkCommandBuffer commandBuffer,
+    const VkPushDescriptorSetWithTemplateInfo
+        *pPushDescriptorSetWithTemplateInfo);
 // Roadmap H7u: `VK_KHR_push_descriptor` is advertised (`AdvertisedExtensions
 // .txt`), so the two entry points above -- registered under their
 // core-promoted (unsuffixed) names only -- must also resolve under their
@@ -408,10 +413,12 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetKHR(
     VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
     VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet *pDescriptorWrites);
-VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplateKHR(
-    VkCommandBuffer commandBuffer,
-    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout, uint32_t set, const void *pData);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer commandBuffer,
+                                      VkDescriptorUpdateTemplate
+                                          descriptorUpdateTemplate,
+                                      VkPipelineLayout layout, uint32_t set,
+                                      const void *pData);
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,
@@ -484,18 +491,21 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer commandBuffer,
 // six specifically had to land alongside the apiVersion bump rather than
 // after it). Each just unwraps its info struct and delegates to the
 // identical logic its non-`2` counterpart above already implements.
-VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer2(
-    VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCopyBufferInfo);
-VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage2(
-    VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyImageInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyBuffer2(VkCommandBuffer commandBuffer,
+                 const VkCopyBufferInfo2 *pCopyBufferInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyImage2(VkCommandBuffer commandBuffer,
+                const VkCopyImageInfo2 *pCopyImageInfo);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
                         const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
                         const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo);
-VKAPI_ATTR void VKAPI_CALL vkCmdBlitImage2(
-    VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitImageInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBlitImage2(VkCommandBuffer commandBuffer,
+                const VkBlitImageInfo2 *pBlitImageInfo);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdResolveImage2(VkCommandBuffer commandBuffer,
                    const VkResolveImageInfo2 *pResolveImageInfo);
@@ -503,15 +513,18 @@ vkCmdResolveImage2(VkCommandBuffer commandBuffer,
 // Roadmap F11: core Vulkan 1.4 promoted `VK_EXT_host_image_copy`'s four
 // commands (HostImageCopy.cpp), each `vkCmd*` copy/transition's own
 // host-side, no-`VkCommandBuffer` counterpart.
-VKAPI_ATTR VkResult VKAPI_CALL vkCopyMemoryToImage(
-    VkDevice device, const VkCopyMemoryToImageInfo *pCopyMemoryToImageInfo);
-VKAPI_ATTR VkResult VKAPI_CALL vkCopyImageToMemory(
-    VkDevice device, const VkCopyImageToMemoryInfo *pCopyImageToMemoryInfo);
-VKAPI_ATTR VkResult VKAPI_CALL vkCopyImageToImage(
-    VkDevice device, const VkCopyImageToImageInfo *pCopyImageToImageInfo);
 VKAPI_ATTR VkResult VKAPI_CALL
-vkTransitionImageLayout(VkDevice device, uint32_t transitionCount,
-                        const VkHostImageLayoutTransitionInfo *pTransitions);
+vkCopyMemoryToImage(VkDevice device,
+                    const VkCopyMemoryToImageInfo *pCopyMemoryToImageInfo);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCopyImageToMemory(VkDevice device,
+                    const VkCopyImageToMemoryInfo *pCopyImageToMemoryInfo);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCopyImageToImage(VkDevice device,
+                   const VkCopyImageToImageInfo *pCopyImageToImageInfo);
+VKAPI_ATTR VkResult VKAPI_CALL vkTransitionImageLayout(
+    VkDevice device, uint32_t transitionCount,
+    const VkHostImageLayoutTransitionInfo *pTransitions);
 
 // V3: push constants (see "Descriptor Model" and "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
@@ -669,7 +682,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetViewportWithCountEXT(
     const VkViewport *pViewports);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetScissorWithCountEXT(VkCommandBuffer commandBuffer,
-                            uint32_t scissorCount, const VkRect2D *pScissors);
+                           uint32_t scissorCount, const VkRect2D *pScissors);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(
     VkCommandBuffer commandBuffer, const float blendConstants[4]);
 VKAPI_ATTR void VKAPI_CALL
@@ -685,34 +698,39 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer,
                                                VkCullModeFlags cullMode);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
                                                 VkFrontFace frontFace);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthTestEnableEXT(
-    VkCommandBuffer commandBuffer, VkBool32 depthTestEnable);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthWriteEnableEXT(
-    VkCommandBuffer commandBuffer, VkBool32 depthWriteEnable);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthCompareOpEXT(
-    VkCommandBuffer commandBuffer, VkCompareOp depthCompareOp);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBoundsTestEnableEXT(
-    VkCommandBuffer commandBuffer, VkBool32 depthBoundsTestEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthTestEnableEXT(VkCommandBuffer commandBuffer,
+                          VkBool32 depthTestEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthWriteEnableEXT(VkCommandBuffer commandBuffer,
+                           VkBool32 depthWriteEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthCompareOpEXT(VkCommandBuffer commandBuffer,
+                         VkCompareOp depthCompareOp);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
+                                VkBool32 depthBoundsTestEnable);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBiasEnable(
     VkCommandBuffer commandBuffer, VkBool32 depthBiasEnable);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetRasterizerDiscardEnable(
     VkCommandBuffer commandBuffer, VkBool32 rasterizerDiscardEnable);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilTestEnableEXT(
-    VkCommandBuffer commandBuffer, VkBool32 stencilTestEnable);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(VkCommandBuffer commandBuffer,
-                                                VkStencilFaceFlags faceMask,
-                                                VkStencilOp failOp,
-                                                VkStencilOp passOp,
-                                                VkStencilOp depthFailOp,
-                                                VkCompareOp compareOp);
-VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveTopologyEXT(
-    VkCommandBuffer commandBuffer, VkPrimitiveTopology primitiveTopology);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilTestEnableEXT(VkCommandBuffer commandBuffer,
+                            VkBool32 stencilTestEnable);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(
+    VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+    VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
+    VkCompareOp compareOp);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetPrimitiveTopologyEXT(VkCommandBuffer commandBuffer,
+                           VkPrimitiveTopology primitiveTopology);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
                                              float lineWidth);
 // (roadmap F5) `VK_KHR_line_rasterization`'s one command.
-VKAPI_ATTR void VKAPI_CALL vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
-                                                  uint32_t lineStippleFactor,
-                                                  uint16_t lineStipplePattern);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
+                       uint32_t lineStippleFactor,
+                       uint16_t lineStipplePattern);
 // (roadmap F8) Core in 1.4 (this driver's advertised `apiVersion`, unlike
 // dynamic rendering itself -- see the `KHR` comment above), so these two
 // names need no `KHR` suffix, matching `vkCmdBindIndexBuffer2`'s own
@@ -782,8 +800,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectEXT(
     uint32_t drawCount, uint32_t stride);
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectCountEXT(
     VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
-    VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
-    uint32_t stride);
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride);
 
 // V3: secondary command buffers (see "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL
@@ -891,14 +909,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreatePrivateDataSlot(
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyPrivateDataSlot(VkDevice device, VkPrivateDataSlot privateDataSlot,
                          const VkAllocationCallbacks *pAllocator);
-VKAPI_ATTR VkResult VKAPI_CALL vkSetPrivateData(
-    VkDevice device, VkObjectType objectType, uint64_t objectHandle,
-    VkPrivateDataSlot privateDataSlot, uint64_t data);
-VKAPI_ATTR void VKAPI_CALL vkGetPrivateData(VkDevice device,
-                                            VkObjectType objectType,
-                                            uint64_t objectHandle,
-                                            VkPrivateDataSlot privateDataSlot,
-                                            uint64_t *pData);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkSetPrivateData(VkDevice device, VkObjectType objectType,
+                 uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                 uint64_t data);
+VKAPI_ATTR void VKAPI_CALL
+vkGetPrivateData(VkDevice device, VkObjectType objectType,
+                 uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                 uint64_t *pData);
 
 // Roadmap H10: `VK_KHR_surface` + `VK_EXT_headless_surface` (Surface.h) and
 // `VK_KHR_swapchain` (Swapchain.h) -- see FeMeVulkanDesign.md's
@@ -947,7 +965,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     const VkAllocationCallbacks *pAllocator, VkSwapchainKHR *pSwapchain);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
-                      const VkAllocationCallbacks *pAllocator);
+                     const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
     VkDevice device, VkSwapchainKHR swapchain, uint32_t *pSwapchainImageCount,
     VkImage *pSwapchainImages);
@@ -984,8 +1002,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetDeviceGroupSurfacePresentModesKHR(
     VkDevice device, VkSurfaceKHR surface,
     VkDeviceGroupPresentModeFlagsKHR *pModes);
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDevicePresentRectanglesKHR(
-    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, uint32_t *pRectCount,
-    VkRect2D *pRects);
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+    uint32_t *pRectCount, VkRect2D *pRects);
 
 // Roadmap H21b: `VK_EXT_transform_feedback`'s six commands -- buffer
 // binding, the begin/end capture scope, indexed queries (selecting which

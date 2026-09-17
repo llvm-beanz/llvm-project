@@ -2215,8 +2215,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (MeshInfo) {
     std::optional<feme::graphics::MeshState> MeshShapeState;
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
-        compileGraphicsStage(*Ctx, *MeshInfo, feme::ShaderStage::Mesh, Layout,
-                             {}, nullptr, nullptr, &MeshShapeState);
+        compileGraphicsStage(*Ctx, *MeshInfo, feme::ShaderStage::Mesh,
+                             Layout, {}, nullptr, nullptr, &MeshShapeState);
     if (!Compiled)
       return Compiled.takeError();
     MeshStageCompiled = std::move(*Compiled);
@@ -2274,9 +2274,10 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
       std::move(VertexStageCompiled);
   if (VertexStage) {
     const feme::cpu::ResourceInfo &VSInfo = VertexStage->getResourceInfo();
-    if (!pushConstantsCoverRootConstantSize(
-            Layout, VSInfo.RootConstantSize, VSInfo.RootConstantMinOffset,
-            Limits.maxPushConstantsSize, VK_SHADER_STAGE_VERTEX_BIT))
+    if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
+                                            VSInfo.RootConstantMinOffset,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_VERTEX_BIT))
       return createStringError(
           inconvertibleErrorCode(),
           "a stage's root-constant span is not fully covered by a "
@@ -2286,9 +2287,10 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   }
   if (FragmentStage) {
     const feme::cpu::ResourceInfo &FSInfo = FragmentStage->getResourceInfo();
-    if (!pushConstantsCoverRootConstantSize(
-            Layout, FSInfo.RootConstantSize, FSInfo.RootConstantMinOffset,
-            Limits.maxPushConstantsSize, VK_SHADER_STAGE_FRAGMENT_BIT))
+    if (!pushConstantsCoverRootConstantSize(Layout, FSInfo.RootConstantSize,
+                                            FSInfo.RootConstantMinOffset,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_FRAGMENT_BIT))
       return createStringError(
           inconvertibleErrorCode(),
           "a stage's root-constant span is not fully covered by a "
@@ -2323,9 +2325,10 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (GeometryStageCompiled) {
     const feme::cpu::ResourceInfo &GSInfo =
         GeometryStageCompiled->getResourceInfo();
-    if (!pushConstantsCoverRootConstantSize(
-            Layout, GSInfo.RootConstantSize, GSInfo.RootConstantMinOffset,
-            Limits.maxPushConstantsSize, VK_SHADER_STAGE_GEOMETRY_BIT))
+    if (!pushConstantsCoverRootConstantSize(Layout, GSInfo.RootConstantSize,
+                                            GSInfo.RootConstantMinOffset,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_GEOMETRY_BIT))
       return createStringError(
           inconvertibleErrorCode(),
           "a stage's root-constant span is not fully covered by a "
@@ -2336,9 +2339,10 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (MeshStageCompiled) {
     const feme::cpu::ResourceInfo &MSInfo =
         MeshStageCompiled->getResourceInfo();
-    if (!pushConstantsCoverRootConstantSize(
-            Layout, MSInfo.RootConstantSize, MSInfo.RootConstantMinOffset,
-            Limits.maxPushConstantsSize, VK_SHADER_STAGE_MESH_BIT_EXT))
+    if (!pushConstantsCoverRootConstantSize(Layout, MSInfo.RootConstantSize,
+                                            MSInfo.RootConstantMinOffset,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_MESH_BIT_EXT))
       return createStringError(
           inconvertibleErrorCode(),
           "a stage's root-constant span is not fully covered by a "
@@ -2349,9 +2353,10 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (TaskStageCompiled) {
     const feme::cpu::ResourceInfo &TSInfo =
         TaskStageCompiled->getResourceInfo();
-    if (!pushConstantsCoverRootConstantSize(
-            Layout, TSInfo.RootConstantSize, TSInfo.RootConstantMinOffset,
-            Limits.maxPushConstantsSize, VK_SHADER_STAGE_TASK_BIT_EXT))
+    if (!pushConstantsCoverRootConstantSize(Layout, TSInfo.RootConstantSize,
+                                            TSInfo.RootConstantMinOffset,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_TASK_BIT_EXT))
       return createStringError(
           inconvertibleErrorCode(),
           "a stage's root-constant span is not fully covered by a "
@@ -2370,8 +2375,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (VertexStage) {
     if (Error E = validateStageInterfaces(
             *VertexStage, FragmentStage.get(), DomainStage.get(),
-            GeometryStageCompiled.get(), ColorAttachments, VertexAttributes,
-            RasterizerDiscardEnable))
+            GeometryStageCompiled.get(), ColorAttachments,
+            VertexAttributes, RasterizerDiscardEnable))
       return std::move(E);
   }
 
@@ -2544,7 +2549,8 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
         compileAndValidateStages(
             VertexInfo, FragmentInfo, TessControlInfo, TessEvalInfo,
             GeometryInfo, MeshInfo, TaskInfo, Layout,
-            DeviceInfo.Properties.limits, llvm::ArrayRef(Result.Attachments),
+            DeviceInfo.Properties.limits,
+            llvm::ArrayRef(Result.Attachments),
             Result.VertexAttributes, Result.Tessellation, Result.Geometry,
             Result.Mesh, Result.Raster.DiscardEnable);
     if (!Compiled)

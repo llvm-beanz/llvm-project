@@ -1646,9 +1646,8 @@ TEST_F(GraphicsPipelineTest, DynamicDepthBiasEnableOverridesStaticState) {
   auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
   DynamicGraphicsState DynState;
   DynState.DepthBiasEnable = true;
-  EXPECT_TRUE(Graphics->buildExecutorPipeline(DynState)
-                  .getRasterState()
-                  .DepthBiasEnable);
+  EXPECT_TRUE(
+      Graphics->buildExecutorPipeline(DynState).getRasterState().DepthBiasEnable);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -2226,7 +2225,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 /// own declared attachments, with a fragment stage that only ever declares
 /// an output for the locations *some* draw plans to use.
 TEST_F(GraphicsPipelineTest,
-       AcceptsFragmentStageNotWritingEveryColorAttachmentLocation) {
+      AcceptsFragmentStageNotWritingEveryColorAttachmentLocation) {
   VkShaderModule Vertex = createModule(VertexSource);
   // Declares only a location-0 output; a real (`R8G8B8A8_UNORM`) location-1
   // color attachment below has no matching fragment output at all.
@@ -3000,8 +2999,7 @@ TEST_F(GraphicsPipelineTest, IsolineDomainOutputsLineDespiteVertexOrderMode) {
 /// output shape this row's own named repros hit -- still merges a
 /// complete `TessellationState`, falling back to the control entry's own
 /// domain shape since the evaluation entry's is incomplete.
-TEST_F(GraphicsPipelineTest,
-       AcceptsTessellationDomainShapeDeclaredOnControlEntry) {
+TEST_F(GraphicsPipelineTest, AcceptsTessellationDomainShapeDeclaredOnControlEntry) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule TessControl = createModule(TessControlWithDomainShapeSource);
   VkShaderModule TessEval = createModule(TessEvalTrianglesOnlySource);
@@ -3040,8 +3038,7 @@ TEST_F(GraphicsPipelineTest,
 /// rejected -- the merge introduced for this row's real DXC shape must
 /// not silently accept a genuinely malformed module missing tessellation
 /// state entirely.
-TEST_F(GraphicsPipelineTest,
-       RejectsTessellationPipelineWithNoDomainShapeAnywhere) {
+TEST_F(GraphicsPipelineTest, RejectsTessellationPipelineWithNoDomainShapeAnywhere) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule TessControl = createModule(TessControlSource);
   VkShaderModule TessEval = createModule(TessEvalTrianglesOnlySource);
@@ -4373,8 +4370,7 @@ TEST_F(GraphicsPipelineTest, LinksDynamicDepthBiasEnableState) {
 
   VkPipeline Handle = VK_NULL_HANDLE;
   ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
-  auto *Graphics =
-      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
   DynamicGraphicsState DynamicState;
   DynamicState.DepthBiasEnable = false;
   EXPECT_FALSE(Graphics->buildExecutorPipeline(DynamicState)

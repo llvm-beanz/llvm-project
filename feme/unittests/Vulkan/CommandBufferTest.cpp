@@ -165,9 +165,8 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 /// image at a fixed direction vector (+Z axis) and cube-array element 1,
 /// writing the four resulting components to a `StorageBuffer`. This is
 /// the first shader in this ICD with a real `Cube`/`CubeArray`-dimensioned
-/// SPIR-V handle -- `SPIRVResourceLowering.cpp`'s
-/// `classifySampledImage2DHandle` rejected every such handle before this
-/// roadmap row.
+/// SPIR-V handle -- `SPIRVResourceLowering.cpp`'s `classifySampledImage2DHandle`
+/// rejected every such handle before this roadmap row.
 const char *kCubeArraySampledImageShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageCubeArray], []> {
   spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
@@ -1556,8 +1555,7 @@ TEST_F(PushDescriptorSetDispatchTest, PushDescriptorSet2ProducesTheSameResult) {
 /// the first time (`ImplementedEntrypoints.txt`/`vk_gen_entrypoints.py`'s own
 /// `SUPPORTED_EXTENSIONS` previously omitted `VK_KHR_push_descriptor`, so
 /// only the core alias was ever registered in the dispatch table).
-TEST_F(PushDescriptorSetDispatchTest,
-       KHRSuffixedEntryPointsProduceTheSameResult) {
+TEST_F(PushDescriptorSetDispatchTest, KHRSuffixedEntryPointsProduceTheSameResult) {
   HostBuffer In = createStorageBuffer(4);
   HostBuffer Out = createStorageBuffer(4);
   uint32_t InitialValue = 7;
@@ -2341,7 +2339,8 @@ TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
   vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
                           &Set, 0, nullptr);
   uint32_t Index = 1;
-  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &Index);
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4,
+                     &Index);
   vkCmdDispatch(CmdBuf, 1, 1, 1);
   vkEndCommandBuffer(CmdBuf);
 
@@ -2418,7 +2417,8 @@ TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
   vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
                           &Set, 0, nullptr);
   uint32_t Index = 1;
-  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &Index);
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4,
+                     &Index);
   vkCmdDispatch(CmdBuf, 1, 1, 1);
   vkEndCommandBuffer(CmdBuf);
 
@@ -2475,9 +2475,10 @@ TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
   ReplacementViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
   ReplacementViewInfo.range = VK_WHOLE_SIZE;
   VkBufferView ReplacementView = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreateBufferView(Device, &ReplacementViewInfo, nullptr,
-                               &ReplacementView),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreateBufferView(Device, &ReplacementViewInfo, nullptr,
+                         &ReplacementView),
+      VK_SUCCESS);
   VkBufferViewCreateInfo OutViewInfo{};
   OutViewInfo.buffer = Out.Buf;
   OutViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -2507,7 +2508,8 @@ TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
   vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
                           &Set, 0, nullptr);
   uint32_t Index = 0;
-  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &Index);
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4,
+                     &Index);
   vkCmdDispatch(CmdBuf, 1, 1, 1);
   vkEndCommandBuffer(CmdBuf);
 
@@ -3040,8 +3042,8 @@ TEST_F(CommandBufferTest, PipelineStatisticsQueryCountsComputeInvocations) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
 
   uint64_t Results[2] = {0, 0};
-  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results), Results,
-                                  2 * sizeof(uint64_t),
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT |
                                       VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
             VK_SUCCESS);
@@ -3101,8 +3103,8 @@ TEST_F(CommandBufferTest, GetQueryPoolResultsLeavesUnavailableValueUntouched) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
 
   uint64_t Results[2] = {0, 0};
-  ASSERT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results), Results,
-                                  2 * sizeof(uint64_t),
+  ASSERT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT |
                                       VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
             VK_SUCCESS);
@@ -3112,8 +3114,8 @@ TEST_F(CommandBufferTest, GetQueryPoolResultsLeavesUnavailableValueUntouched) {
   vkResetQueryPool(Device, QPool, 0, 1);
   // No VK_QUERY_RESULT_WAIT_BIT/VK_QUERY_RESULT_PARTIAL_BIT: the value must
   // stay 6 (unwritten), only the availability flag flips to 0.
-  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results), Results,
-                                  2 * sizeof(uint64_t),
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT |
                                       VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
             VK_NOT_READY);
@@ -3801,7 +3803,8 @@ protected:
 
 } // namespace
 
-TEST_F(BC1SampledImageDispatchTest, SamplesARealDecodedTexelRatherThanAllZero) {
+TEST_F(BC1SampledImageDispatchTest,
+       SamplesARealDecodedTexelRatherThanAllZero) {
   ASSERT_EQ(createPipeline(), VK_SUCCESS);
   writeDescriptorSet();
 

@@ -373,9 +373,11 @@ DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
         uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
         uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
         for (uint32_t Y = 0; Y != CopyH; ++Y) {
-          uint8_t *DstRow = LevelBase + uint64_t(BY * BlockH + Y) * RowPitch +
+          uint8_t *DstRow = LevelBase +
+                            uint64_t(BY * BlockH + Y) * RowPitch +
                             uint64_t(BX) * BlockW * BytesPerTexel;
-          const uint8_t *SrcRow = &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
+          const uint8_t *SrcRow =
+              &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
           std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
         }
       }
@@ -391,7 +393,8 @@ DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
 /// per-texel buffer of \p BytesPerTexel bytes each, one block at a time
 /// via `decodeETC2FormatBlock`. Reuses `DecodedASTCImage`'s own two-field
 /// shape since nothing about it is ASTC-specific.
-DecodedASTCImage decodeETC2ImageForSampling(const Image *Img, uint32_t BaseMip,
+DecodedASTCImage decodeETC2ImageForSampling(const Image *Img,
+                                            uint32_t BaseMip,
                                             uint32_t LevelCount,
                                             uint32_t BytesPerTexel) {
   DecodedASTCImage Result;
@@ -432,9 +435,11 @@ DecodedASTCImage decodeETC2ImageForSampling(const Image *Img, uint32_t BaseMip,
         uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
         uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
         for (uint32_t Y = 0; Y != CopyH; ++Y) {
-          uint8_t *DstRow = LevelBase + uint64_t(BY * BlockH + Y) * RowPitch +
+          uint8_t *DstRow = LevelBase +
+                            uint64_t(BY * BlockH + Y) * RowPitch +
                             uint64_t(BX) * BlockW * BytesPerTexel;
-          const uint8_t *SrcRow = &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
+          const uint8_t *SrcRow =
+              &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
           std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
         }
       }
@@ -522,7 +527,8 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
     return;
   uint32_t LayerCount =
       Img->resolvedLayerCount(Range.baseArrayLayer, Range.layerCount);
-  LayerCount = std::min(LayerCount, Img->arrayLayers() - Range.baseArrayLayer);
+  LayerCount =
+      std::min(LayerCount, Img->arrayLayers() - Range.baseArrayLayer);
   if (LayerCount == 0)
     return;
   if (Range.baseMipLevel >= Img->mipLevels())
@@ -854,11 +860,12 @@ void accumulatePipelineStats(
 /// feme::cpu::JITEngine, which this ICD deliberately bypasses for direct
 /// control over `GroupID` offsetting and indirect argument reads -- see
 /// "Command Buffers"'s Deviation note in FeMeVulkanDesign.md's V1 status).
-Error runDispatch(
-    ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
-    std::array<uint32_t, 3> Count, llvm::ArrayRef<BoundSetState> BoundSets,
-    llvm::ArrayRef<uint8_t> PushConstants,
-    llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries = {}) {
+Error runDispatch(ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
+                  std::array<uint32_t, 3> Count,
+                  llvm::ArrayRef<BoundSetState> BoundSets,
+                  llvm::ArrayRef<uint8_t> PushConstants,
+                  llvm::ArrayRef<ActivePipelineStatsQuery>
+                      ActivePipelineStatsQueries = {}) {
   feme::cpu::CompiledStage &Stage = Pipeline.getStage();
   feme::cpu::StageArtifactInfo Artifact = Stage.getArtifactInfo();
 
@@ -896,8 +903,8 @@ Error runDispatch(
   // many).
   if (!ActivePipelineStatsQueries.empty()) {
     uint64_t Invocations = uint64_t(Count[0]) * Count[1] * Count[2] *
-                           Artifact.GroupSize[0] * Artifact.GroupSize[1] *
-                           Artifact.GroupSize[2];
+                          Artifact.GroupSize[0] * Artifact.GroupSize[1] *
+                          Artifact.GroupSize[2];
     std::array<uint64_t, static_cast<size_t>(PipelineStatisticIndex::Count)>
         Counters{};
     Counters[static_cast<size_t>(
@@ -992,8 +999,7 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
                              "bound");
   bool Is64Bit = (Flags & VK_QUERY_RESULT_64_BIT) != 0;
   bool WithAvailability = (Flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0;
-  VkDeviceSize EntrySize =
-      queryResultEntrySize(*Pool, Is64Bit, WithAvailability);
+  VkDeviceSize EntrySize = queryResultEntrySize(*Pool, Is64Bit, WithAvailability);
   for (uint32_t I = 0; I != QueryCount; ++I) {
     VkDeviceSize Offset = DstOffset + Stride * I;
     if (Offset + EntrySize > Dst->size())
@@ -1565,11 +1571,11 @@ Error buildSubpassInputHeap(
       // (roadmap H7p) Each input attachment's own sample count, not the
       // current (possibly single-sample) pipeline's -- see this
       // function's own comment above.
-      uint32_t ViewSampleCount = I < SubpassInputSampleCounts.size()
-                                     ? SubpassInputSampleCounts[I]
-                                     : SampleCount;
+      uint32_t ViewSampleCount =
+          I < SubpassInputSampleCounts.size() ? SubpassInputSampleCounts[I]
+                                              : SampleCount;
       if (Error E = populate(static_cast<uint32_t>(I), SubpassInputs[I],
-                             ViewSampleCount))
+                            ViewSampleCount))
         return E;
     }
     return Error::success();
@@ -1580,11 +1586,11 @@ Error buildSubpassInputHeap(
       return E;
   if (Gfx.DepthInputAttachmentIndex)
     if (Error E = populate(*Gfx.DepthInputAttachmentIndex, DepthStencil.Depth,
-                           SampleCount))
+                          SampleCount))
       return E;
   if (Gfx.StencilInputAttachmentIndex)
     if (Error E = populate(*Gfx.StencilInputAttachmentIndex,
-                           DepthStencil.Stencil, SampleCount))
+                          DepthStencil.Stencil, SampleCount))
       return E;
   return Error::success();
 }
@@ -1624,6 +1630,7 @@ struct ActiveOcclusionQuery {
   uint32_t FirstQuery = 0;
   uint32_t ViewCount = 1;
 };
+
 
 /// The render-target attachments a draw reads/writes, resolved once from
 /// `GraphicsState::Binding`: every color attachment (and, if any resolves,
@@ -1770,14 +1777,15 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
 /// hands the result to `feme::graphics::executeDraws` -- the single path
 /// every `vkCmdDraw*`/`vkCmdDrawMeshTasks*` command funnels through
 /// (roadmap H6f).
-Error runPreparedDraw(
-    const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
-    const ResolvedDrawAttachments &Resolved,
-    llvm::ArrayRef<BoundSetState> BoundSets,
-    llvm::ArrayRef<uint8_t> PushConstants,
-    llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
-    llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries,
-    feme::graphics::PreparedDraw &Prepared) {
+Error runPreparedDraw(const GraphicsPipeline &Pipeline,
+                     GraphicsState &Gfx,
+                     const ResolvedDrawAttachments &Resolved,
+                     llvm::ArrayRef<BoundSetState> BoundSets,
+                     llvm::ArrayRef<uint8_t> PushConstants,
+                     llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+                     llvm::ArrayRef<ActivePipelineStatsQuery>
+                         ActivePipelineStatsQueries,
+                     feme::graphics::PreparedDraw &Prepared) {
   const std::vector<feme::graphics::AttachmentView> &Attachments =
       Resolved.Attachments;
   const std::vector<feme::graphics::AttachmentView> &ResolveAttachments =
@@ -1916,7 +1924,8 @@ Error runPreparedDraw(
     uint64_t PassedSamples = 0;
     Prepared.PassedSampleCounter = &PassedSamples;
     feme::graphics::PreparedDraw::PipelineStatsCounters LocalStats;
-    Prepared.Stats = ActivePipelineStatsQueries.empty() ? nullptr : &LocalStats;
+    Prepared.Stats =
+        ActivePipelineStatsQueries.empty() ? nullptr : &LocalStats;
     Prepared.Attachments = ViewAttachments;
     Prepared.ResolveAttachments = ViewResolveAttachments;
     Prepared.DepthStencil = ViewDepthStencil;
@@ -1948,13 +1957,13 @@ Error runPreparedDraw(
 /// vertex buffer the pipeline declares (and the index buffer, for an
 /// indexed \p Draw), then hands the result to `runPreparedDraw` -- the
 /// same shared path `runMeshDraw` below uses for a mesh pipeline.
-Error runDraw(
-    const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
-    const feme::graphics::DrawCommand &Draw,
-    llvm::ArrayRef<BoundSetState> BoundSets,
-    llvm::ArrayRef<uint8_t> PushConstants,
-    llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
-    llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries) {
+Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
+              const feme::graphics::DrawCommand &Draw,
+              llvm::ArrayRef<BoundSetState> BoundSets,
+              llvm::ArrayRef<uint8_t> PushConstants,
+              llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+              llvm::ArrayRef<ActivePipelineStatsQuery>
+                  ActivePipelineStatsQueries) {
   Expected<ResolvedDrawAttachments> Resolved =
       resolveDrawAttachments(Pipeline, Gfx);
   if (!Resolved)
@@ -2072,8 +2081,8 @@ Error runDraw(
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
   Prepared.XfbBuffers = XfbCaptures;
   return runPreparedDraw(Pipeline, Gfx, *Resolved, BoundSets, PushConstants,
-                         ActiveOcclusionQueries, ActivePipelineStatsQueries,
-                         Prepared);
+                        ActiveOcclusionQueries, ActivePipelineStatsQueries,
+                        Prepared);
 }
 
 /// (Roadmap H6f) Builds and runs a mesh-pipeline draw
@@ -2087,13 +2096,13 @@ Error runDraw(
 /// `resolveDrawAttachments`/`runPreparedDraw` path `runDraw` does, so a mesh
 /// dispatch's attachments, resources, viewport/scissor and multiview
 /// handling are never duplicated logic of their own.
-Error runMeshDraw(
-    const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
-    const feme::graphics::MeshDrawCommand &MeshDraw,
-    llvm::ArrayRef<BoundSetState> BoundSets,
-    llvm::ArrayRef<uint8_t> PushConstants,
-    llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
-    llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries) {
+Error runMeshDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
+                  const feme::graphics::MeshDrawCommand &MeshDraw,
+                  llvm::ArrayRef<BoundSetState> BoundSets,
+                  llvm::ArrayRef<uint8_t> PushConstants,
+                  llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+                  llvm::ArrayRef<ActivePipelineStatsQuery>
+                      ActivePipelineStatsQueries) {
   Expected<ResolvedDrawAttachments> Resolved =
       resolveDrawAttachments(Pipeline, Gfx);
   if (!Resolved)
@@ -2103,8 +2112,8 @@ Error runMeshDraw(
   Prepared.MeshDraws =
       llvm::ArrayRef<feme::graphics::MeshDrawCommand>(MeshDraw);
   return runPreparedDraw(Pipeline, Gfx, *Resolved, BoundSets, PushConstants,
-                         ActiveOcclusionQueries, ActivePipelineStatsQueries,
-                         Prepared);
+                        ActiveOcclusionQueries, ActivePipelineStatsQueries,
+                        Prepared);
 }
 
 /// Validates a draw's *index* fetch (an indexed draw's index range against
@@ -2313,7 +2322,7 @@ readIndirectMeshDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
 /// stored in `countBuffer`" (`vkCmdDrawMeshTasksIndirectCountEXT`'s own
 /// spec text, identical to `vkCmdDrawIndirectCountKHR`'s).
 Expected<uint32_t> readIndirectDrawCount(Buffer *Buf, uint64_t Offset,
-                                         uint32_t MaxDrawCount) {
+                                        uint32_t MaxDrawCount) {
   if (!Buf || !Buf->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "the indirect draw count buffer is not bound");
@@ -2322,8 +2331,9 @@ Expected<uint32_t> readIndirectDrawCount(Buffer *Buf, uint64_t Offset,
                              "the indirect draw count offset is out of "
                              "range of its buffer");
   uint32_t Count = 0;
-  std::memcpy(&Count, static_cast<const uint8_t *>(Buf->data()) + Offset,
-              sizeof(Count));
+  std::memcpy(&Count,
+             static_cast<const uint8_t *>(Buf->data()) + Offset,
+             sizeof(Count));
   return std::min(Count, MaxDrawCount);
 }
 
@@ -2504,9 +2514,9 @@ Error executeCommandsInto(
         ActiveOcclusionQueries.push_back(
             {Cmd.TargetQueryPool, Cmd.FirstQuery, ViewCount});
       else if (Cmd.TargetQueryPool->queryType() ==
-                   VK_QUERY_TYPE_PIPELINE_STATISTICS ||
-               Cmd.TargetQueryPool->queryType() ==
-                   VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
+                  VK_QUERY_TYPE_PIPELINE_STATISTICS ||
+              Cmd.TargetQueryPool->queryType() ==
+                  VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
         // (roadmap H21d) A `PRIMITIVES_GENERATED_EXT` pool shares this
         // same list rather than a fourth parallel one: both query types
         // need exactly the same per-draw `ClippingInvocations` value
@@ -2533,7 +2543,8 @@ Error executeCommandsInto(
       if (It != ActiveOcclusionQueries.end())
         ActiveOcclusionQueries.erase(It);
       auto StatsIt = llvm::find_if(
-          ActivePipelineStatsQueries, [&](const ActivePipelineStatsQuery &Q) {
+          ActivePipelineStatsQueries,
+          [&](const ActivePipelineStatsQuery &Q) {
             return Q.Pool == Cmd.TargetQueryPool && Q.Query == Cmd.FirstQuery;
           });
       if (StatsIt != ActivePipelineStatsQueries.end()) {
@@ -2553,10 +2564,11 @@ Error executeCommandsInto(
       break;
     case RecordedCommand::Kind::ExecuteCommands:
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
-        if (Error E = executeCommandsInto(
-                Secondary->commands(), DeviceInfo, BoundPipeline,
-                BoundGraphicsPipeline, Gfx, BoundSets, PushConstants,
-                ActiveOcclusionQueries, ActivePipelineStatsQueries))
+        if (Error E = executeCommandsInto(Secondary->commands(), DeviceInfo,
+                                          BoundPipeline, BoundGraphicsPipeline,
+                                          Gfx, BoundSets, PushConstants,
+                                          ActiveOcclusionQueries,
+                                          ActivePipelineStatsQueries))
           return E;
       break;
     case RecordedCommand::Kind::CopyBufferToImage:
@@ -2952,10 +2964,10 @@ Error executeCommandsInto(
       } else {
         Draw.FirstVertex = Cmd.FirstVertexOrIndex;
       }
-      if (Error E =
-              runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw, DeviceInfo,
-                               BoundSets, PushConstants, ActiveOcclusionQueries,
-                               ActivePipelineStatsQueries))
+      if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
+                                     DeviceInfo, BoundSets, PushConstants,
+                                     ActiveOcclusionQueries,
+                                     ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -3018,9 +3030,10 @@ Error executeCommandsInto(
                                  "pipeline to be bound");
       feme::graphics::MeshDrawCommand MeshDraw;
       MeshDraw.GroupCount = Cmd.Count;
-      if (Error E = runMeshDraw(
-              *BoundGraphicsPipeline, Gfx, MeshDraw, BoundSets, PushConstants,
-              ActiveOcclusionQueries, ActivePipelineStatsQueries))
+      if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
+                               BoundSets, PushConstants,
+                               ActiveOcclusionQueries,
+                               ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -3043,13 +3056,14 @@ Error executeCommandsInto(
       }
       Expected<std::vector<feme::graphics::MeshDrawCommand>> MeshDraws =
           readIndirectMeshDraws(Cmd.IndirectBuffer, Cmd.IndirectOffset,
-                                DrawCount, static_cast<uint32_t>(Cmd.DstSize));
+                               DrawCount, static_cast<uint32_t>(Cmd.DstSize));
       if (!MeshDraws)
         return MeshDraws.takeError();
       for (const feme::graphics::MeshDrawCommand &MeshDraw : *MeshDraws)
-        if (Error E = runMeshDraw(
-                *BoundGraphicsPipeline, Gfx, MeshDraw, BoundSets, PushConstants,
-                ActiveOcclusionQueries, ActivePipelineStatsQueries))
+        if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
+                                 BoundSets, PushConstants,
+                                 ActiveOcclusionQueries,
+                                 ActivePipelineStatsQueries))
           return E;
       break;
     }
@@ -3374,8 +3388,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetKHR(
     VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
     VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet *pDescriptorWrites) {
-  feme::vulkan::vkCmdPushDescriptorSet(commandBuffer, pipelineBindPoint, layout,
-                                       set, descriptorWriteCount,
+  feme::vulkan::vkCmdPushDescriptorSet(commandBuffer, pipelineBindPoint,
+                                       layout, set, descriptorWriteCount,
                                        pDescriptorWrites);
 }
 
@@ -4275,13 +4289,12 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetRenderingInputAttachmentIndices(
 // has a real static path (`RasterState::DepthBias*`), so making it dynamic
 // is the same "read from the per-draw snapshot" pattern `vkCmdSetLineWidth`
 // above already uses.
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,
-                                             float depthBiasConstantFactor,
-                                             float depthBiasClamp,
-                                             float depthBiasSlopeFactor) {
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBias(VkCommandBuffer commandBuffer, float depthBiasConstantFactor,
+                  float depthBiasClamp, float depthBiasSlopeFactor) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBias(depthBiasConstantFactor, depthBiasClamp,
-                     depthBiasSlopeFactor);
+                    depthBiasSlopeFactor);
 }
 
 // (roadmap H7d) `vkCmdSetDepthBounds`: `VK_DYNAMIC_STATE_DEPTH_BOUNDS`
@@ -4444,17 +4457,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectEXT(
     uint32_t drawCount, uint32_t stride) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->drawMeshTasksIndirect(fromHandle<vulkan::Buffer>(buffer), offset,
-                              drawCount, stride);
+                             drawCount, stride);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectCountEXT(
     VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
-    VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
-    uint32_t stride) {
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->drawMeshTasksIndirectCount(fromHandle<vulkan::Buffer>(buffer), offset,
-                                   fromHandle<vulkan::Buffer>(countBuffer),
-                                   countBufferOffset, maxDrawCount, stride);
+      ->drawMeshTasksIndirectCount(
+          fromHandle<vulkan::Buffer>(buffer), offset,
+          fromHandle<vulkan::Buffer>(countBuffer), countBufferOffset,
+          maxDrawCount, stride);
 }
 
 // (roadmap H21b) `VK_EXT_transform_feedback`'s own commands -- see
