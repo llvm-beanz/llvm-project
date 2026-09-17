@@ -91,6 +91,10 @@ TEST(ProcAddr, DeviceProcAddrResolvesRasterizerDiscardEnable) {
   EXPECT_NE(getDeviceProcAddr("vkCmdSetRasterizerDiscardEnable"), nullptr);
 }
 
+TEST(ProcAddr, DeviceProcAddrResolvesPrimitiveRestartEnable) {
+  EXPECT_NE(getDeviceProcAddr("vkCmdSetPrimitiveRestartEnable"), nullptr);
+}
+
 // Roadmap H21b: `VK_EXT_transform_feedback`'s six commands are registered
 // in `SUPPORTED_EXTENSIONS`/`ImplementedEntrypoints.txt` so the dispatch
 // table carries real function pointers for them, even though the

@@ -115,6 +115,7 @@ struct RecordedCommand {
     SetDepthBoundsTestEnable,
     SetDepthBiasEnable,
     SetRasterizerDiscardEnable,
+    SetPrimitiveRestartEnable,
     SetStencilTestEnable,
     SetStencilOp,
     SetPrimitiveTopology,
@@ -295,7 +296,7 @@ struct RecordedCommand {
   VkFrontFace FrontFaceValue = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   /// (roadmap C4c/L94(a)) `SetDepthTestEnable`/`SetDepthWriteEnable`/
   /// `SetDepthBoundsTestEnable`/`SetDepthBiasEnable`/
-  /// `SetRasterizerDiscardEnable`:
+  /// `SetRasterizerDiscardEnable`/`SetPrimitiveRestartEnable`:
   /// `vkCmdSetDepthTestEnableEXT`/`vkCmdSetDepthWriteEnableEXT`/
   /// `vkCmdSetDepthBoundsTestEnableEXT`/`vkCmdSetDepthBiasEnable`'s boolean
   /// payload (`Bool32Value`, shared since only one is ever meaningful per

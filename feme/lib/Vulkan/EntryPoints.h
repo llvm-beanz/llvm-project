@@ -714,6 +714,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBiasEnable(
     VkCommandBuffer commandBuffer, VkBool32 depthBiasEnable);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetRasterizerDiscardEnable(
     VkCommandBuffer commandBuffer, VkBool32 rasterizerDiscardEnable);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveRestartEnable(
+    VkCommandBuffer commandBuffer, VkBool32 primitiveRestartEnable);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetStencilTestEnableEXT(VkCommandBuffer commandBuffer,
                             VkBool32 stencilTestEnable);

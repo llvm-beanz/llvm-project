@@ -1106,6 +1106,34 @@ TEST_F(GraphicsPipelineTest, DynamicRasterizerDiscardOverridesStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+TEST_F(GraphicsPipelineTest, DynamicPrimitiveRestartOverridesStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  InputAssembly.primitiveRestartEnable = VK_TRUE;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState DynamicState;
+  DynamicState.PrimitiveRestartEnable = false;
+  EXPECT_FALSE(Graphics->buildExecutorPipeline(DynamicState)
+                   .getPrimitiveRestartEnable());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H74) Specialization constants: `compileGraphicsStage` now
 /// patches a graphics stage's real `VkSpecializationInfo` overrides
 /// directly onto its shader module's raw SPIR-V words before

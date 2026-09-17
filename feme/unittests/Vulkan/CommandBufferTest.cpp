@@ -498,6 +498,20 @@ TEST_F(CommandBufferTest, RecordRasterizerDiscardEnable) {
   EXPECT_EQ(Recorded->commands().front().Bool32Value, VK_TRUE);
 }
 
+TEST_F(CommandBufferTest, RecordPrimitiveRestartEnable) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdSetPrimitiveRestartEnable(CmdBuf, VK_TRUE);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_EQ(Recorded->commands().size(), 1u);
+  EXPECT_EQ(Recorded->commands().front().Op,
+            RecordedCommand::Kind::SetPrimitiveRestartEnable);
+  EXPECT_EQ(Recorded->commands().front().Bool32Value, VK_TRUE);
+}
+
 TEST_F(CommandBufferTest, DispatchBaseOffsetsGroupID) {
   VkCommandBuffer CmdBuf = allocateCommandBuffer();
   VkCommandBufferBeginInfo BeginInfo{};

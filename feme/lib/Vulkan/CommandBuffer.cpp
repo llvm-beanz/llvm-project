@@ -2849,6 +2849,9 @@ Error executeCommandsInto(
     case RecordedCommand::Kind::SetRasterizerDiscardEnable:
       Gfx.Dynamic.RasterizerDiscardEnable = Cmd.Bool32Value != VK_FALSE;
       break;
+    case RecordedCommand::Kind::SetPrimitiveRestartEnable:
+      Gfx.Dynamic.PrimitiveRestartEnable = Cmd.Bool32Value != VK_FALSE;
+      break;
     case RecordedCommand::Kind::SetStencilTestEnable:
       Gfx.Dynamic.StencilTestEnable = Cmd.Bool32Value != VK_FALSE;
       break;
@@ -4174,6 +4177,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetRasterizerDiscardEnable(
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBool(RecordedCommand::Kind::SetRasterizerDiscardEnable,
                      rasterizerDiscardEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveRestartEnable(
+    VkCommandBuffer commandBuffer, VkBool32 primitiveRestartEnable) {
+  fromHandle<vulkan::CommandBuffer>(
+      commandBuffer)
+      ->setDepthBool(RecordedCommand::Kind::SetPrimitiveRestartEnable,
+                     primitiveRestartEnable);
 }
 
 // (roadmap C4c) `vkCmdSetStencilTestEnableEXT`/`vkCmdSetStencilOpEXT`: the

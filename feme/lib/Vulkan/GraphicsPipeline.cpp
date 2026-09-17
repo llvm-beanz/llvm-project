@@ -351,6 +351,8 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateDepthBiasEnable;
   case VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE:
     return DynamicStateRasterizerDiscardEnable;
+  case VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE:
+    return DynamicStatePrimitiveRestartEnable;
   default:
     return std::nullopt;
   }
@@ -1766,6 +1768,10 @@ Error translateFixedFunctionState(
 
   const VkPipelineInputAssemblyStateCreateInfo *InputAssembly =
       CreateInfo.pInputAssemblyState;
+  // Input-assembly validation must know whether primitive restart is dynamic:
+  // when it is, the static create-info member is ignored.
+  if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
+    return E;
   // (roadmap H6g-b) A mesh pipeline originates its own vertices/primitives
   // entirely from the mesh stage's own emitted output -- it has neither a
   // vertex-input stage nor a fixed input-assembly topology to configure.
@@ -1807,7 +1813,8 @@ Error translateFixedFunctionState(
     // neighbors, since this ICD does not implement
     // `VK_EXT_primitive_topology_list_restart`); mirrored here so an
     // unsupported combination fails at creation, not silently at draw time.
-    if (InputAssembly->primitiveRestartEnable &&
+    if ((Result.DynamicStates & DynamicStatePrimitiveRestartEnable) == 0 &&
+        InputAssembly->primitiveRestartEnable &&
         !feme::graphics::topologySupportsPrimitiveRestart(*Topology))
       return createStringError(
           inconvertibleErrorCode(),
@@ -1861,18 +1868,12 @@ Error translateFixedFunctionState(
     }
 
     Result.Topology = *Topology;
-    Result.PrimitiveRestartEnable = InputAssembly->primitiveRestartEnable;
+    if ((Result.DynamicStates & DynamicStatePrimitiveRestartEnable) == 0)
+      Result.PrimitiveRestartEnable = InputAssembly->primitiveRestartEnable;
     Result.SampleCount = Targets->SampleCount;
   }
 
   const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
-  // Dynamic state is translated first: `translateDepthStencilState` below
-  // needs to know whether `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE` was
-  // declared before it can decide whether the static
-  // `depthBoundsTestEnable` field is meaningful (see that function's own
-  // comment).
-  if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
-    return E;
   // (roadmap H6f) A mesh pipeline has no vertex-input state to translate
   // (checked above); `translateVertexInput` is skipped entirely rather
   // than called with a null `pVertexInputState`, which would instead
@@ -3230,7 +3231,10 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
       ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants
                                             : State.BlendConstants,
-      State.PrimitiveRestartEnable, State.SampleShadingEnable,
+      isDynamic(DynamicStatePrimitiveRestartEnable)
+          ? Dynamic.PrimitiveRestartEnable
+          : State.PrimitiveRestartEnable,
+      State.SampleShadingEnable,
       State.AlphaToOneEnable, State.AlphaToCoverageEnable);
   // (roadmap H4b) `Artifact->HullStage` is set exactly when this pipeline
   // declared tessellation stages (see `compileAndValidateStages`'s own
