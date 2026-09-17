@@ -89596,3 +89596,102 @@ struct/array-modeling gap this family happens to expose. Filed as
    beyond just `vector_length.*` (the prior session's sweep stopped at 688
    cases on the now-fixed crash; a full re-sweep hasn't been done yet this
    session) to confirm no further crashes remain in that larger group.
+
+# L94(j): array-of-struct combined with a per-vertex/per-invocation stage-IO dimension
+
+Confirmed device at session start: `FeMe CPU Vulkan Device`. Working tree
+was clean/intact — no repeat of the lost-work incident (mostly: see the
+note below about one mid-session close call).
+
+## What's done (about 4 hours)
+
+1. **Reduced and root-caused two independent gaps**, both left by L94(i)'s
+   own construction-side exclusion of `RowCountIsVertexArray`. Traced the
+   tesc/tese `testStructArray[][3]` shape's raw SPIR-V/LLVM types via
+   `deqp-vk`'s QPA log and `feme-translate --spirv-to-llvmir`, confirming
+   the importer (`StageIOGlobalVariablePattern`) only peels *one* outer
+   `ArrayType` level before checking for a `StructType` — so a doubly-
+   arrayed shape (per-vertex array wrapping an inner array-of-struct)
+   never gets `feme.spirv.MemberDecorations` metadata at all (falls to
+   `addElements`' plain path), while a singly-arrayed one (an ordinary
+   array-of-struct declared directly as a stage-IO variable's type) does
+   get it (routes through `TakeBlockPath` instead) — two different code
+   paths, two different gaps.
+2. **Commit 1** (`00bc029b3e3b`) — gap 2 (`TakeBlockPath`'s
+   `BlockArrayCount` never folded this ordinary array-of-struct shape,
+   leaving every leaf's `RowCount` at 1 instead of the real extent).
+   Fixed by folding `BlockArrayCount` here too, gated by combining
+   `Stage`-based per-vertex/per-invocation recognition
+   (`isPerVertexArrayInputGlobal`/`isPerVertexArrayMeshOutputGlobal`/the
+   Hull-per-invocation-`Output` condition) with a scan of the global's
+   own actual GEP accesses for a non-constant outer index — needed
+   *both* checks, not just one, since address spaces 7/8 are used for
+   every stage-IO global regardless of stage, and some existing unit
+   tests deliberately tag a synthetic per-vertex-shaped global with an
+   unrelated `Stage` to test the mechanism in isolation.
+3. **Commit 2** (`b32fd8072b57`) — gap 1 (the plain-path decomposition
+   guard's `!RowCountIsVertexArray` exclusion). Removed it, added an
+   `AddDecomposedElement` wrapper lambda forwarding
+   `RowCountIsVertexArray`/`XfbBufferArrayStride` through to every leaf
+   `addElement` call `addStageIOStructMembers` makes (its own generic
+   callback signature has no room for either flag).
+4. **Commit 3** (`43c3584d0620`) — docs: `Roadmap.md` L94(j) strikethrough,
+   `VulkanCTSReport.md` L94(j) section covering both gaps.
+5. **Commit 4** (`3b49d789403b`) — two new unit tests, one per fix, each
+   confirmed to fail without its fix via a checkout/rebuild/test/restore
+   cycle against the pre-fix commit.
+
+## Close call: lost uncommitted work mid-session
+
+Ran `git clang-format HEAD` on the whole file (not scoped to my diff) to
+check formatting, saw it wanted to reformat *unrelated* pre-existing code
+too, and reflexively `git checkout --`'d the file to back out — except
+both fixes were still uncommitted at that point, so this deleted ~2
+hours of work in one command. Recovered by re-deriving both fixes from
+memory (I had the exact text of the second fix in my own prior tool
+calls this turn; the first fix I had to reconstruct from my own
+running summary of what it did). Re-verified both against the unit
+tests and CTS repro afterward — ended up in the same place, but cost
+real time. **Lesson for next session: commit each fix immediately after
+its own unit tests pass, before ever touching `git checkout --` on a
+file with uncommitted changes; and use `git add -p` + `git clang-format`
+(which only touches diff-adjacent lines) instead of a bare
+`git clang-format HEAD` when there's any uncommitted work at stake.**
+
+## Verified
+
+- `vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`,
+  confirmed multiple times (session start, after each rebuild, before
+  wrapping up).
+- `ninja -C build2 check-feme`: 3,166 → 3,168 passed (the two new
+  tests), 0 failed, 3 unsupported throughout.
+- Both reduction targets pass individually.
+- `vector_length.*member_of_array_of_structures*` (324 cases): 324 pass,
+  0 fail (up from 180/324 mid-session, itself up from L94(i)'s baseline).
+- Full `vector_length.*` (972 cases): **972 pass, 0 fail** (up from
+  720/972 at L94(i)'s close).
+- Full `pipeline_library.interface_matching.*` (1589 cases): 1121 pass,
+  468 not-supported, **0 fail, 0 crash** — confirms no crashes remain in
+  the broader group, closing out L94(i)'s own next-step ask.
+
+No advertised Vulkan feature/extension changed, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` untouched —
+correctness fix only.
+
+## Next steps
+
+With `vector_length.*` fully green and the broader `interface_matching.*`
+group at 0 fail/0 crash, there's no obvious next reduction target left in
+*this* family. Two options for the next session:
+
+1. **Pick a new CTS group entirely.** The `interface_matching.*` sweep's
+   468 not-supported cases are a different kind of gap (unadvertised
+   feature/format support, not a bug) — worth a quick triage to see if
+   any are cheap wins (e.g. a missing format or feature flag) versus
+   genuinely out of scope for now. Rough estimate: 30–60 minutes to
+   triage, more to fix depending on what's found.
+2. **Broaden the sweep beyond `pipeline_library.interface_matching.*`**
+   to a wider `dEQP-VK.pipeline.*` or a different top-level group
+   entirely, using the same reduce-first methodology this milestone
+   series has used throughout. Rough estimate: a session to sweep plus
+   however long the first reduction takes.
