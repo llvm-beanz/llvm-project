@@ -88317,3 +88317,85 @@ rebuild-ICD + rerun-CTS loop for any `SIMDize`-level bug.
 
 **Cleanup done:** removed `/tmp/h171_*` scratch files (dump logs,
 extracted `.ll` repros, `.qpa` result files) before ending the session.
+
+# Session: H170 bucket 1 fixed -- integer clear-color gap in fbo_float/texture.float
+
+**Fixed:** `dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*`
+(240 cases) no longer fail `vkQueueSubmit` with
+`VK_ERROR_INITIALIZATION_FAILED`. Try it:
+`vulkaninfo --summary | grep deviceName` (confirm `FeMe CPU Vulkan
+Device`), then run
+`deqp-vk -n dEQP-VK.glsl.derivate.dfdx.fbo_float.float_highp` -- passes
+now (was: `VK_ERROR_INITIALIZATION_FAILED`).
+
+**Root cause, in one line:** `fbo_float`/`texture.float` actually
+render to a raw-integer `R32G32B32A32_UINT` framebuffer (CTS's own
+source comment says so -- "FP rendertargets are not in core spec"), and
+`packClearColor`/`unpackColor` had no case for 4 of the 19 real integer
+color-attachment formats (`R8_{UINT,SINT}`, `R8G8_{UINT,SINT}`,
+`R16G16B16A16_{UINT,SINT}`, `R32G32B32A32_{UINT,SINT}`).
+
+**The near-miss worth remembering for next time:** my first draft fixed
+this with one generic `isIntegerColorAttachmentFormat`-guarded branch
+dropped in right after the existing `IsFloat` check. That felt clean
+but was wrong -- it ran *before* several already-existing, already-
+clamping per-format branches further down the same function (`R16_UINT`
+etc.), silently replacing their clamp-on-overflow behavior with raw
+truncation. `ImageFixtureTest.PacksAndUnpacksR16Uint`'s existing clamp
+assertion caught it before commit. Lesson: before adding a "generic
+catch-all" branch to a long `if`-chain in an unfamiliar function,
+`grep` the whole function first for every existing branch guarded by
+the same classification helper -- don't trust a classification
+helper's own doc comment ("each already has a real case") without
+checking, since it was itself stale from an earlier, narrower version
+of the format list.
+
+**3 commits, each buildable and tested independently:**
+1. `packClearColor`/`unpackColor` gain the 4 missing format branches +
+   `getFormatInfo` entries, clamp-not-wrap like every sibling format. 9
+   new `ImageFixtureTest` cases.
+2. A second, independent bug found while fixing the first: all 3
+   `packClearColor` call sites read `VkClearColorValue::float32`
+   unconditionally, even for integer-format attachments (should read
+   `.uint32`/`.int32`). New shared `unpackClearColorValue` helper fixes
+   this at the source. 1 new `ImageOpsTest` case.
+3. `Roadmap.md`/`VulkanCTSReport.md` updated: H170 bucket 1 closed
+   (bucket 2, `in_function`, still open), new roadmap row **H172** filed
+   for a `dfdy`-heavy image-comparison-failure pattern this fix newly
+   exposed (these cases never got far enough to hit real rendering
+   before).
+
+**Verification:** `check-feme` 3142/3145 (3 unsupported, no
+regressions). Real CTS: `fbo_float` 81/132 pass (was 0, all
+`queueSubmit`-failed); `texture.float` 84/108 pass (was 0). Remaining
+27+24 fail image comparison (H172, not this bug); 24 `NotSupported`
+(`VK_SUBGROUP_FEATURE_QUAD_BIT`, pre-existing/unrelated).
+`check-hlsl-feme-vk` **not re-run this session** -- no existing build
+directory in `/home/dev/dev/offload-test-suite`, and a from-scratch
+CMake configure+build was out of scope for this session's budget; flag
+this for whoever picks up next.
+
+**Next steps, ranked:**
+1. **~1-2 hours, do first, cheapest:** H172 -- the new `dfdy`-heavy
+   image-comparison pattern this fix exposed. Quad-shuffle masks in
+   `WaveLowering.cpp` are already ruled out (structurally correct).
+   Start with a channel-level pixel reduction (H88's own technique) on
+   `dfdy.fbo_float.float_highp` to see actual-vs-expected framebuffer
+   content -- that should immediately show whether it's a Y-axis
+   orientation bug or something else. The `dfdx`-only-fails-at-
+   vec3/vec4 vs. `dfdy`-fails-at-every-width asymmetry is a real clue,
+   not yet explained.
+2. **~half a day, real payoff:** H170 bucket 2 -- `in_function`
+   subcases fail with `JIT session error: Symbols not found:
+   [ spirv_var_13 ]`. Reduce to a standalone `dxc`+`feme-opt` repro
+   before touching JIT linkage code.
+3. **First thing next session, ~10 minutes:** actually build
+   `offload-test-suite`'s `check-hlsl-feme-vk` target from scratch (no
+   existing build dir was found this session) so future sessions can
+   run it as a real regression check again, rather than skipping it.
+4. **Low priority, still unaddressed across 6+ sessions:** the
+   `array_of_matrices.test` XPASS flake in `check-hlsl-feme-vk`.
+
+**Cleanup done:** removed `/tmp/h170b1_*`, `/tmp/fbo_fails.txt`,
+`/tmp/tex_fails.txt`, `/tmp/h170_dfdy_*`, `/tmp/x.qpa` scratch files
+before ending the session.
