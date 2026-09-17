@@ -89417,3 +89417,101 @@ session.
    in the existing interface-matching model before writing code. Rough
    estimate: half a day, since it's new decoration support, not a
    one-line guard like L94(g).
+
+# L94(h): SPIR-V Component decoration for interface matching
+
+Confirmed device at session start: `FeMe CPU Vulkan Device`. Good.
+
+## Big gotcha this session: lost work, redone from scratch
+
+The prior session's summary said three fixes were "done" (Component-aware
+matching, Component-seeding, RowCount-peeling) but uncommitted. `git status`
+was clean — none of it existed. The only survivor was the already-committed
+MLIR decoration round-trip fix (`dc03c83e08a3`). Best guess: something
+resets the working tree between session-boundary `agent_prompt.md` commits
+(visible in `git log` as `"Prompt agent for Vulkan ICD"`).
+
+**Mitigation used from here on**: commit each small fix immediately after
+`check-feme` passes, don't batch. Do this in every future feme session —
+treat any uncommitted work as one crash away from gone.
+
+## What's done (about 2.5 hours, redoing the three fixes + validation)
+
+1. **Commit 1** (`4e518507fc9f`) — Component-aware cross-stage matching.
+   `findElementByLocation` (`StageStorage.h/.cpp`) takes a `Component`
+   parameter. `StageLink.cpp`'s `findProducer` and `GraphicsPipeline.cpp`'s
+   `findLocation` pass the consumer's `FirstComponent` through.
+   `Executor.cpp`'s `LinkedVarying` gained `SourceFirstComponent`/
+   `DestFirstComponent`, fixing two real addressing bugs where
+   `readRaw`/`writeRaw` used a bare local index instead of
+   `FirstComponent + C`. New test: `StageLinkTest.
+   LinksByLocationAndComponentWhenBothArePacked`.
+2. **Commit 2** (`ed8b2a0bf95c`) — Component-seeding fix in
+   `CanonicalizeStage.cpp`. Whole-variable load/store emission was hardcoding
+   `Component = 0` instead of reading the element's own `FirstComponent`.
+   Added `resolveElementBaseComponent` helper; fixed `FixedVectorType`
+   recursion to combine (`CreateAdd`) instead of overwrite an incoming
+   non-zero base. New test: `CanonicalizeStageTest.
+   SeedsWholeVariableComponentFromFirstComponent` — confirmed it fails
+   without the fix via `git stash` before restoring.
+3. **Commit 3** (`a0f3397e41b1`) — RowCount-peeling fix. A per-vertex-arrayed
+   `Input` global (Hull/Domain/Geometry) folded its per-vertex dimension
+   *and* a real array extent into one `RowCount`, wrong whenever the extent
+   was more than 1. Peeled the outer array dimension before computing
+   `RowCount`, mirroring the existing Output-side (`PerInvocationOutputArray`)
+   pattern. Simplified `StageLink.cpp`'s `effectiveRowCount` to a plain
+   passthrough. Updated 4 existing tests whose expectations described the
+   old (buggy) folded behavior, added
+   `StageLinkTest.LinksAGeometryPerVertexArrayInputWithAGenuineArrayExtent`
+   for the now-correctly-representable genuinely-arrayed case.
+4. **Commit 4** (`5a4f63355bc1`) — docs: `VulkanCTSReport.md` L94(h)
+   section, `Roadmap.md` strikethrough, new `L94(i)` entry for two
+   unrelated gaps found along the way (see below).
+
+## Verified
+
+- `ninja -C build2 check-feme` after each of the three code commits: 3,160
+  → 3,162 → 3,163 passed, 0 failed, 3 unsupported throughout.
+- Exact reduction target case
+  (`shader_layout_component_matching.vert_tesc_tese_frag.loose_var.
+  float32.multiple_locations.scalar_scalar_scalar_scalar`) now `Pass`.
+- Full `shader_layout_component_matching.*` family (256 cases): **112/112
+  supported pass, 0 fail**, 144 not-supported (pre-existing, unrelated:
+  double-precision floats aren't implemented).
+- Broader `pipeline_library.interface_matching.*` sweep (688 of a larger
+  unknown total, before an unrelated crash): 185 pass, 34 fail, 468
+  not-supported — the 34 failures are all `vector_length.*`, a separate,
+  pre-existing family, not `Component`-related. Filed as L94(i).
+
+No advertised Vulkan feature/extension changed, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` untouched —
+confirmed by grepping both for `Component`/`L94`, no hits, correctness fix
+only.
+
+## What I did NOT do, and why
+
+The broader sweep crashed with a glibc heap-corruption abort
+(`corrupted size vs. prev_size while consolidating`) in a
+`vector_length.*member_of_array_of_structures_in_block` case, and 34
+`vector_length.*` cases fail outright (vector-truncation matching, e.g. a
+producer's `ivec3` feeding a consumer's `ivec2`). Both are unrelated to
+`Component` and out of scope for this milestone — filed as **L94(i)**
+instead of chasing them here.
+
+## Next step
+
+1. **Start L94(i), part 1.** Reduce
+   `vector_length.out_ivec3_in_ivec2_loose_variable_vert_out_frag_in` (or
+   the first failing case in that family). Check whether feme's interface
+   matching rejects a vector-length mismatch outright instead of truncating
+   per Vulkan's rule that a consumer may read only the leading components
+   of a wider producer output. Rough estimate: an hour or two, likely a
+   similar shape to L94(h)'s Component fix (relaxing an equality check in
+   `StageLink.cpp`/`GraphicsPipeline.cpp`'s matching, not a decoration gap).
+2. **Then L94(i), part 2.** Once part 1's fix lands, re-run the
+   `member_of_array_of_structures_in_block` crash case in isolation under
+   `gdb`/ASan — the heap corruption may be a symptom of the same
+   vector-length-mismatch code path (writing past the end of a shorter
+   consumer's storage) rather than a separate bug, so fixing part 1 first
+   might fix or at least change part 2's signature before investigating it
+   standalone.
