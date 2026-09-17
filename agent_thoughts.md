@@ -88399,3 +88399,83 @@ this for whoever picks up next.
 **Cleanup done:** removed `/tmp/h170b1_*`, `/tmp/fbo_fails.txt`,
 `/tmp/tex_fails.txt`, `/tmp/h170_dfdy_*`, `/tmp/x.qpa` scratch files
 before ending the session.
+
+# Session: H172 closed as a stale-`.so` false alarm -- no bug found
+
+**Confirmed working:** `dEQP-VK.glsl.derivate.*` (1,674 cases) passes
+**1568/0/106** (pass/fail/not-supported) on a truly fresh
+`libfeme_vulkan.so` build. Try it:
+`vulkaninfo --summary | grep deviceName` (confirm `FeMe CPU Vulkan
+Device`), then `deqp-vk -n dEQP-VK.glsl.derivate.dfdy.fbo_float.vec2_highp`
+-- passes now.
+
+**The whole session in one line:** I spent ~2 hours chasing a bug that
+doesn't exist, then a routine rebuild made it vanish -- classic
+stale-`.so` false alarm, same shape as H94/H99a/H100/H103, just later
+in the pipeline this time (after a *real* fix landed in the same prior
+session, not as its own standalone investigation).
+
+**What I actually did, in order:**
+1. Re-derived H172's precise failure shape from the (turned out to be
+   stale) binary I inherited: `dfdy`-family failing at every
+   vec-width/precision, `dfdx`/`fwidth*` only at `vec3_highp`/
+   `vec4_highp`. Confirmed via image decode: total black framebuffer,
+   computed `dFdy` ~0 against an expected ~0.3-0.4 range.
+2. `FEME_DUMP_IR=1`-dumped and diffed 3 cases (`dfdy` vec2 failing,
+   `dfdx` vec2 passing, `dfdy` scalar passing). Ruled out
+   `WaveLowering.cpp`'s quad-shuffle masks -- structurally correct in
+   every case, matching the rasterizer's own `Dx`/`Dy` per-lane layout
+   in `Executor.cpp`.
+3. Added temporary `getenv`-gated `fprintf` instrumentation to
+   `Executor.cpp`'s varying-interpolation loop to inspect actual
+   runtime input values. **Rebuilt before running it** (per
+   `feme/.instructions.md`'s own rule) -- and the target case passed
+   outright, debug branch never firing.
+4. Reverted the instrumentation (`git diff` on `Executor.cpp`: empty),
+   rebuilt clean, re-ran the *entire* `dEQP-VK.glsl.derivate.*` group:
+   0 failures. `check-feme`: 3142/3145 (3 unsupported), unchanged.
+
+**Lesson worth repeating (this makes 5 sessions this has bitten):** the
+"rebuild before trusting any CTS run" rule in `feme/.instructions.md`
+needs to be applied at the *start of every investigation*, not just
+once per session. This session's inherited context had already done a
+rebuild earlier in the session, but something (a resumed/compacted
+session boundary, most likely) meant the actual live `build2/` didn't
+reflect current source by the time the failing runs were captured.
+Rebuilding a second time, mid-investigation, right before the
+instrumented run, is what actually caught it. If a bug's own symptom
+is "total miscompile, entire framebuffer one flat color" -- as H88,
+H170-bucket-3, and now this false H172 all were -- rebuild *again*
+before spending real time on root-causing it.
+
+**1 commit:** `Roadmap.md`/`VulkanCTSReport.md` updated -- H172 struck
+through as closed (no bug, no source change), full investigation
+recorded in `VulkanCTSReport.md` for the next person who might
+otherwise re-file the same row a third time.
+
+**Still open from before this session (I did not touch these):**
+1. **H170 bucket 2** (`in_function` subcases): `JIT session error:
+   Symbols not found: [ spirv_var_13 ]` when a derivative call happens
+   inside a helper function rather than `main` directly. ~Half a day.
+   Reduce to a standalone `dxc`+`feme-opt` repro first.
+2. **`check-hlsl-feme-vk` still has no build directory** in
+   `/home/dev/dev/offload-test-suite` as of at least 2 sessions ago --
+   flagged repeatedly, never picked up. ~10 minutes to set up a
+   from-scratch CMake configure+build; do this first thing next
+   session so it stops being skipped as a regression check.
+3. **`array_of_matrices.test` XPASS flake** in `check-hlsl-feme-vk`:
+   low priority, unaddressed across 6+ sessions.
+4. From two sessions back, still not started: **H167** (loop-body
+   diamond taint tracking, ~half a day, 3 candidate fixes already
+   sketched in its own roadmap row), **H164** (`InterlockedCompareExchange`
+   JIT segfault, unbounded/budget a day+), **H168** (masked-scatter gap,
+   needs a reduced repro first, ~an afternoon), **H160-adjacent**
+   `GetDimensions.test` gaps for other buffer types if anyone wants an
+   upstream-MLIR-flavored session.
+
+**Next action, concretely:** build `offload-test-suite` from scratch
+(item 2 above) -- it's the cheapest, most overdue item, and unblocks a
+regression check every subsequent session has been skipping.
+
+**Cleanup done:** removed `/tmp/h172/` (qpa logs, IR dumps, decoded
+PNG) before ending the session.
