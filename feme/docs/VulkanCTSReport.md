@@ -47553,3 +47553,74 @@ cases): **647 passed / 36 failed / 19,819 not supported** --
 byte-identical to the established baseline (expected: no FeMe compiler
 or driver code changed). No `Vulkan14FeatureInventory` /
 `VulkanExtensionInventory` change: this is a test-suite-only change.
+
+## H160: `spirv.ArrayLength`/`OpArrayLength` support added, closing `GetDimensions()` on runtime-sized buffers
+
+**Device check.** `vulkaninfo --summary | grep deviceName` confirmed
+`FeMe CPU Vulkan Device` before starting.
+
+**Symptom.** `Feature/ByteAddressBuffer/GetDimensions.test` and
+`Feature/StructuredBuffer/GetDimensions.test` both failed identically at
+shader-module creation with `error: unhandled opcode 68` (SPIR-V's
+`OpArrayLength`), which DXC emits for any `.GetDimensions()` call against
+a runtime-sized resource (`ByteAddressBuffer`/`RWByteAddressBuffer`,
+`StructuredBuffer`/`RWStructuredBuffer`/`AppendStructuredBuffer`/
+`ConsumeStructuredBuffer`).
+
+**Root cause.** Upstream MLIR's SPIR-V dialect had no `ArrayLengthOp` at
+all -- a genuine upstream gap, not a FeMe-side import/lowering bug.
+
+**Fix.** Implemented in the three layers the failure spans:
+
+1. **Upstream MLIR** (`mlir/include/mlir/Dialect/SPIRV/IR/{SPIRVBase,
+   SPIRVCompositeOps}.td`, `mlir/lib/Dialect/SPIRV/IR/SPIRVOps.cpp`):
+   added `spirv.ArrayLength` (pointer-to-struct operand, `array_member`
+   int attribute, `i32` result), the missing `SPIRV_OC_OpArrayLength`
+   opcode-68 enum case, and a `verify()`. mlir-tblgen's own SPIR-V
+   (de)serialization generator already has full generic support for a
+   plain `I32Attr` literal operand, so **zero** manual
+   `Deserializer.cpp`/`Serializer.cpp` code was needed. 138 MLIR lit
+   tests (`mlir/test/Dialect/SPIRV`, `mlir/test/Target/SPIRV`,
+   `mlir/test/Conversion/SPIRVToLLVM`) confirmed passing.
+2. **SPIR-V-to-LLVM conversion** (`llvm/include/llvm/IR/IntrinsicsSPIRV.td`,
+   `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`): a new
+   generic `llvm.spv.resource.getarraylength` intrinsic (modeled on the
+   existing `.getdimensions.x`'s shape) and a new `ArrayLengthPattern`
+   converting `spirv.ArrayLength` directly into a call to it.
+3. **CPU-backend resource lowering** (`feme/lib/Transforms/CPU/
+   {ResourceCalls,SPIRVResourceLowering}.cpp`,
+   `feme/runtime/CPU/FeMeRuntimeCPU.c`): a new `ResourceCallKind::
+   GetDimensionsRaw`/`feme.cpu.resource.getdimensions.raw.i32` runtime
+   call, lowered exactly mirroring the existing texel-buffer bare
+   `getdimensions.x` special case -- the intrinsic call addresses no
+   element, so it bypasses `getpointer` entirely, dividing the
+   descriptor's byte size by the handle's already-tracked element
+   `Stride`. Confirmed via a real `dxc -spirv` reduction that
+   `ByteAddressBuffer`'s own byte-count `GetDimensions()` needs no extra
+   scaling here: `dxc` itself already emits an explicit `OpIMul` by the
+   element size after `OpArrayLength`, so no per-buffer-kind distinction
+   was needed in the new runtime function.
+
+**`check-hlsl-feme-vk`.** Both `Feature/ByteAddressBuffer/
+GetDimensions.test` and `Feature/StructuredBuffer/GetDimensions.test`
+now pass. The only remaining failures are the pre-existing, unrelated
+H124d bucket (`Graphics/{fwidth,ddx_fine,ddy_fine,DdxCoarse,
+DdyCoarse}.test`, unhandled derivative opcodes 209-214) and the
+pre-existing, already-documented `Feature/PushConstant/
+array_of_matrices.test` XPASS flake -- no regressions.
+
+**Native Vulkan CTS check.** `dEQP-VK.compute.pipeline.*` (20,502
+cases): **654 passed / 29 failed / 19,819 not supported** -- up from the
+established baseline of 647 passed / 36 failed. The 7-case improvement
+is consistent with this fix: several `dEQP-VK.compute.pipeline.basic.*`
+shaders call GLSL's `.length()` on an SSBO runtime array (e.g.
+`vktComputeBasicComputeShaderTests.cpp`'s `ub_in.values.length()`/
+`sb_out.values.length()` idiom), which glslang also lowers to
+`OpArrayLength` -- previously unhandled the same way DXC's own
+`GetDimensions()` codegen was. The 29 still-failing cases are unrelated
+(`builtin_var.*`, `zero_initialize_workgroup_memory.*`,
+`device_group.device_index`, etc. -- no `.length()`/array-length usage).
+
+**Feature/extension inventories.** No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: `OpArrayLength` is core SPIR-V
+functionality, not gated by any optional feature or extension.
