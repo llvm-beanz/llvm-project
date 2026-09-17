@@ -303,6 +303,7 @@ enum SPIRVDecorationCode : uint32_t {
   SPIRVDecorationComponent = 31,
   SPIRVDecorationIndex = 32,
   SPIRVDecorationPerPrimitiveEXT = 5271,
+  SPIRVDecorationStream = 29,
 };
 
 std::optional<uint64_t> getConstMDInt(const Metadata *MD) {
@@ -341,6 +342,12 @@ struct ParsedSPIRVDecorations {
   std::optional<uint32_t> XfbBuffer;
   std::optional<uint32_t> XfbOffset;
   std::optional<uint32_t> XfbStride;
+  /// (Roadmap H173) The `Stream` decoration -- a geometry entry point's
+  /// own per-output-variable stream assignment (`SignatureElement::
+  /// Stream`, "always 0 for every non-geometry stage" default when
+  /// absent), fed by `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive`
+  /// (roadmap H39)'s own paired output-variable decoration.
+  std::optional<uint32_t> Stream;
 };
 
 ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
@@ -385,6 +392,10 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
     case SPIRVDecorationXfbStride:
       if (Arg)
         Result.XfbStride = static_cast<uint32_t>(*Arg);
+      break;
+    case SPIRVDecorationStream:
+      if (Arg)
+        Result.Stream = static_cast<uint32_t>(*Arg);
       break;
     case SPIRVDecorationNoPerspective:
       Result.NoPerspective = true;
@@ -3620,6 +3631,10 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Elt.XfbBuffer = D.XfbBuffer;
       Elt.XfbOffset = D.XfbOffset.value_or(0);
       Elt.XfbStride = D.XfbStride.value_or(0);
+      // (Roadmap H173) A geometry entry point's own `Stream` decoration
+      // (absent -- and every non-geometry stage's own element -- means
+      // stream 0, `SignatureElement::Stream`'s own documented default).
+      Elt.Stream = D.Stream.value_or(0);
 
       StageIORowShape Shape = getStageIORowShape(ValueTy);
       std::tie(Elt.ComponentType, Elt.BitWidth) =

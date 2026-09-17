@@ -408,6 +408,54 @@ TEST(CanonicalizeStageTest, MapsXfbDecorationsToTransformFeedbackCapture) {
   EXPECT_EQ(Varying.XfbStride, 32u);
 }
 
+/// (Roadmap H173) A geometry entry point's own `Stream` (29) decoration
+/// -- paired with `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive`
+/// (roadmap H39)'s own real stream operand -- maps onto
+/// `SignatureElement::Stream`, defaulting to 0 for an element that
+/// carries none (e.g. a plain single-stream geometry output, or any
+/// non-geometry stage's element): this is the plumbing
+/// `Executor.cpp`'s own `RasterizationStream`-selected-stream rasterization
+/// and transform-feedback capture (`GSOutputElementsByStream`) needs to
+/// see a real, non-zero stream from an actually-imported SPIR-V module,
+/// rather than only from a hand-constructed `EntrySignature` (as the
+/// existing `ExecutorTest.cpp` unit tests for multi-stream geometry did
+/// before this row).
+TEST(CanonicalizeStageTest, MapsStreamDecorationToGeometryOutputStream) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @stream0_var = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @stream1_var = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(8) @stream0_var
+      store <4 x float> %v, ptr addrspace(8) @stream0_var
+      store <4 x float> %v, ptr addrspace(8) @stream1_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !0 = !{!2}
+    !1 = !{!3, !4}
+    !2 = !{i32 30, i32 0}
+    !3 = !{i32 30, i32 1}
+    !4 = !{i32 29, i32 1}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &StreamZero = Sig->Elements[0];
+  ASSERT_TRUE(StreamZero.Location.has_value());
+  EXPECT_EQ(*StreamZero.Location, 0u);
+  EXPECT_EQ(StreamZero.Stream, 0u);
+
+  const SignatureElement &StreamOne = Sig->Elements[1];
+  ASSERT_TRUE(StreamOne.Location.has_value());
+  EXPECT_EQ(*StreamOne.Location, 1u);
+  EXPECT_EQ(StreamOne.Stream, 1u);
+}
+
 /// (Roadmap H101c) GLSL's own "array of block instances" syntax
 /// (`layout(xfb_buffer=0, ...) out Block { uvec4 a; } block[3];`) is
 /// GLSL/SPIR-V's own model for 3 *independently*-captured transform-
