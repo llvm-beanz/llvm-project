@@ -54,5 +54,13 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. Continue L94 recovery in deterministic order with the next non-unsupported
-   completed pipeline case, reducing only a reproduced abnormal result.
+1. **Start L94(h).** Reduce
+   `pipeline_library.interface_matching.shader_layout_component_matching.
+   vert_tesc_tese_frag.loose_var.float32.multiple_locations.
+   scalar_scalar_scalar_scalar` (first case in that family from the batch
+   log). Read how SPIR-V's `Component` decoration packs a sub-`Location`
+   offset onto an interface variable, find where the importer currently
+   drops unrecognized decorations, and decide where component offset fits
+   in the existing interface-matching model before writing code. Rough
+   estimate: half a day, since it's new decoration support, not a
+   one-line guard like L94(g).
