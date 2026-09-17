@@ -48186,3 +48186,90 @@ itself stays `VK_FALSE` (see H173, split out for that follow-on).
 needed this session -- no device-visible feature or extension surface
 changed (the new SPIR-V dialect ops and conversion patterns are
 internal-only until H173's own feature-bit flip lands).
+
+## H173(a): a real, genuinely-imported SPIR-V multi-stream geometry test, closing a second (MLIR-level) upstream gap H39 didn't reach
+
+**What was blocking this.** H173 (split out of H39, above) needed a
+real, non-hand-constructed-IR end-to-end test exercising H39's new
+`spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive` ops through the
+full pipeline before flipping `geometryStreams` et al. to `VK_TRUE`.
+
+**Attempt 1 (HLSL/`dxc`), found a hard toolchain blocker, not a FeMe
+bug.** DXC's own SPIR-V backend cannot emit real multi-stream
+geometry-shader SPIR-V for any HLSL construct tried (4 different
+shapes; all constraints from the HLSL geometry-shader spec satisfied):
+every one silently collapses to ordinary single-stream
+`OpEmitVertex`/`OpEndPrimitive`, never emitting `OpEmitStreamVertex`/
+`GeometryStreams` at all -- a real, externally-corroborated DXC
+limitation. This rules out `offload-test-suite`/`check-hlsl-feme-vk`
+(HLSL-via-`dxc`-only) as the venue for H173's own "real ... test"
+requirement, no matter what feme itself does.
+
+**Attempt 2 (real hand-authored SPIR-V via `feme/unittests/Vulkan/
+DrawTest.cpp`'s own real-Vulkan-API infra), found a second, deeper
+gap.** `glslangValidator`/`glslc` are not installed in this environment
+either, so a real multi-stream module was hand-authored directly in
+SPIR-V dialect text (the same `assembleSPIRV`-based real-Vulkan-API
+end-to-end infra `GeometryStageLayerOutputRoutesToANonMultiviewLayer`
+already used), using H39's own ops. This surfaced that
+`SignatureElement::Stream` was never actually populated from a real
+SPIR-V module's `Stream` decoration (code 29) at all: it silently
+defaulted every element to stream 0 regardless of its true decoration,
+because (a) MLIR's own upstream SPIR-V serializer/deserializer never
+round-tripped `Stream` generically the way it already does
+`XfbBuffer`/`XfbStride`/`Offset` (H21a's own precedent), and (b) feme's
+own writer (`buildStageIODecorationsAttr`) and reader
+(`ParsedSPIRVDecorations`/`parseSPIRVDecorations`,
+`CanonicalizeStage.cpp`) never forwarded/read it either.
+
+**Fix.** Added `spirv::Decoration::Stream` to the small
+"plain-integer-literal, symbol-keyed" case list in both
+`mlir/lib/Target/SPIRV/Serialization/Serializer.cpp` and
+`.../Deserialization/Deserializer.cpp`, alongside `XfbBuffer`/
+`XfbStride`/`Offset` -- confirmed via a real `mlir-translate
+-no-implicit-module -test-spirv-roundtrip` round trip, plus a new
+`mlir/test/Target/SPIRV/decorations.mlir` case. Added `addIntDecoration
+(29, Op->getAttr("stream"))` to `buildStageIODecorationsAttr`
+(`SPIRVToLLVMPatterns.cpp`) and a matching `SPIRVDecorationStream = 29`
+case to `CanonicalizeStage.cpp`'s own decoration switch, populating
+`Elt.Stream = D.Stream.value_or(0)` -- mirroring the `xfb_buffer`/
+`xfb_stride` precedent exactly, both directions.
+
+**The real end-to-end test.** `DrawTest.
+RealSPIRVRasterizationStreamSelectsNonzeroStreamOutput`: a two-stream
+real-SPIR-V geometry shader (stream 0 an unreachable decoy varying,
+stream 1 a real `Position`+color-writing full-viewport triangle via
+genuine `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive`), through a
+real `vkCreateShaderModule`/`vkCreateGraphicsPipelines` pipeline with
+`VkPipelineRasterizationStateStreamCreateInfoEXT.rasterizationStream =
+1`, confirms correct stream-1-only rasterization all the way through
+real Vulkan API calls and a real framebuffer readback -- closing the
+gap `ExecutorTest.cpp`'s own `buildTwoStreamGeometryPipeline` comment
+called out ("a real, CTS-driven multi-stream signature ... can never
+actually reach this code").
+
+**Verification.** `check-feme`: 3145/3148 passed (3 unsupported), 0
+failed (2 new unit tests + 1 new lit case added this row). `check-
+hlsl-feme-vk`: 377/663 passed, 0 unexpected results, unchanged (no
+`offload-test-suite` case can exercise this path, per the DXC
+limitation above). `mlir/test/Target/SPIRV`: 64/64 passed, 0 failed --
+the two upstream (de)serializer edits introduce no regression.
+`dEQP-VK.transform_feedback.simple.*` (7899 cases, before/after
+stashed-diff rebuild): bit-for-bit identical, 135 passed / 188 failed
+(known, pre-existing, unrelated to this row) / 7576 not supported,
+both before and after this row's changes -- confirming the new
+`Stream`-decoration plumbing changes no currently-reachable behavior
+(every real CTS case using a non-zero stream is itself gated behind
+`geometryStreams == VK_TRUE`, still false). A broader `dEQP-VK.
+transform_feedback.*` sweep (133,719 cases) reproduces the same
+pre-existing, already-documented `double free or corruption (!prev)`
+fuzz-corpus crash on `all_instance_array.22` (see the top-of-file
+summary table's own `transform_feedback` row) -- confirmed unrelated
+to this session (it is a `random_geometry` fuzz-corpus signature
+already tracked before this row's changes existed).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed this session -- no device-visible feature or extension surface
+changed yet (`geometryStreams` et al. stay `VK_FALSE`; that is H173(b),
+split out below, since real simultaneous multi-stream XFB capture in
+`Executor.cpp` does not exist yet and is a real, separate piece of
+work from this row's SPIR-V-import plumbing).
