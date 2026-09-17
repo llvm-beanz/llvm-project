@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: 3e3ed1ca-e8e0-43ee-a165-5cdf3bba2524
+model: gpt-5.6-sol
 ---
 # Initial Guidelines
 
@@ -49,20 +48,8 @@ just once at the start.
 
 # Request
 
-Can you work the H-series milestones?
+Can you perform a full run of the Vulkan CTS, re-triage all the milestones on
+the roadmap and update the VulkanCTS report.
 
-The last session suggested the next steps:
-
-1. **~1-2 days, the real remaining work, well-scoped in H173(b)'s own
-   roadmap row:** `Executor.cpp`'s transform-feedback capture only
-   ever captures the single `RasterizationStream`-selected stream --
-   real `geometryStreams` semantics need independent, simultaneous
-   per-stream XFB capture (a shader can emit to several streams in one
-   invocation, each targeting its own bound buffer, regardless of
-   which stream rasterization happens to select). Design and implement
-   that in `Executor.cpp` first -- H173(a)'s `SignatureElement::Stream`
-   reflection is necessary groundwork, not sufficient. Then raise
-   `maxTransformFeedbackStreams` (CTS's own `usedStreamId` needs ≥15),
-   flip the three feature bits in `EntryPoints.cpp`, and run a real
-   `dEQP-VK.transform_feedback.*`/`primitives_generated_query.*` CTS
-   sweep to confirm the predicted new pass count.
+In particular when re-triaging the milestones in the roadmap sort incomplete
+milestones toward the bottom of the tables even if that puts numbers out of order.
