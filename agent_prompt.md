@@ -53,18 +53,13 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~half a day to a day, real payoff (closes up to 5 failures),
-   biggest lever left, not urgent:** H124d -- `OpDPdx`/`OpDPdy`/
-   `OpFwidth` (opcodes 207-215) have the same "missing upstream MLIR
-   SPIR-V dialect op" shape H160 just closed, so the dialect-op half
-   should go about as fast (a `.td` op per opcode, or one op with a
-   `Coarse`/`Fine`/plain variant attribute -- check whether
-   mlir-tblgen's generic (de)serialization support extends this far
-   before assuming manual work is needed, the same check that saved
-   most of H160's own budget). The real size difference from H160 is
-   entirely on the CPU-backend side: these need genuine screen-space
-   derivative semantics (quad/2x2-lane-grouping), which the CPU SIMD
-   renderer has **no existing concept of at all** -- not a small
-   special-case mirror of an existing pattern the way H160's
-   `getdimensions.x` precedent was. Budget real design time for that
-   half specifically, not just the dialect-op half.
+1. **~1-2 hours, cheapest, do first:** H170's bucket 3
+   (`private_store` image-comparison mismatch). Mirror H88's own
+   channel-level pixel-reduction technique to determine whether the
+   private-variable-store path itself is broken (unrelated to
+   derivatives) or whether the derivative math produces subtly wrong
+   values in this one specific code shape. Compare against the
+   `in_function`/`fbo_float` buckets' own passing scalar cases first --
+   if plain `dfdx.private_store.float_highp` (no fwidth, no vector) still
+   fails while `dfdx.fbo_float.float_highp` fails for an unrelated
+   reason (queueSubmit), that narrows it fast.
