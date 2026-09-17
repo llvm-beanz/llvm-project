@@ -242,11 +242,48 @@ now resolves the ID once before clipping or point/line expansion, resets the
 fallback sequence for every direct draw instance, and carries the result
 through every generated triangle. The pipeline-library, fast-linked-library,
 and monolithic single-sample cases all pass with the rebuilt explicit ICD and
-`--deqp-shadercache=disable`. The immediately following
-`pipeline_library.framebuffer_attachment.no_attachments_ms` case still fails
-graphics-pipeline construction with `VK_ERROR_INITIALIZATION_FAILED` and is
-tracked separately as L94(f). This implementation changes no advertised
-feature or extension, so both Vulkan inventories remain current.
+`--deqp-shadercache=disable`. This implementation changes no advertised feature
+or extension, so both Vulkan inventories remain current.
+
+# L94(f): attachment-free multisample pipeline and sample-ID invocation
+
+## Outcome
+
+**`dEQP-VK.pipeline.pipeline_library.framebuffer_attachment.no_attachments_ms`
+now passes.**
+
+The four-sample pipeline initially failed creation with
+`VK_ERROR_INITIALIZATION_FAILED`. After fixing creation, it rendered only the
+`gl_SampleID == 0` storage-image row. Both failures are fixed by
+`501d6b1e936c`.
+
+## Investigation and change
+
+1. A render-pass subpass with no color or depth/stencil attachments has no
+   attachment sample count. `getRenderTargets()` left its normalized count at
+   one, which rejected the valid four-sample pipeline. It now derives that
+   count from `VkPipelineMultisampleStateCreateInfo::rasterizationSamples`,
+   matching the existing dynamic-rendering path.
+2. The CTS fragment shader writes a storage image indexed by
+   `gl_PrimitiveID` and `gl_SampleID`. Its multisample state leaves
+   `sampleShadingEnable` false. The executor had therefore run one invocation
+   with sample ID zero, while a shader reading `gl_SampleID` requires
+   sample-frequency invocations. Reflected `SampleIndex` now shares the
+   existing per-sample path with explicit sample shading.
+3. `GraphicsPipelineTest.AcceptsMultisampledNoAttachmentRenderPass` and
+   `ExecutorTest.SampleIndexForcesFragmentInvocationPerSample` cover the two
+   reduced causes.
+
+## Validation
+
+- Focused graphics-pipeline and executor tests pass.
+- `ninja -C build2 check-feme`: 3,159 passed; 3 unsupported.
+- The rebuilt assertions-enabled, ccache-backed explicit FeMe ICD passes the
+  exact CTS case with `--deqp-shadercache=disable`.
+
+No advertised Vulkan feature or extension changed, so
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
+current.
 
 ## Dominant ordinary failures
 
