@@ -53,12 +53,10 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **~half a day, real payoff, well-scoped:** H171 -- the vector-value
-   decomposition gap. Two candidate approaches already noted in its own
-   roadmap row: extend `widenMaskedAllocaLoad`'s existing vector-type
-   support further downstream into `widenInstruction`'s vector-value-use
-   dispatch, or add a new dedicated pattern to the "supported ... pattern"
-   list `SIMDizePass` already checks against. Start by hand-tracing one
-   `vec2_highp` case's IR the same way this session traced the scalar
-   one, to see exactly which use of the reloaded vector value trips the
-   rejection.
+1. **~half a day, well-scoped:** H170 bucket 1 --
+   `fbo_float`/`texture.float` scalar-float subcases fail with
+   `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`. Check
+   `feme::vulkan::PhysicalDevice`'s supported-format table for
+   floating-point color-attachment formats first -- if genuinely
+   unsupported, this likely has a wider blast radius across the CTS
+   than just the derivative test group.
