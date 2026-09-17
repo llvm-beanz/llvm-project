@@ -88700,3 +88700,81 @@ strikethrough check.
    trusting this session's own "0 unexpected results"/"3143/3146"
    numbers are still accurate -- they can and do drift session to
    session exactly like this session's own starting backlog did.
+
+# Session: H173(a) -- real SPIR-V multi-stream geometry test, plus two upstream/reader-side plumbing gaps found along the way
+
+**Confirmed at start:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`.
+
+**What's done, what works now:**
+
+1. `DrawTest.RealSPIRVRasterizationStreamSelectsNonzeroStreamOutput`
+   (feme/unittests/Vulkan/DrawTest.cpp): a real, hand-authored SPIR-V
+   two-stream geometry shader, through a real
+   `vkCreateShaderModule`/`vkCreateGraphicsPipelines`/`vkCmdDraw`
+   pipeline, correctly rasterizes only stream 1's own output. Run it:
+   `./tools/feme/unittests/Vulkan/FeMeVulkanTests
+   --gtest_filter='*RealSPIRVRasterizationStream*'` from `build2`.
+2. `SignatureElement::Stream` now actually gets populated from a real
+   SPIR-V module's `Stream` decoration (was previously always 0 no
+   matter what a real shader decorated) -- fixed in three places, one
+   commit each: MLIR's own SPIR-V (de)serializer, feme's writer
+   (`SPIRVToLLVMPatterns.cpp`), feme's reader (`CanonicalizeStage.cpp`).
+3. Roadmap split: `~~H173(a)~~` struck through, `H173(b)` added with
+   the real remaining scope (see below).
+
+**Why this took most of the session (the two blockers found):**
+
+- **DXC cannot emit real multi-stream geometry-shader SPIR-V at all.**
+  Tried 4 different HLSL shapes; every one silently collapses to
+  ordinary single-stream `OpEmitVertex`/`OpEndPrimitive`. Confirmed via
+  `spirv-dis` on the actual output and corroborated by external
+  reports of this exact DXC limitation. This rules out
+  `offload-test-suite`/`check-hlsl-feme-vk` as the venue for H173's
+  original "real HLSL/GLSL test" wording -- not a FeMe bug, a DXC one.
+- **`glslangValidator`/`glslc` are not installed**, so "just write it
+  in GLSL instead" wasn't a quick pivot either.
+- **Pivoted to DrawTest.cpp's real-Vulkan-API infra** (hand-authored
+  SPIR-V dialect text via `assembleSPIRV`, same technique
+  `GeometryStageLayerOutputRoutesToANonMultiviewLayer` already uses).
+  This surfaced the *second* blocker: `Stream` decorations were
+  silently dropped on any real serialize/deserialize round trip
+  (MLIR-level bug, not feme-specific) and never read by feme's own
+  signature reflection even when present. Both fixed this session.
+
+**Verification (all done, no drama):**
+
+- `check-feme`: 3145/3148 passed (3 unsupported), 0 failed.
+- `check-hlsl-feme-vk`: 377/663 passed, 0 unexpected, unchanged.
+- `mlir/test/Target/SPIRV`: 64/64 passed.
+- CTS: stashed my changes, rebuilt `libfeme_vulkan.so` from the prior
+  commit, ran `dEQP-VK.transform_feedback.simple.*` (7899 cases) --
+  135 passed / 188 failed / 7576 not supported. Un-stashed, rebuilt,
+  re-ran: identical numbers, bit for bit. A broader
+  `transform_feedback.*` sweep (133,719 cases) hits the same,
+  already-documented `all_instance_array` fuzz-corpus
+  `double free or corruption` crash the top-of-file summary table
+  already tracks -- confirmed pre-existing, not caused by this
+  session.
+
+**Next steps, ranked:**
+
+1. **~1-2 days, the real remaining work, well-scoped in H173(b)'s own
+   roadmap row:** `Executor.cpp`'s transform-feedback capture only
+   ever captures the single `RasterizationStream`-selected stream --
+   real `geometryStreams` semantics need independent, simultaneous
+   per-stream XFB capture (a shader can emit to several streams in one
+   invocation, each targeting its own bound buffer, regardless of
+   which stream rasterization happens to select). Design and implement
+   that in `Executor.cpp` first -- H173(a)'s `SignatureElement::Stream`
+   reflection is necessary groundwork, not sufficient. Then raise
+   `maxTransformFeedbackStreams` (CTS's own `usedStreamId` needs ≥15),
+   flip the three feature bits in `EntryPoints.cpp`, and run a real
+   `dEQP-VK.transform_feedback.*`/`primitives_generated_query.*` CTS
+   sweep to confirm the predicted new pass count.
+2. **~15 minutes, do first regardless of what's picked:** re-run
+   `check-hlsl-feme-vk`/`check-feme` fresh before trusting this
+   session's own pass counts are still accurate -- they drift.
+3. **Large, multi-day, still on the shelf:** the ~34 open H33-H68
+   dynamic-rendering/format/pipeline-library/sparse-resources/
+   protected-memory/tessellation rows -- none are quick wins.
