@@ -1132,6 +1132,36 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // `load` already does (see `widenMaskedLoad`'s own vector case),
         // rather than one illegal `<W x <N x T>>` `llvm.masked.gather`.
         IsSupportedProducer = true;
+      } else if (feme::StageOpKind StageKind;
+                 isStageOpCall(*CI, &StageKind) &&
+                 (StageKind == feme::StageOpKind::DerivativeXFine ||
+                  StageKind == feme::StageOpKind::DerivativeYFine ||
+                  StageKind == feme::StageOpKind::DerivativeXCoarse ||
+                  StageKind == feme::StageOpKind::DerivativeYCoarse ||
+                  StageKind == feme::StageOpKind::QuadRead)) {
+        // (Roadmap H171) A `dFdx`/`dFdy`/`fwidth`-family derivative, or a
+        // `subgroupQuadSwap*`/`subgroupQuadBroadcast`-style quad-read,
+        // applied to a whole GLSL/HLSL vector (e.g. `dFdx(vec2 coord)`) --
+        // confirmed by reducing a real
+        // `dEQP-VK.glsl.derivate.dfdx.private_store.vec2_highp` failure
+        // down to its exact IR shape. Both operate purely component-wise
+        // (each component's own derivative/gather never depends on its
+        // siblings), so `widenStageOp`'s own vector-result branch
+        // decomposes this into `N` separate per-component stage-op calls
+        // exactly like ordinary elementwise arithmetic
+        // (`widenVectorElementwise`), rather than building the illegal
+        // `<W x <N x T>>` nested-vector result a naive
+        // `FixedVectorType::get(CI.getType(), WaveSize)` would produce.
+        // Deliberately *not* extended to every other vector-capable
+        // `StageOpKind` (e.g. a hypothetical vector-typed
+        // `TaskPayloadLoad`) here: those would need genuine per-component
+        // *address* arithmetic (a distinct byte offset per component),
+        // not just a shared, unmodified operand broadcast the way
+        // `Derivative`'s lone operand or `QuadRead`'s constant direction
+        // operand both already get -- unaudited, so left unsupported
+        // until a real failing case demonstrates the actual addressing
+        // rule needed.
+        IsSupportedProducer = true;
       } else if (Function *Callee = CI->getCalledFunction()) {
         // Roadmap H6g-b-a-i-a-i-b: a vector-typed, homogeneous "trivially
         // vectorizable" intrinsic call (`llvm.minnum`/`llvm.maxnum`/
@@ -1235,6 +1265,24 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // exact IR shape.
         std::optional<MatchedImageCall> ImgMatched = matchImageCall(*UserCI);
         if (ImgMatched && ImgMatched->Texel == &I)
+          continue;
+        // (Roadmap H171) `I`'s own vector-typed value operand of a
+        // `Derivative{X,Y}{Fine,Coarse}`/`QuadRead` stage op call (e.g.
+        // `dFdx(vec2 coord)`'s own `coord` argument) -- the producer side
+        // of this same call's vector-typed *result* is already validated
+        // above (`isStageOpCall`'s dedicated branch); its argument is
+        // decomposed alongside the result by `widenStageOp`'s own
+        // vector-result branch (see that function's comment), exactly
+        // like a matched resource-store call's stored-value operand just
+        // above.
+        if (feme::StageOpKind StageKind;
+            isStageOpCall(*UserCI, &StageKind) &&
+            (StageKind == feme::StageOpKind::DerivativeXFine ||
+             StageKind == feme::StageOpKind::DerivativeYFine ||
+             StageKind == feme::StageOpKind::DerivativeXCoarse ||
+             StageKind == feme::StageOpKind::DerivativeYCoarse ||
+             StageKind == feme::StageOpKind::QuadRead) &&
+            UserCI->getArgOperand(0) == &I)
           continue;
         // A `feme.cpu.masked.store.*` call (see MaskIntrinsics.h) is
         // `feme::cpu::LinearizePass`'s masked form of an ordinary `store`
@@ -2072,12 +2120,67 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
   // any other operand rather than forced scalar.
   bool FirstTwoOperandsAreConstantIDs =
       Kind == feme::StageOpKind::SubpassLoad;
+  auto KeepOperandScalar = [&](unsigned I) {
+    return (I == 0 && (FirstOperandIsElementID ||
+                       FirstOperandIsConstantTaskPayloadOffset)) ||
+           (I <= 1 && FirstTwoOperandsAreConstantIDs);
+  };
+
+  // (Roadmap H171) `Derivative{X,Y}{Fine,Coarse}`/`QuadRead` are the only
+  // `StageOpKind`s whose result may itself be a whole GLSL/HLSL vector
+  // (e.g. `dFdx(vec2 coord)`) rather than one already-scalarized component
+  // -- `checkVectorDecompositionSupported` only ever accepts these two
+  // kinds as a vector-typed producer (see its own comment for why the
+  // others are excluded). A plain `FixedVectorType::get(CI.getType(),
+  // WaveSize)` below would build an illegal `<W x <N x T>>` nested-vector
+  // callee/result, so decompose into `N` independent per-component stage
+  // op calls first, exactly like `widenVectorElementwise` already does
+  // for ordinary arithmetic: each component's own derivative/gather is
+  // fully independent of its siblings, so no cross-component addressing
+  // is needed, unlike a hypothetical vector-typed `TaskPayloadLoad`. A
+  // vector-typed operand (the value being derived/gathered) decomposes
+  // alongside the result, one `getVectorComponents` component per call; a
+  // scalar operand (e.g. `QuadRead`'s own compile-time-constant
+  // direction) is shared, unchanged, by every component.
+  if (auto *VecTy = dyn_cast<FixedVectorType>(CI.getType())) {
+    Type *WideComponentTy =
+        FixedVectorType::get(VecTy->getElementType(), WaveSize);
+    SmallVector<SmallVector<Value *, 4>, 2> ArgComponents;
+    for (unsigned I = 0, E = CI.arg_size(); I != E; ++I) {
+      Value *Operand = CI.getArgOperand(I);
+      if (KeepOperandScalar(I))
+        ArgComponents.push_back({Operand});
+      else if (Operand->getType()->isVectorTy())
+        ArgComponents.push_back(getVectorComponents(Operand, Builder));
+      else
+        ArgComponents.push_back({getWidened(Operand, Builder)});
+    }
+
+    SmallVector<Value *, 4> WideResults;
+    for (unsigned Idx = 0, End = VecTy->getNumElements(); Idx != End; ++Idx) {
+      SmallVector<Value *, 8> ComponentArgs;
+      SmallVector<Type *, 8> ComponentArgTys;
+      for (const SmallVector<Value *, 4> &Entries : ArgComponents) {
+        // A shared (scalar-kept or non-decomposed) operand supplies its
+        // one entry unchanged to every component; a decomposed vector
+        // operand supplies one distinct entry per component.
+        Value *Arg = Entries.size() == 1 ? Entries[0] : Entries[Idx];
+        ComponentArgs.push_back(Arg);
+        ComponentArgTys.push_back(Arg->getType());
+      }
+      FunctionCallee ComponentCallee =
+          getOrInsertStageOp(*M, Kind, WideComponentTy, ComponentArgTys);
+      WideResults.push_back(
+          Builder.CreateCall(ComponentCallee, ComponentArgs, CI.getName()));
+    }
+    WidenedVectorComponents[&CI] = std::move(WideResults);
+    ToErase.push_back(&CI);
+    return;
+  }
+
   for (unsigned I = 0, E = CI.arg_size(); I != E; ++I) {
-    bool KeepScalar = (I == 0 && (FirstOperandIsElementID ||
-                                 FirstOperandIsConstantTaskPayloadOffset)) ||
-                      (I <= 1 && FirstTwoOperandsAreConstantIDs);
-    Value *Arg =
-        KeepScalar ? CI.getArgOperand(I) : getWidened(CI.getArgOperand(I), Builder);
+    Value *Arg = KeepOperandScalar(I) ? CI.getArgOperand(I)
+                                     : getWidened(CI.getArgOperand(I), Builder);
     WideArgs.push_back(Arg);
     WideArgTys.push_back(Arg->getType());
   }
