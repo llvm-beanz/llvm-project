@@ -1,5 +1,6 @@
 ---
-model: gpt-5.6-sol
+model: gpt-5.6-terra
+resume: 43c1ff2f-f199-452e-bc9a-5d9fe09189c1
 ---
 # Initial Guidelines
 
@@ -54,6 +55,6 @@ file, even if you don't take any other action.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Continue L94 recovery in order.** Resume after the
-   `two_draws_static.vertex_input_*` capability-gated cases and reduce the
-   first reproduced abnormal pipeline result.
+1. **Reduce L94(f).** Start at
+   `pipeline_library.framebuffer_attachment.no_attachments_ms` and identify why
+   the four-sample no-color-attachment pipeline is rejected before drawing.
