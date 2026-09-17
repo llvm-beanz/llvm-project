@@ -88083,3 +88083,123 @@ matrix happens to exercise:
 **Cleanup done:** removed all `/tmp/h124d*`, `/tmp/deriv_test*.mlir`,
 `/tmp/deriv_test2.spv`, `/tmp/derivate*.log`, `/tmp/derivate.qpa` scratch
 files before ending the session.
+
+# Session: H170 bucket 3 fixed -- SIMDize per-lane storage miscompile for uniform-store/divergent-value
+
+## Do this first (2 min)
+
+`export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+and same for `VK_DRIVER_FILES`, then `vulkaninfo --summary | grep
+deviceName` -- confirm `FeMe CPU Vulkan Device`. Do this every session,
+container's system default is Mesa lavapipe.
+
+## What's done
+
+Assigned task: triage H170 bucket 3 (`private_store` scalar-float
+"Image comparison failed", no diagnostic). This turned into a full
+root-cause-and-fix, not just a triage.
+
+**The bug, in one sentence:** any GLSL file-scope (`Private`-storage)
+variable or local, written with a per-lane-*divergent* value under
+*uniform* control flow (no branch involved, e.g. `x = someInput;` at
+the top of a shader), had every lane's write silently overwrite the
+same one scalar/vector slot -- only the last lane's value survived,
+broadcast to all lanes on read. A real miscompile, not subtle math.
+
+**Root cause:** `SIMDizePass`'s `collectMaskedAllocas()` only flagged
+an alloca for real per-lane storage when reached via a
+`feme.cpu.masked.load/store` call, which `LinearizePass` only emits
+inside genuinely *divergent control flow*. A plain unconditional store
+was never on its radar at all, regardless of whether it wrote a value
+that was itself divergent.
+
+**Three-part fix, three commits:**
+1. `collectMaskedAllocas` (`SIMDize.cpp`) now also flags any alloca
+   reached by a plain `StoreInst` whose *value* is
+   `UI.isDivergentAtDef` -- fixes local allocas' store side.
+2. New `widenMaskedAllocaLoad` (`SIMDize.cpp`) fixes the matching
+   read-side gap: a plain load of a widened alloca now reads each
+   lane's own address instead of broadcasting lane 0.
+3. New `LocalizePrivateGlobalsPass` converts eligible SPIR-V `Private`
+   globals into local allocas before Linearize/SIMDize run, since parts
+   1/2 alone never recognize a `GlobalVariable`, only an `AllocaInst`.
+
+3 new lit tests, all passing. `check-feme`: 3131/3134 (3 unsupported),
+zero regressions.
+
+## What now works
+
+- `dEQP-VK.glsl.derivate.{dfdx,dfdy,fwidth}.private_store.
+  {float_highp,float_mediump}` (6 cases): fail -> pass.
+- Regression sweep clean: `dEQP-VK.compute.pipeline.*` (20,502 cases)
+  still 654/29, matches the established baseline exactly.
+  `check-hlsl-feme-vk`: still 376 passed, 1 pre-existing XPASS flake
+  (`array_of_matrices.test`), no regressions.
+
+## The one thing worth remembering from this session
+
+**A "no diagnostic at all, image comparison just silently mismatches"
+CTS failure is the single most useful shape to get, because it's the
+one most likely to be a real miscompile rather than a missing feature
+or a plumbing gap** -- every other H170 bucket produces some kind of
+error message (`VK_ERROR_INITIALIZATION_FAILED`, `JIT session error`).
+This one time, the "cheapest to triage" heuristic (bucket 3 was chosen
+specifically because it reaches real pixel output, unlike buckets 1/2)
+also turned out to be the highest-value one: a general SIMDize gap that
+almost certainly affects other, not-yet-run parts of the CTS surface
+too (any shader with a uniformly-reached, divergently-valued local or
+file-scope variable), not just this one test group.
+
+## Vector-typed subcases surfaced a second, narrower gap (H171, new)
+
+`vec2/vec3/vec4_{highp,mediump}` subcases of the same `private_store`
+bucket (and its `fwidthcoarse`/`fwidthfine` siblings, 30 cases total)
+still fail -- but now with a clean `feme-cpu-simdize` diagnostic
+("divergent vector value ... component decomposition is not yet
+supported") instead of a silent miscompile. This is deliberately
+out-of-scope for this fix (parts 1-3 only widen *storage*, not the
+downstream *use* of a vector value loaded back from that storage) and
+is filed as H171 for a future session.
+
+## Honest accounting of what is left
+
+- H170 buckets (1) `fbo_float`/`texture.float` queueSubmit failures and
+  (2) `in_function` JIT-link failures: untouched this session, still
+  open, still filed in the roadmap under H170's own row.
+- H171 (new): the vector-value-use gap above. Not triaged beyond
+  confirming the diagnostic is clean and self-explaining, not a crash.
+- Did not go looking for other places in the codebase that might hit
+  the same uniform-store/divergent-value pattern outside this test
+  group -- the fix is general (any shader hitting this shape benefits),
+  but I didn't specifically hunt for other currently-passing-for-the-
+  wrong-reason or currently-failing-for-this-same-reason CTS cases
+  beyond the derivative group itself.
+
+## Suggested next steps, ranked
+
+1. **~half a day, real payoff, well-scoped:** H171 -- the vector-value
+   decomposition gap. Two candidate approaches already noted in its own
+   roadmap row: extend `widenMaskedAllocaLoad`'s existing vector-type
+   support further downstream into `widenInstruction`'s vector-value-use
+   dispatch, or add a new dedicated pattern to the "supported ... pattern"
+   list `SIMDizePass` already checks against. Start by hand-tracing one
+   `vec2_highp` case's IR the same way this session traced the scalar
+   one, to see exactly which use of the reloaded vector value trips the
+   rejection.
+2. **~half a day:** H170 bucket 1 (`fbo_float`/`texture.float`
+   queueSubmit failures). Check `feme::vulkan::PhysicalDevice`'s
+   supported-format table for float color-attachment formats -- if
+   genuinely unsupported, this likely has a wider blast radius across
+   the CTS than just this test group.
+3. **~a few hours:** H170 bucket 2 (`in_function` JIT-link failure,
+   `Symbols not found: [ spirv_var_13 ]`). Reduce to a standalone
+   `dxc`+`feme-opt` repro of a GLSL-style helper-function call before
+   touching JIT linkage code.
+4. **Still not done, low priority, now observed across 5+ sessions:**
+   the `array_of_matrices.test` XPASS flake. A 15-minute check of its
+   own `XFAIL:` lit-config lines would likely let it finally be removed
+   from every future session's "noted but not investigated" list.
+
+**Cleanup done:** removed all `/tmp/private_store*`, `/tmp/repro*.ll`,
+`/tmp/derivate_full.qpa`, `/tmp/x.qpa`, `/tmp/compute_pipeline_regress.qpa`
+scratch files before ending the session.
