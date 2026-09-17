@@ -4903,6 +4903,110 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(RowValuesByElement[2], (SmallVector<uint64_t, 2>{5}));
 }
 
+/// (Roadmap L94(i)) A single-member `Block` whose one real member is
+/// itself an array of a genuine multi-member nested struct -- e.g.
+/// `struct TestStruct { int x; int y; }; layout(location=0) out block {
+/// TestStruct s[3]; } blk;`, `dEQP-VK.pipeline.pipeline_library.
+/// interface_matching.vector_length.*member_of_array_of_structures_
+/// in_block.*`'s own shape -- confirmed via a standalone
+/// `feme-translate --spirv-to-llvmir` repro of that CTS family's own
+/// fragment-consuming vertex shader. Unlike roadmap H115's own `S
+/// blockSa[2]; float trailing;` (a *two*-member block, `TakeBlockPath`
+/// true), a single-member block's one array-of-struct member never
+/// reached `TakeBlockPath` at all (`PeekedMemberDecorations.size() ==
+/// 1`, no `BuiltIn`): `addElements`' plain path called `addElement`
+/// directly on the whole peeled `[3 x TestStruct]` member type, and
+/// `getStageIORowShape` -- with no single-member wrapper or array level
+/// left to peel once it reached `TestStruct` itself (2 real members, not
+/// 1) -- silently treated it as one opaque scalar `ComponentCount=1`
+/// leaf, undersizing the `SignatureElement` relative to what the
+/// compiled stores actually write (`ValidateStage.cpp`'s own "component
+/// N is out of range", or, past that, heap corruption in `StageStorage`
+/// itself). Fixed by teaching `addElements`' plain path to recognize
+/// this same `peelSingleMemberStruct`-recovered content is a genuine
+/// multi-member nested struct (optionally array-wrapped) and route it
+/// through the already-existing `addStageIOStructMembers` instead, and
+/// teaching `resolveOffsetWithinElement`'s access-side dispatch to
+/// recognize the resulting peeled `ElemTy` and resolve through
+/// `resolveNestedStageIOField` directly (this shape has no block-array-
+/// instance folding to undo first, unlike `AllowBlockArrayInstanceFold`'s
+/// own `Patch`-array-of-whole-block-instances case).
+TEST(CanonicalizeStageTest,
+     RewritesSingleMemberBlockArrayOfGenuineMultiMemberNestedStruct) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global { [3 x { i32, i32 }] }, !spirv.Decorations !2, !feme.spirv.MemberDecorations !6
+
+    define void @main() #0 {
+      store i32 10, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 0), align 4
+      store i32 20, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 4), align 4
+      store i32 11, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 8), align 4
+      store i32 21, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 12), align 4
+      store i32 12, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 16), align 4
+      store i32 22, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 20), align 4
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+
+    !0 = !{i32 30, i32 0}
+    !1 = !{!0}
+    !2 = !{!0}
+    !3 = !{i32 35, i32 0}
+    !4 = !{!3}
+    !5 = !{i32 0, !4}
+    !6 = !{!5}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw load/store survives against the array-of-struct member's own
+  // two real leaf members (`x`/`y`).
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Two elements: `s`'s own `x` (RowCount 3, one row per array instance)
+  // and `y` (RowCount 3) -- not one bogus, undersized element for the
+  // whole array-of-struct member.
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  DenseMap<uint32_t, DenseMap<uint32_t, uint64_t>> ValuesByElementIDAndRow;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    uint32_t ElementID =
+        getStageOpConstantOperand(*CI, /*Offset=*/0).value_or(~0u);
+    uint32_t Row = getStageOpConstantOperand(*CI, /*Offset=*/1).value_or(~0u);
+    uint64_t Value = 0;
+    if (auto *CInt = dyn_cast<ConstantInt>(CI->getArgOperand(3)))
+      Value = CInt->getZExtValue();
+    ValuesByElementIDAndRow[ElementID][Row] = Value;
+  }
+  // Exactly 2 distinct `ElementID`s used -- confirms `x`'s own three
+  // array instances (values 10, 11, 12) and `y`'s own three array
+  // instances (values 20, 21, 22) each landed on their own distinct,
+  // non-colliding `ElementID`, instead of the pre-fix bug's single,
+  // undersized shared element.
+  ASSERT_EQ(ValuesByElementIDAndRow.size(), 2u);
+  SmallVector<SmallVector<uint64_t, 3>, 2> RowValuesByElement;
+  for (const auto &KV : ValuesByElementIDAndRow) {
+    SmallVector<uint64_t, 3> RowValues;
+    for (const auto &RowKV : KV.second)
+      RowValues.push_back(RowKV.second);
+    llvm::sort(RowValues);
+    RowValuesByElement.push_back(std::move(RowValues));
+  }
+  llvm::sort(RowValuesByElement);
+  ASSERT_EQ(RowValuesByElement.size(), 2u);
+  EXPECT_EQ(RowValuesByElement[0], (SmallVector<uint64_t, 3>{10, 11, 12}));
+  EXPECT_EQ(RowValuesByElement[1], (SmallVector<uint64_t, 3>{20, 21, 22}));
+}
+
 /// Whether \p V transitively (through any chain of `zext`/`mul`/`add`)
 /// uses \p Arg as one of its leaf operands -- used below to confirm
 /// `combineDynamicRowTerms`'s own materialized `Row` value genuinely

@@ -3022,6 +3022,31 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   if (ST) {
     if (ValueTy == ST)
       return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
+  } else if (isGenuineMultiMemberNestedStruct(ElemTy)) {
+    // (Roadmap L94(i)) `ElemTy` may be a plain array of a genuine
+    // multi-member nested struct with *no* block-array-instance folding
+    // at all involved: `addElements`' own single-member-`Block` path
+    // (`TakeBlockPath` false, since there is only one top-level block
+    // member) reaches `addStageIOStructMembers` whenever that one real
+    // member is itself such an array (e.g. `struct TestStruct { vec4 a;
+    // ivec3 b; }; layout(location=0) out block { TestStruct s[3]; }
+    // blk;`'s own `s` member, `dEQP-VK.pipeline.pipeline_library.
+    // interface_matching.vector_length.*member_of_array_of_structures_
+    // in_block.*`'s own shape), unlike the `Patch`-array-of-whole-block-
+    // instances shape the `AllowBlockArrayInstanceFold` branch below
+    // models. Each leaf field there already got its own per-instance
+    // `RowCount` widened to include this array dimension (roadmap H115's
+    // own `addStageIOStructMembers` re-wrapping), so `IDs` here needs no
+    // `BlockInstance` splitting first: `resolveNestedStageIOField` (the
+    // exact recursion that widening's own doc comment points at) walks
+    // `ElemTy`'s array-then-struct levels and this ByteOffset directly
+    // into the right leaf `ElementID`/`Row`/`Component` in one call.
+    if (ValueTy == ElemTy)
+      return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
+    NestedStageIOField Nested =
+        resolveNestedStageIOField(ElemTy, ByteOffset, ValueTy, DL);
+    return StageIOAccess{IDs.slice(Nested.IDStart, 1), AsConstant(Nested.Row),
+                         AsConstant(Nested.Component), Vertex, IsOutput};
   } else {
     // (Roadmap H117/H118) `ElemTy` may also be an outer *array* of a
     // genuine multi-member `Block`-decorated struct -- glslang's "array
@@ -4303,9 +4328,49 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             ValueTy = ArrTy->getElementType();
           RowCountIsVertexArray = false;
         }
-        addElement(GV, AddrSpace, D, ValueTy,
-                   /*RowCountIsVertexArray=*/RowCountIsVertexArray,
-                   /*XfbBufferArrayStride=*/XfbBufferArrayStride);
+        // (Roadmap L94(i)) A single-member `Block` (`PeekedST`/`MemberMD`
+        // above, `TakeBlockPath` false since there is only one top-level
+        // member) whose one real member is itself a genuine multi-member
+        // nested struct -- optionally wrapped in one or more array
+        // dimensions, e.g. `struct TestStruct { vec4 a; ivec3 b; };
+        // layout(location=0) out block { TestStruct s[3]; } blk;`'s own
+        // `structArrayInBlock` member (`dEQP-VK.pipeline.pipeline_
+        // library.interface_matching.vector_length.*member_of_array_of_
+        // structures_in_block.*`'s own shape) -- cannot become one
+        // `SignatureElement` any more than `TakeBlockPath`'s own
+        // multi-member case can: `TestStruct`'s two real fields have
+        // distinct scalar types no single `ComponentType`/`ComponentCount`
+        // pair can hold. Left on the plain `addElement` path below (this
+        // gap's own original bug), `getStageIORowShape`'s `peelSingleMember
+        // Struct`/`ArrayType` peeling ran out of both single-member
+        // wrappers and array levels once it reached `TestStruct` itself (2
+        // real members, not 1), so it silently treated the whole struct as
+        // an opaque scalar `ComponentCount=1` leaf -- one`SignatureElement`
+        // undersized relative to what the compiled stores into it actually
+        // write, surfaced as `ValidateStage.cpp`'s own "component N is out
+        // of range" (or, once past that, `StageStorage`-level corruption).
+        // `peelSingleMemberStruct` recovers the same real content
+        // `PeekedST`/`PeekedBlockTy` above already peeled through single-
+        // member wrapping to find (re-derived here rather than reusing
+        // `PeekedBlockTy` directly, since that variable is only set when
+        // `MemberMD` names a `Block`-decorated struct at all, whereas this
+        // check must apply to a plain, non-`Block` single-member wrapper
+        // too); `addStageIOStructMembers` (this same milestone's own
+        // pre-existing per-member decomposition, already used by
+        // `TakeBlockPath`'s per-member loop above) is reused unchanged: it
+        // already understands the array-of-struct wrapping this shape's
+        // own outer `[3 x TestStruct]` dimension needs (Roadmap H115).
+        Type *PeeledContent = peelSingleMemberStruct(ValueTy);
+        if (!RowCountIsVertexArray && XfbBufferArrayStride == 0 &&
+            isGenuineMultiMemberNestedStruct(PeeledContent)) {
+          uint32_t NestedLocation = D.Location.value_or(0);
+          addStageIOStructMembers(addElement, GV, AddrSpace, D, PeeledContent,
+                                  GV->getDataLayout(), NestedLocation);
+        } else {
+          addElement(GV, AddrSpace, D, ValueTy,
+                     /*RowCountIsVertexArray=*/RowCountIsVertexArray,
+                     /*XfbBufferArrayStride=*/XfbBufferArrayStride);
+        }
       }
     };
     addElements(InputGlobals);
