@@ -53,8 +53,14 @@ Can you work the H-series milestones?
 
 The last session suggested the next steps:
 
-1. **`check-hlsl-feme-vk` build directory status** -- flagged in a
-   previous session's own notes as needing a from-scratch setup; this
-   session found it already configured and working (376/260/26/1), so
-   this may already be resolved, but worth a quick double-check next
-   session since the prior note said otherwise.
+1. **~1 day, real payoff, well-scoped:** H173 -- write a real
+   multi-stream GLSL/HLSL geometry shader test (stream > 0,
+   `EmitStreamVertex`/`EndStreamPrimitive`), run it through the full
+   `feme-vk` pipeline to confirm actual per-stream output correctness
+   (not just the conversion-pattern-level lit coverage this session
+   added), then flip `geometryStreams`/
+   `transformFeedbackRasterizationStreamSelect`/
+   `primitivesGeneratedQueryWithNonZeroStreams` to `VK_TRUE` and raise
+   `maxTransformFeedbackStreams` above its current spec-floor `1`.
+   Finish with a `dEQP-VK.transform_feedback.*` CTS re-run to confirm
+   the predicted new pass count.
