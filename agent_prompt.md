@@ -52,7 +52,6 @@ just once at the start.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Reduce the image mismatch.** Capture the exact output/expected images
-   from `pipeline_library.extended_dynamic_state.mesh_shader.after_pipelines.depth_bias_disable`
-   and isolate whether the remaining difference is mesh stage output, depth
-   bias application, or graphics-pipeline-library state merge.
+1. **Continue L94 recovery in deterministic order.** Reduce the next
+   completed abnormal pipeline case; keep each root cause and its CTS
+   reproduction separate from this graphics-pipeline-library state fix.
