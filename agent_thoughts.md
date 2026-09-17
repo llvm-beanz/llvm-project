@@ -89515,3 +89515,84 @@ instead of chasing them here.
    consumer's storage) rather than a separate bug, so fixing part 1 first
    might fix or at least change part 2's signature before investigating it
    standalone.
+
+# L94(i): vector-length narrowing rejection and array-of-struct block crash
+
+Confirmed device at session start: `FeMe CPU Vulkan Device`. Working tree
+was clean/intact this time — no repeat of the lost-work incident.
+
+## What's done (about 3 hours)
+
+1. **Commit 1** (`2de2b40d4604`) — part 1: relaxed the exact
+   `ComponentCount` equality check to `>` in three independent call sites
+   (`StageLink.cpp`'s `linkStageElements`, `GraphicsPipeline.cpp`'s
+   `validateStageInterfaces`, `Executor.cpp`'s runtime varying-linking
+   loop). `VK_KHR_maintenance4` (already core in feme, roadmap E4)
+   requires a consumer be allowed fewer vector components than its
+   producer. `FEME_VULKAN_LOG_CREATION_ERRORS=1` was the key to seeing the
+   real diagnostic behind the bare `VK_ERROR_INITIALIZATION_FAILED`. Two
+   new tests, both confirmed to fail without the fix via
+   `git stash`/rebuild/test/pop.
+2. **Verified part 1 via CTS**: `vector_length.*loose_variable*` (162
+   cases): 162/162 pass.
+3. **Commit 2** (`351457f7373f`) — part 2: root-caused and fixed the
+   `member_of_array_of_structures_in_block` heap-corruption crash. A
+   single-member `Block` whose one member is itself an array of a genuine
+   multi-member struct never reached `addStageIOStructMembers`
+   (`TakeBlockPath` only triggers for a block with *more than one*
+   top-level member). Fixed both sides in `CanonicalizeStage.cpp`:
+   construction (`addElements`' plain path, routes through
+   `addStageIOStructMembers` after peeling) and access resolution
+   (`resolveOffsetWithinElement`, new branch using
+   `resolveNestedStageIOField`). New test:
+   `CanonicalizeStageTest.RewritesSingleMemberBlockArrayOfGenuineMultiMemberNestedStruct`,
+   confirmed to fail without the fix (`Sig->Elements.size()` was 1, not
+   2).
+4. **Commit 3** (`b9f1fed1b67d`) — docs: `Roadmap.md` L94(i) strikethrough
+   plus a new `L94(j)` entry for the remaining scoped-out gap;
+   `VulkanCTSReport.md` L94(i) section covering both parts.
+
+## Verified
+
+- `ninja -C build2 check-feme` after both code commits: 3,165 → 3,166
+  passed, 0 failed, 3 unsupported throughout.
+- `vector_length.*loose_variable*` (162 cases): 162 pass, 0 fail.
+- `vector_length.*member_of_array_of_structures_in_block*` (162 cases):
+  72 pass, 90 fail, **0 crash** (was crashing before this session).
+- Full `vector_length.*` (972 cases): 720 pass, 252 fail, 0 not-supported,
+  **0 crash** (the prior session's broader sweep had stopped at 688 cases
+  on exactly this crash).
+
+No advertised Vulkan feature/extension changed, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` untouched —
+correctness fix only.
+
+## What I did NOT do, and why
+
+The 252 remaining `vector_length.*` failures (90
+`member_of_array_of_structures_in_block` + 18 sibling non-`Block`
+`member_of_array_of_structures`) are all `Fail (Fail)` rendering
+mismatches, not crashes, and all involve combining the array-of-struct
+shape with a per-vertex/per-control-point-arrayed stage-IO dimension
+(tesc/geom stages) — a combination the construction-side fix deliberately
+excludes (`!RowCountIsVertexArray` guard) rather than risk an
+under-tested interaction in the same change. Confirmed via an
+`out_vec4_in_vec4` repro (same vector length, no length mismatch at all)
+that this is unrelated to L94(i)'s own scope — a pre-existing
+struct/array-modeling gap this family happens to expose. Filed as
+**L94(j)** instead of extending this fix further.
+
+## Next steps
+
+1. **Start L94(j).** Reduce the smallest failing case in that bucket —
+   likely `vector_length.out_vec4_in_vec4_member_of_array_of_structures_
+   vert_tesc_out_tese_in_frag` (the plain non-`Block` variant, to isolate
+   the per-control-point-array interaction from the block-decomposition
+   machinery already fixed this session). Rough estimate: half a day —
+   likely needs threading `RowCountIsVertexArray`'s outer-dimension folding
+   through `addStageIOStructMembers`'s own per-leaf `RowCount` widening
+   (roadmap H115), rather than a new code path.
+2. **Re-run the broader `pipeline_library.interface_matching.*` sweep**
+   beyond just `vector_length.*` (the prior session's sweep stopped at 688
+   cases on the now-fixed crash; a full re-sweep hasn't been done yet this
+   session) to confirm no further crashes remain in that larger group.
