@@ -6348,6 +6348,60 @@ public:
   }
 };
 
+/// Converts `spirv.EmitStreamVertex` (GLSL geometry shader's multi-stream
+/// `EmitStreamVertex(stream)`) into a call to
+/// `feme.stage.stream.emit(stream)`, mirroring
+/// `EmitVertexConversionPattern` above exactly except that the stream
+/// operand is the op's own real, per-invocation-constant `stream` value
+/// (per the SPIR-V spec, always the result of an `OpConstant` of scalar
+/// integer type) rather than a hardcoded `0` -- `feme::cpu::
+/// lowerGeometryStreamEmit` (GeometryWrapper.cpp, roadmap H21e) already
+/// supports an arbitrary per-lane-constant `StreamSlot`, so no further
+/// runtime changes are needed to route a real, non-zero stream through.
+class EmitStreamVertexConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::EmitStreamVertexOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::EmitStreamVertexOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::EmitStreamVertexOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee =
+        getOrInsertStreamOpFunc(Rewriter, Op->getParentOfType<mlir::ModuleOp>(),
+                                "feme.stage.stream.emit");
+    mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
+                               mlir::ValueRange{Adaptor.getStream()});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.EndStreamPrimitive` into a call to
+/// `feme.stage.stream.cut(stream)`, mirroring
+/// `EmitStreamVertexConversionPattern` above exactly except for the callee
+/// name and the `feme::cpu::lowerGeometryStreamCut` consumer it targets.
+class EndStreamPrimitiveConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::EndStreamPrimitiveOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::EndStreamPrimitiveOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::EndStreamPrimitiveOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee =
+        getOrInsertStreamOpFunc(Rewriter, Op->getParentOfType<mlir::ModuleOp>(),
+                                "feme.stage.stream.cut");
+    mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
+                               mlir::ValueRange{Adaptor.getStream()});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Declares (or finds) the `feme.stage.set_mesh_outputs` function: `(i32
 /// vertex_count, i32 primitive_count) -> void`, matching
 /// `feme::StageOpKind::SetMeshOutputs`'s shape (StageOps.h) -- an ordinary
@@ -11273,6 +11327,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BallotBitExtractConversionPattern, BallotBitCountConversionPattern,
       BallotFindLSBConversionPattern, BallotFindMSBConversionPattern,
       EmitVertexConversionPattern, EndPrimitiveConversionPattern,
+      EmitStreamVertexConversionPattern, EndStreamPrimitiveConversionPattern,
       ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
       ImageDrefGatherPattern, ImageFetchPattern, ImageFetchLodPattern,
       ImageGatherPattern, ImagePattern, ImageQueryLodPattern, ImageSampleDrefExplicitLodPattern,
