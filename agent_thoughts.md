@@ -89168,3 +89168,43 @@ Its paired `enable_raster` case passes too.
 1. **Continue L94 recovery in order.** Start with the next non-unsupported
    `pipeline_library.extended_dynamic_state.mesh_shader.two_draws_dynamic`
    case and reduce only a reproduced abnormal result.
+
+# L94(d) dynamic primitive-restart state
+
+## Outcome
+
+The deterministic
+`dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.two_draws_static.prim_restart_enable`
+case now passes. Its prior failure was pipeline creation returning
+`VK_ERROR_INITIALIZATION_FAILED`.
+
+## Decisions and evidence
+
+1. **Record the preceding recovery progress.** Supported dynamic and static
+   front-face, viewport/scissor, cull, depth, rasterizer-discard, and stencil
+   cases pass, including both 54-case stencil groups. The EDS3 and dynamic
+   logic-op families correctly return `NotSupported` because FeMe does not
+   advertise their required features.
+2. **Follow the failure to pipeline dynamic-state translation.** CTS declares
+   `VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE_EXT` and records the promoted
+   core command. FeMe already executes static primitive restart, but rejected
+   the missing dynamic state during pipeline creation.
+3. **Use the established dynamic-boolean boundary.** Generated dispatch
+   records the command's boolean value, and per-draw pipeline construction
+   selects it only when declared dynamic. Translating dynamic states before
+   input-assembly validation ensures the ignored static value cannot reject a
+   dynamic pipeline.
+
+## Validation
+
+- Focused proc-address, command-buffer, graphics-pipeline, and unsupported
+  state tests pass.
+- The exact primitive-restart CTS case passes with the explicit FeMe ICD and
+  disabled shader cache.
+- `ninja -C build2 check-feme` passes: 3,157 passed, 3 unsupported.
+
+## Suggested next step
+
+1. **Continue L94 recovery in order.** Resume after
+   `two_draws_static.prim_restart_enable`; probe the first non-unsupported
+   static primitive/topology case and reduce only a reproduced abnormal result.
