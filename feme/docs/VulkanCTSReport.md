@@ -48273,3 +48273,99 @@ changed yet (`geometryStreams` et al. stay `VK_FALSE`; that is H173(b),
 split out below, since real simultaneous multi-stream XFB capture in
 `Executor.cpp` does not exist yet and is a real, separate piece of
 work from this row's SPIR-V-import plumbing).
+
+## H173(b): independent, simultaneous per-geometry-stream XFB capture, `geometryStreams` et al. advertised `VK_TRUE`
+
+**Problem.** `Executor.cpp`'s geometry-stage transform-feedback capture
+computed a per-stream output-element map (`GSOutputElementsByStream`) and
+ran the geometry stage producing every stream's own emitted vertices
+(`GeometryStreamBuilder Combined`), but only ever flattened and captured
+the single `RasterizationStream`-selected stream via one
+`captureTransformFeedback` call -- every other stream's own
+`XfbBuffer`-tagged elements were silently dropped. Real
+`VK_EXT_transform_feedback`/`geometryStreams` semantics require
+simultaneous, independent capture of every stream carrying an
+`XfbBuffer`-tagged element, confirmed against VK-GL-CTS's own
+`TEST_TYPE_MULTISTREAMS` GLSL generator (`vktTransformFeedbackSimple
+Tests.cpp`), which emits to two streams with two different `xfb_buffer`
+indices in the same shader.
+
+**Fix.** Refactored the existing "flatten `Combined.getVertices(Stream)`
+into a `StageStorage`" inline block into a reusable `flattenStream`
+lambda, still used unchanged for the `RasterizationStream` case (feeding
+`RasterOut`/`AbsTriIndices`/`AbsLineIndices` exactly as before). Added a
+new loop over every entry in `GSOutputElementsByStream` that skips
+streams with no `XfbBuffer`-tagged element, reuses the already-flattened
+output for the `RasterizationStream` case, and calls `flattenStream` +
+`captureTransformFeedback` independently for every other stream.
+`captureTransformFeedback` itself needed no changes -- it was already
+stream-agnostic, taking only an element list, output storage, count, and
+the draw. Raised `maxTransformFeedbackStreams` from the single-stream
+spec floor `1` to `16` (covering VK-GL-CTS's own `usedStreamId` values up
+to 14) and flipped `geometryStreams`/`transformFeedbackRasterization
+StreamSelect`/`primitivesGeneratedQueryWithNonZeroStreams` to `VK_TRUE`
+in `EntryPoints.cpp`.
+
+**Verification.**
+- New unit test `ExecutorTest.CapturesTransformFeedbackFromEvery
+  StreamIndependently`: two geometry-stage streams, each with its own
+  `XfbBuffer`-tagged element, `RasterizationStream` selecting only one --
+  both buffers capture correctly regardless of which stream is
+  rasterized. `FeMeGraphicsTests`: all 110 `ExecutorTest` cases pass (up
+  from 109), including the pre-existing single-stream/two-stream XFB
+  capture tests (no regression).
+- `check-feme`: 3146/3149 passed (3 unsupported), 0 failed.
+- Real CTS re-run (fresh `libfeme_vulkan.so` rebuild, `VK_ICD_FILENAMES`/
+  `VK_DRIVER_FILES` pointed at it): `dEQP-VK.transform_feedback.simple.
+  multistreams_{1,3,6,14}` -- the actual simultaneous-multi-stream-
+  capture cases -- go from `NotSupported` to **4/4 Pass**.
+  `dEQP-VK.transform_feedback.simple.*` (7899 cases): **140 passed / 197
+  failed / 7553 not supported** (from 135/188/7576 before this row) -- a
+  +5 pass delta (the 4 `multistreams_*` passes plus one more) and a net
+  +9 fail delta, all newly-*exposed* (previously `NotSupported`) gaps
+  distinct from the capture fix itself, broken out as roadmap H173(c)
+  (`streams_N`/`streams_clipdistance_N`/`streams_culldistance_N`
+  point-input-geometry image mismatches) and H173(d)
+  (`multistreams_same_location_N`'s unhandled SPIR-V `Component`
+  decoration).
+  - A broader sweep excluding the entire pre-existing, already-tracked
+    `dEQP-VK.transform_feedback.fuzz.random_geometry.*` heap-corruption
+    family (132,869 cases): 4183 passed / 2305 failed / 126381 not
+    supported, no crash.
+  - Isolated a heap-corruption crash the initial full, unfiltered sweep
+    hit (`all_instance_array.12`, then `.61`, then `all_missing.48`) via
+    a `git checkout <pre-H173(b) commit> -- Executor.cpp EntryPoints.cpp`
+    before/after rebuild-and-isolate comparison: each crashes identically
+    at the pre-H173(b) baseline too (same signature, `corrupted size vs.
+    prev_size`/`double free or corruption (!prev)`) -- confirmed
+    pre-existing and unrelated to this row (the same `random_geometry`
+    fuzz-corpus family already tracked in this file's own summary table),
+    not a regression from independent multi-stream capture.
+- `Vulkan14FeatureInventory.md`: no change (extension-scoped, not a core
+  1.4 feature). `VulkanExtensionInventory.md`: `VK_EXT_transform_feedback`
+  and `VK_EXT_primitives_generated_query` rows updated to reflect
+  `geometryStreams`/`transformFeedbackRasterizationStreamSelect`/
+  `primitivesGeneratedQueryWithNonZeroStreams` all `VK_TRUE` and the
+  raised `maxTransformFeedbackStreams`.
+- `FeMeVulkanDesign.md`: updated to record `geometryStreams` et al. now
+  advertised, replacing the stale note that they "remain unadvertised"
+  pending an MLIR SPIR-V dialect blocker H173(a) already closed.
+- `check-hlsl-feme-vk`: unchanged -- no `offload-test-suite` case
+  exercises real multi-stream XFB capture (its corpus is `dxc`-authored
+  HLSL, and `dxc`'s own SPIR-V backend cannot emit
+  `OpEmitStreamVertex`/`OpEndStreamPrimitive` at all, per H173(a)'s own
+  finding); this session did not have a pre-existing
+  `offload-test-suite` build directory available to re-confirm the
+  660-ish-case baseline count directly (see `agent_thoughts.md` for
+  next-session follow-up).
+
+**Roadmap.** H173(b) struck through (independent multi-stream XFB capture
+implemented and verified real end-to-end via CTS). Two new rows added for
+the gaps this same feature-bit flip newly exposed: H173(c) (point-input
+geometry + non-zero-stream rasterization image mismatches, ~1 day,
+smallest/best-isolated repro, do first) and H173(d) (`Component`
+decoration SPIR-V import gap, ~1 day, well-isolated). A third,
+lowest-priority row H173(e) documents the unrelated
+`shaderTessellationAndGeometryPointSize`-gated `_ptsz` variants that stay
+`NotSupported` regardless (not a stream-specific gap, filed only so a
+future point-size milestone knows to re-check this family).

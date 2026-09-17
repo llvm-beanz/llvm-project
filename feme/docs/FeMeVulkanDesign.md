@@ -4363,12 +4363,22 @@ Depends on G5.
   from `Pipeline.getRasterState().RasterizationStream` instead of always
   stream 0, and transform-feedback capture extended to a geometry stage's
   own stream-selected output) all now genuinely support more than one
-  output stream. `geometryStreams`/`transformFeedbackRasterizationStream
-  Select` remain unadvertised, though: the MLIR SPIR-V dialect cannot
-  deserialize `OpEmitStreamVertex`/`OpEndStreamPrimitive` at all (a hard
-  upstream blocker, roadmap H21l), so no real, CTS-driven multi-stream
-  geometry shader can ever reach this now-generalized code regardless of
-  how complete it is. A real content-mismatch gap in the byte-counter
+  output stream. The MLIR SPIR-V dialect's own inability to deserialize
+  `OpEmitStreamVertex`/`OpEndStreamPrimitive` (once a hard blocker,
+  roadmap H21l) was fixed upstream (roadmap H173(a)), and `Executor.cpp`'s
+  transform-feedback capture now independently flattens and captures
+  *every* stream carrying an `XfbBuffer`-tagged element, not only the
+  `RasterizationStream`-selected one (roadmap H173(b)) -- so
+  `geometryStreams`/`transformFeedbackRasterizationStreamSelect`/
+  `primitivesGeneratedQueryWithNonZeroStreams` are now all advertised
+  `VK_TRUE`, and `maxTransformFeedbackStreams` raised to 16. Real CTS
+  confirms the actual simultaneous-multi-stream-capture cases
+  (`dEQP-VK.transform_feedback.simple.multistreams_{1,3,6,14}`) now pass;
+  a handful of other, distinct, previously-`NotSupported` gaps this same
+  flip newly exposed (point-input geometry + non-zero-stream
+  rasterization image mismatches, and an unrelated `Component`-decoration
+  SPIR-V import gap) remain open, tracked as roadmap H173(c)/H173(d). A
+  real content-mismatch gap in the byte-counter
   design's "backward dependency" scenario remains open (roadmap H21i); a
   multiview draw combined with active transform feedback also currently
   captures every view's vertices into the same running counter with no
