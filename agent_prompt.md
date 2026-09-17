@@ -55,15 +55,24 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Scope L98 (float16/float64 stage-IO support).** Start by checking
-   whether `shaderFloat16`/`shaderFloat64` have *any* existing plumbing
-   anywhere else in feme's SPIR-V import or CPU-execution pipeline (a
-   16-bit float ALU type and a 64-bit double ALU type are both a much
-   bigger scope than a property flip). Rough estimate: 30–60 minutes
-   just to figure out how big this actually is, before any real
-   estimate for the fix itself is possible.
-2. **If L98 turns out too large for one session, broaden the sweep
-   instead** to a different `dEQP-VK.pipeline.*` group or a new
-   top-level CTS group entirely, using the same reduce-first
-   methodology used throughout this milestone series. Rough estimate:
-   a session to sweep plus however long the first reduction takes.
+1. **Trace L99's actual root cause.** Dump the SPIR-V and/or LLVM IR
+   for a passing `mat2` case and the failing `mat2x3` case side by
+   side, focused on the matrix's own `OpCompositeConstruct` and the
+   `m[i][j]` `OpAccessChain`+`OpLoad` sequence — look specifically at
+   whether `getTightVectorArrayType`'s marker-struct substitution
+   (H101j) is applied consistently on both the construct side and the
+   index/load side for a `vec3` column. Rough estimate: 1–2 hours to
+   find the actual divergence, once IR is in hand.
+2. **Reduce and scope the other 3 `spec_constant.*` failure buckets**
+   (45 `VectorExtractDynamic` legalize failures, 10 `OpTypeArray` count
+   failures, ~30 "GEP into vector" failures) — not yet touched this
+   session. Each looks like its own distinct gap, not obviously related
+   to L99. Rough estimate: 30–60 minutes each to reduce to a single
+   case and form a hypothesis, before any fix estimate is possible.
+3. **If L99 turns out well-contained, fix it and re-sweep** both
+   `composite.matrix.*` (18+ cases) and the full `spec_constant.*`
+   group (1170 cases) to confirm the fix's real blast radius — a
+   `vec3`-column matrix bug could plausibly affect other GLSL/HLSL
+   constructs beyond spec-constant composites (plain matrix literals,
+   uniform-block matrices, etc.), so a broader post-fix check is
+   warranted before considering it closed.
