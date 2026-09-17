@@ -89304,3 +89304,48 @@ current.
 1. **Reduce L94(f).** Start at
    `pipeline_library.framebuffer_attachment.no_attachments_ms` and identify why
    the four-sample no-color-attachment pipeline is rejected before drawing.
+
+# L94(f): attachment-free multisample recovery
+
+## Goal
+
+Make the next reproduced abnormal deterministic L94 case,
+`dEQP-VK.pipeline.pipeline_library.framebuffer_attachment.no_attachments_ms`,
+pass without broadening advertised Vulkan support.
+
+## What I found
+
+1. Pipeline creation failed because an attachment-free render-pass subpass has
+   no attachment sample count. FeMe retained its default count of one and
+   rejected the valid four-sample pipeline.
+2. After deriving the count from `rasterizationSamples`, CTS reached image
+   comparison but populated only the `gl_SampleID == 0` row.
+3. The CTS shader reads `gl_SampleID` while `sampleShadingEnable` is false.
+   That input still requires sample-frequency fragment invocations; the
+   executor previously only enabled its per-sample loop for explicit sample
+   shading.
+
+## What changed
+
+1. Attachment-free render-pass target normalization now uses the pipeline
+   multisample count.
+2. A reflected `SampleIndex` fragment input uses the executor's existing
+   per-sample path.
+3. Added focused pipeline-translation and execution regression tests.
+
+## Evidence
+
+- The explicit assertions-enabled, ccache-backed FeMe ICD passes the exact CTS
+  case with `--deqp-shadercache=disable`.
+- Focused graphics-pipeline and executor tests pass.
+- `ninja -C build2 check-feme` passes: 3,159 passed and 3 unsupported.
+- Review found and corrected one nearby comment whose condition no longer
+  matched the combined per-sample decision. No functional, structural,
+  security, or performance issues remained.
+- This completes L94(f). No Vulkan feature or extension advertisement changed,
+  so both inventories remain current.
+
+## Next step
+
+1. Continue L94 recovery in deterministic order with the next non-unsupported
+   completed pipeline case, reducing only a reproduced abnormal result.
