@@ -47975,3 +47975,67 @@ next steps.
 `VulkanExtensionInventory` change: this is a CPU-backend correctness fix
 for existing core clear-color/attachment-format handling, not a new
 feature or extension.
+
+## H172: closed as a stale-`.so` false alarm -- no bug found
+
+**Summary.** H172 (filed by the H170-bucket-1 session as a new
+"Image comparison failed" `dfdy`-heavy pattern in
+`dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*`) does not
+reproduce. A from-scratch rebuild of `libfeme_vulkan.so`, done
+immediately before re-testing (per `feme/.instructions.md`'s own
+"must rebuild before trusting any CTS run" rule -- the same rule
+that already caught the unrelated H94/H99a/H100/H103 false alarms),
+found **zero** image-comparison failures anywhere in the
+`dEQP-VK.glsl.derivate.*` group.
+
+**Investigation before the rebuild.** This session first re-derived
+H172's precise failure shape from a (turned out to be stale) binary:
+`dfdy`/`dfdycoarse`/`dfdyfine` failing at every vec-width
+(`vec2`/`vec3`/`vec4`) and precision (`highp`/`mediump`) in both
+buckets (27/132 `fbo_float`, 24/108 `texture.float`), while
+`dfdx`/`dfdxcoarse`/`dfdxfine`/`fwidth*` failed only at
+`vec3_highp`/`vec4_highp`. The minimal repro
+(`dEQP-VK.glsl.derivate.dfdy.fbo_float.vec2_highp`) rendered a
+uniformly black (`(0,0,0,255)` everywhere) 99x133 framebuffer, and its
+qpa log confirmed the *computed* `dFdy` was ~0 against an expected
+range of roughly `+-0.29` to `0.42` -- a total miscompile shape, not a
+subtle precision issue.
+
+`FEME_DUMP_IR=1` dumps of the fragment module (comparing the failing
+`dfdy.vec2_highp` case against the passing `dfdx.vec2_highp` and
+`dfdy.float_highp` scalar cases) confirmed `WaveLowering.cpp`'s
+per-direction quad-shuffle masks are structurally correct in every
+case (`{0,0,2,2}`/`{1,1,3,3}` for X, `{0,1,0,1}`/`{2,3,2,3}` for Y,
+against the rasterizer's own `Dx={0,1,0,1}`/`Dy={0,0,1,1}` per-lane
+pixel layout in `Executor.cpp`), and that `SIMDize.cpp`'s H171 vector-
+derivative decomposition produces two independent, IR-correct
+per-component derivative computations for the vec2 case. Temporary
+instrumentation was then added to `Executor.cpp`'s per-lane varying-
+interpolation loop (a `getenv`-gated `fprintf`, reverted before
+commit -- final `git diff` on this file is empty) to inspect the
+actual runtime-interpolated input values feeding the derivative for
+the minimal repro. The rebuild done immediately before that
+instrumented run made the target case **pass outright**, with the
+debug branch never triggering at all.
+
+**Confirmation.** Reverting the instrumentation and rebuilding once
+more (clean source, no functional change) reproduced the pass cleanly:
+`dEQP-VK.glsl.derivate.*` (1,674 cases): **1568 passed / 0 failed / 106
+not-supported** (the pre-existing `VK_SUBGROUP_FEATURE_QUAD_BIT` gate,
+unchanged from the established baseline). This covers every case named
+in H172's row, plus the `dfdx`/`fwidth*` `vec3_highp`/`vec4_highp`
+cases the row described as a separate, narrower issue -- all pass.
+`check-feme`: 3142/3145 passed (3 unsupported, unchanged), no
+regressions; no source changes were made or needed.
+
+**Likely explanation.** The row's own filing-time numbers were
+themselves already against a stale binary -- i.e. some rebuild step
+between H170 bucket 1 landing and H172's filing either did not happen
+or was itself invalidated by a later, unrelated source change before
+the failing runs were captured. This is the same class of false alarm
+as H94/H99a/H100/H103, just surfacing later in the pipeline (after a
+real, valid fix in the same session, rather than as its own
+standalone investigation).
+
+**Feature/extension inventories.** No change: no bug, no fix, no new
+feature/extension surface touched.
