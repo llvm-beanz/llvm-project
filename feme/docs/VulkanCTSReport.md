@@ -6,7 +6,7 @@ own implementation decisions.
 
 ## Scope and provenance
 
-- FeMe source revision under test: `aa5742ca7ed1`
+- FeMe source revision under test: `8c4f7a365b05`
 - Documentation/inventory revision: `e7c884c84462`
 - VK-GL-CTS revision: `880f31a2bd9cd0659f84f3f80dafd07f2e693f6d`
   (`vulkan-cts-1.4.6.2-525-g880f31a2`)
@@ -15,7 +15,7 @@ own implementation decisions.
 - Device: `FeMe CPU Vulkan Device`
 - Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
   `CMAKE_CXX_COMPILER_LAUNCHER=ccache`
-- `check-feme`: 3,147 passed, 3 unsupported, 0 failed
+- `check-feme`: 3,151 passed, 3 unsupported, 0 failed
 - Registry used by the inventories: `VK_HEADER_VERSION` 358
 
 The inventory audit performed with this run reports 87 of 150 Vulkan
@@ -199,10 +199,15 @@ The first deterministic
 formerly reproduced an immediate `deqp-vk` segmentation fault after starting.
 L94(a) added the missing Vulkan 1.3 promoted `vkCmdSetDepthBiasEnable` device
 dispatch, recording, and dynamic-raster-state resolution. The same case now
-completes and reports an ordinary image mismatch instead of terminating, so
-the remaining failure belongs to broader pipeline correctness rather than a
-missing command path. This implementation changes no advertised feature or
-extension, so both Vulkan inventories remain current.
+passes. With `--deqp-log-images=enable`, the intervening result showed a
+passing color attachment but all 4,096 depth pixels at the statically biased
+0.75 value instead of the dynamically disabled-bias 0.5 value. The monolithic
+construction variant passed, while both graphics-pipeline-library variants
+failed identically. L94(b) fixed this by deep-copying
+`VkGraphicsPipelineCreateInfo::pDynamicState` into each library and
+reconstructing its de-duplicated union when linking, so the linked pipeline
+preserves `VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE`. This implementation changes no
+advertised feature or extension, so both Vulkan inventories remain current.
 
 ## Dominant ordinary failures
 
