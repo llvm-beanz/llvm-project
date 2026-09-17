@@ -377,6 +377,7 @@ LogicalResult Serializer::processDecorationAttr(Location loc, uint32_t resultID,
   case spirv::Decoration::Binding:
   case spirv::Decoration::DescriptorSet:
   case spirv::Decoration::Location:
+  case spirv::Decoration::Component:
   case spirv::Decoration::Index:
   case spirv::Decoration::Offset:
   case spirv::Decoration::XfbBuffer:

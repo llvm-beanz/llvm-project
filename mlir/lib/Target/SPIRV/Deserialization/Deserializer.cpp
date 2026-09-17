@@ -295,6 +295,7 @@ LogicalResult spirv::Deserializer::processDecoration(ArrayRef<uint32_t> words) {
   case spirv::Decoration::DescriptorSet:
   case spirv::Decoration::Binding:
   case spirv::Decoration::Location:
+  case spirv::Decoration::Component:
   case spirv::Decoration::SpecId:
   case spirv::Decoration::Index:
   case spirv::Decoration::Offset:

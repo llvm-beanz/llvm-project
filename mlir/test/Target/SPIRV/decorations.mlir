@@ -13,6 +13,18 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
 // -----
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
+  // The deserializer used to reject this outright with "unhandled
+  // Decoration : 'Component'", failing module deserialization before it
+  // ever reached any interface variable packing a sub-Location component
+  // offset.
+  // CHECK: component = 2 : i32
+  // CHECK: location = 0 : i32
+  spirv.GlobalVariable @var {component = 2 : i32, location = 0 : i32} : !spirv.ptr<f32, Input>
+}
+
+// -----
+
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
   // CHECK: no_perspective
   spirv.GlobalVariable @var {no_perspective} : !spirv.ptr<vector<4xf32>, Input>
 }
