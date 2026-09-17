@@ -336,6 +336,93 @@ No advertised Vulkan feature or extension changed, so
 `Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
 current.
 
+# L94(h): SPIR-V `Component` decoration for interface matching
+
+## Outcome
+
+**All 112 supported cases of `dEQP-VK.pipeline.pipeline_library.
+interface_matching.shader_layout_component_matching.*` now pass** (144 of
+the 256 total cases in this family are `NotSupported`: double-precision
+floats are not implemented, an unrelated, pre-existing gap). Starting from
+the reduction target
+`vert_tesc_tese_frag.loose_var.float32.multiple_locations.
+scalar_scalar_scalar_scalar`, this previously failed pipeline creation
+outright with `error: unhandled Decoration : 'Component`.
+
+## Investigation and change
+
+SPIR-V's `Component` decoration lets several otherwise-unrelated interface
+variables share one `Location`, each occupying its own disjoint sub-range
+of that location's four components. Three independent gaps stacked to
+produce the original failure and its two successive downstream symptoms:
+
+1. `mlir/lib/Target/SPIRV/{De,}serialization` never recognized the
+   `Component` decoration as one of its plain-integer-literal decoration
+   groups at all, so any module using it failed import outright (fixed
+   separately, `dc03c83e08a3`, with an MLIR round-trip test).
+2. feme's cross-stage interface matching (`StageLink.cpp`'s
+   `findProducer`, `GraphicsPipeline.cpp`'s pipeline-creation-time
+   vertex-output/fragment-input check, and `Executor.cpp`'s runtime
+   varying linking) matched only by `Location`/`Index`, ignoring
+   `Component` entirely -- it could find/link the wrong element whenever
+   more than one shared a `Location`, and `Executor.cpp`'s own
+   `StageStorage::readRaw`/`writeRaw` calls always addressed a varying's
+   components starting at 0 rather than at its own `FirstComponent`.
+3. `CanonicalizeStage.cpp` already parsed the `Component` decoration into
+   `SignatureElement::FirstComponent` correctly, but a whole-variable
+   stage-IO access (one that never peels into a sub-range of its own)
+   still seeded the emitted `feme.stage.input.load`/`.output.store`'s
+   `Component` operand from a bare constant 0, silently addressing
+   component 0 of storage regardless of the element's own declared
+   `Component` -- exposed only once (2) above let pipeline creation
+   succeed far enough to reach `vkQueueSubmit`
+   (`feme-graphics-validate-stage: component N is out of range`).
+4. Fixing (3) exposed a fourth, pre-existing bug specific to this test
+   family's own "multiple_locations" shape (a genuine 3-consecutive-
+   `Location` array, `float loose[3];`, not a per-vertex duplication): a
+   Hull/Domain/Geometry stage's own per-vertex-arrayed `Input` global had
+   its outer per-vertex/control-point array dimension folded directly
+   into `SignatureElement::RowCount` (with `RowCountIsVertexArray` the
+   only marker distinguishing it from a real matrix's row count), and
+   `StageLink.cpp`'s `effectiveRowCount` unconditionally folded that flag
+   back down to `1` before comparing/copying -- correct only by
+   coincidence for an ordinary (unarrayed) per-vertex varying. A
+   genuinely arrayed one got its real 3-row extent folded together with
+   the per-vertex dimension into one bogus combined `RowCount` (96 for
+   this Hull-stage case: 32 control points times the real 3 rows),
+   disagreeing with its producer's own genuine, unfolded `RowCount` (3)
+   at `vkQueueSubmit` time ("disagree on component/row count or type").
+   `addElements` now peels the outer per-vertex array dimension off
+   before computing `RowCount` at all, mirroring the existing
+   `PerInvocationOutputArray` (Hull/Mesh `Output`) peeling and consistent
+   with how the per-vertex dimension is already addressed separately
+   everywhere else (the `Vertex` operand, `StageStorage`'s own
+   `Invocation` parameter).
+
+Each of (2)-(4) landed as its own commit with focused unit tests, verified
+to fail without the corresponding fix.
+
+## Validation
+
+- The rebuilt assertions-enabled, ccache-backed explicit FeMe ICD (confirmed
+  via `vulkaninfo --summary | grep deviceName` reporting `FeMe CPU Vulkan
+  Device`) passes the exact reduction target case, then the full
+  `shader_layout_component_matching.*` family (256 cases: 112 passed, 0
+  failed, 144 not supported) with `--deqp-shadercache=disable`.
+- `ninja -C build2 check-feme`: 3,163 passed; 3 unsupported; 0 failed.
+- A broader sweep of the full `pipeline_library.interface_matching.*` group
+  (688 of an unknown larger total, before an unrelated heap-corruption
+  crash in a `vector_length.*member_of_array_of_structures_in_block` case)
+  showed no new failures attributable to this change; its remaining
+  `vector_length.*` failures (`VK_ERROR_INITIALIZATION_FAILED` at
+  `vkPipelineConstructionUtil.cpp:176`/`vkCmdUtil.cpp:338`) are a
+  pre-existing, separate gap (vector-length truncation matching, not
+  `Component`), out of this milestone's scope.
+
+No advertised Vulkan feature or extension changed, so
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` remain
+current.
+
 ## Dominant ordinary failures
 
 The largest result signatures are:
