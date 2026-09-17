@@ -1,5 +1,6 @@
 ---
 model: gpt-5.6-terra
+resume: 43c1ff2f-f199-452e-bc9a-5d9fe09189c1
 ---
 # Initial Guidelines
 
@@ -51,18 +52,6 @@ just once at the start.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **G2(a):** Run the bounded 54-group recovery process through
-   `vk_cts_reconcile.py` and commit its exact `Fail` case list with CTS and
-   FeMe revision provenance. Do not include crashes, timeouts, or unrun
-   cases.
-2. **G2(b):** Add a CI job that rebuilds the assertion-enabled ICD, generates
-   the full case list, retains all QPAs, and fails on reconciliation errors,
-   unrun cases, or newly unexpected failures.
-3. **L94:** Use the resulting deterministic recovery order to reduce
-   `pipeline_library.extended_dynamic_state.mesh_shader` before changing
-   broader pipeline behavior.
-
-As an added note, we have no infrastructure to run a CI job, so building CI is
-not presently actionable. Creating scripts and other tools that can be run
-manually or documenting agent skills are useful, and those assets can live under
-the feme project.
+1. **Implement L94(a).** Add `vkCmdSetDepthBiasEnable` to generated device
+   dispatch, command recording, and per-draw dynamic state; cover it with a
+   Vulkan unit test and rerun the exact reduced CTS case.
