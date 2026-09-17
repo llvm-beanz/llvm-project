@@ -47873,3 +47873,105 @@ pre-existing `Feature/PushConstant/array_of_matrices.test` XPASS flake
 `VulkanExtensionInventory` change: this is a CPU-backend correctness fix
 for existing core SPIR-V derivative/quad-read semantics, not a new
 feature or extension.
+
+## H170 bucket 1: `fbo_float`/`texture.float` integer clear-color fix
+
+**Root cause.** `dEQP-VK.glsl.derivate.*.{fbo_float,texture.float}.*`
+scalar-float subcases failed `vkQueueSubmit` with
+`VK_ERROR_INITIALIZATION_FAILED`. `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+surfaced the real diagnostic: `"attachment clear color is not yet
+supported for this format."` Despite the misleading bucket name, CTS's
+own source comment (`vktShaderRenderDerivateTests.cpp`, ~line 99)
+confirms `fbo_float`/`texture.float` actually render to a real
+`RGBA32UI` (`R32G32B32A32_UINT`) framebuffer, not a floating-point one
+(`"Uses RGBA32UI fbo actually, since FP rendertargets are not in core
+spec"`) -- the name refers to the *shader's own* floating-point
+derivative math, not the attachment format. So this was an integer-format
+clear-color gap, not a float one: `feme::graphics::packClearColor`/
+`unpackColor` (`ImageFixture.cpp`) had no case at all for 4 of the 19
+real integer color-attachment formats `isIntegerColorAttachmentFormat`
+(RuntimeABI.h) recognizes -- `R8_{UINT,SINT}`, `R8G8_{UINT,SINT}`,
+`R16G16B16A16_{UINT,SINT}`, `R32G32B32A32_{UINT,SINT}` -- falling through
+to the function's final "not yet supported" error.
+
+A second, independent, previously-silent bug was found while fixing the
+first: every one of `packClearColor`'s 3 call sites
+(`CommandBuffer.cpp`'s `applyClear`, `ImageOps.cpp`'s
+`clearColorImageRanges`/`runClearAttachments`) unconditionally read
+`VkClearColorValue::float32`, the wrong union member for an
+integer-format attachment (the real Vulkan convention: the app writes
+`.uint32`/`.int32` for an integer format, `.float32` otherwise). This bug
+was silent/benign only when the clear value happened to be all-zero
+(`0u`/`0.0f` share a bit pattern) and had not previously been exercised
+by any passing test.
+
+**Fix (2 parts).**
+1. `ImageFixture.cpp`: added dedicated `packClearColor`/`unpackColor`
+   branches for the 4 missing formats, each matching every existing
+   integer format's established clamp-not-wrap convention (per
+   `PacksAndUnpacksR16Uint`'s own precedent) rather than an unchecked
+   `static_cast`. `R8_{UINT,SINT}`/`R8G8_{UINT,SINT}` needed their own
+   branch positioned like `R16_UINT`/`_SINT`'s (before the shared
+   `Clear.size() != Info->Components` check), since a 1-/2-component
+   format's own `FormatInfo` shape does not match the 4-element
+   `VkClearColorValue`-shaped array every clear color actually arrives
+   as; `R16G16B16A16_{UINT,SINT}`/`R32G32B32A32_{UINT,SINT}` (already
+   4-component) fit the shared, later, `Info`-driven position cleanly.
+   Also added the 4 missing `getFormatInfo` entries for `R8_UINT/SINT`/
+   `R8G8_UINT/SINT` that `packClearColor` itself depends on (mirroring
+   `R16_UINT`/`_SINT`'s own existing entry and rationale comment).
+
+   *Correctness note*: an earlier draft of this fix added one single
+   generic `isIntegerColorAttachmentFormat`-guarded branch positioned
+   right after `packClearColor`'s `IsFloat` check -- which would have
+   shadowed several pre-existing, already-clamping per-format branches
+   further down in the same function (`R16_UINT`/`_SINT`,
+   `R16G16_UINT`/`_SINT`, `R8G8B8A8_UINT`/`_SINT`, `R32_UINT`/`_SINT`,
+   `R32G32_UINT`/`_SINT` all already had one), silently changing their
+   behavior from clamping to unchecked truncation. Caught before commit
+   by `ImageFixtureTest.PacksAndUnpacksR16Uint`'s own existing clamping
+   assertion. Final fix scopes the new branches to only the 4 genuinely
+   uncovered formats, verified by `grep`-enumerating every existing
+   `packClearColor`/`unpackColor` format branch first.
+
+2. New shared `feme::vulkan::unpackClearColorValue(cpu::ResourceFormat,
+   const VkClearColorValue&) -> std::array<double, 4>` helper
+   (`ImageOps.h`/`.cpp`), selecting `.uint32`/`.int32`/`.float32` by
+   `isIntegerColorAttachmentFormat`/`isUnsignedIntegerColorAttachmentFormat`.
+   All 3 call sites updated to use it instead of reading `.float32`
+   directly.
+
+**Unit tests.** 9 new `ImageFixtureTest` cases (one pack/unpack
+round-trip per newly-supported format, each including a clamping
+assertion for out-of-range input) and 1 new `ImageOpsTest`
+(`ClearsIntegerFormatColorImageUsingUint32`, an end-to-end
+`runClearColorImage` check confirming the `.uint32` union-member
+selection). `check-feme`: 3142/3145 passed (3 unsupported, unchanged),
+no regressions.
+
+**Native Vulkan CTS check.** `dEQP-VK.glsl.derivate.*.fbo_float.*` (132
+cases): 0 `queueSubmit`/`VK_ERROR_INITIALIZATION_FAILED` failures remain
+(was: every scalar-float subcase); 81 passed, 27 failed ("Image
+comparison failed", a distinct, not-yet-root-caused `dfdy`-heavy pattern
+-- filed as roadmap H172), 24 `NotSupported`
+(`VK_SUBGROUP_FEATURE_QUAD_BIT`, pre-existing/unrelated gate).
+`dEQP-VK.glsl.derivate.*.texture.float.*` (108 cases): 0 `queueSubmit`
+failures remain; 84 passed, 24 failed (same `dfdy`-heavy pattern), 0
+`NotSupported`. The target case
+`dEQP-VK.glsl.derivate.dfdx.fbo_float.float_highp`: fail -> pass.
+
+**New gap discovered, filed separately (roadmap H172).** Once bucket 1's
+`queueSubmit` failures were fixed, these cases ran far enough to expose a
+new "Image comparison failed" pattern never previously reachable:
+`dfdy`/`dfdycoarse`/`dfdyfine` fail across every vec-width/precision,
+while `dfdx`/`dfdxcoarse`/`dfdxfine`/`fwidth*` only fail for
+`vec3_highp`/`vec4_highp`. `FEME_DUMP_IR=1` ruled out
+`WaveLowering.cpp`'s `lowerDerivative` quad-shuffle-mask logic (the
+`DerivativeYFine` masks are structurally correct for a Y-derivative).
+Not yet root-caused -- see roadmap H172 for full detail and candidate
+next steps.
+
+**Feature/extension inventories.** No `Vulkan14FeatureInventory`/
+`VulkanExtensionInventory` change: this is a CPU-backend correctness fix
+for existing core clear-color/attachment-format handling, not a new
+feature or extension.
