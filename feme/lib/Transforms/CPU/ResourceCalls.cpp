@@ -79,6 +79,8 @@ StringRef getNamePrefix(ResourceCallKind Kind) {
     return "feme.cpu.resource.atomic.compare_exchange.raw.";
   case ResourceCallKind::GetDimensionsTyped:
     return "feme.cpu.resource.getdimensions.typed.";
+  case ResourceCallKind::GetDimensionsRaw:
+    return "feme.cpu.resource.getdimensions.raw.";
   }
   llvm_unreachable("unhandled ResourceCallKind");
 }
@@ -107,7 +109,8 @@ void appendScalarMangling(raw_ostream &OS, Type *Ty) {
 bool feme::cpu::isLoad(ResourceCallKind Kind) {
   return Kind == ResourceCallKind::LoadTyped ||
          Kind == ResourceCallKind::LoadRaw ||
-         Kind == ResourceCallKind::GetDimensionsTyped;
+         Kind == ResourceCallKind::GetDimensionsTyped ||
+         Kind == ResourceCallKind::GetDimensionsRaw;
 }
 
 bool feme::cpu::isAtomic(ResourceCallKind Kind) {
@@ -140,6 +143,7 @@ bool feme::cpu::isAtomic(ResourceCallKind Kind) {
   case ResourceCallKind::LoadRaw:
   case ResourceCallKind::StoreRaw:
   case ResourceCallKind::GetDimensionsTyped:
+  case ResourceCallKind::GetDimensionsRaw:
     return false;
   }
   llvm_unreachable("unhandled ResourceCallKind");
@@ -175,7 +179,9 @@ Function *feme::cpu::getOrInsertResourceCall(Module &M, ResourceCallKind Kind,
   // Every call shares the leading (heap, heap_count, descriptor_index,
   // offset) operands -- except `GetDimensionsTyped` (roadmap H144), which
   // takes no element index/byte offset at all, since it addresses no
-  // particular element; loads return `ElementType` with no trailing value
+  // particular element (`GetDimensionsRaw`, roadmap H160, still takes this
+  // operand, but repurposed to carry a stride rather than an offset -- see
+  // that kind's own doc); loads return `ElementType` with no trailing value
   // operand, an ordinary store instead takes it as a trailing value operand
   // ahead of the mask (see "Lowering"), and an atomic (roadmap H8w/H8x)
   // takes it too but *also* returns `ElementType` (the pre-op value) --
@@ -270,6 +276,17 @@ CallInst *feme::cpu::createGetDimensionsTyped(IRBuilderBase &Builder,
   Type *I32Ty = Type::getInt32Ty(Builder.getContext());
   return createCall(Builder, ResourceCallKind::GetDimensionsTyped, Env,
                     DescriptorIndex, /*Offset=*/nullptr, /*Comparator=*/nullptr,
+                    /*StoredValue=*/nullptr, Mask, I32Ty, Name);
+}
+
+CallInst *feme::cpu::createGetDimensionsRaw(IRBuilderBase &Builder,
+                                            const ResourceCallEnv &Env,
+                                            Value *DescriptorIndex,
+                                            Value *Stride, Value *Mask,
+                                            const Twine &Name) {
+  Type *I32Ty = Type::getInt32Ty(Builder.getContext());
+  return createCall(Builder, ResourceCallKind::GetDimensionsRaw, Env,
+                    DescriptorIndex, /*Offset=*/Stride, /*Comparator=*/nullptr,
                     /*StoredValue=*/nullptr, Mask, I32Ty, Name);
 }
 

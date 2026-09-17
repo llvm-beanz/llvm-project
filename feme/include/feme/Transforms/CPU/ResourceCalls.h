@@ -167,6 +167,27 @@ enum class ResourceCallKind : uint8_t {
   /// own per-lane-masking machinery (which `matchResourceCall` feeds) has
   /// no real case to handle today -- widen this scope if one is found.
   GetDimensionsTyped,
+  /// `feme.cpu.resource.getdimensions.raw.i32` (roadmap H160): a raw or
+  /// structured buffer's own (`ByteAddressBuffer`/`StructuredBuffer<T>`,
+  /// and their `RW`/`Append`/`Consume` variants) `GetDimensions` --
+  /// SPIR-V `OpArrayLength` against the bound storage-buffer handle's own
+  /// runtime-array member. Shaped identically to `LoadRaw` (leading
+  /// (heap, heap_count, descriptor_index) operands, one trailing `i64`
+  /// operand ahead of the mask, no stored value) except that trailing
+  /// operand is the runtime array's element stride in bytes (a
+  /// compile-time constant threaded through from `BoundHandle::Stride`,
+  /// `0` for an unstructured `ByteAddressBuffer`'s own always-`i32`-
+  /// stride view) rather than a byte offset into a particular element,
+  /// and the result is always `i32` (the element count) regardless of
+  /// the buffer's own declared element type, exactly like
+  /// `GetDimensionsTyped`'s own return-type override -- see
+  /// `getOrInsertResourceCall`'s shared operand-building logic, which
+  /// needs no `Kind`-specific special-casing for this kind at all since
+  /// its shape already matches `LoadRaw`'s. Left out of
+  /// `matchResourceCall`'s own `AllKinds` list for the same reason
+  /// `GetDimensionsTyped` is: no known CTS case calls it from inside
+  /// divergent control flow yet.
+  GetDimensionsRaw,
 };
 
 /// Returns whether \p Kind reads or writes through the resource.
@@ -274,6 +295,19 @@ llvm::CallInst *createGetDimensionsTyped(llvm::IRBuilderBase &Builder,
                                          llvm::Value *DescriptorIndex,
                                          llvm::Value *Mask,
                                          const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.getdimensions.raw.i32` call (roadmap H160):
+/// a raw or structured buffer's own element count through descriptor
+/// \p DescriptorIndex, computed at runtime as the descriptor's declared
+/// byte size divided by \p Stride -- see
+/// `ResourceCallKind::GetDimensionsRaw`'s own doc for why this takes a
+/// stride operand (rather than a byte offset, as `createRawLoad`/
+/// `createRawStore` do) and always returns `i32`.
+llvm::CallInst *createGetDimensionsRaw(llvm::IRBuilderBase &Builder,
+                                       const ResourceCallEnv &Env,
+                                       llvm::Value *DescriptorIndex,
+                                       llvm::Value *Stride, llvm::Value *Mask,
+                                       const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.resource.load.raw.*` call reading a value of type
 /// \p ElementType at \p ByteOffset through descriptor \p DescriptorIndex.
