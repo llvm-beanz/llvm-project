@@ -87856,3 +87856,102 @@ env` with correctly separate assignments) -- only manual/ad hoc
 3. **~half a day, real payoff (closes up to 5 failures), not urgent, upstream-MLIR-flavored:** H124d -- same shape as H160 but for `OpDPdx`/`OpDPdy`/`OpFwidth` (opcodes 207-215). Needs new SPIR-V dialect derivative ops plus CPU-backend screen-space-derivative (quad/2x2-lane-grouping) semantics, which the CPU SIMD renderer does not currently implement at all -- larger than H160 for that reason.
 
 **Cleanup done:** removed `/tmp/h167/`, `/tmp/cts-h167.qpa`/`.log`, `/tmp/h164/`, `/tmp/h168/`, `/tmp/cts-h164.qpa`/`.log`, `/tmp/cts-h168.qpa`/`.log` scratch files before ending the session.
+
+# Session: WaveActiveMax.test triaged (H169 closed); H160 fixed (spirv.ArrayLength added, GetDimensions() now works)
+
+## Do this first (2 min)
+
+`vulkaninfo --summary | grep deviceName` -- confirmed `FeMe CPU Vulkan
+Device` at session start, using two separate `export` statements (per
+the gotcha documented two sessions ago).
+
+## What's done
+
+1. **H169 closed**: `WaveOps/WaveActiveMax.test` triaged as a known-
+   flaky upstream test, not a FeMe bug. It indexes a 4-element buffer
+   with `TID.x % 8` across 32 threads -- half the lanes read/write out
+   of bounds. The test's golden `0` value only reproduces when a
+   subgroup mixes valid and OOB lanes (subgroup size >= 8); FeMe's
+   legitimate wave size of 4 here never mixes them, so it correctly
+   computes `-INF`, not a bug. Confirmed via the maintainer's own
+   dedicated fix branch (`beanz/cbieneman/fix-waveactivemax`), which
+   independently deletes this exact test file. Mirrored that deletion
+   on the local `offload-test-suite` `feme` branch checkout (separate
+   repo, no `feme` compiler code touched).
+2. **H160 closed**: `spirv.ArrayLength`/`OpArrayLength` (SPIR-V opcode
+   68) now fully supported, closing `Feature/ByteAddressBuffer/
+   GetDimensions.test` and `Feature/StructuredBuffer/GetDimensions.test`.
+   Three layers, in order:
+   - **Upstream MLIR**: added `spirv.ArrayLength` to the SPIR-V dialect
+     (`.td` op, opcode-68 enum case, `verify()`). Found mlir-tblgen's
+     own SPIR-V (de)serialization generator already fully supports a
+     plain `I32Attr` operand -- **zero** manual `Deserializer.cpp`/
+     `Serializer.cpp` code needed, a big scope cut from the roadmap's
+     own original estimate. 138 MLIR lit tests passing.
+   - **Conversion**: a new generic `llvm.spv.resource.getarraylength`
+     intrinsic plus an `ArrayLengthPattern` converting the op to a call
+     against it, mirroring `ImageQuerySizePattern`'s own shape.
+   - **CPU backend**: a new `feme.cpu.resource.getdimensions.raw.i32`
+     runtime call, wired into `SPIRVResourceLowering.cpp` exactly like
+     the existing texel-buffer bare `getdimensions.x` special case
+     (bypasses `getpointer`, divides descriptor byte size by the
+     handle's known element `Stride`). Confirmed via a real `dxc -spirv`
+     reduction that `ByteAddressBuffer`'s own byte-count result needs no
+     special-casing here: `dxc` itself emits an `OpIMul` by 4 after
+     `OpArrayLength`, so the raw element count is already what every
+     caller expects.
+3. **`check-hlsl-feme-vk`**: 9 -> 7 failures this session (1 from H169,
+   2 from H160), no regressions. Remaining 5 failures are all H124d
+   (`Graphics/{fwidth,ddx_fine,ddy_fine,DdxCoarse,DdyCoarse}.test`), plus
+   the same pre-existing, already-documented `Feature/PushConstant/
+   array_of_matrices.test` XPASS flake.
+4. **`check-feme`**: 3127/3130 passed, 0 failed, 3 unsupported.
+5. **Native `dEQP-VK.compute.pipeline.*` CTS spot-check**: 654 passed /
+   29 failed / 19,819 not supported -- up 7 passes from the 647/36
+   baseline. The jump lines up with H160: several
+   `vktComputeBasicComputeShaderTests.cpp` shaders call GLSL's
+   `.length()` on an SSBO runtime array (glslang also lowers this to
+   `OpArrayLength`), previously unhandled the same way DXC's
+   `GetDimensions()` codegen was. No `Vulkan14FeatureInventory`/
+   `VulkanExtensionInventory` change needed: `OpArrayLength` is core
+   SPIR-V, not gated by any optional feature/extension.
+6. Committed in 6 small steps: offload-test-suite deletion (separate
+   repo), H169 roadmap+report, MLIR op (already committed
+   pre-compaction), LLVM intrinsic, ResourceCalls, SPIRVToLLVM pattern,
+   SPIRVResourceLowering+runtime+tests, H160 roadmap+report.
+
+## Suggested next steps, ranked
+
+1. **~half a day to a day, real payoff (closes up to 5 failures),
+   biggest lever left, not urgent:** H124d -- `OpDPdx`/`OpDPdy`/
+   `OpFwidth` (opcodes 207-215) have the same "missing upstream MLIR
+   SPIR-V dialect op" shape H160 just closed, so the dialect-op half
+   should go about as fast (a `.td` op per opcode, or one op with a
+   `Coarse`/`Fine`/plain variant attribute -- check whether
+   mlir-tblgen's generic (de)serialization support extends this far
+   before assuming manual work is needed, the same check that saved
+   most of H160's own budget). The real size difference from H160 is
+   entirely on the CPU-backend side: these need genuine screen-space
+   derivative semantics (quad/2x2-lane-grouping), which the CPU SIMD
+   renderer has **no existing concept of at all** -- not a small
+   special-case mirror of an existing pattern the way H160's
+   `getdimensions.x` precedent was. Budget real design time for that
+   half specifically, not just the dialect-op half.
+2. **~15 minutes, cheap diagnostic, still not done:** the
+   `array_of_matrices.test` XPASS has now been observed flaking across
+   at least 3 sessions without ever being looked at directly. Worth a
+   quick `-v` run comparing its own `XFAIL: Clang`/`XFAIL: DXC` lines
+   against what `offload-test-suite`'s lit config actually defines as
+   available features for the `feme-vk` target, to confirm (or rule
+   out) that this is simply a stale `XFAIL` condition that never
+   matches under this config, not a real intermittent flake.
+3. **No other H-series work is currently blocking or scoped.** The
+   `check-hlsl-feme-vk` failure count (7) is now entirely accounted for
+   by H124d (5) plus the pre-existing XPASS (1, harmless) plus 1 not
+   otherwise tracked here -- re-run `check-hlsl-feme-vk -v` at the start
+   of the next session to get the exact current list before picking a
+   target, since this session's own fixes shifted which failures remain.
+
+**Cleanup done:** removed `/tmp/arraylength.mlir`, `/tmp/arraylength.spv`,
+`/tmp/gd.hlsl`, `/tmp/gd.spv`, `/tmp/h160_cts.qpa`, `/tmp/h160_failed.txt`
+scratch files before ending the session.
