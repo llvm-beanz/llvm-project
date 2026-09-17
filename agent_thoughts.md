@@ -89129,3 +89129,42 @@ The first deterministic L94 mesh recovery case now passes:
 1. **Continue L94 recovery in deterministic order.** Reduce the next
    completed abnormal pipeline case; keep each root cause and its CTS
    reproduction separate from this graphics-pipeline-library state fix.
+
+# L94(c) dynamic rasterizer-discard state
+
+## Outcome
+
+The next executable deterministic pipeline recovery case now passes:
+`dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.mesh_shader.two_draws_dynamic.disable_raster`.
+Its paired `enable_raster` case passes too.
+
+## Decisions and evidence
+
+1. **Advance past cases that are now clean or honestly unsupported.** The
+   initial dynamic-bias case and both depth-bounds cases pass after L94(b).
+   The representation-info and extended-dynamic-state3 cases are
+   `NotSupported` because their feature bits are not advertised; they do not
+   justify a correctness change.
+2. **Reduce the first remaining abnormal execution result.**
+   `disable_raster` failed during pipeline creation with
+   `VK_ERROR_INITIALIZATION_FAILED`. The state mapper had no
+   `VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE` case, despite an existing
+   static `RasterState::DiscardEnable` executor path.
+3. **Reuse the existing static state rather than adding rasterizer work.**
+   The command records one boolean payload and the per-draw pipeline
+   resolution replaces the static value only when this dynamic state is
+   declared. This matches the existing depth-bias-enable path and retains
+   static discard behavior.
+
+## Validation
+
+- Focused proc-address, command-buffer, and graphics-pipeline tests pass.
+- The exact `disable_raster` and paired `enable_raster` CTS cases pass with
+  the explicit FeMe ICD and disabled shader cache.
+- `ninja -C build2 check-feme` passes: 3,154 passed, 3 unsupported.
+
+## Suggested next step
+
+1. **Continue L94 recovery in order.** Start with the next non-unsupported
+   `pipeline_library.extended_dynamic_state.mesh_shader.two_draws_dynamic`
+   case and reduce only a reproduced abnormal result.
