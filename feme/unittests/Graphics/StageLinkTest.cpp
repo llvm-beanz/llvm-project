@@ -154,6 +154,30 @@ TEST(StageLinkTest, RejectsAComponentCountMismatch) {
   ASSERT_THAT_ERROR(Links.takeError(), Failed());
 }
 
+// (Roadmap L94(i)) `VK_KHR_maintenance4` explicitly permits a consumer to
+// declare *fewer* vector components than its producer: the consumer reads
+// only its own leading components, the producer's trailing ones are
+// dropped. This is the mirror image of `RejectsAComponentCountMismatch`
+// above (which still rejects the consumer wanting *more* than the
+// producer provides): a `vec3` output feeding a `vec2` input must link
+// successfully, reading only the first two of the producer's three
+// components.
+TEST(StageLinkTest, AcceptsAConsumerNarrowerThanItsProducer) {
+  EntrySignature Producer;
+  Producer.Elements = {
+      makeElement(0, SignatureDirection::Output, 0, /*ComponentCount=*/3)};
+  EntrySignature Consumer;
+  Consumer.Elements = {
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/2)};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "producer output -> consumer input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+  EXPECT_EQ((*Links)[0].ComponentCount, 2u);
+}
+
 // (Roadmap H9b) A genuine `RowCount` mismatch -- neither side's own
 // dimension is a per-vertex array's own extent -- must still be rejected;
 // this row's own `effectiveRowCount` fold only applies when

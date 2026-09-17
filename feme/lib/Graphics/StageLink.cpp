@@ -82,7 +82,15 @@ linkStageElements(const EntrySignature &ProducerSig,
                                "element",
                                StageDescription.str().c_str(),
                                Consumer.ElementID);
-    if (Producer->ComponentCount != Consumer.ComponentCount ||
+    // (roadmap L94(i)) `VK_KHR_maintenance4` (core since Vulkan 1.3, always
+    // implemented here per roadmap E4) explicitly allows a consumer's
+    // input variable to declare *fewer* vector components than its
+    // producer's matching output: only the consumer's own leading
+    // components are read, the producer's extra trailing ones are simply
+    // dropped. A consumer that declares *more* components than its
+    // producer wrote remains invalid -- there is nothing to read them
+    // from -- so only that direction of mismatch is still rejected here.
+    if (Consumer.ComponentCount > Producer->ComponentCount ||
         effectiveRowCount(*Producer) != effectiveRowCount(Consumer) ||
         Producer->ComponentType != Consumer.ComponentType)
       return createStringError(inconvertibleErrorCode(),

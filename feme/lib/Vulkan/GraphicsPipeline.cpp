@@ -733,7 +733,13 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                                    "fragment input location %u has no matching "
                                    "vertex stage output",
                                    *FSIn.Location);
-        if (VSOut->ComponentCount != FSIn.ComponentCount ||
+        // (roadmap L94(i)) `VK_KHR_maintenance4` allows a fragment input
+        // to declare fewer vector components than its matching vertex (or
+        // last pre-rasterization stage) output: only the fragment's own
+        // leading components are read. Only the reverse -- a fragment
+        // input wanting *more* components than its producer wrote -- is
+        // still rejected, mirroring `StageLink.cpp`'s `linkStageElements`.
+        if (FSIn.ComponentCount > VSOut->ComponentCount ||
             VSOut->ComponentType != FSIn.ComponentType)
           return createStringError(inconvertibleErrorCode(),
                                    "vertex output and fragment input at "

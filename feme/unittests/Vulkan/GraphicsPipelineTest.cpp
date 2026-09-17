@@ -2313,6 +2313,65 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L94(i)) `VK_KHR_maintenance4` explicitly permits a fragment
+/// input to declare fewer vector components than the vertex output at the
+/// same location -- only the fragment's own leading components are read,
+/// the vertex stage's trailing ones are simply dropped. Before this fix,
+/// `validateStageInterfaces` rejected any component-count difference at
+/// all, so a `vec3` vertex output feeding a `vec2` fragment input (the
+/// shape `dEQP-VK.pipeline.pipeline_library.interface_matching.
+/// vector_length.*` exercises) failed pipeline creation outright.
+TEST_F(GraphicsPipelineTest, AcceptsFragmentInputNarrowerThanVertexOutput) {
+  VkShaderModule Vertex = createModule(R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @varying {location = 0 : i32} : !spirv.ptr<vector<3xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    %v = spirv.Constant dense<[-5.0, 10.0, 15.0]> : vector<3xf32>
+    %vp = spirv.mlir.addressof @varying : !spirv.ptr<vector<3xf32>, Output>
+    spirv.Store "Output" %vp, %v : vector<3xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @pos, @varying
+}
+)mlir");
+  VkShaderModule Fragment = createModule(R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @varying {location = 0 : i32} : !spirv.ptr<vector<2xf32>, Input>
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vp = spirv.mlir.addressof @varying : !spirv.ptr<vector<2xf32>, Input>
+    %v = spirv.Load "Input" %vp : vector<2xf32>
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %vx = spirv.CompositeExtract %v[0 : i32] : vector<2xf32>
+    %vy = spirv.CompositeExtract %v[1 : i32] : vector<2xf32>
+    %c = spirv.CompositeConstruct %vx, %vy, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @varying, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir");
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_NE(Pipe, VK_NULL_HANDLE);
+
+  if (Pipe != VK_NULL_HANDLE)
+    vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A dynamic-rendering pipeline names its attachment formats through a
 /// chained `VkPipelineRenderingCreateInfo` instead of a `VkRenderPass`, and
 /// normalizes into exactly the same translated state.

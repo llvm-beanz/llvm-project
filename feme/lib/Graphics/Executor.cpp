@@ -2027,7 +2027,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // input storage, so the shader simply reads zero for this location.
     if (!VSOut)
       continue;
-    if (VSOut->ComponentCount != FSIn.ComponentCount ||
+    // (roadmap L94(i)) `VK_KHR_maintenance4` allows a fragment input to
+    // declare fewer vector components than its matching producer output;
+    // only the fragment's own leading components are read (already what
+    // this `Varyings` entry's `FSIn.ComponentCount` bound below does).
+    // Mirrors the same relaxation in `GraphicsPipeline.cpp`'s
+    // `validateStageInterfaces` and `StageLink.cpp`'s `linkStageElements`.
+    if (FSIn.ComponentCount > VSOut->ComponentCount ||
         VSOut->RowCount != FSIn.RowCount ||
         VSOut->ComponentType != FSIn.ComponentType)
       return createStringError(inconvertibleErrorCode(),
