@@ -55,14 +55,15 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Pick a new CTS group entirely.** The `interface_matching.*` sweep's
-   468 not-supported cases are a different kind of gap (unadvertised
-   feature/format support, not a bug) — worth a quick triage to see if
-   any are cheap wins (e.g. a missing format or feature flag) versus
-   genuinely out of scope for now. Rough estimate: 30–60 minutes to
-   triage, more to fix depending on what's found.
-2. **Broaden the sweep beyond `pipeline_library.interface_matching.*`**
-   to a wider `dEQP-VK.pipeline.*` or a different top-level group
-   entirely, using the same reduce-first methodology this milestone
-   series has used throughout. Rough estimate: a session to sweep plus
-   however long the first reduction takes.
+1. **Scope L98 (float16/float64 stage-IO support).** Start by checking
+   whether `shaderFloat16`/`shaderFloat64` have *any* existing plumbing
+   anywhere else in feme's SPIR-V import or CPU-execution pipeline (a
+   16-bit float ALU type and a 64-bit double ALU type are both a much
+   bigger scope than a property flip). Rough estimate: 30–60 minutes
+   just to figure out how big this actually is, before any real
+   estimate for the fix itself is possible.
+2. **If L98 turns out too large for one session, broaden the sweep
+   instead** to a different `dEQP-VK.pipeline.*` group or a new
+   top-level CTS group entirely, using the same reduce-first
+   methodology used throughout this milestone series. Rough estimate:
+   a session to sweep plus however long the first reduction takes.
