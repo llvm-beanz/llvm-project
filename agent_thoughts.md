@@ -89777,3 +89777,90 @@ advertised; this is a within-extension property correction only.
    top-level CTS group entirely, using the same reduce-first
    methodology used throughout this milestone series. Rough estimate:
    a session to sweep plus however long the first reduction takes.
+
+# L98 scoping + L99 (new sweep, matNx3 rendering bug)
+
+Next action if picking this back up: dump SPIR-V/LLVM IR for
+`composite.matrix.mat2` (passing) vs `mat2x3` (failing) side by side —
+see step 1 below.
+
+## What happened
+
+1. **Scoped L98** (float16/float64 stage-IO support) without writing
+   code, per the prior session's own contingency plan. Traced the whole
+   pipeline: SPIR-V-to-LLVM type conversion and `CanonicalizeStage.cpp`'s
+   signature modeling are already width-generic. The real, single
+   blocker is `StageStorage.cpp`'s `buildStageStorage`, which hardcodes
+   every stage-IO slot to 32 bits and explicitly rejects anything else.
+   Split into L98(a) (float16 — likely cheap, reuses the existing
+   bool/i1-widening trick, no storage-layout change) and L98(b) (float64
+   — genuinely harder, needs a real design decision on variable-width
+   storage vs. two-slot decomposition).
+2. Confirmed L98 was too large to fix this session (matches the user's
+   own fallback plan) and pivoted to **broadening the sweep** to a new
+   top-level CTS group: `pipeline_library.spec_constant.*` (1170 cases,
+   never swept before).
+3. Swept it: 455 pass, 200 fail, 515 not-supported. Categorized the 200
+   failures into 4 buckets (dominant: 115 "Values did not match").
+4. Reduced the dominant bucket to
+   `composite.matrix.mat2x3`, confirmed reproducible standalone.
+5. Swept every `composite.matrix.*` case across all 5 graphics stages
+   and found a clean, exact pattern: **any matrix with a `vec3` column
+   (`mat2x3`/`mat3`/`mat4x3`) fails; every other row count (2 or 4)
+   passes** — stage-independent, column-count-independent.
+6. Traced the likely code location
+   (`SPIRVToLLVMPatterns.cpp`'s `convertMatrix`/`CompositeConstructOp`
+   plus the existing "tight vector array" `vec3`-packing machinery,
+   H101j) but did not dive into an actual IR-level fix this session —
+   that subsystem is large enough that it deserved its own session
+   rather than a rushed fix at the end of this one.
+
+## Wins (all verified, not just claimed)
+
+- L98 scoped with a concrete, confirmed blocker (`StageStorage.cpp`'s
+  `BitWidth != 32` guard) instead of staying "unconfirmed."
+- New CTS group swept for the first time: `pipeline_library.
+  spec_constant.*`, 1170 cases, full failure taxonomy captured.
+- A genuine, previously-unknown rendering bug found and reduced to a
+  single, reproducible standalone case with a clean, confirmed pattern
+  (3 stages × 3 failing shapes = 9 of the reduction's own confirming
+  data points, plus the same pattern repeating across 2 more stages).
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`,
+  confirmed at session start.
+
+## Commits this session
+
+1. `446adf830e13` — `[feme] L98: scope shaderFloat16/shaderFloat64
+   stage-IO support` (roadmap breakdown only, no code).
+2. `9fd047cef68d` — `[feme] L99: file matNx3 composite-construct/
+   indexing rendering bug` (roadmap entry, no code).
+3. `7825b9891243` — `[feme] L99: document spec_constant sweep and
+   matNx3 reduction` (VulkanCTSReport.md).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+this session — no code changed, so no advertised feature/extension
+changed.
+
+## Next steps
+
+1. **Trace L99's actual root cause.** Dump the SPIR-V and/or LLVM IR
+   for a passing `mat2` case and the failing `mat2x3` case side by
+   side, focused on the matrix's own `OpCompositeConstruct` and the
+   `m[i][j]` `OpAccessChain`+`OpLoad` sequence — look specifically at
+   whether `getTightVectorArrayType`'s marker-struct substitution
+   (H101j) is applied consistently on both the construct side and the
+   index/load side for a `vec3` column. Rough estimate: 1–2 hours to
+   find the actual divergence, once IR is in hand.
+2. **Reduce and scope the other 3 `spec_constant.*` failure buckets**
+   (45 `VectorExtractDynamic` legalize failures, 10 `OpTypeArray` count
+   failures, ~30 "GEP into vector" failures) — not yet touched this
+   session. Each looks like its own distinct gap, not obviously related
+   to L99. Rough estimate: 30–60 minutes each to reduce to a single
+   case and form a hypothesis, before any fix estimate is possible.
+3. **If L99 turns out well-contained, fix it and re-sweep** both
+   `composite.matrix.*` (18+ cases) and the full `spec_constant.*`
+   group (1170 cases) to confirm the fix's real blast radius — a
+   `vec3`-column matrix bug could plausibly affect other GLSL/HLSL
+   constructs beyond spec-constant composites (plain matrix literals,
+   uniform-block matrices, etc.), so a broader post-fix check is
+   warranted before considering it closed.
