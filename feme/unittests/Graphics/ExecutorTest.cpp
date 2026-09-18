@@ -4285,6 +4285,112 @@ TEST(ExecutorTest, AlphaToCoverageEnableGeneratesPerSampleCoverageFromAlpha) {
   }
 }
 
+// (roadmap L111(b)) An explicit `gl_SampleMask`/`SV_Coverage` *output*
+// (element 2, no `Location` -- system-value-linked, like
+// `ClipDistance`/`CullDistance` above) narrowing coverage to a fixed
+// `0b0101` (samples 0 and 2), independent of `alphaToCoverageEnable`
+// (left disabled here) -- the fragment stage's own explicit mask, not a
+// derived one.
+constexpr char SampleMaskFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %r = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %g = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %b = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %a = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %g, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %b, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float %a, i32 0)
+    call void @feme.stage.output.store.i32(i32 2, i32 0, i32 0, i32 5, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+/// (Roadmap L111(b)) A fragment shader's own explicit `gl_SampleMask`
+/// output (a constant `0b0101` here, unlike `alphaToCoverageEnable`'s own
+/// alpha-derived mask above) must narrow each covered pixel's coverage
+/// the same way: only samples 0 and 2 keep the shaded color, samples 1
+/// and 3 are left at the attachment's zero-initialized clear value --
+/// this is the exact root cause of roadmap L111
+/// (`unusual_multisample_state`), where a fragment shader's own
+/// `gl_SampleMask[i] = sampleMask & gl_SampleMaskIn[i]` write previously
+/// had no effect at all on which samples the executor actually wrote.
+TEST(ExecutorTest, FragmentSampleMaskOutputNarrowsPerSampleCoverage) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement SampleMaskOut;
+  SampleMaskOut.ElementID = 2;
+  SampleMaskOut.Direction = SignatureDirection::Output;
+  SampleMaskOut.SystemValue = SignatureSystemValue::Coverage;
+  SampleMaskOut.ComponentType = SignatureComponentType::SInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0),
+      SampleMaskOut};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, SampleMaskFragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false,
+      /*AlphaToOneEnable=*/false, /*AlphaToCoverageEnable=*/false);
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  TriangleScene Scene;
+  // A fully-covering, fully-opaque-red triangle -- every sample this
+  // shader's own mask leaves covered should end up exactly red.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = Attachs;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t Pixel = 0; Pixel != 16; ++Pixel) {
+    for (uint32_t S = 0; S != Samples; ++S) {
+      const uint8_t *Texel = MSStorage.data() + (Pixel * Samples + S) * 4;
+      if (S == 0 || S == 2) {
+        EXPECT_EQ(Texel[0], 255) << "pixel " << Pixel << " sample " << S;
+        EXPECT_EQ(Texel[3], 255) << "pixel " << Pixel << " sample " << S;
+      } else {
+        EXPECT_EQ(Texel[0], 0)
+            << "pixel " << Pixel << " sample " << S
+            << " (the shader's own gl_SampleMask output should have "
+               "culled this sample)";
+      }
+    }
+  }
+}
+
 TEST(ExecutorTest, AcceptsEightSampleCount) {
   Context Ctx;
   EntrySignature VSSig;

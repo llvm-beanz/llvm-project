@@ -2199,6 +2199,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "when alphaToCoverageEnable is set");
   }
 
+  // (Roadmap L111(b)) `gl_SampleMask`/`SV_Coverage`'s own *output*-direction
+  // form: a fragment shader may narrow its own coverage mask explicitly
+  // (e.g. `gl_SampleMask[0] = sampleMask & gl_SampleMaskIn[0];`), ANDed
+  // into each lane's coverage the same way `alphaToCoverageEnable`'s own
+  // derived mask is, just always-on rather than gated by a pipeline state
+  // bit (matching "the sample mask test" in `fragops.adoc`: a coverage bit
+  // this output clears is cleared unconditionally, regardless of any other
+  // multisample state). Absent (the common case -- most fragment shaders
+  // never write this), \c nullptr, leaving every lane's coverage
+  // unmodified exactly as before this row existed.
+  const SignatureElement *FSSampleMaskOut = findElement(
+      FSSig, SignatureDirection::Output, SignatureSystemValue::Coverage);
+  if (FSSampleMaskOut &&
+      (FSSampleMaskOut->ComponentCount != 1 ||
+       (FSSampleMaskOut->ComponentType != SignatureComponentType::SInt &&
+        FSSampleMaskOut->ComponentType != SignatureComponentType::UInt)))
+    return createStringError(inconvertibleErrorCode(),
+                             "a gl_SampleMask/SV_Coverage output must be a "
+                             "single-component signed or unsigned integer");
+
   // (Roadmap E5/H3) The extent used to clamp each selected scissor rect
   // below: the first bound (non-unused) color attachment, or else the
   // depth/stencil attachment, since attachment 0 itself may be an unused
@@ -2306,10 +2326,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // (roadmap H7n) `alphaToCoverageEnable` also forces the late path: its
   // own coverage mask depends on the fragment stage's shaded alpha output,
   // which isn't known until after the fragment stage runs, exactly like a
-  // `SV_Depth`/`SV_StencilRef` write or a discard/demote above.
+  // `SV_Depth`/`SV_StencilRef` write or a discard/demote above. (Roadmap
+  // L111(b)) An explicit `gl_SampleMask`/`SV_Coverage` output forces it for
+  // the identical reason -- the narrowed mask it produces is not known
+  // until the fragment stage itself has run.
   bool UseEarlyDepthStencil = NeedsDepthStencil && !FSDepthOut &&
                               !FSStencilRefOut && !FSMayDiscard &&
-                              !Pipeline.getAlphaToCoverageEnable();
+                              !Pipeline.getAlphaToCoverageEnable() &&
+                              !FSSampleMaskOut;
   // (roadmap H4) Which primitive class actually reaches the rasterizer. A
   // patch-list pipeline's own topology says nothing about that -- the
   // tessellator's `TessOutputPrimitive` does -- so this is the
@@ -3612,6 +3636,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   AlphaCoverage |= (1u << S);
               BaseCoverage &= AlphaCoverage;
             }
+            // (Roadmap L111(b)) An explicit `gl_SampleMask`/`SV_Coverage`
+            // output narrows coverage unconditionally, the same "AND with
+            // the fragment's coverage" rule `alphaToCoverageEnable`'s own
+            // derived mask above follows -- computed here too, ahead of
+            // the depth/stencil test below, for the identical reason (a
+            // coverage-culled sample must not be depth/stencil-tested or
+            // -written either). Only the first (`Row` 0) word is read:
+            // this executor's own per-lane coverage representation
+            // (`FemeFragmentInvocation::Coverage`, `PendingQuad::
+            // SampleMask` above) is already a single `uint32_t`, so a
+            // pipeline needing more than 32 samples' worth of mask bits is
+            // already outside what this executor supports, independent of
+            // this row.
+            if (FSSampleMaskOut)
+              BaseCoverage &= FSOutput->readRaw(FSSampleMaskOut->ElementID, 0,
+                                                Q * 4 + Lane);
             uint32_t PassMask = BaseCoverage;
             if (!UseEarlyDepthStencil && NeedsDepthStencil) {
               float FragDepth = PassInvocations[Q].Position[Lane][2];
