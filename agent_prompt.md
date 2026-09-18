@@ -65,21 +65,16 @@ Can you continue the work on feme? The last agent's suggested next steps are:
    volume, ~59% of the original sweep's `Fail`s): per-leaf decomposition
    for a struct/array/matrix masked load/store in `MaskIntrinsics.cpp`/
    `Linearize.cpp`.
-3. **L120** (new this session): `Modf` (6 occurrences -- needs a new
-   `SPIRV_GLModfOp` taking an `OpVariable` out-parameter, a shape unlike
-   any existing GL op; `GLFrexpStructOp`/`ModfStructPattern` already
-   cover the pointer-free struct-returning sibling upstream, but not this
-   pointer-taking one) and `Ldexp` (10 occurrences -- already has a
-   TableGen op definition, opcode 53, but no feme-side lowering pattern
-   at all; likely `f * exp2(e)` via `llvm.exp2`/`llvm.fmul`, or direct
-   float-exponent-bit manipulation).
-4. **L117** (not yet scoped in detail): matrix vertex attributes in
-   `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
-   matrix column at consecutive locations.
-5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
-   one-at-a-time reduction; no new technique found this session (see
-   the watchdog note above -- it doesn't help here).
-6. Once L116(a)/L117/L118/L120 close or are judged big enough to set
-   aside, go back to L106's other untriaged candidates:
-   `pipeline.monolithic.*`, `subgroups.*`, `compute.*` -- still nobody
-   has picked these up across many sessions now.
+3. **L121** (new this session, scoped): widen `llvm.ldexp`-shaped
+   divergent calls in `SIMDize.cpp`'s `widenElementwise` by also
+   widening a non-homogeneous (independently-overloaded) operand, not
+   just the ones matching the result type -- generalize the existing
+   `is_fpclass` special case rather than adding another one-off. ~Half
+   a day; unblocks the last `Ldexp` repro case.
+4. **L120's `Modf`**: needs a new `SPIRV_GLModfOp` taking an
+   `OpVariable` out-parameter, a shape unlike any existing GL op (the
+   pointer-free `ModfStruct` variant already exists upstream, this one
+   doesn't). Half a day, similar shape to `Determinant`'s own bespoke-op
+   precedent.
+5. **L116(f)'s remaining ~24 un-root-caused hangs/crashes**: still only
+   one-at-a-time reduction; no new technique found this session.
