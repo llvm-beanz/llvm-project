@@ -53,6 +53,9 @@ file.
 
 # Request
 
+The network cut out while you were working on this, can you continue and
+complete the work?
+
 Can you continue the work on feme? The last agent's suggested next steps are:
 
 1. **Root-cause L115** (~1-2 hours to scope, unknown to fix -- a new
