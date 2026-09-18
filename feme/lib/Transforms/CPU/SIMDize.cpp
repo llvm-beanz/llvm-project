@@ -2849,9 +2849,38 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
   // See `widenMaskedLoad` above: `llvm.masked.scatter` over a `<W x ptr>`
   // vector of addresses is correct for a uniform or a divergent address
   // alike, at the cost of the same deferred performance work.
+  //
+  // Roadmap L118: which mask narrows `Env.EntryMask` down to this masked
+  // store's own governing predicate depends on what `Matched.Ptr`
+  // ultimately addresses, though. `Env.SideEffectMask` (`EntryMask`
+  // further narrowed to exclude a fragment shader's own helper
+  // invocations -- kept alive only so a covered quad-mate's derivatives
+  // see real neighbor data, but never allowed to produce an observable
+  // side effect of their own) is the right choice for a genuine
+  // device-visible write -- a groupshared/resource store another
+  // invocation's own load could read back, which a helper invocation must
+  // never actually perform. A `MaskedAllocas` base (`collectMaskedAllocas`,
+  // roadmap L84) is different: it is one function's own per-invocation
+  // *local* variable (a `Private`-storage global `LocalizePrivateGlobals`
+  // localized to an alloca, or an ordinary local array/struct too large to
+  // promote), invisible to every other invocation regardless of live or
+  // helper status -- so masking its own write with `SideEffectMask`
+  // instead of `EntryMask` incorrectly skips a helper invocation's write
+  // to *its own* local copy, leaving that lane's own later read of the
+  // same local variable stale (found root-causing a real CTS regression,
+  // `dEQP-VK.graphicsfuzz.cov-function-loop-condition-constant-array-
+  // always-false`, see roadmap C8b/L118's own text for the full
+  // narrative: runtime instrumentation showed the masked store's own
+  // mask genuinely differing between a wave's helper and non-helper
+  // lanes, `SideEffectMask`-shaped, even though every lane's own control
+  // flow was otherwise provably uniform).
+  AllocaInst *UnderlyingAlloca = getUnderlyingAlloca(Matched.Ptr);
+  Value *GoverningMask = (UnderlyingAlloca && MaskedAllocas.contains(UnderlyingAlloca))
+                            ? Env.EntryMask
+                            : Env.SideEffectMask;
   Value *WideMask = getWidened(Matched.Mask, Builder);
   Value *EffectiveMask =
-      Builder.CreateAnd(Env.SideEffectMask, WideMask, "masked.mask");
+      Builder.CreateAnd(GoverningMask, WideMask, "masked.mask");
   Value *WidePtr = getWidened(Matched.Ptr, Builder);
 
   // "Vectors become components, not nested vectors" (roadmap H6g-b-a-i-a-i-a):

@@ -2315,6 +2315,74 @@ TEST(SIMDizeTest, WidensDivergentIndexIntoMaskedAllocaArray) {
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap L118: `FunctionWidener::widenMaskedStore`'s own governing mask
+// must be `Env.EntryMask`, not `Env.SideEffectMask`, whenever the masked
+// store's own address is a `MaskedAllocas`-tracked local variable. Unlike
+// a genuine device-visible write (a groupshared/resource store another
+// invocation's own load could observe, which `SideEffectMask` correctly
+// excludes a helper invocation from ever performing), a `MaskedAllocas`
+// base is one invocation's own private local storage -- invisible to
+// every other invocation regardless of live/helper status -- so masking
+// its write with `SideEffectMask` incorrectly skips a helper invocation's
+// write to *its own* copy, corrupting that same invocation's later read
+// of it (found root-causing a real CTS regression, `dEQP-VK.graphicsfuzz.
+// cov-function-loop-condition-constant-array-always-false`; see roadmap
+// C8b/L118's own text and `agent_thoughts.md` for the full reduction via
+// runtime instrumentation).
+TEST(SIMDizeTest, MaskedAllocaStoreUsesEntryMaskNotSideEffectMask) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %m) #0 {
+    entry:
+      %a = alloca [2 x i32], align 4
+      %p0 = getelementptr [2 x i32], ptr %a, i32 0, i32 0
+      call void @feme.cpu.masked.store.i32(i32 1, ptr %p0, i32 4, i1 %m)
+      %p1 = getelementptr [2 x i32], ptr %a, i32 0, i32 1
+      %val = call i32 @feme.cpu.masked.load.i32(ptr %p1, i32 4, i1 true, i32 0)
+      ret void
+    }
+    declare void @feme.cpu.masked.store.i32(i32, ptr, i32, i1)
+    declare i32 @feme.cpu.masked.load.i32(ptr, i32, i1, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Argument *EntryMaskArg = nullptr;
+  Argument *SideEffectMaskArg = nullptr;
+  for (Argument &Arg : F->args()) {
+    if (Arg.getName() == "wave_entry_mask")
+      EntryMaskArg = &Arg;
+    else if (Arg.getName() == "wave_sideeffect_mask")
+      SideEffectMaskArg = &Arg;
+  }
+  ASSERT_TRUE(EntryMaskArg);
+  ASSERT_TRUE(SideEffectMaskArg);
+
+  // Find the `llvm.masked.scatter` this masked store widened into, and
+  // confirm its mask operand's own `and` traces back to `wave_entry_mask`,
+  // never to `wave_sideeffect_mask`.
+  CallInst *Scatter = nullptr;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getIntrinsicID() ==
+            Intrinsic::masked_scatter)
+      Scatter = CI;
+  }
+  ASSERT_TRUE(Scatter);
+  Value *MaskOperand = Scatter->getArgOperand(2);
+  auto *AndInst = dyn_cast<Instruction>(MaskOperand);
+  ASSERT_TRUE(AndInst);
+  EXPECT_EQ(AndInst->getOpcode(), Instruction::And);
+  EXPECT_TRUE(llvm::is_contained(AndInst->operands(), EntryMaskArg));
+  EXPECT_FALSE(llvm::is_contained(AndInst->operands(), SideEffectMaskArg));
+}
+
 // Roadmap H107: a `feme.cpu.masked.load`/`.store` call is *unconditionally*
 // widened into a real `<W x T>` `llvm.masked.gather`/`.scatter`
 // (`widenMaskedLoad`'s own comment notwithstanding, unlike the sibling
