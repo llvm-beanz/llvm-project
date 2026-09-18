@@ -90321,3 +90321,80 @@ surface every distinct shape in play.
    unlike a single glob `-n` invocation) is now proven useful for a
    second session running -- worth formalizing as a small shared script
    if a third session needs it again.
+
+# Session: L107 fixed (producer-side array-depth bug), L106 triaged clean
+
+## Wins this session
+
+- **L107 fixed and closed.** Root cause: `OffsetStructMemberReorderAccessChainPattern`
+  (`SPIRVToLLVMPatterns.cpp`) only ever peeled a *single* outer array
+  dimension before giving up on finding the struct it needed to remap a
+  member index into. A tessellation-control shader's own implicit
+  per-control-point array wraps a loose output array-of-structures in a
+  *second* array dimension, so the struct sat two levels deep -- this
+  pattern's own guard bailed, falling through to MLIR's generic
+  `AccessChainPattern`, which forwards the unremapped declared member
+  index straight through (landing on a pad field instead of the real
+  member). Fixed by generalizing the peel to a `while` loop over any
+  array depth, forwarding one array index per level ahead of the
+  (correctly remapped) member selector.
+- **Full `interface_matching.*` group now 1445 Pass / 0 Fail / 144
+  NotSupported** (was 354/0/6 pre-fix on just `decoration_mismatch.*`;
+  the other two subgroups, `vector_length`/`shader_layout_component_
+  matching`, had never been swept before -- both turned out already
+  clean). The 144 NotSupported are all legitimate `float64`-unsupported
+  gaps, not bugs.
+- **L106 triaged, no fix needed.** The prior session's "468 not-yet-
+  triaged not-supported cases" concern turned out stale/incorrect --
+  actual count is 144, all legitimate. This closes L106's first
+  candidate; only a fresh CTS group remains as a candidate.
+- `ninja check-feme`: 3176 Passed, 3 pre-existing Unsupported, 0 Failed
+  (up 1 test from this session's new unit test).
+- 4 commits landed, each small and separate: the pattern fix, the unit
+  test, the Roadmap/CTS-report closeout, and the L106 triage note.
+
+## How the root cause was actually found
+
+Initial hypothesis (from the prior session, carried into this one) was
+that the generic upstream `AccessChainPattern` was the culprit -- wrong.
+A consumer-side trace (`FEME_L107_TRACE`, same env-var-gated `errs()`
+technique as L105) showed the exact byte offset (`68`) decomposing as
+`2 * 32 (correct padded stride) + 4 (the pad's own offset, not the real
+member's offset of 16)` -- proving the *outer* array-of-array indexing
+was already right, only the *inner* member selector was wrong. That
+pointed straight at `OffsetStructMemberReorderAccessChainPattern`'s own
+array-peeling logic (which explicitly special-cased "0 or 1" array
+levels) rather than the generic pattern it falls back to. Reading that
+function's own code directly (not more tracing) confirmed the two-level
+gap in one pass.
+
+## Time actually spent vs. estimate
+
+Prior session's own estimate: "1-2 hours once a minimal repro is in
+hand." Actual: close to that once picked back up -- the trace data was
+already captured from the prior session, so this session only needed to
+read `OffsetStructMemberReorderAccessChainPattern`'s own code, spot the
+single-level special case, and generalize it. No new reduction or
+tracing was needed at all.
+
+## Next steps
+
+1. **Pick a fresh CTS group to sweep** (roadmap L106's own remaining
+   candidate): either a different `dEQP-VK.pipeline.*` subgroup (e.g.
+   `pipeline_library.miscellaneous.*`, `pipeline.monolithic.*`,
+   `pipeline.multisample.*`) or a top-level group outside `pipeline.*`
+   entirely (e.g. `dEQP-VK.subgroups.*`, `dEQP-VK.compute.*`,
+   `dEQP-VK.graphicsfuzz.*`). None of these have been triaged this
+   milestone series. ~30-60 minutes to pick the cheapest-looking one and
+   get a first Pass/Fail/NotSupported count.
+2. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- it is not
+   persisted, so a fresh shell defaults to `lvp_icd.json` (llvmpipe).
+3. **Technique confirmed useful again**: for a *known-clean* subgroup
+   (no expected crashes), a single batched `deqp-vk -n "pattern.*"`
+   invocation is much faster than the one-case-at-a-time bash loop --
+   only fall back to the loop once a crash is actually observed
+   mid-batch (used both ways successfully this session: batched for
+   `vector_length`/`shader_layout_component_matching`, one-at-a-time
+   loop for the previously-crashing `decoration_mismatch.*`).
