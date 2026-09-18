@@ -91396,3 +91396,88 @@ intrinsic, not an SSA `insertvalue`/`extractvalue` chain). Not started.
 5. Once L116 closes (or is judged big enough to move on from), go back
    to L106's other untriaged candidates: `pipeline.monolithic.*`,
    `subgroups.*`, `compute.*` -- still nobody has picked these up.
+
+# Session: C8b's fix finished; a real regression found and fixed; L117/L118 opened
+
+## Wins this session
+
+1. **C8b closed for real: `LocalizePrivateGlobalsPass` now localizes
+   aggregate-typed `Private` globals.** Prior session had broadened
+   `isCandidateGlobal` and validated it in isolation but hadn't finished
+   CTS validation or committed. This session: reran the real repro
+   (`dEQP-VK.glsl.linkage.varying.struct.mat4x2`) -- confirmed the
+   SIMDize-time compile failure is genuinely gone.
+2. **Found the fix's own regression via a full CTS sweep, not luck.**
+   Re-swept all 733 non-hanging `dEQP-VK.graphicsfuzz.*` cases: +3 new
+   passes, but 1 case (`cov-function-loop-condition-constant-array-
+   always-false`) flipped Pass -> Fail. Confirmed real via 3x rerun +
+   `git stash` A/B testing, not a fluke.
+3. **Root-caused the regression to a different, pre-existing bug**, not
+   the fix itself: `SIMDize.cpp`'s generic "uniform value, leftover
+   scalar use" recovery (~line 4515-4595, roadmap H107) broadcasts lane
+   0's copy as a stand-in for all lanes -- safe when storage was one
+   shared global, unsafe once the fix gives each lane real independent
+   storage via `MaskedAllocas` widening (triggered by a discard/demote
+   in the reducing function). Opened as new roadmap row **L118** --
+   not fixed this session, correctly scoped as a separate, deeper issue.
+4. **Shipped a targeted, conservative mitigation**: `mayDiscardOrDemote()`
+   scans (via the existing `feme::getStageOpKind` helper) for a
+   reachable `feme.stage.discard`/`.demote` call and skips the
+   aggregate-localization path (only that path, not the pre-existing
+   scalar/vector path) for such a function. Re-swept: regression gone,
+   all 3 new wins retained. **Final: 532 Pass / 193 Fail / 8 NotSupported
+   (was 529/196/8) -- net +3/-3, 0 regressions.**
+5. `ninja check-feme`: 3192/3195 Pass, 3 pre-existing Unsupported, 0
+   Fail -- both before and after the mitigation.
+6. Opened **L117**: found via C8b's own re-verification -- the real repro
+   still fails, but one layer deeper, at `vkQueueSubmit`, because
+   `Executor.cpp` rejects any matrix *vertex attribute* outright (a
+   distinct, separate gap from matrix *varyings*, which already work).
+
+Three commits: the code fix + guard + lit tests (`e367edf83597`), the
+Roadmap.md update (`1fd30a67d8d7`), the VulkanCTSReport.md write-up
+(`1361148d51b4`).
+
+## The most useful technique this session
+
+**A CTS sweep is the only reliable way to catch a regression a "correct
+in isolation" fix can still cause.** The isolated validation (manual
+IR repros, the lit test, `check-feme`) all looked completely clean --
+none of them exercise the specific interaction (aggregate global +
+discard-driven masking + this pass's own broadening) that caused the
+regression. The 757-case `graphicsfuzz.*` sweep is what surfaced it.
+Worth treating any change to a widely-shared pass (this one touches
+literally any `Private`-storage global in the codebase) as needing a
+real CTS sweep, not just the unit/lit suite, before calling it done --
+consistent with what prior sessions found for `FemeFragmentInvocation`/
+`PerSampleShading` changes.
+
+## Next steps, in order
+
+1. **L118** (~half a day to a day, real scoping work first): teach
+   `SIMDize.cpp`'s stale-use recovery (~line 4515-4595) to either prove
+   all lanes' masks/storage agree before broadcasting lane 0, or skip
+   the lane-0 shortcut entirely for a `MaskedAllocas`-sourced value.
+   This is the real fix the discard/demote guard only worked around --
+   fixing it properly would let the guard be removed and recover the
+   localization wins it currently forgoes.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped by a
+   prior session): per-leaf decomposition for a struct/array/matrix
+   masked load/store in `MaskIntrinsics.cpp`/`Linearize.cpp` -- still
+   the single highest-value fix left in the L116 breakdown by error
+   volume (~59% of the original sweep's `Fail`s).
+3. **L116(c)'s `Determinant`** (~half a day): add `SPIRV_GLDeterminantOp`
+   to `SPIRVGLOps.td` (square-matrix operand shape) plus a feme-side
+   lowering -- pure arithmetic, no runtime callback, same shape as
+   L115(a).
+4. **L117** (not yet scoped in detail): matrix vertex attributes in
+   `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
+   matrix column at consecutive locations, mirroring how a matrix input
+   parameter is already split upstream. Worth a scoping pass before
+   estimating.
+5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
+   one-at-a-time reduction; no new technique found this session.
+6. Once L116/L117/L118 close or are judged big enough to set aside, go
+   back to L106's other untriaged candidates: `pipeline.monolithic.*`,
+   `subgroups.*`, `compute.*` -- still nobody has picked these up across
+   several sessions now.
