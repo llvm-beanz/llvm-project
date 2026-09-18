@@ -91481,3 +91481,85 @@ consistent with what prior sessions found for `FemeFragmentInvocation`/
    back to L106's other untriaged candidates: `pipeline.monolithic.*`,
    `subgroups.*`, `compute.*` -- still nobody has picked these up across
    several sessions now.
+
+# Session: L116(c)'s Determinant closed (MLIR op + feme lowering)
+
+## Win this session
+
+**`GLSL.std.450`'s `Determinant` (opcode 33) now fully supported**, the
+largest single item (17 of 31 occurrences) in L116(c)'s six-gap
+breakdown. Two-part fix, same shape as L115(a)/L115(b):
+
+1. `SPIRV_GLDeterminantOp` added to `SPIRVGLOps.td` (MLIR upstream side):
+   square-matrix operand, scalar-of-component-type result -- a shape no
+   existing generic GL-op pattern models, so a bespoke op def + hand-
+   written `verify()` (square check, result-type check), mirroring
+   `InterpolateAt*`'s own precedent. Commit `e7cff065f694`.
+2. `GLDeterminantPattern` added to feme's own `SPIRVToLLVMPatterns.cpp`:
+   Laplace/cofactor expansion, recursing in host-side C++ to build one
+   flat `fmul`/`fsub`/`fadd` IR chain (not a runtime loop -- every real
+   GLSL matrix is a fixed 2x2/3x3/4x4). Pure arithmetic, no runtime
+   callback needed. Commit `cbe82de944b9`.
+
+New tests: `gl-ops.mlir` (both Dialect/IR and Target/SPIRV), plus
+`spirv-to-llvm-matrix-arithmetic.mlir` (2x2/3x3 lowering, hand-verified
+against the standard `ad - bc` / cofactor formulas before writing
+CHECK lines).
+
+## Measured impact
+
+Found the real repro set directly instead of guessing:
+`grep -li determinant external/vulkancts/data/vulkan/amber/graphicsfuzz/
+*.amber` returned exactly 17 files -- matching L116(c)'s own original
+occurrence count exactly, a good sanity check that this was the right
+gap. All 17 now `Pass` (were all `Fail`).
+
+Full `graphicsfuzz.*` re-sweep (733 non-hanging cases): **532/193/8 ->
+549/176/8** -- exactly the 17 expected cases flip, nothing else moves.
+`ninja check-feme`: 3192/3195, 0 regressions.
+
+Docs: `Roadmap.md`'s L116(c) row struck through and scoped to
+"Determinant only, remainder split to L119" (the other 5 gaps --
+`Modf`, 4x `Pack/Unpack*`, `Ldexp`/`UnpackSnorm*`-family legalization --
+remain open under a fresh flat ID, not nested further). Commit
+`c09ce1a7d583`.
+
+## Technique confirmed again
+
+**Grep the actual CTS asset directory for a keyword match before
+assuming you need to build ad-hoc infrastructure to find the repro
+set.** `grep -li determinant *.amber` found the exact 17-case set in
+one command, and its count matching the original sweep's own diagnostic
+occurrence count was a useful independent confirmation that the right
+gap was being fixed, not a coincidentally-related one.
+
+## Next steps, in order
+
+1. **L118** (~half a day to a day, real scoping work first, still the
+   highest-value fix outstanding): teach `SIMDize.cpp`'s stale-use
+   recovery (~line 4515-4595) to either prove all lanes' masks/storage
+   agree before broadcasting lane 0, or skip the lane-0 shortcut
+   entirely for a `MaskedAllocas`-sourced value -- this is the real fix
+   the discard/demote guard (roadmap C8b) only worked around.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped): per-
+   leaf decomposition for a struct/array/matrix masked load/store in
+   `MaskIntrinsics.cpp`/`Linearize.cpp` -- still the single highest-value
+   fix left in the L116 breakdown by error volume (~59% of the original
+   sweep's `Fail`s).
+3. **L119** (new this session, not yet started): the remaining
+   GLSL.std.450 gaps from L116(c)'s original text -- `Modf` (needs a new
+   op with an `OpVariable` out-parameter, a genuinely new shape),
+   `PackUnorm4x8`/`PackUnorm2x16`/`UnpackUnorm2x16`/`UnpackUnorm4x8`
+   (much simpler, same shape as existing `Pack/UnpackHalf2x16`/
+   `PackSnorm4x8` siblings -- probably the fastest next win if picked
+   next), plus the separate `Ldexp`/`UnpackSnorm*`-family legalization-
+   only follow-up.
+4. **L117** (not yet scoped in detail): matrix vertex attributes in
+   `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
+   matrix column at consecutive locations.
+5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
+   one-at-a-time reduction; no new technique found this session.
+6. Once L116/L117/L118/L119 close or are judged big enough to set aside,
+   go back to L106's other untriaged candidates: `pipeline.monolithic.*`,
+   `subgroups.*`, `compute.*` -- still nobody has picked these up across
+   several sessions now.
