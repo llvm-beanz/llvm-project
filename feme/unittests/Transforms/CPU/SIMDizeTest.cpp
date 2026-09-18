@@ -367,6 +367,56 @@ TEST(SIMDizeTest, WidensDivergentIsFPClassCall) {
   EXPECT_TRUE(FoundWideIsFPClass);
 }
 
+// Roadmap L121: `llvm.ldexp.f32(float, i32)` over a divergent float -- the
+// shape `spirv.GL.Ldexp`'s own feme-side lowering pattern (L120) compiles
+// down to -- also fails the ordinary "same overloaded type shared by result
+// and every argument" `Homogeneous` rule: its `i32` exponent operand is
+// independently overloaded from its `float` result/first-argument pair, per
+// `Intrinsics.td`'s own `[LLVMMatchType<0>, llvm_anyint_ty]` shape. Unlike
+// `is_fpclass`'s `i32 immarg` (never widened at all), this exponent is a
+// genuine per-lane operand and must widen to its own `<W x i32>`, distinct
+// from the result's `<W x float>`.
+TEST(SIMDizeTest, WidensDivergentLdexpCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %f = sitofp i32 %tid to float
+      %r = call float @llvm.ldexp.f32.i32(float %f, i32 %tid)
+      store float %r, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare float @llvm.ldexp.f32.i32(float, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideLdexp = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (CI->getCalledFunction()->getIntrinsicID() != Intrinsic::ldexp)
+      continue;
+    FoundWideLdexp = true;
+    // Both operands widen, but to their own independently-overloaded
+    // types: the float being scaled widens to the same `<W x float>` as
+    // the result, while the integer exponent widens to its own, distinct
+    // `<W x i32>`.
+    EXPECT_TRUE(CI->getArgOperand(0)->getType()->isVectorTy());
+    EXPECT_TRUE(CI->getArgOperand(1)->getType()->isVectorTy());
+    EXPECT_TRUE(CI->getArgOperand(1)->getType()->getScalarType()->isIntegerTy(32));
+    EXPECT_TRUE(CI->getType()->isVectorTy());
+  }
+  EXPECT_TRUE(FoundWideLdexp);
+}
+
 // Roadmap H149: `feme::cpu::LinearizePass` attaches a divergent region's own
 // live mask to a `WaveIsFirstLane`/`llvm.dx.wave.is.first.lane` call as a
 // `"feme.divergence.mask"` operand bundle (see LinearizeTest.cpp's own test

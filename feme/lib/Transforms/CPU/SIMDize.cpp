@@ -373,6 +373,59 @@ bool isElementwiseVectorizableIntrinsic(Intrinsic::ID ID) {
   }
 }
 
+/// Describes how to widen a divergent call to a vectorizable intrinsic
+/// (`isElementwiseVectorizableIntrinsic`) whose operand types are *not* all
+/// identical to its own result type -- i.e. one that fails the simple
+/// `Homogeneous` check `FunctionWidener::widenElementwise` otherwise uses,
+/// but that is still widenable because at most one operand's type is
+/// genuinely, independently overloaded from the rest. There are two
+/// distinct ways an intrinsic's shape can end up "almost Homogeneous" like
+/// this:
+///  - `llvm.is.fpclass.fN(float, i32 immarg)`: its own overloaded type is
+///    driven by argument 0 (the float), not the `i1`-typed result (whose
+///    vector width merely follows argument 0's via `Intrinsics.td`'s
+///    `LLVMScalarOrSameVectorWidth<0, i1>`) -- so `PrimaryOperandIndex` is
+///    `0`, not `std::nullopt`. Its second (test-mask) argument is not
+///    overloaded at all; it is a compile-time-constant `ImmArg`, detected
+///    generically via `CallBase::paramHasAttr` rather than being named
+///    here, and is passed through completely unwidened.
+///  - `llvm.ldexp.fN(float, i32)`: its overloaded types are the float
+///    result/argument-0 pair (`PrimaryOperandIndex = std::nullopt`, i.e.
+///    the result type itself) *and* the independently-overloaded `i32`
+///    exponent at argument 1 (`IndependentOperandIndex = 1`), which is a
+///    genuine per-lane operand (not an `ImmArg`) that still needs widening,
+///    just to its own `<W x i32>` rather than the result's `<W x float>`.
+struct DivergentCallOverloadShape {
+  /// The operand whose type is the intrinsic's "primary" overloaded type
+  /// (shared with every other non-immarg, non-independent operand), or
+  /// `std::nullopt` if that overloaded type is simply the call's own
+  /// result type.
+  std::optional<unsigned> PrimaryOperandIndex;
+  /// A second operand, distinct from the primary overloaded type, that is
+  /// still genuinely per-lane (not an `ImmArg`) and needs widening to its
+  /// own independent `<W x T>` overload. `std::nullopt` if there is none.
+  std::optional<unsigned> IndependentOperandIndex;
+};
+
+/// Returns \p ID's `DivergentCallOverloadShape` if it is one of the small,
+/// explicitly-enumerated set of "almost-Homogeneous" intrinsics this
+/// function widens despite failing the plain same-type-everywhere
+/// `Homogeneous` check -- as opposed to a fully `Homogeneous` intrinsic
+/// (widened by the caller's own generic path) or one not covered at all.
+std::optional<DivergentCallOverloadShape>
+getDivergentCallOverloadShape(Intrinsic::ID ID) {
+  switch (ID) {
+  case Intrinsic::is_fpclass:
+    return DivergentCallOverloadShape{/*PrimaryOperandIndex=*/0u,
+                                       /*IndependentOperandIndex=*/std::nullopt};
+  case Intrinsic::ldexp:
+    return DivergentCallOverloadShape{/*PrimaryOperandIndex=*/std::nullopt,
+                                       /*IndependentOperandIndex=*/1u};
+  default:
+    return std::nullopt;
+  }
+}
+
 /// Roadmap H6g-b-a-i-a-i-b: whether \p ID is one of the `llvm.vector.reduce.*`
 /// intrinsics `FunctionWidener::widenVectorReduce` can widen -- a real,
 /// concrete GLSL/SPIR-V shape a component-wise vector comparison feeds,
@@ -4087,37 +4140,15 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
     // math library/scalarizer handle it, rather than the generic
     // scalarization fallback below (whose per-lane clone would otherwise
     // try to broadcast/extract the callee itself, one of `I.operands()`).
-    // Any other divergent call -- including a vectorizable intrinsic with a
-    // non-overloaded operand, e.g. `llvm.powi`'s integer exponent -- remains
-    // unsupported.
+    // A divergent call whose operand types are not all identical to its
+    // result type ("not `Homogeneous`" below) is still widenable if
+    // `getDivergentCallOverloadShape` recognizes its specific shape (e.g.
+    // `llvm.is.fpclass`'s argument-0-driven overload, roadmap H124p, or
+    // `llvm.ldexp`'s independently-overloaded `i32` exponent, roadmap
+    // L121) -- any other shape remains unsupported.
     Function *Callee = CI->getCalledFunction();
     Intrinsic::ID ID =
         Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
-    // Roadmap H124p: `llvm.is.fpclass.fN(float, i32 immarg)` is not
-    // "Homogeneous" below -- its result is `i1`, not the same type as its
-    // first (float) argument -- so it needs its own dedicated case rather
-    // than falling out of that generic same-type check. Its own vector
-    // overload (`LLVMScalarOrSameVectorWidth<0, i1>` in `Intrinsics.td`)
-    // is mangled on argument 0's type, not the result's, and its second
-    // (test-mask) argument is always a scalar immediate, never widened --
-    // both unlike every other intrinsic this function widens above, whose
-    // overloaded type is shared by the result and every argument alike.
-    // Reduced from a real `Basic/Mandelbrot.test` failure, where the
-    // per-pixel-varying escape-iteration loop's own `isnan`/`isinf`-style
-    // check on a divergent float compiles down to exactly this call.
-    if (ID == Intrinsic::is_fpclass) {
-      Type *WideArgTy =
-          FixedVectorType::get(CI->getArgOperand(0)->getType(), WaveSize);
-      Function *WideCallee =
-          Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideArgTy});
-      Value *NewCall = Builder.CreateCall(
-          WideCallee,
-          {getWidened(CI->getArgOperand(0), Builder), CI->getArgOperand(1)},
-          I.getName() + ".wide");
-      Widened[&I] = NewCall;
-      ToErase.push_back(&I);
-      return;
-    }
     bool Homogeneous = ID != Intrinsic::not_intrinsic &&
                        llvm::all_of(CI->args(), [&](const Value *Arg) {
                          return Arg->getType() == I.getType();
@@ -4139,6 +4170,41 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
       Widened[&I] = NewCall;
       ToErase.push_back(&I);
       return;
+    }
+    if (ID != Intrinsic::not_intrinsic &&
+        isElementwiseVectorizableIntrinsic(ID)) {
+      if (std::optional<DivergentCallOverloadShape> Shape =
+              getDivergentCallOverloadShape(ID)) {
+        Type *PrimaryTy =
+            Shape->PrimaryOperandIndex
+                ? FixedVectorType::get(
+                      CI->getArgOperand(*Shape->PrimaryOperandIndex)
+                          ->getType(),
+                      WaveSize)
+                : FixedVectorType::get(I.getType(), WaveSize);
+        SmallVector<Type *, 2> Tys = {PrimaryTy};
+        if (Shape->IndependentOperandIndex)
+          Tys.push_back(FixedVectorType::get(
+              CI->getArgOperand(*Shape->IndependentOperandIndex)->getType(),
+              WaveSize));
+        Function *WideCallee =
+            Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, Tys);
+        SmallVector<Value *, 4> WideArgs;
+        for (unsigned Idx = 0, End = CI->arg_size(); Idx != End; ++Idx) {
+          Value *Arg = CI->getArgOperand(Idx);
+          // An `ImmArg`-attributed operand (e.g. `llvm.is.fpclass`'s
+          // test-mask) is a compile-time constant, never a per-lane
+          // vector operand, and is passed through unwidened.
+          WideArgs.push_back(CI->paramHasAttr(Idx, Attribute::ImmArg)
+                                  ? Arg
+                                  : getWidened(Arg, Builder));
+        }
+        Value *NewCall =
+            Builder.CreateCall(WideCallee, WideArgs, I.getName() + ".wide");
+        Widened[&I] = NewCall;
+        ToErase.push_back(&I);
+        return;
+      }
     }
     Ctx.emitError("feme-cpu-simdize: unsupported divergent call to '" +
                   Twine(Callee ? Callee->getName() : "<indirect>") +
