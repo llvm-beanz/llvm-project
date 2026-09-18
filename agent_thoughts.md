@@ -91888,3 +91888,39 @@ Two prior sessions each spent most of their budget hand-deriving the widened IR'
 - `ninja check-feme`: 3197/3200 Passed, 3 Unsupported, 0 Failed.
 - `/tmp/gf_skipped.txt` still present for reuse (24 known-hanging `graphicsfuzz.*` names). No other scratch files left in `/tmp`.
 - `graphicsfuzz.*` sweep baseline for next session's comparisons: **593 Pass / 132 Fail / 8 NotSupported** (of 733 excluding the same 24 hangs).
+
+# Session: L122, L116(a), L120 (Modf), L121 all closed -- +8 Pass this session
+
+**Next action:** pick up L116(f)'s ~24 un-root-caused hangs/crashes, or L106's untriaged `pipeline.monolithic.*`/`subgroups.*`/`compute.*` candidates -- both scoped below, neither started yet.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up the prior session's 5-item next-steps list in order: L122, L116(a), L120's `Modf`, L121, then L116(f)/L106 untriaged items.
+3. **L122 closed**: `LocalizePrivateGlobals.cpp`'s `mayDiscardOrDemote` guard was strictly more conservative than needed now that L118's real fix (prior session) landed. Verified via a full sweep with the guard disabled (593/132/8, identical to baseline) before actually removing it and re-sweeping again (593/132/8, same). 2 commits (code+test, docs).
+4. **L116(a) closed**: added `createMaskedLoadRecursive`/`createMaskedStoreRecursive` to `Linearize.cpp`, decomposing a struct/array-typed masked load/store into one masked scalar/vector op per leaf, pre-`SIMDizePass` so no `SIMDize.cpp` changes were needed at all. Measured +1 Pass (594/131/8) -- smaller than the ~59%-of-error-volume estimate suggested, since most affected cases also hit other still-open L116 sub-gaps (documented in `VulkanCTSReport.md`). 2 commits.
+5. **L120's `Modf` closed**: added `SPIRV_GLModfOp` to `SPIRVGLOps.td` (GLSL.std.450 opcode 35, the pointer-out-param sibling of the already-supported `ModfStruct`), a verifier, IR-level + binary-roundtrip tests, and a feme-side `ModfPattern` lowering (truncation + subtraction, storing the integer part through the pointer operand). Measured +6 Pass (600/125/8) -- matching exactly the 6 `Modf` occurrences from L116(c)'s original sweep. 3 commits (MLIR op+tests, feme lowering+test, docs).
+6. **L121 closed**: generalized `SIMDize.cpp`'s `widenElementwise` -- replaced the ad hoc `is_fpclass`-only special case with a `DivergentCallOverloadShape` table describing, per intrinsic ID, which operand drives the "primary" overloaded type and which (if any) is a second, independently-overloaded operand needing its own widened type (vs. an `ImmArg`, passed through unwidened). `is_fpclass` and `ldexp` now share one code path. Measured +1 Pass (601/124/8) -- the exact `cov-ldexp-exponent-undefined-divided-fragcoord-never-executed` case L120's own investigation had flagged. 2 commits (code+test, docs).
+7. Ran `ninja check-feme` after every code change: consistently clean, growing from 3197/3200 → 3200/3203 (each closed row added 1-2 new tests, 0 regressions throughout).
+8. Total measured CTS delta this session: **593/132/8 → 601/124/8** (+8 Pass, 0 regressions), across 4 closed roadmap rows.
+
+## Why L120's `Modf` was tractable in one session (unlike some prior "new op" work)
+
+`ModfStruct` (the pointer-free sibling) was already fully implemented from a prior session, so both the MLIR-side shape (an ext-inst op with a genuine memory-effect pointer operand, following `SPIRV_AtomicUpdateOp`'s "omit `NoMemoryEffect`" convention) and the feme-side lowering math (truncate for the integer part, subtract for the fraction) were already proven correct by that precedent -- this session only had to adapt both to write through a pointer instead of packing into a struct.
+
+## Why L121's generalization uses a lookup table instead of deriving shapes from Intrinsics.td directly
+
+There is no convenient LLVM API to introspect an intrinsic's overloaded-type positions generically at the IR level (the mangling rules live in TableGen-generated IIT descriptor tables, not something `Intrinsic::ID` exposes directly). A small, explicitly-documented per-ID table (`getDivergentCallOverloadShape`) is a reasonable, extensible middle ground: `is_fpclass` and `ldexp` now share one widening code path instead of two separate special-case branches, and a future third shape (e.g. `llvm.powi`'s own integer exponent, mentioned in the code's pre-existing comment) would only need one more table entry, not a third copy-pasted branch.
+
+## Next steps
+
+1. **L116(f)'s ~24 un-root-caused hangs/crashes (no time estimate -- still only one-at-a-time reduction, no new technique found across several sessions now)**: still fully untouched. Consider trying the runtime-instrumentation technique that broke L118 open last session (a `feme.cpu.debug.print.*`-style host callback) if a future session picks one of these up, rather than more manual IR tracing.
+2. **L106's untriaged `pipeline.monolithic.*`/`subgroups.*`/`compute.*` candidates**: still nobody has picked these up across many sessions now. No scoping done yet -- would need a first triage pass (run each family's own `dEQP-VK.*` sweep, bucket failures) before estimating.
+3. Both L116/L117/L118/L120/L121 are now closed; L122 is also closed. The roadmap's "still open, high-value" list is now genuinely down to L116(f) and L106's untriaged items -- worth a fresh full-repository `dEQP-VK.*` sweep (not just `graphicsfuzz.*`) at the start of whichever future session picks this up, to get an up-to-date overall picture before diving into either.
+
+## State for next session
+
+- Working tree clean, 9 new commits this session before this entry (L122: 2, L116(a): 2, L120: 3, L121: 2), plus this entry's own commit = 10 total.
+- `ninja check-feme`: 3200/3203 Passed, 3 Unsupported, 0 Failed.
+- `graphicsfuzz.*` sweep baseline for next session's comparisons: **601 Pass / 124 Fail / 8 NotSupported** (of 733, excluding the same 24-name hang list reused across many sessions now, cached at `/tmp/gf_skipped.txt`).
+- No scratch files left in `/tmp` from this session (cleaned up `/tmp/l120/`); `/tmp/gf_skipped.txt` untouched for future reuse.
