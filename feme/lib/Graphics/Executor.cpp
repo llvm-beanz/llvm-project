@@ -3479,8 +3479,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // tracking `minSampleShading`'s fractional value (see
       // `GraphicsPipeline::getSampleShadingEnable`'s comment in
       // Pipeline.h). `gl_FragCoord`/`SV_Position` is re-evaluated at each
-      // pass's real sample position below; other interpolated values remain
-      // evaluated once at the pixel center.
+      // pass's real sample position below; (roadmap L114(a)) every
+      // ordinary varying is too, whenever `PerSampleShading` is true (see
+      // the varying-interpolation loop's own comment below) -- matching
+      // the spec's "evaluated at the location of the sample" requirement
+      // for a `sample`-qualified input, and this implementation's own
+      // choice to apply that same per-sample evaluation to every input
+      // rather than track `minSampleShading`'s fractional rate.
       uint32_t PassCount = PerSampleShading ? SampleCount : 1;
       for (uint32_t PassSample = 0; PassSample != PassCount; ++PassSample) {
         // `PassInvocations` is `QuadInvocations` narrowed to this one
@@ -3526,9 +3531,43 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         for (uint32_t Q = 0; Q != QuadCount; ++Q) {
           const PendingQuad &Quad = Quads[Q];
           const ScreenTriangle &Tri = ScreenTris[Quad.TriIdx];
+          // (Roadmap L114(a)) When this pass is per-sample-shaded, every
+          // ordinary varying below must be re-evaluated at this pass's
+          // own real sample offset, not the fixed pixel center
+          // `Quad.Bary0/1/2` were computed against -- per the spec, a
+          // `sample`-qualified input (or, per this implementation's own
+          // choice not to track `minSampleShading`'s fractional rate,
+          // any input at all whenever sample shading is active) is
+          // "evaluated at the location of the sample". Before this fix,
+          // a fragment shader comparing a `sample`-qualified varying
+          // directly against `gl_SamplePosition` (e.g. `dEQP-VK.pipeline.
+          // monolithic.multisample_shader_builtin.sample_position.
+          // correctness.*`) saw the two permanently disagree: `gl_
+          // SamplePosition` genuinely varied per pass (roadmap L114
+          // above) while every ordinary varying stayed frozen at its
+          // pixel-center value. Recomputed once per quad (not per lane)
+          // since `Area`/`Tri.Pos` are lane-independent; the per-lane
+          // barycentric weights below still vary by each lane's own
+          // pixel coordinate, exactly like the pixel-center path.
+          float Area = 0.0f;
+          std::array<float, 2> SampleOffset{0.5f, 0.5f};
+          if (PerSampleShading) {
+            Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2]);
+            SampleOffset = (*SamplePositions)[PassSample];
+          }
           for (unsigned Lane = 0; Lane != 4; ++Lane) {
-            float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
-                  B2 = Quad.Bary2[Lane];
+            float B0, B1, B2;
+            if (PerSampleShading) {
+              std::array<float, 2> P{Quad.PixelX[Lane] + SampleOffset[0],
+                                     Quad.PixelY[Lane] + SampleOffset[1]};
+              B0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P) / Area;
+              B1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P) / Area;
+              B2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P) / Area;
+            } else {
+              B0 = Quad.Bary0[Lane];
+              B1 = Quad.Bary1[Lane];
+              B2 = Quad.Bary2[Lane];
+            }
             uint32_t Invocation = Q * 4 + Lane;
             size_t Idx = 0;
             for (const LinkedVarying &LV : Varyings) {

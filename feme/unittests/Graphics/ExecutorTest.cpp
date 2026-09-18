@@ -4286,6 +4286,143 @@ TEST(ExecutorTest, SamplePositionForcesPerSampleShadingAndReadsRealOffset) {
     }
 }
 
+// Roadmap L114(a): a fragment shader that compares an ordinary
+// (`Location`-based, screen-space-affine) varying against `gl_FragCoord`
+// itself must see the two agree at every sample once per-sample shading
+// is active -- both describe the same screen point. Before this fix,
+// `Executor.cpp`'s varying-interpolation loop always used the fixed,
+// pixel-center barycentric weights (`Quad.Bary0/1/2`) even across
+// `PerSampleShading`'s own per-`PassSample` loop, so an ordinary varying
+// stayed frozen at its pixel-center value while `gl_FragCoord`/
+// `gl_SamplePosition` correctly varied per sample -- exactly the
+// `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.
+// sample_position.correctness.*` failure ("Varying values are not
+// sampled at gl_SamplePosition") this closes.
+//
+// The vertex shader's own "color" varying is set, per vertex, to that
+// vertex's own screen-space pixel position (precomputed by hand from the
+// fixed `{0,0,4,4}` viewport's affine NDC->screen formula:
+// `screen = (ndc*0.5+0.5)*4`), so barycentric-interpolating it at any
+// screen point `P` reproduces `P` itself exactly (an inherent property of
+// barycentric coordinates for any per-vertex values that are themselves
+// an affine function of vertex position, which a plain screen coordinate
+// trivially is) -- letting the test compare it directly against
+// `gl_FragCoord` with no floating-point slack beyond ordinary rounding.
+constexpr char VaryingMatchesFragCoordFragmentShaderIR[] = R"(
+  define void @fs_varying_fragcoord() #0 {
+    %vr = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %vg = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %fx = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %fy = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %dr = fsub float %vr, %fx
+    %dg = fsub float %vg, %fy
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %dr, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %dg, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, PerSampleShadingReinterpolatesVaryingsAtEachSample) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement PositionIn;
+  PositionIn.ElementID = 1;
+  PositionIn.Direction = SignatureDirection::Input;
+  PositionIn.ComponentType = SignatureComponentType::Float;
+  PositionIn.SystemValue = SignatureSystemValue::Position;
+  PositionIn.FirstComponent = 0;
+  PositionIn.ComponentCount = 4;
+  EntrySignature FSSig;
+  FSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/0),
+                    PositionIn,
+                    makeElement(2, SignatureDirection::Output, 4,
+                                /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, VaryingMatchesFragCoordFragmentShaderIR,
+                   "fs_varying_fragcoord", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  // `SampleShadingEnable=true` forces per-sample shading without needing
+  // a `gl_SamplePosition`/`gl_SampleID` input at all -- proving this fix
+  // is not somehow tied specifically to L114's own `SamplePosition`
+  // system-value plumbing.
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R32G32B32A32_FLOAT, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/true);
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u * sizeof(float), 0);
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R32G32B32A32_FLOAT, 4,
+                        4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  // A triangle covering the whole [-1, 1] NDC square, so every sample of
+  // every pixel is covered. Its "color" attribute carries each vertex's
+  // own precomputed screen-space pixel position (see the shader's own
+  // comment above), not an arbitrary color.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, // NDC(-1,-1) -> screen(0,0)
+      3.0f,  -1.0f, 0.0f, 8.0f, 0.0f, 0.0f, 1.0f, // NDC(3,-1)  -> screen(8,0)
+      -1.0f, 3.0f,  0.0f, 0.0f, 8.0f, 0.0f, 1.0f, // NDC(-1,3)  -> screen(0,8)
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  // Pixel (0, 0)'s 4 samples: the shader's own `varying - gl_FragCoord`
+  // difference must be (near) zero at *every* sample -- before this fix,
+  // it was `0.5 - SampleOffset` (the pixel-center-vs-real-sample-offset
+  // gap), nonzero at every one of these 4 samples' own "N-rooks" offsets
+  // (none of which is exactly the pixel center).
+  for (uint32_t S = 0; S != Samples; ++S) {
+    std::array<float, 4> RGBA;
+    std::memcpy(RGBA.data(), MSStorage.data() + S * 4 * sizeof(float),
+               sizeof(RGBA));
+    EXPECT_NEAR(RGBA[0], 0.0f, 1e-3f) << "sample " << S << " red (varying.r - fragcoord.x)";
+    EXPECT_NEAR(RGBA[1], 0.0f, 1e-3f) << "sample " << S << " green (varying.g - fragcoord.y)";
+  }
+}
+
 // Roadmap H7f: `alphaToOneEnable` forces every color attachment's output
 // alpha to `1.0` regardless of what the fragment shader itself wrote,
 // applied after `RectangularSmooth`'s own line-coverage alpha multiply
