@@ -90219,3 +90219,105 @@ pre-dates L104's own changes entirely. Logged as roadmap **L105**.
 3. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell.
+
+# L105 fix (interior stage-IO struct pad, not Component-decoration-related), L107 scoped
+
+Fixed L105's own `CanonicalizeStage.cpp` consumer-side bug. Full
+`interface_matching.decoration_mismatch.*` sweep: **354 Pass / 0 Fail /
+6 Assert** (360 cases total), up from 0/40/32 on just the affected
+`member_of_block` subgroup alone pre-fix. `check-feme`: 3175 Passed, 3
+pre-existing Unsupported, 0 Failed (up 1 test). Zero regressions.
+
+## What was wrong (much bigger than the roadmap entry described)
+
+The L105 roadmap entry framed this as an isolated crash on 2-3 cases,
+possibly Component-decoration-related (L94(h)). Both were wrong:
+
+- **Scope**: it hit the *entire* `member_of_block` decoration_mismatch
+  subgroup (72 cases, 0% passing pre-fix), plus a related
+  `member_of_array_of_structures` shape family.
+- **Cause**: nothing to do with Component decoration -- that was a red
+  herring from the first-reported case happening to also use one.
+  `layOutStructIfOffsetsMatch` (L103/L104's own struct-pad-insertion
+  logic) can insert a synthetic `[N x i8]` alignment-gap pad at *any*
+  physical struct position, not just leading. `CanonicalizeStage.cpp`
+  had 5 separate places that only ever checked for a *leading* pad,
+  silently corrupting every member after an interior one.
+
+Found by adding a temporary `errs()` trace (`FEME_L105_TRACE` env var,
+removed before landing) inside `SignatureElement` construction -- showed
+a 2-real-member block producing 4 malformed elements directly. Far
+faster than guessing from the crash backtrace alone.
+
+## The fix (1 code commit + 1 test commit + 1 docs commit)
+
+Added a shared `isStageIOPadField(Type*)` helper (pad = `[N x i8]`, a
+shape no real GLSL/HLSL member type ever takes), then generalized 5
+call sites from "skip field 0 if leading-pad-shaped" to "skip every
+field that's pad-shaped, at any position":
+`resolveOffsetWithinElement`, `addElements`' `TakeBlockPath`,
+`addStageIOStructMembers`, `getStageIOFlattenedRowCount`/
+`getStageIOLeafElementCount`, and `resolveNestedStageIOField`.
+
+New unit test:
+`CanonicalizeStageTest.MapsMultiMemberInterfaceBlockWithInteriorPadToDistinctMembers`.
+
+## New gap found and split off (not fixed this session)
+
+After the 5-location fix, re-sweeping `decoration_mismatch.*` in full
+(360 cases, one `deqp-vk` invocation per case since an assertion
+`abort()`s the whole process) surfaced 6 remaining crashes, all the
+*same* narrow shape: a loose (non-`Block`) array-of-structures `Output`
+variable at exactly the tessellation-control stage boundary (e.g.
+`out_flat_in_none_member_of_array_of_structures_vert_tesc_out_tese_in_frag`).
+
+Traced via `gdb` + a second temporary trace: this is a **different**,
+producer-side bug -- the *compiled IR itself* bakes in a byte offset
+assuming an un-padded layout, disagreeing with the real padded struct
+`CanonicalizeStage.cpp` correctly resolves against. So no amount of
+consumer-side generalization fixes it; something in
+`SPIRVToLLVMPatterns.cpp`'s own GEP-index-remap coverage (likely
+`AccessChainPattern`'s Output-storage-class array-of-struct path never
+routing through `remapNestedStructMemberIndices`, unlike
+`StageIOArrayAccessChainPattern`'s own `Input`-only remap) has a real
+gap for this one shape. Logged as roadmap **L107**, `L105`'s own
+`CanonicalizeStage.cpp` fix left in place and validated as fully correct
+for everything else.
+
+## Time actually spent vs. estimate
+
+Prior session estimated "30-60 minutes to triage L105." Actual: closer
+to 3-4 hours, once the true scope (72-case subgroup, not 2-3 cases) and
+the *second*, distinct producer-side bug (L107) both surfaced during
+validation sweeps. Same lesson as L104's own closing note, reinforced:
+always re-sweep the *full* affected CTS group before calling a
+struct-layout fix done -- a narrower repro or a partial sweep will not
+surface every distinct shape in play.
+
+## Next steps
+
+1. **Reduce and root-cause L107** (~1-2 hours once a minimal repro is
+   in hand -- the exact CTS case name and byte-offset-mismatch symptom
+   are already known, so start there directly with
+   `FEME_DUMP_IR=1`/`spirv-dis` on the reduced shader rather than
+   re-triaging from scratch). Likely fix: extend whichever
+   `AccessChain` conversion pattern handles a non-`Block` array-of-struct
+   `Output` access to call `remapNestedStructMemberIndices`, the same
+   way `StageIOArrayAccessChainPattern` already does for `Input`.
+2. **Re-sweep `decoration_mismatch.*` and the full
+   `interface_matching.*` group** after L107 lands, to confirm 360/360
+   and check for any further crashes elsewhere in the same family.
+3. **Then pick up roadmap L106** (broaden the sweep beyond
+   `spec_constant.*`/`interface_matching.decoration_mismatch.*`) --
+   either `interface_matching.*`'s own 468 not-yet-triaged
+   not-supported cases, or a fresh top-level `dEQP-VK.*` group. ~30-60
+   minutes to triage which is the cheaper win before committing to a
+   full sweep.
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell.
+5. **New technique worth keeping**: running a large CTS group one case
+   at a time via a bash loop (survives a hard `abort()` crash mid-sweep,
+   unlike a single glob `-n` invocation) is now proven useful for a
+   second session running -- worth formalizing as a small shared script
+   if a third session needs it again.
