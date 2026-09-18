@@ -55,24 +55,25 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Trace L99's actual root cause.** Dump the SPIR-V and/or LLVM IR
-   for a passing `mat2` case and the failing `mat2x3` case side by
-   side, focused on the matrix's own `OpCompositeConstruct` and the
-   `m[i][j]` `OpAccessChain`+`OpLoad` sequence — look specifically at
-   whether `getTightVectorArrayType`'s marker-struct substitution
-   (H101j) is applied consistently on both the construct side and the
-   index/load side for a `vec3` column. Rough estimate: 1–2 hours to
-   find the actual divergence, once IR is in hand.
-2. **Reduce and scope the other 3 `spec_constant.*` failure buckets**
-   (45 `VectorExtractDynamic` legalize failures, 10 `OpTypeArray` count
-   failures, ~30 "GEP into vector" failures) — not yet touched this
-   session. Each looks like its own distinct gap, not obviously related
-   to L99. Rough estimate: 30–60 minutes each to reduce to a single
-   case and form a hypothesis, before any fix estimate is possible.
-3. **If L99 turns out well-contained, fix it and re-sweep** both
-   `composite.matrix.*` (18+ cases) and the full `spec_constant.*`
-   group (1170 cases) to confirm the fix's real blast radius — a
-   `vec3`-column matrix bug could plausibly affect other GLSL/HLSL
-   constructs beyond spec-constant composites (plain matrix literals,
-   uniform-block matrices, etc.), so a broader post-fix check is
-   warranted before considering it closed.
+1. **Start L100.** Reduce
+   `spec_constant.graphics.vertex.expression.array_size_spec_const_expression`
+   (`OpTypeArray count ... must come from a constant` — the smallest
+   bucket, 10 cases) to a standalone repro first. Rough estimate:
+   30–60 minutes to reduce + form a hypothesis about the SPIR-V→LLVM
+   array-size-from-spec-constant-expression gap.
+2. **Then the `VectorExtractDynamic` bucket** (45 cases, "failed to
+   legalize" at pipeline-creation time — likely a dynamically-indexed-
+   vector-with-spec-constant-index gap). Rough estimate: 30–60 minutes
+   to reduce, more to scope a fix once IR is in hand.
+3. **Then the "GEP into vector" bucket** (~30 cases, also pipeline-
+   creation-time). Rough estimate: 30–60 minutes to reduce.
+4. **Re-sweep `spec_constant.*` after each fix** to confirm blast radius
+   and no regressions, same methodology used for L99 this session.
+5. **Standing gotcha for whoever picks this up next**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before running `vulkaninfo`/`deqp-vk` in a fresh shell — it is not
+   persisted anywhere, so a fresh shell defaults to the system's
+   `lvp_icd.json` (llvmpipe) instead. The "confirm FeMe device" check
+   does correctly fail loudly if you forget (shows `llvmpipe`, not
+   `FeMe CPU Vulkan Device`) — just don't skip re-running it after
+   exporting the variable.
