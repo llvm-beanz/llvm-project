@@ -39,13 +39,20 @@
 // derivate.dfdx.private_store.*`'s own full-black-framebuffer failure to
 // this exact shape (see feme/docs/Roadmap.md's H170 row).
 //
-// Deliberately narrow in scope for now: only a scalar or fixed-vector
-// -typed global is converted (an array/struct-typed one is left alone,
-// so as not to interact with `feme::cpu::LocalNarrowVectorArrayInitPass`'s
-// own array-specific fixup, itself already scoped to exactly this
-// address-space-0 "Private"/"Function"-storage global category); a
-// broader aggregate-typed case is left for a future session if a real
-// CTS case ever needs it.
+// Deliberately narrow in scope: a `FixedVectorType` array/struct leaf is
+// converted only if it agrees on its tightly packed vs. real, ABI-padded
+// size (roadmap L116(a)/C8b broadened this from "scalar/fixed-vector
+// value type only" to also cover a struct/array whose every leaf is one
+// of those shapes -- see `isSupportedAggregateLeafType`'s own comment in
+// the `.cpp` file for the full reasoning); a non-power-of-2-width vector
+// leaf (e.g. `<3 x float>`) is still excluded, so as not to interact with
+// `feme::cpu::LocalNarrowVectorArrayInitPass`'s own already-scoped
+// tight-offset fixup for exactly that shape. An aggregate-typed global is
+// also still left alone if its one using function can ever `discard`/
+// `demote` (see `mayDiscardOrDemote`'s own comment for the real CTS
+// regression that shape caused, and why it is excluded rather than fixed
+// here) -- this exclusion does not apply to the scalar/fixed-vector case,
+// which predates this row and has no such gap.
 //
 //===----------------------------------------------------------------------===//
 
@@ -56,11 +63,15 @@
 
 namespace feme::cpu {
 
-/// Converts a scalar/fixed-vector-typed, address-space-0, non-constant
+/// Converts a `Private`-storage, address-space-0, non-constant
 /// `GlobalVariable` used only by one function's own instructions into a
-/// real local `alloca` in that function's entry block. See the file
-/// comment above for why this specific category of global needs this
-/// fixup before `feme::cpu::SIMDizePass` runs.
+/// real local `alloca` in that function's entry block -- a scalar or
+/// fixed-vector value type outright, or (roadmap L116(a)/C8b) a
+/// struct/array whose every leaf is one of those shapes, free of a
+/// non-power-of-2-width vector's ABI-padding gap, and used only by a
+/// function that can never `discard`/`demote`. See the file comment
+/// above for why this specific category of global needs this fixup
+/// before `feme::cpu::SIMDizePass` runs.
 class LocalizePrivateGlobalsPass
     : public llvm::OptionalPassInfoMixin<LocalizePrivateGlobalsPass> {
 public:
