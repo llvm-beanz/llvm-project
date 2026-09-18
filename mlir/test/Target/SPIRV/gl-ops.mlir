@@ -231,4 +231,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, 
     %3 = spirv.GL.InterpolateAtOffset %0, %arg1 : !spirv.ptr<f32, Input>, vector<2xf32> -> f32
     spirv.Return
   }
+
+  spirv.func @determinant(%arg0 : !spirv.matrix<3 x vector<3xf32>>) "None" {
+    // CHECK: {{%.*}} = spirv.GL.Determinant {{%.*}} : !spirv.matrix<3 x vector<3xf32>> -> f32
+    %0 = spirv.GL.Determinant %arg0 : !spirv.matrix<3 x vector<3xf32>> -> f32
+    spirv.Return
+  }
 }

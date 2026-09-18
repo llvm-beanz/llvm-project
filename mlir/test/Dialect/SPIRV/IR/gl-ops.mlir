@@ -1529,3 +1529,33 @@ spirv.module Logical GLSL450 {
     spirv.Return
   }
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.Determinant
+//===----------------------------------------------------------------------===//
+
+func.func @determinant(%arg0 : !spirv.matrix<3 x vector<3xf32>>, %arg1 : !spirv.matrix<2 x vector<2xf16>>) -> () {
+  // CHECK: spirv.GL.Determinant {{%.*}} : !spirv.matrix<3 x vector<3xf32>> -> f32
+  %0 = spirv.GL.Determinant %arg0 : !spirv.matrix<3 x vector<3xf32>> -> f32
+  // CHECK: spirv.GL.Determinant {{%.*}} : !spirv.matrix<2 x vector<2xf16>> -> f16
+  %1 = spirv.GL.Determinant %arg1 : !spirv.matrix<2 x vector<2xf16>> -> f16
+  return
+}
+
+// -----
+
+func.func @determinant_non_square(%arg0 : !spirv.matrix<3 x vector<2xf32>>) -> () {
+  // expected-error @+1 {{matrix must be square, but got 2x3}}
+  %0 = spirv.GL.Determinant %arg0 : !spirv.matrix<3 x vector<2xf32>> -> f32
+  return
+}
+
+// -----
+
+func.func @determinant_mismatched_result(%arg0 : !spirv.matrix<3 x vector<3xf32>>) -> () {
+  // expected-error @+1 {{result type must match the matrix's component type, got 'f16' and 'f32'}}
+  %0 = spirv.GL.Determinant %arg0 : !spirv.matrix<3 x vector<3xf32>> -> f16
+  return
+}

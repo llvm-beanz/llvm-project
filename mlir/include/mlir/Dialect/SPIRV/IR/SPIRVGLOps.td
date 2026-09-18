@@ -465,6 +465,40 @@ def SPIRV_GLInverseSqrtOp : SPIRV_GLUnaryArithmeticOp<"InverseSqrt", 32, SPIRV_F
 
 // -----
 
+def SPIRV_GLDeterminantOp : SPIRV_GLOp<"Determinant", 33, [NoMemoryEffect]> {
+  let summary = "Determinant of a square matrix";
+
+  let description = [{
+    Result is the determinant of Matrix, a square matrix of floating-point
+    components.
+
+    Result Type must be a scalar of the same floating-point type as the
+    components of Matrix.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.GL.Determinant %matrix : !spirv.matrix<3 x vector<3xf32>> -> f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_MatrixOf<SPIRV_Float>:$matrix
+  );
+
+  let results = (outs
+    SPIRV_Float:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $matrix `:` type($matrix) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// -----
+
 def SPIRV_GLLogOp : SPIRV_GLUnaryArithmeticOp<"Log", 28, SPIRV_Float16or32, [AlwaysSpeculatable]> {
   let summary = "Natural logarithm of the operand";
 

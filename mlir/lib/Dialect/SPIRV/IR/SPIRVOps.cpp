@@ -2450,6 +2450,24 @@ LogicalResult spirv::GLInterpolateAtOffsetOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.Determinant
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::GLDeterminantOp::verify() {
+  auto matrixType = cast<spirv::MatrixType>(getMatrix().getType());
+  if (matrixType.getNumRows() != matrixType.getNumColumns())
+    return emitOpError("matrix must be square, but got ")
+          << matrixType.getNumRows() << "x" << matrixType.getNumColumns();
+
+  if (matrixType.getElementType() != getResult().getType())
+    return emitOpError(
+              "result type must match the matrix's component type, got ")
+          << getResult().getType() << " and " << matrixType.getElementType();
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.CL.ldexp
 //===----------------------------------------------------------------------===//
 
