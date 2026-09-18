@@ -90047,3 +90047,96 @@ persisted anywhere, export it fresh every shell).
 5. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell.
+
+# L103 fix (struct member-index remapping) + L104 scoped
+
+Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` before starting.
+
+**Win: L103 closed.** `composite.struct.*` (200 cases): 100 Pass ->
+165 Pass, 35 Fail (down from 100), 0 regressions. Full `spec_constant.*`
+sweep: 555/100/515 -> 620/35/515, an exact +65/-65 shift.
+
+## What was broken
+
+The prior session's L103 fix (build a non-offset struct's LLVM type
+explicitly `packed`, with alignment gaps materialized as real `[N x
+i8]` members) was correct but incomplete: it changed *which* physical
+LLVM field index a declared SPIR-V member index maps to, but three
+separate places that build a GEP/insertvalue/extractvalue into such a
+struct still assumed declared index == physical index. Fixed all
+three:
+
+1. `OffsetStructMemberReorderAccessChainPattern`'s gate: `hasOffset()`
+   -> unconditional.
+2. `remapNestedStructMemberIndices`'s own inner gate: same broadening.
+3. `CompositeConstructPattern::convertStruct`'s ternary: same.
+4. **The big one**: `StageIOArrayAccessChainPattern` (misleadingly
+   named -- it handles any `Input`-storage composite, not just arrays)
+   forwarded indices completely unremapped. Found by adding a temporary
+   `llvm::errs()` print to the top of every `AccessChainOp`-converting
+   pattern class (6 total) and rebuilding, since `--debug-only=dialect-
+   conversion` only prints the SPIR-V op name, identically, for every
+   candidate C++ pattern -- it can't tell you *which* one actually ran.
+
+## Reusable technique: disambiguating same-named pattern candidates
+
+When several MLIR conversion patterns match the same op type and
+`--debug-only=dialect-conversion` shows only one anonymous
+"`Pattern : 'spirv.AccessChain -> ()'`" success line with no useful
+declines before it: add one `llvm::errs() << "TAG\n"` at the top of
+`matchAndRewrite` for *every* candidate pattern class, rebuild, rerun.
+Whichever tag prints is the one that actually fired. About 20 minutes
+once you have the list of candidate classes; most of the time here was
+finding that list (grep for `AccessChainOp` pattern class definitions
+in the same file).
+
+## Lesson for next time this file is touched
+
+There is no single choke point for "does this struct need its member
+indices remapped." Every place that independently builds a GEP,
+`insertvalue`, or `extractvalue` into/out of a struct-derived type
+needs its own check. A future audit: grep for every direct
+`llvm.getelementptr`/`llvm.insertvalue`/`llvm.extractvalue` construction
+against a `spirv::StructType`-derived type in this file and confirm
+each one calls through `getStructMemberPhysicalIndex`/
+`remapNestedStructMemberIndices` rather than assuming identity.
+
+## L104 (new, scoped but not fixed)
+
+The remaining 35 `composite.struct.*` failures are a **different** bug,
+same family: every 3-lane-vector-column shape (`vec3`, `ivec3`,
+`uvec3`, every `matNx3`, `array`) across all 5 stages. Root cause:
+`layOutStructIfOffsetsMatch`'s bare `mlir::DataLayout` always rounds a
+vector's own size up to the next power-of-two lane count (3 -> 4, 16
+bytes) when deciding how far the *next* member's offset advances. But
+the real SPIR-V-triple `DataLayout` actually used at GEP-fold time
+computes a `<3 x float>`'s alloc size as a tight, unrounded 12 bytes.
+Confirmed with a standalone repro: the identical struct+GEP folds to
+two different byte offsets depending only on which of the two
+`DataLayout` strings observed in this codebase (a short compute one, a
+longer graphics one) is attached. Full root-cause writeup with the
+exact repro steps is in `VulkanCTSReport.md`'s new "L104" section and
+`Roadmap.md`'s L104 row.
+
+## Next steps
+
+1. **Fix L104** (~1-2 hours): change `layOutStructIfOffsetsMatch`'s
+   cursor-advance step to use a vector member's unrounded store size
+   (`elementCount * elementSize`) for computing where the *next*
+   member starts, while keeping the rounded/natural alignment for the
+   vector member's *own* placement. Verify against both the compute
+   and graphics `DataLayout` strings before landing -- they were
+   observed to differ, so a fix tuned to only one could just move the
+   bug to the other execution model.
+2. **Re-sweep `composite.struct.*` and `spec_constant.*`** after the
+   L104 fix lands -- expect 35/0 and 655/0 respectively if the fix is
+   fully scoped correctly.
+3. **Broaden the sweep beyond `spec_constant.*`** once L104 closes --
+   this whole `pipeline_library.spec_constant.*` group has now had 5
+   sessions of fixes (L99-L104) landed against it; a fresh top-level
+   CTS group (or `dEQP-VK.pipeline.*` more broadly) is due. ~1 session
+   to sweep plus however long the first reduction takes.
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell.
