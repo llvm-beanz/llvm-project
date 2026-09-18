@@ -10956,6 +10956,225 @@ public:
   }
 };
 
+/// Packs each lane of a normalized floating-point vector \p Operand into
+/// a `BitsPerComponent`-bit fixed-point integer and packs all
+/// `NumComponents` such fields into a single `i32` result -- component 0
+/// in the least-significant bits, component `NumComponents - 1` in the
+/// most-significant, matching the GLSL.std.450 spec's own bit ordering
+/// for `PackSnorm4x8`/`PackUnorm4x8`/`PackUnorm2x16` (and, by the same
+/// shape, `PackSnorm2x16`, which MLIR does not currently define). Each
+/// lane's own spec formula is `round(clamp(c, Lo, 1) * Scale)` --
+/// `Lo`/`Scale` differ between the signed (`Lo = -1`, `Scale = 2^(B-1) -
+/// 1`) and unsigned (`Lo = 0`, `Scale = 2^B - 1`) encodings, but the rest
+/// of the construction is shared: clamp via `llvm.maxnum`/`llvm.minnum`
+/// (mirroring `ClampPattern`'s own choice of NaN-propagating-but-
+/// otherwise-IEEE-754 min/max above), round via `llvm.round` (round to
+/// nearest, ties away from zero, matching the spec's own `round()`), then
+/// `llvm.fptosi` to an `i32` (safe for the unsigned encoding too, since
+/// its own clamped range `[0, Scale]` never produces a negative float)
+/// and mask to the low `BitsPerComponent` bits -- correct even for a
+/// negative two's-complement value, since masking after sign-extension
+/// leaves the low bits unchanged.
+static mlir::Value packNormalizedComponents(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value Operand, int64_t NumComponents, int64_t BitsPerComponent,
+    bool IsSigned, mlir::Type ResultType) {
+  double Scale = static_cast<double>(
+      IsSigned ? (int64_t{1} << (BitsPerComponent - 1)) - 1
+              : (int64_t{1} << BitsPerComponent) - 1);
+  mlir::Type F32Ty = Rewriter.getF32Type();
+  mlir::Value LoConst = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, F32Ty,
+      Rewriter.getF32FloatAttr(IsSigned ? -1.0f : 0.0f));
+  mlir::Value HiConst = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, F32Ty, Rewriter.getF32FloatAttr(1.0f));
+  mlir::Value ScaleConst = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, F32Ty,
+      Rewriter.getF32FloatAttr(static_cast<float>(Scale)));
+  mlir::Value Mask = createBitFieldConstant(
+      Rewriter, Loc, ResultType, (int64_t{1} << BitsPerComponent) - 1);
+
+  mlir::Value Result;
+  for (int64_t I = 0; I != NumComponents; ++I) {
+    mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+    mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
+        Rewriter, Loc, Operand, IndexValue);
+    mlir::Value Clamped = mlir::LLVM::MaxNumOp::create(
+        Rewriter, Loc, F32Ty, Lane, LoConst);
+    Clamped = mlir::LLVM::MinNumOp::create(Rewriter, Loc, F32Ty, Clamped,
+                                           HiConst);
+    mlir::Value Scaled = mlir::LLVM::FMulOp::create(Rewriter, Loc, F32Ty,
+                                                     Clamped, ScaleConst);
+    mlir::Value Rounded =
+        mlir::LLVM::RoundOp::create(Rewriter, Loc, F32Ty, Scaled);
+    mlir::Value AsInt =
+        mlir::LLVM::FPToSIOp::create(Rewriter, Loc, ResultType, Rounded);
+    mlir::Value Masked =
+        mlir::LLVM::AndOp::create(Rewriter, Loc, ResultType, AsInt, Mask);
+    mlir::Value ShiftAmt = createBitFieldConstant(
+        Rewriter, Loc, ResultType, I * BitsPerComponent);
+    mlir::Value Shifted = mlir::LLVM::ShlOp::create(Rewriter, Loc, ResultType,
+                                                     Masked, ShiftAmt);
+    Result = Result ? mlir::LLVM::OrOp::create(Rewriter, Loc, ResultType,
+                                               Result, Shifted)
+                    .getResult()
+                    : Shifted;
+  }
+  return Result;
+}
+
+/// Unpacks `NumComponents` `BitsPerComponent`-bit fixed-point fields out
+/// of \p Operand (component 0 in the least-significant bits, the reverse
+/// of `packNormalizedComponents` above) into a floating-point vector,
+/// dividing each by the same encoding's own scale factor. Field
+/// extraction reuses the shift-left-then-shift-right idiom
+/// `BitFieldSExtractPattern`/`BitFieldUExtractPattern` above already
+/// establish for isolating and correctly (sign- or zero-)extending an
+/// arbitrary-width bitfield: shift left so the field's own top bit lands
+/// in the 32-bit value's sign position, then shift right by the same
+/// amount (`llvm.ashr` for the signed encoding, replicating the sign bit;
+/// `llvm.lshr` for the unsigned one). The signed encoding's own spec
+/// formula additionally clamps the divided result to `[-1, 1]` (needed
+/// because the most negative representable fixed-point value divides to
+/// something slightly past `-1`); the unsigned encoding's `[0, 1]` result
+/// never needs clamping since its fixed-point range is exactly `[0,
+/// Scale]`.
+static mlir::Value unpackNormalizedComponents(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value Operand, int64_t NumComponents, int64_t BitsPerComponent,
+    bool IsSigned, mlir::VectorType ResultType) {
+  mlir::Type IntType = Operand.getType();
+  int64_t TotalBits = mlir::cast<mlir::IntegerType>(IntType).getWidth();
+  double Scale = static_cast<double>(
+      IsSigned ? (int64_t{1} << (BitsPerComponent - 1)) - 1
+              : (int64_t{1} << BitsPerComponent) - 1);
+  mlir::Type F32Ty = ResultType.getElementType();
+  mlir::Value ScaleConst = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, F32Ty,
+      Rewriter.getF32FloatAttr(static_cast<float>(Scale)));
+  mlir::Value NegOneConst, OneConst;
+  if (IsSigned) {
+    NegOneConst = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, F32Ty, Rewriter.getF32FloatAttr(-1.0f));
+    OneConst = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, F32Ty, Rewriter.getF32FloatAttr(1.0f));
+  }
+
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultType);
+  for (int64_t I = 0; I != NumComponents; ++I) {
+    int64_t ShiftLeftAmount = TotalBits - BitsPerComponent * (I + 1);
+    mlir::Value ShlAmt =
+        createBitFieldConstant(Rewriter, Loc, IntType, ShiftLeftAmount);
+    mlir::Value Shifted =
+        mlir::LLVM::ShlOp::create(Rewriter, Loc, IntType, Operand, ShlAmt);
+    mlir::Value ShrAmt = createBitFieldConstant(
+        Rewriter, Loc, IntType, TotalBits - BitsPerComponent);
+    mlir::Value Extracted =
+        IsSigned
+            ? mlir::LLVM::AShrOp::create(Rewriter, Loc, IntType, Shifted,
+                                         ShrAmt)
+                  .getResult()
+            : mlir::LLVM::LShrOp::create(Rewriter, Loc, IntType, Shifted,
+                                         ShrAmt)
+                  .getResult();
+    mlir::Value AsFloat =
+        IsSigned
+            ? mlir::LLVM::SIToFPOp::create(Rewriter, Loc, F32Ty, Extracted)
+                  .getResult()
+            : mlir::LLVM::UIToFPOp::create(Rewriter, Loc, F32Ty, Extracted)
+                  .getResult();
+    mlir::Value Normalized =
+        mlir::LLVM::FDivOp::create(Rewriter, Loc, F32Ty, AsFloat, ScaleConst);
+    if (IsSigned) {
+      Normalized = mlir::LLVM::MaxNumOp::create(Rewriter, Loc, F32Ty,
+                                                Normalized, NegOneConst);
+      Normalized = mlir::LLVM::MinNumOp::create(Rewriter, Loc, F32Ty,
+                                                Normalized, OneConst);
+    }
+    mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+    Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                 Normalized, IndexValue);
+  }
+  return Result;
+}
+
+/// Converts `spirv.GL.PackSnorm4x8`/`spirv.GL.PackUnorm4x8`/
+/// `spirv.GL.PackUnorm2x16` (roadmap L119) via `packNormalizedComponents`
+/// above. These three ops have no upstream MLIR conversion pattern at
+/// all -- like the pack/unpack-half-2x16 pair above, they need custom
+/// fixed-point bit-manipulation math with no matching single LLVM
+/// intrinsic, so upstream's own `DirectConversionPattern` table
+/// (`SPIRVToLLVM.cpp`) never covers them.
+template <typename OpTy, int64_t NumComponents, int64_t BitsPerComponent,
+         bool IsSigned>
+class GLPackNormPattern : public mlir::SPIRVToLLVMConversion<OpTy> {
+public:
+  using mlir::SPIRVToLLVMConversion<OpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<OpTy>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(OpTy Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Result = packNormalizedComponents(
+        Rewriter, Op.getLoc(), Adaptor.getOperand(), NumComponents,
+        BitsPerComponent, IsSigned, DstType);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.UnpackSnorm4x8`/`spirv.GL.UnpackUnorm4x8`/
+/// `spirv.GL.UnpackUnorm2x16` (roadmap L119) via
+/// `unpackNormalizedComponents` above -- see `GLPackNormPattern` above
+/// for why these need a bespoke pattern rather than an upstream
+/// `DirectConversionPattern`.
+template <typename OpTy, int64_t NumComponents, int64_t BitsPerComponent,
+         bool IsSigned>
+class GLUnpackNormPattern : public mlir::SPIRVToLLVMConversion<OpTy> {
+public:
+  using mlir::SPIRVToLLVMConversion<OpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<OpTy>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(OpTy Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    auto DstVecType = mlir::dyn_cast_or_null<mlir::VectorType>(DstType);
+    if (!DstVecType || DstVecType.getNumElements() != NumComponents)
+      return Rewriter.notifyMatchFailure(
+          Op, "unexpected result shape for this unpack op");
+    mlir::Value Result = unpackNormalizedComponents(
+        Rewriter, Op.getLoc(), Adaptor.getOperand(), NumComponents,
+        BitsPerComponent, IsSigned, DstVecType);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+using GLPackSnorm4x8Pattern =
+    GLPackNormPattern<mlir::spirv::GLPackSnorm4x8Op, /*NumComponents=*/4,
+                      /*BitsPerComponent=*/8, /*IsSigned=*/true>;
+using GLUnpackSnorm4x8Pattern =
+    GLUnpackNormPattern<mlir::spirv::GLUnpackSnorm4x8Op, /*NumComponents=*/4,
+                        /*BitsPerComponent=*/8, /*IsSigned=*/true>;
+using GLPackUnorm4x8Pattern =
+    GLPackNormPattern<mlir::spirv::GLPackUnorm4x8Op, /*NumComponents=*/4,
+                      /*BitsPerComponent=*/8, /*IsSigned=*/false>;
+using GLUnpackUnorm4x8Pattern =
+    GLUnpackNormPattern<mlir::spirv::GLUnpackUnorm4x8Op, /*NumComponents=*/4,
+                        /*BitsPerComponent=*/8, /*IsSigned=*/false>;
+using GLPackUnorm2x16Pattern =
+    GLPackNormPattern<mlir::spirv::GLPackUnorm2x16Op, /*NumComponents=*/2,
+                      /*BitsPerComponent=*/16, /*IsSigned=*/false>;
+using GLUnpackUnorm2x16Pattern =
+    GLUnpackNormPattern<mlir::spirv::GLUnpackUnorm2x16Op, /*NumComponents=*/2,
+                        /*BitsPerComponent=*/16, /*IsSigned=*/false>;
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -12122,6 +12341,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // `f32tof16`/`f16tof32`): the same "no conversion pattern at all" gap
   // H124f/H124j fixed above, for a different GLSL.std.450 op pair.
   Patterns.add<GLPackHalf2x16Pattern, GLUnpackHalf2x16Pattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+
+  // `spirv.GL.{Pack,Unpack}{Snorm,Unorm}{4x8,2x16}` (roadmap L119): the
+  // same "no conversion pattern at all" gap as the Half2x16 pair above --
+  // `PackSnorm4x8`/`UnpackSnorm4x8` already had a TableGen op definition
+  // but no lowering pattern at all; `PackUnorm4x8`/`UnpackUnorm4x8`/
+  // `PackUnorm2x16`/`UnpackUnorm2x16` needed both a new op definition
+  // (added earlier this session) and a lowering pattern.
+  Patterns.add<GLPackSnorm4x8Pattern, GLUnpackSnorm4x8Pattern,
+              GLPackUnorm4x8Pattern, GLUnpackUnorm4x8Pattern,
+              GLPackUnorm2x16Pattern, GLUnpackUnorm2x16Pattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
