@@ -2192,36 +2192,10 @@ latter uses `SampleShadingEnable=false`, proving the `PerSampleShading`
 OR-condition change alone is what forces per-sample execution here, not
 explicit sample shading).
 
-### Validation (L114)
-
-`ninja check-feme`: 3191/3194 Passed, 3 pre-existing Unsupported, 0 Failed
-(up 3 tests from this session, zero regressions).
-
-CTS re-sweep, `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.*`
-(95 cases): 49 Pass / 6 Fail / 40 NotSupported -- up from 43/12/40 before
-this fix. Pipeline creation no longer fails for any of the 12 originally-
-failing cases; the 6 `distribution.*` cases at supported sample counts now
-Pass. The remaining 6 `correctness.*` cases fail on an image/value
-comparison (`"Varying values are not sampled at gl_SamplePosition"`), a
-second, deeper, and genuinely distinct root cause -- see L114(a) below,
-split out rather than folded into this fix's own scope.
-
-CTS re-sweep, `dEQP-VK.pipeline.pipeline_library.graphics_library.*` (836
-cases, unaffected baseline check since this fix touches `Executor.cpp`'s
-own `PerSampleShading` condition and grows the fragment-invocation ABI
-struct): unchanged at 548 Pass / 0 Fail / 287 NotSupported / 1
-pre-existing benign "linking took too long" warning -- confirming zero
-collateral regressions from this session's ABI/executor changes.
-
-`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
-needed -- `gl_SamplePosition` is core Vulkan 1.0 functionality implied by
-already-advertised `sampleRateShading`, not a new capability; this is a
-correctness fix for an existing, already-advertised feature.
-
-## Roadmap L114(a) (root-caused, not yet fixed): sample-accurate varying interpolation
+## Roadmap L114(a) (fixed this session): sample-accurate varying interpolation
 
 `multisample_shader_builtin.sample_position.correctness.*` (6 cases, found
-while closing L114 above) still fails, now purely on values:
+while closing L114 above) failed, purely on values:
 `"Varying values are not sampled at gl_SamplePosition"` (dEQP's own
 message, not a feme-side error string).
 
@@ -2230,33 +2204,100 @@ message, not a feme-side error string).
 The fragment shader declares `layout(location = 0) sample in vec2
 fs_in_position_screen;` and compares it against a `gl_SamplePosition`-
 derived expected value per sample. `Executor.cpp`'s barycentric
-coordinates (`Quad.Bary0`/`Bary1`/`Bary2`) are -- per this file's own
-existing comment -- "still evaluated once, at the pixel center", even
+coordinates (`Quad.Bary0`/`Bary1`/`Bary2`) were -- per this file's own
+prior comment -- "still evaluated once, at the pixel center", even
 across the per-`PassSample` loop L114 above added `SamplePosition`'s own
-per-pass write to: only `gl_FragCoord`/`gl_SamplePosition` themselves are
-shifted per pass today, not the ordinary interpolated varyings a `sample`-
+per-pass write to: only `gl_FragCoord`/`gl_SamplePosition` themselves were
+shifted per pass, not the ordinary interpolated varyings a `sample`-
 qualified declaration (or, per the Vulkan spec more broadly, any input
 while sample shading is active) requires be evaluated at the real sample
 location instead of the pixel center. `fs_in_position_screen` therefore
-stays a fixed, pixel-center-derived value across every sample pass, while
-`gl_SamplePosition` itself correctly varies -- an inevitable mismatch a
+stayed a fixed, pixel-center-derived value across every sample pass, while
+`gl_SamplePosition` itself correctly varied -- an inevitable mismatch a
 correctness test built specifically to compare the two catches directly.
 
-This is the same gap noted-but-deliberately-deferred during L114's own
-root-causing session: a `Sample`-qualified varying with no
-`gl_SamplePosition`/`gl_SampleID` present also does not force per-sample
-shading at all today -- a related, still-open sub-case of this same row,
-not yet independently confirmed against a CTS case of its own.
+The related, deferred-during-L114 sub-case (a `Sample`-qualified varying
+with no `gl_SamplePosition`/`gl_SampleID` present) turned out **not** to
+need its own separate fix: `multisample_interpolation.
+sample_qualifier_distinct_values.*` exercises exactly that shape and now
+largely passes post-fix (see L115 below for the *separate*, unrelated
+failures discovered in that same CTS group).
 
-### Suggested fix shape (not yet implemented)
+### Fix
 
-Recompute `Bary0`/`Bary1`/`Bary2` per `PassSample` (using
-`(*SamplePositions)[PassSample]`'s own offset in place of the fixed
-pixel-center `Center`), and re-run the varying-interpolation step per pass
--- not once before the pass loop -- whenever `PerSampleShading` is true.
-Materially larger than L114's own field-plumbing fix: it touches the
-interpolation architecture itself (where/when varyings are read from the
-producer stage's output storage and blended by barycentric weight), not
-just one more read-only system value. Left open for a future session; see
-`Roadmap.md`'s own L114(a) row.
+Per quad (not per lane -- `Area`/`Tri.Pos` are lane-independent), compute
+`Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2])` and
+`SampleOffset = (*SamplePositions)[PassSample]` once, ahead of the
+per-lane varying-interpolation loop. Per lane, when `PerSampleShading` is
+true, recompute `B0`/`B1`/`B2` via `edgeFn(Tri.Pos[i], Tri.Pos[j], P) /
+Area` at the real per-pass sample point `P = {Quad.PixelX[Lane] +
+SampleOffset[0], Quad.PixelY[Lane] + SampleOffset[1]}`, instead of
+reusing the fixed pixel-center `Quad.Bary0/1/2[Lane]`. When
+`PerSampleShading` is false, the original pixel-center weights are reused
+unchanged -- avoiding any recomputation cost or behavior change in the
+(much more common) non-per-sample-shaded path.
+
+### New unit test
+
+`ExecutorTest.PerSampleShadingReinterpolatesVaryingsAtEachSample`: a
+triangle covering a whole pixel whose "color" varying is set, per vertex,
+to that vertex's own precomputed screen-space pixel position (`(0,0)`,
+`(8,0)`, `(0,8)` for the existing overscanned-triangle vertex setup and
+`{0,0,4,4}` viewport) -- an affine function of vertex position, so
+barycentric-interpolating it at *any* point exactly reproduces that point.
+The fragment shader reads both this varying and the `Position` system
+value's X/Y and writes their `fsub` difference to an `R32G32B32A32_FLOAT`
+attachment; the test asserts this difference is ~0 at all 4 samples.
+Confirmed to genuinely exercise the fix (not just look plausible): a
+`git stash` of `Executor.cpp` alone reproduces the exact pre-fix failure
+(non-zero differences matching each sample's own pixel-center-vs-real-
+offset gap) with this same test.
+
+### Validation (L114(a))
+
+`ninja check-feme`: 3192/3195 Passed, 3 pre-existing Unsupported, 0 Failed
+(up 1 test from this session, zero regressions).
+
+CTS re-sweep, the 6 previously-failing
+`dEQP-VK.pipeline.monolithic.multisample_shader_builtin.sample_position.
+correctness.*` cases directly (samples 2/4/8; samples 16/32/64 are the
+pre-existing, unrelated `NotSupported` sample-count capability gap): all
+6 now **Pass** (0 Fail).
+
+CTS re-sweep, `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.*`
+(95 cases): 55 Pass / 0 Fail / 40 NotSupported -- up from 49/6/40,
+exactly the predicted numbers, closing this bucket fully clean (modulo
+the pre-existing, separately-confirmed-benign `NotSupported` sample-count
+gap).
+
+CTS re-sweep, `dEQP-VK.pipeline.pipeline_library.graphics_library.*` (836
+cases, regression check since this fix touches `Executor.cpp`'s shared
+varying-interpolation loop): unchanged at 548 Pass / 0 Fail / 287
+NotSupported / 1 pre-existing benign "linking took too long" warning --
+confirming zero collateral regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- sample-accurate interpolation is core Vulkan 1.0 functionality
+implied by already-advertised `sampleRateShading`, not a new capability;
+this is a correctness fix for an existing, already-advertised feature.
+
+## Roadmap L115 (discovered this session, not yet fixed): missing GLSL.std.450 `InterpolateAt*` extended instructions
+
+While continuing the L106 sweep with `dEQP-VK.pipeline.monolithic.
+multisample_interpolation.*` (247 cases, the next fresh group per the
+prior session's own suggested next steps) after L114(a) landed: 115 of
+247 cases fail pipeline creation with `"error: unhandled deserializations
+of 76 from extension set GLSL.std.450"` (12 Pass, 120 NotSupported for
+the remainder). `76` is `InterpolateAtCentroid`'s own GLSL.std.450
+extended-instruction opcode (per the standard's own numbering);
+`interpolateAtSample`/`interpolateAtOffset` (opcodes 77/78) are almost
+certainly the same untouched gap, since this same test file's sibling
+cases exercise all three functions. Entirely unrelated to L114(a)'s own
+barycentric-interpolation architecture fix -- this is a missing SPIR-V
+*extended-instruction* import (most likely in feme's own
+`SPIRVToLLVMPatterns.cpp` and/or upstream MLIR's GLSL.std.450 handling;
+per the L112 precedent, check upstream MLIR first before assuming the gap
+is feme's own). Not yet root-caused in detail or estimated -- a fresh
+session's own starting point, tracked as `Roadmap.md`'s L115 row.
+
 
