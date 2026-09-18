@@ -1459,6 +1459,46 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(FoundCombinedHandle);
 }
 
+// Regression test for roadmap L108: a `Dim::SubpassData` handle (a GLSL
+// `subpassInput` variable's own `handlefrombinding`) is never one of the
+// kinds `collectHandles` classifies, but its `OpImageRead` always converts
+// straight to `feme.stage.subpass.load` without ever referencing this
+// handle's own result -- so it is always dead. A real fragment shader (see
+// `dEQP-VK.pipeline.pipeline_library.graphics_library.
+// independent_sets_random.*.vert_frag.*`) can freely mix a dead subpass
+// input handle alongside a perfectly ordinary, otherwise-normalizable
+// buffer binding in the same function; the whole function must not be
+// declined over the former, unlike `LeavesCombinedSampledImageHandleWithOt
+// herUseUnchanged` above, whose unsupported handle actually has a use.
+TEST(SPIRVResourceLoweringTest,
+     LowersOrdinaryHandleWhenAnUnusedSubpassInputHandleSharesTheFunction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 %idx)
+      %v = load float, ptr %ptr
+      %subpass = call target("spirv.Image", float, 6, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_6_0_0_0_2_0t(
+              i32 1, i32 2, i32 1, i32 0, ptr null)
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+    declare target("spirv.Image", float, 6, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_6_0_0_0_2_0t(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+}
+
 TEST(SPIRVResourceLoweringTest,
      FragmentStageImplicitSampleSynthesizesRealDerivatives) {
   // Roadmap H7i: the same shape as `SampleShader` above, except `main`
