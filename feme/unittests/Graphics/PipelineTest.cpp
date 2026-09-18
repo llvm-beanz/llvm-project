@@ -93,6 +93,51 @@ TEST(GraphicsPipelineTest, DescribesFixedFunctionState) {
   EXPECT_EQ(Pipeline.getAttachments()[0].Height, 4u);
 }
 
+// (Roadmap L110) `PreRasterViewIndexIsDeviceIndex`/
+// `FragmentViewIndexIsDeviceIndex` default to `false` (every pipeline
+// built before this milestone existed, and any pipeline whose `VkGraphics
+// PipelineCreateInfo::flags` never set `VK_PIPELINE_CREATE_VIEW_INDEX_
+// FROM_DEVICE_INDEX_BIT`, must keep reading the real multiview per-view
+// index), and are independently settable per stage group -- mirroring how
+// `VK_EXT_graphics_pipeline_library` lets each of the pre-rasterization
+// and fragment-shader parts set the bit on its own.
+TEST(GraphicsPipelineTest, ViewIndexIsDeviceIndexDefaultsFalseAndIsPerStageGroup) {
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Default(
+      /*VertexStage=*/nullptr, /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList, RasterState{}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, Attachments);
+  EXPECT_FALSE(Default.getPreRasterViewIndexIsDeviceIndex());
+  EXPECT_FALSE(Default.getFragmentViewIndexIsDeviceIndex());
+
+  GraphicsPipeline PreRasterOnly(
+      /*VertexStage=*/nullptr, /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList, RasterState{}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, Attachments, StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false,
+      /*AlphaToOneEnable=*/false, /*AlphaToCoverageEnable=*/false,
+      /*PreRasterViewIndexIsDeviceIndex=*/true,
+      /*FragmentViewIndexIsDeviceIndex=*/false);
+  EXPECT_TRUE(PreRasterOnly.getPreRasterViewIndexIsDeviceIndex());
+  EXPECT_FALSE(PreRasterOnly.getFragmentViewIndexIsDeviceIndex());
+
+  GraphicsPipeline FragmentOnly(
+      /*VertexStage=*/nullptr, /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList, RasterState{}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, Attachments, StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false,
+      /*AlphaToOneEnable=*/false, /*AlphaToCoverageEnable=*/false,
+      /*PreRasterViewIndexIsDeviceIndex=*/false,
+      /*FragmentViewIndexIsDeviceIndex=*/true);
+  EXPECT_FALSE(FragmentOnly.getPreRasterViewIndexIsDeviceIndex());
+  EXPECT_TRUE(FragmentOnly.getFragmentViewIndexIsDeviceIndex());
+}
+
 // (Roadmap H6e) `setMeshStage`'s own plumbing: a mesh pipeline has no real
 // vertex stage of its own (`VertexStage=nullptr` below, mirroring how
 // `FragmentStage` may already be null for a depth/stencil-only pipeline,
