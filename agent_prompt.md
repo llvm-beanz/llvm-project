@@ -55,26 +55,30 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L118** (~half a day to a day, still the highest-value fix
-   outstanding, still not started by anyone): teach `SIMDize.cpp`'s
-   stale-use recovery (~line 4515-4595) to either prove all lanes'
-   masks/storage agree before broadcasting lane 0, or skip the lane-0
-   shortcut entirely for a `MaskedAllocas`-sourced value.
-2. **L116(a)'s real fix** (~half a day to a day, already scoped, still
-   the single highest-value fix left in the L116 breakdown by error
-   volume, ~59% of the original sweep's `Fail`s): per-leaf decomposition
-   for a struct/array/matrix masked load/store in `MaskIntrinsics.cpp`/
-   `Linearize.cpp`.
-3. **L121** (new this session, scoped): widen `llvm.ldexp`-shaped
-   divergent calls in `SIMDize.cpp`'s `widenElementwise` by also
-   widening a non-homogeneous (independently-overloaded) operand, not
-   just the ones matching the result type -- generalize the existing
-   `is_fpclass` special case rather than adding another one-off. ~Half
-   a day; unblocks the last `Ldexp` repro case.
-4. **L120's `Modf`**: needs a new `SPIRV_GLModfOp` taking an
-   `OpVariable` out-parameter, a shape unlike any existing GL op (the
-   pointer-free `ModfStruct` variant already exists upstream, this one
-   doesn't). Half a day, similar shape to `Determinant`'s own bespoke-op
-   precedent.
-5. **L116(f)'s remaining ~24 un-root-caused hangs/crashes**: still only
-   one-at-a-time reduction; no new technique found this session.
+1. **(~30 min)** Build a *minimal* reduced repro instead of using the full
+   GraphicsFuzz shader: a fragment shader with (a) an aggregate `Private`
+   global, (b) a real but always-false discard inside a uniform-condition
+   branch, (c) a read of that global after the discard branches merge back,
+   feeding directly into the output color. Much easier to hand-trace or
+   instrument than the current repro.
+2. **(~30 min)** Add a temporary runtime print (feme's CPU backend can call into
+   a real host function — check `feme/lib/Target/CPU/` for an existing
+   debug-print intrinsic, or add one) right before the block-52-style
+   `extractelement` in `SIMDize.cpp`, printing the full mask vector and gather
+   result for all 4 lanes at actual runtime. This replaces further manual
+   tracing with ground truth.
+3. **(~half a day, blocked on #1/#2)** Once a concrete lane/mask mismatch is
+   observed at runtime, implement the actual fix: most likely, thread through
+   the masked gather's own `EffectiveMask` (or the `WideMask` operand) so the
+   stale-use recovery can pick a lane whose mask bit is dynamically known set
+   (e.g. `llvm.cttz` over the mask cast to an integer), instead of hardcoding
+   lane 0.
+4. If L118 keeps proving harder than a half-day/day budget after step 2's
+   instrumentation, it's reasonable to **set it aside again** and pick from the
+   other still-untouched items: L116(a)'s real per-leaf masked load/store
+   decomposition (still ~59% of the original L116 sweep's `Fail`s, unchanged
+   from prior sessions), L120's `Modf`, L121's `SIMDize.cpp` divergent-call
+   widening generalization, or L116(f)'s ~24 un-root-caused hangs/crashes.
+5. Nobody has picked up L106's `pipeline.monolithic.*`/`subgroups.*`/`compute.*`
+   untriaged candidates across many sessions now — still on the table whenever
+   L116/L117/L118 close or get set aside.
