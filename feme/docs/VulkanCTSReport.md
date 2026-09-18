@@ -2046,3 +2046,118 @@ L111 overall (both L111(a) and L111(b)).
 needed -- this is a correctness fix within already-advertised multisample
 rendering support (core `VkPipelineMultisampleStateCreateInfo`, already
 listed as supported), not a newly-advertised capability.
+
+## Roadmap L106 continued: `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.*`
+
+A fresh top-level group swept per L106's own "broaden past `pipeline_library.*`"
+candidate list, chosen for its small size (95 cases) and topical relevance to
+the just-closed L111. First sweep: **37 Pass / 18 Fail / 40 NotSupported**.
+
+### Roadmap L112 (fixed this session): MLIR's unhandled SPIR-V `Sample` decoration
+
+6 of the 18 failures showed `error: unhandled Decoration : 'Sample'` at
+pipeline creation. Traced (via `grep -rn "unhandled Decoration"` across the
+whole repo) to MLIR's own SPIR-V deserializer/serializer -- **not** any
+feme-specific code:
+
+- `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp` and
+  `mlir/lib/Target/SPIRV/Serialization/Serializer.cpp` each have a `switch`
+  over `spirv::Decoration` listing ~20 plain "unit decoration" (no-operand)
+  cases (`Aliased`, `Block`, `Centroid`, `Flat`, `NoPerspective`, `Patch`,
+  `Coherent`, `PerPrimitiveEXT`, `Volatile`, ...); `Sample` (SPIR-V value 17,
+  GLSL's `sample`-qualified fragment-shader input) was simply missing from
+  both lists, so any module using it was rejected outright before feme's own
+  code ever saw it.
+- Confirmed feme's own downstream handling was already complete and
+  unaffected: `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`
+  already has `{"sample", 17}` in its `StageIOFlagDecorations` table and a
+  full `case mlir::spirv::Decoration::Sample:` in its own attribute-building
+  switch, and `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp` already
+  has a `ParsedSPIRVDecorations::Sample` field consuming it -- this was
+  purely an upstream deserialization gap.
+- This is the same class of bug as two already-documented precedent fixes in
+  `mlir/test/Target/SPIRV/decorations.mlir` (`Centroid`, `NonUniform` -- the
+  latter's own test comment cites feme's prior roadmap L7f), confirming an
+  established pattern of fixing upstream MLIR gaps discovered via feme's own
+  CTS work, in-tree, as part of feme's own effort.
+
+Fix: added `case spirv::Decoration::Sample:` to both switch statements'
+existing unit-decoration case lists (`getSymbolDecoration`'s generic
+CamelCase-to-`snake_case` mangling means no separate attribute-name mapping
+was needed). New MLIR roundtrip test added to `decorations.mlir`.
+
+`ninja -C build2 MLIRSPIRVDeserialization MLIRSPIRVSerialization` and the
+`decorations.mlir` lit test both pass cleanly.
+
+CTS re-sweep after this fix alone: **43 Pass / 12 Fail / 40 NotSupported** --
+the 6 `sample_mask.pattern.*` cases flipped from Fail to a *different* Fail
+(see L113 below), and the other 12 (`sample_position.correctness.*`/
+`sample_position.distribution.*`) were unaffected, confirming they are a
+distinct root cause (see L114).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- `Sample`-qualified fragment inputs are part of core
+`sampleRateShading` (already advertised), not a newly-advertised capability;
+this fix only removes a deserialization gap blocking already-claimed support.
+
+### Roadmap L113 (fixed this session): static `VkPipelineMultisampleStateCreateInfo::pSampleMask`
+
+After L112's fix, the 6 `sample_mask.pattern.*` cases still failed pipeline
+creation, now with a different, previously-hidden error:
+`"vkCreateGraphicsPipelines: a partial VkSampleMask is not implemented"` --
+a deliberate rejection in `GraphicsPipeline.cpp`'s `translateMultisampleState`-
+equivalent code, unrelated to the `Sample` decoration.
+
+Implemented instead of rejected:
+
+- `feme::graphics::GraphicsPipeline` (`Pipeline.h`) and the Vulkan-side
+  `GraphicsPipelineState` (`GraphicsPipeline.h`) both gained a 32-bit
+  `SampleMask` field, defaulting to all-1s (no effect).
+- Captured from `VkPipelineMultisampleStateCreateInfo::pSampleMask`'s first
+  word in the monolithic translation path -- the linked-
+  `VK_EXT_graphics_pipeline_library` path funnels through the same code via
+  its own synthesized `VkGraphicsPipelineCreateInfo`
+  (`synthesizeLinkedGraphicsPipelineCreateInfo`), so no separate
+  library-path plumbing was needed.
+- ANDed into the rasterizer's per-lane per-sample coverage mask as early as
+  possible -- at rasterization itself (`Quad.SampleMask`), not only ahead of
+  the depth/stencil test like `alphaToCoverageEnable`/the fragment shader's
+  own `gl_SampleMask` output (L111(b)) -- since a static mask is known
+  before any fragment shader runs, it can (and should) also gate early
+  depth/stencil testing and whether a lane counts as covered at all.
+
+New unit test: `ExecutorTest.PipelineSampleMaskNarrowsPerSampleCoverage` --
+an ordinary fragment shader (no `Coverage`-system-value output of its own)
+on a pipeline with `setSampleMask(0b0101)`, confirming only samples 0 and 2
+keep the shaded color, exactly mirroring L111(b)'s own shader-driven test.
+
+`ninja check-feme` (ccache, assertions-enabled build): 3188/3191 passed, 3
+pre-existing Unsupported, 0 Failed (up 1 from the new test, no
+regressions).
+
+CTS re-sweep after this fix: **43 Pass / 12 Fail / 40 NotSupported** -- all
+6 `sample_mask.pattern.*` cases now Pass; the remaining 12 failures
+(`sample_position.correctness.*`/`sample_position.distribution.*`) are
+unaffected, confirming (per L114 below) they are a third, distinct root
+cause.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a static `pSampleMask` is core `VkPipelineMultisampleStateCreateInfo`
+state, already advertised; this is a correctness fix, not a new capability.
+
+### Roadmap L114 (not yet fixed): `sample_position.{correctness,distribution}.*`
+
+The remaining 12 failures in this group (of the original 18) are a third,
+distinct root cause from L112/L113 -- confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` single-case reruns, which show a
+different pipeline-creation rejection:
+`"vkCreateGraphicsPipelines: fragment input element 1 has no location to
+link against a vertex output"`.
+
+Not yet reduced or root-caused: likely an interface-matching gap specific
+to how these cases declare a fragment-shader input reading
+`gl_SamplePosition` (or a related per-sample builtin) -- this is core
+Vulkan 1.0 functionality, not extension-gated, so `NotSupported` would not
+be the correct outcome even if some underlying feature genuinely were
+unimplemented. Left open for a future session as roadmap L114; see
+`Roadmap.md`'s own L114 row for the suggested next steps.
