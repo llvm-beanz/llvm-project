@@ -815,6 +815,22 @@ bool isGenuineMultiMemberNestedStruct(Type *Ty) {
 /// leaf, kept in its own function so the first (declared-order,
 /// `Location`-computing) `addElements` pass can call it before any
 /// `SignatureElement` actually exists yet.
+/// (Roadmap L105) Whether \p FieldTy is a synthetic byte-array padding
+/// field `layOutStructIfOffsetsMatch` (SPIRVToLLVMPatterns.cpp) may
+/// insert between (or before) a non-`Offset`-decorated stage-IO struct's
+/// own real, SPIR-V-declared members, to materialize a natural-alignment
+/// gap explicitly (see L103's own closing writeup) -- recognized by
+/// shape (`[N x i8]`, an array of 8-bit integers) exactly like the
+/// original, leading-pad-only special case this generalizes: a real
+/// stage-IO member's own GLSL/HLSL-visible type (a scalar, vector,
+/// matrix, or struct thereof) is never itself a raw byte array, so this
+/// shape unambiguously identifies a synthetic pad rather than a real
+/// declared member.
+bool isStageIOPadField(Type *FieldTy) {
+  auto *ArrTy = dyn_cast<ArrayType>(FieldTy);
+  return ArrTy && ArrTy->getElementType()->isIntegerTy(8);
+}
+
 uint32_t getStageIOFlattenedRowCount(Type *Ty) {
   if (!isGenuineMultiMemberNestedStruct(Ty))
     return getStageIORowShape(Ty).RowCount;
@@ -828,8 +844,15 @@ uint32_t getStageIOFlattenedRowCount(Type *Ty) {
     return static_cast<uint32_t>(ArrTy->getNumElements()) *
            getStageIOFlattenedRowCount(ArrTy->getElementType());
   uint32_t Total = 0;
-  for (Type *FieldTy : cast<StructType>(Ty)->elements())
+  for (Type *FieldTy : cast<StructType>(Ty)->elements()) {
+    // (Roadmap L105) Skip a synthetic alignment-gap pad field the same
+    // way `addStageIOStructMembers` does -- a genuine multi-member
+    // nested struct's own natural-alignment gap needs the identical
+    // treatment as a top-level block's.
+    if (isStageIOPadField(FieldTy))
+      continue;
     Total += getStageIOFlattenedRowCount(FieldTy);
+  }
   return Total;
 }
 
@@ -855,8 +878,13 @@ uint32_t getStageIOLeafElementCount(Type *Ty) {
   if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
     return getStageIOLeafElementCount(ArrTy->getElementType());
   uint32_t Total = 0;
-  for (Type *FieldTy : cast<StructType>(Ty)->elements())
+  for (Type *FieldTy : cast<StructType>(Ty)->elements()) {
+    // (Roadmap L105) See `getStageIOFlattenedRowCount`'s own identical
+    // pad-skip above.
+    if (isStageIOPadField(FieldTy))
+      continue;
     Total += getStageIOLeafElementCount(FieldTy);
+  }
   return Total;
 }
 
@@ -920,6 +948,19 @@ void addStageIOStructMembers(
   const StructLayout *SL = DL.getStructLayout(ST);
   for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
     Type *FieldTy = ST->getElementType(I);
+    // (Roadmap L105) Skip any synthetic `[N x i8]` pad field
+    // `layOutStructIfOffsetsMatch` (SPIRVToLLVMPatterns.cpp) may have
+    // inserted to materialize a natural-alignment gap -- this loop walks
+    // \p ST's own *physical* LLVM fields directly (a loose, non-`Block`-
+    // decorated struct-typed stage-IO variable carries no per-member
+    // `feme.spirv.MemberDecorations` metadata to cross-check against, so
+    // there is no declared-member-count to detect a pad by comparison,
+    // unlike `TakeBlockPath`'s own `NonPadPhysicalIndices`), so a pad
+    // left unskipped here becomes its own spurious `SignatureElement`
+    // (this function's identical-root-cause sibling to L105's own
+    // `TakeBlockPath`/`resolveOffsetWithinElement` fixes).
+    if (isStageIOPadField(FieldTy))
+      continue;
     if (isGenuineMultiMemberNestedStruct(FieldTy)) {
       addStageIOStructMembers(AddElement, GV, AddrSpace, BaseD, FieldTy, DL,
                               NextLocation);
@@ -2938,9 +2979,19 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
     if (isGenuineMultiMemberNestedStruct(ST)) {
       const StructLayout *SL = DL.getStructLayout(ST);
       unsigned Member = SL->getElementContainingOffset(Residual);
+      // (Roadmap L105) Same generalized pad-skip as
+      // `resolveOffsetWithinElement`'s own `IDStart` loop above -- a
+      // genuine multi-member nested struct can carry its own synthetic
+      // `[N x i8]` alignment-gap pad field exactly like a top-level
+      // block can, and `IDs` has no entry for it.
       uint32_t IDStart = 0;
-      for (unsigned I = 0; I != Member; ++I)
+      for (unsigned I = 0; I != Member; ++I) {
+        if (isStageIOPadField(ST->getElementType(I)))
+          continue;
         IDStart += getStageIOLeafElementCount(ST->getElementType(I));
+      }
+      assert(!isStageIOPadField(ST->getElementType(Member)) &&
+            "load/store into a nested struct's own synthetic pad field");
       uint64_t InnerResidual = Residual - SL->getElementOffset(Member);
       NestedStageIOField Inner = resolveNestedStageIOField(
           ST->getElementType(Member), InnerResidual, ValueTy, DL);
@@ -3100,51 +3151,43 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
 
   const StructLayout *SL = DL.getStructLayout(ST);
   unsigned LLVMMember = SL->getElementContainingOffset(InstanceResidual);
-  // (Roadmap H101m) `IDs` (one per real, SPIR-V-declared member --
-  // `addElements`' own `TakeBlockPath` loop, `CanonicalizeStage.cpp`)
-  // does not carry an entry for a leading `[N x i8]` pad field
-  // `layOutStructIfOffsetsMatch` (SPIRVToLLVMPatterns.cpp) may have
-  // prepended to \p ST itself, whenever this block's own first declared
-  // member has a nonzero offset -- exactly the same pad
-  // `getEffectiveStageIOValueType`'s own comment documents for the
-  // single-real-member case, just here on a genuinely multi-member
-  // block instead.
-  //
-  // (Roadmap H101t) Detected directly by \p ST's own field-0 type (a
-  // synthetic pad is always `[N x i8]` -- see `structHasLeadingOffsetPad`
-  // /SPIRVToLLVMPatterns.cpp) rather than by comparing `ST->
-  // getNumElements()` against `IDs.size() + 1`, unlike `addElements`' own
-  // construction-side `HasLeadingPad` (still correct there, since it
-  // compares against `MemberDecorations.size()`, the real *declared*
-  // top-level member count, never affected by this): a genuine
-  // multi-member nested-struct member (`isGenuineMultiMemberNestedStruct`)
-  // now contributes more than one entry to \p IDs (see
-  // `addStageIOStructMembers`), so \p IDs.size() is this block's own
-  // *leaf* element count, not its top-level physical field count, and the
-  // old `+ 1` comparison no longer reliably detects a pad once any
-  // top-level member has this shape.
-  bool HasLeadingPad = false;
-  if (auto *PadArr = dyn_cast<ArrayType>(ST->getElementType(0)))
-    HasLeadingPad = PadArr->getElementType()->isIntegerTy(8);
-  assert((!HasLeadingPad || LLVMMember != 0) &&
-        "store/load into a struct's own leading pad");
-  // (Roadmap H101p) \p IDs is populated in `addElements`' own *physical*
-  // (ascending-byte-offset) order, not necessarily each member's own
-  // *declared* SPIR-V order, whenever a block's members are declared out
-  // of ascending-offset order -- `IDs[k]` (for `k` past any leading pad
-  // shift) names whichever member occupies physical LLVM field `k`, not
-  // necessarily the member SPIR-V declared at that position.
-  //
-  // (Roadmap H101t) Each physical field before `LLVMMember` may itself
-  // have contributed more than one entry to \p IDs (a genuine
-  // multi-member nested-struct field -- see `addStageIOStructMembers`),
-  // so the right starting index into \p IDs for `LLVMMember` is the sum
-  // of every earlier (non-pad) physical field's own leaf element count,
-  // not simply `LLVMMember` (or `LLVMMember - 1`, once a leading pad also
-  // shifts everything) as when every field contributed exactly one.
+  // (Roadmap H101m, generalized by L105) `IDs` (one per real, SPIR-V-
+  // declared member -- `addElements`' own `TakeBlockPath` loop,
+  // `CanonicalizeStage.cpp`) does not carry an entry for any synthetic
+  // `[N x i8]` pad field `layOutStructIfOffsetsMatch`
+  // (SPIRVToLLVMPatterns.cpp) may have inserted into \p ST itself,
+  // whenever a natural-alignment gap needed materializing between (or
+  // before) this block's own real, declared members -- exactly the same
+  // pad `getEffectiveStageIOValueType`'s own comment documents for the
+  // single-real-member case, just here on a genuinely multi-member block
+  // instead. Originally only a *leading* pad (member 0's own declared
+  // offset being nonzero) was recognized; a plain, non-`Offset`-decorated
+  // I/O block's own *interior* alignment gap (e.g. `vec2 dummy; vec4 v;`,
+  // needing an 8-byte pad between them so `v` lands on its own 16-byte
+  // natural alignment) produces the identical shape one field further in,
+  // which the original leading-only check missed entirely -- silently
+  // treating the pad itself as if it were `v`, corrupting every element
+  // after it (`dEQP-VK.pipeline.pipeline_library.interface_matching.
+  // decoration_mismatch.*member_of_block*`'s own `ArrayRef::slice`
+  // assertion crash and "component ... out of range" validation errors,
+  // roadmap L105). `isStageIOPadField` recognizes any pad by shape (a
+  // real stage-IO member's own type is never itself a raw byte array),
+  // so every pad -- leading or interior -- is now skipped uniformly.
   uint32_t IDStart = 0;
-  for (unsigned I = HasLeadingPad ? 1 : 0; I != LLVMMember; ++I)
+  for (unsigned I = 0; I != LLVMMember; ++I) {
+    if (isStageIOPadField(ST->getElementType(I)))
+      continue;
+    // (Roadmap H101t) Each physical field before `LLVMMember` may itself
+    // have contributed more than one entry to \p IDs (a genuine
+    // multi-member nested-struct field -- see `addStageIOStructMembers`),
+    // so the right starting index into \p IDs for `LLVMMember` is the
+    // sum of every earlier (non-pad) physical field's own leaf element
+    // count, not simply `LLVMMember` as when every field contributed
+    // exactly one.
     IDStart += getStageIOLeafElementCount(ST->getElementType(I));
+  }
+  assert(!isStageIOPadField(ST->getElementType(LLVMMember)) &&
+        "store/load into a struct's own synthetic pad field");
   Type *FieldTy = ST->getElementType(LLVMMember);
   uint64_t Residual = InstanceResidual - SL->getElementOffset(LLVMMember);
   // (Roadmap H101t, extended by H115) `FieldTy` may itself be a genuine
@@ -4029,34 +4072,32 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           ParsedSPIRVDecorations WholeVarD =
               parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
           uint32_t NextMemberLocation = WholeVarD.Location.value_or(0);
-          // (Roadmap H101m) `structHasLeadingOffsetPad`
-          // (SPIRVToLLVMPatterns.cpp) synthesizes its leading `[N x i8]`
-          // pad whenever a struct's first *declared* member has a nonzero
-          // offset -- entirely independent of how many real members the
-          // struct has. `getEffectiveStageIOValueType`'s own comment
-          // documents this same pad for the single-real-member case (left
-          // to the plain path below, never `TakeBlockPath`); a genuinely
-          // multi-member block (e.g. `layout(location = 4, xfb_buffer =
-          // 0, xfb_offset = 28) out BlockC { uvec3 c; uint d; }
-          // blockC;`, whose `xfb_offset` is likewise encoded as member
-          // 0's own nonzero `Offset` decoration rather than repeated on
-          // the whole variable) can have the very same pad, and
-          // `TakeBlockPath` was never taught to expect it: `ST->
-          // getNumElements()` (the *LLVM* struct's own field count) then
-          // exceeds `MemberDecorations.size()` (the real, SPIR-V-declared
-          // member count) by exactly one, and walking every LLVM field as
-          // if it were its own same-numbered real member wrongly turned
-          // the pad itself into a spurious element (an 8-bit-scalar
-          // array `StageStorage.cpp` rejects outright) while shifting
-          // every real member's own decorations one index off from its
-          // real LLVM type. `HasLeadingPad` recovers the same shift
-          // `OffsetStructLeadingPadAccessChainPattern` already applied to
-          // every access chain into this same global (SPIRVToLLVMPatterns
-          // .cpp) -- skip LLVM field 0 entirely here, and read real
-          // member `I`'s own decorations/location bookkeeping from LLVM
-          // field `I + 1`.
-          bool HasLeadingPad =
-              ST->getNumElements() == MemberDecorations.size() + 1;
+          // (Roadmap H101m, generalized by L105) `layOutStructIfOffsetsMatch`
+          // (SPIRVToLLVMPatterns.cpp) synthesizes a `[N x i8]` pad
+          // wherever a natural-alignment gap needs materializing between
+          // (or before) a non-`Offset`-decorated stage-IO struct's own
+          // real, SPIR-V-declared members -- not only a *leading* one
+          // (a struct's first declared member having a nonzero offset),
+          // as originally assumed here: a plain multi-member I/O block
+          // with no per-member `Offset`/`xfb_offset` at all (e.g. `out
+          // block { vec2 dummy; layout(location=1) vec4 v; } blk;`) can
+          // just as well need an *interior* pad (8 bytes between `dummy`
+          // and `v`, so `v` lands on its own 16-byte natural alignment),
+          // which the original `HasLeadingPad`/`I + 1 : I` positional
+          // mapping had no way to express -- silently reading every
+          // member from and after the gap off by one physical field,
+          // corrupting `ElementIDs[GV]`'s own construction order (the
+          // `ArrayRef::slice` assertion crash and "component ... out of
+          // range" validation errors this milestone fixes, roadmap L105).
+          // `NonPadPhysicalIndices` lists every one of \p ST's own
+          // physical fields that is *not* a synthetic pad, in ascending
+          // order -- declared member `I`'s real physical field is simply
+          // `NonPadPhysicalIndices[I]`, generalizing the old leading-only
+          // special case to any number of pads at any position.
+          SmallVector<unsigned, 8> NonPadPhysicalIndices;
+          for (unsigned K = 0, KE = ST->getNumElements(); K != KE; ++K)
+            if (!isStageIOPadField(ST->getElementType(K)))
+              NonPadPhysicalIndices.push_back(K);
           // (Roadmap H101p) `layOutStructIfOffsetsMatch`
           // (SPIRVToLLVMPatterns.cpp) now lays a struct's members out in
           // *physical* (ascending byte-offset) order, which need not
@@ -4071,8 +4112,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           // its real physical LLVM field without needing to replicate
           // MLIR's own permutation logic at all -- this sidesteps
           // declared-order assumptions entirely, unlike the (still
-          // correct, for the no-reordering case) `HasLeadingPad ? I + 1
-          // : I` positional fallback below, which this generalizes rather
+          // correct, for the no-reordering case) `NonPadPhysicalIndices[I]`
+          // positional fallback below, which this generalizes rather
           // than replaces (kept for `BuiltIn` members, which carry no
           // `Offset` decoration in practice, so have no offset to look
           // up).
@@ -4100,7 +4141,9 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           Pending.reserve(MemberDecorations.size());
           for (unsigned I = 0, E = MemberDecorations.size(); I != E; ++I) {
             ParsedSPIRVDecorations MemberD = MemberDecorations.lookup(I);
-            unsigned PhysicalIndex = HasLeadingPad ? I + 1 : I;
+            unsigned PhysicalIndex = I < NonPadPhysicalIndices.size()
+                                        ? NonPadPhysicalIndices[I]
+                                        : I;
             if (MemberD.XfbOffset && !MemberD.BuiltIn)
               PhysicalIndex =
                   DL.getStructLayout(ST)->getElementContainingOffset(
