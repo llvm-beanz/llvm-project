@@ -55,25 +55,37 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Reduce and root-cause L111** (`unusual_multisample_state`) --
-   ~1-2 hours. Confirmed unrelated to `gl_ViewIndex`/multiview; not yet
-   reduced or triaged. This is the last failure in
-   `pipeline_library.graphics_library.*`; closing it means that whole
-   836-case group goes fully clean (Pass/NotSupported only, plus the
-   pre-existing benign timing warning).
-2. **Then broaden the sweep again (roadmap L106)** -- same untriaged
-   candidates noted for several sessions running: a fresh `pipeline.*`
-   subgroup (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a
-   top-level group outside `pipeline.*` (`subgroups.*`, `compute.*`,
+1. **Implement L111(b)** (~2-4 hours -- new feature, not a one-line fix,
+   since `Executor.cpp` has zero existing plumbing for a shader-written
+   coverage mask). Read the fragment shader's own `SignatureSystemValue::
+   Coverage` output once per invocation (same lookup pattern as the
+   existing `FSAlphaToCoverage`), AND it together with the coverage mask
+   already computed from rasterization/depth-stencil/alpha-to-coverage
+   (never OR -- the shader's mask can only narrow coverage, per Vulkan's
+   sample-mask-test semantics), and apply it before the per-sample
+   color/depth write loop (~`Executor.cpp` line 3174-3390).
+2. **Re-run `unusual_multisample_state` after L111(b) lands** -- expect
+   it to flip to Pass, closing `pipeline_library.graphics_library.*`
+   fully clean (548 Pass/0 Fail/287 NotSupported/1 pre-existing benign
+   Warning).
+3. **Then broaden the sweep (roadmap L106)** -- same untriaged candidates
+   noted for several sessions running: a fresh `pipeline.*` subgroup
+   (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a top-level
+   group outside `pipeline.*` (`subgroups.*`, `compute.*`,
    `graphicsfuzz.*`). ~30-60 minutes to pick the cheapest-looking one.
-3. **Standing gotcha, still true**: export
+4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
-4. **Technique confirmed again this session**: reusing an existing,
-   near-identical multiview `DrawTest.cpp` test as the starting point for
-   a new flag-gated variant (copy the whole test body, add one line
-   setting `PipeInfo.flags`, change the expected per-layer color) is much
-   faster than building integration test scaffolding from scratch --
-   worth doing again whenever a fix only changes one flag/bit's effect on
-   an already-tested code path.
-
+5. **Technique confirmed again this session**: when a prior session's
+   own "confirmed distinct from X" note turns out to still be an
+   assumption rather than a direct repro, re-run the case with `deqp-vk`
+   directly before trusting it -- this session's own case was assumed to
+   be a runtime image mismatch (like every other `misc.other.*` case)
+   but was actually a pipeline-creation crash, a completely different
+   category of bug with a completely different fix location.
+6. **Technique confirmed again**: when a stage-based restriction breaks
+   existing tests, check whether those tests are testing the shape
+   *mechanically* (with a deliberately unrealistic stage attribute) --
+   if so, prefer a narrower fix (e.g. excluding a specific `BuiltIn`)
+   over a broader one, rather than "fixing" the tests to match a
+   stricter restriction that isn't actually needed for correctness.
