@@ -90587,3 +90587,91 @@ concrete suggested shape already written out.
    PNGs directly (Python + Pillow) -- but check for a `Description` field
    describing a `p'=p*scale+offset` normalization first, and reverse it,
    before concluding anything about the decoded colors.
+
+# Session: L110 fixed (VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`
+at session start.
+
+## What shipped
+
+Implemented last session's L110 write-up almost exactly as scoped:
+
+1. `feme::graphics::GraphicsPipeline` and Vulkan-side `GraphicsPipelineState`
+   each gained `PreRasterViewIndexIsDeviceIndex`/
+   `FragmentViewIndexIsDeviceIndex` bools (default `false`).
+2. `synthesizeLinkedGraphicsPipelineCreateInfo` resolves both per stage
+   group: from the relevant linked `GraphicsPipelineLibrary`'s own
+   `createFlags()` when one supplies that part, else from the top-level
+   `CreateInfo.flags`.
+3. `vkCreateGraphicsPipelines`'s call site wires both bools through to
+   `compileGraphicsPipeline`, defaulting from `pCreateInfos[I].flags` for
+   the monolithic case.
+4. `Executor.cpp`'s 4 `ViewIndex`-writing sites (fragment, vertex, patch
+   pipeline, geometry invocations) substitute `0` for `Draw.ViewIndex`
+   per stage group when the matching bit is set.
+
+## Proof it works
+
+- New tests: `GraphicsPipelineTest.
+  ViewIndexIsDeviceIndexDefaultsFalseAndIsPerStageGroup` (getter
+  plumbing) and `DrawTest.
+  MultiviewViewIndexFromDeviceIndexReadsZeroForEveryView` (real two-view
+  multiview draw with the flag set -- both views render identically
+  instead of the flag-off red/green split).
+- `ninja check-feme`: 3185/3188 passed, 3 Unsupported, 0 Failed (up 2
+  from the new tests, zero regressions).
+- CTS re-sweep: all 16 applicable
+  `misc.other.view_index_from_device_index_in_*` cases now **Pass**.
+  `pipeline_library.graphics_library.*` (836 cases) now
+  **547 Pass / 1 Fail / 287 NotSupported / 1 Warning** -- up from
+  541/7/287/1 before this fix.
+
+Only failure left in that group: `unusual_multisample_state` (L111,
+already known unrelated to `gl_ViewIndex`). The 1 Warning is a
+pre-existing benign "linking took too long" quality warning, not new.
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: L110 struck through with a done write-up; L111
+  refreshed with the new 547/1/287/1 bucket count.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap L110 (fixed this session)"
+  section with fix + validation detail.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- this flag was already gated by already-advertised
+  capabilities (`VK_KHR_multiview`'s `multiview` feature bit,
+  `VK_KHR_device_group_creation`'s single-device-group stub). The fix
+  corrects silent mishandling of an already-advertised flag, not a new
+  capability.
+
+Commits (5, each scoped):
+1. `feme::graphics::GraphicsPipeline` bits/getters
+2. Vulkan-side `GraphicsPipelineState`/`synthesizeLinkedGraphicsPipelineCreateInfo`/
+   `compileGraphicsPipeline`/`vkCreateGraphicsPipelines` wiring
+3. `Executor.cpp` substitution at the 4 `ViewIndex` sites
+4. Unit tests
+5. Documentation
+
+## Suggested next steps
+
+1. **Reduce and root-cause L111** (`unusual_multisample_state`) --
+   ~1-2 hours. Confirmed unrelated to `gl_ViewIndex`/multiview; not yet
+   reduced or triaged. This is the last failure in
+   `pipeline_library.graphics_library.*`; closing it means that whole
+   836-case group goes fully clean (Pass/NotSupported only, plus the
+   pre-existing benign timing warning).
+2. **Then broaden the sweep again (roadmap L106)** -- same untriaged
+   candidates noted for several sessions running: a fresh `pipeline.*`
+   subgroup (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a
+   top-level group outside `pipeline.*` (`subgroups.*`, `compute.*`,
+   `graphicsfuzz.*`). ~30-60 minutes to pick the cheapest-looking one.
+3. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+4. **Technique confirmed again this session**: reusing an existing,
+   near-identical multiview `DrawTest.cpp` test as the starting point for
+   a new flag-gated variant (copy the whole test body, add one line
+   setting `PipeInfo.flags`, change the expected per-layer color) is much
+   faster than building integration test scaffolding from scratch --
+   worth doing again whenever a fix only changes one flag/bit's effect on
+   an already-tested code path.
