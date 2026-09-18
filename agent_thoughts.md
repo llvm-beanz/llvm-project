@@ -91047,3 +91047,133 @@ Commits this session (4, each scoped):
    (`pipeline_library.graphics_library.*`, 836 cases) is cheap insurance
    against silent collateral damage -- confirmed clean this session, but
    worth doing every time such a shared structure changes.
+
+# Session: L114(a) fixed (sample-accurate varying interpolation), L115 opened (GLSL.std.450 InterpolateAt* gap)
+
+**Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`** at session start, per standing instruction.
+
+## What got fixed
+
+`Executor.cpp`'s varying-interpolation loop always reused the fixed,
+pixel-center barycentric weights (`Quad.Bary0/1/2`) inside
+`PerSampleShading`'s per-`PassSample` loop, even though `gl_FragCoord`/
+`gl_SamplePosition` themselves were already correctly shifted per pass
+via a separate, direct (non-barycentric) calculation. A `sample`-
+qualified varying compared directly against `gl_SamplePosition`
+therefore permanently disagreed with it -- exactly the CTS's own
+`multisample_shader_builtin.sample_position.correctness.*` failure
+(6 cases): `"Varying values are not sampled at gl_SamplePosition"`.
+
+Fix: per quad (not per lane -- `Area`/`SampleOffset` are lane-
+independent), recompute each lane's `B0`/`B1`/`B2` via
+`edgeFn(Tri.Pos[i], Tri.Pos[j], P) / Area` at the real per-pass sample
+point when `PerSampleShading` is true; fall back to the original
+pixel-center weights otherwise (zero behavior change, zero extra cost,
+in the much more common non-per-sample-shaded path).
+
+## The one wrong turn this session (worth remembering)
+
+Wrote the new unit test's vertex data by copying the *shape* of an
+existing test's array (`pos.xyz, color.rgba` -- 7 floats/vertex) but
+pasted in the wrong values: left a stray `1.0f` from the old pattern
+where the new test's `color.r` was supposed to go, silently shifting
+every subsequent "screen coordinate" value one slot to the right. The
+test *ran* fine (parsed, executed, produced numbers) -- it just
+computed the wrong expected relationship, and both a fully-broken and
+a fully-fixed `Executor.cpp` gave it *some* nonzero-looking numbers, so
+"it fails" alone wasn't proof of anything. Caught it only by manually
+back-solving the observed diff values against several hypotheses (what
+would this look like if the varying were flat at V0? if it were stuck
+at pixel center? if it were exactly 1.0 constant?) until one matched
+exactly (red diffs = `1 - offsetX` in every sample) -- which pointed at
+"color.r is stuck at the constant 1.0" and straight to the copy-paste
+bug, not at the production code at all.
+
+**Technique worth repeating**: when a new hand-rolled test fails in a
+way that doesn't cleanly match "bug present" or "bug absent" from your
+own mental model, don't tweak-and-rerun blind -- write down 2-3
+concrete hypotheses for what the *test's own* wrong output would look
+like under each, and pattern-match the actual numbers against them
+first. It's a faster diagnosis than adding print statements when the
+numbers are already fully deterministic (as they are for a hand-
+derived barycentric test like this one).
+
+**Also confirmed the test genuinely exercises the fix** (not just
+"looks plausible"): `git stash push -- Executor.cpp` + rebuild +
+rerun reproduced the exact pre-fix failure with this same test, then
+`git stash pop` restored the fix. Cheap and definitive -- worth doing
+for any new test whose only prior evidence is "it passes now."
+
+## Validation
+
+- `ninja check-feme`: 3192/3195 Passed, 3 pre-existing Unsupported,
+  0 Failed (up 1 test, zero regressions).
+- CTS: all 6 previously-failing `sample_position.correctness.*` cases
+  now Pass. `multisample_shader_builtin.*` (95 cases): 55 Pass/0 Fail/
+  40 NotSupported (up from 49/6/40 -- exactly predicted, group now
+  fully clean modulo the pre-existing sample-count `NotSupported`
+  gap). `pipeline_library.graphics_library.*` (836 cases, regression
+  check): unchanged at 548 Pass/0 Fail/287 NotSupported/1 pre-existing
+  benign warning.
+- The related, deferred-during-L114 sub-case ("does a bare `sample`-
+  qualified varying with no `gl_SamplePosition`/`gl_SampleID` force
+  per-sample shading?") turned out not to need its own fix:
+  `multisample_interpolation.sample_qualifier_distinct_values.*`
+  exercises exactly that shape and now largely passes.
+
+## New gap discovered, not fixed: L115
+
+Continued the L106 sweep per the prior session's own suggested pick
+(`multisample-interpolation.txt`, 247 cases) immediately after L114(a)
+landed. Found 115/247 failures, but they're a **completely different,
+unrelated** bug: pipeline creation itself fails with `"error: unhandled
+deserializations of 76 from extension set GLSL.std.450"`. Opcode 76 is
+`InterpolateAtCentroid`; `interpolateAtSample`/`interpolateAtOffset`
+(77/78) are almost certainly the same untouched gap, since sibling
+cases in this same test file exercise all three functions. This is a
+missing SPIR-V *extended-instruction* import, not an interpolation-
+architecture issue -- did not start root-causing it (out of scope for
+this session's assigned L114(a) work), just confirmed the failure
+signature and opened it as `Roadmap.md`'s L115 row for a fresh session.
+
+## Docs updated
+
+- `Roadmap.md`: struck through L114(a) with the fix + validation
+  writeup; added L115 (not yet started).
+- `VulkanCTSReport.md`: rewrote the L114(a) section from "root-caused,
+  not yet fixed" to a full fix/validation writeup; added a new L115
+  section.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  update needed -- L114(a) is a correctness fix for already-advertised
+  `sampleRateShading`, not a new capability.
+
+## Suggested next steps
+
+1. **Root-cause L115** (~1-2 hours to scope, unknown to fix -- a new
+   SPIR-V extended-instruction import, likely a nontrivial chunk of
+   work once scoped). Per the L112 precedent, check upstream MLIR's
+   own GLSL.std.450 import path first (`mlir/lib/Target/SPIRV/...`,
+   look for how `InterpolateAtCentroid`/`interpolateAtSample`/
+   `interpolateAtOffset` extended instructions are (or aren't) handled)
+   before assuming the gap is in feme's own `SPIRVToLLVMPatterns.cpp`.
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a single reduced case rerun
+   (the L112/L113/L114 technique, confirmed useful again three
+   sessions running) should surface exactly which of the 3 opcodes is
+   hit first and where.
+2. **Re-sweep `multisample_interpolation.*` after L115 lands** --
+   expect most of the 115 failures to flip to Pass; worth also
+   re-checking the 12 that already passed and the 120 NotSupported to
+   make sure L115's fix doesn't touch their classification.
+3. **Continue the L106 sweep after L115 closes**: `pipeline.monolithic.*`/
+   `subgroups.*`/`compute.*`/`graphicsfuzz.*` remain the large,
+   untriaged candidates noted for several sessions running -- still no
+   session has picked one of these up yet, worth prioritizing one of
+   them next specifically to break the multi-session `pipeline.*`-only
+   pattern.
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+5. **Technique confirmed again this session**: `deqp-vk`'s
+   `--deqp-caselistfile` flag does not exist (despite looking like the
+   obvious name) -- use `-n "case1,case2,..."` (comma-joined, supports
+   wildcards) instead; saved a round-trip of guessing flag names.
