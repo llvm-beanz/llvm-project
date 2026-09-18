@@ -793,4 +793,42 @@ TEST(SPIRVToLLVMTest, UnboundedArrayedBlockConvertsInsteadOfFailing) {
   EXPECT_NE(Result, "<failed>") << Result;
 }
 
+// (Roadmap L102) An `AccessChain` selecting a single lane of a `bool`
+// vector (e.g. `bvec2`/`bvec3`/`bvec4`) cannot be lowered with upstream's
+// generic single-GEP `AccessChainPattern`: the resulting `getelementptr`
+// would index into an `i1`-element vector, and LLVM's IR verifier rejects
+// any GEP into a non-byte-addressable element type ("GEP into vector with
+// non-byte-addressable element type"). Per SPIR-V's own rule that a
+// pointer to a vector component is only ever a valid immediate operand of
+// `OpLoad`/`OpStore`, the fix fuses the AccessChain into its consuming
+// Load/Store: the AccessChain itself converts to a harmless GEP
+// addressing the *whole* vector (dropping the final lane index), while
+// the Load/Store loads/stores the whole vector and extracts/inserts the
+// selected lane with `llvm.extractelement`/`llvm.insertelement`, instead
+// of failing to legalize / producing a verifier-rejected GEP.
+TEST(SPIRVToLLVMTest, BoolVectorLaneLoadStoreConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.Variable : !spirv.ptr<vector<2xi1>, Function> "
+      "%1 = spirv.Constant 0 : i32 "
+      "%2 = spirv.AccessChain %0[%1] : "
+      "!spirv.ptr<vector<2xi1>, Function>, i32 -> !spirv.ptr<i1, Function> "
+      "%3 = spirv.Load \"Function\" %2 : i1 "
+      "%4 = spirv.AccessChain %0[%1] : "
+      "!spirv.ptr<vector<2xi1>, Function>, i32 -> !spirv.ptr<i1, Function> "
+      "spirv.Store \"Function\" %4, %3 : i1 "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.extractelement"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.insertelement"), std::string::npos) << Result;
+  // The illegal single-GEP lowering must not appear: no GEP result type
+  // should itself be a vector-of-i1 (i.e. `getelementptr` indexing all the
+  // way into the bool lane).
+  EXPECT_EQ(Result.find("getelementptr inbounds <2 x i1>"), std::string::npos)
+      << Result;
+}
+
 } // namespace

@@ -3160,6 +3160,257 @@ public:
   }
 };
 
+/// Returns the type an `spirv.AccessChain`'s own *last* index applies to
+/// (i.e. the type reached after walking every index but the last one),
+/// re-deriving the same per-index walk `spirv::AccessChainOp`'s own
+/// (private, upstream) `getElementPtrType` performs, since that helper
+/// isn't exposed outside `MemoryOps.cpp`. Returns null on any shape this
+/// walk doesn't understand (a struct index that isn't a plain
+/// `spirv.Constant`, for instance) -- BoolVectorLane{Load,Store}Pattern
+/// below simply declines in that case, falling back to the generic
+/// `AccessChainPattern`/`LoadOpPattern`/`StoreOpPattern` conversions.
+mlir::Type getAccessChainLastIndexContainerType(mlir::spirv::AccessChainOp Op) {
+  auto PtrTy = mlir::dyn_cast<mlir::spirv::PointerType>(
+      Op.getBasePtr().getType());
+  if (!PtrTy)
+    return nullptr;
+
+  mlir::Type ResultType = PtrTy.getPointeeType();
+  for (mlir::Value IndexSSA : Op.getIndices().drop_back()) {
+    auto CType = mlir::dyn_cast<mlir::spirv::CompositeType>(ResultType);
+    if (!CType)
+      return nullptr;
+    unsigned Index = 0;
+    if (mlir::isa<mlir::spirv::StructType>(ResultType)) {
+      auto ConstOp = IndexSSA.getDefiningOp<mlir::spirv::ConstantOp>();
+      if (!ConstOp)
+        return nullptr;
+      auto IntAttr = mlir::dyn_cast<mlir::IntegerAttr>(ConstOp.getValue());
+      if (!IntAttr)
+        return nullptr;
+      Index = IntAttr.getValue().getSExtValue();
+    }
+    ResultType = CType.getElementType(Index);
+  }
+  return ResultType;
+}
+
+/// An `spirv.AccessChain` whose last index selects a single lane of a
+/// vector whose (converted) element type LLVM's `getelementptr` cannot
+/// address -- i.e. a `bool` (`i1`) vector, since GEP indexing computes a
+/// byte offset and an `i1` element has no byte size. Every other vector
+/// element type FeMe supports (`i32`/`f32`/etc.) is byte-sized, so the
+/// generic upstream `AccessChainPattern` already handles those by simply
+/// including the lane index as the GEP's own last index -- only bool
+/// vectors need this dedicated fused-with-Load/Store handling below.
+std::optional<mlir::VectorType>
+getBoolVectorLaneAccessChain(mlir::spirv::AccessChainOp Op,
+                             const mlir::TypeConverter &TypeConverter) {
+  if (Op.getIndices().empty())
+    return std::nullopt;
+  mlir::Type ContainerType = getAccessChainLastIndexContainerType(Op);
+  auto VecTy = mlir::dyn_cast_or_null<mlir::VectorType>(ContainerType);
+  if (!VecTy)
+    return std::nullopt;
+  mlir::Type ConvertedElemTy =
+      TypeConverter.convertType(VecTy.getElementType());
+  if (!ConvertedElemTy || !ConvertedElemTy.isIntOrFloat() ||
+      ConvertedElemTy.getIntOrFloatBitWidth() % 8 == 0)
+    return std::nullopt;
+  return VecTy;
+}
+
+/// Builds the GEP addressing a `bool` vector itself (every
+/// `spirv.AccessChain` index but the last -- the lane-selecting one,
+/// which `llvm.extractelement`/`llvm.insertelement` handle instead, see
+/// BoolVectorLaneLoadPattern/BoolVectorLaneStorePattern below), mirroring
+/// the upstream `AccessChainPattern`'s own GEP construction (leading
+/// zero index to go through the base pointer, base element type is the
+/// base pointer's own pointee type).
+mlir::Value buildBoolVectorGEP(mlir::spirv::AccessChainOp AccessChain,
+                               mlir::ValueRange ConvertedIndices,
+                               mlir::Value ConvertedBasePtr,
+                               const mlir::TypeConverter &TypeConverter,
+                               mlir::ConversionPatternRewriter &Rewriter) {
+  mlir::Location Loc = AccessChain.getLoc();
+  mlir::Type IndexType = AccessChain.getIndices().front().getType();
+  mlir::Type LLVMIndexType = TypeConverter.convertType(IndexType);
+  mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, LLVMIndexType, Rewriter.getIntegerAttr(LLVMIndexType, 0));
+  llvm::SmallVector<mlir::Value, 4> GEPIndices;
+  GEPIndices.push_back(Zero);
+  llvm::append_range(GEPIndices, ConvertedIndices.drop_back());
+
+  mlir::Type ElementType = TypeConverter.convertType(
+      mlir::cast<mlir::spirv::PointerType>(AccessChain.getBasePtr().getType())
+          .getPointeeType());
+  auto PtrTy = mlir::LLVM::LLVMPointerType::get(Rewriter.getContext());
+  return mlir::LLVM::GEPOp::create(Rewriter, Loc, PtrTy, ElementType,
+                                   ConvertedBasePtr, GEPIndices);
+}
+
+/// Converts an `spirv.AccessChain` matching getBoolVectorLaneAccessChain's
+/// shape into a GEP addressing the vector itself (every index but the
+/// last -- the lane-selecting one). This result is never actually used:
+/// BoolVectorLaneLoadPattern/BoolVectorLaneStorePattern below build their
+/// own, separate copy of this same GEP directly (since they need the
+/// vector pointer *and* the lane index together, and pattern application
+/// order between an AccessChain and its consuming Load/Store isn't
+/// guaranteed). This pattern exists only so the AccessChain itself has a
+/// *legal* independent conversion instead of being left for the generic
+/// `AccessChainPattern` to (illegally) convert into a GEP indexing all
+/// the way into the non-byte-addressable vector.
+class BoolVectorLaneAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (!getBoolVectorLaneAccessChain(Op, *getTypeConverter()))
+      return Rewriter.notifyMatchFailure(Op, "not a bool vector lane access");
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Adaptor.getBasePtr().getType()))
+      return Rewriter.notifyMatchFailure(Op, "base is not an LLVM pointer");
+
+    mlir::Value VecPtr =
+        buildBoolVectorGEP(Op, Adaptor.getIndices(), Adaptor.getBasePtr(),
+                           *getTypeConverter(), Rewriter);
+    Rewriter.replaceOp(Op, VecPtr);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.Load` of a single lane of a `bool` vector (see
+/// getBoolVectorLaneAccessChain above for why this needs dedicated
+/// handling, unlike every other vector element type) into a full-vector
+/// `llvm.load` followed by an `llvm.extractelement` selecting the lane --
+/// roadmap L102, discovered as a `getelementptr ... with non-byte-
+/// addressable element type` LLVM IR verifier failure (i.e. a bug only
+/// visible after translation to LLVM IR, not during the MLIR-level
+/// conversion itself) in `dEQP-VK.pipeline.pipeline_library.
+/// spec_constant.*.composite.array.bvec2/3/4` (and the array-of-bvec
+/// shapes), whose source GLSL is an ordinary spec-constant-mixed `bool`
+/// vector or array of `bool` vectors indexed by a constant/spec-constant
+/// index -- `AccessChain`'s own last index selecting a lane in the
+/// `bvec`, same shape as every other vector, just with an element type
+/// (`i1`) too narrow for GEP.
+///
+/// This pattern (like MatrixColumnLoadPattern/MatrixColumnStorePattern
+/// above) matches on the *consuming* Load/Store, not the AccessChain
+/// itself: the underlying `bool`-vector-component pointer this
+/// AccessChain would otherwise produce cannot be represented as a real,
+/// independently loadable/storable LLVM value (LLVM has no notion of a
+/// pointer to a single bit), so, per SPIR-V's own rule that such an
+/// AccessChain's result may only ever be the immediate operand of a Load
+/// or Store, this pattern builds its own copy of the vector-addressing
+/// GEP directly (rather than depend on BoolVectorLaneAccessChainPattern
+/// above having already converted the AccessChain -- pattern application
+/// order between an op and its consumer isn't guaranteed) and does the
+/// final lane selection itself with `llvm.extractelement`.
+class BoolVectorLaneLoadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::LoadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::LoadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::LoadOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto AccessChain =
+        Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
+    if (!AccessChain)
+      return Rewriter.notifyMatchFailure(Op, "not an access chain load");
+    if (!AccessChain->hasOneUse())
+      return Rewriter.notifyMatchFailure(Op, "access chain has other uses");
+    std::optional<mlir::VectorType> VecTy =
+        getBoolVectorLaneAccessChain(AccessChain, *getTypeConverter());
+    if (!VecTy)
+      return Rewriter.notifyMatchFailure(Op, "not a bool vector lane load");
+    mlir::Value BasePtr = Rewriter.getRemappedValue(AccessChain.getBasePtr());
+    if (!BasePtr)
+      return Rewriter.notifyMatchFailure(Op, "base not yet converted");
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(BasePtr.getType()))
+      return Rewriter.notifyMatchFailure(Op, "base is not an LLVM pointer");
+
+    llvm::SmallVector<mlir::Value, 4> ConvertedIndices;
+    for (mlir::Value Index : AccessChain.getIndices()) {
+      mlir::Value Converted = Rewriter.getRemappedValue(Index);
+      if (!Converted)
+        return Rewriter.notifyMatchFailure(Op, "index not yet converted");
+      ConvertedIndices.push_back(Converted);
+    }
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type VecLLVMTy = getTypeConverter()->convertType(*VecTy);
+    mlir::Value VecPtr =
+        buildBoolVectorGEP(AccessChain, ConvertedIndices, BasePtr,
+                           *getTypeConverter(), Rewriter);
+    mlir::Value Vec = mlir::LLVM::LoadOp::create(Rewriter, Loc, VecLLVMTy,
+                                                 VecPtr);
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Result = mlir::LLVM::ExtractElementOp::create(
+        Rewriter, Loc, ResultType, Vec, ConvertedIndices.back());
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// The `spirv.Store` counterpart to BoolVectorLaneLoadPattern above --
+/// see its own comment for the shape matched and why this needs fused
+/// Load/Store handling. Reads the full vector, inserts the new lane
+/// value, and writes the whole vector back.
+class BoolVectorLaneStorePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::StoreOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::StoreOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::StoreOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto AccessChain =
+        Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
+    if (!AccessChain)
+      return Rewriter.notifyMatchFailure(Op, "not an access chain store");
+    if (!AccessChain->hasOneUse())
+      return Rewriter.notifyMatchFailure(Op, "access chain has other uses");
+    std::optional<mlir::VectorType> VecTy =
+        getBoolVectorLaneAccessChain(AccessChain, *getTypeConverter());
+    if (!VecTy)
+      return Rewriter.notifyMatchFailure(Op, "not a bool vector lane store");
+    mlir::Value BasePtr = Rewriter.getRemappedValue(AccessChain.getBasePtr());
+    if (!BasePtr)
+      return Rewriter.notifyMatchFailure(Op, "base not yet converted");
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(BasePtr.getType()))
+      return Rewriter.notifyMatchFailure(Op, "base is not an LLVM pointer");
+
+    llvm::SmallVector<mlir::Value, 4> ConvertedIndices;
+    for (mlir::Value Index : AccessChain.getIndices()) {
+      mlir::Value Converted = Rewriter.getRemappedValue(Index);
+      if (!Converted)
+        return Rewriter.notifyMatchFailure(Op, "index not yet converted");
+      ConvertedIndices.push_back(Converted);
+    }
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type VecLLVMTy = getTypeConverter()->convertType(*VecTy);
+    mlir::Value VecPtr =
+        buildBoolVectorGEP(AccessChain, ConvertedIndices, BasePtr,
+                           *getTypeConverter(), Rewriter);
+    mlir::Value Vec = mlir::LLVM::LoadOp::create(Rewriter, Loc, VecLLVMTy,
+                                                 VecPtr);
+    mlir::Value NewVec = mlir::LLVM::InsertElementOp::create(
+        Rewriter, Loc, Vec, Adaptor.getValue(), ConvertedIndices.back());
+    mlir::LLVM::StoreOp::create(Rewriter, Loc, NewVec, VecPtr);
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Replaces `spirv.mlir.addressof` of a resource variable with the
 /// `llvm.spv.resource.handlefrombinding` call producing its handle. As for
 /// builtin variables, there is no LLVM global to address: LLVM's SPIRV
@@ -11430,7 +11681,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       StageIOGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern,
-      VectorExtractDynamicPattern>(
+      VectorExtractDynamicPattern, BoolVectorLaneAccessChainPattern,
+      BoolVectorLaneLoadPattern, BoolVectorLaneStorePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceArrayAccessChainPattern,
                ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
