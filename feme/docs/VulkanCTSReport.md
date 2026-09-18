@@ -1790,3 +1790,84 @@ No fix landed this session for either -- both are scoping-only entries.
 no new feature or extension is newly advertised by L109's fix
 (`multiviewGeometryShader` was already `VK_TRUE` from H5e), and L110/L111
 are not yet implemented.
+
+## Roadmap L110 (fixed this session): `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT`
+
+### Fix
+
+Implemented exactly the shape scoped in the prior session's L110 roadmap
+entry:
+
+- `feme::graphics::GraphicsPipeline` (`Pipeline.h`/`Pipeline.cpp`) gained
+  two defaulted-`false` constructor parameters/fields,
+  `PreRasterViewIndexIsDeviceIndex`/`FragmentViewIndexIsDeviceIndex`, and
+  matching getters.
+- Vulkan-side `GraphicsPipelineState` (`GraphicsPipeline.h`) gained the
+  same two bools.
+- `synthesizeLinkedGraphicsPipelineCreateInfo` (`GraphicsPipeline.cpp`)
+  gained two `bool &` out-parameters, resolved the same way it already
+  resolves `pVertexInputState`/`pViewportState`/etc.: from whichever
+  linked `GraphicsPipelineLibrary`'s own `createFlags()` supplies that
+  stage group's part, falling back to the top-level `CreateInfo.flags`
+  for a part not supplied by any linked library.
+- `compileGraphicsPipeline` gained the same two bools as parameters,
+  storing them straight into the `GraphicsPipelineState` it builds.
+- `vkCreateGraphicsPipelines`'s call site now: defaults both bools from
+  `pCreateInfos[I].flags` (the monolithic-pipeline case, and the default
+  before any linked-library override); when a `VkPipelineLibraryCreateInfoKHR`
+  links one or more parts, passes both by reference into
+  `synthesizeLinkedGraphicsPipelineCreateInfo`, which overwrites them per
+  the per-part resolution above.
+- `Executor.cpp`'s 4 `ViewIndex`-writing sites (fragment shading, vertex
+  fetch, the `runPatchPipeline` call, the `buildGeometryInvocations`
+  call) each now consult `Pipeline.getFragmentViewIndexIsDeviceIndex()`
+  (fragment site) or `Pipeline.getPreRasterViewIndexIsDeviceIndex()`
+  (vertex/patch-pipeline/geometry sites), substituting the constant `0`
+  (this ICD's own always-single device index) for `Draw.ViewIndex` when
+  the relevant flag is set.
+
+Mesh/task stages were deliberately left untouched: the CTS test's own
+`_mesh_shading` variants are already `NotSupported` for an unrelated,
+pre-existing reason (`multiviewMeshShader` not advertised), so there is
+no `ViewIndex`-carrying mesh/task ABI record to update.
+
+### Validation (L110)
+
+New unit tests:
+- `GraphicsPipelineTest.ViewIndexIsDeviceIndexDefaultsFalseAndIsPerStageGroup`
+  (`PipelineTest.cpp`): confirms both bools default `false`, and that each
+  is independently settable via the constructor.
+- `DrawTest.MultiviewViewIndexFromDeviceIndexReadsZeroForEveryView`
+  (`DrawTest.cpp`): a real two-view multiview draw (mirroring the
+  existing `MultiviewRendersDifferentColorPerViewIntoItsOwnLayer` test)
+  with `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` set on the
+  (monolithic) pipeline -- confirms both views' own layers render
+  identically (`gl_ViewIndex == 0` for both), instead of the flag-off
+  test's real-per-view red/green split.
+
+`ninja check-feme` (ccache, assertions-enabled build): 3185/3188 passed,
+3 pre-existing Unsupported, 0 Failed (up 2 discovered tests from this
+session's additions, no regressions).
+
+CTS re-sweep (`deqp-vk`, `feme_icd.json` rebuilt first per the standing
+gotcha):
+- All 16 applicable `pipeline_library.graphics_library.misc.other.
+  view_index_from_device_index_in_*` cases now **Pass** (6 mesh-shading
+  variants remain `NotSupported`, the unrelated pre-existing gap noted
+  above).
+- `pipeline_library.graphics_library.*` (836 cases) now lands at **547
+  Pass / 1 Fail / 287 NotSupported / 1 Warning** -- the sole remaining
+  Fail is `unusual_multisample_state` (roadmap L111, confirmed unrelated
+  to `gl_ViewIndex`/multiview), and the sole Warning is a pre-existing,
+  benign "linking of one or more combinations took too long" quality
+  warning, unrelated to this fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed. `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` is a
+`VkPipelineCreateFlagBits` value gated by the already-`VK_TRUE`
+`VkPhysicalDeviceMultiviewFeatures::multiview` (`VK_KHR_multiview`/core
+1.1) and `VK_KHR_device_group_creation`'s own always-1-device-1-group
+`vkEnumeratePhysicalDeviceGroups` stub, both already accurately listed;
+this fix corrects previously-silent mishandling of an already-advertised
+flag, not a newly-advertised capability, so neither inventory document
+gains a new row.
