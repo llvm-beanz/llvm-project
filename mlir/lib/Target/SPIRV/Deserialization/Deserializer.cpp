@@ -368,6 +368,7 @@ LogicalResult spirv::Deserializer::processDecoration(ArrayRef<uint32_t> words) {
   case spirv::Decoration::Patch:
   case spirv::Decoration::Coherent:
   case spirv::Decoration::PerPrimitiveEXT:
+  case spirv::Decoration::Sample:
   case spirv::Decoration::Volatile:
     if (words.size() != 2) {
       return emitError(unknownLoc, "OpDecorate with ")

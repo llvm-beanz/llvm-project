@@ -225,3 +225,19 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.5, [Shader, ShaderNonUniform
     spirv.ReturnValue %0 : i32
   }
 }
+
+// -----
+
+// The `Sample` decoration (a fragment-shader input's own per-sample, as
+// opposed to per-pixel, interpolation qualifier -- GLSL's `sample in`)
+// used to be entirely unhandled by both the deserializer ("unhandled
+// Decoration : 'Sample'") and the serializer ("unhandled decoration
+// Sample"), despite being a plain unit decoration exactly like
+// `Centroid`/`NoPerspective`/`Flat` above -- feme roadmap L106's own CTS
+// sweep of `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.*`
+// found this from a real fragment shader's own `sample`-qualified input.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, SampleRateShading, Linkage], []> {
+  // CHECK: sample
+  spirv.GlobalVariable @var {sample} : !spirv.ptr<vector<4xf32>, Input>
+}
+
