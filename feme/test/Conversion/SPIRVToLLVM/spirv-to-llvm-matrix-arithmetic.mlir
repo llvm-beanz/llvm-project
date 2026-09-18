@@ -139,3 +139,53 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
     spirv.ReturnValue %0 : !spirv.matrix<3 x vector<2xf32>>
   }
 }
+
+// -----
+
+// `spirv.GL.Determinant` (roadmap L116(c)): Laplace expansion along the
+// first row. For a 2x2 matrix this collapses to the ordinary `ad - bc`
+// formula (element(row,col): a=[0][0], b=[0][1], c=[1][0], d=[1][1]).
+
+// CHECK-LABEL: llvm.func @determinant_2x2
+// CHECK: %[[C0:.*]] = llvm.extractvalue %arg0[0] : !llvm.array<2 x vector<2xf32>>
+// CHECK: %[[A:.*]] = llvm.extractelement %[[C0]][%{{.*}} : i32] : vector<2xf32>
+// CHECK: %[[C1:.*]] = llvm.extractvalue %arg0[1] : !llvm.array<2 x vector<2xf32>>
+// CHECK: %[[B:.*]] = llvm.extractelement %[[C1]][%{{.*}} : i32] : vector<2xf32>
+// CHECK: %[[C0B:.*]] = llvm.extractvalue %arg0[0] : !llvm.array<2 x vector<2xf32>>
+// CHECK: %[[C:.*]] = llvm.extractelement %[[C0B]][%{{.*}} : i32] : vector<2xf32>
+// CHECK: %[[C1B:.*]] = llvm.extractvalue %arg0[1] : !llvm.array<2 x vector<2xf32>>
+// CHECK: %[[D:.*]] = llvm.extractelement %[[C1B]][%{{.*}} : i32] : vector<2xf32>
+// CHECK: %[[AD:.*]] = llvm.fmul %[[A]], %[[D]] : f32
+// CHECK: %[[BC:.*]] = llvm.fmul %[[B]], %[[C]] : f32
+// CHECK: %[[DET:.*]] = llvm.fsub %[[AD]], %[[BC]] : f32
+// CHECK: llvm.return %[[DET]] : f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
+  spirv.func @determinant_2x2(%m : !spirv.matrix<2 x vector<2xf32>>) -> f32 "None" {
+    %0 = spirv.GL.Determinant %m : !spirv.matrix<2 x vector<2xf32>> -> f32
+    spirv.ReturnValue %0 : f32
+  }
+}
+
+// -----
+
+// A 3x3 determinant recurses one level deeper: the first-row expansion's
+// three 2x2 minors, each built and combined the same way as the 2x2 case
+// above, alternating +/- across the three terms.
+
+// CHECK-LABEL: llvm.func @determinant_3x3
+// CHECK-COUNT-9: llvm.extractelement
+// CHECK: %[[MINOR0:.*]] = llvm.fsub {{.*}} : f32
+// CHECK: %[[TERM0:.*]] = llvm.fmul {{.*}}, %[[MINOR0]] : f32
+// CHECK: %[[MINOR1:.*]] = llvm.fsub {{.*}} : f32
+// CHECK: %[[TERM1:.*]] = llvm.fmul {{.*}}, %[[MINOR1]] : f32
+// CHECK: %[[ACC1:.*]] = llvm.fsub %[[TERM0]], %[[TERM1]] : f32
+// CHECK: %[[MINOR2:.*]] = llvm.fsub {{.*}} : f32
+// CHECK: %[[TERM2:.*]] = llvm.fmul {{.*}}, %[[MINOR2]] : f32
+// CHECK: %[[ACC2:.*]] = llvm.fadd %[[ACC1]], %[[TERM2]] : f32
+// CHECK: llvm.return %[[ACC2]] : f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
+  spirv.func @determinant_3x3(%m : !spirv.matrix<3 x vector<3xf32>>) -> f32 "None" {
+    %0 = spirv.GL.Determinant %m : !spirv.matrix<3 x vector<3xf32>> -> f32
+    spirv.ReturnValue %0 : f32
+  }
+}

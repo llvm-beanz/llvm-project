@@ -9351,6 +9351,95 @@ public:
   }
 };
 
+/// Extracts element (\p Row, \p Col) (row-major indices; the matrix's own
+/// storage is an `!llvm.array` of column vectors -- see extractColumn) as
+/// a scalar `llvm.extractelement`.
+static mlir::Value getMatrixElement(mlir::ConversionPatternRewriter &Rewriter,
+                                    mlir::Location Loc, mlir::Value Matrix,
+                                    int64_t Row, int64_t Col) {
+  mlir::Value Column = extractColumn(Rewriter, Loc, Matrix, Col);
+  mlir::Value RowIndex =
+      mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), Row);
+  return mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Column, RowIndex);
+}
+
+/// Computes the determinant of the square matrix described by \p Elems
+/// (`Elems[Row][Col]`, both 0-based, `Elems.size()` square) via Laplace
+/// (cofactor) expansion along the first row -- correct for any N, and
+/// simple to build recursively at IR-construction time (host-side C++
+/// recursion producing one `llvm.fmul`/`llvm.fsub`/`llvm.fadd` chain, not
+/// an actual runtime loop), which matters here since every real GLSL
+/// determinant is a compile-time-fixed 2x2/3x3/4x4, never a genuinely
+/// dynamic size. `computeDeterminant`'s own minor extraction (dropping row
+/// 0 and column `J`) is `O(N)` per term and this recurses `N` deep, so
+/// total work is `O(N!)` -- entirely fine for the only sizes GLSL's own
+/// matrix types ever have (N <= 4), not intended for a general large-N
+/// use.
+static mlir::Value
+computeDeterminant(mlir::ConversionPatternRewriter &Rewriter,
+                   mlir::Location Loc, mlir::Type ElementTy,
+                   llvm::ArrayRef<llvm::SmallVector<mlir::Value>> Elems) {
+  int64_t N = Elems.size();
+  if (N == 1)
+    return Elems[0][0];
+
+  mlir::Value Result;
+  for (int64_t J = 0; J != N; ++J) {
+    llvm::SmallVector<llvm::SmallVector<mlir::Value>> Minor;
+    for (int64_t R = 1; R != N; ++R) {
+      llvm::SmallVector<mlir::Value> MinorRow;
+      for (int64_t C = 0; C != N; ++C) {
+        if (C != J)
+          MinorRow.push_back(Elems[R][C]);
+      }
+      Minor.push_back(std::move(MinorRow));
+    }
+    mlir::Value MinorDet = computeDeterminant(Rewriter, Loc, ElementTy, Minor);
+    mlir::Value Term =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, ElementTy, Elems[0][J], MinorDet);
+    if (!Result) {
+      Result = Term;
+    } else if (J % 2 == 0) {
+      Result = mlir::LLVM::FAddOp::create(Rewriter, Loc, ElementTy, Result, Term);
+    } else {
+      Result = mlir::LLVM::FSubOp::create(Rewriter, Loc, ElementTy, Result, Term);
+    }
+  }
+  return Result;
+}
+
+/// Converts `spirv.GL.Determinant` (roadmap L116(c)) via Laplace
+/// expansion (computeDeterminant): pure arithmetic over the matrix's own
+/// already-extracted scalar elements, no runtime callback needed (unlike
+/// e.g. `InterpolateAt*`'s own feme-side lowering, roadmap L115(b)).
+class GLDeterminantPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLDeterminantOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLDeterminantOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLDeterminantOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto MatrixTy = mlir::cast<mlir::spirv::MatrixType>(Op.getMatrix().getType());
+    mlir::Type ElementTy = getTypeConverter()->convertType(MatrixTy.getElementType());
+    if (!ElementTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    int64_t N = MatrixTy.getNumColumns();
+    llvm::SmallVector<llvm::SmallVector<mlir::Value>> Elems(N);
+    for (int64_t R = 0; R != N; ++R) {
+      Elems[R].reserve(N);
+      for (int64_t C = 0; C != N; ++C)
+        Elems[R].push_back(
+            getMatrixElement(Rewriter, Loc, Adaptor.getMatrix(), R, C));
+    }
+    Rewriter.replaceOp(Op, computeDeterminant(Rewriter, Loc, ElementTy, Elems));
+    return mlir::success();
+  }
+};
+
 /// A whole-matrix `spirv.AccessChain` access this file's own physical
 /// layout substitution (getPhysicalMatrixMemberType) can interpret: the
 /// matrix's ordinary (logical, always column-major) MatrixType, and the
@@ -11933,7 +12022,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
-      MatrixTimesScalarPattern, TransposePattern, RowMajorMatrixStorePattern,
+      MatrixTimesScalarPattern, TransposePattern, GLDeterminantPattern,
+      RowMajorMatrixStorePattern,
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
       MatrixColumnStorePattern, OffsetStructMemberReorderAccessChainPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,
