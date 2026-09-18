@@ -2500,3 +2500,102 @@ several plausibly as large as L115 itself), left for future sessions per
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
 needed for the one fix landed this session (a pure bug fix, not a new
 capability).
+
+## L116(e): both one-off bugs fixed this session
+
+Continuing the L116 breakdown, this session picked L116(e) (the smallest,
+best quick-win row per the prior session's own ranking) over L116(a).
+
+### Bug 1: `spirv.Store`/`spirv.Load` with combined `Volatile|Nontemporal`
+
+`dEQP-VK.graphicsfuzz.spv-stable-pillars-volatile-nontemporal-store` failed
+pipeline creation with `"failed to legalize operation 'spirv.Store'"` when
+its `MemoryAccess` operand combined the `Volatile` and `Nontemporal` bits
+(`Volatile|Nontemporal`, a real, independently-combinable bit-OR per SPIR-V's
+own `MemoryAccess` bit-enum, not two mutually-exclusive alternatives).
+
+Root cause: upstream MLIR's `LoadStorePattern`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) matched the memory-access
+attribute with a `switch` comparing the *whole* value against each single
+enumerant (`Aligned`/`None`/`Nontemporal`/`Volatile`); a combined value like
+`Volatile|Nontemporal` (1|4 = 5) equals none of those single values, so it
+always fell to `default: return failure()` -- a classic bit-enum-vs-switch
+antipattern.
+
+Fix: replaced the `switch` with independent `bitEnumContainsAll`/
+`bitEnumContainsAny` bit checks (the idiomatic pattern already used
+elsewhere in the SPIR-V dialect, e.g. `CooperativeMatrixOps.cpp`): reject
+any bit outside `{Aligned, Volatile, Nontemporal}` exactly as before
+(verified `NonPrivatePointer` is still rejected), and independently honor
+each of the three supported bits in any combination, including `Aligned`'s
+alignment operand alongside the other two.
+
+New tests: `store_volatile_nontemporal`, `load_volatile_nontemporal`,
+`store_volatile_nontemporal_aligned` appended to
+`mlir/test/Conversion/SPIRVToLLVM/memory-ops-to-llvm.mlir`.
+
+### Bug 2: `OpSwitch` block-argument wiring for a duplicated target block
+
+`dEQP-VK.graphicsfuzz.call-if-while-switch` failed pipeline creation with
+`"branch has 0 operands for successor #3, but target block has 1"`. Its
+SPIR-V has an `OpSwitch` with two case literals (38 and 23) both branching
+to the same label, and that label has its own `OpPhi` (SPIR-V/LLVM phi
+semantics key a value by predecessor *block*, not predecessor *edge*, so a
+block with two switch-case edges from the same predecessor still needs
+only one phi entry for it).
+
+Root cause, one layer further upstream than feme's own code (per the L112
+precedent -- always check the upstream MLIR SPIR-V import path first):
+`Deserializer::wireUpBlockArgument()`
+(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`) uses
+`llvm::find()` to locate a `spirv.Switch`'s target block index when
+back-patching the `OpPhi`-derived block arguments onto it. `llvm::find()`
+only returns the *first* matching index -- so when the same block appears
+more than once in the switch's own target list (our case, since case
+literals 38 and 23 both target it), only the first occurrence's operand
+list gets the phi's block arguments; every later duplicate occurrence's
+list is left at the empty `{}` it was constructed with in `processSwitch()`,
+producing an ill-typed `llvm.switch` once lowered.
+
+Fix: iterate every occurrence of the target block (`llvm::enumerate`) and
+assign the same phi-derived block arguments to each one, rather than
+stopping at the first match.
+
+New test: `mlir/test/Target/SPIRV/selection_switch_duplicate_target.spvasm`,
+a minimal switch with two case literals targeting the same block that takes
+one `OpPhi`-derived block argument -- confirmed to fail without the fix
+(`git stash` round-trip) with the exact same error shape, and pass with it.
+
+### Validation
+
+`ninja check-feme`: 3192/3195 Pass, 3 pre-existing Unsupported, 0 Failed --
+zero regressions from either fix. `mlir/test/Target/SPIRV/` (66 tests) and
+`mlir/test/Conversion/SPIRVToLLVM/` all passing.
+
+CTS: `dEQP-VK.graphicsfuzz.call-if-while-switch` flips Fail -> Pass outright.
+`spv-stable-pillars-volatile-nontemporal-store`'s original `spirv.Store`
+legalization error is gone, but the case still shows `Fail` overall -- it
+now fails one layer deeper on the already-tracked L116(a)/(d) aggregate-value
+gap (`feme-cpu-simdize: ... divergent aggregate value ...`), confirming this
+fix is correctly scoped rather than incomplete.
+
+### Full `graphicsfuzz.*` re-sweep (757 cases, with both fixes applied)
+
+|                                        | Count | Prior session |
+|----------------------------------------|-------|----------------|
+| Pass                                   | 529   | 528            |
+| Fail                                   | 196   | 197            |
+| NotSupported                           | 8     | 8              |
+| Process hangs or crashes (no verdict)  | 24    | 24             |
+
+Net movement is exactly the one case expected to flip
+(`call-if-while-switch`, Fail -> Pass); the `MemoryAccess` fix's own case
+stays `Fail` for the separate, already-tracked reason above, and the 24
+hang/crash cases (re-confirmed via the same watchdog-enabled skip-and-continue
+harness as last session, rebuilt fresh this session as a throwaway script,
+not committed) are the identical 24 case names as last session's sweep --
+no new hangs, no previously-hanging case resolved.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- both fixes are pure bug fixes in existing SPIR-V import/lowering
+paths, not new capabilities.
