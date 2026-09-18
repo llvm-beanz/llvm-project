@@ -407,20 +407,27 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // '!llvm.struct<...>''). Broadening both predicates to recognize *any*
 // struct type (not just an array-wrapping one) fixes this.
 //
-// (Roadmap L103) `b`'s own physical field index is 2, not its declared 1:
-// this struct's `vector<3xf32>` member needs 16-byte natural alignment
-// (the host's real vector ABI alignment), so
-// `layOutStructIfOffsetsMatch`'s own non-offset-struct branch inserts a
-// 12-byte gap after the leading `f32` to reach it -- `StageIOArrayAccess
-// ChainPattern` (which handles this Input-storage, non-`Block` struct's
-// own `spirv.AccessChain`) remaps every declared member selector through
-// `remapNestedStructMemberIndices` to account for exactly that kind of
-// gap, the same way `OffsetStructMemberReorderAccessChainPattern` already
-// did for an offset-decorated struct.
+// (Roadmap L104) `b`'s own physical field index is 1, matching its
+// declared index: this struct's `vector<3xf32>` member's own *real*
+// natural alignment (matching the SPIR-V-logical DataLayout's
+// `vectorsAreElementAligned` rule) is its element's own alignment (4
+// bytes for `f32`), not the host's rounded-up-to-16-bytes vector ABI
+// alignment `mlir::DataLayout`'s generic default rule used to compute
+// (roadmap L104's own bug) -- so no gap is needed after the leading
+// `f32` (already 4-byte aligned) to reach it, and the member converts to
+// `getTightVectorArrayType`'s own `feme.tight_vector` marker-wrapped
+// tight array form (its alloc size is then always exactly 12 bytes,
+// regardless of whichever DataLayout later reads through it) rather than
+// a raw `vector<3xf32>`. `StageIOArrayAccessChainPattern` (which handles
+// this Input-storage, non-`Block` struct's own `spirv.AccessChain`)
+// still remaps through `remapNestedStructMemberIndices` in general (a
+// struct whose gap truly does require padding still needs that), and
+// also inserts the extra index needed to step through this marker
+// struct's own single member to reach the array it wraps.
 
 // CHECK-LABEL: llvm.func @read_multi_member_block
 // CHECK: %[[PTR:.*]] = llvm.mlir.addressof @in_multi_member : !llvm.ptr<7>
-// CHECK: %[[GEP:.*]] = llvm.getelementptr %[[PTR]][%{{.*}}, 2] : (!llvm.ptr<7>, i32) -> !llvm.ptr<7>, !llvm.struct<packed (f32, array<12 x i8>, vector<3xf32>, f32, array<12 x i8>)>
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %[[PTR]][%{{.*}}, 1] : (!llvm.ptr<7>, i32) -> !llvm.ptr<7>, !llvm.struct<packed (f32, struct<"feme.tight_vector", (array<3 x f32>)>, f32)>
 // CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> vector<3xf32>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT], [SPV_EXT_mesh_shader]> {
   spirv.GlobalVariable @in_multi_member {per_primitive_ext} : !spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input>

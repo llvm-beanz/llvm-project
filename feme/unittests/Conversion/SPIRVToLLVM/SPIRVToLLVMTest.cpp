@@ -874,7 +874,7 @@ TEST(SPIRVToLLVMTest, NonOffsetStructWithAlignmentGapBuildsExplicitPadding) {
 // (or the gap itself). The fix routes these indices through the same
 // remapNestedStructMemberIndices helper OffsetStructMemberReorderAccess-
 // ChainPattern already used for offset-decorated structs.
-TEST(SPIRVToLLVMTest, InputStorageStructAccessChainRemapsPhysicalIndex) {
+TEST(SPIRVToLLVMTest, InputStorageStructVec3MemberStaysAtDeclaredIndex) {
   std::string Result = convertToLLVMDialect(
       "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
       "{ spirv.GlobalVariable @in_multi_member : "
@@ -891,14 +891,64 @@ TEST(SPIRVToLLVMTest, InputStorageStructAccessChainRemapsPhysicalIndex) {
       "} spirv.EntryPoint \"Fragment\" @entry "
       "spirv.ExecutionMode @entry \"OriginUpperLeft\" }");
   EXPECT_NE(Result, "<failed>") << Result;
-  // The `vector<3xf32>` member needs a natural 16-byte alignment, so a
-  // 12-byte pad is inserted after the leading `f32`, pushing this
-  // member's own physical index to 2 (declared index 1); the GEP must
-  // select that physical index, not the stale declared one.
-  EXPECT_NE(Result.find(", 2] : (!llvm.ptr"), std::string::npos) << Result;
-  // The stale, unremapped declared index (1) must not appear as a GEP
-  // selector into this struct.
-  EXPECT_EQ(Result.find(", 1] : (!llvm.ptr"), std::string::npos) << Result;
+  // (Roadmap L104) A `vector<3xf32>` member's own *real* natural
+  // alignment -- matching the SPIR-V-logical DataLayout's
+  // `vectorsAreElementAligned` rule, see
+  // substituteTightVectorMembersIfNeeded's own comment -- is its
+  // element's alignment (4 bytes for `f32`), not a rounded-up-to-power-
+  // of-two 16 bytes. A leading `f32` member is already 4-byte aligned,
+  // so no interior padding is needed before this member at all, and its
+  // physical index equals its declared index (1); the GEP must select
+  // that index directly, with no remap and no synthetic pad member
+  // ahead of it.
+  EXPECT_NE(Result.find(", 1] : (!llvm.ptr"), std::string::npos) << Result;
+  // The struct's own vec3 member converts to the `feme.tight_vector`
+  // marker-wrapped tight array form (roadmap H101j/L104), not a raw
+  // `vector<3xf32>`, so its own alloc size stays the tight 12 bytes
+  // regardless of whichever DataLayout later reads through it.
+  EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
 }
+
+// (Roadmap L104) A non-offset struct with a `vec3` member immediately
+// followed by another member needs that trailing member placed 12 bytes
+// (the vec3's own real, tight alloc size) after the vec3's own start, not
+// 16 (the size `mlir::DataLayout`'s generic, "no explicit vector spec"
+// rounding rule -- and this codebase's own pre-L104 behavior -- computes
+// for a 3-lane vector). Modeled directly on
+// `dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.
+// composite.struct.vec3`'s own real struct shape (`{int, float, bool,
+// vec3, uint}`), whose trailing `uint` member's own value was read back
+// from the wrong byte range before this fix -- see this roadmap item's
+// own writeup for the full store/load `DataLayout` disagreement this
+// caused.
+TEST(SPIRVToLLVMTest, NonOffsetStructTightlyPacksVec3MemberSize) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @s : "
+      "!spirv.ptr<!spirv.struct<(i32, f32, i1, vector<3xf32>, i32)>, "
+      "Private> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @s : "
+      "!spirv.ptr<!spirv.struct<(i32, f32, i1, vector<3xf32>, i32)>, "
+      "Private> "
+      "%1 = spirv.Constant 4 : i32 "
+      "%2 = spirv.AccessChain %0[%1] : "
+      "!spirv.ptr<!spirv.struct<(i32, f32, i1, vector<3xf32>, i32)>, "
+      "Private>, i32 -> !spirv.ptr<i32, Private> "
+      "%3 = spirv.Load \"Private\" %2 : i32 "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The gap between the `i1` and the `vec3` member is only 3 bytes
+  // (aligning the vec3's own 1-byte-past-`i1` cursor position up to the
+  // vec3's own real 4-byte alignment), not 7 (which would align to a
+  // rounded-up-to-16-bytes alignment instead).
+  EXPECT_NE(Result.find("array<3 x i8>"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("array<7 x i8>"), std::string::npos) << Result;
+  // The vec3 member itself converts to the tight-vector marker form.
+  EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
+}
+
 
 } // namespace
