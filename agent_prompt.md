@@ -55,30 +55,31 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L118** (~half a day to a day, real scoping work first): teach
-   `SIMDize.cpp`'s stale-use recovery (~line 4515-4595) to either prove
-   all lanes' masks/storage agree before broadcasting lane 0, or skip
-   the lane-0 shortcut entirely for a `MaskedAllocas`-sourced value.
-   This is the real fix the discard/demote guard only worked around --
-   fixing it properly would let the guard be removed and recover the
-   localization wins it currently forgoes.
-2. **L116(a)'s real fix** (~half a day to a day, already scoped by a
-   prior session): per-leaf decomposition for a struct/array/matrix
-   masked load/store in `MaskIntrinsics.cpp`/`Linearize.cpp` -- still
-   the single highest-value fix left in the L116 breakdown by error
-   volume (~59% of the original sweep's `Fail`s).
-3. **L116(c)'s `Determinant`** (~half a day): add `SPIRV_GLDeterminantOp`
-   to `SPIRVGLOps.td` (square-matrix operand shape) plus a feme-side
-   lowering -- pure arithmetic, no runtime callback, same shape as
-   L115(a).
+1. **L118** (~half a day to a day, real scoping work first, still the
+   highest-value fix outstanding): teach `SIMDize.cpp`'s stale-use
+   recovery (~line 4515-4595) to either prove all lanes' masks/storage
+   agree before broadcasting lane 0, or skip the lane-0 shortcut
+   entirely for a `MaskedAllocas`-sourced value -- this is the real fix
+   the discard/demote guard (roadmap C8b) only worked around.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped): per-
+   leaf decomposition for a struct/array/matrix masked load/store in
+   `MaskIntrinsics.cpp`/`Linearize.cpp` -- still the single highest-value
+   fix left in the L116 breakdown by error volume (~59% of the original
+   sweep's `Fail`s).
+3. **L119** (new this session, not yet started): the remaining
+   GLSL.std.450 gaps from L116(c)'s original text -- `Modf` (needs a new
+   op with an `OpVariable` out-parameter, a genuinely new shape),
+   `PackUnorm4x8`/`PackUnorm2x16`/`UnpackUnorm2x16`/`UnpackUnorm4x8`
+   (much simpler, same shape as existing `Pack/UnpackHalf2x16`/
+   `PackSnorm4x8` siblings -- probably the fastest next win if picked
+   next), plus the separate `Ldexp`/`UnpackSnorm*`-family legalization-
+   only follow-up.
 4. **L117** (not yet scoped in detail): matrix vertex attributes in
    `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
-   matrix column at consecutive locations, mirroring how a matrix input
-   parameter is already split upstream. Worth a scoping pass before
-   estimating.
+   matrix column at consecutive locations.
 5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
    one-at-a-time reduction; no new technique found this session.
-6. Once L116/L117/L118 close or are judged big enough to set aside, go
-   back to L106's other untriaged candidates: `pipeline.monolithic.*`,
+6. Once L116/L117/L118/L119 close or are judged big enough to set aside,
+   go back to L106's other untriaged candidates: `pipeline.monolithic.*`,
    `subgroups.*`, `compute.*` -- still nobody has picked these up across
    several sessions now.
