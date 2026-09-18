@@ -1029,6 +1029,94 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(llvm::count(ElementIDs, 1u), 1u);
 }
 
+/// (Roadmap L105) A *genuinely multi-real-member*, non-`BuiltIn` interface
+/// block whose members have no non-zero `Offset`/`xfb_offset` decoration
+/// at all (plain `layout(location = ...) out Block { float dummy; vec4 v;
+/// } blk;`), but whose own natural-alignment gap still needs a synthetic
+/// `[N x i8]` pad -- here an *interior* one, between `dummy` (a 4-byte
+/// `float`) and `v` (a 16-byte-aligned `vec4`), rather than the leading
+/// pad `MapsMultiMemberInterfaceBlockWithLeadingPadToDistinctMembers`
+/// above already covers. Found via `dEQP-VK.pipeline.pipeline_library.
+/// interface_matching.decoration_mismatch.*member_of_block*` (the entire
+/// 72-case subgroup failed before this fix): `addElements`' own
+/// `TakeBlockPath` loop and `resolveOffsetWithinElement`'s own struct-
+/// member walk both previously only recognized a pad at LLVM field 0
+/// (`HasLeadingPad`), silently treating this pad (LLVM field 1) as if it
+/// were `v` itself -- corrupting `ElementIDs[GV]`'s own construction
+/// order and, depending on the exact shape, either an
+/// `ArrayRef::slice`-out-of-bounds assertion crash or a
+/// "component ... out of range" validation error. Fixed by detecting a
+/// pad by shape (`isStageIOPadField`, any `[N x i8]` field) at *every*
+/// physical position, not just field 0.
+TEST(CanonicalizeStageTest,
+    MapsMultiMemberInterfaceBlockWithInteriorPadToDistinctMembers) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @blockD = external addrspace(8) global { float, [12 x i8], <4 x float> }, !spirv.Decorations !4, !feme.spirv.MemberDecorations !11
+    define void @main() #0 {
+      store float 1.0, ptr addrspace(8) @blockD
+      store <4 x float> <float 2.0, float 3.0, float 4.0, float 5.0>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @blockD, i64 16)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 4}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 44}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{i32 35, i32 16}
+    !9 = !{!8}
+    !10 = !{i32 1, !9}
+    !11 = !{!7, !10}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  // Member 0 (`float dummy`) must map to its own real scalar element,
+  // never the interior pad that physically follows it.
+  const SignatureElement &Dummy = Sig->Elements[0];
+  EXPECT_EQ(Dummy.ComponentCount, 1u);
+  EXPECT_EQ(Dummy.XfbOffset, 0u);
+
+  // Member 1 (`vec4 v`) must map to its own real 4-component vector
+  // element at its own real offset, never the pad itself (which
+  // `StageStorage.cpp` would otherwise reject as an unsupported 8-bit
+  // scalar element).
+  const SignatureElement &V = Sig->Elements[1];
+  EXPECT_EQ(V.ComponentCount, 4u);
+  EXPECT_EQ(V.XfbOffset, 16u);
+
+  // No raw store on `@blockD` (bare or via `getelementptr`) survives --
+  // every store is rewritten to one of the two real elements' own
+  // `feme.stage.output.store` (member 0's own scalar store stays whole;
+  // member 1's own `<4 x float>` store decomposes into 4 per-row scalar
+  // stores), and every resolved `ElementID` is 0 or 1 -- never a third,
+  // spurious element for the pad itself.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+
+  SmallVector<uint64_t> ElementIDs;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      StageOpKind Kind;
+      if (!isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+        continue;
+      ElementIDs.push_back(
+          cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue());
+    }
+  ASSERT_EQ(ElementIDs.size(), 5u);
+  for (uint64_t ID : ElementIDs)
+    EXPECT_LE(ID, 1u);
+  EXPECT_EQ(llvm::count(ElementIDs, 0u), 1u);
+  EXPECT_EQ(llvm::count(ElementIDs, 1u), 4u);
+}
+
 /// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
 /// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
 /// instance view a vertex/fragment invocation runs for, readable from
