@@ -8634,6 +8634,75 @@ public:
 /// element, already of the array's own element type, so it lowers the same
 /// way: one `llvm.insertvalue` per element, each constituent inserted
 /// as-is.
+/// (Roadmap L104) Reassembles \p Constituent (a `spirv.CompositeConstruct`
+/// member value, already converted to its own "natural" LLVM type -- a
+/// raw `vector<Nxf32>`, or an `!llvm.array` of raw vectors for a matrix/
+/// array-of-vector constituent) into \p FieldTy, the struct member's own
+/// *real* converted field type, whenever the two disagree because
+/// `layOutStructIfOffsetsMatch`/`convertOffsetStructTypeIgnoringDecorations`
+/// substituted one or more `feme.tight_vector` marker structs somewhere
+/// inside \p FieldTy (see substituteTightVectorMembersIfNeeded's own
+/// comment for why: a raw vector's own alloc size is ambiguous across
+/// `DataLayout`s whenever its lane count isn't a power of two). Returns a
+/// null `mlir::Value` if the two types' own shapes disagree in a way this
+/// cannot reconcile (a real mismatch, not just a marker-wrapping
+/// difference).
+///
+/// Recurses through any enclosing `LLVM::LLVMArrayType` in lockstep on
+/// both \p Constituent's type and \p FieldTy -- needed for a matrix
+/// member (each column's own vector may itself need marker-wrapping) or
+/// an array-of-vector member, both of which convert their *own*
+/// constituent to `!llvm.array<N x vector<...>>` even though \p FieldTy's
+/// corresponding array now wraps each element in its own marker struct
+/// (`substituteTightVectorMembersIfNeeded`'s own array case) -- a single,
+/// one-level "is this whole thing a bare vector" check (as the pre-L104
+/// version of this reassembly only needed, since only a *direct* vector
+/// member could ever need it) is one level too shallow for either shape.
+mlir::Value reassembleTightVectorValue(mlir::Value Constituent,
+                                       mlir::Type FieldTy,
+                                       mlir::ConversionPatternRewriter &Rewriter,
+                                       mlir::Location Loc) {
+  if (Constituent.getType() == FieldTy)
+    return Constituent;
+  if (mlir::Type MarkerInnerTy = getTightVectorMarkerInnerType(FieldTy)) {
+    auto VecTy = mlir::dyn_cast<mlir::VectorType>(Constituent.getType());
+    auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(MarkerInnerTy);
+    if (!VecTy || !ArrTy ||
+        static_cast<uint64_t>(VecTy.getNumElements()) != ArrTy.getNumElements())
+      return {};
+    mlir::Value Array = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
+    for (int64_t Lane = 0, E = VecTy.getNumElements(); Lane != E; ++Lane) {
+      mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(), Lane);
+      mlir::Value Element = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, Constituent, LaneIndex);
+      Array = mlir::LLVM::InsertValueOp::create(
+          Rewriter, Loc, Array, Element, llvm::ArrayRef<int64_t>{Lane});
+    }
+    mlir::Value Wrapped = mlir::LLVM::PoisonOp::create(Rewriter, Loc, FieldTy);
+    return mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Wrapped, Array,
+                                             llvm::ArrayRef<int64_t>{0});
+  }
+  auto FieldArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(FieldTy);
+  auto ConstituentArrTy =
+      mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Constituent.getType());
+  if (!FieldArrTy || !ConstituentArrTy ||
+      FieldArrTy.getNumElements() != ConstituentArrTy.getNumElements())
+    return {};
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, FieldArrTy);
+  for (int64_t I = 0, E = FieldArrTy.getNumElements(); I != E; ++I) {
+    mlir::Value Element = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, Constituent, llvm::ArrayRef<int64_t>{I});
+    mlir::Value Reassembled = reassembleTightVectorValue(
+        Element, FieldArrTy.getElementType(), Rewriter, Loc);
+    if (!Reassembled)
+      return {};
+    Result = mlir::LLVM::InsertValueOp::create(
+        Rewriter, Loc, Result, Reassembled, llvm::ArrayRef<int64_t>{I});
+  }
+  return Result;
+}
+
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
 public:
@@ -8743,41 +8812,18 @@ private:
       mlir::Type FieldTy = FieldTypes[Index];
       mlir::Value Field = Constituent;
       if (Field.getType() != FieldTy) {
-        // Only the "tight-vector retry" substitution described above this
-        // pattern's own comment is expected to disagree here: a real
-        // vector-typed constituent whose member converted to a
-        // same-bit-width tightly-packed array instead -- itself wrapped
-        // in `getTightVectorArrayType`'s own marker struct (roadmap
-        // H101j), so unwrap that first if present. `llvm.bitcast` itself
-        // cannot reinterpret a vector as an array (its own verifier
-        // requires a non-aggregate result), so reassemble lane-by-lane
-        // instead: extract each vector lane and insert it into a poison
-        // array at the same position.
-        mlir::Type MarkerInnerTy = getTightVectorMarkerInnerType(FieldTy);
-        auto VecTy = mlir::dyn_cast<mlir::VectorType>(Constituent.getType());
-        auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(
-            MarkerInnerTy ? MarkerInnerTy : FieldTy);
-        if (!VecTy || !ArrTy ||
-            static_cast<uint64_t>(VecTy.getNumElements()) !=
-                ArrTy.getNumElements())
+        // (Roadmap H101j/L104) A constituent's own "natural" converted
+        // type may disagree with its member's real field type whenever
+        // this struct's own layout substituted a `feme.tight_vector`
+        // marker somewhere inside that member -- for a bare vector
+        // member directly, or (roadmap L104) one level down inside an
+        // array-of-vector or matrix member's own column array. See
+        // reassembleTightVectorValue's own comment for how it walks both
+        // types in lockstep to reconcile any depth of this substitution.
+        Field = reassembleTightVectorValue(Constituent, FieldTy, Rewriter, Loc);
+        if (!Field)
           return Rewriter.notifyMatchFailure(
               Op, "constituent type does not match struct member type");
-        mlir::Value Array = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
-        for (int64_t Lane = 0, E = VecTy.getNumElements(); Lane != E; ++Lane) {
-          mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
-              Rewriter, Loc, Rewriter.getI32Type(), Lane);
-          mlir::Value Element = mlir::LLVM::ExtractElementOp::create(
-              Rewriter, Loc, Constituent, LaneIndex);
-          Array = mlir::LLVM::InsertValueOp::create(
-              Rewriter, Loc, Array, Element, llvm::ArrayRef<int64_t>{Lane});
-        }
-        if (MarkerInnerTy) {
-          mlir::Value Wrapped =
-              mlir::LLVM::PoisonOp::create(Rewriter, Loc, FieldTy);
-          Array = mlir::LLVM::InsertValueOp::create(
-              Rewriter, Loc, Wrapped, Array, llvm::ArrayRef<int64_t>{0});
-        }
-        Field = Array;
       }
       Result = mlir::LLVM::InsertValueOp::create(
           Rewriter, Loc, Result, Field,
