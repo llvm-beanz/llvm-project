@@ -90909,3 +90909,141 @@ Commits this session (5, each scoped):
    `CanonicalizeStage.cpp`), with the actual gap one layer further
    upstream than feme's own codebase. Saved significant time versus
    assuming the bug was in feme's own importer.
+
+# Session: L114 fixed (gl_SamplePosition unmapped), L114(a) opened (sample-accurate interpolation gap)
+
+## Next action
+
+Nothing left to do this session -- all work committed. For the next
+session: **implement L114(a)** (see step 1 below).
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+   Vulkan Device` (standing check, done first as always).
+2. Picked up L114 exactly where the last session left it: 12 failing
+   `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.
+   sample_position.{correctness,distribution}.*` cases, pipeline
+   creation rejected with `"fragment input element 1 has no location to
+   link against a vertex output"`.
+3. Root-caused: SPIR-V `BuiltIn SamplePosition` (`gl_SamplePosition`)
+   was entirely unmapped in `getSystemValueForBuiltIn`
+   (`CanonicalizeStage.cpp`) -- fell through to `None`, so it looked
+   like an ordinary `Location`-less varying and got rejected outright.
+4. Implemented the fix across 6 files (enum, BuiltIn mapping, ABI
+   struct field, wrapper read-back, executor per-sample-shading
+   force + per-pass write) -- see "Files touched" below.
+5. **First build/rerun still failed** with the exact same error. This
+   was the important moment of the session: I had assumed `BuiltIn
+   SamplePosition == 24` from the prior session's own doc-comment list
+   without ever verifying the actual spec value. Cross-checked against
+   `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`'s own
+   `SPIRV_BI_SamplePosition` definition -- the real value is **19**.
+   Fixed the `case` value and the fix started working immediately.
+6. Re-ran both originally-failing cases directly: `distribution.*`
+   **Passes**; `correctness.*` still fails, but now on values
+   (`"Varying values are not sampled at gl_SamplePosition"`), not a
+   pipeline-creation crash -- a real, different, second bug.
+7. Root-caused that too (didn't fix it -- out of scope for L114 itself,
+   see L114(a) below): `Executor.cpp`'s barycentric coordinates are
+   evaluated once at the pixel center, never re-evaluated per sample
+   pass, so a `sample`-qualified varying stays fixed across every
+   sample while `gl_SamplePosition` itself correctly varies.
+8. Full CTS re-sweeps confirmed no regressions:
+   `multisample_shader_builtin.*` (95 cases): 49 Pass/6 Fail/40
+   NotSupported, up from 43/12/40. `pipeline.pipeline_library.
+   graphics_library.*` (836 cases, the group most exposed to the
+   `PerSampleShading`/ABI changes): unchanged at 548/0/287/1.
+
+## Proof it works
+
+- `ninja check-feme` (ccache, assertions build): 3191/3194 passed, 3
+  pre-existing Unsupported, 0 Failed (up 3 tests this session, zero
+  regressions).
+- CTS: `multisample_shader_builtin.*` up from 43 Pass to 49 Pass, 0 new
+  failures, 0 new NotSupported.
+- CTS regression check: `pipeline_library.graphics_library.*` (836
+  cases) unchanged at 548/0/287/1.
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start and again after the CTS sweeps.
+
+## Files touched
+
+- `feme/include/feme/Core/Signature.h` -- new `SamplePosition` enumerator.
+- `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp` -- `case 19` mapping + doc comment.
+- `feme/include/feme/Target/CPU/RuntimeABI.h` -- new `SamplePosition[4][2]` field.
+- `feme/lib/Transforms/CPU/StageArgsLayout.h` -- matching enum + LLVM type entry.
+- `feme/lib/Transforms/CPU/FragmentWrapper.cpp` -- `loadFragmentSystemValue` case.
+- `feme/lib/Graphics/Executor.cpp` -- `PerSampleShading` OR-condition + per-pass write + default.
+- 3 new unit tests (`CanonicalizeStageTest`, `FragmentWrapperTest`, `ExecutorTest`).
+- `feme/docs/Roadmap.md`, `feme/docs/VulkanCTSReport.md`.
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: `~~L114~~` struck through with a done
+  write-up; new `L114(a)` row opened for the sample-accurate-
+  interpolation gap (one level of lowercase-letter nesting, per the
+  standing rule).
+- `feme/docs/VulkanCTSReport.md`: L114's section rewritten from
+  "not yet fixed" to a full root-cause/fix/validation writeup
+  (including the 24-vs-19 correction); new L114(a) section added.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- `gl_SamplePosition` is core Vulkan 1.0 functionality
+  implied by already-advertised `sampleRateShading`, not a new
+  capability.
+
+Commits this session (4, each scoped):
+1. `[feme] Roadmap L114: map SPIR-V BuiltIn SamplePosition (gl_SamplePosition)`
+2. `[feme] Roadmap L114: plumb gl_SamplePosition through the fragment ABI`
+3. `[feme] Roadmap L114: force per-sample shading for gl_SamplePosition inputs`
+4. `[feme] docs: close roadmap L114, open L114(a) for sample-accurate interpolation`
+
+## Suggested next steps
+
+1. **Implement L114(a)** (~2-4 hours -- an interpolation-architecture
+   change, not a field addition). In `Executor.cpp`, recompute
+   `Quad.Bary0`/`Bary1`/`Bary2` per `PassSample` using
+   `(*SamplePositions)[PassSample]`'s own offset instead of the fixed
+   pixel-center `Center`, and move (or duplicate) the varying-
+   interpolation step so it runs per pass when `PerSampleShading` is
+   true, not once before the pass loop. This closes the remaining 6
+   `sample_position.correctness.*` failures.
+2. **Also check the related, still-open sub-case noted but not
+   confirmed**: a `Sample`-qualified varying with no
+   `gl_SamplePosition`/`gl_SampleID` present does not force per-sample
+   shading at all today -- worth a quick CTS grep for a case exercising
+   exactly that shape once L114(a)'s main fix lands, to see if it needs
+   its own follow-up or is already covered by the same fix.
+3. **Re-sweep `multisample_shader_builtin.*` after L114(a) lands** --
+   expect all 55 supported-sample-count cases to Pass (0 Fail), leaving
+   only the 40 NotSupported cases -- still worth a spot-check of a
+   couple of those to confirm they're a genuine capability gap
+   (unsupported sample counts 16/32/64, per this session's own sweep
+   output) rather than another undiscovered bug.
+4. **Continue the L106 sweep** after L114(a) closes: same untriaged
+   candidates noted for several sessions running --
+   `multisample-interpolation.txt` (247 cases, small, also topically
+   related, possibly *also* exposed by the same L114(a) interpolation
+   gap -- worth picking this one next specifically because of that
+   overlap) is the cheapest next pick; `pipeline.monolithic.*`/
+   `subgroups.*`/`compute.*`/`graphicsfuzz.*` are much larger and still
+   untriaged.
+5. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+6. **Technique confirmed this session, worth repeating**: when a fix
+   for a specific numeric constant (an enum value, a builtin ID, a
+   decoration code, ...) comes from a prior session's own doc comment
+   or notes rather than the authoritative spec/tablegen source, and the
+   fix doesn't work on the first try, re-verify that constant directly
+   against the source of truth (here, `mlir/include/mlir/Dialect/SPIRV/
+   IR/SPIRVBase.td`) before re-reading application logic for bugs --
+   the constant itself was wrong, not the logic around it, and this was
+   the fastest possible way to find that out.
+7. **Technique confirmed again**: after any fix that touches a shared,
+   widely-used per-invocation ABI struct (`FemeFragmentInvocation`) or a
+   condition gating a widely-shared code path (`PerSampleShading`), a
+   CTS regression sweep of an unrelated-but-heavily-overlapping group
+   (`pipeline_library.graphics_library.*`, 836 cases) is cheap insurance
+   against silent collateral damage -- confirmed clean this session, but
+   worth doing every time such a shared structure changes.
