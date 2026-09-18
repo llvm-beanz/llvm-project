@@ -90675,3 +90675,109 @@ Commits (5, each scoped):
    faster than building integration test scaffolding from scratch --
    worth doing again whenever a fix only changes one flag/bit's effect on
    an already-tested code path.
+
+# Session: L111(a) fixed (SampleMask misclassified as per-vertex array), L111(b) root-caused
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`
+at session start.
+
+## What shipped
+
+1. Ran `unusual_multisample_state` directly against `deqp-vk` -- it was
+   **not** a runtime image mismatch like the rest of `misc.other.*` (the
+   prior session's assumption). It was a pipeline-creation crash:
+   `feme-graphics-validate-stage: '...' has a non-constant vertex operand,
+   illegal outside the geometry/mesh stages`.
+2. Root cause: `isDynamicIndexedArrayGlobal` (`CanonicalizeStage.cpp`)
+   claimed *any* dynamically-indexed address-space-7/8 array global as a
+   per-vertex/per-primitive array (`gl_in[]`/`gl_MeshVerticesEXT[]`
+   shape), no stage/`BuiltIn` restriction at all. This wrongly grabbed
+   the fragment shader's own `gl_SampleMask[i] = sampleMask &
+   gl_SampleMaskIn[i]` loop, threading the sample index through as a
+   bogus `Vertex` operand instead of `Row`.
+3. First attempt (restrict by `ShaderStage`) broke 5 pre-existing unit
+   tests that deliberately use an unrealistic stage attribute to test
+   shape-recognition in isolation. Reverted.
+4. Actual fix: exclude `BuiltIn == SampleMask` (20) specifically from
+   `isDynamicIndexedArrayGlobal` -- narrow, surgical, zero collateral
+   damage to other tests.
+5. New unit test: `ThreadsDynamicRowIndexIntoSampleMaskOutputStore`.
+6. Re-ran the CTS case: pipeline creation now succeeds. Test still fails
+   at runtime: `Fail (192 wrong samples values out of 256)` -- a
+   different, deeper bug.
+7. Dumped the compiled IR (`FEME_DUMP_IR=1`) for both fragment shaders --
+   confirmed the shader-side `gl_SampleMask` compilation is correct
+   (reads `gl_SampleMaskIn`, ANDs with the mask constant, writes back to
+   `gl_SampleMask` via `feme.stage.output.store` resolving to
+   `SignatureSystemValue::Coverage`).
+8. Grepped `Executor.cpp` for `SignatureSystemValue::Coverage` -- **zero**
+   consumers anywhere. The CPU rasterizer's own per-sample coverage
+   logic (`Quad.SampleMask`/`Quad.Coverage`, `alphaToCoverageEnable`'s
+   `FSAlphaToCoverage` handling nearby) never reads back a fragment
+   shader's own explicit coverage-mask output at all. This is why the
+   test still fails: the shader's masking has zero effect on which
+   samples actually get written.
+9. Split this off as roadmap L111(b) (new gap, not yet fixed) rather than
+   nesting deeper under L111 or declaring the row done -- per the
+   one-lowercase-letter nesting rule.
+
+## Proof it works
+
+- `ninja check-feme`: 3186/3189 passed, 3 pre-existing Unsupported, 0
+  Failed (up 1 from the new test, zero regressions).
+- CTS re-sweep: `pipeline_library.graphics_library.*` (836 cases) is
+  still **547 Pass / 1 Fail / 287 NotSupported / 1 Warning** -- unchanged
+  bucket count from before this fix, since `unusual_multisample_state`
+  is still the sole Fail (now for a different, deeper reason).
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: L111 split into `~~L111(a)~~` (struck through,
+  done write-up) and `L111(b)` (new, scoped, not yet attempted).
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap L111(a) (fixed this
+  session)" and "Roadmap L111(b) (root-caused, not yet fixed)" sections.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- L111(a) is a correctness fix within already-advertised
+  multisample support, not a newly-advertised capability. L111(b) isn't
+  fixed yet, so nothing to advertise either way.
+
+Commits (2, each scoped):
+1. `CanonicalizeStage.cpp` `SampleMask` exclusion fix + new unit test
+2. Roadmap/VulkanCTSReport doc updates
+
+## Suggested next steps
+
+1. **Implement L111(b)** (~2-4 hours -- new feature, not a one-line fix,
+   since `Executor.cpp` has zero existing plumbing for a shader-written
+   coverage mask). Read the fragment shader's own `SignatureSystemValue::
+   Coverage` output once per invocation (same lookup pattern as the
+   existing `FSAlphaToCoverage`), AND it together with the coverage mask
+   already computed from rasterization/depth-stencil/alpha-to-coverage
+   (never OR -- the shader's mask can only narrow coverage, per Vulkan's
+   sample-mask-test semantics), and apply it before the per-sample
+   color/depth write loop (~`Executor.cpp` line 3174-3390).
+2. **Re-run `unusual_multisample_state` after L111(b) lands** -- expect
+   it to flip to Pass, closing `pipeline_library.graphics_library.*`
+   fully clean (548 Pass/0 Fail/287 NotSupported/1 pre-existing benign
+   Warning).
+3. **Then broaden the sweep (roadmap L106)** -- same untriaged candidates
+   noted for several sessions running: a fresh `pipeline.*` subgroup
+   (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a top-level
+   group outside `pipeline.*` (`subgroups.*`, `compute.*`,
+   `graphicsfuzz.*`). ~30-60 minutes to pick the cheapest-looking one.
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+5. **Technique confirmed again this session**: when a prior session's
+   own "confirmed distinct from X" note turns out to still be an
+   assumption rather than a direct repro, re-run the case with `deqp-vk`
+   directly before trusting it -- this session's own case was assumed to
+   be a runtime image mismatch (like every other `misc.other.*` case)
+   but was actually a pipeline-creation crash, a completely different
+   category of bug with a completely different fix location.
+6. **Technique confirmed again**: when a stage-based restriction breaks
+   existing tests, check whether those tests are testing the shape
+   *mechanically* (with a deliberately unrealistic stage attribute) --
+   if so, prefer a narrower fix (e.g. excluding a specific `BuiltIn`)
+   over a broader one, rather than "fixing" the tests to match a
+   stricter restriction that isn't actually needed for correctness.
