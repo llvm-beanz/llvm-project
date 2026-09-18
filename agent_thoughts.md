@@ -91669,3 +91669,104 @@ finding from a prior session.
    aside, go back to L106's other untriaged candidates:
    `pipeline.monolithic.*`, `subgroups.*`, `compute.*` -- still nobody
    has picked these up across many sessions now.
+
+# Session: L120's `Ldexp` closed, L117 (matrix vertex attributes) closed, new L121 finding
+
+## Do this first
+
+Nothing left to do -- this session's work is committed. If picking up
+next, start at "Next steps" below, item 1.
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+   Device` (every-session check, done).
+2. Picked up L120's `Ldexp` sub-item first (well-scoped, op already had
+   a TableGen definition). Found `LLVM_LoadExpOp`'s own exponent operand
+   is always a scalar integer even for a vector `val` (an MLIR TableGen
+   quirk), so `spirv.GL.Ldexp`'s vector form (where `exp` can be a full
+   per-lane vector) couldn't use a simple table-driven conversion.
+3. Wrote a bespoke `GLLdexpPattern` (scalar form forwards directly;
+   vector form loops per-lane via extract/call/insert). Added a new lit
+   test, manually verified the generated IR by hand before writing
+   `CHECK` lines. `ninja check-feme`: 3194/3197 Passed (+1 new test), 0
+   regressions. **Committed separately.**
+4. Measured real CTS impact: 6/7 direct `Ldexp` graphicsfuzz repro cases
+   now Pass. The 7th case flipped to a *new, more specific* error
+   (`unsupported divergent call to 'llvm.ldexp.f32.i32'`) -- not a
+   regression, but a genuinely new gap in `SIMDize.cpp`'s
+   `widenElementwise`: it can't widen a divergent intrinsic call whose
+   operand types don't all match the result type (llvm.ldexp's integer
+   exponent never matches its float result). Recorded as new roadmap
+   row L121, not fixed this session.
+5. Started a full `graphicsfuzz.*` re-sweep (757 cases) in the
+   background while scoping the next item.
+6. Scoped and started L117 (matrix vertex attributes rejected outright
+   in `Executor.cpp`) while the sweep ran. Found `StageStorage`'s
+   `readRaw`/`writeRaw` already support an optional `Row` parameter
+   (built for matrix *varyings*) -- the fix was to wire that same
+   machinery up for vertex *input* fetching, which had never used it.
+7. **Session got compacted mid-edit** -- resumed with an incomplete
+   change (the new per-row loop's `writeRaw` call and closing brace
+   weren't finished). Fixed both, ran `clang-format` on the touched
+   range to fix indentation, rebuilt cleanly.
+8. Added `ExecutorTest.RendersTriangleWithColorFromAMatrixVertexAttribute`
+   (mirrors the existing matrix-varying test, but fetches from two
+   separate per-row vertex-buffer bindings). `ninja check-feme`:
+   3195/3198 Passed (+1 new test), 0 regressions. **Committed
+   separately.**
+9. Confirmed the real repro end to end:
+   `dEQP-VK.glsl.linkage.varying.struct.mat4x2` now **Passes** (was
+   failing at `vkQueueSubmit` on this exact rejection before the fix).
+10. Read back the background sweep's results: 568 Pass / 156 Fail / 8
+    NotSupported / 19 crash / 6 timeout (of 757), up from 559/166/8
+    before this session's `Ldexp` fix -- consistent with the 6 direct
+    repro flips (the extra +3 Pass beyond the expected +6 minus other
+    small moves elsewhere wasn't individually re-diffed case-by-case;
+    no `check-feme` regressions anywhere, so treated as sweep noise, not
+    chased further this session).
+11. Updated `Roadmap.md` (struck L117, struck L120's `Ldexp` portion,
+    added new L121 row) and `VulkanCTSReport.md` (new sections for both
+    L120 and L117). **Committed separately.**
+
+## Wins today
+
+- `spirv.GL.Ldexp` lowers correctly (scalar + vector), 6/7 real CTS
+  cases fixed.
+- Matrix vertex attributes work end to end --
+  `dEQP-VK.glsl.linkage.varying.struct.mat4x2` now fully Passes, closing
+  out the last piece of the C8b/L116(a)/L117 chain that started several
+  sessions ago.
+- Found (but didn't yet fix) a new, precisely-scoped `SIMDize.cpp` gap
+  (L121) rather than leaving it as a vague "still fails" data point.
+
+## Next steps, in order
+
+1. **L118** (~half a day to a day, still the highest-value fix
+   outstanding, still not started by anyone): teach `SIMDize.cpp`'s
+   stale-use recovery (~line 4515-4595) to either prove all lanes'
+   masks/storage agree before broadcasting lane 0, or skip the lane-0
+   shortcut entirely for a `MaskedAllocas`-sourced value.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped, still
+   the single highest-value fix left in the L116 breakdown by error
+   volume, ~59% of the original sweep's `Fail`s): per-leaf decomposition
+   for a struct/array/matrix masked load/store in `MaskIntrinsics.cpp`/
+   `Linearize.cpp`.
+3. **L121** (new this session, scoped): widen `llvm.ldexp`-shaped
+   divergent calls in `SIMDize.cpp`'s `widenElementwise` by also
+   widening a non-homogeneous (independently-overloaded) operand, not
+   just the ones matching the result type -- generalize the existing
+   `is_fpclass` special case rather than adding another one-off. ~Half
+   a day; unblocks the last `Ldexp` repro case.
+4. **L120's `Modf`**: needs a new `SPIRV_GLModfOp` taking an
+   `OpVariable` out-parameter, a shape unlike any existing GL op (the
+   pointer-free `ModfStruct` variant already exists upstream, this one
+   doesn't). Half a day, similar shape to `Determinant`'s own bespoke-op
+   precedent.
+5. **L116(f)'s remaining ~24 un-root-caused hangs/crashes**: still only
+   one-at-a-time reduction; no new technique found this session.
+
+Once L116(a)/L118/L120's `Modf`/L121 close or are judged big enough to
+set aside, go back to L106's other untriaged candidates:
+`pipeline.monolithic.*`, `subgroups.*`, `compute.*` -- still nobody has
+picked these up across many sessions now.
