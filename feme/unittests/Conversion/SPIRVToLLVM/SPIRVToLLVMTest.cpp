@@ -950,5 +950,61 @@ TEST(SPIRVToLLVMTest, NonOffsetStructTightlyPacksVec3MemberSize) {
   EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
 }
 
+// (Roadmap L107) An `Output`-storage `AccessChain` reaching a padded
+// struct member through *two* outer array dimensions (e.g. a
+// tessellation-control shader's own per-control-point-arrayed loose
+// output composite, `out TestStruct testStructArray[][3];`, accessed as
+// `testStructArray[gl_InvocationID][2].variableInStruct` --
+// `dEQP-VK.pipeline.pipeline_library.interface_matching.
+// decoration_mismatch.*member_of_array_of_structures_vert_tesc_out_
+// tese_in_frag`) used to be missed by OffsetStructMemberReorderAccess-
+// ChainPattern entirely: it only ever peeled a *single* outer array
+// level before giving up on finding the struct (`MemberIndexPos` 0 or 1
+// only), so a struct two array dimensions deep fell through to MLIR's
+// generic `AccessChainPattern`, which forwards the declared (pre-remap)
+// member index unchanged -- wrongly selecting whatever physical field an
+// interior alignment pad shifted into that position instead of the real
+// member, corrupting the resulting byte offset
+// (`CanonicalizeStage.cpp`'s own consumer-side pad-check assertion). The
+// fix generalizes the array-peeling loop to any depth, forwarding one
+// array index per level peeled ahead of the (now correctly remapped)
+// member selector.
+TEST(SPIRVToLLVMTest, OutputStorageTwoArrayDimsStructRemapsMemberIndex) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @out_arr : "
+      "!spirv.ptr<!spirv.array<2 x !spirv.array<3 x "
+      "!spirv.struct<(f32, vector<4xf32>)>>>, Output> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @out_arr : "
+      "!spirv.ptr<!spirv.array<2 x !spirv.array<3 x "
+      "!spirv.struct<(f32, vector<4xf32>)>>>, Output> "
+      "%invocation = spirv.Constant 1 : i32 "
+      "%elt = spirv.Constant 2 : i32 "
+      "%member = spirv.Constant 1 : i32 "
+      "%1 = spirv.AccessChain %0[%invocation, %elt, %member] : "
+      "!spirv.ptr<!spirv.array<2 x !spirv.array<3 x "
+      "!spirv.struct<(f32, vector<4xf32>)>>>, Output>, i32, i32, i32 -> "
+      "!spirv.ptr<vector<4xf32>, Output> "
+      "%2 = spirv.Load \"Output\" %1 : vector<4xf32> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"Vertex\" @entry }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The inner struct's own natural-alignment gap (a 16-byte-aligned
+  // `<4 x f32>` following a 4-byte `f32`) must still be materialized as
+  // an explicit pad, same as any single-array-dimension case.
+  EXPECT_NE(Result.find("array<12 x i8>"), std::string::npos) << Result;
+  // Both outer array indices (the per-invocation index, then the inner
+  // constant array index) must precede the member selector unchanged,
+  // and the declared member index (1, the `vector<4xf32>`) must be
+  // remapped to its real physical field index (2, after the synthetic
+  // pad): the resulting GEP's own trailing indices are `[..., %1, %2, 2]`
+  // (a leading zero, then the two array indices, then the remapped
+  // member index), not `[..., %1, %2, 1]` (the unremapped, declared
+  // index the bug used to forward straight through).
+  EXPECT_NE(Result.find("%1, %2, 2] :"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("%1, %2, 1] :"), std::string::npos) << Result;
+}
+
 
 } // namespace
