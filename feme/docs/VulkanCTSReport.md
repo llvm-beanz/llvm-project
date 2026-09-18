@@ -1540,3 +1540,20 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.interface_matching.decoration_mismatch.*" \
   --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
+
+## L106 triage: full `interface_matching.*` group swept (no fix needed)
+
+While closing out L107, the full `dEQP-VK.pipeline.pipeline_library.
+interface_matching.*` group (not just `decoration_mismatch.*`) was swept
+to check L106's own "broaden the sweep" candidate (a): **1589 cases total
+across `decoration_mismatch` (360), `vector_length` (972), and
+`shader_layout_component_matching`+`misc` (257) -- 1445 Pass / 0 Fail /
+144 NotSupported, zero remaining failures or crashes anywhere in the
+group.** The 144 NotSupported cases are all `shader_layout_component_
+matching`'s own `float64` variants (`"Double-precision floats not
+supported"`), a legitimate, expected capability gap (feme does not
+advertise `shaderFloat64`), not a bug. This closes out the entire
+`interface_matching.*` group as a sweep target; L106's own next
+candidate is a fresh `dEQP-VK.pipeline.*` subgroup or a top-level
+`dEQP-VK.*` group outside `pipeline.*` altogether (see Roadmap.md's L106
+entry for specifics).
