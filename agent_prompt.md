@@ -55,24 +55,18 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L122 (~half a day)**: with C8b's guard now provably addressing a bug (this
-   session's fix) that no longer exists, re-disable the guard, re-run the full
-   `graphicsfuzz.*` sweep, and confirm 0 new regressions. If clean, remove the
-   guard from `LocalizePrivateGlobals.cpp` entirely and re-sweep once more to
-   measure the incremental win from broader localization.
-2. **L116(a) (~half a day to a day, still unstarted across many sessions)**:
-   per-leaf decomposition for a struct/array/matrix masked load/store in
-   `MaskIntrinsics.cpp`/`Linearize.cpp` -- still the single highest-value item
-   left in the L116 breakdown by error volume (~59% of the original sweep's
-   `Fail`s).
-3. **L120's `Modf` (~half a day)**: needs a new `SPIRV_GLModfOp` taking an
-   `OpVariable` out-parameter -- a shape unlike any existing GL op (the
-   pointer-free `ModfStruct` sibling already exists upstream).
-4. **L121 (~half a day)**: generalize `SIMDize.cpp`'s `widenElementwise` to
-   widen a non-homogeneous (independently-overloaded) operand for
-   `llvm.ldexp`-shaped divergent calls, not just operands matching the result
-   type -- unblocks the last `Ldexp` repro case.
-5. **L116(f)'s ~24 un-root-caused hangs/crashes** and **L106's untriaged
-   `pipeline.monolithic.*`/`subgroups.*`/`compute.*` candidates** remain
-   untouched across many sessions -- still on the table whenever
-   L116/L117/L118/L120/L121 close or get set aside.
+1. **L116(f)'s ~24 un-root-caused hangs/crashes (no time estimate -- still only
+   one-at-a-time reduction, no new technique found across several sessions
+   now)**: still fully untouched. Consider trying the runtime-instrumentation
+   technique that broke L118 open last session (a `feme.cpu.debug.print.*`-style
+   host callback) if a future session picks one of these up, rather than more
+   manual IR tracing.
+2. **L106's untriaged `pipeline.monolithic.*`/`subgroups.*`/`compute.*`
+   candidates**: still nobody has picked these up across many sessions now. No
+   scoping done yet -- would need a first triage pass (run each family's own
+   `dEQP-VK.*` sweep, bucket failures) before estimating.
+3. Both L116/L117/L118/L120/L121 are now closed; L122 is also closed. The
+   roadmap's "still open, high-value" list is now genuinely down to L116(f) and
+   L106's untriaged items -- worth a fresh full-repository `dEQP-VK.*` sweep
+   (not just `graphicsfuzz.*`) at the start of whichever future session picks
+   this up, to get an up-to-date overall picture before diving into either.
