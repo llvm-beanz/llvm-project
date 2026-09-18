@@ -648,6 +648,22 @@ public:
     return FragmentViewIndexIsDeviceIndex;
   }
 
+  /// (roadmap L113) Sets the static per-sample coverage mask
+  /// (`VkPipelineMultisampleStateCreateInfo::pSampleMask`'s first word --
+  /// this ICD's 32-bit-only coverage representation, matching the
+  /// existing `alphaToCoverageEnable`/`gl_SampleMask`-output limitation,
+  /// means only samples 0-31 are representable here, which is already
+  /// every sample count this ICD supports). Bits at or above
+  /// `getSampleCount()` are ignored -- the spec requires the application
+  /// set them to `1`, but nothing in this ICD depends on that.
+  void setSampleMask(uint32_t Mask) { SampleMask = Mask; }
+  /// (roadmap L113) The mask `setSampleMask` set, or all-1s (no effect)
+  /// if never called -- ANDed into `BaseCoverage` unconditionally,
+  /// exactly like the fragment shader's own `gl_SampleMask` output
+  /// (roadmap L111(b)), since both are coverage-narrowing-only signals
+  /// per Vulkan's "sample mask test" (24.7.1) semantics.
+  uint32_t getSampleMask() const { return SampleMask; }
+
   /// Attaches the three compiled stages a tessellation-enabled pipeline
   /// runs between its vertex stage and rasterization -- a hull shader's
   /// control-point phase and patch-constant phase, and a domain shader --
@@ -799,6 +815,10 @@ private:
   bool AlphaToCoverageEnable;
   bool PreRasterViewIndexIsDeviceIndex;
   bool FragmentViewIndexIsDeviceIndex;
+  /// (roadmap L113) `VkPipelineMultisampleStateCreateInfo::pSampleMask`'s
+  /// first word, defaulting to all-1s (no effect) when the pipeline
+  /// specified no static sample mask -- see `getSampleMask()`.
+  uint32_t SampleMask = ~0u;
 };
 
 } // namespace feme::graphics

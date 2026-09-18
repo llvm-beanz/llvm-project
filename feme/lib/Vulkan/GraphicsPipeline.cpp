@@ -1936,11 +1936,13 @@ Error translateFixedFunctionState(
     // `minSampleShading` itself is never stored.
     Result.SampleShadingEnable = Multisample->sampleShadingEnable != VK_FALSE;
     Result.AlphaToOneEnable = Multisample->alphaToOneEnable != VK_FALSE;
-    if (Multisample->pSampleMask && Samples <= 32 &&
-        (*Multisample->pSampleMask & ((1u << Samples) - 1)) !=
-            ((1u << Samples) - 1))
-      return createStringError(inconvertibleErrorCode(),
-                               "a partial VkSampleMask is not implemented");
+    // (roadmap L113) A static `pSampleMask` narrows per-sample coverage
+    // exactly like the fragment shader's own `gl_SampleMask` output
+    // (roadmap L111(b)) -- see `Executor.cpp`'s shared `BaseCoverage &=`
+    // handling. Only the first word is representable/needed: this ICD's
+    // supported sample counts (1/2/4/8) never exceed 32.
+    if (Multisample->pSampleMask)
+      Result.SampleMask = *Multisample->pSampleMask;
   }
 
   // A pipeline's attachment identity is its formats; the extent is a
@@ -3289,6 +3291,9 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
       State.AlphaToOneEnable, State.AlphaToCoverageEnable,
       State.PreRasterViewIndexIsDeviceIndex,
       State.FragmentViewIndexIsDeviceIndex);
+  // (roadmap L113) A static `VkSampleMask` narrows per-sample coverage
+  // exactly like the fragment shader's own `gl_SampleMask` output.
+  Result.setSampleMask(State.SampleMask);
   // (roadmap H4b) `Artifact->HullStage` is set exactly when this pipeline
   // declared tessellation stages (see `compileAndValidateStages`'s own
   // comment); `PatchConstantStage`/`DomainStage` are always set alongside

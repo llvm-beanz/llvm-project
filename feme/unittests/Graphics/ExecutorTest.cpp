@@ -4391,6 +4391,77 @@ TEST(ExecutorTest, FragmentSampleMaskOutputNarrowsPerSampleCoverage) {
   }
 }
 
+/// (roadmap L113) `VkPipelineMultisampleStateCreateInfo::pSampleMask`
+/// narrows coverage exactly the same way as the fragment shader's own
+/// `gl_SampleMask` output above, but set at pipeline-creation time via
+/// `setSampleMask` rather than by the shader -- an ordinary fragment
+/// shader with no `Coverage`-system-value output of its own must still
+/// have its output narrowed to only the pipeline's own masked-in
+/// samples (`0b0101` here too, samples 0 and 2).
+TEST(ExecutorTest, PipelineSampleMaskNarrowsPerSampleCoverage) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false,
+      /*AlphaToOneEnable=*/false, /*AlphaToCoverageEnable=*/false);
+  Pipeline.setSampleMask(0b0101);
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = Attachs;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t Pixel = 0; Pixel != 16; ++Pixel) {
+    for (uint32_t S = 0; S != Samples; ++S) {
+      const uint8_t *Texel = MSStorage.data() + (Pixel * Samples + S) * 4;
+      if (S == 0 || S == 2) {
+        EXPECT_EQ(Texel[0], 255) << "pixel " << Pixel << " sample " << S;
+        EXPECT_EQ(Texel[3], 255) << "pixel " << Pixel << " sample " << S;
+      } else {
+        EXPECT_EQ(Texel[0], 0)
+            << "pixel " << Pixel << " sample " << S
+            << " (the pipeline's own VkSampleMask should have culled "
+               "this sample)";
+      }
+    }
+  }
+}
+
 TEST(ExecutorTest, AcceptsEightSampleCount) {
   Context Ctx;
   EntrySignature VSSig;

@@ -3311,6 +3311,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   SampleMask |= (1u << S);
                 }
               }
+              // (roadmap L113) A static `VkSampleMask`
+              // (`VkPipelineMultisampleStateCreateInfo::pSampleMask`)
+              // narrows coverage unconditionally, applied here (the
+              // earliest point at which a per-sample coverage mask
+              // exists) rather than only ahead of the depth/stencil test
+              // like `alphaToCoverageEnable`/the shader's own
+              // `gl_SampleMask` output (roadmap L111(b)) below -- unlike
+              // those two, this mask is known at pipeline-creation time,
+              // so it can and should also gate early depth/stencil
+              // testing and whether a lane counts as covered at all.
+              SampleMask &= Pipeline.getSampleMask();
               if (SampleMask) {
                 Quad.Coverage |= (1u << Lane);
                 AnyCovered = true;

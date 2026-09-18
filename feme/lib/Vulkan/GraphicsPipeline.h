@@ -391,6 +391,11 @@ struct GraphicsPipelineState {
   bool SampleShadingEnable = false;
   bool AlphaToOneEnable = false;
   bool AlphaToCoverageEnable = false;
+  /// (roadmap L113) `VkPipelineMultisampleStateCreateInfo::pSampleMask`'s
+  /// first word, defaulting to all-1s (no effect) when the pipeline
+  /// specified none -- see `feme::graphics::GraphicsPipeline::
+  /// getSampleMask`'s own comment for why only the first word matters.
+  uint32_t SampleMask = ~0u;
   std::vector<feme::graphics::AttachmentFormat> Attachments;
   std::vector<VertexInputBinding> VertexBindings;
   std::vector<VertexInputAttribute> VertexAttributes;
