@@ -55,25 +55,25 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Implement L110** (~half a day, well-scoped already in Roadmap.md). Start
-   at `GraphicsPipelineState` in `GraphicsPipeline.cpp`: add
-   `PreRasterViewIndexIsDeviceIndex`/`FragmentViewIndexIsDeviceIndex` bools,
-   set from `CreateInfo.flags` (non-linked path) and from each linked
-   library's own `Pipeline::createFlags()` (linked path). Then thread a
-   per-stage-group override into wherever `ViewIndex` is currently written
-   into the ABI invocation records (`CommandBuffer.cpp`'s per-view loop,
-   `Executor.cpp`).
-2. **Re-sweep `pipeline_library.graphics_library.*` after L110 lands** --
-   expect the 6 `view_index_from_device_index_in_*` cases (12 counting
-   `_link_time_opt` siblings) to flip from Fail to Pass, landing at
-   548/1/287/1 (only `unusual_multisample_state`, L111, still failing).
-3. **Reduce and root-cause L111** (`unusual_multisample_state`) -- confirmed
-   unrelated to gl_ViewIndex/multiview, not yet touched.
-4. **Standing gotcha, still true**: export
+1. **Reduce and root-cause L111** (`unusual_multisample_state`) --
+   ~1-2 hours. Confirmed unrelated to `gl_ViewIndex`/multiview; not yet
+   reduced or triaged. This is the last failure in
+   `pipeline_library.graphics_library.*`; closing it means that whole
+   836-case group goes fully clean (Pass/NotSupported only, plus the
+   pre-existing benign timing warning).
+2. **Then broaden the sweep again (roadmap L106)** -- same untriaged
+   candidates noted for several sessions running: a fresh `pipeline.*`
+   subgroup (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a
+   top-level group outside `pipeline.*` (`subgroups.*`, `compute.*`,
+   `graphicsfuzz.*`). ~30-60 minutes to pick the cheapest-looking one.
+3. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
-5. **Technique confirmed this session**: when a CTS `SelfValidate` test gives
-   you `Fail` with no diagnostic message, decode the QPA's embedded base64
-   PNGs directly (Python + Pillow) -- but check for a `Description` field
-   describing a `p'=p*scale+offset` normalization first, and reverse it,
-   before concluding anything about the decoded colors.
+4. **Technique confirmed again this session**: reusing an existing,
+   near-identical multiview `DrawTest.cpp` test as the starting point for
+   a new flag-gated variant (copy the whole test body, add one line
+   setting `PipeInfo.flags`, change the expected per-layer color) is much
+   faster than building integration test scaffolding from scratch --
+   worth doing again whenever a fix only changes one flag/bit's effect on
+   an already-tested code path.
+
