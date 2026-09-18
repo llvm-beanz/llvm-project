@@ -1098,6 +1098,25 @@ struct FemePatchArgs {
   /// no vertex-stage-forwarded data to occupy), so the control-point phase's
   /// wrapper must read it from here rather than from `Inputs`.
   uint32_t PrimitiveID;
+  /// (Roadmap L109) `gl_ViewIndex`: the current multiview render-pass
+  /// instance view, or 0 for a non-multiview draw, uniform across every
+  /// control point in the batch -- exactly like `PrimitiveID` above, and
+  /// for the identical reason: `feme::graphics::buildStageStorage` never
+  /// allocates a storage slot for it either, so the control-point phase's
+  /// wrapper reads it from here rather than from `Inputs`. Mirrors
+  /// `FemeVertexInvocation::ViewIndex`'s own "same value for every
+  /// invocation of one draw" rule. Taken from this struct's own former
+  /// `Reserved[4]` headroom (now `Reserved[3]`, with one slot's worth of
+  /// space split between this field and the `Reserved32` padding field
+  /// below it) rather than growing the struct, keeping `AbiVersion`
+  /// unchanged.
+  uint32_t ViewIndex;
+  /// ABI headroom kept solely to hold the following pointer fields at
+  /// their natural 8-byte alignment now that `ViewIndex` above makes five
+  /// consecutive `uint32_t` fields -- ordinary C struct layout would insert
+  /// this same padding implicitly, but the hand-written LLVM struct type
+  /// `getPatchArgsType` (StageArgsLayout.h) build must spell it out.
+  uint32_t Reserved32;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.
@@ -1114,8 +1133,10 @@ struct FemePatchArgs {
   const FemeStageLayout *OutputLayout;
   /// Structure-of-arrays output storage for this batch's control points.
   void *Outputs;
-  /// ABI headroom for later patch-batch metadata.
-  void *Reserved[4];
+  /// ABI headroom for later patch-batch metadata. Was `Reserved[4]` before
+  /// roadmap L109 donated one slot's worth of space to `ViewIndex`/
+  /// `Reserved32` above.
+  void *Reserved[3];
 };
 
 /// The single argument a compiled patch-constant entry point takes:
@@ -1171,6 +1192,19 @@ struct FemePatchConstantArgs {
   /// `SignatureElement::CapturedSelfIndex`) reads it from here rather than
   /// from `Inputs`.
   uint32_t PrimitiveID;
+  /// (Roadmap L109) `gl_ViewIndex`, mirroring `FemePatchArgs::ViewIndex`'s
+  /// own comment: a patch-constant function reading `gl_ViewIndex` (a real
+  /// GLSL tessellation-control shader's own barrier-based split can
+  /// duplicate a control-point-phase `gl_ViewIndex` read into both halves,
+  /// per `splitBarrierlessTessellationControlEntry`) reads it from here
+  /// rather than from `Inputs`. Taken from this struct's own former
+  /// `Reserved[2]` headroom (now `Reserved[1]`, with `Reserved32` below
+  /// restoring the following pointer fields' natural alignment), keeping
+  /// this struct's total size unchanged.
+  uint32_t ViewIndex;
+  /// ABI headroom kept solely for the following pointer fields' natural
+  /// 8-byte alignment, mirroring `FemePatchArgs::Reserved32`'s own reason.
+  uint32_t Reserved32;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.
@@ -1194,8 +1228,10 @@ struct FemePatchConstantArgs {
   /// over a control-point count: there is exactly one patch's worth of
   /// storage, addressed by row/component alone.
   void *Outputs;
-  /// ABI headroom for later patch-constant-batch metadata.
-  void *Reserved[2];
+  /// ABI headroom for later patch-constant-batch metadata. Was
+  /// `Reserved[2]` before roadmap L109 donated one slot to `ViewIndex`/
+  /// `Reserved32` above.
+  void *Reserved[1];
 };
 
 /// One domain/evaluation-stage invocation record: the tessellator-generated
@@ -1222,8 +1258,23 @@ struct FemeDomainInvocation {
   /// since both are per-invocation record fields this stage's compiled
   /// wrapper already reads directly, with no stage-storage indirection.
   uint32_t PrimitiveID;
-  /// ABI headroom for later domain-stage invocation metadata.
-  uint32_t Reserved[4];
+  /// (Roadmap L109) `gl_ViewIndex`: the current multiview render-pass
+  /// instance view, or 0 for a non-multiview draw, uniform across every
+  /// domain point in the batch -- unlike `PrimitiveID` above, a real
+  /// DXC/SPIR-V compile never decorates a domain-stage `gl_ViewIndex` read
+  /// `Patch`, so `classifySPIRVElement`'s existing `DomainLocation`/
+  /// `PatchVertices`/`PrimitiveID` special-case needed `ViewIndex` added
+  /// alongside them only for symmetry with the other two invocation-record
+  /// fields, not because it would otherwise be misclassified. Mirrors
+  /// `FemeVertexInvocation::ViewIndex`'s own "same value for every
+  /// invocation of one draw" rule. Taken from this struct's own former
+  /// `Reserved[4]` headroom (now `Reserved[3]`), keeping this struct's
+  /// total size unchanged.
+  uint32_t ViewIndex;
+  /// ABI headroom for later domain-stage invocation metadata. Was
+  /// `Reserved[4]` before roadmap L109 donated one slot to `ViewIndex`
+  /// above.
+  uint32_t Reserved[3];
 };
 
 /// The single argument a compiled domain/evaluation entry point takes:
@@ -1306,8 +1357,17 @@ struct FemeGeometryInvocation {
   /// same `PrimitiveID` but repeat that primitive's own `Inputs` slots
   /// (see `FemeGeometryArgs::PrimitiveCount`'s own comment).
   uint32_t InvocationID;
-  /// ABI headroom for later geometry-invocation metadata.
-  uint32_t Reserved[6];
+  /// (Roadmap H51/L109) `gl_ViewIndex`: the current multiview render-pass
+  /// instance view, or 0 for a non-multiview draw, uniform across every
+  /// invocation of this draw -- mirrors `FemeVertexInvocation::ViewIndex`'s
+  /// own "same value for every invocation of one draw" rule. Taken from
+  /// this struct's own former `Reserved[6]` headroom (now `Reserved[5]`),
+  /// keeping this struct's total size unchanged.
+  uint32_t ViewIndex;
+  /// ABI headroom for later geometry-invocation metadata. Was
+  /// `Reserved[6]` before roadmap L109 donated one slot to `ViewIndex`
+  /// above.
+  uint32_t Reserved[5];
 };
 
 /// The single argument a compiled geometry entry point takes:

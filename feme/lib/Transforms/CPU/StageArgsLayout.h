@@ -121,12 +121,17 @@ enum PatchArgsField : unsigned {
   PatchArgsFieldOutputControlPointCount = 1,
   PatchArgsFieldInputPatchControlPointCount = 2,
   PatchArgsFieldPrimitiveID = 3,
-  PatchArgsFieldResources = 4,
-  PatchArgsFieldInputLayout = 5,
-  PatchArgsFieldInputs = 6,
-  PatchArgsFieldOutputLayout = 7,
-  PatchArgsFieldOutputs = 8,
-  PatchArgsFieldReserved = 9,
+  // (Roadmap L109) `ViewIndex`/`Reserved32` split the space `FemePatchArgs`'s
+  // own former `Reserved[4]` (now `Reserved[3]`) freed up -- see that
+  // struct's own comment.
+  PatchArgsFieldViewIndex = 4,
+  PatchArgsFieldReserved32 = 5,
+  PatchArgsFieldResources = 6,
+  PatchArgsFieldInputLayout = 7,
+  PatchArgsFieldInputs = 8,
+  PatchArgsFieldOutputLayout = 9,
+  PatchArgsFieldOutputs = 10,
+  PatchArgsFieldReserved = 11,
 };
 
 enum PatchConstantArgsField : unsigned {
@@ -134,20 +139,28 @@ enum PatchConstantArgsField : unsigned {
   PatchConstantArgsFieldOutputControlPointCount = 1,
   PatchConstantArgsFieldInputPatchControlPointCount = 2,
   PatchConstantArgsFieldPrimitiveID = 3,
-  PatchConstantArgsFieldResources = 4,
-  PatchConstantArgsFieldInputLayout = 5,
-  PatchConstantArgsFieldInputs = 6,
-  PatchConstantArgsFieldInputPatchLayout = 7,
-  PatchConstantArgsFieldInputPatch = 8,
-  PatchConstantArgsFieldOutputLayout = 9,
-  PatchConstantArgsFieldOutputs = 10,
-  PatchConstantArgsFieldReserved = 11,
+  // (Roadmap L109) Mirrors `PatchArgsField`'s own `ViewIndex`/`Reserved32`
+  // split, donated the same way from this struct's own reserved headroom.
+  PatchConstantArgsFieldViewIndex = 4,
+  PatchConstantArgsFieldReserved32 = 5,
+  PatchConstantArgsFieldResources = 6,
+  PatchConstantArgsFieldInputLayout = 7,
+  PatchConstantArgsFieldInputs = 8,
+  PatchConstantArgsFieldInputPatchLayout = 9,
+  PatchConstantArgsFieldInputPatch = 10,
+  PatchConstantArgsFieldOutputLayout = 11,
+  PatchConstantArgsFieldOutputs = 12,
+  PatchConstantArgsFieldReserved = 13,
 };
 
 enum DomainInvocationField : unsigned {
   DomainInvocationFieldDomainLocation = 0,
   DomainInvocationFieldPrimitiveID = 1,
-  DomainInvocationFieldReserved = 2,
+  // (Roadmap L109) Donated from this struct's own former `Reserved[4]`
+  // (now `Reserved[3]`) -- see `FemeDomainInvocation::ViewIndex`'s own
+  // comment.
+  DomainInvocationFieldViewIndex = 2,
+  DomainInvocationFieldReserved = 3,
 };
 
 enum DomainArgsField : unsigned {
@@ -169,7 +182,11 @@ enum DomainArgsField : unsigned {
 enum GeometryInvocationField : unsigned {
   GeometryInvocationFieldPrimitiveID = 0,
   GeometryInvocationFieldInvocationID = 1,
-  GeometryInvocationFieldReserved = 2,
+  // (Roadmap L109) Donated from this struct's own former `Reserved[6]`
+  // (now `Reserved[5]`) -- see `FemeGeometryInvocation::ViewIndex`'s own
+  // comment.
+  GeometryInvocationFieldViewIndex = 2,
+  GeometryInvocationFieldReserved = 3,
 };
 
 enum GeometryArgsField : unsigned {
@@ -260,9 +277,9 @@ inline llvm::StructType *getFragmentArgsType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(Ctx,
-                               {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy, PtrTy,
-                                PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
+  return llvm::StructType::get(
+      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy, PtrTy,
+            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 3)});
 }
 
 /// Distinct from `getPatchArgsType` (see `FemePatchConstantArgs`'s own
@@ -273,9 +290,9 @@ inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy,
-                                     PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
-                                     llvm::ArrayType::get(PtrTy, 2)});
+  return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
+                                     PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+                                     PtrTy, llvm::ArrayType::get(PtrTy, 1)});
 }
 
 /// Mirrors `FemeDomainInvocation`: the tessellator-generated domain
@@ -284,8 +301,8 @@ inline llvm::StructType *getDomainInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *F32Ty = llvm::Type::getFloatTy(Ctx);
   return llvm::StructType::get(
-      Ctx, {llvm::ArrayType::get(F32Ty, 3), I32Ty,
-           llvm::ArrayType::get(I32Ty, 4)});
+      Ctx, {llvm::ArrayType::get(F32Ty, 3), I32Ty, I32Ty,
+           llvm::ArrayType::get(I32Ty, 3)});
 }
 
 /// Mirrors `FemeDomainArgs`: a vertex-shaped per-invocation batch whose
@@ -305,7 +322,7 @@ inline llvm::StructType *getDomainArgsType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getGeometryInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 6)});
+      Ctx, {I32Ty, I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 5)});
 }
 
 /// Mirrors `FemeGeometryArgs`: a vertex-shaped per-invocation batch whose
