@@ -2723,3 +2723,82 @@ retained. Net movement: +3 Pass / -3 Fail, 0 regressions.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
 needed -- pure bug fix (plus a conservative regression mitigation) in an
 existing CPU-target optimization pass, not a new capability or extension.
+
+## Roadmap L116(c) (Determinant fixed this session): GLSL.std.450 `Determinant`
+
+Continuing the L116 breakdown, this session picked L116(c)'s `Determinant`
+sub-item (17 of the row's 31 `unhandled deserializations` occurrences, by
+far the largest of its six named gaps) -- a genuinely missing MLIR SPIR-V
+op, the same shape as roadmap L115(a)'s own `InterpolateAt*` precedent.
+
+### The fix
+
+Added `SPIRV_GLDeterminantOp` (GLSL.std.450 opcode 33) to `SPIRVGLOps.td`:
+a square-matrix operand, a scalar-of-the-matrix's-own-component-type
+result -- a shape none of the existing generic GL-op patterns
+(`SPIRV_GLUnaryArithmeticOp` et al.) model, so a bespoke op definition
+plus a hand-written `verify()` (matrix-is-square check via
+`MatrixType::getNumRows()`/`getNumColumns()`, result-type-matches-
+component-type check) was needed, mirroring `InterpolateAt*`'s own
+approach.
+
+feme's own `SPIRVToLLVMPatterns.cpp` lowering (`GLDeterminantPattern`)
+computes the determinant via ordinary Laplace (cofactor) expansion along
+the first row, recursing on the matrix's own already-extracted scalar
+elements (`llvm.extractvalue`/`llvm.extractelement` against the matrix's
+`!llvm.array` of column vectors, the same representation the existing
+`MatrixTimesMatrix`/`Transpose`/etc. patterns already use) -- pure
+arithmetic, no runtime callback needed, unlike L115(b)'s own
+`InterpolateAt*` lowering. Correct for any N in principle, though only
+ever exercised at GLSL's own fixed 2x2/3x3/4x4 sizes.
+
+New tests:
+- `mlir/test/Dialect/SPIRV/IR/gl-ops.mlir`: parse/print roundtrip (f32
+  and f16 matrices), a non-square-matrix and a mismatched-result-type
+  verifier failure.
+- `mlir/test/Target/SPIRV/gl-ops.mlir`: SPIR-V binary
+  serialize/deserialize roundtrip.
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-matrix-arithmetic.mlir`:
+  2x2 and 3x3 lowering, IR shape confirmed against a hand-computed
+  cofactor expansion (2x2 collapses to the ordinary `ad - bc` formula).
+
+### Measured impact
+
+Identified the real CTS repro set directly (`grep -li determinant` over
+`external/vulkancts/data/vulkan/amber/graphicsfuzz/*.amber`): exactly 17
+cases, matching the original sweep's own `Determinant` occurrence count.
+All 17 now `Pass` (all were `Fail` before):
+
+`cov-apfloat-determinant`, `cov-apfloat-determinant-for-if`,
+`cov-apfloat-negative-step-func`, `cov-condition-matrix-determinant-
+uniform`, `cov-const-folding-clamp-max`, `cov-const-folding-det-identity`,
+`cov-const-folding-dot-determinant`, `cov-determinant-uninitialized-
+matrix-never-chosen`, `cov-function-loop-check-determinant-zero-return-
+vector`, `cov-inst-combine-add-sub-determinant`, `cov-instr-info-det-mat-
+min`, `cov-irbuilder-matrix-cell-uniform`, `cov-simplify-select-
+fragcoord`, `cov-value-tracking-constant-fold-refraction-dfxd-
+determinant`, `cov-x86-instr-info-determinant-min`, `cov-x86-isel-
+lowering-determinant-exp-acos`, `stable-colorgrid-modulo-float-mat-
+determinant-clamp`.
+
+A full `graphicsfuzz.*` re-sweep (733 non-hanging cases, same 24-case
+exclusion list as prior sessions) confirms exactly those 17 flip and
+nothing else moves:
+
+|               | Before this fix | After |
+|---------------|------------------|-------|
+| Pass          | 532              | 549   |
+| Fail          | 193              | 176   |
+| NotSupported  | 8                | 8     |
+
+`ninja -C build2 check-feme`: 3192/3195 Passed, 3 pre-existing
+Unsupported, 0 Failed -- clean.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a new GL-op *implementation*, not a new Vulkan feature/
+extension surface.
+
+The other five gaps L116(c)'s original text named (`Modf`, the four
+`Pack/Unpack*` ops, and the separate `Ldexp`/`UnpackSnorm*`-family
+legalization-only follow-up) remain open, tracked as new roadmap row
+L119.
