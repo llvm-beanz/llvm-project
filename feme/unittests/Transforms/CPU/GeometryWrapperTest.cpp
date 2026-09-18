@@ -66,6 +66,17 @@ SignatureElement makeInvocationIDInput(uint32_t ElementID) {
   return Elt;
 }
 
+/// (Roadmap H51/L109) `gl_ViewIndex`, mirroring `makePrimitiveIDInput`/
+/// `makeInvocationIDInput` above.
+SignatureElement makeViewIndexInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::ViewIndex;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  return Elt;
+}
+
 TEST(GeometryWrapperTest, LowersInputEmitAndCutAndBuildsWrapper) {
   LLVMContext Ctx;
   // Reads two of the input triangle's three vertices (element 0), scales by
@@ -146,6 +157,51 @@ TEST(GeometryWrapperTest, LowersInvocationIDInputLoad) {
   EntrySignature Sig;
   Sig.Elements = {makeFloatElement(0, SignatureDirection::Input),
                   makeInvocationIDInput(1),
+                  makeFloatElement(2, SignatureDirection::Output)};
+  dxil::setEntrySignature(*M->getFunction("gs_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  GeometryWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_gs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("gs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// (Roadmap H51/L109) Reads this invocation's own `gl_ViewIndex` (element
+/// 1, `SignatureSystemValue::ViewIndex`) the same shape as
+/// `LowersInvocationIDInputLoad` above -- exercises `lowerGeometryViewIndex`.
+TEST(GeometryWrapperTest, LowersViewIndexInputLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @gs_main() #0 {
+      %vidx = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+      %vidxf = uitofp i32 %vidx to float
+      %v0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %r0 = fmul float %v0, %vidxf
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %r0, i32 0)
+      call void @feme.stage.stream.emit(i32 0)
+      call void @feme.stage.stream.cut(i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    declare void @feme.stage.stream.emit(i32)
+    declare void @feme.stage.stream.cut(i32)
+    attributes #0 = { "feme.shader.stage"="geometry" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatElement(0, SignatureDirection::Input),
+                  makeViewIndexInput(1),
                   makeFloatElement(2, SignatureDirection::Output)};
   dxil::setEntrySignature(*M->getFunction("gs_main"), Sig);
 

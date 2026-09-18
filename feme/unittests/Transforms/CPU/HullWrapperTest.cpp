@@ -373,6 +373,54 @@ TEST(HullWrapperTest, LowersPrimitiveIDInput) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+/// (Roadmap H51/L109) `gl_ViewIndex` read from the hull control-point
+/// phase: mirrors `LowersPrimitiveIDInput` immediately above, but for
+/// `HullStageEnv::ViewIndex`/`FemePatchArgs::ViewIndex` instead of
+/// `PrimitiveID` -- another pipeline-supplied, per-draw scalar with no
+/// per-control-point storage of its own.
+TEST(HullWrapperTest, LowersViewIndexInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @hs_main() #0 {
+      %vidx = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %vidxf = uitofp i32 %vidx to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %vidxf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement ViewIndex;
+  ViewIndex.ElementID = 0;
+  ViewIndex.Direction = SignatureDirection::Input;
+  ViewIndex.SystemValue = SignatureSystemValue::ViewIndex;
+  ViewIndex.ComponentType = SignatureComponentType::UInt;
+  ViewIndex.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {ViewIndex, Out};
+  dxil::setEntrySignature(*M->getFunction("hs_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  HullWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_hs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("hs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 /// (Roadmap H29e) A real CTS-shaped hull entry reading its own input
 /// control point's `Position` (`gl_in[gl_InvocationID].gl_Position` /
 /// `SV_Position`, an ordinary per-control-point attribute the previous

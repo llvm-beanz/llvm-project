@@ -114,4 +114,20 @@ TEST(GeometryInputsTest, BuildsDistinctInvocationIDsForRepeatedPrimitives) {
   EXPECT_EQ(Invocations[3].InvocationID, 1u);
 }
 
+/// (Roadmap H51/L109) `gl_ViewIndex` is uniform for every invocation built
+/// from one draw (this draw's own multiview view, not per-primitive or
+/// per-invocation data), so it must be broadcast the same way to every
+/// record regardless of `PrimitiveID`/`InvocationID`.
+TEST(GeometryInputsTest, BroadcastsViewIndexToEveryInvocation) {
+  std::vector<uint32_t> PrimitiveIDs = {3, 3, 7, 7};
+  std::vector<uint32_t> InvocationIDs = {0, 1, 0, 1};
+
+  std::vector<FemeGeometryInvocation> Invocations = buildGeometryInvocations(
+      PrimitiveIDs, InvocationIDs, /*ViewIndex=*/2);
+
+  ASSERT_EQ(Invocations.size(), 4u);
+  for (const FemeGeometryInvocation &Invocation : Invocations)
+    EXPECT_EQ(Invocation.ViewIndex, 2u);
+}
+
 } // namespace

@@ -67,6 +67,8 @@ TEST(DomainInvocationsTest, DefaultsPrimitiveIDToZero) {
   ASSERT_EQ(Invocations.size(), 2u);
   EXPECT_EQ(Invocations[0].PrimitiveID, 0u);
   EXPECT_EQ(Invocations[1].PrimitiveID, 0u);
+  EXPECT_EQ(Invocations[0].ViewIndex, 0u);
+  EXPECT_EQ(Invocations[1].ViewIndex, 0u);
 }
 
 TEST(DomainInvocationsTest, BroadcastsPrimitiveIDToEveryPoint) {
@@ -83,6 +85,24 @@ TEST(DomainInvocationsTest, BroadcastsPrimitiveIDToEveryPoint) {
   ASSERT_EQ(Invocations.size(), 3u);
   for (const FemeDomainInvocation &Invocation : Invocations)
     EXPECT_EQ(Invocation.PrimitiveID, 7u);
+}
+
+/// (Roadmap H51/L109) `gl_ViewIndex` is likewise uniform across an entire
+/// patch (this draw's own view, not something the tessellator generates
+/// per point), so it must be broadcast to every domain point the same way
+/// `PrimitiveID` is above.
+TEST(DomainInvocationsTest, BroadcastsViewIndexToEveryPoint) {
+  TessellatedPatch Patch;
+  Patch.Points = {{0.0f, 0.0f, 0.0f}, {0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}};
+
+  std::vector<FemeDomainInvocation> Invocations =
+      buildDomainInvocations(Patch, /*PrimitiveID=*/7, /*ViewIndex=*/2);
+
+  ASSERT_EQ(Invocations.size(), 3u);
+  for (const FemeDomainInvocation &Invocation : Invocations) {
+    EXPECT_EQ(Invocation.PrimitiveID, 7u);
+    EXPECT_EQ(Invocation.ViewIndex, 2u);
+  }
 }
 
 } // namespace
