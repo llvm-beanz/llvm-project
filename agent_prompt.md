@@ -55,31 +55,31 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L118** (~half a day to a day, real scoping work first, still the
-   highest-value fix outstanding): teach `SIMDize.cpp`'s stale-use
-   recovery (~line 4515-4595) to either prove all lanes' masks/storage
-   agree before broadcasting lane 0, or skip the lane-0 shortcut
-   entirely for a `MaskedAllocas`-sourced value -- this is the real fix
-   the discard/demote guard (roadmap C8b) only worked around.
-2. **L116(a)'s real fix** (~half a day to a day, already scoped): per-
-   leaf decomposition for a struct/array/matrix masked load/store in
-   `MaskIntrinsics.cpp`/`Linearize.cpp` -- still the single highest-value
-   fix left in the L116 breakdown by error volume (~59% of the original
-   sweep's `Fail`s).
-3. **L119** (new this session, not yet started): the remaining
-   GLSL.std.450 gaps from L116(c)'s original text -- `Modf` (needs a new
-   op with an `OpVariable` out-parameter, a genuinely new shape),
-   `PackUnorm4x8`/`PackUnorm2x16`/`UnpackUnorm2x16`/`UnpackUnorm4x8`
-   (much simpler, same shape as existing `Pack/UnpackHalf2x16`/
-   `PackSnorm4x8` siblings -- probably the fastest next win if picked
-   next), plus the separate `Ldexp`/`UnpackSnorm*`-family legalization-
-   only follow-up.
+1. **L118** (~half a day to a day, still the highest-value fix
+   outstanding, still not started by anyone): teach `SIMDize.cpp`'s
+   stale-use recovery (~line 4515-4595) to either prove all lanes'
+   masks/storage agree before broadcasting lane 0, or skip the lane-0
+   shortcut entirely for a `MaskedAllocas`-sourced value.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped, still
+   the single highest-value fix left in the L116 breakdown by error
+   volume, ~59% of the original sweep's `Fail`s): per-leaf decomposition
+   for a struct/array/matrix masked load/store in `MaskIntrinsics.cpp`/
+   `Linearize.cpp`.
+3. **L120** (new this session): `Modf` (6 occurrences -- needs a new
+   `SPIRV_GLModfOp` taking an `OpVariable` out-parameter, a shape unlike
+   any existing GL op; `GLFrexpStructOp`/`ModfStructPattern` already
+   cover the pointer-free struct-returning sibling upstream, but not this
+   pointer-taking one) and `Ldexp` (10 occurrences -- already has a
+   TableGen op definition, opcode 53, but no feme-side lowering pattern
+   at all; likely `f * exp2(e)` via `llvm.exp2`/`llvm.fmul`, or direct
+   float-exponent-bit manipulation).
 4. **L117** (not yet scoped in detail): matrix vertex attributes in
    `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
    matrix column at consecutive locations.
 5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
-   one-at-a-time reduction; no new technique found this session.
-6. Once L116/L117/L118/L119 close or are judged big enough to set aside,
-   go back to L106's other untriaged candidates: `pipeline.monolithic.*`,
-   `subgroups.*`, `compute.*` -- still nobody has picked these up across
-   several sessions now.
+   one-at-a-time reduction; no new technique found this session (see
+   the watchdog note above -- it doesn't help here).
+6. Once L116(a)/L117/L118/L120 close or are judged big enough to set
+   aside, go back to L106's other untriaged candidates:
+   `pipeline.monolithic.*`, `subgroups.*`, `compute.*` -- still nobody
+   has picked these up across many sessions now.
