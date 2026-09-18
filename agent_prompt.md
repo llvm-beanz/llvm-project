@@ -55,37 +55,43 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Implement L111(b)** (~2-4 hours -- new feature, not a one-line fix,
-   since `Executor.cpp` has zero existing plumbing for a shader-written
-   coverage mask). Read the fragment shader's own `SignatureSystemValue::
-   Coverage` output once per invocation (same lookup pattern as the
-   existing `FSAlphaToCoverage`), AND it together with the coverage mask
-   already computed from rasterization/depth-stencil/alpha-to-coverage
-   (never OR -- the shader's mask can only narrow coverage, per Vulkan's
-   sample-mask-test semantics), and apply it before the per-sample
-   color/depth write loop (~`Executor.cpp` line 3174-3390).
-2. **Re-run `unusual_multisample_state` after L111(b) lands** -- expect
-   it to flip to Pass, closing `pipeline_library.graphics_library.*`
-   fully clean (548 Pass/0 Fail/287 NotSupported/1 pre-existing benign
-   Warning).
-3. **Then broaden the sweep (roadmap L106)** -- same untriaged candidates
-   noted for several sessions running: a fresh `pipeline.*` subgroup
-   (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a top-level
-   group outside `pipeline.*` (`subgroups.*`, `compute.*`,
-   `graphicsfuzz.*`). ~30-60 minutes to pick the cheapest-looking one.
+1. **Reduce and root-cause L114** (~1-2 hours). Get a
+   `--deqp-log-shader-sources=enable` dump or SPIR-V disassembly of one
+   reduced `sample_position.correctness.128_128_1.samples_2` case to see
+   exactly which fragment input triggers `"element 1 has no location"`
+   -- almost certainly a `gl_SamplePosition`-adjacent builtin the SPIR-V
+   importer or `StageLink.cpp`'s interface-matching validation doesn't
+   recognize as system-value-linked, wrongly treating it as an ordinary
+   `Location`-based varying with no matching vertex-stage output. This
+   is core Vulkan 1.0 (not extension-gated), so the fix must actually
+   make it work, not just report `NotSupported`.
+2. **Re-sweep `multisample_shader_builtin.*` after L114 lands** --
+   expect all 95 cases to resolve to 55 Pass / 0 Fail / 40 NotSupported
+   (the 40 NotSupported are a separate, not-yet-confirmed-benign bucket
+   -- worth a quick spot-check of a couple to confirm they're a real
+   capability gap, not another undiscovered bug, before assuming so).
+3. **Continue the L106 sweep** after L114 closes: same untriaged
+   candidates noted for several sessions running --
+   `multisample-interpolation.txt` (247 cases, small, also topically
+   related) is the cheapest next pick; `pipeline.monolithic.*`/
+   `subgroups.*`/`compute.*`/`graphicsfuzz.*` are much larger and still
+   untriaged.
 4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
-5. **Technique confirmed again this session**: when a prior session's
-   own "confirmed distinct from X" note turns out to still be an
-   assumption rather than a direct repro, re-run the case with `deqp-vk`
-   directly before trusting it -- this session's own case was assumed to
-   be a runtime image mismatch (like every other `misc.other.*` case)
-   but was actually a pipeline-creation crash, a completely different
-   category of bug with a completely different fix location.
-6. **Technique confirmed again**: when a stage-based restriction breaks
-   existing tests, check whether those tests are testing the shape
-   *mechanically* (with a deliberately unrealistic stage attribute) --
-   if so, prefer a narrower fix (e.g. excluding a specific `BuiltIn`)
-   over a broader one, rather than "fixing" the tests to match a
-   stricter restriction that isn't actually needed for correctness.
+5. **Technique confirmed again this session**: when a CTS pipeline-
+   creation `Fail` gives only a generic `VK_ERROR_INITIALIZATION_FAILED`
+   in the batched sweep log, `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a
+   single-case rerun reliably surfaces the real underlying `error:`
+   string -- used three times this session (L112's `unhandled
+   Decoration`, L113's `partial VkSampleMask`, L114's `no location to
+   link`), and each time the string alone was enough to identify a
+   completely different root cause and fix location, without needing
+   any temporary code instrumentation.
+6. **Technique confirmed**: before assuming a CTS gap needs a *feme*
+   code change, `grep` the relevant MLIR upstream code path first
+   (`mlir/lib/Target/SPIRV/...`) -- L112 turned out to already be fully
+   handled on feme's own side (`SPIRVToLLVMPatterns.cpp`,
+   `CanonicalizeStage.cpp`), with the actual gap one layer further
+   upstream than feme's own codebase. Saved significant time versus
+   assuming the bug was in feme's own importer.
