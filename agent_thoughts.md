@@ -90398,3 +90398,102 @@ tracing was needed at all.
    mid-batch (used both ways successfully this session: batched for
    `vector_length`/`shader_layout_component_matching`, one-at-a-time
    loop for the previously-crashing `decoration_mismatch.*`).
+
+# Session: L108 fixed (dead subpass-input handle poisoned whole-function resource lowering)
+
+**Start check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**Done this session**: `pipeline_library.graphics_library.*` (836 cases,
+L106's own next candidate group) went from 460 Pass/88 Fail/287
+NotSupported/1 Warning to **541 Pass/7 Fail/287 NotSupported/1
+Warning** — all 88 original failures fixed except a distinct,
+not-yet-triaged 7-case cluster. `check-feme`: 3177 Passed, 3 pre-existing
+Unsupported, 0 Failed.
+
+## What was broken
+
+`SPIRVResourceLoweringPass::collectHandles` (`SPIRVResourceLowering.cpp`)
+declined an *entire function* the moment any one `handlefrombinding` call
+failed every `HandleKind` classification. A `subpassInput` variable's own
+handle (`Dim::SubpassData`) is never classified — its `OpImageRead`
+always converts straight to `feme.stage.subpass.load`, never touching the
+handle's own result — so it's always dead. A real fragment shader mixing
+a subpass input with several otherwise-fine resources (separate
+sampler/2 textures/1 storage-texel-buffer/1 SSBO) got the *whole
+function* left unnormalized, surfacing downstream as a misleading
+"unsupported raised operation" error naming an unrelated bystander handle
+(exactly the trap `UnsupportedOps.cpp`'s own L64 comment warns about).
+
+## The fix
+
+Skip (don't reject-the-function-over) any unclassifiable handle whose
+call result is `use_empty()` — 4 lines in `collectHandles`, mirroring
+`checkSupportedRaisedOps`'s own pre-existing tolerance for this exact
+shape. New unit test:
+`SPIRVResourceLoweringTest.LowersOrdinaryHandleWhenAnUnusedSubpassInputHandleSharesTheFunction`.
+
+## Key technique found this session (bigger deal than the fix itself)
+
+`SPIRVResourceLowering.cpp` already has its own diagnostic,
+`FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`, gated by
+`resourceNormalizationLoggingEnabled()` — nobody in this milestone chain
+had used it before. It prints the *exact* rejected call and reason
+directly:
+```
+FEME_CPU_LOG_RESOURCE_NORMALIZATION: handle result type is not one of
+the kinds this pass normalizes:   %20 = call target(...) ...
+```
+This is strictly better than the `checkSupportedRaisedOps`-level
+diagnostic (`FEME_VULKAN_LOG_CREATION_ERRORS=1`), which only names
+whatever handle happens to be first/last standing after the real
+rejection already poisoned the function — a documented red herring.
+**Next time any "unsupported raised operation"/resource-normalization
+failure shows up, reach for `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`
+first**, before falling back to a temporary IR-dump trace
+(`FEME_L105_TRACE`-style) the way past sessions (including the start of
+this one) had to.
+
+I started this session by adding a temporary `FEME_L108_TRACE` IR-dump
+hook in `Pipeline.cpp` (same pattern as L105/L107's own temp traces)
+before finding this pre-existing, more-precise mechanism — reverted that
+edit before committing anything, so the git history has zero trace of the
+false start.
+
+## Commits (4, all small)
+
+1. `SPIRVResourceLowering.cpp` fix (4-line skip + comment)
+2. Regression unit test
+3. `Roadmap.md` (L108 struck through, L106 updated with the sweep
+   outcome) + `VulkanCTSReport.md` (full L108 write-up)
+4. This file
+
+## Not touched, and why
+
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  advertised feature or extension changed — pure internal
+  resource-lowering correctness fix.
+- `offload-test-suite`'s `feme` branch / `check-hlsl-feme-vk`: not
+  exercised this session, no reason to touch it for an internal CPU
+  Vulkan lowering fix.
+
+## Next steps (pick #1 first — it's the cheapest, most concrete lead)
+
+1. **Reduce and root-cause the remaining 7 `misc.other.*` failures**
+   (`unusual_multisample_state`, six `view_index_from_device_index_in_*`
+   variants) — confirmed distinct from L108 (no subpass input involved).
+   ~30-60 minutes to get a standalone repro + first error text via
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`, same technique as this session.
+2. **Then re-close `graphics_library.*`** once #1 lands — expect
+   548/0/287/1 if fully scoped.
+3. **Broaden the sweep again (roadmap L106)** after #1/#2 close — same
+   untriaged candidates as before: a fresh `pipeline.*` subgroup
+   (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a top-level
+   group outside `pipeline.*` (`subgroups.*`, `compute.*`,
+   `graphicsfuzz.*`).
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell — not persisted.
+5. **Technique to keep using**: `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`
+   for any future SPIR-V resource-lowering rejection — found this
+   session, strictly more precise than the `checkSupportedRaisedOps`-level
+   diagnostic, and needs no temporary code changes at all.
