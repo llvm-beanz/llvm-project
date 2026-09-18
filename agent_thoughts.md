@@ -91809,3 +91809,41 @@ Manual IR tracing of this shader is expensive and error-prone (see the false-sta
 - `git stash list` unchanged: 3 pre-existing stashes, none touched.
 - `ninja check-feme`: 3195/3198 Passed, 3 Unsupported, 0 Failed (unchanged baseline).
 - No commits made this session (nothing to commit besides this `agent_thoughts.md` entry — no docs/roadmap changes needed since no behavior changed).
+
+# Session: L118 partial fix landed (EntryMask-derived recovery lane), real regression still unresolved
+
+**Next action:** read step 1 in "Next steps" below, budget ~1-2 hours to instrument runtime execution of the actual failing case before more manual IR tracing.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up where last session left off on L118 (`SIMDize.cpp`'s stale-use recovery blindly trusting a hardcoded lane 0). Rather than more manual IR tracing on the full GraphicsFuzz repro (which burned most of last session's budget with a false lead), built a minimal, hand-written `.ll` unit test driven directly through `feme-opt -passes=feme-cpu-simdize` to test hypotheses quickly.
+3. **Found a real, distinct bug in the same code** while investigating: the H107 recovery's "lane 0 is always a real invocation" justification is a *compute-shader-specific* argument (`EntryWrapperPass`'s `WavesPerGroup` loop bound). It does **not** hold for **fragment shaders**: `FragmentWrapper.cpp`'s per-quad `EntryMask` (`buildQuadMaskValue`) is built from each invocation's own live/helper-invocation bit, and a "helper" invocation (kept alive only for a covered quad-mate's derivatives) can land at quad-lane 0.
+4. **Implemented the fix**: `FunctionWidener::getFirstActiveLaneIndex()` derives the recovery's extraction lane from `EntryMask` itself (lowest set bit via `cttz`, memoized per function) instead of hardcoding lane 0. Zero behavior change for compute/task/mesh (EntryMask lane 0 is always set there); fixes the fragment/quad-tiled case in general.
+5. Added a unit test (`SIMDizeTest.RecoversUniformValueFromEntryMaskDerivedLaneNotHardcodedLaneZero`) asserting the recovery's extraction index is a genuine `cttz`-derived computation, not a bare constant. All 50 pre-existing `SIMDizeTest` cases plus the new one pass; `ninja check-feme` clean (3196/3199, +1 test, 0 regressions).
+6. **Measured against the actual named regression** (`cov-function-loop-condition-constant-array-always-false`, temporarily re-enabling C8b's excluded localization path): **still Fails**. That specific shader doesn't use derivative instructions, so its `EntryMask` isn't quad/helper-shaped at all -- this fix's mechanism doesn't reach it. Reverted the diagnostic re-enable; C8b's guard stays in place, unchanged.
+7. Ran a `graphicsfuzz.*` sweep (733/757, excluding the same 24 known hangs) with the fix landed but C8b's guard unchanged: 568 Pass / 157 Fail / 8 NotSupported -- identical Pass count to L120's last-recorded baseline (568/156/8 of 732; the 1-Fail discrepancy is a hang-exclusion-list count mismatch between sessions, not a regression). **Confirmed 0 regressions, 0 new passes** from this fix alone.
+8. Updated `Roadmap.md`'s L118 row (now "in progress (partial fix landed, real regression unresolved)", not struck through -- the row's own named regression is still open) and added a new `VulkanCTSReport.md` section with the full narrative and measured numbers.
+9. Committed in 3 small commits: (1) code fix + test, (2) docs, (3) this `agent_thoughts.md` entry.
+
+## Why this is a real, independently-valuable contribution even though it doesn't close L118
+
+The fragment/quad-tiled-shader lane-0-can-be-a-helper-invocation bug is genuinely distinct from C8b's own repro and was previously undocumented. It's a latent correctness bug that would eventually bite some other fragment shader using derivatives + discard/demote + a masked-alloca-sourced uniform value with a leftover scalar use -- fixing it now, cheaply, with no regressions, was worth doing regardless of whether it closed this specific roadmap row.
+
+## What's still unresolved
+
+The actual root cause of `cov-function-loop-condition-constant-array-always-false`'s regression remains unknown. Two prior investigation passes (this session's predecessor, and a manual re-derivation this session before pivoting to the fragment/quad-tiled hypothesis) both failed to nail it down by hand-tracing the widened IR -- one produced a false lead (a `data0`/`data1` init-value mix-up), the corrected trace showed the flagged site was actually fine, and this session's new fragment/quad-tiled hypothesis, while a real bug, turned out not to be *this* shader's bug either (no derivatives used here).
+
+## Next steps
+
+1. **(~1-2 hours)** Stop hand-tracing IR for this specific case. Add real runtime instrumentation instead: a temporary host-callback intrinsic (check `feme/lib/Target/CPU/` for how existing `feme.cpu.resource.load.raw.*`-style calls are lowered to real function calls at codegen, and add a `feme.cpu.debug.print.i32`-shaped one following that exact pattern) that prints a value + lane index at runtime, inserted right before the specific `.uniform`-suffixed `extractelement` this row's original investigation flagged (block 52 of the `FEME_DUMP_IR=1` dump, or wherever it lands now) for the *actual* failing shader. This replaces guesswork with ground truth in one iteration instead of more manual algebra.
+2. **(~30 min, if #1 doesn't immediately reveal it)** Since the fragment shader here has no derivatives, its `EntryMask` should be a simple "in-bounds pixel" mask, closer to the compute-style guarantee than the quad/helper-invocation case -- meaning lane 0 SHOULD behave safely per this session's own fix's own reasoning. If runtime instrumentation confirms lane 0's `EntryMask` bit really is always 1 for this shader, the bug is NOT in the recovery's lane choice at all, and is more likely in `widenMaskedAllocaStore`'s "run unconditionally, once per lane" model itself corrupting some *other* lane's (not lane 0's) storage in a way that later surfaces through a different, not-yet-identified path (e.g., a per-lane store into a `MaskedAllocas` array skipping a write for a discard-narrowed lane, then a later per-lane, unconditional -- not masked -- read of that exact lane's own now-stale slot, entirely independent of the stale-use recovery this session and last session both focused on). Re-scope the investigation to `widenMaskedAllocaStore`/`Load`'s own per-lane write/read pairing if so.
+3. **(if L118 keeps proving hard, per standing next-steps precedent)**: set it aside again in favor of L116(a)'s real per-leaf masked load/store decomposition (still ~59% of the original L116 sweep's `Fail`s by volume, unchanged from prior sessions -- the single highest-value item still on the table), L120's `Modf`, or L121's `SIMDize.cpp` divergent-call widening generalization (needed for the last `Ldexp` repro case).
+4. L116(f)'s ~24 un-root-caused hangs/crashes and L106's `pipeline.monolithic.*`/`subgroups.*`/`compute.*` untriaged candidates remain untouched across many sessions now.
+
+## State for next session
+
+- Working tree clean, matches the last commit (`4ee0f1ce936d` at session end, plus this entry's own commit).
+- `git stash list` unchanged: 3 pre-existing stashes, none touched.
+- `ninja check-feme`: 3196/3199 Passed, 3 Unsupported, 0 Failed.
+- No scratch files left in `/tmp` from this session (cleaned up; `/tmp/gf_skipped.txt` from a prior session was read but not modified, still there for reuse).
