@@ -55,50 +55,31 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Implement L114(a)** (~2-4 hours -- an interpolation-architecture
-   change, not a field addition). In `Executor.cpp`, recompute
-   `Quad.Bary0`/`Bary1`/`Bary2` per `PassSample` using
-   `(*SamplePositions)[PassSample]`'s own offset instead of the fixed
-   pixel-center `Center`, and move (or duplicate) the varying-
-   interpolation step so it runs per pass when `PerSampleShading` is
-   true, not once before the pass loop. This closes the remaining 6
-   `sample_position.correctness.*` failures.
-2. **Also check the related, still-open sub-case noted but not
-   confirmed**: a `Sample`-qualified varying with no
-   `gl_SamplePosition`/`gl_SampleID` present does not force per-sample
-   shading at all today -- worth a quick CTS grep for a case exercising
-   exactly that shape once L114(a)'s main fix lands, to see if it needs
-   its own follow-up or is already covered by the same fix.
-3. **Re-sweep `multisample_shader_builtin.*` after L114(a) lands** --
-   expect all 55 supported-sample-count cases to Pass (0 Fail), leaving
-   only the 40 NotSupported cases -- still worth a spot-check of a
-   couple of those to confirm they're a genuine capability gap
-   (unsupported sample counts 16/32/64, per this session's own sweep
-   output) rather than another undiscovered bug.
-4. **Continue the L106 sweep** after L114(a) closes: same untriaged
-   candidates noted for several sessions running --
-   `multisample-interpolation.txt` (247 cases, small, also topically
-   related, possibly *also* exposed by the same L114(a) interpolation
-   gap -- worth picking this one next specifically because of that
-   overlap) is the cheapest next pick; `pipeline.monolithic.*`/
-   `subgroups.*`/`compute.*`/`graphicsfuzz.*` are much larger and still
-   untriaged.
-5. **Standing gotcha, still true**: export
+1. **Root-cause L115** (~1-2 hours to scope, unknown to fix -- a new
+   SPIR-V extended-instruction import, likely a nontrivial chunk of
+   work once scoped). Per the L112 precedent, check upstream MLIR's
+   own GLSL.std.450 import path first (`mlir/lib/Target/SPIRV/...`,
+   look for how `InterpolateAtCentroid`/`interpolateAtSample`/
+   `interpolateAtOffset` extended instructions are (or aren't) handled)
+   before assuming the gap is in feme's own `SPIRVToLLVMPatterns.cpp`.
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a single reduced case rerun
+   (the L112/L113/L114 technique, confirmed useful again three
+   sessions running) should surface exactly which of the 3 opcodes is
+   hit first and where.
+2. **Re-sweep `multisample_interpolation.*` after L115 lands** --
+   expect most of the 115 failures to flip to Pass; worth also
+   re-checking the 12 that already passed and the 120 NotSupported to
+   make sure L115's fix doesn't touch their classification.
+3. **Continue the L106 sweep after L115 closes**: `pipeline.monolithic.*`/
+   `subgroups.*`/`compute.*`/`graphicsfuzz.*` remain the large,
+   untriaged candidates noted for several sessions running -- still no
+   session has picked one of these up yet, worth prioritizing one of
+   them next specifically to break the multi-session `pipeline.*`-only
+   pattern.
+4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
-6. **Technique confirmed this session, worth repeating**: when a fix
-   for a specific numeric constant (an enum value, a builtin ID, a
-   decoration code, ...) comes from a prior session's own doc comment
-   or notes rather than the authoritative spec/tablegen source, and the
-   fix doesn't work on the first try, re-verify that constant directly
-   against the source of truth (here, `mlir/include/mlir/Dialect/SPIRV/
-   IR/SPIRVBase.td`) before re-reading application logic for bugs --
-   the constant itself was wrong, not the logic around it, and this was
-   the fastest possible way to find that out.
-7. **Technique confirmed again**: after any fix that touches a shared,
-   widely-used per-invocation ABI struct (`FemeFragmentInvocation`) or a
-   condition gating a widely-shared code path (`PerSampleShading`), a
-   CTS regression sweep of an unrelated-but-heavily-overlapping group
-   (`pipeline_library.graphics_library.*`, 836 cases) is cheap insurance
-   against silent collateral damage -- confirmed clean this session, but
-   worth doing every time such a shared structure changes.
+5. **Technique confirmed again this session**: `deqp-vk`'s
+   `--deqp-caselistfile` flag does not exist (despite looking like the
+   obvious name) -- use `-n "case1,case2,..."` (comma-joined, supports
+   wildcards) instead; saved a round-trip of guessing flag names.
