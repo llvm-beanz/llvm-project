@@ -2085,4 +2085,188 @@ def SPIRV_GLUnpackSnorm4x8Op : SPIRV_GLOp<"UnpackSnorm4x8", 63, [Pure]> {
   let hasVerifier = 0;
 }
 
+// -----
+
+def SPIRV_GLPackUnorm4x8Op : SPIRV_GLOp<"PackUnorm4x8", 55, [Pure]> {
+  let summary = "Pack four-component vector of normalized 32-bit floats into a 32-bit integer";
+
+  let description = [{
+    First, converts each component of the normalized floating-point value v into
+    8-bit integer values. These are then packed into the result.
+
+    The conversion for component c of v to fixed point is done as follows:
+
+    ```
+    round(clamp(c, 0, +1) * 255.0)
+    ```
+
+    The RelaxedPrecision Decoration only affects the conversion step of the instruction.
+
+    The first component of the vector is written to the least significant bits of the
+    output; the last component is written to the most significant bits.
+
+    The v operand must be a vector of 4 components whose type is a 32-bit floating-point.
+
+    Result Type must be a 32-bit integer type.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.GL.PackUnorm4x8 %1 : vector<4xf32> -> i32
+    ```
+  }];
+
+  let arguments = (ins
+    VectorOfLengthAndType<[4], [SPIRV_Float32]>:$operand
+  );
+
+  let results = (outs
+    SPIRV_Int32:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $operand `:` type($operand) `->` type($result)
+  }];
+
+  let hasVerifier = 0;
+}
+
+// -----
+
+def SPIRV_GLUnpackUnorm4x8Op : SPIRV_GLOp<"UnpackUnorm4x8", 64, [Pure]> {
+  let summary = "Unpack 32-bit integer into four-component vector of normalized 32-bit floats";
+
+  let description = [{
+    First, unpacks a single 32-bit unsigned integer p into four 8-bit unsigned integers.
+    Then, each component is converted to a normalized floating-point value to generate
+    the result. The conversion for unpacked fixed-point value f to floating point is
+    done as follows:
+
+    ```
+    f / 255.0
+    ```
+
+    The first component of the result is extracted from the least significant bits of the
+    input; the last component is extracted from the most significant bits.
+
+    The RelaxedPrecision Decoration only affects the conversion step of the instruction.
+
+    The p operand must be a scalar with 32-bit integer type.
+
+    Result Type must be a vector of 4 components whose type is 32-bit floating point.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.GL.UnpackUnorm4x8 %1 : i32 -> vector<4xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_Int32:$operand
+  );
+
+  let results = (outs
+    VectorOfLengthAndType<[4], [SPIRV_Float32]>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $operand `:` type($operand) `->` type($result)
+  }];
+
+  let hasVerifier = 0;
+}
+
+// -----
+
+def SPIRV_GLPackUnorm2x16Op : SPIRV_GLOp<"PackUnorm2x16", 57, [Pure]> {
+  let summary = "Pack two-component vector of normalized 32-bit floats into a 32-bit integer";
+
+  let description = [{
+    First, converts each component of the normalized floating-point value v into
+    16-bit integer values. These are then packed into the result.
+
+    The conversion for component c of v to fixed point is done as follows:
+
+    ```
+    round(clamp(c, 0, +1) * 65535.0)
+    ```
+
+    The RelaxedPrecision Decoration only affects the conversion step of the instruction.
+
+    The first component of the vector is written to the least significant bits of the
+    output; the last component is written to the most significant bits.
+
+    The v operand must be a vector of 2 components whose type is a 32-bit floating-point.
+
+    Result Type must be a 32-bit integer type.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.GL.PackUnorm2x16 %1 : vector<2xf32> -> i32
+    ```
+  }];
+
+  let arguments = (ins
+    VectorOfLengthAndType<[2], [SPIRV_Float32]>:$operand
+  );
+
+  let results = (outs
+    SPIRV_Int32:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $operand `:` type($operand) `->` type($result)
+  }];
+
+  let hasVerifier = 0;
+}
+
+// -----
+
+def SPIRV_GLUnpackUnorm2x16Op : SPIRV_GLOp<"UnpackUnorm2x16", 61, [Pure]> {
+  let summary = "Unpack 32-bit integer into two-component vector of normalized 32-bit floats";
+
+  let description = [{
+    First, unpacks a single 32-bit unsigned integer p into two 16-bit unsigned integers.
+    Then, each component is converted to a normalized floating-point value to generate
+    the result. The conversion for unpacked fixed-point value f to floating point is
+    done as follows:
+
+    ```
+    f / 65535.0
+    ```
+
+    The first component of the result is extracted from the least significant bits of the
+    input; the last component is extracted from the most significant bits.
+
+    The RelaxedPrecision Decoration only affects the conversion step of the instruction.
+
+    The p operand must be a scalar with 32-bit integer type.
+
+    Result Type must be a vector of 2 components whose type is 32-bit floating point.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.GL.UnpackUnorm2x16 %1 : i32 -> vector<2xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_Int32:$operand
+  );
+
+  let results = (outs
+    VectorOfLengthAndType<[2], [SPIRV_Float32]>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $operand `:` type($operand) `->` type($result)
+  }];
+
+  let hasVerifier = 0;
+}
+
 #endif // MLIR_DIALECT_SPIRV_IR_GL_OPS

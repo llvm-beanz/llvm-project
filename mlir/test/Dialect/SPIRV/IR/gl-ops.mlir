@@ -1298,6 +1298,86 @@ func.func @unpack_snorm_4x8_scalar_out(%arg0 : i32) -> () {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.PackUnorm4x8
+//===----------------------------------------------------------------------===//
+
+func.func @pack_unorm_4x8(%arg0 : vector<4xf32>) -> () {
+  // CHECK: spirv.GL.PackUnorm4x8 {{%.*}} : vector<4xf32> -> i32
+  %0 = spirv.GL.PackUnorm4x8 %arg0 : vector<4xf32> -> i32
+  return
+}
+
+// -----
+
+func.func @pack_unorm_4x8_wrong_vec_size(%arg0 : vector<3xf32>) -> () {
+  // expected-error @+1 {{op operand #0 must be vector of Float32 values of length 4, but got 'vector<3xf32>'}}
+  %0 = spirv.GL.PackUnorm4x8 %arg0 : vector<3xf32> -> i32
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.UnpackUnorm4x8
+//===----------------------------------------------------------------------===//
+
+func.func @unpack_unorm_4x8(%arg0 : i32) -> () {
+  // CHECK: spirv.GL.UnpackUnorm4x8 {{%.*}} : i32 -> vector<4xf32>
+  %0 = spirv.GL.UnpackUnorm4x8 %arg0 : i32 -> vector<4xf32>
+  return
+}
+
+// -----
+
+func.func @unpack_unorm_4x8_wrong_vec_size(%arg0 : i32) -> () {
+  // expected-error @+1 {{op result #0 must be vector of Float32 values of length 4, but got 'vector<3xf32>'}}
+  %0 = spirv.GL.UnpackUnorm4x8 %arg0 : i32 -> vector<3xf32>
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.PackUnorm2x16
+//===----------------------------------------------------------------------===//
+
+func.func @pack_unorm_2x16(%arg0 : vector<2xf32>) -> () {
+  // CHECK: spirv.GL.PackUnorm2x16 {{%.*}} : vector<2xf32> -> i32
+  %0 = spirv.GL.PackUnorm2x16 %arg0 : vector<2xf32> -> i32
+  return
+}
+
+// -----
+
+func.func @pack_unorm_2x16_wrong_vec_size(%arg0 : vector<3xf32>) -> () {
+  // expected-error @+1 {{op operand #0 must be vector of Float32 values of length 2, but got 'vector<3xf32>'}}
+  %0 = spirv.GL.PackUnorm2x16 %arg0 : vector<3xf32> -> i32
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.UnpackUnorm2x16
+//===----------------------------------------------------------------------===//
+
+func.func @unpack_unorm_2x16(%arg0 : i32) -> () {
+  // CHECK: spirv.GL.UnpackUnorm2x16 {{%.*}} : i32 -> vector<2xf32>
+  %0 = spirv.GL.UnpackUnorm2x16 %arg0 : i32 -> vector<2xf32>
+  return
+}
+
+// -----
+
+func.func @unpack_unorm_2x16_wrong_vec_size(%arg0 : i32) -> () {
+  // expected-error @+1 {{op result #0 must be vector of Float32 values of length 2, but got 'vector<3xf32>'}}
+  %0 = spirv.GL.UnpackUnorm2x16 %arg0 : i32 -> vector<3xf32>
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.Length
 //===----------------------------------------------------------------------===//
 

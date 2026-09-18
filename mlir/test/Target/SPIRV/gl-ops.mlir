@@ -204,6 +204,22 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, 
     spirv.Return
   }
 
+  spirv.func @pack_unorm_4x8(%arg0 : i32) "None" {
+    // CHECK: {{%.*}} = spirv.GL.UnpackUnorm4x8 {{%.*}} : i32 -> vector<4xf32>
+    %0 = spirv.GL.UnpackUnorm4x8 %arg0 : i32 -> vector<4xf32>
+    // CHECK: {{%.*}} = spirv.GL.PackUnorm4x8 {{%.*}} : vector<4xf32> -> i32
+    %1 = spirv.GL.PackUnorm4x8 %0 : vector<4xf32> -> i32
+    spirv.Return
+  }
+
+  spirv.func @pack_unorm_2x16(%arg0 : i32) "None" {
+    // CHECK: {{%.*}} = spirv.GL.UnpackUnorm2x16 {{%.*}} : i32 -> vector<2xf32>
+    %0 = spirv.GL.UnpackUnorm2x16 %arg0 : i32 -> vector<2xf32>
+    // CHECK: {{%.*}} = spirv.GL.PackUnorm2x16 {{%.*}} : vector<2xf32> -> i32
+    %1 = spirv.GL.PackUnorm2x16 %0 : vector<2xf32> -> i32
+    spirv.Return
+  }
+
   spirv.func @step(%arg0 : f32, %arg1 : f32) "None" {
     // CHECK: spirv.GL.Step {{%[^,]*}}, {{%[^,]*}} : f32
     %0 = spirv.GL.Step %arg0, %arg1 : f32
