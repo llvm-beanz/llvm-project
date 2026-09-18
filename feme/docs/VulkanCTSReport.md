@@ -2802,3 +2802,117 @@ The other five gaps L116(c)'s original text named (`Modf`, the four
 `Pack/Unpack*` ops, and the separate `Ldexp`/`UnpackSnorm*`-family
 legalization-only follow-up) remain open, tracked as new roadmap row
 L119.
+
+## Roadmap L119 (Pack/Unpack Snorm/Unorm family fixed this session): GLSL.std.450 `PackSnorm4x8`/`PackUnorm4x8`/`PackUnorm2x16`/`UnpackSnorm4x8`/`UnpackUnorm2x16`/`UnpackUnorm4x8`
+
+Picked up L119 (opened last session for the five remaining gaps in
+L116(c)'s original `Determinant`/`Modf`/`Pack*`/`Unpack*`/`Ldexp` sweep).
+Split into two distinct kinds of gap, only one of which this session
+closes:
+
+1. `PackUnorm4x8`/`PackUnorm2x16`/`UnpackUnorm2x16`/`UnpackUnorm4x8` had
+   **no TableGen op definition at all** in `SPIRVGLOps.td` -- added all
+   four (opcodes 55/57/61/64 per `GLSL.std.450.h`), mirroring the existing
+   `PackSnorm4x8`/`UnpackSnorm4x8` op shape exactly (same non-verified
+   `SPIRV_GLOp<Name, opcode, [Pure]>` shape, vector-float <-> i32
+   operand/result) with each op's own `Unorm` conversion formula
+   (`round(clamp(c, 0, 1) * 255)` for the `4x8` pair, `* 65535` for the
+   `2x16` pair) in place of `Snorm`'s `[-1, 1]`/`127`/`32767`.
+2. `PackSnorm4x8`/`UnpackSnorm4x8` already had a TableGen op definition
+   but **no feme-side `SPIRVToLLVMPatterns.cpp` lowering pattern at all**
+   -- confirmed via exhaustive grep (also confirmed upstream MLIR's own
+   `DirectConversionPattern` table in `SPIRVToLLVM.cpp` never covers any
+   of these six ops, since none has a matching single LLVM intrinsic; they
+   need the same kind of bespoke bit-manipulation pattern
+   `GLPackHalf2x16Pattern`/`GLUnpackHalf2x16Pattern` already established
+   for the analogous `Half2x16` pair).
+
+**Correction to last session's own L119 text**: it claimed
+`spirv.GL.UnpackSnorm2x16`/`PackSnorm2x16` "already deserialize (the op
+exists)" but fail feme's legalization step. Exhaustive grep across all of
+`mlir/` this session found **no trace of `PackSnorm2x16`/`UnpackSnorm2x16`
+anywhere** -- neither op exists in MLIR at all. This was very likely a
+naming mix-up with `PackSnorm4x8`/`UnpackSnorm4x8` (which do exist and are
+exactly the ones with the missing-lowering gap described above). Recorded
+here, and in `Roadmap.md`'s L119 row, so the error isn't repeated again.
+
+Added two new templated pattern classes to `SPIRVToLLVMPatterns.cpp`,
+`GLPackNormPattern<OpTy, NumComponents, BitsPerComponent, IsSigned>` and
+its inverse `GLUnpackNormPattern`, covering all six affected ops via one
+shared implementation each (`packNormalizedComponents`/
+`unpackNormalizedComponents`) of the GLSL.std.450 spec's own per-lane
+formula:
+
+- Pack: `round(clamp(c, signed ? -1 : 0, 1) * scale)` per lane (`scale =
+  2^(B-1) - 1` signed, `2^B - 1` unsigned), each lane's `B`-bit result
+  packed into a single `i32` (component 0 in the low bits) via
+  `llvm.fptosi` + mask + shift + `llvm.or`. Clamping uses `llvm.maxnum`/
+  `llvm.minnum` (the same NaN-propagating-but-IEEE-754-otherwise choice
+  `ClampPattern` already makes for `spirv.GL.*Clamp`); rounding uses
+  `llvm.round` (ties away from zero, matching the spec's own `round()`).
+  `llvm.fptosi` (not `fptoui`) is used uniformly for both encodings,
+  since masking a two's-complement negative value to its low `B` bits
+  after sign-extension already yields the correct unsigned bit pattern --
+  no separate signed/unsigned integer-conversion path is needed.
+- Unpack: the reverse per lane, extracting each `B`-bit field via the same
+  shift-left-then-`(a|l)shr` idiom `BitFieldSExtractPattern`/
+  `BitFieldUExtractPattern` already use to correctly sign- or zero-extend
+  an arbitrary-width bitfield, converting to float (`sitofp`/`uitofp`),
+  and dividing by the same `scale`. The signed encoding's result gets an
+  extra `[-1, 1]` clamp (its own most-negative fixed-point value would
+  otherwise divide to something slightly past `-1`); the unsigned
+  encoding's `[0, 1]` result never needs one, since its fixed-point range
+  is exactly `[0, scale]`.
+
+New tests:
+- `mlir/test/Dialect/SPIRV/IR/gl-ops.mlir`: parse/print roundtrip plus a
+  wrong-vector-length verifier-failure case for each of the four new ops.
+- `mlir/test/Target/SPIRV/gl-ops.mlir`: SPIR-V binary
+  serialize/deserialize roundtrip for the four new ops.
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-gl-pack-unpack-norm.mlir`:
+  all six lowering-pattern instantiations, IR shape confirmed by hand
+  against `feme-opt`'s own output for each op before writing the
+  `CHECK` lines.
+
+### Measured impact
+
+Identified 8 real CTS repro cases directly (`grep -li` across
+`external/vulkancts/data/vulkan/amber/graphicsfuzz/*.amber` for
+pack/unpack-unorm/snorm-related keywords): `cov-inst-combine-and-or-xor-
+pack-unpack`, `cov-inst-combine-simplify-demanded-pack-unpack`,
+`cov-apfloat-unpackunorm-loop`, `cov-function-unpack-unorm-2x16-one`,
+`cov-inst-combine-pack-unpack`, `cov-packhalf-unpackunorm`,
+`cov-inst-combine-simplify-demanded-packsnorm-unpackunorm`,
+`cov-unpack-unorm-mix-always-one`. All 8 now `Pass` (all previously failed
+pipeline creation with "failed to legalize operation").
+
+A full `graphicsfuzz.*` re-sweep (757 cases this session -- the CTS
+checkout's own case count grew by one group-header parsing artifact since
+last session's 733 + 24 count; same 24 hangs/crashes excluded, reconfirmed
+identical by name) shows exactly a 10-case Pass/Fail flip and nothing
+else moves -- matching the roadmap's own occurrence-count arithmetic
+exactly (`PackUnorm4x8` 2 + `PackUnorm2x16` 1 + `UnpackUnorm2x16` 1 +
+`UnpackUnorm4x8` 4 + the `PackSnorm4x8`/`UnpackSnorm4x8` legalization-only
+family's own 2 occurrences the roadmap's prior text miscounted as
+`UnpackSnorm2x16` = 10):
+
+|               | Before this fix | After |
+|---------------|------------------|-------|
+| Pass          | 549              | 559   |
+| Fail          | 176              | 166   |
+| NotSupported  | 8                | 8     |
+
+`ninja -C build2 check-feme`: 3193/3196 Passed (+1 new test), 3
+pre-existing Unsupported, 0 Failed -- clean. Broader
+`mlir/test/Dialect/SPIRV`, `mlir/test/Target/SPIRV`, and
+`mlir/test/Conversion/SPIRVToLLVM` lit suites also 0 regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a new/completed GL-op *implementation*, not a new Vulkan
+feature/extension surface.
+
+`Modf` and `Ldexp` (the two remaining gaps from L116(c)'s original text)
+remain open, split out to new roadmap row L120 since they're a distinct
+shape (an `OpVariable` out-parameter for `Modf`, a different
+exponent-scaling math for `Ldexp`) from this session's Pack/Unpack-family
+fix.
