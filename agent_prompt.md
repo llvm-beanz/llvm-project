@@ -58,21 +58,27 @@ complete the work?
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L116(a)** (~30 min to confirm same-as-C8b, then unknown to fix
-   depending on answer): grep `SIMDize.cpp`'s own aggregate
-   `insertvalue`/`extractvalue` handling and `MaskIntrinsics.cpp`'s
-   `appendScalarMangling` side by side -- confirm whether they share one
-   underlying "aggregate values through the CPU backend" gap before
-   writing any code.
-2. **L116(c)'s `Determinant`** (~half a day, same shape as L115(a)):
+1. **Re-verify C8b's own original repro against today's `SIMDize.cpp`**
+   (~15 min): if `widenInsertValue`/`widenExtractValue`/
+   `widenAggregateSelect` (added under L21) already cover it, strike
+   through C8b -- it may be a free, no-code-change roadmap closure.
+2. **L116(a)'s real fix** (now correctly scoped, not "~30 min then
+   unknown" -- budget a half-day-to-a-day): add per-leaf decomposition
+   for a struct/array/matrix-typed masked load/store in
+   `MaskIntrinsics.cpp`/`Linearize.cpp`, likely the single highest-value
+   fix left in the L116 breakdown (~59% of `Fail` error volume in the
+   original sweep).
+3. **L116(c)'s `Determinant`** (~half a day, same shape as L115(a)):
    add `SPIRV_GLDeterminantOp` to `SPIRVGLOps.td` (needs a square-matrix
-   operand shape, not one of the existing generic patterns) plus a
-   feme-side lowering (this one's just arithmetic, no runtime callback
-   needed unlike L115(b) -- should close fully in one session).
-3. **L116(e)'s two one-off bugs** (~1-2 hours combined): good if you
-   want two visible wins before tackling (a) or (c).
-4. **L116(f)'s remaining 22 unroot-caused hangs/crashes**: one-at-a-time
-   reduction, same technique used on the two already investigated.
+   operand shape) plus a feme-side lowering -- pure arithmetic, no
+   runtime callback needed unlike L115(b).
+4. **L116(f)'s remaining 22 un-root-caused hangs/crashes**: this
+   session's rebuilt skip-and-continue harness (`/tmp/sweep_gf.sh`, not
+   committed, throwaway) reconfirmed the identical 24 case names as last
+   session (no new hangs, none resolved) -- one-at-a-time reduction is
+   still the only way to make progress here, same technique used on the
+   two already investigated (`arr-value-set-to-arr-value-squared`,
+   `complex-nested-loops-and-call`).
 5. Once L116 closes (or is judged big enough to move on from), go back
    to L106's other untriaged candidates: `pipeline.monolithic.*`,
    `subgroups.*`, `compute.*` -- still nobody has picked these up.
