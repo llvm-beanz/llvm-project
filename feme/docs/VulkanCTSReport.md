@@ -1006,3 +1006,64 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.expression.array_size_*expression" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L101: measured impact
+
+## Outcome
+
+**Fixed.** The `spirv.VectorExtractDynamic` "failed to legalize" bucket
+(45 cases, one of the three unrelated `spec_constant.*` buckets left
+over from L99/L100) is closed.
+
+## Investigation
+
+Reduced to
+`dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.
+composite.vector.ivec2` (and the sibling `bvec2` case): GLSL indexing a
+spec-constant-mixed local vector with a runtime, non-constant index
+(`v[i]` where `i` is a loop variable, as opposed to a literal index)
+compiles to `spirv.VectorExtractDynamic`, which errored with `failed to
+legalize operation 'spirv.VectorExtractDynamic' that was explicitly
+marked illegal`. Confirmed neither upstream MLIR's own
+`SPIRVToLLVM.cpp` nor feme's own `SPIRVToLLVMPatterns.cpp` had any
+conversion pattern for this op at all -- a plain missing-pattern gap,
+not a narrower scoping bug like L99/L100.
+
+Fixed by adding `VectorExtractDynamicPattern`: the op's `vector`/`index`
+operands and result type (always the vector's own element type) match
+`llvm.extractelement`'s own shape exactly, so the conversion is a
+direct 1:1 rewrite.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` before and during this session.
+- New unit test `SPIRVToLLVMTest.VectorExtractDynamicConvertsInsteadOfFailing`
+  (all 25 tests in this suite pass).
+- `ninja check-feme`: 3170 Passed, 3 pre-existing Unsupported, 0 Failed
+  (up 1 test, no regressions).
+- Full `composite.vector.*` re-sweep (75 cases across 5 stages): **60/60
+  Pass** of the supported cases (15 not-supported, unrelated), up from
+  45/60 pre-fix -- exactly the `bvec*`/`ivec*`/`uvec*` dynamic-index
+  cases across the 5 stages, zero collateral regressions.
+- Full `pipeline_library.spec_constant.*` re-sweep (1170 cases): **525
+  Pass / 130 Fail / 515 NotSupported**, up from the pre-fix 480/175/515
+  -- an exact +45/-45 shift, matching this row's own 45-case scope
+  precisely. The remaining 130 failures split into roadmap L102 ("GEP
+  into vector", ~30 cases, not yet touched) and a newly-identified,
+  previously-undercounted roadmap L103 (`composite.struct.*` "Values
+  did not match", 100 cases -- see L103's own roadmap entry for why
+  this was missed in L99's own closing count).
+
+No advertised Vulkan feature or extension changed -- this is a pure
+missing-conversion-pattern fix.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.composite.vector.*" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
