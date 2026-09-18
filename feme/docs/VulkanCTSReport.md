@@ -1067,3 +1067,91 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.composite.vector.*" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L102: measured impact
+
+## Outcome
+
+**Fixed.** The "GEP into vector with non-byte-addressable element type"
+pipeline-creation-time bucket (~30 cases, the last of the three
+unrelated `spec_constant.*` failure buckets tracked since L99's own
+sweep) is closed.
+
+## Investigation
+
+Reduced to
+`dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.
+composite.array.bvec2`: the failure is an LLVM IR *verifier* rejection
+(`llvm/lib/IR/Verifier.cpp:4594`), surfacing only after MLIR-to-LLVM-IR
+translation, not an MLIR-level dialect-conversion failure -- the
+conversion itself "succeeds" but produces invalid IR.
+
+Root cause: `spirv.AccessChain`'s generic upstream conversion
+(`AccessChainPattern` in `mlir/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVM.cpp`) builds a single `llvm.getelementptr` using *all* of
+the AccessChain's indices, including a final index that selects a lane
+inside a vector. This is valid when the vector's element type is
+byte-sized (`i32`/`f32`, etc.), since GEP computes byte offsets, but
+LLVM's IR verifier rejects it for an `i1` (bool) vector element, which
+has no byte size -- hence only `bvec2/3/4` (never scalar `bool` or a
+non-bool vector) hit this bucket.
+
+Per SPIR-V's own rule that a pointer to a vector component is a valid
+input only to `OpLoad`/`OpStore` (never stored/passed elsewhere),
+fixed by fusing the AccessChain into its consuming Load/Store, the
+same shape as the existing `MatrixColumnLoadPattern`/
+`MatrixColumnStorePattern` precedent:
+
+- `BoolVectorLaneAccessChainPattern` converts the AccessChain on its
+  own into a harmless/unused GEP addressing the vector itself (every
+  index but the last), so it still has *some* legal conversion instead
+  of falling through to the illegal generic pattern.
+- `BoolVectorLaneLoadPattern`/`BoolVectorLaneStorePattern` match the
+  consuming `spirv.Load`/`spirv.Store`, rebuild the same
+  vector-addressing GEP directly from the AccessChain's own (remapped)
+  base pointer, and perform the final lane selection with
+  `llvm.extractelement`/`llvm.insertelement`.
+
+Three bugs were found and fixed along the way while building this:
+a `sed` command intended narrowly ended up globally corrupting ~9
+unrelated pre-existing function signatures (reverted by hand); an
+`IntegerAttr::getInt()` assertion crash inside the new struct-index
+walk helper (its signless-only precondition doesn't hold for every
+SPIR-V constant, fixed by using `.getValue().getSExtValue()` instead);
+and a `dialect conversion attempted to replace a root operation that
+has no parent block` crash from explicitly `eraseOp`-ing the
+AccessChain inside the Load/Store patterns (fixed by never erasing it,
+matching the `MatrixColumnLoadPattern` precedent, and adding the
+companion `BoolVectorLaneAccessChainPattern` so the now-otherwise-dead
+AccessChain still converts legally on its own).
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` before and during this session.
+- New unit test `SPIRVToLLVMTest.BoolVectorLaneLoadStoreConvertsInsteadOfFailing`.
+- `ninja check-feme`: 3171 Passed, 3 pre-existing Unsupported, 0 Failed
+  (up 1 test, no regressions).
+- Full `composite.array.*` re-sweep (385 cases across 5 stages):
+  **255/385 Pass, 0 Fail, 130 NotSupported**, up from 225/30/130
+  pre-fix -- exactly the 30 `bvec2/3/4` and `array_bvec2/3/4` cases
+  across the 5 stages, zero collateral regressions.
+- Full `pipeline_library.spec_constant.*` re-sweep (1170 cases): **555
+  Pass / 100 Fail / 515 NotSupported**, up from the pre-fix
+  525/130/515 -- an exact +30/-30 shift, matching this row's own scope
+  precisely. The remaining 100 failures are entirely roadmap L103's
+  own, still-open `composite.struct.*` bucket.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+SPIR-V-to-LLVM conversion correctness fix for an existing (bool
+vector) type shape.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.composite.array.*" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
