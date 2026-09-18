@@ -3214,3 +3214,47 @@ This row is now **closed**. See roadmap row L122 (new this session) for
 the natural follow-up: confirming C8b's own conservative exclusion guard
 is now provably redundant and can be removed, recovering whatever
 further localization wins it still forgoes.
+
+## Roadmap L122 (closed): removed C8b's now-redundant discard/demote localization guard
+
+C8b's `mayDiscardOrDemote` guard (`LocalizePrivateGlobals.cpp`)
+conservatively excluded any aggregate global used by a discard/demote-
+capable function from localization at all, working around a
+`SIMDize.cpp` bug (roadmap L118) rather than fixing it. L118's own
+session fixed that bug at its root (`widenMaskedStore` now uses
+`Env.EntryMask`, not `Env.SideEffectMask`, for a `MaskedAllocas`-based
+destination) and confirmed, with the guard temporarily disabled, that
+the one named regression the guard was written to prevent
+(`cov-function-loop-condition-constant-array-always-false`) no longer
+reproduces. The guard itself was left in place pending a broader
+confirmation sweep, since it is broader than that one bug's trigger
+condition.
+
+This session ran that confirmation: rebuilt with the guard temporarily
+disabled (same `if (false && ...)` throwaway technique used throughout
+this roadmap's own history) and re-ran the full `graphicsfuzz.*` sweep
+(733 of 757 cases, same 24-name hang exclusion list reused across
+sessions). Result: **identical 593 Pass / 132 Fail / 8 NotSupported**
+totals to the guard-enabled baseline -- 0 regressions, confirming no
+other bug is being masked by the guard.
+
+Removed the guard for real: deleted `mayDiscardOrDemote` and its call
+site from `LocalizePrivateGlobalsPass::run`, along with its now-unused
+`feme/Core/StageOps.h` and `llvm/IR/InstIterator.h` includes. Updated
+`localize-private-globals.ll`'s `usesArrayInDiscardingFunction`
+regression case to assert the global is now localized (previously
+asserted it was left alone). Re-ran the full `graphicsfuzz.*` sweep a
+second time with the guard actually removed (not just disabled):
+**identical 593/132/8 totals again**, confirming the real removal
+behaves exactly like the diagnostic disable.
+
+`ninja -C build2 check-feme`: 3197/3200 Passed, 3 pre-existing
+Unsupported, 0 Failed -- clean, no change in test count since removing
+a guard doesn't add new coverage, only removes an exclusion.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal `LocalizePrivateGlobalsPass` simplification, not a
+new Vulkan feature/extension surface.
+
+This row is now **closed**. C8b's own row has been updated to reflect
+that its guard was removed with 0 further regressions.
