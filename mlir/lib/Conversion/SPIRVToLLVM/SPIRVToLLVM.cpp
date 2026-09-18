@@ -850,6 +850,32 @@ public:
   }
 };
 
+/// Converts the GLSL.std.450 `Modf` instruction (`spirv.GL.Modf`), which
+/// splits its operand into an integer part and a fractional part, both of
+/// the same sign as the operand, writing the integer part through a pointer
+/// operand and returning the fractional part as the result. Computed the
+/// same way as `ModfStruct` above, but the integer part is stored through
+/// the pointer operand instead of being packed into a struct result.
+class ModfPattern : public SPIRVToLLVMConversion<spirv::GLModfOp> {
+public:
+  using SPIRVToLLVMConversion<spirv::GLModfOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::GLModfOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type operandType = adaptor.getX().getType();
+    Value integer =
+        LLVM::FTruncOp::create(rewriter, loc, operandType, adaptor.getX());
+    Value fraction = LLVM::FSubOp::create(rewriter, loc, operandType,
+                                          adaptor.getX(), integer);
+
+    LLVM::StoreOp::create(rewriter, loc, integer, adaptor.getI());
+    rewriter.replaceOp(op, fraction);
+    return success();
+  }
+};
+
 /// Converts `spirv.ExecutionMode` into a global struct constant that holds
 /// execution mode information.
 class ExecutionModePattern
@@ -2454,7 +2480,7 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::GLTanOp, LLVM::TanOp>,
       DirectConversionPattern<spirv::GLTanhOp, LLVM::TanhOp>,
       DirectConversionPattern<spirv::GLFrexpStructOp, LLVM::FractionExpOp>,
-      ModfStructPattern,
+      ModfStructPattern, ModfPattern,
       InverseSqrtPattern, SAbsPattern, FractPattern,
       SignPattern<spirv::GLFSignOp, /*isFloat=*/true>,
       SignPattern<spirv::GLSSignOp, /*isFloat=*/false>, GLFMixPattern,

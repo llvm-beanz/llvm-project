@@ -1,13 +1,14 @@
 // RUN: feme-opt --feme-convert-spirv-to-llvm --split-input-file %s | FileCheck %s
 
-// Checks that `spirv.GL.FrexpStruct`/`spirv.GL.ModfStruct` (GLSL.std.450's
-// `FrexpStruct`/`ModfStruct`, roadmap F16) convert through this pass's own
-// pipeline: an entry-point-less function is enough here, since these two
-// ops' own conversion patterns (`mlir::populateSPIRVToLLVMConversionPatterns`)
-// don't depend on any of the entry-point/resource maps this pass otherwise
-// threads through. `CompositeExtract`ing a single member (as CTS's own
-// `frexp_st`/`modf_st` operations, and this dialect's deserializer, do) is
-// included to mirror the shape those tests actually exercise.
+// Checks that `spirv.GL.FrexpStruct`/`spirv.GL.ModfStruct`/`spirv.GL.Modf`
+// (GLSL.std.450's `FrexpStruct`/`ModfStruct`/`Modf`, roadmap L120) convert
+// through this pass's own pipeline: an entry-point-less function is enough
+// here, since these ops' own conversion patterns
+// (`mlir::populateSPIRVToLLVMConversionPatterns`) don't depend on any of the
+// entry-point/resource maps this pass otherwise threads through.
+// `CompositeExtract`ing a single member (as CTS's own `frexp_st`/`modf_st`
+// operations, and this dialect's deserializer, do) is included to mirror the
+// shape those tests actually exercise for the struct-returning variants.
 
 // CHECK-LABEL: llvm.func @frexp_st
 // CHECK: %[[STRUCT:.*]] = llvm.intr.frexp(%arg0) : (f32) -> !llvm.struct<packed (f32, i32)>
@@ -41,5 +42,27 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     %0 = spirv.GL.ModfStruct %arg0 : f32 -> !spirv.struct<(f32, f32)>
     %1 = spirv.CompositeExtract %0[1 : i32] : !spirv.struct<(f32, f32)>
     spirv.ReturnValue %1 : f32
+  }
+}
+
+// -----
+
+// `Modf` (unlike `ModfStruct`) writes its integer part through a genuine
+// pointer operand rather than packing both parts into a struct result, so
+// it converts the same way except the integer part is stored through the
+// (already-converted, plain LLVM) pointer instead of being inserted into a
+// struct.
+
+// CHECK-LABEL: llvm.func @modf
+// CHECK: %[[PTR:.*]] = llvm.alloca {{.*}} x f32
+// CHECK: %[[INT:.*]] = llvm.intr.trunc(%arg0) : (f32) -> f32
+// CHECK: %[[FRAC:.*]] = llvm.fsub %arg0, %[[INT]] : f32
+// CHECK: llvm.store %[[INT]], %[[PTR]]
+// CHECK: llvm.return %[[FRAC]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @modf(%arg0 : f32) -> f32 "None" {
+    %ptr = spirv.Variable : !spirv.ptr<f32, Function>
+    %0 = spirv.GL.Modf %arg0, %ptr : f32, !spirv.ptr<f32, Function> -> f32
+    spirv.ReturnValue %0 : f32
   }
 }
