@@ -1994,3 +1994,55 @@ semantics -- the shader's mask can only narrow coverage, never widen it),
 and mask out the corresponding per-sample color/depth writes accordingly.
 Not yet attempted this session, to keep this investigation's own scope
 bounded; see L111(b)'s own roadmap entry for further detail.
+
+## Roadmap L111(b) (fixed this session): fragment-shader `gl_SampleMask` output now consumed
+
+### Fix
+
+`Executor.cpp` had zero consumers for a fragment shader's own
+`SignatureSystemValue::Coverage` output. Added:
+
+- A lookup for the fragment stage's `Coverage`-direction `Output` element
+  (`FSSampleMaskOut`), mirroring how `FSAlphaToCoverage` is already looked
+  up by location. Validated to be a single-component signed/unsigned
+  integer.
+- `UseEarlyDepthStencil` now also forces the late depth/stencil path when
+  `FSSampleMaskOut` is present -- mirroring `alphaToCoverageEnable`'s own
+  identical reasoning: the narrowed mask a fragment shader computes is not
+  known until the shader itself has run, so an early (pre-shader)
+  depth/stencil test would test/write samples the shader's own mask was
+  about to cull.
+- Each lane's `BaseCoverage` is ANDed with the shader's own mask (its
+  first/only word -- this executor's own per-lane coverage representation
+  is already a single `uint32_t`, an existing 32-bit-sample-count
+  limitation unrelated to this fix) before the depth/stencil test and
+  color merge -- unconditionally, unlike `alphaToCoverageEnable`'s own
+  pipeline-state-gated mask, matching Vulkan's "sample mask test"
+  (`fragops.adoc`) always-on semantics.
+
+### Validation (L111(b))
+
+New unit test: `ExecutorTest.FragmentSampleMaskOutputNarrowsPerSampleCoverage`
+-- a fragment shader writing a constant `0b0101` `gl_SampleMask` output on
+a fully-covering, fully-opaque-red 4x-multisampled triangle, confirming
+only samples 0 and 2 (the mask's set bits) keep the shaded red color;
+samples 1 and 3 are left at the attachment's zero-initialized clear
+value.
+
+`ninja check-feme` (ccache, assertions-enabled build): 3187/3190 passed, 3
+pre-existing Unsupported, 0 Failed (up 1 discovered test from this
+session's addition, no regressions).
+
+CTS re-run (`deqp-vk`, `feme_icd.json` rebuilt first per the standing
+gotcha): `unusual_multisample_state` now **Passes**. Full re-sweep of
+`pipeline_library.graphics_library.*` (836 cases) lands **fully clean**
+at **548 Pass / 0 Fail / 287 NotSupported / 1 Warning** -- the sole
+Warning is the same pre-existing, benign `compare_link_times` "linking of
+one or more combinations took too long" quality warning noted in every
+prior sweep of this group, unrelated to this fix. This closes roadmap
+L111 overall (both L111(a) and L111(b)).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- this is a correctness fix within already-advertised multisample
+rendering support (core `VkPipelineMultisampleStateCreateInfo`, already
+listed as supported), not a newly-advertised capability.
