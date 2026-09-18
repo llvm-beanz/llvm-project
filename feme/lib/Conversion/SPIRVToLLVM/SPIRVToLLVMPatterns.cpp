@@ -5992,30 +5992,38 @@ public:
 /// reordering never touches) unchanged.
 ///
 /// Scoped to the outermost struct a `spirv.AccessChain`'s own base pointer
-/// directly points to, or (roadmap H101n) to that same struct one level
-/// deeper, behind a single outer array dimension -- GLSL's own "array of
-/// block instances" syntax (`layout(...) out Block { T member; } block[N];`,
-/// e.g. `dEQP-VK.transform_feedback.fuzz.*instance_array*`'s own per-
-/// instance interface blocks) addresses one instance's own member through
-/// exactly that shape: `spirv.AccessChain`'s own first index selects the
-/// array element, its *second* index selects the struct member this
-/// pattern remaps. A struct member that is itself a struct independently
-/// requiring its own leading pad or reordering, nested more than one level
-/// deep, would need a similar adjustment at that deeper level too, which
-/// this does not yet attempt (mirroring this file's own precedent
-/// elsewhere, e.g. convertUndersizedScalarArrayMemberIgnoringDecorations's
-/// "matching every real case" scoping, of not generalizing past what is
-/// actually observed).
-///
-/// A struct (whether pointed to directly or through that one outer array
-/// dimension) needing neither a pad nor any reordering is left to the
-/// generic pattern (`notifyMatchFailure`), so no already-working access
-/// chain changes. Likewise if the member-selecting index is not a
-/// compile-time constant (always true for a real struct-member selector
-/// per the SPIR-V spec, but declined rather than miscompiled if a
-/// malformed module ever violates that), or if the access chain does not
-/// reach far enough to select a struct member at all (e.g. only selects
-/// the whole array element).
+/// directly points to, or (roadmap H101n, generalized by L107) to that
+/// same struct any number of levels deeper, behind any number of outer
+/// array dimensions -- GLSL's own "array of block instances" syntax
+/// (`layout(...) out Block { T member; } block[N];`, e.g.
+/// `dEQP-VK.transform_feedback.fuzz.*instance_array*`'s own per-instance
+/// interface blocks) addresses one instance's own member through exactly
+/// this shape one array level deep; a tessellation-control entry's own
+/// per-control-point-arrayed *loose* (non-`Block`) array-of-structures
+/// output (e.g. `out TestStruct testStructArray[][3];`, `dEQP-VK.pipeline.
+/// pipeline_library.interface_matching.decoration_mismatch.*member_of_
+/// array_of_structures_vert_tesc_out_tese_in_frag`, roadmap L107) takes
+/// the same shape *two* array levels deep instead -- the automatic
+/// per-control-point array TCS adds to every one of its own outputs,
+/// wrapping the shader's own declared `[3]` array-of-structures dimension.
+/// Originally this only peeled a single outer array level (`MemberIndexPos`
+/// 0 or 1), leaving a two-(or-more)-level case's own `StructTy` `null` and
+/// falling through to MLIR's generic `AccessChainPattern` instead --
+/// which forwards the declared (pre-remap) member index verbatim, wrongly
+/// selecting whatever physical field an interior alignment-gap pad (see
+/// L103/L104/L105) happened to shift into that position, corrupting the
+/// resulting byte offset (`CanonicalizeStage.cpp`'s own consumer-side
+/// `ArrayRef::slice`/pad assertion crash, since the byte offset it
+/// receives lands inside the pad itself rather than at the real member's
+/// own address). A struct (however many array dimensions deep) needing
+/// neither a pad nor any reordering is left to the generic pattern
+/// (`notifyMatchFailure`), so no already-working access chain changes.
+/// Likewise if the member-selecting index is not a compile-time constant
+/// (always true for a real struct-member selector per the SPIR-V spec,
+/// but declined rather than miscompiled if a malformed module ever
+/// violates that), or if the access chain does not reach far enough to
+/// select a struct member at all (e.g. only selects a whole array
+/// element).
 class OffsetStructMemberReorderAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
@@ -6044,17 +6052,20 @@ public:
               "BlockAccessChainPattern instead");
     mlir::Type PointeeTy = PointerType.getPointeeType();
     // `MemberIndexPos` is which of `Op`'s own indices selects the
-    // reordered/padded struct's own member -- index 0 if the struct sits
-    // directly behind the base pointer, index 1 if an outer array
-    // dimension (one "array of block instances" element) comes first.
+    // reordered/padded struct's own member -- 0 if the struct sits
+    // directly behind the base pointer, or (roadmap H101n, generalized by
+    // L107) the number of outer array dimensions wrapping it, one index
+    // per dimension, whenever any number of array-of-(...-of-struct)
+    // levels come first.
     unsigned MemberIndexPos = 0;
     auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(PointeeTy);
-    if (!StructTy) {
-      if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(PointeeTy)) {
-        StructTy =
-            mlir::dyn_cast<mlir::spirv::StructType>(ArrayTy.getElementType());
-        MemberIndexPos = 1;
-      }
+    for (mlir::Type Probe = PointeeTy; !StructTy;) {
+      auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Probe);
+      if (!ArrayTy)
+        break;
+      Probe = ArrayTy.getElementType();
+      ++MemberIndexPos;
+      StructTy = mlir::dyn_cast<mlir::spirv::StructType>(Probe);
     }
     // (Roadmap H129) Whether \p StructTy needs any remapping at all --
     // a leading pad, an interior pad, a declaration-order permutation, or
@@ -6153,12 +6164,12 @@ public:
 
     llvm::SmallVector<mlir::Value, 4> Indices;
     Indices.push_back(Zero);
-    if (MemberIndexPos == 1) {
-      // Forward the outer array index unchanged -- the reordered/padded
-      // struct lives inside each array element itself, not across the
-      // array dimension.
-      Indices.push_back(Adaptor.getIndices().front());
-    }
+    // Forward every outer array index unchanged (one per array dimension
+    // `MemberIndexPos` counted while peeling down to \p StructTy above)
+    // -- the reordered/padded struct lives inside each such array
+    // element itself, not across any of these array dimensions.
+    for (unsigned I = 0; I != MemberIndexPos; ++I)
+      Indices.push_back(Adaptor.getIndices()[I]);
     Indices.push_back(AdjustedMember);
     mlir::Type SelectedMemberType =
         StructTy.getElementType(static_cast<unsigned>(*MemberIndex));
