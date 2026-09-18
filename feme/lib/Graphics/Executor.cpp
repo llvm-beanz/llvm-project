@@ -3376,6 +3376,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               Inv.PrimitiveID[Lane] = Tri.PrimitiveID;
               Inv.SampleIndex[Lane] = 0;
               Inv.Coverage[Lane] = Quad.SampleMask[Lane];
+              // (roadmap L114) Default (non-per-sample-shaded) pass:
+              // sample 0's own real offset, matching `SampleIndex`'s own
+              // default of 0 above -- overwritten with the real
+              // per-`PassSample` offset below whenever `PerSampleShading`
+              // is true, exactly like `Position.xy`'s own pixel-center
+              // default is overwritten there too.
+              Inv.SamplePosition[Lane][0] = (*SamplePositions)[0][0];
+              Inv.SamplePosition[Lane][1] = (*SamplePositions)[0][1];
               Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
               Inv.ViewportIndex[Lane] = Tri.ViewportIndex;
               // (Roadmap H73) `gl_Layer`/`SV_RenderTargetArrayIndex` read
@@ -3457,10 +3465,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // Fragment shaders reading `gl_SampleID`/`SV_SampleIndex` execute at
       // sample frequency even when `sampleShadingEnable` is false. Explicit
       // sample shading also executes every fragment invocation per sample.
+      // (Roadmap L114) `gl_SamplePosition` carries the identical
+      // per-spec requirement -- a shader statically reading it must also
+      // execute at least once per covered sample, exactly like
+      // `SampleIndex`.
       bool PerSampleShading =
           Pipeline.getSampleShadingEnable() ||
           findElement(FSSig, SignatureDirection::Input,
-                      SignatureSystemValue::SampleIndex);
+                      SignatureSystemValue::SampleIndex) ||
+          findElement(FSSig, SignatureDirection::Input,
+                      SignatureSystemValue::SamplePosition);
       // This project always shades at the full sample rate rather than
       // tracking `minSampleShading`'s fractional value (see
       // `GraphicsPipeline::getSampleShadingEnable`'s comment in
@@ -3495,6 +3509,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               PassInv.Coverage[Lane] &= SampleBit;
               PassInv.Position[Lane][0] = Quad.PixelX[Lane] + Offset[0];
               PassInv.Position[Lane][1] = Quad.PixelY[Lane] + Offset[1];
+              // (roadmap L114) `gl_SamplePosition` reads back this same
+              // `Offset`, unmixed with `Quad.PixelX`/`PixelY` (unlike
+              // `Position.xy` above): it is the sample's own offset
+              // *within* its pixel, not an absolute screen position.
+              PassInv.SamplePosition[Lane][0] = Offset[0];
+              PassInv.SamplePosition[Lane][1] = Offset[1];
             }
           }
         }
