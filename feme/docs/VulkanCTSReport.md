@@ -3027,3 +3027,87 @@ pre-existing Unsupported, 0 Failed -- clean.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
 needed -- a bug fix in existing vertex-input handling, not a new Vulkan
 feature/extension surface.
+
+## Roadmap L118 (partial fix, real regression unresolved): stale-use recovery's hardcoded lane 0
+
+`feme::cpu::SIMDizePass`'s post-widening cleanup (`FunctionWidener`'s
+"leftover stale scalar use" recovery, roadmap H107) extracts lane 0 of a
+widened value as a scalar stand-in whenever `UniformityInfo` classifies
+the value uniform and a scalar use survives erasure -- justified by "lane
+0 of every wave this pass ever iterates is guaranteed a real invocation",
+citing `EntryWrapperPass`'s `WavesPerGroup` loop bound. Root-caused
+during roadmap C8b's own investigation to a real regression
+(`dEQP-VK.graphicsfuzz.cov-function-loop-condition-constant-array-always-false`),
+mitigated there only by excluding the triggering shape from a separate,
+otherwise-desirable global-localization broadening (C8b's own guard),
+not by fixing the recovery itself.
+
+This session confirmed the compute-shader justification above does not
+generalize to every shader stage: a fragment shader's own `EntryMask`
+(`FragmentWrapper.cpp`'s `buildQuadMaskValue`) is built per quad from
+each invocation's own "live"/helper-invocation state, and can leave lane
+0 itself inactive -- a whole quad is dispatched whenever at least one of
+its four pixels is covered by the primitive, so a pixel outside the
+primitive but sharing a quad with a covered one (kept alive only so that
+covered pixel's own derivatives have real neighbor data) can land at
+quad-lane 0. `WavesPerGroup`'s bound has no bearing on this per-quad
+mask, so the recovery's "always lane 0" assumption is unsound here in
+general, independent of C8b's own specific repro.
+
+Fixed the general case: `FunctionWidener::getFirstActiveLaneIndex`
+derives the lane to extract from `EntryMask` itself (the lowest set bit,
+via `cttz` over its bitcast-to-integer form, computed once per widened
+function and memoized) instead of a hardcoded constant 0. Every
+iterated wave has at least one active lane by construction (a wave with
+none would never be dispatched), so this is always well-defined, and it
+reduces to exactly lane 0 for the compute/task/mesh case (`EntryMask`'s
+lane 0 is always set there), so no widened function's behavior changes
+outside the fragment/quad-tiled case this was written for.
+
+New unit test:
+`SIMDizeTest.RecoversUniformValueFromEntryMaskDerivedLaneNotHardcodedLaneZero`,
+asserting the recovery's `extractelement` index is a genuinely computed
+`cttz`-derived value (traced through its `zext`/`trunc`), never a bare
+constant.
+
+**Measured against the actual named regression** (temporarily
+re-enabling C8b's excluded localization path to reproduce it):
+`cov-function-loop-condition-constant-array-always-false` still `Fail`s
+after this fix. That specific fragment shader does not use derivative
+instructions (`functionUsesQuadTiledComputeDerivatives` is false for it),
+so its own `EntryMask` is not quad/helper-invocation-shaped at all --
+this fix's mechanism does not apply to this particular case's actual
+failure. The real root cause behind this specific regression remains
+unidentified; C8b's own conservative exclusion guard is unchanged and
+still required.
+
+`ninja -C build2 check-feme`: 3196/3199 Passed (+1 new test), 3
+pre-existing Unsupported, 0 Failed -- clean.
+
+A `graphicsfuzz.*` re-sweep (733 of 757, excluding the same 24
+pre-existing hangs/crashes as roadmap L120's own last-recorded sweep),
+with this fix applied but C8b's guard left unchanged:
+
+|               | Before this fix (L120's last sweep, 732 of 757) | After (733 of 757) |
+|---------------|--------------------------------------------------|----------------------|
+| Pass          | 568                                              | 568                 |
+| Fail          | 156                                               | 157                 |
+| NotSupported  | 8                                                 | 8                   |
+
+Identical Pass count; the 1-case Fail-count difference is a 24-vs-25-
+name hang-exclusion-list mismatch between this session's reused list
+(`/tmp/gf_skipped.txt`, 24 names) and L120's own session (25 names,
+noted there as "one more than the previously-tracked 24...most plausibly
+test-harness timing variance"), not a new regression -- no case Passing
+before now Fails, or vice versa.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a `SIMDizePass` internal correctness fix, not a new Vulkan
+feature/extension surface.
+
+This row is **not closed**: the fix landed is real and independently
+motivated (a genuine, previously-undiscovered fragment/quad-tiled-shader
+bug in the same recovery code, now fixed), but the CTS regression this
+roadmap row was originally opened to explain is still unresolved by it.
+See `agent_thoughts.md`'s new entry for this session's own next-steps
+recommendation on how to actually pin down that regression's root cause.
