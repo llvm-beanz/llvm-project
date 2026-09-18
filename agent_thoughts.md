@@ -90497,3 +90497,93 @@ false start.
    for any future SPIR-V resource-lowering rejection — found this
    session, strictly more precise than the `checkSupportedRaisedOps`-level
    diagnostic, and needs no temporary code changes at all.
+
+# Session: H51/L109 gl_ViewIndex on Hull/Domain/Geometry, and finding the real L110 bug
+
+**Start here**: read Roadmap.md's L109/L110/L111 rows and VulkanCTSReport.md's
+"H51/L109/L110/L111" section first -- they have the full detail. This is the
+short version.
+
+## What's done, right now
+
+1. `gl_ViewIndex` works on Hull/Domain/Geometry stages (roadmap H51/L109).
+   Crash that used to happen at `vkQueueSubmit` is gone, confirmed by a real
+   CTS re-run. `ninja check-feme`: 3183 Passed, 3 Unsupported, 0 Failed.
+2. Found the REAL reason the 6 target CTS cases still fail. It is not a
+   rendering bug. It's a missing Vulkan feature:
+   `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` is 100%
+   unimplemented in feme. Filed as roadmap **L110**.
+3. Filed the 7th unrelated `misc.other.*` failure (`unusual_multisample_state`)
+   as roadmap **L111** -- not investigated this session, kept separate on
+   purpose.
+
+## The "all-black image" scare -- and why it wasn't real
+
+An earlier session (before this one) decoded the CTS's logged PNG images with
+a plain PNG viewer and concluded rendering was completely broken -- every
+pixel looked like `(0,0,0,255)`, i.e. nothing drawn at all. That reading was
+wrong, and it cost real time.
+
+The fix: CTS logs each image with its own `Description` field recording a
+`p' = p*scale + offset` normalization it applied before writing the PNG
+(needed because the real per-pixel values are tiny integers like 0/1/2,
+invisible in an 8-bit image without stretching). Reverse that transform
+before trusting what you see. Once reversed, the real pixel values were
+exactly `0`, `1`, `2` across the 3 multiview slices -- precisely correct.
+
+**Takeaway for next time**: when a CTS `SelfValidate` test logs an image with
+a `p' = p*scale + offset` description, always reverse it before concluding
+anything about "black"/"wrong" pixels. A naive PNG decode of small-integer
+UINT texture data will look uniformly dark/black even when it's 100% correct.
+
+## How L110 was actually found (30 min, once the PNG scare was resolved)
+
+1. Read `vktPipelineLibraryTests.cpp`'s own `iterate()` and its
+   `allowedValueSets` expected-value table for
+   `CreateViewIndexFromDeviceIndexInstance` -- it computes different expected
+   `gl_ViewIndex` values per RGBA-channel depending on whether
+   `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` was set on the
+   pre-rasterization library part, the fragment library part, both, or
+   neither.
+2. Grepped feme for that flag: zero hits, anywhere.
+3. Confirmed via decoded pixel values that feme always reports the *real*
+   per-view index, never the device index (always 0 here, single device) --
+   exactly what "flag unimplemented, always falls through to the default
+   real-per-view behavior" predicts.
+
+## Why I stopped here instead of implementing L110 too
+
+L110 needs new plumbing of comparable size to L109 itself: two independent
+"use device index instead of real view index" bits (one for the
+pre-rasterization stage group, one for fragment), captured per
+`VK_EXT_graphics_pipeline_library` part (`Pipeline::createFlags()` already
+has the raw data), threaded through `synthesizeLinkedGraphicsPipelineCreateInfo`
+-> `GraphicsPipelineState` -> `CommandBuffer.cpp`'s per-view draw loop ->
+`Executor.cpp`'s geometry/patch invocation building. Doing that carefully in
+the same session as L109 risked rushing both. L110's roadmap row has the
+concrete suggested shape already written out.
+
+## Suggested next steps
+
+1. **Implement L110** (~half a day, well-scoped already in Roadmap.md). Start
+   at `GraphicsPipelineState` in `GraphicsPipeline.cpp`: add
+   `PreRasterViewIndexIsDeviceIndex`/`FragmentViewIndexIsDeviceIndex` bools,
+   set from `CreateInfo.flags` (non-linked path) and from each linked
+   library's own `Pipeline::createFlags()` (linked path). Then thread a
+   per-stage-group override into wherever `ViewIndex` is currently written
+   into the ABI invocation records (`CommandBuffer.cpp`'s per-view loop,
+   `Executor.cpp`).
+2. **Re-sweep `pipeline_library.graphics_library.*` after L110 lands** --
+   expect the 6 `view_index_from_device_index_in_*` cases (12 counting
+   `_link_time_opt` siblings) to flip from Fail to Pass, landing at
+   548/1/287/1 (only `unusual_multisample_state`, L111, still failing).
+3. **Reduce and root-cause L111** (`unusual_multisample_state`) -- confirmed
+   unrelated to gl_ViewIndex/multiview, not yet touched.
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+5. **Technique confirmed this session**: when a CTS `SelfValidate` test gives
+   you `Fail` with no diagnostic message, decode the QPA's embedded base64
+   PNGs directly (Python + Pillow) -- but check for a `Description` field
+   describing a `p'=p*scale+offset` normalization first, and reverse it,
+   before concluding anything about the decoded colors.
