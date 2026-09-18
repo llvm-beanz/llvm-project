@@ -444,6 +444,44 @@ public:
   }
 };
 
+/// Builds the operand list for an `llvm.return` replacing a true-terminator
+/// discard op (`spirv.Kill`/`spirv.TerminateInvocation`) nested inside an
+/// arbitrary SPIR-V function -- not just the fragment entry point itself.
+/// Both ops always legalize to `llvm.return` directly (rather than a branch
+/// to the function's own exit block), but a non-entry-point SPIR-V helper
+/// function may have a non-void result type (e.g. `vec3 drawShape() {
+/// discard; return vec3(1.0); }`, roadmap L106's
+/// `always-false-if-with-discard-return` graphicsfuzz case) -- the discard
+/// unconditionally terminates the invocation, so the value returned here is
+/// never actually observed, but LLVM's own `llvm.return` still requires an
+/// operand count exactly matching the enclosing function's result count
+/// (verified via `'llvm.return' op expected 1 operand`, the confirmed
+/// failure signature this fixes) -- so a `poison` value of the converted
+/// result type is synthesized when needed.
+static llvm::SmallVector<mlir::Value, 1>
+buildDiscardReturnOperands(mlir::Operation *Op,
+                            const mlir::TypeConverter &TypeConverter,
+                            mlir::ConversionPatternRewriter &Rewriter) {
+  // The enclosing `spirv.func` is normally already converted to
+  // `llvm.func` by the time this pattern runs (MLIR's dialect conversion
+  // driver does not guarantee body ops convert before their parent
+  // function's signature does), so the converted `llvm.func`'s own result
+  // type -- not the original `spirv.func`'s -- is the one that must be
+  // matched here.
+  if (auto LLVMFunc = Op->getParentOfType<mlir::LLVM::LLVMFuncOp>()) {
+    mlir::Type ResultTy = LLVMFunc.getFunctionType().getReturnType();
+    if (mlir::isa<mlir::LLVM::LLVMVoidType>(ResultTy))
+      return {};
+    return {mlir::LLVM::PoisonOp::create(Rewriter, Op->getLoc(), ResultTy)};
+  }
+  auto Func = Op->getParentOfType<mlir::spirv::FuncOp>();
+  if (!Func || Func.getFunctionType().getNumResults() == 0)
+    return {};
+  mlir::Type ResultTy =
+      TypeConverter.convertType(Func.getFunctionType().getResult(0));
+  return {mlir::LLVM::PoisonOp::create(Rewriter, Op->getLoc(), ResultTy)};
+}
+
 /// Converts `spirv.Kill` (roadmap H99) -- which, like `spirv.Switch` above,
 /// MLIR has no pattern for at all -- into an unconditional discard-and-return:
 /// a call to the `llvm.spv.discard` intrinsic (already raised into
@@ -468,7 +506,8 @@ public:
         Rewriter, Op.getLoc(),
         mlir::StringAttr::get(Rewriter.getContext(), "llvm.spv.discard"),
         mlir::ValueRange{});
-    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(Op, mlir::ValueRange{});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(
+        Op, buildDiscardReturnOperands(Op, *getTypeConverter(), Rewriter));
     return mlir::success();
   }
 };
@@ -499,7 +538,8 @@ public:
         Rewriter, Op.getLoc(),
         mlir::StringAttr::get(Rewriter.getContext(), "llvm.spv.discard"),
         mlir::ValueRange{});
-    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(Op, mlir::ValueRange{});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(
+        Op, buildDiscardReturnOperands(Op, *getTypeConverter(), Rewriter));
     return mlir::success();
   }
 };
