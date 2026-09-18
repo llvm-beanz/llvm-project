@@ -78,9 +78,12 @@ enum FragmentInvocationField : unsigned {
   FragmentInvocationFieldViewportIndex = 5,
   FragmentInvocationFieldRenderTargetArrayIndex = 6,
   FragmentInvocationFieldViewIndex = 7,
-  FragmentInvocationFieldLiveMask = 8,
-  FragmentInvocationFieldSideEffectMask = 9,
-  FragmentInvocationFieldReserved = 10,
+  // (Roadmap L114) Inserted between `ViewIndex` and `LiveMask` to mirror
+  // `FemeFragmentInvocation`'s own field order exactly.
+  FragmentInvocationFieldSamplePosition = 8,
+  FragmentInvocationFieldLiveMask = 9,
+  FragmentInvocationFieldSideEffectMask = 10,
+  FragmentInvocationFieldReserved = 11,
 };
 
 enum FragmentResultField : unsigned {
@@ -247,9 +250,13 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *PositionTy =
       llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 4), 4);
   llvm::Type *I32x4 = llvm::ArrayType::get(I32Ty, 4);
-  return llvm::StructType::get(Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4,
-                                     I32x4, I32x4, I32Ty, I32Ty, I32Ty,
-                                     llvm::ArrayType::get(I32Ty, 3)});
+  // (Roadmap L114) `SamplePositionTy` mirrors `PositionTy`'s own
+  // `[Lane][Component]` shape, just with 2 components (x, y) instead of 4.
+  llvm::Type *SamplePositionTy =
+      llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 2), 4);
+  return llvm::StructType::get(
+      Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4, I32Ty,
+            SamplePositionTy, I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 3)});
 }
 
 inline llvm::StructType *getFragmentResultType(llvm::LLVMContext &Ctx) {

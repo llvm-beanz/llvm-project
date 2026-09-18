@@ -975,6 +975,14 @@ struct FemeFragmentInvocation {
   /// (not per lane), matching `FemeVertexInvocation::ViewIndex`'s own
   /// "same value for every invocation of one draw" rule.
   uint32_t ViewIndex;
+  /// (Roadmap L114) `gl_SamplePosition` read back as a fragment-shader
+  /// input: the current pass's own sample offset within its pixel
+  /// (`SamplePosition[Lane][0]` = x, `[1]` = y, both in `[0, 1)`),
+  /// mirroring `Position` above -- one value per lane since a 2x2 quad's
+  /// lanes may be shading different samples' worth of coverage in the
+  /// same pass, matching `Position.xy`'s own per-lane, per-`PassSample`
+  /// shift (`Executor.cpp`'s per-sample-pass loop).
+  float SamplePosition[4][2];
   /// Lanes participating in execution, including helper lanes.
   uint32_t LiveMask;
   /// Lanes allowed to perform side effects.

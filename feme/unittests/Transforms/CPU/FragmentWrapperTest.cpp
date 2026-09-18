@@ -280,4 +280,86 @@ TEST(FragmentWrapperTest, LowersRenderTargetArrayIndexSystemValueInput) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression test for roadmap L114: `gl_SamplePosition` read back as a
+// fragment input requires `loadFragmentSystemValue()` to handle
+// `SignatureSystemValue::SamplePosition`, the same shape H3a/H73 already
+// fixed for `ViewportArrayIndex`/`RenderTargetArrayIndex` above -- verify
+// it is lowered the same way, without hitting the "unsupported fragment
+// system value" error path, and that the requested component (`.y`, not
+// just the default `.x`) is actually the one read, mirroring
+// `ResolvesRequestedPositionComponentNotAlwaysX` above for `Position`'s own
+// multi-component GEP resolution.
+TEST(FragmentWrapperTest, LowersSamplePositionSystemValueInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main() #0 {
+      %sposy = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %sposy, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  In.SystemValue = SignatureSystemValue::SamplePosition;
+  In.FirstComponent = 0;
+  In.ComponentCount = 2;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {In, Out};
+  dxil::setEntrySignature(*M->getFunction("ps_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+
+  bool SawError = false;
+  Ctx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        (void)DI;
+        *reinterpret_cast<bool *>(Ctx) = true;
+      },
+      &SawError);
+
+  FragmentWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(SawError) << "loadFragmentSystemValue() reported an "
+                             "\"unsupported fragment system value\" error "
+                             "for SignatureSystemValue::SamplePosition";
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_ps_main"));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // The requested component (`.y`, index 1) is the one actually loaded,
+  // not always the default `.x` -- same check
+  // `ResolvesRequestedPositionComponentNotAlwaysX` performs for `Position`.
+  Function *Entry = M->getFunction("ps_main");
+  ASSERT_TRUE(Entry);
+  bool FoundComponentOneLoad = false;
+  for (const Instruction &I : instructions(*Entry)) {
+    const auto *Load = dyn_cast<LoadInst>(&I);
+    if (!Load || !Load->getType()->isFloatTy())
+      continue;
+    const auto *GEP = dyn_cast<GetElementPtrInst>(Load->getPointerOperand());
+    if (!GEP)
+      continue;
+    auto *LastIdx =
+        dyn_cast<ConstantInt>(GEP->getOperand(GEP->getNumOperands() - 1));
+    if (LastIdx && LastIdx->getZExtValue() == 1)
+      FoundComponentOneLoad = true;
+  }
+  EXPECT_TRUE(FoundComponentOneLoad)
+      << "expected a `load float` from the requested component (1, `.y`) of "
+         "the SamplePosition system value";
+}
+
 } // namespace

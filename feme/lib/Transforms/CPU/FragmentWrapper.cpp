@@ -213,6 +213,25 @@ Value *loadFragmentSystemValue(IRBuilder<> &Builder,
         {Builder.getInt32(0), Builder.getInt32(Elt.FirstComponent)});
     return Builder.CreateLoad(Builder.getFloatTy(), ComponentPtr);
   }
+  case SignatureSystemValue::SamplePosition: {
+    // (Roadmap L114) Mirrors the `Position` case immediately above
+    // exactly, just against `FragmentInvocationFieldSamplePosition`'s own
+    // `[Lane][2]` (not `[4]`) shape.
+    Value *PosPtr = Builder.CreateStructGEP(
+        InvocationTy, InvocationPtr, FragmentInvocationFieldSamplePosition);
+    Value *LanePtr = Builder.CreateInBoundsGEP(
+        cast<ArrayType>(InvocationTy->getElementType(
+            FragmentInvocationFieldSamplePosition)),
+        PosPtr, {Builder.getInt32(0), Builder.getInt32(QuadLane)});
+    auto *LaneTy = cast<ArrayType>(
+        cast<ArrayType>(InvocationTy->getElementType(
+                            FragmentInvocationFieldSamplePosition))
+            ->getElementType());
+    Value *ComponentPtr = Builder.CreateInBoundsGEP(
+        LaneTy, LanePtr,
+        {Builder.getInt32(0), Builder.getInt32(Elt.FirstComponent)});
+    return Builder.CreateLoad(Builder.getFloatTy(), ComponentPtr);
+  }
   case SignatureSystemValue::PrimitiveID: {
     Value *Ptr = Builder.CreateStructGEP(InvocationTy, InvocationPtr,
                                          FragmentInvocationFieldPrimitiveID);
