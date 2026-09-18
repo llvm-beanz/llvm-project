@@ -2916,3 +2916,114 @@ remain open, split out to new roadmap row L120 since they're a distinct
 shape (an `OpVariable` out-parameter for `Modf`, a different
 exponent-scaling math for `Ldexp`) from this session's Pack/Unpack-family
 fix.
+
+## Roadmap L120 (`Ldexp` fixed this session; `Modf` remains open): GLSL.std.450 `Ldexp`
+
+`spirv.GL.Ldexp` already had a TableGen op definition (opcode 53) but no
+feme-side `SPIRVToLLVMPatterns.cpp` lowering pattern at all. Investigated
+`LLVM_LoadExpOp` (`llvm.intr.ldexp`) as the natural target and found its
+own `power`/exponent operand is constrained to always be a *scalar*
+integer (MLIR's `LLVM_PowFI` TableGen base class), even when the `val`
+operand is a vector -- confirmed against both the generated accessor
+types and an existing upstream lit test. `spirv.GL.Ldexp`'s vector form
+legitimately allows `exp` to be a full per-lane vector matching `x`'s
+component count per the GLSL.std.450 spec, so a simple
+`DirectConversionPattern<GLLdexpOp, LLVM::LoadExpOp>` table entry could
+not cover it.
+
+Added a bespoke `GLLdexpPattern`: the scalar form forwards directly to
+one `LLVM::LoadExpOp`; the vector form loops per-lane, extracting `x`/
+`exp` lanes via `llvm.extractelement`, calling `LLVM::LoadExpOp` per
+lane, and reassembling via `llvm.insertelement` into a
+`llvm.mlir.poison`-initialized result vector. New lit test:
+`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-gl-ldexp.mlir` (scalar
+and vector forms), matched against manually-verified `feme-opt` output.
+
+`ninja -C build2 check-feme`: 3194/3197 Passed (+1 new test), 3
+pre-existing Unsupported, 0 Failed -- clean.
+
+Measured real CTS impact: dumped the full case list via
+`deqp-vk --deqp-runmode=txt-caselist` and grepped for `ldexp` (171 cases).
+Of the 7 `dEQP-VK.graphicsfuzz.*ldexp*` cases directly tied to the
+roadmap's original 10-occurrence count, 6 now `Pass` (were `Fail`):
+`cov-apfloat-acos-ldexp`, `cov-inst-combine-add-sub-ldexp`,
+`cov-inst-combine-compares-ldexp`, `cov-simplify-ldexp-exponent-zero`,
+`cov-sinh-ldexp`, `cov-ldexp-undefined-mat-vec-multiply`. The 7th
+(`cov-ldexp-exponent-undefined-divided-fragcoord-never-executed`) still
+fails, but now with a new, more specific diagnostic: `"feme-cpu-simdize:
+unsupported divergent call to 'llvm.ldexp.f32.i32'"` -- not a regression
+(it failed earlier, less specifically, before this fix), but a genuinely
+new, previously-undiscovered gap in `SIMDize.cpp`'s `widenElementwise`:
+it only widens a divergent intrinsic call when every non-result operand
+shares the exact same type as the result, or via one hardcoded
+`is_fpclass` special case; `llvm.ldexp`'s integer exponent operand is
+independently-overloaded and never matches the float result type, so it
+falls through to the generic "unsupported divergent call" path. Recorded
+as new roadmap row L121 (not fixed this session).
+
+A full `graphicsfuzz.*` re-sweep (757 cases, same skip-and-continue
+per-case methodology, same known hangs/crashes excluded) after this fix:
+
+|               | Before this fix | After |
+|---------------|------------------|-------|
+| Pass          | 559              | 568   |
+| Fail          | 166              | 156   |
+| NotSupported  | 8                | 8      |
+
+(568 + 156 + 8 = 732 accounted for; the remaining 25 are the pre-existing
+known hangs/timeouts/crashes, one more than the previously-tracked 24 --
+not investigated further this session, no evidence any of them are new;
+most plausibly test-harness timing variance around the `timeout 20`
+skip-and-continue methodology rather than a real regression, since 0
+`check-feme` regressions and 0 unexpected new Fails were observed
+anywhere else in this sweep.)
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a GL-op legalization fix, not a new Vulkan feature/extension
+surface.
+
+`Modf` remains open (needs a new `SPIRV_GLModfOp` taking an `OpVariable`
+out-parameter, a shape unlike any existing GL op) -- not started this
+session.
+
+## Roadmap L117 (fixed this session): matrix vertex attributes
+
+`feme::graphics::Executor`'s vertex-input fetch previously rejected any
+input `SignatureElement` with `RowCount != 1` outright ("vertex input
+element %u spans %u rows; matrix vertex attributes are not implemented
+yet"), unlike a matrix *varying* between shader stages, which
+`StageStorage`/`readRaw`/`writeRaw` already support directly via an
+optional `Row` parameter. Found via C8b's own re-verification: once C8b's
+fix closed the compile-time SIMDize gap, `dEQP-VK.glsl.linkage.varying.
+struct.mat4x2` (a `mat4x2` bound as a *vertex attribute*, not just a
+varying) advanced to fail here instead, at `vkQueueSubmit` time.
+
+Replaced the outright rejection in `Executor.cpp`'s vertex-input fetch
+loop with a `for (Row = 0; Row != Elt.RowCount; ++Row)` loop: for each
+matrix row, look up and fetch the `VertexBufferBinding`/`VertexAttribute`
+bound at that row's own consecutive `Location` (`*Elt.Location + Row`,
+Vulkan's own one-`VkVertexInputAttributeDescription`-per-row/column
+convention, mirrored by every upstream frontend that splits a matrix
+input parameter into per-row signature elements), then pass `Row`
+through to the existing `StageStorage::writeRaw`'s already-supported
+optional parameter. No `StageStorage` changes were needed -- the matrix-
+varying machinery C8b's own history built already covers this shape;
+only the vertex-input fetch loop itself needed updating to use it for
+attributes too.
+
+New unit test: `ExecutorTest.RendersTriangleWithColorFromAMatrixVertexAttribute`,
+mirroring the existing `InterpolatesConstantColorPackedInAMatrixVarying`
+matrix-varying test, but for a 2x2 matrix vertex attribute fetched from
+two separate per-row `VertexAttribute` bindings at consecutive locations,
+rendered into a solid-color triangle and checked pixel-for-pixel.
+
+Real-repro result: `dEQP-VK.glsl.linkage.varying.struct.mat4x2` now
+`Pass`es end to end (was `Fail` at `vkQueueSubmit` on this exact
+rejection before this fix).
+
+`ninja -C build2 check-feme`: 3195/3198 Passed (+1 new test), 3
+pre-existing Unsupported, 0 Failed -- clean.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a bug fix in existing vertex-input handling, not a new Vulkan
+feature/extension surface.
