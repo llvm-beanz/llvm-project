@@ -1451,3 +1451,92 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.interface_matching.decoration_mismatch.*" \
   --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
+
+# L107: measured impact (fix landed)
+
+## Root cause
+
+A producer-side gap in `SPIRVToLLVMPatterns.cpp`'s
+`OffsetStructMemberReorderAccessChainPattern`, not the initially-suspected
+generic upstream `AccessChainPattern` (that hypothesis turned out
+incorrect once traced further). This pattern remaps a `spirv.AccessChain`'s
+declared (SPIR-V) struct-member index to its real physical LLVM field
+index whenever `layOutStructIfOffsetsMatch` (L103/L104) inserted a
+synthetic `[N x i8]` pad -- but it only ever peeled a **single** outer
+array dimension before giving up on finding the struct to remap into
+(`MemberIndexPos` 0 or 1, matching either "struct behind the base
+pointer directly" or "struct behind one array of struct instances").
+
+A tessellation-control shader's own loose (non-`Block`) array-of-structures
+output (`out TestStruct testStructArray[3];`) gets an *additional*, implicit
+per-control-point array dimension from TCS's own execution model
+(`gl_InvocationID`-indexed), giving the real declared type an effective
+`testStructArray[][3]` shape -- the struct sits **two** array dimensions
+deep, not one. With `StructTy` left `null` after this pattern's own
+single-level peel, its own guard bailed (`notifyMatchFailure`), falling
+through to MLIR's generic `AccessChainPattern`, which forwards the
+declared (pre-remap) member index straight through unmodified.
+
+Confirmed via a temporary `errs()` trace (`FEME_L107_TRACE`, gated on an
+env var, mirroring `FEME_L105_TRACE`'s technique) in
+`CanonicalizeStage.cpp`'s consumer-side resolution: the byte offset baked
+into the compiled IR for `testStructArray[gl_InvocationID][2].
+variableInStruct` was `68`, which decomposes exactly as `2 * 32 (the
+correct, padded per-instance stride: 4-byte `float` + 12-byte pad +
+16-byte `vec4`) + 4` -- the *outer* array-of-array stride was already
+correct, but the residual `4` lands exactly at the pad's own start (right
+after the leading `float`), not at `variableInStruct`'s real offset of 16.
+This confirmed the *inner* member selector itself, not the array
+indexing, carried the bug -- consistent with an unremapped, declared
+member index (1) being forwarded straight into the 3-physical-field
+padded struct (selecting the pad, physical field 1, instead of the real
+member at physical field 2).
+
+## Fix
+
+Generalized `OffsetStructMemberReorderAccessChainPattern`'s array-peeling
+logic from a single `if` (0 or 1 array level) to a `while` loop peeling
+any number of nested `spirv.array` levels before testing for a
+`spirv.struct`, tracking one `MemberIndexPos` per level peeled. The GEP
+construction was correspondingly generalized to forward that many outer
+array indices (one per level) ahead of the (now correctly remapped)
+member selector, instead of special-casing exactly one array index.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start.
+- New unit test
+  `SPIRVToLLVMTest.OutputStorageTwoArrayDimsStructRemapsMemberIndex`,
+  modeling the exact two-array-dims-then-struct shape directly (an
+  `Output`-storage `spirv.array<2 x spirv.array<3 x spirv.struct<(f32,
+  vector<4xf32>)>>>`, accessed via a 3-index `AccessChain`): confirms the
+  resulting GEP's trailing indices are `[..., <outer-idx>, <inner-idx>,
+  2]` (the remapped physical index), not `[..., <outer-idx>, <inner-idx>,
+  1]` (the unremapped, declared index the bug used to forward straight
+  through).
+- `ninja check-feme`: 3176 Passed, 3 pre-existing Unsupported, 0 Failed --
+  up 1 test, no regressions.
+- The originally-crashing case
+  (`dEQP-VK.pipeline.pipeline_library.interface_matching.
+  decoration_mismatch.out_flat_in_none_member_of_array_of_structures_
+  vert_tesc_out_tese_in_frag`) now Passes.
+- Full `pipeline_library.interface_matching.*` re-sweep (360 cases, one
+  case at a time, same methodology as L105): **360 Pass / 0 Fail / 0
+  Assert** -- up from 354 Pass/0 Fail/6 Assert, an exact +6 shift with
+  zero collateral regressions. This closes out the `interface_matching.
+  decoration_mismatch.*`/L105/L107 investigation chain entirely.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+`AccessChain`-conversion correctness fix; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` are unchanged.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.interface_matching.decoration_mismatch.*" \
+  --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
