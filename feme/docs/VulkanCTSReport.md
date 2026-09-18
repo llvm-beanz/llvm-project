@@ -3258,3 +3258,77 @@ new Vulkan feature/extension surface.
 
 This row is now **closed**. C8b's own row has been updated to reflect
 that its guard was removed with 0 further regressions.
+
+## Roadmap L116(a) (closed): per-leaf decomposition for aggregate masked load/store
+
+`MaskIntrinsics.cpp`'s `appendScalarMangling` has no notion of a
+struct/array element type at all -- masked load/store semantics are
+inherently per-element, so a masked op over a whole aggregate has no
+natural single-instruction lowering the way a masked scalar/vector
+access does. This left any masked access to a `struct`- or
+`mat4`-typed local array element indexed by a divergent index inside a
+loop (exactly graphicsfuzz's own idiom) diagnosed as unsupported by
+`feme-cpu-masked-mem-op` rather than legalized -- by far the largest
+single bucket in the original L116 sweep, ~59% of that sweep's `Fail`
+error volume.
+
+**Fix**: added `createMaskedLoadRecursive`/`createMaskedStoreRecursive`
+to `Linearize.cpp`. Each recursively walks a struct/array-typed access
+one leaf (scalar or fixed-vector) at a time: `CreateStructGEP`/
+`CreateGEP` compute each leaf's own address, `insertvalue`/
+`extractvalue` reassemble/decompose the aggregate value itself, and
+`commonAlignment` narrows each leaf's own alignment from the whole
+access's base alignment and the leaf's byte offset (mirroring
+`SIMDize.cpp`'s own per-component alignment narrowing for a wave-widened
+vector gather/scatter, roadmap L118's own neighboring code). Each leaf
+is still handed to the existing, entirely unchanged
+`createMaskedLoad`/`createMaskedStore` -- so this fix needed no change
+at all to `MaskIntrinsics.cpp`'s own mangling, nor to `SIMDize.cpp`:
+the decomposed leaves are ordinary scalar/vector masked load/store
+calls, a shape `SIMDize.cpp` already fully supports (confirmed directly
+via `feme-opt --llvm -passes="feme-cpu-linearize,feme-cpu-simdize"`
+against a hand-written `{i32, <2 x float>}` repro -- both leaves widen
+cleanly into a `llvm.masked.scatter`/per-lane store with no error).
+
+The pre-existing `LinearizeTest.
+UnsupportedAggregateMaskedStoreDiagnosesGracefullyInsteadOfCrashing`
+regression case was reduced against `{float, float}` -- a shape this
+fix now fully supports -- so it was rewritten against a genuinely-
+still-unsupported leaf type (`x86_fp80`) to keep covering the
+graceful-diagnostic path for whatever leaf shape decomposition itself
+cannot yet handle. New tests
+`DecomposesAggregateMaskedStorePerLeaf`/`DecomposesAggregateMaskedLoadPerLeaf`
+cover the new decomposition itself (a two-leaf struct store, and a
+struct-containing-an-array load reassembled via `insertvalue`).
+
+`ninja -C build2 check-feme`: 3199/3202 Passed (+2 new tests), 3
+pre-existing Unsupported, 0 Failed -- clean.
+
+A full `graphicsfuzz.*` re-sweep (733 of 757 cases, same 24-name hang
+exclusion list reused across sessions), immediately following L122's
+own confirmation sweep in this same session:
+
+|               | Before this fix (L122's own 593/132/8) | After |
+|---------------|------------------------------------------|--------|
+| Pass          | 593                                       | 594    |
+| Fail          | 132                                       | 131    |
+| NotSupported  | 8                                         | 8      |
+
+**+1 Pass, 0 regressions.** A smaller real-world win than this row's
+own ~59%-of-error-volume estimate might suggest: most of the original
+197 `Fail` cases this error occurred in also hit at least one other,
+still-open `L116` sub-row's own gap (see L116(b)'s divergent-branch/
+reconvergence gaps, L116(d)'s `spirv.Constant`/`CompositeConstruct`
+aggregate-legalization gap, or L116(f)'s un-root-caused hangs/crashes)
+before the shader could ever reach a real pass/fail verdict -- so this
+fix is a necessary, but for most of those cases not sufficient, step
+toward closing them. It is still real, independently-verified progress
+(confirmed error-free legalization end to end for the shape this row
+names), and removes what was previously the single largest blocking
+gap in the L116 breakdown.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal `LinearizePass` legalization fix, not a new
+Vulkan feature/extension surface.
+
+This row is now **closed**.
