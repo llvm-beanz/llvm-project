@@ -58,31 +58,21 @@ complete the work?
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Root-cause L115** (~1-2 hours to scope, unknown to fix -- a new
-   SPIR-V extended-instruction import, likely a nontrivial chunk of
-   work once scoped). Per the L112 precedent, check upstream MLIR's
-   own GLSL.std.450 import path first (`mlir/lib/Target/SPIRV/...`,
-   look for how `InterpolateAtCentroid`/`interpolateAtSample`/
-   `interpolateAtOffset` extended instructions are (or aren't) handled)
-   before assuming the gap is in feme's own `SPIRVToLLVMPatterns.cpp`.
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a single reduced case rerun
-   (the L112/L113/L114 technique, confirmed useful again three
-   sessions running) should surface exactly which of the 3 opcodes is
-   hit first and where.
-2. **Re-sweep `multisample_interpolation.*` after L115 lands** --
-   expect most of the 115 failures to flip to Pass; worth also
-   re-checking the 12 that already passed and the 120 NotSupported to
-   make sure L115's fix doesn't touch their classification.
-3. **Continue the L106 sweep after L115 closes**: `pipeline.monolithic.*`/
-   `subgroups.*`/`compute.*`/`graphicsfuzz.*` remain the large,
-   untriaged candidates noted for several sessions running -- still no
-   session has picked one of these up yet, worth prioritizing one of
-   them next specifically to break the multi-session `pipeline.*`-only
-   pattern.
-4. **Standing gotcha, still true**: export
-   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
-   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
-5. **Technique confirmed again this session**: `deqp-vk`'s
-   `--deqp-caselistfile` flag does not exist (despite looking like the
-   obvious name) -- use `-n "case1,case2,..."` (comma-joined, supports
-   wildcards) instead; saved a round-trip of guessing flag names.
+1. **L116(a)** (~30 min to confirm same-as-C8b, then unknown to fix
+   depending on answer): grep `SIMDize.cpp`'s own aggregate
+   `insertvalue`/`extractvalue` handling and `MaskIntrinsics.cpp`'s
+   `appendScalarMangling` side by side -- confirm whether they share one
+   underlying "aggregate values through the CPU backend" gap before
+   writing any code.
+2. **L116(c)'s `Determinant`** (~half a day, same shape as L115(a)):
+   add `SPIRV_GLDeterminantOp` to `SPIRVGLOps.td` (needs a square-matrix
+   operand shape, not one of the existing generic patterns) plus a
+   feme-side lowering (this one's just arithmetic, no runtime callback
+   needed unlike L115(b) -- should close fully in one session).
+3. **L116(e)'s two one-off bugs** (~1-2 hours combined): good if you
+   want two visible wins before tackling (a) or (c).
+4. **L116(f)'s remaining 22 unroot-caused hangs/crashes**: one-at-a-time
+   reduction, same technique used on the two already investigated.
+5. Once L116 closes (or is judged big enough to move on from), go back
+   to L106's other untriaged candidates: `pipeline.monolithic.*`,
+   `subgroups.*`, `compute.*` -- still nobody has picked these up.
