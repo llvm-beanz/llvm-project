@@ -867,3 +867,80 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk --deqp-case="dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.composite.matrix.mat2x3" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L99: measured impact (fix landed)
+
+## Outcome
+
+**Fixed.** Root-caused and fixed this session's continuation: the bug was
+not in `SPIRVToLLVMPatterns.cpp`'s matrix conversion at all (the
+suspected location from the prior session's own reduction), but in
+`feme::cpu::LocalNarrowVectorArrayInitPass` (roadmap H69) applying its
+tight-offset store-splitting fixup to a global it was never designed for.
+
+## Investigation
+
+Built a standalone repro (`mat2x3.frag`, mirroring the CTS's own
+generated GLSL) and traced `feme-translate`'s SPIR-V-to-LLVM-IR
+translation in isolation -- self-consistent, no bug visible there.
+Captured the *real*, fully-CPU-pipeline-processed IR for the actual CTS
+case via `FEME_DUMP_IR=1` and found the divergence: the matrix global's
+per-column init stores land at a *tight* 12-byte offset for column 1,
+while the `m[i][j]` read path's `getelementptr` computes a *natural-ABI*
+16-byte stride (LLVM's `DataLayout` rounds a 3-lane vector's 12-byte
+store size up to a 4-lane vector's 16-byte alloc size -- confirmed via
+an isolated `opt -passes=instsimplify` GEP-folding test against the
+real CPU target datalayout). Bisected the CPU `Normalize` pass pipeline
+one pass at a time (`feme-opt --llvm -passes=<pass>`) and found
+`LocalNarrowVectorArrayInitPass` (H69) is the pass performing this
+split -- but H69's own scoping (any `Private`/`Function`-storage
+address-space-0 global whose array element is a narrow vector) is too
+broad: it also matches a `spirv.MatrixType`-turned array-of-columns
+global, which is read back through MLIR upstream's own generic,
+natural-ABI-strided `AccessChainOp` conversion, not the tight-offset
+`i8`-GEP convention H69's own mesh-scratch-array scenario
+(`uint3 idx[2]` feeding `gl_PrimitiveTriangleIndicesEXT`) actually uses.
+
+Fixed by adding `hasTightGEPUser` to `LocalNarrowVectorArrayInitPass`:
+it now only rewrites a global's init store if some other real user of
+that same global is itself already a tight (`i8`-element) `getelementptr`
+-- true for H69's own case, false for a matrix global -- so the pass no
+longer "fixes" a global whose reads were never tight to begin with.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` before and during this session (note: `VK_ICD_FILENAMES` must
+  be exported explicitly each session -- it is not set in any shell
+  profile).
+- `ninja check-feme`: 3169 Passed, 3 pre-existing Unsupported, 0 Failed
+  (no regressions; 4 new `LocalNarrowVectorArrayInitTest` cases,
+  including the new `IgnoresGlobalWithOnlyNaturalGEPReaders` regression
+  test for this exact bug).
+- Reduced case (`composite.matrix.mat2x3`): now **1/1 Pass** (was Fail).
+- Full `composite.matrix.*` re-sweep (90 cases across 5 stages): **45/45
+  Pass** of the supported cases (45 not-supported, unrelated), up from
+  27/45 pre-fix -- exactly the 18 `matNx3` cases across the 5 stages,
+  zero collateral regressions.
+- Full `pipeline_library.spec_constant.*` re-sweep (1170 cases): **470
+  Pass / 185 Fail / 515 NotSupported**, up from the pre-fix 455/200/515
+  -- an exact +15/-15 shift (this session's own standalone-vs-mustpass
+  case counts differ slightly from the 18-case CTS-stage sweep above
+  since not every stage/matrix combination is present in the default
+  build's mustpass list). The remaining 185 failures are the three
+  other, already-tracked, unrelated buckets (`VectorExtractDynamic`,
+  `OpTypeArray` count, "GEP into vector") now tracked as roadmap L100.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+rendering-correctness fix.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.composite.matrix.*" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
+
