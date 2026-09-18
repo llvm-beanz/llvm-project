@@ -4965,6 +4965,72 @@ getOffsetSortedMemberIndices(mlir::spirv::StructType Type) {
 /// cannot help a struct whose members are declared out of physical order
 /// in the first place: see its own comment) has already failed.
 
+/// (Roadmap L104) Returns \p Member with every vector-typed leaf whose own
+/// lane count is not a power of two (only ever 3, since SPIR-V vectors
+/// only ever have 2/3/4 lanes) substituted for its own
+/// `getTightVectorArrayType`-style tight array form, wrapped in that same
+/// `kTightVectorMarkerName` marker struct -- recursing through any
+/// enclosing `LLVM::LLVMArrayType` (an array-of-vec3 member, or a
+/// `spirv.matrix`'s own column-vector array, both convert to this exact
+/// shape) so a `matNx3`/array-of-`vec3` member is substituted the same
+/// way, one level in. Returns \p Member completely unchanged (same
+/// `mlir::Type`, not merely bit-identical) whenever no substitution is
+/// needed anywhere inside it, so a caller can cheaply tell whether
+/// anything actually changed.
+///
+/// Unlike `convertOffsetStructTypeIgnoringDecorations`'s own tight-vector
+/// *retry* (tried only after a first, unsubstituted attempt already fails
+/// to reproduce every declared `Offset`), `layOutStructIfOffsetsMatch`'s
+/// own non-offset branch below has no declared offset to validate a retry
+/// against in the first place -- so this substitution must be applied
+/// proactively, every time, rather than only as a fallback. The
+/// substitution is needed there for exactly the same underlying reason:
+/// an N-lane vector's own real ABI *alloc size* is ambiguous across
+/// `DataLayout`s whenever N is not a power of two. LLVM's generic
+/// "no explicit vector spec" rule rounds a vector's own alignment (and so
+/// its alloc size) up to the next power of two, but the SPIR-V *logical*
+/// target's own `DataLayout` (`e-ve-i64:64-n8:16:32:64-G10`,
+/// `computeSPIRVDataLayout`'s own `Triple::spirv` case) sets
+/// `vectorsAreElementAligned` instead, aligning (and so sizing) a vector
+/// as its own *element*'s alignment -- e.g. a `vec3`'s alloc size is 12
+/// bytes there, not 16. This codebase's own struct-typed `AccessChain`s
+/// fold to a raw byte offset using that SPIR-V-logical `DataLayout` at
+/// `SPIRVToLLVMTranslator`'s own translation time, but a whole-aggregate
+/// `store`'s own *materialization* into individual byte writes happens
+/// later, using whichever `DataLayout` is attached to the module at that
+/// (later) point -- `feme::cpu`'s own real host `DataLayout`, which has
+/// no "element aligned" rule and so disagrees on a `vec3` member's own
+/// alloc size (16 bytes, rounded). Two different `DataLayout`s computing
+/// two different offsets for the very same struct member silently
+/// corrupts every member declared after it. An LLVM array's own alloc
+/// size has no target-specific rounding at all (its alignment is simply
+/// its element's own alignment, with no power-of-two adjustment),
+/// removing the ambiguity entirely -- this is the exact same technique
+/// `getTightVectorArrayType` already uses for an offset-decorated
+/// struct's own retry, just applied here unconditionally (a vec2/vec4
+/// member's own alloc size already agrees between both `DataLayout`s, so
+/// leaving it as a raw vector -- unlike a vec3 -- changes nothing and
+/// avoids touching any already-correct struct's own converted shape).
+mlir::Type substituteTightVectorMembersIfNeeded(mlir::Type Member) {
+  if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Member)) {
+    if (llvm::isPowerOf2_64(VectorTy.getNumElements()))
+      return Member;
+    mlir::Type ArrayTy = mlir::LLVM::LLVMArrayType::get(
+        VectorTy.getElementType(), VectorTy.getNumElements());
+    return mlir::LLVM::LLVMStructType::getNewIdentified(
+        VectorTy.getContext(), kTightVectorMarkerName, {ArrayTy});
+  }
+  if (auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Member)) {
+    mlir::Type NewElementTy =
+        substituteTightVectorMembersIfNeeded(ArrTy.getElementType());
+    if (NewElementTy == ArrTy.getElementType())
+      return Member;
+    return mlir::LLVM::LLVMArrayType::get(NewElementTy,
+                                          ArrTy.getNumElements());
+  }
+  return Member;
+}
+
 /// (Roadmap H135) Returns \p Ty's natural ABI alignment *as if* it (and
 /// every aggregate nested inside it) were laid out non-packed, ignoring
 /// whatever `isPacked` an already-built `LLVM::LLVMStructType` actually
@@ -5035,7 +5101,12 @@ mlir::Type layOutStructIfOffsetsMatch(
     llvm::SmallVector<mlir::Type, 8> Laid;
     llvm::SmallVector<unsigned, 8> PhysicalIndexOf(Members.size(), 0);
     for (unsigned I = 0, E = Members.size(); I != E; ++I) {
-      mlir::Type Member = Members[I];
+      // (Roadmap L104) See substituteTightVectorMembersIfNeeded's own
+      // comment: a raw vec3 (or array-of-vec3/matNx3) member's own alloc
+      // size is ambiguous across DataLayouts, so it must always be
+      // substituted here, not merely retried after the fact -- this
+      // branch has no declared Offset to validate a retry against.
+      mlir::Type Member = substituteTightVectorMembersIfNeeded(Members[I]);
       uint64_t Alignment = getNaturalAlignmentIgnoringPacking(Member, DL);
       StructAlignment = std::max(StructAlignment, Alignment);
       uint64_t Aligned = llvm::alignTo(Cursor, Alignment);
@@ -5720,7 +5791,14 @@ bool remapNestedStructMemberIndices(
       // still remains -- a vector is always a leaf, so this is the last
       // possible insertion point on this path.
       ElementType = StructTy.getElementType(Declared);
-      if (StructTy.hasOffset() && Pos + 1 < Op.getIndices().size()) {
+      // (Roadmap L104) No longer gated on StructTy.hasOffset(): a
+      // non-offset struct's own layout (layOutStructIfOffsetsMatch's
+      // non-offset branch) now also substitutes a non-power-of-two-lane
+      // vector member (e.g. vec3) for this same marker-wrapped form, for
+      // exactly the same underlying reason an offset-decorated struct's
+      // own retry does -- see substituteTightVectorMembersIfNeeded's own
+      // comment.
+      if (Pos + 1 < Op.getIndices().size()) {
         if (mlir::isa<mlir::VectorType>(ElementType)) {
           mlir::Type PhysicalFieldTy =
               getStructMemberPhysicalFieldType(StructTy, Declared, Converter);
@@ -6084,13 +6162,17 @@ public:
     Indices.push_back(AdjustedMember);
     mlir::Type SelectedMemberType =
         StructTy.getElementType(static_cast<unsigned>(*MemberIndex));
-    // (Roadmap H124o) \p MemberIndex's own member may itself be a vector
-    // that needed `getTightVectorArrayType`'s marker-struct substitution
-    // (see remapNestedStructMemberIndices's own comment for why this is
-    // checked against \p StructTy's real converted field type, not a
-    // standalone reconversion of the vector type). Only relevant when a
-    // further (component-selecting) index still remains.
-    if (StructTy.hasOffset() && Op.getIndices().size() > MemberIndexPos + 1 &&
+    // (Roadmap H124o, broadened by L104) \p MemberIndex's own member may
+    // itself be a vector that needed `getTightVectorArrayType`'s
+    // marker-struct substitution (see remapNestedStructMemberIndices's
+    // own comment for why this is checked against \p StructTy's real
+    // converted field type, not a standalone reconversion of the vector
+    // type). No longer gated on StructTy.hasOffset(): a non-offset
+    // struct's own layout now also substitutes a non-power-of-two-lane
+    // vector member this same way (see
+    // substituteTightVectorMembersIfNeeded's own comment). Only relevant
+    // when a further (component-selecting) index still remains.
+    if (Op.getIndices().size() > MemberIndexPos + 1 &&
         mlir::isa<mlir::VectorType>(SelectedMemberType)) {
       mlir::Type PhysicalFieldTy = getStructMemberPhysicalFieldType(
           StructTy, static_cast<unsigned>(*MemberIndex), *getTypeConverter());
