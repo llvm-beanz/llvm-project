@@ -1283,23 +1283,39 @@ public:
                                     /*isNonTemporal=*/false);
     }
     auto memoryAccess = *op.getMemoryAccess();
-    switch (memoryAccess) {
-    case spirv::MemoryAccess::Aligned:
-    case spirv::MemoryAccess::None:
-    case spirv::MemoryAccess::Nontemporal:
-    case spirv::MemoryAccess::Volatile: {
-      unsigned alignment =
-          memoryAccess == spirv::MemoryAccess::Aligned ? *op.getAlignment() : 0;
-      bool isNonTemporal = memoryAccess == spirv::MemoryAccess::Nontemporal;
-      bool isVolatile = memoryAccess == spirv::MemoryAccess::Volatile;
-      return replaceWithLoadOrStore(op, adaptor.getOperands(), rewriter,
-                                    *this->getTypeConverter(), alignment,
-                                    isVolatile, isNonTemporal);
-    }
-    default:
+    // `MemoryAccess` is a bit-enum attribute (its `Volatile`/`Aligned`/
+    // `Nontemporal` bits are independently combinable, e.g. a single
+    // `spirv.Store` legitimately carrying `Volatile|Nontemporal`
+    // together), so this can no longer switch on `memoryAccess` itself
+    // as if it were a plain enum with one case active at a time -- a
+    // combined value like `Volatile|Nontemporal` is not equal to any
+    // single `case`, so it always fell to `default` below and failed to
+    // convert at all (a real dEQP-VK.graphicsfuzz.* case,
+    // `spv-stable-pillars-volatile-nontemporal-store`, does exactly
+    // this). Every bit this lowering doesn't itself model (anything
+    // beyond `Aligned`/`Volatile`/`Nontemporal`, e.g. the Vulkan-memory-
+    // model-only `MakePointerAvailable`/`MakePointerVisible`/
+    // `NonPrivatePointer` or the INTEL alias-scope bits) is still
+    // unsupported and still reported as a conversion failure, exactly as
+    // before.
+    spirv::MemoryAccess Supported = spirv::MemoryAccess::Aligned |
+                                    spirv::MemoryAccess::Volatile |
+                                    spirv::MemoryAccess::Nontemporal;
+    if (spirv::bitEnumContainsAny(memoryAccess, ~Supported)) {
       // There is no support of other memory access attributes.
       return failure();
     }
+    unsigned alignment =
+        spirv::bitEnumContainsAll(memoryAccess, spirv::MemoryAccess::Aligned)
+            ? *op.getAlignment()
+            : 0;
+    bool isNonTemporal = spirv::bitEnumContainsAll(
+        memoryAccess, spirv::MemoryAccess::Nontemporal);
+    bool isVolatile =
+        spirv::bitEnumContainsAll(memoryAccess, spirv::MemoryAccess::Volatile);
+    return replaceWithLoadOrStore(op, adaptor.getOperands(), rewriter,
+                                  *this->getTypeConverter(), alignment,
+                                  isVolatile, isNonTemporal);
   }
 };
 

@@ -218,6 +218,44 @@ spirv.func @store_nontemporal(%arg0 : f32) "None" {
   spirv.Return
 }
 
+// Checks a `spirv.Store`/`spirv.Load` combining two independent
+// `MemoryAccess` bits at once (`Volatile|Nontemporal`) -- a real
+// dEQP-VK.graphicsfuzz.spv-stable-pillars-volatile-nontemporal-store SPIR-V
+// shape. `MemoryAccess` is a bit-enum attribute whose flags are
+// independently combinable, so this must not be confused with the single
+// `Aligned`/`Volatile`/`Nontemporal`-only cases above: this previously fell
+// through to the default "unsupported memory access" case and failed
+// conversion outright, since a combined value is not equal to any single
+// enumerant.
+
+// CHECK-LABEL: @store_volatile_nontemporal
+spirv.func @store_volatile_nontemporal(%arg0 : f32) "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: llvm.store volatile %{{.*}}, %{{.*}} <nontemporal> : f32, !llvm.ptr
+  spirv.Store "Function" %0, %arg0 ["Volatile|Nontemporal"] : f32
+  spirv.Return
+}
+
+// CHECK-LABEL: @load_volatile_nontemporal
+spirv.func @load_volatile_nontemporal() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: llvm.load volatile %{{.*}} <nontemporal> : !llvm.ptr -> f32
+  %1 = spirv.Load "Function" %0 ["Volatile|Nontemporal"] : f32
+  spirv.Return
+}
+
+// Checks a combination that also carries `Aligned` (so all three
+// currently-supported bits are set at once), confirming the alignment
+// operand is still parsed and honored alongside the other two bits.
+
+// CHECK-LABEL: @store_volatile_nontemporal_aligned
+spirv.func @store_volatile_nontemporal_aligned(%arg0 : f32) "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: llvm.store volatile %{{.*}}, %{{.*}} <alignment = 4, nontemporal> : f32, !llvm.ptr
+  spirv.Store "Function" %0, %arg0 ["Volatile|Aligned|Nontemporal", 4] : f32
+  spirv.Return
+}
+
 //===----------------------------------------------------------------------===//
 // spirv.Variable
 //===----------------------------------------------------------------------===//
