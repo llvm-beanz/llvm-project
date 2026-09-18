@@ -91563,3 +91563,109 @@ gap was being fixed, not a coincidentally-related one.
    go back to L106's other untriaged candidates: `pipeline.monolithic.*`,
    `subgroups.*`, `compute.*` -- still nobody has picked these up across
    several sessions now.
+
+# Session: L119 closed for Pack/Unpack Snorm/Unorm; Modf/Ldexp split to L120
+
+## Do this first
+
+Nothing left to do -- this session's work is committed. If picking up
+next, start at "Next steps" below, item 1.
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+   Device` (every-session check, done).
+2. Picked up L119 (opened last session): the six remaining GLSL.std.450
+   gaps from L116(c)'s original sweep, minus `Determinant` (already
+   fixed).
+3. Found L119 actually bundles two different kinds of gap, not one:
+   - Four ops (`PackUnorm4x8`/`PackUnorm2x16`/`UnpackUnorm2x16`/
+     `UnpackUnorm4x8`) had **no TableGen definition at all**.
+   - Two ops (`PackSnorm4x8`/`UnpackSnorm4x8`) **did** have a definition
+     but **no feme-side lowering pattern**, ever.
+4. Caught a factual error in last session's own L119 text: it said
+   `UnpackSnorm2x16`/`PackSnorm2x16` "already deserialize" but fail
+   legalization. Grepped all of `mlir/` -- those two ops don't exist
+   anywhere. Almost certainly a mix-up with `UnpackSnorm4x8`/
+   `PackSnorm4x8` (the ones with the real gap above). Corrected in both
+   `Roadmap.md` and `VulkanCTSReport.md` this session so it doesn't get
+   copy-pasted forward again.
+5. Added the four missing op definitions to `SPIRVGLOps.td`
+   (opcodes 55/57/61/64), mirroring `PackSnorm4x8`/`UnpackSnorm4x8`'s own
+   shape. Built `mlir-opt`/`mlir-translate`, added parse/print + binary
+   roundtrip lit tests, ran them clean. **Committed separately.**
+6. Wrote two templated pattern classes, `GLPackNormPattern`/
+   `GLUnpackNormPattern` (parameterized by component count / bits per
+   component / signedness), covering all six affected ops with one
+   implementation each of the GLSL.std.450 spec's own pack/unpack
+   formula. Registered all six. Added a new lit test file with all six
+   instantiations, checked the generated IR by hand against `feme-opt`'s
+   actual output before writing `CHECK` lines (didn't guess).
+7. Built `feme-opt`, ran `ninja check-feme`: 3193/3196 Passed (+1 new
+   test), 3 Unsupported, 0 Failed. Ran the broader `mlir/test/Dialect/
+   SPIRV`/`mlir/test/Target/SPIRV`/`mlir/test/Conversion/SPIRVToLLVM`
+   suites too -- 0 regressions. **Committed separately.**
+8. Found 8 real CTS repro cases via `grep -li` over the graphicsfuzz
+   `.amber` directory for pack/unpack/unorm/snorm keywords. Ran them:
+   8/8 Pass (all previously failed pipeline creation).
+9. Ran a full `graphicsfuzz.*` re-sweep (757 cases this session, not 733
+   -- the extra count turned out to be a stray `GROUP:` header line in
+   `deqp-vk`'s own case-list output, not a real new case; same 24
+   hangs/crashes reconfirmed by name, excluded). Result: exactly a
+   10-case Pass/Fail flip (549->559 Pass, 176->166 Fail), matching the
+   roadmap's own per-op occurrence-count arithmetic exactly (2+1+1+4+2 =
+   10). Nothing else moved.
+10. Updated `Roadmap.md`'s L119 row (struck through the fixed portion,
+    corrected the `UnpackSnorm2x16` error, split `Modf`/`Ldexp` into a
+    new flat `L120` row) and added a matching `VulkanCTSReport.md`
+    section. **Committed separately.**
+
+## Technique confirmed again
+
+**`deqp-vk`'s own `--deqp-runmode=txt-caselist` dump is a fast way to get
+a full, exact case list for a group** -- faster and more reliable than
+grepping `.amber` filenames and guessing the `dEQP-VK.*` case-name
+mapping by hand. Watch out for a stray `GROUP: <name>` header line mixed
+into the `TEST:`-prefixed lines in the dumped file -- filter it out
+before treating the line count as a case count (cost ~10 minutes of
+confusion this session before spotting it).
+
+**`--deqp-watchdog=enable` did not actually kill the known-hanging
+`arr-value-set-to-arr-value-squared` case within 5+ minutes** despite
+setting both time-limit flags -- gave up on it and fell back to the
+established manual `timeout <n> ./deqp-vk -n <single-case>` skip-and-
+continue loop (one process per case), which is slower per-case (process
+startup overhead x757) but actually bounded and reliable. Confirms this
+is still the only working technique for `graphicsfuzz.*`, not a one-off
+finding from a prior session.
+
+## Next steps, in order
+
+1. **L118** (~half a day to a day, still the highest-value fix
+   outstanding, still not started by anyone): teach `SIMDize.cpp`'s
+   stale-use recovery (~line 4515-4595) to either prove all lanes'
+   masks/storage agree before broadcasting lane 0, or skip the lane-0
+   shortcut entirely for a `MaskedAllocas`-sourced value.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped, still
+   the single highest-value fix left in the L116 breakdown by error
+   volume, ~59% of the original sweep's `Fail`s): per-leaf decomposition
+   for a struct/array/matrix masked load/store in `MaskIntrinsics.cpp`/
+   `Linearize.cpp`.
+3. **L120** (new this session): `Modf` (6 occurrences -- needs a new
+   `SPIRV_GLModfOp` taking an `OpVariable` out-parameter, a shape unlike
+   any existing GL op; `GLFrexpStructOp`/`ModfStructPattern` already
+   cover the pointer-free struct-returning sibling upstream, but not this
+   pointer-taking one) and `Ldexp` (10 occurrences -- already has a
+   TableGen op definition, opcode 53, but no feme-side lowering pattern
+   at all; likely `f * exp2(e)` via `llvm.exp2`/`llvm.fmul`, or direct
+   float-exponent-bit manipulation).
+4. **L117** (not yet scoped in detail): matrix vertex attributes in
+   `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
+   matrix column at consecutive locations.
+5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
+   one-at-a-time reduction; no new technique found this session (see
+   the watchdog note above -- it doesn't help here).
+6. Once L116(a)/L117/L118/L120 close or are judged big enough to set
+   aside, go back to L106's other untriaged candidates:
+   `pipeline.monolithic.*`, `subgroups.*`, `compute.*` -- still nobody
+   has picked these up across many sessions now.
