@@ -2376,6 +2376,74 @@ TEST(SIMDizeTest, ReadsBackRealUniformValueThroughAMaskedLoadFeedingAnUnwidenedP
   EXPECT_TRUE(FoundUniformPHI);
 }
 
+// Roadmap L118: the recovery `ReadsBackRealUniformValueThroughAMaskedLoad
+// FeedingAnUnwidenedPhi` above exercises always extracted a *hardcoded*
+// lane 0 of the widened masked-load result, which is only a safe stand-in
+// for "some real, active lane" in a compute/task/mesh shader, whose
+// `EntryMask` lane 0 is always a real invocation (`buildEntryMask`'s own
+// `WavesPerGroup` loop bound). A fragment shader's own per-quad
+// `EntryMask` (`FragmentWrapper.cpp`'s `buildQuadMaskValue`) can leave
+// lane 0 itself inactive (a "helper" invocation), so hardcoding lane 0
+// here can broadcast a masked-off passthru/garbage value instead of a
+// real one -- found root-causing a real CTS regression, see roadmap
+// C8b/L118's own text. The fix derives the lane to extract from
+// `EntryMask` itself (this pass's own `wave_entry_mask` parameter, always
+// real in every stage) instead of assuming lane 0.
+TEST(SIMDizeTest, RecoversUniformValueFromEntryMaskDerivedLaneNotHardcodedLaneZero) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %g, ptr %out, i32 %uniform_bound) #0 {
+    entry:
+      %cond = icmp ult i32 %uniform_bound, 100
+      br i1 %cond, label %then, label %else
+    then:
+      %masked = call i32 @feme.cpu.masked.load.i32(ptr %g, i32 4, i1 true, i32 0)
+      br label %merge
+    else:
+      br label %merge
+    merge:
+      %val = phi i32 [ %masked, %then ], [ 0, %else ]
+      store i32 %val, ptr %out
+      ret void
+    }
+    declare i32 @feme.cpu.masked.load.i32(ptr, i32, i1, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Find the `.uniform`-named `extractelement` the stale-use recovery
+  // built for the merge phi's `then`-edge incoming value, and confirm its
+  // lane index is a genuinely computed value (traceable back to
+  // `wave_entry_mask` through a `cttz` over its bitcast-to-integer form),
+  // never a bare constant -- the exact distinction between "trust
+  // whichever lane `EntryMask` proves real" (the fix) and "always trust
+  // lane 0" (the bug).
+  ExtractElementInst *Recovery = nullptr;
+  for (Instruction &I : instructions(F)) {
+    auto *EE = dyn_cast<ExtractElementInst>(&I);
+    if (EE && EE->getName().ends_with(".uniform"))
+      Recovery = EE;
+  }
+  ASSERT_TRUE(Recovery);
+  Value *Index = Recovery->getIndexOperand();
+  EXPECT_FALSE(isa<ConstantInt>(Index));
+
+  // The index must ultimately derive from a `cttz` over `wave_entry_mask`
+  // (possibly through a `zext`/`trunc`), not from any other value -- a
+  // loose "not a constant" check alone would also accept an unrelated,
+  // equally-wrong computation.
+  auto *Cast = dyn_cast<CastInst>(Index);
+  ASSERT_TRUE(Cast);
+  auto *Cttz = dyn_cast<IntrinsicInst>(Cast->getOperand(0));
+  ASSERT_TRUE(Cttz);
+  EXPECT_EQ(Cttz->getIntrinsicID(), Intrinsic::cttz);
+}
+
 // Roadmap H111(b): `FunctionWidener::widenMaskedAlloca` gives a
 // `MaskedAllocas`-tracked local real per-lane storage (a distinct
 // `WaveSize`-element array, one slot per lane) precisely because some

@@ -736,6 +736,12 @@ class FunctionWidener {
   /// a value that was left without its usual `Widened`/`ToErase` entry.
   bool HadError = false;
 
+  /// Memoized result of `getFirstActiveLaneIndex` -- computed at most once
+  /// per widened function, since every leftover-uniform-use recovery site
+  /// (`widen()`'s own final cleanup loop) needs the identical value and
+  /// `Env.EntryMask` never changes within one widened function.
+  Value *FirstActiveLaneIndex = nullptr;
+
 public:
   FunctionWidener(Function &OldF, unsigned WaveSize, UniformityInfo &UI)
       : OldF(&OldF), Ctx(OldF.getContext()), WaveSize(WaveSize), UI(UI),
@@ -754,6 +760,7 @@ private:
   void collectMaskedAllocas();
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
+  Value *getFirstActiveLaneIndex();
   SmallVector<Value *, 4> getVectorComponents(Value *V, IRBuilderBase &Builder);
   SmallVector<Value *, 8> getAggregateComponents(Value *V,
                                                  IRBuilderBase &Builder);
@@ -1610,6 +1617,58 @@ Function *FunctionWidener::buildWidenedFunction() {
   OldF->eraseFromParent();
   OldF = nullptr;
   return F;
+}
+
+Value *FunctionWidener::getFirstActiveLaneIndex() {
+  if (FirstActiveLaneIndex)
+    return FirstActiveLaneIndex;
+
+  // Roadmap L118: unlike a compute/task/mesh shader's `EntryMask`, whose
+  // lane 0 is always a real invocation (`buildEntryMask`'s own
+  // `w * WaveSize + L < GroupSizeTotal` comparison, `w` bounded by
+  // `WavesPerGroup` -- see the H107 comment on this function's only
+  // caller), a fragment shader's own `EntryMask` (`FragmentWrapper.cpp`'s
+  // `buildQuadMaskValue`) is built per quad from each invocation's own
+  // "live" bit and can leave *any* lane, including lane 0, inactive: a
+  // whole quad is dispatched whenever at least one of its four pixels is
+  // covered by the primitive being rasterized, so a pixel outside the
+  // primitive but sharing a quad with a covered one (a "helper"
+  // invocation, kept alive only so the covered pixel's own derivatives
+  // have real neighbor data) can legitimately land at quad-lane 0. A
+  // masked load/store's own governing mask always further narrows
+  // `EntryMask`, never widens it, so any lane `EntryMask` itself already
+  // excludes is excluded from every masked access for the rest of the
+  // wave's execution too -- lane 0 is therefore not a safe stand-in for
+  // "some real, active lane" in general, only in the compute-style case.
+  //
+  // The fix generalizes the recovery to pick whichever lane `EntryMask`
+  // itself proves is real, computed once, up front, rather than assuming
+  // it is always lane 0: every iterated wave has at least one active
+  // lane by construction (a wave with none would never be dispatched at
+  // all), so the lowest set bit of `EntryMask`, read as a bitmask, is
+  // always a real invocation, in every shader stage -- and for the
+  // compute-style case this reduces to exactly lane 0 (`EntryMask`'s
+  // lane 0 is always set there), so no widened function changes
+  // behavior other than the fragment-style case this was written for.
+  IRBuilder<> Builder(&*NewF->getEntryBlock().getFirstInsertionPt());
+  Type *MaskIntTy = Builder.getIntNTy(WaveSize);
+  Value *MaskBits =
+      Builder.CreateBitCast(Env.EntryMask, MaskIntTy, "entry_mask.bits");
+  // Defends against a mask with no bits set, which should not be
+  // reachable (see above) but would otherwise make `cttz` return
+  // `WaveSize`, an out-of-range lane index -- clamp to lane 0 instead of
+  // relying on that invariant holding under every future caller.
+  Value *IsAllInactive = Builder.CreateICmpEQ(
+      MaskBits, Constant::getNullValue(MaskIntTy), "entry_mask.is_zero");
+  Value *SafeMaskBits = Builder.CreateSelect(
+      IsAllInactive, ConstantInt::get(MaskIntTy, 1), MaskBits,
+      "entry_mask.safe_bits");
+  Value *LaneBits = Builder.CreateBinaryIntrinsic(
+      Intrinsic::cttz, SafeMaskBits, Builder.getFalse(), nullptr,
+      "entry_mask.first_active_lane");
+  FirstActiveLaneIndex =
+      Builder.CreateZExtOrTrunc(LaneBits, Builder.getInt64Ty(), "active.lane");
+  return FirstActiveLaneIndex;
 }
 
 Value *FunctionWidener::getWidened(Value *V, IRBuilderBase &Builder) {
@@ -4532,15 +4591,33 @@ Function *FunctionWidener::widen() {
   // failure down to a task shader's own `EmitMeshTasksEXT(pc.one, pc.one,
   // pc.one)` call reading a `poison` `pc.one` instead of the real,
   // uniform push-constant value, itself gathered under a divergent-shaped
-  // but dynamically-uniform `if (pc.dimCoord == ...)` chain. Lane 0 of
-  // every wave this pass ever iterates is guaranteed a real invocation
+  // but dynamically-uniform `if (pc.dimCoord == ...)` chain. For a value
+  // this pass's own analysis already proved is uniform, meaning every
+  // active lane necessarily agrees, *some* active lane of `Widened[I]`
+  // is exactly the scalar value such a leftover use expects, recovered
+  // instead of poisoned.
+  //
+  // Roadmap L118: which lane that is cannot simply be lane 0, though,
+  // once `Widened[I]` can be sourced from genuinely independent per-lane
+  // storage or a real masked gather (`MaskedAllocas`-widened via
+  // `widenMaskedAllocaLoad`/`widenMaskedLoad`) -- unlike a compute/task/
+  // mesh shader, whose `EntryMask` lane 0 is always a real invocation
   // (`feme::cpu::EntryWrapperPass`'s own `WavesPerGroup` loop bound
   // guarantees `wave_index * WaveSize < GroupSizeTotal` for every
-  // iterated `wave_index`, see `buildEntryMask`'s own comment), so -- for
-  // a value this pass's own analysis already proved is uniform, meaning
-  // every active lane necessarily agrees -- lane 0 of `Widened[I]` is
-  // exactly the scalar value such a leftover use expects, recovered
-  // instead of poisoned.
+  // iterated `wave_index`, see `buildEntryMask`'s own comment), a
+  // fragment shader's own per-quad `EntryMask` (`FragmentWrapper.cpp`'s
+  // `buildQuadMaskValue`) can leave lane 0 itself inactive -- a "helper"
+  // invocation kept alive only for a covered quad-mate's derivatives,
+  // never a real one. Broadcasting *that* lane's own masked-off
+  // load/store slot (whatever passthru or stale garbage it holds)
+  // instead of a real active lane's is exactly this row's bug (found
+  // root-causing a real CTS regression, `dEQP-VK.graphicsfuzz.
+  // cov-function-loop-condition-constant-array-always-false`, see
+  // roadmap C8b/L118's own text for the full narrative).
+  // `getFirstActiveLaneIndex` fixes this by deriving the lane to extract
+  // from `EntryMask` itself -- always real, in every stage -- rather
+  // than assuming lane 0, at zero behavior change for the compute-style
+  // case (`EntryMask`'s lane 0 is always set there too).
   //
   // Only a use whose *user* survives this whole cleanup (is not itself a
   // `ToErase` entry) needs that real recovery, though: the "honest cycle"
@@ -4589,7 +4666,8 @@ Function *FunctionWidener::widen() {
                             ? &*I->getParent()->getFirstInsertionPt()
                             : I);
           UniformReplacement = B.CreateExtractElement(
-              It->second, uint64_t(0), I->getName() + ".uniform");
+              It->second, getFirstActiveLaneIndex(),
+              I->getName() + ".uniform");
         }
       }
       U.set(UniformReplacement);
