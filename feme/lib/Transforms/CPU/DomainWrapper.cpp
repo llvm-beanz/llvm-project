@@ -439,6 +439,38 @@ Value *lowerDomainPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
   return Result;
 }
 
+/// Lowers a `feme.stage.input.load` of the `ViewIndex` system value
+/// (`gl_ViewIndex`, roadmap H51/L109) to a read of this invocation's own
+/// `FemeDomainInvocation` record, exactly mirroring
+/// `lowerDomainPrimitiveID` above but for the record's `ViewIndex` field.
+Value *lowerDomainViewIndex(CallInst &CI, const WaveBodyEnv &WEnv,
+                           const DomainStageEnv &DEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  LLVMContext &Ctx = CI.getContext();
+  IRBuilder<> Builder(&CI);
+
+  StructType *InvocationTy = getDomainInvocationType(Ctx);
+  Value *InvocationBase =
+      Builder.CreateBitCast(DEnv.Invocations, PointerType::get(Ctx, 0));
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *InvocationIndex =
+        getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
+    Value *InvocationPtr = Builder.CreateInBoundsGEP(
+        InvocationTy, InvocationBase, InvocationIndex);
+    Value *ViewIndexPtr = Builder.CreateStructGEP(
+        InvocationTy, InvocationPtr, DomainInvocationFieldViewIndex);
+    Value *LaneResult =
+        Builder.CreateLoad(Builder.getInt32Ty(), ViewIndexPtr);
+    LaneResult = Builder.CreateSelect(Active, LaneResult, Builder.getInt32(0));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 void lowerDomainOutputStore(CallInst &CI, const SignatureElement &Elt,
                             const WaveBodyEnv &WEnv,
                             const DomainStageEnv &DEnv) {
@@ -485,6 +517,10 @@ Value *lowerDomainInputLoad(CallInst &CI, const SignatureElement &Elt,
     // `PatchInput`, which would otherwise wrongly demand a patch-constant
     // producer -- see `FemeDomainInvocation::PrimitiveID`'s own comment).
     return lowerDomainPrimitiveID(CI, WEnv, DEnv);
+  case SignatureSystemValue::ViewIndex:
+    // (Roadmap H51/L109) See `lowerDomainViewIndex`'s own comment: mirrors
+    // `PrimitiveID` above for the identical reason.
+    return lowerDomainViewIndex(CI, WEnv, DEnv);
   default:
     // (roadmap H21k) Every other input control-point system value this
     // domain (tessellation-evaluation) stage's own `feme.stage.input.load`

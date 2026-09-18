@@ -122,6 +122,7 @@ constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InputPatchControlPointCountParamName =
     "stage_input_patch_control_point_count";
 constexpr StringLiteral PrimitiveIDParamName = "stage_primitive_id";
+constexpr StringLiteral ViewIndexParamName = "stage_view_index";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -141,6 +142,7 @@ struct PatchConstantStageEnv {
   Value *Outputs = nullptr;
   Value *InputPatchControlPointCount = nullptr;
   Value *PrimitiveID = nullptr;
+  Value *ViewIndex = nullptr;
 };
 
 std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
@@ -163,6 +165,8 @@ std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
       Env.InputPatchControlPointCount = &Arg, Found = true;
     else if (Arg.getName() == PrimitiveIDParamName)
       Env.PrimitiveID = &Arg, Found = true;
+    else if (Arg.getName() == ViewIndexParamName)
+      Env.ViewIndex = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -174,7 +178,7 @@ Function *appendPatchConstantStageParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -202,6 +206,7 @@ Function *appendPatchConstantStageParams(Function &F) {
   (&*ArgIt++)->setName(OutputsParamName);
   (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
   (&*ArgIt++)->setName(PrimitiveIDParamName);
+  (&*ArgIt++)->setName(ViewIndexParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -347,6 +352,12 @@ Value *lowerPatchConstantSystemValue(CallInst &CI, const SignatureElement &Elt,
                   // mistake this mirrors on the control-point side).
                   : Elt.SystemValue == SignatureSystemValue::PrimitiveID
                       ? PEnv.PrimitiveID
+                  // (Roadmap H51/L109) `gl_ViewIndex` read from the
+                  // patch-constant phase: same rationale as `PrimitiveID`
+                  // just above -- pipeline-supplied and uniform for the
+                  // whole batch, not storage-backed.
+                  : Elt.SystemValue == SignatureSystemValue::ViewIndex
+                      ? PEnv.ViewIndex
                       : nullptr;
   if (!Scalar)
     return nullptr;
@@ -555,6 +566,7 @@ struct WrapperEnv {
   Value *Outputs = nullptr;
   Value *InputPatchControlPointCount = nullptr;
   Value *PrimitiveID = nullptr;
+  Value *ViewIndex = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -580,6 +592,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
                       PatchConstantArgsFieldInputPatchControlPointCount, I32Ty);
   Env.PrimitiveID = loadStructField(
       Builder, ArgsTy, Args, PatchConstantArgsFieldPrimitiveID, I32Ty);
+  Env.ViewIndex = loadStructField(
+      Builder, ArgsTy, Args, PatchConstantArgsFieldViewIndex, I32Ty);
 
   Value *ResourcesRaw = loadStructField(Builder, ArgsTy, Args,
                                         PatchConstantArgsFieldResources, PtrTy);
@@ -696,6 +710,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.InputPatchControlPointCount);
     else if (Arg.getName() == PrimitiveIDParamName)
       CallArgs.push_back(Env.PrimitiveID);
+    else if (Arg.getName() == ViewIndexParamName)
+      CallArgs.push_back(Env.ViewIndex);
     else
       llvm_unreachable("unexpected parameter for PatchConstantWrapperPass");
   }

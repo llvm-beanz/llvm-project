@@ -412,6 +412,15 @@ Value *lowerGeometryInvocationID(CallInst &CI, const WaveBodyEnv &WEnv,
                                      GeometryInvocationFieldInvocationID);
 }
 
+/// Lowers a `feme.stage.input.load` of the `ViewIndex` system value
+/// (`gl_ViewIndex`, roadmap H51/L109) to a read of this invocation's own
+/// `FemeGeometryInvocation` record.
+Value *lowerGeometryViewIndex(CallInst &CI, const WaveBodyEnv &WEnv,
+                              const GeometryStageEnv &GEnv) {
+  return lowerGeometryInvocationField(CI, WEnv, GEnv,
+                                     GeometryInvocationFieldViewIndex);
+}
+
 void lowerGeometryOutputStore(CallInst &CI, const SignatureElement &Elt,
                               const WaveBodyEnv &WEnv,
                               const GeometryStageEnv &GEnv) {
@@ -728,6 +737,8 @@ bool lowerGeometryStageOps(Function &F) {
         Lowered = lowerGeometryPrimitiveID(*CI, *WEnv, *GEnv);
       else if (Elt->SystemValue == SignatureSystemValue::InvocationID)
         Lowered = lowerGeometryInvocationID(*CI, *WEnv, *GEnv);
+      else if (Elt->SystemValue == SignatureSystemValue::ViewIndex)
+        Lowered = lowerGeometryViewIndex(*CI, *WEnv, *GEnv);
       else
         Lowered = lowerGeometryInputLoad(*CI, *Elt, *WEnv, *GEnv);
       CI->replaceAllUsesWith(Lowered);

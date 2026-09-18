@@ -127,6 +127,7 @@ constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InputPatchControlPointCountParamName =
     "stage_input_patch_control_point_count";
 constexpr StringLiteral PrimitiveIDParamName = "stage_primitive_id";
+constexpr StringLiteral ViewIndexParamName = "stage_view_index";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -144,6 +145,7 @@ struct HullStageEnv {
   Value *Outputs = nullptr;
   Value *InputPatchControlPointCount = nullptr;
   Value *PrimitiveID = nullptr;
+  Value *ViewIndex = nullptr;
 };
 
 std::optional<HullStageEnv> getHullStageEnv(Function &F) {
@@ -162,6 +164,8 @@ std::optional<HullStageEnv> getHullStageEnv(Function &F) {
       Env.InputPatchControlPointCount = &Arg, Found = true;
     else if (Arg.getName() == PrimitiveIDParamName)
       Env.PrimitiveID = &Arg, Found = true;
+    else if (Arg.getName() == ViewIndexParamName)
+      Env.ViewIndex = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -173,7 +177,7 @@ Function *appendHullStageParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -199,6 +203,7 @@ Function *appendHullStageParams(Function &F) {
   (&*ArgIt++)->setName(OutputsParamName);
   (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
   (&*ArgIt++)->setName(PrimitiveIDParamName);
+  (&*ArgIt++)->setName(ViewIndexParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -333,6 +338,30 @@ Value *lowerHullPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *LaneResult =
         Builder.CreateSelect(Active, HEnv.PrimitiveID, Builder.getInt32(0));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
+/// (Roadmap H51/L109) Lowers a `feme.stage.input.load` of the `ViewIndex`
+/// system value (`gl_ViewIndex`) to a read of this batch's own
+/// `HEnv.ViewIndex`, exactly like `lowerHullPrimitiveID` above but for the
+/// control-point phase's `FemePatchArgs::ViewIndex` field instead of
+/// `PrimitiveID`: uniform across every control point in the batch, with no
+/// per-control-point storage of its own (`buildStageStorage` never
+/// allocates one for it either, for the same reason it does not for
+/// `PrimitiveID`).
+Value *lowerHullViewIndex(CallInst &CI, const WaveBodyEnv &WEnv,
+                          const HullStageEnv &HEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, HEnv.ViewIndex, Builder.getInt32(0));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }
@@ -597,6 +626,11 @@ bool lowerHullStageOps(Function &F) {
         // falling into the generic default below.
         Lowered = lowerHullPrimitiveID(*CI, *WEnv, *HEnv);
         break;
+      case SignatureSystemValue::ViewIndex:
+        // (roadmap H51/L109) See `lowerHullViewIndex`'s own comment:
+        // mirrors `PrimitiveID` above for the identical reason.
+        Lowered = lowerHullViewIndex(*CI, *WEnv, *HEnv);
+        break;
       default:
         // (roadmap H29e) Every other input system value a control-point
         // phase's own `feme.stage.input.load` can reach here with -- `None`
@@ -654,6 +688,7 @@ struct WrapperEnv {
   Value *OutputControlPointCount = nullptr;
   Value *InputPatchControlPointCount = nullptr;
   Value *PrimitiveID = nullptr;
+  Value *ViewIndex = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -668,6 +703,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
       Builder, ArgsTy, Args, PatchArgsFieldInputPatchControlPointCount, I32Ty);
   Env.PrimitiveID = loadStructField(Builder, ArgsTy, Args,
                                     PatchArgsFieldPrimitiveID, I32Ty);
+  Env.ViewIndex = loadStructField(Builder, ArgsTy, Args,
+                                 PatchArgsFieldViewIndex, I32Ty);
   Env.InputLayout =
       loadStructField(Builder, ArgsTy, Args, PatchArgsFieldInputLayout, PtrTy);
   Env.Inputs =
@@ -806,6 +843,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.InputPatchControlPointCount);
     else if (Arg.getName() == PrimitiveIDParamName)
       CallArgs.push_back(Env.PrimitiveID);
+    else if (Arg.getName() == ViewIndexParamName)
+      CallArgs.push_back(Env.ViewIndex);
     else
       llvm_unreachable("unexpected parameter for HullWrapperPass");
   }
