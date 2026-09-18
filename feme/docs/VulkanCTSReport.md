@@ -1671,3 +1671,122 @@ No advertised Vulkan feature or extension changed -- this is a pure
 resource-normalization correctness fix inside the SPIR-V-to-CPU-ABI
 lowering pipeline; `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` are unchanged.
+
+## Roadmap H51/L109/L110/L111: `gl_ViewIndex` on Hull/Domain/Geometry, and the real remaining `misc.other.*` gap
+
+### Reproduction
+
+`dEQP-VK.pipeline.pipeline_library.graphics_library.misc.other.
+view_index_from_device_index_in_{all_stages,fragment,pre_rasterization}`
+(and their `_link_time_opt` siblings; the `_mesh_shading` variants are
+`NotSupported`, unaffected). Before this session: `vkQueueSubmit` crashed
+with `"vertex/domain stage output -> geometry stage input: element 5 has
+no matching producer element"` (roadmap H51).
+
+### Root cause (H51/L109 -- the crash)
+
+A geometry (and, for a device advertising `multiviewTessellationShader`,
+tessellation-control/-evaluation) stage reading `gl_ViewIndex` was
+classified as an ordinary stage-IO *input* element, so `Executor.cpp`'s
+geometry-input linkage demanded a producing output for it in the
+previous stage -- but `gl_ViewIndex` is system-supplied, like
+`SV_PrimitiveID`/`gl_InvocationID`, which the same linkage call already
+excludes. `FemeGeometryInvocation`/`FemeDomainInvocation` (`RuntimeABI.h`)
+had no `ViewIndex` field at all, and none of `HullWrapper.cpp`/
+`PatchConstantWrapper.cpp`/`DomainWrapper.cpp`/`GeometryWrapper.cpp`
+lowered a `ViewIndex` input load.
+
+### Fix (L109)
+
+Added the full chain, mirroring `SV_PrimitiveID`/H5d-a/L81's own shape:
+- `ViewIndex` fields carved from existing `Reserved[N]` padding in
+  `FemePatchArgs`/`FemePatchConstantArgs`/`FemeDomainInvocation`/
+  `FemeGeometryInvocation` (`RuntimeABI.h`), mirrored in
+  `StageArgsLayout.h`'s LLVM struct-type builders (ABI size/version
+  unchanged).
+- Wrapper-lowering support (`lowerHullViewIndex`, a `ViewIndex` arm in
+  `PatchConstantWrapper.cpp`'s unified ternary, `lowerDomainViewIndex`,
+  `lowerGeometryViewIndex`) in all four wrapper files.
+- `Executor.cpp`'s geometry-input `ConsumerFilter` and `PatchPipeline.cpp`'s
+  `isForwardedFromProducerStage` both exclude `ViewIndex` from
+  producer-matching, alongside the existing `PrimitiveID`/`InvocationID`
+  exclusions.
+- `Draw.ViewIndex` threaded from `Executor.cpp`'s per-view draw loop
+  through `runPatchPipeline`/`buildDomainInvocations`/
+  `buildGeometryInvocations` and `ResourceHeap.h`'s `PatchResources`/
+  `PatchConstantResources`/`PreparedPatchBatch`/
+  `PreparedPatchConstantBatch` -- these are free functions taking scalar
+  parameters rather than writable struct fields, so each needed its own
+  new parameter; materially deeper plumbing than H51's own text
+  anticipated.
+
+### Validation (L109)
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device`.
+- New unit tests: `HullWrapperTest.LowersViewIndexInput`,
+  `PatchConstantWrapperTest.LowersViewIndexInput`,
+  `DomainWrapperTest.LowersViewIndexInput`,
+  `GeometryWrapperTest.LowersViewIndexInputLoad`,
+  `DomainInvocationsTest.BroadcastsViewIndexToEveryPoint`,
+  `GeometryInputsTest.BroadcastsViewIndexToEveryInvocation`.
+- `ninja check-feme`: **3183 Passed, 3 pre-existing Unsupported, 0
+  Failed** -- up 6 tests, no regressions.
+- Real CTS re-run: the originally-reported crash is gone on all 6 target
+  cases (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`: pipeline
+  creation and `vkQueueSubmit` both now succeed). `dEQP-VK.multiview.*`
+  (838 cases, the pre-existing non-pipeline-library-split path) stays a
+  clean 643 Pass/0 Fail/195 NotSupported -- no regression.
+- The 6 cases still `Fail`, now on image comparison rather than a crash.
+  `pipeline_library.graphics_library.*`'s own bucket count is unchanged,
+  541 Pass/7 Fail/287 NotSupported/1 Warning: real progress
+  (crash -> correctness-level mismatch), not yet a CTS-visible pass.
+
+### Root cause (L110 -- the actual remaining mismatch)
+
+An earlier pass through this investigation, this session, decoded the
+CTS's own logged PNG images with a plain PNG viewer and found every pixel
+near `(0,0,0)` across all 3 multiview slices -- reported as "all black,
+nothing rendered". That reading was **wrong**, and re-investigating it
+this session found why: `vktPipelineLibraryTests.cpp` logs each image
+with a `Description` recording a per-image `p' = p*scale + offset`
+normalization CTS itself applied before encoding the PNG (small integer
+data like 0/1/2 is otherwise invisible in an 8-bit image), and the
+displayed/decoded pixel values must be un-transformed (`p = (p' -
+offset)/scale`) to recover the real underlying data. Doing that (see
+`view_index_from_device_index_in_all_stages`'s own 3 slices) shows the
+real R/B channel values are exactly `0`, `1`, `2` for slices 0/1/2 --
+precisely the correct per-view `gl_ViewIndex` value L109's own fix
+produces. **Rendering is not broken; L109's fix is correct.**
+
+The CTS test's own expected-value table (`ViewIndexFromDeviceIndexParams`
+tests three `pipelineStateMode`s: `PRE_RASTERIZATION`, `FRAGMENT`, `BOTH`)
+computes different expected values depending on whether
+`VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` was set on the
+pre-rasterization library part, the fragment library part, or both: for
+whichever part(s) have that bit, `gl_ViewIndex` must evaluate to the
+*device index* (always `0` here -- feme has no multi-device support) in
+that part's own stages, not the real per-view value. **feme does not
+implement `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` at all**
+(confirmed: zero grep hits anywhere in the codebase before this row), so
+it always reports the real per-view value -- correct only for the parts
+that did *not* request the device-index substitution, wrong for the ones
+that did. This is a real, distinct, well-scoped feature gap, filed as
+roadmap L110 (unimplemented) -- not attempted this session, to keep this
+investigation bounded; see L110's own roadmap entry for the concrete
+suggested shape (two independent `PreRasterViewIndexIsDeviceIndex`/
+`FragmentViewIndexIsDeviceIndex` bits, captured from `Pipeline::
+createFlags()` per linked library part, reaching a per-stage-group
+`ViewIndex` override at draw time).
+
+`unusual_multisample_state`, the 7th `graphics_library.*` failure, is
+confirmed unrelated (no `gl_ViewIndex`/multiview involved) and left open
+under a new roadmap L111 for a future session.
+
+### Validation (L110/L111)
+
+No fix landed this session for either -- both are scoping-only entries.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` are unchanged:
+no new feature or extension is newly advertised by L109's fix
+(`multiviewGeometryShader` was already `VK_TRUE` from H5e), and L110/L111
+are not yet implemented.
