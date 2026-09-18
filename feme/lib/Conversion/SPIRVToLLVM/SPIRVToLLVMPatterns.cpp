@@ -11175,6 +11175,64 @@ using GLUnpackUnorm2x16Pattern =
     GLUnpackNormPattern<mlir::spirv::GLUnpackUnorm2x16Op, /*NumComponents=*/2,
                         /*BitsPerComponent=*/16, /*IsSigned=*/false>;
 
+/// Converts `spirv.GL.Ldexp` (roadmap L120, `significand * 2^exponent`) to
+/// `llvm.intr.ldexp`. Not a `DirectConversionPattern`, because unlike
+/// every op in that table's own operand shape, `LLVM::LoadExpOp`'s own
+/// `power` operand is constrained to a *scalar* integer
+/// (`AnySignlessInteger`, not `LLVM_ScalarOrVectorOf<...>` like its `val`
+/// operand) even when `val` itself is a vector -- confirmed against
+/// `LLVMIntrinsicOps.td`'s own `LLVM_PowFI` base class and the
+/// `llvm.intr.ldexp(%vec, %scalar_i32) : (vector<8xf32>, i32) -> ...`
+/// shape `mlir/test/Target/LLVMIR/llvmir-intrinsics.mlir` already
+/// exercises for it. `spirv.GL.Ldexp`, however, allows `exp` to be a
+/// full per-lane vector matching `x`'s own component count (the spec's
+/// "the number of components in x and exp must be the same" wording) --
+/// so a vector-typed `Ldexp` needs one scalar `llvm.intr.ldexp` call per
+/// lane, extracting the matching lane of both `x` and `exp` and
+/// reassembling the per-lane results into the result vector; only the
+/// scalar case can forward its operands to a single `LoadExpOp` call
+/// directly.
+class GLLdexpPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLLdexpOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLLdexpOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLLdexpOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getX();
+    mlir::Value Exp = Adaptor.getExp();
+    auto VecType = mlir::dyn_cast<mlir::VectorType>(DstType);
+    if (!VecType) {
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadExpOp>(Op, DstType, X, Exp);
+      return mlir::success();
+    }
+
+    mlir::Type ScalarFloatTy = VecType.getElementType();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, VecType);
+    for (int64_t I = 0, E = VecType.getNumElements(); I != E; ++I) {
+      mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      mlir::Value XLane =
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, X, IndexValue);
+      mlir::Value ExpLane = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, Exp, IndexValue);
+      mlir::Value LaneResult = mlir::LLVM::LoadExpOp::create(
+          Rewriter, Loc, ScalarFloatTy, XLane, ExpLane);
+      Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                   LaneResult, IndexValue);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -12353,5 +12411,12 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
               GLPackUnorm4x8Pattern, GLUnpackUnorm4x8Pattern,
               GLPackUnorm2x16Pattern, GLUnpackUnorm2x16Pattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
+
+  // `spirv.GL.Ldexp` (roadmap L120): already had a TableGen op
+  // definition (opcode 53) but no feme-side lowering pattern at all,
+  // unlike its `Frexp`/`FrexpStruct` sibling which upstream's own
+  // `DirectConversionPattern`/`FractionExpOp` table already covers.
+  Patterns.add<GLLdexpPattern>(Patterns.getContext(), TypeConverter,
+                              FeMeBenefit);
 }
 
