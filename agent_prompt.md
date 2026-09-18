@@ -55,22 +55,25 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Reduce and root-cause the remaining 7 `misc.other.*` failures**
-   (`unusual_multisample_state`, six `view_index_from_device_index_in_*`
-   variants) — confirmed distinct from L108 (no subpass input involved).
-   ~30-60 minutes to get a standalone repro + first error text via
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1`, same technique as this session.
-2. **Then re-close `graphics_library.*`** once #1 lands — expect
-   548/0/287/1 if fully scoped.
-3. **Broaden the sweep again (roadmap L106)** after #1/#2 close — same
-   untriaged candidates as before: a fresh `pipeline.*` subgroup
-   (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a top-level
-   group outside `pipeline.*` (`subgroups.*`, `compute.*`,
-   `graphicsfuzz.*`).
+1. **Implement L110** (~half a day, well-scoped already in Roadmap.md). Start
+   at `GraphicsPipelineState` in `GraphicsPipeline.cpp`: add
+   `PreRasterViewIndexIsDeviceIndex`/`FragmentViewIndexIsDeviceIndex` bools,
+   set from `CreateInfo.flags` (non-linked path) and from each linked
+   library's own `Pipeline::createFlags()` (linked path). Then thread a
+   per-stage-group override into wherever `ViewIndex` is currently written
+   into the ABI invocation records (`CommandBuffer.cpp`'s per-view loop,
+   `Executor.cpp`).
+2. **Re-sweep `pipeline_library.graphics_library.*` after L110 lands** --
+   expect the 6 `view_index_from_device_index_in_*` cases (12 counting
+   `_link_time_opt` siblings) to flip from Fail to Pass, landing at
+   548/1/287/1 (only `unusual_multisample_state`, L111, still failing).
+3. **Reduce and root-cause L111** (`unusual_multisample_state`) -- confirmed
+   unrelated to gl_ViewIndex/multiview, not yet touched.
 4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
-   before any `vulkaninfo`/`deqp-vk` in a fresh shell — not persisted.
-5. **Technique to keep using**: `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`
-   for any future SPIR-V resource-lowering rejection — found this
-   session, strictly more precise than the `checkSupportedRaisedOps`-level
-   diagnostic, and needs no temporary code changes at all.
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+5. **Technique confirmed this session**: when a CTS `SelfValidate` test gives
+   you `Fail` with no diagnostic message, decode the QPA's embedded base64
+   PNGs directly (Python + Pillow) -- but check for a `Description` field
+   describing a `p'=p*scale+offset` normalization first, and reverse it,
+   before concluding anything about the decoded colors.
