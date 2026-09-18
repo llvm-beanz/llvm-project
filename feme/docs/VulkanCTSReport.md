@@ -3332,3 +3332,36 @@ needed -- an internal `LinearizePass` legalization fix, not a new
 Vulkan feature/extension surface.
 
 This row is now **closed**.
+
+## L120's `Modf` (this session)
+
+`spirv.GL.Modf` (GLSL.std.450 opcode 35) had no MLIR op at all --
+only its pointer-free sibling `ModfStruct` (opcode 36) was
+implemented. Added `SPIRV_GLModfOp` to `SPIRVGLOps.td` (a genuine
+memory-effect op, since it writes its integer part through a pointer
+operand; verified via a new `spirv::GLModfOp::verify()`), plus a
+feme-side `ModfPattern` lowering it the same way `ModfStructPattern`
+already does (truncation for the integer part, subtraction for the
+fraction), except storing the integer part through the pointer
+operand instead of packing it into a struct result.
+
+A full `graphicsfuzz.*` re-sweep (733 of 757 cases, same 24-name hang
+exclusion list reused across sessions):
+
+|               | Before this fix (L116(a)'s own 594/131/8) | After |
+|---------------|--------------------------------------------|--------|
+| Pass          | 594                                          | 600    |
+| Fail          | 131                                          | 125    |
+| NotSupported  | 8                                             | 8      |
+
+**+6 Pass, 0 regressions** -- matching exactly the 6 `Modf`
+occurrences flagged in L116(c)'s original sweep. `ninja check-feme`:
+3199/3202 Passed, 3 pre-existing Unsupported, 0 Failed -- clean.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+update needed -- an internal SPIR-V-to-LLVM legalization fix for an
+already-supported GLSL.std.450 extended instruction set, not a new
+Vulkan feature/extension surface.
+
+This closes L120 (both `Ldexp`, from the prior session, and `Modf`,
+this session).
