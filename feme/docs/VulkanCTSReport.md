@@ -2281,23 +2281,119 @@ needed -- sample-accurate interpolation is core Vulkan 1.0 functionality
 implied by already-advertised `sampleRateShading`, not a new capability;
 this is a correctness fix for an existing, already-advertised feature.
 
-## Roadmap L115 (discovered this session, not yet fixed): missing GLSL.std.450 `InterpolateAt*` extended instructions
+## Roadmap L115(a) (fixed this session): missing GLSL.std.450 `InterpolateAt*` extended instructions -- MLIR-side op support
 
 While continuing the L106 sweep with `dEQP-VK.pipeline.monolithic.
 multisample_interpolation.*` (247 cases, the next fresh group per the
 prior session's own suggested next steps) after L114(a) landed: 115 of
-247 cases fail pipeline creation with `"error: unhandled deserializations
-of 76 from extension set GLSL.std.450"` (12 Pass, 120 NotSupported for
-the remainder). `76` is `InterpolateAtCentroid`'s own GLSL.std.450
-extended-instruction opcode (per the standard's own numbering);
-`interpolateAtSample`/`interpolateAtOffset` (opcodes 77/78) are almost
-certainly the same untouched gap, since this same test file's sibling
-cases exercise all three functions. Entirely unrelated to L114(a)'s own
-barycentric-interpolation architecture fix -- this is a missing SPIR-V
-*extended-instruction* import (most likely in feme's own
-`SPIRVToLLVMPatterns.cpp` and/or upstream MLIR's GLSL.std.450 handling;
-per the L112 precedent, check upstream MLIR first before assuming the gap
-is feme's own). Not yet root-caused in detail or estimated -- a fresh
-session's own starting point, tracked as `Roadmap.md`'s L115 row.
+247 cases failed pipeline creation with `"error: unhandled
+deserializations of 76 from extension set GLSL.std.450"` (12 Pass, 120
+NotSupported for the remainder).
+
+### Root cause
+
+`76` is `InterpolateAtCentroid`'s own GLSL.std.450 extended-instruction
+opcode; `77`/`78` are `InterpolateAtSample`/`InterpolateAtOffset`
+(verified directly against the spec's own `GLSL.std.450.h`, not trusted
+from memory, per the L114(a) "verify against source of truth" lesson).
+All three were entirely absent from MLIR's own `SPIRVGLOps.td` --
+confirmed via a GitHub code search that this is also true of real
+upstream `llvm/llvm-project`, not just this fork's own checkout, so
+this is a genuine upstream MLIR gap (per the L112 precedent of checking
+upstream first) rather than something to expect already-fixed there.
+Entirely unrelated to L114(a)'s own barycentric-interpolation
+architecture fix -- this is a missing SPIR-V *extended-instruction*
+import, not an interpolation-math bug.
+
+### Fix (MLIR-side only)
+
+Added `spirv.GL.InterpolateAtCentroid`/`InterpolateAtSample`/
+`InterpolateAtOffset` to MLIR's SPIR-V dialect. Unlike every other
+GLSL.std.450 op (plain-value operands), these 3 take an `Interpolant`
+operand typed as a pointer (`SPIRV_AnyPtr`) to the Input-storage-class
+variable to re-interpolate -- the same operand shape `spirv.Load`
+already uses for its own `ptr` operand, so no new type-system machinery
+was needed. Added a `verifyInterpolateAtOp` helper (mirroring
+`LoadOp::verify()`'s own pointee/value-type check) confirming the
+pointer's storage class is `Input` and its pointee type matches the
+op's own result type exactly.
+
+### New tests
+
+- `mlir/test/Dialect/SPIRV/IR/gl-ops.mlir`: parse/print roundtrip for
+  all 3 ops (scalar and vector interpolants), plus 2 verifier-failure
+  cases (wrong storage class, mismatched result type).
+- `mlir/test/Target/SPIRV/gl-ops.mlir`: SPIR-V binary
+  serialize/deserialize roundtrip for all 3 ops.
+
+Both confirmed passing directly via `mlir-opt`/`mlir-translate` +
+`FileCheck` and via `llvm-lit`.
+
+### Validation
+
+`ninja check-feme`: 3192/3195 Passed, 3 pre-existing Unsupported, 0
+Failed -- unaffected by this MLIR-only change, as expected.
+
+CTS re-sweep, `multisample_interpolation.*`: unchanged at 12 Pass/115
+Fail/120 NotSupported (expected -- this fix only unblocks
+*deserialization*, not feme's own lowering). But the failure signature
+for all 115 changed from `"unhandled deserialization of 76"` to
+`"failed to legalize operation 'spirv.GL.InterpolateAtCentroid' ...
+explicitly marked illegal"` (confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a single reduced case rerun,
+the L112/L113/L114 technique) -- proving this fix is both necessary and
+correctly scoped: the gap moved cleanly one layer downstream into
+feme's own `SPIRVToLLVMPatterns.cpp`, tracked as L115(b) below rather
+than folded into this fix's own scope.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- `interpolateAtCentroid`/`interpolateAtSample`/
+`interpolateAtOffset` are core GLSL 4.00+ functions implied by
+already-advertised `sampleRateShading`, not a new Vulkan capability;
+this is an importer completeness fix, and it still doesn't render
+correctly end-to-end until L115(b) lands.
+
+## Roadmap L115(b) (scoped, not started): feme-side lowering for `InterpolateAtCentroid`/`InterpolateAtSample`/`InterpolateAtOffset`
+
+Unlike a typical `spirv.GL.*` arithmetic op (a handful of pure LLVM
+instructions, no runtime dependency), these 3 ops need a genuinely new
+runtime-callback ABI surface in feme's own CPU backend:
+
+- `Interpolant` resolves at compile time to a specific `Location`/
+  `Component` stage-input (the same signature-element analysis
+  `CanonicalizeStage.cpp` already does for ordinary varyings).
+- But the *interpolation point itself* (a sample index, or an x/y
+  offset) is often a **runtime** SSA value (e.g.
+  `interpolateAtSample(v, gl_SampleID)`), not a compile-time constant --
+  so this cannot reuse the existing `feme.stage.input.load.f32`
+  intrinsic, which only ever reads an already-precomputed value baked
+  into per-invocation storage *before* the shader runs (L114(a)'s own
+  architecture: every ordinary varying is interpolated once, up front,
+  at either the pixel center or the current pass's fixed sample
+  location -- never on demand, mid-shader, at an arbitrary point the
+  shader itself computes).
+
+### Suggested fix shape (not yet implemented)
+
+1. A new stage op (e.g. `feme.stage.input.interpolate`) carrying the
+   resolved element/row/component plus a runtime mode (centroid/
+   sample/offset) and its runtime operand(s).
+2. A new per-invocation runtime-callback mechanism -- likely modeled on
+   `ImageCalls.cpp`'s existing precedent of shader code calling into a
+   host-implemented C runtime function with runtime arguments (e.g.
+   texture sampling) -- exposing enough of `Executor.cpp`'s own
+   per-lane triangle data (`Tri.Pos`/`InvW`/`Varyings`, `Area`,
+   `Quad.PixelX`/`PixelY`) for a host function to recompute barycentric
+   weights at an arbitrary runtime-supplied point, reusing L114(a)'s
+   own `edgeFn`-based math rather than duplicating it.
+3. `SPIRVToLLVMPatterns.cpp` conversion patterns for the 3 ops
+   themselves, resolving `Interpolant` back to its `Location`/
+   `Component` and lowering to the new stage op.
+
+A materially larger, multi-file architecture addition -- not yet
+started, not yet estimated in detail beyond "likely 1-2 full sessions
+given the new ABI surface". Left open for a future session; see
+`Roadmap.md`'s own L115(b) row.
+
 
 
