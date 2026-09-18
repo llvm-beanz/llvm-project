@@ -55,22 +55,19 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Fix L104** (~1-2 hours): change `layOutStructIfOffsetsMatch`'s
-   cursor-advance step to use a vector member's unrounded store size
-   (`elementCount * elementSize`) for computing where the *next*
-   member starts, while keeping the rounded/natural alignment for the
-   vector member's *own* placement. Verify against both the compute
-   and graphics `DataLayout` strings before landing -- they were
-   observed to differ, so a fix tuned to only one could just move the
-   bug to the other execution model.
-2. **Re-sweep `composite.struct.*` and `spec_constant.*`** after the
-   L104 fix lands -- expect 35/0 and 655/0 respectively if the fix is
-   fully scoped correctly.
-3. **Broaden the sweep beyond `spec_constant.*`** once L104 closes --
-   this whole `pipeline_library.spec_constant.*` group has now had 5
-   sessions of fixes (L99-L104) landed against it; a fresh top-level
-   CTS group (or `dEQP-VK.pipeline.*` more broadly) is due. ~1 session
-   to sweep plus however long the first reduction takes.
-4. **Standing gotcha, still true**: export
+1. **Reduce and root-cause L105** (~1-2 hours to reduce once IR is in
+   hand -- three concrete failing cases already named in the roadmap
+   entry, so no fresh CTS triage is needed to start). Likely related to
+   the `Component`-decoration/L94(h) code path given the "component"
+   wording in the error, but not yet confirmed.
+2. **Broaden the sweep beyond `spec_constant.*`** (roadmap L106) -- that
+   whole group is now fully closed after 6 sessions of fixes (L99-L104).
+   Either pick up `interface_matching.*`'s own 468 not-yet-triaged
+   not-supported cases (a different kind of gap: unadvertised
+   feature/format support, not a bug -- flagged by an even earlier
+   session and still not picked up), or a fresh top-level `dEQP-VK.*`
+   group. ~30-60 minutes to triage which is the cheaper win before
+   committing to a full sweep.
+3. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell.
