@@ -2421,13 +2421,17 @@ Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
                         PipelineCache *Cache, PipelineCache &ImplicitCache,
-                        bool &CacheHit) {
+                        bool &CacheHit,
+                        bool PreRasterViewIndexIsDeviceIndex,
+                        bool FragmentViewIndexIsDeviceIndex) {
   CacheHit = false;
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
                              "graphics pipeline requires a VkPipelineLayout");
 
   GraphicsPipelineState Result;
+  Result.PreRasterViewIndexIsDeviceIndex = PreRasterViewIndexIsDeviceIndex;
+  Result.FragmentViewIndexIsDeviceIndex = FragmentViewIndexIsDeviceIndex;
   const VkPipelineShaderStageCreateInfo *VertexInfo = nullptr;
   const VkPipelineShaderStageCreateInfo *FragmentInfo = nullptr;
   const VkPipelineShaderStageCreateInfo *TessControlInfo = nullptr;
@@ -2973,10 +2977,21 @@ findLinkedLibraryForBit(ArrayRef<GraphicsPipelineLibrary *> Libraries,
 /// pointers reinterpreted into longer-lived storage, so nothing here
 /// depends on \p CreateInfo outliving this function beyond its own,
 /// already-existing lifetime guarantee.
+///
+/// \p PreRasterViewIndexIsDeviceIndex/\p FragmentViewIndexIsDeviceIndex
+/// (roadmap L110) are out-parameters, not part of the synthesized
+/// `VkGraphicsPipelineCreateInfo` itself (there is no single field for
+/// them in real Vulkan -- `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_
+/// INDEX_BIT` is a per-library-part creation flag, resolved here to
+/// whichever library provided each of the pre-rasterization/fragment-
+/// shader parts, falling back to \p CreateInfo's own flags for a part
+/// not supplied by any linked library).
 static Expected<VkGraphicsPipelineCreateInfo>
 synthesizeLinkedGraphicsPipelineCreateInfo(
     const VkGraphicsPipelineCreateInfo &CreateInfo,
-    ArrayRef<VkPipeline> LibraryHandles, LinkedPipelineStorage &Storage) {
+    ArrayRef<VkPipeline> LibraryHandles, LinkedPipelineStorage &Storage,
+    bool &PreRasterViewIndexIsDeviceIndex,
+    bool &FragmentViewIndexIsDeviceIndex) {
   SmallVector<GraphicsPipelineLibrary *, 4> Libraries;
   for (VkPipeline Handle : LibraryHandles) {
     auto *P = fromHandle<Pipeline>(Handle);
@@ -3082,6 +3097,15 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
       Storage.TessellationState = *S.TessellationState;
       Result.pTessellationState = &Storage.TessellationState;
     }
+    // (roadmap L110) This part's own creation-time flags -- not
+    // `CreateInfo.flags` (the top-level link call's own flags, which
+    // never carries this bit for a pipeline that is fully split into
+    // libraries) -- are what
+    // `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` was actually
+    // set on for this stage group.
+    PreRasterViewIndexIsDeviceIndex =
+        (Lib->createFlags() &
+         VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
   } else {
     for (uint32_t I = 0; I != CreateInfo.stageCount; ++I)
       if (CreateInfo.pStages[I].stage != VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -3089,6 +3113,9 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
     Result.pViewportState = CreateInfo.pViewportState;
     Result.pRasterizationState = CreateInfo.pRasterizationState;
     Result.pTessellationState = CreateInfo.pTessellationState;
+    PreRasterViewIndexIsDeviceIndex =
+        (CreateInfo.flags &
+         VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
   }
 
   // Fragment shader.
@@ -3102,11 +3129,19 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
       Storage.DepthStencilState = *S.DepthStencilState;
       Result.pDepthStencilState = &Storage.DepthStencilState;
     }
+    // (roadmap L110) Same reasoning as the pre-rasterization group above,
+    // for the fragment-shader library part's own flags.
+    FragmentViewIndexIsDeviceIndex =
+        (FragLib->createFlags() &
+         VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
   } else {
     for (uint32_t I = 0; I != CreateInfo.stageCount; ++I)
       if (CreateInfo.pStages[I].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
         Storage.Stages.push_back(CreateInfo.pStages[I]);
     Result.pDepthStencilState = CreateInfo.pDepthStencilState;
+    FragmentViewIndexIsDeviceIndex =
+        (CreateInfo.flags &
+         VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
   }
 
   // Fragment output interface.
@@ -3251,7 +3286,9 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
           ? Dynamic.PrimitiveRestartEnable
           : State.PrimitiveRestartEnable,
       State.SampleShadingEnable,
-      State.AlphaToOneEnable, State.AlphaToCoverageEnable);
+      State.AlphaToOneEnable, State.AlphaToCoverageEnable,
+      State.PreRasterViewIndexIsDeviceIndex,
+      State.FragmentViewIndexIsDeviceIndex);
   // (roadmap H4b) `Artifact->HullStage` is set exactly when this pipeline
   // declared tessellation stages (see `compileAndValidateStages`'s own
   // comment); `PatchConstantStage`/`DomainStage` are always set alongside
@@ -3362,12 +3399,23 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     LinkedPipelineStorage LinkedStorage;
     VkGraphicsPipelineCreateInfo LinkedInfo{};
     const VkGraphicsPipelineCreateInfo *EffectiveInfo = &pCreateInfos[I];
+    // (roadmap L110) Resolved per stage group below -- either directly
+    // from this call's own flags (a monolithic pipeline, or a pipeline
+    // with no linked library at all), or per-library-part when a
+    // `VkPipelineLibraryCreateInfoKHR` links one or more `VK_EXT_graphics_
+    // pipeline_library` parts (see `synthesizeLinkedGraphicsPipelineCreateInfo`'s
+    // own comment).
+    bool PreRasterViewIndexIsDeviceIndex =
+        (pCreateInfos[I].flags &
+         VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
+    bool FragmentViewIndexIsDeviceIndex = PreRasterViewIndexIsDeviceIndex;
     if (LinkInfo && LinkInfo->libraryCount != 0) {
       Expected<VkGraphicsPipelineCreateInfo> Synthesized =
           synthesizeLinkedGraphicsPipelineCreateInfo(
               pCreateInfos[I],
               ArrayRef(LinkInfo->pLibraries, LinkInfo->libraryCount),
-              LinkedStorage);
+              LinkedStorage, PreRasterViewIndexIsDeviceIndex,
+              FragmentViewIndexIsDeviceIndex);
       if (!Synthesized) {
         logCreationFailure(Synthesized.takeError(),
                            "vkCreateGraphicsPipelines");
@@ -3380,7 +3428,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     bool CacheHit = false;
     Expected<std::optional<GraphicsPipelineState>> Compiled =
         compileGraphicsPipeline(*EffectiveInfo, DeviceInfo, Cache,
-                                ImplicitCache, CacheHit);
+                                ImplicitCache, CacheHit,
+                                PreRasterViewIndexIsDeviceIndex,
+                                FragmentViewIndexIsDeviceIndex);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       Result = VK_ERROR_INITIALIZATION_FAILED;

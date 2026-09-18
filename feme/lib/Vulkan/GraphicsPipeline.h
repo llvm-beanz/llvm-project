@@ -423,6 +423,16 @@ struct GraphicsPipelineState {
   /// (like `Geometry` above, nothing here comes from a
   /// `VkGraphicsPipelineCreateInfo` field).
   feme::graphics::MeshState Mesh;
+  /// (roadmap L110) `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT`,
+  /// resolved per stage group -- see `feme::graphics::GraphicsPipeline::
+  /// getPreRasterViewIndexIsDeviceIndex`'s own comment for the full
+  /// semantics. Set from `CreateInfo.flags` directly for a monolithic
+  /// pipeline, or from each `VK_EXT_graphics_pipeline_library` part's own
+  /// captured `Pipeline::createFlags()` for a linked one (see
+  /// `synthesizeLinkedGraphicsPipelineCreateInfo`'s own `PreRaster`/
+  /// `Fragment` sections).
+  bool PreRasterViewIndexIsDeviceIndex = false;
+  bool FragmentViewIndexIsDeviceIndex = false;
 };
 
 /// A `VkPipeline` graphics pipeline: the compiled stages plus the
