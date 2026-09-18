@@ -55,30 +55,37 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~30 min)** Build a *minimal* reduced repro instead of using the full
-   GraphicsFuzz shader: a fragment shader with (a) an aggregate `Private`
-   global, (b) a real but always-false discard inside a uniform-condition
-   branch, (c) a read of that global after the discard branches merge back,
-   feeding directly into the output color. Much easier to hand-trace or
-   instrument than the current repro.
-2. **(~30 min)** Add a temporary runtime print (feme's CPU backend can call into
-   a real host function — check `feme/lib/Target/CPU/` for an existing
-   debug-print intrinsic, or add one) right before the block-52-style
-   `extractelement` in `SIMDize.cpp`, printing the full mask vector and gather
-   result for all 4 lanes at actual runtime. This replaces further manual
-   tracing with ground truth.
-3. **(~half a day, blocked on #1/#2)** Once a concrete lane/mask mismatch is
-   observed at runtime, implement the actual fix: most likely, thread through
-   the masked gather's own `EffectiveMask` (or the `WideMask` operand) so the
-   stale-use recovery can pick a lane whose mask bit is dynamically known set
-   (e.g. `llvm.cttz` over the mask cast to an integer), instead of hardcoding
-   lane 0.
-4. If L118 keeps proving harder than a half-day/day budget after step 2's
-   instrumentation, it's reasonable to **set it aside again** and pick from the
-   other still-untouched items: L116(a)'s real per-leaf masked load/store
-   decomposition (still ~59% of the original L116 sweep's `Fail`s, unchanged
-   from prior sessions), L120's `Modf`, L121's `SIMDize.cpp` divergent-call
-   widening generalization, or L116(f)'s ~24 un-root-caused hangs/crashes.
-5. Nobody has picked up L106's `pipeline.monolithic.*`/`subgroups.*`/`compute.*`
-   untriaged candidates across many sessions now — still on the table whenever
-   L116/L117/L118 close or get set aside.
+1. **(~1-2 hours)** Stop hand-tracing IR for this specific case. Add real
+   runtime instrumentation instead: a temporary host-callback intrinsic (check
+   `feme/lib/Target/CPU/` for how existing `feme.cpu.resource.load.raw.*`-style
+   calls are lowered to real function calls at codegen, and add a
+   `feme.cpu.debug.print.i32`-shaped one following that exact pattern) that
+   prints a value + lane index at runtime, inserted right before the specific
+   `.uniform`-suffixed `extractelement` this row's original investigation
+   flagged (block 52 of the `FEME_DUMP_IR=1` dump, or wherever it lands now) for
+   the *actual* failing shader. This replaces guesswork with ground truth in one
+   iteration instead of more manual algebra.
+2. **(~30 min, if #1 doesn't immediately reveal it)** Since the fragment shader
+   here has no derivatives, its `EntryMask` should be a simple "in-bounds pixel"
+   mask, closer to the compute-style guarantee than the quad/helper-invocation
+   case -- meaning lane 0 SHOULD behave safely per this session's own fix's own
+   reasoning. If runtime instrumentation confirms lane 0's `EntryMask` bit
+   really is always 1 for this shader, the bug is NOT in the recovery's lane
+   choice at all, and is more likely in `widenMaskedAllocaStore`'s "run
+   unconditionally, once per lane" model itself corrupting some *other* lane's
+   (not lane 0's) storage in a way that later surfaces through a different,
+   not-yet-identified path (e.g., a per-lane store into a `MaskedAllocas` array
+   skipping a write for a discard-narrowed lane, then a later per-lane,
+   unconditional -- not masked -- read of that exact lane's own now-stale slot,
+   entirely independent of the stale-use recovery this session and last session
+   both focused on). Re-scope the investigation to
+   `widenMaskedAllocaStore`/`Load`'s own per-lane write/read pairing if so.
+3. **(if L118 keeps proving hard, per standing next-steps precedent)**: set it
+   aside again in favor of L116(a)'s real per-leaf masked load/store
+   decomposition (still ~59% of the original L116 sweep's `Fail`s by volume,
+   unchanged from prior sessions -- the single highest-value item still on the
+   table), L120's `Modf`, or L121's `SIMDize.cpp` divergent-call widening
+   generalization (needed for the last `Ldexp` repro case).
+4. L116(f)'s ~24 un-root-caused hangs/crashes and L106's
+   `pipeline.monolithic.*`/`subgroups.*`/`compute.*` untriaged candidates remain
+   untouched across many sessions now.
