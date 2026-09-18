@@ -457,8 +457,8 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 
 /// The `feme::SignatureSystemValue` a SPIR-V `BuiltIn` decoration's value
 /// names, or `None` for a builtin FeMe's signature model has no
-/// representation for yet (`PointCoord`, `SamplePosition`, `DeviceIndex`,
-/// ...), which is then treated as an
+/// representation for yet (`PointCoord`, `DeviceIndex`, ...), which is
+/// then treated as an
 /// ordinary -- and, having no `Location` either, unlinkable -- varying and
 /// diagnosed by `feme::graphics::ValidateStagePass`/the executor rather
 /// than silently mapped onto an unrelated system value. Numbering is the
@@ -523,6 +523,17 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 /// true` write an ordinary, unlinkable output that
 /// `ValidateStagePass`/the executor simply ignored -- every primitive
 /// rasterized regardless of the shader's own culling intent.
+///
+/// (Roadmap L114) `SamplePosition` (`gl_SamplePosition`) now maps to
+/// `SignatureSystemValue::SamplePosition`: `Executor.cpp` reads back the
+/// current pass's own `SamplePositions[PassSample]` offset (the same
+/// value already used to place `gl_FragCoord`/the per-sample coverage
+/// test), and forces per-sample shading when this input is present,
+/// exactly like `SampleIndex`. Before this row it mapped to `None`,
+/// making a real `gl_SamplePosition` read an ordinary, `Location`-less
+/// output that was always rejected outright at pipeline-creation time
+/// (`"fragment input element N has no location to link against a vertex
+/// output"`) rather than executing.
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
@@ -580,6 +591,8 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
     return SignatureSystemValue::PrimitiveIndices;
   case 5299: // CullPrimitiveEXT
     return SignatureSystemValue::CullPrimitive;
+  case 19: // SamplePosition
+    return SignatureSystemValue::SamplePosition;
   default:
     return SignatureSystemValue::None;
   }

@@ -3169,6 +3169,43 @@ TEST(CanonicalizeStageTest, GeometryStageMapsSystemValues) {
   EXPECT_EQ(PrimitiveID.SystemValue, SignatureSystemValue::PrimitiveID);
 }
 
+/// (Roadmap L114) A fragment entry's `BuiltIn SamplePosition` (code 19,
+/// `gl_SamplePosition`) input now maps to
+/// `SignatureSystemValue::SamplePosition` instead of falling through to
+/// `None` (which made it an ordinary, `Location`-less varying that
+/// `Executor.cpp`'s fragment-input linkage loop always rejected outright:
+/// `"fragment input element N has no location to link against a vertex
+/// output"`, the `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.
+/// sample_position.*` failure this fixes).
+TEST(CanonicalizeStageTest, FragmentStageMapsSamplePositionBuiltin) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_SamplePosition = external addrspace(7) constant <2 x float>, !spirv.Decorations !0
+    @out_var = external addrspace(8) global <2 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %v = load <2 x float>, ptr addrspace(7) @gl_SamplePosition
+      store <2 x float> %v, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 19}
+    !3 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &SamplePosition = Sig->Elements[0];
+  EXPECT_EQ(SamplePosition.Direction, SignatureDirection::Input);
+  EXPECT_EQ(SamplePosition.SystemValue, SignatureSystemValue::SamplePosition);
+  EXPECT_EQ(SamplePosition.ComponentCount, 2u);
+}
+
 /// (Roadmap H5e-d) A geometry entry compiled from an `emit`-count shape
 /// that ends its primitive without ever emitting on that stream/count
 /// combination (e.g. a CTS `dEQP-VK.geometry.emit.*_emit_0_end_1` case)

@@ -152,6 +152,18 @@ enum class SignatureSystemValue : uint8_t {
   /// end for the same no-renumbering reason `PointSize`/`PrimitiveIndices`
   /// were.
   CullPrimitive,
+  /// (Roadmap L114) `gl_SamplePosition`: a fragment-shader-only input, the
+  /// current sample's own `(x, y)` offset within its pixel (`[0, 1)`
+  /// each), matching the executor's own `SamplePositions` table already
+  /// used to place each per-sample rasterization test/`gl_FragCoord`
+  /// (`Executor.cpp`'s per-`PassSample` loop) -- reading this builtin
+  /// also forces per-sample fragment shading exactly like `SampleIndex`,
+  /// per the spec's "shader ... executed at least once per covered
+  /// sample" rule for either builtin. Always an input; always a `vec2`
+  /// (`ComponentCount == 2`). Added at the end for the same
+  /// no-renumbering reason `PointSize`/`PrimitiveIndices`/`CullPrimitive`
+  /// were.
+  SamplePosition,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };
