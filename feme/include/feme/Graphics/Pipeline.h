@@ -574,7 +574,9 @@ public:
       bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
       std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f, 0.0f},
       bool PrimitiveRestartEnable = false, bool SampleShadingEnable = false,
-      bool AlphaToOneEnable = false, bool AlphaToCoverageEnable = false);
+      bool AlphaToOneEnable = false, bool AlphaToCoverageEnable = false,
+      bool PreRasterViewIndexIsDeviceIndex = false,
+      bool FragmentViewIndexIsDeviceIndex = false);
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
   /// Whether this pipeline has a fragment stage at all (roadmap H2j); false
@@ -627,6 +629,24 @@ public:
   /// for the per-sample threshold this project uses). Distinct from, and
   /// independent of, `alphaToOneEnable`/`sampleShadingEnable` above.
   bool getAlphaToCoverageEnable() const { return AlphaToCoverageEnable; }
+
+  /// (roadmap L110) `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT`,
+  /// resolved per pre-rasterization/fragment-shader stage group the way
+  /// `VK_EXT_graphics_pipeline_library` lets each group's own library part
+  /// set this bit independently: when true, every pre-rasterization-group
+  /// stage (vertex/hull/domain/geometry) this pipeline runs must read
+  /// `gl_ViewIndex` as the physical device index within a device group
+  /// (always `0` on this single-device ICD -- see
+  /// `vkEnumeratePhysicalDeviceGroups`) instead of the real multiview
+  /// per-view index `PreparedDraw::ViewIndex` otherwise supplies.
+  bool getPreRasterViewIndexIsDeviceIndex() const {
+    return PreRasterViewIndexIsDeviceIndex;
+  }
+  /// (roadmap L110) The fragment-shader stage group's own counterpart to
+  /// `getPreRasterViewIndexIsDeviceIndex()` above.
+  bool getFragmentViewIndexIsDeviceIndex() const {
+    return FragmentViewIndexIsDeviceIndex;
+  }
 
   /// Attaches the three compiled stages a tessellation-enabled pipeline
   /// runs between its vertex stage and rasterization -- a hull shader's
@@ -777,6 +797,8 @@ private:
   bool SampleShadingEnable;
   bool AlphaToOneEnable;
   bool AlphaToCoverageEnable;
+  bool PreRasterViewIndexIsDeviceIndex;
+  bool FragmentViewIndexIsDeviceIndex;
 };
 
 } // namespace feme::graphics
