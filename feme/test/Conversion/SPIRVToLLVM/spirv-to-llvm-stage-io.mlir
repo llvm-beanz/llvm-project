@@ -209,7 +209,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT],
 // multi-index `spirv.AccessChain` into that value at all).
 
 // CHECK-LABEL: llvm.func @read_gl_in_position
-// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, %{{.*}}, 0] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.array<3 x struct<(vector<4xf32>, f32)>>
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, %{{.*}}, 0] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.array<3 x struct<packed (vector<4xf32>, f32, array<12 x i8>)>>
 // CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> vector<4xf32>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Geometry], []> {
   spirv.GlobalVariable @gl_in : !spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input>
@@ -298,7 +298,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ClipDistance], [
 // array.
 
 // CHECK-LABEL: llvm.func @read_block_wrapped_array
-// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, 0, %{{.*}}] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.struct<(array<3 x i32>)>
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, 0, %{{.*}}] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.struct<packed (array<3 x i32>)>
 // CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT], [SPV_EXT_mesh_shader]> {
   spirv.GlobalVariable @in_block {per_primitive_ext} : !spirv.ptr<!spirv.struct<(!spirv.array<3 x i32>)>, Input>
@@ -406,10 +406,21 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // GEP ('operand #0 must be LLVM pointer type ... but got
 // '!llvm.struct<...>''). Broadening both predicates to recognize *any*
 // struct type (not just an array-wrapping one) fixes this.
+//
+// (Roadmap L103) `b`'s own physical field index is 2, not its declared 1:
+// this struct's `vector<3xf32>` member needs 16-byte natural alignment
+// (the host's real vector ABI alignment), so
+// `layOutStructIfOffsetsMatch`'s own non-offset-struct branch inserts a
+// 12-byte gap after the leading `f32` to reach it -- `StageIOArrayAccess
+// ChainPattern` (which handles this Input-storage, non-`Block` struct's
+// own `spirv.AccessChain`) remaps every declared member selector through
+// `remapNestedStructMemberIndices` to account for exactly that kind of
+// gap, the same way `OffsetStructMemberReorderAccessChainPattern` already
+// did for an offset-decorated struct.
 
 // CHECK-LABEL: llvm.func @read_multi_member_block
 // CHECK: %[[PTR:.*]] = llvm.mlir.addressof @in_multi_member : !llvm.ptr<7>
-// CHECK: %[[GEP:.*]] = llvm.getelementptr %[[PTR]][%{{.*}}, 1] : (!llvm.ptr<7>, i32) -> !llvm.ptr<7>, !llvm.struct<(f32, vector<3xf32>, f32)>
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %[[PTR]][%{{.*}}, 2] : (!llvm.ptr<7>, i32) -> !llvm.ptr<7>, !llvm.struct<packed (f32, array<12 x i8>, vector<3xf32>, f32, array<12 x i8>)>
 // CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> vector<3xf32>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT], [SPV_EXT_mesh_shader]> {
   spirv.GlobalVariable @in_multi_member {per_primitive_ext} : !spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input>

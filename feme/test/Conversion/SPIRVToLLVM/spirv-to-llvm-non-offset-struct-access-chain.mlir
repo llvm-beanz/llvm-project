@@ -18,8 +18,18 @@
 // helpers behind `StructType::hasOffset()`, matching every other call site
 // of `getOffsetSortedMemberIndices` in this file.
 //
+// (Roadmap L103) `OffsetStructMemberReorderAccessChainPattern` itself no
+// longer gates its own physical-index computation on `hasOffset()` --
+// a non-offset struct's own type conversion may now insert a
+// natural-alignment gap too (see `layOutStructIfOffsetsMatch`), which
+// this pattern must also remap member selectors for -- but the struct
+// below (two same-size, same-alignment `i32` members, no gap needed
+// either way) still exercises the original H96 null-pointer-read
+// regression shape unchanged: no permutation, no remap, just confirming
+// this pattern's own `matchAndRewrite` no longer crashes on it.
+//
 // CHECK-LABEL: llvm.func @local_struct
-// CHECK: %[[VAR:.*]] = llvm.alloca %{{.*}} x !llvm.struct<(i32, i32)>
+// CHECK: %[[VAR:.*]] = llvm.alloca %{{.*}} x !llvm.struct<packed (i32, i32)>
 // CHECK: %[[ELEM:.*]] = llvm.getelementptr %[[VAR]][%{{.*}}, 1]
 // CHECK: llvm.store %{{.*}}, %[[ELEM]] : i32, !llvm.ptr
 spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader], []> {

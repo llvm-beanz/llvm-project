@@ -10,8 +10,8 @@
 // included to mirror the shape those tests actually exercise.
 
 // CHECK-LABEL: llvm.func @frexp_st
-// CHECK: %[[STRUCT:.*]] = llvm.intr.frexp(%arg0) : (f32) -> !llvm.struct<(f32, i32)>
-// CHECK: %[[SIGNIFICAND:.*]] = llvm.extractvalue %[[STRUCT]][0] : !llvm.struct<(f32, i32)>
+// CHECK: %[[STRUCT:.*]] = llvm.intr.frexp(%arg0) : (f32) -> !llvm.struct<packed (f32, i32)>
+// CHECK: %[[SIGNIFICAND:.*]] = llvm.extractvalue %[[STRUCT]][0] : !llvm.struct<packed (f32, i32)>
 // CHECK: llvm.return %[[SIGNIFICAND]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @frexp_st(%arg0 : f32) -> f32 "None" {
@@ -31,10 +31,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // CHECK-LABEL: llvm.func @modf_st
 // CHECK: %[[INT:.*]] = llvm.intr.trunc(%arg0) : (f32) -> f32
 // CHECK: %[[FRAC:.*]] = llvm.fsub %arg0, %[[INT]] : f32
-// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(f32, f32)>
-// CHECK: %[[S0:.*]] = llvm.insertvalue %[[FRAC]], %[[POISON]][0] : !llvm.struct<(f32, f32)>
-// CHECK: %[[S1:.*]] = llvm.insertvalue %[[INT]], %[[S0]][1] : !llvm.struct<(f32, f32)>
-// CHECK: %[[RESULT:.*]] = llvm.extractvalue %[[S1]][1] : !llvm.struct<(f32, f32)>
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<packed (f32, f32)>
+// CHECK: %[[S0:.*]] = llvm.insertvalue %[[FRAC]], %[[POISON]][0] : !llvm.struct<packed (f32, f32)>
+// CHECK: %[[S1:.*]] = llvm.insertvalue %[[INT]], %[[S0]][1] : !llvm.struct<packed (f32, f32)>
+// CHECK: %[[RESULT:.*]] = llvm.extractvalue %[[S1]][1] : !llvm.struct<packed (f32, f32)>
 // CHECK: llvm.return %[[RESULT]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @modf_st(%arg0 : f32) -> f32 "None" {
