@@ -90781,3 +90781,131 @@ Commits (2, each scoped):
    if so, prefer a narrower fix (e.g. excluding a specific `BuiltIn`)
    over a broader one, rather than "fixing" the tests to match a
    stricter restriction that isn't actually needed for correctness.
+
+# Session: L111(b) closed L111 fully; L112/L113 fixed (Sample decoration + static VkSampleMask), L114 opened
+
+## Do this now
+
+Next agent: read L114's row in `Roadmap.md` and `VulkanCTSReport.md`'s
+own L114 section first. That's the live, unfixed thread. Everything
+below this line is what got done and how, for context only.
+
+## What's done, in order
+
+1. **L111(b) closed L111 overall.** `Executor.cpp` had zero consumers
+   for a fragment shader's own `gl_SampleMask` output
+   (`SignatureSystemValue::Coverage`). Added the lookup (mirroring
+   `FSAlphaToCoverage`), ANDed it into `BaseCoverage` unconditionally.
+   `unusual_multisample_state` now Passes;
+   `pipeline_library.graphics_library.*` (836 cases) is **fully clean**:
+   548 Pass / 0 Fail / 287 NotSupported / 1 pre-existing benign Warning.
+2. **L106 sweep picked a fresh group**:
+   `dEQP-VK.pipeline.monolithic.multisample_shader_builtin.*` (95 cases,
+   small, topically related to L111). First pass: 37 Pass / 18 Fail /
+   40 NotSupported.
+3. **L112 fixed**: 6 of the 18 failures showed
+   `error: unhandled Decoration : 'Sample'`. Root cause was **upstream
+   MLIR**, not feme -- `mlir/lib/Target/SPIRV/{Deserialization,
+   Serialization}/{Deserializer,Serializer}.cpp` never listed
+   `spirv::Decoration::Sample` among their ~20 other "plain unit
+   decoration" cases. feme's own `SPIRVToLLVMPatterns.cpp`/
+   `CanonicalizeStage.cpp` already fully handle `Sample` once it
+   reaches the `spirv` dialect at all -- confirmed by grep before
+   writing any code, so this was a one-line-per-file addition, exactly
+   the same shape as two already-documented precedent fixes
+   (`Centroid`, `NonUniform` -- the latter's own test cites feme's own
+   L7f). Added a roundtrip test to `mlir/test/Target/SPIRV/
+   decorations.mlir`.
+4. **L113 fixed**: after L112, the same 6 cases still failed pipeline
+   creation, now with `"a partial VkSampleMask is not implemented"` --
+   a deliberate rejection, unrelated to `Sample`. Implemented instead:
+   `GraphicsPipeline`/`GraphicsPipelineState` gained a 32-bit
+   `SampleMask` (default all-1s), ANDed into the rasterizer's per-lane
+   coverage as early as possible (unlike L111(b)'s shader-driven mask,
+   a static mask is known before rasterization, so it can gate early
+   depth/stencil too, not just the depth/stencil test).
+5. **Re-swept after both fixes**: 43 Pass / 12 Fail / 40 NotSupported --
+   up from 37/18/40, all 6 `sample_mask.pattern.*` cases now Pass.
+6. **L114 opened, not fixed**: the remaining 12
+   (`sample_position.correctness.*`/`sample_position.distribution.*`)
+   fail with a third, distinct error:
+   `"fragment input element 1 has no location to link against a vertex
+   output"` -- confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   single-case reruns to be unaffected by either L112 or L113. Not yet
+   reduced or root-caused.
+
+## Proof it works
+
+- `ninja check-feme` (ccache, assertions build): 3188/3191 passed, 3
+  pre-existing Unsupported, 0 Failed (up 2 tests total this session --
+  1 from L111(b), 1 from L113 -- zero regressions).
+- `mlir-translate` roundtrip: `decorations.mlir` lit test passes with
+  the new `Sample` case.
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start and again before/after each CTS sweep.
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: `~~L112~~`/`~~L113~~` struck through with done
+  write-ups; new `L114` row scoped (not yet attempted) with a suggested
+  next step.
+- `feme/docs/VulkanCTSReport.md`: new sections for L112 (root cause +
+  fix + validation), L113 (same), and L114 (not-yet-fixed status).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed for L112/L113 -- both are correctness fixes within
+  already-advertised capabilities (`sampleRateShading`,
+  `VkPipelineMultisampleStateCreateInfo`), not new ones.
+
+Commits this session (5, each scoped):
+1. `[feme] Consume fragment-shader gl_SampleMask output (L111(b))`
+2. `[feme] Strike through L111(b), closing L111 overall`
+3. `[mlir][spirv] Handle the Sample unit decoration`
+4. `[mlir][spirv] Reference roadmap L112 in the Sample decoration test`
+   (small wording fixup, since the milestone ID wasn't assigned yet
+   when the first MLIR commit landed)
+5. `[feme] Implement static VkPipelineMultisampleStateCreateInfo::
+   pSampleMask (L113)`
+6. `[feme] Document L112/L113 fixes and open L114 (roadmap L106 sweep)`
+
+## Suggested next steps
+
+1. **Reduce and root-cause L114** (~1-2 hours). Get a
+   `--deqp-log-shader-sources=enable` dump or SPIR-V disassembly of one
+   reduced `sample_position.correctness.128_128_1.samples_2` case to see
+   exactly which fragment input triggers `"element 1 has no location"`
+   -- almost certainly a `gl_SamplePosition`-adjacent builtin the SPIR-V
+   importer or `StageLink.cpp`'s interface-matching validation doesn't
+   recognize as system-value-linked, wrongly treating it as an ordinary
+   `Location`-based varying with no matching vertex-stage output. This
+   is core Vulkan 1.0 (not extension-gated), so the fix must actually
+   make it work, not just report `NotSupported`.
+2. **Re-sweep `multisample_shader_builtin.*` after L114 lands** --
+   expect all 95 cases to resolve to 55 Pass / 0 Fail / 40 NotSupported
+   (the 40 NotSupported are a separate, not-yet-confirmed-benign bucket
+   -- worth a quick spot-check of a couple to confirm they're a real
+   capability gap, not another undiscovered bug, before assuming so).
+3. **Continue the L106 sweep** after L114 closes: same untriaged
+   candidates noted for several sessions running --
+   `multisample-interpolation.txt` (247 cases, small, also topically
+   related) is the cheapest next pick; `pipeline.monolithic.*`/
+   `subgroups.*`/`compute.*`/`graphicsfuzz.*` are much larger and still
+   untriaged.
+4. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
+5. **Technique confirmed again this session**: when a CTS pipeline-
+   creation `Fail` gives only a generic `VK_ERROR_INITIALIZATION_FAILED`
+   in the batched sweep log, `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a
+   single-case rerun reliably surfaces the real underlying `error:`
+   string -- used three times this session (L112's `unhandled
+   Decoration`, L113's `partial VkSampleMask`, L114's `no location to
+   link`), and each time the string alone was enough to identify a
+   completely different root cause and fix location, without needing
+   any temporary code instrumentation.
+6. **Technique confirmed**: before assuming a CTS gap needs a *feme*
+   code change, `grep` the relevant MLIR upstream code path first
+   (`mlir/lib/Target/SPIRV/...`) -- L112 turned out to already be fully
+   handled on feme's own side (`SPIRVToLLVMPatterns.cpp`,
+   `CanonicalizeStage.cpp`), with the actual gap one layer further
+   upstream than feme's own codebase. Saved significant time versus
+   assuming the bug was in feme's own importer.
