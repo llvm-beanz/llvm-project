@@ -831,4 +831,74 @@ TEST(SPIRVToLLVMTest, BoolVectorLaneLoadStoreConvertsInsteadOfFailing) {
       << Result;
 }
 
+// (Roadmap L103) A plain (non-`Block`, no `Offset` decorations) struct
+// whose members' own natural ABI alignments require a gap the SPIR-V
+// declaration order alone doesn't reserve (e.g. a `bool`/`i1` member
+// immediately followed by a wider, more-aligned vector member) used to
+// convert as an ordinary, non-packed LLVM struct, leaving that gap's own
+// size to whatever `DataLayout` happened to be attached to the
+// surrounding `llvm::Module` at the moment a GEP into it was constant-
+// folded to a raw byte offset -- a moment that, for `feme::cpu`, precedes
+// the later switch to the real host `DataLayout` (see
+// layOutStructIfOffsetsMatch's own comment), silently baking in the
+// *wrong* byte offset for every member after such a gap. The fix builds
+// this struct explicitly `packed`, with every natural-alignment gap
+// materialized as its own synthetic `[N x i8]` member (computed via
+// `mlir::DataLayout`'s own default rules, which agree with the real
+// host's here), so the byte layout is fixed independent of whichever
+// `DataLayout` a later GEP fold happens to see.
+TEST(SPIRVToLLVMTest, NonOffsetStructWithAlignmentGapBuildsExplicitPadding) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @g : "
+      "!spirv.ptr<!spirv.struct<(i1, vector<2xsi32>)>, Private> }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // A `<2 x i32>` member's own natural (host) ABI alignment is 8 bytes,
+  // so a 1-byte `i1` immediately before it needs a 7-byte pad -- which
+  // must be materialized explicitly in an otherwise-`packed` struct.
+  EXPECT_NE(Result.find("!llvm.struct<packed (i1, array<7 x i8>, "
+                        "vector<2xi32>"),
+            std::string::npos)
+      << Result;
+}
+
+// (Roadmap L103) An `Input`-storage `AccessChain` selecting a member of a
+// plain (non-`Block`) struct is converted by StageIOArrayAccessChainPattern
+// (despite its name, this handles any composite -- struct or array --
+// `Input`-storage pointee, not just arrays), which used to forward the
+// SPIR-V AccessChain's declared member index straight through to the
+// resulting GEP unchanged. Once layOutStructIfOffsetsMatch's non-offset
+// branch (above) can insert a gap member ahead of a later field, that
+// field's *physical* LLVM struct index no longer matches its *declared*
+// SPIR-V index -- so an unremapped GEP silently selects the wrong field
+// (or the gap itself). The fix routes these indices through the same
+// remapNestedStructMemberIndices helper OffsetStructMemberReorderAccess-
+// ChainPattern already used for offset-decorated structs.
+TEST(SPIRVToLLVMTest, InputStorageStructAccessChainRemapsPhysicalIndex) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @in_multi_member : "
+      "!spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @in_multi_member : "
+      "!spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input> "
+      "%1 = spirv.Constant 1 : i32 "
+      "%2 = spirv.AccessChain %0[%1] : "
+      "!spirv.ptr<!spirv.struct<(f32, vector<3xf32>, f32)>, Input>, i32 -> "
+      "!spirv.ptr<vector<3xf32>, Input> "
+      "%3 = spirv.Load \"Input\" %2 : vector<3xf32> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"Fragment\" @entry "
+      "spirv.ExecutionMode @entry \"OriginUpperLeft\" }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The `vector<3xf32>` member needs a natural 16-byte alignment, so a
+  // 12-byte pad is inserted after the leading `f32`, pushing this
+  // member's own physical index to 2 (declared index 1); the GEP must
+  // select that physical index, not the stale declared one.
+  EXPECT_NE(Result.find(", 2] : (!llvm.ptr"), std::string::npos) << Result;
+  // The stale, unremapped declared index (1) must not appear as a GEP
+  // selector into this struct.
+  EXPECT_EQ(Result.find(", 1] : (!llvm.ptr"), std::string::npos) << Result;
+}
+
 } // namespace
