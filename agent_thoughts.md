@@ -91287,3 +91287,112 @@ Full detail, including exact opcode numbers and error-text quotes, is in
 5. Once L116 closes (or is judged big enough to move on from), go back
    to L106's other untriaged candidates: `pipeline.monolithic.*`,
    `subgroups.*`, `compute.*` -- still nobody has picked these up.
+
+# Session: L116(e) both bugs fixed, L116(a) triaged
+
+## Wins this session
+
+Two committed fixes, both confirmed via CTS + `check-feme`:
+
+1. **`spirv.Store`/`spirv.Load` with combined `Volatile|Nontemporal` bits
+   now legalize.** Upstream MLIR's `LoadStorePattern` used a `switch` over
+   the whole `MemoryAccess` bit-enum value instead of independent bit
+   checks -- any bit-OR combination matched no `case` and fell to
+   `default: return failure()`. Fixed with `bitEnumContainsAll`/
+   `bitEnumContainsAny`. Commit `3720a3afcb6c`.
+2. **`dEQP-VK.graphicsfuzz.call-if-while-switch` now Passes.** Root
+   cause: `Deserializer::wireUpBlockArgument()` used `llvm::find()` to
+   locate a switch's target block when back-patching `OpPhi`-derived
+   block arguments -- only finds the *first* occurrence, so a block that
+   is a switch target more than once (two case literals branching to the
+   same label, legal SPIR-V) had every later duplicate's block-argument
+   list left empty. Fixed by iterating all occurrences via
+   `llvm::enumerate`. Commit `555f2de3c4a0`.
+
+Both are upstream MLIR bugs (`mlir/lib/...`), not feme-specific code --
+same pattern as L112/L115's own precedent of checking upstream first.
+
+Re-swept `graphicsfuzz.*` (757 cases) with both fixes applied: **529
+Pass / 196 Fail / 8 NotSupported / 24 hangs-or-crashes** (up from
+528/197/8/24 -- exactly the one case expected to flip,
+`call-if-while-switch`). `ninja check-feme`: 3192/3195 Pass, 0
+regressions, confirmed after each individual fix.
+
+## L116(a) triaged, not fixed
+
+Checked the prior session's own suggested question: is L116(a) (masked
+load/store rejects aggregate element types) the same root cause as C8b
+(SIMDize can't widen aggregate `insertvalue`/`extractvalue`)? **No.**
+`git log -S"widenInsertValue" -- feme/lib/Transforms/CPU/SIMDize.cpp`
+shows that support was already added under roadmap L21, well before C8b
+was even written -- so **C8b's own premise looks stale** and may already
+be resolved (not independently re-verified against C8a's own repro this
+session -- flagged in Roadmap.md for a future session to check before
+assuming it's still open).
+
+L116(a)'s actual gap is a different file entirely:
+`MaskIntrinsics.cpp`'s `appendScalarMangling`, called from
+`Linearize.cpp`'s `createMaskedLoad`/`createMaskedStore`, has zero
+decomposition logic for a struct/array/matrix element type. A real fix
+needs per-leaf decomposition of an aggregate-typed masked load/store,
+conceptually mirroring `SIMDize.cpp`'s own `widenInsertValue`/
+`widenExtractValue` approach but at a different IR level (a masked-call
+intrinsic, not an SSA `insertvalue`/`extractvalue` chain). Not started.
+
+## Techniques confirmed again this session
+
+- **Reproduce a deserializer bug directly with hand-written SPIR-V
+  assembly** (`spirv-as` + `mlir-translate --deserialize-spirv`) rather
+  than reasoning from a CTS shader's raw disassembly text alone -- built
+  a minimal 25-line `.spvasm` repro for the duplicate-switch-target bug,
+  confirmed it failed identically to the real CTS case, confirmed the
+  fix via a `git stash`/`stash pop` round-trip (fails without the fix,
+  passes with it) before writing the permanent test.
+- **A batched CTS sweep needs a skip-and-continue harness for hangs, and
+  the harness's own "did this chunk finish cleanly" check must look for
+  a paired `#beginTestCaseResult`/`#endTestCaseResult` marker, not just
+  `grep -q "<name>"` against the whole log** -- the latter false-positived
+  on the very first attempt this session, because `#beginTestCaseResult
+  <name>` itself contains the case name as a substring even when that
+  case never finished, so a naive substring check thinks every case
+  "completed" the moment it starts.
+- **A qpa log parser must scope a `<Result StatusCode=...>` search to
+  between one case's own `#beginTestCaseResult`/`#endTestCaseResult`
+  markers**, not a bare regex spanning `.*?` across the whole file --
+  the first parsing attempt this session used a non-greedy cross-file
+  regex and silently mis-attributed a later case's verdict to an earlier,
+  actually-hung case, since the hung case's own block has no closing
+  `Result` line for the regex to stop at.
+- **`deqp-vk` re-runs its *entire* remaining caselist from scratch every
+  time it's invoked** -- a resumable multi-chunk sweep script must dedupe
+  by keeping only the *last* verdict seen for each case name across all
+  chunks' concatenated logs, not just count every `<Result StatusCode>`
+  line, or the totals come out ~12x inflated from repeated reruns of
+  already-passed cases in every subsequent chunk.
+
+## Next steps, in order
+
+1. **Re-verify C8b's own original repro against today's `SIMDize.cpp`**
+   (~15 min): if `widenInsertValue`/`widenExtractValue`/
+   `widenAggregateSelect` (added under L21) already cover it, strike
+   through C8b -- it may be a free, no-code-change roadmap closure.
+2. **L116(a)'s real fix** (now correctly scoped, not "~30 min then
+   unknown" -- budget a half-day-to-a-day): add per-leaf decomposition
+   for a struct/array/matrix-typed masked load/store in
+   `MaskIntrinsics.cpp`/`Linearize.cpp`, likely the single highest-value
+   fix left in the L116 breakdown (~59% of `Fail` error volume in the
+   original sweep).
+3. **L116(c)'s `Determinant`** (~half a day, same shape as L115(a)):
+   add `SPIRV_GLDeterminantOp` to `SPIRVGLOps.td` (needs a square-matrix
+   operand shape) plus a feme-side lowering -- pure arithmetic, no
+   runtime callback needed unlike L115(b).
+4. **L116(f)'s remaining 22 un-root-caused hangs/crashes**: this
+   session's rebuilt skip-and-continue harness (`/tmp/sweep_gf.sh`, not
+   committed, throwaway) reconfirmed the identical 24 case names as last
+   session (no new hangs, none resolved) -- one-at-a-time reduction is
+   still the only way to make progress here, same technique used on the
+   two already investigated (`arr-value-set-to-arr-value-squared`,
+   `complex-nested-loops-and-call`).
+5. Once L116 closes (or is judged big enough to move on from), go back
+   to L106's other untriaged candidates: `pipeline.monolithic.*`,
+   `subgroups.*`, `compute.*` -- still nobody has picked these up.
