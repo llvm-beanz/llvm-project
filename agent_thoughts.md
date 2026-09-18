@@ -91177,3 +91177,113 @@ signature and opened it as `Roadmap.md`'s L115 row for a fresh session.
    `--deqp-caselistfile` flag does not exist (despite looking like the
    obvious name) -- use `-n "case1,case2,..."` (comma-joined, supports
    wildcards) instead; saved a round-trip of guessing flag names.
+
+# Session: L115(a) close-out + first graphicsfuzz.* sweep (L106/L116)
+
+**Start here next session**: rebuild `feme_vulkan` first
+(`ninja -C build2 feme_vulkan`), export
+`VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`,
+confirm `vulkaninfo --summary | grep deviceName` = `FeMe CPU Vulkan
+Device`, then jump to L116(a) below -- it's the highest-value item found
+this session.
+
+## What shipped (2 commits, both verified)
+
+1. **Wrote up L115(a)** (MLIR `InterpolateAtCentroid`/`Sample`/`Offset`
+   ops, done last session) into `Roadmap.md`/`VulkanCTSReport.md` --
+   struck through, split off `L115(b)` (feme-side lowering, scoped but
+   not started, see that row for the runtime-callback design sketch).
+2. **Fixed a real bug**: `spirv.Kill`/`spirv.TerminateInvocation` inside
+   a non-void-returning SPIR-V helper function (e.g.
+   `vec3 f() { discard; return vec3(1.0); }`) crashed with
+   `"'llvm.return' op expected 1 operand"`. Fix: return a `poison` value
+   of the right type instead of nothing. 2 new MLIR unit tests, 0
+   regressions (`ninja check-feme`: 3192/3195). Confirmed via CTS: the
+   reduced case flips Fail -> Pass.
+   File: `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`.
+
+## The big finding: graphicsfuzz.* is a different animal than pipeline.*
+
+Ran the full 757-case `dEQP-VK.graphicsfuzz.*` group for the first time
+ever (no prior session had touched it). Numbers with this session's fix
+applied:
+
+| Outcome | Count |
+|---|---|
+| Pass | 528 |
+| Fail | 197 |
+| NotSupported | 8 |
+| **Process hangs or crashes -- no verdict at all** | **24** |
+
+That last row never showed up in any `pipeline.*` sweep. Two of the 24
+were root-caused directly:
+- `arr-value-set-to-arr-value-squared`: looks like a genuine infinite
+  loop in JIT'd shader code (quicksort-with-injected-bug shader, `timeout
+  30` confirms it never returns).
+- `complex-nested-loops-and-call`: a real `LinearizePass` bug --
+  `"Uses remain when a value is destroyed!"` LLVM assertion, deleting a
+  loop-guard value that's still referenced elsewhere.
+
+The other 22 hangs/crashes and all 197 `Fail`s are triaged into 6
+roadmap rows, ranked by size:
+
+1. **L116(a)** -- `feme-cpu-masked-mem-op` rejects struct/matrix element
+   types. **~59% of all Fail error occurrences.** Probably the same bug
+   as the already-tracked `C8b` row. **Start here** -- highest
+   fix-to-effort ratio by a wide margin if the two really are the same
+   gap (confirm that first, ~30 min, before writing any code).
+2. **L116(b)** -- divergent-branch/linearize gaps specific to
+   `discard`/`break`/`continue` nested in loops (graphicsfuzz's whole
+   idiom). ~80 error occurrences, likely several distinct bugs.
+3. **L116(c)** -- 6 more missing GLSL.std.450 ops
+   (`Determinant`/`Modf`/4 `Pack/Unpack*` variants), same TableGen
+   pattern as this session's own L115(a). `Determinant` alone is 17
+   cases -- probably a half-day job like L115(a) was.
+4. **L116(d)** -- `spirv.Constant`/`CompositeConstruct` of aggregate
+   types fail legalization (20 occurrences). Might collapse into
+   L116(a)/C8b too.
+5. **L116(e)** -- 2 small one-off bugs (`spirv.Switch` branch arity,
+   `spirv.Store` with volatile+nontemporal). Best 30-minute quick wins
+   if you want a fast early win before tackling (a).
+
+Full detail, including exact opcode numbers and error-text quotes, is in
+`Roadmap.md`'s L116(a)-(f) rows and `VulkanCTSReport.md`'s L116 section
+-- read those, not just this summary, before starting any of them.
+
+## Techniques worth repeating
+
+- **`--deqp-watchdog=enable --deqp-watchdog-total-time-limit=20
+  --deqp-watchdog-interval-time-limit=10`** (units are **seconds**, not
+  ms -- I burned 15 minutes finding that out by passing `15000` and
+  waiting for a 4-hour timeout that obviously never came). Use this any
+  time sweeping an untriaged group that might contain a hang.
+- **A batch sweep dies entirely on a single fatal crash** (not just that
+  one test) -- `deqp-vk` has no per-case process isolation. Build a
+  skip-and-continue wrapper (grep the log for the last `"Test case
+  '...'.."` line with no result after it, strip everything up to and
+  including it from the caselist, rerun) rather than assuming one bad
+  case only costs you that one case.
+- **`--deqp-caselist-file` has a hyphen before `file`** (not
+  `--deqp-caselistfile`, confirmed wrong again this session before
+  finding the right one via `--help`).
+
+## Next steps, in order
+
+1. **L116(a)** (~30 min to confirm same-as-C8b, then unknown to fix
+   depending on answer): grep `SIMDize.cpp`'s own aggregate
+   `insertvalue`/`extractvalue` handling and `MaskIntrinsics.cpp`'s
+   `appendScalarMangling` side by side -- confirm whether they share one
+   underlying "aggregate values through the CPU backend" gap before
+   writing any code.
+2. **L116(c)'s `Determinant`** (~half a day, same shape as L115(a)):
+   add `SPIRV_GLDeterminantOp` to `SPIRVGLOps.td` (needs a square-matrix
+   operand shape, not one of the existing generic patterns) plus a
+   feme-side lowering (this one's just arithmetic, no runtime callback
+   needed unlike L115(b) -- should close fully in one session).
+3. **L116(e)'s two one-off bugs** (~1-2 hours combined): good if you
+   want two visible wins before tackling (a) or (c).
+4. **L116(f)'s remaining 22 unroot-caused hangs/crashes**: one-at-a-time
+   reduction, same technique used on the two already investigated.
+5. Once L116 closes (or is judged big enough to move on from), go back
+   to L106's other untriaged candidates: `pipeline.monolithic.*`,
+   `subgroups.*`, `compute.*` -- still nobody has picked these up.
