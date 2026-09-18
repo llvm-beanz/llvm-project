@@ -90140,3 +90140,82 @@ exact repro steps is in `VulkanCTSReport.md`'s new "L104" section and
 4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell.
+
+# L104 fix (vec3 struct-member alloc-size mismatch), L105/L106 scoped
+
+Fixed L104: the last open `composite.struct.*` failure bucket (35
+cases, every 3-lane-vector-column shape). `spec_constant.*` is now
+fully clean: 655 Pass / 0 Fail / 515 NotSupported. Zero regressions
+across `check-feme` (3174/3/0) and every re-swept group.
+
+## What was wrong
+
+Same root-cause *family* as L103 (a `DataLayout`-timing disagreement),
+different specific gap: `mlir::DataLayout`'s generic default rule
+rounds a `vec3`'s alloc size up to a power-of-two (16 bytes), but the
+real SPIR-V-logical `DataLayout` string sets `vectorsAreElementAligned`
+and gives it a tight 12 bytes instead. Any struct member declared right
+after a `vec3` landed 4 bytes off from where the GEP-folder actually
+put it -- reads silently pulled `vec3`'s own trailing padding instead
+of the next member's real value.
+
+## The fix (2 commits + 1 test-update commit)
+
+1. Reused the existing `getTightVectorArrayType`/`feme.tight_vector`
+   marker-struct substitution mechanism (previously only a fallback
+   retry for `Offset`-decorated structs) -- now applied *unconditionally*
+   to any non-power-of-two-lane vector member (only ever `vec3`) in
+   `layOutStructIfOffsetsMatch`'s non-offset branch. An LLVM array's
+   alloc size has no target-specific rounding, so this kills the
+   ambiguity at the source instead of trying to keep two `DataLayout`
+   computations in permanent lockstep.
+2. Two `AccessChain` remap gates, previously `StructTy.hasOffset()`-
+   gated, broadened to unconditional (non-offset structs can now also
+   have marker-wrapped members needing an extra GEP index).
+3. A second bug surfaced *after* the first fix landed: a `matNx3`/
+   array-of-`vec3` member's own constituent converts to a raw
+   (non-marker) `!llvm.array<N x vector<...>>`, one level removed from
+   struct-context awareness. Added `reassembleTightVectorValue`, a
+   recursive helper walking both the constituent's and the field's
+   real type in lockstep through any array-nesting depth, replacing
+   `CompositeConstructPattern::convertStruct`'s old single-level unwrap.
+
+## Time actually spent vs. estimate
+
+Prior session estimated "an hour, similar to L102." Actual: closer to
+half a day, because of the second (reassembly) bug -- it only showed up
+on a *second*, broader re-sweep after the first fix already looked
+clean on the narrower repro. Lesson banked for next time: always
+re-sweep the *full* affected CTS group (not just the single reduced
+case) before calling a struct-layout fix done, since matrix/array
+member shapes route through a completely different conversion path
+(`CompositeConstruct`) than the plain scalar/vector member shapes the
+reduced repro covers.
+
+## New gap found (not fixed, not in scope for L104)
+
+A pre-existing, unrelated crash while spot-checking `interface_matching.*`
+for collateral effects: `ArrayRef<unsigned>::slice` assertion failure on
+`decoration_mismatch.out_component0_in_none_member_of_block_vert_out_frag_in`,
+plus a related non-fatal "component out of range" error on two adjacent
+cases in the same sweep. Confirmed via baseline rebuild that this
+pre-dates L104's own changes entirely. Logged as roadmap **L105**.
+
+## Next steps
+
+1. **Reduce and root-cause L105** (~1-2 hours to reduce once IR is in
+   hand -- three concrete failing cases already named in the roadmap
+   entry, so no fresh CTS triage is needed to start). Likely related to
+   the `Component`-decoration/L94(h) code path given the "component"
+   wording in the error, but not yet confirmed.
+2. **Broaden the sweep beyond `spec_constant.*`** (roadmap L106) -- that
+   whole group is now fully closed after 6 sessions of fixes (L99-L104).
+   Either pick up `interface_matching.*`'s own 468 not-yet-triaged
+   not-supported cases (a different kind of gap: unadvertised
+   feature/format support, not a bug -- flagged by an even earlier
+   session and still not picked up), or a fresh top-level `dEQP-VK.*`
+   group. ~30-60 minutes to triage which is the cheaper win before
+   committing to a full sweep.
+3. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell.
