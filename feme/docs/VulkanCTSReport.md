@@ -1355,3 +1355,99 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.*" \
   --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
+
+# L105: measured impact (fix landed for CanonicalizeStage.cpp's own consumer-side bug; producer-side gap split off as L107)
+
+## Root cause
+
+Not Component-decoration-related (the initial hypothesis, a red herring
+from the first-reported case happening to also carry a `Component`
+decoration) -- a general bug in `CanonicalizeStage.cpp`'s own
+consumer-side stage-IO struct-member mapping, in the same root-cause
+family as L103/L104.
+
+`layOutStructIfOffsetsMatch`'s non-offset branch (added by L103, tightened
+by L104) can insert a synthetic `[N x i8]` alignment-gap pad field at
+**any** physical position in a struct -- not just leading -- whenever two
+adjacent real members have a natural-alignment gap between them (e.g.
+`float dummy; vec4 v;`, needing 12 bytes of padding so `v` lands on its
+own 16-byte natural alignment). `CanonicalizeStage.cpp`'s own consumer
+side had five separate places that only ever recognized a **leading**
+pad (`HasLeadingPad`/`ST->getNumElements() == MemberDecorations.size() +
+1`, an artifact of how much narrower the pad shape was when this logic
+was first written), silently mis-mapping every declared member after an
+interior gap to the wrong physical LLVM struct field:
+
+1. `resolveOffsetWithinElement`'s `IDStart` computation (block member
+   path).
+2. `addElements`' `TakeBlockPath` physical-index mapping (construction
+   side).
+3. `addStageIOStructMembers` (loose, non-`Block` struct/array-of-struct
+   path).
+4. `getStageIOFlattenedRowCount`/`getStageIOLeafElementCount` (nested
+   multi-member struct row/leaf counting).
+5. `resolveNestedStageIOField`'s own `IDStart` computation (nested
+   struct member path).
+
+Debugged via a temporary `errs()` trace gated on an env var
+(`FEME_L105_TRACE`), printing every constructed `SignatureElement`'s
+`ElementID`/`FirstComponent`/`ComponentCount`/`RowCount` -- this revealed
+a 2-real-member block producing 4 malformed `SignatureElement`s directly,
+far more effective than guessing from the crash backtrace alone.
+
+## Fix
+
+Added a shared `isStageIOPadField(Type *FieldTy)` helper: a synthetic pad
+is always shaped as `[N x i8]` (an `ArrayType` of `i8`), an unambiguous
+signal since a real stage-IO member's own GLSL/HLSL-visible type
+(scalar/vector/matrix/struct thereof) is never itself a raw byte array --
+the same technique the original leading-only checks already used, just
+generalized to check every physical field rather than only field 0. Used
+it to generalize all five locations above from leading-only to
+any-position pad skipping.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start.
+- New unit test
+  `CanonicalizeStageTest.MapsMultiMemberInterfaceBlockWithInteriorPadToDistinctMembers`,
+  modeled on the existing leading-pad sibling test.
+- `ninja check-feme`: 3175 Passed, 3 pre-existing Unsupported, 0 Failed --
+  no regressions.
+- Both originally-reported crash cases (`out_component0_in_none_member_of_
+  block_vert_out_frag_in`, `out_none_in_flat_member_of_block_vert_out_frag_in`)
+  now Pass.
+- A manual 72-case `member_of_block` decoration_mismatch sweep (run one
+  case at a time, since an `abort()` kills the whole `deqp-vk` process):
+  **0 Pass / 40 Fail / 32 Assertion pre-fix**, confirming the bug's real
+  scope was the entire subgroup, not the 2-3 cases the roadmap entry
+  originally described.
+- Full `pipeline_library.interface_matching.decoration_mismatch.*`
+  re-sweep (360 cases, same one-at-a-time methodology): **354 Pass / 0
+  Fail / 6 Assert**, up from widespread failure across the
+  `member_of_block` subgroup pre-fix. The remaining 6 crashes are a
+  single, narrow, distinct shape (a loose, non-`Block`
+  array-of-structures `Output` variable at exactly the
+  tessellation-control stage boundary, e.g. `out_flat_in_none_member_of_
+  array_of_structures_vert_tesc_out_tese_in_frag`) -- traced via
+  `gdb`/temporary tracing to a **separate, producer-side** gap in
+  `SPIRVToLLVMPatterns.cpp`'s own GEP-index remapping (the compiled IR
+  itself bakes in a byte offset that assumes an un-padded layout,
+  disagreeing with the real padded struct `CanonicalizeStage.cpp`
+  correctly resolves against), not this consumer-side bug family --
+  split off and tracked separately as roadmap L107.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+stage-IO struct-layout consumer-side correctness fix; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` are unchanged.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.interface_matching.decoration_mismatch.*" \
+  --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
