@@ -55,28 +55,22 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Reduce and root-cause L107** (~1-2 hours once a minimal repro is
-   in hand -- the exact CTS case name and byte-offset-mismatch symptom
-   are already known, so start there directly with
-   `FEME_DUMP_IR=1`/`spirv-dis` on the reduced shader rather than
-   re-triaging from scratch). Likely fix: extend whichever
-   `AccessChain` conversion pattern handles a non-`Block` array-of-struct
-   `Output` access to call `remapNestedStructMemberIndices`, the same
-   way `StageIOArrayAccessChainPattern` already does for `Input`.
-2. **Re-sweep `decoration_mismatch.*` and the full
-   `interface_matching.*` group** after L107 lands, to confirm 360/360
-   and check for any further crashes elsewhere in the same family.
-3. **Then pick up roadmap L106** (broaden the sweep beyond
-   `spec_constant.*`/`interface_matching.decoration_mismatch.*`) --
-   either `interface_matching.*`'s own 468 not-yet-triaged
-   not-supported cases, or a fresh top-level `dEQP-VK.*` group. ~30-60
-   minutes to triage which is the cheaper win before committing to a
-   full sweep.
-4. **Standing gotcha, still true**: export
+1. **Pick a fresh CTS group to sweep** (roadmap L106's own remaining
+   candidate): either a different `dEQP-VK.pipeline.*` subgroup (e.g.
+   `pipeline_library.miscellaneous.*`, `pipeline.monolithic.*`,
+   `pipeline.multisample.*`) or a top-level group outside `pipeline.*`
+   entirely (e.g. `dEQP-VK.subgroups.*`, `dEQP-VK.compute.*`,
+   `dEQP-VK.graphicsfuzz.*`). None of these have been triaged this
+   milestone series. ~30-60 minutes to pick the cheapest-looking one and
+   get a first Pass/Fail/NotSupported count.
+2. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
-   before any `vulkaninfo`/`deqp-vk` in a fresh shell.
-5. **New technique worth keeping**: running a large CTS group one case
-   at a time via a bash loop (survives a hard `abort()` crash mid-sweep,
-   unlike a single glob `-n` invocation) is now proven useful for a
-   second session running -- worth formalizing as a small shared script
-   if a third session needs it again.
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- it is not
+   persisted, so a fresh shell defaults to `lvp_icd.json` (llvmpipe).
+3. **Technique confirmed useful again**: for a *known-clean* subgroup
+   (no expected crashes), a single batched `deqp-vk -n "pattern.*"`
+   invocation is much faster than the one-case-at-a-time bash loop --
+   only fall back to the loop once a crash is actually observed
+   mid-batch (used both ways successfully this session: batched for
+   `vector_length`/`shader_layout_component_matching`, one-at-a-time
+   loop for the previously-crashing `decoration_mismatch.*`).
