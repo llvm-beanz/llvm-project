@@ -3007,6 +3007,18 @@ bool isInputArrayAccessChain(mlir::spirv::AccessChainOp Op) {
 /// reading through the real pointer with an ordinary `llvm.load` whenever
 /// the dialect conversion framework needs a value of the "expected"
 /// (eagerly-loaded-value) type but only has this real pointer on hand.
+/// Forward declaration: defined in full below (roadmap H133), used by
+/// StageIOArrayAccessChainPattern (roadmap L103) to remap a plain
+/// (non-offset) struct member selector -- reached either directly or
+/// through this pointer's own outer array dimension -- whenever
+/// layOutStructIfOffsetsMatch's own natural-alignment gap insertion has
+/// shifted that member's physical field index away from its declared one.
+bool remapNestedStructMemberIndices(
+    mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
+    const mlir::TypeConverter &Converter,
+    mlir::ConversionPatternRewriter &Rewriter,
+    llvm::SmallVectorImpl<mlir::Value> &Indices);
+
 class StageIOArrayAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
@@ -3040,7 +3052,24 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
     Indices.push_back(mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, IndexType, Rewriter.getIntegerAttr(IndexType, 0)));
-    llvm::append_range(Indices, Adaptor.getIndices());
+    // (Roadmap L103) `Adaptor.getIndices()` is every one of \p Op's own
+    // declared indices, unremapped -- correct as-is for a leading array
+    // dimension (every element shares one physical layout regardless of
+    // which one is selected), but *not* for a struct member reached
+    // directly or through that array: layOutStructIfOffsetsMatch's own
+    // `!Type.hasOffset()` branch may insert a natural-alignment gap for
+    // such a struct exactly as an offset-decorated one already could,
+    // shifting a later member's physical field index away from its
+    // declared one -- remap every declared index the same way
+    // OffsetStructMemberReorderAccessChainPattern/rewriteBlockAccess
+    // already do for their own struct-typed accesses.
+    llvm::SmallVector<mlir::Value, 4> RemappedIndices(Adaptor.getIndices());
+    if (!remapNestedStructMemberIndices(BaseType.getPointeeType(), Op,
+                                        /*StartIndex=*/0, *getTypeConverter(),
+                                        Rewriter, RemappedIndices))
+      return Rewriter.notifyMatchFailure(
+          Op, "struct member selector is not a constant");
+    llvm::append_range(Indices, RemappedIndices);
 
     mlir::Type ResultType = mlir::LLVM::LLVMPointerType::get(
         Rewriter.getContext(),
@@ -4971,13 +5000,66 @@ mlir::Type layOutStructIfOffsetsMatch(
     llvm::SmallVectorImpl<unsigned> *PhysicalIndexOut = nullptr,
     bool AllowInteriorPad = false) {
   if (!Type.hasOffset()) {
-    if (PhysicalIndexOut) {
-      PhysicalIndexOut->clear();
-      for (unsigned I = 0, E = Members.size(); I != E; ++I)
-        PhysicalIndexOut->push_back(I);
+    // (Roadmap L103) Building this as a plain non-packed LLVM struct
+    // leaves any padding a member's own natural ABI alignment requires
+    // (e.g. a `<2 x i32>` member immediately after a 1-byte `i1`/`bool`
+    // member) to be computed *implicitly* -- by whatever `DataLayout`
+    // happens to be attached to the enclosing `llvm::Module` at the
+    // moment a GEP into this struct is constant-folded into a raw byte
+    // offset. That moment is `feme::SPIRVToLLVMTranslator`'s own
+    // translation, well before `feme::cpu`'s later switch to the real
+    // host `DataLayout` (see `Pipeline.cpp`'s own comment on that
+    // switch) -- so it is still the SPIR-V execution model's own
+    // triple-derived `DataLayout` at that point, and that `DataLayout`'s
+    // own vector alignment rule disagrees with the real host's (a
+    // `<2 x i32>` aligns to only 4 bytes there, vs. the host's real
+    // 8-byte natural alignment) -- silently baking in the *wrong* byte
+    // offset for every member after such a gap, permanently: switching
+    // to the real host `DataLayout` afterward cannot retroactively
+    // re-fold an already-materialized constant GEP.
+    //
+    // Building this struct *explicitly packed* instead, with every
+    // natural-alignment gap materialized as its own synthetic `[N x i8]`
+    // member (computed here via `mlir::DataLayout`'s own default rules,
+    // which do match the real host's), makes its resulting byte layout
+    // fixed and independent of whatever `DataLayout` is attached to the
+    // module whenever a GEP into it later gets folded -- the same
+    // technique this function already uses below for an offset-decorated
+    // struct, just with no declared `Offset` to match against, so every
+    // member is simply placed at its own next naturally-aligned position
+    // in declaration order (no permutation possible with no declared
+    // offsets to sort by).
+    mlir::DataLayout DL;
+    uint64_t Cursor = 0;
+    uint64_t StructAlignment = 1;
+    llvm::SmallVector<mlir::Type, 8> Laid;
+    llvm::SmallVector<unsigned, 8> PhysicalIndexOf(Members.size(), 0);
+    for (unsigned I = 0, E = Members.size(); I != E; ++I) {
+      mlir::Type Member = Members[I];
+      uint64_t Alignment = getNaturalAlignmentIgnoringPacking(Member, DL);
+      StructAlignment = std::max(StructAlignment, Alignment);
+      uint64_t Aligned = llvm::alignTo(Cursor, Alignment);
+      if (Aligned > Cursor)
+        Laid.push_back(mlir::LLVM::LLVMArrayType::get(
+            mlir::IntegerType::get(Type.getContext(), 8), Aligned - Cursor));
+      Cursor = Aligned;
+      PhysicalIndexOf[I] = Laid.size();
+      Laid.push_back(Member);
+      Cursor += DL.getTypeSize(Member);
     }
-    return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
-                                                  /*isPacked=*/false);
+    // A non-packed struct's own overall size is always rounded up to its
+    // own largest member's alignment; replicate that same trailing
+    // padding explicitly too, since this struct's own size (e.g. an
+    // array of this struct's own per-element stride) must still agree
+    // with what the un-packed version would otherwise have reported.
+    uint64_t FinalSize = llvm::alignTo(Cursor, StructAlignment);
+    if (FinalSize > Cursor)
+      Laid.push_back(mlir::LLVM::LLVMArrayType::get(
+          mlir::IntegerType::get(Type.getContext(), 8), FinalSize - Cursor));
+    if (PhysicalIndexOut)
+      *PhysicalIndexOut = std::move(PhysicalIndexOf);
+    return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Laid,
+                                                  /*isPacked=*/true);
   }
 
   llvm::SmallVector<unsigned, 8> Order = getOffsetSortedMemberIndices(Type);
@@ -5560,16 +5642,19 @@ getStructMemberPhysicalFieldType(mlir::spirv::StructType Struct,
 /// touched.
 ///
 /// Walks \p CurrentType exactly as the AccessChain's own declared indices
-/// would navigate it: a struct needing no reordering (no `Offset`
-/// decorations at all) or an array/runtime-array (whose every element
-/// shares one physical layout regardless of which one is selected) needs
-/// no remapping at that level, so its own index is left unchanged and
-/// this simply advances into the selected element/member's own declared
-/// type; a struct that *does* need reordering has its selector remapped
-/// exactly as getStructMemberPhysicalIndex already does for a single
-/// level. Stops (successfully, leaving every remaining index unchanged)
-/// at the first matrix/scalar leaf -- no further struct-member selector
-/// is possible past that point -- or once \p Indices is exhausted.
+/// would navigate it: a struct needing no remapping (no member reordering
+/// and no natural-alignment padding gap, roadmap L103) or an array/
+/// runtime-array (whose every element shares one physical layout
+/// regardless of which one is selected) needs no remapping at that level,
+/// so its own index is left unchanged and this simply advances into the
+/// selected element/member's own declared type; a struct that *does* need
+/// remapping (whether from a declared `Offset` permutation/pad, or a
+/// plain, non-offset-decorated struct's own natural-alignment gap) has
+/// its selector remapped exactly as getStructMemberPhysicalIndex already
+/// does for a single level. Stops (successfully, leaving every remaining
+/// index unchanged) at the first matrix/scalar leaf -- no further
+/// struct-member selector is possible past that point -- or once \p
+/// Indices is exhausted.
 ///
 /// (Roadmap H124o) A struct member that is itself a *vector* gets one
 /// further check, right when it is selected: `spirv.AccessChain`'s own
@@ -5610,7 +5695,7 @@ bool remapNestedStructMemberIndices(
       unsigned Declared = static_cast<unsigned>(*DeclaredIndex);
       if (Declared >= StructTy.getNumElements())
         return false;
-      if (StructTy.hasOffset()) {
+      {
         unsigned Physical =
             getStructMemberPhysicalIndex(StructTy, Declared, Converter);
         if (Physical != Declared) {
@@ -5905,17 +5990,19 @@ public:
     // permutes nothing and has no leading pad, yet still needs every
     // member after that gap remapped one or more slots forward).
     //
-    // (Roadmap H96) `StructTy.hasOffset()` must still be checked here: an
-    // ordinary, non-block struct (no member `Offset` decorations, e.g.
-    // an ordinary function-scope aggregate rather than a uniform/storage
-    // block) has no physical-index map to speak of, and
-    // convertOffsetStructTypeIgnoringDecorations's own early return for
-    // that case (see layOutStructIfOffsetsMatch) already reports an
-    // identity map, so this check is really just an optimization to
-    // avoid the reconversion below for the common (non-offset) case.
+    // (Roadmap L103) This is computed for *every* struct, not just an
+    // offset-decorated one: layOutStructIfOffsetsMatch's own
+    // `!Type.hasOffset()` branch may itself insert a natural-alignment
+    // gap (e.g. before a `<2 x i32>` member following a 1-byte `bool`
+    // member) even with no declared `Offset` to satisfy, and any such gap
+    // shifts every later member's own physical field index the exact
+    // same way an offset-decorated struct's own padding would -- an
+    // ordinary, no-gap-needed struct (the overwhelmingly common case,
+    // e.g. an all-scalar aggregate) still gets an identity map back, so
+    // this is a no-op for every struct that was already fine.
     llvm::SmallVector<unsigned, 8> PhysicalIndexOf;
     bool NeedsRemap = false;
-    if (StructTy && StructTy.hasOffset()) {
+    if (StructTy) {
       if (!convertOffsetStructTypeIgnoringDecorations(
               StructTy, *getTypeConverter(), &PhysicalIndexOf))
         return Rewriter.notifyMatchFailure(Op, "type conversion failed");
@@ -8567,10 +8654,8 @@ private:
     mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstType);
     for (auto [DeclaredIndex, Constituent] :
          llvm::enumerate(Adaptor.getConstituents())) {
-      unsigned Index = StructTy.hasOffset()
-                           ? getStructMemberPhysicalIndex(
-                                 StructTy, DeclaredIndex, *getTypeConverter())
-                           : static_cast<unsigned>(DeclaredIndex);
+      unsigned Index = getStructMemberPhysicalIndex(
+          StructTy, DeclaredIndex, *getTypeConverter());
       if (Index >= FieldTypes.size())
         return Rewriter.notifyMatchFailure(Op, "physical index out of range");
       mlir::Type FieldTy = FieldTypes[Index];
