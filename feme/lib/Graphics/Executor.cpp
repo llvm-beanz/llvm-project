@@ -4388,130 +4388,134 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                  "vertex input element %u has no location "
                                  "to bind a vertex buffer attribute",
                                  Elt.ElementID);
-      // A matrix vertex *attribute* needs one
-      // `VkVertexInputAttributeDescription` per column, at consecutive
-      // locations (unlike a matrix varying/ `Output`, which this executor's
-      // `StageStorage`/`readRaw`/`writeRaw` now support directly via `Row`) --
-      // that per-column attribute splitting is not implemented yet, so this is
-      // still rejected explicitly rather than silently binding only row 0's
-      // data.
-      if (Elt.RowCount != 1)
-        return createStringError(
-            inconvertibleErrorCode(),
-            "vertex input element %u spans %u rows; matrix vertex "
-            "attributes are not implemented yet",
-            Elt.ElementID, Elt.RowCount);
-      const VertexBufferBinding *Binding = nullptr;
-      const VertexAttribute *Attr = nullptr;
-      for (const VertexBufferBinding &VB : Draw.VertexBuffers)
-        for (const VertexAttribute &A : VB.Attributes)
-          if (A.Location == *Elt.Location) {
-            Binding = &VB;
-            Attr = &A;
-          }
-      if (!Binding)
-        return createStringError(inconvertibleErrorCode(),
-                                 "vertex input location %u has no bound "
-                                 "vertex buffer attribute",
-                                 *Elt.Location);
+      // A matrix vertex *attribute* is bound as one
+      // `VkVertexInputAttributeDescription` per row/column, at
+      // consecutive locations starting at `*Elt.Location` (Vulkan's own
+      // convention for a mat*-typed vertex input, mirrored by every
+      // upstream frontend that splits a matrix input parameter into
+      // per-row/per-column signature elements) -- unlike a matrix
+      // varying/`Output`, which this executor's `StageStorage`/
+      // `readRaw`/`writeRaw` already supported directly via `Row` before
+      // this fix. Look up and fetch each row's own bound attribute
+      // separately below, writing each into its own `Row` slot of the
+      // same `Elt.ElementID`.
+      for (uint32_t Row = 0; Row != Elt.RowCount; ++Row) {
+        uint32_t RowLocation = *Elt.Location + Row;
+        const VertexBufferBinding *Binding = nullptr;
+        const VertexAttribute *Attr = nullptr;
+        for (const VertexBufferBinding &VB : Draw.VertexBuffers)
+          for (const VertexAttribute &A : VB.Attributes)
+            if (A.Location == RowLocation) {
+              Binding = &VB;
+              Attr = &A;
+            }
+        if (!Binding)
+          return createStringError(inconvertibleErrorCode(),
+                                   "vertex input location %u has no bound "
+                                   "vertex buffer attribute",
+                                   RowLocation);
 
-      for (uint32_t Flat = 0; Flat != Total; ++Flat) {
-        // A restart-marker index fetches no vertex at all (its lane never
-        // appears in an assembled primitive below), and the raw index
-        // arithmetic above is not a valid array index for it.
-        if (RestartEnabled && IsRestart[Flat % PerInstance])
-          continue;
-        // A per-instance binding advances once per instance rather than
-        // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
-        // INSTANCE`): it is indexed by the invocation's instance index, not
-        // its vertex index. (roadmap F6) `VK_KHR_vertex_attribute_divisor`
-        // generalizes that one-fetch-per-instance step to one fetch every
-        // `Divisor` instances (`Divisor == 1`, the default, is exactly the
-        // plain per-instance case above), and `Divisor == 0`
-        // (`vertexAttributeInstanceRateZeroDivisor`) is the one further
-        // case where every instance reads the same vertex, at
-        // `firstInstance` -- not a new fetch mechanism, just this same
-        // formula's own degenerate divide-by-zero case spelled out
-        // explicitly.
-        uint32_t FetchIndex;
-        if (!Binding->PerInstance) {
-          FetchIndex = VertexIndices[Flat];
-        } else if (Binding->Divisor == 0) {
-          FetchIndex = Invocations[Flat].BaseInstance;
-        } else {
-          uint32_t FirstInstance = Invocations[Flat].BaseInstance;
-          FetchIndex =
-              FirstInstance +
-              (Invocations[Flat].InstanceID - FirstInstance) / Binding->Divisor;
-        }
-        uint64_t SrcOff = (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
-        Expected<AttributeFetchLayout> FetchLayout =
-            attributeFetchLayout(Attr->Format);
-        if (!FetchLayout)
-          return FetchLayout.takeError();
-        // (roadmap F10) `VkPipelineRobustnessCreateInfo::vertexInputs` /
-        // `robustBufferAccess` (unconditionally on, see
-        // `PhysicalDeviceInfo.cpp`'s own comment): an out-of-bounds vertex
-        // attribute read must return zero per component -- like the
-        // descriptor-bound helper path's own "For a vector access the check
-        // is per-component" convention ("Bounds checking" in
-        // FeMeCPUDesign.md) -- rather than fail the whole draw. Only the
-        // components that actually fit within `Binding->Data` are decoded;
-        // `Bits` is already zero-initialized for the rest. `AvailableFetches`
-        // counts whole `FetchByteSize`-byte reads available (roadmap H8h: a
-        // packed format's single fetch is available in full or not at all,
-        // never partially per component -- this generalizes the pre-H8h
-        // one-fetch-per-component arithmetic, since `ComponentsPerFetch == 1`
-        // there makes `AvailableFetches * ComponentsPerFetch` identical to
-        // the old `AvailableBytes / CompByteSize` formula).
-        //
-        // (roadmap L79) `FormatComponents` additionally caps how many
-        // components are ever decoded *from memory* by the bound attribute
-        // format's own real channel count, distinct from the buffer-bounds
-        // cap below: a shader declaring more components than the format
-        // itself supplies (e.g. `float4 position` bound to an
-        // `R32G32_FLOAT` attribute) must not read the next fetch's worth of
-        // bytes as if they belonged to this component -- that would read
-        // into the *next* vertex's own data whenever the format's real
-        // width is narrower than the shader's declared width, which was
-        // this row's own reported bug. Any shader-declared component
-        // beyond `FormatComponents` is defaulted below instead, per the
-        // standard HLSL/Vulkan convention (0 for a missing X/Y/Z, 1 for a
-        // missing W) -- distinct from, and applied after, the
-        // buffer-bounds robustness zero-fill above, which still applies
-        // unchanged to any component within the format's own channel count
-        // that the actual bound buffer's real length happens to cut short.
-        uint32_t FormatComponents =
-            std::min(Elt.ComponentCount, FetchLayout->ChannelCount);
-        uint64_t AvailableBytes =
-            SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
-        uint64_t AvailableFetches = AvailableBytes / FetchLayout->FetchByteSize;
-        uint32_t InBoundsComponents = static_cast<uint32_t>(std::min<uint64_t>(
-            FormatComponents,
-            AvailableFetches * FetchLayout->ComponentsPerFetch));
-        std::array<uint32_t, 4> Bits{};
-        if (InBoundsComponents != 0) {
-          if (Error E =
-                  decodeAttribute(Attr->Format, Binding->Data.data() + SrcOff,
-                                  InBoundsComponents, Elt.ComponentType, Bits))
-            return E;
-        }
-        // A component the bound format never supplies at all (as opposed
-        // to one merely truncated by the robustness check above, which
-        // correctly stays zero) defaults per the standard convention: 0 for
-        // a missing X/Y/Z (already zero-initialized above, nothing to do)
-        // and 1 for a missing W.
-        if (FormatComponents < 4 && Elt.ComponentCount == 4) {
-          if (Elt.ComponentType == SignatureComponentType::Float) {
-            float One = 1.0f;
-            memcpy(&Bits[3], &One, sizeof(float));
+        for (uint32_t Flat = 0; Flat != Total; ++Flat) {
+          // A restart-marker index fetches no vertex at all (its lane never
+          // appears in an assembled primitive below), and the raw index
+          // arithmetic above is not a valid array index for it.
+          if (RestartEnabled && IsRestart[Flat % PerInstance])
+            continue;
+          // A per-instance binding advances once per instance rather than
+          // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
+          // INSTANCE`): it is indexed by the invocation's instance index, not
+          // its vertex index. (roadmap F6) `VK_KHR_vertex_attribute_divisor`
+          // generalizes that one-fetch-per-instance step to one fetch every
+          // `Divisor` instances (`Divisor == 1`, the default, is exactly the
+          // plain per-instance case above), and `Divisor == 0`
+          // (`vertexAttributeInstanceRateZeroDivisor`) is the one further
+          // case where every instance reads the same vertex, at
+          // `firstInstance` -- not a new fetch mechanism, just this same
+          // formula's own degenerate divide-by-zero case spelled out
+          // explicitly.
+          uint32_t FetchIndex;
+          if (!Binding->PerInstance) {
+            FetchIndex = VertexIndices[Flat];
+          } else if (Binding->Divisor == 0) {
+            FetchIndex = Invocations[Flat].BaseInstance;
           } else {
-            Bits[3] = 1u;
+            uint32_t FirstInstance = Invocations[Flat].BaseInstance;
+            FetchIndex =
+                FirstInstance + (Invocations[Flat].InstanceID - FirstInstance) /
+                                    Binding->Divisor;
           }
+          uint64_t SrcOff =
+              (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
+          Expected<AttributeFetchLayout> FetchLayout =
+              attributeFetchLayout(Attr->Format);
+          if (!FetchLayout)
+            return FetchLayout.takeError();
+          // (roadmap F10) `VkPipelineRobustnessCreateInfo::vertexInputs` /
+          // `robustBufferAccess` (unconditionally on, see
+          // `PhysicalDeviceInfo.cpp`'s own comment): an out-of-bounds vertex
+          // attribute read must return zero per component -- like the
+          // descriptor-bound helper path's own "For a vector access the check
+          // is per-component" convention ("Bounds checking" in
+          // FeMeCPUDesign.md) -- rather than fail the whole draw. Only the
+          // components that actually fit within `Binding->Data` are decoded;
+          // `Bits` is already zero-initialized for the rest. `AvailableFetches`
+          // counts whole `FetchByteSize`-byte reads available (roadmap H8h: a
+          // packed format's single fetch is available in full or not at all,
+          // never partially per component -- this generalizes the pre-H8h
+          // one-fetch-per-component arithmetic, since `ComponentsPerFetch == 1`
+          // there makes `AvailableFetches * ComponentsPerFetch` identical to
+          // the old `AvailableBytes / CompByteSize` formula).
+          //
+          // (roadmap L79) `FormatComponents` additionally caps how many
+          // components are ever decoded *from memory* by the bound attribute
+          // format's own real channel count, distinct from the buffer-bounds
+          // cap below: a shader declaring more components than the format
+          // itself supplies (e.g. `float4 position` bound to an
+          // `R32G32_FLOAT` attribute) must not read the next fetch's worth of
+          // bytes as if they belonged to this component -- that would read
+          // into the *next* vertex's own data whenever the format's real
+          // width is narrower than the shader's declared width, which was
+          // this row's own reported bug. Any shader-declared component
+          // beyond `FormatComponents` is defaulted below instead, per the
+          // standard HLSL/Vulkan convention (0 for a missing X/Y/Z, 1 for a
+          // missing W) -- distinct from, and applied after, the
+          // buffer-bounds robustness zero-fill above, which still applies
+          // unchanged to any component within the format's own channel count
+          // that the actual bound buffer's real length happens to cut short.
+          uint32_t FormatComponents =
+              std::min(Elt.ComponentCount, FetchLayout->ChannelCount);
+          uint64_t AvailableBytes =
+              SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
+          uint64_t AvailableFetches =
+              AvailableBytes / FetchLayout->FetchByteSize;
+          uint32_t InBoundsComponents =
+              static_cast<uint32_t>(std::min<uint64_t>(
+                  FormatComponents,
+                  AvailableFetches * FetchLayout->ComponentsPerFetch));
+          std::array<uint32_t, 4> Bits{};
+          if (InBoundsComponents != 0) {
+            if (Error E = decodeAttribute(
+                    Attr->Format, Binding->Data.data() + SrcOff,
+                    InBoundsComponents, Elt.ComponentType, Bits))
+              return E;
+          }
+          // A component the bound format never supplies at all (as opposed
+          // to one merely truncated by the robustness check above, which
+          // correctly stays zero) defaults per the standard convention: 0 for
+          // a missing X/Y/Z (already zero-initialized above, nothing to do)
+          // and 1 for a missing W.
+          if (FormatComponents < 4 && Elt.ComponentCount == 4) {
+            if (Elt.ComponentType == SignatureComponentType::Float) {
+              float One = 1.0f;
+              memcpy(&Bits[3], &One, sizeof(float));
+            } else {
+              Bits[3] = 1u;
+            }
+          }
+          for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
+            VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,
+                              Bits[C], Row);
         }
-        for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
-          VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,
-                            Bits[C]);
       }
     }
 

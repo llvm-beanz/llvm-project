@@ -162,6 +162,40 @@ constexpr char ClipCullDistanceVertexShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="vertex" }
 )";
 
+// (Roadmap L117) A vertex shader whose *input* signature is a position
+// (location 2, plain float3) plus a 2x2 matrix vertex attribute (element
+// 1, `RowCount == 2`, `ComponentCount == 2`, `Location == 0`) spanning
+// locations 0 and 1 -- Vulkan's own convention for a mat*-typed vertex
+// input, one `VkVertexInputAttributeDescription` per row at consecutive
+// locations. Reads each matrix row's own bound attribute back out via
+// `feme.stage.input.load.f32`'s `Row` operand and repacks it into a plain
+// float4 color output, exercising `Executor.cpp`'s per-row vertex-buffer
+// lookup/fetch loop (previously an outright "matrix vertex attributes are
+// not implemented yet" rejection) through a real compiled pipeline.
+constexpr char MatrixVertexAttributeVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %r = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %g = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %b = call float @feme.stage.input.load.f32(i32 1, i32 1, i32 0, i32 0)
+    %a = call float @feme.stage.input.load.f32(i32 1, i32 1, i32 1, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %g, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %b, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %a, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
 // (Roadmap C8) A vertex shader like VertexShaderIR above, but its color
 // varying (element 4, location 1) is a 2x2 matrix -- `RowCount == 2`,
 // `ComponentCount == 2` -- rather than a plain float4, packing the same
@@ -901,6 +935,95 @@ TEST(ExecutorTest, InterpolatesConstantColorPackedInAMatrixVarying) {
 
   for (uint32_t I = 0; I != 16; ++I) {
     const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 51) << "texel " << I;  // round(0.2 * 255)
+    EXPECT_EQ(Texel[1], 102) << "texel " << I; // round(0.4 * 255)
+    EXPECT_EQ(Texel[2], 153) << "texel " << I; // round(0.6 * 255)
+    EXPECT_EQ(Texel[3], 204) << "texel " << I; // round(0.8 * 255)
+  }
+}
+
+/// (Roadmap L117) Renders a fully-covered triangle whose color comes from
+/// a 2x2 matrix *vertex attribute* (`MatrixVertexAttributeVertexShaderIR`
+/// above), fetched from two separate per-row `VertexAttribute` bindings
+/// at consecutive locations 0 and 1 -- confirms `Executor.cpp`'s per-row
+/// vertex-buffer lookup/fetch loop threads each row into the right
+/// `StageStorage` slot (a wrong `Row` anywhere would scramble the
+/// distinguishable (r, g, b, a) below, not just fail to compile).
+TEST(ExecutorTest, RendersTriangleWithColorFromAMatrixVertexAttribute) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/2),
+      makeElement(1, SignatureDirection::Input, /*ComponentCount=*/2,
+                  /*Location=*/0, SignatureSystemValue::None,
+                  /*RowCount=*/2),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, MatrixVertexAttributeVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A triangle covering the whole [-1, 1] NDC square, CCW-wound, every
+  // vertex a distinguishable (r, g, b, a) = (0.2, 0.4, 0.6, 0.8) packed
+  // into the matrix's two rows (row 0: r, g; row 1: b, a), interleaved
+  // with the position: pos (xyz), row0 (r, g), row1 (b, a), 7 floats/vtx.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, // v0
+      3.0f,  -1.0f, 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, // v1
+      -1.0f, 3.0f,  0.0f, 0.2f, 0.4f, 0.6f, 0.8f, // v2
+  };
+  std::array<VertexAttribute, 3> VertexAttributes = {
+      VertexAttribute{2, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{0, cpu::ResourceFormat::R32G32_FLOAT, 12},
+      VertexAttribute{1, cpu::ResourceFormat::R32G32_FLOAT, 20}};
+  std::array<uint8_t, 64> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                       4, 4};
+  std::array<AttachmentView, 1> ColorAttachments = {Color};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      VertexAttributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = ColorAttachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = AttachmentStorage.data() + I * 4;
     EXPECT_EQ(Texel[0], 51) << "texel " << I;  // round(0.2 * 255)
     EXPECT_EQ(Texel[1], 102) << "texel " << I; // round(0.4 * 255)
     EXPECT_EQ(Texel[2], 153) << "texel " << I; // round(0.6 * 255)
