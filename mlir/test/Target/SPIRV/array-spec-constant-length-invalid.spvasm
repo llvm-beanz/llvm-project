@@ -1,11 +1,12 @@
 ; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | not mlir-translate --deserialize-spirv - -o - 2>&1 | FileCheck %s %}
 
 ; COM: An `OpTypeArray` length operand naming an `OpSpecConstantOp` built from
-; COM: an enclosed opcode other than the two (`OpCompositeExtract`, `OpIMul`)
-; COM: a real `gl_WorkGroupSize`-derived array-length expression is confirmed
-; COM: to need (see array-spec-constant-composite-length.spvasm) is correctly
-; COM: declined rather than silently guessed at -- `OpUDiv` below stands in for
-; COM: any such unsupported shape.
+; COM: an enclosed opcode other than the ones (`OpCompositeExtract`, `OpIMul`,
+; COM: `OpIAdd`, `OpISub`) a real array-length expression is confirmed to need
+; COM: (see array-spec-constant-composite-length.spvasm and
+; COM: array-spec-constant-add-length.spvasm) is correctly declined rather
+; COM: than silently guessed at -- `OpUDiv` below stands in for any such
+; COM: unsupported shape.
 
 ; CHECK: error: OpTypeArray count <id> {{[0-9]+}} must come from a constant, specialization constant, or supported specialization constant operation
 

@@ -1,0 +1,37 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpTypeArray`'s own length operand may instead name an `OpSpecConstantOp`
+; COM: expression built from `OpIAdd`/`OpISub` combining a specialization
+; COM: constant with an ordinary constant or another specialization constant --
+; COM: exactly the shape glslang compiles a GLSL `const int size = sc0 + 3;
+; COM: T arr[size];` declaration down to (confirmed via a real `spirv-dis`
+; COM: disassembly of `dEQP-VK.pipeline.pipeline_library.spec_constant.*.
+; COM: expression.array_size_expression`'s own real compiled shader, roadmap
+; COM: L100). Resolved by recursively folding each spec constant to its own
+; COM: declared default value (3 + 3 = 6, then 6 - 1 = 5 below), the only
+; COM: value this deserializer could ever produce.
+
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(0) = 3 : i32
+; CHECK: spirv.GlobalVariable @{{.*}} : !spirv.ptr<!spirv.array<5 x i32>, Workgroup>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %sc0 SpecId 0
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %int = OpTypeInt 32 1
+       %int_3 = OpConstant %int 3
+       %int_1 = OpConstant %int 1
+       %sc0 = OpSpecConstant %int 3
+     %sum = OpSpecConstantOp %int IAdd %sc0 %int_3
+     %length = OpSpecConstantOp %int ISub %sum %int_1
+      %arrty = OpTypeArray %int %length
+     %arrptr = OpTypePointer Workgroup %arrty
+     %shared = OpVariable %arrptr Workgroup
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

@@ -235,7 +235,9 @@ private:
   /// Only the specific `OpSpecConstantOp` enclosed-opcode shapes such a
   /// real array-length expression is confirmed to need
   /// (`OpCompositeExtract` on a specialization-constant composite,
-  /// `OpIMul` combining two resolved operands) are folded; any other
+  /// `OpIMul`/`OpIAdd`/`OpISub` combining two resolved operands, the
+  /// latter two confirmed needed by a GLSL `const int size = sc0 + 3;
+  /// T arr[size];` declaration) are folded; any other
   /// enclosed opcode, or a multi-level `OpCompositeExtract` index, or a
   /// composite constituent this deserializer cannot itself resolve to an
   /// integer, declines (returns `std::nullopt`) rather than guessing.

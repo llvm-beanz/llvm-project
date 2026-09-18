@@ -1393,6 +1393,26 @@ spirv::Deserializer::resolveConstantArrayLength(uint32_t id) {
       return std::nullopt;
     return *lhs * *rhs;
   }
+  case spirv::Opcode::OpIAdd:
+  case spirv::Opcode::OpISub: {
+    // Operand encoding: Operand 1 <id>, Operand 2 <id>. Same shape as
+    // OpIMul above -- e.g. a GLSL `const int size = sc0 + 3; T arr[size];`
+    // declaration's own compiled shape (`dEQP-VK.pipeline.pipeline_
+    // library.spec_constant.*.expression.array_size_expression`/
+    // `array_size_spec_const_expression`), which glslang emits as a
+    // top-level `OpSpecConstantOp %int IAdd %sc0 %int_3` rather than
+    // OpIMul's own multiplication.
+    if (specOp->enclosedOpOperands.size() != 2)
+      return std::nullopt;
+    std::optional<llvm::APInt> lhs =
+        resolveConstantArrayLength(specOp->enclosedOpOperands[0]);
+    std::optional<llvm::APInt> rhs =
+        resolveConstantArrayLength(specOp->enclosedOpOperands[1]);
+    if (!lhs || !rhs)
+      return std::nullopt;
+    return specOp->enclodesOpcode == spirv::Opcode::OpIAdd ? (*lhs + *rhs)
+                                                            : (*lhs - *rhs);
+  }
   default:
     // Any other enclosed opcode is a real gap in this resolution, not a
     // malformed module -- decline rather than guess, matching this
