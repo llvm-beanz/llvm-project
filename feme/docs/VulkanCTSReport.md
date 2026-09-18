@@ -3365,3 +3365,37 @@ Vulkan feature/extension surface.
 
 This closes L120 (both `Ldexp`, from the prior session, and `Modf`,
 this session).
+
+## L121 (this session)
+
+`feme::cpu::SIMDizePass`'s `widenElementwise` only widened a divergent
+call to a vectorizable intrinsic via a same-type-everywhere
+`Homogeneous` check, plus one hardcoded special case for
+`llvm.is.fpclass`. `llvm.ldexp`'s independently-overloaded `i32`
+exponent operand fell through to the generic "unsupported divergent
+call" error -- discovered measuring L120's own `Ldexp` fix's CTS
+impact (`dEQP-VK.graphicsfuzz.cov-ldexp-exponent-undefined-divided-
+fragcoord-never-executed`).
+
+Replaced the ad hoc `is_fpclass`-only special case with a small,
+explicitly-enumerated `DivergentCallOverloadShape` table so both
+`is_fpclass` and `ldexp` share one general widening path.
+
+A full `graphicsfuzz.*` re-sweep (733 of 757 cases, same 24-name hang
+exclusion list reused across sessions):
+
+|               | Before this fix (L120's own 600/125/8) | After |
+|---------------|-------------------------------------------|--------|
+| Pass          | 600                                        | 601    |
+| Fail          | 125                                        | 124    |
+| NotSupported  | 8                                           | 8      |
+
+**+1 Pass, 0 regressions** -- the exact case this row's own
+investigation found. `ninja check-feme`: 3200/3203 Passed, 3
+pre-existing Unsupported, 0 Failed -- clean.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal `SIMDizePass` legalization fix, not a new Vulkan
+feature/extension surface.
+
+This row is now **closed**.
