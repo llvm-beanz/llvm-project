@@ -781,21 +781,29 @@ TEST(LinearizeTest, IsHelperReflectsDemotedState) {
 }
 
 // H4e: a store whose value operand is a shape `MaskIntrinsics.cpp`'s
-// `appendScalarMangling` does not recognize (a matrix/aggregate type,
-// represented here by a struct -- the same shape a matrix lowers to) must
-// not crash this pass with `llvm_unreachable` when it needs masking. It
-// should instead report a diagnostic through the module's `LLVMContext`
-// (see `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard`, which turns this
+// `appendScalarMangling` does not recognize must not crash this pass
+// with `llvm_unreachable` when it needs masking. It should instead
+// report a diagnostic through the module's `LLVMContext` (see
+// `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard`, which turns this
 // into a graceful pipeline failure) and leave the original `store`
 // untouched, rather than replace it with a call built from a null callee.
+// Roadmap L116(a): a struct/array-typed masked store is now decomposed
+// into one masked store per leaf (see `createMaskedStoreRecursive`), so
+// this regression case (originally reduced against `{float, float}`, a
+// shape that decomposition now fully supports) is rewritten against a
+// struct with one leaf type (`x86_fp80`) `MaskIntrinsics.cpp`'s own
+// `appendScalarMangling` genuinely cannot mangle, to keep covering the
+// still-real "leave the original, unmasked store untouched rather than
+// replace it with a call built from a null callee" diagnostic path for
+// whatever leaf shape decomposition itself cannot yet handle.
 TEST(LinearizeTest,
      UnsupportedAggregateMaskedStoreDiagnosesGracefullyInsteadOfCrashing) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define void @main(ptr %p, i1 %cond, {float, float} %val) #0 {
+    define void @main(ptr %p, i1 %cond, {x86_fp80, float} %val) #0 {
     entry:
       call void @feme.stage.discard(i1 %cond)
-      store {float, float} %val, ptr %p
+      store {x86_fp80, float} %val, ptr %p
       ret void
     }
     declare void @feme.stage.discard(i1)
@@ -832,6 +840,104 @@ TEST(LinearizeTest,
   }
   EXPECT_TRUE(FoundPlainStore);
 }
+
+// Roadmap L116(a): a struct/array-typed masked load/store whose every
+// leaf is a scalar or fixed-vector type -- the common graphicsfuzz shape
+// this row exists to close -- is now decomposed into one masked
+// load/store per leaf instead of being diagnosed as unsupported.
+TEST(LinearizeTest, DecomposesAggregateMaskedStorePerLeaf) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p, i1 %cond, {i32, <2 x float>} %val) #0 {
+    entry:
+      call void @feme.stage.discard(i1 %cond)
+      store {i32, <2 x float>} %val, ptr %p
+      ret void
+    }
+    declare void @feme.stage.discard(i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_FALSE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned MaskedStoreCount = 0;
+  bool FoundPlainStore = false;
+  for (Instruction &I : instructions(F)) {
+    if (isa<StoreInst>(I))
+      FoundPlainStore = true;
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (matchMaskedStore(*CI))
+        ++MaskedStoreCount;
+  }
+  EXPECT_FALSE(FoundPlainStore)
+      << "the original aggregate store should be fully decomposed away";
+  EXPECT_EQ(MaskedStoreCount, 2u)
+      << "one masked store per leaf (i32, then <2 x float>)";
+}
+
+// Roadmap L116(a): the `load` counterpart of
+// `DecomposesAggregateMaskedStorePerLeaf` -- a struct/array-typed masked
+// load's leaves are reassembled with `insertvalue`.
+TEST(LinearizeTest, DecomposesAggregateMaskedLoadPerLeaf) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define {i32, [2 x float]} @main(ptr %p, i1 %cond) #0 {
+    entry:
+      call void @feme.stage.discard(i1 %cond)
+      %v = load {i32, [2 x float]}, ptr %p
+      ret {i32, [2 x float]} %v
+    }
+    declare void @feme.stage.discard(i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_FALSE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned MaskedLoadCount = 0;
+  bool FoundPlainLoad = false;
+  bool FoundInsertValue = false;
+  for (Instruction &I : instructions(F)) {
+    if (isa<LoadInst>(I))
+      FoundPlainLoad = true;
+    if (isa<InsertValueInst>(I))
+      FoundInsertValue = true;
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (matchMaskedLoad(*CI))
+        ++MaskedLoadCount;
+  }
+  EXPECT_FALSE(FoundPlainLoad)
+      << "the original aggregate load should be fully decomposed away";
+  EXPECT_TRUE(FoundInsertValue)
+      << "the decomposed leaves should be reassembled with insertvalue";
+  EXPECT_EQ(MaskedLoadCount, 3u)
+      << "one masked load per leaf (i32, then the two floats of the "
+         "[2 x float] array)";
+}
+
 
 // Roadmap L88: a real `llvm::Value::~Value` "Uses remain when a value is
 // destroyed!" assertion, discovered by a speculative

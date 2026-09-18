@@ -62,6 +62,7 @@
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -267,6 +268,130 @@ static bool dependsOnTaintedValue(Value *V,
   return false;
 }
 
+
+/// (Roadmap L116(a)) Recursively decomposes a masked load of a possibly
+/// struct/array-typed \p Ty at \p Ptr into one masked load per leaf
+/// (scalar or fixed-vector) type, reassembled with `insertvalue` --
+/// mirroring `feme::cpu::SIMDizePass`'s own per-leaf `insertvalue`/
+/// `extractvalue` decomposition of a divergent vector producer (roadmap
+/// L21), but at this pass's own pre-`SIMDizePass`, per-scalar-lane level:
+/// `MaskIntrinsics.cpp`'s `appendScalarMangling` has no notion of a
+/// struct/array element type at all (masked load/store semantics are
+/// inherently per-element, so there is no single-instruction lowering for
+/// a masked op over a whole aggregate the way there is for a masked
+/// scalar/vector), so a masked access to an aggregate-typed graphicsfuzz
+/// local (e.g. a `struct`- or `mat4`-typed array element indexed by a
+/// divergent index inside a loop) must be split into one real masked
+/// load per leaf before it ever reaches that mangling. \p BaseAlign and
+/// \p Offset track the *whole* access's own base alignment and this
+/// leaf's byte offset within it, so each leaf gets its own correctly
+/// narrowed alignment (see `SIMDize.cpp`'s own `commonAlignment` use for
+/// the same reasoning at the wave-widened level). Returns nullptr, without
+/// creating any further calls, the first time a leaf type
+/// `appendScalarMangling` cannot mangle is reached (already reported
+/// through the module's `LLVMContext` by that point).
+static Value *createMaskedLoadRecursive(IRBuilderBase &Builder, Value *Ptr,
+                                        Type *Ty, Align BaseAlign,
+                                        uint64_t Offset, Value *Mask,
+                                        const Twine &Name,
+                                        SmallPtrSetImpl<Value *> *MaskedLoads) {
+  const DataLayout &DL =
+      Builder.GetInsertBlock()->getModule()->getDataLayout();
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    const StructLayout *SL = DL.getStructLayout(StructTy);
+    Value *Agg = PoisonValue::get(StructTy);
+    for (unsigned Idx = 0, End = StructTy->getNumElements(); Idx != End;
+        ++Idx) {
+      Value *FieldPtr = Builder.CreateStructGEP(
+          StructTy, Ptr, Idx, Name + ".field" + Twine(Idx) + ".ptr");
+      Value *FieldVal = createMaskedLoadRecursive(
+          Builder, FieldPtr, StructTy->getElementType(Idx), BaseAlign,
+          Offset + SL->getElementOffset(Idx), Mask,
+          Name + ".field" + Twine(Idx), MaskedLoads);
+      if (!FieldVal)
+        return nullptr;
+      Agg = Builder.CreateInsertValue(Agg, FieldVal, Idx);
+    }
+    return Agg;
+  }
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    Type *ElemTy = ArrTy->getElementType();
+    uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+    Value *Agg = PoisonValue::get(ArrTy);
+    for (unsigned Idx = 0, End = ArrTy->getNumElements(); Idx != End; ++Idx) {
+      Value *ElemPtr = Builder.CreateGEP(
+          ArrTy, Ptr, {Builder.getInt32(0), Builder.getInt32(Idx)},
+          Name + ".elt" + Twine(Idx) + ".ptr");
+      Value *ElemVal = createMaskedLoadRecursive(
+          Builder, ElemPtr, ElemTy, BaseAlign, Offset + Idx * ElemSize, Mask,
+          Name + ".elt" + Twine(Idx), MaskedLoads);
+      if (!ElemVal)
+        return nullptr;
+      Agg = Builder.CreateInsertValue(Agg, ElemVal, Idx);
+    }
+    return Agg;
+  }
+  // Leaf: a scalar or fixed-vector type, exactly what
+  // `feme::cpu::createMaskedLoad` already supports directly.
+  Value *Passthru = Constant::getNullValue(Ty);
+  CallInst *Masked =
+      feme::cpu::createMaskedLoad(Builder, Ptr, commonAlignment(BaseAlign, Offset).value(),
+                                  Mask, Passthru, Name);
+  if (!Masked)
+    return nullptr;
+  if (MaskedLoads)
+    MaskedLoads->insert(Masked);
+  return Masked;
+}
+
+/// (Roadmap L116(a)) The `store` counterpart of
+/// `createMaskedLoadRecursive`: recursively decomposes a masked store of
+/// a possibly struct/array-typed \p Val at \p Ptr into one masked store
+/// per leaf, extracting each leaf's own value with `extractvalue` first.
+/// Returns false, without creating any further calls, the first time an
+/// unsupported leaf type is reached.
+static bool createMaskedStoreRecursive(IRBuilderBase &Builder, Value *Val,
+                                       Value *Ptr, Type *Ty, Align BaseAlign,
+                                       uint64_t Offset, Value *Mask,
+                                       const Twine &Name) {
+  const DataLayout &DL =
+      Builder.GetInsertBlock()->getModule()->getDataLayout();
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    const StructLayout *SL = DL.getStructLayout(StructTy);
+    for (unsigned Idx = 0, End = StructTy->getNumElements(); Idx != End;
+        ++Idx) {
+      Value *FieldVal = Builder.CreateExtractValue(Val, Idx);
+      Value *FieldPtr = Builder.CreateStructGEP(
+          StructTy, Ptr, Idx, Name + ".field" + Twine(Idx) + ".ptr");
+      if (!createMaskedStoreRecursive(
+              Builder, FieldVal, FieldPtr, StructTy->getElementType(Idx),
+              BaseAlign, Offset + SL->getElementOffset(Idx), Mask,
+              Name + ".field" + Twine(Idx)))
+        return false;
+    }
+    return true;
+  }
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    Type *ElemTy = ArrTy->getElementType();
+    uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+    for (unsigned Idx = 0, End = ArrTy->getNumElements(); Idx != End; ++Idx) {
+      Value *ElemVal = Builder.CreateExtractValue(Val, Idx);
+      Value *ElemPtr = Builder.CreateGEP(
+          ArrTy, Ptr, {Builder.getInt32(0), Builder.getInt32(Idx)},
+          Name + ".elt" + Twine(Idx) + ".ptr");
+      if (!createMaskedStoreRecursive(Builder, ElemVal, ElemPtr, ElemTy,
+                                      BaseAlign, Offset + Idx * ElemSize,
+                                      Mask, Name + ".elt" + Twine(Idx)))
+        return false;
+    }
+    return true;
+  }
+  // Leaf: a scalar or fixed-vector type, exactly what
+  // `feme::cpu::createMaskedStore` already supports directly.
+  CallInst *Masked = feme::cpu::createMaskedStore(
+      Builder, Val, Ptr, commonAlignment(BaseAlign, Offset).value(), Mask);
+  return Masked != nullptr;
+}
 
 /// Shared between `DiamondFlattener` (a divergent arm's masks) and
 /// `LoopLinearizer` (a loop iteration's "active" masks) below. A given
@@ -527,18 +652,35 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
       if (!LI->isSimple() || isKnownConstantMask(Masks.Live))
         continue; // Atomic/volatile: not this milestone's problem yet.
       IRBuilder<> B(LI);
+      // (Roadmap L116(a)) A struct/array-typed access is decomposed into
+      // one masked load per leaf, reassembled with `insertvalue`, rather
+      // than handed to `createMaskedLoad` directly -- see
+      // `createMaskedLoadRecursive`'s own comment for why. A scalar or
+      // fixed-vector-typed access (the overwhelmingly common case) still
+      // goes through the single, non-recursive call below unchanged.
+      if (isa<StructType>(LI->getType()) || isa<ArrayType>(LI->getType())) {
+        Value *Result = createMaskedLoadRecursive(
+            B, LI->getPointerOperand(), LI->getType(), LI->getAlign(),
+            /*Offset=*/0, Masks.Live, LI->getName(), MaskedLoads);
+        if (!Result) // See the scalar/vector case's own comment below.
+          continue;
+        LI->replaceAllUsesWith(Result);
+        LI->eraseFromParent();
+        continue;
+      }
       Value *Passthru = Constant::getNullValue(LI->getType());
       CallInst *Masked =
           createMaskedLoad(B, LI->getPointerOperand(), LI->getAlign().value(),
                            Masks.Live, Passthru, LI->getName());
       // A null result means `LI`'s type is a shape `MaskIntrinsics.cpp`'s
-      // `appendScalarMangling` cannot yet mangle (a matrix/aggregate
-      // element type, most notably), which has already reported an error
-      // through `LI`'s own `LLVMContext` (caught by `feme::cpu::
-      // runPipeline`'s `ErrorDiagnosticGuard`). Leave `LI` itself
-      // unmasked and unmodified rather than RAUW/erase with a call that
-      // was never created, so this loop keeps making progress on the rest
-      // of `BB` instead of crashing on a null `CallInst *`.
+      // `appendScalarMangling` cannot yet mangle (an unsupported scalar
+      // element type inside an otherwise-supported vector, most notably;
+      // a struct/array itself is now handled above), which has already
+      // reported an error through `LI`'s own `LLVMContext` (caught by
+      // `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard`). Leave `LI`
+      // itself unmasked and unmodified rather than RAUW/erase with a call
+      // that was never created, so this loop keeps making progress on the
+      // rest of `BB` instead of crashing on a null `CallInst *`.
       if (!Masked)
         continue;
       LI->replaceAllUsesWith(Masked);
@@ -551,6 +693,18 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
       if (!SI->isSimple() || isKnownConstantMask(Masks.SideEffect))
         continue;
       IRBuilder<> B(SI);
+      Type *ValTy = SI->getValueOperand()->getType();
+      // (Roadmap L116(a)) See the load case's own comment above:
+      // struct/array-typed stores are decomposed per leaf instead of
+      // handed to `createMaskedStore` directly.
+      if (isa<StructType>(ValTy) || isa<ArrayType>(ValTy)) {
+        if (!createMaskedStoreRecursive(
+                B, SI->getValueOperand(), SI->getPointerOperand(), ValTy,
+                SI->getAlign(), /*Offset=*/0, Masks.SideEffect, SI->getName()))
+          continue; // See the load case's own comment.
+        SI->eraseFromParent();
+        continue;
+      }
       CallInst *Masked =
           createMaskedStore(B, SI->getValueOperand(), SI->getPointerOperand(),
                             SI->getAlign().value(), Masks.SideEffect);
