@@ -74,10 +74,13 @@ std::vector<float> buildGeometryInputs(llvm::ArrayRef<uint32_t> VertexSlots,
 /// `FemeGeometryArgs::Invocations` array (see FemeGeometryArgs's comment).
 /// \p InvocationIDs must be the same size as \p PrimitiveIDs; pass an
 /// all-zero array (or an empty one, treated as all-zero) for a shader with
-/// `GeometryState::Invocations` == 1, matching SPIR-V's own default.
+/// `GeometryState::Invocations` == 1, matching SPIR-V's own default. \p
+/// ViewIndex (roadmap H51/L109) is this draw's own `gl_ViewIndex`, uniform
+/// across every invocation built here.
 std::vector<cpu::FemeGeometryInvocation>
 buildGeometryInvocations(llvm::ArrayRef<uint32_t> PrimitiveIDs,
-                         llvm::ArrayRef<uint32_t> InvocationIDs = {});
+                         llvm::ArrayRef<uint32_t> InvocationIDs = {},
+                         uint32_t ViewIndex = 0);
 
 } // namespace feme::graphics
 

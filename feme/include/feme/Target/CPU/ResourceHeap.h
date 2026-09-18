@@ -258,6 +258,9 @@ struct PatchResources {
   /// `FemePatchArgs::PrimitiveID`'s own comment for why this is a plain
   /// scalar rather than another `Inputs`-addressed element.
   uint32_t PrimitiveID = 0;
+  /// (Roadmap H51/L109) `gl_ViewIndex` -- see `FemePatchArgs::ViewIndex`'s
+  /// own comment; threaded through the same way as `PrimitiveID` above.
+  uint32_t ViewIndex = 0;
 };
 
 /// One prepared control-point batch: materialized resources plus borrowed
@@ -279,7 +282,7 @@ private:
                      const FemeStageLayout *OutputLayout, void *Outputs,
                      uint32_t OutputControlPointCount,
                      uint32_t InputPatchControlPointCount,
-                     uint32_t PrimitiveID);
+                     uint32_t PrimitiveID, uint32_t ViewIndex);
 
   std::vector<FemeDescriptor> ResourceHeap;
   std::vector<FemeImageDescriptor> ImageHeap;
@@ -293,6 +296,7 @@ private:
   uint32_t OutputControlPointCount = 0;
   uint32_t InputPatchControlPointCount = 0;
   uint32_t PrimitiveID = 0;
+  uint32_t ViewIndex = 0;
 };
 
 /// Caller-owned storage for one patch-constant invocation (added after
@@ -323,6 +327,9 @@ struct PatchConstantResources {
   /// (Roadmap L82) This patch's `SV_PrimitiveID`/`gl_PrimitiveID` -- see
   /// `FemePatchConstantArgs::PrimitiveID`'s own comment.
   uint32_t PrimitiveID = 0;
+  /// (Roadmap H51/L109) `gl_ViewIndex` -- see
+  /// `FemePatchConstantArgs::ViewIndex`'s own comment.
+  uint32_t ViewIndex = 0;
 };
 
 /// One prepared patch-constant invocation: materialized resources plus
@@ -348,7 +355,7 @@ private:
                              const FemeStageLayout *OutputLayout, void *Outputs,
                              uint32_t OutputControlPointCount,
                              uint32_t InputPatchControlPointCount,
-                             uint32_t PrimitiveID);
+                             uint32_t PrimitiveID, uint32_t ViewIndex);
 
   std::vector<FemeDescriptor> ResourceHeap;
   std::vector<FemeImageDescriptor> ImageHeap;
@@ -364,6 +371,7 @@ private:
   uint32_t OutputControlPointCount = 0;
   uint32_t InputPatchControlPointCount = 0;
   uint32_t PrimitiveID = 0;
+  uint32_t ViewIndex = 0;
 };
 
 /// Caller-owned storage for one domain/evaluation batch (roadmap R34's

@@ -263,13 +263,13 @@ PreparedPatchBatch::PreparedPatchBatch(
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     uint32_t OutputControlPointCount, uint32_t InputPatchControlPointCount,
-    uint32_t PrimitiveID)
+    uint32_t PrimitiveID, uint32_t ViewIndex)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
       Outputs(Outputs), OutputControlPointCount(OutputControlPointCount),
       InputPatchControlPointCount(InputPatchControlPointCount),
-      PrimitiveID(PrimitiveID) {
+      PrimitiveID(PrimitiveID), ViewIndex(ViewIndex) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -295,7 +295,7 @@ PreparedPatchBatch PreparedPatchBatch::create(const ResourceInfo &Info,
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.OutputLayout, Resources.Outputs,
       Resources.OutputControlPointCount, Resources.InputPatchControlPointCount,
-      Resources.PrimitiveID);
+      Resources.PrimitiveID, Resources.ViewIndex);
 }
 
 FemePatchArgs PreparedPatchBatch::args() const {
@@ -304,6 +304,7 @@ FemePatchArgs PreparedPatchBatch::args() const {
   Args.OutputControlPointCount = OutputControlPointCount;
   Args.InputPatchControlPointCount = InputPatchControlPointCount;
   Args.PrimitiveID = PrimitiveID;
+  Args.ViewIndex = ViewIndex;
   Args.Resources = &ShaderResources;
   Args.InputLayout = InputLayout;
   Args.Inputs = Inputs;
@@ -320,7 +321,7 @@ PreparedPatchConstantBatch::PreparedPatchConstantBatch(
     const void *Inputs, const FemeStageLayout *InputPatchLayout,
     const void *InputPatch, const FemeStageLayout *OutputLayout, void *Outputs,
     uint32_t OutputControlPointCount, uint32_t InputPatchControlPointCount,
-    uint32_t PrimitiveID)
+    uint32_t PrimitiveID, uint32_t ViewIndex)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs),
@@ -328,7 +329,7 @@ PreparedPatchConstantBatch::PreparedPatchConstantBatch(
       OutputLayout(OutputLayout), Outputs(Outputs),
       OutputControlPointCount(OutputControlPointCount),
       InputPatchControlPointCount(InputPatchControlPointCount),
-      PrimitiveID(PrimitiveID) {
+      PrimitiveID(PrimitiveID), ViewIndex(ViewIndex) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -355,7 +356,8 @@ PreparedPatchConstantBatch::create(const ResourceInfo &Info,
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.InputPatchLayout, Resources.InputPatch, Resources.OutputLayout,
       Resources.Outputs, Resources.OutputControlPointCount,
-      Resources.InputPatchControlPointCount, Resources.PrimitiveID);
+      Resources.InputPatchControlPointCount, Resources.PrimitiveID,
+      Resources.ViewIndex);
 }
 
 FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
@@ -364,6 +366,7 @@ FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
   Args.OutputControlPointCount = OutputControlPointCount;
   Args.InputPatchControlPointCount = InputPatchControlPointCount;
   Args.PrimitiveID = PrimitiveID;
+  Args.ViewIndex = ViewIndex;
   Args.Resources = &ShaderResources;
   Args.InputLayout = InputLayout;
   Args.Inputs = Inputs;

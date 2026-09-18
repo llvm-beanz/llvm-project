@@ -42,11 +42,13 @@ namespace feme::graphics {
 /// `feme::cpu::FemeDomainInvocation` per point, in the same order, for use
 /// as a `feme::cpu::FemeDomainArgs::Invocations` array. Every invocation's
 /// `PrimitiveID` field is set to \p PrimitiveID (roadmap L81: this patch's
-/// own `SV_PrimitiveID`, uniform across every point generated for it) and
-/// its `Reserved` field is zeroed.
+/// own `SV_PrimitiveID`, uniform across every point generated for it),
+/// `ViewIndex` is set to \p ViewIndex (roadmap H51/L109: this draw's own
+/// `gl_ViewIndex`, likewise uniform across every point), and its
+/// `Reserved` field is zeroed.
 std::vector<cpu::FemeDomainInvocation>
-buildDomainInvocations(const TessellatedPatch &Patch,
-                       uint32_t PrimitiveID = 0);
+buildDomainInvocations(const TessellatedPatch &Patch, uint32_t PrimitiveID = 0,
+                       uint32_t ViewIndex = 0);
 
 } // namespace feme::graphics
 

@@ -181,7 +181,9 @@ struct PatchPipelineResult {
 /// and `Stages.PatchConstant.invokePatchConstant`'s patch-constant phase
 /// (see `FemePatchArgs::PrimitiveID`/`FemePatchConstantArgs::PrimitiveID`'s
 /// own comments for why this is not just another `VertexOutputs`-linked
-/// element).
+/// element). \p ViewIndex is passed through the same way (roadmap
+/// H51/L109), for `FemePatchArgs::ViewIndex`/`FemePatchConstantArgs::ViewIndex`
+/// and the domain stage's own `FemeDomainInvocation::ViewIndex`.
 ///
 /// Returns an `Error` if \p Tess's control-point counts violate
 /// `feme::graphics::validatePatchControlPointCounts`,
@@ -193,7 +195,7 @@ llvm::Expected<PatchPipelineResult> runPatchPipeline(
     const TessellationState &Tess, const StageStorage &VertexOutputs,
     llvm::ArrayRef<uint32_t> ControlPointInvocations,
     const cpu::DispatchResources *Resources = nullptr,
-    uint32_t PrimitiveID = 0);
+    uint32_t PrimitiveID = 0, uint32_t ViewIndex = 0);
 
 } // namespace feme::graphics
 
