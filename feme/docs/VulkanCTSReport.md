@@ -944,3 +944,65 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
 
+
+# L100: measured impact
+
+## Outcome
+
+**Fixed.** The `OpTypeArray count ... must come from a constant` bucket
+(10 cases, one of the three unrelated `spec_constant.*` buckets left
+over from L99) is closed.
+
+## Investigation
+
+Reduced to
+`dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.vertex.
+expression.array_size_spec_const_expression`. Built a standalone repro
+GLSL shader (`const int size = sc0 + 3; int a0[size];`) matching the
+CTS's own generated shape, compiled it with `glslangValidator`, and
+disassembled with `spirv-dis`: the array length operand is an
+`OpSpecConstantOp %int IAdd %sc0 %int_3` (and, for the two-spec-constant
+sibling case, `%sc0 %sc1`). Upstream MLIR's SPIR-V deserializer
+(`Deserializer.cpp`'s `resolveConstantArrayLength`, a feme-added
+function) only folded `OpCompositeExtract` and `OpIMul` enclosed
+opcodes for a spec-constant-derived array length, declining every other
+opcode including `OpIAdd`/`OpISub` -- exactly this shape.
+
+Fixed by adding `OpIAdd`/`OpISub` cases to the switch, recursively
+folding each operand exactly like the existing `OpIMul` case already
+does.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` before and during this session (remember to export
+  `VK_ICD_FILENAMES` first in a fresh shell).
+- New MLIR deserialization test `array-spec-constant-add-length.spvasm`
+  (mirrors `array-spec-constant-composite-length.spvasm`'s convention);
+  updated `array-spec-constant-length-invalid.spvasm`'s comment to
+  reflect the now-3-opcode supported list. All 4
+  `array-spec-constant-*.spvasm` tests pass.
+- `ninja check-feme`: 3169 Passed, 3 pre-existing Unsupported, 0 Failed
+  (no regressions).
+- All 10 previously-failing cases (`array_size_expression`/
+  `array_size_spec_const_expression` across all 5 graphics stages) now
+  **Pass**.
+- Full `pipeline_library.spec_constant.*` re-sweep (1170 cases): **480
+  Pass / 175 Fail / 515 NotSupported**, up from the pre-fix 470/185/515
+  -- an exact +10/-10 shift, matching this row's own 10-case scope
+  precisely, zero collateral regressions. The remaining 175 failures are
+  the two other, already-tracked buckets (`VectorExtractDynamic`,
+  now roadmap L101; "GEP into vector", now roadmap L102).
+
+No advertised Vulkan feature or extension changed -- this is a pure
+SPIR-V-deserialization correctness fix.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.expression.array_size_*expression" \
+  --deqp-log-images=disable --deqp-shadercache=disable
+```
