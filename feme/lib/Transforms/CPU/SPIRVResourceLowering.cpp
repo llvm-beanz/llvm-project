@@ -2615,6 +2615,25 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     if (!Classification)
       Classification = classifySamplerHandle(*CI);
     if (!Classification) {
+      // (Roadmap L108) A `Dim::SubpassData` handle (a GLSL `subpassInput`
+      // variable's own `handlefrombinding`) is never one of the kinds
+      // this pass classifies -- its `OpImageRead` converts directly to
+      // `feme.stage.subpass.load` (`feme::spirv::SubpassLoadPattern`,
+      // SPIRVToLLVMPatterns.cpp), never referencing this handle's own
+      // result at all, so it is always left with no uses (see
+      // `feme::cpu::checkSupportedRaisedOps`'s own comment for this same
+      // shape, which already tolerates it there). Rejecting the *whole*
+      // function over a handle nothing actually uses -- as opposed to one
+      // some other, real resource access genuinely needs but this pass
+      // cannot model -- would otherwise leave every *other*, perfectly
+      // normalizable handle in the same function un-normalized purely
+      // because a subpass input happened to be declared alongside them
+      // (found via `dEQP-VK.pipeline.pipeline_library.graphics_library.
+      // independent_sets_random.*.vert_frag.*`, whose generated shaders
+      // routinely mix a `subpassInput` with several genuinely
+      // unrelated, otherwise-supported resources in the same function).
+      if (CI->use_empty())
+        continue;
       logNormalizationRejection(
           "handle result type is not one of the kinds this pass normalizes",
           CI);
