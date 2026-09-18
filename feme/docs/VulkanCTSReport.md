@@ -3111,3 +3111,106 @@ bug in the same recovery code, now fixed), but the CTS regression this
 roadmap row was originally opened to explain is still unresolved by it.
 See `agent_thoughts.md`'s new entry for this session's own next-steps
 recommendation on how to actually pin down that regression's root cause.
+
+## Roadmap L118 (fixed this session): the real regression root cause was a `widenMaskedStore` masking bug, not the recovery lane
+
+The section above ("Roadmap L118 (partial fix, real regression
+unresolved)") landed a real, independently-motivated fix
+(`getFirstActiveLaneIndex`) but measured it did *not* close
+`dEQP-VK.graphicsfuzz.cov-function-loop-condition-constant-array-always-false`.
+This session found and fixed the actual root cause, using runtime
+instrumentation instead of further manual IR tracing (the prior two
+sessions' own hand-algebra had both failed to converge).
+
+**Method**: added a temporary debug-print host callback
+(`femeCpuDebugPrintUniformRecoveryI32`, `feme/runtime/CPU/FeMeRuntimeCPU.c`,
+reverted after use -- linked in automatically via the runtime bitcode's
+own `LinkOnlyNeeded` embedding, the same mechanism every
+`feme.cpu.resource.*` call already uses) and called it from
+`SIMDize.cpp` at every masked-gather and masked-scatter site in the
+failing shader's own widened IR, printing all 4 lanes' values and the
+site's own effective mask bits. Rebuilt `libfeme_vulkan.so` (with C8b's
+guard temporarily disabled to reproduce the regression) and re-ran the
+failing case through `deqp-vk` to capture real runtime values.
+
+**Finding**: `EntryMask` was `0xf` (all 4 lanes genuinely active) at
+every site, and the two masked gathers inside the shader's own loop body
+always agreed across all 4 lanes -- ruling out the stale-use recovery's
+lane choice entirely, since that mechanism never even mattered here.
+The divergence appeared only at the *final* masked store into the
+localized `data0`/`data1` arrays: for roughly 32 of 272 dispatched
+wave-groups, the scatter's own effective mask was `0xb` (lanes 0, 1, 3)
+or `0x4` (lane 2 alone) instead of the expected `0xf` -- a genuine
+per-lane mask divergence in a shader whose own control flow is otherwise
+100% uniform (every branch condition reads only a shared uniform
+buffer, no per-invocation input at all). This is exactly the signature
+of a fragment shader's own helper invocations: whichever lane(s) are
+"helper" for that particular dispatched quad (kept alive only so a
+covered quad-mate's derivatives see real neighbor data, at a triangle or
+framebuffer edge) get excluded from `Env.SideEffectMask`, which
+`FunctionWidener::widenMaskedStore` used, *unconditionally*, as every
+masked store's own governing mask -- including a masked store into a
+`MaskedAllocas`-tracked base (a `Private`-storage global localized to a
+real per-lane alloca, roadmap L84). A `MaskedAllocas` write is not a
+device-visible side effect at all -- it is one invocation's own private
+local storage, invisible to every other invocation regardless of
+live/helper status -- so masking it with `SideEffectMask` incorrectly
+skipped a helper invocation's own write to *its own* local copy, leaving
+that lane's own later read of the same local variable stale. (Masked
+*loads*, by contrast, already correctly used `Env.EntryMask`, which is
+why the two earlier loop-body gathers always agreed.)
+
+**Fix**: `widenMaskedStore` now branches its effective mask on whether
+`Matched.Ptr` bottoms out (through zero or more `getelementptr`s, via
+the pass's own existing `getUnderlyingAlloca` helper) at a
+`MaskedAllocas`-tracked alloca: `Env.EntryMask` for that case,
+`Env.SideEffectMask` unchanged for every other destination (groupshared,
+device resources), where excluding helper invocations from an
+observable side effect remains correct.
+
+New unit test: `SIMDizeTest.MaskedAllocaStoreUsesEntryMaskNotSideEffectMask`,
+constructing a masked store into a local alloca and asserting the
+resulting `llvm.masked.scatter`'s mask operand traces back to
+`wave_entry_mask`, never `wave_sideeffect_mask` -- confirmed to fail
+without the fix (`wave_sideeffect_mask` found, `wave_entry_mask` not).
+
+`ninja -C build2 check-feme`: 3197/3200 Passed (+1 new test since the
+last L118 session), 3 pre-existing Unsupported, 0 Failed -- clean.
+
+**Measured against the actual named regression** (temporarily
+re-disabling C8b's excluded-localization guard, the same reproduction
+technique as every prior L118/C8b session): `cov-function-loop-
+condition-constant-array-always-false` now **Passes**.
+
+A full `graphicsfuzz.*` re-sweep (733 of 757, excluding the same 24
+pre-existing hangs/crashes reused across every recent session's own
+sweep, `/tmp/gf_skipped.txt`), with this fix applied and C8b's own guard
+left in place (unchanged -- see roadmap row L122 for why it is not yet
+removed):
+
+|               | Before this fix (568/157/8 baseline) | After (this session) |
+|---------------|----------------------------------------|-----------------------|
+| Pass          | 568                                     | 593                   |
+| Fail          | 157                                     | 132                   |
+| NotSupported  | 8                                       | 8                     |
+
+**+25 Pass / -25 Fail, 0 regressions** -- the largest single-session
+`graphicsfuzz.*` sweep improvement recorded on this roadmap to date,
+despite fixing what reduces to a single-line masking bug. This is
+consistent with the bug's own mechanism: any shader combining a
+localized `Private` aggregate (or any other `MaskedAllocas`-tracked
+local) with a masked store, dispatched across a wave containing at least
+one helper invocation (i.e. essentially any fragment shader whose
+triangle edges or framebuffer bounds do not exactly tile into whole
+wave-groups), was silently corrupting that helper lane's own local
+storage -- a broad, generically-triggered bug, not one specific to the
+named regression's own particular shader shape.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- a `SIMDizePass` internal correctness fix, not a new Vulkan
+feature/extension surface.
+
+This row is now **closed**. See roadmap row L122 (new this session) for
+the natural follow-up: confirming C8b's own conservative exclusion guard
+is now provably redundant and can be removed, recovering whatever
+further localization wins it still forgoes.
