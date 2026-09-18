@@ -1614,6 +1614,25 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
   }
   ParsedSPIRVDecorations D =
       parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+  // (Roadmap L111) `SampleMask`/`SampleMaskIn` (`BuiltIn` 20) is *not* a
+  // per-vertex/per-primitive array of instances despite sharing this
+  // function's exact structural shape (a plain `ArrayType` global in
+  // address space 7/8): it is a single fragment invocation's own
+  // multi-word coverage mask (`gl_SampleMask[]`/`gl_SampleMaskIn[]`),
+  // legally read/written with a genuinely dynamic index in the Fragment
+  // stage (e.g. `for (i = 0; i < N; ++i) gl_SampleMask[i] = ...;`), which
+  // has no per-vertex/per-primitive dimension for a `Vertex` operand to
+  // occupy at all. Before this exclusion, a dynamically-indexed
+  // `gl_SampleMask`/`gl_SampleMaskIn` access was wrongly claimed here
+  // (via `getDynamicVertexIndexedAccess`), threading the sample index
+  // through as a bogus `Vertex` operand instead of
+  // `getDynamicRowIndexedAccess`'s `Row` -- rejected by
+  // `ValidateStagePass`'s `validateVertex` ("has a non-constant vertex
+  // operand, illegal outside the geometry/mesh stages"),
+  // `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.other.
+  // unusual_multisample_state`'s own failure.
+  if (D.BuiltIn && *D.BuiltIn == 20)
+    return false;
   return !D.Patch;
 }
 

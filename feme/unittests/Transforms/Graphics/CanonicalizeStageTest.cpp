@@ -5460,4 +5460,70 @@ TEST(CanonicalizeStageTest,
   EXPECT_GE(SeenStores, 2u);
 }
 
+/// (Roadmap L111) `gl_SampleMask[i]` -- a fragment shader's own
+/// multisample coverage-mask output, `BuiltIn` `SampleMask` (20) -- with a
+/// non-constant (loop-carried) index `i`, the shape a real
+/// `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.other.
+/// unusual_multisample_state` fragment shader's own
+/// `for (i = 0; i < N; ++i) gl_SampleMask[i] = sampleMask & gl_SampleMaskIn[i];`
+/// compiles into. Despite sharing `ThreadsDynamicVertexIndexIntoOutputStore`'s
+/// exact structural shape (a plain `ArrayType` global in address space 8,
+/// its outer array dimension indexed non-constantly), this is not a
+/// per-vertex/per-primitive output array at all -- it is a single
+/// fragment invocation's own multi-word coverage mask, with no
+/// per-vertex/per-primitive dimension for a `Vertex` operand to occupy.
+/// Before this fix, `isDynamicIndexedArrayGlobal` claimed this shape
+/// unconditionally (it did not yet exclude `SampleMask`), threading the
+/// sample index through as a bogus `Vertex` operand instead of `Row` --
+/// rejected by `ValidateStagePass`'s `validateVertex` ("has a
+/// non-constant vertex operand, illegal outside the geometry/mesh
+/// stages").
+TEST(CanonicalizeStageTest, ThreadsDynamicRowIndexIntoSampleMaskOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_SampleMask = external addrspace(8) global [1 x i32], !spirv.Decorations !0
+    define void @main(i32 %i, i32 %v) #0 {
+      %p = getelementptr inbounds [1 x i32], ptr addrspace(8) @gl_SampleMask, i32 0, i32 %i
+      store i32 %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 20}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+  Argument *VArg = F->getArg(1);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::Coverage);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    // `Row` (operand 1) is the non-constant loop index itself -- not the
+    // bogus `Vertex` operand (operand 4) this shape was wrongly given
+    // before this fix.
+    EXPECT_EQ(CI->getArgOperand(1), IArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(1)));
+    EXPECT_EQ(CI->getArgOperand(3), VArg);
+  }
+  EXPECT_EQ(SeenStores, 1u);
+
+  // No store targets `@gl_SampleMask` directly anymore.
+  for (Instruction &I : instructions(F))
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
+}
+
 } // namespace
