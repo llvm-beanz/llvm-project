@@ -55,25 +55,29 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Start L100.** Reduce
-   `spec_constant.graphics.vertex.expression.array_size_spec_const_expression`
-   (`OpTypeArray count ... must come from a constant` — the smallest
-   bucket, 10 cases) to a standalone repro first. Rough estimate:
-   30–60 minutes to reduce + form a hypothesis about the SPIR-V→LLVM
-   array-size-from-spec-constant-expression gap.
-2. **Then the `VectorExtractDynamic` bucket** (45 cases, "failed to
-   legalize" at pipeline-creation time — likely a dynamically-indexed-
-   vector-with-spec-constant-index gap). Rough estimate: 30–60 minutes
-   to reduce, more to scope a fix once IR is in hand.
-3. **Then the "GEP into vector" bucket** (~30 cases, also pipeline-
-   creation-time). Rough estimate: 30–60 minutes to reduce.
-4. **Re-sweep `spec_constant.*` after each fix** to confirm blast radius
-   and no regressions, same methodology used for L99 this session.
-5. **Standing gotcha for whoever picks this up next**: export
+1. **Find the exact pattern responsible for L103's wrong offset.** Add
+   a temporary trace (`llvm::errs()` at pattern entry, or step through
+   in `gdb`) while converting `dEQP-VK.pipeline.pipeline_library.
+   spec_constant.graphics.fragment.composite.struct.ivec2`'s SPIR-V —
+   confirm whether it's actually reaching upstream's generic
+   `AccessChainPattern` (which should be correct, per the `opt` probe)
+   or some other feme-specific fallback that computes offsets by hand.
+   Rough estimate: 30–60 minutes, now that the exact wrong/right offset
+   numbers (12 vs 16) and a standalone repro (`/tmp/l103_layout_test.ll`,
+   recreatable with the snippet in `Roadmap.md`'s L103 entry) are known.
+2. **Fix it** once found — likely either routing this shape through
+   upstream's real type-indexed GEP (dropping whatever hand-computed
+   byte-offset path currently wins), or fixing that path's own
+   alignment arithmetic to match LLVM's `DataLayout`. Rough estimate:
+   an hour, similar shape to L102's own fix once the responsible code
+   is pinned down.
+3. **Explain the `bvec*`-passes-but-`ivec*`-fails asymmetry** as part of
+   the investigation — it's a real clue about which code path is
+   involved (the two element types clearly go through different
+   conversion logic somewhere).
+4. **Re-sweep `composite.struct.*` and the full `spec_constant.*` group**
+   after the fix, same "exact bucket-count shift, zero collateral
+   regressions" validation used for L100/L101/L102.
+5. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
-   before running `vulkaninfo`/`deqp-vk` in a fresh shell — it is not
-   persisted anywhere, so a fresh shell defaults to the system's
-   `lvp_icd.json` (llvmpipe) instead. The "confirm FeMe device" check
-   does correctly fail loudly if you forget (shows `llvmpipe`, not
-   `FeMe CPU Vulkan Device`) — just don't skip re-running it after
-   exporting the variable.
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell.
