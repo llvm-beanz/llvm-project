@@ -2397,3 +2397,106 @@ given the new ABI surface". Left open for a future session; see
 
 
 
+
+## Roadmap L116 (fixed one bug; broadly swept and triaged): `dEQP-VK.graphicsfuzz.*`
+
+The first fresh top-level group outside `pipeline.*` picked up by the L106
+sweep, per several prior sessions' own suggested next steps ("still no
+session has picked one of these up yet, worth prioritizing one of them next
+specifically to break the multi-session `pipeline.*`-only pattern").
+
+### Fix landed this session: `spirv.Kill`/`spirv.TerminateInvocation` return arity
+
+`dEQP-VK.graphicsfuzz.always-false-if-with-discard-return` failed pipeline
+creation with `"error: 'llvm.return' op expected 1 operand"`. Its fragment
+shader has a `vec3`-returning helper function whose body is just `discard;`
+(no reachable `return` -- valid SPIR-V, since `OpKill`/
+`OpTerminateInvocation` are true terminators). `KillConversionPattern`/
+`TerminateInvocationConversionPattern` (`SPIRVToLLVMPatterns.cpp`) always
+replaced the op with a zero-operand `llvm.return`, correct only when the
+enclosing function is void-returning.
+
+Fixed with a shared `buildDiscardReturnOperands` helper looking up the
+enclosing function's actual result type -- preferring the already-converted
+`llvm.func` (MLIR's dialect conversion driver had already rewritten the
+parent `spirv.func`'s signature by the time this pattern runs, confirmed by
+testing) and falling back to the original `spirv.func`'s own result type
+otherwise -- synthesizing a `poison` value of that type when non-void,
+since the value can never actually be observed once the discard has
+already terminated the invocation.
+
+New tests: a non-void-returning variant appended (via `--split-input-file`)
+to both `spirv-to-llvm-kill.mlir` and
+`spirv-to-llvm-terminate-invocation.mlir`. `ninja check-feme`: 3192/3195
+Passed, 3 pre-existing Unsupported, 0 Failed. CTS: the reduced single case
+confirmed flips Fail -> Pass.
+
+### Full sweep, with the fix applied: 757 cases
+
+|                                        | Count |
+|----------------------------------------|-------|
+| Pass                                   | 528   |
+| Fail                                   | 197   |
+| NotSupported                           | 8     |
+| Process hangs or crashes (no verdict)  | 24    |
+
+The last row is new: unlike every prior `pipeline.*` group swept this
+milestone series, `graphicsfuzz.*`'s control-flow-heavy shaders (loops,
+`discard`/`return`/`break` nested inside them, data-dependent bounds) hit
+cases where `deqp-vk` itself never produces a per-case verdict -- either
+because the compiled shader hangs (an apparent infinite loop) or because a
+compiler bug crashes the whole process with a fatal internal error (an
+LLVM assertion, not a graceful diagnostic). Found via an ad hoc
+`--deqp-watchdog`-enabled skip-and-continue harness built this session
+(`/tmp/l106sweep/run_sweep.sh`, not committed -- a throwaway sweep-only
+script; reproducible directly from this section's own description if
+needed again) that re-runs the remaining caselist, watches for a case that
+starts but never finishes, and removes just that one case before
+resuming.
+
+### Failure taxonomy (this session's triage, not yet fixed beyond the one bug above)
+
+Broken out into `Roadmap.md`'s L116(a)-(f) rows (all one lowercase-letter
+deep, no further nesting), roughly in descending order of `Fail`-case
+volume:
+
+- **L116(a)** (~59% of `Fail` error occurrences): `feme-cpu-masked-mem-op`
+  rejects struct/aggregate/matrix element types outright. Likely the same
+  root cause as the already-tracked `C8b` row (`SIMDize.cpp`'s own
+  aggregate `insertvalue`/`extractvalue` gap) -- by far the highest-value
+  single investigation in this list if so.
+- **L116(b)** (~80 error occurrences): `feme-cpu-linearize`/`-simdize`/
+  `-wrap-entry` divergent-branch/mask-affecting-op-in-a-loop gaps --
+  graphicsfuzz's own `discard`/`return`/`break`/`continue`-nested-in-loops
+  idiom, likely several distinct sub-gaps in `LinearizePass`.
+- **L116(c)** (31 + 12 occurrences): 6 more missing/incomplete
+  GLSL.std.450 ops beyond L115's own three --
+  `Determinant`/`Modf`/`PackUnorm4x8`/`PackUnorm2x16`/`UnpackUnorm2x16`/
+  `UnpackUnorm4x8` entirely undefined in `SPIRVGLOps.td` (same per-op
+  TableGen pattern L115(a) established), plus `Ldexp`/`UnpackSnorm*`
+  already defined but failing SPIRVToLLVMPatterns.cpp legalization for
+  some operand shape.
+- **L116(d)** (20 occurrences): `spirv.Constant`/`spirv.CompositeConstruct`
+  of an aggregate type fails legalization -- likely overlaps L116(a)/C8b's
+  own theme.
+- **L116(e)** (3 occurrences, smallest, best quick-win candidates): a
+  `spirv.Switch`-shaped branch-arity bug, and a `spirv.Store` with
+  `Volatile|Nontemporal` memory-access qualifiers the existing conversion
+  pattern doesn't yet handle.
+- **L116(f)** (24 cases, no verdict at all): two investigated directly --
+  `arr-value-set-to-arr-value-squared` (a quicksort-with-injected-bug
+  shader, apparent infinite loop in JIT'd code, not yet confirmed via
+  debugger) and `complex-nested-loops-and-call` (a genuine
+  `LinearizePass` bug: `"Uses remain when a value is destroyed!"` at
+  `llvm/lib/IR/Value.cpp:99`, deleting a loop-guard value
+  (`%.inv21`/`loop.exit.guard4.Flow24_crit_edge`) that still has a live
+  use). The other 22 were only skipped, not yet individually triaged.
+
+None of L116(a)-(f) were attempted this session -- each is a
+substantially sized, independent investigation (per the taxonomy above,
+several plausibly as large as L115 itself), left for future sessions per
+`Roadmap.md`'s own breakdown.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed for the one fix landed this session (a pure bug fix, not a new
+capability).
