@@ -1242,54 +1242,116 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
 
-# L104: scoped, not yet fixed
+# L104: measured impact (fix landed)
 
-`composite.struct.*`'s remaining 35 failures (all and only 3-lane-vector
-shapes: `vec3`/`ivec3`/`uvec3`, every `matNx3`, and `array`, across all 5
-graphics stages) are a **different** `DataLayout`-timing bug than
-L103's: this one is about a `vec3`'s own *alloc size* (its own
-contribution to the *next* member's offset), not a preceding member's
-alignment gap.
+## Root cause
 
-`layOutStructIfOffsetsMatch`'s gap computation uses a bare, unscoped
+A **different** `DataLayout`-timing bug than L103's, though the same
+root-cause family: this one is about a `vec3`'s own *alloc size* (its
+own contribution to the *next* member's offset), not a preceding
+member's alignment gap.
+
+`layOutStructIfOffsetsMatch`'s gap computation used a bare, unscoped
 `mlir::DataLayout`, whose generic default rule for a builtin
 `VectorType` (`getDefaultTypeSizeInBits`) always rounds a vector's lane
 count up to the next power of two (3 lanes -> 4, 16 bytes) when
-computing size. But the *actual* SPIR-V-execution-model `DataLayout`
-string attached to the module at `SPIRVToLLVMTranslator`'s own
-GEP-folding time computes a `<3 x float>`'s alloc size as a tight 12
-bytes instead, with **no** power-of-two rounding -- confirmed via both
-a hand-built standalone repro (an identical struct/GEP pair folds to
-different byte offsets depending on which of the two `DataLayout`
-strings observed in this codebase -- a short compute-shader one and a
-longer graphics-shader one -- is used) and a real `FEME_DUMP_IR=1`
-capture on `composite.struct.vec3` itself.
+computing size. But the *actual* SPIR-V-logical `DataLayout` string
+(`e-ve-i64:64-n8:16:32:64-G10`, identical across every shader stage's
+own execution model -- confirmed via direct inspection that this is
+one `DataLayout`, not a distinct compute-vs-graphics pair as first
+suspected) sets `vectorsAreElementAligned`, giving a `<3 x float>` a
+real, tight 12-byte alloc size instead, with no power-of-two rounding
+at all -- confirmed via both a hand-built standalone repro and a real
+`FEME_DUMP_IR=1` capture on `composite.struct.vec3` itself.
 
-The result: the member `e` right after a `vec3` member `d` gets folded
+The result: the member `e` right after a `vec3` member `d` got folded
 to `offset(d) + 12` (matching the real fold-time `DataLayout`'s tight
-size), but the struct type our own code built assumed `d` occupies 16
+size), but the struct type our own code built assumed `d` occupied 16
 bytes -- so `e`'s real address, per the struct's own declared LLVM
-type, is actually `offset(d) + 16`, 4 bytes further out. The baked GEP
-silently reads from `d`'s own trailing padding bytes instead of `e`'s
+type, was actually `offset(d) + 16`, 4 bytes further out. The baked GEP
+silently read from `d`'s own trailing padding bytes instead of `e`'s
 real value.
 
-Not yet fixed: likely needs `layOutStructIfOffsetsMatch`'s cursor-
-advance step to use a vector member's *store* size (`elementCount *
-elementSize`, unrounded) rather than its *rounded/aligned* size when
-computing where the *next* member starts, while still using the
-rounded/natural alignment for the *placement* decision of the vector
-member itself -- matching what the real SPIR-V-triple `DataLayout`
-does. This needs confirming against both the compute and graphics
-execution models' own `DataLayout` strings (observed to differ) before
-landing a fix, to avoid trading this bug for a symmetric one on the
-other target.
+## Fix
+
+Rather than trying to keep two `DataLayout`-derived size/alignment
+computations in permanent lockstep (fragile, and the exact failure mode
+L103 and L104 both are), the fix eliminates the ambiguity at its
+source: any non-power-of-two-lane vector member (only ever `vec3` for
+SPIR-V, since vectors are 2/3/4 lanes) is substituted for
+`getTightVectorArrayType`'s own tight, alignment-free array form
+(`!llvm.struct<"feme.tight_vector", (array<N x Scalar>)>`), reusing a
+marker-struct substitution mechanism that previously existed only as an
+offset-decorated-struct fallback retry. An LLVM array's own alloc size
+has no target-specific rounding at all, so every later reader agrees on
+it regardless of which `DataLayout` happens to be attached to the
+module at that point.
+
+Applied unconditionally in `layOutStructIfOffsetsMatch`'s non-offset
+branch (not as a fallback retry, unlike the offset-decorated branch's
+usage, since that branch has no declared `Offset` to validate a retry
+against). Two consumer-side gaps needed closing to make this land
+cleanly:
+
+1. Two `AccessChain` component-index remap gates (in
+   `remapNestedStructMemberIndices` and a sibling AccessChain-lowering
+   function), previously scoped to `StructTy.hasOffset()`, were
+   broadened to unconditional -- a non-offset struct's own `vec3`
+   member can now also need the same marker-stepping GEP index
+   inserted.
+2. A `matNx3`/array-of-`vec3` struct member converts its own
+   constituent's *natural* type (`!llvm.array<N x vector<...>>`, with
+   *raw*, non-marker-wrapped elements) with no awareness of this
+   struct-context substitution happening one level down inside its own
+   column/element array. `CompositeConstructPattern::convertStruct`'s
+   reassembly logic (previously a single-level "is the whole field a
+   marker" unwrap) was generalized to a new recursive helper,
+   `reassembleTightVectorValue`, walking both the constituent's actual
+   type and the field's real (post-substitution) type in lockstep
+   through any depth of `LLVM::LLVMArrayType` nesting.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` throughout this session.
+- Renamed/updated unit test
+  `SPIRVToLLVMTest.InputStorageStructVec3MemberStaysAtDeclaredIndex`
+  (was `...RemapsPhysicalIndex` -- the corrected layout needs no remap
+  for that particular shape) and new test
+  `SPIRVToLLVMTest.NonOffsetStructTightlyPacksVec3MemberSize`, modeling
+  the exact CTS bug shape.
+- `ninja check-feme`: 3174 Passed, 3 pre-existing Unsupported, 0 Failed
+  -- no regressions.
+- Reduced case `dEQP-VK.pipeline.pipeline_library.spec_constant.
+  graphics.fragment.composite.struct.vec3`: now Passes.
+- Full `composite.struct.*` re-sweep (200 cases): **135 Pass / 0 Fail /
+  65 NotSupported**, up from L103's own closing baseline of 115/20/65
+  -- a clean +20/-20 shift, fully closing this bucket (0 remaining
+  failures).
+- Full `pipeline_library.spec_constant.*` re-sweep (1170 cases): **655
+  Pass / 0 Fail / 515 NotSupported**, up from L103's own closing
+  baseline of 620/35/515 -- matching the prior session's own predicted
+  655/0/515 exactly, zero collateral regressions. This closes the
+  entire `spec_constant.*` group's failure count to 0 across the whole
+  L99-L104 fix chain.
+- A broader `pipeline_library.interface_matching.*` spot-check (for
+  collateral effects beyond `spec_constant.*`) surfaced one pre-existing,
+  unrelated crash (`ArrayRef::slice` assertion) and one related
+  non-fatal "component out of range" error, both confirmed via baseline
+  comparison to pre-date this session's fix -- tracked as roadmap L105,
+  not caused by or fixed as part of L104.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+SPIR-V-to-LLVM conversion correctness fix for existing (struct member
+layout) shapes; `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+are unchanged.
 
 ## Reproduction
 
 ```console
-export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
 cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
-FEME_DUMP_IR=1 ./deqp-vk \
-  -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.composite.struct.vec3" \
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.*" \
   --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
