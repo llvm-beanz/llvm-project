@@ -91770,3 +91770,42 @@ Once L116(a)/L118/L120's `Modf`/L121 close or are judged big enough to
 set aside, go back to L106's other untriaged candidates:
 `pipeline.monolithic.*`, `subgroups.*`, `compute.*` -- still nobody has
 picked these up across many sessions now.
+
+# Session: L118 root-cause investigation (no fix landed)
+
+**Next action:** read the "Next steps" section at the bottom, pick #1, budget 15 min just to decide whether to keep digging on L118 or switch to a different roadmap item first.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed (twice — once at start, once again after a stale first check hit `llvmpipe` because `VK_ICD_FILENAMES` wasn't exported in that fresh shell; every `bash` call is a new shell, this env var must be re-exported every time).
+2. Picked up L118 (`SIMDize.cpp`'s "leftover stale scalar use" recovery blindly trusting lane 0 of a widened value, even when that value came from `MaskedAllocas`-sourced storage under a genuinely non-uniform mask). This is the mechanism behind the C8b mitigation (`LocalizePrivateGlobals.cpp`'s `mayDiscardOrDemote` guard) that's currently working around a real bug instead of fixing it.
+3. Reproduced the regression empirically: temporarily patched `LocalizePrivateGlobals.cpp`'s guard to `if (false && ...)` (throwaway, never committed), rebuilt, confirmed `dEQP-VK.graphicsfuzz.cov-function-loop-condition-constant-array-always-false` flips Pass→Fail exactly as C8b's roadmap entry describes.
+4. Dumped the widened IR (`FEME_DUMP_IR=1`) for the failing fragment shader and manually traced it end-to-end against the shader's own GLSL source (embedded in the `.amber` file) to find the exact site where a wrong value could leak in.
+5. **Spent most of the session's budget on manual symbolic execution of the IR** — traced `data0`/`data1` array contents through two loops, an if/else, and a discard branch, by hand, twice (first pass had a bug: confused `data0`'s init values with `data1`'s, which produced a false "found it" root cause). Second, corrected pass showed the shader's actual runtime values should produce the CORRECT answer (RED) if the traced masks are what I think they are — meaning the specific `block 52` masked-gather-then-extract-lane-0 site I'd flagged as "the bug" is not obviously wrong after all, since every mask at that site is a splat of a scalar that is itself provably always-true in this specific test.
+6. **Did not reach a confirmed root cause.** Reverted the throwaway diagnostic patch, rebuilt, reconfirmed the CTS case Passes again on the restored baseline, ran `ninja check-feme` (3195/3198 Passed, 3 Unsupported — same as the standing baseline, no regressions from this session's work since none of it was left in place).
+
+## Why no code change landed
+
+Manual IR tracing of this shader is expensive and error-prone (see the false-start above) — a masked-SIMD-lane bug like this needs either a smaller, purpose-built reduced test case, or actual runtime instrumentation (a print/assert compiled into the CPU-executed code) to nail down which specific gather/mask disagrees at which lane, rather than more hand-tracing of an already-complex GraphicsFuzz-generated shader. That's real work, not a "half a day" scoping estimate anymore — closer to "build a minimal repro first."
+
+## What's confirmed true (safe to build on next time)
+
+- The regression is 100% real and 100% reproducible via the `if (false && ...)` patch technique above (couple minutes to redo).
+- `FEME_DUMP_IR=1` + reading the dump against the `.amber` file's embedded GLSL comment is a viable technique, just needs a *much smaller* repro shader than a GraphicsFuzz-generated coverage test to be tractable by hand.
+- The recovery loop's exact location is `feme/lib/Transforms/CPU/SIMDize.cpp` lines ~4547-4595 (`for (Instruction *I : ToErase) { ... CreateExtractElement(It->second, uint64_t(0), ...) ... }`) — unchanged from prior sessions' scoping, still the right place to fix.
+- `widenMaskedLoad` (~line 2715) is where a masked gather's `EffectiveMask = Env.EntryMask AND WideMask` and its `WidePassthru` are built — worth checking whether `Matched.ValueOperand` (the passthru) is a hardcoded 0 by construction from the frontend's masked-load lowering, or something else; not yet checked this session, `zeroinitializer` was observed in the dump but its origin (frontend default vs. genuinely-computed-then-optimized-to-0) was not traced back.
+
+## Next steps
+
+1. **(~30 min)** Build a *minimal* reduced repro instead of using the full GraphicsFuzz shader: a fragment shader with (a) an aggregate `Private` global, (b) a real but always-false discard inside a uniform-condition branch, (c) a read of that global after the discard branches merge back, feeding directly into the output color. Much easier to hand-trace or instrument than the current repro.
+2. **(~30 min)** Add a temporary runtime print (feme's CPU backend can call into a real host function — check `feme/lib/Target/CPU/` for an existing debug-print intrinsic, or add one) right before the block-52-style `extractelement` in `SIMDize.cpp`, printing the full mask vector and gather result for all 4 lanes at actual runtime. This replaces further manual tracing with ground truth.
+3. **(~half a day, blocked on #1/#2)** Once a concrete lane/mask mismatch is observed at runtime, implement the actual fix: most likely, thread through the masked gather's own `EffectiveMask` (or the `WideMask` operand) so the stale-use recovery can pick a lane whose mask bit is dynamically known set (e.g. `llvm.cttz` over the mask cast to an integer), instead of hardcoding lane 0.
+4. If L118 keeps proving harder than a half-day/day budget after step 2's instrumentation, it's reasonable to **set it aside again** and pick from the other still-untouched items: L116(a)'s real per-leaf masked load/store decomposition (still ~59% of the original L116 sweep's `Fail`s, unchanged from prior sessions), L120's `Modf`, L121's `SIMDize.cpp` divergent-call widening generalization, or L116(f)'s ~24 un-root-caused hangs/crashes.
+5. Nobody has picked up L106's `pipeline.monolithic.*`/`subgroups.*`/`compute.*` untriaged candidates across many sessions now — still on the table whenever L116/L117/L118 close or get set aside.
+
+## State for next session
+
+- Working tree is clean, matches the last committed baseline (no uncommitted diffs).
+- `git stash list` unchanged: 3 pre-existing stashes, none touched.
+- `ninja check-feme`: 3195/3198 Passed, 3 Unsupported, 0 Failed (unchanged baseline).
+- No commits made this session (nothing to commit besides this `agent_thoughts.md` entry — no docs/roadmap changes needed since no behavior changed).
