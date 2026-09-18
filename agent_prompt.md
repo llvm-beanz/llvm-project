@@ -55,43 +55,50 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Reduce and root-cause L114** (~1-2 hours). Get a
-   `--deqp-log-shader-sources=enable` dump or SPIR-V disassembly of one
-   reduced `sample_position.correctness.128_128_1.samples_2` case to see
-   exactly which fragment input triggers `"element 1 has no location"`
-   -- almost certainly a `gl_SamplePosition`-adjacent builtin the SPIR-V
-   importer or `StageLink.cpp`'s interface-matching validation doesn't
-   recognize as system-value-linked, wrongly treating it as an ordinary
-   `Location`-based varying with no matching vertex-stage output. This
-   is core Vulkan 1.0 (not extension-gated), so the fix must actually
-   make it work, not just report `NotSupported`.
-2. **Re-sweep `multisample_shader_builtin.*` after L114 lands** --
-   expect all 95 cases to resolve to 55 Pass / 0 Fail / 40 NotSupported
-   (the 40 NotSupported are a separate, not-yet-confirmed-benign bucket
-   -- worth a quick spot-check of a couple to confirm they're a real
-   capability gap, not another undiscovered bug, before assuming so).
-3. **Continue the L106 sweep** after L114 closes: same untriaged
+1. **Implement L114(a)** (~2-4 hours -- an interpolation-architecture
+   change, not a field addition). In `Executor.cpp`, recompute
+   `Quad.Bary0`/`Bary1`/`Bary2` per `PassSample` using
+   `(*SamplePositions)[PassSample]`'s own offset instead of the fixed
+   pixel-center `Center`, and move (or duplicate) the varying-
+   interpolation step so it runs per pass when `PerSampleShading` is
+   true, not once before the pass loop. This closes the remaining 6
+   `sample_position.correctness.*` failures.
+2. **Also check the related, still-open sub-case noted but not
+   confirmed**: a `Sample`-qualified varying with no
+   `gl_SamplePosition`/`gl_SampleID` present does not force per-sample
+   shading at all today -- worth a quick CTS grep for a case exercising
+   exactly that shape once L114(a)'s main fix lands, to see if it needs
+   its own follow-up or is already covered by the same fix.
+3. **Re-sweep `multisample_shader_builtin.*` after L114(a) lands** --
+   expect all 55 supported-sample-count cases to Pass (0 Fail), leaving
+   only the 40 NotSupported cases -- still worth a spot-check of a
+   couple of those to confirm they're a genuine capability gap
+   (unsupported sample counts 16/32/64, per this session's own sweep
+   output) rather than another undiscovered bug.
+4. **Continue the L106 sweep** after L114(a) closes: same untriaged
    candidates noted for several sessions running --
    `multisample-interpolation.txt` (247 cases, small, also topically
-   related) is the cheapest next pick; `pipeline.monolithic.*`/
+   related, possibly *also* exposed by the same L114(a) interpolation
+   gap -- worth picking this one next specifically because of that
+   overlap) is the cheapest next pick; `pipeline.monolithic.*`/
    `subgroups.*`/`compute.*`/`graphicsfuzz.*` are much larger and still
    untriaged.
-4. **Standing gotcha, still true**: export
+5. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell -- not persisted.
-5. **Technique confirmed again this session**: when a CTS pipeline-
-   creation `Fail` gives only a generic `VK_ERROR_INITIALIZATION_FAILED`
-   in the batched sweep log, `FEME_VULKAN_LOG_CREATION_ERRORS=1` plus a
-   single-case rerun reliably surfaces the real underlying `error:`
-   string -- used three times this session (L112's `unhandled
-   Decoration`, L113's `partial VkSampleMask`, L114's `no location to
-   link`), and each time the string alone was enough to identify a
-   completely different root cause and fix location, without needing
-   any temporary code instrumentation.
-6. **Technique confirmed**: before assuming a CTS gap needs a *feme*
-   code change, `grep` the relevant MLIR upstream code path first
-   (`mlir/lib/Target/SPIRV/...`) -- L112 turned out to already be fully
-   handled on feme's own side (`SPIRVToLLVMPatterns.cpp`,
-   `CanonicalizeStage.cpp`), with the actual gap one layer further
-   upstream than feme's own codebase. Saved significant time versus
-   assuming the bug was in feme's own importer.
+6. **Technique confirmed this session, worth repeating**: when a fix
+   for a specific numeric constant (an enum value, a builtin ID, a
+   decoration code, ...) comes from a prior session's own doc comment
+   or notes rather than the authoritative spec/tablegen source, and the
+   fix doesn't work on the first try, re-verify that constant directly
+   against the source of truth (here, `mlir/include/mlir/Dialect/SPIRV/
+   IR/SPIRVBase.td`) before re-reading application logic for bugs --
+   the constant itself was wrong, not the logic around it, and this was
+   the fastest possible way to find that out.
+7. **Technique confirmed again**: after any fix that touches a shared,
+   widely-used per-invocation ABI struct (`FemeFragmentInvocation`) or a
+   condition gating a widely-shared code path (`PerSampleShading`), a
+   CTS regression sweep of an unrelated-but-heavily-overlapping group
+   (`pipeline_library.graphics_library.*`, 836 cases) is cheap insurance
+   against silent collateral damage -- confirmed clean this session, but
+   worth doing every time such a shared structure changes.
