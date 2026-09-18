@@ -3350,7 +3350,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               // invocation record, mirroring `ViewportIndex` immediately
               // above.
               Inv.RenderTargetArrayIndex[Lane] = Tri.TargetLayer;
-              Inv.ViewIndex = Draw.ViewIndex;
+              // (roadmap L110) `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_
+              // INDEX_BIT`, when set on this pipeline's own fragment-
+              // shader stage group, substitutes the physical device index
+              // (always 0 -- this ICD never reports more than one
+              // physical device in a group) for the real multiview
+              // per-view index the fragment stage would otherwise read.
+              Inv.ViewIndex = Pipeline.getFragmentViewIndexIsDeviceIndex()
+                                  ? 0
+                                  : Draw.ViewIndex;
 
               if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {
                 int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];
@@ -4248,7 +4256,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                      : static_cast<int32_t>(Cmd.FirstVertex);
         Inv.BaseInstance = Cmd.FirstInstance;
         Inv.DrawID = 0;
-        Inv.ViewIndex = Draw.ViewIndex;
+        // (roadmap L110) Same device-index substitution as the fragment
+        // site above, for the vertex stage's own pre-rasterization group.
+        Inv.ViewIndex = Pipeline.getPreRasterViewIndexIsDeviceIndex()
+                            ? 0
+                            : Draw.ViewIndex;
       }
     }
 
@@ -4484,10 +4496,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           // through so the hull/patch-constant phases can source that
           // system value from the invocation record rather than from
           // (nonexistent) per-control-point storage. (Roadmap H51/L109)
-          // `Draw.ViewIndex` is passed the same way for `gl_ViewIndex`.
+          // `Draw.ViewIndex` is passed the same way for `gl_ViewIndex`,
+          // substituted for the device index (roadmap L110) when this
+          // pipeline's own pre-rasterization stage group requested it.
           Expected<PatchPipelineResult> Patch = runPatchPipeline(
               Stages, *TessLink, Tess, *VSOutput, ControlPointInvocations,
-              &Draw.Resources, P, Draw.ViewIndex);
+              &Draw.Resources, P,
+              Pipeline.getPreRasterViewIndexIsDeviceIndex() ? 0
+                                                            : Draw.ViewIndex);
           if (!Patch)
             return Patch.takeError();
           PatchBases.push_back(TotalPoints);
@@ -4942,8 +4958,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             InvocationIDs[Row] = Inv;
           }
         std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
-            buildGeometryInvocations(PrimitiveIDs, InvocationIDs,
-                                     Draw.ViewIndex);
+            buildGeometryInvocations(
+                PrimitiveIDs, InvocationIDs,
+                // (roadmap L110) Same pre-rasterization-group device-index
+                // substitution as the vertex/patch-pipeline sites above.
+                Pipeline.getPreRasterViewIndexIsDeviceIndex() ? 0
+                                                              : Draw.ViewIndex);
 
         std::vector<float> EmittedVertices((size_t)RowCount * StreamCount *
                                                GState.MaxOutputVertices *
