@@ -147,6 +147,11 @@ bool isForwardedFromProducerStage(const SignatureElement &Elt) {
   case SignatureSystemValue::PatchVertices:
   case SignatureSystemValue::PrimitiveID:
   case SignatureSystemValue::DomainLocation:
+  case SignatureSystemValue::ViewIndex:
+    // (Roadmap H51/L109) Like `PrimitiveID` above, `gl_ViewIndex` is a
+    // pipeline-supplied, per-draw scalar with no real cross-stage
+    // producer to link against -- see `FemePatchArgs::ViewIndex`'s own
+    // comment.
     return false;
   default:
     return true;
@@ -246,7 +251,8 @@ Expected<PatchPipelineResult> runPatchPipeline(
     const PatchPipelineStages &Stages, const PatchPipelineLinkage &Link,
     const TessellationState &Tess, const StageStorage &VertexOutputs,
     ArrayRef<uint32_t> ControlPointInvocations,
-    const cpu::DispatchResources *Resources, uint32_t PrimitiveID) {
+    const cpu::DispatchResources *Resources, uint32_t PrimitiveID,
+    uint32_t ViewIndex) {
   std::string ValidationErr;
   {
     raw_string_ostream OS(ValidationErr);
@@ -291,6 +297,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
     Res.OutputControlPointCount = Tess.OutputControlPointCount;
     Res.InputPatchControlPointCount = Tess.InputControlPointCount;
     Res.PrimitiveID = PrimitiveID;
+    Res.ViewIndex = ViewIndex;
     cpu::PreparedPatchBatch Prepared =
         cpu::PreparedPatchBatch::create(Stages.Hull.getResourceInfo(), Res);
     if (Error E = Stages.Hull.invokePatch(Prepared))
@@ -341,6 +348,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
     Res.Outputs = Result.PatchConstants.Data.data();
     Res.OutputControlPointCount = Tess.OutputControlPointCount;
     Res.PrimitiveID = PrimitiveID;
+    Res.ViewIndex = ViewIndex;
     cpu::PreparedPatchConstantBatch Prepared =
         cpu::PreparedPatchConstantBatch::create(
             Stages.PatchConstant.getResourceInfo(), Res);
@@ -388,7 +396,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
   }
 
   std::vector<cpu::FemeDomainInvocation> Invocations =
-      buildDomainInvocations(Result.Tessellated, PrimitiveID);
+      buildDomainInvocations(Result.Tessellated, PrimitiveID, ViewIndex);
   {
     cpu::FemeStageLayout InLayout = DomainInput->layout();
     cpu::FemeStageLayout PatchLayout = DomainPatchConstants.layout();

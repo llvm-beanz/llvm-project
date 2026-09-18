@@ -1792,16 +1792,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
     // Links every geometry-input element (except `SV_PrimitiveID`/
     // `gl_InvocationID`, both sourced from `FemeGeometryInvocation`
-    // instead, roadmap H5d-a) to the producing stage's matching output by
-    // `Location`/system value (e.g. `SV_Position`), mirroring the
-    // fragment-input varying linkage below.
+    // instead, roadmap H5d-a; and `gl_ViewIndex`, likewise sourced from
+    // `FemeGeometryInvocation`, roadmap H51/L109) to the producing
+    // stage's matching output by `Location`/system value (e.g.
+    // `SV_Position`), mirroring the fragment-input varying linkage below.
     Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
         PreGeometrySig, SignatureDirection::Output, *GSSig,
         SignatureDirection::Input,
         "vertex/domain stage output -> geometry stage input",
         [](const SignatureElement &Elt) {
           return Elt.SystemValue != SignatureSystemValue::PrimitiveID &&
-                 Elt.SystemValue != SignatureSystemValue::InvocationID;
+                 Elt.SystemValue != SignatureSystemValue::InvocationID &&
+                 Elt.SystemValue != SignatureSystemValue::ViewIndex;
         });
     if (!Links)
       return Links.takeError();
@@ -4481,10 +4483,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           // instance -- its `SV_PrimitiveID`/`gl_PrimitiveID` -- passed
           // through so the hull/patch-constant phases can source that
           // system value from the invocation record rather than from
-          // (nonexistent) per-control-point storage.
-          Expected<PatchPipelineResult> Patch =
-              runPatchPipeline(Stages, *TessLink, Tess, *VSOutput,
-                               ControlPointInvocations, &Draw.Resources, P);
+          // (nonexistent) per-control-point storage. (Roadmap H51/L109)
+          // `Draw.ViewIndex` is passed the same way for `gl_ViewIndex`.
+          Expected<PatchPipelineResult> Patch = runPatchPipeline(
+              Stages, *TessLink, Tess, *VSOutput, ControlPointInvocations,
+              &Draw.Resources, P, Draw.ViewIndex);
           if (!Patch)
             return Patch.takeError();
           PatchBases.push_back(TotalPoints);
@@ -4939,7 +4942,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             InvocationIDs[Row] = Inv;
           }
         std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
-            buildGeometryInvocations(PrimitiveIDs, InvocationIDs);
+            buildGeometryInvocations(PrimitiveIDs, InvocationIDs,
+                                     Draw.ViewIndex);
 
         std::vector<float> EmittedVertices((size_t)RowCount * StreamCount *
                                                GState.MaxOutputVertices *
