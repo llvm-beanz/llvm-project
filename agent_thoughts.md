@@ -91847,3 +91847,44 @@ The actual root cause of `cov-function-loop-condition-constant-array-always-fals
 - `git stash list` unchanged: 3 pre-existing stashes, none touched.
 - `ninja check-feme`: 3196/3199 Passed, 3 Unsupported, 0 Failed.
 - No scratch files left in `/tmp` from this session (cleaned up; `/tmp/gf_skipped.txt` from a prior session was read but not modified, still there for reuse).
+
+# Session: L118 closed -- real root cause found via runtime instrumentation, +25 Pass
+
+**Next action:** pick up L122 (verify + remove C8b's now-likely-redundant guard) or L116(a)'s per-leaf masked load/store decomposition -- both scoped below.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up L118 per the prior session's step 1: stopped hand-tracing IR (two prior sessions had both failed that way) and added real runtime instrumentation instead.
+3. Added a temporary debug-print host callback (`femeCpuDebugPrintUniformRecoveryI32` in `FeMeRuntimeCPU.c`, following the exact `feme.cpu.resource.load.raw.*` lowering pattern -- an ordinary extern function, auto-linked in via the runtime bitcode's `LinkOnlyNeeded` embedding, no registration needed). Wired calls to it at the stale-use recovery site, every masked-load (gather) site, and every masked-store (scatter) site in `SIMDize.cpp`.
+4. Reproduced the regression (temporarily disabled C8b's guard, same throwaway technique as every prior L118 session), rebuilt, ran the failing case through `deqp-vk`, captured real stderr output.
+5. **Ground truth, in one iteration**: `EntryMask` was `0xf` everywhere (ruling out the lane-selection question entirely for this shader). The two in-loop gathers always agreed across all 4 lanes. The final masked *store* into the localized `data0`/`data1` arrays diverged for ~32 of 272 calls: effective mask `0xb` or `0x4` instead of `0xf` -- a real per-lane mask bug, in a shader whose own control flow is 100% uniform (verified via the embedded GLSL source: the discard condition compares two fixed uniform-buffer constants, `1 < 0`, always false).
+6. **Root cause**: `widenMaskedStore` unconditionally used `Env.SideEffectMask` (which correctly excludes fragment-shader helper invocations from *device-visible* writes) even for a store into `MaskedAllocas`-tracked local storage (a localized `Private` global, roadmap L84/C8b) -- but a private local's write is invisible to every other invocation regardless of helper status, so excluding a helper lane there just leaves that lane's own later read of its own local variable stale. Masked *loads* already used `EntryMask` correctly, which is why the gathers never showed the bug.
+7. **Fixed it**: branch the governing mask on whether the store's underlying alloca (via the pass's own `getUnderlyingAlloca` helper) is in `MaskedAllocas` -- `EntryMask` if so, `SideEffectMask` unchanged otherwise.
+8. Added `SIMDizeTest.MaskedAllocaStoreUsesEntryMaskNotSideEffectMask`, verified via `git stash` to fail without the fix.
+9. Reverted all debug instrumentation (`git checkout --` on `FeMeRuntimeCPU.c`, `SIMDize.cpp`'s instrumentation calls, `LocalizePrivateGlobals.cpp`'s diagnostic guard-disable) before finalizing the real fix.
+10. `ninja check-feme`: 3197/3200 Passed (+1 test), 3 Unsupported, 0 Failed. Clean, twice (once before docs, once as final re-verification).
+11. **Measured against the named regression**: `cov-function-loop-condition-constant-array-always-false` now **Passes** (with C8b's guard temporarily re-disabled to reproduce/confirm).
+12. Full `graphicsfuzz.*` sweep (733/757, same 24-name hang exclusion list reused across sessions): **593 Pass / 132 Fail / 8 NotSupported**, vs. 568/157/8 baseline. **+25 Pass, 0 regressions** -- the largest single-session sweep improvement on this roadmap to date.
+13. Updated `Roadmap.md` (L118 struck through as done, C8b's row updated, new row **L122** added to track verifying/removing C8b's now-likely-redundant guard) and `VulkanCTSReport.md` (new section with the full narrative, following the doc's own "root-caused" → "fixed this session" two-section convention).
+14. Confirmed no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update needed (internal correctness fix, no new Vulkan surface).
+15. Committed in 3 small commits: (1) `SIMDize.cpp` fix + test, (2) docs, (3) this entry. Cleaned up `/tmp/l118b/` and `/tmp/gf_exclude.txt`; left `/tmp/gf_skipped.txt` for future reuse.
+
+## Why runtime instrumentation won this time when manual tracing failed twice
+
+Two prior sessions each spent most of their budget hand-deriving the widened IR's mask algebra and converged on plausible-but-wrong hypotheses (a lane-0 recovery bug that turned out to be real but not *this* bug; a `data0`/`data1` init-value mix-up that wasn't real). Actually printing the runtime mask/value ground truth at the 3 candidate sites took under an hour and immediately pointed at the scatter site, not the recovery site. **Recommend this technique earlier** for any future SIMDize.cpp bug that survives one round of manual tracing without a confirmed hypothesis.
+
+## Next steps
+
+1. **L122 (~half a day)**: with C8b's guard now provably addressing a bug (this session's fix) that no longer exists, re-disable the guard, re-run the full `graphicsfuzz.*` sweep, and confirm 0 new regressions. If clean, remove the guard from `LocalizePrivateGlobals.cpp` entirely and re-sweep once more to measure the incremental win from broader localization.
+2. **L116(a) (~half a day to a day, still unstarted across many sessions)**: per-leaf decomposition for a struct/array/matrix masked load/store in `MaskIntrinsics.cpp`/`Linearize.cpp` -- still the single highest-value item left in the L116 breakdown by error volume (~59% of the original sweep's `Fail`s).
+3. **L120's `Modf` (~half a day)**: needs a new `SPIRV_GLModfOp` taking an `OpVariable` out-parameter -- a shape unlike any existing GL op (the pointer-free `ModfStruct` sibling already exists upstream).
+4. **L121 (~half a day)**: generalize `SIMDize.cpp`'s `widenElementwise` to widen a non-homogeneous (independently-overloaded) operand for `llvm.ldexp`-shaped divergent calls, not just operands matching the result type -- unblocks the last `Ldexp` repro case.
+5. **L116(f)'s ~24 un-root-caused hangs/crashes** and **L106's untriaged `pipeline.monolithic.*`/`subgroups.*`/`compute.*` candidates** remain untouched across many sessions -- still on the table whenever L116/L117/L118/L120/L121 close or get set aside.
+
+## State for next session
+
+- Working tree clean, 3 new commits this session (fix+test, docs, this entry).
+- `ninja check-feme`: 3197/3200 Passed, 3 Unsupported, 0 Failed.
+- `/tmp/gf_skipped.txt` still present for reuse (24 known-hanging `graphicsfuzz.*` names). No other scratch files left in `/tmp`.
+- `graphicsfuzz.*` sweep baseline for next session's comparisons: **593 Pass / 132 Fail / 8 NotSupported** (of 733 excluding the same 24 hangs).
