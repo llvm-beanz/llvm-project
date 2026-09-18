@@ -1557,3 +1557,117 @@ advertise `shaderFloat64`), not a bug. This closes out the entire
 candidate is a fresh `dEQP-VK.pipeline.*` subgroup or a top-level
 `dEQP-VK.*` group outside `pipeline.*` altogether (see Roadmap.md's L106
 entry for specifics).
+
+# L108: `SPIRVResourceLoweringPass` rejects an entire function over a dead subpass-input handle
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.graphics_library.*" \
+  --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
+
+Picking up L106's own next candidate group (a fresh, untriaged
+`dEQP-VK.pipeline.*` subgroup), `pipeline_library.graphics_library.*`
+(836 cases) was swept for the first time this milestone series: **460
+Pass / 88 Fail / 287 NotSupported / 1 Warning**. All 88 failures clustered
+under `independent_sets_random` (a randomized-descriptor-set fuzz-test
+family), across `vert_frag`/`vert_geom_frag`/`mesh_frag`/`task_mesh_frag`
+stage combos and 3 pipeline-construction variants
+(`fast_lib`/`monolithic`/`optimized_lib`) each -- reduced to a single
+standalone repro,
+`dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_
+random.fast_lib.vert_frag.case_0`, which failed with a bare
+`Fail (retcode: VK_ERROR_INITIALIZATION_FAILED at
+vkPipelineConstructionUtil.cpp:176)` and no error text by default.
+
+## Root cause
+
+`feme::Vulkan::Diagnostics.cpp`'s `logCreationFailure` only prints an
+`Error`'s message when `FEME_VULKAN_LOG_CREATION_ERRORS` is set (off by
+default, otherwise `consumeError` swallows it silently). With it set, the
+real error was:
+
+```
+vkCreateGraphicsPipelines: unsupported raised operation:
+'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_1_0t' is a
+register-bound resource handle the FeMe CPU target cannot normalize...
+```
+
+`checkSupportedRaisedOps` (`UnsupportedOps.cpp`) itself documents (roadmap
+L64) that the *named* handle in this diagnostic is often just "whichever
+declaration happens to appear first in the module" -- an innocent
+bystander, not necessarily the actual failing resource. Rather than
+re-deriving the pass's own accept/reject logic by hand against the IR, the
+pass's own pre-existing `FEME_CPU_LOG_RESOURCE_NORMALIZATION` env-var-gated
+diagnostic (`SPIRVResourceLowering.cpp`'s `logNormalizationRejection`,
+previously unused by this milestone series) pinpointed the exact rejected
+call directly:
+
+```
+FEME_CPU_LOG_RESOURCE_NORMALIZATION: handle result type is not one of the
+kinds this pass normalizes:   %20 = call target("spirv.Image", float, 6,
+0, 0, 0, 2, 0) @llvm.spv.resource.handlefrombinding...
+```
+
+`Dim == 6` is SPIR-V's `SubpassData` -- a GLSL `subpassInput` variable's
+own handle. `collectHandles` walks every `handlefrombinding` call in a
+function and declines the *whole function* (leaving every handle
+unnormalized) the moment any one of them fails every `HandleKind`
+classification -- correct behavior for a genuinely unsupported resource
+access, but wrong here: a subpass input's `OpImageRead` always converts
+directly to `feme.stage.subpass.load`
+(`feme::spirv::SubpassLoadPattern`), never referencing this handle's own
+result at all, so the handle is *always* dead. The failing fragment
+shader legitimately mixed a subpass input (two, actually) with several
+otherwise-perfectly-normalizable resources (a separate sampler + 2
+textures, an `imageBuffer` storage texel buffer, an SSBO) in the same
+function; the whole function was being declined purely because of the
+two always-dead subpass handles, leaving every genuinely-normalizable
+handle raw too, which is what `checkSupportedRaisedOps` then tripped on
+downstream (against an unrelated, innocent-bystander handle name, exactly
+as its own L64 comment warns).
+
+The sibling *vertex* shader's function, with no subpass input at all,
+lowered cleanly -- confirming the bug was specific to the subpass-input
+shape, not the other resource kinds present.
+
+## Fix
+
+`collectHandles` now skips (rather than declining the whole function
+over) any unclassifiable `handlefrombinding` call whose own result is
+`use_empty()`, mirroring `checkSupportedRaisedOps`'s own pre-existing
+tolerance for this exact "dead subpass-input handle" shape. A dead handle
+that is skipped is simply left as a raw, unreferenced call -- harmless,
+since nothing downstream ever reads its result -- while every other,
+real handle in the same function is now normalized as usual.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start.
+- New unit test
+  `SPIRVResourceLoweringTest.LowersOrdinaryHandleWhenAnUnusedSubpassInputHandleSharesTheFunction`:
+  an ordinary storage-buffer handle is normalized to a resource-load call
+  even when an unused `Dim::SubpassData` handle shares the same function.
+- `ninja check-feme`: 3177 Passed, 3 pre-existing Unsupported, 0 Failed --
+  up 1 test, no regressions.
+- The originally-crashing case (`...independent_sets_random.fast_lib.
+  vert_frag.case_0`) now Passes.
+- Full `pipeline_library.graphics_library.*` re-sweep (836 cases, single
+  batched invocation -- all failures here are soft `Fail`s, not hard
+  crashes, so no one-at-a-time loop was needed): **541 Pass / 7 Fail /
+  287 NotSupported / 1 Warning** -- up from 460 Pass/88 Fail, an exact
+  +81 shift. The remaining 7 failures are a single, distinct,
+  not-yet-triaged cluster (`misc.other.unusual_multisample_state` and six
+  `misc.other.view_index_from_device_index_in_*` variants) -- confirmed
+  unrelated to this fix (no subpass-input handle involved) and left open
+  under roadmap L106 for a future session.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+resource-normalization correctness fix inside the SPIR-V-to-CPU-ABI
+lowering pipeline; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` are unchanged.
