@@ -89864,3 +89864,79 @@ changed.
    constructs beyond spec-constant composites (plain matrix literals,
    uniform-block matrices, etc.), so a broader post-fix check is
    warranted before considering it closed.
+
+# L99 fix: LocalNarrowVectorArrayInitPass scoped to tight-GEP readers
+
+## Next action for future sessions
+
+Start L100 (see Roadmap.md): reduce
+`spec_constant.graphics.vertex.expression.array_size_spec_const_expression`
+(the `OpTypeArray count` bucket, smallest of the 3 remaining, 10 cases) to
+a standalone repro. Rough estimate: 30–60 minutes to reduce + hypothesis.
+
+## What got done this session
+
+1. **Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary`.
+   Caught a real gotcha: `VK_ICD_FILENAMES` was NOT set in the shell by
+   default this session (pointed at `lvp_icd.json`, llvmpipe, until I
+   exported it manually to
+   `build2/tools/feme/tools/feme-vulkan/feme_icd.json`). It is not in
+   any shell profile — **every future session must export it explicitly
+   before trusting `vulkaninfo`,** not just check the output at face
+   value.
+2. **Found L99's real root cause** (the prior session's reduction/
+   hypothesis was wrong — it suspected `SPIRVToLLVMPatterns.cpp`'s
+   matrix conversion itself). Bisected the CPU `Normalize` pass pipeline
+   one pass at a time with `feme-opt --llvm -passes=<name>` against a
+   hand-dumped `FEME_DUMP_IR=1` capture, and found
+   `feme::cpu::LocalNarrowVectorArrayInitPass` (H69) was splitting a
+   `mat2x3` global's init store at the *wrong* byte offset — a scoping
+   bug in a pass built for a different (mesh-scratch-array) scenario,
+   not a new gap in matrix conversion at all.
+3. **Fixed it**: added `hasTightGEPUser` — only rewrite a global's init
+   store if some other real user of that exact global is already a
+   tight (`i8`-element) GEP. Two commits: code+test, then docs.
+4. **Verified no regressions**: `ninja check-feme` → 3169 Passed, 3
+   pre-existing Unsupported, 0 Failed. Real CTS re-run:
+   `composite.matrix.mat2x3` now 1/1 Pass; full `composite.matrix.*` now
+   45/45 Pass (up from 27/45); full `spec_constant.*` now 470/185/515
+   (up from 455/200/515, exact +15/-15 shift, no new failures).
+5. **Docs updated**: struck through L99 in `Roadmap.md`, added L100 for
+   the 3 remaining unrelated `spec_constant.*` buckets (currently just a
+   stub — needs its own reduce-first triage, not yet started). Appended
+   an "L99: measured impact" section to `VulkanCTSReport.md`.
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+   changes needed (pure correctness fix, no feature/extension surface
+   changed).
+
+## Commits this session
+
+1. `49faf71ef286` — `[feme] Fix L99: scope LocalNarrowVectorArrayInitPass
+   to tight-GEP readers only` (code + unit test).
+2. `1a8a800ed56c` — `[feme] docs: close L99, add L100 for remaining
+   spec_constant.* buckets` (Roadmap.md, VulkanCTSReport.md).
+
+## Next steps
+
+1. **Start L100.** Reduce
+   `spec_constant.graphics.vertex.expression.array_size_spec_const_expression`
+   (`OpTypeArray count ... must come from a constant` — the smallest
+   bucket, 10 cases) to a standalone repro first. Rough estimate:
+   30–60 minutes to reduce + form a hypothesis about the SPIR-V→LLVM
+   array-size-from-spec-constant-expression gap.
+2. **Then the `VectorExtractDynamic` bucket** (45 cases, "failed to
+   legalize" at pipeline-creation time — likely a dynamically-indexed-
+   vector-with-spec-constant-index gap). Rough estimate: 30–60 minutes
+   to reduce, more to scope a fix once IR is in hand.
+3. **Then the "GEP into vector" bucket** (~30 cases, also pipeline-
+   creation-time). Rough estimate: 30–60 minutes to reduce.
+4. **Re-sweep `spec_constant.*` after each fix** to confirm blast radius
+   and no regressions, same methodology used for L99 this session.
+5. **Standing gotcha for whoever picks this up next**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before running `vulkaninfo`/`deqp-vk` in a fresh shell — it is not
+   persisted anywhere, so a fresh shell defaults to the system's
+   `lvp_icd.json` (llvmpipe) instead. The "confirm FeMe device" check
+   does correctly fail loudly if you forget (shows `llvmpipe`, not
+   `FeMe CPU Vulkan Device`) — just don't skip re-running it after
+   exporting the variable.
