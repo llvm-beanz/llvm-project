@@ -3150,11 +3150,33 @@ LogicalResult spirv::Deserializer::wireUpBlockArgument() {
             switchOp.getTargets(), targetOperands);
         switchOp.erase();
       } else {
+        // A `target` block may legitimately appear more than once in
+        // `switchOp`'s own target list (e.g. two distinct SPIR-V `OpSwitch`
+        // case literals both branching to the same block -- a real
+        // dEQP-VK.graphicsfuzz.call-if-while-switch shape). Every one of
+        // those occurrences is its own successor entry needing its own
+        // block-argument list (`OpPhi`'s value for a given predecessor
+        // block is shared across all of that predecessor's edges to the
+        // target, since SPIR-V/LLVM phis key on predecessor block, not
+        // predecessor edge, so every duplicate occurrence gets the exact
+        // same `blockArgs` this phi produced). Only fixing up the *first*
+        // occurrence (this code's own prior behavior, via `llvm::find`)
+        // left every later duplicate's target-operand list empty,
+        // producing a real block downstream (`LLVM::SwitchOp`'s own
+        // verifier via SPIRVToLLVM's 1:1 conversion) that failed with
+        // "branch has 0 operands for successor #N, but target block has
+        // 1" the moment the target block expected any block arguments at
+        // all.
         SuccessorRange targets = switchOp.getTargets();
-        auto it = llvm::find(targets, target);
-        assert(it != targets.end());
-        size_t index = std::distance(targets.begin(), it);
-        switchOp.getTargetOperandsMutable(index).assign(blockArgs);
+        bool foundTarget = false;
+        for (auto [index, candidate] : llvm::enumerate(targets)) {
+          if (candidate != target)
+            continue;
+          foundTarget = true;
+          switchOp.getTargetOperandsMutable(index).assign(blockArgs);
+        }
+        assert(foundTarget);
+        (void)foundTarget;
       }
     } else {
       return emitError(unknownLoc, "unimplemented terminator for Phi creation");

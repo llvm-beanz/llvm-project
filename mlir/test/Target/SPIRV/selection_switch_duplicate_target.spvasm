@@ -1,0 +1,51 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; This tests deserializing an OpSwitch where two different case literals (0
+; and 1) both branch to the same target block (%13), which itself takes an
+; OpPhi-derived block argument. Each occurrence of a duplicated switch target
+; is its own successor entry and must get its own copy of the block argument;
+; previously only the first occurrence of a repeated target was wired up,
+; leaving later occurrences with zero block arguments and failing
+; verification ("branch has 0 operands for successor #N, but target block
+; has 1").
+
+; CHECK:      spirv.Switch {{%.*}} : si32, [
+; CHECK-NEXT:   default: ^[[bb:.+]],
+; CHECK-NEXT:   0: ^[[dup:.+]]({{%.*}} : f32),
+; CHECK-NEXT:   1: ^[[dup]]({{%.*}} : f32),
+; CHECK-NEXT:   2: ^[[other:.+]]
+; CHECK-NEXT: ]
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpName %switch "switch"
+               OpName %main "main"
+       %void = OpTypeVoid
+        %int = OpTypeInt 32 1
+          %1 = OpTypeFunction %void %int
+      %float = OpTypeFloat 32
+    %float_1 = OpConstant %float 1
+    %float_3 = OpConstant %float 3
+         %25 = OpTypeFunction %void
+     %switch = OpFunction %void None %1
+          %5 = OpFunctionParameter %int
+          %6 = OpLabel
+               OpSelectionMerge %90 None
+               OpSwitch %5 %90 0 %13 1 %13 2 %14
+         %13 = OpLabel
+         %16 = OpPhi %float %float_1 %6
+               OpBranch %15
+         %14 = OpLabel
+               OpBranch %15
+         %15 = OpLabel
+         %22 = OpPhi %float %16 %13 %float_3 %14
+               OpBranch %90
+         %90 = OpLabel
+               OpReturn
+               OpFunctionEnd
+       %main = OpFunction %void None %25
+         %27 = OpLabel
+               OpReturn
+               OpFunctionEnd
