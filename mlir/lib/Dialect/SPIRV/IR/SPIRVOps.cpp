@@ -2311,6 +2311,26 @@ LogicalResult spirv::SpecConstantOperationOp::verifyRegions() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.Modf
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::GLModfOp::verify() {
+  Type xTy = getX().getType();
+  if (getResult().getType() != xTy)
+    return emitError(
+        "result type must be the same type as the first operand");
+
+  auto ptrTy = dyn_cast<spirv::PointerType>(getI().getType());
+  if (!ptrTy)
+    return emitError("second operand must be a pointer");
+  if (ptrTy.getPointeeType() != xTy)
+    return emitError("pointee type of the second operand must be the same "
+                     "type as the first operand");
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.ModfStruct
 //===----------------------------------------------------------------------===//
 

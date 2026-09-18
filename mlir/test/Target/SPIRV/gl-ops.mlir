@@ -6,7 +6,7 @@
 // RUN: %if spirv-tools %{ spirv-val %t %}
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, Int64], []> {
-  spirv.func @math(%arg0 : f32, %arg1 : f32, %arg2 : i32) "None" {
+  spirv.func @math(%arg0 : f32, %arg1 : f32, %arg2 : i32, %arg3 : !spirv.ptr<f32, Function>) "None" {
     // CHECK: {{%.*}} = spirv.GL.Exp {{%.*}} : f32
     %0 = spirv.GL.Exp %arg0 : f32
     // CHECK: {{%.*}} = spirv.GL.Sqrt {{%.*}} : f32
@@ -39,6 +39,8 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, 
     %13 = spirv.GL.FrexpStruct %arg0 : f32 -> !spirv.struct<(f32, i32)>
     // CHECK: {{%.*}} = spirv.GL.ModfStruct {{%.*}} : f32 -> !spirv.struct<(f32, f32)>
     %modf = spirv.GL.ModfStruct %arg0 : f32 -> !spirv.struct<(f32, f32)>
+    // CHECK: {{%.*}} = spirv.GL.Modf {{%.*}}, {{%.*}} : f32, !spirv.ptr<f32, Function> -> f32
+    %modf2 = spirv.GL.Modf %arg0, %arg3 : f32, !spirv.ptr<f32, Function> -> f32
     // CHECK: {{%.*}} = spirv.GL.Ldexp {{%.*}} : f32, {{%.*}} : i32 -> f32
     %14 = spirv.GL.Ldexp %arg0 : f32, %arg2 : i32 -> f32
     // CHECK: {{%.*}} = spirv.GL.FMix {{%.*}} : f32, {{%.*}} : f32, {{%.*}} : f32 -> f32

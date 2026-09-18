@@ -513,6 +513,40 @@ func.func @fma(%a : vector<3xf32>, %b : vector<3xf32>, %c : vector<3xf32>) -> ()
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.Modf
+//===----------------------------------------------------------------------===//
+
+func.func @modf(%arg0 : f32, %arg1 : !spirv.ptr<f32, Function>) -> () {
+  // CHECK: spirv.GL.Modf {{%.*}}, {{%.*}} : f32, !spirv.ptr<f32, Function> -> f32
+  %0 = spirv.GL.Modf %arg0, %arg1 : f32, !spirv.ptr<f32, Function> -> f32
+  return
+}
+
+func.func @modf_vec(%arg0 : vector<3xf32>, %arg1 : !spirv.ptr<vector<3xf32>, Function>) -> () {
+  // CHECK: spirv.GL.Modf {{%.*}}, {{%.*}} : vector<3xf32>, !spirv.ptr<vector<3xf32>, Function> -> vector<3xf32>
+  %0 = spirv.GL.Modf %arg0, %arg1 : vector<3xf32>, !spirv.ptr<vector<3xf32>, Function> -> vector<3xf32>
+  return
+}
+
+// -----
+
+func.func @modf_result_type_mismatch(%arg0 : f32, %arg1 : !spirv.ptr<f32, Function>) -> () {
+  // expected-error @+1 {{result type must be the same type as the first operand}}
+  %0 = spirv.GL.Modf %arg0, %arg1 : f32, !spirv.ptr<f32, Function> -> f64
+  return
+}
+
+// -----
+
+func.func @modf_pointee_type_mismatch(%arg0 : f32, %arg1 : !spirv.ptr<f64, Function>) -> () {
+  // expected-error @+1 {{pointee type of the second operand must be the same type as the first operand}}
+  %0 = spirv.GL.Modf %arg0, %arg1 : f32, !spirv.ptr<f64, Function> -> f32
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.ModfStruct
 //===----------------------------------------------------------------------===//
 

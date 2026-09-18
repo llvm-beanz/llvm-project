@@ -1232,6 +1232,54 @@ def SPIRV_GLFmaOp : SPIRV_GLTernaryArithmeticOp<"Fma", 50, SPIRV_Float, [AlwaysS
 
 // ----
 
+def SPIRV_GLModfOp : SPIRV_GLOp<"Modf", 35, []> {
+  let summary = "Splits x into fractional and integer parts, writing the "
+                "integer part through a pointer";
+
+  let description = [{
+    Result is the fractional part of x, with the same sign as x, such that:
+
+    x = i + Result
+
+    i gets the integer part of x, with the same sign as x, written to the
+    location pointed to by the second operand.
+
+    The first operand, x, must be a scalar or vector whose component type
+    is floating-point.
+
+    The second operand, i, must be a pointer whose pointee type is the same
+    type as x's -- unlike `spirv.GL.ModfStruct` (whose result is a struct
+    holding both the fractional and integer parts, with no side effect),
+    this op writes its own integer-part result through that pointer as a
+    genuine memory side effect, so it carries no `NoMemoryEffect` trait
+    (mirroring every `SPIRV_AtomicUpdateOp`'s own convention of omitting
+    that trait for exactly this reason).
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.GL.Modf %0, %1 : f32, !spirv.ptr<f32, Function> -> f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$x,
+    SPIRV_AnyPtr:$i
+  );
+
+  let results = (outs
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $x `,` $i `:` type($x) `,` type($i) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// ----
+
 def SPIRV_GLModfStructOp : SPIRV_GLOp<"ModfStruct", 36, [NoMemoryEffect]> {
   let summary = "Splits x into fractional and integer parts";
 
