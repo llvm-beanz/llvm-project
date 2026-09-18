@@ -1155,3 +1155,141 @@ VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/
   ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.composite.array.*" \
   --deqp-log-images=disable --deqp-shadercache=disable
 ```
+
+# L103: measured impact (fix landed)
+
+## Root cause
+
+A struct-typed `spirv.AccessChain` into a **non-`Offset`-decorated**
+struct (a plain `Private`/`Function`/`Input`-storage struct, not a
+`Block`-decorated interface block) was previously converted as an
+ordinary, non-packed LLVM struct type. Any padding a member's own
+natural ABI alignment required (e.g. a `<2 x i32>` member immediately
+after a 1-byte `bool`/`i1` member) was left for LLVM to compute
+implicitly, using whatever `DataLayout` happened to be attached to the
+surrounding `llvm::Module` at the moment a GEP into it was constant-
+folded to a raw byte offset. For `feme::cpu`, that moment is
+`feme::SPIRVToLLVMTranslator`'s own translation -- well before the
+later switch to the real host `DataLayout` (`Pipeline.cpp`) -- and the
+SPIR-V execution model's own triple-derived `DataLayout` disagrees with
+the real host's on a `<2 x i32>`'s natural alignment (4 vs 8 bytes),
+silently baking in the wrong byte offset for every member after such a
+gap, permanently (switching to the real host `DataLayout` afterward
+cannot retroactively re-fold an already-materialized constant GEP).
+
+## Fix
+
+Three parts, since there is no single choke point for "does this
+struct's declared member index need remapping to a different physical
+index":
+
+1. `layOutStructIfOffsetsMatch`'s non-offset branch now always builds
+   an explicitly `packed` struct, with every natural-alignment gap
+   materialized as its own synthetic `[N x i8]` member (computed via
+   `mlir::DataLayout`'s own default rules, which agree with the real
+   host's for these shapes) -- fixing its byte layout independent of
+   whichever `DataLayout` a later GEP fold happens to see.
+2. `OffsetStructMemberReorderAccessChainPattern`'s gate,
+   `remapNestedStructMemberIndices`'s own inner per-level gate, and
+   `CompositeConstructPattern::convertStruct`'s member-index ternary
+   were all broadened from `StructTy.hasOffset()` to unconditional --
+   a declared member index may now need remapping to its physical
+   index even for a struct with no `Offset` decorations at all.
+3. `StageIOArrayAccessChainPattern` (despite its name, this handles
+   any `Input`-storage composite -- struct or array -- `AccessChain`,
+   not just arrays) previously forwarded `Adaptor.getIndices()`
+   verbatim, with zero remapping awareness -- the largest find this
+   session, since it silently selected the wrong (or a gap) field for
+   any `Input`-storage struct with a natural-alignment gap. Fixed by
+   routing its indices through the same `remapNestedStructMemberIndices`
+   helper the other patterns already use.
+
+## Validation
+
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` before and during this session.
+- New unit tests `SPIRVToLLVMTest.NonOffsetStructWithAlignmentGapBuilds
+  ExplicitPadding` and `SPIRVToLLVMTest.InputStorageStructAccessChain
+  RemapsPhysicalIndex`.
+- `ninja check-feme`: 3173 Passed, 3 pre-existing Unsupported, 0 Failed
+  (up 2 tests, no regressions).
+- Reduced case `dEQP-VK.pipeline.pipeline_library.spec_constant.
+  graphics.fragment.composite.struct.ivec2`: now Passes.
+- Full `composite.struct.*` re-sweep (200 cases across 5 stages):
+  **165/200 Pass, 35 Fail, 0 NotSupported** (this group has no
+  NotSupported cases), up from the pre-fix 100/100/0. The remaining 35
+  failures are a distinct, separately root-caused bucket -- every
+  3-lane-vector-column shape (`vec3`/`ivec3`/`uvec3`, every `matNx3`,
+  and `array`) across all 5 stages -- tracked separately as roadmap
+  L104.
+- Full `pipeline_library.spec_constant.*` re-sweep (1170 cases): **620
+  Pass / 35 Fail / 515 NotSupported**, up from the pre-fix 555/100/515
+  -- an exact +65/-65 shift, matching this row's own scope precisely
+  (the 65 now-passing cases are every `composite.struct.*` shape except
+  the 35 3-lane-vector ones), zero collateral regressions.
+
+No advertised Vulkan feature or extension changed -- this is a pure
+SPIR-V-to-LLVM conversion correctness fix for existing (struct member
+layout) shapes.
+
+## Reproduction
+
+```console
+cd /home/dev/dev/llvm-project/build2 && ninja check-feme
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.*.composite.struct.*" \
+  --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
+
+# L104: scoped, not yet fixed
+
+`composite.struct.*`'s remaining 35 failures (all and only 3-lane-vector
+shapes: `vec3`/`ivec3`/`uvec3`, every `matNx3`, and `array`, across all 5
+graphics stages) are a **different** `DataLayout`-timing bug than
+L103's: this one is about a `vec3`'s own *alloc size* (its own
+contribution to the *next* member's offset), not a preceding member's
+alignment gap.
+
+`layOutStructIfOffsetsMatch`'s gap computation uses a bare, unscoped
+`mlir::DataLayout`, whose generic default rule for a builtin
+`VectorType` (`getDefaultTypeSizeInBits`) always rounds a vector's lane
+count up to the next power of two (3 lanes -> 4, 16 bytes) when
+computing size. But the *actual* SPIR-V-execution-model `DataLayout`
+string attached to the module at `SPIRVToLLVMTranslator`'s own
+GEP-folding time computes a `<3 x float>`'s alloc size as a tight 12
+bytes instead, with **no** power-of-two rounding -- confirmed via both
+a hand-built standalone repro (an identical struct/GEP pair folds to
+different byte offsets depending on which of the two `DataLayout`
+strings observed in this codebase -- a short compute-shader one and a
+longer graphics-shader one -- is used) and a real `FEME_DUMP_IR=1`
+capture on `composite.struct.vec3` itself.
+
+The result: the member `e` right after a `vec3` member `d` gets folded
+to `offset(d) + 12` (matching the real fold-time `DataLayout`'s tight
+size), but the struct type our own code built assumed `d` occupies 16
+bytes -- so `e`'s real address, per the struct's own declared LLVM
+type, is actually `offset(d) + 16`, 4 bytes further out. The baked GEP
+silently reads from `d`'s own trailing padding bytes instead of `e`'s
+real value.
+
+Not yet fixed: likely needs `layOutStructIfOffsetsMatch`'s cursor-
+advance step to use a vector member's *store* size (`elementCount *
+elementSize`, unrounded) rather than its *rounded/aligned* size when
+computing where the *next* member starts, while still using the
+rounded/natural alignment for the *placement* decision of the vector
+member itself -- matching what the real SPIR-V-triple `DataLayout`
+does. This needs confirming against both the compute and graphics
+execution models' own `DataLayout` strings (observed to differ) before
+landing a fix, to avoid trading this bug for a symmetric one on the
+other target.
+
+## Reproduction
+
+```console
+export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+FEME_DUMP_IR=1 ./deqp-vk \
+  -n "dEQP-VK.pipeline.pipeline_library.spec_constant.graphics.fragment.composite.struct.vec3" \
+  --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
