@@ -1871,3 +1871,126 @@ needed. `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` is a
 this fix corrects previously-silent mishandling of an already-advertised
 flag, not a newly-advertised capability, so neither inventory document
 gains a new row.
+
+## Roadmap L111(a) (fixed this session): `unusual_multisample_state`'s pipeline-creation crash
+
+`unusual_multisample_state` had been assumed (by the L109/L110 session)
+to be a runtime image-comparison mismatch like the rest of `misc.other.*`.
+Running it directly against `deqp-vk` this session instead showed pipeline
+*creation* itself failing outright:
+
+```
+error: feme-graphics-validate-stage: 'feme.stage.input.load' in function
+'main' has a non-constant vertex operand, illegal outside the
+geometry/mesh stages
+error: feme-graphics-validate-stage: 'feme.stage.output.store' in
+function 'main' has a non-constant vertex operand, illegal outside the
+geometry/mesh stages
+Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+```
+
+### Root cause
+
+The CTS test's `frag0` masks per-sample coverage with a loop:
+`for (i...) gl_SampleMask[i] = sampleMask & gl_SampleMaskIn[i];` -- a
+genuinely dynamic (loop-carried) index into `gl_SampleMask`/
+`gl_SampleMaskIn` (SPIR-V `BuiltIn` `SampleMask`, 20). `CanonicalizeStage.
+cpp`'s `isDynamicIndexedArrayGlobal` (used by
+`getDynamicVertexIndexedAccess`, tried first by `resolveStageIOAccess`)
+classified *any* address-space-7/8 `ArrayType` stage-IO global accessed
+with a non-constant index as a per-vertex/per-primitive array (the
+`gl_in[]`/`gl_MeshVerticesEXT[]` shape) -- with no restriction by stage or
+`BuiltIn` at all, unlike its constant-index counterparts
+(`isPerVertexArrayInputGlobal`/`isPerVertexArrayMeshOutputGlobal`, both
+already correctly stage-restricted). This wrongly claimed
+`gl_SampleMask`/`gl_SampleMaskIn` -- an ordinary per-invocation coverage
+mask, not a per-vertex/per-primitive array at all -- threading the sample
+index through as a bogus `Vertex` operand instead of `Row`. `ValidateStage
+Pass`'s `validateVertex` then correctly (if unhelpfully upstream)
+diagnosed the resulting non-constant `Vertex` operand as illegal outside
+Geometry/Mesh. `getDynamicRowIndexedAccess` (the correct path for this
+shape) already deliberately defers to `getDynamicVertexIndexedAccess` for
+any global it claims, so the wrong classification silently foreclosed the
+correct path rather than surfacing an ambiguity.
+
+An initial attempt to fix this by restricting `isDynamicIndexedArrayGlobal`
+by `ShaderStage` (Geometry-only for address space 7, Mesh-only for 8)
+compiled cleanly but regressed 5 pre-existing `CanonicalizeStageTest`
+cases: several deliberately use a `"feme.shader.stage"="vertex"` attribute
+on their test IR (testing the mechanical GEP-shape recognition in
+isolation, not simulating a fully realistic pipeline) for a genuinely
+Mesh-only-in-production shape, and a stage-based restriction broke them.
+The actual fix taken instead is narrower and more surgical: exclude only
+`BuiltIn == SampleMask` (20) from `isDynamicIndexedArrayGlobal`, leaving
+every other stage-IO global's classification (and every existing test)
+unaffected.
+
+### Fix
+
+`isDynamicIndexedArrayGlobal` (`CanonicalizeStage.cpp`) now returns `false`
+for a global decorated `BuiltIn SampleMask`, mirroring its existing
+`!D.Patch` exclusion. This lets `getDynamicRowIndexedAccess` claim the
+shape instead, threading the dynamic sample index through as `Row`, which
+`validateVertex` never restricts by stage.
+
+### Validation (L111(a))
+
+New unit test: `ThreadsDynamicRowIndexIntoSampleMaskOutputStore`
+(`CanonicalizeStageTest.cpp`) -- a fragment-stage `gl_SampleMask[i]` store
+with a non-constant loop index `i`, confirming it now resolves via `Row`
+(operand 1, the loop variable itself) rather than being wrongly claimed as
+`Vertex`.
+
+`ninja check-feme` (ccache, assertions-enabled build): 3186/3189 passed, 3
+pre-existing Unsupported, 0 Failed (up 1 discovered test from this
+session's addition, no regressions).
+
+CTS re-run (`deqp-vk`, `feme_icd.json` rebuilt first per the standing
+gotcha): the pipeline-creation crash is gone -- `vk.createGraphicsPipelines`
+now succeeds. The test still reports `Fail (192 wrong samples values out
+of 256)`, a **separate**, deeper runtime bug: split out as roadmap
+L111(b) rather than declaring this row done. `pipeline_library.
+graphics_library.*` (836 cases) re-swept at **547 Pass / 1 Fail / 287
+NotSupported / 1 Warning** -- unchanged from L110's own count, since
+`unusual_multisample_state` is still the sole Fail (now for a different
+reason).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- this is a correctness fix within already-advertised multisample
+rendering support (`VkPhysicalDeviceFeatures::sampleRateShading` and
+core multisample state are already listed as supported), not a
+newly-advertised capability.
+
+## Roadmap L111(b) (root-caused, not yet fixed): fragment-shader `gl_SampleMask` output has no runtime consumer
+
+With L111(a)'s pipeline-creation crash fixed, `unusual_multisample_state`
+now fails at runtime instead: `Fail (192 wrong samples values out of
+256)`. Inspecting the compiled IR (`FEME_DUMP_IR=1`) confirms `frag0`'s
+own `gl_SampleMask[i] = sampleMask & gl_SampleMaskIn[i]` masking logic
+compiles correctly (reads `gl_SampleMaskIn` via `feme.stage.input.load`,
+ANDs with the shader's own mask constant, writes the result back via
+`feme.stage.output.store` with `ElementID` resolving to
+`SignatureSystemValue::Coverage`) -- the shader-side compilation is not
+the bug.
+
+Grepping `Executor.cpp` for `SignatureSystemValue::Coverage` (the system
+value a fragment shader's `gl_SampleMask` *output* now correctly resolves
+to, post-L111(a)) finds **zero** consumers: the CPU rasterizer's own
+per-sample coverage/write-masking logic (`Quad.SampleMask`/`Quad.Coverage`,
+and the existing `alphaToCoverageEnable`/`FSAlphaToCoverage` handling
+nearby, ~`Executor.cpp` line 3174-3390) only ever derives per-sample
+coverage from rasterization geometry, depth/stencil tests, and
+`alphaToCoverage` -- never from an explicit shader-written coverage mask
+output. This is a genuine, previously-undiscovered feature gap (the CPU
+executor never reads back a fragment shader's own `SampleMask` output at
+all), not a bug introduced by L111(a)'s fix.
+
+Scoped as roadmap L111(b) for a future session: read the fragment
+shader's own `Coverage`-system-value output once per invocation (parallel
+to how `FSAlphaToCoverage` is already looked up by `SystemValue`), AND it
+together with the coverage mask already computed from rasterization/
+depth-stencil/alpha-to-coverage (never OR, per Vulkan's "sample mask test"
+semantics -- the shader's mask can only narrow coverage, never widen it),
+and mask out the corresponding per-sample color/depth writes accordingly.
+Not yet attempted this session, to keep this investigation's own scope
+bounded; see L111(b)'s own roadmap entry for further detail.
