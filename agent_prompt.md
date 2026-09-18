@@ -55,29 +55,22 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Find the exact pattern responsible for L103's wrong offset.** Add
-   a temporary trace (`llvm::errs()` at pattern entry, or step through
-   in `gdb`) while converting `dEQP-VK.pipeline.pipeline_library.
-   spec_constant.graphics.fragment.composite.struct.ivec2`'s SPIR-V —
-   confirm whether it's actually reaching upstream's generic
-   `AccessChainPattern` (which should be correct, per the `opt` probe)
-   or some other feme-specific fallback that computes offsets by hand.
-   Rough estimate: 30–60 minutes, now that the exact wrong/right offset
-   numbers (12 vs 16) and a standalone repro (`/tmp/l103_layout_test.ll`,
-   recreatable with the snippet in `Roadmap.md`'s L103 entry) are known.
-2. **Fix it** once found — likely either routing this shape through
-   upstream's real type-indexed GEP (dropping whatever hand-computed
-   byte-offset path currently wins), or fixing that path's own
-   alignment arithmetic to match LLVM's `DataLayout`. Rough estimate:
-   an hour, similar shape to L102's own fix once the responsible code
-   is pinned down.
-3. **Explain the `bvec*`-passes-but-`ivec*`-fails asymmetry** as part of
-   the investigation — it's a real clue about which code path is
-   involved (the two element types clearly go through different
-   conversion logic somewhere).
-4. **Re-sweep `composite.struct.*` and the full `spec_constant.*` group**
-   after the fix, same "exact bucket-count shift, zero collateral
-   regressions" validation used for L100/L101/L102.
-5. **Standing gotcha, still true**: export
+1. **Fix L104** (~1-2 hours): change `layOutStructIfOffsetsMatch`'s
+   cursor-advance step to use a vector member's unrounded store size
+   (`elementCount * elementSize`) for computing where the *next*
+   member starts, while keeping the rounded/natural alignment for the
+   vector member's *own* placement. Verify against both the compute
+   and graphics `DataLayout` strings before landing -- they were
+   observed to differ, so a fix tuned to only one could just move the
+   bug to the other execution model.
+2. **Re-sweep `composite.struct.*` and `spec_constant.*`** after the
+   L104 fix lands -- expect 35/0 and 655/0 respectively if the fix is
+   fully scoped correctly.
+3. **Broaden the sweep beyond `spec_constant.*`** once L104 closes --
+   this whole `pipeline_library.spec_constant.*` group has now had 5
+   sessions of fixes (L99-L104) landed against it; a fresh top-level
+   CTS group (or `dEQP-VK.pipeline.*` more broadly) is due. ~1 session
+   to sweep plus however long the first reduction takes.
+4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
    before any `vulkaninfo`/`deqp-vk` in a fresh shell.
