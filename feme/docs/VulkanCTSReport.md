@@ -2599,3 +2599,127 @@ no new hangs, no previously-hanging case resolved.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
 needed -- both fixes are pure bug fixes in existing SPIR-V import/lowering
 paths, not new capabilities.
+
+## Roadmap L116(a)/C8b (fixed this session, then a regression fixed): aggregate-typed `Private` globals now localize
+
+Continuing from the prior session's C8b re-verification (which found
+`SIMDize.cpp`'s `insertvalue`/`extractvalue`/`select` producer support,
+added under L21, already covers the shape C8b's own text originally named,
+but the repro still failed on a different diagnostic), this session traced
+the real remaining gap to `feme::cpu::LocalizePrivateGlobalsPass`
+(roadmap H170): a GLSL-compiler-materialized matrix/struct intermediate is
+frequently routed through a genuine module-scope `Private`-storage
+`OpVariable` via a whole-aggregate `store`/`load` round-trip, and this
+pass's own `isCandidateGlobal` check previously rejected any array/struct
+-typed global outright, leaving it as a bare `GlobalVariable` that
+`SIMDize.cpp` has no widening rule for at all.
+
+### The fix
+
+Broadened `isCandidateGlobal` (`LocalizePrivateGlobals.cpp`) to also accept
+a struct/array-typed global whose every leaf is a scalar or fixed-vector
+type, as long as no leaf is a non-power-of-2-width vector (which would
+reintroduce the tight-vs-ABI-padded-layout corruption
+`feme::cpu::LocalNarrowVectorArrayInitPass`, roadmap H69/L99, already
+exists to prevent for that narrower shape). Verified via `feme-opt`+`sroa`
+that a localized aggregate global fully promotes back to a pure
+`insertvalue`/`extractvalue` chain, the shape `SIMDize.cpp` already
+supports.
+
+New/updated lit coverage in `localize-private-globals.ll`: `@anArray`
+(scalar-leaf array, now localized), `@vec2Array` (`<2 x float>`-leaf,
+power-of-2, now localized), `@vec3Array` (`<3 x float>`-leaf,
+non-power-of-2, still excluded), `@aStruct` (scalar-leaf struct, now
+localized).
+
+Real-repro result: `dEQP-VK.glsl.linkage.varying.struct.mat4x2` (C8b's own
+original case) no longer fails at SIMDize time; `FEME_VULKAN_LOG_CREATION_
+ERRORS=1` confirms the fix genuinely closes the compile-time gap. The case
+still does not `Pass` overall -- it now fails at `vkQueueSubmit` on a
+separate, pre-existing limitation (`Executor.cpp` rejects any matrix
+*vertex attribute* outright, as distinct from a matrix *varying*, which
+already works) -- tracked as new roadmap row L117.
+
+### A `graphicsfuzz.*` re-sweep found one genuine regression
+
+A full re-sweep of the 733 non-hanging `dEQP-VK.graphicsfuzz.*` cases (24
+known hangs/crashes excluded, same list as prior sessions' own watchdog
+sweeps) against this fix, versus the last documented full-sweep baseline:
+
+|               | Baseline | After L116(a)/C8b fix (pre-mitigation) |
+|---------------|----------|-----------------------------------------|
+| Pass          | 529      | 531                                       |
+| Fail          | 196      | 194                                       |
+| NotSupported  | 8        | 8                                          |
+
+Per-case diffing (`#beginTestCaseResult`/`StatusCode` parsing of the raw
+`.qpa` logs) found **3 cases flipped Fail -> Pass**
+(`stable-binarysearch-tree-nested-if-and-conditional`,
+`cov-nested-functions-accumulate-global-matrix`,
+`stable-binarysearch-tree-fragcoord-less-than-zero`) and **1 case flipped
+Pass -> Fail**: `cov-function-loop-condition-constant-array-always-false`
+-- a genuine regression, confirmed real and deterministic via repeated
+reruns and `git stash`-based A/B testing (passes with the fix stashed out,
+fails with it applied).
+
+Root cause: the regressed shader's two file-scope `int[10]` arrays are
+mutated inside a helper function containing a `discard` that is
+*statically* unprovable (driven by a uniform-buffer read) but, for this
+specific test's runtime values, always false. `feme::cpu::LinearizePass`
+conservatively treats every later memory access in that function as
+conditionally executed (a `feme.cpu.masked.load`/`.store` call) once any
+discard/demote is reachable at all -- correct in general. With this
+session's fix, the two arrays are now localized to per-function `alloca`s,
+so `SIMDize.cpp`'s `collectMaskedAllocas`/`widenMaskedAlloca*` family now
+gives each SIMD lane **real, independent storage** instead of one
+previously-shared global address -- also correct in isolation. The actual
+bug is a separate, pre-existing gap this interaction exposed for the first
+time: `SIMDize.cpp`'s generic "leftover stale use, value already
+classified uniform by `UniformityInfo`" recovery path (~SIMDize.cpp:4515-
+4595, roadmap H107) extracts lane 0 of a widened value as a scalar
+stand-in whenever a scalar use survives erasure -- always safe when the
+source was one shared global address, not proven safe once the source is
+4 independently-masked-and-gathered per-lane copies. This gap is real and
+separate from the fix itself; recorded as new roadmap row **L118** for a
+future session, since properly teaching the stale-use recovery path to
+verify per-lane validity (rather than assuming it) is a deeper
+`SIMDize.cpp` architectural change, out of scope here.
+
+### Mitigation applied this session
+
+Added `mayDiscardOrDemote(Function &F)` to `LocalizePrivateGlobals.cpp`: a
+transitive scan (via `feme::getStageOpKind`, matching a callee against
+`StageOpKind::Discard`/`Demote`) for whether a function can ever reach a
+`feme.stage.discard`/`.demote` call. `feme::graphics::CanonicalizeStagePass`
+(which creates these calls) runs before `LocalizePrivateGlobalsPass` in the
+pipeline, so they are already present in the IR when this pass runs. The
+aggregate-broadening path (not the pre-existing scalar/fixed-vector path,
+which has no such gap) now skips a global whose one using function may
+discard/demote, leaving it as a shared global exactly as before this
+session's fix -- a deliberately conservative mitigation that trades away
+some potential future localization wins in discard/demote-adjacent code
+for correctness today.
+
+New lit coverage: `@arrayInDiscardingFunction`, an `i32` array (no ABI-
+padding risk on its own) used only in a function that calls
+`feme.stage.discard`, confirming it is still excluded despite otherwise
+qualifying.
+
+### Final, post-mitigation re-sweep
+
+|               | Baseline | Final (post-mitigation) |
+|---------------|----------|---------------------------|
+| Pass          | 529      | 532                        |
+| Fail          | 196      | 193                        |
+| NotSupported  | 8        | 8                           |
+
+Confirmed via the same per-case diff: the regression is gone (no case
+flipped Pass -> Fail this time), and all 3 of the fix's own wins are
+retained. Net movement: +3 Pass / -3 Fail, 0 regressions.
+
+`ninja -C build2 check-feme`: 3192/3195 Passed, 3 pre-existing Unsupported,
+0 Failed -- clean, both before and after the mitigation.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- pure bug fix (plus a conservative regression mitigation) in an
+existing CPU-target optimization pass, not a new capability or extension.
