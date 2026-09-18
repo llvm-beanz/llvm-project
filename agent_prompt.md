@@ -53,32 +53,32 @@ file.
 
 # Request
 
-The network cut out while you were working on this, can you continue and
-complete the work?
-
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Re-verify C8b's own original repro against today's `SIMDize.cpp`**
-   (~15 min): if `widenInsertValue`/`widenExtractValue`/
-   `widenAggregateSelect` (added under L21) already cover it, strike
-   through C8b -- it may be a free, no-code-change roadmap closure.
-2. **L116(a)'s real fix** (now correctly scoped, not "~30 min then
-   unknown" -- budget a half-day-to-a-day): add per-leaf decomposition
-   for a struct/array/matrix-typed masked load/store in
-   `MaskIntrinsics.cpp`/`Linearize.cpp`, likely the single highest-value
-   fix left in the L116 breakdown (~59% of `Fail` error volume in the
-   original sweep).
-3. **L116(c)'s `Determinant`** (~half a day, same shape as L115(a)):
-   add `SPIRV_GLDeterminantOp` to `SPIRVGLOps.td` (needs a square-matrix
-   operand shape) plus a feme-side lowering -- pure arithmetic, no
-   runtime callback needed unlike L115(b).
-4. **L116(f)'s remaining 22 un-root-caused hangs/crashes**: this
-   session's rebuilt skip-and-continue harness (`/tmp/sweep_gf.sh`, not
-   committed, throwaway) reconfirmed the identical 24 case names as last
-   session (no new hangs, none resolved) -- one-at-a-time reduction is
-   still the only way to make progress here, same technique used on the
-   two already investigated (`arr-value-set-to-arr-value-squared`,
-   `complex-nested-loops-and-call`).
-5. Once L116 closes (or is judged big enough to move on from), go back
-   to L106's other untriaged candidates: `pipeline.monolithic.*`,
-   `subgroups.*`, `compute.*` -- still nobody has picked these up.
+1. **L118** (~half a day to a day, real scoping work first): teach
+   `SIMDize.cpp`'s stale-use recovery (~line 4515-4595) to either prove
+   all lanes' masks/storage agree before broadcasting lane 0, or skip
+   the lane-0 shortcut entirely for a `MaskedAllocas`-sourced value.
+   This is the real fix the discard/demote guard only worked around --
+   fixing it properly would let the guard be removed and recover the
+   localization wins it currently forgoes.
+2. **L116(a)'s real fix** (~half a day to a day, already scoped by a
+   prior session): per-leaf decomposition for a struct/array/matrix
+   masked load/store in `MaskIntrinsics.cpp`/`Linearize.cpp` -- still
+   the single highest-value fix left in the L116 breakdown by error
+   volume (~59% of the original sweep's `Fail`s).
+3. **L116(c)'s `Determinant`** (~half a day): add `SPIRV_GLDeterminantOp`
+   to `SPIRVGLOps.td` (square-matrix operand shape) plus a feme-side
+   lowering -- pure arithmetic, no runtime callback, same shape as
+   L115(a).
+4. **L117** (not yet scoped in detail): matrix vertex attributes in
+   `Executor.cpp` -- needs one `VkVertexInputAttributeDescription` per
+   matrix column at consecutive locations, mirroring how a matrix input
+   parameter is already split upstream. Worth a scoping pass before
+   estimating.
+5. **L116(f)'s remaining 22 un-root-caused hangs/crashes** -- still only
+   one-at-a-time reduction; no new technique found this session.
+6. Once L116/L117/L118 close or are judged big enough to set aside, go
+   back to L106's other untriaged candidates: `pipeline.monolithic.*`,
+   `subgroups.*`, `compute.*` -- still nobody has picked these up across
+   several sessions now.
