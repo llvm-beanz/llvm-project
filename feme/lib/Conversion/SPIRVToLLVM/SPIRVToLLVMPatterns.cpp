@@ -3122,6 +3122,44 @@ public:
   }
 };
 
+/// Converts `spirv.VectorExtractDynamic` (extract a single, dynamically
+/// selected, component of an ordinary, real (not value-modeled-builtin,
+/// see `BuiltInAccessChainPattern` above) vector value) directly to
+/// `llvm.extractelement` -- roadmap L101, a plain gap (no conversion
+/// pattern for this op existed at all, upstream or in this file) surfaced
+/// by a real `dEQP-VK.pipeline.pipeline_library.spec_constant.*.
+/// composite.vector.*` case indexing a spec-constant-mixed local vector
+/// with a runtime (non-constant) index, e.g. GLSL `v[i]` where `i` is a
+/// loop variable, not a literal -- which glslang always emits as this op
+/// rather than an `AccessChain`+`Load` pair (that shape is reserved for a
+/// pointer-typed base, not a bare vector SSA value). Both operands convert
+/// 1:1: `spirv.VectorExtractDynamic`'s `vector`/`index` operand order and
+/// arity exactly match `llvm.extractelement`'s own `vector`/`position`,
+/// and its result type is always the vector's own (already-converted)
+/// element type, so no further shape adjustment is needed here (unlike
+/// `BuiltInAccessChainPattern`, which additionally has to distinguish a
+/// value-modeled builtin's synthetic "access chain" from a real memory
+/// one).
+class VectorExtractDynamicPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::VectorExtractDynamicOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::VectorExtractDynamicOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::VectorExtractDynamicOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractElementOp>(
+        Op, ResultType, Adaptor.getVector(), Adaptor.getIndex());
+    return mlir::success();
+  }
+};
+
 /// Replaces `spirv.mlir.addressof` of a resource variable with the
 /// `llvm.spv.resource.handlefrombinding` call producing its handle. As for
 /// builtin variables, there is no LLVM global to address: LLVM's SPIRV
@@ -11391,7 +11429,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SpecConstantErasurePattern, SpecConstantCompositeErasurePattern,
       StageIOGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
-      TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
+      TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern,
+      VectorExtractDynamicPattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceArrayAccessChainPattern,
                ResourceAddressOfPattern, ResourceGlobalVariablePattern>(

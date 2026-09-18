@@ -156,6 +156,24 @@ TEST(SPIRVToLLVMTest, NonBuiltinInputOutputConvertsInsteadOfFailing) {
       << Result;
 }
 
+// (Roadmap L101) `spirv.VectorExtractDynamic` (indexing a vector value
+// with a runtime, non-constant index -- e.g. GLSL `v[i]` where `i` is a
+// loop variable, the shape `dEQP-VK.pipeline.pipeline_library.
+// spec_constant.*.composite.vector.*` compiles down to) converts directly
+// to `llvm.extractelement` instead of failing to legalize (no conversion
+// pattern for this op existed at all before this fix, upstream or in this
+// file).
+TEST(SPIRVToLLVMTest, VectorExtractDynamicConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry() -> () \"None\" { %0 = spirv.Constant "
+      "dense<[1, 2, 3]> : vector<3xi32> %1 = spirv.Constant 1 : i32 %2 = "
+      "spirv.VectorExtractDynamic %0[%1] : vector<3xi32>, i32 spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(Result.find("llvm.extractelement"), std::string::npos) << Result;
+}
+
 // (Roadmap H111) A function-local `spirv.Variable` initialized with an
 // array (as opposed to a scalar or vector) constant -- e.g. GLSL's `const
 // vec4 positions[4] = vec4[](...)`, the shape
