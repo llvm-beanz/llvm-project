@@ -89940,3 +89940,110 @@ a standalone repro. Rough estimate: 30–60 minutes to reduce + hypothesis.
    does correctly fail loudly if you forget (shows `llvmpipe`, not
    `FeMe CPU Vulkan Device`) — just don't skip re-running it after
    exporting the variable.
+
+# L102 fix (bool-vector-lane GEP) + L103 scoping (struct vector-member offset bug)
+
+## Start here
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` at session start (with `VK_ICD_FILENAMES` exported — still not
+persisted anywhere, export it fresh every shell).
+
+## What got done
+
+1. **Finished L101's leftover docs** (in progress from last session):
+   appended "L101: measured impact" to `VulkanCTSReport.md`, struck
+   through L101 in `Roadmap.md`, corrected L99's own closing note (it
+   had wrongly claimed 3 buckets fully explained the post-L99 failures
+   — actually 4, missing `composite.struct.*`/L103).
+2. **Fixed L102** ("GEP into vector with non-byte-addressable element
+   type", ~30 cases). Root cause: SPIR-V's `AccessChain` selecting a
+   lane of a `bool` (`i1`) vector can't lower to a single GEP — LLVM's
+   verifier rejects GEP arithmetic into a non-byte-sized element. Fix:
+   fuse AccessChain into its consuming Load/Store (3 new patterns:
+   `BoolVectorLaneAccessChainPattern`, `BoolVectorLaneLoadPattern`,
+   `BoolVectorLaneStorePattern`), same shape as the existing
+   `MatrixColumnLoadPattern`/`MatrixColumnStorePattern` precedent.
+3. **Hit and fixed 4 bugs along the way** (worth remembering for next
+   time):
+   - A `sed` meant to be narrow matched globally, corrupting 9
+     unrelated function signatures — always `git diff` after a scripted
+     edit to this file before building.
+   - `IntegerAttr::getInt()` asserts on non-signless types — use
+     `.getValue().getSExtValue()` instead for a SPIR-V constant index.
+   - Explicitly `eraseOp()`-ing an op other than the one your pattern
+     matched crashes the dialect-conversion driver
+     (`root operation that has no parent block`) — never do this; let
+     the other op convert on its own (add a dedicated, even if unused,
+     pattern for it instead).
+   - `Adaptor.getPtr()` inside a Load/Store pattern is the **AccessChain's
+     converted result**, not its base pointer — use
+     `Rewriter.getRemappedValue(AccessChain.getBasePtr())` to get the
+     real base. Mixing these up caused a double-GEP (wrong address,
+     "Values did not match" instead of a crash).
+4. **Validated and closed L102**: new unit test
+   `BoolVectorLaneLoadStoreConvertsInsteadOfFailing`. `check-feme`:
+   3171/3174 Passed, 0 Failed. Real CTS: `composite.array.*` 255/385
+   Pass (up from 225/385, 0 Fail); full `spec_constant.*` 555/1170 Pass
+   (up from 525/1170, exact +30/-30 shift, zero collateral
+   regressions). Docs: struck through L102 in `Roadmap.md`, added
+   "L102: measured impact" to `VulkanCTSReport.md`.
+5. **Scoped L103** (`composite.struct.*`, the bucket newly discovered
+   during L101's closing sweep). Corrected an earlier wrong claim in
+   the roadmap (a plain scalar-member struct does **not** fail —
+   `struct.bool`/`int`/`float` all pass). Narrowed the real failure to
+   **vector-typed members** (`ivec2`/`ivec3`/`ivec4` fail;
+   `bvec2`/`bvec3`/`bvec4` pass — not yet explained why bool vectors
+   are fine here but int vectors aren't). `FEME_DUMP_IR=1` plus a
+   standalone `opt`-based LLVM DataLayout probe pinned the root cause:
+   a non-`Offset`-decorated struct's vector member gets read through a
+   manually pre-computed byte-offset GEP that assumes every member
+   rounds up to 4 bytes with no extra alignment gap — LLVM's own real
+   layout for `{ i32, float, i1, <2 x i32>, i32 }` places the vector
+   member at byte 16, feme computed 12, an off-by-4 read from the
+   wrong address (confirmed by manually building the same struct type
+   in a `.ll` file and asking `opt` for the real GEP offset). **Not
+   fixed this session** — the code path responsible (which pattern
+   actually converts this non-offset struct's AccessChain, since
+   upstream's own generic `AccessChainPattern` should compute this
+   correctly via LLVM's own type-indexed GEP) is not yet located.
+
+## Commits this session
+
+1. `0d5a119bc12e` — docs: close L101 (from prior session's leftover
+   work; see prior checkpoint for the code commit `b87d8b9cc2cd`).
+2. (this session) `[feme] L102: fix GEP into non-byte-addressable
+   (bool) vector lanes` — code + unit test.
+3. (this session) `[feme] L102: close roadmap entry, add
+   measured-impact doc`.
+4. (this session) `[feme] L103: correct and expand investigation
+   notes` — docs only, no code fix yet.
+
+## Next steps
+
+1. **Find the exact pattern responsible for L103's wrong offset.** Add
+   a temporary trace (`llvm::errs()` at pattern entry, or step through
+   in `gdb`) while converting `dEQP-VK.pipeline.pipeline_library.
+   spec_constant.graphics.fragment.composite.struct.ivec2`'s SPIR-V —
+   confirm whether it's actually reaching upstream's generic
+   `AccessChainPattern` (which should be correct, per the `opt` probe)
+   or some other feme-specific fallback that computes offsets by hand.
+   Rough estimate: 30–60 minutes, now that the exact wrong/right offset
+   numbers (12 vs 16) and a standalone repro (`/tmp/l103_layout_test.ll`,
+   recreatable with the snippet in `Roadmap.md`'s L103 entry) are known.
+2. **Fix it** once found — likely either routing this shape through
+   upstream's real type-indexed GEP (dropping whatever hand-computed
+   byte-offset path currently wins), or fixing that path's own
+   alignment arithmetic to match LLVM's `DataLayout`. Rough estimate:
+   an hour, similar shape to L102's own fix once the responsible code
+   is pinned down.
+3. **Explain the `bvec*`-passes-but-`ivec*`-fails asymmetry** as part of
+   the investigation — it's a real clue about which code path is
+   involved (the two element types clearly go through different
+   conversion logic somewhere).
+4. **Re-sweep `composite.struct.*` and the full `spec_constant.*` group**
+   after the fix, same "exact bucket-count shift, zero collateral
+   regressions" validation used for L100/L101/L102.
+5. **Standing gotcha, still true**: export
+   `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell.
