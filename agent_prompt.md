@@ -55,22 +55,22 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Pick a fresh CTS group to sweep** (roadmap L106's own remaining
-   candidate): either a different `dEQP-VK.pipeline.*` subgroup (e.g.
-   `pipeline_library.miscellaneous.*`, `pipeline.monolithic.*`,
-   `pipeline.multisample.*`) or a top-level group outside `pipeline.*`
-   entirely (e.g. `dEQP-VK.subgroups.*`, `dEQP-VK.compute.*`,
-   `dEQP-VK.graphicsfuzz.*`). None of these have been triaged this
-   milestone series. ~30-60 minutes to pick the cheapest-looking one and
-   get a first Pass/Fail/NotSupported count.
-2. **Standing gotcha, still true**: export
+1. **Reduce and root-cause the remaining 7 `misc.other.*` failures**
+   (`unusual_multisample_state`, six `view_index_from_device_index_in_*`
+   variants) — confirmed distinct from L108 (no subpass input involved).
+   ~30-60 minutes to get a standalone repro + first error text via
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`, same technique as this session.
+2. **Then re-close `graphics_library.*`** once #1 lands — expect
+   548/0/287/1 if fully scoped.
+3. **Broaden the sweep again (roadmap L106)** after #1/#2 close — same
+   untriaged candidates as before: a fresh `pipeline.*` subgroup
+   (`pipeline.monolithic.*`, `pipeline.multisample.*`) or a top-level
+   group outside `pipeline.*` (`subgroups.*`, `compute.*`,
+   `graphicsfuzz.*`).
+4. **Standing gotcha, still true**: export
    `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build2/tools/feme/tools/feme-vulkan/feme_icd.json`
-   before any `vulkaninfo`/`deqp-vk` in a fresh shell -- it is not
-   persisted, so a fresh shell defaults to `lvp_icd.json` (llvmpipe).
-3. **Technique confirmed useful again**: for a *known-clean* subgroup
-   (no expected crashes), a single batched `deqp-vk -n "pattern.*"`
-   invocation is much faster than the one-case-at-a-time bash loop --
-   only fall back to the loop once a crash is actually observed
-   mid-batch (used both ways successfully this session: batched for
-   `vector_length`/`shader_layout_component_matching`, one-at-a-time
-   loop for the previously-crashing `decoration_mismatch.*`).
+   before any `vulkaninfo`/`deqp-vk` in a fresh shell — not persisted.
+5. **Technique to keep using**: `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`
+   for any future SPIR-V resource-lowering rejection — found this
+   session, strictly more precise than the `checkSupportedRaisedOps`-level
+   diagnostic, and needs no temporary code changes at all.
