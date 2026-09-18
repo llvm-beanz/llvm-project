@@ -1466,3 +1466,66 @@ func.func @nclampvec(%arg0 : vector<3xf32>, %min : vector<3xf32>, %max : vector<
   %2 = spirv.GL.NClamp %arg0, %min, %max : vector<3xf32>
   return
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.InterpolateAtCentroid/InterpolateAtSample/InterpolateAtOffset
+//===----------------------------------------------------------------------===//
+
+// (Roadmap L115) Unlike every other GLSL.std.450 op above, `Interpolant`
+// must be a pointer to an Input-storage-class variable (a fragment-shader
+// input), not a plain value operand -- so these need a `spirv.module` +
+// `spirv.GlobalVariable` to construct a legal operand, unlike the bare
+// `func.func` bodies used above.
+spirv.module Logical GLSL450 {
+  spirv.GlobalVariable @interpolant_f32 : !spirv.ptr<f32, Input>
+  spirv.GlobalVariable @interpolant_vec2 : !spirv.ptr<vector<2xf32>, Input>
+
+  spirv.func @interpolate_at_centroid() -> () "None" {
+    %0 = spirv.mlir.addressof @interpolant_f32 : !spirv.ptr<f32, Input>
+    // CHECK: spirv.GL.InterpolateAtCentroid {{%.*}} : !spirv.ptr<f32, Input> -> f32
+    %1 = spirv.GL.InterpolateAtCentroid %0 : !spirv.ptr<f32, Input> -> f32
+    spirv.Return
+  }
+
+  spirv.func @interpolate_at_sample(%sample : i32) -> () "None" {
+    %0 = spirv.mlir.addressof @interpolant_vec2 : !spirv.ptr<vector<2xf32>, Input>
+    // CHECK: spirv.GL.InterpolateAtSample {{%.*}}, {{%.*}} : !spirv.ptr<vector<2xf32>, Input>, i32 -> vector<2xf32>
+    %1 = spirv.GL.InterpolateAtSample %0, %sample : !spirv.ptr<vector<2xf32>, Input>, i32 -> vector<2xf32>
+    spirv.Return
+  }
+
+  spirv.func @interpolate_at_offset(%offset : vector<2xf32>) -> () "None" {
+    %0 = spirv.mlir.addressof @interpolant_f32 : !spirv.ptr<f32, Input>
+    // CHECK: spirv.GL.InterpolateAtOffset {{%.*}}, {{%.*}} : !spirv.ptr<f32, Input>, vector<2xf32> -> f32
+    %1 = spirv.GL.InterpolateAtOffset %0, %offset : !spirv.ptr<f32, Input>, vector<2xf32> -> f32
+    spirv.Return
+  }
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+  spirv.GlobalVariable @interpolant_f32 : !spirv.ptr<f32, StorageBuffer>
+
+  spirv.func @interpolate_at_centroid_wrong_storage_class() -> () "None" {
+    %0 = spirv.mlir.addressof @interpolant_f32 : !spirv.ptr<f32, StorageBuffer>
+    // expected-error @+1 {{interpolant must be a pointer to an Input storage class variable, but provided StorageBuffer}}
+    %1 = spirv.GL.InterpolateAtCentroid %0 : !spirv.ptr<f32, StorageBuffer> -> f32
+    spirv.Return
+  }
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+  spirv.GlobalVariable @interpolant_f32 : !spirv.ptr<f32, Input>
+
+  spirv.func @interpolate_at_centroid_mismatched_result() -> () "None" {
+    %0 = spirv.mlir.addressof @interpolant_f32 : !spirv.ptr<f32, Input>
+    // expected-error @+1 {{result type must match the interpolant's pointee type, got 'vector<2xf32>' and 'f32'}}
+    %1 = spirv.GL.InterpolateAtCentroid %0 : !spirv.ptr<f32, Input> -> vector<2xf32>
+    spirv.Return
+  }
+}

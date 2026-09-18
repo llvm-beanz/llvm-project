@@ -1707,6 +1707,148 @@ def SPIRV_GLFindUMsbOp : SPIRV_GLUnaryArithmeticOp<"FindUMsb", 75, SPIRV_Int32, 
 
 // ----
 
+def SPIRV_GLInterpolateAtCentroidOp :
+    SPIRV_GLOp<"InterpolateAtCentroid", 76, [NoMemoryEffect]> {
+  let summary = "Interpolate a fragment-shader input at the pixel's centroid";
+
+  let description = [{
+    Result is obtained by interpolating the value of Interpolant sampled
+    at a location extrapolated from the center of the pixel to the
+    centroid of the area covered by the primitive within the pixel. If
+    that fragment invocation does not compute any samples covered by the
+    primitive, it uses the pixel's center.
+
+    Interpolant must be an object of pointer type, which must be a
+    variable of Input storage class or a struct member thereof. It must
+    not have a Sample decoration. It must not be a per-primitive input.
+
+    Result Type and the type of Interpolant's pointee must both be a
+    scalar or vector floating-point type.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.Variable : !spirv.ptr<f32, Input>
+    %1 = spirv.GL.InterpolateAtCentroid %0 : !spirv.ptr<f32, Input> -> f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$interpolant
+  );
+
+  let results = (outs
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $interpolant `:` type($interpolant) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// ----
+
+def SPIRV_GLInterpolateAtSampleOp :
+    SPIRV_GLOp<"InterpolateAtSample", 77, [NoMemoryEffect]> {
+  let summary = "Interpolate a fragment-shader input at a given sample's location";
+
+  let description = [{
+    Result is obtained by interpolating the value of Interpolant at the
+    location of sample number Sample. If multisample rasterization is not
+    active, or the fragment is not covered by that sample, or that sample
+    does not exist, then the resulting value is undefined. If Sample does
+    not identify a sample at the pixel centroid, then the value is
+    considered to accurately reflect the value at the sample location
+    rather than a coarser approximation.
+
+    Interpolant must be an object of pointer type, which must be a
+    variable of Input storage class or a struct member thereof. It must
+    not have a Sample decoration. It must not be a per-primitive input.
+
+    Sample must be a scalar integer type. It is interpreted as a sample
+    number.
+
+    Result Type and the type of Interpolant's pointee must both be a
+    scalar or vector floating-point type.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.Variable : !spirv.ptr<f32, Input>
+    %1 = spirv.GL.InterpolateAtSample %0, %sample : !spirv.ptr<f32, Input>, i32 -> f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$interpolant,
+    SPIRV_Integer:$sample
+  );
+
+  let results = (outs
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $interpolant `,` $sample `:` type($interpolant) `,`
+    type($sample) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// ----
+
+def SPIRV_GLInterpolateAtOffsetOp :
+    SPIRV_GLOp<"InterpolateAtOffset", 78, [NoMemoryEffect]> {
+  let summary = "Interpolate a fragment-shader input at an offset from the pixel center";
+
+  let description = [{
+    Result is obtained by interpolating the value of Interpolant sampled
+    at an offset from the center of the pixel specified by Offset.
+
+    The two floating-point components of Offset give the offset in the x
+    and y direction, respectively, in units of the fragment's size, from
+    the center of the pixel. Both offsets must be in the range [-0.5,
+    0.5]. Any values outside this range are implementation-dependent.
+
+    Interpolant must be an object of pointer type, which must be a
+    variable of Input storage class or a struct member thereof. It must
+    not have a Sample decoration. It must not be a per-primitive input.
+
+    Offset must be a vector of two 32-bit floating-point components.
+
+    Result Type and the type of Interpolant's pointee must both be a
+    scalar or vector floating-point type.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.Variable : !spirv.ptr<f32, Input>
+    %1 = spirv.GL.InterpolateAtOffset %0, %offset : !spirv.ptr<f32, Input>, vector<2xf32> -> f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$interpolant,
+    VectorOfLengthAndType<[2], [F32]>:$offset
+  );
+
+  let results = (outs
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $interpolant `,` $offset `:` type($interpolant) `,`
+    type($offset) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// ----
+
 def SPIRV_GLFractOp : SPIRV_GLUnaryArithmeticOp<"Fract", 10, SPIRV_Float, [AlwaysSpeculatable]> {
   let summary = "Returns the `x - floor(x)` of the operand";
 

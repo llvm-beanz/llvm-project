@@ -2404,6 +2404,52 @@ LogicalResult spirv::GLLdexpOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.InterpolateAtCentroid/InterpolateAtSample/InterpolateAtOffset
+//===----------------------------------------------------------------------===//
+
+// The three `InterpolateAt*` GLSL.std.450 extended instructions share the
+// same shape of "Interpolant" operand and "Result Type" constraints: the
+// operand must be a pointer to an Input-storage-class variable (or a struct
+// member thereof) whose pointee type matches the op's own result type
+// exactly, per the SPIR-V spec's own wording for each of the three
+// instructions.
+static LogicalResult verifyInterpolateAtOp(Operation *op, Value interpolant,
+                                           Type resultType) {
+  auto ptrType = dyn_cast<spirv::PointerType>(interpolant.getType());
+  if (!ptrType)
+    return op->emitOpError("interpolant must be a pointer, but provided ")
+          << interpolant.getType();
+
+  if (ptrType.getStorageClass() != spirv::StorageClass::Input)
+    return op->emitOpError(
+              "interpolant must be a pointer to an Input storage class "
+              "variable, but provided ")
+          << stringifyStorageClass(ptrType.getStorageClass());
+
+  if (ptrType.getPointeeType() != resultType)
+    return op->emitOpError(
+              "result type must match the interpolant's pointee type, got ")
+          << resultType << " and " << ptrType.getPointeeType();
+
+  return success();
+}
+
+LogicalResult spirv::GLInterpolateAtCentroidOp::verify() {
+  return verifyInterpolateAtOp(getOperation(), getInterpolant(),
+                               getResult().getType());
+}
+
+LogicalResult spirv::GLInterpolateAtSampleOp::verify() {
+  return verifyInterpolateAtOp(getOperation(), getInterpolant(),
+                               getResult().getType());
+}
+
+LogicalResult spirv::GLInterpolateAtOffsetOp::verify() {
+  return verifyInterpolateAtOp(getOperation(), getInterpolant(),
+                               getResult().getType());
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.CL.ldexp
 //===----------------------------------------------------------------------===//
 

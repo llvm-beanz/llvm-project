@@ -215,4 +215,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, 
     %0 = spirv.GL.SmoothStep %arg0, %arg1, %arg2 : f32
     spirv.Return
   }
+
+  // (Roadmap L115) `Interpolant` must be a pointer to an Input-storage-class
+  // variable (a fragment-shader input), not a plain value operand -- unlike
+  // every other GLSL.std.450 op above.
+  spirv.GlobalVariable @interpolant_f32 : !spirv.ptr<f32, Input>
+
+  spirv.func @interpolate_at(%arg0 : i32, %arg1 : vector<2xf32>) "None" {
+    %0 = spirv.mlir.addressof @interpolant_f32 : !spirv.ptr<f32, Input>
+    // CHECK: {{%.*}} = spirv.GL.InterpolateAtCentroid {{%.*}} : !spirv.ptr<f32, Input> -> f32
+    %1 = spirv.GL.InterpolateAtCentroid %0 : !spirv.ptr<f32, Input> -> f32
+    // CHECK: {{%.*}} = spirv.GL.InterpolateAtSample {{%.*}}, {{%.*}} : !spirv.ptr<f32, Input>, i32 -> f32
+    %2 = spirv.GL.InterpolateAtSample %0, %arg0 : !spirv.ptr<f32, Input>, i32 -> f32
+    // CHECK: {{%.*}} = spirv.GL.InterpolateAtOffset {{%.*}}, {{%.*}} : !spirv.ptr<f32, Input>, vector<2xf32> -> f32
+    %3 = spirv.GL.InterpolateAtOffset %0, %arg1 : !spirv.ptr<f32, Input>, vector<2xf32> -> f32
+    spirv.Return
+  }
 }
