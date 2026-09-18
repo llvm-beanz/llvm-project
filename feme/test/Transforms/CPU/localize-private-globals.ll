@@ -38,13 +38,15 @@
 ; A scalar-leaf struct is also localized.
 ; CHECK-NOT: @aStruct
 ; An `int`-array global used by a function that may `discard`/`demote`
-; is deliberately left alone too, even though `i32` alone has no
-; padding-gap risk: `feme::cpu::SIMDizePass`'s own leftover-uniform-use
-; recovery for a `MaskedAllocas`-widened per-lane load is not yet proven
-; safe once a governing mask can leave some lane's own copy unwritten
-; (see `mayDiscardOrDemote`'s own comment in `LocalizePrivateGlobals.cpp`
-; for the real CTS regression that shape caused).
-; CHECK: @arrayInDiscardingFunction = private global [4 x i32] zeroinitializer
+; is now also localized (roadmap L122): this pass previously excluded
+; any aggregate global whose one using function could ever discard or
+; demote, working around a `feme::cpu::SIMDizePass` bug (roadmap L118)
+; that has since been fixed at its own root (`widenMaskedStore` now uses
+; `Env.EntryMask`, not `Env.SideEffectMask`, for a `MaskedAllocas`-based
+; destination); a full `graphicsfuzz.*` CTS re-sweep with this guard
+; removed confirmed 0 regressions relative to the guard-enabled
+; baseline, so the guard itself was removed as no longer necessary.
+; CHECK-NOT: @arrayInDiscardingFunction
 
 ; CHECK-LABEL: define void @usesScalarNoInit(
 ; CHECK: %scalarNoInit = alloca float
@@ -126,7 +128,9 @@ define void @usesStruct(ptr %out) {
 }
 
 ; CHECK-LABEL: define void @usesArrayInDiscardingFunction(
-; CHECK: %v = load i32, ptr @arrayInDiscardingFunction
+; CHECK: %arrayInDiscardingFunction = alloca [4 x i32]
+; CHECK-NEXT: store [4 x i32] zeroinitializer, ptr %arrayInDiscardingFunction
+; CHECK: %v = load i32, ptr %arrayInDiscardingFunction
 @arrayInDiscardingFunction = private global [4 x i32] zeroinitializer
 define void @usesArrayInDiscardingFunction(i1 %cond, ptr %out) {
   call void @feme.stage.discard(i1 %cond)
