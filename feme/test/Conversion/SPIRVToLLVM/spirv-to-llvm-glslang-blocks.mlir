@@ -75,6 +75,43 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// (Roadmap L124(l)) A `Block`-decorated storage buffer struct whose
+// trailing runtime array's own element is itself a struct whose natural
+// (packed) size undershoots the array's declared `ArrayStride` -- the
+// shape `dEQP-VK.ssbo.unsized_nested_struct_array.*` hits, e.g.
+// `struct T { float a; }; buffer Block { int header; T t[]; };`, where
+// `T`'s own real size (4 bytes) is smaller than the 16-byte stride every
+// std140/std430 array rounds its element up to regardless of the
+// element's own size. There is no wrapper here (`header` is a second
+// member alongside `t`), so this array never reaches
+// `convertBufferBlockType`'s own explicit third-integer-parameter stride
+// mechanism (see `header_field`/`array_element` above) -- the only place
+// this stride can be recorded is `T`'s own converted LLVM type, which
+// must therefore carry the padding itself (mirroring how a *fixed*-size
+// array's identified-struct element already does, see
+// `convertArrayTypeIgnoringDecorations`), or every array index past the
+// first computes the wrong byte offset via `getelementptr`.
+
+// CHECK-LABEL: llvm.func @nested_struct_array_element
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (i32, array<12 x i8>, array<0 x struct<packed (f32, array<12 x i8>)>>)>, 12, 1>
+// CHECK: %[[MEMBER:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
+// CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[MEMBER]][0, %{{.*}}, 0]
+// CHECK: llvm.load %[[ELEM]] : !llvm.ptr<11> -> f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @nb bind(0, 6) : !spirv.ptr<!spirv.struct<(i32 [0], !spirv.rtarray<!spirv.struct<(f32 [0])>, stride=16> [16]), Block>, StorageBuffer>
+  spirv.func @nested_struct_array_element(%idx : i32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @nb : !spirv.ptr<!spirv.struct<(i32 [0], !spirv.rtarray<!spirv.struct<(f32 [0])>, stride=16> [16]), Block>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %ac = spirv.AccessChain %0[%c1, %idx, %c0] : !spirv.ptr<!spirv.struct<(i32 [0], !spirv.rtarray<!spirv.struct<(f32 [0])>, stride=16> [16]), Block>, StorageBuffer>, i32, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %v = spirv.Load "StorageBuffer" %ac : f32
+    spirv.ReturnValue %v : f32
+  }
+}
+
+// -----
+
 // A `Block`-decorated *uniform* struct with more than one member declared
 // directly -- the shape a plain GLSL `uniform UBO { vec4 a; float b; };`
 // compiles to, with no wrapper struct either.
