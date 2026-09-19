@@ -12453,6 +12453,27 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // returning null (and thus leaving `ElementType` untouched) for any
   // vector, scalar, or already-correctly-sized element, exactly as needed
   // to keep relying on the explicit `Stride` int parameter there instead.
+  //
+  // (Roadmap L124(n)) A *scalar or vector*-typed `T` element in that same
+  // `StorageStruct` shape needs the identical byte-array-stand-in
+  // substitution `convertArrayTypeIgnoringDecorations` already applies for
+  // a *fixed*-size array's own scalar/vector element (e.g.
+  // `dEQP-VK.ssbo.layout.random.*`'s own trailing `ivec2 d[]` member,
+  // whose 8-byte natural size undershoots a 16-byte declared stride) --
+  // `padStructToSize` is a deliberate no-op for a non-struct `ElementType`,
+  // so without this, every element past the first lands short by exactly
+  // the same kind of miscomputed-offset bug the struct case above already
+  // fixes. This substitution is unreachable for the wrapper shape's own
+  // per-element access above: that shape's `rewriteBlockAccess` recovers
+  // `SelectedType` as this array's *element* type directly from the SPIR-V
+  // type itself (`RuntimeArrayType::getElementType()`), never by
+  // re-converting the `RuntimeArrayType` as a whole through this
+  // conversion, and `convertBufferBlockType`'s own `ContentType` (the only
+  // place this conversion's result reaches the wrapper's handle type
+  // parameter) is purely descriptive there -- `classifyVulkanBufferHandle`
+  // always prefers the handle's explicit third integer parameter over
+  // anything derived from that type whenever `Stride` is nonzero, which is
+  // exactly when this substitution ever applies.
   TypeConverter.addConversion(
       [&TypeConverter](
           mlir::spirv::RuntimeArrayType Type) -> std::optional<mlir::Type> {
@@ -12462,8 +12483,14 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
           return std::nullopt;
         if (unsigned Stride = Type.getArrayStride()) {
           mlir::DataLayout DL;
-          if (mlir::Type Padded = padStructToSize(ElementType, Stride, DL))
+          if (mlir::Type Padded = padStructToSize(ElementType, Stride, DL)) {
             ElementType = Padded;
+          } else {
+            uint64_t NaturalSize = DL.getTypeSize(ElementType);
+            if (NaturalSize < Stride)
+              ElementType = mlir::LLVM::LLVMArrayType::get(
+                  mlir::IntegerType::get(Type.getContext(), 8), Stride);
+          }
         }
         return mlir::LLVM::LLVMArrayType::get(ElementType, 0);
       });
