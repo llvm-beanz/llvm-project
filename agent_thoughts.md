@@ -92229,3 +92229,110 @@ binary.
 - `ssbo.*` baseline for next session: **2,865 Pass / 377 Fail / 8,983 NotSupported** (of 12,225) -- up from 2,847/395/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this session.
 - This session's own `/tmp` scratch files cleaned up (large pile of prior-session leftovers in `/tmp` untouched -- not from this session).
+
+# Session: L124(f) closed (+162 ssbo.* Pass) -- RowMajor column-select through a wrapper array
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`.
+
+**Picked up prior session's top next step**: L124(f), `spirv.AccessChain` into
+a `RowMajor`-decorated matrix through an array wrapper failing legalization
+outright.
+
+## What happened
+
+1. Reproduced via `deqp-vk`:
+   `dEQP-VK.ssbo.layout.single_basic_array.std140.row_major_mat2_store_cols`
+   fails with `spirv.AccessChain` explicitly marked illegal -- a
+   column-select access (3 indices: dummy selector, array index, column
+   index) through `!spirv.rtarray<!spirv.matrix<...>> [0, RowMajor,
+   MatrixStride=...]`.
+2. Root-caused via code reading, no guessing: `rewriteBlockAccess`'s own
+   `isa<MatrixType>(SelectedType)` RowMajor column-select branch only
+   deferred to `MatrixColumnLoadPattern`/`StorePattern` (bare `ElementPtr`
+   replace) when `!Element.HasWrapper` -- for the wrapper-array shape it
+   fell through to a decline instead. Those patterns' own
+   `getMatrixColumnAccess` helper only recognized `Element.Content` as
+   directly a struct, or an array of struct -- never an array (any nesting
+   depth) directly wrapping a matrix with no struct at all.
+3. Key design point: both sides had to move together. Deferring without the
+   receiving pattern actually being able to resolve the shape would silently
+   corrupt (worse than declining), so I couldn't just remove the guard --
+   `getMatrixColumnAccess` needed the new shape recognized first.
+4. Added `getWrapperArrayMatrixColumnAccess`: peels `Element.Content`
+   through however many array levels precede the matrix (same peel shape as
+   L124(j)'s), reads `RowMajor`/`MatrixStride` off the wrapper struct's own
+   sole member (index 0 -- there's no member index in the access chain
+   itself for this shape). Wired ahead of the pre-existing logic in
+   `getMatrixColumnAccess`. Verified by reasoning through both pre-existing
+   shapes that the new peel loop naturally can't reach a bare matrix for
+   either (so falls through unchanged).
+5. Removed the `!Element.HasWrapper` guard in `rewriteBlockAccess`; updated
+   comments.
+6. Rebuilt **both** `feme_vulkan` and `feme-opt` explicitly (learned from
+   last session's stale-binary gotcha) and manually verified 4 target CTS
+   repros (`single_basic_array`/`2_level_array`/`3_level_array`/
+   `3_level_unsized_array`'s `row_major_mat2_store_cols`) all now Pass.
+7. `ninja check-feme` found 1 expected "regression":
+   `spirv-to-llvm-matrix-block-invalid.mlir`'s second `RUN` split explicitly
+   expected the legalization failure this fix now resolves. Not a real
+   regression -- the test was documenting old declined behavior.
+8. Created `spirv-to-llvm-matrix-rowmajor-wrapper-array-column.mlir`
+   (2 cases: single-level wrapper moved from the invalid file, plus new
+   2-level nested-array coverage matching `2_level_array`'s CTS shape).
+   **Hit a self-inflicted parse error mid-edit** -- one of my `edit` calls
+   correcting `CHECK` lines accidentally deleted the `spirv.module`/
+   `spirv.func` opening lines along with the old `CHECK` block it was meant
+   to replace, leaving the body orphaned. Fixed by re-adding the missing
+   header lines; `feme-opt --split-input-file | FileCheck` then passed
+   cleanly.
+9. Edited `spirv-to-llvm-matrix-block-invalid.mlir`: removed the
+   now-resolved second split and its comment, added a note pointing to
+   where that case moved.
+10. `ninja check-feme`: **3,206/3,209 Passed**, 3 Unsupported, 0 Failed (was
+    3,205/3,208 -- +1 Pass from the new test's second split).
+11. Re-swept `ssbo.*`: **3,027 Pass / 215 Fail / 8,983 NotSupported** (was
+    2,865/377/8,983) -- **+162 Pass**, well beyond the ~126 originally
+    estimated. Turns out the same code path also closed most of
+    `instance_array_basic_type`/`random`/`unsized_nested_struct_array`'s own
+    RowMajor column-select cases, not just the four families originally
+    scoped. Re-swept `compute.*`: unchanged (679/6/60,775).
+12. Re-bucketed the remaining 215 fails: `instance_array_basic_type` (84,
+    unchanged -- L124(k)), `random` (67, unchanged), `unsized_nested_struct_
+    array` (24, unchanged), and a **new** residual bucket --
+    `2_level_array`/`3_level_array`/`3_level_unsized_array` each still have
+    12 fails (was 42 each before this fix), not column-select related since
+    this fix closed those; a materially different remaining gap in the same
+    families. Broke this out as a new roadmap row, L124(m), rather than
+    folding it into L124(k)/(l) since it's a distinct shape family.
+13. Committed in 3 pieces: (a) core fix, (b) test changes (new file + invalid
+    file edit), (c) `Roadmap.md`/`VulkanCTSReport.md` updates. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+    needed -- internal correctness fix on an already-supported surface.
+14. Cleaned up this session's own `/tmp` scratch files
+    (`ssbo-l124f.log`/`.qpa`, `compute-l124f.log`/`.qpa`,
+    `ssbo-fails-l124f.txt`) -- left the large pile of prior-session leftovers
+    untouched.
+
+## Lesson: watch for edit-tool collateral damage on adjacent lines
+
+When correcting `CHECK` lines with the `edit` tool mid-test-file-authoring,
+double-check the `old_str`/`new_str` boundaries don't accidentally swallow
+unrelated adjacent lines (here: the `spirv.module`/`spirv.func` header just
+after the `CHECK` block I was editing). A `--split-input-file` parse error
+with a confusing location is a good signal to diff the whole file against
+what you intended, not just stare at the reported line.
+
+## Next steps
+
+1. **L124(m)** (~half a day to scope): `2_level_array`/`3_level_array`/`3_level_unsized_array`'s residual 12 fails each (36 total), left after this session's column-select fix -- not yet re-triaged, needs its own `FEME_DUMP_IR=1` trace on one repro per family to find the new shared shape (or confirm they're unrelated).
+2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84 fails, unchanged by this session -- still needs its own trace, may be a materially different content shape (array of block instances).
+3. **L124(l)** (~half a day to re-triage): `random` (67, unchanged), `unsized_nested_struct_array` (24, unchanged), `unsized_array_length.*` (4 singletons) -- `basic_unsized_array`'s prior 36 no longer appear in the bucket list, so that family looks fully closed now and can be dropped from this row.
+4. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, 3 new commits this session (core fix, test changes, Roadmap/CTSReport update) plus this entry's own commit = 4 total.
+- `ninja check-feme`: 3,206/3,209 Passed, 3 Unsupported, 0 Failed (was 3,205/3,208 -- +1 Pass from this session's new lit test split).
+- `ssbo.*` baseline for next session: **3,027 Pass / 215 Fail / 8,983 NotSupported** (of 12,225) -- up from 2,865/377/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this session.
+- This session's own `/tmp` scratch files cleaned up (large pile of prior-session leftovers in `/tmp` untouched -- not from this session).
