@@ -12417,10 +12417,42 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // 3-component vector's, whose 12-byte natural size still needs a 16-byte
   // stride under std430 (roadmap L106): `convertBufferBlockType`, the only
   // caller that reaches a `RuntimeArrayType` through `getBufferBlockElement`'s
-  // wrapper shape, reads `Type.getArrayStride()` itself and carries it as
+  // *wrapper* shape, reads `Type.getArrayStride()` itself and carries it as
   // `spirv.VulkanBuffer`'s own explicit third integer parameter when it is
-  // ever real (see that function's own comment), so nothing is lost by
-  // this conversion still discarding it here.
+  // ever real (see that function's own comment) -- `classifyVulkanBufferHandle`
+  // (SPIRVResourceLowering.cpp) then addresses every element via an explicit
+  // `index * Stride` byte computation for that shape, entirely bypassing
+  // whatever size this converted type itself reports, so nothing is lost by
+  // this conversion still discarding the stride there.
+  //
+  // (Roadmap L124(l)) That reasoning does *not* extend to a runtime array
+  // that is instead one *member* of an outer block struct converted
+  // directly (glslang's usual shape for a plain GLSL `buffer` block with a
+  // trailing unsized array member, e.g. `buffer Block { ...; T t[]; };`) --
+  // `getBufferBlockElement`'s non-wrapper path treats that whole outer
+  // struct as `Element->Content`, so `convertBufferBlockType` never sees
+  // this `RuntimeArrayType` on its own at all, and `classifyVulkanBufferHandle`
+  // resolves this shape as `HandleKind::StorageStruct` (carrying the
+  // struct's LLVM type directly, `Stride` always 0) -- meaning ordinary
+  // GEP-style indexing through this array's own converted LLVM type, whose
+  // per-element size *is* `T`'s reported size, is the only place this
+  // runtime array's per-element stride is ever expressed. A struct-typed
+  // `T` element whose own natural (packed, but otherwise unpadded) size
+  // undershoots the declared `ArrayStride` -- e.g. one ending in a member
+  // smaller than the block's own largest alignment requirement, needing
+  // std140/std430's usual "round every array element up to a 16-byte
+  // multiple" tail padding the same way a bare `vec3` element already
+  // needs (see above) -- must have that gap closed here, by padding `T`
+  // itself (`padStructToSize`, exactly as `convertArrayTypeIgnoringDecorations`
+  // already does for a *fixed*-size array's own identified-struct element),
+  // or every element past the first lands at the wrong byte offset
+  // (`dEQP-VK.ssbo.unsized_nested_struct_array.*`, whose own runtime array
+  // element is a struct with a nested nested-struct array member). This
+  // does not disturb the wrapper shape's own vector element case above,
+  // since `padStructToSize` only ever pads a struct-typed element --
+  // returning null (and thus leaving `ElementType` untouched) for any
+  // vector, scalar, or already-correctly-sized element, exactly as needed
+  // to keep relying on the explicit `Stride` int parameter there instead.
   TypeConverter.addConversion(
       [&TypeConverter](
           mlir::spirv::RuntimeArrayType Type) -> std::optional<mlir::Type> {
@@ -12428,6 +12460,11 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
             TypeConverter.convertType(Type.getElementType());
         if (!ElementType)
           return std::nullopt;
+        if (unsigned Stride = Type.getArrayStride()) {
+          mlir::DataLayout DL;
+          if (mlir::Type Padded = padStructToSize(ElementType, Stride, DL))
+            ElementType = Padded;
+        }
         return mlir::LLVM::LLVMArrayType::get(ElementType, 0);
       });
 
