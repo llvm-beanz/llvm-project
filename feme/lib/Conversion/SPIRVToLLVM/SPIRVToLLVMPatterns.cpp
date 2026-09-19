@@ -12147,8 +12147,30 @@ convertBufferBlockType(mlir::spirv::PointerType Type,
                getTrailingRuntimeArrayMember(Struct))
     Writable = isBufferBlockWritable(Struct, *ArrayMember);
 
+  // (Roadmap L124(l)) Every pointer reaching here is unambiguously a
+  // storage buffer block -- getBufferBlockElement's own
+  // isBufferBlockStorage gate already accepted either spelling (a real
+  // `StorageBuffer`-class pointer, or the pre-SPIR-V-1.3 `Uniform`-class
+  // + `BufferBlock`-decoration one glslang still emits by default, e.g.
+  // for a `readonly buffer`) -- so the storage-class integer parameter
+  // must always record the canonical `StorageBuffer` marker here,
+  // *not* `Type.getStorageClass()`'s own literal value. Forwarding the
+  // literal value silently reintroduces the exact ambiguity
+  // `classifyVulkanBufferHandle` (SPIRVResourceLowering.cpp) warns about
+  // in its own comment: a pre-1.3-spelled storage buffer that happens to
+  // also be non-writable (`readonly buffer`, e.g.
+  // `dEQP-VK.ssbo.unsized_array_length.*`'s own `xs` binding) carries the
+  // identical `[Uniform, Writable=0]` pair a genuine (always read-only)
+  // uniform block does, and that function's own writability-based
+  // disambiguation for the `Uniform`-storage-class case cannot tell them
+  // apart -- silently misclassifying this readonly storage buffer as a
+  // std140 *uniform* array instead, which then rejects its own always-0
+  // (unbounded/runtime) size as an unsupported "unbounded range" handle,
+  // rather than the always-legal runtime-sized storage array it actually
+  // is.
   llvm::SmallVector<unsigned, 3> IntParams{
-      static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u};
+      static_cast<unsigned>(mlir::spirv::StorageClass::StorageBuffer),
+      Writable ? 1u : 0u};
   if (Element->HasWrapper) {
     // `Element->Content` is either FeMe's own dxc-style wrapper's
     // dynamically-sized array, or a plain GLSL storage buffer's own
