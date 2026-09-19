@@ -3738,3 +3738,82 @@ member) did not close them, suggesting a related but distinct gap in the
 same array-wrapper-recognition/physical-substitution machinery for more
 deeply nested or struct-wrapped shapes. See `agent_thoughts.md` for the
 full narrative and next steps.
+
+## Roadmap L124(i) (whole-access gap closed this session): nested array-of-matrices RowMajor/MatrixStride storage-buffer fix
+
+Picked up L124(i)'s own 513-fail re-bucketing from the prior session.
+Reduced a first repro from the largest bucket family
+(`dEQP-VK.ssbo.layout.2_level_array.std140.column_major_mat2`), confirmed
+via `FEME_DUMP_IR=1` that the bug affects both `RowMajor` and `ColMajor`
+matrices (not `RowMajor`-transpose-specific), and traced it to the same
+underlying `MatrixStride`-padding symptom L124(g) fixed, but for a matrix
+reached through *two* levels of array nesting instead of one.
+
+Root cause: `getMatrixWholeAccess`'s wrapper-shape branch hard-coded the
+expected `spirv.AccessChain` index count to exactly 2 (a dummy wrapper
+selector plus one array index) -- exactly L124(g)'s own single-nesting
+shape, and no other. A 2-level-or-deeper wrapper content
+(`!spirv.array<M x !spirv.array<N x matCxR>>>`, what `2_level_array`/
+`3_level_array`/`3_level_unsized_array` exercise) needs one more index
+per array level, so this check always rejected it: neither
+`RowMajorMatrixStorePattern` nor `RowMajorMatrixLoadPattern` ever fired
+for this shape, and the plain, physically-wrong generic `spirv.Store`/
+`spirv.Load` conversion silently took over instead.
+
+Fixed by replacing the hard-coded count with a loop that peels through
+however many levels of array nesting the wrapper's own sole member
+actually has before reaching the innermost matrix, and requiring exactly
+that many indices. Investigated (via `padStructToSize`/
+`convertArrayTypeIgnoringDecorations`) whether the array levels'
+themselves also needed a fix, and confirmed they did not: the pre-existing
+generic array-type conversion already pads an undersized element (a
+matrix's own naturally-tight LLVM type) up to its declared `ArrayStride`
+with a uniform byte-array stand-in, recursively at every nesting level,
+so a nested array-of-matrices' own per-level byte strides were already
+correct -- only the whole-matrix *access recognition* itself was too
+narrow.
+
+New regression test: `spirv-to-llvm-matrix-rowmajor-nested-array-block.mlir`
+(mirrors L124(g)'s own `spirv-to-llvm-matrix-rowmajor-fixed-array-block.mlir`,
+but with a second array nesting level).
+
+A full `ssbo.*` re-sweep (12,225 cases):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 2,729  | 2,847 |
+| Fail          | 513    | 395   |
+| NotSupported  | 8,983  | 8,983 |
+
+**+118 Pass, 0 regressions.** A full `compute.*` re-sweep confirmed no
+change (679/6/60,775). `ninja check-feme`: 3,204/3,207 Passed, 3
+pre-existing Unsupported, 0 Failed (was 3,203/3,206 -- +1 Pass from this
+session's own new lit test; 0 regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal storage-buffer layout-correctness fix on an
+already-supported surface, not a new Vulkan feature or extension.
+
+`ssbo.*`'s remaining 395 `Fail`s were re-bucketed by case-name family:
+`instance_array_basic_type` (84), `random` (67), `3_level_unsized_array`
+(48), `3_level_array` (48), `2_level_array` (48), `single_basic_array`
+(36), `basic_unsized_array` (36), `unsized_nested_struct_array` (24), plus
+4 lingering `unsized_array_length.*` singletons. Inspecting the still-
+failing case names within `2_level_array`/`3_level_array`/
+`3_level_unsized_array` shows every one is now a `*_store_cols`/
+`*_comp_access_store_cols` variant (a partial column/scalar write, not a
+whole-matrix one) -- this session's fix only ever addressed whole-matrix
+access; `rewriteBlockAccess`'s own partial-access special case
+(`isa<MatrixType>(SelectedType)`) still requires `SelectedType` to be
+*directly* a matrix one index past the wrapper's own initial
+`getpointer` selector, so it's skipped entirely for any array nesting
+(including `single_basic_array`'s own pre-existing single-level case,
+whose RowMajor column-select was already known-declined rather than
+fixed). Tracked as `Roadmap.md`'s new L124(j) row. `instance_array_basic_type`'s
+84 remaining fails include *whole*-access failures too (not just partial
+ones), suggesting a materially different content shape (array of block
+*instances*, not an array member nested inside one block) -- tracked as
+L124(k). The rest (`random`/`basic_unsized_array`/
+`unsized_nested_struct_array`/`unsized_array_length.*`) not yet
+re-triaged this session -- tracked as L124(l). See `agent_thoughts.md` for
+the full narrative and next steps.
