@@ -4223,3 +4223,91 @@ out as roadmap L124(n), since a correct fix needs to avoid disturbing the
 wrapper shape's own existing vec3-handling mechanism (see L124(n)'s own
 roadmap text for the scoping concern) -- not implemented this session.
 See `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L124(n) (closed this session): vector-typed runtime-array-element stride padding, `ssbo.*`'s last named bucket
+
+Picked up exactly where the prior session left off: `random`'s residual
+64 `ssbo.*` fails were already root-caused (last session) to a sibling
+of L124(l)'s struct-element bug -- a *vector*-typed (`ivec2`) trailing
+runtime-array element in the same `HandleKind::StorageStruct` shape,
+whose 8-byte natural size undershoots its 16-byte std430 `ArrayStride`,
+which `padStructToSize` (L124(l)'s own fix) is a deliberate no-op for
+(it only ever pads a struct-typed element).
+
+Before writing any code, spent this session's first half confirming (via
+code reading, not just testing) that a fix could safely extend the
+*shared* `RuntimeArrayType` type conversion -- used by both the wrapper
+shape (`HandleKind::Storage`/`UniformArray`, roadmap L106's own vec3
+case) and the non-wrapper shape (`HandleKind::StorageStruct`, this
+session's target) -- without disturbing the wrapper shape's existing
+vec3 mechanism:
+
+- `classifyVulkanBufferHandle` (SPIRVResourceLowering.cpp): its `Stride`
+  computation only ever falls back to the converted element type's own
+  `DataLayout` size when the handle has *no* explicit third integer
+  parameter -- and `convertBufferBlockType` always attaches that
+  parameter whenever `Type.getArrayStride()` is nonzero, i.e. exactly
+  whenever this session's new padding would ever apply. The fallback
+  path is therefore never reached for any real `ArrayStride`-decorated
+  array, confirming the wrapper shape's own `Stride` value can never be
+  affected by padding the element type.
+- `lowerAccesses` (SPIRVResourceLowering.cpp): the wrapper shape's own
+  addressing (both element access and `ArrayLength`) always uses the
+  handle's explicit `BH.Stride` field via `ElemIdx * BH.Stride`, never
+  the array's own converted LLVM element type's size directly.
+- `rewriteBlockAccess` (SPIRVToLLVMPatterns.cpp): for the wrapper shape,
+  `SelectedType` is recovered as the runtime array's *element* type
+  directly from the SPIR-V type itself (`RuntimeArrayType::getElementType()`),
+  never by re-converting the `RuntimeArrayType` as a whole through the
+  type converter -- so the per-element load/store value type used there
+  is entirely independent of this session's change. The only place the
+  wrapper shape's `RuntimeArrayType` conversion result reaches anything
+  is `convertBufferBlockType`'s own `ContentType`, which becomes part of
+  the handle's own type parameter -- purely descriptive metadata, per
+  the two points above.
+- Grepped every existing lit test for a wrapper-shape handle with a
+  stride-mismatched vector/scalar runtime-array element: found none, so
+  no test-visible handle-type-spelling change was expected to need
+  updating.
+
+With that confirmed, implemented the fix by extending the
+`RuntimeArrayType` conversion (after its existing `padStructToSize`
+attempt) with the identical byte-array stand-in substitution
+`convertArrayTypeIgnoringDecorations` already applies for a *fixed*-size
+array's own scalar/vector element: whenever the natural size undershoots
+the declared `Stride`, substitute a `Stride`-sized opaque `[N x i8]`
+array for the element uniformly (safe since every pointer in this
+codebase is opaque). Updated the surrounding doc comment to describe
+this new case alongside L124(l)'s existing struct case. New lit test
+`vector_array_element` in `spirv-to-llvm-glslang-blocks.mlir`, mirroring
+L124(l)'s own `nested_struct_array_element` test, confirming the emitted
+handle type is `!llvm.struct<packed (i32, array<12 x i8>, array<0 x
+array<16 x i8>>)>` and the element GEP indexes correctly regardless of
+which vector component is loaded.
+
+**Critical regression check** (flagged by last session's own notes,
+run before landing): re-ran `dEQP-VK.compute.pipeline.builtin_var.*`
+(L106's own vec3-stride regression coverage) directly via `deqp-vk` --
+still 11/11 Pass, confirming the wrapper shape's own vec3 mechanism is
+unaffected.
+
+`ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed (+1 from
+the new lit test, 0 regressions).
+
+Re-swept `ssbo.*` (12,225 cases): **3,187 Pass / 55 Fail / 8,983
+NotSupported** (was 3,178/64/8,983) -- **+9 Pass, 0 regressions**.
+`compute.*` unchanged (679/6/60,775, confirmed by a full re-sweep).
+
+Remaining `ssbo.*` fails (55, still all `random`): a quick
+failure-message-only triage (grepping the sweep log's own per-case
+verdict text, not a `FEME_DUMP_IR=1` trace on any individual repro) found
+at least 3 distinct symptom shapes still mixed into this one bucket -- 25
+"Result comparison and counter values are incorrect", 15 "Counter value
+incorrect" (both mention an SSBO atomic-counter mismatch specifically,
+suggesting a bug distinct from this session's plain-load/store one), 14
+"Result comparison failed" (plain data mismatch, possibly more
+`ArrayStride`-shaped bugs of the same general family), and 1
+`VK_ERROR_INITIALIZATION_FAILED` (a pipeline-creation-time failure, not a
+runtime miscompile at all). Broken out as roadmap L124(o), not
+individually reduced this session. See `agent_thoughts.md` for the full
+narrative and next steps.
