@@ -93096,3 +93096,105 @@ bigger commit over two commits where the first is knowingly red.
 4. Once `ubo.*` is unblocked (after L124(p)), run the full sweep (not
    just `ubo.random.*`) for completeness -- L124(o)'s own fix only got
    spot-verified against the `random` subset this session.
+
+# Session: L124(p) closed -- BlockStruct/Content decoration mismatch, first-ever clean full ubo.* sweep
+
+**Start here next session**: nothing broken. `check-feme` green, `ubo.*`
+full sweep clean (0 Fail). Next real work is L124(q) (new, see below) --
+the `ssbo.*` 47 residual fails, all in `layout.random.*`.
+
+## What happened, in order
+
+1. Confirmed device (`FeMe CPU Vulkan Device`) as required at session
+   start.
+2. Cleaned `/tmp/ctsrun`'s stale scratch logs left from the prior
+   session's L124(p) triage (kept the binary/data/cache).
+3. Resumed the prior session's L124(p) triage from its confirmed root
+   cause: `rewriteBlockAccess` looks up `RowMajor`/`MatrixStride`
+   decorations on `BlockStruct` (the outer struct) at
+   `MatrixDecorationMemberIndex`, but for `getUniformBlockElement`'s
+   "sole member is itself a struct" wrapper shape that index is actually
+   relative to `Element.Content` (the inner struct) -- a different
+   struct with a different member count. Passing the outer struct with
+   an index computed for the inner one crashes
+   `getMemberDecorations`'s bounds assertion whenever the index is >= 1.
+4. Finished the fix the prior session had half-applied: added
+   `DecorationStruct` (defaults to `BlockStruct`, reassigned to
+   `Element.Content` whenever `MatrixDecorationMemberIndex` is set from
+   struct-typed content) and swapped it in at all four decoration-lookup
+   call sites in `rewriteBlockAccess`.
+5. Verified two ways before touching the real CTS: built a minimal
+   `feme-opt`-only repro (`uniform Block { S s; }`-shaped, `S` with a
+   non-square array-of-matrices member past index 0) -- confirmed it
+   crashed identically pre-fix (via `git stash`) and produced correct
+   widened output post-fix.
+6. Checked whether a structurally similar helper,
+   `getWrapperArrayMatrixColumnAccess`, shares the same bug pattern (it
+   also takes a `BlockStruct` param). Read its own doc comment and code:
+   its shape always has `MatrixDecorationMemberIndex == 0`, which is
+   correctly `BlockStruct`'s own member 0 in that shape. **Not buggy,
+   confirmed via reading, no fix needed.**
+7. Added a permanent regression test,
+   `spirv-to-llvm-matrix-uniform-wrapper-struct-array-of-matrix.mlir`,
+   mirroring the minimal repro. Ran `check-feme`: 3,211/3,214 Passed, 3
+   Unsupported, 0 Failed (+1 from the new test).
+8. Rebuilt `feme_vulkan`, re-ran the actual originally-crashing test
+   (`dEQP-VK.ubo.single_struct.per_block_buffer.std140_both`) via
+   `deqp-vk` directly (no gdb needed this time -- it just passes now).
+9. Ran the full `ubo.single_struct.*` family (72 cases): 48 Pass / 0
+   Fail / 24 NotSupported, clean.
+10. Ran the **full `ubo.*` sweep** (13,240 cases, previously entirely
+    blocked by this crash) for the first time ever: **5,687 Pass / 0
+    Fail / 7,553 NotSupported**. Confirms L124(p) was the *only* thing
+    blocking this sweep.
+11. Re-ran the full `ssbo.*` sweep as a sanity check that L124(p)'s fix
+    didn't touch anything there (it's a `ubo.*`-only code path):
+    **3,195 Pass / 47 Fail / 8,983 NotSupported**, same count and same
+    47 test names as the prior session left it. Extracted the full list
+    of 47 names for future triage.
+12. Spot-checked one of the 47 (`ssbo.layout.random.basic_types.18`) --
+    fails with "Counter value incorrect" (a data mismatch, not a
+    crash/legalization rejection). Consistent with the L124(l)/(n)
+    pattern of several small distinct bugs bundled in one fuzzer-driven
+    family, but not confirmed to share a root cause -- didn't go deeper,
+    out of this session's scope.
+13. Struck L124(p) on the roadmap, filed the 47 `ssbo.*` fails as new
+    item L124(q) (not started).
+14. Committed in 4 separate commits: `361df0b2f177` (the code fix + new
+    lit test), `85a81554f4b7` (Roadmap), `dc984fe81d76`
+    (VulkanCTSReport), and this file next.
+
+## State right now
+
+- Working tree clean before this file's own commit, HEAD at
+  `dc984fe81d76`.
+- `ninja check-feme`: 3,211/3,214 Passed, 3 Unsupported, 0 Failed.
+- `ubo.*` **full** sweep: 5,687 Pass / 0 Fail / 7,553 NotSupported (of
+  13,240) -- first time this sweep has ever run clean to completion.
+- `ssbo.*`: 3,195 Pass / 47 Fail / 8,983 NotSupported -- unchanged from
+  before this session, confirmed same 47 test names, not L124(p)-related.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface) -- verified, not just assumed.
+- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
+  place, warm/incremental. `/tmp/ctsrun` has this session's own fresh
+  scratch logs (`std140_both.qpa`, `single_struct.qpa`, `ubo_full.qpa`,
+  `ssbo_full.qpa`, `ssbo_triage1.qpa` + their `.stdout` companions) --
+  not referenced by anything committed.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun`'s scratch logs from this session
+   if a future session doesn't need the raw QPA output (`std140_both.qpa`,
+   `single_struct.qpa`, `ubo_full.qpa`/`.stdout`, `ssbo_full.qpa`/
+   `.stdout`, `ssbo_triage1.qpa`) -- not referenced by anything
+   committed.
+2. Start L124(q) (`ssbo.*`'s remaining 47 `layout.random.*` fails) --
+   the full list of 47 test names is in this session's own
+   `/tmp/ctsrun/ssbo_fails.txt` if still present, otherwise regenerate
+   with `./deqp-vk -n "dEQP-VK.ssbo.*" ...` and
+   `grep -B1 "^  Fail" | grep "Test case"`. Start with
+   `dEQP-VK.ssbo.layout.random.basic_types.18` (already confirmed to
+   fail with "Counter value incorrect", not a crash) and build a
+   `FEME_DUMP_IR=1` trace the same way L124(l)/(n) did.
+3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
+   -- reuse the existing build directories, no reconfigure needed.
