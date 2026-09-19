@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 6e011932-a46a-43ae-97b3-283c96c999ff
 ---
 # Initial Guidelines
 
@@ -52,5 +53,18 @@ file.
 
 # Request
 
-Can you merge fetch then merge origin/main into this branch and resolve any
-conflicts and fix any test issues that arise?
+Can you continue the work on feme? The last agent's suggested next steps are:
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun` if a future session doesn't need
+   this session's raw QPA logs (its own scratch, not referenced by
+   anything committed).
+2. Resume L124(o) (`getMatrixWholeAccess` non-wrapper-branch nested-struct
+   walk + `getTightNestedStructType`/`getTightMatrixType` widening) --
+   still the standing next real Vulkan-correctness work; see the prior
+   session's heading above in this same file for the fully scoped
+   6-item breakdown. Nothing in this merge session changes that scoping.
+3. If a future merge-main request lands again, reuse this session's build
+   directories rather than reconfiguring from scratch -- `ninja
+   check-feme` and `ninja deqp-vk` are both incremental once configured.
