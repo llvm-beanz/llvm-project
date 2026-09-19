@@ -55,18 +55,35 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L116(f)'s ~24 un-root-caused hangs/crashes (no time estimate -- still only
-   one-at-a-time reduction, no new technique found across several sessions
-   now)**: still fully untouched. Consider trying the runtime-instrumentation
-   technique that broke L118 open last session (a `feme.cpu.debug.print.*`-style
-   host callback) if a future session picks one of these up, rather than more
-   manual IR tracing.
-2. **L106's untriaged `pipeline.monolithic.*`/`subgroups.*`/`compute.*`
-   candidates**: still nobody has picked these up across many sessions now. No
-   scoping done yet -- would need a first triage pass (run each family's own
-   `dEQP-VK.*` sweep, bucket failures) before estimating.
-3. Both L116/L117/L118/L120/L121 are now closed; L122 is also closed. The
-   roadmap's "still open, high-value" list is now genuinely down to L116(f) and
-   L106's untriaged items -- worth a fresh full-repository `dEQP-VK.*` sweep
-   (not just `graphicsfuzz.*`) at the start of whichever future session picks
-   this up, to get an up-to-date overall picture before diving into either.
+1. **L124** (~1-2 hours to scope, unknown to fix): triage `compute.*`'s
+   remaining 16 `Fail`s and `ssbo.*`'s remaining 905 `Fail`s. `ssbo.*`'s 905 is
+   large enough it's likely several distinct bugs, not one -- bucket by failing
+   case name before picking a first repro, the same way L116's original
+   `graphicsfuzz.*` sweep did.
+2. **L125** (~1 hour to scope): first triage pass of `pipeline.monolithic.*`
+   (465,554 cases, never sampled). Run a representative sample of its own
+   subfamilies, bucket failures, pick a first concrete repro.
+3. **L126** (~30 min): finish `subgroups.ballot_broadcast.*`'s sweep, abandoned
+   mid-read this session when focus shifted to `compute.*`. Likely folds into
+   "no real bugs in `subgroups.*`" but not yet confirmed for this specific
+   subfamily.
+4. **L116(f)** (no time estimate, several sessions untouched): ~24
+   un-root-caused hangs/crashes in `graphicsfuzz.*`. Consider the
+   runtime-instrumentation technique that broke L118 open (a
+   `feme.cpu.debug.print.*`-style host callback) rather than more manual IR
+   tracing.
+
+## State for next session
+
+- Working tree clean, 6 new commits this session (fix, lit-test updates,
+  DXIL-raising fix, new regression test, CTS report, roadmap) plus this entry's
+  own commit = 7 total.
+- `ninja check-feme`: 3,201/3,204 Passed, 3 Unsupported, 0 Failed.
+- `compute.*` baseline for next session: **669 Pass / 16 Fail / 60,775
+  NotSupported** (of 61,460).
+- `ssbo.*` baseline for next session: **2,337 Pass / 905 Fail / 8,983
+  NotSupported** (of 12,225).
+- `graphicsfuzz.*` baseline unchanged from last session: 601 Pass / 124 Fail / 8
+  NotSupported (of 733) -- not re-swept this session, since this session's fix
+  didn't touch anything on that path.
+- No scratch files left in `/tmp` from this session.
