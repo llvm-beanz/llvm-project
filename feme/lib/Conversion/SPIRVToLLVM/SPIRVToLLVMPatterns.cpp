@@ -11711,10 +11711,29 @@ convertUniformArrayContent(mlir::spirv::ArrayType Array,
 /// parameter is the block's content (see getBufferBlockElement -- a 0-sized
 /// `!llvm.array` for the wrapper shape, or the block's own struct,
 /// including any trailing array member, for the shape glslang emits
-/// directly), and the two integer parameters are the storage class
+/// directly), and the first two integer parameters are the storage class
 /// (forwarded unchanged, like an image type's parameters) and whether the
 /// buffer is writable (`RWStructuredBuffer<T>`/a GLSL `buffer` block) or
 /// not (`StructuredBuffer<T>`/a GLSL `readonly buffer` block).
+///
+/// For the wrapper shape specifically, a third integer parameter carries
+/// the runtime array's own real `ArrayStride`: MLIR's own `RuntimeArrayType`
+/// conversion (registered above, in populateSPIRVToLLVMTargetTypeConversions)
+/// discards `ArrayStride` entirely, on the assumption a std430 storage
+/// buffer's stride always equals its element's natural size -- true for
+/// every scalar, 2-/4-component vector, or matrix element, but *not* for a
+/// 3-component vector one: std430 still pads every array element up to a
+/// 16-byte multiple regardless of storage class, so `vec3`'s 12-byte
+/// natural size still gets a 16-byte `ArrayStride` (see the SPIR-V spec's
+/// "Vulkan-supported std430" rules). Carrying the real stride explicitly
+/// here, read back by `classifyVulkanBufferHandle`
+/// (SPIRVResourceLowering.cpp), is exactly the same convention
+/// `convertUniformArrayContent`/that function already use for a std140
+/// array's own always-possible mismatch (roadmap L106's own
+/// `dEQP-VK.compute.pipeline.builtin_var.*` regression: silently-dropped
+/// writes to the tail of a `uvec3`/`vec3`-typed `StorageBuffer` array,
+/// once every element past whatever the *wrong* (natural-size) stride's
+/// own footprint could reach was simply never addressed at all).
 mlir::Type
 convertBufferBlockType(mlir::spirv::PointerType Type,
                        const mlir::LLVMTypeConverter &TypeConverter) {
@@ -11733,10 +11752,18 @@ convertBufferBlockType(mlir::spirv::PointerType Type,
                getTrailingRuntimeArrayMember(Struct))
     Writable = isBufferBlockWritable(Struct, *ArrayMember);
 
+  llvm::SmallVector<unsigned, 3> IntParams{
+      static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u};
+  if (Element->HasWrapper) {
+    auto Array = mlir::cast<mlir::spirv::RuntimeArrayType>(Element->Content);
+    if (unsigned Stride = Array.getArrayStride())
+      IntParams.push_back(Stride);
+  }
+
   return mlir::LLVM::LLVMTargetExtType::get(
-      Type.getContext(), "spirv.VulkanBuffer", {ContentType},
-      {static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u});
+      Type.getContext(), "spirv.VulkanBuffer", {ContentType}, IntParams);
 }
+
 
 /// Converts a uniform buffer block pointer to the same `spirv.VulkanBuffer`
 /// handle type convertBufferBlockType produces for a storage buffer block
@@ -11958,8 +11985,15 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // MLIR's own runtime array conversion refuses one with an `ArrayStride`
   // decoration (see `convertRuntimeArrayType` in MLIR's `SPIRVToLLVM.cpp`),
   // which every runtime array nested in a real (Vulkan-valid) storage
-  // buffer block carries -- the stride is otherwise unused here, since the
-  // resulting `!llvm.array<0 x T>`'s layout comes from `T` itself.
+  // buffer block carries -- this pass's own resulting `!llvm.array<0 x T>`
+  // marker's layout comes from `T` itself for every element shape except a
+  // 3-component vector's, whose 12-byte natural size still needs a 16-byte
+  // stride under std430 (roadmap L106): `convertBufferBlockType`, the only
+  // caller that reaches a `RuntimeArrayType` through `getBufferBlockElement`'s
+  // wrapper shape, reads `Type.getArrayStride()` itself and carries it as
+  // `spirv.VulkanBuffer`'s own explicit third integer parameter when it is
+  // ever real (see that function's own comment), so nothing is lost by
+  // this conversion still discarding it here.
   TypeConverter.addConversion(
       [&TypeConverter](
           mlir::spirv::RuntimeArrayType Type) -> std::optional<mlir::Type> {

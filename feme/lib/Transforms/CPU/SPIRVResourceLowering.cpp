@@ -347,24 +347,34 @@ constexpr unsigned SPIRVStorageClassStorageBuffer = 12;
 /// direct-field storage or uniform buffer's own struct, or a uniform
 /// buffer array's own `!llvm.array<0 x ElemTy>` marker array -- the same
 /// shape a storage buffer's own uses) and either two integer parameters
-/// (storage class, writability) or, for a uniform buffer array only, three
-/// (storage class, writability, and its own explicit `ArrayStride`).
+/// (storage class, writability) or three (storage class, writability, and
+/// an explicit `ArrayStride`).
 ///
-/// A storage buffer's own stride is never carried explicitly: SPIR-V
-/// records it implicitly via `ElemTy`'s own store size instead, mirroring
-/// how `feme::cpu::ResourceLoweringPass::classifyHandle` recovers a DXIL
-/// `dx.RawBuffer`'s stride from its element type parameter -- valid because
-/// a std430 storage buffer's own `ArrayStride` always equals its element's
-/// natural size. A std140 uniform buffer array's own `ArrayStride` need
-/// not (every array widens its element to a 16-byte multiple regardless of
-/// the element's own size -- e.g. a scalar `uint`'s 4-byte size against a
-/// 16-byte stride, the shape roadmap F12a's own CTS case hits), so its
-/// real stride has nowhere else to come from and is carried as that third
-/// integer parameter instead (see `feme::spirv::convertUniformBlockType`'s
-/// own comment for why the marker array itself cannot carry it). The two
-/// shapes are otherwise indistinguishable from `Param`'s own type alone,
-/// which is why the parameter count -- not `ElemTy` -- is what
-/// distinguishes them here.
+/// A storage buffer's own stride usually recovers from `ElemTy`'s own
+/// store size, mirroring how `feme::cpu::ResourceLoweringPass::
+/// classifyHandle` recovers a DXIL `dx.RawBuffer`'s stride from its
+/// element type parameter -- valid for every scalar, 2-/4-component
+/// vector, or matrix element, whose std430 `ArrayStride` always equals
+/// that natural size. A 3-component vector element is the one shape where
+/// that is *not* true (std430, like std140, still pads every array
+/// element up to a 16-byte multiple regardless of storage class -- roadmap
+/// L106's own `dEQP-VK.compute.pipeline.builtin_var.*` regression: writes
+/// past whatever the *wrong* stride's own footprint could reach inside a
+/// fixed-size buffer were simply never addressed at all, silently
+/// dropped), so `convertBufferBlockType` carries the real stride
+/// explicitly as this handle's own third integer parameter whenever it
+/// was decorated, exactly like a std140 uniform buffer array's own
+/// always-possible mismatch (every array widens its element to a 16-byte
+/// multiple regardless of the element's own size -- e.g. a scalar
+/// `uint`'s 4-byte size against a 16-byte stride, the shape roadmap F12a's
+/// own CTS case hits) already required (see
+/// `feme::spirv::convertUniformBlockType`'s own comment for why the
+/// marker array itself cannot carry it, and why storage class plus
+/// writability -- not the parameter count -- is what disambiguates a
+/// storage array from a uniform one below, both of which may now carry
+/// this third parameter). The two array shapes are otherwise
+/// indistinguishable from `Param`'s own type alone, which is why storage
+/// class/writability, not `ElemTy`, is what distinguishes them here.
 ///
 /// A struct parameter is normally a direct-field uniform buffer, but a
 /// `StorageBuffer`-class handle with one is a glslang-style storage buffer
@@ -399,12 +409,31 @@ classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
     return std::nullopt;
   Type *Param = HandleTy->getTypeParameter(0);
   if (auto *ArrayTy = dyn_cast<ArrayType>(Param)) {
-    if (HandleTy->getNumIntParameters() > 2)
-      return HandleClassification{HandleKind::UniformArray,
-                                  HandleTy->getIntParameter(2), nullptr};
-    return HandleClassification{HandleKind::Storage,
-                                DL.getTypeStoreSize(ArrayTy->getElementType()),
-                                nullptr};
+    // A storage buffer's own runtime array wrapper and a std140 uniform
+    // buffer's fixed-size array both convert to this same 0-sized
+    // `!llvm.array<0 x ElemTy>` shape (see convertBufferBlockType's own
+    // comment), so -- exactly like the `StructType` branch just below --
+    // storage class plus writability, not the type alone, is what tells
+    // them apart: a real uniform block is never writable, so a writable
+    // `Uniform`-class handle here must be the legacy (pre-SPIR-V-1.3)
+    // `BufferBlock` storage-buffer spelling instead.
+    bool Writable = HandleTy->getIntParameter(1) != 0;
+    bool IsStorage =
+        HandleTy->getIntParameter(0) == SPIRVStorageClassStorageBuffer ||
+        (HandleTy->getIntParameter(0) == SPIRVStorageClassUniform && Writable);
+    // Both kinds carry their own real `ArrayStride` as an explicit third
+    // integer parameter whenever it was decorated (`convertBufferBlockType`/
+    // `convertUniformBlockType`) -- a storage buffer's stride otherwise
+    // falls back to its element's natural size, true for every element
+    // shape except a 3-component vector's (see convertBufferBlockType's
+    // own comment: std430 still pads a `vec3` array element up to 16
+    // bytes, roadmap L106).
+    uint64_t Stride = HandleTy->getNumIntParameters() > 2
+                          ? HandleTy->getIntParameter(2)
+                          : DL.getTypeStoreSize(ArrayTy->getElementType());
+    if (IsStorage)
+      return HandleClassification{HandleKind::Storage, Stride, nullptr};
+    return HandleClassification{HandleKind::UniformArray, Stride, nullptr};
   }
   if (auto *StructTy = dyn_cast<StructType>(Param)) {
     bool Writable = HandleTy->getIntParameter(1) != 0;
