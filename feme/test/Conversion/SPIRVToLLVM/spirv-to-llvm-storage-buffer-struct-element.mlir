@@ -22,7 +22,7 @@
 
 // CHECK-LABEL: llvm.func @copy
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, i32)>>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, i32)>>, 12, 1, 16>
 // CHECK: %[[ELEM:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK-SAME: -> !llvm.ptr<11>
 // CHECK-NOT: !llvm.target<"spirv.VulkanBuffer"

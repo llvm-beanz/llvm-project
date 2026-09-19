@@ -13,7 +13,7 @@
 
 // CHECK-LABEL: llvm.func @legacy_ssbo
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 2, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 2, 1, 4>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: llvm.load %[[PTR]] : !llvm.ptr<12> -> f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

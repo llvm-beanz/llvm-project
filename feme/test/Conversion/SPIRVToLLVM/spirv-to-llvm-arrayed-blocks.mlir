@@ -18,7 +18,7 @@
 // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(4 : i32) : i32
 // CHECK: %[[NAME:.*]] = llvm.mlir.addressof @buffers.str : !llvm.ptr
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"(%[[SET]], %[[BINDING]], %[[COUNT]], %arg0, %[[NAME]])
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 12, 1, 4>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %arg1)
 // CHECK: llvm.load %[[PTR]] : !llvm.ptr<11> -> f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

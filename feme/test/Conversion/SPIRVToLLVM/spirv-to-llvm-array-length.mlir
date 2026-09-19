@@ -11,7 +11,7 @@
 
 // CHECK-LABEL: llvm.func @array_length
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x i32>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x i32>, 12, 1, 4>
 // CHECK: llvm.call_intrinsic "llvm.spv.resource.getarraylength"(%[[HANDLE]])
 // CHECK-SAME: -> i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

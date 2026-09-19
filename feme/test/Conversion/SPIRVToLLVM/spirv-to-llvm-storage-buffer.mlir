@@ -15,7 +15,7 @@
 // CHECK: %[[BINDING:.*]] = llvm.mlir.constant(1 : i32) : i32
 // CHECK: %[[NAME:.*]] = llvm.mlir.addressof @out.str : !llvm.ptr
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"(%[[SET]], %[[BINDING]], %{{.*}}, %{{.*}}, %[[NAME]])
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x vector<4xf32>>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x vector<4xf32>>, 12, 1, 16>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK-SAME: -> !llvm.ptr<11>
 // CHECK: %[[VAL:.*]] = llvm.load %[[PTR]] : !llvm.ptr<11> -> vector<4xf32>
@@ -41,7 +41,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // CHECK-LABEL: llvm.func @read_field
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<packed (vector<4xi32>, vector<4xf32>)>>, 12, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x struct<packed (vector<4xi32>, vector<4xf32>)>>, 12, 0, 32>
 // CHECK: %[[ELEM:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: %[[FIELD:.*]] = llvm.getelementptr inbounds %[[ELEM]][0, 1]
 // CHECK: llvm.load %[[FIELD]] : !llvm.ptr<11> -> vector<4xf32>
