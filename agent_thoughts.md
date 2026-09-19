@@ -92553,3 +92553,132 @@ total), left after L124(f)'s column-select fix.
    likely fastest win, and they've been carried over unfixed since before
    L124(g) (at least 5 sessions) without ever getting their own dedicated
    trace.
+
+# Session: L124(l) continued -- legacy SSBO misclassification + struct-typed runtime-array-element stride padding
+
+Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` at session start (per standing instruction, every session).
+
+## What's done
+
+1. Reproduced the 4 `unsized_array_length.*` singletons first (smallest
+   bucket, per last session's own recommendation). All 4 failed at
+   `vkCreateComputePipelines` with a bare `VK_ERROR_INITIALIZATION_FAILED`.
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an opt-in diagnostic env var,
+   `feme::vulkan::logCreationFailure`, `feme/lib/Vulkan/Diagnostics.cpp`)
+   surfaced the real error: an "unbounded range" resource-normalization
+   rejection.
+2. Root-caused: the failing shader's `readonly buffer x { int xs[]; };`
+   uses the pre-SPIR-V-1.3 legacy spelling (`Uniform` storage class +
+   `BufferBlock` decoration, still what glslang emits by default).
+   `convertBufferBlockType` forwarded that literal `Uniform` storage class
+   into the emitted handle; `classifyVulkanBufferHandle`'s
+   writability-based disambiguation for `Uniform`-class handles can't tell
+   a genuine (always non-writable) uniform block apart from a *readonly*
+   legacy-spelled storage buffer (both are `[Uniform, Writable=0]`) --
+   misclassifying it as a std140 uniform array, which can never
+   legitimately be unbounded.
+3. Fixed at the source: `convertBufferBlockType` now always emits the
+   canonical `StorageBuffer` marker for every storage buffer block it
+   converts, since `getBufferBlockElement`'s own gate already confirms
+   that unambiguously, regardless of spelling. Updated 2 pre-existing
+   tests' CHECK lines (`2` -> `12`) for the same reason L124(m)'s own
+   fix needed test updates.
+4. All 4 singletons now Pass. Confirmed `random`/`unsized_nested_struct_array`
+   unaffected (isolated fix) via a targeted re-sweep of each.
+5. Moved to `unsized_nested_struct_array` (24 fails) next. Confirmed via
+   `FEME_DUMP_IR=1` these are runtime miscompiles ("Counter value
+   incorrect"), not creation failures. Hand-traced one repro's emitted
+   byte offsets against its own `OpDecorate ArrayStride` (368, read via
+   `--deqp-log-decompiled-spirv`): the second array element loaded 100
+   bytes too early (468 instead of 480... corrected to 468 is actually
+   the *unpadded* natural size, glslang's own real declared stride is 368,
+   so 112+368=480 was expected but 468 was seen -- write-up in
+   `VulkanCTSReport.md` has the precise numbers).
+6. Root-caused: `RuntimeArrayType`'s type conversion discards `ArrayStride`
+   unconditionally -- correct for the *wrapper* shape (stride carried
+   explicitly as the handle's 3rd int param, applied via runtime multiply
+   instead), wrong for a runtime array that's one member of a directly-
+   converted multi-member block struct (`HandleKind::StorageStruct`),
+   which has no such explicit-stride mechanism and relies entirely on the
+   converted element type's own reported size for every array access
+   (`getelementptr`, or a compile-time-constant offset derived from the
+   same size).
+7. Fixed: pad the converted element type to its declared `ArrayStride`
+   with the pre-existing `padStructToSize` helper whenever it's a struct --
+   mirrors what `convertArrayTypeIgnoringDecorations` already does for a
+   *fixed*-size array's own identified-struct element. `padStructToSize`
+   is a no-op for non-struct elements, so this doesn't touch the wrapper
+   shape's own vec3-handling mechanism.
+8. All 24 `unsized_nested_struct_array` cases now Pass.
+9. `ninja check-feme`: **3,208/3,211 Passed**, 3 Unsupported, 0 Failed
+   (no regressions from either fix; total test count unchanged since new
+   cases were added as splits inside existing files, not new files).
+10. Re-swept `ssbo.*`: **3,178 Pass / 64 Fail / 8,983 NotSupported** (was
+    3,150/92/8,983) -- **+28 Pass, 0 regressions**. `compute.*` unchanged
+    (679/6/60,775, confirmed by a full re-sweep).
+11. Triaged one `random` repro
+    (`dEQP-VK.ssbo.layout.random.all_per_block_buffers.15`): same
+    `HandleKind::StorageStruct` shape, but its undersized trailing array
+    element is a *vector* (`ivec2`), not a struct -- `padStructToSize` is
+    a deliberate no-op for that, so this session's fix doesn't cover it.
+    Did **not** implement a fix this session -- see "Why I stopped here"
+    below.
+12. Committed in 5 pieces: (1) legacy-SSBO core fix, (2) its 2 test CHECK
+    updates, (3) struct-padding core fix, (4) its new test, (5)
+    Roadmap/CTSReport update. This entry is commit 6.
+13. Struck through L124(l) in `Roadmap.md` (3 of 4 sub-buckets: all
+    committed and verified); added L124(n) for the remaining `random`
+    bucket, one level of nesting deep (not L124(l)(n)), per the standing
+    "no deeper than one lowercase letter" instruction.
+
+## Why I stopped here (not a blocker, a judgment call)
+
+The likely fix for `random`'s vector-element case mirrors
+`convertArrayTypeIgnoringDecorations`'s own scalar/vector handling: a
+uniform `Stride`-sized byte-array stand-in substituted for every element.
+But the *wrapper* shape's own existing vec3 mechanism (roadmap L106)
+deliberately leaves the vec3 element type unpadded, relying on a
+side-channel (the handle's 3rd int param + a runtime multiply) instead --
+and `RuntimeArrayType`'s conversion is shared by both shapes. Padding the
+element type there universally could silently change the wrapper shape's
+own emitted handle type too. That's very likely still safe (the 3rd int
+param and the runtime multiply path don't inspect the element type's own
+size at all), but I did not have time this session to actually verify
+that against `dEQP-VK.compute.pipeline.builtin_var.*` (L106's own vec3
+regression coverage) before landing it, and a regression there would be
+worse than leaving `random` open one more session.
+
+## State for next session
+
+- Working tree clean, 5 new commits this session (legacy-SSBO fix + test
+  updates, struct-padding fix + test, Roadmap/CTSReport update) plus this
+  entry's own commit = 6 total.
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*` baseline for next session: **3,178 Pass / 64 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 3,150/92/8,983. `random` is now
+  the *only* remaining named bucket.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
+  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep
+  this session.
+- `/tmp` scratch cleaned up.
+
+## Next steps
+
+1. **L124(n)** (~half a day): implement the vector/scalar element padding
+   for `RuntimeArrayType`'s non-wrapper (`HandleKind::StorageStruct`)
+   case -- likely a `Stride`-sized byte-array stand-in, same idea as
+   `convertArrayTypeIgnoringDecorations`'s own scalar-array handling.
+   **Before landing it**: re-run the `dEQP-VK.compute.pipeline.
+   builtin_var.*` sweep (L106's own vec3 regression coverage) to confirm
+   the wrapper shape's own vec3 mechanism still works unchanged. This
+   should close most or all of `random`'s remaining 64 fails, since that
+   family is CTS's own fuzz-shaped mix of whatever else is still broken.
+2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched,
+   standing fallbacks from prior sessions -- see `Roadmap.md` for each
+   row's own scoping.
+3. With `ssbo.*` down to 64 fails (from 651 eight sessions ago, now
+   0.5% of the whole suite) and concentrated in one single family, the
+   next session should prioritize L124(n) first -- it is very likely the
+   last `ssbo.*` item standing between this milestone series and a fully
+   clean `ssbo.*` sweep.
