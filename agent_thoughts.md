@@ -92059,3 +92059,42 @@ This means `RowMajorMatrixStorePattern`'s (`SPIRVToLLVMPatterns.cpp`) own `Needs
 - `ssbo.*` baseline for next session: **2,591 Pass / 651 Fail / 8,983 NotSupported** (of 12,225) -- up from 2,337/905/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this session.
 - No scratch files left in `/tmp` from this session.
+
+# Session: L124(g) closed (+138 ssbo.* Pass) -- array-of-matrices RowMajor fix
+
+**Next action:** open `feme/docs/Roadmap.md`'s L124(i) row and pick one repro from `3_level_unsized_array`/`3_level_array`/`2_level_array` (87 fails each, largest of the remaining buckets) and reduce it with `FEME_DUMP_IR=1`, the same way L124(g) was reduced.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up L124(g) (prior session's lead: `row_major_mat2`'s intra-matrix stride came out `8` instead of `16`), continuing from a paused mid-diagnosis state (a first fix attempt, `peelArraysToMatrixType`/`wrapPhysicalMatrixInArrays` in `convertOffsetStructTypeIgnoringDecorations`, had been written but the repro's IR was unchanged).
+3. Added a temporary `llvm::errs()` diagnostic in the modified loop — confirmed the fix *was* being reached and correctly computed a padded physical type (`array<2 x struct<packed(array<2xf32>, array<8xi8>)>>`, i.e. 16-byte rows). So the type conversion fix was working. But the actual store/load IR was still unchanged.
+4. Added a second diagnostic directly in `RowMajorMatrixStorePattern::matchAndRewrite` — found `getMatrixWholeAccess` was returning `std::nullopt` for this repro, meaning the pattern never even fired; the ordinary (wrong) `spirv.Store` conversion was doing the work instead, ignoring the new physical member type entirely.
+5. Traced `getMatrixWholeAccess` → `getBufferBlockElement`: it only ever recognizes a sole `spirv.rtarray` (runtime array) member as FeMe's own dynamically-indexed wrapper shape (`HasWrapper=true`). This repro's `mat2 matrices[3]` is a *fixed*-size `spirv.array`, which fell through to the "ordinary struct" branch (`HasWrapper=false`) — so `getMatrixWholeAccess`'s member-index-count check (`Op.getIndices().size() != 1`) rejected the access outright (it actually has 2 indices: dummy struct-member-0, then array index). `getUniformBlockElement` already has this exact fix for uniform blocks (roadmap F12a); `getBufferBlockElement` never got the storage-buffer counterpart.
+6. Fixed `getBufferBlockElement` to also recognize a sole fixed-size `spirv.array` member as `HasWrapper=true`. This immediately hit a `cast<RuntimeArrayType>` assertion crash elsewhere (`convertBufferBlockType`'s stride computation assumed `Element->Content` was always a `RuntimeArrayType` once `HasWrapper` was true) — fixed that cast site to handle both array kinds.
+7. Removed all temporary debug diagnostics. Rebuilt, re-tested `row_major_mat2` with `FEME_DUMP_IR=1`: intra-matrix offsets now correctly `+0`/`+16`, and the CTS case **Passes**.
+8. `ninja check-feme` caught one stale lit test (`spirv-to-llvm-storage-buffer.mlir`'s `read_vec3_array_element`): the same `getBufferBlockElement` fix changes a *non-matrix* fixed-array SSBO member's own conversion too (no more struct-wrapper, no extra GEP needed, and its `NonWritable` decoration is now correctly reflected as `IsWriteable=0` — previously always `1`, a separate pre-existing bug this incidentally also fixed). Updated the CHECK lines to match the new, correct output.
+9. Added a new regression test, `spirv-to-llvm-matrix-rowmajor-fixed-array-block.mlir`, mirroring the existing `spirv-to-llvm-matrix-rowmajor-buffer-block.mlir` (which only covered the `rtarray`/dxc-wrapper shape) but for this plain-GLSL fixed-array shape.
+10. Re-swept `ssbo.*` (12,225 cases): **2,729 Pass / 513 Fail / 8,983 NotSupported** (was 2,591/651/8,983) — **+138 Pass, 0 regressions**. Re-swept `compute.*`, confirmed unchanged (679/6/60,775). `ninja check-feme`: 3,203/3,206 Passed, 3 Unsupported, 0 Failed.
+11. Committed in 4 pieces: (a) the core fix, (b) the new/updated tests, (c) `Roadmap.md` (struck through L124(g), added L124(i) breaking down the remaining 513 fails by family), (d) `VulkanCTSReport.md`. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed — internal layout-correctness fix, not a new feature/extension.
+12. Cleaned up all `/tmp/l124g_*` scratch files.
+
+## Why the diagnosis took two rounds of debug instrumentation (not just one)
+
+The first diagnostic (in the type-conversion loop) confirmed the fix's *own* logic was correct in isolation — it would be easy to stop there and conclude "the fix works, something downstream must be broken in a way I can't see." The second diagnostic (in the pattern that actually consumes the converted type) was what found the real blocker: a *different* function (`getBufferBlockElement`) gating whether the consuming pattern (`RowMajorMatrixStorePattern`) even attempts to look at the converted type at all. **Two independently-buggy functions were masking each other**: fixing only the first (type conversion) was necessary but silently insufficient, and no amount of re-reading the first fix's own code would have revealed that — only tracing the actual data flow with instrumentation at the point of consumption did.
+
+## Next steps
+
+1. **L124(i)** (~half a day+ to scope a first repro, unknown to fix): `ssbo.*`'s remaining 513 fails, re-bucketed by family: `3_level_unsized_array` (87), `3_level_array` (87), `2_level_array` (87), `instance_array_basic_type` (84), `random` (68), `unsized_nested_struct_array` (24), plus 4 `unsized_array_length.*` singletions. L124(g)'s fix (single fixed-size array-of-matrices member) didn't close these — likely a related but distinct gap in the same array-wrapper-recognition/physical-substitution machinery, for a member that is an array-of-arrays, an array of structs each containing a matrix, or the `rtarray` analogue of the same nesting. Start with one repro from the largest bucket (`3_level_unsized_array`/`3_level_array`/`2_level_array`, 87 each) and reduce with `FEME_DUMP_IR=1`.
+2. **L124(f)** (~half a day, needs its own root-cause pass first): `spirv.AccessChain` into a `RowMajor`-decorated matrix nested inside a runtime array fails legalization (36 cases) — `ColMajor` in the same position is fine.
+3. **L124(a)** (~half a day): `read_unbound_ssbo` — design already scoped in a prior session, see `Roadmap.md`'s L124(a) row.
+4. **L124(b)/(c)** (~half a day+ each): `remove_global_load_pass` (new `spirv.GlobalVariable` initializer-attribute) and `undefined_values` (new `spirv.CopyLogical` op) — both real dialect additions.
+5. **L124(d)/L124(h)/L125/L126/L116(f)** all remain untouched, standing fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, 4 new commits this session (core fix, test+CHECK update, Roadmap update, CTSReport update) plus this entry's own commit = 5 total.
+- `ninja check-feme`: 3,203/3,206 Passed, 3 Unsupported, 0 Failed (was 3,202/3,205 — +1 Pass from this session's new lit test).
+- `ssbo.*` baseline for next session: **2,729 Pass / 513 Fail / 8,983 NotSupported** (of 12,225) — up from 2,591/651/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) — unchanged, confirmed by a full re-sweep this session.
+- No scratch files left in `/tmp` from this session.
