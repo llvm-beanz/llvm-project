@@ -3993,18 +3993,20 @@ mlir::LogicalResult rewriteBlockAccess(
           Rewriter.replaceOp(Op, ColumnPtr);
           return mlir::success();
         }
-        // The RowMajor deferral below only works for the direct
-        // (`cbuffer`/`ConstantBuffer<T>`, non-wrapper) shape:
-        // MatrixColumnLoadPattern/StorePattern's own getMatrixColumnAccess
-        // helper only recognizes that shape (see its own comment), so a
-        // wrapper-shape RowMajor column-select falls through to the
-        // decline below instead of deferring to a pattern that would
-        // never actually match it -- silently leaving a wrong,
-        // unresolved address is worse than declining.
-        if (!Element.HasWrapper) {
-          Rewriter.replaceOp(Op, ElementPtr);
-          return mlir::success();
-        }
+        // Defer to MatrixColumnLoadPattern/MatrixColumnStorePattern,
+        // which re-derive this same shape from the original
+        // AccessChainOp via getMatrixColumnAccess to perform the real
+        // scattered-row gather/scatter a RowMajor column needs.
+        // (Roadmap L124(f)) getMatrixColumnAccess now recognizes this
+        // wrapper-array-wraps-matrix-directly shape too (via
+        // getWrapperArrayMatrixColumnAccess), not just the direct
+        // (`cbuffer`/`ConstantBuffer<T>`, non-wrapper) shape it originally
+        // only supported -- ElementPtr already points at the matrix's own
+        // base address regardless of HasWrapper or however many array
+        // levels were peeled to reach SelectedType above, so no further
+        // distinction is needed here.
+        Rewriter.replaceOp(Op, ElementPtr);
+        return mlir::success();
       }
       if (Layout && AllIndices.size() == NextIndexPos + 2) {
         auto MatrixSpirvTy = mlir::cast<mlir::spirv::MatrixType>(SelectedType);
@@ -9973,11 +9975,61 @@ getMatrixColumnAccessShape(const BlockElement &Element, unsigned Selector) {
   return std::nullopt;
 }
 
+/// Resolves the L124(f) shape: `Element.Content`, peeled through however
+/// many further array levels (zero or more -- `single_basic_array`'s own
+/// one level, `2_level_array`'s/`3_level_array`'s/
+/// `3_level_unsized_array`'s own two/three), is directly a `MatrixType`,
+/// with no intervening struct at any level (a plain GLSL
+/// `buffer Block { mat2 matrices[3]; }`/`mat2 matrices[3][2];`, unlike
+/// getMatrixColumnAccessShape's own array-of-*struct* shape). The
+/// `RowMajor`/`MatrixStride` decorations describing it are always on the
+/// wrapper struct's own sole member (index 0 of \p BlockStruct, the
+/// pointee this access chain's base pointer points to) -- never on any
+/// individual array level or the matrix itself -- exactly the
+/// `MatrixDecorationMemberIndex == 0` convention rewriteBlockAccess's own
+/// nesting-depth peel (roadmap L124(j)) already established for this same
+/// shape's whole/scalar-element accesses; this only extends it to the
+/// column-select case those two didn't need `getMatrixColumnAccess`'s own
+/// scattered-row gather for. Returns `std::nullopt` if the fully-peeled
+/// type isn't a matrix, if it is but a different number of indices remain
+/// than exactly one (the column selector), or if \p BlockStruct's member 0
+/// has no `RowMajor` `MatrixStride` decoration.
+std::optional<MatrixColumnAccess>
+getWrapperArrayMatrixColumnAccess(mlir::spirv::StructType BlockStruct,
+                                  const BlockElement &Element,
+                                  unsigned Selector,
+                                  mlir::spirv::AccessChainOp Op) {
+  mlir::Type PeekedType = Element.Content;
+  unsigned PeekedPos = Selector;
+  while (PeekedPos < Op.getIndices().size()) {
+    mlir::Type Next;
+    if (auto Array = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(PeekedType))
+      Next = Array.getElementType();
+    else if (auto FixedArray =
+                 mlir::dyn_cast<mlir::spirv::ArrayType>(PeekedType))
+      Next = FixedArray.getElementType();
+    else
+      break;
+    PeekedType = Next;
+    ++PeekedPos;
+  }
+  auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(PeekedType);
+  if (!MatrixTy || Op.getIndices().size() != PeekedPos + 1)
+    return std::nullopt;
+  std::optional<MatrixMemberLayout> Layout =
+      getMatrixMemberLayout(BlockStruct, /*Index=*/0);
+  if (!Layout || !Layout->IsRowMajor)
+    return std::nullopt;
+  return MatrixColumnAccess{MatrixTy, *Layout, Op.getIndices()[PeekedPos]};
+}
+
 /// Returns \p Op's own MatrixColumnAccess facts if it matches either shape
-/// getMatrixColumnAccessShape resolves, or `std::nullopt` otherwise (not a
-/// block access, not exactly a member-plus-column-index AccessChain past
-/// whichever shape's own member-selector position, the member isn't a
-/// matrix, or it isn't `RowMajor`).
+/// getMatrixColumnAccessShape resolves, the L124(f) array-wraps-matrix-
+/// directly shape getWrapperArrayMatrixColumnAccess resolves, or
+/// `std::nullopt` otherwise (not a block access, not exactly a
+/// member-plus-column-index AccessChain past whichever shape's own
+/// member-selector position, the member isn't a matrix, or it isn't
+/// `RowMajor`).
 std::optional<MatrixColumnAccess>
 getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
   auto PointerType =
@@ -9990,6 +10042,12 @@ getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
   if (!Element)
     return std::nullopt;
   unsigned Selector = Element->HasWrapper ? 1 : 0;
+  auto BlockStruct =
+      mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+  if (std::optional<MatrixColumnAccess> WrapperArrayAccess =
+          getWrapperArrayMatrixColumnAccess(BlockStruct, *Element, Selector,
+                                            Op))
+    return WrapperArrayAccess;
   std::optional<std::pair<mlir::spirv::StructType, unsigned>> Shape =
       getMatrixColumnAccessShape(*Element, Selector);
   if (!Shape)
