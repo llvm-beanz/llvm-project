@@ -3557,3 +3557,93 @@ all -- likely the single highest-value item in the whole L124 breakdown,
 plausibly a systemic std140/std430 matrix layout/stride bug analogous in
 shape to L123's own vec3-stride fix, but for matrices. See `agent_thoughts.md`
 for the full narrative and next steps.
+
+## Roadmap L124(e) (closed this session): `ssbo.*`'s missing-runtime-symbol bucket fixed as a poison-padding-store elision, not new runtime variants
+
+Started this session by picking up L124(e), the previous session's own
+largest scoped `ssbo.*` bucket (274 of 905 `Fail`s, all hitting
+`JIT session error: Symbols not found: [ feme.cpu.resource.store.raw.i8 ]`).
+The prior session's own scoping assumed this needed brand-new
+`i8`/`v2i8`/`v3i8`/`v4i8` raw-store runtime-function variants (mirroring the
+existing `i16` variant's shape) plus their JIT-symbol registration.
+
+Reproducing `dEQP-VK.ssbo.layout.single_basic_type.std140.
+column_major_highp_mat2` with `FEME_DUMP_IR=1` showed every failing
+`store.raw.i8` call in the dumped IR stores a literal `poison` operand, one
+call per byte, across 8 consecutive bytes between a `mat2`'s two real
+4-byte columns -- exactly std140's own per-column vec4 padding. Tracing
+this to `layOutStructIfOffsetsMatch` (`SPIRVToLLVMPatterns.cpp`) confirmed
+it inserts a synthetic `[N x i8]` gap array member wherever a std140/std430
+struct/matrix needs interior alignment padding -- a member no SPIR-V-level
+composite construction ever assigns a real value to. `lowerRawStore`
+(`SPIRVResourceLowering.cpp`)'s generic per-field/per-element decomposition
+had no awareness of "padding vs. real data" and recursed all the way into
+each gap byte, emitting a genuine runtime call for it regardless.
+
+Confirmed via the mirror-image LOAD path in the same dumped IR that the
+read side does the identical per-byte decomposition (16 `load.raw.i8`
+calls for the same 16 padding bytes) and does not crash today only because
+`feme.cpu.resource.load.raw.i8` already happens to exist -- meaning the
+read side already silently tolerates this same wasteful pattern.
+
+Concluded the minimal, correct fix is not new runtime variants at all, but
+teaching `lowerRawStore` to recognize a poison-valued aggregate subtree and
+skip storing it entirely -- writing an unspecified byte pattern into
+padding no SPIR-V-visible load can ever observe is a pure no-op, and no
+real SPIR-V-level value production could ever legitimately produce a
+literal `poison`/`undef` operand at this call site. Since a real matrix
+value's gap member is usually reached via an `extractvalue` over an
+as-yet-unfolded `insertvalue` chain (not yet a literal `poison` constant at
+this pass's own point in the pipeline, confirmed by a first attempt at this
+fix that only checked `isa<UndefValue>` on the aggregate/leaf directly and
+found 0 elision in a hand-written unit test until a later `ninja
+check-feme`-style full-pipeline InstCombine run would have folded it),
+`lowerRawStore` now uses `llvm::FindInsertedValue` (the same insertvalue-
+chain-walking utility InstCombine's own peephole uses) to see through that
+chain immediately, rather than depending on a separate, later simplification
+pass to fold it first.
+
+New unit test: `SPIRVResourceLoweringTest.
+SkipsRawStoreOfPoisonAlignmentGapMember`, constructing a packed
+`<{ [2 x float], [8 x i8] }>`-shaped store value (the same shape the real
+`mat2`/std140 repro produces) with only the real `[2 x float]` field
+populated via `insertvalue`, confirming exactly 2 `store.raw.f32` calls are
+emitted and 0 `store.raw.i8` calls.
+
+A full `ssbo.*` re-sweep (12,225 cases):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 2,337  | 2,591 |
+| Fail          | 905    | 651   |
+| NotSupported  | 8,983  | 8,983 |
+
+**+254 Pass, 0 regressions.** A full `compute.*` re-sweep confirmed no
+change (679/6/60,775, as expected -- this bug was `ssbo.*`-only, since
+`compute.*`'s own remaining fails are the unrelated L124(a)-(d) gaps).
+`ninja check-feme`: 3,202/3,205 Passed, 3 pre-existing Unsupported, 0
+Failed (+1 Passed from this session's own new unit test; 0 regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- this is an internal codegen-efficiency/correctness fix on an
+already-supported storage-buffer surface (std140/std430 layout was already
+modeled; this only fixes a wasteful/crashing padding-byte round-trip), not
+a new Vulkan feature or extension.
+
+`ssbo.*`'s remaining 651 `Fail`s were re-bucketed after this fix (L124(e)
+only removed missing-symbol crashes, not any wrong-result cases, so
+L124(f)/(g)/(h)'s own bucket counts shift only by whichever cases happened
+to double-fail on both a missing symbol and something else -- none did, so
+L124(f)/(g)/(h)'s buckets are unchanged in absolute count, just a larger
+share of the new, smaller 651 total):
+
+| Bucket | Count | Roadmap row |
+|--------|-------|-------------|
+| `spirv.AccessChain` into a `RowMajor` matrix in a runtime array fails legalization | 36 | L124(f) |
+| Wrong numeric result (not a crash/legalization failure) | ~572 | L124(g) |
+| Unclassified / `unsized_array_length.*` | ~23 | L124(h) |
+
+555 of the 651 (85%) are still matrix-typed cases by name, mostly
+`row_major`. L124(g)'s 572-case wrong-numeric-result bucket remains the
+single largest, still-unstarted item in the whole `ssbo.*` breakdown. See
+`agent_thoughts.md` for the full narrative and next steps.
