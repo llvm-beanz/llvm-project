@@ -55,16 +55,39 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
+## State for next session
+
+- Working tree clean, HEAD at `325d7d79b0c3` (5 commits this session:
+  Fix 1, Fix 2+3, Roadmap, VulkanCTSReport, and this file next).
+- `ninja check-feme`: 3,210/3,213 Passed, 3 Unsupported, 0 Failed.
+- `ubo.random.*`: 607 Pass / 0 Fail / 1,643 NotSupported.
+- `ssbo.*`: 3,195 Pass / 47 Fail / 8,983 NotSupported (the 47 are a
+  different, not-yet-triaged bucket -- not L124(o), not investigated
+  this session).
+- `compute.pipeline.builtin_var.*`: 11/11 Pass.
+- New, not-yet-triaged: L124(p), `std140_both` assertion crash, blocks a
+  full `ubo.*` sweep. Confirmed pre-existing, confirmed unrelated to
+  this session's changes.
+- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
+  place, warm/incremental. `/tmp/ctsrun` (this session's scratch QPA
+  logs) left in place too -- not referenced by anything committed.
+
 ## Suggested next steps
 
 1. **(~5 min)** Delete `/tmp/ctsrun` if a future session doesn't need
-   this session's raw QPA logs (its own scratch, not referenced by
-   anything committed).
-2. Resume L124(o) (`getMatrixWholeAccess` non-wrapper-branch nested-struct
-   walk + `getTightNestedStructType`/`getTightMatrixType` widening) --
-   still the standing next real Vulkan-correctness work; see the prior
-   session's heading above in this same file for the fully scoped
-   6-item breakdown. Nothing in this merge session changes that scoping.
-3. If a future merge-main request lands again, reuse this session's build
-   directories rather than reconfiguring from scratch -- `ninja
-   check-feme` and `ninja deqp-vk` are both incremental once configured.
+   this session's raw QPA logs.
+2. Triage L124(p) (`std140_both` assertion crash) -- start with
+   `gdb -batch -ex run -ex bt --args ./deqp-vk -n
+   dEQP-VK.ubo.single_struct.per_block_buffer.std140_both ...` from
+   `/tmp/ctsrun` (deqp-vk binary + `vulkan/` data dir already staged
+   there) to get the crashing struct shape, then build a minimal
+   `feme-opt`-only repro the same way this session did for the Fix-3
+   regression.
+3. Re-run a full `ssbo.*` sweep's own 47 remaining fails with fresh eyes
+   -- not yet individually re-triaged this session (only confirmed the
+   aggregate count matches the expected -8 from this session's own
+   fix); likely several distinct small bugs, same pattern as L124(i)/(l)
+   before it.
+4. Once `ubo.*` is unblocked (after L124(p)), run the full sweep (not
+   just `ubo.random.*`) for completeness -- L124(o)'s own fix only got
+   spot-verified against the `random` subset this session.
