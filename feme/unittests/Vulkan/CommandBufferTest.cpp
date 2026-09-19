@@ -87,6 +87,54 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, GroupNonUniform]
 }
 )mlir";
 
+/// (roadmap L106) Writes `LocalInvocationId` (always `(0, 0, 0)` since the
+/// `LocalSizeId` spec constants' *default* values are all `1`) into
+/// `out[idx]`, where `idx` is `WorkgroupId` linearized against a fixed
+/// `(2, 7, 3)` group count -- reproduces `dEQP-VK.compute.pipeline.
+/// builtin_var.local_invocation_id`'s own shape exactly: a `LocalSizeId`
+/// (not a literal `LocalSize`) execution mode with unoverridden spec
+/// constants, since glslang emits both a literal `local_size_x = 1` *and*
+/// a `local_size_x_id = 0` for this family (see genBuiltinVarSource's
+/// "force it to be specialized" comment) -- merging into a `LocalSizeId`
+/// execution mode whose spec constants simply default to the literal
+/// value when the pipeline never overrides them.
+const char *kLocalSizeOneBuiltinVarShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.SpecConstant @wgx = 1 : i32
+  spirv.SpecConstant @wgy = 1 : i32
+  spirv.SpecConstant @wgz = 1 : i32
+  spirv.GlobalVariable @lid built_in("LocalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
+  spirv.GlobalVariable @gid built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
+  spirv.GlobalVariable @stride bind(0, 0) : !spirv.ptr<!spirv.struct<(vector<2xi32> [0]), Block>, Uniform>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<vector<3xi32>, stride=16> [0]), Block>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %lidp = spirv.mlir.addressof @lid : !spirv.ptr<vector<3xi32>, Input>
+    %lidv = spirv.Load "Input" %lidp : vector<3xi32>
+    %gidp = spirv.mlir.addressof @gid : !spirv.ptr<vector<3xi32>, Input>
+    %gidv = spirv.Load "Input" %gidp : vector<3xi32>
+    %gx = spirv.CompositeExtract %gidv[0 : i32] : vector<3xi32>
+    %gy = spirv.CompositeExtract %gidv[1 : i32] : vector<3xi32>
+    %gz = spirv.CompositeExtract %gidv[2 : i32] : vector<3xi32>
+    %c0 = spirv.Constant 0 : i32
+    %stridep = spirv.mlir.addressof @stride : !spirv.ptr<!spirv.struct<(vector<2xi32> [0]), Block>, Uniform>
+    %strideac = spirv.AccessChain %stridep[%c0] : !spirv.ptr<!spirv.struct<(vector<2xi32> [0]), Block>, Uniform>, i32 -> !spirv.ptr<vector<2xi32>, Uniform>
+    %stridev = spirv.Load "Uniform" %strideac : vector<2xi32>
+    %sx = spirv.CompositeExtract %stridev[0 : i32] : vector<2xi32>
+    %sy = spirv.CompositeExtract %stridev[1 : i32] : vector<2xi32>
+    %t1 = spirv.IMul %sx, %gz : i32
+    %t2 = spirv.IMul %sy, %gy : i32
+    %t3 = spirv.IAdd %t1, %t2 : i32
+    %idx = spirv.IAdd %t3, %gx : i32
+    %outp = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<vector<3xi32>, stride=16> [0]), Block>, StorageBuffer>
+    %ac = spirv.AccessChain %outp[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<vector<3xi32>, stride=16> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<vector<3xi32>, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac, %lidv : vector<3xi32>
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @lid, @gid, @stride, @out
+  spirv.ExecutionModeId @main "LocalSizeId" @wgx, @wgy, @wgz
+}
+)mlir";
+
 /// Reads `in[gid.x]`, adds one, and writes the result to `out[gid.x]` --
 /// two flat (non-aggregate) `i32` `StorageBuffer` bindings in one
 /// descriptor set, matching V2's own "run a Vulkan compute shader that
@@ -1249,6 +1297,163 @@ TEST_F(CommandBufferTest, SubgroupBuiltinsWriteThroughStorageBuffer) {
   vkDestroyPipeline(Device, SubgroupPipeline, nullptr);
   vkDestroyShaderModule(Device, SubgroupModule, nullptr);
   vkDestroyPipelineLayout(Device, SubgroupLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+}
+
+/// (roadmap L106) Reproduces `dEQP-VK.compute.pipeline.builtin_var.
+/// local_invocation_id`'s failure without CTS: `LocalSize 1, 1, 1` means
+/// every workgroup has exactly one invocation, so `LocalInvocationId` must
+/// be `(0, 0, 0)` for every one of the 42 (`2x7x3`) dispatched workgroups.
+TEST_F(CommandBufferTest, LocalSizeOneManyWorkgroupsReadsCorrectBuiltins) {
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  Bindings[0].descriptorCount = 1;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[1].descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 2;
+  SetLayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout PLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &PLayout),
+            VK_SUCCESS);
+
+  std::vector<uint32_t> Words = assembleSPIRV(kLocalSizeOneBuiltinVarShader);
+  ASSERT_FALSE(Words.empty());
+
+  VkShaderModuleCreateInfo ShaderInfo{};
+  ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+  ShaderInfo.pCode = Words.data();
+  VkShaderModule ShaderMod = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &ShaderMod),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo PipelineInfo{};
+  PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  PipelineInfo.stage.module = ShaderMod;
+  PipelineInfo.stage.pName = "main";
+  PipelineInfo.layout = PLayout;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                     nullptr, &Pipe),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSizes[2] = {
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+  };
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 2;
+  PoolInfo.pPoolSizes = PoolSizes;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+  // `Stride` uniform buffer: (u_stride.x, u_stride.y) = (globalSize.x *
+  // globalSize.y, globalSize.x) = (2 * 7, 2) = (14, 2), the same
+  // `vktComputeShaderBuiltinVarTests.cpp` formula the real CTS test uses.
+  HostBuffer Stride;
+  VkBufferCreateInfo StrideBufInfo{};
+  StrideBufInfo.size = 8;
+  StrideBufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+  ASSERT_EQ(vkCreateBuffer(Device, &StrideBufInfo, nullptr, &Stride.Buf),
+            VK_SUCCESS);
+  VkMemoryAllocateInfo StrideAllocInfo{};
+  StrideAllocInfo.allocationSize = 8;
+  StrideAllocInfo.memoryTypeIndex = 0;
+  ASSERT_EQ(
+      vkAllocateMemory(Device, &StrideAllocInfo, nullptr, &Stride.Memory),
+      VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Stride.Buf, Stride.Memory, 0),
+            VK_SUCCESS);
+  ASSERT_EQ(
+      vkMapMemory(Device, Stride.Memory, 0, VK_WHOLE_SIZE, 0, &Stride.Data),
+      VK_SUCCESS);
+  uint32_t StrideValues[2] = {14, 2};
+  std::memcpy(Stride.Data, StrideValues, sizeof(StrideValues));
+
+  // 42 workgroups (2 x 7 x 3), each a vector<4xi32> (16 bytes) slot.
+  constexpr uint32_t NumGroups = 42;
+  constexpr uint32_t BufSize = NumGroups * 16;
+  HostBuffer Out;
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = BufSize;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Out.Buf),
+            VK_SUCCESS);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = BufSize;
+  AllocInfo.memoryTypeIndex = 0;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Out.Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Out.Buf, Out.Memory, 0), VK_SUCCESS);
+  ASSERT_EQ(
+      vkMapMemory(Device, Out.Memory, 0, VK_WHOLE_SIZE, 0, &Out.Data),
+      VK_SUCCESS);
+  // Poison the buffer so an un-written slot is easy to distinguish from a
+  // wrongly-computed one.
+  std::memset(Out.Data, 0xCD, BufSize);
+
+  VkDescriptorBufferInfo StrideInfo{Stride.Buf, 0, 8};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, BufSize};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  Writes[0].pBufferInfo = &StrideInfo;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[1].pBufferInfo = &OutInfo;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipe);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, PLayout, 0,
+                          1, &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 2, 7, 3);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  for (uint32_t I = 0; I != NumGroups; ++I) {
+    uint32_t Result[4];
+    std::memcpy(Result, static_cast<uint8_t *>(Out.Data) + I * 16,
+               sizeof(Result));
+    EXPECT_EQ(Result[0], 0u) << "workgroup slot " << I;
+    EXPECT_EQ(Result[1], 0u) << "workgroup slot " << I;
+    EXPECT_EQ(Result[2], 0u) << "workgroup slot " << I;
+  }
+
+  vkDestroyBuffer(Device, Stride.Buf, nullptr);
+  vkFreeMemory(Device, Stride.Memory, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, ShaderMod, nullptr);
+  vkDestroyPipelineLayout(Device, PLayout, nullptr);
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
