@@ -4802,3 +4802,100 @@ feature/extension surface, so
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Session: L124(s) fixed -- non-wrapper array-of-struct matrix access, corrected a prior methodology false positive, closes 6 of `ssbo.*`'s remaining 10; residual 4 re-scoped as L124(t)
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep
+deviceName` at session start, per standing instructions.
+
+**Corrected a methodology false positive from the prior session**: the
+prior session's own "type-level gap" finding (that
+`convertOffsetStructTypeIgnoringDecorations`/
+`convertArrayTypeIgnoringDecorations` do not widen a matrix nested
+inside a non-wrapper array-of-struct member's own type) was based on
+testing with the *wrong* `feme-opt` pass flag
+(`--convert-spirv-to-llvm`, an upstream MLIR generic pass that does not
+run FeMe's own registered patterns, instead of the real
+`--feme-convert-spirv-to-llvm`). Re-testing the same minimal repro with
+the correct flag showed the struct type converts successfully and is
+**already correctly widened** -- there is no type-level gap. The real
+gap was at the access-pattern level: the store/load at the correctly-
+widened GEP still used the plain, unpadded logical type.
+
+Root-caused to `walkStructMembersToMatrix`'s array-nesting-peel loop
+(shared by `getMatrixWholeAccess`'s non-wrapper and `HasWrapper`
+branches, roadmap L124(o)/(q)/(r)) only recognizing a peeled array's
+inner type being a bare `MatrixType`, with no case for the inner type
+being a `StructType` -- i.e. a non-wrapper block member that is a
+direct fixed-size array of *structs*, each containing a matrix (e.g.
+`struct { ...; struct { matCxR mA; vecN other; } j[N]; }`'s own
+`j[i].mA`), found via `dEQP-VK.ssbo.layout.random.all_shared_buffer.44`
+and `.nested_structs_arrays.14`. Fixed by extending the peel loop's
+terminal case: when the fully-peeled inner type is a `StructType`,
+consume the array-index selectors already walked and continue the same
+struct-member search from that inner struct, rather than declining.
+
+Also discovered a **second methodology gap** while verifying: rebuilding
+`feme-opt`/`feme` alone does not update `libfeme_vulkan.so` (the actual
+Vulkan ICD loaded via `VK_DRIVER_FILES`), which is a separate build
+target -- an initial round of real-CTS verification against the stale
+ICD showed all 3 targeted tests still failing, a false negative. Running
+`ninja libfeme_vulkan.so` explicitly (a relink only, the object file was
+already up to date) and re-testing confirmed the fix is real.
+
+New `spirv-to-llvm-matrix-rowmajor-nonwrapper-array-struct-member.mlir`
+regression test. `ninja check-feme`: **3,214/3,217 Passed, 3
+Unsupported, 0 Failed** (+1 from the new test, 0 regressions).
+
+Full Vulkan CTS re-sweep after the fix:
+
+- `dEQP-VK.ssbo.layout.random.all_shared_buffer.44`,
+  `.nested_structs.12`, `.nested_structs_arrays.14`: **all now
+  individually Pass** (previously "Result comparison failed").
+- `ssbo.*` (12,225 cases): **3,238 Pass / 4 Fail / 8,983 NotSupported**
+  -- was 3,232/10/8,983 before this session's fix: **+6 Pass** (3
+  directly confirmed, plus 3 collateral fixes from the same root cause
+  among the prior session's six-strong unexplained `ac_numPassed`
+  bucket), 0 regressions.
+- `ubo.random.*` (2,250 cases): **607 Pass / 0 Fail / 1,643 NotSupported**
+  -- unchanged, confirmed by a re-sweep, no regression.
+
+**Remaining 4 `ssbo.*` fails, re-scoped as roadmap L124(t)**:
+
+1. `all_per_block_buffers.20`: `vk.createComputePipelines` fails with
+   `VK_ERROR_INITIALIZATION_FAILED` -- unchanged from the prior session,
+   not investigated further this session.
+2. `all_shared_buffer.13` ("Counter value incorrect") and
+   `nested_structs_instance_arrays.8` ("Result comparison and counter
+   values are incorrect") -- the residual of the prior session's
+   six-strong unexplained `ac_numPassed` bucket after this session's fix
+   collaterally closed the other four; still not decoded.
+3. `all_shared_buffer.41` ("Result comparison failed") -- investigated
+   this session in depth. Initially suspected to be a distinct
+   wrapper-content-type stride mismatch (a non-square `mat4x3` `RowMajor`
+   matrix reached through a sole-fixed-array-member wrapper shape, whose
+   content type is computed via a decoration-blind
+   `convertArrayTypeIgnoringDecorations` path). However, pulling the
+   real failing test's own SPIR-V shape via
+   `--deqp-log-decompiled-spirv=enable` showed the block struct has 4
+   members (not 1), so it is **not** actually the wrapper shape at all
+   -- it is an ordinary non-wrapper block member, going through the
+   already-decoration-aware `convertOffsetStructTypeIgnoringDecorations`
+   path instead. A faithful minimal `feme-opt` repro mirroring the real
+   4-member struct layout converts correctly: the struct's own physical
+   layout, the widened matrix member, and the GEP addressing all look
+   correct. **The true root cause remains unidentified** -- likely a
+   runtime/JIT-level bug (untested past `feme-opt`'s own IR output) or
+   an interaction with a sibling struct member's own layout
+   substitution, not a matrix-decoration gap in the conversion patterns
+   themselves.
+
+FeMe source revision under test: this session's own commits (see
+`agent_thoughts.md` for the exact commit list). No feature or extension
+inventory changes: this session's fix is an internal SPIR-V-to-LLVM
+matrix-access recognition correctness fix, not new Vulkan
+feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
