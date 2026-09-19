@@ -93309,3 +93309,127 @@ distinct from this session's own fix.
    (0 Fail of 13,240), L124(r) closing this last small bucket would put
    both the `ubo.*` and `ssbo.*` CTS families at a **fully clean** state
    -- worth prioritizing over any other open roadmap item next session.
+
+# Session: L124(r) closed -- wrapper-array-of-struct matrix access, ssbo.* down to 10 fails spanning 3 distinct classes
+
+**Start here next session**: nothing broken. `check-feme` green,
+`ssbo.*` at 10 fails (down from 12). Next real work is **L124(s)** (new,
+see below) -- the remaining 10 fails, confirmed to be 3 distinct bug
+classes, not one shared root cause. Time-box the type-level sub-class;
+it's bigger than any prior L124 fix.
+
+## What happened, in order
+
+1. Confirmed device (`FeMe CPU Vulkan Device`) as required at session
+   start.
+2. Re-ran `dEQP-VK.ssbo.layout.random.nested_structs.12` (the prior
+   session's own spot-check) with `--deqp-log-decompiled-spirv=enable`
+   -- confirmed still "Result comparison failed", pulled its real
+   SPIR-V shape: a `StructuredBuffer<S>`-style wrapper block whose sole
+   member is a dynamically-indexed array, and `S` itself is a struct
+   with two direct matrix members either side of a non-matrix member.
+3. Root-caused via code reading: `getMatrixWholeAccess`'s `HasWrapper`
+   branch peels array-nesting levels then requires the inner type to be
+   directly a `MatrixType` -- no case existed for the inner type being a
+   `StructType` containing matrices. Declined unconditionally, silently
+   falling back to the unpadded generic conversion.
+4. Built a minimal `feme-opt` repro mirroring the real shape. Confirmed
+   the bug and the fix.
+5. Fixed by extracting the non-wrapper branch's existing nested-struct-
+   member-walk loop into a shared helper, `walkStructMembersToMatrix`,
+   and calling it from the `HasWrapper` branch too once the peeled inner
+   type turns out to be a struct. Non-wrapper branch's own call site is
+   a pure refactor, no behavior change.
+6. Rebuilt `feme-opt`, confirmed fix on the repro. Added a permanent lit
+   test, confirmed it fails pre-fix (`git stash`) and passes post-fix.
+7. `ninja check-feme`: 3,213/3,216 Passed, 3 Unsupported, 0 Failed (+1
+   new test, 0 regressions).
+8. Re-ran the real CTS repro: **now Passes**. Full `ssbo.*` re-sweep:
+   **3,232 Pass / 10 Fail / 8,983 NotSupported** (was 3,230/12/8,983) --
+   **+2 Pass**, 0 regressions. Smaller win than L124(q)'s own 35 -- this
+   fix closed only 2 of the 12, not the whole bucket.
+9. Sanity-checked `ubo.random.*`: 607/0/1,643, unchanged, 0 regression.
+10. Committed the fix + lit test (`b7fcb31deba3`).
+11. Triaged the remaining 10: pulled the full list from a fresh sweep's
+    own qpa file. Spot-checked `all_per_block_buffers.20`
+    (`vk.createComputePipelines` fails with
+    `VK_ERROR_INITIALIZATION_FAILED` -- a pipeline-creation crash, not a
+    data mismatch) and `all_shared_buffer.44` (mismatch shows the shader
+    output is the exact **transpose** of expected, in a struct shape
+    that is a non-wrapper block member holding a direct array of
+    *structs* containing a matrix -- `struct { ...; struct { matCxR mA;
+    vecN other; } j[N]; }`'s own `j[i].mA`).
+12. Extended `walkStructMembersToMatrix` speculatively to also recurse
+    through a nested-struct array element (mirroring this session's own
+    `HasWrapper`-branch fix) to see if it closed `all_shared_buffer.44`.
+    It did not: the real CTS test still failed the same way after
+    rebuilding.
+13. Built a minimal `feme-opt` repro of that exact shape to isolate
+    whether the access-pattern fix itself was wrong, or something else
+    was going on. Found the **struct type itself fails to legalize**
+    (`spirv.GlobalVariable` conversion failure) independent of any
+    `getMatrixWholeAccess` logic -- meaning
+    `convertOffsetStructTypeIgnoringDecorations`/
+    `convertArrayTypeIgnoringDecorations` don't yet widen a matrix
+    nested inside a non-wrapper array-of-struct member's own *type*.
+    This is a type-level gap, bigger than an access-pattern fix.
+14. Reverted the speculative access-pattern change (unverified, and
+    insufficient on its own) rather than commit unproven code.
+15. Struck L124(r) on the roadmap (1 of 12), filed the remaining 10 as
+    new item L124(s) with all 3 failure classes documented so next
+    session doesn't have to re-discover them.
+16. Committed docs (`a9fa298d0409`: Roadmap + VulkanCTSReport together,
+    since the roadmap strike-through and the CTS report entry describe
+    the same finding), and this file next.
+
+## Why the fix landed smaller than hoped (worth remembering)
+
+Each L124 sub-item in this series has found "one shared bug closing a
+chunk" (L124(l)/(n)/(q)) or, this time, a much smaller 2-of-12 win. The
+remaining 10 are **not** one more shared bug -- they're 3 unrelated
+classes (crash, unexplained assertion, type-level gap). Don't assume
+the next spot-check will find "the" root cause for all 10; each class
+needs its own triage.
+
+## State right now
+
+- Working tree clean before this file's own commit, HEAD at
+  `a9fa298d0409`.
+- `ninja check-feme`: 3,213/3,216 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*`: **3,232 Pass / 10 Fail / 8,983 NotSupported** (of 12,225) --
+  down from 3,230/12/8,983 at session start.
+- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface) -- verified, not just assumed.
+- Build directories left in place, warm/incremental. `/tmp/ctsrun` has
+  this session's own fresh scratch logs plus two abandoned minimal
+  repros (`/tmp/l124s_repro1.mlir`, `/tmp/l124s_repro2.mlir`,
+  `/tmp/l124s_repro3.mlir`) that reproduce the type-legalization gap --
+  worth keeping for next session's own L124(s) type-level investigation
+  rather than deleting.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun`'s CTS-run scratch logs from this
+   session if a future session doesn't need the raw QPA output. Keep
+   `/tmp/l124s_repro3.mlir` (the working minimal repro of the
+   type-legalization gap) -- it saves rebuilding it from scratch.
+2. Start **L124(s)**'s type-level sub-class first (3 of the 10 fails:
+   `all_shared_buffer.{41,44}`, `nested_structs_arrays.14`) --
+   `convertOffsetStructTypeIgnoringDecorations`/
+   `convertArrayTypeIgnoringDecorations` need to widen a matrix nested
+   inside a non-wrapper array-of-struct member's own type. Start from
+   `/tmp/l124s_repro3.mlir`'s own `spirv.GlobalVariable` legalization
+   failure and trace which conversion function declines it.
+3. Then the 6 `ac_numPassed = 0, expected 1` fails
+   (`all_per_block_buffers.47`, `all_shared_buffer.{1,13,17}`,
+   `nested_structs.16`, `nested_structs_instance_arrays.8`) -- not
+   decoded at all yet. Start with `--deqp-log-decompiled-spirv=enable`
+   on one of them the same way every prior L124 triage did.
+4. `all_per_block_buffers.20`'s own `VK_ERROR_INITIALIZATION_FAILED`
+   pipeline-creation crash is its own separate investigation (a
+   compiler crash, not a data mismatch) -- likely needs a debugger
+   attached to the pipeline-creation call, not a CTS-log trace. Lowest
+   priority of the 3 classes since it's a single isolated case.
+5. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
+   -- reuse the existing build directories, no reconfigure needed.
