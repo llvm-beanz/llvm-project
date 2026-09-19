@@ -4600,3 +4600,93 @@ correctness fix, not new Vulkan feature/extension surface, so
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Session: L124(q) fixed -- direct array-of-matrix member misses whole-access reinterpretation, closes 35 of `ssbo.*`'s remaining 47
+
+Triaged and fixed roadmap L124(q) (the 47 `ssbo.*` fails left unchanged
+by the prior session's L124(p) fix, all in `layout.random.*`).
+
+Reproduced `dEQP-VK.ssbo.layout.random.basic_types.18` (fails with
+"Counter value incorrect", not a crash) and pulled its own decompiled
+SPIR-V via `--deqp-log-decompiled-spirv=enable`. Its SSBO struct has a
+`mat2x3` member, `RowMajor`+`MatrixStride=16` (non-natural: a `vec3`
+column's natural size is 12 bytes, padded to 16), wrapped in a
+one-element fixed-size array -- a direct (non-wrapper) block member,
+not the dxc/glslang dynamically-indexed-array wrapper shape.
+
+Root-caused via code reading: `getMatrixWholeAccess`'s non-wrapper
+branch (added for L124(o)) only ever walked through nested *struct*-
+member selects before a final select landing directly on a bare matrix.
+It never expected that final member itself to be a direct array of
+matrices, so this shape's `spirv.AccessChain` (one member-select plus
+one array-index selecting the sole element) was rejected outright by
+that branch, falling back to the generic conversion. The matrix's own
+*type* was already correctly widened (`convertOffsetStructTypeIgnoringDecorations`'s
+array-of-matrix retry tier, roadmap H134), but the whole-matrix
+`spirv.Store`/`spirv.Load` reinterpretation (RowMajor transpose +
+per-row `MatrixStride` padding) that requires never fired -- silently
+storing/loading the plain logical (column-major, unpadded) value
+straight into the already-widened physical (row-major, padded) memory
+layout, corrupting every element past the first.
+
+Fixed by generalizing the non-wrapper branch's terminal case: once a
+struct-member select lands on a member that is directly an array (of
+however many levels) of matrices rather than a bare matrix, require
+exactly that many further array-index selectors before treating the
+access as reaching the whole matrix -- mirroring the `HasWrapper`
+branch's own pre-existing array-nesting peel just above it in the same
+function -- with the physical-layout decorations still read from the
+owning struct's own member (the array itself).
+
+Verified via a minimal `feme-opt`-only repro built directly from the
+real SPIR-V's own struct shape (mirroring `basic_types.18`'s own
+5-member SSBO struct): confirmed to fail (produce a plain,
+un-transposed/un-padded store/load) pre-fix and produce the correctly
+transposed/padded physical-layout IR post-fix. Added as a permanent
+regression test,
+`spirv-to-llvm-matrix-rowmajor-array-member-whole-access.mlir`,
+confirmed to fail pre-fix (via `git stash`) and pass post-fix.
+
+Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache`, incremental (existing build
+directory reused).
+
+```console
+VK_DRIVER_FILES=$PWD/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+  vulkaninfo --summary | grep deviceName
+# => FeMe CPU Vulkan Device
+```
+
+`ninja check-feme`: **3,212 Passed / 3 Unsupported / 0 Failed** (+1 from
+the new lit test, 0 regressions).
+
+Full Vulkan CTS re-sweep after the fix:
+
+- The originally-failing test, `dEQP-VK.ssbo.layout.random.basic_types.18`:
+  **now individually Passes** (previously "Counter value incorrect").
+- `ssbo.*` (12,225 cases): **3,230 Pass / 12 Fail / 8,983 NotSupported**
+  -- was 3,195/47/8,983 before this session's fix: **+35 Pass**, 0
+  regressions. The remaining 12 fails are all still in `layout.random.*`
+  (`all_per_block_buffers` 2, `all_shared_buffer` 5, `nested_structs` 2,
+  `nested_structs_arrays` 2, `nested_structs_instance_arrays` 1) --
+  confirmed distinct from this fix's own repro, re-filed as roadmap
+  L124(r), not yet individually triaged.
+- `ubo.random.*` (2,250 cases): **607 Pass / 0 Fail / 1,643 NotSupported**
+  -- unchanged, confirmed by a re-sweep, no regression (this fix's own
+  code path, `getMatrixWholeAccess`'s non-wrapper branch, is shared by
+  both `ubo.*` and `ssbo.*`, so a targeted re-check was worthwhile even
+  though the fix was found via an `ssbo.*` repro). The full `ubo.*`
+  sweep from the prior session's L124(p) fix was not re-run in full this
+  session (no `Block`/`Uniform`-class-specific code touched by this fix)
+  -- left for a future session's own full-sweep pass if ever needed
+  again.
+
+FeMe source revision under test: `eee82b9b5903` (`[feme] Fix L124(q):
+getMatrixWholeAccess misses direct array-of-matrix member`) and
+`394614650ccf` (roadmap update). No feature or extension inventory
+changes: this session's fix is an internal SPIR-V-to-LLVM matrix-access
+recognition correctness fix, not new Vulkan feature/extension surface,
+so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
