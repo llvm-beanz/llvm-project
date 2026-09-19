@@ -9708,6 +9708,41 @@ public:
   }
 };
 
+/// (Roadmap L124(k)) Peels however many leading `spirv::ArrayType`/
+/// `spirv::RuntimeArrayType` levels wrap \p Type's own pointee before
+/// reaching a `spirv::StructType`, returning the resulting struct-pointee
+/// pointer type and how many levels were peeled. An arrayed block
+/// instance (GLSL `T blocks[N];`, ArrayedBlockAccessChainPattern's own
+/// concern) needs exactly that many leading `spirv.AccessChain` indices
+/// consumed selecting *which* instance, before any of the block's own
+/// ordinary per-member indices apply. getMatrixWholeAccess/
+/// getMatrixColumnAccess below re-derive their own shape directly from
+/// the AccessChain's original (unconverted) base pointer type -- for this
+/// shape that is the array-of-blocks pointer, not the single-block struct
+/// pointer the rest of their own logic assumes, so without this peel they
+/// always silently decline (return `std::nullopt`) for every RowMajor/
+/// non-representable matrix reached through an instance array, falling
+/// back to the generic, physically-wrong (always natural-layout)
+/// conversion instead. Returns `std::nullopt` if \p Type's pointee is not
+/// a (possibly array-of-)struct at all.
+std::optional<std::pair<mlir::spirv::PointerType, unsigned>>
+peelInstanceArrayPointer(mlir::spirv::PointerType Type) {
+  mlir::Type Pointee = Type.getPointeeType();
+  unsigned Depth = 0;
+  while (!mlir::isa<mlir::spirv::StructType>(Pointee)) {
+    if (auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(Pointee))
+      Pointee = Array.getElementType();
+    else if (auto RTArray =
+                 mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Pointee))
+      Pointee = RTArray.getElementType();
+    else
+      return std::nullopt;
+    ++Depth;
+  }
+  return std::make_pair(
+      mlir::spirv::PointerType::get(Pointee, Type.getStorageClass()), Depth);
+}
+
 /// A whole-matrix `spirv.AccessChain` access this file's own physical
 /// layout substitution (getPhysicalMatrixMemberType) can interpret: the
 /// matrix's ordinary (logical, always column-major) MatrixType, and the
@@ -9749,14 +9784,24 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
       mlir::dyn_cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
   if (!PointerType)
     return std::nullopt;
-  std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
+  // (Roadmap L124(k)) An arrayed block instance (`T blocks[N];`) wraps
+  // the per-instance struct in one or more leading array levels; peel
+  // those off first, and require that many extra leading indices
+  // (selecting *which* instance) on top of every check below.
+  std::optional<std::pair<mlir::spirv::PointerType, unsigned>> Peeled =
+      peelInstanceArrayPointer(PointerType);
+  if (!Peeled)
+    return std::nullopt;
+  auto [StructPointerType, InstanceArrayDepth] = *Peeled;
+  std::optional<BlockElement> Element =
+      getBufferBlockElement(StructPointerType);
   if (!Element)
-    Element = getUniformBlockElement(PointerType);
+    Element = getUniformBlockElement(StructPointerType);
   if (!Element)
     return std::nullopt;
 
   auto Struct =
-      mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+      mlir::cast<mlir::spirv::StructType>(StructPointerType.getPointeeType());
   unsigned MemberIndex;
   if (Element->HasWrapper) {
     // The wrapper's own sole member is always index 0; every remaining
@@ -9784,7 +9829,7 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
       ++ArrayNestingDepth;
     }
     if (!mlir::isa<mlir::spirv::MatrixType>(Inner) ||
-        Op.getIndices().size() != 1 + ArrayNestingDepth)
+        Op.getIndices().size() != InstanceArrayDepth + 1 + ArrayNestingDepth)
       return std::nullopt;
     MemberIndex = 0;
   } else {
@@ -9792,10 +9837,10 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
     // `ConstantBuffer<T>` shape all of H124b's real failures hit) --
     // exactly one index (the member selector) reaches a whole matrix,
     // with no room for a further one that would select only part of it.
-    if (Op.getIndices().size() != 1)
+    if (Op.getIndices().size() != InstanceArrayDepth + 1)
       return std::nullopt;
     std::optional<uint64_t> Idx =
-        getConstantMemberIndex(Op.getIndices()[0]);
+        getConstantMemberIndex(Op.getIndices()[InstanceArrayDepth]);
     if (!Idx)
       return std::nullopt;
     MemberIndex = static_cast<unsigned>(*Idx);
@@ -10141,14 +10186,25 @@ getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
       mlir::dyn_cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
   if (!PointerType)
     return std::nullopt;
-  std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
+  // (Roadmap L124(k)) Same arrayed-block-instance peel getMatrixWholeAccess
+  // needed: an instance array's own leading index (selecting which
+  // instance) is consumed before any of the ordinary per-block Selector
+  // logic below, folded into Selector itself so every existing
+  // `Op.getIndices()`-relative check downstream stays correct unchanged.
+  std::optional<std::pair<mlir::spirv::PointerType, unsigned>> Peeled =
+      peelInstanceArrayPointer(PointerType);
+  if (!Peeled)
+    return std::nullopt;
+  auto [StructPointerType, InstanceArrayDepth] = *Peeled;
+  std::optional<BlockElement> Element =
+      getBufferBlockElement(StructPointerType);
   if (!Element)
-    Element = getUniformBlockElement(PointerType);
+    Element = getUniformBlockElement(StructPointerType);
   if (!Element)
     return std::nullopt;
-  unsigned Selector = Element->HasWrapper ? 1 : 0;
+  unsigned Selector = InstanceArrayDepth + (Element->HasWrapper ? 1 : 0);
   auto BlockStruct =
-      mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+      mlir::cast<mlir::spirv::StructType>(StructPointerType.getPointeeType());
   if (std::optional<MatrixColumnAccess> WrapperArrayAccess =
           getWrapperArrayMatrixColumnAccess(BlockStruct, *Element, Selector,
                                             Op))
