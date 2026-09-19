@@ -4106,3 +4106,120 @@ closed except these): `layout.random` (64, L124(l)),
 `layout.unsized_nested_struct_array` (24, L124(l)), and 4
 `unsized_array_length.*` singletons (L124(l)). See `agent_thoughts.md` for
 the full narrative and next steps.
+
+## Roadmap L124(l) (3 of 4 sub-buckets closed this session): legacy-spelled readonly SSBO misclassification + struct-typed runtime-array-element stride padding
+
+Continued L124(l)'s own scope: `random` (64), `unsized_nested_struct_array`
+(24), and 4 `unsized_array_length.*` singletons, the entire remaining
+`ssbo.*` fail set (92 of 12,225) after L124(m).
+
+Started with the 4 singletons (smallest bucket). All 4 failed identically
+at `vkCreateComputePipelines` time (`VK_ERROR_INITIALIZATION_FAILED`).
+Setting `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an opt-in diagnostic env var,
+`feme::vulkan::logCreationFailure`, `feme/lib/Vulkan/Diagnostics.cpp`)
+surfaced the real underlying error: `"unsupported raised operation:
+'llvm.spv.resource.handlefrombinding...' is a register-bound resource
+handle the FeMe CPU target cannot normalize... (an unbounded range...)"`.
+
+Root cause: all 4 cases' shader has a `readonly buffer x { int xs[]; };`
+binding -- a genuine, legitimate storage buffer using the pre-SPIR-V-1.3
+legacy spelling (`Uniform` storage class + `BufferBlock` decoration,
+still what glslang emits by default for a plain GLSL `buffer` block).
+`convertBufferBlockType` (`SPIRVToLLVMPatterns.cpp`) forwarded the
+pointer's own *literal* storage class (`Uniform`, value 2) as the emitted
+`spirv.VulkanBuffer` handle's own storage-class marker. Downstream,
+`classifyVulkanBufferHandle` (`SPIRVResourceLowering.cpp`) disambiguates
+a literal-`Uniform`-class handle as storage-vs-uniform via its
+`Writable` parameter, since a real uniform block is always non-writable
+-- but this is inherently ambiguous for a `readonly buffer` (a
+legitimate, intentionally non-writable storage buffer) using the legacy
+spelling: its `[Uniform, Writable=0]` pair is bit-for-bit identical to a
+genuine uniform block's own. The misclassification treats the buffer's
+runtime-sized array as a std140 *uniform* array, which can never
+legitimately be unbounded, so it is rejected downstream as an
+unsupported "unbounded range" handle.
+
+Fixed at the source rather than patching the ambiguous downstream
+disambiguation (which structurally cannot distinguish the two cases from
+the `Writable` bit alone): `convertBufferBlockType` is the only function
+that emits a `spirv.VulkanBuffer` handle for a storage buffer block,
+already gated by `getBufferBlockElement`'s `isBufferBlockStorage` check,
+which unambiguously recognizes both spellings as "this is a storage
+buffer" -- so it now always emits the canonical `StorageBuffer` (12)
+marker, discarding the pointer's own literal (and, for the legacy
+spelling, misleading) storage class value. Required updating two
+pre-existing tests' CHECK lines (`2` -> `12`) for the same reason
+L124(m)'s own fix did, since this changes every legacy-spelled storage
+buffer's emitted handle spelling, not just the previously-misclassified
+case.
+
+Verified all 4 singleton cases now Pass; confirmed `random`/
+`unsized_nested_struct_array` unaffected (isolated fix).
+
+Continued with `unsized_nested_struct_array` (24 fails) next -- confirmed
+(via `FEME_DUMP_IR=1`) these are runtime miscompiles ("Counter value
+incorrect"), not creation-time failures. Traced one repro
+(`per_block_buffer.std140`)'s emitted LLVM IR byte offsets by hand against
+its own `OpDecorate ArrayStride` (read via `--deqp-log-decompiled-spirv`):
+its trailing `T t[]` member's declared stride is 368 bytes, but the
+second element (`t[1]`) was loaded starting at byte 468 -- exactly `T`'s
+own *unpadded* natural size (356, rounded to nothing) past the first,
+not the declared 368.
+
+Root cause: the `RuntimeArrayType` type conversion discards a runtime
+array's own declared `ArrayStride` unconditionally. This is correct for
+the *wrapper* shape (a storage buffer whose sole member is the runtime
+array itself) -- its element indexing goes through an explicit
+`index * Stride` byte computation instead, reading the handle's own
+third integer parameter (the mechanism roadmap L106 added for a bare
+`vec3` element's own 12-vs-16-byte mismatch). It is *not* correct for a
+runtime array that is instead one member of a directly-converted,
+multi-member outer block struct -- glslang's usual shape for a plain
+GLSL `buffer` block with a trailing unsized array member, e.g. `buffer
+Block { int header; T t[]; };`. That shape classifies as
+`HandleKind::StorageStruct` (`classifyVulkanBufferHandle`), which
+carries no explicit stride at all and addresses every element through
+ordinary `getelementptr` into the array's own converted LLVM element
+type -- so a struct-typed element whose natural (packed) size undershoots
+its declared `ArrayStride` (needing the same "round every array element
+up to a 16-byte multiple" tail padding a bare `vec3` element already
+needs) places every element past the first at the wrong byte offset,
+for both a constant-index access (resolved to a literal byte offset at
+compile time) and a dynamic-index one (resolved via `getelementptr`
+using the element type's own `DataLayout`-derived size) -- both paths
+are downstream of the same converted LLVM element type's own reported
+size.
+
+Fixed by padding the converted element type to its declared
+`ArrayStride` with the pre-existing `padStructToSize` helper whenever it
+is a struct, mirroring exactly what `convertArrayTypeIgnoringDecorations`
+already does for a *fixed*-size array's own identified-struct element.
+`padStructToSize` is a no-op for any non-struct (vector/scalar) element,
+so this does not disturb the wrapper shape's own explicit-third-
+parameter mechanism for a `vec3` element. New test in
+`spirv-to-llvm-glslang-blocks.mlir` (a header field alongside a trailing
+runtime array of an identified struct whose own natural size undershoots
+its declared stride).
+
+Verified all 24 `unsized_nested_struct_array` cases now Pass.
+
+`ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed (no
+regressions from either fix; the two updated CHECK lines and one new
+test case account for the unchanged total test count -- new cases were
+added within existing `RUN`-split files, not new files).
+
+Re-swept `ssbo.*` (12,225 cases): **3,178 Pass / 64 Fail / 8,983
+NotSupported** (was 3,150/92/8,983) -- **+28 Pass, 0 regressions**.
+`compute.*` unchanged (679/6/60,775, confirmed by a full re-sweep).
+
+Remaining `ssbo.*` fails (64 total, all `random`): triaged one repro
+(`dEQP-VK.ssbo.layout.random.all_per_block_buffers.15`) and found a
+related-but-distinct root cause this session's fix does not cover: its
+`blockB` has a trailing `lowp ivec2 d[]` member (a *vector*-typed runtime
+array element, not struct-typed) in the same `HandleKind::StorageStruct`
+shape -- `padStructToSize` is a deliberate no-op for a non-struct
+element, so this vector case is not padded by this session's fix. Broken
+out as roadmap L124(n), since a correct fix needs to avoid disturbing the
+wrapper shape's own existing vec3-handling mechanism (see L124(n)'s own
+roadmap text for the scoping concern) -- not implemented this session.
+See `agent_thoughts.md` for the full narrative and next steps.
