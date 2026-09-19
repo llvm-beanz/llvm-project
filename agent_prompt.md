@@ -1,6 +1,5 @@
 ---
 model: claude-sonnet-5
-resume: 52e661a0-b284-45ee-892f-3073721ca338
 ---
 # Initial Guidelines
 
@@ -83,14 +82,3 @@ Can you continue the work on feme? The last agent's suggested next steps are:
    shares `.41`'s matrix-nesting bug without its own trace.
 6. `L124(a)/(b)/(c)/(d)/L125/L126/L116(f)` all remain untouched, standing
    fallbacks from prior sessions.
-
-## State for next session
-
-- Working tree clean, HEAD at `b8d8983c3639` (2 doc-only commits this
-  session, no code commits -- see "why the wrong turn happened" above).
-- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed
-  (unchanged).
-- `ssbo.*`: **3,187 Pass / 55 Fail / 8,983 NotSupported** (of 12,225) --
-  unchanged from last session.
-- `compute.*`: 679 Pass / 6 Fail / 60,775 NotSupported (unchanged).
-- `/tmp` scratch cleaned up (this session's own; see below).
