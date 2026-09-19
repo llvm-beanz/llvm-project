@@ -2343,6 +2343,19 @@ spirv::Deserializer::processConstantNull(ArrayRef<uint32_t> operands) {
 Attribute spirv::Deserializer::getNullAttrForType(Type type) {
   if (type.isIntOrFloat() || isa<VectorType>(type))
     return opBuilder.getZeroAttr(type);
+  // A `spirv.matrix`'s null value is the same flat, broadcast-element
+  // `DenseElementsAttr` shape `processConstantComposite` builds for one of
+  // its ordinary composite constants (its constituents, each a column
+  // vector, are flattened into one dense attribute matching the matrix's own
+  // `ShapedType` shape) -- `Builder::getZeroAttr` itself only special-cases
+  // `VectorType`/`RankedTensorType`, not `spirv::MatrixType`, so this cannot
+  // simply delegate to it the way the scalar/vector case above does.
+  if (auto matrixType = dyn_cast<spirv::MatrixType>(type)) {
+    Attribute elementAttr = opBuilder.getZeroAttr(matrixType.getElementType());
+    if (!elementAttr)
+      return nullptr;
+    return DenseElementsAttr::get(cast<ShapedType>(matrixType), elementAttr);
+  }
   if (auto tensorType = dyn_cast<TensorArmType>(type)) {
     if (auto element = opBuilder.getZeroAttr(tensorType.getElementType()))
       return DenseElementsAttr::get(tensorType, element);

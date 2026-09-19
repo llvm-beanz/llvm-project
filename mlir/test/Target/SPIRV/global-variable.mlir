@@ -71,9 +71,9 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
 
 // `zero_initializer` (SPV_KHR_zero_initialize_workgroup_memory): round trips
 // through an `OpConstantNull` Initializer operand with no symbol of its own
-// (see `spirv.GlobalVariable`'s own doc comment), for a scalar, an array and
-// a struct pointee -- the three shapes `getNullAttrForType`'s deserializer
-// counterpart builds a null value for.
+// (see `spirv.GlobalVariable`'s own doc comment), for a scalar, an array, a
+// struct, and a matrix pointee -- the four shapes `getNullAttrForType`'s
+// deserializer counterpart builds a null value for.
 spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader], []> {
   // CHECK: spirv.GlobalVariable @scalar zero_initializer : !spirv.ptr<f32, Workgroup>
   spirv.GlobalVariable @scalar zero_initializer : !spirv.ptr<f32, Workgroup>
@@ -81,4 +81,6 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader], []> {
   spirv.GlobalVariable @arr zero_initializer : !spirv.ptr<!spirv.array<4 x i32>, Workgroup>
   // CHECK: spirv.GlobalVariable @st zero_initializer : !spirv.ptr<!spirv.struct<(i32, f32)>, Workgroup>
   spirv.GlobalVariable @st zero_initializer : !spirv.ptr<!spirv.struct<(i32, f32)>, Workgroup>
+  // CHECK: spirv.GlobalVariable @mat zero_initializer : !spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Workgroup>
+  spirv.GlobalVariable @mat zero_initializer : !spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Workgroup>
 }
