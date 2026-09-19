@@ -92336,3 +92336,116 @@ what you intended, not just stare at the reported line.
 - `ssbo.*` baseline for next session: **3,027 Pass / 215 Fail / 8,983 NotSupported** (of 12,225) -- up from 2,865/377/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this session.
 - This session's own `/tmp` scratch files cleaned up (large pile of prior-session leftovers in `/tmp` untouched -- not from this session).
+
+# Session: L124(m) closed (+36 ssbo.* Pass) -- non-square RowMajor matrix through 2+ array levels
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`.
+
+**Picked up prior session's top next step**: L124(m), `2_level_array`/
+`3_level_array`/`3_level_unsized_array`'s own residual 12 fails each (36
+total), left after L124(f)'s column-select fix.
+
+## What happened
+
+1. Reproduced via `deqp-vk`: `2_level_array`/`3_level_array`/
+   `3_level_unsized_array`'s remaining fails were "Result comparison and
+   counter values are incorrect" -- a silent miscompile, not a legalization
+   failure. Every remaining fail used a *non-square* matrix (`mat4x3`,
+   `mat2x3`, etc), unlike the square matrices L124(f)/(i)/(j) had already
+   fixed for the same families.
+2. Root-caused via minimal hand-crafted `.mlir` repros (not the full CTS
+   shader) run through `feme-opt --feme-convert-spirv-to-llvm`: a
+   `RowMajor`+`MatrixStride` non-square matrix reached through 2+ array
+   levels was converted with the WRONG (too-large) LLVM type.
+3. Traced the actual defect: this codebase's own
+   `convertArrayTypeIgnoringDecorations` correctly *declines* when a
+   non-square matrix's natural (vector-padded) LLVM size exceeds the
+   declared `ArrayStride` -- but that decline falls through to MLIR
+   upstream's own `spirv::ArrayType` conversion, which checks the stride
+   against a *different* natural-size formula for matrices (tightly-packed
+   scalar count, not vector-padded). Since that check can still pass even
+   when the two "natural size" definitions disagree, upstream silently
+   built the array around the wrong matrix conversion instead of erroring.
+   This was previously undocumented and easy to miss -- it's a fallback
+   silently disagreeing with the caller it's a fallback *for*.
+4. Fixed by adding a shared helper, `substituteArrayOfMatrixElementType`,
+   that substitutes the correct physical (RowMajor/MatrixStride-aware) type
+   via the pre-existing `getPhysicalMatrixMemberType`/
+   `wrapPhysicalMatrixInArrays` helpers whenever this mismatch is detected.
+   Had to forward-declare those helpers earlier in the file since they were
+   previously only defined after `rewriteBlockAccess`.
+5. Applied the fix at TWO call sites in `rewriteBlockAccess`: the initial
+   `ElementType` computation (whole-matrix access, closes the 2-level
+   cases), and the `NeedsDeepNestingPeel` loop's per-iteration
+   `PeeledElementType` computation (partial/column-select access, closes the
+   3-level cases -- this is a second, independent instance of the identical
+   bug, only found because the 3-level sweep still showed 6 residual fails
+   after the first fix landed).
+6. Verified via minimal repros that the fix produces the correct physical
+   type; confirmed all three target families now show 0 fails via targeted
+   CTS sweeps.
+7. `ninja check-feme` found 1 expected type-spelling change (not a
+   regression): a pre-existing square-matrix test's GEP element type changed
+   spelling (same byte size, same actual load/store types) because the fix
+   now *always* prefers the physical substitution, even for square matrices
+   where old and new types happened to coincide in size. Updated its CHECK
+   line with an explanatory comment.
+8. Added `spirv-to-llvm-matrix-rowmajor-nonsquare-nested-array-block.mlir`
+   for the whole-access fix. **Spent real time (would not recommend
+   repeating) trying to hand-build a synthetic 3-level test for the
+   `NeedsDeepNestingPeel` partial-access fix** -- every attempt (several
+   struct shapes, with/without `EntryPoint`/`ExecutionMode`) failed to
+   legalize with a generic, non-specific MLIR error. A 2-level version of
+   the *identical* shape converted fine and produced the correct physical
+   type. Given the real CTS sweep already showed 0 fails across all
+   `_store_cols`/`_comp_access_store_cols` cases in the 3-level families
+   (exercising exactly this code path), I concluded the synthetic test's
+   failure was a test-construction artifact unrelated to this session's fix,
+   and stopped chasing it rather than keep guessing at shapes -- the CTS
+   sweep itself is the regression check for that specific fix.
+9. `ninja check-feme`: **3,207/3,210 Passed**, 3 Unsupported, 0 Failed (was
+   3,206/3,209 -- +1 Pass from the new test).
+10. Re-swept `ssbo.*`: **3,063 Pass / 179 Fail / 8,983 NotSupported** (was
+    3,027/215/8,983) -- **+36 Pass**, exactly matching this row's scope, 0
+    regressions. Re-swept `compute.*`: unchanged (679/6/60,775).
+11. Committed in 4 pieces: (1) core `SPIRVToLLVMPatterns.cpp` fix, (2) test
+    additions/updates, (3) `Roadmap.md`/`VulkanCTSReport.md` updates, (4)
+    this entry.
+12. Struck through L124(m) in `Roadmap.md` as done. No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` changes needed -- this is an internal
+    correctness fix, not a new feature/extension surface.
+
+## State for next session
+
+- Working tree clean, 3 new commits this session (core fix, tests,
+  Roadmap/CTSReport update) plus this entry's own commit = 4 total.
+- `ninja check-feme`: 3,207/3,210 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*` baseline for next session: **3,063 Pass / 179 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 3,027/215/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
+  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
+  session.
+- This session's own `/tmp` scratch files cleaned up (large pile of
+  prior-session leftovers in `/tmp` untouched -- not from this session).
+
+## Next steps
+
+1. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84
+   remaining fails, still not individually reduced across several sessions
+   now -- needs its own `FEME_DUMP_IR=1` trace. May be a materially
+   different content shape (array of block *instances*, i.e. `buffer Block
+   { mat2 m; } blocks[N];`, rather than an array member nested inside one
+   block) than every fix so far has addressed.
+2. **L124(l)** (~half a day to re-triage): `random` (67, unchanged across
+   several sessions), `unsized_nested_struct_array` (24, unchanged), 4
+   `unsized_array_length.*` singletons -- not re-triaged this session, some
+   may already be absorbed by L124(k) once that's scoped.
+3. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
+   fallbacks from prior sessions -- see `Roadmap.md` for each row's own
+   scoping.
+4. With `ssbo.*` down to 179 fails (from 651 six sessions ago) and
+   concentrated in just two named families (`instance_array_basic_type`,
+   `random`) plus one small one (`unsized_nested_struct_array`), the next
+   session should prioritize L124(k) first -- it's the single largest
+   remaining bucket and has been deferred without investigation across at
+   least 3 prior sessions now.
