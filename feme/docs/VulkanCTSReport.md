@@ -4690,3 +4690,115 @@ so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Session: L124(r) fixed -- wrapper-array-of-struct matrix access, closes 2 of `ssbo.*`'s remaining 12; remaining 10 re-scoped as L124(s), spanning 3 distinct failure classes
+
+Triaged and fixed roadmap L124(r) (2 of the 12 `ssbo.*` fails left
+unchanged by the prior session's L124(q) fix).
+
+Reproduced `dEQP-VK.ssbo.layout.random.nested_structs.12` (fails with
+"Result comparison failed") and pulled its own decompiled SPIR-V via
+`--deqp-log-decompiled-spirv=enable`. Its SSBO is a
+`StructuredBuffer<S>`-style wrapper block whose sole member is a
+dynamically-indexed array, and `S` itself is a struct with two direct
+matrix members (`mat2x2`, `RowMajor`+`MatrixStride=16`) either side of
+a non-matrix member -- a shape distinct from both L124(q) (a direct,
+non-wrapper array-of-matrix block member) and every prior wrapper-shape
+fix in this series (which only ever expected the wrapped array's
+element to be directly a matrix, never a struct containing one).
+
+Root-caused via code reading: `getMatrixWholeAccess`'s `HasWrapper`
+branch peels through however many array-nesting levels wrap the
+wrapper's own content, then required the fully-peeled inner type to be
+directly a `MatrixType` -- it declined unconditionally whenever that
+inner type was instead a `StructType`. The matrix's own type was
+already correctly widened elsewhere, but the plain generic store/load
+used the unpadded logical shape instead of the widened physical layout,
+a memory-size mismatch that silently corrupted adjacent struct data.
+
+Fixed by extracting the non-wrapper branch's existing nested-struct-
+member-walk loop into a shared helper, `walkStructMembersToMatrix`, and
+calling it from the `HasWrapper` branch too: after peeling array levels
+down to the inner type, if that inner type is a struct rather than a
+bare matrix, continue the same walk from there instead of declining.
+The non-wrapper branch's own call site is a pure refactor (same logic,
+now shared), not a behavior change.
+
+Verified via a minimal `feme-opt`-only repro mirroring the real
+struct's shape: confirmed to fail pre-fix and produce the correctly
+transposed/padded physical layout post-fix for both matrix members.
+Added as a permanent regression test,
+`spirv-to-llvm-matrix-rowmajor-wrapper-array-struct-member.mlir`,
+confirmed to fail pre-fix (via `git stash`) and pass post-fix.
+
+Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache`, incremental (existing build
+directory reused).
+
+```console
+VK_DRIVER_FILES=$PWD/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+  vulkaninfo --summary | grep deviceName
+# => FeMe CPU Vulkan Device
+```
+
+`ninja check-feme`: **3,213 Passed / 3 Unsupported / 0 Failed** (+1 from
+the new lit test, 0 regressions).
+
+Full Vulkan CTS re-sweep after the fix:
+
+- The originally-failing test, `dEQP-VK.ssbo.layout.random.nested_structs.12`:
+  **now individually Passes** (previously "Result comparison failed").
+- `ssbo.*` (12,225 cases): **3,232 Pass / 10 Fail / 8,983 NotSupported**
+  -- was 3,230/12/8,983 before this session's fix: **+2 Pass**, 0
+  regressions.
+- `ubo.random.*` (2,250 cases): **607 Pass / 0 Fail / 1,643 NotSupported**
+  -- unchanged, confirmed by a re-sweep, no regression.
+
+**Remaining 10 `ssbo.*` fails triaged this session and confirmed to
+span (at least) 3 distinct failure classes, not one shared root cause**
+(unlike L124(l)/(n)/(q), each of which found one shared bug closing a
+large chunk):
+
+1. `all_per_block_buffers.20`: `vk.createComputePipelines` fails with
+   `VK_ERROR_INITIALIZATION_FAILED` -- a compiler crash/pipeline-creation
+   failure, structurally distinct from every data-mismatch bug fixed so
+   far in this L124 series. Not yet investigated further.
+2. `all_per_block_buffers.47`, `all_shared_buffer.{1,13,17}`,
+   `nested_structs.16`, `nested_structs_instance_arrays.8`: all fail
+   with an unexplained `ac_numPassed = 0, expected 1` message, not yet
+   decoded at all.
+3. `all_shared_buffer.{41,44}`, `nested_structs_arrays.14`: fail with
+   "Result comparison failed" data mismatches. Spot-checked
+   `all_shared_buffer.44`'s own shape (a non-wrapper block member that
+   is a direct array of *structs* containing a matrix, e.g.
+   `struct { ...; struct { matCxR mA; vecN other; } j[N]; }`'s own
+   `j[i].mA`) with a speculative extension of
+   `walkStructMembersToMatrix` to also recurse through a nested-struct
+   array element (mirroring this session's own `HasWrapper`-branch
+   fix). That access-pattern-level change alone did not fix the real
+   CTS repro, and a minimal `feme-opt`-only repro of the same shape
+   revealed why: **the block struct's own type conversion fails to
+   legalize at all** (`spirv.GlobalVariable` legalization failure,
+   independent of any `getMatrixWholeAccess`-side logic) --
+   `convertOffsetStructTypeIgnoringDecorations`/
+   `convertArrayTypeIgnoringDecorations` do not yet widen a matrix
+   nested inside a non-wrapper array-of-struct member's own *type*.
+   This is a type-level gap, a materially bigger fix than any single
+   `getMatrixWholeAccess` change in this series so far. The speculative
+   access-pattern change was reverted (unverified, and insufficient on
+   its own); no code change from this investigation is included in this
+   session's commit.
+
+Re-scoped as roadmap L124(s), to be time-boxed as its own dedicated
+investigation given the now-confirmed type-level scope of at least one
+of its three sub-classes.
+
+FeMe source revision under test: `b7fcb31deba3` (`[feme] L124(r): fix
+wrapper-array-of-struct matrix access`). No feature or extension
+inventory changes: this session's fix is an internal SPIR-V-to-LLVM
+matrix-access recognition correctness fix, not new Vulkan
+feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
