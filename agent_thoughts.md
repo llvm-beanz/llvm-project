@@ -92449,3 +92449,107 @@ total), left after L124(f)'s column-select fix.
    session should prioritize L124(k) first -- it's the single largest
    remaining bucket and has been deferred without investigation across at
    least 3 prior sessions now.
+
+# Session: L124(k) closed (+87 ssbo.* Pass) -- RowMajor matrix miscompile in arrayed block instances
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`.
+
+**Picked up prior session's top next step**: L124(k), `instance_array_basic_type`'s
+84 remaining fails, deferred without investigation across 3+ sessions.
+
+## What happened
+
+1. Reproduced via `deqp-vk`: all 84 fails in this family were matrix-typed
+   ("Result comparison and counter values are incorrect" -- a silent
+   miscompile, not a legalization crash). Confirmed via
+   `--deqp-log-shader-sources=enable` that this family's own GLSL declares
+   the block *itself* as an array of instances (`buffer Block { mat2 var;
+   } block[3];`), not an array member nested inside one block -- the
+   distinct content shape a prior session had already guessed at but never
+   verified.
+2. Root-caused via a minimal hand-crafted `.mlir` repro (not the full CTS
+   shader): `getMatrixWholeAccess`/`getMatrixColumnAccess` (used by the
+   RowMajor/column-select matrix load/store patterns) both re-derive their
+   own shape directly from a `spirv.AccessChain`'s ORIGINAL, unconverted
+   base pointer type, assuming its pointee is directly the block's own
+   struct type. For an arrayed block instance, that pointee is instead an
+   array *of* that struct (one level per instance dimension) -- neither
+   helper accounted for this, so both silently returned `std::nullopt`,
+   and the store/load fell back to the generic, physically-wrong
+   conversion (raw natural-layout store, no RowMajor transpose/pad).
+3. Key finding: `ArrayedBlockAccessChainPattern` itself (the pattern that
+   actually builds the per-instance handle) already handled this shape
+   correctly -- it has its own `Selector` parameter accounting for the
+   leading instance-selecting index, which is exactly why every
+   *non*-matrix basic type in this family already passed. The bug was
+   isolated entirely to these two matrix-specific helpers re-deriving
+   their own shape independently rather than reusing the already-correct
+   resolved shape.
+4. Fixed via a new `peelInstanceArrayPointer` helper: peels however many
+   leading array levels wrap a pointer's pointee before reaching the
+   struct, then both matrix helpers fold that depth into an index-position
+   offset -- letting every existing check downstream (which still operates
+   against the full original index list) stay unchanged. Much simpler than
+   threading a sliced index range through every existing check.
+5. Verified via the minimal repro that the fix produces the correct
+   physical (transposed/padded) store; rebuilt both `feme-opt` and
+   `feme_vulkan`; targeted CTS sweep confirmed `instance_array_basic_type`:
+   0 fails (was 84).
+6. `ninja check-feme`: 3,207/3,210 -> unaffected until the new test was
+   added (no pre-existing test needed updating this time, unlike L124(m)'s
+   own type-spelling fallout).
+7. Added `spirv-to-llvm-matrix-rowmajor-instance-array-block.mlir`
+   (2 splits: whole-access store, column-select load), mimicking the
+   existing `spirv-to-llvm-arrayed-blocks.mlir`'s own style for the
+   arrayed-block shape itself. Verified CHECK lines against actual
+   `feme-opt` output; one CHECK-line mistake caught by FileCheck itself
+   (referenced a load's own SSA result via the wrong pattern-match capture)
+   and fixed on the first iteration.
+8. `ninja check-feme`: **3,208/3,211 Passed**, 3 Unsupported, 0 Failed
+   (was 3,207/3,210 -- +1 Pass from the new test).
+9. Re-swept `ssbo.*`: **3,150 Pass / 92 Fail / 8,983 NotSupported** (was
+   3,063/179/8,983) -- **+87 Pass** (a few more than the 84 originally
+   scoped -- a couple of `readonly` variants of the same family also
+   closed), 0 regressions. Re-swept `compute.*`: unchanged (679/6/60,775).
+10. Committed in 4 pieces: (1) core fix, (2) test, (3) Roadmap/CTSReport
+    update, (4) this entry.
+11. Struck through L124(k) in `Roadmap.md`; updated L124(l)'s own scope to
+    reflect it now covers the *entire* remaining `ssbo.*` fail set (92
+    total: `random` 64, `unsized_nested_struct_array` 24, 4
+    `unsized_array_length.*` singletons) -- every other named bucket has
+    now closed across L124(f)/(g)/(i)/(j)/(k)/(m). No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+    needed -- internal correctness fix only.
+
+## State for next session
+
+- Working tree clean, 3 new commits this session (core fix, test,
+  Roadmap/CTSReport update) plus this entry's own commit = 4 total.
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*` baseline for next session: **3,150 Pass / 92 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 3,063/179/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
+  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
+  session.
+- `/tmp` scratch cleaned up.
+
+## Next steps
+
+1. **L124(l)** (~half a day to re-triage, now the *only* remaining named
+   `ssbo.*` bucket): `random` (64), `unsized_nested_struct_array` (24), and
+   4 `unsized_array_length.*` singletons (`float_{no_offset,offset}_
+   {explicit_size,whole_size}`) -- these 92 cases are everything left in
+   `ssbo.*`. `random` is likely a mix of whatever's left once the other two
+   are individually reduced (it's CTS's own fuzz-shaped family, drawing
+   from every other feature), so start with `unsized_nested_struct_array`
+   or the 4 singletons first -- smaller, more likely a single distinct root
+   cause each.
+2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
+   fallbacks from prior sessions -- see `Roadmap.md` for each row's own
+   scoping.
+3. With `ssbo.*` down to 92 fails (from 651 seven sessions ago, now under
+   1% of the whole `ssbo.*` suite), the next session should prioritize
+   L124(l)'s 4 `unsized_array_length.*` singletons first -- smallest,
+   likely fastest win, and they've been carried over unfixed since before
+   L124(g) (at least 5 sessions) without ever getting their own dedicated
+   trace.
