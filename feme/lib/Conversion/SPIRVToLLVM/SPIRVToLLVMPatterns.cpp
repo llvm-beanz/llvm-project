@@ -9833,17 +9833,41 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
       return std::nullopt;
     MemberIndex = 0;
   } else {
-    // A matrix directly a named struct member (the `cbuffer`/
-    // `ConstantBuffer<T>` shape all of H124b's real failures hit) --
-    // exactly one index (the member selector) reaches a whole matrix,
-    // with no room for a further one that would select only part of it.
-    if (Op.getIndices().size() != InstanceArrayDepth + 1)
+    // A matrix reached through zero or more intervening (non-array)
+    // struct-member selects before the final member select that lands
+    // directly on the whole matrix -- the `cbuffer`/`ConstantBuffer<T>`
+    // shape all of H124b's real failures hit (a matrix that is *itself*
+    // a top-level block member, zero intervening selects), generalized
+    // (roadmap L124(o)) to also cover one reached one or more further
+    // struct levels down (e.g. `struct { struct { float pad; matCxR m;
+    // } b; }`'s own `b.m`, real HLSL cbuffer packing's own nested-struct
+    // member shape): every index but the last must select a struct-typed
+    // member (descending one level further before the next index
+    // applies, mirroring peelInstanceArrayPointer's own array-nesting
+    // peel above, just through struct nesting instead of array nesting);
+    // the last must select the matrix itself, with no room for a further
+    // index that would select only part of it.
+    unsigned NumSelectors = Op.getIndices().size() - InstanceArrayDepth;
+    if (NumSelectors == 0)
       return std::nullopt;
-    std::optional<uint64_t> Idx =
-        getConstantMemberIndex(Op.getIndices()[InstanceArrayDepth]);
-    if (!Idx)
+    for (unsigned I = 0; I + 1 != NumSelectors; ++I) {
+      std::optional<uint64_t> Idx =
+          getConstantMemberIndex(Op.getIndices()[InstanceArrayDepth + I]);
+      if (!Idx || *Idx >= Struct.getNumElements())
+        return std::nullopt;
+      auto NestedStruct = mlir::dyn_cast<mlir::spirv::StructType>(
+          Struct.getElementType(static_cast<unsigned>(*Idx)));
+      if (!NestedStruct)
+        return std::nullopt;
+      Struct = NestedStruct;
+    }
+    std::optional<uint64_t> Idx = getConstantMemberIndex(
+        Op.getIndices()[InstanceArrayDepth + NumSelectors - 1]);
+    if (!Idx || *Idx >= Struct.getNumElements())
       return std::nullopt;
     MemberIndex = static_cast<unsigned>(*Idx);
+    if (!mlir::isa<mlir::spirv::MatrixType>(Struct.getElementType(MemberIndex)))
+      return std::nullopt;
   }
 
   std::optional<MatrixMemberLayout> Layout =
