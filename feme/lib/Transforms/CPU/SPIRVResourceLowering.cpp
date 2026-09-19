@@ -2998,12 +2998,49 @@ Value *lowerRawLoad(IRBuilderBase &Builder, const ResourceCallEnv &Env,
 void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
                    Value *DescriptorIndex, Value *Offset, Value *Val,
                    Value *Mask, const DataLayout &DL) {
+  // (Roadmap L124(e)) `Val` is `undef`/`poison` whenever this call is
+  // storing one of `layOutStructIfOffsetsMatch`'s own synthetic `[N x i8]`
+  // interior/trailing alignment-gap members (`SPIRVToLLVMPatterns.cpp`) --
+  // a std140/std430-decorated matrix or struct's own explicit padding,
+  // never assigned a real value by any `insertvalue`/composite-construct
+  // reaching this store (`CompositeConstructPattern`/`spirv.Constant`
+  // materialization only ever fill in a gap-inserted struct's *real*,
+  // logical member indices, per `PhysicalIndexOut`'s own mapping -- a
+  // synthetic gap index is left exactly as `PoisonValue::get` initialized
+  // it). Writing an unspecified byte pattern there is a pure no-op (no
+  // SPIR-V-visible load can ever observe interior padding), so skip the
+  // store entirely instead of recursing into the leaf and emitting a real
+  // `feme.cpu.resource.store.raw.*` call for it -- avoiding both the
+  // wasted per-byte call overhead and (roadmap L124's own original
+  // finding) a hard dependency on runtime entry points
+  // (`feme.cpu.resource.store.raw.i8` in particular) that would otherwise
+  // need to exist purely to write throwaway padding. `isa<UndefValue>`
+  // alone already covers `PoisonValue` too, since `PoisonValue` is itself
+  // a subclass of `UndefValue`.
+  if (isa<UndefValue>(Val))
+    return;
+  // A struct/array field's value is only ever a genuine `ExtractValueInst`
+  // here when the aggregate builder chain feeding `Val` is itself not
+  // wholly constant-foldable (e.g. any real per-lane runtime data); for a
+  // synthetic `[N x i8]` alignment-gap member (see this function's own
+  // comment above) that no `insertvalue` in that chain ever targets,
+  // `llvm::FindInsertedValue` walks back through the chain to the original
+  // (always `poison`) base aggregate's value at this index without needing
+  // an later, separate InstCombine run to fold the resulting
+  // `extractvalue` first -- letting the `isa<UndefValue>` recursive check
+  // below see through an as-yet-unsimplified chain the same way it would
+  // see a pre-folded literal `poison` operand.
+  auto ExtractField = [&](unsigned Idx) -> Value * {
+    if (Value *Found = FindInsertedValue(Val, {Idx}))
+      return Found;
+    return Builder.CreateExtractValue(Val, Idx);
+  };
   if (auto *StructTy = dyn_cast<StructType>(Val->getType())) {
     const StructLayout *SL = DL.getStructLayout(StructTy);
     for (unsigned I = 0, E = StructTy->getNumElements(); I != E; ++I) {
       Value *FieldOffset = Builder.CreateAdd(
           Offset, ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
-      Value *Field = Builder.CreateExtractValue(Val, I);
+      Value *Field = ExtractField(I);
       lowerRawStore(Builder, Env, DescriptorIndex, FieldOffset, Field, Mask,
                     DL);
     }
@@ -3015,7 +3052,7 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
     for (unsigned I = 0, E = ArrayTy->getNumElements(); I != E; ++I) {
       Value *ElemOffset = Builder.CreateAdd(
           Offset, ConstantInt::get(Offset->getType(), I * ElemSize));
-      Value *Elem = Builder.CreateExtractValue(Val, I);
+      Value *Elem = ExtractField(I);
       lowerRawStore(Builder, Env, DescriptorIndex, ElemOffset, Elem, Mask, DL);
     }
     return;

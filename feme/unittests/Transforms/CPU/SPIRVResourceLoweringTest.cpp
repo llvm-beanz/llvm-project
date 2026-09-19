@@ -335,6 +335,58 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(NumStores, 4u);
 }
 
+// Roadmap L124(e): a storage-buffer store of a struct value containing one
+// of `layOutStructIfOffsetsMatch`'s own synthetic `[N x i8]` alignment-gap
+// members (SPIRVToLLVMPatterns.cpp's own std140/std430 padding-insertion
+// mechanism -- e.g. a `mat2`'s own 8-byte column padding under std140,
+// exactly the shape `dEQP-VK.ssbo.layout.single_basic_type.std140.
+// column_major_highp_mat2` produces) must not recurse into that gap
+// member and emit a `feme.cpu.resource.store.raw.i8` call per padding
+// byte: the gap member is never assigned a real value by any
+// `insertvalue` reaching this store (it stays exactly the `poison` value
+// the surrounding struct literal started as), so `lowerRawStore` must
+// recognize the whole gap member's value is `poison` and skip storing it
+// entirely -- both because writing an unspecified byte pattern into
+// padding no SPIR-V-visible load can ever observe is a pure no-op, and
+// because (this row's own original motivation) doing so would otherwise
+// require a `feme.cpu.resource.store.raw.i8` runtime entry point that
+// does not exist purely to write throwaway padding.
+TEST(SPIRVResourceLoweringTest, SkipsRawStoreOfPoisonAlignmentGapMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", [0 x <{ [2 x float], [8 x i8] }>], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <{ [2 x float], [8 x i8] }>], 12, 1) %h, i32 %idx)
+      %v = insertvalue <{ [2 x float], [8 x i8] }> poison, [2 x float] [float 1.0, float 2.0], 0
+      store <{ [2 x float], [8 x i8] }> %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x <{ [2 x float], [8 x i8] }>], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x <{ [2 x float], [8 x i8] }>], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned NumF32Stores = 0;
+  unsigned NumI8Stores = 0;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction()) {
+        StringRef Name = Callee->getName();
+        if (Name == "feme.cpu.resource.store.raw.f32")
+          ++NumF32Stores;
+        else if (Name == "feme.cpu.resource.store.raw.i8")
+          ++NumI8Stores;
+      }
+  EXPECT_EQ(NumF32Stores, 2u);
+  EXPECT_EQ(NumI8Stores, 0u);
+}
+
 // Roadmap H138: `<4 x i64>` (32 bytes) exceeds this target's 16-byte
 // direct-value-ABI threshold (roadmap H137's own closing note), so
 // `lowerRawStore` must decompose it into two `v2i64` stores rather than
