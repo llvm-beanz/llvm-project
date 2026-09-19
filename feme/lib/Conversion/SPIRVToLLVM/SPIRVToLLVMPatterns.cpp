@@ -205,6 +205,20 @@ getBufferBlockElement(mlir::spirv::PointerType Type) {
     if (auto Array = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(
             Struct.getElementType(0)))
       return BlockElement{Array, /*HasWrapper=*/true};
+    // A plain GLSL `buffer Block { mat2 matrices[3]; }` (a fixed-size,
+    // not runtime-sized, array as the block's sole member -- exactly
+    // the shape `getUniformBlockElement` already recognizes for a
+    // uniform block's own sole fixed-size array member, roadmap F12a):
+    // dynamically-indexed exactly like the wrapper's own runtime array,
+    // so it must be recognized the same way, or getMatrixWholeAccess's
+    // own two-shapes-only expectations (see its own comment) silently
+    // decline every whole-matrix load/store through such a member,
+    // leaving it to fall back to the ordinary (unpadded, always
+    // column-major) conversion regardless of any real `RowMajor`/
+    // `MatrixStride` decorations it carries.
+    if (auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(
+            Struct.getElementType(0)))
+      return BlockElement{Array, /*HasWrapper=*/true};
   }
   return BlockElement{Struct, /*HasWrapper=*/false};
 }
@@ -4490,6 +4504,41 @@ mlir::Type getPhysicalMatrixMemberType(mlir::spirv::MatrixType MatrixTy,
   return mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
 }
 
+/// Peels through any nesting of `spirv::ArrayType` (e.g. the
+/// `!spirv.array<M x !spirv.array<N x matCxR>>`-shaped SSBO member the
+/// `2_level_array`/`3_level_array` CTS naming exercises, roadmap
+/// L124(g)) to find the innermost `spirv::MatrixType`, or returns null
+/// if \p Type is not a matrix, or an array (at any nesting depth) of
+/// matrices, at all. `spirv::RuntimeArrayType` is deliberately not
+/// peeled here: it may only ever be a struct's own last member (per
+/// SPIR-V/Vulkan validation rules), so this only ever needs to look
+/// through a fixed-size wrap.
+mlir::spirv::MatrixType peelArraysToMatrixType(mlir::Type Type) {
+  while (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
+    Type = ArrayTy.getElementType();
+  return mlir::dyn_cast<mlir::spirv::MatrixType>(Type);
+}
+
+/// Rebuilds \p Type's own `spirv::ArrayType` nesting (see
+/// peelArraysToMatrixType, whose inverse this is) as LLVM array types
+/// around \p PhysicalMatrixTy -- getPhysicalMatrixMemberType's own
+/// RowMajor/MatrixStride-substituted type for the matrix \p Type
+/// ultimately wraps -- producing the correctly-shaped
+/// array-of-arrays-of-substituted-matrix member type
+/// convertOffsetStructTypeIgnoringDecorations's own member loop needs
+/// whenever that inner matrix's declared layout is not representable,
+/// just wrapped in however many array dimensions \p Type has around it
+/// (zero for a bare matrix member, matching getPhysicalMatrixMemberType's
+/// own return value exactly in that case).
+mlir::Type wrapPhysicalMatrixInArrays(mlir::Type Type,
+                                     mlir::Type PhysicalMatrixTy) {
+  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
+    return mlir::LLVM::LLVMArrayType::get(
+        wrapPhysicalMatrixInArrays(ArrayTy.getElementType(), PhysicalMatrixTy),
+        ArrayTy.getNumElements());
+  return PhysicalMatrixTy;
+}
+
 /// Reorders/pads the two scalar-element indices at \p Indices[InsertPos]
 /// (column) and \p Indices[InsertPos + 1] (row) -- SPIR-V's own
 /// `spirv.AccessChain` index order into a matrix is always [column, row]
@@ -5426,7 +5475,35 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
       MemberTy = Converter.convertType(ElementTy);
     if (!MemberTy)
       return nullptr;
-    if (!isMatrixMemberLayoutRepresentable(Type, I, MemberTy)) {
+    // (Roadmap L124(g)) A member that is (possibly nested-array-of-) a
+    // matrix needs the same RowMajor/MatrixStride representability check
+    // a bare matrix member gets below -- an `!spirv.array<M x matCxR>>`-
+    // (or further-nested-array-)shaped SSBO member is exactly as much a
+    // RowMajor/MatrixStride member as a bare matrix is, but
+    // isMatrixMemberLayoutRepresentable's own `Struct.getElementType(Index)`
+    // check only ever sees the outermost ArrayType there, never the
+    // matrix nested inside it -- silently treating every array-of-
+    // matrices member as naturally representable regardless of its real
+    // decorations (the same false-negative isMatrixLayoutRepresentable's
+    // own forward-declaration comment already flags for
+    // rewriteBlockAccess's narrower AccessChain case, which sidesteps it
+    // the same way this does). Peel through to the real inner matrix
+    // type first (peelArraysToMatrixType) and call
+    // isMatrixLayoutRepresentable directly on its own fresh conversion,
+    // exactly as rewriteBlockAccess itself already does for the same
+    // reason, rather than trusting isMatrixMemberLayoutRepresentable's
+    // member-type check to see through the array wrapper.
+    mlir::spirv::MatrixType InnerMatrixTy = peelArraysToMatrixType(ElementTy);
+    bool Representable;
+    if (InnerMatrixTy) {
+      mlir::Type ConvertedMatrixTy = Converter.convertType(InnerMatrixTy);
+      if (!ConvertedMatrixTy)
+        return nullptr;
+      Representable = isMatrixLayoutRepresentable(Type, I, ConvertedMatrixTy);
+    } else {
+      Representable = isMatrixMemberLayoutRepresentable(Type, I, MemberTy);
+    }
+    if (!Representable) {
       // (Roadmap H124b) Rather than rejecting the whole struct's own
       // conversion outright, retry with this one member substituted for
       // its own physical (RowMajor/ColMajor- and MatrixStride-aware, but
@@ -5438,11 +5515,17 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
       // interpreting a real Load/Store through it correctly.
       std::optional<MatrixMemberLayout> Layout =
           getMatrixMemberLayout(Type, I);
-      MemberTy =
-          Layout ? getPhysicalMatrixMemberType(
-                       mlir::cast<mlir::spirv::MatrixType>(ElementTy),
-                       *Layout, Converter, DL)
+      mlir::Type PhysicalMatrixTy =
+          Layout ? getPhysicalMatrixMemberType(InnerMatrixTy, *Layout,
+                                               Converter, DL)
                  : nullptr;
+      // wrapPhysicalMatrixInArrays re-wraps ElementTy's own array nesting
+      // (empty for a bare matrix member, matching the old
+      // `getPhysicalMatrixMemberType(...)` result directly in that case)
+      // around the substituted matrix type.
+      MemberTy = PhysicalMatrixTy
+                     ? wrapPhysicalMatrixInArrays(ElementTy, PhysicalMatrixTy)
+                     : nullptr;
       if (!MemberTy)
         return nullptr;
     }
@@ -11755,8 +11838,18 @@ convertBufferBlockType(mlir::spirv::PointerType Type,
   llvm::SmallVector<unsigned, 3> IntParams{
       static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u};
   if (Element->HasWrapper) {
-    auto Array = mlir::cast<mlir::spirv::RuntimeArrayType>(Element->Content);
-    if (unsigned Stride = Array.getArrayStride())
+    // `Element->Content` is either FeMe's own dxc-style wrapper's
+    // dynamically-sized array, or a plain GLSL storage buffer's own
+    // fixed-size sole array member (roadmap F12a's storage-buffer
+    // counterpart, see getBufferBlockElement's own comment) -- both
+    // carry their own `ArrayStride` the same way.
+    unsigned Stride =
+        mlir::isa<mlir::spirv::RuntimeArrayType>(Element->Content)
+            ? mlir::cast<mlir::spirv::RuntimeArrayType>(Element->Content)
+                  .getArrayStride()
+            : mlir::cast<mlir::spirv::ArrayType>(Element->Content)
+                  .getArrayStride();
+    if (Stride)
       IntParams.push_back(Stride);
   }
 
