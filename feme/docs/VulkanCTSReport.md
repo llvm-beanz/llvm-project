@@ -3647,3 +3647,94 @@ share of the new, smaller 651 total):
 `row_major`. L124(g)'s 572-case wrong-numeric-result bucket remains the
 single largest, still-unstarted item in the whole `ssbo.*` breakdown. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## L124(g): Array-of-matrices RowMajor/MatrixStride storage-buffer fix
+
+`dEQP-VK.ssbo.layout.single_basic_array.std140.row_major_mat2` (an array of
+`mat2`s, plain GLSL `buffer Block { mat2 matrices[3]; }`) was reduced with
+`FEME_DUMP_IR=1`: its intra-matrix row-to-row byte offsets landed at `+0`/
+`+8` (the row's own natural, unpadded size) instead of std140's required
+`+0`/`+16` (vec4-rounded `MatrixStride`), even though the *array*-level
+stride between matrix elements was correctly `32`.
+
+Root-caused to two independent gaps in `SPIRVToLLVMPatterns.cpp` that
+combined to silently miscompile this shape:
+
+1. `getBufferBlockElement` only ever recognized a sole `spirv.rtarray`
+   member (FeMe's own dxc-wrapper shape) as a dynamically-indexed wrapper;
+   a sole *fixed*-size `spirv.array` member (this GLSL shape) fell through
+   to the "ordinary struct" branch instead, unlike `getUniformBlockElement`'s
+   pre-existing analogous fix for uniform blocks (roadmap F12a). This alone
+   meant `getMatrixWholeAccess` could never recognize a whole-matrix access
+   through this shape at all, so `RowMajorMatrixStorePattern`/
+   `RowMajorMatrixLoadPattern` never fired, silently falling back to the
+   ordinary (always logical/column-major) `spirv.Store`/`spirv.Load`
+   conversion.
+2. Independently, `isMatrixMemberLayoutRepresentable` -- the check
+   `convertOffsetStructTypeIgnoringDecorations` uses to decide whether a
+   member needs the physical RowMajor/MatrixStride layout substitution at
+   all -- only ever recognized a matrix that is directly a struct member's
+   own type, never one reached through an array wrapper, so it always
+   answered "representable" for an array-of-matrices member regardless of
+   its real decorations.
+
+Both root-caused via direct debugging (`llvm::errs()` diagnostics
+temporarily added and removed, per the standing plan from the prior
+session, rather than reasoning from source alone this time): the first
+diagnostic confirmed the type-conversion fix (added first) computed the
+correct physical/padded member type, yet the generated IR was unchanged;
+a second diagnostic in `RowMajorMatrixStorePattern::matchAndRewrite`
+confirmed `getMatrixWholeAccess` was returning `std::nullopt` for this
+repro, tracing back to `getBufferBlockElement`'s own wrapper-recognition
+gap as the real blocker.
+
+Fixed by recognizing a sole fixed-size `spirv.array` member as
+`HasWrapper=true` in `getBufferBlockElement` (mirroring
+`getUniformBlockElement`), updating `convertBufferBlockType`'s
+stride/writability computation to handle both array kinds, and adding
+`peelArraysToMatrixType`/`wrapPhysicalMatrixInArrays` helpers so
+`convertOffsetStructTypeIgnoringDecorations`'s per-member representability
+check and physical-type substitution both see through array nesting to the
+real inner matrix, exactly as `rewriteBlockAccess` already does for its own
+narrower AccessChain purpose.
+
+New regression test: `spirv-to-llvm-matrix-rowmajor-fixed-array-block.mlir`
+(mirrors `spirv-to-llvm-matrix-rowmajor-buffer-block.mlir`'s own dxc-wrapper
+RowMajor store/load test, but for this plain-GLSL fixed-array shape).
+`spirv-to-llvm-storage-buffer.mlir`'s own `read_vec3_array_element` CHECK
+lines needed updating too: the same underlying fix means a fixed-size
+array-of-vec3 storage-buffer member (no matrix/RowMajor decorations
+involved) is now also recognized as the wrapper shape, so its handle's
+content type is the array directly (no enclosing single-member struct), no
+extra GEP is needed to reach an element, and its declared `NonWritable`
+decoration is now correctly reflected in the handle's `IsWriteable`
+parameter (previously always `1`, a pre-existing bug for this exact shape
+this incidentally also fixes).
+
+A full `ssbo.*` re-sweep (12,225 cases):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 2,591  | 2,729 |
+| Fail          | 651    | 513   |
+| NotSupported  | 8,983  | 8,983 |
+
+**+138 Pass, 0 regressions.** A full `compute.*` re-sweep confirmed no
+change (679/6/60,775, as expected -- this bug was `ssbo.*`-only).
+`ninja check-feme`: 3,203/3,206 Passed, 3 pre-existing Unsupported, 0
+Failed (+1 Passed from this session's own new unit test; 0 regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal storage-buffer layout-correctness fix on an
+already-supported surface, not a new Vulkan feature or extension.
+
+`ssbo.*`'s remaining 513 `Fail`s were re-bucketed by case-name family (see
+`Roadmap.md`'s new L124(i) row): `3_level_unsized_array` (87),
+`3_level_array` (87), `2_level_array` (87), `instance_array_basic_type`
+(84), `random` (68), `unsized_nested_struct_array` (24), plus 4 lingering
+`unsized_array_length.*` singletons. None of these individually
+root-caused yet -- L124(g)'s own fix (single fixed-size array-of-matrices
+member) did not close them, suggesting a related but distinct gap in the
+same array-wrapper-recognition/physical-substitution machinery for more
+deeply nested or struct-wrapped shapes. See `agent_thoughts.md` for the
+full narrative and next steps.
