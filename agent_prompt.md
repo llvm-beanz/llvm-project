@@ -55,36 +55,42 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## State right now
+## Next steps (start here)
 
-- Working tree clean after this entry's own commit, 4 new commits this
-  session total.
-- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
+1. **(~2-3 hours)** Fix `getMatrixWholeAccess`'s non-wrapper branch to
+   walk through zero-or-more intervening struct-member selections
+   before the final matrix-member select (mirroring how
+   `peelInstanceArrayPointer` already peels array nesting for the same
+   function) -- track the innermost struct + member index actually
+   reached, not just the outermost block struct's own direct member.
+2. **(~2-3 hours, do together with #1, not separately)** Extend
+   `getTightNestedStructType`/`getTightMatrixType` to *widen* (not just
+   tighten) a nested struct's own matrix member to its declared
+   `MatrixStride`, using the same substitution `getPhysicalMatrixMemberType`
+   already builds for a direct block member. Verify against the
+   isolated repro (recreate `/tmp/mat2_stride16.mlir`'s shape as a
+   permanent lit test) before touching the CTS sweep.
+3. **Always, before declaring any fix done**: re-run the *full*
+   `ssbo.*` sweep (not just `random`), not only the subset the fix
+   targets -- this is what caught this session's regression.
+4. Re-run `dEQP-VK.compute.pipeline.builtin_var.*` (L106's own vec3
+   regression coverage) as a sanity check, since this area is adjacent.
+5. `random`'s other symptom buckets (25 "Result comparison and counter
+   values are incorrect", 15 "Counter value incorrect",
+   1 `VK_ERROR_INITIALIZATION_FAILED`) are still un-triaged past this
+   session's own `.39`/`.41` repros -- `.39`'s own root cause (a
+   "Counter value incorrect" case) is still open; do not assume it
+   shares `.41`'s matrix-nesting bug without its own trace.
+6. `L124(a)/(b)/(c)/(d)/L125/L126/L116(f)` all remain untouched, standing
+   fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, HEAD at `b8d8983c3639` (2 doc-only commits this
+  session, no code commits -- see "why the wrong turn happened" above).
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed
+  (unchanged).
 - `ssbo.*`: **3,187 Pass / 55 Fail / 8,983 NotSupported** (of 12,225) --
-  all 55 remaining fails are in `random`.
-- `compute.*`: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) --
-  unchanged.
-- `/tmp` scratch cleaned up (this session's own; a large pile of prior-
-  session leftovers in `/tmp` still untouched, not from this session).
-
-## Next steps
-
-1. **L124(o)** (~half a day, needs its own `FEME_DUMP_IR=1` trace):
-   `random`'s residual 55 fails. Quick message-only triage (no deep
-   trace yet) found 3 distinct shapes still mixed in:
-   - 25 "Result comparison and counter values are incorrect"
-   - 15 "Counter value incorrect"
-   - 14 "Result comparison failed"
-   - 1 `VK_ERROR_INITIALIZATION_FAILED` (pipeline-creation failure, not
-     a runtime miscompile -- needs `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
-
-   Start with the two "counter" buckets (40 of 55 combined) -- both
-   mention an SSBO atomic counter specifically, most likely one shared
-   root cause distinct from anything fixed so far (this session's fix
-   was a plain load/store bug, not atomics-related).
-2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched,
-   standing fallbacks from prior sessions -- see `Roadmap.md` for each
-   row's own scoping.
-3. `ssbo.*` is now at 0.45% fail rate (55 of 12,225), down from 651 nine
-   sessions ago -- L124(o) is very likely the last item standing before
-   a fully clean `ssbo.*` sweep. Prioritize it first next session.
+  unchanged from last session.
+- `compute.*`: 679 Pass / 6 Fail / 60,775 NotSupported (unchanged).
+- `/tmp` scratch cleaned up (this session's own; see below).
