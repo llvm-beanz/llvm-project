@@ -9574,17 +9574,32 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
       mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType());
   unsigned MemberIndex;
   if (Element->HasWrapper) {
-    // The wrapper's own sole member is always index 0; a second index
-    // selects the specific array element (the runtime index into the
-    // `RWStructuredBuffer`/`StructuredBuffer`) and nothing further,
-    // matching this pattern's own "whole matrix" scope -- its own value
-    // does not matter here, since every element of the array shares the
-    // same layout. The decorations describing that shared layout are
-    // attached to the wrapper's own member 0 (the array itself), not to
-    // any one of its elements.
-    if (Op.getIndices().size() != 2 ||
-        !mlir::isa<mlir::spirv::RuntimeArrayType, mlir::spirv::ArrayType>(
-            Element->Content))
+    // The wrapper's own sole member is always index 0; every remaining
+    // index selects one more array dimension on the way down to the
+    // whole matrix this access reaches (roadmap L124(i): a
+    // `2_level_array`/`3_level_array`-shaped wrapper content --
+    // `!spirv.array<M x !spirv.array<N x matCxR>>`, or the same nested
+    // one level further -- needs exactly as many array-selecting
+    // indices as it has array levels, not always exactly one the way
+    // L124(g)'s own single-array-of-matrices fix assumed). The runtime
+    // index's own value does not matter here, since every element of
+    // the array shares the same layout; the decorations describing that
+    // shared layout are attached to the wrapper's own member 0 (the
+    // outermost array), not to any one of its elements.
+    unsigned ArrayNestingDepth = 0;
+    mlir::Type Inner = Element->Content;
+    while (true) {
+      if (auto RTArray = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Inner)) {
+        Inner = RTArray.getElementType();
+      } else if (auto FixedArray = mlir::dyn_cast<mlir::spirv::ArrayType>(Inner)) {
+        Inner = FixedArray.getElementType();
+      } else {
+        break;
+      }
+      ++ArrayNestingDepth;
+    }
+    if (!mlir::isa<mlir::spirv::MatrixType>(Inner) ||
+        Op.getIndices().size() != 1 + ArrayNestingDepth)
       return std::nullopt;
     MemberIndex = 0;
   } else {
