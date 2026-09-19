@@ -57,30 +57,30 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Next steps
 
-1. **L124(f)** (~half a day, needs its own root-cause pass): `spirv.AccessChain`
-   into a `RowMajor`-decorated matrix through an array wrapper fails
-   legalization outright -- now confirmed to also cover `single_basic_array`'s
-   36 fails and every remaining
-   `2_level_array`/`3_level_array`/`3_level_unsized_array` fail (126 total),
-   making this the single highest-value remaining `ssbo.*` item.
+1. **L124(m)** (~half a day to scope):
+   `2_level_array`/`3_level_array`/`3_level_unsized_array`'s residual 12 fails
+   each (36 total), left after this session's column-select fix -- not yet
+   re-triaged, needs its own `FEME_DUMP_IR=1` trace on one repro per family to
+   find the new shared shape (or confirm they're unrelated).
 2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84 fails,
-   still not individually reduced -- needs its own `FEME_DUMP_IR=1` trace, may
-   be a materially different content shape (array of block instances) than this
-   session's fix addressed.
-3. **L124(l)** (~half a day to re-triage): `random` (67), `basic_unsized_array`
-   (36), `unsized_nested_struct_array` (24), `unsized_array_length.*` (5
-   singletons) -- not re-triaged this session.
+   unchanged by this session -- still needs its own trace, may be a materially
+   different content shape (array of block instances).
+3. **L124(l)** (~half a day to re-triage): `random` (67, unchanged),
+   `unsized_nested_struct_array` (24, unchanged), `unsized_array_length.*` (4
+   singletons) -- `basic_unsized_array`'s prior 36 no longer appear in the
+   bucket list, so that family looks fully closed now and can be dropped from
+   this row.
 4. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
    fallbacks from prior sessions.
 
 ## State for next session
 
-- Working tree clean, 3 new commits this session (core fix, new test,
+- Working tree clean, 3 new commits this session (core fix, test changes,
   Roadmap/CTSReport update) plus this entry's own commit = 4 total.
-- `ninja check-feme`: 3,205/3,208 Passed, 3 Unsupported, 0 Failed (was
-  3,204/3,207 -- +1 Pass from this session's new lit test).
-- `ssbo.*` baseline for next session: **2,865 Pass / 377 Fail / 8,983
-  NotSupported** (of 12,225) -- up from 2,847/395/8,983.
+- `ninja check-feme`: 3,206/3,209 Passed, 3 Unsupported, 0 Failed (was
+  3,205/3,208 -- +1 Pass from this session's new lit test split).
+- `ssbo.*` baseline for next session: **3,027 Pass / 215 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 2,865/377/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
   NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
   session.
