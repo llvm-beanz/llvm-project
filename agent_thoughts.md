@@ -92682,3 +92682,77 @@ worse than leaving `random` open one more session.
    next session should prioritize L124(n) first -- it is very likely the
    last `ssbo.*` item standing between this milestone series and a fully
    clean `ssbo.*` sweep.
+
+# Session: L124(n) -- vector-element ArrayStride padding closes ssbo.* down to 55
+
+Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` at session start.
+
+**Done this session**: `ssbo.*` 3,178 Pass/64 Fail -> 3,187/55 (+9,
+0 regressions). `random` was the only named bucket left; this fix closed
+9 of its 64.
+
+## What I did
+
+1. Confirmed the prior session's suspicion (vector-typed runtime-array
+   element undersized relative to its `ArrayStride`, same family as
+   L124(l)'s struct-element fix) was the real root cause -- no new
+   tracing needed, the prior session had already reduced one repro.
+2. Spent time up front (not writing code yet) confirming a shared-type-
+   converter fix would not disturb the wrapper shape's own vec3
+   mechanism (roadmap L106) -- read `classifyVulkanBufferHandle` and
+   `lowerAccesses` (SPIRVResourceLowering.cpp) and `rewriteBlockAccess`
+   (SPIRVToLLVMPatterns.cpp) directly, confirmed all three only ever use
+   the handle's explicit `Stride` int parameter or the SPIR-V element
+   type read directly, never the shared type converter's output, for
+   that shape. Grepped existing lit tests for any wrapper-shape test that
+   would break -- found none.
+3. Implemented: extended `RuntimeArrayType`'s conversion with the same
+   byte-array stand-in substitution `convertArrayTypeIgnoringDecorations`
+   already uses for a fixed-size array's scalar/vector element.
+4. New lit test `vector_array_element` in
+   `spirv-to-llvm-glslang-blocks.mlir`.
+5. **Verified the risky assumption empirically, not just by reading
+   code**: re-ran `dEQP-VK.compute.pipeline.builtin_var.*` directly --
+   still 11/11 Pass.
+6. `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
+7. Re-swept `ssbo.*` (3,187/55/8,983) and `compute.*` (unchanged,
+   679/6/60,775).
+8. Updated `Roadmap.md` (struck L124(n), added L124(o) for the residual
+   55) and `VulkanCTSReport.md`. No Vulkan14FeatureInventory/
+   VulkanExtensionInventory changes -- pure bug fix, no new capability.
+9. Committed in 4 pieces: core fix, lit test, doc update, this entry.
+
+## State right now
+
+- Working tree clean after this entry's own commit, 4 new commits this
+  session total.
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*`: **3,187 Pass / 55 Fail / 8,983 NotSupported** (of 12,225) --
+  all 55 remaining fails are in `random`.
+- `compute.*`: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) --
+  unchanged.
+- `/tmp` scratch cleaned up (this session's own; a large pile of prior-
+  session leftovers in `/tmp` still untouched, not from this session).
+
+## Next steps
+
+1. **L124(o)** (~half a day, needs its own `FEME_DUMP_IR=1` trace):
+   `random`'s residual 55 fails. Quick message-only triage (no deep
+   trace yet) found 3 distinct shapes still mixed in:
+   - 25 "Result comparison and counter values are incorrect"
+   - 15 "Counter value incorrect"
+   - 14 "Result comparison failed"
+   - 1 `VK_ERROR_INITIALIZATION_FAILED` (pipeline-creation failure, not
+     a runtime miscompile -- needs `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
+
+   Start with the two "counter" buckets (40 of 55 combined) -- both
+   mention an SSBO atomic counter specifically, most likely one shared
+   root cause distinct from anything fixed so far (this session's fix
+   was a plain load/store bug, not atomics-related).
+2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched,
+   standing fallbacks from prior sessions -- see `Roadmap.md` for each
+   row's own scoping.
+3. `ssbo.*` is now at 0.45% fail rate (55 of 12,225), down from 651 nine
+   sessions ago -- L124(o) is very likely the last item standing before
+   a fully clean `ssbo.*` sweep. Prioritize it first next session.
