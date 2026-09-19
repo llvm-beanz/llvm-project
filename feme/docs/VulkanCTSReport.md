@@ -111,7 +111,7 @@ completed without a crash, timeout, or unrun case.
 | `api` | 267,504 | 267,504 | 96,343 | 18,502 | 152,656 | 0 | 0 | 3 | 0 | 0 |
 | `binding_model` | 150,289 | 150,289 | 72,988 | 14,684 | 62,617 | 0 | 0 | 0 | 0 | 0 |
 | `clipping` | 308 | 308 | 298 | 0 | 10 | 0 | 0 | 0 | 0 | 0 |
-| `compute` | 61,460 | 61,460 | 656 | 29 | 60,775 | 0 | 0 | 0 | 0 | 0 |
+| `compute` | 61,460 | 61,460 | 669 | 16 | 60,775 | 0 | 0 | 0 | 0 | 0 |
 | `conditional_rendering` | 1,030 | 1,030 | 0 | 0 | 1,030 | 0 | 0 | 0 | 0 | 0 |
 | `cooperative_vector` | 53,562 | 53,562 | 0 | 0 | 53,562 | 0 | 0 | 0 | 0 | 0 |
 | `data_graph` | 12,632 | 12,632 | 0 | 0 | 12,632 | 0 | 0 | 0 | 0 | 0 |
@@ -150,7 +150,7 @@ completed without a crash, timeout, or unrun case.
 | `shader_object` | 243,853 | 243,853 | 0 | 6 | 243,847 | 0 | 0 | 0 | 0 | 0 |
 | `sparse_resources` | 19,402 | 19,402 | 0 | 0 | 19,402 | 0 | 0 | 0 | 0 | 0 |
 | `spirv_assembly` | 68,734 | 68,734 | 5,849 | 1,344 | 61,540 | 0 | 0 | 1 | 0 | 0 |
-| `ssbo` | 12,225 | 12,225 | 2,236 | 1,006 | 8,983 | 0 | 0 | 0 | 0 | 0 |
+| `ssbo` | 12,225 | 12,225 | 2,337 | 905 | 8,983 | 0 | 0 | 0 | 0 | 0 |
 | `subgroups` | 48,705 | 48,705 | 546 | 96 | 47,490 | 0 | 0 | 6 | 567 | 0 |
 | `synchronization` | 64,872 | 64,872 | 15,089 | 3,330 | 46,452 | 1 | 0 | 0 | 0 | 0 |
 | `synchronization2` | 81,617 | 81,617 | 20,940 | 3,691 | 56,986 | 0 | 0 | 0 | 0 | 0 |
@@ -3399,3 +3399,80 @@ needed -- an internal `SIMDizePass` legalization fix, not a new Vulkan
 feature/extension surface.
 
 This row is now **closed**.
+
+## L106 (this session)
+
+Triaged the previously-untriaged `pipeline.monolithic.*`/`subgroups.*`/
+`compute.*` families (too large to sweep exhaustively -- 465,554/48,705/
+61,460 cases respectively). Sampled `subgroups.*`'s small/medium
+subfamilies (~9,700+ cases): no real `Fail`s found; `quad`/`clustered`
+are 100% `NotSupported` (legitimate unadvertised-feature gaps, not
+bugs). Sampled `compute.pipeline.*`'s small subfamilies (~136 cases) and
+found `builtin_var.*` systemically broken: 10 of 11 cases failing --
+every vec3-typed compute builtin (`global_invocation_id`,
+`local_invocation_id`, `work_group_id`, etc.) failed; only the scalar
+`local_invocation_index` passed.
+
+Root-caused this to a real bug in the SPIR-V-to-LLVM storage-buffer
+lowering: `convertBufferBlockType` (SPIRVToLLVMPatterns.cpp) and
+`classifyVulkanBufferHandle` (SPIRVResourceLowering.cpp) both assumed a
+std430 storage buffer's `ArrayStride` always equals its element's
+natural LLVM store size. True for scalar/vec2/vec4/matrix elements, but
+false for a 3-component vector element: std430 still pads every array
+element up to a 16-byte multiple regardless of storage class, so a
+`vec3`'s 12-byte natural size still needs a 16-byte stride. Using the
+too-small natural-size stride addressed later array indices at the
+wrong byte offset, silently dropping writes to the buffer's true tail
+slots -- confirmed via a new, minimal `CommandBufferTest.cpp` unit test
+before touching any production code.
+
+Fixed by carrying the real `ArrayStride` explicitly as an optional
+third integer parameter on the `spirv.VulkanBuffer` handle, mirroring
+the existing convention `convertUniformArrayContent`/
+`classifyVulkanBufferHandle` already use for a std140 uniform array's
+own (more common) stride mismatch, and by disambiguating a storage vs.
+uniform array handle by storage class plus writability (mirroring the
+adjacent struct-handling branch) instead of by parameter count, since
+parameter count no longer implies the kind. `SPIRVRaising.cpp`'s DXIL
+handle-type translation needed a matching relaxation (accept two or
+three int parameters, ignoring the third): DXIL's own
+`StructuredBuffer<T>` has no std430-style padding, so it always uses
+`ElemTy`'s own natural size regardless.
+
+`dEQP-VK.compute.pipeline.builtin_var.*` (the family that exposed the
+bug):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 1      | 11    |
+| Fail          | 10     | 0     |
+
+A full `compute.*` re-sweep (61,460 cases):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 656    | 669   |
+| Fail          | 29     | 16    |
+| NotSupported  | 60,775 | 60,775 |
+
+A full `ssbo.*` re-sweep (12,225 cases -- the other family directly
+exercising storage-buffer array addressing):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 2,236  | 2,337 |
+| Fail          | 1,006  | 905   |
+| NotSupported  | 8,983  | 8,983 |
+
+**+114 Pass across `compute.*`/`ssbo.*` combined, 0 regressions.**
+`ninja check-feme`: 3,201/3,204 Passed, 3 pre-existing Unsupported, 0
+Failed -- clean.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal SPIR-V-to-LLVM/DXIL-raising legalization fix for
+an already-supported buffer-resource surface, not a new Vulkan
+feature/extension.
+
+The remaining `compute.*`/`ssbo.*` failures, `pipeline.monolithic.*`'s
+untriaged status, and `subgroups.ballot_broadcast.*`'s sweep are not
+yet root-caused -- see `agent_thoughts.md` for next steps.
