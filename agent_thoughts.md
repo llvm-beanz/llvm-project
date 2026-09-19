@@ -92137,3 +92137,95 @@ Last session's own compaction summary predicted a *second*, deeper fix would be 
 - `ssbo.*` baseline for next session: **2,847 Pass / 395 Fail / 8,983 NotSupported** (of 12,225) — up from 2,729/513/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) — unchanged, confirmed by a full re-sweep this session.
 - No scratch files left in `/tmp` from this session.
+
+# Session: L124(j) -- partial (column-select/scalar-element) access into nested-array-wrapped matrices
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`.
+
+**Picked up prior session's top next step**: L124(j), `rewriteBlockAccess`'s
+partial-access branch needing the same nesting-depth generalization
+`getMatrixWholeAccess` got in L124(i).
+
+## What happened
+
+1. Traced `rewriteBlockAccess`: its `isa<MatrixType>(SelectedType)` branch
+   only fires when `SelectedType` is directly a matrix, one index past the
+   wrapper selector -- for any array nesting, it's still an array there, so
+   the branch never fires and the generic fallback GEP (no `MatrixStride`
+   awareness) silently computes the wrong offset.
+2. First fix attempt: an unconditional loop peeling `SelectedType` through
+   however many array levels precede the matrix, updating all downstream
+   `Selector+1`/`+2`/`+3` index arithmetic to a running counter.
+   **Built clean, but broke a pre-existing lit test**
+   (`spirv-to-llvm-array-of-identified-struct-stride.mlir`, a non-matrix
+   fixed-array-of-struct case) -- the eager peel changed emitted IR shape
+   (one combined GEP -> two separate GEPs) even for shapes that don't need
+   the matrix logic at all.
+3. Redesigned to peek-then-conditionally-act: a no-side-effect peek first
+   confirms the access is genuinely one of the two deep-nesting shapes that
+   need special handling (matrix with 1-2 indices remaining, or a struct
+   with exactly 2), and only then performs the real peeling GEPs. When the
+   peek doesn't confirm, `NextIndexPos` equals `Selector+1` exactly as
+   before -- every non-deep-nested shape's IR is unchanged.
+4. **Rebuilt but the fix appeared not to work at first** -- `feme-opt`
+   still emitted the old, split-GEP IR for the regression test. Root cause
+   was NOT the fix logic: I'd only run `ninja feme_vulkan`, and `feme-opt`
+   statically links the same object but wasn't relinked. Running
+   `ninja feme-opt` picked up the change; all 6 spot-checked lit tests then
+   passed, including the previously-broken one.
+5. Full `ninja check-feme`: 3,204/3,207 -> unaffected by the fix logic
+   itself once linked; re-ran clean at 3,204/3,207 pass before adding a new
+   test.
+6. Added `spirv-to-llvm-matrix-colmajor-nested-array-column.mlir` (column-
+   select + scalar-element access into a `ColMajor` 2-level-array-wrapped
+   matrix, mirroring `spirv-to-llvm-matrix-block-wrapper-partial.mlir`'s
+   single-level shape one nesting level deeper). Passed FileCheck standalone
+   before adding to the tree.
+7. Re-ran `ninja check-feme` with the new test: **3,205/3,208 Passed**, 3
+   Unsupported, 0 Failed.
+8. Re-swept `ssbo.*`: **2,865 Pass / 377 Fail / 8,983 NotSupported** (was
+   2,847/395/8,983) -- +18 Pass, 0 regressions. Re-swept `compute.*`:
+   unchanged (679/6/60,775).
+9. Investigated why the delta was smaller than the row's original 180-case
+   estimate: bucketed the remaining `2_level_array`/`3_level_array`/
+   `3_level_unsized_array` fails (42 each, was 48 each) and found **every
+   single one is now `RowMajor`-only** -- `ColMajor` is fully fixed for this
+   shape. Checked `single_basic_array`'s pre-existing 36 RowMajor fails
+   directly with `FEME_DUMP_IR=1`/error output: **identical error
+   shape/message to L124(f)**'s own repros (`spirv.AccessChain` explicitly
+   marked illegal, a legalization failure, not a silent wrong result). This
+   contradicts a prior session's own notes, which speculated it was a
+   separate `getMatrixColumnAccessShape` gap needing its own fix -- closer
+   inspection this session shows it's the same bug as L124(f), already
+   tracked, no new roadmap row needed.
+10. Committed in 2 pieces: (a) the core fix + new test, (b) `Roadmap.md`/
+    `VulkanCTSReport.md` updates. No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` changes needed.
+11. Cleaned up this session's own `/tmp` scratch files
+    (`2level.qpa`/`2level_full.log`/`ssbo_sweep.*`/`compute_sweep.*`/
+    `ssbo_fails.txt`) -- left the large pile of prior-session scratch files
+    in `/tmp` untouched since they predate this session and weren't part of
+    this session's own cleanup scope.
+
+## Lesson: relink the actual test binary, not just the shared library
+
+When a fix appears not to take effect after a clean rebuild, check whether
+*every* binary that statically links the changed object was actually
+relinked -- `ninja feme_vulkan` alone left `feme-opt` stale here, wasting a
+debugging cycle chasing a "wrong" logic bug that was actually just a stale
+binary.
+
+## Next steps
+
+1. **L124(f)** (~half a day, needs its own root-cause pass): `spirv.AccessChain` into a `RowMajor`-decorated matrix through an array wrapper fails legalization outright -- now confirmed to also cover `single_basic_array`'s 36 fails and every remaining `2_level_array`/`3_level_array`/`3_level_unsized_array` fail (126 total), making this the single highest-value remaining `ssbo.*` item.
+2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84 fails, still not individually reduced -- needs its own `FEME_DUMP_IR=1` trace, may be a materially different content shape (array of block instances) than this session's fix addressed.
+3. **L124(l)** (~half a day to re-triage): `random` (67), `basic_unsized_array` (36), `unsized_nested_struct_array` (24), `unsized_array_length.*` (5 singletons) -- not re-triaged this session.
+4. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, 3 new commits this session (core fix, new test, Roadmap/CTSReport update) plus this entry's own commit = 4 total.
+- `ninja check-feme`: 3,205/3,208 Passed, 3 Unsupported, 0 Failed (was 3,204/3,207 -- +1 Pass from this session's new lit test).
+- `ssbo.*` baseline for next session: **2,865 Pass / 377 Fail / 8,983 NotSupported** (of 12,225) -- up from 2,847/395/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this session.
+- This session's own `/tmp` scratch files cleaned up (large pile of prior-session leftovers in `/tmp` untouched -- not from this session).
