@@ -3871,6 +3871,27 @@ mlir::LogicalResult rewriteBlockAccess(
   // whatever its element type), or the constant member index the
   // non-array (direct struct-content) branch already has to read anyway.
   unsigned MatrixDecorationMemberIndex = 0;
+  // (Roadmap L124(p)) The actual struct \p MatrixDecorationMemberIndex is
+  // a member index *into* -- \p BlockStruct itself only when
+  // Element.Content is that same struct (the non-wrapper shape, or
+  // either array-wrapped shape below, whose own sole member -- always
+  // index 0 of BlockStruct -- is Content itself, whatever its own
+  // element type). When Element.Content is instead a *struct* reached
+  // through a wrapper (dxc's own `cbuffer`/`ConstantBuffer<T>`
+  // convention, or a plain GLSL `uniform Block { S s; }` -- structurally
+  // identical, see BlockElement's own comment), BlockStruct is the
+  // *outer*, one-member wrapper struct, not Content -- decorations for a
+  // member of Content (e.g. a matrix nested inside `S`) live on Content
+  // itself, never on BlockStruct, whose own single member is Content as
+  // a whole, not any one of Content's own members. Passing BlockStruct
+  // to a decoration lookup keyed by an index into Content in that case
+  // reads (or, once Content has more members than BlockStruct's own
+  // single one, out-of-bounds asserts on) the wrong struct entirely --
+  // confirmed via `dEQP-VK.ubo.single_struct.per_block_buffer.
+  // std140_both`'s own `StructType::getMemberDecorations`: "member index
+  // out of range" crash, a `uniform Block { S s; }`-shaped block whose
+  // `S` has an array-of-matrix member past index 0.
+  mlir::spirv::StructType DecorationStruct = BlockStruct;
   // (Roadmap H151) Whether SelectedType was reached by indexing into
   // Element.Content as an array (either shape below), as opposed to
   // selecting a member of Element.Content directly as a struct -- the
@@ -3896,9 +3917,10 @@ mlir::LogicalResult rewriteBlockAccess(
     if (!MemberIndex)
       return Rewriter.notifyMatchFailure(Op,
                                          "member selector is not a constant");
-    SelectedType = mlir::cast<mlir::spirv::StructType>(Element.Content)
-                       .getElementType(*MemberIndex);
+    auto ContentStruct = mlir::cast<mlir::spirv::StructType>(Element.Content);
+    SelectedType = ContentStruct.getElementType(*MemberIndex);
     MatrixDecorationMemberIndex = static_cast<unsigned>(*MemberIndex);
+    DecorationStruct = ContentStruct;
   }
   mlir::Type ElementType = TypeConverter.convertType(SelectedType);
   if (!ElementType)
@@ -3912,7 +3934,7 @@ mlir::LogicalResult rewriteBlockAccess(
   // this one shape. Substitute it here, before it is used by anything
   // below.
   ElementType = substituteArrayOfMatrixElementType(
-      SelectedType, ElementType, BlockStruct, MatrixDecorationMemberIndex,
+      SelectedType, ElementType, DecorationStruct, MatrixDecorationMemberIndex,
       TypeConverter);
   if (!ElementType)
     return Rewriter.notifyMatchFailure(Op, "type conversion failed");
@@ -3995,7 +4017,7 @@ mlir::LogicalResult rewriteBlockAccess(
       // iteration of this loop, rather than only the first ElementType
       // computed before this loop started.
       PeeledElementType = substituteArrayOfMatrixElementType(
-          PeeledSpirvType, PeeledElementType, BlockStruct,
+          PeeledSpirvType, PeeledElementType, DecorationStruct,
           MatrixDecorationMemberIndex, TypeConverter);
       if (!PeeledElementType)
         return Rewriter.notifyMatchFailure(Op, "type conversion failed");
@@ -4082,10 +4104,11 @@ mlir::LogicalResult rewriteBlockAccess(
     // member regardless of its real RowMajor/MatrixStride decorations,
     // silently miscompiling this partial access instead of correctly
     // handling or declining it.
-    if (!isMatrixLayoutRepresentable(BlockStruct, MatrixDecorationMemberIndex,
+    if (!isMatrixLayoutRepresentable(DecorationStruct,
+                                     MatrixDecorationMemberIndex,
                                      ElementType)) {
       std::optional<MatrixMemberLayout> Layout =
-          getMatrixMemberLayout(BlockStruct, MatrixDecorationMemberIndex);
+          getMatrixMemberLayout(DecorationStruct, MatrixDecorationMemberIndex);
       if (Layout && AllIndices.size() == NextIndexPos + 1) {
         if (!Layout->IsRowMajor) {
           mlir::Type ByteTy = mlir::IntegerType::get(Rewriter.getContext(), 8);
