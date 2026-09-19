@@ -4503,3 +4503,100 @@ so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Session: L124(p) fixed -- `BlockStruct`/`Element.Content` decoration mismatch, unblocks full `ubo.*` sweep
+
+Triaged and fixed roadmap L124(p) (the fatal `StructType::
+getMemberDecorations`: "member index out of range" assertion in
+`dEQP-VK.ubo.single_struct.per_block_buffer.std140_both`, discovered
+incidentally during the prior session's L124(o) verification and
+confirmed pre-existing/unrelated to that fix).
+
+Root-caused via a `gdb -batch -ex run -ex bt` backtrace against the
+real CTS test plus code reading: `rewriteBlockAccess` always looked up
+a member's `RowMajor`/`MatrixStride` decorations on `BlockStruct` (the
+*outer* struct type the original base pointer points to) at
+`MatrixDecorationMemberIndex`. For `getUniformBlockElement`'s "sole
+member is itself a struct" wrapper shape -- indistinguishable, by type
+shape alone, from dxc's own `cbuffer`/`ConstantBuffer<T>` convention,
+but here reached via glslang's lowering of a plain
+`uniform Block { S s; };`, exactly `single_struct`'s own shape --
+`MatrixDecorationMemberIndex` is actually computed relative to
+`Element.Content` (the inner Field struct `S`), not `BlockStruct`
+itself. `BlockStruct` has only one member in this wrapper shape, so any
+index >= 1 (any member of `S` past its own first) crashed the assertion
+outright, rather than returning a wrong answer.
+
+Fixed by introducing a new `DecorationStruct` local (defaults to
+`BlockStruct`, reassigned to `Element.Content` cast to `StructType`
+whenever `MatrixDecorationMemberIndex` is set from indexing into
+struct-typed content) and using `DecorationStruct` in place of
+`BlockStruct` at every decoration-lookup call site in
+`rewriteBlockAccess`: both `substituteArrayOfMatrixElementType` calls
+and the two direct `isMatrixLayoutRepresentable`/`getMatrixMemberLayout`
+calls in the RowMajor/ColMajor column-select logic. Also audited
+`getWrapperArrayMatrixColumnAccess` (a structurally similar helper
+taking its own `BlockStruct` parameter) for the same mismatch pattern
+and confirmed it does *not* share the bug: its own shape
+(array-wraps-matrix-directly, no intervening struct) always has
+`MatrixDecorationMemberIndex == 0`, which is correctly `BlockStruct`'s
+own sole member index in that shape.
+
+Verified the fix two ways before touching the real CTS harness: (1) a
+minimal `feme-opt`-only repro (a `uniform Block { S s; }`-shaped module
+with `S` containing a non-square, `ColMajor`+`MatrixStride`-decorated
+array-of-matrices member at index 1) confirmed to crash identically to
+the real bug pre-fix (via `git stash`) and produce the correctly-widened
+output post-fix; (2) added as a permanent regression test,
+`spirv-to-llvm-matrix-uniform-wrapper-struct-array-of-matrix.mlir`.
+
+Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache`, incremental (existing build
+directory reused).
+
+```console
+VK_DRIVER_FILES=$PWD/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+  vulkaninfo --summary | grep deviceName
+# => FeMe CPU Vulkan Device
+```
+
+`ninja check-feme`: **3,211 Passed / 3 Unsupported / 0 Failed** (+1 from
+the new lit test, 0 regressions).
+
+Full Vulkan CTS re-sweep after the fix:
+
+- The originally-crashing test,
+  `dEQP-VK.ubo.single_struct.per_block_buffer.std140_both`: **now
+  individually Passes** (previously a fatal abort).
+- `ubo.single_struct.*` (72 cases): **48 Pass / 0 Fail / 24
+  NotSupported** -- clean, no other crashes/fails in this family.
+- `ubo.*` **full** sweep (13,240 cases, previously entirely blocked by
+  this crash): **5,687 Pass / 0 Fail / 7,553 NotSupported**. This is
+  the first time a full `ubo.*` sweep (not just `ubo.random.*`) has run
+  to completion.
+- `ssbo.*` (12,225 cases): **3,195 Pass / 47 Fail / 8,983 NotSupported**
+  -- unchanged from before this fix (confirmed via a full re-run, same
+  47 test names both before and after), as expected since L124(p) is a
+  `ubo.*`-only code path (`getUniformBlockElement`'s wrapper shape via
+  `BlockAccessChainPattern`, not any `ssbo.*`-specific pattern). These
+  47 are re-filed as a new roadmap item, L124(q) (see below), not part
+  of L124(p).
+
+Light triage of one of the 47 `ssbo.*` fails
+(`dEQP-VK.ssbo.layout.random.basic_types.18`) done as a sanity check,
+not a full root-cause: fails with a generic "Counter value incorrect"
+message (a data-mismatch, not a crash/legalization-rejection),
+consistent with -- but not yet confirmed to share a root cause with --
+the `random`-bucket pattern from L124(l)/(n) (several small, distinct
+layout bugs bundled under one fuzzer-driven test family). Filed as
+L124(q), not started.
+
+FeMe source revision under test: `361df0b2f177` (`[feme] Fix L124(p):
+BlockStruct/Element.Content decoration mismatch`) and `85a81554f4b7`
+(roadmap update). No feature or extension inventory changes: this
+session's fix is an internal SPIR-V-to-LLVM access-chain-rewriting
+correctness fix, not new Vulkan feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
