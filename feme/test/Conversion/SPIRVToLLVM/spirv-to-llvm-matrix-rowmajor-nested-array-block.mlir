@@ -34,6 +34,25 @@
 // declared stride regardless of how many levels deep a matrix element
 // sits, so no further change was needed there; only the whole-matrix
 // *access recognition* itself was too narrow.)
+//
+// (Roadmap L124(m)) The inner GEP's own source element type below is
+// `!llvm.array<2 x array<2 x struct<packed (array<2 x f32>, array<8 x
+// i8>)>>>` rather than the plainer, undersized-byte-array-padded
+// `!llvm.array<2 x array<32 x i8>>` this test originally checked for --
+// substituteArrayOfMatrixElementType now always prefers the matrix's own
+// physical (RowMajor-transposed, MatrixStride-padded) type for a
+// RowMajor-decorated array-of-matrix member's own GEP navigation,
+// exactly as convertOffsetStructTypeIgnoringDecorations's own struct
+// member conversion already does, rather than the plain
+// convertArrayTypeIgnoringDecorations padding this square matrix's own
+// natural size happened to reach an equally-sized (but structurally
+// different, and for a non-square matrix genuinely wrong -- see that
+// roadmap entry) type via instead. Both spellings reserve exactly the
+// same 32 bytes per inner-array element, so this is a type-spelling
+// change only, not a behavioral one -- the actual `llvm.store`/
+// `llvm.load` types below (computed independently by
+// RowMajorMatrixStorePattern/RowMajorMatrixLoadPattern from the same
+// decorations) are unchanged.
 
 // CHECK-LABEL: llvm.func @store_load
 // CHECK-SAME: (%[[OUTER:.*]]: i32, %[[INNER:.*]]: i32, %[[M:.*]]: !llvm.array<2 x vector<2xf32>>) -> !llvm.array<2 x vector<2xf32>>
@@ -42,7 +61,7 @@
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %[[OUTER]])
 // CHECK-SAME: -> !llvm.ptr<11>
 // CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[PTR]][0, %[[INNER]]]
-// CHECK-SAME: !llvm.ptr<11>, !llvm.array<2 x array<32 x i8>>
+// CHECK-SAME: !llvm.ptr<11>, !llvm.array<2 x array<2 x struct<packed (array<2 x f32>, array<8 x i8>)>>>
 //
 // The value stored is transposed (RowMajor) and padded (each row's own
 // natural 8-byte size padded up to the declared 16-byte MatrixStride)
