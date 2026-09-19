@@ -9824,6 +9824,66 @@ peelInstanceArrayPointer(mlir::spirv::PointerType Type) {
       mlir::spirv::PointerType::get(Pointee, Type.getStorageClass()), Depth);
 }
 
+/// Walks \p NumSelectors consecutive `spirv.AccessChain` indices of \p Op
+/// starting at \p StartPos, each selecting one member of \p Struct (or
+/// whichever nested struct the previous selector landed on), until
+/// landing on a member that is directly a matrix or a direct (however
+/// many levels) array of matrices -- consuming exactly one further index
+/// per array level once that happens. Shared by getMatrixWholeAccess's
+/// two shapes (see its own comment): the plain `cbuffer`/
+/// `ConstantBuffer<T>` shape (a bare block struct, roadmap L124(o)/(q)),
+/// and (roadmap L124(r)) a `StructuredBuffer<S>`/`RWStructuredBuffer<S>`
+/// wrapper array whose *element* is itself such a struct (`S` containing
+/// one or more matrix members), reached after
+/// getMatrixWholeAccess's own wrapper-array-nesting peel already landed
+/// on `S`. Returns the owning struct (the one whose own member carries
+/// the `RowMajor`/`ColMajor`/`MatrixStride` decorations) and that
+/// member's index, or `std::nullopt` if \p NumSelectors are exhausted
+/// before reaching a matrix (or an array of one), any selector isn't a
+/// compile-time-constant index, or a further index remains after the
+/// matrix (or its own array levels) is reached.
+std::optional<std::pair<mlir::spirv::StructType, unsigned>>
+walkStructMembersToMatrix(mlir::spirv::StructType Struct,
+                           mlir::spirv::AccessChainOp Op, unsigned StartPos,
+                           unsigned NumSelectors) {
+  unsigned Pos = 0;
+  while (true) {
+    std::optional<uint64_t> Idx =
+        getConstantMemberIndex(Op.getIndices()[StartPos + Pos]);
+    if (!Idx || *Idx >= Struct.getNumElements())
+      return std::nullopt;
+    unsigned MemberIndex = static_cast<unsigned>(*Idx);
+    mlir::Type MemberType = Struct.getElementType(MemberIndex);
+    ++Pos;
+    if (auto NestedStruct = mlir::dyn_cast<mlir::spirv::StructType>(MemberType)) {
+      if (Pos == NumSelectors)
+        return std::nullopt; // Landed on a struct, not a matrix.
+      Struct = NestedStruct;
+      continue;
+    }
+    if (mlir::isa<mlir::spirv::MatrixType>(MemberType)) {
+      if (Pos != NumSelectors)
+        return std::nullopt; // A further index would select only part.
+      return std::make_pair(Struct, MemberIndex);
+    }
+    unsigned ArrayNestingDepth = 0;
+    mlir::Type Inner = MemberType;
+    while (true) {
+      if (auto RTArray = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Inner))
+        Inner = RTArray.getElementType();
+      else if (auto FixedArray = mlir::dyn_cast<mlir::spirv::ArrayType>(Inner))
+        Inner = FixedArray.getElementType();
+      else
+        break;
+      ++ArrayNestingDepth;
+    }
+    if (!mlir::isa<mlir::spirv::MatrixType>(Inner) ||
+        Pos + ArrayNestingDepth != NumSelectors)
+      return std::nullopt;
+    return std::make_pair(Struct, MemberIndex);
+  }
+}
+
 /// A whole-matrix `spirv.AccessChain` access this file's own physical
 /// layout substitution (getPhysicalMatrixMemberType) can interpret: the
 /// matrix's ordinary (logical, always column-major) MatrixType, and the
@@ -9909,10 +9969,36 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
       }
       ++ArrayNestingDepth;
     }
-    if (!mlir::isa<mlir::spirv::MatrixType>(Inner) ||
-        Op.getIndices().size() != InstanceArrayDepth + 1 + ArrayNestingDepth)
+    if (mlir::isa<mlir::spirv::MatrixType>(Inner)) {
+      // The array wraps the matrix directly (roadmap L83/L124(g)/(i)):
+      // decorations live on the wrapper's own sole member 0.
+      if (Op.getIndices().size() != InstanceArrayDepth + 1 + ArrayNestingDepth)
+        return std::nullopt;
+      MemberIndex = 0;
+    } else if (auto InnerStruct =
+                   mlir::dyn_cast<mlir::spirv::StructType>(Inner)) {
+      // (Roadmap L124(r)) The array wraps a *struct* instead
+      // (`StructuredBuffer<S>`/`RWStructuredBuffer<S>` where `S` itself
+      // has one or more matrix members, e.g. `struct S { matCxR a; T
+      // other; matCxR b; };`), so this access needs further struct-
+      // member selects past the wrapper-array levels already peeled
+      // above, exactly like the non-wrapper branch below's own walk --
+      // just starting from `InnerStruct` instead of the block's own
+      // top-level struct, and starting the remaining selectors after
+      // the wrapper's own dummy index and every array level already
+      // consumed.
+      unsigned StartPos = InstanceArrayDepth + 1 + ArrayNestingDepth;
+      if (StartPos >= Op.getIndices().size())
+        return std::nullopt;
+      std::optional<std::pair<mlir::spirv::StructType, unsigned>> Found =
+          walkStructMembersToMatrix(InnerStruct, Op, StartPos,
+                                     Op.getIndices().size() - StartPos);
+      if (!Found)
+        return std::nullopt;
+      std::tie(Struct, MemberIndex) = *Found;
+    } else {
       return std::nullopt;
-    MemberIndex = 0;
+    }
   } else {
     // A matrix reached through zero or more intervening struct-member
     // selects before a final member select that lands directly on the
@@ -9929,58 +10015,17 @@ getMatrixWholeAccess(mlir::spirv::AccessChainOp Op) {
     // `dEQP-VK.ssbo.layout.random.basic_types.18`, whose own SSBO struct
     // has an ordinary scalar/vector member *and* a `RowMajor`+
     // non-natural-`MatrixStride` `mat2x3` member wrapped in a one-element
-    // array). Every selector but the ones spent walking array levels at
-    // the very end must select a struct-typed member (descending one
-    // level further before the next index applies, mirroring
-    // peelInstanceArrayPointer's own array-nesting peel above, just
-    // through struct nesting instead); once a selector lands on a member
-    // that is directly a matrix, or an array (of however many levels) of
-    // matrices, that must be the *last* struct-member select, with
-    // exactly one further index consumed per remaining array level and
-    // no room for a further index that would select only part of the
-    // matrix itself. The decorations describing the physical layout are
-    // always attached to this struct's own member (whichever of the two
-    // final shapes it is), never to anything inside the array.
+    // array). See walkStructMembersToMatrix's own comment for the shared
+    // walk logic.
     unsigned NumSelectors = Op.getIndices().size() - InstanceArrayDepth;
     if (NumSelectors == 0)
       return std::nullopt;
-    unsigned Pos = 0;
-    while (true) {
-      std::optional<uint64_t> Idx =
-          getConstantMemberIndex(Op.getIndices()[InstanceArrayDepth + Pos]);
-      if (!Idx || *Idx >= Struct.getNumElements())
-        return std::nullopt;
-      MemberIndex = static_cast<unsigned>(*Idx);
-      mlir::Type MemberType = Struct.getElementType(MemberIndex);
-      ++Pos;
-      if (auto NestedStruct = mlir::dyn_cast<mlir::spirv::StructType>(MemberType)) {
-        if (Pos == NumSelectors)
-          return std::nullopt; // Landed on a struct, not a matrix.
-        Struct = NestedStruct;
-        continue;
-      }
-      if (mlir::isa<mlir::spirv::MatrixType>(MemberType)) {
-        if (Pos != NumSelectors)
-          return std::nullopt; // A further index would select only part.
-        break;
-      }
-      unsigned ArrayNestingDepth = 0;
-      mlir::Type Inner = MemberType;
-      while (true) {
-        if (auto RTArray =
-                mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Inner))
-          Inner = RTArray.getElementType();
-        else if (auto FixedArray = mlir::dyn_cast<mlir::spirv::ArrayType>(Inner))
-          Inner = FixedArray.getElementType();
-        else
-          break;
-        ++ArrayNestingDepth;
-      }
-      if (!mlir::isa<mlir::spirv::MatrixType>(Inner) ||
-          Pos + ArrayNestingDepth != NumSelectors)
-        return std::nullopt;
-      break;
-    }
+    std::optional<std::pair<mlir::spirv::StructType, unsigned>> Found =
+        walkStructMembersToMatrix(Struct, Op, InstanceArrayDepth,
+                                   NumSelectors);
+    if (!Found)
+      return std::nullopt;
+    std::tie(Struct, MemberIndex) = *Found;
   }
 
   std::optional<MatrixMemberLayout> Layout =
