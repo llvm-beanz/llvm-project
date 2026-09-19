@@ -4409,3 +4409,97 @@ not any Vulkan-facing code path, so
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Session: L124(o) fixed -- widened non-representable nested-struct matrix members, third-fix regression found and fixed same session
+
+Continued L124(o) (`ssbo.*`'s `random` bucket's residual repro,
+`all_per_block_buffers.41`'s `b.mB` whole-matrix corruption, root-caused
+but not yet fixed by the prior session). Landed the fix in three
+separate commits:
+
+1. Generalized `getMatrixWholeAccess`'s non-wrapper branch to walk
+   through zero-or-more intervening struct-member selects (not just
+   exactly one) before the final matrix-member select, fixing the
+   originally-root-caused whole-matrix Store/Load corruption for a
+   matrix nested one or more struct levels below the top-level `Block`.
+2. Added `getTightOrPhysicalMatrixMemberType`, wired into
+   `getTightNestedStructType`'s matrix branch and
+   `convertOffsetStructTypeIgnoringDecorations`'s array-of-matrix retry
+   tier, so a non-representable (`RowMajor`, or non-natural
+   `MatrixStride`) matrix member nested inside a struct member is
+   *widened* rather than naively tightened, matching a direct block
+   member's own already-correct physical layout.
+3. **Same-session regression, found and fixed**: a full `ubo.random.*`
+   CTS sweep after (1)+(2) surfaced
+   `dEQP-VK.ubo.random.nested_structs_arrays_instance_arrays_compute.4`
+   crashing (`'llvm.getelementptr' op index N indexing a struct is out
+   of bounds`) rather than merely computing a wrong value. Root-caused
+   to the *same* tighten-vs-widen bug existing independently in
+   `convertOffsetStructTypeIgnoringDecorations`'s *direct*-matrix-member
+   retry-tier case (a third call site (2)'s own fix missed) -- for a
+   nested struct with two or more non-representable matrix members,
+   this produced a struct whose field layout silently disagreed with
+   the one `getTightNestedStructType` produces for the same struct when
+   embedded as another struct's own member, so a GEP built against one
+   shape got indexed with a physical index computed for the other.
+   Fixed by giving that third call site the identical widen-or-tighten
+   treatment as its already-fixed array-of-matrix sibling.
+
+Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache`, incremental (existing build
+directory reused, per standing practice).
+
+```console
+VK_DRIVER_FILES=$PWD/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+  vulkaninfo --summary | grep deviceName
+# => FeMe CPU Vulkan Device
+```
+
+`ninja check-feme`: **3,210 Passed / 3 Unsupported / 0 Failed** (+2 new
+regression tests: `spirv-to-llvm-matrix-rowmajor-nested-struct-block.mlir`
+for fix (1), `spirv-to-llvm-two-nonrepresentable-matrices-nested-struct.mlir`
+for fix (3); 2 pre-existing tests' CHECK lines updated to reflect the
+now-correct widened output, `spirv-to-llvm-array-of-matrix-struct-
+member.mlir` and `spirv-to-llvm-nested-struct-reorder.mlir`).
+
+Full Vulkan CTS re-sweep after all three fixes landed:
+
+- `ubo.random.*` (2,250 cases): **607 Pass / 0 Fail / 1,643 NotSupported**
+  -- was 606/1/1,643 with only fixes (1)+(2) applied (the fix-(3)
+  regression); confirmed clean (0 Fail) with fix (3) added. The specific
+  regression repro, `nested_structs_arrays_instance_arrays_compute.4`,
+  individually re-confirmed Pass.
+- `ssbo.*` (12,225 cases): **3,195 Pass / 47 Fail / 8,983 NotSupported**
+  -- was 3,187/55/8,983 before this session's fixes: **-8 Fail**, 0
+  regressions, matching this fix (the remaining 47 are a different,
+  not-yet-triaged bucket, filed separately, not part of L124(o)).
+- `compute.pipeline.builtin_var.*` (11 cases): **11 Pass / 0 Fail** --
+  unchanged, sanity check for an unrelated area, no regression.
+
+A full `ubo.*` sweep (beyond just `ubo.random.*`) remains blocked by a
+newly-discovered, **pre-existing** (confirmed via `git stash` comparison
+to crash identically without this session's changes) fatal
+`StructType::getMemberDecorations`: "member index out of range"
+assertion in `dEQP-VK.ubo.single_struct.per_block_buffer.std140_both` --
+filed as roadmap L124(p), not fixed this session (out of scope).
+
+Also discovered, flagged for future work, not fixed: `spirv-to-llvm-
+nested-struct-reorder.mlir`'s own dynamic-column-select `spirv.
+AccessChain` had a latent stale-physical-index bug that this session's
+fix (3) happened to also correct as a side effect (see that test's own
+updated comment) -- confirmed via this session's investigation to be
+the *same* embedded-vs-standalone-conversion mismatch root cause as the
+fix-(3) regression itself, just for a struct shape that didn't
+previously *crash* (a numerically in-bounds, merely type-mismatched
+GEP). No further action needed; noted here only for completeness since
+it was investigated as part of this session's own root-causing.
+
+FeMe source revision under test: see this session's own commits (three
+`[feme] L124(o): ...`-titled commits immediately preceding this report
+update in `git log`). No feature or extension inventory changes: this
+session's fixes are internal SPIR-V-to-LLVM struct/matrix layout
+conversion correctness fixes, not new Vulkan feature/extension surface,
+so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
