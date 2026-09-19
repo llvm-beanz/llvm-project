@@ -92012,3 +92012,50 @@ Bucketing alone (grepping error-message shape) cannot distinguish "one systemic 
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- the 6 remaining are L124(a)-(d) plus the 2 pre-existing `containsAddressableBool` cases (out of scope).
 - `ssbo.*` baseline for next session: **2,337 Pass / 905 Fail / 8,983 NotSupported** (of 12,225), bucketed but unchanged in count -- see the L124(e)-(h) breakdown above for exact bucket sizes.
 - No scratch files left in `/tmp` from this session.
+
+# Session: L124(e) closed (+254 ssbo.* Pass) -- L124(g) row_major stride lead found, not fixed
+
+**Next action:** open `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`'s `RowMajorMatrixStorePattern::matchAndRewrite` and add a temporary `llvm::dbgs()` dump of `Access->Layout.Stride` vs `NaturalMinorBytes` for `dEQP-VK.ssbo.layout.single_basic_array.std140.row_major_mat2` -- confirms which one is wrong before touching any code (see "L124(g) lead" below).
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up L124(e) first (`ssbo.*`'s 274-case missing `feme.cpu.resource.store.raw.i8` symbol) over L124(g) (572-case wrong-result bucket), since it looked more mechanical going in.
+3. Reproduced `dEQP-VK.ssbo.layout.single_basic_type.std140.column_major_highp_mat2` with `FEME_DUMP_IR=1`. Found every failing `store.raw.i8` call stores a literal `poison` operand -- these are `layOutStructIfOffsetsMatch`'s own synthetic `[N x i8]` std140 alignment-gap padding bytes (a `mat2` column's 8-byte pad), never assigned a real value by anything.
+4. **Root cause was not "missing runtime variant," it was "should never call this at all."** The 274-case bucket's original scoping (previous session) assumed new `i8`/`v{2,3,4}i8` runtime functions were needed. They are not: `lowerRawStore` (`SPIRVResourceLowering.cpp`) just needed to recognize a poison-valued aggregate subtree and skip storing it -- writing unspecified bytes into padding no SPIR-V-visible load can ever observe is a pure no-op.
+5. **First attempt at the fix (`isa<UndefValue>(Val)` check alone) failed its own unit test**: a hand-written IR store value reaches the gap member as an `extractvalue` over an *unfolded* `insertvalue` chain, not yet a literal `poison` constant at this pass's point in the pipeline (that folding normally happens later, via a separate InstCombine run). Fixed by using `llvm::FindInsertedValue` (the same insertvalue-chain-walking utility InstCombine's own peephole uses) to see through the chain immediately, instead of depending on a later pass to fold it first.
+6. New unit test: `SPIRVResourceLoweringTest.SkipsRawStoreOfPoisonAlignmentGapMember`. `FeMeTransformsCPUTests`: 522/522 Pass.
+7. Re-swept `ssbo.*` (12,225 cases): **2,591 Pass / 651 Fail / 8,983 NotSupported** (was 2,337/905/8,983) -- **+254 Pass, 0 regressions**. `compute.*` re-swept too, confirmed unchanged (679/6/60,775 -- this bug was `ssbo.*`-only). `ninja check-feme`: 3,202/3,205 Passed, 3 Unsupported, 0 Failed (+1 Pass from the new unit test itself).
+8. Committed the fix + test, then updated `Roadmap.md` (L124(e) struck through as done) and `VulkanCTSReport.md` (new section) in a separate commit. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed -- this is an internal codegen fix on an already-supported storage-buffer surface, not a new Vulkan feature.
+9. Spent remaining time scoping L124(g) rather than diving into a fix blind (see below). Recorded the lead in `Roadmap.md`'s L124(g) row and committed it separately.
+10. Cleaned up all `/tmp/l124e_*`/`l124g_*` scratch files.
+
+## Why the first fix attempt (plain `isa<UndefValue>`) looked right but wasn't enough
+
+The real pipeline's `FEME_DUMP_IR=1` dump showed literal `poison` operands at the failing call sites -- but that dump is of the *final*, fully-optimized IR, after a later InstCombine pass has already folded the `extractvalue`-of-unwritten-`insertvalue`-index chain down to a literal constant. At the point `lowerRawStore` itself runs (earlier in the pipeline, no InstCombine has touched this function yet), the same value is still an unfolded `ExtractValueInst` -- semantically poison, but not `isa<UndefValue>` yet. This is exactly the kind of gap a hand-written unit test (which runs the pass with no prior/surrounding InstCombine) catches immediately but a full-pipeline manual IR trace does not -- worth remembering: **always write the unit test before declaring a fix done, even when a real CTS repro appears to confirm it**, since the CTS repro's own dumped IR can be a misleading, already-simplified snapshot.
+
+## L124(g) lead (not fixed, needs confirmation before touching code)
+
+Reduced `dEQP-VK.ssbo.layout.single_basic_array.std140.row_major_mat2` (an array of `mat2`s) with `FEME_DUMP_IR=1`:
+
+- One matrix element's two rows are stored/loaded (`store.raw.v2f32`/`load.raw.v2f32`) at byte offsets `+0` and `+8` within that element.
+- The *array* stride between elements is correctly `32` (`2 rows * 16-byte std140 MatrixStride`).
+- Std140 requires each row's own stride to be rounded up to `16` bytes (vec4), same as the array stride's own per-element math already assumes -- so the intra-matrix row-to-row offset should be `+0`/`+16`, not `+0`/`+8`.
+
+This means `RowMajorMatrixStorePattern`'s (`SPIRVToLLVMPatterns.cpp`) own `NeedsPad` computation (`Access->Layout.Stride != NaturalMinorBytes`) evidently came out `false` for this shape, even though the same member's `MatrixStride` decoration is clearly `16` per the correct array-level math elsewhere. **Not yet confirmed which side is wrong**: `getMatrixWholeAccess`'s own extraction of `Access->Layout.Stride` for this specific "array of matrices" shape, vs. some other code path handling arrays-of-matrices differently than the single-matrix-member case L124(e)'s fix touched. First diagnostic step (named in "Next action" above) is a `dbgs()` dump, not a code change -- avoid guessing at a fix for a bug this consequential (85% of the remaining `ssbo.*` fails are matrix-typed) without first confirming the actual wrong value.
+
+## Next steps
+
+1. **L124(g)** (~half a day+, lead already found this session): confirm `Access->Layout.Stride`'s actual value in `RowMajorMatrixStorePattern::matchAndRewrite` for `row_major_mat2` via a temporary debug dump before changing anything (see lead above). Once confirmed, the fix is likely narrow (either `getMatrixWholeAccess` reads the wrong decoration/field, or a distinct arrays-of-matrices code path needs the same `MatrixStride`-vs-natural-size padding math the single-matrix case already has). This is still the single highest-value remaining item in the whole L124 breakdown (555 of 651 `ssbo.*` fails, 85%, are matrix-typed).
+2. **L124(f)** (~half a day, needs its own root-cause pass first): `spirv.AccessChain` into a `RowMajor`-decorated matrix nested inside a runtime array fails legalization (36 cases) -- `ColMajor` in the same position is fine.
+3. **L124(a)** (~half a day): `read_unbound_ssbo` -- design already scoped in a prior session, see `Roadmap.md`'s L124(a) row.
+4. **L124(b)/(c)** (~half a day+ each): `remove_global_load_pass` (new `spirv.GlobalVariable` initializer-attribute) and `undefined_values` (new `spirv.CopyLogical` op) -- both real dialect additions.
+5. **L124(d)/L124(h)/L125/L126/L116(f)** all remain untouched, standing fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, 3 new commits this session (L124(e) fix+test, Roadmap/CTSReport update, L124(g) lead scoping) plus this entry's own commit = 4 total.
+- `ninja check-feme`: 3,202/3,205 Passed, 3 Unsupported, 0 Failed (was 3,201/3,204 -- +1 Pass from this session's new unit test).
+- `ssbo.*` baseline for next session: **2,591 Pass / 651 Fail / 8,983 NotSupported** (of 12,225) -- up from 2,337/905/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this session.
+- No scratch files left in `/tmp` from this session.
