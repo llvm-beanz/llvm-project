@@ -57,33 +57,34 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## State for next session
 
-- Working tree clean, 3 new commits this session (core fix, test,
-  Roadmap/CTSReport update) plus this entry's own commit = 4 total.
+- Working tree clean, 5 new commits this session (legacy-SSBO fix + test
+  updates, struct-padding fix + test, Roadmap/CTSReport update) plus this
+  entry's own commit = 6 total.
 - `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
-- `ssbo.*` baseline for next session: **3,150 Pass / 92 Fail / 8,983
-  NotSupported** (of 12,225) -- up from 3,063/179/8,983.
+- `ssbo.*` baseline for next session: **3,178 Pass / 64 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 3,150/92/8,983. `random` is now
+  the *only* remaining named bucket.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
-  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
-  session.
+  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep
+  this session.
 - `/tmp` scratch cleaned up.
 
 ## Next steps
 
-1. **L124(l)** (~half a day to re-triage, now the *only* remaining named
-   `ssbo.*` bucket): `random` (64), `unsized_nested_struct_array` (24), and
-   4 `unsized_array_length.*` singletons (`float_{no_offset,offset}_
-   {explicit_size,whole_size}`) -- these 92 cases are everything left in
-   `ssbo.*`. `random` is likely a mix of whatever's left once the other two
-   are individually reduced (it's CTS's own fuzz-shaped family, drawing
-   from every other feature), so start with `unsized_nested_struct_array`
-   or the 4 singletons first -- smaller, more likely a single distinct root
-   cause each.
-2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
-   fallbacks from prior sessions -- see `Roadmap.md` for each row's own
-   scoping.
-3. With `ssbo.*` down to 92 fails (from 651 seven sessions ago, now under
-   1% of the whole `ssbo.*` suite), the next session should prioritize
-   L124(l)'s 4 `unsized_array_length.*` singletons first -- smallest,
-   likely fastest win, and they've been carried over unfixed since before
-   L124(g) (at least 5 sessions) without ever getting their own dedicated
-   trace.
+1. **L124(n)** (~half a day): implement the vector/scalar element padding
+   for `RuntimeArrayType`'s non-wrapper (`HandleKind::StorageStruct`)
+   case -- likely a `Stride`-sized byte-array stand-in, same idea as
+   `convertArrayTypeIgnoringDecorations`'s own scalar-array handling.
+   **Before landing it**: re-run the `dEQP-VK.compute.pipeline.
+   builtin_var.*` sweep (L106's own vec3 regression coverage) to confirm
+   the wrapper shape's own vec3 mechanism still works unchanged. This
+   should close most or all of `random`'s remaining 64 fails, since that
+   family is CTS's own fuzz-shaped mix of whatever else is still broken.
+2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched,
+   standing fallbacks from prior sessions -- see `Roadmap.md` for each
+   row's own scoping.
+3. With `ssbo.*` down to 64 fails (from 651 eight sessions ago, now
+   0.5% of the whole suite) and concentrated in one single family, the
+   next session should prioritize L124(n) first -- it is very likely the
+   last `ssbo.*` item standing between this milestone series and a fully
+   clean `ssbo.*` sweep.
