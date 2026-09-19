@@ -3954,3 +3954,90 @@ unsized_nested_struct_array` (24), `layout.2_level_array`/`3_level_array`/
 as L124(m) since it's a materially different remaining shape from the
 column-select gap this fix closed), and 4 `unsized_array_length.*`
 singletons. See `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L124(m) (closed this session): non-square RowMajor matrix through 2+ array levels
+
+Root-caused and fixed a silent miscompile (wrong numeric result, not a
+legalization failure) affecting `RowMajor`+`MatrixStride`-decorated
+*non-square* matrices (e.g. `mat4x3`: 4 columns, 3 rows) reached through 2 or
+more levels of SPIR-V array nesting inside a storage buffer block --
+`2_level_array`/`3_level_array`/`3_level_unsized_array`'s own residual 12
+fails each (36 total), left after L124(f)'s column-select fix.
+
+Root cause: this codebase's own `convertArrayTypeIgnoringDecorations`
+correctly *declines* (returns `nullptr`) to convert an array wrapping a
+non-square matrix when the matrix's natural LLVM size -- vector-padded per
+SPIR-V rules (e.g. 64 bytes for `mat4x3`, since LLVM pads `vector<3xf32>` to
+16 bytes) -- exceeds the declared `ArrayStride` (e.g. 48 bytes, the *correct*
+physical size). That decline was intended to fall through to a caller that
+performs the correct RowMajor/MatrixStride-aware substitution. Instead, it
+fell through to MLIR upstream's own `spirv::ArrayType` conversion (in
+`SPIRVToLLVM.cpp`), which validates the declared stride against a
+*different* natural-size calculation for matrices --
+`VulkanLayoutUtils::getNaturalArrayStride`, a tightly-packed scalar-count
+size (`rows*cols*sizeof(scalar)` = 48 for `mat4x3`), not the vector-padded
+size FeMe's own matrix conversion actually produces. Since 48 == 48 (the
+declared stride), upstream's own check passed, and it silently built the
+array around the *natural* (wrong, 64-byte) matrix conversion regardless --
+a previously-undocumented discrepancy between the two conversion paths'
+notions of "natural size" for a matrix specifically.
+
+This mismatch is invisible for square matrices (natural and physical sizes
+numerically coincide), and for 0 or exactly 1 levels of array nesting for a
+whole-matrix access (handled by other, unaffected code paths). It manifested
+in two call sites within `rewriteBlockAccess`:
+- the initial `ElementType` computation, for whole-matrix access through 2+
+  array levels;
+- the `NeedsDeepNestingPeel` loop's per-iteration `PeeledElementType`
+  computation, for partial/column-select access through 3+ array levels
+  (at exactly 2 levels, the single peel iteration reaches the bare matrix
+  directly, so no array-of-matrix conversion step is needed).
+
+Fixed both via a new shared helper, `substituteArrayOfMatrixElementType`,
+which substitutes the correct physical matrix type (via the pre-existing
+`getPhysicalMatrixMemberType`/`wrapPhysicalMatrixInArrays` helpers, the same
+machinery `convertOffsetStructTypeIgnoringDecorations`'s own struct-member
+loop already uses) whenever the selected type is an array wrapping a matrix
+whose naive conversion isn't representable. Required forward-declaring
+`peelArraysToMatrixType`/`getPhysicalMatrixMemberType`/
+`wrapPhysicalMatrixInArrays` before `rewriteBlockAccess`, since they were
+previously only defined much later in the file.
+
+This fix is a pure type-spelling change for square matrices, where the bug
+was invisible: the fix now always prefers the physical substitution over the
+old accidental-padding-based type, even when the two happened to coincide in
+byte size. Verified via a minimal isolated repro that the GEP's actual byte
+size/stride is identical, and that the real `llvm.load`/`llvm.store` types
+(computed independently by `RowMajorMatrixLoadPattern`/
+`RowMajorMatrixStorePattern`) are completely unchanged -- required updating
+one pre-existing test's CHECK line
+(`spirv-to-llvm-matrix-rowmajor-nested-array-block.mlir`) with an explanatory
+comment, no behavioral regression.
+
+New `spirv-to-llvm-matrix-rowmajor-nonsquare-nested-array-block.mlir`
+regression test, covering the whole-matrix-access fix (2-level array of
+`mat4x3`, `RowMajor`+`MatrixStride=16`). The partial-access
+(`NeedsDeepNestingPeel` loop) fix does not have its own synthetic unit test:
+a hand-constructed 3-level wrapper-array-of-non-square-matrix repro,
+mimicking `spirv-to-llvm-matrix-rowmajor-wrapper-array-column.mlir`'s own
+style, consistently failed to legalize for reasons unrelated to this fix (a
+2-level version of the identical shape converts correctly and produces the
+expected physical-substitution GEP) -- likely a pre-existing, narrower gap in
+shape recognition specific to hand-built (non-CTS-derived) 3-level SPIR-V,
+not a product bug. Given the *real* CTS sweep already confirms 0 failures
+across all of `2_level_array`/`3_level_array`/`3_level_unsized_array`
+(including every `_store_cols`/`_comp_access_store_cols` case, which exercise
+exactly this partial-access shape), this was not pursued further given the
+concrete CTS evidence of correctness.
+
+Re-swept `ssbo.*` (12,225 cases): **3,063 Pass / 179 Fail / 8,983
+NotSupported** (was 3,027/215/8,983) -- **+36 Pass, 0 regressions**, exactly
+matching the 36 cases this row scoped, with all three target families now at
+0 fails. `compute.*` unchanged (679/6/60,775, confirmed by a full re-sweep).
+`ninja check-feme`: 3,207/3,210 Passed, 3 Unsupported, 0 Failed (was
+3,206/3,209 -- +1 Pass from the new lit test).
+
+Remaining `ssbo.*` fails (179 total): `layout.instance_array_basic_type` (84,
+L124(k)), `layout.random` (67), `layout.unsized_nested_struct_array` (24),
+and 4 `unsized_array_length.*` singletons (L124(l)). See `agent_thoughts.md`
+for the full narrative and next steps.
