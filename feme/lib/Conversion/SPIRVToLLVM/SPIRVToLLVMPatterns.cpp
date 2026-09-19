@@ -3710,6 +3710,83 @@ struct MatrixMemberLayout {
 std::optional<MatrixMemberLayout>
 getMatrixMemberLayout(mlir::spirv::StructType Struct, unsigned Index);
 
+/// Forward declarations: defined below, alongside getMatrixMemberLayout's
+/// own struct. Used by rewriteBlockAccess (roadmap L124(m)) to substitute
+/// a RowMajor/MatrixStride-non-representable matrix's own physical layout
+/// for the plain ElementType a whole-matrix access reached through 2+
+/// array levels would otherwise silently use unsubstituted -- see
+/// getPhysicalMatrixMemberType's and wrapPhysicalMatrixInArrays's own
+/// comments, and peelArraysToMatrixType's for why the matrix nested
+/// inside a member's own array wrapping (of any depth) needs peeling
+/// through first.
+mlir::spirv::MatrixType peelArraysToMatrixType(mlir::Type Type);
+mlir::Type getPhysicalMatrixMemberType(mlir::spirv::MatrixType MatrixTy,
+                                       const MatrixMemberLayout &Layout,
+                                       const mlir::TypeConverter &Converter,
+                                       mlir::DataLayout &DL);
+mlir::Type wrapPhysicalMatrixInArrays(mlir::Type Type,
+                                     mlir::Type PhysicalMatrixTy);
+
+/// Substitutes \p NaiveElementType -- \p SelectedType's own plain
+/// `Converter.convertType` result, exactly as rewriteBlockAccess's own
+/// several call sites already compute it -- with the physical
+/// RowMajor/MatrixStride-aware layout convertOffsetStructTypeIgnoring
+/// Decorations's own member loop would use instead, whenever \p
+/// SelectedType is (at any remaining array-wrapping depth) a matrix
+/// \p BlockStruct's member \p MatrixDecorationMemberIndex's own
+/// decorations make unrepresentable in \p NaiveElementType's plain,
+/// natural (always-column-major, tightly-packed) shape (roadmap L124(m)).
+///
+/// Needed because this file's own convertArrayTypeIgnoringDecorations
+/// correctly declines an array whose element's ordinary conversion
+/// overshoots the declared ArrayStride (true of a *non-square* matrix,
+/// whose LLVM vector-padded natural size can exceed its own
+/// tightly-packed MatrixStride*NumRows/NumColumns byte count) -- but that
+/// decline falls through to MLIR's own upstream `spirv::ArrayType`
+/// conversion (see that function's own comment), which instead validates
+/// the stride against `VulkanLayoutUtils::getNaturalArrayStride` -- a
+/// *different*, tightly-packed-scalar-count size for a matrix element,
+/// which does match the declared stride -- and then silently builds the
+/// array around the natural (wrong, too-wide) matrix conversion anyway.
+/// This mismatch is invisible for a square matrix (both sizes coincide)
+/// and for \p SelectedType directly being the matrix itself (no array
+/// left to wrap it, so there is no array-element-size question at all);
+/// only a non-square matrix reached through at least one more array level
+/// past \p SelectedType actually depends on \p NaiveElementType being
+/// right.
+///
+/// Returns \p NaiveElementType unchanged if \p SelectedType is not an
+/// array, wraps no matrix at all, or that matrix's layout is already
+/// representable; returns null on an otherwise-unexpected conversion
+/// failure (a malformed module).
+mlir::Type substituteArrayOfMatrixElementType(
+    mlir::Type SelectedType, mlir::Type NaiveElementType,
+    mlir::spirv::StructType BlockStruct, unsigned MatrixDecorationMemberIndex,
+    const mlir::TypeConverter &TypeConverter) {
+  if (!mlir::isa<mlir::spirv::ArrayType>(SelectedType) &&
+      !mlir::isa<mlir::spirv::RuntimeArrayType>(SelectedType))
+    return NaiveElementType;
+  mlir::spirv::MatrixType InnerMatrixTy = peelArraysToMatrixType(SelectedType);
+  if (!InnerMatrixTy)
+    return NaiveElementType;
+  mlir::Type ConvertedMatrixTy = TypeConverter.convertType(InnerMatrixTy);
+  if (!ConvertedMatrixTy)
+    return nullptr;
+  if (isMatrixLayoutRepresentable(BlockStruct, MatrixDecorationMemberIndex,
+                                  ConvertedMatrixTy))
+    return NaiveElementType;
+  std::optional<MatrixMemberLayout> Layout =
+      getMatrixMemberLayout(BlockStruct, MatrixDecorationMemberIndex);
+  mlir::DataLayout DL;
+  mlir::Type PhysicalMatrixTy =
+      Layout ? getPhysicalMatrixMemberType(InnerMatrixTy, *Layout,
+                                           TypeConverter, DL)
+             : nullptr;
+  return PhysicalMatrixTy
+             ? wrapPhysicalMatrixInArrays(SelectedType, PhysicalMatrixTy)
+             : nullptr;
+}
+
 /// \p BlockStruct is the struct Element was itself derived from (see
 /// BlockElement's own comment) -- always a plain struct type, whether or
 /// not `Element.HasWrapper`, since both getBufferBlockElement and
@@ -3826,6 +3903,19 @@ mlir::LogicalResult rewriteBlockAccess(
   mlir::Type ElementType = TypeConverter.convertType(SelectedType);
   if (!ElementType)
     return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+  // (Roadmap L124(m)) A *whole*-matrix access reached through 2+ array
+  // levels wrapping a RowMajor/non-natural-MatrixStride *non-square*
+  // matrix needs the same physical substitution
+  // convertOffsetStructTypeIgnoringDecorations's own member loop already
+  // applies -- see substituteArrayOfMatrixElementType's own comment for
+  // why the plain `ElementType` just computed above is silently wrong for
+  // this one shape. Substitute it here, before it is used by anything
+  // below.
+  ElementType = substituteArrayOfMatrixElementType(
+      SelectedType, ElementType, BlockStruct, MatrixDecorationMemberIndex,
+      TypeConverter);
+  if (!ElementType)
+    return Rewriter.notifyMatchFailure(Op, "type conversion failed");
   // (Roadmap L124(j)) The single peel above only ever reflects one array
   // nesting level -- exactly what `2_level_array`/`3_level_array`-shaped
   // wrapper content (`!spirv.array<M x !spirv.array<N x matCxR>>>`, or
@@ -3833,14 +3923,16 @@ mlir::LogicalResult rewriteBlockAccess(
   // actually becomes the innermost matrix (or matrix-containing struct)
   // the branches below expect to see for a *partial* (column-select/
   // scalar-element) access. A *whole*-element access at any depth is
-  // already handled correctly by the existing, untouched single,
-  // multi-index GEP fallback further below (verified by roadmap L124(i):
+  // handled by the existing, untouched single, multi-index GEP fallback
+  // further below, now using the substituted ElementType just computed
+  // above whenever it applies (verified by roadmap L124(i):
   // getMatrixWholeAccess needed the exact same generalization for that
   // case, but rewriteBlockAccess itself did not, since the per-array-
   // level ArrayStride padding the ordinary array type conversion already
   // applies is enough to reach the right byte address in one shot when
-  // nothing further indexes past it) -- so peek ahead first (no side
-  // effects yet) to confirm this access is genuinely one of the two
+  // nothing further indexes past it, *except* for the non-square-matrix
+  // shape roadmap L124(m) fixes just above) -- so peek ahead first (no
+  // side effects yet) to confirm this access is genuinely one of the two
   // deep-nesting shapes needing special handling before doing anything:
   // peeling SelectedType through further array levels, one per
   // additional not-yet-consumed index, until it is no longer an array.
@@ -3892,6 +3984,19 @@ mlir::LogicalResult rewriteBlockAccess(
       else
         break; // Unreachable: matches the peek loop above exactly.
       mlir::Type PeeledElementType = TypeConverter.convertType(PeeledSpirvType);
+      if (!PeeledElementType)
+        return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+      // (Roadmap L124(m)) A partial (column-select/scalar-element)
+      // access reached through 3+ array levels wrapping a non-square
+      // RowMajor matrix peels through at least one intermediate level
+      // that is itself still an array of that matrix (not the matrix
+      // directly) -- exactly the same shape substituteArrayOfMatrixElementType
+      // exists to fix, just one level further in per additional
+      // iteration of this loop, rather than only the first ElementType
+      // computed before this loop started.
+      PeeledElementType = substituteArrayOfMatrixElementType(
+          PeeledSpirvType, PeeledElementType, BlockStruct,
+          MatrixDecorationMemberIndex, TypeConverter);
       if (!PeeledElementType)
         return Rewriter.notifyMatchFailure(Op, "type conversion failed");
       ElementPtr = mlir::LLVM::GEPOp::create(
