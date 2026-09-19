@@ -52,33 +52,5 @@ file.
 
 # Request
 
-Can you continue the work on feme? The last agent's suggested next steps are:
-
-## Next steps (start here)
-
-1. **(~2-3 hours)** Fix `getMatrixWholeAccess`'s non-wrapper branch to
-   walk through zero-or-more intervening struct-member selections
-   before the final matrix-member select (mirroring how
-   `peelInstanceArrayPointer` already peels array nesting for the same
-   function) -- track the innermost struct + member index actually
-   reached, not just the outermost block struct's own direct member.
-2. **(~2-3 hours, do together with #1, not separately)** Extend
-   `getTightNestedStructType`/`getTightMatrixType` to *widen* (not just
-   tighten) a nested struct's own matrix member to its declared
-   `MatrixStride`, using the same substitution `getPhysicalMatrixMemberType`
-   already builds for a direct block member. Verify against the
-   isolated repro (recreate `/tmp/mat2_stride16.mlir`'s shape as a
-   permanent lit test) before touching the CTS sweep.
-3. **Always, before declaring any fix done**: re-run the *full*
-   `ssbo.*` sweep (not just `random`), not only the subset the fix
-   targets -- this is what caught this session's regression.
-4. Re-run `dEQP-VK.compute.pipeline.builtin_var.*` (L106's own vec3
-   regression coverage) as a sanity check, since this area is adjacent.
-5. `random`'s other symptom buckets (25 "Result comparison and counter
-   values are incorrect", 15 "Counter value incorrect",
-   1 `VK_ERROR_INITIALIZATION_FAILED`) are still un-triaged past this
-   session's own `.39`/`.41` repros -- `.39`'s own root cause (a
-   "Counter value incorrect" case) is still open; do not assume it
-   shares `.41`'s matrix-nesting bug without its own trace.
-6. `L124(a)/(b)/(c)/(d)/L125/L126/L116(f)` all remain untouched, standing
-   fallbacks from prior sessions.
+Can you merge fetch then merge origin/main into this branch and resolve any
+conflicts and fix any test issues that arise?
