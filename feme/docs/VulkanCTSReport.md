@@ -3886,3 +3886,71 @@ error message/shape for `single_basic_array.std140.row_major_mat2_store_cols`
 is identical to L124(f)'s own repros). No new roadmap row needed -- L124(f)
 already covers it. See `agent_thoughts.md` for the full narrative and next
 steps.
+
+## Roadmap L124(f) (closed this session): `RowMajor` column-select through a wrapper array
+
+`spirv.AccessChain` into a `RowMajor`-decorated matrix reached through a
+dxc-style wrapper array (`RWStructuredBuffer<matCxR>`) or nested fixed-size
+GLSL arrays, at any nesting depth, previously declined legalization outright
+for the column-select case (`error: failed to legalize operation
+'spirv.AccessChain' that was explicitly marked illegal`) -- confirmed via
+`dEQP-VK.ssbo.layout.single_basic_array.std140.row_major_mat2_store_cols` and
+its `2_level_array`/`3_level_array`/`3_level_unsized_array` siblings.
+
+Root cause: `rewriteBlockAccess`'s own `isa<MatrixType>(SelectedType)`
+partial-access branch, for the `RowMajor` column-select case, only deferred to
+`MatrixColumnLoadPattern`/`MatrixColumnStorePattern` (by replacing the op with
+the bare `ElementPtr`) when `!Element.HasWrapper` -- i.e. only for the direct
+(`cbuffer`/`ConstantBuffer<T>`) shape. For the wrapper-array shape it fell
+through and declined instead. Those patterns' own `getMatrixColumnAccess`
+helper, which independently re-derives the access shape from the original
+`AccessChainOp`, only recognized two shapes: `Element.Content` directly a
+`StructType`, or an array of `StructType` -- never an array (at any nesting
+depth) directly wrapping a `MatrixType` with no intervening struct at all,
+exactly the wrapper-array shape.
+
+Both sides had to move in lockstep: `rewriteBlockAccess`'s decision to defer
+(rather than decline) must be gated on exactly the shapes `getMatrixColumnAccess`
+can actually resolve, or a deferred, unresolved address would silently
+corrupt (worse than declining). Fixed by adding
+`getWrapperArrayMatrixColumnAccess`, which peels `Element.Content` through
+however many array levels precede the matrix (mirroring L124(j)'s own peel)
+and -- if the fully-peeled type is a `MatrixType` with exactly one remaining
+index (a column selector) -- reads the `RowMajor`/`MatrixStride` decorations
+off the wrapper struct's own sole member (always index 0, since there is no
+member index to read from the access chain itself for this shape, unlike the
+pre-existing array-of-struct shape). Wired this in ahead of the pre-existing
+`getMatrixColumnAccessShape`-based logic in `getMatrixColumnAccess`, verified
+it naturally falls through unchanged for both pre-existing shapes (the
+direct-struct-content shape's peel loop breaks immediately; the
+array-of-struct shape's peel loop stops at the struct, never reaching a bare
+matrix). Removed the now-redundant `!Element.HasWrapper` guard in
+`rewriteBlockAccess`'s own deferral, since `ElementPtr` already points at the
+matrix's own base address regardless of wrapper/nesting.
+
+New `spirv-to-llvm-matrix-rowmajor-wrapper-array-column.mlir` regression test
+(single-level wrapper `read_column`, plus a new 2-level nested-array
+`read_column_nested` matching `2_level_array`'s own CTS shape). The
+now-resolved case that used to live in
+`spirv-to-llvm-matrix-block-invalid.mlir`'s second `RUN` split (whose
+`expected-error` no longer fires) moved into the new file as a positive test
+instead; that invalid-test file now covers only the one case that remains
+genuinely malformed (`RowMajor` with no `MatrixStride` decoration at all).
+
+Re-swept `ssbo.*` (12,225 cases): **3,027 Pass / 215 Fail / 8,983
+NotSupported** (was 2,865/377/8,983) -- **+162 Pass, 0 regressions**, well
+beyond the 126 cases originally estimated (36 `single_basic_array` + 90 from
+`2_level_array`/`3_level_array`/`3_level_unsized_array`), since this same code
+path also closed most of `instance_array_basic_type`/`random`/
+`unsized_nested_struct_array`'s own RowMajor column-select cases. `compute.*`
+unchanged (679/6/60,775, confirmed by a full re-sweep). `ninja check-feme`:
+3,206/3,209 Passed, 3 Unsupported, 0 Failed (was 3,205/3,208 -- +1 Pass from
+the new lit test/split).
+
+Remaining `ssbo.*` fails re-bucketed post-fix (215 total): `layout.
+instance_array_basic_type` (84, L124(k)), `layout.random` (67), `layout.
+unsized_nested_struct_array` (24), `layout.2_level_array`/`3_level_array`/
+`3_level_unsized_array` (12 each, 36 total -- a new residual bucket, tracked
+as L124(m) since it's a materially different remaining shape from the
+column-select gap this fix closed), and 4 `unsized_array_length.*`
+singletons. See `agent_thoughts.md` for the full narrative and next steps.
