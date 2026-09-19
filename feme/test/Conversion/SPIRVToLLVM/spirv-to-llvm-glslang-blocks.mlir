@@ -9,11 +9,18 @@
 
 // A pre-SPIR-V-1.3 SSBO: `Uniform` storage class, `BufferBlock` decoration,
 // rather than `StorageBuffer`/`Block`. Otherwise identical to the ordinary
-// single-member storage-buffer wrapper case.
-
+// single-member storage-buffer wrapper case. The handle's own storage-class
+// integer parameter is `12` (`StorageBuffer`), not `2` (the pointer's own
+// literal `Uniform` storage class) -- see convertBufferBlockType's own
+// comment (roadmap L124(l)) for why the literal value must not be forwarded
+// here: this legacy spelling is indistinguishable from a genuine uniform
+// block by storage class and writability alone whenever it also happens to
+// be non-writable (a `readonly buffer`, as here), so the marker itself must
+// unambiguously record "this is a storage buffer" instead.
+//
 // CHECK-LABEL: llvm.func @legacy_ssbo
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 2, 1, 4>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 12, 1, 4>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: llvm.load %[[PTR]] : !llvm.ptr<12> -> f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {

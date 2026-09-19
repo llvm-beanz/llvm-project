@@ -43,14 +43,19 @@
 // storage buffer block: the matrix's own logical (natural, column-major)
 // value ((%arg1)) must be transposed and MatrixStride-padded into the
 // physical struct<packed(array<2xf32>, array<8xi8>)> layout, not stored
-// as-is.
+// as-is. This block uses the pre-SPIR-V-1.3 `Uniform`-storage-class +
+// `BufferBlock`-decoration spelling deliberately (rather than the more
+// common `StorageBuffer`/`Block` one) -- the handle's own storage-class
+// integer parameter (`12`) is `convertBufferBlockType`'s own canonical
+// "this is a storage buffer" marker (roadmap L124(l)), not the pointer's
+// literal SPIR-V storage class value (`2`, `Uniform`).
 
 // CHECK-LABEL: llvm.func @store_whole
 // CHECK-SAME: (%[[IDX:.*]]: i32, %[[M:.*]]: !llvm.array<2 x vector<2xf32>>)
 // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(3 : i32) : i32
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
 // CHECK-SAME: %[[COUNT]], %[[IDX]]
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<2 x struct<packed (array<2 x f32>, array<8 x i8>)>>)>, 2, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<2 x struct<packed (array<2 x f32>, array<8 x i8>)>>)>, 12, 1>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK-SAME: -> !llvm.ptr<12>
 // CHECK: llvm.store %{{.*}}, %[[PTR]] : !llvm.array<2 x struct<packed (array<2 x f32>, array<8 x i8>)>>, !llvm.ptr<12>
@@ -76,7 +81,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(3 : i32) : i32
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
 // CHECK-SAME: %[[COUNT]], %[[IDX]]
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<2 x struct<packed (array<2 x f32>, array<8 x i8>)>>)>, 2, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<2 x struct<packed (array<2 x f32>, array<8 x i8>)>>)>, 12, 1>
 // CHECK: %[[BASE:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK-SAME: -> !llvm.ptr<12>
 // CHECK: %[[ROW0:.*]] = llvm.getelementptr inbounds %[[BASE]][0, 0, 0, %[[COL]]]
