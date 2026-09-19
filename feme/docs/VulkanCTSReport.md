@@ -3817,3 +3817,72 @@ L124(k). The rest (`random`/`basic_unsized_array`/
 `unsized_nested_struct_array`/`unsized_array_length.*`) not yet
 re-triaged this session -- tracked as L124(l). See `agent_thoughts.md` for
 the full narrative and next steps.
+
+## Roadmap L124(j) (`ColMajor` half closed this session): partial (column-select/scalar-element) access into a nested-array-wrapped matrix
+
+L124(i)'s fix only ever addressed *whole*-matrix `spirv.Store`/`spirv.Load`
+recognition for a nested-array-wrapped matrix; a *partial* access (a single
+column write/read, or a single scalar element) into the same shape --
+exactly `2_level_array`/`3_level_array`/`3_level_unsized_array`'s own
+`*_store_cols`/`*_comp_access_store_cols` variants -- silently miscompiled
+even after that fix, since `rewriteBlockAccess`'s own
+`isa<MatrixType>(SelectedType)` partial-access branch only ever fires when
+`SelectedType` (the type reached one index past the wrapper's own initial
+selector) is *directly* a matrix. For any array nesting, `SelectedType` was
+still an array at that point, so the branch never fired and the access fell
+through to the generic, `MatrixStride`-unaware index-forwarding GEP
+fallback instead, computing a plain byte-granularity offset rather than the
+correct `MatrixStride`-granularity one.
+
+Fixed with a peek-then-conditionally-act design (an unconditional eager-peel
+first attempt caused a regression in `spirv-to-llvm-array-of-identified-
+struct-stride.mlir`, a fixed-array-of-identified-struct case with no matrix
+involved at all -- reverted in favor of this safer design): peek ahead (no
+side effects) through however many further array levels precede the matrix
+or a matrix-containing struct, to confirm the access is genuinely one of
+the two deep-nesting shapes needing special handling (a matrix with 1-2
+indices remaining, or a struct with exactly 2, mirroring H151's own
+nested-struct-with-matrix-member shape) -- only then perform the actual
+peeling GEPs and generalize every downstream `Selector+1`/`+2`/`+3`
+index-position reference (the partial-access branch itself, the H151
+nested-struct-in-array branch, and the final generic fallback) to a dynamic
+`NextIndexPos`. When the peek doesn't confirm a deep-nesting shape,
+`NextIndexPos` equals `Selector+1` exactly as before, so every existing
+non-deep-nested shape's IR/test output is unchanged.
+
+New regression test: `spirv-to-llvm-matrix-colmajor-nested-array-column.mlir`
+(column-select and scalar-element access into a `ColMajor` 2-level-array-
+wrapped matrix, mirroring `spirv-to-llvm-matrix-block-wrapper-partial.mlir`'s
+own single-level shape one nesting level deeper).
+
+A full `ssbo.*` re-sweep (12,225 cases):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 2,847  | 2,865 |
+| Fail          | 395    | 377   |
+| NotSupported  | 8,983  | 8,983 |
+
+**+18 Pass, 0 regressions.** Confirmed every remaining `2_level_array`/
+`3_level_array`/`3_level_unsized_array` fail (42 each, was 48 each) is now
+`RowMajor`-only -- `ColMajor` is fully closed for this shape. A full
+`compute.*` re-sweep confirmed no change (679/6/60,775). `ninja check-feme`:
+3,205/3,208 Passed, 3 pre-existing Unsupported, 0 Failed (was 3,204/3,207 --
++1 Pass from this session's own new lit test; 0 regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- an internal storage-buffer layout-correctness fix on an
+already-supported surface, not a new Vulkan feature or extension.
+
+The `RowMajor` half of L124(j)'s original scope (`2_level_array`'s/
+`3_level_array`'s/`3_level_unsized_array`'s own remaining `RowMajor` fails,
+plus `single_basic_array`'s pre-existing 36) turned out, on closer
+inspection this session, to be the *same* underlying bug as L124(f) (a
+`spirv.AccessChain` into a `RowMajor`-decorated matrix through an array
+wrapper fails legalization outright -- an explicit conversion-target
+rejection, not a silent wrong result), not a distinct
+`getMatrixColumnAccessShape` gap as a prior session's notes speculated (the
+error message/shape for `single_basic_array.std140.row_major_mat2_store_cols`
+is identical to L124(f)'s own repros). No new roadmap row needed -- L124(f)
+already covers it. See `agent_thoughts.md` for the full narrative and next
+steps.
