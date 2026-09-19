@@ -2454,6 +2454,14 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::GLFloorOp, LLVM::FFloorOp>,
       DirectConversionPattern<spirv::GLFmaOp, LLVM::FMAOp>,
       ClampPattern<spirv::GLFClampOp, LLVM::MinNumOp, LLVM::MaxNumOp>,
+      // `spirv.GL.NClamp`'s own NaN-safe `min(max(x, minVal), maxVal)`
+      // semantics (GLSL.std.450: propagate through the *other*, non-NaN
+      // operand rather than propagating a NaN) are already exactly what
+      // `llvm.intr.maxnum`/`llvm.intr.minnum` compute, so reuse the same
+      // `ClampPattern` instantiation `GLFClampOp` above uses -- no new
+      // pattern class needed (roadmap L124's
+      // `compute.pipeline.basic.vec2_nclamp_nan_component` CTS case).
+      ClampPattern<spirv::GLNClampOp, LLVM::MinNumOp, LLVM::MaxNumOp>,
       ClampPattern<spirv::GLSClampOp, LLVM::SMinOp, LLVM::SMaxOp>,
       ClampPattern<spirv::GLUClampOp, LLVM::UMinOp, LLVM::UMaxOp>,
       DirectConversionPattern<spirv::GLFMaxOp, LLVM::MaxNumOp>,

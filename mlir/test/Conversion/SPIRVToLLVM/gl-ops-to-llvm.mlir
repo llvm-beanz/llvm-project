@@ -104,6 +104,18 @@ spirv.func @fclamp(%arg0: f32, %arg1: f32, %arg2: f32) "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.NClamp
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @nclamp
+spirv.func @nclamp(%arg0: vector<2xf32>, %arg1: vector<2xf32>, %arg2: vector<2xf32>) "None" {
+  // CHECK: %[[MAX:.*]] = llvm.intr.maxnum(%{{.*}}, %{{.*}}) : (vector<2xf32>, vector<2xf32>) -> vector<2xf32>
+  // CHECK: llvm.intr.minnum(%[[MAX]], %{{.*}}) : (vector<2xf32>, vector<2xf32>) -> vector<2xf32>
+  %0 = spirv.GL.NClamp %arg0, %arg1, %arg2 : vector<2xf32>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.NMax
 //===----------------------------------------------------------------------===//
 
