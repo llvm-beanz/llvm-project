@@ -4041,3 +4041,68 @@ Remaining `ssbo.*` fails (179 total): `layout.instance_array_basic_type` (84,
 L124(k)), `layout.random` (67), `layout.unsized_nested_struct_array` (24),
 and 4 `unsized_array_length.*` singletons (L124(l)). See `agent_thoughts.md`
 for the full narrative and next steps.
+
+## Roadmap L124(k) (closed this session): RowMajor matrix miscompile in arrayed block instances
+
+Root-caused and fixed a silent miscompile (wrong numeric result, not a
+legalization failure) affecting `RowMajor`/`MatrixStride`-decorated matrix
+members of an *arrayed block instance* -- GLSL's `buffer Block { mat2 var;
+} block[3];`, a single binding covering `N` descriptors, each its own
+storage/uniform buffer block instance, unlike every other L124 fix's own
+shape of an array member nested *inside* one block -- `instance_array_
+basic_type`'s own 84 remaining fails, all matrix-typed.
+
+Root cause: `getMatrixWholeAccess`/`getMatrixColumnAccess` (used by
+`RowMajorMatrixLoadPattern`/`RowMajorMatrixStorePattern`/
+`MatrixColumnLoadPattern`/`MatrixColumnStorePattern` to re-derive their own
+shape) both re-derive that shape directly from a `spirv.AccessChain`'s
+original (unconverted) base pointer type, assuming its pointee is directly
+the block's own `spirv::StructType`. For an arrayed block instance, that
+pointee is instead an `spirv::ArrayType` *of* that struct (one level per
+instance-array dimension) -- neither helper accounted for this extra
+wrapping level, so `getBufferBlockElement`/`getUniformBlockElement` (both
+requiring a `StructType` pointee directly) always returned `std::nullopt`,
+and every RowMajor/non-representable matrix reached this way silently fell
+back to the generic, physically-wrong (always natural, always-column-major)
+`spirv.Store`/`spirv.Load` conversion.
+
+Notably, `ArrayedBlockAccessChainPattern` itself -- the pattern that
+actually builds the per-instance handle from the leading (instance-
+selecting) index and delegates to `rewriteBlockAccess` for the rest of the
+navigation -- already correctly accounted for that leading index via its
+own `Selector` parameter, which is why every *non*-matrix basic type in
+this same family already passed. The bug was isolated entirely to the two
+matrix-specific helpers above, which independently re-derive their own
+shape straight from the SPIR-V `AccessChainOp` rather than reusing
+`rewriteBlockAccess`'s own already-correct resolved `Element`/`Selector`.
+
+Fixed via a new `peelInstanceArrayPointer` helper: peels however many
+leading `spirv::ArrayType`/`spirv::RuntimeArrayType` levels wrap a pointer's
+pointee before reaching a `spirv::StructType`, returning both the
+struct-pointee pointer type and how many levels were peeled. Both
+`getMatrixWholeAccess` and `getMatrixColumnAccess` now peel first, then
+apply their own pre-existing per-block shape logic completely unchanged --
+the peeled depth is simply folded into an index-position offset (added to
+`getMatrixWholeAccess`'s own index-count checks, and into
+`getMatrixColumnAccess`'s own `Selector`), so every existing
+`Op.getIndices()`-relative check downstream (which still operates against
+the full, unmodified original index list) stays correct as-is.
+
+New `spirv-to-llvm-matrix-rowmajor-instance-array-block.mlir` regression
+test, covering both the whole-matrix-access (store) and column-select
+(load) fixes for a `RowMajor` `mat2` member of a 3-instance arrayed block,
+verified against actual `feme-opt` output.
+
+Re-swept `ssbo.*` (12,225 cases): **3,150 Pass / 92 Fail / 8,983
+NotSupported** (was 3,063/179/8,983) -- **+87 Pass, 0 regressions**,
+`instance_array_basic_type` now fully closed (0 of its own 84 -- the small
+excess over 84 is a couple of `readonly` variants of the same family also
+closing). `compute.*` unchanged (679/6/60,775, confirmed by a full
+re-sweep). `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed
+(was 3,207/3,210 -- +1 Pass from the new lit test).
+
+Remaining `ssbo.*` fails (92 total, all of `ssbo.*`'s named buckets now
+closed except these): `layout.random` (64, L124(l)),
+`layout.unsized_nested_struct_array` (24, L124(l)), and 4
+`unsized_array_length.*` singletons (L124(l)). See `agent_thoughts.md` for
+the full narrative and next steps.
