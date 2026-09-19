@@ -4715,13 +4715,18 @@ mlir::Type getPhysicalMatrixMemberType(mlir::spirv::MatrixType MatrixTy,
 /// Peels through any nesting of `spirv::ArrayType` (e.g. the
 /// `!spirv.array<M x !spirv.array<N x matCxR>>`-shaped SSBO member the
 /// `2_level_array`/`3_level_array` CTS naming exercises, roadmap
-/// L124(g)) to find the innermost `spirv::MatrixType`, or returns null
-/// if \p Type is not a matrix, or an array (at any nesting depth) of
-/// matrices, at all. `spirv::RuntimeArrayType` is deliberately not
-/// peeled here: it may only ever be a struct's own last member (per
-/// SPIR-V/Vulkan validation rules), so this only ever needs to look
-/// through a fixed-size wrap.
+/// L124(g)), or a single trailing `spirv::RuntimeArrayType` (roadmap
+/// L124(t): a plain GLSL `buffer Block { ...; matCxR m[]; };`'s own
+/// trailing unsized-array member, found via
+/// `dEQP-VK.ssbo.layout.random.all_shared_buffer.41` -- it may only ever
+/// be a struct's own last member per SPIR-V/Vulkan validation rules, so
+/// unlike a fixed-size `spirv::ArrayType` it never itself nests inside
+/// another array), to find the innermost `spirv::MatrixType`, or returns
+/// null if \p Type is not a matrix, or an array (at any nesting depth,
+/// fixed or the one trailing runtime one) of matrices, at all.
 mlir::spirv::MatrixType peelArraysToMatrixType(mlir::Type Type) {
+  if (auto RTArrayTy = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Type))
+    Type = RTArrayTy.getElementType();
   while (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
     Type = ArrayTy.getElementType();
   return mlir::dyn_cast<mlir::spirv::MatrixType>(Type);
@@ -4737,9 +4742,19 @@ mlir::spirv::MatrixType peelArraysToMatrixType(mlir::Type Type) {
 /// whenever that inner matrix's declared layout is not representable,
 /// just wrapped in however many array dimensions \p Type has around it
 /// (zero for a bare matrix member, matching getPhysicalMatrixMemberType's
-/// own return value exactly in that case).
+/// own return value exactly in that case). A trailing
+/// `spirv::RuntimeArrayType` wrapping (roadmap L124(t)) is rebuilt the
+/// same way `RuntimeArrayType`'s own type conversion spells an unsized
+/// array (`!llvm.array<0 x T>`, see the `TypeConverter.addConversion`
+/// lambda for `mlir::spirv::RuntimeArrayType`) -- mirroring
+/// peelArraysToMatrixType's own matching addition to peel through it.
 mlir::Type wrapPhysicalMatrixInArrays(mlir::Type Type,
                                      mlir::Type PhysicalMatrixTy) {
+  if (auto RTArrayTy = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Type))
+    return mlir::LLVM::LLVMArrayType::get(
+        wrapPhysicalMatrixInArrays(RTArrayTy.getElementType(),
+                                   PhysicalMatrixTy),
+        0);
   if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
     return mlir::LLVM::LLVMArrayType::get(
         wrapPhysicalMatrixInArrays(ArrayTy.getElementType(), PhysicalMatrixTy),
