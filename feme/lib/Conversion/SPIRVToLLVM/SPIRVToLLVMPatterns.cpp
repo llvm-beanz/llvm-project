@@ -4920,6 +4920,46 @@ mlir::Type getTightMatrixType(mlir::spirv::MatrixType MatrixTy,
                                         MatrixTy.getNumColumns());
 }
 
+/// Returns the LLVM type to substitute for \p Struct's member \p Index --
+/// known to be \p MatrixTy -- when re-converting it as part of a tight
+/// (alignment-free) struct/array retry (getTightNestedStructType, or the
+/// array-of-matrix retry tier in
+/// convertOffsetStructTypeIgnoringDecorations below), rather than as an
+/// ordinary top-level member (that same function's own primary loop,
+/// which already makes this exact substitution choice for a *direct*,
+/// not-yet-retried top-level member -- see its own `isMatrixLayoutRepresentable`/
+/// `getPhysicalMatrixMemberType` call). If \p Index's own RowMajor/
+/// MatrixStride decorations are representable by the ordinary, natural
+/// column-major conversion (isMatrixLayoutRepresentable), this only
+/// tightens away that natural conversion's own vector-ABI-rounding
+/// padding (getTightMatrixType) -- this retry's own original purpose,
+/// unrelated to RowMajor/MatrixStride at all. Otherwise (roadmap L124(o))
+/// substitutes \p MatrixTy's own physical, transposed/padded layout
+/// (getPhysicalMatrixMemberType) instead: a naive tighten alone silently
+/// drops the RowMajor transpose and/or MatrixStride padding a non-
+/// representable member's own real physical layout needs, producing an
+/// undersized, wrongly-shaped member that getMatrixWholeAccess/
+/// RowMajorMatrixStorePattern/LoadPattern's own independently
+/// reconstructed physical shape then reads/writes out of step with (see
+/// getMatrixWholeAccess's own comment for the matching AccessChain-side
+/// generalization this pairs with). Returns null if any conversion this
+/// needs fails.
+mlir::Type getTightOrPhysicalMatrixMemberType(
+    mlir::spirv::StructType Struct, unsigned Index,
+    mlir::spirv::MatrixType MatrixTy, const mlir::TypeConverter &Converter) {
+  mlir::Type NaturalMatrixTy = Converter.convertType(MatrixTy);
+  if (!NaturalMatrixTy)
+    return nullptr;
+  if (isMatrixLayoutRepresentable(Struct, Index, NaturalMatrixTy))
+    return getTightMatrixType(MatrixTy, Converter);
+  std::optional<MatrixMemberLayout> Layout =
+      getMatrixMemberLayout(Struct, Index);
+  if (!Layout)
+    return nullptr;
+  mlir::DataLayout DL;
+  return getPhysicalMatrixMemberType(MatrixTy, *Layout, Converter, DL);
+}
+
 /// If \p ElementTy is a SPIR-V struct (any member count -- e.g.
 /// `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>`, or a two-member
 /// `!spirv.struct<(!spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision],
@@ -4988,11 +5028,8 @@ mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
       MemberTy = getTightVectorArrayType(VectorTy, Converter);
     } else if (auto MatrixTy =
                    mlir::dyn_cast<mlir::spirv::MatrixType>(ElementTy)) {
-      auto ColumnTy = mlir::cast<mlir::VectorType>(MatrixTy.getColumnType());
-      mlir::Type TightColumn = getTightVectorArrayType(ColumnTy, Converter);
-      if (TightColumn)
-        MemberTy = mlir::LLVM::LLVMArrayType::get(TightColumn,
-                                                  MatrixTy.getNumColumns());
+      MemberTy = getTightOrPhysicalMatrixMemberType(NestedStruct, I, MatrixTy,
+                                                    Converter);
     } else if (auto ArrayTy =
                    mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
       if (auto InnerVectorTy =
@@ -5895,7 +5932,12 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     if (auto OuterArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
       if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
               OuterArrayTy.getElementType())) {
-        mlir::Type TightMatrixTy = getTightMatrixType(MatrixTy, Converter);
+        // (Roadmap L124(o)) Widen (not just tighten) if this
+        // array-of-matrices member's own RowMajor/MatrixStride
+        // decorations are not representable by the natural conversion
+        // -- see getTightOrPhysicalMatrixMemberType's own comment.
+        mlir::Type TightMatrixTy =
+            getTightOrPhysicalMatrixMemberType(Type, I, MatrixTy, Converter);
         if (!TightMatrixTy)
           return nullptr;
         WithArraysAndMatrices[I] = mlir::LLVM::LLVMArrayType::get(
@@ -5911,8 +5953,24 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
       InnerCount = ArrayTy.getNumElements();
     } else if (auto MatrixTy =
                    mlir::dyn_cast<mlir::spirv::MatrixType>(ElementTy)) {
-      InnerElementTy = MatrixTy.getColumnType();
-      InnerCount = MatrixTy.getNumColumns();
+      // (Roadmap L124(o)) A *direct* matrix member hits this same
+      // tighten-only gap the array-of-matrices case above already
+      // widens for instead of tightening whenever its own RowMajor/
+      // MatrixStride decorations are not representable by the natural
+      // conversion -- see getTightOrPhysicalMatrixMemberType's own
+      // comment. Handled here, rather than falling into the generic
+      // array-of-vectors substitution below (which would naively
+      // tighten this matrix's own column vector regardless of
+      // representability, exactly the bug this roadmap item fixes),
+      // since a direct matrix member needs the same widen-or-tighten
+      // choice the array-of-matrices case above already makes.
+      mlir::Type MatrixMemberTy =
+          getTightOrPhysicalMatrixMemberType(Type, I, MatrixTy, Converter);
+      if (!MatrixMemberTy)
+        return nullptr;
+      WithArraysAndMatrices[I] = MatrixMemberTy;
+      SubstitutedArrayOrMatrix = true;
+      continue;
     } else {
       continue;
     }

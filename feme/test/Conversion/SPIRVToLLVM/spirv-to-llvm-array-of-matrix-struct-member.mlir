@@ -22,22 +22,24 @@
 // `ptr addrspace(12)`/`ptr addrspace(11)` handle instead of a real
 // `spirv.VulkanBuffer` one.
 //
-// Fixed by adding a third case to the same retry tier: `getTightMatrixType`
-// (factored out of the existing direct-matrix case's own inline logic)
-// substitutes a matrix's own tight (alignment-free) form -- an
-// `!llvm.array<NumColumns x TightColumn>`, `TightColumn` built by the
-// existing `getTightVectorArrayType` -- and this array-of-matrix case
-// wraps that in one more outer `!llvm.array<N x TightMatrix>`, matching
-// the outer array's own declared element count. `HasVectorMember`'s own
-// per-member classification (which gates whether this retry tier is
-// even attempted at all) is extended identically, since an array-of-
-// matrices member sharing a struct with no *other* vector/matrix/nested-
-// struct member would otherwise never reach this tier in the first
-// place.
+// Fixed by adding a third case to the same retry tier:
+// getTightOrPhysicalMatrixMemberType (roadmap L124(o), see its own
+// comment) substitutes either the matrix's own tight (alignment-free)
+// form, or (whenever this member's own RowMajor/MatrixStride decorations
+// are not representable by the natural conversion, as here: `RowMajor`
+// with `MatrixStride=16` over a `mat4x3` transposes and pads each row)
+// its own physical, transposed/padded layout instead -- and this
+// array-of-matrix case wraps that in one more outer
+// `!llvm.array<N x ...>`, matching the outer array's own declared
+// element count. `HasVectorMember`'s own per-member classification
+// (which gates whether this retry tier is even attempted at all) is
+// extended identically, since an array-of-matrices member sharing a
+// struct with no *other* vector/matrix/nested-struct member would
+// otherwise never reach this tier in the first place.
 
 // CHECK-LABEL: llvm.func @read_scalar_member
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector", (array<4 x i32>)>, i32, array<12 x i8>, array<5 x array<4 x struct<"feme.tight_vector.{{[0-9]+}}", (array<3 x f32>)>>>, struct<"feme.tight_vector.{{[0-9]+}}", (array<2 x i32>)>)>, 2, 0>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector", (array<4 x i32>)>, i32, array<12 x i8>, array<5 x array<3 x array<4 x f32>>>, struct<"feme.tight_vector.{{[0-9]+}}", (array<2 x i32>)>)>, 2, 0>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: llvm.load %[[PTR]] : !llvm.ptr<12> -> i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
