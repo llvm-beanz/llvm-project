@@ -60,20 +60,27 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // -----
 
 // A fixed-size (not runtime) array of 3-component vectors, as a
-// `StorageBuffer` block member -- e.g. a vertex-attribute SSBO with a
-// `float3 positions[4]` field -- must convert (and its `spirv.AccessChain`
-// into an element legalize) even though the array's declared `ArrayStride`
-// (16) doesn't match `vector<3xf32>`'s own compact size (12): 16 is that
-// vector's Vulkan *base alignment*, the natural stride every conformant
-// SPIR-V producer emits for such an array. See
-// `getNaturalArrayStride` in `mlir/lib/Dialect/SPIRV/Utils/LayoutUtils.cpp`.
+// `StorageBuffer` block's own sole member -- e.g. a vertex-attribute SSBO
+// with a `float3 positions[4]` field -- is recognized as FeMe's own
+// wrapper shape (`BlockElement`'s `HasWrapper`, roadmap L124(g)'s storage-
+// buffer counterpart to `getUniformBlockElement`'s pre-existing F12a fix),
+// exactly like a `RWStructuredBuffer<T>`'s runtime array: the array itself
+// becomes the handle's content type directly (no enclosing single-member
+// struct wrapper), `llvm.spv.resource.getpointer` addresses an element
+// directly with no further GEP needed, and the member's own `NonWritable`
+// decoration is correctly reflected in the handle's `IsWriteable`
+// parameter (0 below) -- none of which the old, unrecognized-as-wrapper
+// conversion could do. The array's declared `ArrayStride` (16) doesn't
+// match `vector<3xf32>`'s own compact size (12): 16 is that vector's
+// Vulkan *base alignment*, the natural stride every conformant SPIR-V
+// producer emits for such an array. See `getNaturalArrayStride` in
+// `mlir/lib/Dialect/SPIRV/Utils/LayoutUtils.cpp`.
 
 // CHECK-LABEL: llvm.func @read_vec3_array_element
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (array<4 x vector<3xf32>>)>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<4 x vector<3xf32>>, 12, 0, 16>
 // CHECK: %[[ELEM:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
-// CHECK: %[[FIELD:.*]] = llvm.getelementptr inbounds %[[ELEM]][0, %{{.*}}]
-// CHECK: llvm.load %[[FIELD]] : !llvm.ptr<11> -> vector<3xf32>
+// CHECK: llvm.load %[[ELEM]] : !llvm.ptr<11> -> vector<3xf32>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @positions bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.array<4 x vector<3xf32>, stride=16> [0, NonWritable]), Block>, StorageBuffer>
   spirv.func @read_vec3_array_element(%idx : i32) -> vector<3xf32> "None" {
