@@ -58,34 +58,38 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 ## State right now
 
 - Working tree clean before this file's own commit, HEAD at
-  `dc984fe81d76`.
-- `ninja check-feme`: 3,211/3,214 Passed, 3 Unsupported, 0 Failed.
-- `ubo.*` **full** sweep: 5,687 Pass / 0 Fail / 7,553 NotSupported (of
-  13,240) -- first time this sweep has ever run clean to completion.
-- `ssbo.*`: 3,195 Pass / 47 Fail / 8,983 NotSupported -- unchanged from
-  before this session, confirmed same 47 test names, not L124(p)-related.
+  `e1b26d5ba29c`.
+- `ninja check-feme`: 3,212/3,215 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*`: **3,230 Pass / 12 Fail / 8,983 NotSupported** (of 12,225) --
+  down from 3,195/47/8,983 at session start.
+- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression. Full
+  `ubo.*` (13,240 cases) not re-run this session -- not needed, no
+  `Uniform`/`Block`-specific code touched.
 - No feature/extension inventory changes needed (internal correctness
   fix, no new Vulkan surface) -- verified, not just assumed.
-- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
-  place, warm/incremental. `/tmp/ctsrun` has this session's own fresh
-  scratch logs (`std140_both.qpa`, `single_struct.qpa`, `ubo_full.qpa`,
-  `ssbo_full.qpa`, `ssbo_triage1.qpa` + their `.stdout` companions) --
-  not referenced by anything committed.
+- Build directories left in place, warm/incremental. `/tmp/ctsrun` has
+  this session's own fresh scratch logs (`ssbo_full.qpa`/`.stdout`,
+  `triage1.qpa`, `triage1b.qpa`, `ssbo_full2.qpa`/`.stdout`,
+  `ubo_random_check.qpa`, `triage_r1.qpa`) -- not referenced by anything
+  committed.
 
 ## Suggested next steps
 
 1. **(~5 min)** Delete `/tmp/ctsrun`'s scratch logs from this session
-   if a future session doesn't need the raw QPA output (`std140_both.qpa`,
-   `single_struct.qpa`, `ubo_full.qpa`/`.stdout`, `ssbo_full.qpa`/
-   `.stdout`, `ssbo_triage1.qpa`) -- not referenced by anything
-   committed.
-2. Start L124(q) (`ssbo.*`'s remaining 47 `layout.random.*` fails) --
-   the full list of 47 test names is in this session's own
-   `/tmp/ctsrun/ssbo_fails.txt` if still present, otherwise regenerate
-   with `./deqp-vk -n "dEQP-VK.ssbo.*" ...` and
-   `grep -B1 "^  Fail" | grep "Test case"`. Start with
-   `dEQP-VK.ssbo.layout.random.basic_types.18` (already confirmed to
-   fail with "Counter value incorrect", not a crash) and build a
-   `FEME_DUMP_IR=1` trace the same way L124(l)/(n) did.
+   if a future session doesn't need the raw QPA output.
+2. Start **L124(r)** (`ssbo.*`'s remaining 12 `layout.random.*` fails:
+   `all_per_block_buffers` 2, `all_shared_buffer` 5, `nested_structs` 2,
+   `nested_structs_arrays` 2, `nested_structs_instance_arrays` 1). One
+   already spot-checked this session
+   (`dEQP-VK.ssbo.layout.random.nested_structs.12`, "Result comparison
+   failed" -- a different message than L124(q)'s own repro, suggesting a
+   distinct bug, not confirmed). Use `--deqp-log-decompiled-spirv=enable`
+   the same way this session did to pull the real struct shape straight
+   from the qpa log, then build a minimal `feme-opt` repro before
+   assuming a shared root cause across all 12.
 3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
    -- reuse the existing build directories, no reconfigure needed.
+4. With `ssbo.*` down to 12 of 12,225 (0.1%) and `ubo.*` fully clean
+   (0 Fail of 13,240), L124(r) closing this last small bucket would put
+   both the `ubo.*` and `ssbo.*` CTS families at a **fully clean** state
+   -- worth prioritizing over any other open roadmap item next session.
