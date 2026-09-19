@@ -4352,3 +4352,60 @@ Unsupported, 0 Failed, unchanged.
 No code changes landed this session (0 net diff to
 `feme/lib`/`feme/test`). See `agent_thoughts.md` for the full narrative
 and precisely scoped next steps.
+
+## Session: merged upstream `llvm/llvm-project` `main` (1,398 commits), fixed one resulting build break
+
+Merged `origin/main` into this branch per the standing "merge main"
+next-step request (fetch + merge, resolve conflicts, fix any resulting
+test issues). `git merge` itself produced **zero textual conflicts** across
+1,398 incoming upstream commits against feme's 4,292; every feme-touched
+file (all under `feme/`, plus feme's small deltas to upstream MLIR SPIR-V
+and `llvm/lib/Target/DirectX`/`DXContainer` files) merged cleanly.
+
+The merge was not build-clean, though: upstream reworked
+`llvm::opt::OptTable` (adding subcommand support) in the merged window,
+replacing `GenericOptTable`/`OPTTABLE_STR_TABLE_CODE`/
+`OPTTABLE_PREFIXES_TABLE_CODE` and the `LLVM_CONSTRUCT_OPT_INFO`-based
+`Info` table with a single `OPTTABLE_CODE` section emitting an
+`optionTables()` helper and a new `OptTable(Tables, IgnoreCase)`
+constructor. `feme/lib/Frontend/Options.cpp` was the only feme file still
+using the old pattern (`feme/include/feme/Frontend/Options.h`'s `ID` enum
+already used the unaffected `LLVM_MAKE_OPT_ID` macro, so it needed no
+change). Updated `Options.cpp` to the new pattern, matching the
+now-canonical usage in `llvm/tools/llvm-ml/llvm-ml.cpp`. One commit,
+surgical (5 insertions, 19 deletions in that one file).
+
+Verified with a full from-scratch build (`Release`,
+`LLVM_ENABLE_ASSERTIONS=ON`, `CMAKE_CXX_COMPILER_LAUNCHER=ccache`,
+`CMAKE_DISABLE_PRECOMPILE_HEADERS=ON` per `feme/cmake/caches/feme.cmake`):
+
+- `ninja check-feme`: **3,208 Passed / 3 Unsupported / 0 Failed**
+  (unchanged from the pre-merge baseline).
+
+Also rebuilt `deqp-vk` from scratch against the merged VK-GL-CTS checkout
+(same revision, `880f31a2bd9c` -- the merge did not touch that checkout)
+and re-verified the FeMe ICD against it:
+
+```console
+VK_DRIVER_FILES=$PWD/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+  vulkaninfo --summary | grep deviceName
+# => FeMe CPU Vulkan Device
+```
+
+Re-ran the two sweeps this report already tracks as regression coverage
+(rather than the full multi-hour, 3.2M-case sweep, since nothing in the
+merge touched Vulkan-facing feme code -- only the unrelated CLI
+option-parsing fix above):
+
+- `ssbo.*` (12,225 cases): **3,187 Pass / 55 Fail / 8,983 NotSupported**
+  -- unchanged from the last recorded baseline, 0 regressions.
+- `compute.*` (61,460 cases): **679 Pass / 6 Fail / 60,775 NotSupported**
+  -- unchanged from the last recorded baseline, 0 regressions.
+
+FeMe source revision under test: `5417103e8b02`. No feature or extension
+inventory changes: this session touched only CLI option-table plumbing,
+not any Vulkan-facing code path, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
