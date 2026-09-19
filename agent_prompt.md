@@ -55,35 +55,54 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L124** (~1-2 hours to scope, unknown to fix): triage `compute.*`'s
-   remaining 16 `Fail`s and `ssbo.*`'s remaining 905 `Fail`s. `ssbo.*`'s 905 is
-   large enough it's likely several distinct bugs, not one -- bucket by failing
-   case name before picking a first repro, the same way L116's original
-   `graphicsfuzz.*` sweep did.
-2. **L125** (~1 hour to scope): first triage pass of `pipeline.monolithic.*`
-   (465,554 cases, never sampled). Run a representative sample of its own
-   subfamilies, bucket failures, pick a first concrete repro.
-3. **L126** (~30 min): finish `subgroups.ballot_broadcast.*`'s sweep, abandoned
-   mid-read this session when focus shifted to `compute.*`. Likely folds into
-   "no real bugs in `subgroups.*`" but not yet confirmed for this specific
-   subfamily.
-4. **L116(f)** (no time estimate, several sessions untouched): ~24
-   un-root-caused hangs/crashes in `graphicsfuzz.*`. Consider the
-   runtime-instrumentation technique that broke L118 open (a
-   `feme.cpu.debug.print.*`-style host callback) rather than more manual IR
-   tracing.
+1. **L124(g)** (~half a day+ to scope a first repro, unknown to fix): `ssbo.*`'s
+   572-case wrong-numeric-result bucket, 63% of all `ssbo.*` fails and likely
+   the single highest-value item across the whole L124 breakdown. 735 of 905
+   `ssbo.*` fails are matrix-typed by name -- strongly suggests a systemic
+   std140/std430 matrix layout/stride bug analogous to L123's vec3-stride fix.
+   Start by picking one small, single-matrix repro (e.g.
+   `dEQP-VK.ssbo.layout.single_basic_type.std140.row_major_mat3`) and tracing
+   actual vs. expected byte layout, the same way L123's `CommandBufferTest.cpp`
+   repro worked.
+2. **L124(e)** (~half a day): add the missing
+   `feme.cpu.resource.store.raw.i8`/`v{2,3,4}i8` runtime-function variants and
+   their JIT-symbol registration, mirroring the existing `i16` variant's shape
+   exactly. Unblocks 274 of 905 `ssbo.*` fails (30%) -- though some may have a
+   second, independent bug hiding behind this one once unblocked, not yet
+   confirmed.
+3. **L124(f)** (~half a day, needs its own root-cause pass first):
+   `spirv.AccessChain` into a `RowMajor`-decorated matrix nested inside a
+   runtime array fails legalization (36 cases) -- `ColMajor` in the same
+   position is fine, so the gap is specific to `RowMajor`'s own row-vs-column
+   addressing arithmetic.
+4. **L124(a)** (~half a day): `read_unbound_ssbo` -- `ArrayLengthPattern`'s
+   member-index check needs relaxing from "must be 0" to "must be the struct's
+   own last member", plus a new runtime-call variant (or operand) to subtract a
+   fixed prefix byte offset before dividing by stride, since the existing
+   `femeCpuResourceGetDimensionsRawI32` has no way to do that without breaking
+   the "unbound descriptor returns 0" contract. Full design already scoped this
+   session -- see `Roadmap.md`'s L124(a) row for the exact plan.
+5. **L124(b)/(c)** (~half a day+ each): `remove_global_load_pass` (new
+   `spirv.GlobalVariable` initializer-attribute) and `undefined_values` (new
+   `spirv.CopyLogical` op) -- both real dialect additions, scoped above.
+6. **L124(d)** (~half a day to scope, unknown to fix):
+   `device_group.device_index` -- `gl_DeviceIndex` unwired for compute
+   pipelines. Needs research into whether `VK_KHR_device_group` is otherwise
+   supported by feme's Vulkan layer before estimating; may be as simple as
+   always reporting `DeviceIndex = 0`.
+7. **L125**/**L126**/**L116(f)** all remain untouched, standing fallbacks from
+   prior sessions.
 
 ## State for next session
 
-- Working tree clean, 6 new commits this session (fix, lit-test updates,
-  DXIL-raising fix, new regression test, CTS report, roadmap) plus this entry's
-  own commit = 7 total.
+- Working tree clean, 4 new commits this session (matrix `OpConstantNull` fix,
+  `OpName`/`NClamp` fix, roadmap/CTS-report update) plus this entry's own commit
+  = 5 total.
 - `ninja check-feme`: 3,201/3,204 Passed, 3 Unsupported, 0 Failed.
-- `compute.*` baseline for next session: **669 Pass / 16 Fail / 60,775
-  NotSupported** (of 61,460).
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
+  NotSupported** (of 61,460) -- the 6 remaining are L124(a)-(d) plus the 2
+  pre-existing `containsAddressableBool` cases (out of scope).
 - `ssbo.*` baseline for next session: **2,337 Pass / 905 Fail / 8,983
-  NotSupported** (of 12,225).
-- `graphicsfuzz.*` baseline unchanged from last session: 601 Pass / 124 Fail / 8
-  NotSupported (of 733) -- not re-swept this session, since this session's fix
-  didn't touch anything on that path.
+  NotSupported** (of 12,225), bucketed but unchanged in count -- see the
+  L124(e)-(h) breakdown above for exact bucket sizes.
 - No scratch files left in `/tmp` from this session.
