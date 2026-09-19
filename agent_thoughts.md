@@ -92756,3 +92756,124 @@ Device` at session start.
 3. `ssbo.*` is now at 0.45% fail rate (55 of 12,225), down from 651 nine
    sessions ago -- L124(o) is very likely the last item standing before
    a fully clean `ssbo.*` sweep. Prioritize it first next session.
+
+# Session: L124(o) -- root cause found for one repro, no fix landed, one wrong turn reverted
+
+**Start**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan
+Device`, confirmed. Working tree clean at `f6c49b1164db`.
+
+**Bottom line**: 0 code commits landed this session. `ssbo.*` is
+unchanged from last session: 3,187 Pass / 55 Fail / 8,983 NotSupported.
+Two doc-only commits landed (Roadmap/VulkanCTSReport updates, this
+entry). Everything below is investigation to save the next session real
+time -- read it before starting L124(o) again.
+
+## What actually happened, in order
+
+1. Reproduced `random`'s 55 fails directly. Picked one "Counter value
+   incorrect" repro (`all_per_block_buffers.39`), traced its IR, found
+   the compare logic itself correct.
+2. Formed a hypothesis: a 3-lane vector (`ivec3`) nested in a
+   fixed-size-array struct member reports an inflated (16-byte, not the
+   real 12-byte) size from `mlir::DataLayout::getTypeSize`, coinciding
+   with a real 16-byte `ArrayStride` and wrongly skipping needed
+   padding. Confirmed this specific type-level bug in isolation via a
+   minimal `feme-opt`-only MLIR test.
+3. **Implemented the fix** (`getTightSize` helper, wired into
+   `padStructToSize` and its two callers), added lit tests, got
+   `check-feme` clean (3,209/3,209 Pass), committed 2 commits.
+4. **Ran the actual CTS repro it was supposed to fix -- still failed.**
+   Dumped IR again: offsets were already correct on both the read and
+   write side before my fix. The fix was solving a real but unrelated
+   type-consistency issue, not this bug.
+5. **Ran the full `ssbo.*` sweep anyway (always do this, not just the
+   narrow subset) -- caught a regression**: 3,151 Pass / 91 Fail (was
+   3,187/55). +36 new fails, all `single_struct{,_array,_nested_struct}`
+   `*_store_cols` (matrix column stores). My fix broke a case where the
+   old "buggy" inflated vector size was actually load-bearing (real
+   codegen's own vector ABI size apparently already matches what I
+   assumed was wrong).
+6. **Reverted in full** (`git reset --hard f6c49b1164db`). Re-swept
+   `ssbo.*` to confirm back to 3,187/55/8,983 exactly.
+7. Picked a different, cleaner-looking repro from a different symptom
+   bucket: `all_per_block_buffers.41`, "Result comparison failed" on
+   `b.mB`, `expected mat2(7,4,7,-9) got mat2(7,-4,4,-2)`.
+8. Decompiled its SPIR-V: `mB` is a `mat2` (ColMajor) with
+   `MatrixStride 16` (not the natural 8 for a 2-float column -- forced
+   wide by std140-style nested-struct alignment), nested one level
+   inside another struct (`b.mB`, not a direct block member).
+9. **Root-caused it precisely** via an isolated `feme-opt` repro:
+   `getMatrixWholeAccess`'s non-wrapper branch (used by
+   `RowMajorMatrixStorePattern`/`LoadPattern`) requires the matrix to be
+   *exactly* one member-select index below the top-level block struct.
+   `b.mB` needs two (select `b`, then select `mB`), so this check bails
+   `std::nullopt`, and the store falls back to the ordinary, unpadded
+   whole-matrix conversion -- writing a tight 16-byte value into a slot
+   the struct's own declared layout reserves 32 bytes for (2 columns x
+   16-byte `MatrixStride`), corrupting the second column.
+10. Also found the type-conversion side has the identical gap:
+    `getTightNestedStructType`/`getTightMatrixType` only *tighten* (undo
+    ABI alignment) a nested struct's own matrix member -- never *widen*
+    it to its declared `MatrixStride` the way `getPhysicalMatrixMemberType`
+    does for a direct block member. Confirmed via the same isolated
+    repro's dumped IR: the nested struct's own converted field type for
+    `mB` had no padding member at all.
+11. Ran out of session time/budget to implement and fully verify a
+    two-part fix (`getMatrixWholeAccess`'s index-walk generalization +
+    the type-conversion widening) in an area this delicate, especially
+    right after one regression already happened this session. Stopped
+    here rather than risk a second, rushed one.
+
+## Why the wrong turn happened (so it doesn't happen again)
+
+I trusted a type-level analytical argument ("MLIR's `DataLayout` rounds
+a 3-lane vector's size, so any place trusting it is buggy") without
+first checking whether *real* LLVM codegen for this target's own
+`llvm.data_layout` string does the *same* rounding -- which would make
+the "buggy" value already correct in practice. The isolated MLIR test
+proved the type conversion *changed*; it did not prove the change was
+*needed*. **Lesson for next time**: after any fix in this file, run the
+full relevant CTS suite (not just the one subset the fix targets)
+*before* declaring victory -- a change that helps zero targeted cases
+and breaks 36 untargeted ones is easy to miss if you only check the
+narrow slice.
+
+## Next steps (start here)
+
+1. **(~2-3 hours)** Fix `getMatrixWholeAccess`'s non-wrapper branch to
+   walk through zero-or-more intervening struct-member selections
+   before the final matrix-member select (mirroring how
+   `peelInstanceArrayPointer` already peels array nesting for the same
+   function) -- track the innermost struct + member index actually
+   reached, not just the outermost block struct's own direct member.
+2. **(~2-3 hours, do together with #1, not separately)** Extend
+   `getTightNestedStructType`/`getTightMatrixType` to *widen* (not just
+   tighten) a nested struct's own matrix member to its declared
+   `MatrixStride`, using the same substitution `getPhysicalMatrixMemberType`
+   already builds for a direct block member. Verify against the
+   isolated repro (recreate `/tmp/mat2_stride16.mlir`'s shape as a
+   permanent lit test) before touching the CTS sweep.
+3. **Always, before declaring any fix done**: re-run the *full*
+   `ssbo.*` sweep (not just `random`), not only the subset the fix
+   targets -- this is what caught this session's regression.
+4. Re-run `dEQP-VK.compute.pipeline.builtin_var.*` (L106's own vec3
+   regression coverage) as a sanity check, since this area is adjacent.
+5. `random`'s other symptom buckets (25 "Result comparison and counter
+   values are incorrect", 15 "Counter value incorrect",
+   1 `VK_ERROR_INITIALIZATION_FAILED`) are still un-triaged past this
+   session's own `.39`/`.41` repros -- `.39`'s own root cause (a
+   "Counter value incorrect" case) is still open; do not assume it
+   shares `.41`'s matrix-nesting bug without its own trace.
+6. `L124(a)/(b)/(c)/(d)/L125/L126/L116(f)` all remain untouched, standing
+   fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, HEAD at `b8d8983c3639` (2 doc-only commits this
+  session, no code commits -- see "why the wrong turn happened" above).
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed
+  (unchanged).
+- `ssbo.*`: **3,187 Pass / 55 Fail / 8,983 NotSupported** (of 12,225) --
+  unchanged from last session.
+- `compute.*`: 679 Pass / 6 Fail / 60,775 NotSupported (unchanged).
+- `/tmp` scratch cleaned up (this session's own; see below).
