@@ -92098,3 +92098,42 @@ The first diagnostic (in the type-conversion loop) confirmed the fix's *own* log
 - `ssbo.*` baseline for next session: **2,729 Pass / 513 Fail / 8,983 NotSupported** (of 12,225) — up from 2,591/651/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) — unchanged, confirmed by a full re-sweep this session.
 - No scratch files left in `/tmp` from this session.
+
+# Session: L124(i) whole-access fix closed (+118 ssbo.* Pass); partial-access gap found
+
+**Next action:** open `feme/docs/Roadmap.md`'s L124(j) row and generalize `rewriteBlockAccess`'s `isa<MatrixType>(SelectedType)` branch to peel through array nesting before checking, the same way `getMatrixWholeAccess` was just generalized in this session's own fix.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up L124(i) (prior session's own next step): `ssbo.*`'s remaining 513 fails, re-bucketed by family, none root-caused yet.
+3. Reduced a first repro from the largest bucket: `dEQP-VK.ssbo.layout.2_level_array.std140.column_major_mat2`. Ran the whole `2_level_array` family first and found `column_major_mat2` also fails, not just `row_major` — confirmed this bug is the general `MatrixStride`-padding gap, not RowMajor-transpose-specific, same underlying symptom as L124(g) but one array level deeper.
+4. Traced with `FEME_DUMP_IR=1`: intra-matrix column offsets were wrong, same root shape as L124(g).
+5. Root-caused in `getMatrixWholeAccess`: its wrapper-shape branch hard-coded `Op.getIndices().size() != 2`, matching only L124(g)'s own single-array-nesting shape. A 2-level nested array (`array<M x array<N x mat2>>`) needs 3 indices, not 2, so this always rejected it — `RowMajorMatrixStorePattern`/`LoadPattern` never fired at all for this shape.
+6. Fixed: replaced the hard-coded `!= 2` with a loop peeling through arbitrary array nesting to find the innermost matrix, requiring `Op.getIndices().size() == 1 + ArrayNestingDepth`.
+7. **Before writing any more code**, traced through whether the array levels' *own* strides also needed fixing (a second suspected gap from last session's own analysis). Read `convertArrayTypeIgnoringDecorations`/`padStructToSize`: confirmed a matrix element's own natural (tight) LLVM size is already padded up to its array's declared `ArrayStride` via a uniform byte-array stand-in, recursively at every nesting level — this machinery was already correct and pre-existing. **This turned out to make the deeper `rewriteBlockAccess` generalization I'd planned unnecessary** — the generic index-forwarding GEP fallback already computes the right byte offset for a *whole*-matrix access at any nesting depth, once `getMatrixWholeAccess` itself recognizes the shape.
+8. Rebuilt, re-tested the repro directly: **passed** on the first attempt with only the `getMatrixWholeAccess` fix — no `rewriteBlockAccess` changes needed after all.
+9. Added a new regression test, `spirv-to-llvm-matrix-rowmajor-nested-array-block.mlir`, mirroring L124(g)'s own single-nesting test but with a second array level; verified it round-trips through `feme-opt`/`FileCheck` standalone before adding it to the tree.
+10. Re-swept `ssbo.*` (12,225 cases): **2,847 Pass / 395 Fail / 8,983 NotSupported** (was 2,729/513/8,983) — **+118 Pass, 0 regressions**. Re-swept `compute.*`: unchanged (679/6/60,775). `ninja check-feme`: **3,204/3,207 Passed**, 3 Unsupported, 0 Failed.
+11. Re-bucketed the remaining 395 `ssbo.*` fails by family and inspected the still-failing case names within `2_level_array`/`3_level_array`/`3_level_unsized_array`: every one is now a `*_store_cols`/`*_comp_access_store_cols` variant (partial column/scalar write, not whole-matrix). Traced this to a second, separate gap in `rewriteBlockAccess`'s own partial-access branch (`isa<MatrixType>(SelectedType)`), which only fires when `SelectedType` is *directly* a matrix — skipped entirely for any array nesting, including `single_basic_array`'s own pre-existing single-level RowMajor case (already known-declined from before this session, not new). `instance_array_basic_type`'s 84 remaining fails include *whole*-access failures this session's fix didn't close, pointing at a materially different content shape (array of block instances, not an array member inside one block).
+12. Committed in 2 pieces: (a) the core fix + new test, (b) `Roadmap.md`/`VulkanCTSReport.md` updates. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed — internal layout-correctness fix, not a new feature/extension.
+13. Cleaned up all `/tmp/l124i_*`/`/tmp/l124j_*` scratch files.
+
+## Why this session's fix was smaller than expected
+
+Last session's own compaction summary predicted a *second*, deeper fix would be needed in `rewriteBlockAccess` (generalizing its own index-position arithmetic for nested-array navigation), based on reading its structure alone. Reading the *array conversion* machinery it actually depends on (`convertArrayTypeIgnoringDecorations`) before writing that second fix showed it was already correct — the generic GEP fallback rewriteBlockAccess already has was sufficient once `getMatrixWholeAccess` recognized the shape. **Tracing one level further down into the type-conversion machinery before assuming a consuming function needs a matching fix saved rewriting a ~150-line function that turned out to already work.**
+
+## Next steps
+
+1. **L124(j)** (~half a day, arithmetic pattern already known from this session's own fix): `rewriteBlockAccess`'s partial-access branch (column-select/scalar-element) needs the same nesting-depth generalization `getMatrixWholeAccess` just got, applied to its own `SelectedType` check and `Selector+1`/`+2`/`+3` index arithmetic. Also closes `single_basic_array`'s pre-existing 36-case RowMajor-column-select gap (same code path at nesting depth 1). Covers 180 of the remaining 395 `ssbo.*` fails (144 + 36).
+2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84 remaining fails include whole-access failures L124(i) didn't close — needs its own `FEME_DUMP_IR=1` trace to confirm whether its content shape (array of block instances) is a variant of the same bug or something new, before assuming either L124(i) or L124(j)'s fix applies.
+3. **L124(l)** (~half a day to re-triage): `random` (67), `basic_unsized_array` (36), `unsized_nested_struct_array` (24), `unsized_array_length.*` (4 singletons) — not re-triaged this session; some may already be absorbed by L124(j)/(k) once those land.
+4. **L124(f)/(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing fallbacks from prior sessions.
+
+## State for next session
+
+- Working tree clean, 2 new commits this session (core fix + test, Roadmap/CTSReport update) plus this entry's own commit = 3 total.
+- `ninja check-feme`: 3,204/3,207 Passed, 3 Unsupported, 0 Failed (was 3,203/3,206 — +1 Pass from this session's new lit test).
+- `ssbo.*` baseline for next session: **2,847 Pass / 395 Fail / 8,983 NotSupported** (of 12,225) — up from 2,729/513/8,983.
+- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) — unchanged, confirmed by a full re-sweep this session.
+- No scratch files left in `/tmp` from this session.
