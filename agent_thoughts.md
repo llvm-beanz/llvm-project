@@ -91924,3 +91924,48 @@ There is no convenient LLVM API to introspect an intrinsic's overloaded-type pos
 - `ninja check-feme`: 3200/3203 Passed, 3 Unsupported, 0 Failed.
 - `graphicsfuzz.*` sweep baseline for next session's comparisons: **601 Pass / 124 Fail / 8 NotSupported** (of 733, excluding the same 24-name hang list reused across many sessions now, cached at `/tmp/gf_skipped.txt`).
 - No scratch files left in `/tmp` from this session (cleaned up `/tmp/l120/`); `/tmp/gf_skipped.txt` untouched for future reuse.
+
+# Session: L123 closed (vec3 SSBO stride bug) -- +114 Pass across compute.*/ssbo.*
+
+**Next action:** pick up L124 (`compute.*`'s remaining 16 `Fail`s, `ssbo.*`'s remaining 905), L125 (`pipeline.monolithic.*` untriaged, 465,554 cases), L126 (finish `subgroups.ballot_broadcast.*`'s sweep), or L116(f) (~24 un-root-caused hangs/crashes) -- all scoped below, none started this session beyond L123.
+
+## What happened this session
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up the prior session's next-steps: broaden the CTS sweep to previously-untriaged `pipeline.monolithic.*`/`subgroups.*`/`compute.*` (L106), then L116(f) if time allowed.
+3. Sampled `subgroups.*`'s small/medium subfamilies (~9,700+ cases): no real `Fail`s -- `quad`/`clustered` are 100% `NotSupported` (legitimate feature gaps).
+4. Sampled `compute.pipeline.*`'s small subfamilies (~136 cases): found `builtin_var.*` systemically broken, 10 of 11 cases failing. Every vec3-typed compute builtin (`global_invocation_id`, `local_invocation_id`, `work_group_id`, etc.) failed; only the scalar `local_invocation_index` passed.
+5. Root-caused `builtin_var.*` through several ruled-out hypotheses (pipeline-cache-key bug, queue-family threading race, JIT scheduling race -- all read and eliminated) before building a **minimal, isolated unit-test repro** in `CommandBufferTest.cpp`, iterating shader shapes until the bug reproduced. The breakthrough: switching the storage buffer's element type from `vector<4xi32>` (no stride mismatch) to the real shader's `vector<3xi32>` (stride=16, natural size 12) reproduced it exactly -- slots 31-41 of 42 never got written.
+6. **Real root cause**: `convertBufferBlockType` (`SPIRVToLLVMPatterns.cpp`) and `classifyVulkanBufferHandle` (`SPIRVResourceLowering.cpp`) both assumed a std430 storage buffer's `ArrayStride` always equals its element's natural LLVM store size -- true for scalar/vec2/vec4/matrix elements, **false for vec3** (std430 still pads every array element to a 16-byte multiple, so a vec3's 12-byte natural size still needs a 16-byte stride). The too-small stride silently misaddressed later array indices.
+7. **Fixed** by carrying the real `ArrayStride` as an optional third integer parameter on the `spirv.VulkanBuffer` handle, reusing the existing convention `convertUniformArrayContent`/`classifyVulkanBufferHandle` already use for std140 uniform arrays' own (more common) stride mismatch. Changed the array-branch classification from parameter-count-based to storage-class-plus-writability-based (matching the adjacent struct-branch's own logic), since parameter count no longer implies the kind on its own.
+8. Rebuilt and ran `ninja check-feme`: found 6 lit-test regressions (FileCheck lines expecting the old 2-int-param handle type) plus 1 real regression (`feme-spirv-to-dxil.mlir`, an `UNREACHABLE` crash) -- `SPIRVRaising.cpp`'s `translateHandleType` required *exactly* 2 int params to raise a `spirv.VulkanBuffer` handle to DXIL's `dx.RawBuffer`, so it now silently refused every storage buffer, leaving the handle un-lowered all the way to DXIL codegen. Fixed by relaxing that check to accept 2 or more params (DXIL's own `StructuredBuffer<T>` has no std430-style padding, so the extra stride param is correctly ignored there).
+9. Updated the 6 affected lit tests' `CHECK-SAME` lines to the new, correct output (verified against `feme-opt`'s actual output first, not guessed).
+10. Rebuilt everything; `ninja check-feme`: 3,201/3,204 Passed, 3 pre-existing Unsupported, 0 Failed -- clean.
+11. Removed the repro test's own now-dead "warm-up dispatch" block (built mid-investigation to test the disproven cache-key hypothesis).
+12. Ran the real CTS: `compute.pipeline.builtin_var.*` went 1/11 → 11/11 Pass. Full `compute.*` re-sweep (61,460 cases): 656/29/60,775 → 669/16/60,775. Full `ssbo.*` re-sweep (12,225 cases, the other family directly exercising storage-buffer array addressing): 2,236/1,006/8,983 → 2,337/905/8,983. **+114 Pass combined, 0 regressions.**
+13. 5 commits: fix code, lit-test updates, DXIL-raising compat fix, new regression unit test, `VulkanCTSReport.md` update. Plus a 6th for `Roadmap.md` (L123 closed, L124-L126 added).
+14. Cleaned up `/tmp` scratch files from this and prior sessions' CTS runs.
+
+## Why this took most of the session (root-causing, not the fix itself)
+
+The actual fix is small (~90 lines across 2 files). Getting there required ruling out three plausible-looking wrong hypotheses first (pipeline cache key, queue-family concurrency, JIT thread-pool race) by reading the relevant code in full, then building a minimal unit-test repro from scratch by iterating shader shapes -- the CTS test itself couldn't be run in isolation with print debugging, so the repro had to be built blind, shape by shape, until it reproduced. This is the same pattern L118 used last session (build a real repro before touching production code) and it paid off again: the eventual fix was exactly targeted, with no guesswork.
+
+## Why the DXIL-raising regression wasn't caught until the full `check-feme` run
+
+The Vulkan unit tests and the targeted lit tests for `SPIRVToLLVMPatterns.cpp` don't exercise the DXIL backend at all -- only `ninja check-feme`'s full suite (which includes `feme-spirv-to-dxil.mlir`, a distinct tool test) does. This is exactly why the standing instruction to always build+test the full `check-feme` target (not just the directly-relevant unit tests) matters: a narrower validation pass would have missed this real regression entirely.
+
+## Next steps
+
+1. **L124** (~1-2 hours to scope, unknown to fix): triage `compute.*`'s remaining 16 `Fail`s and `ssbo.*`'s remaining 905 `Fail`s. `ssbo.*`'s 905 is large enough it's likely several distinct bugs, not one -- bucket by failing case name before picking a first repro, the same way L116's original `graphicsfuzz.*` sweep did.
+2. **L125** (~1 hour to scope): first triage pass of `pipeline.monolithic.*` (465,554 cases, never sampled). Run a representative sample of its own subfamilies, bucket failures, pick a first concrete repro.
+3. **L126** (~30 min): finish `subgroups.ballot_broadcast.*`'s sweep, abandoned mid-read this session when focus shifted to `compute.*`. Likely folds into "no real bugs in `subgroups.*`" but not yet confirmed for this specific subfamily.
+4. **L116(f)** (no time estimate, several sessions untouched): ~24 un-root-caused hangs/crashes in `graphicsfuzz.*`. Consider the runtime-instrumentation technique that broke L118 open (a `feme.cpu.debug.print.*`-style host callback) rather than more manual IR tracing.
+
+## State for next session
+
+- Working tree clean, 6 new commits this session (fix, lit-test updates, DXIL-raising fix, new regression test, CTS report, roadmap) plus this entry's own commit = 7 total.
+- `ninja check-feme`: 3,201/3,204 Passed, 3 Unsupported, 0 Failed.
+- `compute.*` baseline for next session: **669 Pass / 16 Fail / 60,775 NotSupported** (of 61,460).
+- `ssbo.*` baseline for next session: **2,337 Pass / 905 Fail / 8,983 NotSupported** (of 12,225).
+- `graphicsfuzz.*` baseline unchanged from last session: 601 Pass / 124 Fail / 8 NotSupported (of 733) -- not re-swept this session, since this session's fix didn't touch anything on that path.
+- No scratch files left in `/tmp` from this session.
