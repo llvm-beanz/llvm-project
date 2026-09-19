@@ -3826,6 +3826,84 @@ mlir::LogicalResult rewriteBlockAccess(
   mlir::Type ElementType = TypeConverter.convertType(SelectedType);
   if (!ElementType)
     return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+  // (Roadmap L124(j)) The single peel above only ever reflects one array
+  // nesting level -- exactly what `2_level_array`/`3_level_array`-shaped
+  // wrapper content (`!spirv.array<M x !spirv.array<N x matCxR>>>`, or
+  // deeper) needs one more of, per further level, before SelectedType
+  // actually becomes the innermost matrix (or matrix-containing struct)
+  // the branches below expect to see for a *partial* (column-select/
+  // scalar-element) access. A *whole*-element access at any depth is
+  // already handled correctly by the existing, untouched single,
+  // multi-index GEP fallback further below (verified by roadmap L124(i):
+  // getMatrixWholeAccess needed the exact same generalization for that
+  // case, but rewriteBlockAccess itself did not, since the per-array-
+  // level ArrayStride padding the ordinary array type conversion already
+  // applies is enough to reach the right byte address in one shot when
+  // nothing further indexes past it) -- so peek ahead first (no side
+  // effects yet) to confirm this access is genuinely one of the two
+  // deep-nesting shapes needing special handling before doing anything:
+  // peeling SelectedType through further array levels, one per
+  // additional not-yet-consumed index, until it is no longer an array.
+  mlir::Type PeekedType = SelectedType;
+  unsigned PeekedIndexPos = Selector + 1;
+  bool PeekedThroughFurtherArray = false;
+  while (PeekedIndexPos < AllIndices.size()) {
+    mlir::Type Next;
+    if (auto Array = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(PeekedType))
+      Next = Array.getElementType();
+    else if (auto FixedArray =
+                 mlir::dyn_cast<mlir::spirv::ArrayType>(PeekedType))
+      Next = FixedArray.getElementType();
+    else
+      break;
+    PeekedType = Next;
+    PeekedThroughFurtherArray = true;
+    ++PeekedIndexPos;
+  }
+  // A partial matrix access has exactly one (column-select) or two
+  // (scalar-element) indices remaining past the fully-peeled matrix; the
+  // struct-containing-a-matrix shape (H151 below) always has exactly two
+  // (the nested member selector, then its own column select).
+  bool NeedsDeepNestingPeel =
+      PeekedThroughFurtherArray &&
+      ((mlir::isa<mlir::spirv::MatrixType>(PeekedType) &&
+        (AllIndices.size() == PeekedIndexPos + 1 ||
+         AllIndices.size() == PeekedIndexPos + 2)) ||
+       (mlir::isa<mlir::spirv::StructType>(PeekedType) &&
+        AllIndices.size() == PeekedIndexPos + 2));
+  unsigned NextIndexPos = Selector + 1;
+  if (NeedsDeepNestingPeel) {
+    // Actually perform the array-level navigation the peek above only
+    // simulated: an ordinary GEP through each level's own natural/padded
+    // (ArrayStride-aware) type, consuming one further index per level,
+    // advancing `ElementPtr`/`SelectedType`/`ElementType` in lockstep
+    // this time, so the matrix/struct-specific logic below can apply its
+    // own specialized (non-GEP-representable) addressing math to
+    // whatever indices remain from the true innermost type's own base
+    // address, not an intermediate array level's.
+    while (NextIndexPos < PeekedIndexPos) {
+      mlir::Type PeeledSpirvType;
+      if (auto Array =
+              mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(SelectedType))
+        PeeledSpirvType = Array.getElementType();
+      else if (auto FixedArray =
+                   mlir::dyn_cast<mlir::spirv::ArrayType>(SelectedType))
+        PeeledSpirvType = FixedArray.getElementType();
+      else
+        break; // Unreachable: matches the peek loop above exactly.
+      mlir::Type PeeledElementType = TypeConverter.convertType(PeeledSpirvType);
+      if (!PeeledElementType)
+        return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+      ElementPtr = mlir::LLVM::GEPOp::create(
+          Rewriter, Loc, ResultType, ElementType, ElementPtr,
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{0, AllIndices[NextIndexPos]},
+          mlir::LLVM::GEPNoWrapFlags::inbounds);
+      SelectedType = PeeledSpirvType;
+      ElementType = PeeledElementType;
+      SelectedTypeIsArrayElement = true;
+      ++NextIndexPos;
+    }
+  }
 
   // (Roadmap H124b) A matrix reached through more than just the member
   // selector above -- e.g. one row/column or scalar element of it, rather
@@ -3903,14 +3981,14 @@ mlir::LogicalResult rewriteBlockAccess(
                                      ElementType)) {
       std::optional<MatrixMemberLayout> Layout =
           getMatrixMemberLayout(BlockStruct, MatrixDecorationMemberIndex);
-      if (Layout && AllIndices.size() == Selector + 2) {
+      if (Layout && AllIndices.size() == NextIndexPos + 1) {
         if (!Layout->IsRowMajor) {
           mlir::Type ByteTy = mlir::IntegerType::get(Rewriter.getContext(), 8);
           auto StrideBlockTy =
               mlir::LLVM::LLVMArrayType::get(ByteTy, Layout->Stride);
           mlir::Value ColumnPtr = mlir::LLVM::GEPOp::create(
               Rewriter, Loc, ResultType, StrideBlockTy, ElementPtr,
-              llvm::ArrayRef<mlir::LLVM::GEPArg>{AllIndices[Selector + 1]},
+              llvm::ArrayRef<mlir::LLVM::GEPArg>{AllIndices[NextIndexPos]},
               mlir::LLVM::GEPNoWrapFlags::inbounds);
           Rewriter.replaceOp(Op, ColumnPtr);
           return mlir::success();
@@ -3928,7 +4006,7 @@ mlir::LogicalResult rewriteBlockAccess(
           return mlir::success();
         }
       }
-      if (Layout && AllIndices.size() == Selector + 3) {
+      if (Layout && AllIndices.size() == NextIndexPos + 2) {
         auto MatrixSpirvTy = mlir::cast<mlir::spirv::MatrixType>(SelectedType);
         mlir::Type ScalarTy =
             TypeConverter.convertType(MatrixSpirvTy.getElementType());
@@ -3956,8 +4034,8 @@ mlir::LogicalResult rewriteBlockAccess(
         }
         auto PhysicalArrTy =
             mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
-        mlir::Value ColIdx = AllIndices[Selector + 1];
-        mlir::Value RowIdx = AllIndices[Selector + 2];
+        mlir::Value ColIdx = AllIndices[NextIndexPos];
+        mlir::Value RowIdx = AllIndices[NextIndexPos + 1];
         mlir::Value MajorIdx = Layout->IsRowMajor ? RowIdx : ColIdx;
         mlir::Value MinorIdx = Layout->IsRowMajor ? ColIdx : RowIdx;
         llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
@@ -3997,9 +4075,9 @@ mlir::LogicalResult rewriteBlockAccess(
   // `RowMajor` member, and any member whose `MatrixStride` needs padding.
   if (SelectedTypeIsArrayElement) {
   if (auto NestedStruct = mlir::dyn_cast<mlir::spirv::StructType>(SelectedType)) {
-    if (AllIndices.size() == Selector + 3) {
+    if (AllIndices.size() == NextIndexPos + 2) {
       if (std::optional<uint64_t> NestedMemberIndex =
-              getConstantMemberIndex(Op.getIndices()[Selector + 1])) {
+              getConstantMemberIndex(Op.getIndices()[NextIndexPos])) {
         unsigned NestedIdx = static_cast<unsigned>(*NestedMemberIndex);
         if (NestedIdx < NestedStruct.getNumElements()) {
           if (auto NestedMatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
@@ -4037,7 +4115,7 @@ mlir::LogicalResult rewriteBlockAccess(
                 mlir::Value ColumnPtr = mlir::LLVM::GEPOp::create(
                     Rewriter, Loc, ResultType, StrideBlockTy, MemberPtr,
                     llvm::ArrayRef<mlir::LLVM::GEPArg>{
-                        AllIndices[Selector + 2]},
+                        AllIndices[NextIndexPos + 1]},
                     mlir::LLVM::GEPNoWrapFlags::inbounds);
                 Rewriter.replaceOp(Op, ColumnPtr);
                 return mlir::success();
@@ -4062,7 +4140,7 @@ mlir::LogicalResult rewriteBlockAccess(
   // those exactly as Selector's own selector already was above.
   llvm::SmallVector<mlir::Value, 4> RemappedIndices(AllIndices.begin(),
                                                     AllIndices.end());
-  if (!remapNestedStructMemberIndices(SelectedType, Op, Selector + 1,
+  if (!remapNestedStructMemberIndices(SelectedType, Op, NextIndexPos,
                                       TypeConverter, Rewriter, RemappedIndices))
     return Rewriter.notifyMatchFailure(
         Op, "nested struct member selector is not a constant");
@@ -4070,7 +4148,7 @@ mlir::LogicalResult rewriteBlockAccess(
   llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
   GEPIndices.push_back(0);
   llvm::append_range(GEPIndices,
-                     llvm::ArrayRef(RemappedIndices).drop_front(Selector + 1));
+                     llvm::ArrayRef(RemappedIndices).drop_front(NextIndexPos));
   Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
       Op, ResultType, ElementType, ElementPtr, GEPIndices,
       mlir::LLVM::GEPNoWrapFlags::inbounds);
