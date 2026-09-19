@@ -55,34 +55,37 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## Next steps
-
-1. **L124(m)** (~half a day to scope):
-   `2_level_array`/`3_level_array`/`3_level_unsized_array`'s residual 12 fails
-   each (36 total), left after this session's column-select fix -- not yet
-   re-triaged, needs its own `FEME_DUMP_IR=1` trace on one repro per family to
-   find the new shared shape (or confirm they're unrelated).
-2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84 fails,
-   unchanged by this session -- still needs its own trace, may be a materially
-   different content shape (array of block instances).
-3. **L124(l)** (~half a day to re-triage): `random` (67, unchanged),
-   `unsized_nested_struct_array` (24, unchanged), `unsized_array_length.*` (4
-   singletons) -- `basic_unsized_array`'s prior 36 no longer appear in the
-   bucket list, so that family looks fully closed now and can be dropped from
-   this row.
-4. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
-   fallbacks from prior sessions.
-
 ## State for next session
 
-- Working tree clean, 3 new commits this session (core fix, test changes,
+- Working tree clean, 3 new commits this session (core fix, tests,
   Roadmap/CTSReport update) plus this entry's own commit = 4 total.
-- `ninja check-feme`: 3,206/3,209 Passed, 3 Unsupported, 0 Failed (was
-  3,205/3,208 -- +1 Pass from this session's new lit test split).
-- `ssbo.*` baseline for next session: **3,027 Pass / 215 Fail / 8,983
-  NotSupported** (of 12,225) -- up from 2,865/377/8,983.
+- `ninja check-feme`: 3,207/3,210 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*` baseline for next session: **3,063 Pass / 179 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 3,027/215/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
   NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
   session.
 - This session's own `/tmp` scratch files cleaned up (large pile of
   prior-session leftovers in `/tmp` untouched -- not from this session).
+
+## Next steps
+
+1. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84
+   remaining fails, still not individually reduced across several sessions
+   now -- needs its own `FEME_DUMP_IR=1` trace. May be a materially
+   different content shape (array of block *instances*, i.e. `buffer Block
+   { mat2 m; } blocks[N];`, rather than an array member nested inside one
+   block) than every fix so far has addressed.
+2. **L124(l)** (~half a day to re-triage): `random` (67, unchanged across
+   several sessions), `unsized_nested_struct_array` (24, unchanged), 4
+   `unsized_array_length.*` singletons -- not re-triaged this session, some
+   may already be absorbed by L124(k) once that's scoped.
+3. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
+   fallbacks from prior sessions -- see `Roadmap.md` for each row's own
+   scoping.
+4. With `ssbo.*` down to 179 fails (from 651 six sessions ago) and
+   concentrated in just two named families (`instance_array_basic_type`,
+   `random`) plus one small one (`unsized_nested_struct_array`), the next
+   session should prioritize L124(k) first -- it's the single largest
+   remaining bucket and has been deferred without investigation across at
+   least 3 prior sessions now.
