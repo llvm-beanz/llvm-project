@@ -92877,3 +92877,95 @@ narrow slice.
   unchanged from last session.
 - `compute.*`: 679 Pass / 6 Fail / 60,775 NotSupported (unchanged).
 - `/tmp` scratch cleaned up (this session's own; see below).
+
+# Session: merge origin/main into cbieneman/feme
+
+**Start here next session**: nothing broken -- `check-feme` and the
+`ssbo.*`/`compute.*` sweeps are all green at baseline. If you want to keep
+going on Vulkan work, jump straight to L124(o)'s open items (still
+untouched, see the previous session's heading above).
+
+## What happened, in order
+
+1. Confirmed device (`FeMe CPU Vulkan Device`) as required at session start.
+2. `git fetch origin && git merge origin/main --no-edit`: 1,398 incoming
+   commits, 4,292 of ours. **Zero textual conflicts** -- git auto-merged
+   cleanly. Merge commit: `408c91b0c9b1`.
+3. Configured a fresh build (`cmake -C feme/cmake/caches/feme.cmake`,
+   `+ccache launcher, +CMAKE_BUILD_TYPE=Release`; the cache file already
+   forces `LLVM_ENABLE_ASSERTIONS=ON`). `ninja check-feme` **failed to
+   build**: `feme/lib/Frontend/Options.cpp` used the pre-merge
+   `llvm::opt::OptTable` API (`GenericOptTable`, `OPTTABLE_STR_TABLE_CODE`,
+   `OPTTABLE_PREFIXES_TABLE_CODE`, `LLVM_CONSTRUCT_OPT_INFO`), which
+   upstream's merged-in `OptTable` rework (subcommand support) removed.
+4. Found the new canonical pattern in-tree
+   (`llvm/tools/llvm-ml/llvm-ml.cpp`): single `#define OPTTABLE_CODE` +
+   `#include "...Opts.inc"` generates an `optionTables()` helper; the
+   `OptTable` subclass constructor becomes
+   `OptTable(optionTables(), /*IgnoreCase=*/false)`. Rewrote
+   `Options.cpp` to match (`feme/include/feme/Frontend/Options.h`'s `ID`
+   enum already used the unaffected `LLVM_MAKE_OPT_ID` macro, so it needed
+   no change). Grepped the rest of `feme/` for the same three retired
+   macros/class -- no other hits. Committed alone (`5417103e8b02`).
+5. Rebuilt clean. `ninja check-feme`: **3,208 Passed / 3 Unsupported /
+   0 Failed** -- identical to the pre-merge baseline recorded in this
+   file's previous session.
+6. Built `deqp-vk` from scratch against the (unmodified,
+   `880f31a2bd9c`) VK-GL-CTS checkout -- there was no existing CTS build
+   directory this session, so ran `external/fetch_sources.py` first, then
+   `cmake -G Ninja -DDEQP_TARGET=default` (+ccache), then `ninja deqp-vk`.
+7. Re-verified the ICD (`vulkaninfo --summary` via `VK_DRIVER_FILES` ->
+   `FeMe CPU Vulkan Device`), then re-ran this report's own two tracked
+   regression sweeps rather than the full 3.2M-case run (nothing in the
+   merge touched Vulkan-facing feme code -- only the CLI option-parsing
+   fix above, so a full multi-hour sweep wasn't warranted just to confirm
+   that):
+   - `ssbo.*`: 3,187 Pass / 55 Fail / 8,983 NotSupported -- unchanged.
+   - `compute.*`: 679 Pass / 6 Fail / 60,775 NotSupported -- unchanged.
+8. Updated `VulkanCTSReport.md` with a new dated session entry
+   (`b942b4a5f5f3`). Left `Vulkan14FeatureInventory.md` and
+   `VulkanExtensionInventory.md` untouched -- correctly: no feature,
+   limit, or extension surface changed this session, and the CTS revision
+   they're keyed to (`880f31a2bd9c`) didn't move either.
+9. Left `Roadmap.md` untouched: this session's request was a plain
+   merge-and-fix-build task, not a roadmap-stage completion, and it
+   didn't discover any new roadmap-shaped work (L124(o) etc. are already
+   tracked from prior sessions).
+
+## Why this went smoothly (worth remembering)
+
+feme's own code lives almost entirely under `feme/`, a directory upstream
+doesn't touch, so a 1,398-commit upstream merge produced a genuinely
+trivial `git merge` (no conflicts at all) despite the size gap. The only
+real risk in a merge this size is a silent *build* break from an API
+upstream removed out from under an in-tree consumer -- which is exactly
+what happened here, and it only affected one file. **Lesson for next
+merge**: don't assume "clean merge" means "still builds" -- always
+rebuild + `check-feme` immediately after, even with zero conflicts.
+
+## State for next session
+
+- Working tree clean, HEAD at `b942b4a5f5f3` (3 commits this session: the
+  merge itself, the `OptTable` API fix, the report update).
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed
+  (unchanged from before the merge).
+- `ssbo.*`: 3,187 Pass / 55 Fail / 8,983 NotSupported (unchanged).
+- `compute.*`: 679 Pass / 6 Fail / 60,775 NotSupported (unchanged).
+- Build directories from this session (`llvm-project/build`,
+  `VK-GL-CTS/build`) were left in place in case a follow-up session wants
+  them warm; `/tmp/ctsrun` (this session's own scratch QPA logs) was not
+  otherwise persisted anywhere durable.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun` if a future session doesn't need
+   this session's raw QPA logs (its own scratch, not referenced by
+   anything committed).
+2. Resume L124(o) (`getMatrixWholeAccess` non-wrapper-branch nested-struct
+   walk + `getTightNestedStructType`/`getTightMatrixType` widening) --
+   still the standing next real Vulkan-correctness work; see the prior
+   session's heading above in this same file for the fully scoped
+   6-item breakdown. Nothing in this merge session changes that scoping.
+3. If a future merge-main request lands again, reuse this session's build
+   directories rather than reconfiguring from scratch -- `ninja
+   check-feme` and `ninja deqp-vk` are both incremental once configured.
