@@ -55,36 +55,36 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## State for next session
+## State right now
 
-- Working tree clean, 5 new commits this session (legacy-SSBO fix + test
-  updates, struct-padding fix + test, Roadmap/CTSReport update) plus this
-  entry's own commit = 6 total.
+- Working tree clean after this entry's own commit, 4 new commits this
+  session total.
 - `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
-- `ssbo.*` baseline for next session: **3,178 Pass / 64 Fail / 8,983
-  NotSupported** (of 12,225) -- up from 3,150/92/8,983. `random` is now
-  the *only* remaining named bucket.
-- `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
-  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep
-  this session.
-- `/tmp` scratch cleaned up.
+- `ssbo.*`: **3,187 Pass / 55 Fail / 8,983 NotSupported** (of 12,225) --
+  all 55 remaining fails are in `random`.
+- `compute.*`: **679 Pass / 6 Fail / 60,775 NotSupported** (of 61,460) --
+  unchanged.
+- `/tmp` scratch cleaned up (this session's own; a large pile of prior-
+  session leftovers in `/tmp` still untouched, not from this session).
 
 ## Next steps
 
-1. **L124(n)** (~half a day): implement the vector/scalar element padding
-   for `RuntimeArrayType`'s non-wrapper (`HandleKind::StorageStruct`)
-   case -- likely a `Stride`-sized byte-array stand-in, same idea as
-   `convertArrayTypeIgnoringDecorations`'s own scalar-array handling.
-   **Before landing it**: re-run the `dEQP-VK.compute.pipeline.
-   builtin_var.*` sweep (L106's own vec3 regression coverage) to confirm
-   the wrapper shape's own vec3 mechanism still works unchanged. This
-   should close most or all of `random`'s remaining 64 fails, since that
-   family is CTS's own fuzz-shaped mix of whatever else is still broken.
+1. **L124(o)** (~half a day, needs its own `FEME_DUMP_IR=1` trace):
+   `random`'s residual 55 fails. Quick message-only triage (no deep
+   trace yet) found 3 distinct shapes still mixed in:
+   - 25 "Result comparison and counter values are incorrect"
+   - 15 "Counter value incorrect"
+   - 14 "Result comparison failed"
+   - 1 `VK_ERROR_INITIALIZATION_FAILED` (pipeline-creation failure, not
+     a runtime miscompile -- needs `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
+
+   Start with the two "counter" buckets (40 of 55 combined) -- both
+   mention an SSBO atomic counter specifically, most likely one shared
+   root cause distinct from anything fixed so far (this session's fix
+   was a plain load/store bug, not atomics-related).
 2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched,
    standing fallbacks from prior sessions -- see `Roadmap.md` for each
    row's own scoping.
-3. With `ssbo.*` down to 64 fails (from 651 eight sessions ago, now
-   0.5% of the whole suite) and concentrated in one single family, the
-   next session should prioritize L124(n) first -- it is very likely the
-   last `ssbo.*` item standing between this milestone series and a fully
-   clean `ssbo.*` sweep.
+3. `ssbo.*` is now at 0.45% fail rate (55 of 12,225), down from 651 nine
+   sessions ago -- L124(o) is very likely the last item standing before
+   a fully clean `ssbo.*` sweep. Prioritize it first next session.
