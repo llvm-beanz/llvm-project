@@ -57,35 +57,33 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## State for next session
 
-- Working tree clean, 3 new commits this session (core fix, tests,
+- Working tree clean, 3 new commits this session (core fix, test,
   Roadmap/CTSReport update) plus this entry's own commit = 4 total.
-- `ninja check-feme`: 3,207/3,210 Passed, 3 Unsupported, 0 Failed.
-- `ssbo.*` baseline for next session: **3,063 Pass / 179 Fail / 8,983
-  NotSupported** (of 12,225) -- up from 3,027/215/8,983.
+- `ninja check-feme`: 3,208/3,211 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*` baseline for next session: **3,150 Pass / 92 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 3,063/179/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
   NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
   session.
-- This session's own `/tmp` scratch files cleaned up (large pile of
-  prior-session leftovers in `/tmp` untouched -- not from this session).
+- `/tmp` scratch cleaned up.
 
 ## Next steps
 
-1. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84
-   remaining fails, still not individually reduced across several sessions
-   now -- needs its own `FEME_DUMP_IR=1` trace. May be a materially
-   different content shape (array of block *instances*, i.e. `buffer Block
-   { mat2 m; } blocks[N];`, rather than an array member nested inside one
-   block) than every fix so far has addressed.
-2. **L124(l)** (~half a day to re-triage): `random` (67, unchanged across
-   several sessions), `unsized_nested_struct_array` (24, unchanged), 4
-   `unsized_array_length.*` singletons -- not re-triaged this session, some
-   may already be absorbed by L124(k) once that's scoped.
-3. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
+1. **L124(l)** (~half a day to re-triage, now the *only* remaining named
+   `ssbo.*` bucket): `random` (64), `unsized_nested_struct_array` (24), and
+   4 `unsized_array_length.*` singletons (`float_{no_offset,offset}_
+   {explicit_size,whole_size}`) -- these 92 cases are everything left in
+   `ssbo.*`. `random` is likely a mix of whatever's left once the other two
+   are individually reduced (it's CTS's own fuzz-shaped family, drawing
+   from every other feature), so start with `unsized_nested_struct_array`
+   or the 4 singletons first -- smaller, more likely a single distinct root
+   cause each.
+2. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
    fallbacks from prior sessions -- see `Roadmap.md` for each row's own
    scoping.
-4. With `ssbo.*` down to 179 fails (from 651 six sessions ago) and
-   concentrated in just two named families (`instance_array_basic_type`,
-   `random`) plus one small one (`unsized_nested_struct_array`), the next
-   session should prioritize L124(k) first -- it's the single largest
-   remaining bucket and has been deferred without investigation across at
-   least 3 prior sessions now.
+3. With `ssbo.*` down to 92 fails (from 651 seven sessions ago, now under
+   1% of the whole `ssbo.*` suite), the next session should prioritize
+   L124(l)'s 4 `unsized_array_length.*` singletons first -- smallest,
+   likely fastest win, and they've been carried over unfixed since before
+   L124(g) (at least 5 sessions) without ever getting their own dedicated
+   trace.
