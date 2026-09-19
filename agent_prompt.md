@@ -57,38 +57,33 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Next steps
 
-1. **L124(i)** (~half a day+ to scope a first repro, unknown to fix): `ssbo.*`'s
-   remaining 513 fails, re-bucketed by family: `3_level_unsized_array` (87),
-   `3_level_array` (87), `2_level_array` (87), `instance_array_basic_type` (84),
-   `random` (68), `unsized_nested_struct_array` (24), plus 4
-   `unsized_array_length.*` singletions. L124(g)'s fix (single fixed-size
-   array-of-matrices member) didn't close these — likely a related but distinct
-   gap in the same array-wrapper-recognition/physical-substitution machinery,
-   for a member that is an array-of-arrays, an array of structs each containing
-   a matrix, or the `rtarray` analogue of the same nesting. Start with one repro
-   from the largest bucket
-   (`3_level_unsized_array`/`3_level_array`/`2_level_array`, 87 each) and reduce
-   with `FEME_DUMP_IR=1`.
-2. **L124(f)** (~half a day, needs its own root-cause pass first):
-   `spirv.AccessChain` into a `RowMajor`-decorated matrix nested inside a
-   runtime array fails legalization (36 cases) — `ColMajor` in the same position
-   is fine.
-3. **L124(a)** (~half a day): `read_unbound_ssbo` — design already scoped in a
-   prior session, see `Roadmap.md`'s L124(a) row.
-4. **L124(b)/(c)** (~half a day+ each): `remove_global_load_pass` (new
-   `spirv.GlobalVariable` initializer-attribute) and `undefined_values` (new
-   `spirv.CopyLogical` op) — both real dialect additions.
-5. **L124(d)/L124(h)/L125/L126/L116(f)** all remain untouched, standing
+1. **L124(j)** (~half a day, arithmetic pattern already known from this
+   session's own fix): `rewriteBlockAccess`'s partial-access branch
+   (column-select/scalar-element) needs the same nesting-depth generalization
+   `getMatrixWholeAccess` just got, applied to its own `SelectedType` check and
+   `Selector+1`/`+2`/`+3` index arithmetic. Also closes `single_basic_array`'s
+   pre-existing 36-case RowMajor-column-select gap (same code path at nesting
+   depth 1). Covers 180 of the remaining 395 `ssbo.*` fails (144 + 36).
+2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84
+   remaining fails include whole-access failures L124(i) didn't close — needs
+   its own `FEME_DUMP_IR=1` trace to confirm whether its content shape (array of
+   block instances) is a variant of the same bug or something new, before
+   assuming either L124(i) or L124(j)'s fix applies.
+3. **L124(l)** (~half a day to re-triage): `random` (67), `basic_unsized_array`
+   (36), `unsized_nested_struct_array` (24), `unsized_array_length.*` (4
+   singletons) — not re-triaged this session; some may already be absorbed by
+   L124(j)/(k) once those land.
+4. **L124(f)/(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
    fallbacks from prior sessions.
 
 ## State for next session
 
-- Working tree clean, 4 new commits this session (core fix, test+CHECK update,
-  Roadmap update, CTSReport update) plus this entry's own commit = 5 total.
-- `ninja check-feme`: 3,203/3,206 Passed, 3 Unsupported, 0 Failed (was
-  3,202/3,205 — +1 Pass from this session's new lit test).
-- `ssbo.*` baseline for next session: **2,729 Pass / 513 Fail / 8,983
-  NotSupported** (of 12,225) — up from 2,591/651/8,983.
+- Working tree clean, 2 new commits this session (core fix + test,
+  Roadmap/CTSReport update) plus this entry's own commit = 3 total.
+- `ninja check-feme`: 3,204/3,207 Passed, 3 Unsupported, 0 Failed (was
+  3,203/3,206 — +1 Pass from this session's new lit test).
+- `ssbo.*` baseline for next session: **2,847 Pass / 395 Fail / 8,983
+  NotSupported** (of 12,225) — up from 2,729/513/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
   NotSupported** (of 61,460) — unchanged, confirmed by a full re-sweep this
   session.
