@@ -92969,3 +92969,130 @@ rebuild + `check-feme` immediately after, even with zero conflicts.
 3. If a future merge-main request lands again, reuse this session's build
    directories rather than reconfiguring from scratch -- `ninja
    check-feme` and `ninja deqp-vk` are both incremental once configured.
+
+# Session: L124(o) closed -- got the fix, then found and fixed its own regression
+
+**Start here next session**: nothing broken -- `check-feme` and the CTS
+sweeps below are all green. Next real work is L124(p) (new, see below)
+or picking any other open roadmap item; no standing L124(o) work left.
+
+## What happened, in order
+
+1. Confirmed device (`FeMe CPU Vulkan Device`) as required at session
+   start.
+2. Resumed L124(o) from the prior session's root cause (matrix nested
+   inside a struct member gets miscompiled two independent ways).
+   Implemented **Fix 1**: generalized `getMatrixWholeAccess`'s
+   non-wrapper branch from "exactly one member-select" to "zero or more
+   intervening struct-member selects then the matrix select," mirroring
+   `peelInstanceArrayPointer`'s array-nesting peel.
+3. Implemented **Fix 2**: new helper `getTightOrPhysicalMatrixMemberType`
+   (widen if non-representable, else tighten as before), wired into
+   `getTightNestedStructType`'s matrix branch and
+   `convertOffsetStructTypeIgnoringDecorations`'s array-of-matrix retry
+   tier.
+4. Ran `check-feme`: 2 pre-existing tests failed with stale CHECK lines
+   (their old, wrong un-widened output). Updated both, verified the
+   widening was a genuine correctness improvement (not just a diff),
+   confirmed via git-stash comparison.
+5. Ran a full `ubo.random.*` CTS sweep to double-check beyond
+   `check-feme`'s own coverage -- **found a new crash**:
+   `dEQP-VK.ubo.random.nested_structs_arrays_instance_arrays_compute.4`,
+   `'llvm.getelementptr' op index N indexing a struct is out of bounds`.
+   Confirmed via git-stash it was a genuine regression from Fix 2, not
+   pre-existing.
+6. Spent most of this session's middle stretch root-causing that crash:
+   built a minimal 2-level nested-struct repro
+   (`!sD` containing `!sC` containing two non-representable matrices),
+   reproduced the crash standalone, then traced it to a **third call
+   site** with the exact same tighten-vs-widen bug --
+   `convertOffsetStructTypeIgnoringDecorations`'s *direct*-matrix-member
+   retry-tier case (distinct from the array-of-matrix case Fix 2 already
+   covered). This third site only gets reached when a struct's
+   "natural" per-member conversion fails to reproduce every member's
+   declared offset simultaneously (e.g. because two non-representable
+   matrices are declared out of physical order relative to their
+   siblings) -- rare enough that the earlier single-matrix test cases
+   never hit it, but real once a struct has two.
+7. **Fix 3**: gave that third call site the identical
+   `getTightOrPhysicalMatrixMemberType` treatment as its sibling. Rebuilt,
+   re-ran the minimal repro -- fixed. Re-ran `check-feme`: all green,
+   3,210/3,213 Passed, 0 Failed (added a new regression test for this
+   exact crash shape).
+8. Re-ran the full CTS re-verification: `ubo.random.*` went from
+   606/1/1,643 (the regression) back to **607/0/1,643 clean**;
+   `ssbo.*` **3,195 Pass / 47 Fail / 8,983 NotSupported** (was
+   3,187/55/8,983 -- confirms the original L124(o) fix, -8 fails, 0
+   regressions); `compute.pipeline.builtin_var.*` 11/11, unchanged.
+9. While attempting a **full** `ubo.*` sweep (not just `ubo.random.*`) to
+   be thorough, hit a **different, pre-existing** fatal assertion crash
+   (`StructType::getMemberDecorations`: "member index out of range") in
+   `dEQP-VK.ubo.single_struct.per_block_buffer.std140_both`. Confirmed
+   via git-stash it predates this session entirely -- filed as new
+   roadmap item **L124(p)**, not investigated further (out of scope,
+   time budget).
+10. Also noticed (not a new bug, a side-effect worth recording):
+    `spirv-to-llvm-nested-struct-reorder.mlir`'s own dynamic-column-select
+    access chain had a latent stale-GEP-index bug -- the *same*
+    embedded-vs-standalone mismatch root cause as the Fix-3 regression,
+    just for a struct shape that happened not to crash (an in-bounds but
+    type-mismatched GEP). Fix 3 corrected it as a side effect; documented
+    in that test's own updated comment, no separate action needed.
+11. Split the code changes into 3 commits (could not cleanly separate
+    Fix 2 and Fix 3 into their own commits without leaving an
+    intermediate commit with a real, known-broken test -- see "commit
+    granularity" note below):
+    - `87c4619fb95a`: Fix 1 alone (`getMatrixWholeAccess`), verified
+      `check-feme` green with zero test-file changes at that commit.
+    - `113d4f030640`: Fix 2 + Fix 3 together, plus the 2 pre-existing
+      tests' CHECK-line updates and 2 new regression tests.
+    - `d754c292d712`, `325d7d79b0c3`: `Roadmap.md` (L124(o) struck
+      through, L124(p) added) and `VulkanCTSReport.md` session entry.
+
+## Commit granularity note (why Fix 2/3 aren't split further)
+
+Tried splitting Fix 2 (`getTightNestedStructType` + array-of-matrix tier)
+from Fix 3 (direct-matrix tier) into separate commits. Fix 2 alone
+leaves `spirv-to-llvm-nested-struct-reorder.mlir` genuinely broken (its
+own struct needs *both* fixes to convert consistently -- Fix 2 widens
+the embedded conversion, but the test's own standalone-reconversion path
+still needs Fix 3 to agree), so a Fix-2-only commit would have a real
+failing test in the middle of the history. Chose one honest, slightly
+bigger commit over two commits where the first is knowingly red.
+
+## State for next session
+
+- Working tree clean, HEAD at `325d7d79b0c3` (5 commits this session:
+  Fix 1, Fix 2+3, Roadmap, VulkanCTSReport, and this file next).
+- `ninja check-feme`: 3,210/3,213 Passed, 3 Unsupported, 0 Failed.
+- `ubo.random.*`: 607 Pass / 0 Fail / 1,643 NotSupported.
+- `ssbo.*`: 3,195 Pass / 47 Fail / 8,983 NotSupported (the 47 are a
+  different, not-yet-triaged bucket -- not L124(o), not investigated
+  this session).
+- `compute.pipeline.builtin_var.*`: 11/11 Pass.
+- New, not-yet-triaged: L124(p), `std140_both` assertion crash, blocks a
+  full `ubo.*` sweep. Confirmed pre-existing, confirmed unrelated to
+  this session's changes.
+- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
+  place, warm/incremental. `/tmp/ctsrun` (this session's scratch QPA
+  logs) left in place too -- not referenced by anything committed.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun` if a future session doesn't need
+   this session's raw QPA logs.
+2. Triage L124(p) (`std140_both` assertion crash) -- start with
+   `gdb -batch -ex run -ex bt --args ./deqp-vk -n
+   dEQP-VK.ubo.single_struct.per_block_buffer.std140_both ...` from
+   `/tmp/ctsrun` (deqp-vk binary + `vulkan/` data dir already staged
+   there) to get the crashing struct shape, then build a minimal
+   `feme-opt`-only repro the same way this session did for the Fix-3
+   regression.
+3. Re-run a full `ssbo.*` sweep's own 47 remaining fails with fresh eyes
+   -- not yet individually re-triaged this session (only confirmed the
+   aggregate count matches the expected -8 from this session's own
+   fix); likely several distinct small bugs, same pattern as L124(i)/(l)
+   before it.
+4. Once `ubo.*` is unblocked (after L124(p)), run the full sweep (not
+   just `ubo.random.*`) for completeness -- L124(o)'s own fix only got
+   spot-verified against the `random` subset this session.
