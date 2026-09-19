@@ -58,42 +58,58 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 ## State right now
 
 - Working tree clean before this file's own commit, HEAD at
-  `a9fa298d0409`.
-- `ninja check-feme`: 3,213/3,216 Passed, 3 Unsupported, 0 Failed.
-- `ssbo.*`: **3,232 Pass / 10 Fail / 8,983 NotSupported** (of 12,225) --
-  down from 3,230/12/8,983 at session start.
-- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression.
+  `e06a67389ffc`.
+- `ninja check-feme`: 3,214/3,217 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*`: **3,238 Pass / 4 Fail / 8,983 NotSupported** (of 12,225) --
+  down from 3,232/10/8,983 at session start.
+- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression. Full
+  `ubo.*` (13,240 cases) not re-run this session -- not needed, no
+  `Uniform`/`Block`-specific code touched.
 - No feature/extension inventory changes needed (internal correctness
   fix, no new Vulkan surface) -- verified, not just assumed.
-- Build directories left in place, warm/incremental. `/tmp/ctsrun` has
-  this session's own fresh scratch logs plus two abandoned minimal
-  repros (`/tmp/l124s_repro1.mlir`, `/tmp/l124s_repro2.mlir`,
-  `/tmp/l124s_repro3.mlir`) that reproduce the type-legalization gap --
-  worth keeping for next session's own L124(s) type-level investigation
-  rather than deleting.
+- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
+  place, warm/incremental. `/tmp/ctsrun` has this session's own fresh
+  scratch logs (`ssbo_l124s.qpa`/`.stdout`, `l124s_confirm.qpa`/`.stdout`,
+  `ubo_random_l124s.qpa`/`.stdout`) plus older scratch from prior
+  sessions (`l124s_41.qpa`, `l124s_shape.qpa`, `l124s_verify.qpa`,
+  `l124s_verify2.qpa`) and this session's own dead-end repros
+  (`/tmp/l124t_repro.mlir`, the wrapper-shape repro that turned out not
+  to match the real failing test) -- none referenced by anything
+  committed.
 
 ## Suggested next steps
 
-1. **(~5 min)** Delete `/tmp/ctsrun`'s CTS-run scratch logs from this
-   session if a future session doesn't need the raw QPA output. Keep
-   `/tmp/l124s_repro3.mlir` (the working minimal repro of the
-   type-legalization gap) -- it saves rebuilding it from scratch.
-2. Start **L124(s)**'s type-level sub-class first (3 of the 10 fails:
-   `all_shared_buffer.{41,44}`, `nested_structs_arrays.14`) --
-   `convertOffsetStructTypeIgnoringDecorations`/
-   `convertArrayTypeIgnoringDecorations` need to widen a matrix nested
-   inside a non-wrapper array-of-struct member's own type. Start from
-   `/tmp/l124s_repro3.mlir`'s own `spirv.GlobalVariable` legalization
-   failure and trace which conversion function declines it.
-3. Then the 6 `ac_numPassed = 0, expected 1` fails
-   (`all_per_block_buffers.47`, `all_shared_buffer.{1,13,17}`,
-   `nested_structs.16`, `nested_structs_instance_arrays.8`) -- not
-   decoded at all yet. Start with `--deqp-log-decompiled-spirv=enable`
-   on one of them the same way every prior L124 triage did.
-4. `all_per_block_buffers.20`'s own `VK_ERROR_INITIALIZATION_FAILED`
-   pipeline-creation crash is its own separate investigation (a
-   compiler crash, not a data mismatch) -- likely needs a debugger
-   attached to the pipeline-creation call, not a CTS-log trace. Lowest
-   priority of the 3 classes since it's a single isolated case.
-5. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
+1. **(~5 min)** Delete `/tmp/ctsrun`'s scratch logs and `/tmp/l124s_*.mlir`/
+   `/tmp/l124t_repro.mlir`/`/tmp/l124u_repro.mlir` if a future session
+   doesn't need them -- none are referenced by anything committed.
+   Keep `/tmp/l124s_repro3.mlir` only if useful as a reference for the
+   now-fixed shape (it's also captured permanently in the new lit test,
+   so not strictly needed either).
+2. Start **L124(t)** (`ssbo.*`'s remaining 4 fails). Recommended order,
+   cheapest/most-isolated first:
+   - `all_shared_buffer.13` and `nested_structs_instance_arrays.8`: pull
+     their real shapes via `--deqp-log-decompiled-spirv=enable` the same
+     way every prior L124 triage did -- these were previously bundled
+     into an "unexplained `ac_numPassed`" bucket of 6 that this
+     session's fix collaterally reduced to 2, so they may share a
+     related (but not identical) root cause worth checking first.
+   - `all_shared_buffer.41`: **do not restart from the wrapper-shape
+     assumption** -- confirmed this session that the real block has 4
+     members and is NOT the wrapper shape; a faithful repro of the real
+     shape converts correctly at the IR level. The bug (if it's a
+     compiler bug at all, as opposed to a CTS/driver-level issue) is
+     likely downstream of `feme-opt`'s own output -- consider tracing
+     with the actual `feme`/JIT runtime path, or checking interaction
+     with a sibling struct member's own layout, rather than more
+     `feme-opt`-only repros.
+   - `all_per_block_buffers.20`'s own pipeline-creation crash
+     (`VK_ERROR_INITIALIZATION_FAILED`) is its own separate
+     investigation -- likely needs a debugger attached to the
+     pipeline-creation call, not a CTS-log trace.
+3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
    -- reuse the existing build directories, no reconfigure needed.
+4. With `ssbo.*` down to 4 of 12,225 (0.03%) and `ubo.random.*` fully
+   clean, L124(t) closing this last small bucket would put the `ssbo.*`
+   family fully clean too -- worth prioritizing, though each of the 3
+   remaining issues may need its own dedicated debugging session (a
+   crash needs a debugger, not a CTS trace).
