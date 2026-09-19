@@ -93433,3 +93433,162 @@ needs its own triage.
    priority of the 3 classes since it's a single isolated case.
 5. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
    -- reuse the existing build directories, no reconfigure needed.
+
+# Session: L124(s) closed -- corrected a methodology false positive, ssbo.* down to 4 fails
+
+**Start here next session**: nothing broken. `check-feme` green, `ssbo.*`
+at 4 fails (down from 10). Next real work is **L124(t)** (new, see
+below) -- 3 distinct, small, not-yet-root-caused issues: 1 crash, 2
+unexplained mismatches, 1 investigated-but-unresolved mismatch.
+
+## What happened, in order
+
+1. Confirmed device (`FeMe CPU Vulkan Device`) as required at session
+   start.
+2. Re-checked the prior session's own `/tmp/l124s_repro3.mlir` (its
+   claimed "type-level gap" repro) -- still showed a `spirv.GlobalVariable`
+   legalization failure with `--convert-spirv-to-llvm`.
+3. **Found the prior session's finding was a false positive**:
+   `--convert-spirv-to-llvm` is MLIR's own generic pass, not FeMe's real
+   pipeline. The real flag, confirmed from an existing lit test's own
+   `RUN:` line, is `--feme-convert-spirv-to-llvm`. Re-running the same
+   repro with the correct flag: **converts successfully, struct type
+   already correctly widened**. There is no type-level gap. This
+   invalidated the entire "L124(s) is a type-level fix" framing.
+4. Re-examined at the access-pattern level instead: the GEP reaches the
+   correctly-widened struct, but the `llvm.store`/`llvm.load` there uses
+   the plain unpadded logical type, not the physical one.
+5. Root-caused: `walkStructMembersToMatrix`'s array-peel loop only
+   recognized a peeled array's inner type being a bare `MatrixType`, not
+   a `StructType`. Re-implemented the same fix the prior session had
+   speculatively tried and reverted, now properly verified: extend the
+   peel loop to recurse into a `StructType` inner type, consuming the
+   array-index selectors first.
+6. Rebuilt `feme-opt`, confirmed the repro converts correctly (real
+   transpose + padding on store/load).
+7. Rebuilt `feme` -- but **initially forgot to rebuild
+   `libfeme_vulkan.so`** (the actual Vulkan ICD, a separate build
+   target). Testing 3 real CTS repros against the stale ICD: all 3
+   still failed -- a false negative.
+8. Ran `ninja libfeme_vulkan.so` explicitly (just a relink, object file
+   was current). Re-tested: `all_shared_buffer.44`, `nested_structs.12`,
+   `nested_structs_arrays.14` **all now Pass**.
+9. Investigated the 4th test from the original triage,
+   `all_shared_buffer.41`, still failing. Pulled its real shape via
+   `--deqp-log-decompiled-spirv=enable`: a non-square (`mat4x3`)
+   `RowMajor` matrix, initially assumed to be a sole-fixed-array-member
+   wrapper shape (since it looked like the only matrix member of
+   interest). Built a repro of that wrapper shape and found the
+   `spirv.VulkanBuffer` handle's content type looked wrong (natural,
+   unwidened) -- spent real time chasing this as "a new distinct bug,"
+   including drafting a fix-approach description.
+10. **Corrected this too before implementing anything**: re-read the
+    real block's own SPIR-V and found it has **4 members**, not 1 -- it
+    is NOT the wrapper shape at all. Built a faithful repro of the real
+    4-member struct instead: it converts correctly at both the type and
+    GEP-addressing level. The `all_shared_buffer.41` root cause is still
+    unidentified -- did not implement a fix for a bug that turned out not
+    to exist as originally framed. Time-boxed this and stopped rather
+    than keep chasing.
+11. Wrote a permanent lit test for the verified fix
+    (`spirv-to-llvm-matrix-rowmajor-nonwrapper-array-struct-member.mlir`),
+    confirmed it exercises the exact repro shape and passes with FileCheck.
+12. `ninja check-feme`: 3,214/3,217 Passed, 3 Unsupported, 0 Failed (+1
+    new test, 0 regressions).
+13. Re-confirmed the ICD was freshly rebuilt (mtime newer than the
+    source edit) before any further CTS testing.
+14. Full `ssbo.*` re-sweep: **3,238 Pass / 4 Fail / 8,983 NotSupported**
+    (was 3,232/10/8,983) -- **+6 Pass**: 3 directly confirmed, plus 3
+    collateral fixes from the same root cause among the prior session's
+    six-strong unexplained `ac_numPassed` bucket (`all_per_block_buffers.47`,
+    `all_shared_buffer.{1,17}`, `nested_structs.16` all now gone from the
+    fail list).
+15. `ubo.random.*` re-swept: 607/0/1,643, unchanged, 0 regression.
+16. Committed the fix + lit test (`fcb135fc00ef`).
+17. Updated and committed Roadmap.md (`cf2fe73104c6`): struck L124(s),
+    re-scoped the residual 4 fails as new L124(t).
+18. Updated and committed VulkanCTSReport.md (`e06a67389ffc`) with the
+    full narrative, including both methodology corrections.
+19. Verified no Vulkan14FeatureInventory.md/VulkanExtensionInventory.md
+    changes needed (internal correctness fix, no new surface) -- checked,
+    not just assumed.
+
+## The two methodology lessons this session (both worth remembering hard)
+
+1. **Always check a lit test's own `RUN:` line before trusting an ad-hoc
+   `feme-opt` repro.** `--convert-spirv-to-llvm` silently runs a
+   different (upstream, patternless) pass than `--feme-convert-spirv-to-llvm`.
+   Using the wrong one produced a confident, wrong "type-level gap"
+   conclusion that ate a chunk of the prior session and the start of
+   this one.
+2. **`libfeme_vulkan.so` is a separate build target from `feme`/`feme-opt`.**
+   Rebuilding the compiler tools does not update the actual Vulkan ICD
+   real CTS runs load. Always `ninja libfeme_vulkan.so` (or check its
+   mtime against the source edit) before drawing any conclusion from a
+   `deqp-vk` run.
+
+Both mistakes were self-corrected within this session by going back to
+first-principles evidence (the lit test's own RUN line; the real
+4-member struct's own decompiled SPIR-V) rather than trusting the first
+plausible-looking repro. Worth being suspicious of any repro built from
+memory/assumption rather than pulled directly from the failing test's
+own log.
+
+## State right now
+
+- Working tree clean before this file's own commit, HEAD at
+  `e06a67389ffc`.
+- `ninja check-feme`: 3,214/3,217 Passed, 3 Unsupported, 0 Failed.
+- `ssbo.*`: **3,238 Pass / 4 Fail / 8,983 NotSupported** (of 12,225) --
+  down from 3,232/10/8,983 at session start.
+- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression. Full
+  `ubo.*` (13,240 cases) not re-run this session -- not needed, no
+  `Uniform`/`Block`-specific code touched.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface) -- verified, not just assumed.
+- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
+  place, warm/incremental. `/tmp/ctsrun` has this session's own fresh
+  scratch logs (`ssbo_l124s.qpa`/`.stdout`, `l124s_confirm.qpa`/`.stdout`,
+  `ubo_random_l124s.qpa`/`.stdout`) plus older scratch from prior
+  sessions (`l124s_41.qpa`, `l124s_shape.qpa`, `l124s_verify.qpa`,
+  `l124s_verify2.qpa`) and this session's own dead-end repros
+  (`/tmp/l124t_repro.mlir`, the wrapper-shape repro that turned out not
+  to match the real failing test) -- none referenced by anything
+  committed.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun`'s scratch logs and `/tmp/l124s_*.mlir`/
+   `/tmp/l124t_repro.mlir`/`/tmp/l124u_repro.mlir` if a future session
+   doesn't need them -- none are referenced by anything committed.
+   Keep `/tmp/l124s_repro3.mlir` only if useful as a reference for the
+   now-fixed shape (it's also captured permanently in the new lit test,
+   so not strictly needed either).
+2. Start **L124(t)** (`ssbo.*`'s remaining 4 fails). Recommended order,
+   cheapest/most-isolated first:
+   - `all_shared_buffer.13` and `nested_structs_instance_arrays.8`: pull
+     their real shapes via `--deqp-log-decompiled-spirv=enable` the same
+     way every prior L124 triage did -- these were previously bundled
+     into an "unexplained `ac_numPassed`" bucket of 6 that this
+     session's fix collaterally reduced to 2, so they may share a
+     related (but not identical) root cause worth checking first.
+   - `all_shared_buffer.41`: **do not restart from the wrapper-shape
+     assumption** -- confirmed this session that the real block has 4
+     members and is NOT the wrapper shape; a faithful repro of the real
+     shape converts correctly at the IR level. The bug (if it's a
+     compiler bug at all, as opposed to a CTS/driver-level issue) is
+     likely downstream of `feme-opt`'s own output -- consider tracing
+     with the actual `feme`/JIT runtime path, or checking interaction
+     with a sibling struct member's own layout, rather than more
+     `feme-opt`-only repros.
+   - `all_per_block_buffers.20`'s own pipeline-creation crash
+     (`VK_ERROR_INITIALIZATION_FAILED`) is its own separate
+     investigation -- likely needs a debugger attached to the
+     pipeline-creation call, not a CTS-log trace.
+3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
+   -- reuse the existing build directories, no reconfigure needed.
+4. With `ssbo.*` down to 4 of 12,225 (0.03%) and `ubo.random.*` fully
+   clean, L124(t) closing this last small bucket would put the `ssbo.*`
+   family fully clean too -- worth prioritizing, though each of the 3
+   remaining issues may need its own dedicated debugging session (a
+   crash needs a debugger, not a CTS trace).
