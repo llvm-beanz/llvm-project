@@ -4311,3 +4311,44 @@ suggesting a bug distinct from this session's plain-load/store one), 14
 runtime miscompile at all). Broken out as roadmap L124(o), not
 individually reduced this session. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## Session: L124(o) investigated -- one repro root-caused, no fix landed
+
+Investigated `ssbo.*`'s residual 55 `random` fails (roadmap L124(o)).
+Reproduced directly via `deqp-vk`: 267 Pass / 55 Fail / 1559 NotSupported
+of 1881 `random` cases -- unchanged from last session's own count.
+
+Reduced one repro to a precise root cause:
+`dEQP-VK.ssbo.layout.random.all_per_block_buffers.41` mismatches on
+`b.mB` (`expected mat2(7, 4, 7, -9), got mat2(7, -4, 4, -2)`) --
+`getMatrixWholeAccess`'s non-wrapper branch (used by
+`RowMajorMatrixStorePattern`/`LoadPattern`) only recognizes a
+`RowMajor`/non-natural-`MatrixStride` matrix that is *directly* a
+top-level block member (`Op.getIndices().size() != InstanceArrayDepth +
+1` bails out), not one nested a further struct level down (`b.mB`),
+silently falling back to the ordinary unpadded whole-matrix store/load.
+`getTightNestedStructType`/`getTightMatrixType` (the parallel
+type-conversion-side helpers) have the same gap: they only *tighten* a
+nested struct's own matrix member, never *widen* it to its declared
+`MatrixStride`. Confirmed via an isolated `feme-opt`-only MLIR repro
+(`!spirv.struct<(!spirv.struct<B, (f32, mat2 stride=16)>)>`) outside CTS
+entirely -- see roadmap L124(o) for the full writeup.
+
+A separate hypothesis (a `mlir::DataLayout` 3-lane-vector rounding bug in
+`padStructToSize`/`convertArrayTypeIgnoringDecorations`, parallel to
+L124(n)'s own fix) was implemented, verified in isolation, and passed
+`check-feme` clean, but a full `ssbo.*` re-sweep showed it fixed **zero**
+of `random`'s 55 fails while regressing 36 previously-passing
+`single_struct{,_array,_nested_struct}` matrix-column tests --
+**reverted in full**; working tree is back at the exact state this
+session started from (commit `f6c49b1164db`).
+
+`ssbo.*` re-swept after the revert to confirm no drift: **3,187 Pass /
+55 Fail / 8,983 NotSupported** (unchanged from last session).
+`compute.pipeline.builtin_var.*` (L106's own regression coverage):
+11/11 Pass, unchanged. `ninja check-feme`: 3,208/3,211 Passed, 3
+Unsupported, 0 Failed, unchanged.
+
+No code changes landed this session (0 net diff to
+`feme/lib`/`feme/test`). See `agent_thoughts.md` for the full narrative
+and precisely scoped next steps.
