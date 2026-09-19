@@ -540,14 +540,24 @@ Deserializer::processOp<spirv::EntryPointOp>(ArrayRef<uint32_t> words) {
     return emitError(unknownLoc, "no function matching <id> ") << fnID;
   }
   if (parsedFunc.getName() != fnName) {
-    // The deserializer uses "spirv_fn_<id>" as the function name if the input
-    // SPIR-V blob does not contain a name for it. We should use a more clear
-    // indication for such case rather than relying on naming details.
-    if (!parsedFunc.getName().starts_with("spirv_fn_"))
-      return emitError(unknownLoc,
-                       "function name mismatch between OpEntryPoint "
-                       "and OpFunction with <id> ")
-             << fnID << ": " << fnName << " vs. " << parsedFunc.getName();
+    // `OpName` (which is what gives a function its initial, pre-rename name
+    // here unless the SPIR-V blob had none, in which case the deserializer
+    // uses "spirv_fn_<id>" as a placeholder) is a purely informational debug
+    // annotation with no semantic significance -- see the SPIR-V spec's
+    // "Debug Instructions" section, which explicitly allows removing it
+    // without changing a module's meaning. `OpEntryPoint`'s own Name is the
+    // authoritative, semantically-meaningful name for this entry point (it
+    // is what the API's `pName` uses to select it), so a real-world shader
+    // can legally give a function an arbitrary `OpName` that differs from
+    // its own entry point's Name (roadmap L124's
+    // `compute.pipeline.basic.vec2_nclamp_nan_component` is exactly such a
+    // case: `OpName %_computeSomething "_computeSomething"` alongside
+    // `OpEntryPoint GLCompute %_computeSomething "main"`). Since
+    // `spirv.EntryPointOp` has no separate attribute of its own to carry a
+    // distinct API-facing name apart from its referenced function's MLIR
+    // symbol, always rename the function to the entry point's own name
+    // (discarding any prior `OpName`) rather than treating the mismatch as
+    // an error.
     parsedFunc.setName(fnName);
   }
   SmallVector<Attribute, 4> interface;

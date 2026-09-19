@@ -1,0 +1,27 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpName` is a purely informational debug annotation (see the SPIR-V
+; COM: spec's "Debug Instructions" section) with no semantic significance,
+; COM: so it may legally differ from the entry point's own, authoritative
+; COM: `OpEntryPoint` Name -- as roadmap L124's real-world
+; COM: `compute.pipeline.basic.vec2_nclamp_nan_component` CTS case does
+; COM: (`OpName %_computeSomething "_computeSomething"` alongside
+; COM: `OpEntryPoint GLCompute %_computeSomething "main"`). The deserializer
+; COM: must not reject this as a "function name mismatch" error, and should
+; COM: rename the function to the entry point's own name.
+
+; CHECK: spirv.func @main() "None"
+; CHECK: spirv.EntryPoint "GLCompute" @main
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %_computeSomething "main"
+               OpExecutionMode %_computeSomething LocalSize 1 1 1
+               OpName %_computeSomething "_computeSomething"
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+%_computeSomething = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd
