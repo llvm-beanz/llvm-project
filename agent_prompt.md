@@ -57,34 +57,32 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Next steps
 
-1. **L124(j)** (~half a day, arithmetic pattern already known from this
-   session's own fix): `rewriteBlockAccess`'s partial-access branch
-   (column-select/scalar-element) needs the same nesting-depth generalization
-   `getMatrixWholeAccess` just got, applied to its own `SelectedType` check and
-   `Selector+1`/`+2`/`+3` index arithmetic. Also closes `single_basic_array`'s
-   pre-existing 36-case RowMajor-column-select gap (same code path at nesting
-   depth 1). Covers 180 of the remaining 395 `ssbo.*` fails (144 + 36).
-2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84
-   remaining fails include whole-access failures L124(i) didn't close — needs
-   its own `FEME_DUMP_IR=1` trace to confirm whether its content shape (array of
-   block instances) is a variant of the same bug or something new, before
-   assuming either L124(i) or L124(j)'s fix applies.
+1. **L124(f)** (~half a day, needs its own root-cause pass): `spirv.AccessChain`
+   into a `RowMajor`-decorated matrix through an array wrapper fails
+   legalization outright -- now confirmed to also cover `single_basic_array`'s
+   36 fails and every remaining
+   `2_level_array`/`3_level_array`/`3_level_unsized_array` fail (126 total),
+   making this the single highest-value remaining `ssbo.*` item.
+2. **L124(k)** (~half a day to scope): `instance_array_basic_type`'s 84 fails,
+   still not individually reduced -- needs its own `FEME_DUMP_IR=1` trace, may
+   be a materially different content shape (array of block instances) than this
+   session's fix addressed.
 3. **L124(l)** (~half a day to re-triage): `random` (67), `basic_unsized_array`
-   (36), `unsized_nested_struct_array` (24), `unsized_array_length.*` (4
-   singletons) — not re-triaged this session; some may already be absorbed by
-   L124(j)/(k) once those land.
-4. **L124(f)/(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
+   (36), `unsized_nested_struct_array` (24), `unsized_array_length.*` (5
+   singletons) -- not re-triaged this session.
+4. **L124(a)/(b)/(c)/(d)/L125/L126/L116(f)** all remain untouched, standing
    fallbacks from prior sessions.
 
 ## State for next session
 
-- Working tree clean, 2 new commits this session (core fix + test,
-  Roadmap/CTSReport update) plus this entry's own commit = 3 total.
-- `ninja check-feme`: 3,204/3,207 Passed, 3 Unsupported, 0 Failed (was
-  3,203/3,206 — +1 Pass from this session's new lit test).
-- `ssbo.*` baseline for next session: **2,847 Pass / 395 Fail / 8,983
-  NotSupported** (of 12,225) — up from 2,729/513/8,983.
+- Working tree clean, 3 new commits this session (core fix, new test,
+  Roadmap/CTSReport update) plus this entry's own commit = 4 total.
+- `ninja check-feme`: 3,205/3,208 Passed, 3 Unsupported, 0 Failed (was
+  3,204/3,207 -- +1 Pass from this session's new lit test).
+- `ssbo.*` baseline for next session: **2,865 Pass / 377 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 2,847/395/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
-  NotSupported** (of 61,460) — unchanged, confirmed by a full re-sweep this
+  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
   session.
-- No scratch files left in `/tmp` from this session.
+- This session's own `/tmp` scratch files cleaned up (large pile of
+  prior-session leftovers in `/tmp` untouched -- not from this session).
