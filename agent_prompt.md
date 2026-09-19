@@ -55,54 +55,37 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L124(g)** (~half a day+ to scope a first repro, unknown to fix): `ssbo.*`'s
-   572-case wrong-numeric-result bucket, 63% of all `ssbo.*` fails and likely
-   the single highest-value item across the whole L124 breakdown. 735 of 905
-   `ssbo.*` fails are matrix-typed by name -- strongly suggests a systemic
-   std140/std430 matrix layout/stride bug analogous to L123's vec3-stride fix.
-   Start by picking one small, single-matrix repro (e.g.
-   `dEQP-VK.ssbo.layout.single_basic_type.std140.row_major_mat3`) and tracing
-   actual vs. expected byte layout, the same way L123's `CommandBufferTest.cpp`
-   repro worked.
-2. **L124(e)** (~half a day): add the missing
-   `feme.cpu.resource.store.raw.i8`/`v{2,3,4}i8` runtime-function variants and
-   their JIT-symbol registration, mirroring the existing `i16` variant's shape
-   exactly. Unblocks 274 of 905 `ssbo.*` fails (30%) -- though some may have a
-   second, independent bug hiding behind this one once unblocked, not yet
-   confirmed.
-3. **L124(f)** (~half a day, needs its own root-cause pass first):
+1. **L124(g)** (~half a day+, lead already found this session): confirm
+   `Access->Layout.Stride`'s actual value in
+   `RowMajorMatrixStorePattern::matchAndRewrite` for `row_major_mat2` via a
+   temporary debug dump before changing anything (see lead above). Once
+   confirmed, the fix is likely narrow (either `getMatrixWholeAccess` reads the
+   wrong decoration/field, or a distinct arrays-of-matrices code path needs the
+   same `MatrixStride`-vs-natural-size padding math the single-matrix case
+   already has). This is still the single highest-value remaining item in the
+   whole L124 breakdown (555 of 651 `ssbo.*` fails, 85%, are matrix-typed).
+2. **L124(f)** (~half a day, needs its own root-cause pass first):
    `spirv.AccessChain` into a `RowMajor`-decorated matrix nested inside a
    runtime array fails legalization (36 cases) -- `ColMajor` in the same
-   position is fine, so the gap is specific to `RowMajor`'s own row-vs-column
-   addressing arithmetic.
-4. **L124(a)** (~half a day): `read_unbound_ssbo` -- `ArrayLengthPattern`'s
-   member-index check needs relaxing from "must be 0" to "must be the struct's
-   own last member", plus a new runtime-call variant (or operand) to subtract a
-   fixed prefix byte offset before dividing by stride, since the existing
-   `femeCpuResourceGetDimensionsRawI32` has no way to do that without breaking
-   the "unbound descriptor returns 0" contract. Full design already scoped this
-   session -- see `Roadmap.md`'s L124(a) row for the exact plan.
-5. **L124(b)/(c)** (~half a day+ each): `remove_global_load_pass` (new
+   position is fine.
+3. **L124(a)** (~half a day): `read_unbound_ssbo` -- design already scoped in a
+   prior session, see `Roadmap.md`'s L124(a) row.
+4. **L124(b)/(c)** (~half a day+ each): `remove_global_load_pass` (new
    `spirv.GlobalVariable` initializer-attribute) and `undefined_values` (new
-   `spirv.CopyLogical` op) -- both real dialect additions, scoped above.
-6. **L124(d)** (~half a day to scope, unknown to fix):
-   `device_group.device_index` -- `gl_DeviceIndex` unwired for compute
-   pipelines. Needs research into whether `VK_KHR_device_group` is otherwise
-   supported by feme's Vulkan layer before estimating; may be as simple as
-   always reporting `DeviceIndex = 0`.
-7. **L125**/**L126**/**L116(f)** all remain untouched, standing fallbacks from
-   prior sessions.
+   `spirv.CopyLogical` op) -- both real dialect additions.
+5. **L124(d)/L124(h)/L125/L126/L116(f)** all remain untouched, standing
+   fallbacks from prior sessions.
 
 ## State for next session
 
-- Working tree clean, 4 new commits this session (matrix `OpConstantNull` fix,
-  `OpName`/`NClamp` fix, roadmap/CTS-report update) plus this entry's own commit
-  = 5 total.
-- `ninja check-feme`: 3,201/3,204 Passed, 3 Unsupported, 0 Failed.
+- Working tree clean, 3 new commits this session (L124(e) fix+test,
+  Roadmap/CTSReport update, L124(g) lead scoping) plus this entry's own commit =
+  4 total.
+- `ninja check-feme`: 3,202/3,205 Passed, 3 Unsupported, 0 Failed (was
+  3,201/3,204 -- +1 Pass from this session's new unit test).
+- `ssbo.*` baseline for next session: **2,591 Pass / 651 Fail / 8,983
+  NotSupported** (of 12,225) -- up from 2,337/905/8,983.
 - `compute.*` baseline for next session: **679 Pass / 6 Fail / 60,775
-  NotSupported** (of 61,460) -- the 6 remaining are L124(a)-(d) plus the 2
-  pre-existing `containsAddressableBool` cases (out of scope).
-- `ssbo.*` baseline for next session: **2,337 Pass / 905 Fail / 8,983
-  NotSupported** (of 12,225), bucketed but unchanged in count -- see the
-  L124(e)-(h) breakdown above for exact bucket sizes.
+  NotSupported** (of 61,460) -- unchanged, confirmed by a full re-sweep this
+  session.
 - No scratch files left in `/tmp` from this session.
