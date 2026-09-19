@@ -9829,19 +9829,24 @@ peelInstanceArrayPointer(mlir::spirv::PointerType Type) {
 /// whichever nested struct the previous selector landed on), until
 /// landing on a member that is directly a matrix or a direct (however
 /// many levels) array of matrices -- consuming exactly one further index
-/// per array level once that happens. Shared by getMatrixWholeAccess's
-/// two shapes (see its own comment): the plain `cbuffer`/
-/// `ConstantBuffer<T>` shape (a bare block struct, roadmap L124(o)/(q)),
-/// and (roadmap L124(r)) a `StructuredBuffer<S>`/`RWStructuredBuffer<S>`
-/// wrapper array whose *element* is itself such a struct (`S` containing
-/// one or more matrix members), reached after
-/// getMatrixWholeAccess's own wrapper-array-nesting peel already landed
-/// on `S`. Returns the owning struct (the one whose own member carries
-/// the `RowMajor`/`ColMajor`/`MatrixStride` decorations) and that
-/// member's index, or `std::nullopt` if \p NumSelectors are exhausted
-/// before reaching a matrix (or an array of one), any selector isn't a
-/// compile-time-constant index, or a further index remains after the
-/// matrix (or its own array levels) is reached.
+/// per array level once that happens. A member that is instead a direct
+/// (however many levels) array of *structs* (roadmap L124(s)) is treated
+/// the same as landing on a nested struct directly: the array-index
+/// selectors are consumed the same way, and the walk continues from that
+/// struct rather than requiring a bare matrix at the end of the array
+/// levels. Shared by getMatrixWholeAccess's two shapes (see its own
+/// comment): the plain `cbuffer`/`ConstantBuffer<T>` shape (a bare block
+/// struct, roadmap L124(o)/(q)/(s)), and (roadmap L124(r)) a
+/// `StructuredBuffer<S>`/`RWStructuredBuffer<S>` wrapper array whose
+/// *element* is itself such a struct (`S` containing one or more matrix
+/// members), reached after getMatrixWholeAccess's own
+/// wrapper-array-nesting peel already landed on `S`. Returns the owning
+/// struct (the one whose own member carries the `RowMajor`/`ColMajor`/
+/// `MatrixStride` decorations) and that member's index, or `std::nullopt`
+/// if \p NumSelectors are exhausted before reaching a matrix (or an array
+/// of one), any selector isn't a compile-time-constant index, or a
+/// further index remains after the matrix (or its own array levels) is
+/// reached.
 std::optional<std::pair<mlir::spirv::StructType, unsigned>>
 walkStructMembersToMatrix(mlir::spirv::StructType Struct,
                            mlir::spirv::AccessChainOp Op, unsigned StartPos,
@@ -9876,6 +9881,22 @@ walkStructMembersToMatrix(mlir::spirv::StructType Struct,
       else
         break;
       ++ArrayNestingDepth;
+    }
+    if (auto InnerStruct = mlir::dyn_cast<mlir::spirv::StructType>(Inner)) {
+      // (Roadmap L124(s)) The member is a direct (non-wrapper) array of
+      // *structs* rather than of matrices or a bare struct (e.g.
+      // `struct { ...; struct { matCxR mA; vecN other; } j[N]; }`'s own
+      // `j[i].mA`, found via
+      // `dEQP-VK.ssbo.layout.random.all_shared_buffer.44`) -- consume the
+      // array-index selectors the same way the bare-matrix case below
+      // does, then keep walking the same struct-member search from
+      // `InnerStruct`, exactly like landing directly on a nested struct
+      // above.
+      Pos += ArrayNestingDepth;
+      if (Pos >= NumSelectors)
+        return std::nullopt; // Landed on a struct, not a matrix.
+      Struct = InnerStruct;
+      continue;
     }
     if (!mlir::isa<mlir::spirv::MatrixType>(Inner) ||
         Pos + ArrayNestingDepth != NumSelectors)
