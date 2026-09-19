@@ -59,16 +59,23 @@ bool substituteCallee(CallInst &CI, Intrinsic::ID To) {
 }
 
 /// Translates a SPIR-V `StorageBuffer` handle type
-/// (`target("spirv.VulkanBuffer", [0 x ElemTy], StorageClass, IsWriteable)`,
-/// see feme::spirv::convertBufferBlockType in SPIRVToLLVMPatterns.cpp) into
-/// the DXIL raw/structured-buffer handle type describing the same resource
-/// (`target("dx.RawBuffer", ElemTy, IsUAV, IsROV)`, see
-/// feme::dxil::OpRaisingPass::raiseResourceHandleFromBinding), or nullptr
-/// if \p SPIRVTy is not that shape.
+/// (`target("spirv.VulkanBuffer", [0 x ElemTy], StorageClass, IsWriteable
+/// [, ArrayStride])`, see feme::spirv::convertBufferBlockType in
+/// SPIRVToLLVMPatterns.cpp) into the DXIL raw/structured-buffer handle type
+/// describing the same resource (`target("dx.RawBuffer", ElemTy, IsUAV,
+/// IsROV)`, see feme::dxil::OpRaisingPass::raiseResourceHandleFromBinding),
+/// or nullptr if \p SPIRVTy is not that shape. The optional fourth integer
+/// parameter (roadmap L106: a std430 array's real `ArrayStride`, present
+/// whenever it was decorated -- e.g. always for a 3-component vector
+/// element, whose 12-byte natural size still needs a 16-byte stride) is
+/// intentionally ignored here: DXIL's own `StructuredBuffer<T>`/
+/// `RWStructuredBuffer<T>` has no such vec4-alignment padding at all, so
+/// `ElemTy`'s own natural DXIL size is always the right stride on this
+/// side regardless of what SPIR-V's std430 rules required.
 TargetExtType *translateHandleType(TargetExtType *SPIRVTy) {
   if (SPIRVTy->getName() != "spirv.VulkanBuffer" ||
       SPIRVTy->getNumTypeParameters() != 1 ||
-      SPIRVTy->getNumIntParameters() != 2)
+      SPIRVTy->getNumIntParameters() < 2)
     return nullptr;
 
   auto *ArrayTy = dyn_cast<ArrayType>(SPIRVTy->getTypeParameter(0));
