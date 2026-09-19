@@ -3476,3 +3476,84 @@ feature/extension.
 The remaining `compute.*`/`ssbo.*` failures, `pipeline.monolithic.*`'s
 untriaged status, and `subgroups.ballot_broadcast.*`'s sweep are not
 yet root-caused -- see `agent_thoughts.md` for next steps.
+
+## Roadmap L124 (partially fixed this session): `compute.*`'s remaining fails triaged and 11/16 fixed; `ssbo.*` bucketed
+
+Picked up L124's own `compute.*`/`ssbo.*` triage. Bucketed `compute.*`'s 16
+`Fail`s by case name: 11 in `zero_initialize_workgroup_memory.*` (10 matrix
+types plus `types.bool`/`composites.2`), 5 in `compute.pipeline.basic.*`/
+`device_group.*` (carried over unfixed from an earlier session).
+
+**Fix 1: `OpConstantNull` for `spirv.matrix`.** `getNullAttrForType`
+(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`) had no case for
+`spirv::MatrixType` -- `Builder::getZeroAttr` itself only special-cases
+`VectorType`/`RankedTensorType`, not `MatrixType`, so every matrix-typed
+`Workgroup`-storage global's `OpConstantNull` zero-initializer failed with
+`unsupported OpConstantNull type: '!spirv.matrix<...>'`. Fixed by building
+the same flat, broadcast-element `DenseElementsAttr` shape
+`processConstantComposite` already builds for an ordinary matrix composite
+constant. New test case added to `mlir/test/Target/SPIRV/global-variable.mlir`.
+
+**Fix 2: `OpName`/`OpEntryPoint` name mismatch + `spirv.GL.NClamp`
+legalization**, both needed to unblock
+`dEQP-VK.compute.pipeline.basic.vec2_nclamp_nan_component`:
+
+- Its hand-written SPIR-V has `OpName %_computeSomething
+  "_computeSomething"` alongside `OpEntryPoint GLCompute %_computeSomething
+  "main"` -- entirely legal SPIR-V (`OpName` is a purely informational debug
+  annotation, no semantic significance per spec), but the deserializer's
+  `OpEntryPoint` processing (`DeserializeOps.cpp`) rejected any non-
+  placeholder name mismatch as an error. Fixed by always renaming the
+  function to the entry point's own authoritative name. New `.spvasm`
+  deserialization-only regression test (round-tripping through MLIR text
+  alone can never construct this mismatch, since serialization always keeps
+  a function's name and its entry point's name in sync).
+- With that fixed, the case still failed one layer deeper: `failed to
+  legalize operation 'spirv.GL.NClamp'`. Upstream's `SPIRVToLLVM.cpp`
+  registered a `ClampPattern` for `FClamp`/`SClamp`/`UClamp` but never for
+  `NClamp`, even though `NClamp`'s NaN-safe `min(max(x, minVal), maxVal)`
+  semantics are exactly what the same `llvm.intr.maxnum`/`llvm.intr.minnum`
+  pair `FClamp` already uses computes. Fixed by reusing the existing
+  `ClampPattern` template for `GLNClampOp`, no new pattern class needed. New
+  test in `mlir/test/Conversion/SPIRVToLLVM/gl-ops-to-llvm.mlir`.
+
+A full `compute.*` re-sweep (61,460 cases):
+
+|               | Before | After |
+|---------------|--------|-------|
+| Pass          | 669    | 679   |
+| Fail          | 16     | 6     |
+| NotSupported  | 60,775 | 60,775 |
+
+**+10 Pass, 0 regressions.** `ninja check-feme`: 3,201/3,204 Passed, 3
+pre-existing Unsupported, 0 Failed -- clean, run after each fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- both fixes are internal SPIR-V-dialect/legalization gaps for
+already-supported surfaces (a null-constant shape, a debug annotation
+relaxation, and a GLSL.std.450 extended instruction), not new Vulkan
+features/extensions.
+
+The remaining 6 `compute.*` fails are scoped as roadmap rows L124(a)-(d)
+(`read_unbound_ssbo`, `remove_global_load_pass`, `undefined_values`,
+`device_group.device_index`) plus the pre-existing, separately-documented
+`containsAddressableBool` limitation (`types.bool`/`composites.2`, out of
+scope for this session's fixes).
+
+`ssbo.*`'s 905 `Fail`s were bucketed this session (no fixes attempted) by
+grepping each failing case's first `error:`/`JIT session error`/result-
+comparison line across a full re-sweep:
+
+| Bucket | Count | Roadmap row |
+|--------|-------|-------------|
+| Missing `feme.cpu.resource.store.raw.i8` runtime symbol | 274 | L124(e) |
+| `spirv.AccessChain` into a `RowMajor` matrix in a runtime array fails legalization | 36 | L124(f) |
+| Wrong numeric result (not a crash/legalization failure) | 572 | L124(g) |
+| Unclassified / `unsized_array_length.*` | 23 | L124(h) |
+
+735 of the 905 (81%) are matrix-typed cases by name, and the 572-case
+wrong-numeric-result bucket (63% of the total) is not yet root-caused at
+all -- likely the single highest-value item in the whole L124 breakdown,
+plausibly a systemic std140/std430 matrix layout/stride bug analogous in
+shape to L123's own vec3-stride fix, but for matrices. See `agent_thoughts.md`
+for the full narrative and next steps.
