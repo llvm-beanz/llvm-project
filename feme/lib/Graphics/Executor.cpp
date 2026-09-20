@@ -1248,7 +1248,16 @@ double blendFactorValue(BlendFactor F, unsigned Channel,
   llvm_unreachable("unhandled BlendFactor");
 }
 
-double applyBlendOp(BlendOp Op, double SrcTerm, double DstTerm) {
+/// \p Src/\p Dst are the raw (unscaled) operands and \p SrcTerm/\p DstTerm
+/// are those same operands pre-multiplied by their respective blend
+/// factors. (Roadmap L125y) `Min`/`Max` are special-cased to use the raw,
+/// unscaled operands: per the Vulkan/Direct3D spec, "the blend
+/// operations MIN and MAX ... ignore the blend factor" and simply
+/// compute the component-wise minimum/maximum of the raw source and
+/// destination values, unlike every other op (which combines each
+/// operand's own blend-factor-scaled term).
+double applyBlendOp(BlendOp Op, double Src, double Dst, double SrcTerm,
+                    double DstTerm) {
   switch (Op) {
   case BlendOp::Add:
     return SrcTerm + DstTerm;
@@ -1257,18 +1266,20 @@ double applyBlendOp(BlendOp Op, double SrcTerm, double DstTerm) {
   case BlendOp::ReverseSubtract:
     return DstTerm - SrcTerm;
   case BlendOp::Min:
-    return std::min(SrcTerm, DstTerm);
+    return std::min(Src, Dst);
   case BlendOp::Max:
-    return std::max(SrcTerm, DstTerm);
+    return std::max(Src, Dst);
   }
   llvm_unreachable("unhandled BlendOp");
 }
 
 /// Blends \p Src (the fragment's new color) with \p Dst (the attachment's
 /// existing color) per \p Blend's equation, matching every graphics API's
-/// shared "scale each operand, then combine" blend model. \p Src1 is the
-/// fragment stage's second color output, or all-zero for a pipeline with
-/// no dual-source blend factor (see `blendFactorValue`'s own comment).
+/// shared "scale each operand, then combine" blend model (except `Min`/
+/// `Max`, which ignore the factors entirely -- see `applyBlendOp`'s own
+/// comment). \p Src1 is the fragment stage's second color output, or
+/// all-zero for a pipeline with no dual-source blend factor (see
+/// `blendFactorValue`'s own comment).
 std::array<double, 4> blendColor(const BlendState &Blend,
                                  const std::array<double, 4> &Src,
                                  const std::array<double, 4> &Dst,
@@ -1280,13 +1291,15 @@ std::array<double, 4> blendColor(const BlendState &Blend,
         blendFactorValue(Blend.SrcColorFactor, C, Src, Dst, Constant, Src1);
     double DF =
         blendFactorValue(Blend.DstColorFactor, C, Src, Dst, Constant, Src1);
-    Result[C] = applyBlendOp(Blend.ColorOp, Src[C] * SF, Dst[C] * DF);
+    Result[C] = applyBlendOp(Blend.ColorOp, Src[C], Dst[C], Src[C] * SF,
+                             Dst[C] * DF);
   }
   double SFA =
       blendFactorValue(Blend.SrcAlphaFactor, 3, Src, Dst, Constant, Src1);
   double DFA =
       blendFactorValue(Blend.DstAlphaFactor, 3, Src, Dst, Constant, Src1);
-  Result[3] = applyBlendOp(Blend.AlphaOp, Src[3] * SFA, Dst[3] * DFA);
+  Result[3] = applyBlendOp(Blend.AlphaOp, Src[3], Dst[3], Src[3] * SFA,
+                           Dst[3] * DFA);
   return Result;
 }
 
