@@ -6560,3 +6560,93 @@ changes made this session; `Roadmap.md`'s L125(c) row is struck through
 (re-triaged and decomposed) and 6 new rows (L125(p) through L125(u)) file
 the residual work with per-bucket root-cause notes and fail counts, ready
 to be picked up individually in a future session.
+
+## Roadmap L125(q) sub-bucket (1): `border_swizzle` R16/R16G16 UNORM/SNORM format-support gap
+
+**Investigated L125(r) first, found it duplicates L115(b) (no code change)**:
+this session picked up the prior session's "fastest win" pick, `L125(r)`
+(`InterpolateAtCentroid`/`InterpolateAtSample` legalization, 27 fails).
+Found the prior session's time estimate ("mechanically similar... likely
+a good win") was wrong: `StageOps.h`/`.cpp` already has
+`StageOpKind::InterpolateAtCentroid`/`AtSample`/`AtOffset` builders, but
+nothing in `SPIRVToLLVMPatterns.cpp` calls them; `FragmentWrapper.cpp`
+already has a switch case for these ops that deliberately emits
+"pull-model interpolation is not implemented yet" rather than
+miscompiling; `FeMeGraphicsDesign.md` already documents this exact
+deviation; and this exact gap is already tracked in detail as `L115(b)`,
+scoped as needing a genuinely new runtime-callback ABI surface (not just
+an LLVM lowering pattern) since the interpolation point is often a
+runtime SSA value, not a compile-time constant -- confirmed via
+`RuntimeABI.h`'s `FemeFragmentInvocation` struct, which has no
+barycentric-plane/interpolant-plane data at all in the current
+per-invocation ABI. `L115(b)`'s own text already estimates this at
+"likely 1-2 full sessions" -- too large for this session's "small,
+separately-committed changes" budget. No code change attempted;
+`Roadmap.md`'s `L125(r)` row updated to cross-reference `L115(b)` as the
+real tracking item rather than independent work.
+
+**Root cause (L125(q) sub-bucket (1))**: pivoted to `L125(q)`'s
+sub-bucket (1), 80 fails, `sampler.border_swizzle.*`'s single/dual-channel
+non-8-bit formats combined with a `gather_N` sub-case, previously
+root-caused (but not yet fixed) to "image fixture format is not yet
+supported". `FEME_VULKAN_LOG_CREATION_ERRORS=1` on the isolated repro
+(`dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16_snorm.rgba.
+transparent_black.gather_2.no_swizzle_hint`) confirmed the message comes
+from `ImageFixture.cpp`'s `getFormatInfo` (a *test-fixture*-layer switch,
+distinct from the production sampling path, used by the CTS-facing
+test-image/color-attachment setup machinery) -- its switch over
+`ResourceFormat` had no case at all for `R16_UNORM`/`R16_SNORM`/
+`R16G16_UNORM`/`R16G16_SNORM`, unlike their `R16_UINT`/`R16_SINT`/
+`R16G16_UINT`/`R16G16_SINT` siblings (which already have entries). A
+stale comment on those `UINT`/`SINT` siblings claimed the UNORM/SNORM
+pair were "an `EAC_R11` sampling-bridge target only, never a color
+attachment" -- contradicted by: (a) `parseFixtureFormat` already accepting
+`"r16-unorm"`/`"r16-snorm"`/`"r16g16-unorm"`/`"r16g16-snorm"` as ordinary
+fixture-format spellings; (b) `packClearColor`/`unpackColor` already
+having dedicated, working code paths treating these as real render-target
+clear colors, not merely an EAC-decode bridge; (c) the actual failing CTS
+test samples a real `VkImage` in `r16_snorm` format directly.
+
+**Fix**: added the missing `FormatInfo` entries to `getFormatInfo`
+(`ImageFixture.cpp`), mirroring the existing `UINT`/`SINT` shape exactly
+(`R16_UNORM`/`R16_SNORM`: `{1, 2, false}`; `R16G16_UNORM`/`R16G16_SNORM`:
+`{2, 2, false}`), and corrected the stale comments (on the `UINT`/`SINT`
+case, and on the neighboring `R16_FLOAT` case, which also referenced the
+old "unlike its UNORM/SNORM neighbors" claim).
+
+### Unit tests
+
+`ImageFixtureTest.GetFixtureFormatElementSizeCoversR16UnormSnormAndR16G16UnormSnorm`:
+confirms `getFixtureFormatElementSize` now resolves successfully (2 bytes
+for the single-channel pair, 4 bytes for the two-channel pair) rather than
+erroring, mirroring the existing `R16_FLOAT`/`R16G16_FLOAT`-coverage test's
+own shape.
+
+`ninja check-feme`: 3,259/3,262 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- The original isolated repro,
+  `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16_snorm.rgba.
+  transparent_black.gather_2.no_swizzle_hint`, now **Passes** (was
+  `VK_ERROR_INITIALIZATION_FAILED`).
+- A full `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16*`
+  re-sweep (25,600 cases: 4,686 Pass, 864 Fail, 20,050 NotSupported)
+  confirms **zero** remaining fails on any `_unorm`/`_snorm` format --
+  every one of this sub-bucket's original 80 "not yet supported" fails is
+  gone, with no regressions on the already-passing `_uint`/`_sint`/
+  `_float`/`_sfloat` sibling formats.
+- The same re-sweep's remaining 864 fails are **all** `Ref`-vs-`Color`
+  value mismatches on integer formats (`r16_uint`/`r16_sint`: 76+76,
+  `r16g16_uint`/`r16g16_sint`: 96+96, `r16g16b16a16_uint`/
+  `r16g16b16a16_sint`: 140+140) -- the same "sub-bucket (2)" shape
+  (border-color-defaulting-through-swizzle-plus-gather mismatch)
+  `L125(q)`'s own original triage already named, but confirmed this
+  session to be **larger in scope than originally estimated** (864 fails
+  across 6 formats, not just the 64 originally attributed to
+  `r16_sint`/`r16_uint`). `Roadmap.md`'s `L125(q)` row updated: sub-bucket
+  (1) struck through and marked fixed; sub-bucket (2) left open with the
+  corrected, larger scope noted. See `agent_thoughts.md` for the full
+  narrative and next steps.
