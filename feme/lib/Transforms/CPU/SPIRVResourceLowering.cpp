@@ -1552,13 +1552,23 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // `Sample2D` path below, only the narrow shape a real CTS case
       // (`dEQP-VK.mesh_shader.ext.synchronization.*.sampled_image.*`)
       // needs is accepted for now: a plain (non-arrayed, non-cube,
-      // non-1D/3D) `Plain2D` image, an explicit LOD (SPIR-V forbids
-      // `Bias`/`Grad`/implicit LOD alongside the mandatory `NEAREST`
-      // filtering in every case this pass has needed to support so far),
-      // and no `MinLod` clamp (`createSample2DI32` has no such operand).
+      // non-1D/3D) `Plain2D` image, no `Bias`/`Grad` (SPIR-V forbids both
+      // alongside the mandatory `NEAREST` filtering in every case this
+      // pass has needed to support so far), and no `MinLod` clamp
+      // (`createSample2DI32` has no such operand). Roadmap L125(a) widens
+      // this from explicit-LOD-only to also accept an *implicit*-LOD
+      // sample (`OpImageSampleImplicitLod`, GLSL's/HLSL's ordinary
+      // `texture()`/`Sample()` call against an integer-format texture,
+      // e.g. `dEQP-VK.pipeline.monolithic.image.*.format.r8_[su]int.*`):
+      // `lowerImageAccesses` below already defaults `Lod` to a constant
+      // `0.0` whenever `ExplicitLod` is false (see its own comment), which
+      // is exactly right here too -- every real CTS case this widening
+      // covers samples a single-mip-level image, so the true
+      // (unimplemented) derivative-based implicit-LOD computation would
+      // clamp to mip 0 regardless.
       if (IsInteger) {
-        if (Shape != ImageShape::Plain2D || !ExplicitLod || HasMinLodClamp ||
-            HasBias || HasGrad)
+        if (Shape != ImageShape::Plain2D || HasMinLodClamp || HasBias ||
+            HasGrad)
           return false;
         unsigned OffsetIdx =
             getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);

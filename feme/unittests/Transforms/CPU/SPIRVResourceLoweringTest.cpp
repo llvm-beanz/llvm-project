@@ -5268,15 +5268,53 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-     LeavesAnIntegerSampledImageHandleUsedForSampleAlone) {
-  // Roadmap H109: an *implicit*-LOD `OpImageSample*` against an integer-
-  // sampled image is still rejected -- SPIR-V requires `NEAREST` filtering
-  // for an integer-format image, and this pass has no synthesized-
-  // derivative/anisotropic-footprint math to support such a sample yet
-  // (only the narrower explicit-LOD shape `LowersIntegerSampledImageToImage
-  // SampleV4I32` below covers is accepted). The whole handle (and
-  // therefore the whole function) is left unrewritten, matching
-  // `LeavesAnArrayedImageHandleAlone`'s own "no partial lowering" contract.
+     LeavesA1DIntegerSampledImageHandleUsedForSampleAlone) {
+  // Roadmap L125(a): unlike `Plain2D` (see `LowersImplicitLodIntegerSampled
+  // ImageToImageSampleV4I32` and `LowersIntegerSampledImageToImageSampleV4
+  // I32` below, both now accepted), a `Plain1D` integer-sampled image is
+  // still rejected -- no `createSample1DI32` runtime helper exists yet
+  // (only `createSample2DI32` does), so every non-`Plain2D` shape remains
+  // out of scope for now. The whole handle (and therefore the whole
+  // function) is left unrewritten, matching `LeavesAnArrayedImageHandle
+  // Alone`'s own "no partial lowering" contract.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(float %coord) {
+      %img = call target("spirv.Image", i32, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.sample(
+          target("spirv.Image", i32, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %coord, i32 0)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4i32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersImplicitLodIntegerSampledImageToImageSampleV4I32) {
+  // Roadmap L125(a): an *implicit*-LOD `OpImageSampleImplicitLod` against
+  // an integer-channel (`usampler2D`/`isampler2D`) `Plain2D` sampled image
+  // is legal SPIR-V (still restricted, per the Vulkan spec, to `NEAREST`
+  // filtering) -- widening `LowersIntegerSampledImageToImageSampleV4I32`
+  // below's pre-existing explicit-LOD-only acceptance. Every real CTS case
+  // driving this (`dEQP-VK.pipeline.monolithic.image.*.format.
+  // r8_[su]int.*`, etc.) samples a single-mip-level image, so
+  // `lowerImageAccesses`'s own implicit-LOD default of a constant `0.0`
+  // `Lod` (see its own comment) is exactly right here, without needing
+  // real derivative-based LOD computation.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x i32> @main(<2 x float> %coord) {
@@ -5299,8 +5337,12 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, lod, offset_x, offset_y, mask). Implicit LOD defaults to 0.0.
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(8))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
 TEST(SPIRVResourceLoweringTest, LowersIntegerSampledImageToImageSampleV4I32) {
