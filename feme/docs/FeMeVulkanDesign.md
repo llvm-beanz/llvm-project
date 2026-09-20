@@ -1915,6 +1915,20 @@ was known-good before" without letting it skip recompilation; a hit
 within the same process (the same `VkPipelineCache` object) does skip it,
 sharing one `CachedPipelineArtifact`.
 
+**Status (roadmap L125(o)):** `computeGraphicsPipelineCacheKey` originally
+omitted the "Specialization data" bullet above entirely for every graphics
+stage, even though `compileGraphicsStage` genuinely folds a stage's
+`VkSpecializationInfo` into the compiled code (mirroring
+`computePipelineCacheKey`'s own compute-stage handling) -- two graphics
+pipelines built from the same shader module and entry point but differing
+specialization data collided on the same key and silently reused each
+other's stale compiled artifact. Fixed by threading a
+`SpecializationOverride` list per stage through
+`computeGraphicsPipelineCacheKey` and hashing each the same way the compute
+key already does (`PipelineCache.cpp`'s `hashSpecializationOverrides`,
+shared by both key functions). See `VulkanCTSReport.md`'s own L125(o)
+section for the CTS repro and re-verification.
+
 **Status (roadmap L89c):** the cache above is no longer consulted only when
 the application supplies a `VkPipelineCache`. A `VkPipelineCache` is opt-in
 in Vulkan, and much real software (and much of the CTS) never creates one --

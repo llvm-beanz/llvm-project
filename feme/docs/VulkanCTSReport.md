@@ -6424,3 +6424,85 @@ CTS (`dEQP-VK.glsl.texture_gather.*`, `feme_icd.json`,
 
 `Roadmap.md`'s L125(k) row is now struck through and marked done. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L125(o): graphics-pipeline cache-key omits specialization data
+
+**Root cause**: picked up L125(c)'s `sampler.border_swizzle.r8g8b8a8_unorm.*`
+sample (1,280 cases: 357 Pass, 13 Fail, 910 NotSupported) and found all 13
+`Fail`s were `no_gather.no_swizzle_hint` cases. Running any single failing
+case in isolation always Passed; running it after certain other cases in
+the same process reproducibly Failed -- a test-order-dependent bug, not a
+stateless one. Bisected to a minimal 2-test repro:
+`...opaque_black.gather_0.no_swizzle_hint` immediately followed by
+`...opaque_black.no_gather.no_swizzle_hint` in the same process. The wrong
+`Color` the second (failing) test reported was byte-identical to the
+first test's own correct `Color` -- proof the second pipeline was silently
+executing the first's stale compiled code.
+
+Both sub-cases share one GLSL module (a graphics and a compute variant)
+differentiated only by `constant_id`-selected specialization-constant
+values (`u`/`v`/`gatherFlag`) supplied at pipeline-creation time, not by
+separate shader modules or entry points. `computeGraphicsPipelineCacheKey`
+(`PipelineCache.cpp`) hashed every stage's SPIR-V words, entry point,
+descriptor-set/push-constant layout, and serialized fixed-function state,
+but never a stage's own `VkSpecializationInfo` -- unlike its compute
+sibling, `computePipelineCacheKey`, which already hashes an explicit
+`Overrides` list. `compileGraphicsStage` genuinely folds specialization
+constants into the compiled graphics-stage code via
+`buildSpecializationOverrides`, directly contradicting
+`PipelineCache.h`'s own (now-corrected) doc comment claiming a graphics
+stage has no specialization data to fold in. Two pipelines built from an
+identical module/entry point but differing specialization data therefore
+collided on the same cache key and silently reused each other's stale
+compiled artifact.
+
+**Fix**: added a shared `hashSpecializationOverrides` helper (used by
+both `computePipelineCacheKey` and `computeGraphicsPipelineCacheKey` now)
+and threaded a `SpecializationOverride` list per graphics stage (Vertex,
+Fragment, TessControl, TessEval, Geometry, Mesh, Task) through
+`computeGraphicsPipelineCacheKey`'s signature, hashing each the same way
+the compute key already does. Updated the one real call site
+(`GraphicsPipeline.cpp`) to compute each stage's own
+`buildSpecializationOverrides(StageInfo->pSpecializationInfo)` result and
+pass it through; a stage with no info, or one whose specialization data
+fails to validate, falls back to an empty override list (caching is
+simply skipped for that malformed creation -- `compileGraphicsStage` will
+independently surface the real validation error once it gets there, the
+same honest simplification already used elsewhere for an inline shader
+module). Corrected `PipelineCache.h`'s stale doc comment.
+
+### Unit tests
+
+`GraphicsPipelineTest.DifferingSpecializationDataIsACacheMiss`: two
+pipelines built from the same shader module/entry point but differing
+`VkSpecializationInfo` must compile independent artifacts (the
+specialization-data counterpart of the existing
+`DifferingFixedFunctionStateIsACacheMiss`).
+
+`ninja check-feme`: 3,258/3,261 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- The original 13-fail sample,
+  `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r8g8b8a8_unorm.*`
+  (1,280 cases), is now **370 Pass / 0 Fail / 910 NotSupported** (was
+  357/13/910).
+- A full `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.*` sweep
+  across every supported format: **619 Pass / 0 Fail / 1,618
+  NotSupported**.
+- A time-boxed, partial `dEQP-VK.pipeline.monolithic.sampler.*` sample
+  (broader than `border_swizzle.*` alone, thousands of cases, not run to
+  full completion) surfaced zero additional fails in the portion covered.
+
+This is a general, cross-cutting correctness bug (any graphics pipeline
+pair sharing a shader module with differing specialization constants was
+affected), not scoped to border-swizzle specifically -- it likely explains
+a share of L125(c)'s wider, still-untriaged "image mismatch"/pipeline
+buckets too, though that has not been re-verified case-by-case.
+`Roadmap.md`'s new L125(o) row is struck through and marked done; L125(c)'s
+own remaining buckets (ASTC/EAC/ETC2 image mismatches, the
+`createComputePipelines`-site `VK_ERROR_INITIALIZATION_FAILED`,
+`vktPipelineBindPointTests.cpp`) are unaffected by this fix and remain
+untriaged. See `agent_thoughts.md` for the full narrative and next steps.
