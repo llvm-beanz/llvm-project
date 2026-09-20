@@ -4329,8 +4329,25 @@ public:
 
     mlir::ValueRange Indices = Adaptor.getIndices();
     unsigned Selector = Element->HasWrapper ? 1 : 0;
-    if (Indices.size() <= Selector)
-      return Rewriter.notifyMatchFailure(Op, "not enough indices");
+    if (Indices.size() <= Selector) {
+      // A wrapper block's own access chain with only the wrapper-selecting
+      // index and no further real per-element index is a legal, if
+      // degenerate, whole-array access -- a pointer to the entire
+      // content, not any one element of it (roadmap L124(b); e.g. Tint's
+      // own dead, never-loaded-from
+      // `%15 = OpAccessChain %_ptr..._runtimearr_int %outputs %uint_0` in
+      // `dEQP-VK.compute.pipeline.basic.remove_global_load_pass`). There
+      // is no separate real index to pass to
+      // `llvm.spv.resource.getpointer` in that case, so reuse the
+      // wrapper-selecting index itself (always the constant 0) as that
+      // operand instead -- rewriteBlockAccess's own `AllIndices.size() ==
+      // Selector + 1` check then returns the resulting pointer directly,
+      // exactly the "whole array" result this access chain asks for.
+      if (Element->HasWrapper && Indices.size() == 1)
+        Selector = 0;
+      else
+        return Rewriter.notifyMatchFailure(Op, "not enough indices");
+    }
 
     return rewriteBlockAccess(
         Op, Rewriter, *getTypeConverter(), *Element,
