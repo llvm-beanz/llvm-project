@@ -1548,15 +1548,16 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // Roadmap L109/L125(a)/L125(b): an ordinary sample against an
       // integer-channel (`_UINT`/`_SINT`) image is legal SPIR-V
       // (`OpImageSampleExplicitLod`/`OpImageSampleImplicitLod` against a
-      // `usampler2D`/`isampler2D`/`usampler1D`/`isampler1D`), just
-      // restricted, per the Vulkan spec, to `NEAREST` filtering: no
-      // `Bias`/`Grad` (SPIR-V forbids both alongside the mandatory
-      // `NEAREST` filtering in every case this pass has needed to
-      // support so far), and no `MinLod` clamp (neither
-      // `createSample2DI32` nor `createSample1DI32` has such an
-      // operand). `Plain2D` (roadmap H109, widened to implicit-LOD by
-      // L125(a)) and `Plain1D` (roadmap L125(b), mirroring `Plain2D`'s
-      // own widening exactly) are the only shapes accepted so far;
+      // `usampler2D`/`isampler2D`/`usampler1D`/`isampler1D`/
+      // `usampler1DArray`/`isampler1DArray`), just restricted, per the
+      // Vulkan spec, to `NEAREST` filtering: no `Bias`/`Grad` (SPIR-V
+      // forbids both alongside the mandatory `NEAREST` filtering in
+      // every case this pass has needed to support so far), and no
+      // `MinLod` clamp (none of `createSample2DI32`/`createSample1DI32`/
+      // `createSample1DArrayI32` has such an operand). `Plain2D`
+      // (roadmap H109, widened to implicit-LOD by L125(a)), `Plain1D`,
+      // and `Array1D` (both roadmap L125(b), mirroring `Plain2D`'s own
+      // widening exactly) are the only shapes accepted so far;
       // `lowerImageAccesses` below already defaults `Lod` to a constant
       // `0.0` whenever `ExplicitLod` is false (see its own comment),
       // which is exactly right here too -- every real CTS case either
@@ -1564,7 +1565,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // (unimplemented) derivative-based implicit-LOD computation would
       // clamp to mip 0 regardless.
       if (IsInteger) {
-        if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D) ||
+        if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D &&
+             Shape != ImageShape::Array1D) ||
             HasMinLodClamp || HasBias || HasGrad)
           return false;
         unsigned OffsetIdx =
@@ -1573,8 +1575,9 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                       /*Float=*/true) ||
             !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape,
                                /*AllowArray2D=*/false,
-                               /*AllowPlain1DArray1D=*/Shape ==
-                                   ImageShape::Plain1D) ||
+                               /*AllowPlain1DArray1D=*/
+                               Shape == ImageShape::Plain1D ||
+                                   Shape == ImageShape::Array1D) ||
             !isV4I32(CI->getType()))
           return false;
         continue;
@@ -3533,11 +3536,12 @@ void lowerImageAccesses(
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
         // Roadmap H109/L125(b): an integer-channel sample is only ever
-        // accepted by `hasOnlySupportedImageUses` as a `Plain2D`/`Plain1D`,
-        // no-`Bias`/`Grad`/`MinLod` call (see its own comment) -- so this
-        // narrower emission runs before, and instead of, the general
-        // float-sample shape dispatch below, which would otherwise need
-        // an `IsInteger` branch threaded through every shape's own case.
+        // accepted by `hasOnlySupportedImageUses` as a `Plain2D`/`Plain1D`/
+        // `Array1D`, no-`Bias`/`Grad`/`MinLod` call (see its own comment)
+        // -- so this narrower emission runs before, and instead of, the
+        // general float-sample shape dispatch below, which would
+        // otherwise need an `IsInteger` branch threaded through every
+        // shape's own case.
         if (isV4I32(CI->getType())) {
           // Roadmap L125(b): `Plain1D`'s own coordinate/offset are bare
           // scalars (see `isCoordN`'s/`isSupportedOffset`'s own comments
@@ -3552,6 +3556,25 @@ void lowerImageAccesses(
             CallInst *NewSampleI32Call =
                 createSample1DI32(Builder, Env, ImageIndex, SamplerIndex,
                                   Coord, Lod, IntOffset, Mask, CI->getName());
+            CI->replaceAllUsesWith(NewSampleI32Call);
+            CI->eraseFromParent();
+            continue;
+          }
+          // Roadmap L125(b): `Array1D`'s own `Offset` is likewise a bare
+          // scalar (mirroring `Plain1D`'s own, per `isSupportedOffset`'s
+          // comment), unlike `Plain2D`'s 2-wide `Offset` -- but its own
+          // coordinate is still a real 2-wide `(U, ArrayLayer)` vector, so
+          // only the offset extraction differs from `Plain1D`'s case
+          // above.
+          if (Shape == ImageShape::Array1D) {
+            Value *IntU = Builder.CreateExtractElement(Coord, uint64_t{0});
+            Value *IntArrayLayer =
+                Builder.CreateExtractElement(Coord, uint64_t{1});
+            Value *IntOffset = CI->getArgOperand(
+                getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+            CallInst *NewSampleI32Call = createSample1DArrayI32(
+                Builder, Env, ImageIndex, SamplerIndex, IntU, IntArrayLayer,
+                Lod, IntOffset, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;

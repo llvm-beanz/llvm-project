@@ -663,6 +663,12 @@ enum class ImageCallKind : uint8_t {
   /// mirrors `Sample1D`'s own bare-scalar `Offset` parameter, unlike
   /// `Sample2DI32`'s two-component `OffsetX`/`OffsetY`.
   Sample1DI32,
+  /// `feme.cpu.image.sample.1darray.v4i32` (roadmap L125(b)): the
+  /// `Array1D` counterpart of `Sample1DI32`, mirroring `Sample1DArray`'s
+  /// own relationship to `Sample1D`. Like `Sample1DI32`, `Lod` defaults to
+  /// a constant `0.0` at the call site for an ordinary implicit-LOD
+  /// sample, and no `Bias`/`Grad`/`MinLod` operand exists.
+  Sample1DArrayI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -918,6 +924,22 @@ llvm::CallInst *createSample1DI32(llvm::IRBuilderBase &Builder,
                                   llvm::Value *Lod, llvm::Value *Offset,
                                   llvm::Value *Mask,
                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.1darray.v4i32` call (roadmap L125(b)):
+/// the `Array1D` counterpart of `createSample1DI32`, mirroring
+/// `createSample1DArray`'s own relationship to `createSample1D`. \p
+/// ArrayLayer joins \p U as a second coordinate operand, but (like
+/// `createSample1DArray`'s own \p Offset) \p Offset itself stays a bare
+/// scalar, excluding the array layer, matching a real `deqp-vk` SPIR-V
+/// capture's own `ConstOffset` dimensionality for this shape.
+llvm::CallInst *createSample1DArrayI32(llvm::IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       llvm::Value *ImageIndex,
+                                       llvm::Value *SamplerIndex,
+                                       llvm::Value *U, llvm::Value *ArrayLayer,
+                                       llvm::Value *Lod, llvm::Value *Offset,
+                                       llvm::Value *Mask,
+                                       const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY
 /// (roadmap L50d) are the same `ConstOffset` image operand

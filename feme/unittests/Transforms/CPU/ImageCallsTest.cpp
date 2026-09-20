@@ -1006,8 +1006,41 @@ TEST_F(ImageCallsTest, MatchesSample1DI32Call) {
   EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
 }
 
-// `createGatherCmpArray2D`'s own `feme.cpu.image.gathercmp.array2d.v4f32`
-// call (roadmap H124q): the `Array2D` counterpart of
+TEST_F(ImageCallsTest, MatchesSample1DArrayI32Call) {
+  // Roadmap L125(b): the `Array1D` counterpart of `MatchesSample1DI32Call`
+  // above, confirming `matchImageCall`'s new `Sample1DArrayI32` case
+  // extracts the added `ArrayLayer` operand alongside `U`, mirroring
+  // `Sample1DArray`'s own relationship to `Sample1D`.
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createSample1DArrayI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 2.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(0),
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample1DArrayI32);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->ArrayLayer, ConstantFP::get(Builder.getFloatTy(), 2.0));
+  EXPECT_EQ(Matched->Lod, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->OffsetX, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
+}
+
+
 // `ImageCallKind::GatherCmp2D`, with an extra `ArrayLayer` operand.
 TEST_F(ImageCallsTest, MatchesGatherCmpArray2DCall) {
   IRBuilder<> Builder(BB);

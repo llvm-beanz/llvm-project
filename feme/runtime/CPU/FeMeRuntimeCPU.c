@@ -7327,6 +7327,57 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
   return femeRTSampleFiltered1D(&Img, &Samp, U, Layer, ClampedLod, Offset);
 }
 
+// (Roadmap L125(b)) The `Array1D` counterpart of `femeCpuImageSample1DV4I32`
+// (see above), for `feme.cpu.image.sample.1darray.v4i32` -- mirrors that
+// function's structure exactly, but adds `ArrayLayer` (clamped/rounded via
+// the same `femeRTRoundClampLayer` helper `femeCpuImageSample1DArrayV4F32`
+// immediately above uses), matching `Sample1DArray`'s own relationship to
+// `Sample1D`.
+FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
+    float Lod, int32_t Offset,
+    _Bool Mask) asm("feme.cpu.image.sample.1darray.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
+    float Lod, int32_t Offset, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+
+  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
+  // `0.0f`), mirroring `femeCpuImageSample1DV4I32`'s own choice above.
+  float ClampedLod = femeRTComputeClampedLod(
+      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  uint32_t Level = femeRTNearestMipLevel(MipPlan);
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
+  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + Offset;
+  _Bool BorderX = 0;
+  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                         Samp.AddressU, &BorderX);
+  if (BorderX) {
+    // Roadmap L125(b): same documented, narrow limitation as
+    // `femeCpuImageSample1DV4I32`'s own identical fallback above -- no
+    // real CTS case is known to exercise `CLAMP_TO_BORDER` addressing
+    // against an integer-sampled `Array1D` image either.
+    FemeRTv4i32 Border = {0, 0, 0, 1};
+    return Border;
+  }
+  return femeRTFetchTexel1DArrayI32(&Img, Level, AddrX, Layer);
+}
+
 // (Roadmap L54) The single-level body of `femeCpuImageSampleCmp1DF32`/
 // `femeCpuImageSampleCmpArray1DF32` below, mirroring
 // `femeRTSampleCmp2DAtLevel`'s own point/bilinear comparison-filtering
