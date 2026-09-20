@@ -5832,3 +5832,68 @@ unchanged.
 L125(b) row is updated to reflect `Plain1D`/`Array1D`/`Array2D`/
 `Plain3D`/`Cube` done and `CubeArray` still to go. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## L125(b) closed: widen integer-sampled implicit-LOD fix to `CubeArray`
+
+`CubeArray` was the final remaining shape in the L125(b) `SampleXI32`
+widening series. Confirmed its own design was a direct follow-on to
+this session's own prior `Cube` work:
+
+- `femeRTRoundClampLayer` (already reused by `Array2D`/`Array1D`) rounds
+  and clamps a float array index to a valid selectable cube element,
+  same as `femeCpuImageSampleCubeArrayV4F32`'s own identical use.
+- `femeCpuImageSampleCubeArrayV4F32`'s own `NEAREST` path (via
+  `femeRTSampleFilteredCube`) already folds `LayerBase + BaseFace` into
+  a single texel fetch's own `Layer` -- the new I32 function does the
+  same directly against `femeRTFetchTexel2DI32` (`CubeIndex * 6 +
+  CF.Face`), reusing it rather than any new low-level helper.
+- SPIR-V's own arrayed-cube coordinate convention is a 4-wide `(DirX,
+  DirY, DirZ, ArrayLayer)` vector (`SampleCoordWidth == 4` for
+  `CubeArray`, already correctly set for the existing float-sampling
+  path) -- `isSupportedOffset` already required (and accepts) a zero
+  offset for `CubeArray` via the same generic fallback `Cube` uses, so
+  no change was needed there either.
+
+Implemented `ImageCallKind::SampleCubeArrayI32`/
+`createSampleCubeArrayI32` (12-arg call: image/sampler heap operands,
+`DirX`/`DirY`/`DirZ`, `ArrayLayer`, `Lod`, `Mask` -- no offset, no
+derivatives, no `Bias`/`MinLodClamp`), `femeCpuImageSampleCubeArrayV4I32`
+(placed after `femeCpuImageSampleCubeArrayV4F32`'s own definition), and
+widened `hasOnlySupportedImageUses`'s `IsInteger` shape check plus
+`lowerImageAccesses`'s integer-sample emission branch (a new
+`CubeArray` case extracting `DirX`/`DirY`/`DirZ`/`ArrayLayer` from
+`Coord`'s four lanes, no offset extraction).
+
+Converted the previous
+`LeavesACubeArrayIntegerSampledImageHandleUsedForSampleAlone` rejection
+test into a pair of "lowers" tests for `CubeArray` (implicit-LOD
+defaulting `Lod` to `0.0`, and explicit-LOD with an all-zero
+`ConstOffset` since `CubeArray` accepts no nonzero one, same as
+`Cube`) -- no further rejection test is needed, since `CubeArray` was
+the final remaining shape -- and added `MatchesSampleCubeArrayI32Call`
+to `ImageCallsTest.cpp`.
+
+- `ninja FeMeTransformsCPUTests`: all 540 tests pass (+2 net vs. the
+  `Cube` commit).
+- `ninja check-feme`: **3,237/3,240 Passed, 3 Unsupported, 0 Failed** (0
+  regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: two independent 20-case samples of
+  `dEQP-VK.pipeline.monolithic.image.suballocation.sampling_type.combined.
+  view_type.cube_array.format.*_[su]int.*` (several sizes/formats/array
+  counts, both the `combined` graphics variant and its `_compute`
+  counterpart) -- **0 Fail / 18 Pass / 22 NotSupported** combined
+  (the NotSupported cases an unrelated feature gap, not this fix's
+  concern).
+
+Internal correctness fix again, not new Vulkan feature/extension surface
+-- [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+**This closes the entire L125(b) widening series** -- all six shapes
+(`Plain1D`, `Array1D`, `Array2D`, `Plain3D`, `Cube`, `CubeArray`) now
+accept integer-channel implicit-LOD/explicit-LOD sampling. `Roadmap.md`'s
+L125(b) row is struck through. See `agent_thoughts.md` for the full
+narrative and next steps (picking between `L125(c)`/`L125(d)` or
+L125's next fresh sample).
