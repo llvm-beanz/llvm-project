@@ -95284,3 +95284,79 @@ Picked up the prior session's #1 next step: re-sample L125(c) now that L125(o)'s
 5. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) remains the other open, larger cross-repo item from before this session -- not touched, not a quick pick.
 6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 7. This session's own scratch CTS logs (`/tmp/ctsrun/l125c2/*`) are already cleaned up -- nothing to do here.
+
+# Session: L125(r) triage (duplicate of L115(b)) + L125(q) sub-bucket (1) fix
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep
+deviceName` first, per standing instruction.
+
+## What got done, in order
+
+1. Checked the prior session's #1 "fastest win" pick, `L125(r)`
+   (`InterpolateAtCentroid`/`InterpolateAtSample` legalization, 27
+   fails). It was **not** a quick win: `StageOps.h`/`.cpp` already has
+   builders for these ops, `FragmentWrapper.cpp` already deliberately
+   rejects them with "pull-model interpolation is not implemented yet",
+   `FeMeGraphicsDesign.md` already documents the deviation, and the gap
+   is already tracked in detail as `L115(b)` -- scoped there as needing
+   a new runtime-callback ABI surface (confirmed via `RuntimeABI.h`'s
+   `FemeFragmentInvocation`, which has zero barycentric-plane data
+   today), estimated at 1-2 full sessions. No code change attempted.
+   Updated `Roadmap.md`'s `L125(r)` row to point at `L115(b)` instead of
+   describing independent work.
+2. Picked up `L125(q)` sub-bucket (1) instead (80 fails,
+   `sampler.border_swizzle.*` on single/dual-channel non-8-bit formats +
+   `gather_N`, `VK_ERROR_INITIALIZATION_FAILED`). Root cause:
+   `ImageFixture.cpp`'s `getFormatInfo` (a test-fixture-layer switch, not
+   the production sampling path) had no entry for `R16_UNORM`/
+   `R16_SNORM`/`R16G16_UNORM`/`R16G16_SNORM`, based on a stale comment
+   claiming they were "EAC_R11-bridge only, never a color attachment" --
+   contradicted by `parseFixtureFormat`/`packClearColor`/`unpackColor`
+   already handling them as real formats.
+3. Fixed: added the missing `FormatInfo` entries (mirroring the
+   `UINT`/`SINT` shape), corrected the stale comments. Added
+   `ImageFixtureTest.GetFixtureFormatElementSizeCoversR16UnormSnormAndR16G16UnormSnorm`.
+4. Ran `ninja check-feme`: 3,259/3,262 Passed, 3 Unsupported, 0 Failed
+   (+1 new test, 0 regressions).
+5. Verified via CTS: isolated repro now Passes. Full
+   `sampler.border_swizzle.r16*` re-sweep (25,600 cases) confirms zero
+   remaining fails on any `_unorm`/`_snorm` format. Discovered the
+   remaining 864 fails in that same sweep are all sub-bucket (2)'s
+   `Ref`-vs-`Color` mismatch shape, but on **more formats than
+   originally scoped** (`r16g16_uint`/`_sint`,
+   `r16g16b16a16_uint`/`_sint` in addition to the originally-named
+   `r16_uint`/`_sint`).
+6. Updated `Roadmap.md` (struck through `L125(q)` sub-bucket (1),
+   corrected `L125(r)`) and `VulkanCTSReport.md` (new section).
+7. Committed in 2 pieces: the code+test fix, then the doc updates.
+
+## Wins visible right now
+
+- `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16_snorm.*` and
+  its UNORM/SNORM siblings: 80 previously-failing cases now Pass.
+- `ninja check-feme`: 0 regressions, +1 new test.
+- `L125(r)` is no longer a mis-scoped "quick win" on the roadmap --
+  future sessions won't waste time re-discovering it duplicates
+  `L115(b)`.
+
+## Next steps
+
+1. **(~20-30 min)** `L125(q)` sub-bucket (2) is now the more clearly
+   scoped pick in this row: 864 fails (not 64), `Ref`-vs-`Color`
+   mismatches combining a non-identity swizzle + non-default border
+   color + `gather_N`, across `r16_uint`/`_sint`, `r16g16_uint`/`_sint`,
+   `r16g16b16a16_uint`/`_sint`. Start by isolating one case (e.g.
+   `r16_sint.barg.transparent_black.gather_3.no_swizzle_hint`,
+   already confirmed to fail identically standalone) and tracing the
+   swizzle/border-color application order for `Gather*` specifically.
+2. **(~1-2 sessions)** `L115(b)` (pull-model interpolation) remains the
+   real, larger, not-yet-started item behind `L125(r)`'s duplicate row
+   -- worth a dedicated session with the new-ABI-surface work properly
+   budgeted, not squeezed in alongside smaller fixes.
+3. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain untouched from the
+   prior session's decomposition -- good alternative picks if
+   sub-bucket (2) above stalls.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. Clean up `/tmp/ctsrun/l125q_verify/*` (this session's own scratch
+   QPA/fails.txt files) before ending a future session.
