@@ -55,23 +55,33 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## Next steps (ranked)
+### Suggested next steps
 
-1. **(~2 min)** Nothing to clean up -- this session's own `/tmp/ctsrun/
-   l125_*`/`l126_ballot_broadcast.*` scratch files are already deleted;
-   only prior sessions' own leftover `l124*` files remain there,
-   untouched (not this session's to clean).
-2. Pick up **L125(b)** next: widen L125(a)'s fix one shape at a time
-   (`Plain1D` is probably the smallest first step -- `Array1D`/
-   `Array2D`/`Plain3D`/`Cube`/`CubeArray` after). Each shape is its own
-   small commit, mirroring how the float-sampling path was widened
-   shape-by-shape historically (L52a, L61c, L65, L66a, L67a).
-3. Alternatively, **L125(d)** is a good quick, sharply-scoped pick if
-   L125(b)'s multi-shape runtime-helper work looks too big for the
-   time available -- start with `--deqp-log-decompiled-spirv=enable`
-   on one `sampler.border_swizzle.*` repro from the `Ref:`/`Color:`
-   mismatch bucket.
-4. **L126(a)** needs real debugging tooling (gdb/perf), not just CTS
-   triage -- pick this up only when there's time for that kind of dig.
-5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (`/tmp/ctsrun/l125b_*.qpa`) are already deleted; only prior
+   sessions' own leftover `l124*` files remain there, untouched (not
+   this session's to clean).
+2. Pick up **`Array2D`** next (the next shape in L125(b)'s own
+   established ordering) -- mirror this session's `Array1D` pattern
+   exactly: new `Sample2DArrayI32` call kind, `createSample2DArrayI32`,
+   `femeCpuImageSample2DArrayV4I32` runtime function (check
+   `femeRTFetchTexel2DArrayI32`/`femeRTRoundClampLayer` for what already
+   exists to reuse -- likely everything needed is already there, same as
+   both shapes this session), and the `hasOnlySupportedImageUses`/
+   `lowerImageAccesses` wiring. Remember the `femeRTRoundClampLayer`
+   placement gotcha above.
+3. Then **`Plain3D`** (3-component `(U, V, W)` coordinate, real 3-wide
+   `ConstOffset` per L67(c)'s own precedent) -- similar shape to
+   `Array2D` but no array layer.
+4. **`Cube`/`CubeArray`** last -- structurally different (direction-vector
+   coordinate resolved via `femeRTSelectCubeFace`, no `ConstOffset` at
+   all per SPIR-V spec) -- worth its own careful read of
+   `createSampleCube`'s/`createSampleCubeArray`'s own float counterparts
+   before starting, rather than assuming the same 3-step pattern applies
+   unchanged.
+5. Once all 6 shapes are done, strike through L125(b) in `Roadmap.md` and
+   consider whether `L125(c)`/`L125(d)` (the other, not-yet-root-caused
+   fail buckets from L125(a)'s own original triage) or **L125's next
+   fresh sample** is the better next pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
