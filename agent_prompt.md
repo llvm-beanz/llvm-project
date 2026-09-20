@@ -55,32 +55,23 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## Next steps
-
-1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
-   logs (`/tmp/ctsrun/l125h_*`) are already deleted.
-2. **L125(g)** is the last item in this sub-tree: `SampleCmp*`/
-   `Gather*`/`GatherCmp*` swizzle semantics. Needs spec research
-   *before* any code change -- specifically: (a) does a depth-compare's
-   single-channel dref read honor a non-identity `VkComponentMapping`
-   at all, or is depth-compare exempt since it reads a specific
-   depth-format channel rather than an RGBA color? (b) does
-   `OpImageGather`'s `Component` (0-3) selector operate on the
-   pre-swizzle or post-swizzle channel layout? Check the Vulkan spec's
-   own "Image Operations" chapter and `vktPipelineImageViewTests.cpp`/
-   `vktImageGatherTests.cpp` for any existing coverage before assuming
-   either answer.
-3. Consider the new `VK_ERROR_INITIALIZATION_FAILED`-on-plain-`_sint`-
-   sampling data point discovered this session as a fresh lead for
-   L125(c)'s own untriaged buckets -- it may share a root cause with
-   the already-known `sampler.border_swizzle.*`-heavy
-   `VK_ERROR_INITIALIZATION_FAILED` bucket from that row's original
-   triage, worth checking before assuming they're the same or
-   different bugs.
-4. `L125(c)`'s own remaining buckets (ASTC/EAC/ETC2/BC image
-   mismatches, the two distinct `VK_ERROR_INITIALIZATION_FAILED`
-   sites, `vktPipelineBindPointTests.cpp`) remain untouched and
-   untriaged -- a good alternative pick if L125(g)'s spec research
-   doesn't pan out quickly.
-5. `ninja check-feme` and both CTS build directories are incremental
-   from here -- no reconfigure needed.
+1. **(~15 min)** Root-cause **L125(j)** first: run
+   `dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.filter_mode.
+   min_linear_mag_linear` with `--deqp-log-decompiled-spirv=enable`
+   and `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`, compare the expected
+   vs. actual face/texel indices against `femeRTSelectCubeFace`'s own
+   face-numbering convention. It's a plain correctness bug (not
+   swizzle-related), so likely the fastest win of the three open items.
+2. **(~20-30 min)** For **L125(i)**, search
+   `vktTextureShadowTests.cpp` and `vktPipelineSamplerTests.cpp`'s own
+   compare-mode tests for any depth-compare + non-identity-swizzle
+   coverage before writing any code. If none exists, this row may need
+   to stay deferred rather than implemented on spec-reasoning alone.
+3. **L125(c)**'s own four buckets are still the biggest remaining
+   scope in this series -- a good pick once L125(j)/L125(i) are
+   resolved or confirmed blocked.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. Clean up `/tmp/ctsrun/l125g_*` and the two scratch spec-fetch files
+   (`/tmp/1789914627854-copilot-tool-output-....txt`, `/tmp/images.adoc`)
+   before ending a future session, if not already gone.
