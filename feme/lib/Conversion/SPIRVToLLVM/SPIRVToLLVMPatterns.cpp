@@ -6910,35 +6910,27 @@ public:
   }
 };
 
-/// Whether \p Type is, or (recursively, through a `spirv::StructType`/
-/// `spirv::ArrayType`) contains, SPIR-V's `OpTypeBool` (represented, like
-/// MLIR's SPIR-V dialect itself, as a plain `i1` -- there is no distinct
-/// `spirv::BoolType`). `OpTypeBool` has no defined memory representation
-/// (its only legal storage classes -- `Workgroup`, `Private`, `Function` --
-/// are exactly the ones this ICD's SPIR-V producers can put one in), and an
-/// `i1` is only sound as a pure SSA value: once addressed by
-/// `getelementptr` as part of an aggregate (any `Workgroup`-storage
-/// `shared`/`groupshared` struct or array containing a `bool`/`bvec*`),
-/// its 1-bit size is not byte-addressable, asserting deep in LLVM's own
-/// `GetElementPtrTypeIterator` ("Not byte-addressable") rather than failing
-/// to legalize (`dEQP-VK.compute.pipeline.
-/// zero_initialize_workgroup_memory.composites.*`, whose per-case struct
-/// mixes a `bool`/`bvec2`/`bvec3`/`bvec4` field in with real scalars).
-/// `WorkgroupGlobalVariablePattern` checks this before converting so the
-/// unsupported shape fails to legalize cleanly instead.
-bool containsAddressableBool(mlir::Type Type) {
-  if (Type.isInteger(1))
-    return true;
-  if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(Type)) {
-    for (unsigned I = 0, E = StructTy.getNumElements(); I != E; ++I)
-      if (containsAddressableBool(StructTy.getElementType(I)))
-        return true;
-    return false;
-  }
-  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
-    return containsAddressableBool(ArrayTy.getElementType());
-  return false;
-}
+/// Historical note (roadmap L124(v)): this file used to reject any
+/// `Workgroup`-storage global containing `OpTypeBool` (`i1`) anywhere,
+/// under the assumption that addressing an `i1` field/element with
+/// `getelementptr` is unsound (an `i1` has no defined byte size). That
+/// assumption turned out to be wrong for every shape FeMe's own struct/
+/// array conversion actually produces: a struct member's `getelementptr`
+/// index resolves to a fixed byte offset baked into the struct's own
+/// layout (never a runtime multiply-by-element-size the way array/vector
+/// indexing is), and LLVM's data layout already reserves a full byte for
+/// an `i1` array element's own stride -- both directly confirmed via a
+/// `mlir-translate -mlir-to-llvmir` + `opt -passes=verify` repro of a
+/// `Workgroup` struct with a bare `i1` member, an array of `i1`, and
+/// `bvec2`/`bvec3`/`bvec4` members, and via `dEQP-VK.compute.pipeline.
+/// zero_initialize_workgroup_memory.{composites.2,types.bool}` now
+/// passing directly. The one shape that genuinely cannot use
+/// `getelementptr` -- indexing a single lane out of a `bool` *vector* --
+/// was never covered by this now-removed guard's own struct/array-only
+/// recursion in the first place, and is already handled correctly by
+/// `BoolVectorLaneAccessChainPattern`/`BoolVectorLaneLoadPattern`/
+/// `BoolVectorLaneStorePattern` below (full-vector load/store plus
+/// `extractelement`/`insertelement`, never a lane-indexing `getelementptr`).
 
 /// Converts a `Workgroup`-storage-class `spirv.GlobalVariable` -- a GLSL
 /// `shared`/HLSL `groupshared` variable declared directly in SPIR-V, rather
@@ -6974,11 +6966,6 @@ public:
     auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
     if (SrcType.getStorageClass() != mlir::spirv::StorageClass::Workgroup)
       return Rewriter.notifyMatchFailure(Op, "not a workgroup variable");
-
-    if (containsAddressableBool(SrcType.getPointeeType()))
-      return Rewriter.notifyMatchFailure(
-          Op, "a bool member of a workgroup variable is not yet supported "
-              "(not byte-addressable)");
 
     mlir::Type DstType =
         getTypeConverter()->convertType(SrcType.getPointeeType());
