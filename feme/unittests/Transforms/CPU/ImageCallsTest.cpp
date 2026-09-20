@@ -1332,4 +1332,110 @@ TEST_F(ImageCallsTest, MatchesGatherCubeCall) {
       cast<FixedVectorType>(CI->getType())->getElementType()->isFloatTy());
 }
 
+// `createGather2DI32`'s own `feme.cpu.image.gather.2d.v4i32` call
+// (roadmap L125(k)): the integer-channel counterpart of `ImageCallKind::
+// Gather2D`, identical operand shape, but returning `<4 x i32>`.
+TEST_F(ImageCallsTest, MatchesGather2DI32Call) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGather2DI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.5), Builder.getInt32(1),
+      Builder.getInt32(0), Builder.getInt32(0), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Gather2DI32);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->Component, Builder.getInt32(1));
+  EXPECT_EQ(Matched->OffsetX, Builder.getInt32(0));
+  EXPECT_EQ(Matched->OffsetY, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
+}
+
+// `createGatherArray2DI32`'s own `feme.cpu.image.gather.array2d.v4i32`
+// call (roadmap L125(k)): the `Array2D` counterpart of `ImageCallKind::
+// Gather2DI32`, with an extra `ArrayLayer` operand, mirroring
+// `GatherArray2D`'s own relationship to `Gather2D`.
+TEST_F(ImageCallsTest, MatchesGatherArray2DI32Call) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGatherArray2DI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 2.0), Builder.getInt32(1),
+      Builder.getInt32(0), Builder.getInt32(0), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GatherArray2DI32);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->ArrayLayer, ConstantFP::get(Builder.getFloatTy(), 2.0));
+  EXPECT_EQ(Matched->Component, Builder.getInt32(1));
+  EXPECT_EQ(Matched->OffsetX, Builder.getInt32(0));
+  EXPECT_EQ(Matched->OffsetY, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
+}
+
+// `createGatherCubeI32`'s own `feme.cpu.image.gather.cube.v4i32` call
+// (roadmap L125(k)): the integer-channel counterpart of `ImageCallKind::
+// GatherCube`, mirroring that call's direction-vector coordinate and
+// lack of an offset operand.
+TEST_F(ImageCallsTest, MatchesGatherCubeI32Call) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createGatherCubeI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 1.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(1),
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::GatherCubeI32);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 1.0));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->W, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->Component, Builder.getInt32(1));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(
+      cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
+}
+
 } // namespace

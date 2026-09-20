@@ -3913,6 +3913,124 @@ TEST(SPIRVResourceLoweringTest, LowersGatherArray2DToImageGatherArray2D) {
   EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(12))->isOne());
 }
 
+TEST(SPIRVResourceLoweringTest, LowersIntegerGatherToImageGatherI32) {
+  // Roadmap L125(k): a `spv_resource_gather` against an integer-sampled
+  // (`i32`) `Plain2D` image lowers to `feme.cpu.image.gather.2d.v4i32`
+  // instead of `hasOnlySupportedImageUses` rejecting it outright --
+  // mirrors `LowersGatherToImageGather`'s own identical operand shape,
+  // just with the image's own sampled type and the intrinsic's result
+  // type both switched from `float`/`<4 x float>` to `i32`/`<4 x i32>`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<2 x float> %coord, i32 %component) {
+      %img = call target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.gather(
+          target("spirv.Image", i32, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord,
+          i32 %component, <2 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Gather = findImageCall(*F, "feme.cpu.image.gather.2d.v4i32");
+  ASSERT_TRUE(Gather);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, component, offset_x, offset_y, mask).
+  ASSERT_EQ(Gather->arg_size(), 12u);
+  EXPECT_EQ(Gather->getArgOperand(8)->getName(), "component");
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(9))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(10))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(11))->isOne());
+}
+
+TEST(SPIRVResourceLoweringTest, LowersIntegerGatherCubeToImageGatherCubeI32) {
+  // Roadmap L125(k): the `Cube` counterpart of
+  // `LowersIntegerGatherToImageGatherI32` above, mirroring
+  // `LowersGatherCubeToImageGatherCube`'s own direction-vector coordinate
+  // and lack of an offset operand.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<3 x float> %dir, i32 %component) {
+      %img = call target("spirv.Image", i32, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.gather(
+          target("spirv.Image", i32, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %dir,
+          i32 %component, <3 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Gather = findImageCall(*F, "feme.cpu.image.gather.cube.v4i32");
+  ASSERT_TRUE(Gather);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, component, mask).
+  ASSERT_EQ(Gather->arg_size(), 11u);
+  EXPECT_EQ(Gather->getArgOperand(9)->getName(), "component");
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(10))->isOne());
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerGatherArray2DToImageGatherArray2DI32) {
+  // Roadmap L125(k): the `Array2D` counterpart of
+  // `LowersIntegerGatherToImageGatherI32` above, mirroring
+  // `LowersGatherArray2DToImageGatherArray2D`'s own 3-wide `Array2D`
+  // coordinate.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<3 x float> %coord, i32 %component) {
+      %img = call target("spirv.Image", i32, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.gather(
+          target("spirv.Image", i32, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          i32 %component, <2 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Gather = findImageCall(*F, "feme.cpu.image.gather.array2d.v4i32");
+  ASSERT_TRUE(Gather);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, array_layer, component, offset_x, offset_y, mask).
+  ASSERT_EQ(Gather->arg_size(), 13u);
+  EXPECT_EQ(Gather->getArgOperand(9)->getName(), "component");
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(10))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(11))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Gather->getArgOperand(12))->isOne());
+}
+
 TEST(SPIRVResourceLoweringTest,
      LowersSampleCmpLevelToImageSampleCmpWithRealLod) {
   // Roadmap L72(b): unlike `samplecmplevelzero` above, `spv_resource_

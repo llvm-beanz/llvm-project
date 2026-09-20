@@ -226,6 +226,29 @@ using GatherCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
                               const FemeSamplerDescriptor *, uint32_t, uint32_t,
                               uint32_t, float, float, float, int32_t, bool,
                               void *);
+/// `feme.cpu.image.gather.2d.v4i32`'s own operand shape (roadmap
+/// L125(k)): identical to `GatherFn` above, except the `out` pointer is
+/// `<4 x i32>`-shaped rather than `<4 x float>`, for a gather against an
+/// integer-sampled (`usampler2D`/`isampler2D`) image.
+using GatherI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
+                             uint32_t, float, float, int32_t, int32_t, int32_t,
+                             bool, void *);
+/// `feme.cpu.image.gather.array2d.v4i32`'s own operand shape (roadmap
+/// L125(k)): the `Array2D` counterpart of `GatherI32Fn` above, mirroring
+/// `GatherArray2DFn`'s relationship to `GatherFn`.
+using GatherArray2DI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                    const FemeSamplerDescriptor *, uint32_t,
+                                    uint32_t, uint32_t, float, float, float,
+                                    int32_t, int32_t, int32_t, bool, void *);
+/// `feme.cpu.image.gather.cube.v4i32`'s own operand shape (roadmap
+/// L125(k)): the `Cube` counterpart of `GatherI32Fn` above, mirroring
+/// `GatherCubeFn`'s direction-vector coordinate and lack of an offset
+/// operand.
+using GatherCubeI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                 const FemeSamplerDescriptor *, uint32_t,
+                                 uint32_t, uint32_t, float, float, float,
+                                 int32_t, bool, void *);
 /// Roadmap L52a: the ordinary (non-comparison) `Texture1D` counterpart of
 /// `SampleFn` -- a single `U` coordinate, no `ConstOffset` (mirroring
 /// `SampleArrayFn`'s own simpler scope, see `ImageCallKind::Sample1D`'s
@@ -2092,6 +2115,35 @@ TEST_F(ImageSamplingTest, GatherAppliesImageViewSwizzleToEachTexel) {
   EXPECT_FLOAT_EQ(Out[3], 0.4f); // T(X0,Y0)
 }
 
+// (Roadmap L125(k)) `feme.cpu.image.gather.2d.v4i32` -- the
+// integer-channel counterpart of `GatherReturnsFourTexelsInGatherOrder`
+// above, same 2x2-image/component-1-selection proof technique, but
+// through an `R32G32B32A32_SINT`-formatted image and a `<4 x i32>`-
+// shaped `out`.
+TEST_F(ImageSamplingTest, Gather2DI32ReturnsFourTexelsInGatherOrder) {
+  int32_t Storage[2][2][4] = {{{9, 4, 0, 0}, {9, 6, 0, 0}},
+                              {{9, 3, 0, 0}, {9, 7, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 2, 2, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherI32Fn Fn = resolve<GatherI32Fn>(
+      addWrapper("gather_i32", "feme.cpu.image.gather.2d.v4i32"));
+  int32_t Out[4] = {-1, -1, -1, -1};
+  // Component 1 (green): T(X0,Y0)=4, T(X1,Y0)=6, T(X0,Y1)=3, T(X1,Y1)=7.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*Component=*/1, 0, 0,
+     true, Out);
+  EXPECT_EQ(Out[0], 3); // T(X0,Y1)
+  EXPECT_EQ(Out[1], 7); // T(X1,Y1)
+  EXPECT_EQ(Out[2], 6); // T(X1,Y0)
+  EXPECT_EQ(Out[3], 4); // T(X0,Y0)
+}
+
 TEST_F(ImageSamplingTest, GatherCmpArray2DIsolatesNamedLayer) {
   // Roadmap H124q: `feme.cpu.image.gathercmp.array2d.v4f32` must gather
   // its 2x2 depth-comparison footprint from the requested `ArrayLayer`
@@ -2179,6 +2231,46 @@ TEST_F(ImageSamplingTest, GatherArray2DIsolatesNamedLayer) {
   EXPECT_FLOAT_EQ(Layer1[1], 0.8f); // T(X1,Y1)
   EXPECT_FLOAT_EQ(Layer1[2], 0.9f); // T(X1,Y0)
   EXPECT_FLOAT_EQ(Layer1[3], 0.1f); // T(X0,Y0)
+}
+
+// (Roadmap L125(k)) `feme.cpu.image.gather.array2d.v4i32` -- the
+// integer-channel counterpart of `GatherArray2DIsolatesNamedLayer`
+// above, same two-layer/"every corner differs" proof technique, through
+// an `R32G32B32A32_SINT`-formatted image and a `<4 x i32>`-shaped `out`.
+TEST_F(ImageSamplingTest, GatherArray2DI32IsolatesNamedLayer) {
+  int32_t Storage[2][2][2][4] = {{{{9, 4, 0, 0}, {9, 6, 0, 0}},
+                                  {{9, 3, 0, 0}, {9, 7, 0, 0}}},
+                                 {{{9, 1, 0, 0}, {9, 9, 0, 0}},
+                                  {{9, 2, 0, 0}, {9, 8, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 2,
+                       ResourceFormat::R32G32B32A32_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherArray2DI32Fn Fn = resolve<GatherArray2DI32Fn>(addWrapper(
+      "gather_array2d_i32", "feme.cpu.image.gather.array2d.v4i32"));
+  // Layer 0, component 1 (green): T(X0,Y0)=4, T(X1,Y0)=6, T(X0,Y1)=3,
+  // T(X1,Y1)=7.
+  int32_t Layer0[4] = {-1, -1, -1, -1};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.0f,
+     /*Component=*/1, 0, 0, true, Layer0);
+  EXPECT_EQ(Layer0[0], 3); // T(X0,Y1)
+  EXPECT_EQ(Layer0[1], 7); // T(X1,Y1)
+  EXPECT_EQ(Layer0[2], 6); // T(X1,Y0)
+  EXPECT_EQ(Layer0[3], 4); // T(X0,Y0)
+  // Layer 1, component 1 (green): T(X0,Y0)=1, T(X1,Y0)=9, T(X0,Y1)=2,
+  // T(X1,Y1)=8 -- every corner differs from layer 0.
+  int32_t Layer1[4] = {-1, -1, -1, -1};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/1.0f,
+     /*Component=*/1, 0, 0, true, Layer1);
+  EXPECT_EQ(Layer1[0], 2); // T(X0,Y1)
+  EXPECT_EQ(Layer1[1], 8); // T(X1,Y1)
+  EXPECT_EQ(Layer1[2], 9); // T(X1,Y0)
+  EXPECT_EQ(Layer1[3], 1); // T(X0,Y0)
 }
 
 TEST_F(ImageSamplingTest, GatherCmpCubeIsolatesNamedFace) {
@@ -2284,6 +2376,49 @@ TEST_F(ImageSamplingTest, GatherCubeIsolatesNamedFace) {
   EXPECT_FLOAT_EQ(Face1[3], 0.1f); // T(X0,Y0)
 }
 
+// (Roadmap L125(k)) `feme.cpu.image.gather.cube.v4i32` -- the
+// integer-channel counterpart of `GatherCubeIsolatesNamedFace` above,
+// same two-face/"every corner differs" proof technique, through an
+// `R32G32B32A32_SINT`-formatted image and a `<4 x i32>`-shaped `out`.
+TEST_F(ImageSamplingTest, GatherCubeI32IsolatesNamedFace) {
+  int32_t Storage[6][2][2][4] = {
+      {{{9, 4, 0, 0}, {9, 6, 0, 0}}, {{9, 3, 0, 0}, {9, 7, 0, 0}}},
+      {{{9, 1, 0, 0}, {9, 9, 0, 0}}, {{9, 2, 0, 0}, {9, 8, 0, 0}}},
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {0, 0, 0, 0}}},
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {0, 0, 0, 0}}},
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {0, 0, 0, 0}}},
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {0, 0, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCubeI32Fn Fn = resolve<GatherCubeI32Fn>(
+      addWrapper("gather_cube_i32", "feme.cpu.image.gather.cube.v4i32"));
+  // Face 0 (+X direction), component 1 (green): T(X0,Y0)=4, T(X1,Y0)=6,
+  // T(X0,Y1)=3, T(X1,Y1)=7.
+  int32_t Face0[4] = {-1, -1, -1, -1};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*Component=*/1, true, Face0);
+  EXPECT_EQ(Face0[0], 3); // T(X0,Y1)
+  EXPECT_EQ(Face0[1], 7); // T(X1,Y1)
+  EXPECT_EQ(Face0[2], 6); // T(X1,Y0)
+  EXPECT_EQ(Face0[3], 4); // T(X0,Y0)
+  // Face 1 (-X direction), component 1 (green): T(X0,Y0)=1, T(X1,Y0)=9,
+  // T(X0,Y1)=2, T(X1,Y1)=8 -- every corner differs from face 0.
+  int32_t Face1[4] = {-1, -1, -1, -1};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/-1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*Component=*/1, true, Face1);
+  EXPECT_EQ(Face1[0], 2); // T(X0,Y1)
+  EXPECT_EQ(Face1[1], 8); // T(X1,Y1)
+  EXPECT_EQ(Face1[2], 9); // T(X1,Y0)
+  EXPECT_EQ(Face1[3], 1); // T(X0,Y0)
+}
+
 // Roadmap L125(j): `TextureCube::Gather`'s own 2x2 footprint must remap
 // across a cube face edge the same way a `LINEAR` `Sample` already does
 // (`SampleCubeSeamlessBlendsAcrossFaceEdge` above), not clamp in place --
@@ -2320,6 +2455,38 @@ TEST_F(ImageSamplingTest, GatherCubeSeamlessBlendsAcrossFaceEdge) {
   EXPECT_FLOAT_EQ(Out[1], 100.0f); // T(X1,Y1), still face 0.
   EXPECT_FLOAT_EQ(Out[2], 100.0f); // T(X1,Y0), still face 0.
   EXPECT_FLOAT_EQ(Out[3], 0.0f);   // T(X0,Y0) remapped onto face 4.
+}
+
+// (Roadmap L125(k)) `feme.cpu.image.gather.cube.v4i32` -- the
+// integer-channel counterpart of `GatherCubeSeamlessBlendsAcrossFaceEdge`
+// above, confirming `femeRTFetchCubeSeamlessTexelI32` performs the same
+// cross-face remap as its float sibling, through an
+// `R32G32B32A32_SINT`-formatted image and a `<4 x i32>`-shaped `out`.
+TEST_F(ImageSamplingTest, GatherCubeI32SeamlessBlendsAcrossFaceEdge) {
+  int32_t Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face)
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = (Face == 0) ? 100 : 0;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCubeI32Fn Fn = resolve<GatherCubeI32Fn>(addWrapper(
+      "gather_cube_i32_seamless", "feme.cpu.image.gather.cube.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.6f, /*Component=*/0, true, Out);
+  EXPECT_EQ(Out[0], 0);   // T(X0,Y1) remapped onto face 4.
+  EXPECT_EQ(Out[1], 100); // T(X1,Y1), still face 0.
+  EXPECT_EQ(Out[2], 100); // T(X1,Y0), still face 0.
+  EXPECT_EQ(Out[3], 0);   // T(X0,Y0) remapped onto face 4.
 }
 
 
