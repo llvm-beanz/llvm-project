@@ -1971,7 +1971,14 @@ typedef struct {
   uint32_t Flags;
   const FemeRTImageSubresourceLayout *MipLayouts;
   uint32_t MipLayoutCount;
-  uint32_t Reserved[3];
+  // (Roadmap L125(d)) Packed per-output-channel component swizzle (one
+  // byte per channel, mirroring `VK_COMPONENT_SWIZZLE_*`'s own numeric
+  // ordering -- see `feme::cpu::ImageComponentSwizzle`'s own comment,
+  // RuntimeABI.h): 0=Identity, 1=Zero, 2=One, 3=R, 4=G, 5=B, 6=A. Taken
+  // from this struct's own former `Reserved[3]` headroom (now
+  // `Reserved[2]`).
+  uint32_t Swizzle;
+  uint32_t Reserved[2];
 } FemeRTImageDescriptor;
 
 // Mirrors `feme::cpu::FemeSamplerDescriptor` (RuntimeABI.h) field for field.
@@ -4082,6 +4089,47 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
   }
 }
 
+// Applies a packed `FemeRTImageDescriptor::Swizzle` word (see its own
+// comment) to `Color`, returning one output channel per byte of `Swizzle`
+// in R/G/B/A order. `Identity` (0) reads the same-named input channel
+// (e.g. output G reads input G), `Zero`/`One` (1/2) are constants, and
+// `R`/`G`/`B`/`A` (3..6) read a specific input channel regardless of
+// output position.
+//
+// Roadmap L125(d): used to apply an image view's own component swizzle to
+// a synthesized border color (`SamplerAddressMode::ClampToBorder`
+// resolving out of range) the same way core Vulkan requires it be applied
+// to `VK_BORDER_COLOR_*_TRANSPARENT_BLACK`/`*_OPAQUE_WHITE` (a "well-known"
+// border color, always well-defined regardless of
+// `VK_EXT_border_color_swizzle` support -- unlike `*_OPAQUE_BLACK`/custom
+// border colors, which need that extension for a non-identity swizzle,
+// per `vktPipelineSamplerBorderSwizzleTests.cpp`'s own gating). An
+// in-bounds texel fetch does not yet apply this swizzle -- a separate,
+// broader gap tracked as roadmap L125(e), out of scope here.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTApplyImageSwizzle(FemeRTv4f32 Color, uint32_t Swizzle) {
+  FemeRTv4f32 Result = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (int I = 0; I != 4; ++I) {
+    uint32_t Channel = (Swizzle >> (I * 8)) & 0xffu;
+    switch (Channel) {
+    case 0: // Identity: this output channel reads its own same-named
+            // input channel.
+      Result[I] = Color[I];
+      break;
+    case 1: // Zero
+      Result[I] = 0.0f;
+      break;
+    case 2: // One
+      Result[I] = 1.0f;
+      break;
+    default: // R, G, B, A (3..6).
+      Result[I] = Color[Channel - 3 < 4 ? Channel - 3 : 0];
+      break;
+    }
+  }
+  return Result;
+}
+
 // Reads one texel at integer coordinates `(X, Y)`, array layer `Layer`,
 // sample `Sample`, of mip level `Level` of `Img`, or `BorderColor` if
 // `UseBorder` is set (a `ClampToBorder` axis resolved out of range), or
@@ -4120,7 +4168,7 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (UseBorder) {
     FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
                           BorderColor[3]};
-    return Border;
+    return femeRTApplyImageSwizzle(Border, Img->Swizzle);
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
     return Zero;
@@ -4557,7 +4605,7 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (UseBorder) {
     FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
                           BorderColor[3]};
-    return Border;
+    return femeRTApplyImageSwizzle(Border, Img->Swizzle);
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
     return Zero;

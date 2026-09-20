@@ -606,6 +606,37 @@ struct FemeImageSubresourceLayout {
   uint64_t SampleStride;
 };
 
+/// One output channel's swizzle source for `FemeImageDescriptor::Swizzle`
+/// below, mirroring `VkComponentSwizzle` numerically (`Identity == 0`,
+/// like `VK_COMPONENT_SWIZZLE_IDENTITY`) so that a zero-filled/unwritten
+/// descriptor -- the same "reads as empty/default" idiom every other
+/// `FemeImageDescriptor` field already follows (see this struct's own
+/// comment) -- reads as an identity swizzle on every channel, not an
+/// all-red one. The CPU runtime resolves `Identity` to the concrete
+/// per-channel source itself (R's identity is `R`, G's is `G`, etc. --
+/// see `femeRTApplyImageSwizzle`, FeMeRuntimeCPU.c) rather than requiring
+/// it pre-resolved.
+enum class ImageComponentSwizzle : uint32_t {
+  Identity = 0,
+  Zero = 1,
+  One = 2,
+  R = 3,
+  G = 4,
+  B = 5,
+  A = 6,
+};
+
+/// Packs four `ImageComponentSwizzle` values -- one per output channel, in
+/// R/G/B/A order -- into one `FemeImageDescriptor::Swizzle` word, one byte
+/// per channel.
+constexpr uint32_t packImageSwizzle(ImageComponentSwizzle R,
+                                    ImageComponentSwizzle G,
+                                    ImageComponentSwizzle B,
+                                    ImageComponentSwizzle A) {
+  return static_cast<uint32_t>(R) | (static_cast<uint32_t>(G) << 8) |
+         (static_cast<uint32_t>(B) << 16) | (static_cast<uint32_t>(A) << 24);
+}
+
 /// One image descriptor: the unit the image heap is an array of. Images do
 /// not fit `FemeDescriptor`'s buffer-oriented shape (see "Separate
 /// descriptor kinds" in feme/docs/FeMeGraphicsDesign.md), so they get their
@@ -644,8 +675,22 @@ struct FemeImageDescriptor {
   /// Number of entries in `MipLayouts`; always equal to `MipLevels` for a
   /// valid descriptor.
   uint32_t MipLayoutCount;
-  /// ABI headroom for later image-descriptor extensions.
-  uint32_t Reserved[3];
+  /// (Roadmap L125(d)) The image view's component swizzle, packed via
+  /// `packImageSwizzle` (see `ImageComponentSwizzle`'s own comment for why
+  /// `Identity` is `0`, not pre-resolved). Applied to a synthesized border color
+  /// (`SamplerAddressMode::ClampToBorder` resolving out of range) the same
+  /// way it would be to an in-bounds texel fetch, mirroring core Vulkan's
+  /// own border-color "conversion to RGBA" rule (see
+  /// `femeRTFetchTexel2D`/`femeRTFetchTexel3D`, FeMeRuntimeCPU.c). An
+  /// in-bounds texel fetch does not yet apply this swizzle itself --
+  /// tracked as a separate, broader gap (roadmap L125(e)) than this one's
+  /// narrower border-color scope. Taken from this struct's own former
+  /// `Reserved[3]` headroom (now `Reserved[2]`).
+  uint32_t Swizzle;
+  /// ABI headroom for later image-descriptor extensions. Was `Reserved[3]`
+  /// before roadmap L125(d) donated one slot's worth of space to
+  /// `Swizzle` above.
+  uint32_t Reserved[2];
 };
 
 /// The minification/magnification/mip filter a `FemeSamplerDescriptor`
