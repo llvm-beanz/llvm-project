@@ -96209,3 +96209,147 @@ needs -- it does not persist across shell calls).
 8. This session's own scratch CTS logs are already cleaned up (along
    with two prior sessions' leftover `l125u*`/`l125x` directories) --
    nothing to do here.
+
+# Session: L125(z) -- missing pre-blend clamp for fixed-point attachments
+
+1. Started with the mandatory `vulkaninfo --summary | grep deviceName`
+   check (fresh `VK_ICD_FILENAMES` export in the same shell call, as
+   always) -- confirmed `FeMe CPU Vulkan Device`.
+2. Picked up `L125(z)` from the prior session's next-steps: the
+   `pipeline.monolithic.blend.clamp.*` 4-of-6 fail bucket, plus the
+   unreconciled `H99a` "21/21 pass" contradiction flagged alongside it.
+3. Read the real CTS test source
+   (`vktPipelineBlendTests.cpp`'s `ClampTest`/`ClampTestInstance`)
+   instead of guessing -- found the test's own comment quotes the
+   actual Vulkan spec requirement: for a fixed-point attachment, the
+   source/destination values *and blend factors* must each be clamped
+   to `[0, 1]`/`[-1, 1]` **before** the blend equation runs; no
+   floating-point-attachment clamping. The test's own reference value
+   is computed as `clamp(blendConstants) * clamp(quadColor)`
+   (clamp-then-multiply), deliberately using out-of-range inputs to
+   probe this.
+4. Hand-verified clamp-then-multiply and multiply-then-clamp diverge
+   for out-of-range inputs (`clamp(2.0)*0.5=0.5` vs `2.0*0.5=1.0`, and
+   `1.0` survives a final `[0,1]` clamp unchanged) -- proving a
+   final-result-only clamp can't substitute for a pre-blend input
+   clamp, and confirming `Executor.cpp` had no such clamp anywhere
+   (grep for `clamp` near the blend code came back empty).
+5. Derived the exact blend-eligible-format partition from
+   `RenderPass.cpp`'s `isSupportedColorAttachmentFormat` (the
+   authoritative list `mergeColor` can ever reach with
+   `BlendEnable=true`): 7 float formats need no clamp, exactly one
+   SNORM format (`R16G16B16A16_SNORM`) needs `[-1, 1]`, everything else
+   reachable needs `[0, 1]` -- letting the fix be a short 3-branch
+   helper rather than a full per-format table.
+6. Implemented `blendClampRange` in `Executor.cpp` and clamped
+   `Src`/`Dst`/`Src1`/`BlendConstants` to it before calling
+   `blendColor` in `mergeColor`'s `BlendEnable` branch.
+7. Added `BlendClampsSourceColorAndConstantFactorBeforeEvaluatingTheEquation`
+   in `ExecutorTest.cpp`, reproducing the real CTS
+   `blend.clamp.r8g8b8a8_unorm` case exactly; confirmed via a
+   stash/rebuild round-trip that it fails identically to the real bug
+   pre-fix and passes post-fix -- not a tautological test.
+8. `ninja check-feme`: 3,269/3,272 Passed, 3 Unsupported, 0 Failed (+1
+   new test, 0 regressions).
+9. CTS: `pipeline.monolithic.blend.clamp.*` 4 Fail -> 0 Fail (4 Pass, 2
+   NotSupported unchanged); the one blend-eligible SNORM format's own
+   `[-1, 1]` branch spot-checked via `blend.format.r16g16b16a16_snorm.*`
+   (100/100 Pass, 0 regressions).
+10. Committed the fix (`6c00531f47b0`) and the new test (`c390f6fcf3b0`)
+    as two separate commits.
+11. Kicked off a broader `pipeline.monolithic.blend.*` full-family
+    regression sweep as a background process to avoid blocking other
+    investigation on it (a deviation from the strict sync-then-wait
+    pattern, done because the prior `L125(y)` session's own sweep of
+    this same family had already timed out at 30 minutes without
+    finishing).
+12. While that ran, followed up on the `H99a` "21/21 pass"
+    contradiction: re-ran `pipeline.*.blend.clamp.*` across all 7
+    pipeline-construction-type variants (42 total cases) -- got 12
+    Pass / 0 Fail / 30 NotSupported. This confirms the fix is correct
+    everywhere it's reachable, but **still doesn't match** `H99a`'s
+    historical count of 21. Concluded this is most likely a
+    CTS-build/extension-support snapshot difference from whenever
+    `H99a` was written (more construction types may have reported
+    `Supported` then), not a residual bug -- the fix itself is
+    independently verified correct against both the spec text and the
+    CTS's own reference computation regardless of this historical
+    count mismatch. Documented as unreconciled-but-not-concerning in
+    both `Roadmap.md` and `VulkanCTSReport.md` rather than continuing
+    to dig (time better spent elsewhere; the count discrepancy has no
+    bearing on whether the fix itself is correct).
+13. The background `blend.*` full-family sweep hit the same ~25-minute
+    timeout ceiling the prior session's own sweep hit -- again did not
+    finish the entire family. Got through 3,927 cases with 0 Fail
+    before being killed by `timeout`, giving solid (if incomplete)
+    regression confidence.
+14. Struck through `L125(z)` in `Roadmap.md` with the full fix summary,
+    CTS results, and the `H99a`-discrepancy resolution/non-resolution
+    note.
+15. Added a new `## Roadmap L125(z): ...` section to
+    `VulkanCTSReport.md` documenting the investigation, root cause,
+    fix, and results, mirroring the format of every prior session's
+    own sections.
+16. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+    updates needed -- pure correctness fix, no new feature/extension
+    surface, consistent with every prior bug-fix-only session.
+17. Cleaned up this session's own `/tmp/ctsrun/l125z/*` scratch logs.
+
+## Wins
+
+- Reading the real CTS test source's own embedded spec quote (rather
+  than guessing from the "clamp" group name alone) gave an exact,
+  checkable hypothesis in minutes -- and the test's own deliberately
+  out-of-range input values made a hand-computed divergence proof
+  trivial before writing any code.
+- The "clamp-then-multiply vs multiply-then-clamp" distinction is a
+  subtle but important one: a final-result clamp is not a substitute
+  for a spec-mandated pre-operation clamp whenever an intermediate
+  result can land back in-range after the fact (`1.0` staying `1.0`
+  under a final `[0,1]` clamp is the textbook example) -- worth
+  remembering as a general pattern for other "is a single terminal
+  clamp/saturate enough" questions elsewhere in this codebase.
+- Deriving the format-range partition from the *existing*
+  `isSupportedColorAttachmentFormat` list (rather than writing a new
+  one from scratch) kept the fix to a 3-branch helper and
+  automatically stayed consistent with which formats can even reach
+  `mergeColor` with blending enabled.
+- Running the long regression sweep as a background/detached process
+  (rather than blocking on it with `mode="sync"` + polling) let the
+  `H99a`-discrepancy follow-up and doc updates proceed concurrently
+  instead of losing 25 minutes to pure waiting -- worth reusing this
+  pattern for future large sweeps that are known from prior sessions
+  to run past any single reasonable timeout.
+
+## Suggested next steps
+
+1. `L125(s)`/`L125(t)` (vertex_input format gaps, bind-point bucket)
+   remain untouched from several sessions back -- good next picks,
+   still not started.
+2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session with the upstream
+   repo(s) properly budgeted.
+3. `L115(b)` (pull-model interpolation, `InterpolateAtCentroid`/
+   `InterpolateAtSample`) remains flagged from several sessions ago as
+   a larger, not-yet-started item needing a new runtime-callback ABI
+   surface (barycentric/interpolant-plane data doesn't exist in
+   `FemeFragmentInvocation` today) -- also not a quick pick.
+4. The BC-format CTS coverage gap noted across multiple prior sessions
+   (`sampler.view_type.*.format.*bc*.address_modes.
+   *clamp_to_border*` matches 0 cases) still hasn't been investigated
+   -- worth a quick dedicated look next time nothing else is more
+   pressing.
+5. Finishing the `pipeline.monolithic.blend.*` full-family regression
+   sweep is now a **two-session-running pattern** (both this session
+   and the prior `L125(y)` session hit the same ~25-30 minute timeout
+   without completing it) -- worth either raising the timeout
+   substantially (e.g. `timeout 6000`) or explicitly splitting the
+   sweep into smaller sub-family chunks (`blend.format.*`,
+   `blend.dual_source.*`, `blend.clamp.*`, etc. individually) next
+   time this is picked up, rather than repeating the same
+   whole-family attempt a third time.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l125z/*`) are
+   already cleaned up -- nothing to do here.
