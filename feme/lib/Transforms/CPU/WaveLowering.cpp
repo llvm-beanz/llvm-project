@@ -471,9 +471,10 @@ Value *lowerReadLaneViaMemory(IRBuilder<> &Builder, Value *WideMask,
         Builder.getInt1Ty());
     Value *RawVal = Builder.CreateLoad(
         StorageTy, Builder.CreateInBoundsGEP(StorageTy, SrcScratch, SrcIdx));
-    Builder.CreateStore(Builder.CreateSelect(LaneActive, RawVal, Zero),
-                        Builder.CreateInBoundsGEP(StorageTy, DstScratch,
-                                                  Builder.getInt32(Lane)));
+    Value *Selected = Builder.CreateSelect(LaneActive, RawVal, Zero);
+    Value *DstPtr = Builder.CreateInBoundsGEP(StorageTy, DstScratch,
+                                              Builder.getInt32(Lane));
+    Builder.CreateStore(Selected, DstPtr);
   }
 
   Value *Result =

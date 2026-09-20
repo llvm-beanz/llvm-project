@@ -756,11 +756,12 @@ public:
     for (int64_t I = 0, E = VectorTy.getNumElements(); I != E; ++I) {
       mlir::Value Index = mlir::LLVM::ConstantOp::create(
           Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      mlir::Value ValueLane =
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Value, Index);
+      mlir::Value ExpectedLane = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, ExpectedValue, Index);
       mlir::Value Lane = mlir::LLVM::ExpectOp::create(
-          Rewriter, Loc,
-          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Value, Index),
-          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, ExpectedValue,
-                                               Index));
+          Rewriter, Loc, ValueLane, ExpectedLane);
       Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result, Lane,
                                                    Index);
     }
@@ -1366,28 +1367,26 @@ mlir::Value buildSubgroupMask(mlir::ConversionPatternRewriter &Rewriter,
     Bits = mlir::LLVM::SubOp::create(Rewriter, Loc, Eq, One);
     break;
   case SubgroupMaskKind::Le:
-    Bits = mlir::LLVM::SubOp::create(
-        Rewriter, Loc, mlir::LLVM::ShlOp::create(Rewriter, Loc, Eq, One), One);
+    Bits = mlir::LLVM::ShlOp::create(Rewriter, Loc, Eq, One);
+    Bits = mlir::LLVM::SubOp::create(Rewriter, Loc, Bits, One);
     break;
-  case SubgroupMaskKind::Ge:
-    Bits = clipBallotBitsToSubgroupSize(
-        Rewriter, Loc,
-        mlir::LLVM::XOrOp::create(
-            Rewriter, Loc, mlir::LLVM::SubOp::create(Rewriter, Loc, Eq, One),
-            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128,
-                                           llvm::APInt::getAllOnes(128))));
+  case SubgroupMaskKind::Ge: {
+    mlir::Value Lt = mlir::LLVM::SubOp::create(Rewriter, Loc, Eq, One);
+    mlir::Value AllOnes = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, I128, llvm::APInt::getAllOnes(128));
+    Bits = mlir::LLVM::XOrOp::create(Rewriter, Loc, Lt, AllOnes);
+    Bits = clipBallotBitsToSubgroupSize(Rewriter, Loc, Bits);
     break;
-  case SubgroupMaskKind::Gt:
-    Bits = clipBallotBitsToSubgroupSize(
-        Rewriter, Loc,
-        mlir::LLVM::XOrOp::create(
-            Rewriter, Loc,
-            mlir::LLVM::SubOp::create(
-                Rewriter, Loc,
-                mlir::LLVM::ShlOp::create(Rewriter, Loc, Eq, One), One),
-            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I128,
-                                           llvm::APInt::getAllOnes(128))));
+  }
+  case SubgroupMaskKind::Gt: {
+    mlir::Value Shifted = mlir::LLVM::ShlOp::create(Rewriter, Loc, Eq, One);
+    mlir::Value Le = mlir::LLVM::SubOp::create(Rewriter, Loc, Shifted, One);
+    mlir::Value AllOnes = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, I128, llvm::APInt::getAllOnes(128));
+    Bits = mlir::LLVM::XOrOp::create(Rewriter, Loc, Le, AllOnes);
+    Bits = clipBallotBitsToSubgroupSize(Rewriter, Loc, Bits);
     break;
+  }
   }
   return mlir::LLVM::BitcastOp::create(Rewriter, Loc, ResultType, Bits);
 }
@@ -2409,12 +2408,16 @@ public:
                                                   IndexValue);
     };
 
-    mlir::Value Result = mlir::LLVM::FMulOp::create(
-        Rewriter, Loc, ExtractElement(Vector1, 0), ExtractElement(Vector2, 0));
-    for (int64_t I = 1; I != NumElements; ++I)
-      Result = mlir::LLVM::FMulAddOp::create(
-          Rewriter, Loc, ExtractElement(Vector1, I), ExtractElement(Vector2, I),
-          Result);
+    mlir::Value Lane1 = ExtractElement(Vector1, 0);
+    mlir::Value Lane2 = ExtractElement(Vector2, 0);
+    mlir::Value Result =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, Lane1, Lane2);
+    for (int64_t I = 1; I != NumElements; ++I) {
+      Lane1 = ExtractElement(Vector1, I);
+      Lane2 = ExtractElement(Vector2, I);
+      Result = mlir::LLVM::FMulAddOp::create(Rewriter, Loc, Lane1, Lane2,
+                                             Result);
+    }
 
     Rewriter.replaceOp(Op, Result);
     return mlir::success();
@@ -11243,11 +11246,16 @@ createScalarOrVectorDotProduct(mlir::ConversionPatternRewriter &Rewriter,
                                                 IndexValue);
   };
 
-  mlir::Value Result = mlir::LLVM::FMulOp::create(
-      Rewriter, Loc, ExtractElement(V1, 0), ExtractElement(V2, 0));
-  for (int64_t I = 1; I != NumElements; ++I)
-    Result = mlir::LLVM::FMulAddOp::create(
-        Rewriter, Loc, ExtractElement(V1, I), ExtractElement(V2, I), Result);
+  mlir::Value Lane1 = ExtractElement(V1, 0);
+  mlir::Value Lane2 = ExtractElement(V2, 0);
+  mlir::Value Result =
+      mlir::LLVM::FMulOp::create(Rewriter, Loc, Lane1, Lane2);
+  for (int64_t I = 1; I != NumElements; ++I) {
+    Lane1 = ExtractElement(V1, I);
+    Lane2 = ExtractElement(V2, I);
+    Result =
+        mlir::LLVM::FMulAddOp::create(Rewriter, Loc, Lane1, Lane2, Result);
+  }
   return Result;
 }
 
@@ -11562,10 +11570,14 @@ public:
                                                   IndexValue);
     };
     auto Component = [&](int64_t A, int64_t B) {
-      mlir::Value XaYb = mlir::LLVM::FMulOp::create(Rewriter, Loc,
-                                                    Extract(X, A), Extract(Y, B));
-      mlir::Value YaXb = mlir::LLVM::FMulOp::create(Rewriter, Loc,
-                                                    Extract(Y, A), Extract(X, B));
+      mlir::Value Xa = Extract(X, A);
+      mlir::Value Yb = Extract(Y, B);
+      mlir::Value XaYb =
+          mlir::LLVM::FMulOp::create(Rewriter, Loc, Xa, Yb);
+      mlir::Value Ya = Extract(Y, A);
+      mlir::Value Xb = Extract(X, B);
+      mlir::Value YaXb =
+          mlir::LLVM::FMulOp::create(Rewriter, Loc, Ya, Xb);
       return mlir::LLVM::FSubOp::create(Rewriter, Loc, XaYb, YaXb);
     };
 
@@ -13431,4 +13443,3 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<GLLdexpPattern>(Patterns.getContext(), TypeConverter,
                               FeMeBenefit);
 }
-

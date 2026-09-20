@@ -62,7 +62,7 @@ Swapchain::Swapchain(const Allocator &Alloc, const PhysicalDeviceInfo &,
     DeviceMemory *Mem = Alloc.create<DeviceMemory>(
         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Data, Img->sizeInBytes());
     if (!Mem) {
-      std::free(Data);
+      freeDeviceMemory(Data);
       Valid = false;
       break;
     }
@@ -76,7 +76,7 @@ Swapchain::~Swapchain() {
   for (Image *Img : Images)
     Alloc.destroy(Img);
   for (DeviceMemory *Mem : Backing) {
-    std::free(Mem->data());
+    freeDeviceMemory(Mem->data());
     Alloc.destroy(Mem);
   }
 }

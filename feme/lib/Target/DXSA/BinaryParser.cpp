@@ -2143,15 +2143,21 @@ public:
                     DECODE_D3D11_SB_EXTENDED_RESOURCE_DIMENSION_STRUCTURE_STRIDE(
                         extendedToken))
               : std::nullopt;
-      ext.resourceDim = {dim, stride};
+      ext.resourceDim = ExtendedInstructionResourceDim();
+      ext.resourceDim->dim = dim;
+      ext.resourceDim->stride = stride;
       return;
     }
     case D3D11_SB_EXTENDED_OPCODE_RESOURCE_RETURN_TYPE: {
       ext.resourceReturnType = {
-          DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 0),
-          DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 1),
-          DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 2),
-          DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 3),
+          static_cast<uint32_t>(
+              DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 0)),
+          static_cast<uint32_t>(
+              DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 1)),
+          static_cast<uint32_t>(
+              DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 2)),
+          static_cast<uint32_t>(
+              DECODE_D3D11_SB_EXTENDED_RESOURCE_RETURN_TYPE(extendedToken, 3)),
       };
       return;
     }

@@ -60,9 +60,9 @@ Value *expandFDot(IRBuilder<> &Builder, CallInst &CI) {
   Function *FMulAdd = Intrinsic::getOrInsertDeclaration(
       CI.getModule(), Intrinsic::fmuladd, ElemTy);
 
-  Value *Result =
-      Builder.CreateFMul(Builder.CreateExtractElement(A, uint64_t(0)),
-                         Builder.CreateExtractElement(B, uint64_t(0)));
+  Value *A0 = Builder.CreateExtractElement(A, uint64_t(0));
+  Value *B0 = Builder.CreateExtractElement(B, uint64_t(0));
+  Value *Result = Builder.CreateFMul(A0, B0);
   for (unsigned I = 1; I != N; ++I) {
     Value *Ai = Builder.CreateExtractElement(A, I);
     Value *Bi = Builder.CreateExtractElement(B, I);

@@ -13,17 +13,32 @@
 
 #include <cstdlib>
 
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+
 using namespace feme::vulkan;
 
 namespace feme::vulkan {
 
 void *allocateDeviceMemory(size_t Size, size_t Alignment) {
+  Alignment = Alignment < sizeof(void *) ? sizeof(void *) : Alignment;
+#ifdef _WIN32
+  return _aligned_malloc(Size, Alignment);
+#else
   void *Ptr = nullptr;
-  if (posix_memalign(&Ptr,
-                      Alignment < sizeof(void *) ? sizeof(void *) : Alignment,
-                      Size) != 0)
+  if (posix_memalign(&Ptr, Alignment, Size) != 0)
     return nullptr;
   return Ptr;
+#endif
+}
+
+void freeDeviceMemory(void *Ptr) {
+#ifdef _WIN32
+  _aligned_free(Ptr);
+#else
+  std::free(Ptr);
+#endif
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
@@ -47,7 +62,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
   DeviceMemory *Obj = Alloc.create<DeviceMemory>(
       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, Data, pAllocateInfo->allocationSize);
   if (!Obj) {
-    std::free(Data);
+    freeDeviceMemory(Data);
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   }
   *pMemory = toHandle<VkDeviceMemory>(Obj);
@@ -59,7 +74,7 @@ VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
   if (!memory)
     return;
   DeviceMemory *Obj = fromHandle<DeviceMemory>(memory);
-  std::free(Obj->data());
+  freeDeviceMemory(Obj->data());
   Allocator Alloc(pAllocator);
   Alloc.destroy(Obj);
 }

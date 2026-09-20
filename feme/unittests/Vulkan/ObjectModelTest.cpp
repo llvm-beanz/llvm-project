@@ -15,6 +15,10 @@
 
 #include <cstdlib>
 
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+
 using namespace feme::vulkan;
 
 namespace {
@@ -30,13 +34,12 @@ struct CountingAllocator {
                                VkSystemAllocationScope) {
     auto *Self = static_cast<CountingAllocator *>(pUserData);
     ++Self->Allocations;
-#if defined(_ISOC11_SOURCE)
-    return aligned_alloc(Alignment, Size);
+    Alignment = Alignment < sizeof(void *) ? sizeof(void *) : Alignment;
+#ifdef _WIN32
+    return _aligned_malloc(Size, Alignment);
 #else
     void *Ptr = nullptr;
-    if (posix_memalign(&Ptr,
-                       Alignment < sizeof(void *) ? sizeof(void *) : Alignment,
-                       Size) != 0)
+    if (posix_memalign(&Ptr, Alignment, Size) != 0)
       return nullptr;
     return Ptr;
 #endif
@@ -45,7 +48,11 @@ struct CountingAllocator {
     auto *Self = static_cast<CountingAllocator *>(pUserData);
     if (Ptr)
       ++Self->Frees;
+#ifdef _WIN32
+    _aligned_free(Ptr);
+#else
     std::free(Ptr);
+#endif
   }
   static void *VKAPI_PTR realloc(void *, void *, size_t, size_t,
                                  VkSystemAllocationScope) {

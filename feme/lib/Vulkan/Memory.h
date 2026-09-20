@@ -53,6 +53,9 @@ private:
 /// maintained copy.
 void *allocateDeviceMemory(size_t Size, size_t Alignment);
 
+/// Frees storage returned by `allocateDeviceMemory`.
+void freeDeviceMemory(void *Ptr);
+
 /// Walks a `VkMemoryRequirements2`-family `pNext` chain (also chained by
 /// `VkDeviceBufferMemoryRequirements`/`VkDeviceImageMemoryRequirements`'
 /// own `VkMemoryRequirements2` output), filling every recognized extension

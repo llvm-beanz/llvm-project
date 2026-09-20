@@ -16,10 +16,15 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
+#ifdef _WIN32
+#include "llvm/Support/Windows/WindowsSupport.h"
+#else
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
-#include <unistd.h>
 
 using namespace feme::vulkan;
 
@@ -61,11 +66,19 @@ unsigned detectHostVectorBits() {
 /// minima copied verbatim"). Falls back to a conservative 1 GiB if the host
 /// can't answer (e.g. an unexpected `sysconf` failure).
 VkDeviceSize detectHostMemorySize() {
+#ifdef _WIN32
+  MEMORYSTATUSEX Status{};
+  Status.dwLength = sizeof(Status);
+  if (!GlobalMemoryStatusEx(&Status))
+    return VkDeviceSize{1} << 30;
+  return Status.ullTotalPhys;
+#else
   long Pages = sysconf(_SC_PHYS_PAGES);
   long PageSize = sysconf(_SC_PAGE_SIZE);
   if (Pages <= 0 || PageSize <= 0)
     return VkDeviceSize{1} << 30;
   return static_cast<VkDeviceSize>(Pages) * static_cast<VkDeviceSize>(PageSize);
+#endif
 }
 
 template <size_t N> void copyStringField(char (&Dst)[N], llvm::StringRef Src) {
