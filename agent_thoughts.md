@@ -94219,3 +94219,85 @@ I didn't just delete it and hope -- I:
    effort.
 3. `ninja check-feme` and the CTS build directories are both
    incremental from here -- reuse them, no reconfigure needed.
+
+# Session: L125(a) fix (integer implicit-LOD sampling) + L126 re-scoped
+
+Confirmed `FeMe CPU Vulkan Device` first, per standing instructions.
+
+## What's done
+
+1. **Fixed L125(a)**: `pipeline.monolithic.image.*.format.r8_[su]int/
+   r32_uint/r8g8_uint/r32g32b32a32_uint.*` (integer texture formats,
+   `Plain2D` view type) were failing with `VK_ERROR_INITIALIZATION_FAILED`
+   at pipeline creation -- the single largest bucket (515 of 1,165) in
+   this session's first-ever `pipeline.monolithic.*` triage sample.
+   Root cause: `hasOnlySupportedImageUses` (`SPIRVResourceLowering.cpp`)
+   only accepted an *explicit*-LOD sample against an integer-format
+   image, rejecting the far more common ordinary `texture()` call
+   (implicit LOD) outright. One-line-ish fix: drop the `!ExplicitLod`
+   check, since `lowerImageAccesses` already defaults `Lod` to `0.0`
+   when there's no explicit one -- exactly right for these
+   single-mip-level test images.
+2. Verified directly: `r8_sint.*` and `r8_uint.*` both go from several
+   `Fail`s to **0 Fail**. `ninja check-feme`: 3,220/3,223 Passed, 0
+   Failed (+2 new unit tests).
+3. Committed in 2 pieces: the code+test fix (`88c4d89f574d`), then the
+   Roadmap/CTS-report doc update (`84c63c7391cf`).
+4. **L126 investigated, not fixed**: resuming `subgroups.ballot_
+   broadcast.*`'s sweep found `bvec2_requiredsubgroupsize128` genuinely
+   hangs (10+ min at 100% CPU, zero progress; a fresh 60s-timeout repro
+   also never finished). A 30s-timeout probe found `bool_
+   requiredsubgroupsize128` and `bvec3_requiredsubgroupsize64` also
+   don't finish that fast, while `bvec2_requiredsubgroupsize64` does --
+   looks like a steep-to-exponential cost in `(subgroup size) x
+   (vector width)`, not a simple isolated hang. Not root-caused --
+   this was NOT the quick win the prior session's notes guessed at.
+   Re-scoped as `L126(a)` in `Roadmap.md` rather than closed.
+
+## What I found but didn't fix (scoped for next session)
+
+- **L125(b)**: the same integer-sampling fix only covers `Plain2D`.
+  `Plain1D`/`Array1D`/`Array2D`/`Plain3D`/`Cube`/`CubeArray` all still
+  reject an integer-channel sample outright (confirmed via a new unit
+  test) -- each needs its own `createSampleNDI32`-style runtime helper,
+  mirroring `createSample2DI32`. This is the bulk of what's left in
+  the `image.*`/`sampler.*` fail buckets after L125(a)'s fix.
+- **L125(c)**: several other fail buckets in the 1/50 sample, none
+  root-caused yet -- `Image mismatch` (likely ASTC/EAC/ETC2 compressed
+  formats), a `vkCmdUtil.cpp`-site `VK_ERROR_INITIALIZATION_FAILED`
+  bucket (`vertex_input.single_attribute.*`), and a *separate*
+  `vkPipelineConstructionUtil.cpp`-site one inside `sampler.
+  border_swizzle.*` that's confirmed NOT the same root cause as
+  L125(a) (it hits ordinary float formats too).
+- **L125(d)**: `sampler.border_swizzle.*` has its own smaller, already
+  partly-decoded color-mismatch bucket (`Ref:(...) Color:(...)` at
+  `vktPipelineSamplerBorderSwizzleTests.cpp`) -- looks like a custom
+  component swizzle isn't applied to a synthesized border color the
+  way it is to a real texel fetch. Smaller/sharper than L125(c)'s
+  catch-alls -- good first pick.
+- **L126(a)**: the ballot_broadcast slowdown/hang itself. Needs a
+  debugger backtrace or profiler sample on `bvec3_requiredsubgroupsize64`
+  (might actually finish given enough time, unlike `bvec2`+128) to find
+  the real hot loop -- could be FeMe's own subgroup emulation, or the
+  CTS harness's own reference computation. Not yet known which.
+
+## Next steps (ranked)
+
+1. **(~2 min)** Nothing to clean up -- this session's own `/tmp/ctsrun/
+   l125_*`/`l126_ballot_broadcast.*` scratch files are already deleted;
+   only prior sessions' own leftover `l124*` files remain there,
+   untouched (not this session's to clean).
+2. Pick up **L125(b)** next: widen L125(a)'s fix one shape at a time
+   (`Plain1D` is probably the smallest first step -- `Array1D`/
+   `Array2D`/`Plain3D`/`Cube`/`CubeArray` after). Each shape is its own
+   small commit, mirroring how the float-sampling path was widened
+   shape-by-shape historically (L52a, L61c, L65, L66a, L67a).
+3. Alternatively, **L125(d)** is a good quick, sharply-scoped pick if
+   L125(b)'s multi-shape runtime-helper work looks too big for the
+   time available -- start with `--deqp-log-decompiled-spirv=enable`
+   on one `sampler.border_swizzle.*` repro from the `Ref:`/`Color:`
+   mismatch bucket.
+4. **L126(a)** needs real debugging tooling (gdb/perf), not just CTS
+   triage -- pick this up only when there's time for that kind of dig.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
