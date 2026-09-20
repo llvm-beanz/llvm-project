@@ -55,16 +55,27 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~15-20 min)** Re-sample `L125(c)`'s remaining buckets now that the
-   cache-key bug is fixed: ASTC/EAC/ETC2 image mismatches, the two
-   `VK_ERROR_INITIALIZATION_FAILED` sites (`createGraphicsPipelines` vs
-   `createComputePipelines`), and `vktPipelineBindPointTests.cpp` -- some may
-   have been this same cache bug in disguise; re-triage before assuming the old
-   counts still hold.
-2. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is the next real
-   scoped-out gather gap -- larger, cross-repo work, not a quick pick.
-3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~20-30 min)** `L125(r)` (`InterpolateAtCentroid`/`InterpolateAtSample`
+   legalization gap, 27 fails) is likely the fastest win of the six: a missing
+   SPIR-V-to-LLVM conversion pattern for two GLSL.std.450 extended instructions,
+   mechanically similar in shape to other "operation not legalized" gaps this
+   roadmap has already closed. Start in `SPIRVToLLVMPatterns.cpp`.
+2. **(~15 min)** `L125(q)`'s sub-bucket (1) (80 fails, `border_swizzle`'s
+   single/dual-channel non-8-bit gather formats reporting "image fixture format
+   is not yet supported") already has its root cause identified this session --
+   a mechanical format-support gap, likely a good second pick alongside L125(r).
+3. `L125(p)` (440 fails, "Image mismatch" across
+   `image.suballocation`/`image_view.view_type`/`sampler.view_type`) is the
+   single largest bucket by far but needs its own
+   `--deqp-log-decompiled-spirv=enable` trace per area before estimating --
+   start here only with more time budgeted.
+4. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, the bind-point
+   bucket, and the small exact_sampling bucket) are all not yet started at all
+   -- good picks once the above three are underway or blocked.
+5. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) remains the other
+   open, larger cross-repo item from before this session -- not touched, not a
+   quick pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-4. This session's own scratch CTS logs (`/tmp/ctsrun/l125o/*`,
-   `/tmp/ctsrun/l125c/*`) and the regenerated `dEQP-VK-cases.xml` build artifact
-   are already cleaned up -- nothing to do here.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l125c2/*`) are already
+   cleaned up -- nothing to do here.
