@@ -93791,3 +93791,95 @@ triple-check its offset math against the struct's own declared
    nested *inside* an array -- not tested this session, not currently
    known to be a live CTS failure (both families are fully clean), so
    low priority unless a future regression surfaces there.
+
+# Session: L124(a) fixed -- ArrayLength against real multi-field blocks, compute.* down to 5 fails
+
+## State right now
+
+- Working tree: code fix + tests committed (`2a93b0a191c7`,
+  `2ccc09eb6b5b`), docs committed (`6e346caea8d6`); this file's own
+  commit is next.
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start (`VK_DRIVER_FILES` pointed at the local
+  build's `feme_icd.json`).
+- `ninja check-feme`: 3,217/3,220 Passed, 3 Unsupported, 0 Failed (+1
+  new lit test, 0 regressions).
+- `dEQP-VK.compute.pipeline.basic.read_unbound_ssbo`: now **Passes**,
+  confirmed by running the real CTS case directly.
+- `compute.*` full sweep: **680 Pass / 5 Fail / 60,775 NotSupported**
+  (of 61,460) -- was 679/6/60,775. Remaining 5 fails confirmed to be
+  exactly L124(b)/(c)/(d) plus 2 still-open
+  `zero_initialize_workgroup_memory` cases, all previously known.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface).
+
+## What the bug was (10-second version)
+
+`spirv.ArrayLength`'s conversion pattern assumed a runtime array is
+always its struct's *only* member (index 0). Wrong: SPIR-V only
+requires it be the struct's *last* member, which for a real multi-field
+block (`SSBO_1 { vec4 data; uint not_set[]; }`) is a nonzero index.
+
+## What I did (in order)
+
+1. Relaxed `ArrayLengthPattern`'s check from "member 0" to "the
+   pointee struct's own last member index" -- committed with a new
+   lit test case for the real multi-field-block shape.
+2. Extended `SPIRVResourceLowering.cpp`'s `isGetArrayLengthIntrinsic`
+   special-case (both `hasOnlySupportedUses` and `lowerAccesses`) from
+   `HandleKind::Storage`-only to also accept `HandleKind::StorageStruct`,
+   deriving stride/prefix from `BH.ElementStruct`'s own last member.
+3. Threaded a new `PrefixOffset` operand through `createGetDimensionsRaw`
+   and the shared `createCall` helper (all ~10 call sites updated).
+4. Updated `femeCpuResourceGetDimensionsRawI32` to subtract the prefix
+   *inside* the runtime function (with an underflow guard) rather than
+   via caller-side IR arithmetic -- doing it in IR would make an
+   unbound descriptor's `0 - PrefixOffset` wrap around instead of
+   staying `0`.
+5. Added a new lit test (`spirv-resource-lowering-array-length-struct.ll`)
+   for the `StorageStruct` shape; updated the pre-existing
+   `Storage`-shape test's `CHECK` line for the new operand.
+6. Ran `ninja check-feme` -- clean.
+7. Ran the real failing CTS case directly -- passed.
+8. Ran a full `compute.*` sweep (61,460 cases) -- +1 pass, 0
+   regressions, confirmed the remaining 5 fails are all previously
+   known/unrelated.
+9. Updated `Roadmap.md` (struck through L124(a)) and
+   `VulkanCTSReport.md` (new session narrative).
+10. Committed in 3 pieces: conversion-layer fix+test, resource-lowering
+    fix+tests, docs.
+
+## Why I didn't need fresh root-causing this time
+
+An earlier session had already scoped all three layers of this fix in
+`Roadmap.md`'s own L124(a) entry, including the exact underflow
+concern for the runtime subtraction. This session followed that
+scoping directly rather than re-deriving it.
+
+## Suggested next steps
+
+1. **(~5 min)** No scratch files created this session outside
+   `/tmp/l124a_repro.mlir` (already existed from before compaction) --
+   nothing new to clean up.
+2. Pick up **L124(b)** next
+   (`dEQP-VK.compute.pipeline.basic.remove_global_load_pass`): a plain
+   `OpConstant`/`OpConstantComposite` used as a module-scope
+   `OpVariable`'s initializer isn't modeled anywhere in the deserializer
+   -- needs a new attribute on `spirv.GlobalVariable` (alongside
+   `initializer`/`zero_initialized`) plus matching serializer/
+   `SPIRVToLLVM` lowering support. Not yet scoped in more detail than
+   the roadmap entry itself -- start there.
+3. Alternatively, **L124(c)**
+   (`dEQP-VK.compute.pipeline.basic.undefined_values`, `OpCopyLogical`
+   entirely unmodeled) or **L124(d)**
+   (`dEQP-VK.compute.pipeline.device_group.device_index`, `gl_DeviceIndex`
+   not wired up in the CPU compute pipeline) are the other two
+   remaining `compute.*` items -- each is a standalone feature gap, not
+   yet started, roughly similar scope to L124(b).
+4. The 2 `zero_initialize_workgroup_memory` fails
+   (`composites.2`, `types.bool`) seen in this session's sweep aren't
+   yet broken out as their own roadmap letter -- worth adding a new
+   L124 sub-item for them if picked up, since they weren't touched
+   this session and their root cause is unconfirmed.
+5. `ninja check-feme` and the CTS build directories are both
+   incremental from here -- reuse them, no reconfigure needed.
