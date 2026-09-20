@@ -57,31 +57,21 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Suggested next steps
 
-1. **(~5 min)** Scratch files from this session:
-   `/tmp/l124b_wholearray.mlir` (superseded by the committed lit test,
-   safe to delete) and `/tmp/ctsrun/l124b_confirm2.qpa`/
-   `l124b_final.qpa`/`l124b_test_glob.qpa`/`l124b_compute_full.qpa`
-   (+`.stdout`) -- none referenced by anything committed.
-2. Pick up **L124(c)** next
-   (`dEQP-VK.compute.pipeline.basic.undefined_values`): `OpCopyLogical`
-   (opcode 400, SPIR-V 1.4) is entirely unmodeled in MLIR's SPIR-V
-   dialect -- needs a new `spirv.CopyLogical` ODS op, verifier,
-   deserializer/serializer autogen wiring, and an `SPIRVToLLVM`
-   lowering pattern (likely per-leaf `extractvalue`/`insertvalue`
-   decomposition between two logically-compatible-but-not-identical
-   aggregate types, mirroring L116(a)'s masked load/store
-   decomposition). Roadmap has this scoped already; start there.
-3. Alternatively, **L124(d)**
-   (`dEQP-VK.compute.pipeline.device_group.device_index`):
-   `gl_DeviceIndex` isn't wired up anywhere in feme's CPU compute
-   pipeline (`grep -rl DeviceIndex feme/lib` only finds graphics-stage
-   hits). Likely trivial to report `DeviceIndex = 0` unconditionally
-   if feme's CPU backend never models more than one physical device,
-   but not yet confirmed -- needs a little research into
-   `VK_KHR_device_group` support first.
-4. The 2 `zero_initialize_workgroup_memory` fails (`composites.2`,
-   `types.bool`) still aren't broken out as their own roadmap letter --
-   worth adding one if picked up, since neither this nor prior sessions
-   have touched them and their root cause is unconfirmed.
-5. `ninja check-feme` and the CTS build directories are both
+1. **(~5 min)** Clean up this session's scratch files: `/tmp/l124c_*.mlir`
+   (superseded by the committed lit test) and `/tmp/l124c_undef.qpa`,
+   `/tmp/ctsrun/l124c_compute_sweep.qpa`/`.stdout` -- none referenced
+   by anything committed.
+2. **The entire L124 series is now closed** except **L124(v)**
+   (the 2 `zero_initialize_workgroup_memory` fails,
+   `composites.2`/`types.bool`) -- not yet root-caused at all. Start
+   with `--deqp-log-decompiled-spirv=enable` on both cases to see
+   their exact `Workgroup`-storage global's type shape (likely `i1`/
+   `struct`-typed, since matrix/vector/plain-integer shapes already
+   pass per this milestone's own opening fix).
+3. Beyond L124(v), the next unstarted milestone is **L125**: triage
+   `pipeline.monolithic.*` (465,554 cases, never sampled) -- large,
+   needs its own first bucketing pass before any concrete repro can be
+   picked, mirroring how L106/L123 approached `subgroups.*`/
+   `compute.*`.
+4. `ninja check-feme` and the CTS build directories are both
    incremental from here -- reuse them, no reconfigure needed.
