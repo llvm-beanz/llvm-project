@@ -5413,3 +5413,108 @@ and still accurate.
 **The entire L124 series (`compute.*` and `ssbo.*`) is now fully closed:
 both families are 100% clean of `Fail`s.** See `agent_thoughts.md` for the
 full narrative and next steps.
+
+## L125(a): implicit-LOD integer-sampled `Plain2D` image sampling; L126 re-scoped
+
+This session picked up both of the prior session's suggested next steps:
+**L126** (finish the abandoned `subgroups.ballot_broadcast.*` sweep) and
+**L125** (first triage pass over the never-before-sampled
+`pipeline.monolithic.*`, 465,554 cases).
+
+### L125: `pipeline.monolithic.*` first triage
+
+A `--deqp-fraction=0,50` (1/50) representative sample (8,007 cases)
+completed cleanly and found **1,165 Fail (14.5%)**. Bucketing by error
+message found the largest single bucket (515 of 1,165) was a
+`VK_ERROR_INITIALIZATION_FAILED` pipeline-creation failure, concentrated in
+integer-channel image formats (`r8_uint`/`r8_sint`/`r32_uint`/`r8g8_uint`/
+`r32g32b32a32_uint`) across many `view_type`s.
+
+Root-caused via `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1` (an existing opt-in
+diagnostic env var, `SPIRVResourceLowering.cpp`): an ordinary
+`texture()`/`Sample()` call (`OpImageSampleImplicitLod`) against an
+integer-format sampled image was rejected outright by
+`hasOnlySupportedImageUses`'s roadmap-H109 integer-sample acceptance, which
+required an *explicit* LOD unconditionally -- a prior session's own fix
+only ever covered `usampler2D`/`isampler2D`'s narrower explicit-LOD shape
+(a real but rarer case from `mesh_shader.ext.synchronization.*`), leaving
+the far more common ordinary-sampling shape (used pervasively by
+`pipeline.monolithic.image.*`'s own integer-format test matrix) unsupported
+and failing the *entire* shader's resource normalization, hence a
+pipeline-creation-time crash rather than a data mismatch.
+
+Fixed by widening `hasOnlySupportedImageUses`'s integer-`Plain2D` branch to
+also accept implicit-LOD sampling: `lowerImageAccesses`'s own pre-existing
+`Lod` default (a constant `0.0` whenever `ExplicitLod` is false) is already
+exactly right, since every real CTS case this widening covers samples a
+single-mip-level image (mip selection would clamp to 0 regardless of a
+real derivative-based LOD computation).
+
+New unit tests: `LowersImplicitLodIntegerSampledImageToImageSampleV4I32`
+(the fix itself) and `LeavesA1DIntegerSampledImageHandleUsedForSampleAlone`
+(confirming every non-`Plain2D` shape -- e.g. `Plain1D` -- is still
+correctly rejected, unchanged; no `createSample1DI32`-equivalent runtime
+helper exists yet for any other shape).
+
+Results:
+
+- `ninja check-feme`: **3,220/3,223 Passed, 3 Unsupported, 0 Failed** (+2
+  from the new tests, 0 regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: `dEQP-VK.pipeline.monolithic.image.suballocation.
+  sampling_type.combined.view_type.2d.format.r8_sint.*` went from **18
+  Fail / 34 Pass** (pre-fix) to **0 Fail / 36 Pass** (post-fix).
+- A second, fresh `--deqp-fraction=0,50` sample (note: `deqp-vk`'s own
+  fraction sampling is not deterministic run-to-run, so this is a
+  *different* ~8,007-case subset, not a like-for-like before/after diff of
+  the same cases) confirmed the fix's own target bucket is gone from every
+  case reached; this session's own time budget only allowed 5,214 of that
+  second sample's cases to run before stopping partway through the very
+  large `sampler.*` subfamily. The residual fails in that partial run are
+  a mix of already-known buckets (`Image mismatch`, likely ASTC/EAC/ETC2
+  compressed-format decoding) plus newly-found ones, broken out in
+  `Roadmap.md` as **L125(b)** (widen this same integer-sampling fix to
+  every non-`Plain2D` shape), **L125(c)** (the other, not-yet-root-caused
+  fail buckets, including a `sampler.border_swizzle`-specific
+  `VK_ERROR_INITIALIZATION_FAILED` bucket confirmed *not* to share
+  L125(a)'s own root cause, since it also hits ordinary float formats),
+  and **L125(d)** (a smaller, already-decoded `sampler.border_swizzle`
+  color-mismatch bucket, suggesting a custom component swizzle isn't
+  applied to a synthesized border color the way it is to an in-bounds
+  texel fetch).
+
+This session's fix is an internal correctness fix (widening an existing,
+narrowly-scoped resource-lowering acceptance check), not new Vulkan
+feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate.
+
+### L126: `subgroups.ballot_broadcast.*` -- not a quick win after all
+
+Resuming the prior session's abandoned sweep found it was not actually
+hung nor merely "slow" in the way a `requiredsubgroupsize128` case for a
+narrow type (`bool`) had already been observed to be (eventually
+completing in around a minute) -- `subgroupbroadcast_bvec2_
+requiredsubgroupsize128` ran for over 10 minutes at 100% CPU with zero
+forward progress (checked via `/proc/<pid>/status`/`top`, confirmed truly
+executing, not blocked), and a fresh, independent single-case repro with a
+60-second `timeout` also never completed.
+
+A further, tightly time-boxed triage (30-second `timeout` per case) found
+`subgroupbroadcast_bool_requiredsubgroupsize128` and
+`subgroupbroadcast_bvec3_requiredsubgroupsize64` *also* fail to finish in
+30 seconds, while `subgroupbroadcast_bvec2_requiredsubgroupsize64` finishes
+quickly -- suggesting a cost that scales steeply (possibly exponentially)
+with `(required subgroup size) x (vector width)`, rather than a single
+isolated hang. Given the depth of investigation this would need (a
+debugger-attached backtrace or profiler sample to find the actual hot
+loop, and to determine whether the cost lives in FeMe's own subgroup-
+broadcast emulation or in the CTS harness's own reference-value
+computation), this was **re-scoped rather than closed**: broken out as
+**L126(a)** in `Roadmap.md` for a future session with a larger time budget
+to root-cause properly.
+
+No code change for L126 this session -- purely an investigation, captured
+in `Roadmap.md` for the next session to pick up. See `agent_thoughts.md`
+for the full narrative and next steps.
