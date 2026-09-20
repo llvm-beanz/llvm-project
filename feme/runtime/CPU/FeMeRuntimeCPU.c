@@ -4250,6 +4250,82 @@ femeRTExpandBorderColorForFormat(const float BorderColor[4], uint32_t Format) {
   return Result;
 }
 
+// The integer-format (`_UINT`/`_SINT`) counterpart of
+// `femeRTImageFormatComponentMask` above, covering exactly the format
+// codes `femeRTUnpackImageTexelI32` itself decodes (the two switches
+// necessarily differ, since the same numeric `Format` code means a
+// different `VkFormat` in the two switches' respective float/int
+// contexts -- e.g. code 1 is `R32_FLOAT` in the float switch above, but
+// is never reached by this one, while code 5 (`R32_UINT`) is only
+// meaningful here). An unrecognized format conservatively returns "all
+// four present" (`0xf`), the same policy as the float-format switch's own
+// default.
+//
+// Roadmap L125(v): needed by `femeRTExpandBorderColorForFormatI32` below,
+// mirroring `femeRTImageFormatComponentMask`'s own role for the float
+// path.
+__attribute__((always_inline)) static uint32_t
+femeRTImageFormatComponentMaskI32(uint32_t Format) {
+  switch (Format) {
+  case 5:  // R32_UINT
+  case 9:  // R32_SINT
+  case 87: // R8_UINT
+  case 88: // R8_SINT
+  case 96: // R16_UINT
+  case 97: // R16_SINT
+    return 0x1u; // R only.
+  case 6:   // R32G32_UINT
+  case 10:  // R32G32_SINT
+  case 91:  // R8G8_UINT
+  case 92:  // R8G8_SINT
+  case 101: // R16G16_UINT
+  case 102: // R16G16_SINT
+    return 0x3u; // R, G.
+  case 8:   // R32G32B32A32_UINT
+  case 12:  // R32G32B32A32_SINT
+  case 15:  // R8G8B8A8_UINT
+  case 16:  // R8G8B8A8_SINT
+  case 21:  // R16G16B16A16_UINT
+  case 22:  // R16G16B16A16_SINT
+  case 25:  // R10G10B10A2_UINT
+  case 104: // R10G10B10A2_SINT
+    return 0xfu; // R, G, B, A.
+  default:
+    return 0xfu;
+  }
+}
+
+// (Roadmap L125(v)) The integer-sampled (`v4i32`) counterpart of
+// `femeRTExpandBorderColorForFormat` above, used by every
+// `femeCpuImage{Sample,Gather}*V4I32` `CLAMP_TO_BORDER` fallback in place
+// of the fixed `{0, 0, 0, 1}` literal those functions used before this
+// roadmap entry: `mapBorderColor` (Image.cpp) only ever bakes a `Sampler`'s
+// `BorderColor[4]` to exactly `0.0f`/`1.0f` per component (this ICD
+// advertises no `VK_EXT_custom_border_color`, so every `VkBorderColor`
+// enumerator it accepts -- `..._TRANSPARENT_BLACK`/`..._OPAQUE_BLACK`/
+// `..._OPAQUE_WHITE`, float or int variants alike -- is representable as a
+// binary 0/1-per-channel pattern), so truncating that same already-baked
+// float value to `int32_t` recovers the identical `VkClearColorValue`
+// `int32[4]` an integer-sampled image's own border color would have,
+// without needing any new integer-typed storage on `FemeRTSamplerDescriptor`
+// itself. The result is then masked per `Format` via
+// `femeRTImageFormatComponentMaskI32` (not the float-only
+// `femeRTImageFormatComponentMask`, whose switch does not cover any
+// `_UINT`/`_SINT` format code), since Vulkan's border-color "conversion to
+// RGBA" rule (a component the image format doesn't store reads as a fixed
+// `0`/`1`, not the border color's own nominal value for that channel)
+// applies identically to an integer-sampled image.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTExpandBorderColorForFormatI32(const float BorderColor[4],
+                                    uint32_t Format) {
+  uint32_t Mask = femeRTImageFormatComponentMaskI32(Format);
+  FemeRTv4i32 Result;
+  for (int I = 0; I != 4; ++I)
+    Result[I] =
+        (Mask & (1u << I)) ? (int32_t)BorderColor[I] : (I == 3 ? 1 : 0);
+  return Result;
+}
+
 // Reads one texel at integer coordinates `(X, Y)`, array layer `Layer`,
 // sample `Sample`, of mip level `Level` of `Img`, or `BorderColor` if
 // `UseBorder` is set (a `ClampToBorder` axis resolved out of range), or
@@ -5746,16 +5822,20 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
   int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                          Samp.AddressV, &BorderY);
   if (BorderX || BorderY) {
-    // Roadmap H109: `FemeRTSamplerDescriptor` has no integer border-color
-    // storage (only a float `BorderColor[4]`) -- fall back to a fixed
-    // `{0, 0, 0, 1}` default. (Roadmap L125(q)): this default must still
-    // go through the image view's own swizzle like any other tap
-    // (`femeRTFetchTexel2DI32`'s own in-bounds branch already does this,
-    // via `ApplySwizzle`) -- confirmed via a real CTS case,
+    // Roadmap L125(v): `femeRTExpandBorderColorForFormatI32` recovers
+    // `Samp`'s own real border color (not a fixed `{0, 0, 0, 1}` default
+    // -- see that helper's own comment for why `FemeRTSamplerDescriptor`
+    // needs no new integer-typed storage to do this) and masks it per
+    // `Img.Format`'s stored-component count. (Roadmap L125(q)): this
+    // default must still go through the image view's own swizzle like
+    // any other tap (`femeRTFetchTexel2DI32`'s own in-bounds branch
+    // already does this, via `ApplySwizzle`) -- confirmed via a real CTS
+    // case,
     // `sampler.border_swizzle.r16_sint.barg.transparent_black.no_gather.*`,
     // that this row's own former "no real CTS case is known" claim no
     // longer holds.
-    FemeRTv4i32 Border = {0, 0, 0, 1};
+    FemeRTv4i32 Border =
+        femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format);
     return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/0, AddrX, AddrY,
@@ -5800,9 +5880,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
   int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
                                          Samp.AddressU, &BorderX);
   if (BorderX) {
-    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // Roadmap L125(v): same femeRTExpandBorderColorForFormatI32 fix as
     // `femeCpuImageSample2DV4I32`'s own identical fallback above.
-    FemeRTv4i32 Border = {0, 0, 0, 1};
+    FemeRTv4i32 Border =
+        femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format);
     return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel1DI32(&Img, Level, AddrX, /*ApplySwizzle=*/1);
@@ -5860,9 +5941,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample3DV4I32(
   int32_t AddrZ = femeRTApplyAddressMode(Z, (int32_t)LevelDepth,
                                          Samp.AddressW, &BorderZ);
   if (BorderX || BorderY || BorderZ) {
-    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // Roadmap L125(v): same femeRTExpandBorderColorForFormatI32 fix as
     // `femeCpuImageSample2DV4I32`'s own identical fallback above.
-    FemeRTv4i32 Border = {0, 0, 0, 1};
+    FemeRTv4i32 Border =
+        femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format);
     return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel3DI32(&Img, Level, AddrX, AddrY, AddrZ,
@@ -6565,12 +6647,11 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGather2DV4F32(
 // (`usampler2D`/`isampler2D`) counterpart of `femeCpuImageGather2DV4F32`
 // above -- identical bilinear-footprint/result-ordering/mip-level-0-only
 // structure, but each tap reads through `femeRTFetchTexel2DI32` and
-// returns `<4 x i32>`. Roadmap H109's own "no integer border-color
-// storage" limitation (see `femeCpuImageSample2DV4I32`'s own comment)
-// applies per-tap here too: any tap whose `FemeRTBilinearSupport` marks
-// it `CLAMP_TO_BORDER`-out-of-bounds falls back to the same fixed
-// `{0, 0, 0, 1}` default that function uses, rather than reading an
-// address `femeRTApplyAddressMode` has already clamped in place.
+// returns `<4 x i32>`. Any tap whose `FemeRTBilinearSupport` marks it
+// `CLAMP_TO_BORDER`-out-of-bounds falls back to
+// `femeRTExpandBorderColorForFormatI32`'s own per-format-masked border
+// default (roadmap L125(v)) rather than reading an address
+// `femeRTApplyAddressMode` has already clamped in place.
 FemeRTv4i32 femeCpuImageGather2DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
@@ -6595,16 +6676,19 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageGather2DV4I32(
   uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
-  // Roadmap L125(q): the fixed `{0, 0, 0, 1}` integer border default (see
-  // `femeCpuImageSample2DV4I32`'s own identical fallback) must go through
+  // Roadmap L125(q): the per-tap integer border default must go through
   // the image view's own swizzle just like every in-bounds tap already
   // does (`ApplySwizzle=1` below) -- previously returned unswizzled,
   // confirmed via a real CTS case,
   // `sampler.border_swizzle.r16_sint.barg.transparent_black.gather_3.*`,
   // to select the wrong (pre-swizzle) channel whenever every tap in the
-  // gather footprint fell on the border.
-  FemeRTv4i32 IntBorder =
-      femeRTApplyImageSwizzleI32((FemeRTv4i32){0, 0, 0, 1}, Img.Swizzle);
+  // gather footprint fell on the border. Roadmap L125(v): the default
+  // itself now also comes from `Samp`'s own real border color (via
+  // `femeRTExpandBorderColorForFormatI32`), not a fixed `{0, 0, 0, 1}`
+  // literal -- see that helper's own comment for why.
+  FemeRTv4i32 IntBorder = femeRTApplyImageSwizzleI32(
+      femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format),
+      Img.Swizzle);
   FemeRTv4i32 T00 = (S.BorderX0 || S.BorderY0)
                         ? IntBorder
                         : femeRTFetchTexel2DI32(&Img, /*Level=*/0, /*Layer=*/0,
@@ -7544,10 +7628,13 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageGatherArray2DV4I32(
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
-  // Roadmap L125(q): see `femeCpuImageGather2DV4I32`'s own identical fix
-  // above -- the integer border default must be swizzled too.
-  FemeRTv4i32 IntBorder =
-      femeRTApplyImageSwizzleI32((FemeRTv4i32){0, 0, 0, 1}, Img.Swizzle);
+  // Roadmap L125(q)/L125(v): see `femeCpuImageGather2DV4I32`'s own
+  // identical fix above -- the integer border default must be swizzled,
+  // and now comes from `Samp`'s own real border color, not a fixed
+  // `{0, 0, 0, 1}` literal.
+  FemeRTv4i32 IntBorder = femeRTApplyImageSwizzleI32(
+      femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format),
+      Img.Swizzle);
   FemeRTv4i32 T00 =
       (S.BorderX0 || S.BorderY0)
           ? IntBorder
@@ -7803,9 +7890,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
   int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
                                          Samp.AddressU, &BorderX);
   if (BorderX) {
-    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // Roadmap L125(v): same femeRTExpandBorderColorForFormatI32 fix as
     // `femeCpuImageSample2DV4I32`'s own identical fallback above.
-    FemeRTv4i32 Border = {0, 0, 0, 1};
+    FemeRTv4i32 Border =
+        femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format);
     return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel1DArrayI32(&Img, Level, AddrX, Layer,
@@ -7860,9 +7948,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DArrayV4I32(
   int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                          Samp.AddressV, &BorderY);
   if (BorderX || BorderY) {
-    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // Roadmap L125(v): same femeRTExpandBorderColorForFormatI32 fix as
     // `femeCpuImageSample2DV4I32`'s own identical fallback above.
-    FemeRTv4i32 Border = {0, 0, 0, 1};
+    FemeRTv4i32 Border =
+        femeRTExpandBorderColorForFormatI32(Samp.BorderColor, Img.Format);
     return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel2DI32(&Img, Level, Layer, AddrX, AddrY,

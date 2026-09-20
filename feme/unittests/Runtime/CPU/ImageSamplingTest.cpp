@@ -1250,13 +1250,21 @@ TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToInBoundsTexel) {
 
 // (Roadmap L125(q)) Unlike the float path (`ClampToBorderAppliesImage
 // ViewSwizzle` above), the integer-sampled `CLAMP_TO_BORDER` fallback
-// (`FemeRTSamplerDescriptor` has no integer border-color storage, so a
-// fixed `{0, 0, 0, 1}` default is used instead -- roadmap H109) previously
-// returned that default unswizzled, bypassing the image view's own
-// component mapping entirely. Confirmed via a real CTS regression
+// previously returned its border default unswizzled, bypassing the image
+// view's own component mapping entirely. Confirmed via a real CTS
+// regression
 // (`sampler.border_swizzle.r16_sint.barg.transparent_black.no_gather.*`)
 // that this is reachable, not merely a theoretical gap. `U`/`V` far
-// outside `[0, 1]` force every axis onto the border.
+// outside `[0, 1]` force every axis onto the border. Uses
+// `VK_BORDER_COLOR_INT_OPAQUE_BLACK` (`BorderColor = {0, 0, 0, 1}`,
+// set explicitly rather than relying on `makeSampler`'s own
+// `transparent_black`-shaped zero-initialized default) so the border's
+// own non-identity per-channel pattern -- not just `femeRTImageFormat
+// ComponentMask`'s forced-fill defaults, see
+// `SampleI32BorderColorFallbackVariesByFormatAndBorderColor` below for
+// that -- is what this test's swizzle-order assertions exercise, against
+// a 4-real-channel format (`R32G32B32A32_SINT`) where no component is
+// format-masked at all.
 TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToBorderColorFallback) {
   int32_t Storage[1][1][4] = {{{9, 9, 9, 9}}}; // Never read: always border.
   FemeImageSubresourceLayout Layout;
@@ -1269,6 +1277,7 @@ TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToBorderColorFallback)
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp = makeSampler(SamplerFilter::Nearest,
                                            SamplerAddressMode::ClampToBorder);
+  Samp.BorderColor[3] = 1.0f; // VK_BORDER_COLOR_INT_OPAQUE_BLACK.
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
   SampleI32Fn Fn = resolve<SampleI32Fn>(
@@ -1280,6 +1289,47 @@ TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToBorderColorFallback)
   EXPECT_EQ(Out[1], 1); // G <- A (pre-swizzle border A is 1)
   EXPECT_EQ(Out[2], 0); // B <- R (pre-swizzle border R is 0)
   EXPECT_EQ(Out[3], 0); // A <- Zero
+}
+
+// (Roadmap L125(v)) Unlike the fix above (which only corrected swizzle
+// *order*, still against a fixed `{0, 0, 0, 1}` border default), this
+// confirms the border default itself now varies by the sampler's own
+// `BorderColor` and by the *image format*'s stored-component count, not a
+// hardcoded literal. `R16_SINT` stores only 1 real component (R); with
+// `opaque_white` (`BorderColor = {1, 1, 1, 1}`), Vulkan's border-color
+// "conversion to RGBA" rule keeps only R from the border color's own
+// nominal value and forces G/B to `0`/A to `1` regardless of the border
+// color's own nominal G/B/A -- pre-swizzle border is therefore
+// `(1, 0, 0, 1)`, not `opaque_white`'s own nominal `(1, 1, 1, 1)`.
+// Confirmed via a real CTS regression
+// (`sampler.border_swizzle.r16_sint.argb.opaque_white.no_gather.*`,
+// `Ref:(1, 1, 0, 0)` vs. the pre-fix `Color:(1, 0, 0, 0)`).
+TEST_F(ImageSamplingTest,
+       SampleI32BorderColorFallbackVariesByFormatAndBorderColor) {
+  int16_t Storage[1][1] = {{9}}; // Never read: always border.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                       ResourceFormat::R16_SINT, Layout);
+  // `argb` component mapping: R<-A, G<-R, B<-G, A<-B.
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::A, ImageComponentSwizzle::R,
+      ImageComponentSwizzle::G, ImageComponentSwizzle::B);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp = makeSampler(SamplerFilter::Nearest,
+                                           SamplerAddressMode::ClampToBorder);
+  Samp.BorderColor[0] = Samp.BorderColor[1] = Samp.BorderColor[2] =
+      Samp.BorderColor[3] = 1.0f; // VK_BORDER_COLOR_INT_OPAQUE_WHITE.
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleI32Fn Fn = resolve<SampleI32Fn>(addWrapper(
+      "sample_i32_border_opaque_white", "feme.cpu.image.sample.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, /*Lod=*/0.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, true, Out);
+  EXPECT_EQ(Out[0], 1); // R <- A (pre-swizzle border A is 1)
+  EXPECT_EQ(Out[1], 1); // G <- R (pre-swizzle border R is 1)
+  EXPECT_EQ(Out[2], 0); // B <- G (pre-swizzle border G is forced 0)
+  EXPECT_EQ(Out[3], 0); // A <- B (pre-swizzle border B is forced 0)
 }
 
 // (Roadmap L125(h)) The integer-sampled counterpart of
@@ -2184,7 +2234,9 @@ TEST_F(ImageSamplingTest, Gather2DI32ReturnsFourTexelsInGatherOrder) {
 // (`sampler.border_swizzle.r16_sint.barg.transparent_black.gather_3.*`)
 // where the whole 2x2 gather footprint landed on the border. Every one
 // of the 4 gathered corners must go through the same swizzle an
-// in-bounds tap would, not the unswizzled `{0, 0, 0, 1}` default.
+// in-bounds tap would. Uses `VK_BORDER_COLOR_INT_OPAQUE_BLACK` for the
+// same reason `SampleI32AppliesImageViewSwizzleToBorderColorFallback`
+// above does (see that test's own updated comment).
 TEST_F(ImageSamplingTest, Gather2DI32AppliesImageViewSwizzleToBorderColorFallback) {
   int32_t Storage[1][1][4] = {{{9, 9, 9, 9}}}; // Never read: always border.
   FemeImageSubresourceLayout Layout;
@@ -2197,6 +2249,7 @@ TEST_F(ImageSamplingTest, Gather2DI32AppliesImageViewSwizzleToBorderColorFallbac
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp = makeSampler(SamplerFilter::Linear,
                                            SamplerAddressMode::ClampToBorder);
+  Samp.BorderColor[3] = 1.0f; // VK_BORDER_COLOR_INT_OPAQUE_BLACK.
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
   GatherI32Fn Fn = resolve<GatherI32Fn>(
