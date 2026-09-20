@@ -4247,15 +4247,30 @@ femeRTExpandBorderColorForFormat(const float BorderColor[4], uint32_t Format) {
 // `subpassLoad`-supplied index already checked against the bound
 // attachment's own real sample count) selects which of those contiguous
 // samples this fetch reads, via `Sample * Layout->SampleStride`.
+//
+// Roadmap L125(f): `ApplySwizzle` distinguishes the two Vulkan semantics
+// this one shared helper serves -- a sampled-image fetch (`OpImageSample*`/
+// `OpImageFetch`, reached only from the `femeRT{Sample,SampleCmp}*`
+// family) has its image view's own `VkComponentMapping` applied to the
+// texel per spec, while a storage-image load (`OpImageRead`, reached only
+// from `feme.cpu.image.load.*`'s own `femeCpuImageLoad*` wrappers) must
+// not be swizzled at all. Every `Sample*`/`SampleCmp*` caller passes `1`;
+// every `Load*`-family caller passes `0`. The border branch above already
+// only ever executes for a `Sample*`-family caller (`UseBorder` requires a
+// real `VkSampler`'s addressing mode, never present for a `Load*` access),
+// so gating it by the same flag is safe and never observably changes its
+// already-CTS-verified L125(d)/(e) behavior.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    uint32_t Layer, int32_t X, int32_t Y, uint32_t Sample,
-                   _Bool UseBorder, const float BorderColor[4]) {
+                   _Bool UseBorder, const float BorderColor[4],
+                   _Bool ApplySwizzle) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border =
         femeRTExpandBorderColorForFormat(BorderColor, Img->Format);
-    return femeRTApplyImageSwizzle(Border, Img->Swizzle);
+    return ApplySwizzle ? femeRTApplyImageSwizzle(Border, Img->Swizzle)
+                        : Border;
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
     return Zero;
@@ -4273,7 +4288,8 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
-  return femeRTUnpackImageTexel(Img->Format, Ptr);
+  FemeRTv4f32 Texel = femeRTUnpackImageTexel(Img->Format, Ptr);
+  return ApplySwizzle ? femeRTApplyImageSwizzle(Texel, Img->Swizzle) : Texel;
 }
 
 // The integer counterpart of `femeRTFetchTexel2D` above, for
@@ -4598,9 +4614,9 @@ femeRTStoreTexel2DArrayMSI32(const FemeRTImageDescriptor *Img, int32_t X,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel1D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    int32_t X, uint32_t Sample, _Bool UseBorder,
-                   const float BorderColor[4]) {
+                   const float BorderColor[4], _Bool ApplySwizzle) {
   return femeRTFetchTexel2D(Img, Level, /*Layer=*/0, X, /*Y=*/0, Sample,
-                            UseBorder, BorderColor);
+                            UseBorder, BorderColor, ApplySwizzle);
 }
 
 // The integer counterpart of `femeRTFetchTexel1D` above, for
@@ -4641,9 +4657,10 @@ femeRTStoreTexel1DI32(const FemeRTImageDescriptor *Img, int32_t X,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel1DArray(const FemeRTImageDescriptor *Img, uint32_t Level,
                         int32_t X, uint32_t Layer, uint32_t Sample,
-                        _Bool UseBorder, const float BorderColor[4]) {
+                        _Bool UseBorder, const float BorderColor[4],
+                        _Bool ApplySwizzle) {
   return femeRTFetchTexel2D(Img, Level, Layer, X, /*Y=*/0, Sample, UseBorder,
-                            BorderColor);
+                            BorderColor, ApplySwizzle);
 }
 
 // The integer counterpart of `femeRTFetchTexel1DArray` above, for
@@ -4687,12 +4704,13 @@ femeRTStoreTexel1DArrayI32(const FemeRTImageDescriptor *Img, int32_t X,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    int32_t X, int32_t Y, int32_t Z, _Bool UseBorder,
-                   const float BorderColor[4]) {
+                   const float BorderColor[4], _Bool ApplySwizzle) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border =
         femeRTExpandBorderColorForFormat(BorderColor, Img->Format);
-    return femeRTApplyImageSwizzle(Border, Img->Swizzle);
+    return ApplySwizzle ? femeRTApplyImageSwizzle(Border, Img->Swizzle)
+                        : Border;
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
     return Zero;
@@ -4710,7 +4728,8 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
-  return femeRTUnpackImageTexel(Img->Format, Ptr);
+  FemeRTv4f32 Texel = femeRTUnpackImageTexel(Img->Format, Ptr);
+  return ApplySwizzle ? femeRTApplyImageSwizzle(Texel, Img->Swizzle) : Texel;
 }
 
 // The integer counterpart of `femeRTFetchTexel3D` above, for
@@ -5116,7 +5135,8 @@ femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
   int32_t AddrY =
       femeRTApplyAddressMode(Y, (int32_t)LevelHeight, Samp->AddressV, &BorderY);
   return femeRTFetchTexel2D(Img, Level, Layer, AddrX, AddrY, /*Sample=*/0,
-                            BorderX || BorderY, Samp->BorderColor);
+                            BorderX || BorderY, Samp->BorderColor,
+                            /*ApplySwizzle=*/1);
 }
 
 // Bilinearly filters `Img` at `(U, V)`, array layer `Layer` (roadmap
@@ -5131,16 +5151,16 @@ femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
       femeRTComputeBilinearSupport(Img, U, V, Samp, Level, OffsetX, OffsetY);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(
       Img, Level, Layer, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
-      Samp->BorderColor);
+      Samp->BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(
       Img, Level, Layer, S.X1, S.Y0, /*Sample=*/0, S.BorderX1 || S.BorderY0,
-      Samp->BorderColor);
+      Samp->BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(
       Img, Level, Layer, S.X0, S.Y1, /*Sample=*/0, S.BorderX0 || S.BorderY1,
-      Samp->BorderColor);
+      Samp->BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(
       Img, Level, Layer, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
-      Samp->BorderColor);
+      Samp->BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
   FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
   return Top + (Bottom - Top) * S.Wy;
@@ -5199,7 +5219,8 @@ femeRTSamplePoint1D(const FemeRTImageDescriptor *Img,
   int32_t AddrX =
       femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp->AddressU, &BorderX);
   return femeRTFetchTexel1DArray(Img, Level, AddrX, Layer, /*Sample=*/0,
-                                 BorderX, Samp->BorderColor);
+                                 BorderX, Samp->BorderColor,
+                                 /*ApplySwizzle=*/1);
 }
 
 // Linearly filters a 1D(-array) image at normalized coordinate `U`, array
@@ -5223,10 +5244,12 @@ femeRTSampleLinear1D(const FemeRTImageDescriptor *Img,
                                       Samp->AddressU, &BorderX1);
   FemeRTv4f32 T0 = femeRTFetchTexel1DArray(Img, Level, X0, Layer,
                                            /*Sample=*/0, BorderX0,
-                                           Samp->BorderColor);
+                                           Samp->BorderColor,
+                                           /*ApplySwizzle=*/1);
   FemeRTv4f32 T1 = femeRTFetchTexel1DArray(Img, Level, X1, Layer,
                                            /*Sample=*/0, BorderX1,
-                                           Samp->BorderColor);
+                                           Samp->BorderColor,
+                                           /*ApplySwizzle=*/1);
   return T0 + (T1 - T0) * Wx;
 }
 
@@ -5286,7 +5309,8 @@ femeRTSamplePoint3D(const FemeRTImageDescriptor *Img,
   int32_t AddrZ =
       femeRTApplyAddressMode(Z, (int32_t)LevelDepth, Samp->AddressW, &BorderZ);
   return femeRTFetchTexel3D(Img, Level, AddrX, AddrY, AddrZ,
-                            BorderX || BorderY || BorderZ, Samp->BorderColor);
+                            BorderX || BorderY || BorderZ, Samp->BorderColor,
+                            /*ApplySwizzle=*/1);
 }
 
 // Trilinearly filters a `Plain3D` image at normalized coordinates
@@ -5330,21 +5354,29 @@ femeRTSampleLinear3D(const FemeRTImageDescriptor *Img,
   int32_t Z1 = femeRTApplyAddressMode(BaseZ + 1, (int32_t)LevelDepth,
                                       Samp->AddressW, &BZ1);
   FemeRTv4f32 T000 = femeRTFetchTexel3D(Img, Level, X0, Y0, Z0,
-                                        BX0 || BY0 || BZ0, Samp->BorderColor);
+                                        BX0 || BY0 || BZ0, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T100 = femeRTFetchTexel3D(Img, Level, X1, Y0, Z0,
-                                        BX1 || BY0 || BZ0, Samp->BorderColor);
+                                        BX1 || BY0 || BZ0, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T010 = femeRTFetchTexel3D(Img, Level, X0, Y1, Z0,
-                                        BX0 || BY1 || BZ0, Samp->BorderColor);
+                                        BX0 || BY1 || BZ0, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T110 = femeRTFetchTexel3D(Img, Level, X1, Y1, Z0,
-                                        BX1 || BY1 || BZ0, Samp->BorderColor);
+                                        BX1 || BY1 || BZ0, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T001 = femeRTFetchTexel3D(Img, Level, X0, Y0, Z1,
-                                        BX0 || BY0 || BZ1, Samp->BorderColor);
+                                        BX0 || BY0 || BZ1, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T101 = femeRTFetchTexel3D(Img, Level, X1, Y0, Z1,
-                                        BX1 || BY0 || BZ1, Samp->BorderColor);
+                                        BX1 || BY0 || BZ1, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T011 = femeRTFetchTexel3D(Img, Level, X0, Y1, Z1,
-                                        BX0 || BY1 || BZ1, Samp->BorderColor);
+                                        BX0 || BY1 || BZ1, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 T111 = femeRTFetchTexel3D(Img, Level, X1, Y1, Z1,
-                                        BX1 || BY1 || BZ1, Samp->BorderColor);
+                                        BX1 || BY1 || BZ1, Samp->BorderColor,
+                                        /*ApplySwizzle=*/1);
   FemeRTv4f32 Top0 = T000 + (T100 - T000) * Wx;
   FemeRTv4f32 Bottom0 = T010 + (T110 - T010) * Wx;
   FemeRTv4f32 Slice0 = Top0 + (Bottom0 - Top0) * Wy;
@@ -6234,7 +6266,8 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
                                            Samp->AddressV, &BorderY);
     FemeRTv4f32 T =
         femeRTFetchTexel2D(Img, Level, Layer, AddrX, AddrY,
-                           /*Sample=*/0, BorderX || BorderY, Samp->BorderColor);
+                           /*Sample=*/0, BorderX || BorderY, Samp->BorderColor,
+                           /*ApplySwizzle=*/0);
     return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0], IsFixedPointDepth);
   }
 
@@ -6242,16 +6275,20 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
       femeRTComputeBilinearSupport(Img, U, V, Samp, Level, OffsetX, OffsetY);
   FemeRTv4f32 T00 =
       femeRTFetchTexel2D(Img, Level, Layer, S.X0, S.Y0, /*Sample=*/0,
-                         S.BorderX0 || S.BorderY0, Samp->BorderColor);
+                         S.BorderX0 || S.BorderY0, Samp->BorderColor,
+                         /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 =
       femeRTFetchTexel2D(Img, Level, Layer, S.X1, S.Y0, /*Sample=*/0,
-                         S.BorderX1 || S.BorderY0, Samp->BorderColor);
+                         S.BorderX1 || S.BorderY0, Samp->BorderColor,
+                         /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 =
       femeRTFetchTexel2D(Img, Level, Layer, S.X0, S.Y1, /*Sample=*/0,
-                         S.BorderX0 || S.BorderY1, Samp->BorderColor);
+                         S.BorderX0 || S.BorderY1, Samp->BorderColor,
+                         /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 =
       femeRTFetchTexel2D(Img, Level, Layer, S.X1, S.Y1, /*Sample=*/0,
-                         S.BorderX1 || S.BorderY1, Samp->BorderColor);
+                         S.BorderX1 || S.BorderY1, Samp->BorderColor,
+                         /*ApplySwizzle=*/0);
   float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0], IsFixedPointDepth);
   float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0], IsFixedPointDepth);
   float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0], IsFixedPointDepth);
@@ -6383,19 +6420,19 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmp2DV4F32(
   FemeRTv4f32 T00 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y0,
                         /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y0,
                         /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y1,
                         /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y1,
                         /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 Result;
   Result[0] = femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0], IsFixedPointDepth);
   Result[1] = femeRTApplyCompare(Samp.CompareFunc, Dref, T11[0], IsFixedPointDepth);
@@ -6443,19 +6480,19 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGather2DV4F32(
   FemeRTv4f32 T00 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y0,
                         /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y0,
                         /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y1,
                         /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y1,
                         /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                        Samp.BorderColor);
+                        Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
@@ -6493,7 +6530,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel2D(&Img, Mip, /*Layer=*/0, X, Y, Sample,
-                            /*UseBorder=*/0, NoBorder);
+                            /*UseBorder=*/0, NoBorder, /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
@@ -6971,7 +7008,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DV4F32(
   if (X < 0 || (uint32_t)X >= Img.Width)
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  return femeRTFetchTexel1D(&Img, Mip, X, Sample, /*UseBorder=*/0, NoBorder);
+  return femeRTFetchTexel1D(&Img, Mip, X, Sample, /*UseBorder=*/0, NoBorder,
+                            /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.load.1d.v4i32` (roadmap H19c): the integer-format
@@ -7057,7 +7095,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DArrayV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel1DArray(&Img, Mip, X, (uint32_t)Layer, Sample,
-                                 /*UseBorder=*/0, NoBorder);
+                                 /*UseBorder=*/0, NoBorder,
+                                 /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.load.1darray.v4i32` (roadmap H19e): the integer-format
@@ -7149,7 +7188,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad3DV4F32(
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  return femeRTFetchTexel3D(&Img, Mip, X, Y, Z, /*UseBorder=*/0, NoBorder);
+  return femeRTFetchTexel3D(&Img, Mip, X, Y, Z, /*UseBorder=*/0, NoBorder,
+                            /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.load.3d.v4i32` (roadmap H19c): the integer-format
@@ -7266,16 +7306,16 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpArray2DV4F32(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y0,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y0,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y1,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y1,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 Result;
   Result[0] =
       femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0], IsFixedPointDepth);
@@ -7320,16 +7360,16 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherArray2DV4F32(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y0,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y0,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y1,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y1,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
@@ -7660,7 +7700,8 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
                                            Samp->AddressU, &BorderX);
     FemeRTv4f32 T = femeRTFetchTexel1DArray(Img, Level, AddrX, Layer,
                                             /*Sample=*/0, BorderX,
-                                            Samp->BorderColor);
+                                            Samp->BorderColor,
+                                            /*ApplySwizzle=*/0);
     return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0], IsFixedPointDepth);
   }
 
@@ -7676,10 +7717,12 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
                                       Samp->AddressU, &BorderX1);
   FemeRTv4f32 T0 = femeRTFetchTexel1DArray(Img, Level, X0, Layer,
                                           /*Sample=*/0, BorderX0,
-                                          Samp->BorderColor);
+                                          Samp->BorderColor,
+                                          /*ApplySwizzle=*/0);
   FemeRTv4f32 T1 = femeRTFetchTexel1DArray(Img, Level, X1, Layer,
                                           /*Sample=*/0, BorderX1,
-                                          Samp->BorderColor);
+                                          Samp->BorderColor,
+                                          /*ApplySwizzle=*/0);
   float C0 = femeRTApplyCompare(Samp->CompareFunc, Dref, T0[0], IsFixedPointDepth);
   float C1 = femeRTApplyCompare(Samp->CompareFunc, Dref, T1[0], IsFixedPointDepth);
   return C0 + (C1 - C0) * Wx;
@@ -7893,7 +7936,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DArrayV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel2D(&Img, Mip, (uint32_t)Layer, X, Y, Sample,
-                            /*UseBorder=*/0, NoBorder);
+                            /*UseBorder=*/0, NoBorder, /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.load.2darray.v4i32` (roadmap H7b-a): the integer-format
@@ -8243,7 +8286,8 @@ femeRTRemapCubeEdgeCoords(uint32_t Face, int32_t X, int32_t Y, int32_t Size) {
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchCubeSeamlessTexel(const FemeRTImageDescriptor *Img, uint32_t Level,
                              uint32_t LayerBase, uint32_t BaseFace, int32_t X,
-                             int32_t Y, int32_t Size, _Bool *Ambiguous) {
+                             int32_t Y, int32_t Size, _Bool *Ambiguous,
+                             _Bool ApplySwizzle) {
   FemeRTCubeEdgeCoords C = femeRTRemapCubeEdgeCoords(BaseFace, X, Y, Size);
   if (C.Ambiguous) {
     *Ambiguous = 1;
@@ -8253,7 +8297,8 @@ femeRTFetchCubeSeamlessTexel(const FemeRTImageDescriptor *Img, uint32_t Level,
   *Ambiguous = 0;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel2D(Img, Level, LayerBase + C.Face, C.X, C.Y,
-                           /*Sample=*/0, /*UseBorder=*/0, NoBorder);
+                           /*Sample=*/0, /*UseBorder=*/0, NoBorder,
+                           ApplySwizzle);
 }
 
 // The four raw (unblended) integer texel coordinates and fractional
@@ -8306,16 +8351,16 @@ femeRTSampleCubeLinearAtLevel(const FemeRTImageDescriptor *Img, uint32_t Level,
   _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
   FemeRTv4f32 T00 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X0, S.Y0, Size,
-                                                &Amb00);
+                                                &Amb00, /*ApplySwizzle=*/1);
   FemeRTv4f32 T10 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X1, S.Y0, Size,
-                                                &Amb10);
+                                                &Amb10, /*ApplySwizzle=*/1);
   FemeRTv4f32 T01 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X0, S.Y1, Size,
-                                                &Amb01);
+                                                &Amb01, /*ApplySwizzle=*/1);
   FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X1, S.Y1, Size,
-                                                &Amb11);
+                                                &Amb11, /*ApplySwizzle=*/1);
   // At most one of the four taps can ever be the doubly-out-of-bounds
   // corner (a bilinear footprint spans at most a 2x2 texel square, which
   // can straddle at most one cube corner at a time).
@@ -8398,7 +8443,8 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
                                            Samp->AddressV, &BorderY);
     FemeRTv4f32 T = femeRTFetchTexel2D(Img, Level, LayerBase + BaseFace,
                                       AddrX, AddrY, /*Sample=*/0,
-                                      BorderX || BorderY, Samp->BorderColor);
+                                      BorderX || BorderY, Samp->BorderColor,
+                                      /*ApplySwizzle=*/0);
     return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0], IsFixedPointDepth);
   }
 
@@ -8408,16 +8454,16 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
   _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
   FemeRTv4f32 T00 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X0, S.Y0, Size,
-                                                &Amb00);
+                                                &Amb00, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X1, S.Y0, Size,
-                                                &Amb10);
+                                                &Amb10, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X0, S.Y1, Size,
-                                                &Amb01);
+                                                &Amb01, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
                                                 BaseFace, S.X1, S.Y1, Size,
-                                                &Amb11);
+                                                &Amb11, /*ApplySwizzle=*/0);
   float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0], IsFixedPointDepth);
   float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0], IsFixedPointDepth);
   float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0], IsFixedPointDepth);
@@ -8709,16 +8755,16 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpCubeV4F32(
       &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 Result;
   Result[0] =
       femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0], IsFixedPointDepth);
@@ -8770,16 +8816,16 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCubeV4F32(
       &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor);
+                                       Samp.BorderColor, /*ApplySwizzle=*/0);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
