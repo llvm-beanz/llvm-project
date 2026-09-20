@@ -570,6 +570,68 @@ void spirv::CompositeInsertOp::print(OpAsmPrinter &printer) {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.CopyLogical
+//===----------------------------------------------------------------------===//
+
+/// Returns true if \p Lhs and \p Rhs are "logically compatible" per the
+/// SPIR-V spec's own definition for `OpCopyLogical`: recursively the same
+/// type, ignoring per-member decorations (e.g. `Offset`) and treating a
+/// fixed-size array and a runtime array as compatible shapes so long as
+/// their element types are (both are homogeneous, dynamically-unrelated-to-
+/// layout aggregates for this purpose).
+static bool areLogicallyCompatible(Type Lhs, Type Rhs) {
+  if (Lhs == Rhs)
+    return true;
+
+  if (auto LhsStruct = dyn_cast<spirv::StructType>(Lhs)) {
+    auto RhsStruct = dyn_cast<spirv::StructType>(Rhs);
+    if (!RhsStruct ||
+        LhsStruct.getNumElements() != RhsStruct.getNumElements())
+      return false;
+    for (unsigned I = 0, E = LhsStruct.getNumElements(); I != E; ++I)
+      if (!areLogicallyCompatible(LhsStruct.getElementType(I),
+                                  RhsStruct.getElementType(I)))
+        return false;
+    return true;
+  }
+
+  if (auto LhsArray = dyn_cast<spirv::ArrayType>(Lhs)) {
+    auto RhsArray = dyn_cast<spirv::ArrayType>(Rhs);
+    if (!RhsArray || LhsArray.getNumElements() != RhsArray.getNumElements())
+      return false;
+    return areLogicallyCompatible(LhsArray.getElementType(),
+                                  RhsArray.getElementType());
+  }
+
+  if (auto LhsRTArray = dyn_cast<spirv::RuntimeArrayType>(Lhs)) {
+    auto RhsRTArray = dyn_cast<spirv::RuntimeArrayType>(Rhs);
+    if (!RhsRTArray)
+      return false;
+    return areLogicallyCompatible(LhsRTArray.getElementType(),
+                                  RhsRTArray.getElementType());
+  }
+
+  if (auto LhsPointer = dyn_cast<spirv::PointerType>(Lhs)) {
+    auto RhsPointer = dyn_cast<spirv::PointerType>(Rhs);
+    if (!RhsPointer ||
+        LhsPointer.getStorageClass() != RhsPointer.getStorageClass())
+      return false;
+    return areLogicallyCompatible(LhsPointer.getPointeeType(),
+                                  RhsPointer.getPointeeType());
+  }
+
+  return false;
+}
+
+LogicalResult spirv::CopyLogicalOp::verify() {
+  if (!areLogicallyCompatible(getOperand().getType(), getType()))
+    return emitOpError("operand type ")
+           << getOperand().getType() << " and result type " << getType()
+           << " are not logically compatible";
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.Constant
 //===----------------------------------------------------------------------===//
 

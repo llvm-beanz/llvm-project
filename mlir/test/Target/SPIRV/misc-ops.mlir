@@ -22,3 +22,14 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
     spirv.ReturnValue %0 : vector<4xi32>
   }
 }
+
+// -----
+
+// `OpCopyLogical` was added in SPIR-V 1.4.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, Linkage], []> {
+  spirv.func @copy_logical(%arg0 : !spirv.struct<(i32, i32, !spirv.array<2 x i32>)>) -> !spirv.struct<(i32, i32, !spirv.array<2 x i32>)> "None" {
+    // CHECK: {{%.*}} = spirv.CopyLogical {{%.*}} : !spirv.struct<(i32, i32, !spirv.array<2 x i32>)> to !spirv.struct<(i32, i32, !spirv.array<2 x i32>)>
+    %0 = spirv.CopyLogical %arg0 : !spirv.struct<(i32, i32, !spirv.array<2 x i32>)> to !spirv.struct<(i32, i32, !spirv.array<2 x i32>)>
+    spirv.ReturnValue %0 : !spirv.struct<(i32, i32, !spirv.array<2 x i32>)>
+  }
+}

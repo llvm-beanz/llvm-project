@@ -125,3 +125,50 @@ func.func @copy_object_type_mismatch(%arg : i32) -> i64 {
   spirv.ReturnValue %0 : i64
 }
 
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.CopyLogical
+//===----------------------------------------------------------------------===//
+
+func.func @copy_logical_identical_structs(
+    %arg : !spirv.struct<(i32, i32)>) -> !spirv.struct<(i32, i32)> {
+  // CHECK: %{{.*}} = spirv.CopyLogical %{{.*}} : !spirv.struct<(i32, i32)> to !spirv.struct<(i32, i32)>
+  %0 = spirv.CopyLogical %arg : !spirv.struct<(i32, i32)> to !spirv.struct<(i32, i32)>
+  spirv.ReturnValue %0 : !spirv.struct<(i32, i32)>
+}
+
+// -----
+
+// Two differently-identified struct types with the same member types are
+// logically compatible -- exactly the shape a real deduplicated/re-emitted
+// SPIR-V module produces for what is conceptually "the same" struct type
+// under two different IDs.
+func.func @copy_logical_distinct_identified_structs(
+    %arg : !spirv.struct<a_struct, (i32, !spirv.array<2 x i32>)>)
+    -> !spirv.struct<b_struct, (i32, !spirv.array<2 x i32>)> {
+  // CHECK: %{{.*}} = spirv.CopyLogical %{{.*}} : !spirv.struct<a_struct, (i32, !spirv.array<2 x i32>)> to !spirv.struct<b_struct, (i32, !spirv.array<2 x i32>)>
+  %0 = spirv.CopyLogical %arg
+      : !spirv.struct<a_struct, (i32, !spirv.array<2 x i32>)>
+      to !spirv.struct<b_struct, (i32, !spirv.array<2 x i32>)>
+  spirv.ReturnValue %0 : !spirv.struct<b_struct, (i32, !spirv.array<2 x i32>)>
+}
+
+// -----
+
+func.func @copy_logical_member_count_mismatch(
+    %arg : !spirv.struct<(i32, i32)>) -> !spirv.struct<(i32)> {
+  // expected-error @+1 {{op operand type '!spirv.struct<(i32, i32)>' and result type '!spirv.struct<(i32)>' are not logically compatible}}
+  %0 = spirv.CopyLogical %arg : !spirv.struct<(i32, i32)> to !spirv.struct<(i32)>
+  spirv.ReturnValue %0 : !spirv.struct<(i32)>
+}
+
+// -----
+
+func.func @copy_logical_member_type_mismatch(
+    %arg : !spirv.struct<(i32, i32)>) -> !spirv.struct<(i32, f32)> {
+  // expected-error @+1 {{op operand type '!spirv.struct<(i32, i32)>' and result type '!spirv.struct<(i32, f32)>' are not logically compatible}}
+  %0 = spirv.CopyLogical %arg : !spirv.struct<(i32, i32)> to !spirv.struct<(i32, f32)>
+  spirv.ReturnValue %0 : !spirv.struct<(i32, f32)>
+}
+

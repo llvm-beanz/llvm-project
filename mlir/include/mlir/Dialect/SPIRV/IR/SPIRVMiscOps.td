@@ -165,4 +165,52 @@ def SPIRV_CopyObjectOp : SPIRV_Op<"CopyObject", [Pure, AllTypesMatch<["operand",
 
 // -----
 
+def SPIRV_CopyLogicalOp : SPIRV_Op<"CopyLogical", [Pure]> {
+  let summary = "Copy an object, with the result type possibly differing "
+                "from the source's type.";
+
+  let description = [{
+    Result Type and Operand's type must be two different types that are
+    logically compatible. Only valid to use with types having compatible
+    layouts. Only valid when Shader capability is declared.
+
+    Operand is the value to copy.
+
+    Behavior is undefined if the operand's storage or result's storage does
+    not have the equivalent of the logical shape.
+
+    Results are undefined if the operand's storage or result's storage are
+    not equivalent.
+
+    "Logically compatible" means the two types are recursively the same
+    type, ignoring any per-member decorations (e.g. `Offset`) and ignoring
+    whether an aggregate is a plain array or a runtime array: two struct
+    types with the same number of members whose corresponding members are
+    logically compatible, two arrays of the same length whose element
+    types are logically compatible, two runtime arrays whose element types
+    are logically compatible, or two pointers to the same storage class
+    whose pointee types are logically compatible.
+
+    #### Example:
+
+    ```mlir
+    %1 = spirv.CopyLogical %0 : !spirv.struct<(i32, i32)> to !spirv.struct<(i32, i32)>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_Type:$operand
+  );
+
+  let results = (outs
+    SPIRV_Type:$result
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = "$operand attr-dict `:` type($operand) `to` type($result)";
+}
+
+// -----
+
 #endif // MLIR_DIALECT_SPIRV_IR_MISC_OPS
