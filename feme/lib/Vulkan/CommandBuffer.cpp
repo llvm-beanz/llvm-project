@@ -251,25 +251,45 @@ struct DecodedASTCImage {
   std::vector<feme::cpu::FemeImageSubresourceLayout> MipLayouts;
 };
 
-/// (Roadmap E23) Decodes mip levels `[BaseMip, BaseMip + LevelCount)`,
-/// array layer 0 only (matching `materializeImageDescriptor`'s own
-/// Texture2D-only, layer-0-only scope), of ASTC LDR-format image \p Img
-/// into a per-texel RGBA8 buffer `feme::vulkan::decodeASTCBlock` produces
-/// one block at a time -- the "bridge the image-descriptor-materialization
-/// path back into ASTCDecode.h" option this row's own roadmap text
-/// describes, chosen over porting a second decoder into the CPU runtime
-/// (feme/runtime/CPU/FeMeRuntimeCPU.c) since that runtime's existing
-/// `R8G8B8A8_UNORM`/`_UNORM_SRGB` unpack path already reads exactly this
-/// shape of data unmodified.
+/// (Roadmap L125(p)) Decodes mip levels `[BaseMip, BaseMip + LevelCount)`
+/// and slices `[BaseSlice, BaseSlice + SliceCount)` (an array-layer range
+/// for `Texture2DArray`/`TextureCube(Array)`, or a depth-slice range for
+/// `Texture3D` -- see `Image::blockPointer`'s own "ArrayLayer + Z" comment
+/// for why a single slice index suffices either way) of ASTC LDR-format
+/// image \p Img into a per-texel RGBA8 buffer `feme::vulkan::decodeASTCBlock`
+/// produces one block at a time -- the "bridge the
+/// image-descriptor-materialization path back into ASTCDecode.h" option
+/// roadmap E23's own text describes, chosen over porting a second decoder
+/// into the CPU runtime (feme/runtime/CPU/FeMeRuntimeCPU.c) since that
+/// runtime's existing `R8G8B8A8_UNORM`/`_UNORM_SRGB` unpack path already
+/// reads exactly this shape of data unmodified. Widened from E23's
+/// original single-slice (`BaseSlice == 0`, `SliceCount == 1`) scope by
+/// roadmap L125(p): each level's `SlicePitch`-sized chunk is laid out
+/// consecutively per slice, exactly like a physical `Image`'s own
+/// `computeSubresourceLayouts` table, so the CPU runtime's existing
+/// `Layer * SlicePitch`/`Z * SlicePitch` addressing (`femeRTFetchTexel2D`/
+/// `femeRTFetchTexel3D`) already picks the right slice with no runtime
+/// change needed.
 DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
-                                            uint32_t LevelCount) {
+                                            uint32_t LevelCount,
+                                            uint32_t BaseSlice,
+                                            uint32_t SliceCount, bool Is3D) {
   DecodedASTCImage Result;
   uint32_t BlockW = blockWidth(Img->format());
   uint32_t BlockH = blockHeight(Img->format());
 
   // First pass: lay out every level's offset/pitch so `Texels` can be
-  // allocated once, rather than grown level by level.
+  // allocated once, rather than grown level by level. `SlicePitch` here is
+  // one slice's own size; a level's total size is
+  // `SlicePitch * LevelSliceCounts[L]` since every slice of that level is
+  // stored back to back. For a `Texture3D` (`Is3D`), a mip level's own
+  // depth halves per level (matching `computeSubresourceLayouts`'s own
+  // per-level `LevelDepth` -- the caller's single `SliceCount` is only the
+  // *base* level's depth, so reusing it for every level here would read
+  // out of bounds on any level below the first); every other dimension
+  // keeps a constant slice count (an array layer count) across all mips.
   std::vector<std::pair<uint32_t, uint32_t>> LevelExtents(LevelCount);
+  std::vector<uint32_t> LevelSliceCounts(LevelCount);
   Result.MipLayouts.resize(LevelCount);
   uint64_t Offset = 0;
   for (uint32_t L = 0; L != LevelCount; ++L) {
@@ -277,6 +297,9 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
     uint32_t W = std::max(1u, Img->width() >> Level);
     uint32_t H = std::max(1u, Img->height() >> Level);
     LevelExtents[L] = {W, H};
+    uint32_t LevelSliceCount =
+        Is3D ? std::max(1u, Img->depth() >> Level) : SliceCount;
+    LevelSliceCounts[L] = LevelSliceCount;
     uint64_t RowPitch = uint64_t(W) * 4;
     uint64_t SlicePitch = RowPitch * H;
     // A block-compressed format is never multisampled in real Vulkan (see
@@ -286,7 +309,7 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
     // surfaced this row's own pre-existing `SampleStride == SlicePitch`
     // mistake (harmless while the field went unread).
     Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, 0};
-    Offset += SlicePitch;
+    Offset += SlicePitch * LevelSliceCount;
   }
   Result.Texels.resize(Offset);
 
@@ -298,24 +321,35 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
     auto [W, H] = LevelExtents[L];
     uint32_t BlocksX = (W + BlockW - 1) / BlockW;
     uint32_t BlocksY = (H + BlockH - 1) / BlockH;
-    uint8_t *LevelBase = Result.Texels.data() + Result.MipLayouts[L].Offset;
     uint64_t RowPitch = Result.MipLayouts[L].RowPitch;
-    for (uint32_t BY = 0; BY != BlocksY; ++BY) {
-      for (uint32_t BX = 0; BX != BlocksX; ++BX) {
-        const auto *Block = static_cast<const uint8_t *>(
-            Img->blockPointer(BaseMip + L, /*ArrayLayer=*/0, BX, BY, /*Z=*/0));
-        decodeASTCBlock(Block, BlockW, BlockH, BlockBuf.data());
-        // A non-integer-multiple mip extent's rightmost/bottommost block
-        // only partially covers the image -- copy just the in-bounds
-        // rows/columns of it, per the specification's own "a block may
-        // extend past the image edge" allowance.
-        uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
-        uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
-        for (uint32_t Y = 0; Y != CopyH; ++Y) {
-          uint8_t *DstRow = LevelBase + uint64_t(BY * BlockH + Y) * RowPitch +
-                            uint64_t(BX) * BlockW * 4;
-          const uint8_t *SrcRow = &BlockBuf[size_t(Y) * BlockW * 4];
-          std::memcpy(DstRow, SrcRow, size_t(CopyW) * 4);
+    uint64_t SlicePitch = Result.MipLayouts[L].SlicePitch;
+    // A `Texture3D`'s own per-level depth (`LevelSliceCounts[L]`) may be
+    // smaller than the base level's `SliceCount` -- only the in-bounds
+    // slices of *this* level are decoded, matching `femeRTFetchTexel3D`'s
+    // own `Z < LevelDepth` bounds check.
+    for (uint32_t S = 0; S != LevelSliceCounts[L]; ++S) {
+      uint8_t *SliceBase = Result.Texels.data() +
+                           Result.MipLayouts[L].Offset + S * SlicePitch;
+      uint32_t ArrayLayer = Is3D ? 0 : BaseSlice + S;
+      uint32_t Z = Is3D ? BaseSlice + S : 0;
+      for (uint32_t BY = 0; BY != BlocksY; ++BY) {
+        for (uint32_t BX = 0; BX != BlocksX; ++BX) {
+          const auto *Block = static_cast<const uint8_t *>(
+              Img->blockPointer(BaseMip + L, ArrayLayer, BX, BY, Z));
+          decodeASTCBlock(Block, BlockW, BlockH, BlockBuf.data());
+          // A non-integer-multiple mip extent's rightmost/bottommost
+          // block only partially covers the image -- copy just the
+          // in-bounds rows/columns of it, per the specification's own "a
+          // block may extend past the image edge" allowance.
+          uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
+          uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
+          for (uint32_t Y = 0; Y != CopyH; ++Y) {
+            uint8_t *DstRow = SliceBase +
+                              uint64_t(BY * BlockH + Y) * RowPitch +
+                              uint64_t(BX) * BlockW * 4;
+            const uint8_t *SrcRow = &BlockBuf[size_t(Y) * BlockW * 4];
+            std::memcpy(DstRow, SrcRow, size_t(CopyW) * 4);
+          }
         }
       }
     }
@@ -324,9 +358,11 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
 }
 
 /// (Roadmap H8n) The BC analogue of `decodeASTCImageForSampling` above:
-/// decodes mip levels `[BaseMip, BaseMip + LevelCount)`, array layer 0
-/// only (same Texture2D-only, layer-0-only scope as the ASTC bridge), of
-/// a `VK_FORMAT_BC*`-format image into a per-texel buffer of
+/// decodes mip levels `[BaseMip, BaseMip + LevelCount)` and slices
+/// `[BaseSlice, BaseSlice + SliceCount)` (widened from H8n's original
+/// single-slice scope by roadmap L125(p) -- see
+/// `decodeASTCImageForSampling`'s own comment for the full rationale) of a
+/// `VK_FORMAT_BC*`-format image into a per-texel buffer of
 /// \p BytesPerTexel bytes each (1, 2, 4, or 8, per `bcSamplingTarget`),
 /// one block at a time via `decodeBCBlock`. Reuses `DecodedASTCImage`'s
 /// own two-field shape (decoded texel bytes plus a per-texel
@@ -334,12 +370,19 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
 /// ASTC-specific.
 DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
                                           uint32_t LevelCount,
-                                          uint32_t BytesPerTexel) {
+                                          uint32_t BytesPerTexel,
+                                          uint32_t BaseSlice,
+                                          uint32_t SliceCount, bool Is3D) {
   DecodedASTCImage Result;
   uint32_t BlockW = blockWidth(Img->format());
   uint32_t BlockH = blockHeight(Img->format());
 
   std::vector<std::pair<uint32_t, uint32_t>> LevelExtents(LevelCount);
+  // See `decodeASTCImageForSampling`'s own comment: a `Texture3D`'s depth
+  // halves per mip level, so its own per-level slice count must be
+  // recomputed here rather than reusing the caller's single (base-level)
+  // `SliceCount` for every level.
+  std::vector<uint32_t> LevelSliceCounts(LevelCount);
   Result.MipLayouts.resize(LevelCount);
   uint64_t Offset = 0;
   for (uint32_t L = 0; L != LevelCount; ++L) {
@@ -347,10 +390,13 @@ DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
     uint32_t W = std::max(1u, Img->width() >> Level);
     uint32_t H = std::max(1u, Img->height() >> Level);
     LevelExtents[L] = {W, H};
+    uint32_t LevelSliceCount =
+        Is3D ? std::max(1u, Img->depth() >> Level) : SliceCount;
+    LevelSliceCounts[L] = LevelSliceCount;
     uint64_t RowPitch = uint64_t(W) * BytesPerTexel;
     uint64_t SlicePitch = RowPitch * H;
     Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, 0};
-    Offset += SlicePitch;
+    Offset += SlicePitch * LevelSliceCount;
   }
   Result.Texels.resize(Offset);
 
@@ -359,26 +405,32 @@ DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
     auto [W, H] = LevelExtents[L];
     uint32_t BlocksX = (W + BlockW - 1) / BlockW;
     uint32_t BlocksY = (H + BlockH - 1) / BlockH;
-    uint8_t *LevelBase = Result.Texels.data() + Result.MipLayouts[L].Offset;
     uint64_t RowPitch = Result.MipLayouts[L].RowPitch;
-    for (uint32_t BY = 0; BY != BlocksY; ++BY) {
-      for (uint32_t BX = 0; BX != BlocksX; ++BX) {
-        const auto *Block = static_cast<const uint8_t *>(
-            Img->blockPointer(BaseMip + L, /*ArrayLayer=*/0, BX, BY, /*Z=*/0));
-        decodeBCBlock(Img->format(), Block, BlockBuf.data());
-        // A non-integer-multiple mip extent's rightmost/bottommost block
-        // only partially covers the image -- copy just the in-bounds
-        // rows/columns of it, mirroring `decodeASTCImageForSampling`'s
-        // own handling of the same case.
-        uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
-        uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
-        for (uint32_t Y = 0; Y != CopyH; ++Y) {
-          uint8_t *DstRow = LevelBase +
-                            uint64_t(BY * BlockH + Y) * RowPitch +
-                            uint64_t(BX) * BlockW * BytesPerTexel;
-          const uint8_t *SrcRow =
-              &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
-          std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
+    uint64_t SlicePitch = Result.MipLayouts[L].SlicePitch;
+    for (uint32_t S = 0; S != LevelSliceCounts[L]; ++S) {
+      uint8_t *SliceBase = Result.Texels.data() +
+                           Result.MipLayouts[L].Offset + S * SlicePitch;
+      uint32_t ArrayLayer = Is3D ? 0 : BaseSlice + S;
+      uint32_t Z = Is3D ? BaseSlice + S : 0;
+      for (uint32_t BY = 0; BY != BlocksY; ++BY) {
+        for (uint32_t BX = 0; BX != BlocksX; ++BX) {
+          const auto *Block = static_cast<const uint8_t *>(
+              Img->blockPointer(BaseMip + L, ArrayLayer, BX, BY, Z));
+          decodeBCBlock(Img->format(), Block, BlockBuf.data());
+          // A non-integer-multiple mip extent's rightmost/bottommost block
+          // only partially covers the image -- copy just the in-bounds
+          // rows/columns of it, mirroring `decodeASTCImageForSampling`'s
+          // own handling of the same case.
+          uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
+          uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
+          for (uint32_t Y = 0; Y != CopyH; ++Y) {
+            uint8_t *DstRow = SliceBase +
+                              uint64_t(BY * BlockH + Y) * RowPitch +
+                              uint64_t(BX) * BlockW * BytesPerTexel;
+            const uint8_t *SrcRow =
+                &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
+            std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
+          }
         }
       }
     }
@@ -387,21 +439,29 @@ DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
 }
 
 /// (Roadmap H8j) The ETC2/EAC analogue of `decodeBCImageForSampling`
-/// above: decodes mip levels `[BaseMip, BaseMip + LevelCount)`, array
-/// layer 0 only (same Texture2D-only, layer-0-only scope as the ASTC/BC
-/// bridges), of a `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*`-format image into a
-/// per-texel buffer of \p BytesPerTexel bytes each, one block at a time
-/// via `decodeETC2FormatBlock`. Reuses `DecodedASTCImage`'s own two-field
-/// shape since nothing about it is ASTC-specific.
+/// above: decodes mip levels `[BaseMip, BaseMip + LevelCount)` and slices
+/// `[BaseSlice, BaseSlice + SliceCount)` (widened from H8j's original
+/// single-slice scope by roadmap L125(p), mirroring the BC/ASTC bridges'
+/// own widening) of a `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*`-format image
+/// into a per-texel buffer of \p BytesPerTexel bytes each, one block at a
+/// time via `decodeETC2FormatBlock`. Reuses `DecodedASTCImage`'s own
+/// two-field shape since nothing about it is ASTC-specific.
 DecodedASTCImage decodeETC2ImageForSampling(const Image *Img,
                                             uint32_t BaseMip,
                                             uint32_t LevelCount,
-                                            uint32_t BytesPerTexel) {
+                                            uint32_t BytesPerTexel,
+                                            uint32_t BaseSlice,
+                                            uint32_t SliceCount, bool Is3D) {
   DecodedASTCImage Result;
   uint32_t BlockW = blockWidth(Img->format());
   uint32_t BlockH = blockHeight(Img->format());
 
   std::vector<std::pair<uint32_t, uint32_t>> LevelExtents(LevelCount);
+  // See `decodeASTCImageForSampling`'s own comment: a `Texture3D`'s depth
+  // halves per mip level, so its own per-level slice count must be
+  // recomputed here rather than reusing the caller's single (base-level)
+  // `SliceCount` for every level.
+  std::vector<uint32_t> LevelSliceCounts(LevelCount);
   Result.MipLayouts.resize(LevelCount);
   uint64_t Offset = 0;
   for (uint32_t L = 0; L != LevelCount; ++L) {
@@ -409,10 +469,13 @@ DecodedASTCImage decodeETC2ImageForSampling(const Image *Img,
     uint32_t W = std::max(1u, Img->width() >> Level);
     uint32_t H = std::max(1u, Img->height() >> Level);
     LevelExtents[L] = {W, H};
+    uint32_t LevelSliceCount =
+        Is3D ? std::max(1u, Img->depth() >> Level) : SliceCount;
+    LevelSliceCounts[L] = LevelSliceCount;
     uint64_t RowPitch = uint64_t(W) * BytesPerTexel;
     uint64_t SlicePitch = RowPitch * H;
     Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, 0};
-    Offset += SlicePitch;
+    Offset += SlicePitch * LevelSliceCount;
   }
   Result.Texels.resize(Offset);
 
@@ -421,26 +484,32 @@ DecodedASTCImage decodeETC2ImageForSampling(const Image *Img,
     auto [W, H] = LevelExtents[L];
     uint32_t BlocksX = (W + BlockW - 1) / BlockW;
     uint32_t BlocksY = (H + BlockH - 1) / BlockH;
-    uint8_t *LevelBase = Result.Texels.data() + Result.MipLayouts[L].Offset;
     uint64_t RowPitch = Result.MipLayouts[L].RowPitch;
-    for (uint32_t BY = 0; BY != BlocksY; ++BY) {
-      for (uint32_t BX = 0; BX != BlocksX; ++BX) {
-        const auto *Block = static_cast<const uint8_t *>(
-            Img->blockPointer(BaseMip + L, /*ArrayLayer=*/0, BX, BY, /*Z=*/0));
-        decodeETC2FormatBlock(Img->format(), Block, BlockBuf.data());
-        // A non-integer-multiple mip extent's rightmost/bottommost block
-        // only partially covers the image -- copy just the in-bounds
-        // rows/columns of it, mirroring `decodeBCImageForSampling`'s own
-        // handling of the same case.
-        uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
-        uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
-        for (uint32_t Y = 0; Y != CopyH; ++Y) {
-          uint8_t *DstRow = LevelBase +
-                            uint64_t(BY * BlockH + Y) * RowPitch +
-                            uint64_t(BX) * BlockW * BytesPerTexel;
-          const uint8_t *SrcRow =
-              &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
-          std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
+    uint64_t SlicePitch = Result.MipLayouts[L].SlicePitch;
+    for (uint32_t S = 0; S != LevelSliceCounts[L]; ++S) {
+      uint8_t *SliceBase = Result.Texels.data() +
+                           Result.MipLayouts[L].Offset + S * SlicePitch;
+      uint32_t ArrayLayer = Is3D ? 0 : BaseSlice + S;
+      uint32_t Z = Is3D ? BaseSlice + S : 0;
+      for (uint32_t BY = 0; BY != BlocksY; ++BY) {
+        for (uint32_t BX = 0; BX != BlocksX; ++BX) {
+          const auto *Block = static_cast<const uint8_t *>(
+              Img->blockPointer(BaseMip + L, ArrayLayer, BX, BY, Z));
+          decodeETC2FormatBlock(Img->format(), Block, BlockBuf.data());
+          // A non-integer-multiple mip extent's rightmost/bottommost block
+          // only partially covers the image -- copy just the in-bounds
+          // rows/columns of it, mirroring `decodeBCImageForSampling`'s own
+          // handling of the same case.
+          uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
+          uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
+          for (uint32_t Y = 0; Y != CopyH; ++Y) {
+            uint8_t *DstRow = SliceBase +
+                              uint64_t(BY * BlockH + Y) * RowPitch +
+                              uint64_t(BX) * BlockW * BytesPerTexel;
+            const uint8_t *SrcRow =
+                &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
+            std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
+          }
         }
       }
     }
@@ -465,9 +534,10 @@ DecodedASTCImage decodeETC2ImageForSampling(const Image *Img,
 /// (see FeMeVulkanDesign.md's V5 status note).
 ///
 /// Roadmap E23: an ASTC LDR-format image is decoded whole (every sampled
-/// mip level) into `Result`'s own per-texel RGBA8 storage before this
-/// function returns, and \p Dst points into *that* rather than \p Img's
-/// own raw block-compressed bytes -- the CPU runtime
+/// mip level, and -- since roadmap L125(p) -- every sampled array
+/// layer/depth slice) into `Result`'s own per-texel RGBA8 storage before
+/// this function returns, and \p Dst points into *that* rather than
+/// \p Img's own raw block-compressed bytes -- the CPU runtime
 /// (feme/runtime/CPU/FeMeRuntimeCPU.c) that eventually reads \p Dst has no
 /// block-compressed case of its own (see this file's header comment), so a
 /// shader-visible descriptor must already be decoded before it gets there.
@@ -579,16 +649,22 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   // format branch below shares this one assignment either way.
   Dst.Swizzle = resolveImageSwizzle(View->components());
 
+  // (Roadmap L125(p)) The decoded formats below (ASTC/BC/ETC2) all
+  // address their own physical `Image` storage by a single "slice" index
+  // that is an array layer for every dimension except `Texture3D`, whose
+  // one array layer instead spans multiple depth slices (see
+  // `Image::blockPointer`'s own "ArrayLayer + Z" comment) -- compute that
+  // shared (BaseSlice, SliceCount, Is3D) triple once here rather than
+  // duplicating the `Texture3D` special case in all three decode calls.
+  bool IsDecodedImage3D =
+      View->dimension() == feme::cpu::ImageDimension::Texture3D;
+  uint32_t DecodeBaseSlice = IsDecodedImage3D ? 0 : Range.baseArrayLayer;
+  uint32_t DecodeSliceCount = IsDecodedImage3D ? Dst.Depth : LayerCount;
+
   if (feme::cpu::isASTCLdrFormat(Img->format())) {
-    // (Roadmap E23 scope, unchanged by H7b) ASTC decode only ever
-    // produces layer 0's texels -- a nonzero base layer or a
-    // multi-layer range on an ASTC image reads as all-zero the same
-    // way an unsupported dimension already did, rather than silently
-    // decoding the wrong layer's blocks.
-    if (Range.baseArrayLayer != 0 || LayerCount != 1)
-      return;
-    DecodedASTCImage Decoded =
-        decodeASTCImageForSampling(Img, Range.baseMipLevel, LevelCount);
+    DecodedASTCImage Decoded = decodeASTCImageForSampling(
+        Img, Range.baseMipLevel, LevelCount, DecodeBaseSlice,
+        DecodeSliceCount, IsDecodedImage3D);
     Result.DecodedImageStorage.push_back(std::move(Decoded.Texels));
     Result.DecodedImageLayoutStorage.push_back(std::move(Decoded.MipLayouts));
     Dst.Data = Result.DecodedImageStorage.back().data();
@@ -603,15 +679,10 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   }
 
   if (feme::cpu::isBCFormat(Img->format())) {
-    // (Roadmap H8n scope, mirroring E23/H7b) BC decode, like ASTC decode
-    // above, only ever produces layer 0's texels -- a nonzero base layer
-    // or a multi-layer range on a BC image reads as all-zero rather than
-    // silently decoding the wrong layer's blocks.
-    if (Range.baseArrayLayer != 0 || LayerCount != 1)
-      return;
     BCSamplingTarget Target = bcSamplingTarget(Img->format());
     DecodedASTCImage Decoded = decodeBCImageForSampling(
-        Img, Range.baseMipLevel, LevelCount, Target.BytesPerTexel);
+        Img, Range.baseMipLevel, LevelCount, Target.BytesPerTexel,
+        DecodeBaseSlice, DecodeSliceCount, IsDecodedImage3D);
     Result.DecodedImageStorage.push_back(std::move(Decoded.Texels));
     Result.DecodedImageLayoutStorage.push_back(std::move(Decoded.MipLayouts));
     Dst.Data = Result.DecodedImageStorage.back().data();
@@ -623,15 +694,10 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   }
 
   if (feme::cpu::isETC2Format(Img->format())) {
-    // (Roadmap H8j scope, mirroring H8n's BC branch above) ETC2/EAC
-    // decode, like ASTC/BC decode, only ever produces layer 0's texels --
-    // a nonzero base layer or a multi-layer range reads as all-zero
-    // rather than silently decoding the wrong layer's blocks.
-    if (Range.baseArrayLayer != 0 || LayerCount != 1)
-      return;
     ETC2SamplingTarget Target = etc2SamplingTarget(Img->format());
     DecodedASTCImage Decoded = decodeETC2ImageForSampling(
-        Img, Range.baseMipLevel, LevelCount, Target.BytesPerTexel);
+        Img, Range.baseMipLevel, LevelCount, Target.BytesPerTexel,
+        DecodeBaseSlice, DecodeSliceCount, IsDecodedImage3D);
     Result.DecodedImageStorage.push_back(std::move(Decoded.Texels));
     Result.DecodedImageLayoutStorage.push_back(std::move(Decoded.MipLayouts));
     Dst.Data = Result.DecodedImageStorage.back().data();
