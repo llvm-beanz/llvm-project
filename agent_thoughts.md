@@ -94669,3 +94669,71 @@ No new Vulkan feature/extension surface -- `Vulkan14FeatureInventory.md`/
      given its narrower scope.
 3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+# Session: L125(d) -- sampler.border_swizzle.* component-swizzle fix
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary`. Done.
+
+## What's fixed
+
+`ImageView` used to drop `VkImageViewCreateInfo::components` entirely --
+every synthesized `ClampToBorder` border color came out unswizzled, even
+though core Vulkan requires swizzling `TRANSPARENT_BLACK`/`OPAQUE_WHITE`
+with no `VK_EXT_border_color_swizzle` needed (only `OPAQUE_BLACK`/custom
+colors need that extension for a non-identity mapping).
+
+1. `RuntimeABI.h`: new `ImageComponentSwizzle` enum (numbered to match
+   `VkComponentSwizzle`, `Identity == 0` so a zero-initialized descriptor
+   still means identity), `packImageSwizzle`, and a `Swizzle` field on
+   `FemeImageDescriptor` (donated from `Reserved[3]`).
+2. `FeMeRuntimeCPU.c`: `femeRTApplyImageSwizzle`, applied to the border
+   branch in `femeRTFetchTexel2D`/`femeRTFetchTexel3D`.
+3. `Image.h`/`Image.cpp`: `ImageView` stores the real component mapping.
+4. `CommandBuffer.cpp`: `resolveImageSwizzle` + `materializeImageDescriptor`
+   wiring.
+5. Two new unit tests (runtime-level + full Vulkan-dispatch-level).
+
+Real CTS proof: 48/48 pass on every 4-component-format
+`transparent_black.no_gather.no_swizzle_hint` case that used to fail
+(`Color:(0,0,0,0)` universally before the fix).
+
+`ninja check-feme`: 3239/3242 Passed, 3 Unsupported, 0 Failed.
+
+## What's still open (new row L125(e))
+
+While verifying the fix on a broader 150-case sample (35 Pass / 33 Fail /
+82 NotSupported), found 7 fails with a **different** root cause: a format
+missing a channel (`d16_unorm`, `r16_sfloat`, `r16g16_sfloat`,
+`r32_sfloat`, `r32g32b32_sfloat`) doesn't get its border color's missing
+channels re-defaulted (alpha to `1`) before the swizzle applies. FeMe
+bakes `BorderColor` as a fixed, format-independent `float[4]` at
+*sampler*-creation time (`mapBorderColor`, Image.cpp) -- but a real
+Vulkan sampler genuinely has no idea which image format it'll sample
+later, so the fix has to happen at *fetch* time using the bound image's
+own format. Split out as roadmap `L125(e)`, not part of this fix.
+
+The other 26 of the 33 fails are `VK_ERROR_INITIALIZATION_FAILED` at
+pipeline creation -- already-tracked, separate `L125(c)` bucket,
+unrelated to this fix.
+
+## Next steps
+
+1. **(~20 min)** Pick up **L125(e)**: add a per-format "channel count"
+   query (`femeRTUnpackImageTexel`'s own per-format switch already has
+   this info per-case, FeMeRuntimeCPU.c ~line 2591) and use it in
+   `femeRTFetchTexel2D`/`femeRTFetchTexel3D`'s `UseBorder` branch to
+   override missing channels (alpha to `1`, or G/B to `0`/`1` per the
+   same rule) before `femeRTApplyImageSwizzle` runs. Check whether
+   `d16_unorm` (a depth-only format) shares this root cause or needs
+   separate handling -- not triaged yet.
+2. Once L125(e) lands, re-run the 150-case sample (or a fresh larger
+   one) and confirm the whole `sampler.border_swizzle.*`
+   `Ref:`/`Color:`-mismatch family (minus the already-tracked L125(c)
+   `VK_ERROR_INITIALIZATION_FAILED` bucket and the `custom`/`opaque_black`
+   extension-gated `NotSupported` cases) is fully green.
+3. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
+   distinct `VK_ERROR_INITIALIZATION_FAILED` sites, `vktPipelineBind
+   PointTests.cpp`) remain untouched and untriaged -- a good pick after
+   L125(e), or pick **L125's next fresh sample** instead.
+4. `ninja check-feme` and both CTS build directories are incremental
+   from here -- no reconfigure needed.
