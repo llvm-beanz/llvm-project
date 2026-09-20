@@ -5281,3 +5281,74 @@ fix, not new Vulkan feature/extension surface, so
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## L124(c)/(d): spirv.CopyLogical + gl_DeviceIndex
+
+This session fixed the two remaining `compute.*` fails from the prior
+session's sweep.
+
+**L124(d)** (`dEQP-VK.compute.pipeline.device_group.device_index`):
+`gl_DeviceIndex` was entirely unwired for the compute pipeline (only the
+graphics pipeline's `ViewIndex`/`DeviceIndex` aliasing existed). Since
+neither `feme`'s own `BuiltInMappings[]` table nor LLVM's own
+`IntrinsicsSPIRV.td` has an `llvm.spv.*` intrinsic for it at all, and
+FeMe's CPU backend always models exactly one physical device, it always
+legally resolves to the constant `0` -- a value-level fold rather than an
+intrinsic call. Fixed via a new `isDeviceIndexBuiltIn()` check
+special-cased in `BuiltInAddressOfPattern::matchAndRewrite`
+(`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`).
+
+**L124(c)** (`dEQP-VK.compute.pipeline.basic.undefined_values`): the real
+shader's `OpCopyLogical` (opcode 400, SPIR-V 1.4) was entirely unmodeled
+in MLIR's SPIR-V dialect -- confirmed via
+`--deqp-log-decompiled-spirv=enable` that it copies an uninitialized
+`Function`-storage local struct into a logically-compatible-but-not-
+identical `StorageBuffer` block-member struct (same member value types,
+different/absent `Offset` decorations) before storing. Added a brand-new
+upstream `spirv.CopyLogical` op end-to-end:
+
+- `SPIRVBase.td` (opcode-400 enum case), `SPIRVMiscOps.td` (ODS
+  definition), `SPIRVOps.cpp` (`areLogicallyCompatible()` verifier
+  implementing the spec's recursive same-shape-ignoring-decorations
+  check).
+- Following the `spirv.CopyObject` precedent, (de)serialization needed
+  **zero** manual `Deserializer.cpp`/`SerializeOps.cpp` code -- confirmed
+  via `mlir-translate -test-spirv-roundtrip`.
+- `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`:
+  `CopyLogicalConversionPattern`, with an identity fast-path (mirroring
+  `CopyObject`) plus a leaf-by-leaf `extractvalue`/`insertvalue` rebuild
+  for the general case. A deliberately-constructed stress repro (not the
+  real CTS shape, which is naturally tight/gapless) exposed a bug: the
+  destination struct's own explicit layout can insert a synthetic
+  alignment-padding member the source side has no equivalent of, so the
+  declared-to-physical member index must be remapped independently on
+  *both* sides via `getStructMemberPhysicalIndex` (the same helper
+  `spirv.AccessChain`'s own struct-member lowering already relies on).
+
+Results:
+
+- `ninja check-feme`: **3,219/3,222 Passed, 3 Unsupported, 0 Failed**
+  (0 regressions; +1 from the new `spirv-to-llvm-copy-logical.mlir` lit
+  test on top of the prior session's 3,218/3,221).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Both originally-failing tests now **Pass** when run directly:
+  `dEQP-VK.compute.pipeline.basic.undefined_values` and
+  `dEQP-VK.compute.pipeline.device_group.device_index`.
+- `compute.*` (61,460 cases): **683 Pass / 2 Fail / 60,775 NotSupported**
+  -- was 681/4/60,775 before this session's fixes: **+2 Pass, 0
+  regressions**. Confirmed both fixes hold across every `compute.*`
+  variant (`pipeline`, `shader_object_binary`, `shader_object_spirv`).
+  The remaining 2 fails are exactly the still-open
+  `zero_initialize_workgroup_memory` cases (`composites.2`,
+  `types.bool`), previously known and unchanged.
+
+This session's fixes are a new SPIR-V-dialect op (`spirv.CopyLogical`,
+mirroring `OpCopyLogical`'s existing SPIR-V 1.4 semantics -- no new
+Vulkan-visible capability) plus an internal builtin-value fold
+(`gl_DeviceIndex` always folding to a compile-time constant, since
+`VK_KHR_device_group`'s multi-device semantics are moot on a
+single-device CPU backend). Neither introduces new Vulkan feature or
+extension surface, so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
+and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
+unchanged and still accurate. See `agent_thoughts.md` for the full
+narrative and next steps.
