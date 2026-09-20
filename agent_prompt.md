@@ -58,58 +58,64 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 ## State right now
 
 - Working tree clean before this file's own commit, HEAD at
-  `e06a67389ffc`.
-- `ninja check-feme`: 3,214/3,217 Passed, 3 Unsupported, 0 Failed.
-- `ssbo.*`: **3,238 Pass / 4 Fail / 8,983 NotSupported** (of 12,225) --
-  down from 3,232/10/8,983 at session start.
-- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression. Full
-  `ubo.*` (13,240 cases) not re-run this session -- not needed, no
-  `Uniform`/`Block`-specific code touched.
+  `105d572ad9cd`.
+- `ssbo.*` down to **1 fail of 12,225 (0.008%)**:
+  `dEQP-VK.ssbo.layout.random.nested_structs_instance_arrays.8`
+  ("Result comparison and counter values are incorrect").
+- Investigated this residual: it's a considerably more complex shader
+  (3 blocks, 6 nested struct types `sA`-`sF`, several matrix shapes).
+  Built a faithful repro of its own `BlockD.n[]` member (a *square*
+  `mat3` runtime array, matching this test's exact real offsets/
+  decorations including a preceding `sF{bool}` struct member) and
+  confirmed **this session's own fix already handles it correctly** --
+  ruling that member out. The real mismatch is elsewhere in the
+  shader, not yet isolated.
 - No feature/extension inventory changes needed (internal correctness
   fix, no new Vulkan surface) -- verified, not just assumed.
-- Build directories (`llvm-project/build`, `VK-GL-CTS/build`) left in
-  place, warm/incremental. `/tmp/ctsrun` has this session's own fresh
-  scratch logs (`ssbo_l124s.qpa`/`.stdout`, `l124s_confirm.qpa`/`.stdout`,
-  `ubo_random_l124s.qpa`/`.stdout`) plus older scratch from prior
-  sessions (`l124s_41.qpa`, `l124s_shape.qpa`, `l124s_verify.qpa`,
-  `l124s_verify2.qpa`) and this session's own dead-end repros
-  (`/tmp/l124t_repro.mlir`, the wrapper-shape repro that turned out not
-  to match the real failing test) -- none referenced by anything
-  committed.
+- Build directories left in place, warm/incremental. `/tmp/ctsrun` has
+  this session's fresh scratch logs (`l124t_41.qpa`/`.stdout`,
+  `l124t_confirm.qpa`/`.stdout`, `l124t_nsia8.qpa`/`.stdout`,
+  `l124t_triage1.qpa`/`.stdout`, `ssbo_l124t.qpa`/`.stdout`,
+  `ubo_random_l124t.qpa`/`.stdout`) and `/tmp/l124t_*.mlir` repros
+  (`blockB_repro`, `blockC_repro` -- the one that found the bug,
+  `mat3_repro`, `blockD_full` -- confirms the fix already covers
+  `nested_structs_instance_arrays.8`'s own `BlockD.n[]`, `minimal` --
+  redundant with the committed lit test) -- none referenced by
+  anything committed.
 
 ## Suggested next steps
 
-1. **(~5 min)** Delete `/tmp/ctsrun`'s scratch logs and `/tmp/l124s_*.mlir`/
-   `/tmp/l124t_repro.mlir`/`/tmp/l124u_repro.mlir` if a future session
-   doesn't need them -- none are referenced by anything committed.
-   Keep `/tmp/l124s_repro3.mlir` only if useful as a reference for the
-   now-fixed shape (it's also captured permanently in the new lit test,
-   so not strictly needed either).
-2. Start **L124(t)** (`ssbo.*`'s remaining 4 fails). Recommended order,
-   cheapest/most-isolated first:
-   - `all_shared_buffer.13` and `nested_structs_instance_arrays.8`: pull
-     their real shapes via `--deqp-log-decompiled-spirv=enable` the same
-     way every prior L124 triage did -- these were previously bundled
-     into an "unexplained `ac_numPassed`" bucket of 6 that this
-     session's fix collaterally reduced to 2, so they may share a
-     related (but not identical) root cause worth checking first.
-   - `all_shared_buffer.41`: **do not restart from the wrapper-shape
-     assumption** -- confirmed this session that the real block has 4
-     members and is NOT the wrapper shape; a faithful repro of the real
-     shape converts correctly at the IR level. The bug (if it's a
-     compiler bug at all, as opposed to a CTS/driver-level issue) is
-     likely downstream of `feme-opt`'s own output -- consider tracing
-     with the actual `feme`/JIT runtime path, or checking interaction
-     with a sibling struct member's own layout, rather than more
-     `feme-opt`-only repros.
-   - `all_per_block_buffers.20`'s own pipeline-creation crash
-     (`VK_ERROR_INITIALIZATION_FAILED`) is its own separate
-     investigation -- likely needs a debugger attached to the
-     pipeline-creation call, not a CTS-log trace.
+1. **(~5 min)** Delete `/tmp/ctsrun/l124t_*.qpa`/`.stdout`,
+   `/tmp/ctsrun/ssbo_l124t.*`, `/tmp/ctsrun/ubo_random_l124t.*`, and
+   `/tmp/l124t_*.mlir` if a future session doesn't need them -- none
+   referenced by anything committed. Worth keeping
+   `/tmp/ctsrun/l124t_nsia8.qpa` a little longer: it has the full
+   decompiled SPIR-V/GLSL source for `nested_structs_instance_arrays.8`
+   already extracted (3 blocks, 6 struct types), saving a re-run.
+2. Start **L124(u)** (`nested_structs_instance_arrays.8`, the sole
+   remaining `ssbo.*` fail). This session already ruled out `BlockD.n[]`
+   (the trailing `mat3` runtime array) as the cause -- the fix from
+   this session handles it fine. Recommended order for what's left to
+   check, cheapest first:
+   - `BlockB`'s `sA d[]` (runtime array of struct containing a `mat4`,
+     `RowMajor`) -- this goes through the nested-struct-type conversion
+     path (not `peelArraysToMatrixType` at all), which should already be
+     correct via `TypeConverter.addConversion` for `StructType`, but
+     hasn't been directly repro-verified for this specific runtime-array-
+     of-struct-with-matrix combination.
+   - `BlockC`'s doubly-nested `sD.mA` (a `sB` struct containing a
+     `mat3x2`, `RowMajor`) and `sE.mB` (a direct `mat3` member) -- both
+     ordinary nested-struct matrix members, should be well-trodden but
+     not yet individually repro-verified in this exact combination.
+   - Consider whether `bool`/`bvec3`/`bvec4` members (present in `sC`,
+     `sD.mC`) interacting with a following matrix member's offset could
+     be the gap -- not investigated at all this session.
+   - If none of the above isolate it, consider binary-search by editing
+     the real GLSL shader source directly (nulling out unrelated block
+     members) rather than another guess-based `feme-opt` repro.
 3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
    -- reuse the existing build directories, no reconfigure needed.
-4. With `ssbo.*` down to 4 of 12,225 (0.03%) and `ubo.random.*` fully
-   clean, L124(t) closing this last small bucket would put the `ssbo.*`
-   family fully clean too -- worth prioritizing, though each of the 3
-   remaining issues may need its own dedicated debugging session (a
-   crash needs a debugger, not a CTS trace).
+4. With `ssbo.*` at 1 fail of 12,225 and `ubo.random.*` fully clean,
+   L124(u) closing this last case would make **both** `ubo.*` and
+   `ssbo.*` families fully clean -- highest-value single item left on
+   the L124 series.
