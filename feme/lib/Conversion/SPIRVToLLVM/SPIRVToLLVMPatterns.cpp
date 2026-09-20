@@ -3091,30 +3091,43 @@ public:
 /// `getDynamicVertexIndexedAccess`/`getDynamicRowIndexedAccess` are written
 /// to expect exactly this real-pointer shape (see their own comments).
 ///
-/// (Roadmap H87/H82) Returns true if \p PointeeType is a `spirv.array`, or
-/// any `spirv.struct` (regardless of member count) -- both shapes a real
-/// shader may subsequently index with a `spirv.AccessChain` rather than
-/// read as a single whole value. This originally only recognized a plain
-/// array, or a single-member struct wrapping one (the shape a mesh
-/// shader's own per-primitive/per-vertex flat-array `Input` interface
-/// block takes, SPIR-V's `Block` decoration requiring an interface block
-/// to be a struct even when it logically holds nothing but one array), but
-/// a genuine multi-member `Input` interface block with no array at all --
-/// e.g. a fragment stage's own `in PerPrimitiveEXT { float a; vec3 b;
-/// float c; }`-shaped read of a mesh shader's per-primitive output, each
-/// member selected by its own constant-indexed `spirv.AccessChain` -- needs
-/// exactly the same real-pointer treatment: `spirv.AccessChain`'s own
-/// member-selecting indices are always compile-time constant, so this
-/// shape does not strictly need it to support a *dynamic* index the way
-/// the array shapes do, but it still needs a real pointer base because
-/// MLIR's own generic `AccessChainPattern` (see `StageIOArrayAccessChainPattern`'s
-/// own comment below) unconditionally builds a `getelementptr`, which
-/// requires a pointer operand, not the previously-eagerly-loaded struct
-/// value this predicate answering `false` for a multi-member struct used
-/// to produce.
+/// (Roadmap H87/H82/L125s) Returns true if \p PointeeType is a
+/// `spirv.array`, any `spirv.struct` (regardless of member count), or a
+/// `spirv.matrix` -- all three shapes a real shader may subsequently index
+/// with a `spirv.AccessChain` rather than read as a single whole value.
+/// This originally only recognized a plain array, or a single-member
+/// struct wrapping one (the shape a mesh shader's own per-primitive/per-
+/// vertex flat-array `Input` interface block takes, SPIR-V's `Block`
+/// decoration requiring an interface block to be a struct even when it
+/// logically holds nothing but one array), but a genuine multi-member
+/// `Input` interface block with no array at all -- e.g. a fragment
+/// stage's own `in PerPrimitiveEXT { float a; vec3 b; float c; }`-shaped
+/// read of a mesh shader's per-primitive output, each member selected by
+/// its own constant-indexed `spirv.AccessChain` -- needs exactly the same
+/// real-pointer treatment: `spirv.AccessChain`'s own member-selecting
+/// indices are always compile-time constant, so this shape does not
+/// strictly need it to support a *dynamic* index the way the array shapes
+/// do, but it still needs a real pointer base because MLIR's own generic
+/// `AccessChainPattern` (see `StageIOArrayAccessChainPattern`'s own
+/// comment below) unconditionally builds a `getelementptr`, which requires
+/// a pointer operand, not the previously-eagerly-loaded struct value this
+/// predicate answering `false` for a multi-member struct used to produce.
+/// A directly `matrix`-typed `Input` variable (e.g. a vertex-input
+/// attribute declared `layout(location = N) in mat4 M`, indexed by its own
+/// column- then row-selecting `spirv.AccessChain`) needs the identical
+/// treatment for the identical reason: `spirv.MatrixType` converts to an
+/// `!llvm.array` of column vectors (see MLIR's own `MatrixTypeConverter`),
+/// which `StageIOAddressOfPattern`'s own `isCompositeLLVMType` check
+/// already recognizes as composite and keeps as a real pointer -- but
+/// until this predicate (checked on the *original*, unconverted SPIR-V
+/// pointee type, not the already-converted LLVM one) also recognized
+/// `spirv.matrix`, `isInputArrayAccessChain` never routed such a matrix's
+/// own `spirv.AccessChain` to `StageIOArrayAccessChainPattern` at all,
+/// leaving it to fail generic legalization outright (no other pattern
+/// expects an already-real-pointer base for a matrix-typed leaf).
 bool isCompositeStageIOType(mlir::Type PointeeType) {
-  return mlir::isa<mlir::spirv::ArrayType, mlir::spirv::StructType>(
-      PointeeType);
+  return mlir::isa<mlir::spirv::ArrayType, mlir::spirv::StructType,
+                    mlir::spirv::MatrixType>(PointeeType);
 }
 
 /// LLVM-dialect counterpart of isCompositeStageIOType, applied to an
