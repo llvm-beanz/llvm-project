@@ -95360,3 +95360,155 @@ deviceName` first, per standing instruction.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 5. Clean up `/tmp/ctsrun/l125q_verify/*` (this session's own scratch
    QPA/fails.txt files) before ending a future session.
+
+# Session: L125(q) sub-bucket (2) swizzle-order fix + residual re-scoped as L125(v)
+
+## Brain dump (i-have-adhd style)
+
+- Confirmed `FeMe CPU Vulkan Device` first, as always.
+- Picked up sub-bucket (2) exactly where the last session left it:
+  864 fails, `Ref`-vs-`Color` mismatches, integer formats, non-identity
+  swizzle + non-default border color + `gather_N`.
+- Isolated `r16_sint.barg.transparent_black.gather_3.no_swizzle_hint`.
+  `Fail (Ref:(0,0,0,0) ... Color:(1,1,1,1))`.
+- Read `vktPipelineSamplerBorderSwizzleTests.cpp`'s `getExpectedColor`.
+  Confirmed (again, matching L125(g)/(h)'s prior finding): swizzle
+  always happens BEFORE Gather's Component selects a channel.
+- Hand-traced the expected math by hand on paper (well, in my head):
+  pre-swizzle border for `r16_sint` (1 real channel) +
+  `transparent_black` = `(0,0,0,1)` (alpha forced to 1 by Vulkan's own
+  "convert to RGBA" rule, regardless of the border color's own nominal
+  value); post-`barg`-swizzle = `(0,1,0,0)`; `gather_3` picks index 3
+  = `(0,0,0,0)` for all slots. Matches CTS's `Ref` exactly.
+- Grepped `FeMeRuntimeCPU.c` for the integer border literal
+  `{0, 0, 0, 1}`. Found **7** occurrences, all completely unswizzled --
+  every one of the `Sample*I32`/`Gather*I32` functions across
+  1D/2D/3D/Array1D/Array2D/Gather2D/GatherArray2D. Cube gather doesn't
+  have this pattern (seamless filtering, no border addressing there).
+- Also checked the CTS's own `no_gather` sibling case
+  (`r16_sint.barg.transparent_black.no_gather.no_swizzle_hint`) out of
+  paranoia that maybe only `Gather*` was buggy. It was ALSO failing --
+  which quietly falsifies 5 stale doc comments in the file claiming "no
+  real CTS case is known to exercise `CLAMP_TO_BORDER` against an
+  integer-sampled image yet." Nice catch, corrected those comments too.
+- Fixed all 7 sites: route the fixed default through the existing
+  `femeRTApplyImageSwizzleI32` helper (already used by every in-bounds
+  texel path -- this was purely a "one branch forgot to call the
+  existing helper" bug, not a missing architectural piece).
+- Small self-inflicted hiccup: one `edit` call on the
+  `femeCpuImageGather2DV4I32` site accidentally deleted the `T00`
+  assignment line while inserting the swizzle line above it. Caught it
+  immediately (build failed with "T00 undeclared") and fixed with a
+  follow-up edit. Lesson: when inserting a line right before another
+  assignment in a dense function body, double check the `old_str`/
+  `new_str` boundary didn't accidentally swallow a neighboring line.
+- `ninja FeMeRuntimeCPU` -- clean build, compound-literal syntax for the
+  GCC vector-extension `FemeRTv4i32` type worked with no fuss.
+- Added 2 new unit tests (not 3 -- I'd briefly considered a third,
+  separate `GatherArray2D`-specific test, but the existing 2D coverage
+  plus the Sample-path coverage already exercises the fixed code path
+  identically, so didn't add a redundant third).
+- `ninja check-feme`: 3,261/3,264 Passed, 3 Unsupported, 0 Failed (+2,
+  0 regressions).
+- Re-ran the isolated repro pair: both Pass now.
+- Ran the full `border_swizzle.r16*` sweep (25,600 cases, ~25 min in
+  the background while I did other bookkeeping): **4,918 Pass / 632
+  Fail / 20,050 NotSupported**. Up from 4,686/864/20,050. **232 fails
+  fixed.**
+- Started triaging the remaining 632. Same 6 formats, roughly half the
+  fails each (so the fix genuinely helped uniformly, not just one
+  format). Split into 392 gather + 240 non-gather -- a new detail,
+  since before my fix it was 864 gather-only (the non-gather cases
+  were presumably *already* wrong before too, just not previously
+  counted in this row's "864" total since the prior session's own
+  triage apparently only sampled `gather_N` cases).
+- Sampled 10 of the still-failing `no_gather` cases: all `opaque_white`
+  border color (not `transparent_black`), various swizzles, all
+  `r16_sint`. Isolated one:
+  `r16_sint.argb.opaque_white.no_gather.no_swizzle_hint` --->
+  `Fail (Ref:(1,1,0,0) ... Color:(1,0,0,0))`.
+- Traced this by hand too. `argb` swizzle: r=A,g=R,b=G,a=B. CTS's own
+  per-format masking rule for integer border colors: only the first
+  `numComp` components of the border color's own raw value survive;
+  everything past that is 0, **except** component 3 (alpha) which is
+  forced to 1 regardless of `numComp`. For `r16_sint` (`numComp=1`) +
+  `opaque_white` (raw `(1,1,1,1)`): pre-swizzle border =
+  `(1, 0, 0, 1)` (component 0 keeps the border's own value since
+  `0 < numComp`; components 1/2 get zeroed since they're past
+  `numComp`; component 3 forced to 1). Post-`argb`-swizzle:
+  `(borderRaw[a]=1, borderRaw[r]=1, borderRaw[g]=0, borderRaw[b]=0)`
+  = `(1, 1, 0, 0)`. Matches CTS's `Ref` exactly.
+- The production code's hardcoded `{0, 0, 0, 1}` is **only correct**
+  when the border color's own component-0 value happens to be 0 (i.e.
+  transparent_black-shaped data) -- for `opaque_white` (whose
+  component-0 value is 1), the hardcoded literal is simply wrong,
+  independent of swizzle. This is why my swizzle-order fix closed
+  exactly the `transparent_black` fails (232, matching that subset)
+  and left every non-`transparent_black` border color still broken.
+- Decided **not** to attempt the deeper fix in this session. It's a
+  materially bigger change: `FemeSamplerDescriptor` (shared ABI header,
+  `RuntimeABI.h`) has zero integer border-color storage today, only
+  `float BorderColor[4]` -- and its `Reserved[3]` headroom (3 words) is
+  one word short of holding 4 more `int32_t`s, so the struct itself
+  would need to grow, which then needs the mirrored `FemeRTSamplerDescriptor`
+  struct in the runtime C file updated in lockstep, plus a new
+  `mapBorderColorInt`-style resolver in `Image.cpp`, plus a
+  `femeRTExpandBorderColorForFormatI32` counterpart to the float path's
+  existing per-format masking helper, plus updating all 7 sites again,
+  plus new tests. That's a full session's worth of careful,
+  ABI-touching work on its own, not a "squeeze in at the end" fix.
+- Filed it as its own roadmap row instead: `L125(v)` (kept it one
+  lowercase letter deep, per the standing instruction -- did NOT nest
+  it under `L125(q)`).
+- Updated `Roadmap.md`: struck through sub-bucket (2)'s old text,
+  replaced with "partially fixed" wording documenting the swizzle-order
+  fix's own scope and the 232-fail CTS delta, then pointed at the new
+  `L125(v)` row for the residual 632.
+- Updated `VulkanCTSReport.md` with a new dedicated section (repro,
+  root cause, fix, unit tests, CTS results, and an explicit note about
+  the second root cause + re-scoping), following the file's own
+  established per-fix template.
+- Committed in 2 pieces: (1) the runtime fix + 2 unit tests, (2) the
+  doc updates (Roadmap.md + VulkanCTSReport.md). No Vulkan14
+  FeatureInventory/ExtensionInventory changes needed -- this session
+  added no new Vulkan feature/extension surface, purely a runtime
+  bugfix.
+
+## Wins visible right now
+
+- 232 of the 864 `border_swizzle` sub-bucket (2) fails now Pass
+  (`transparent_black`-border cases across all 6 affected integer
+  formats).
+- `ninja check-feme`: 0 regressions, +2 new tests.
+- 5 stale "no real CTS case is known" doc comments corrected --
+  future sessions won't be misled by them again.
+- Root cause of the remaining 632 fails is now clearly understood and
+  documented (not just "still failing, unknown why") -- next session
+  can start implementing immediately rather than re-triaging.
+
+## Next steps
+
+1. **(~1 session, ABI-touching)** Implement `L125(v)`: add real integer
+   border-color storage to `FemeSamplerDescriptor` (`RuntimeABI.h`,
+   growing the struct since the existing `Reserved[3]` headroom is one
+   word short of 4 more `int32_t`s), a `mapBorderColorInt`-style
+   resolver in `Image.cpp`'s `Sampler` construction (mirroring
+   `mapBorderColor`'s own `TRANSPARENT_BLACK`/`OPAQUE_BLACK`/
+   `OPAQUE_WHITE` cases as integer 0/1 literals), and a
+   `femeRTExpandBorderColorForFormatI32` counterpart to the float
+   path's `femeRTExpandBorderColorForFormat` in `FeMeRuntimeCPU.c`,
+   applied at all 7 sites in place of today's hardcoded `{0, 0, 0, 1}`.
+   Start by re-reading `mapBorderColor`/`femeRTExpandBorderColorForFormat`
+   side by side to confirm the exact per-format masking rule (numComp
+   truncation + forced alpha=1) applies identically to the int path
+   before touching the ABI struct.
+2. Once `L125(v)` is fixed, re-run the full `border_swizzle.r16*` sweep
+   to confirm the remaining 632 fails close (or reveal a third,
+   still-narrower root cause).
+3. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain untouched from prior
+   sessions' decomposition -- good alternative picks if `L125(v)`'s
+   ABI work stalls or needs a design pause.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. Clean up `/tmp/ctsrun/l125q2/*` (this session's own scratch
+   QPA/console-log files) before ending a future session.
