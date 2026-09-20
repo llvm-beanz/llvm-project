@@ -1545,30 +1545,27 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias, HasGrad)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      // Roadmap H109: an ordinary sample against an integer-channel
-      // (`_UINT`/`_SINT`) image is legal SPIR-V (`OpImageSampleExplicitLod`
-      // against a `usampler2D`/`isampler2D`), just restricted, per the
-      // Vulkan spec, to `NEAREST` filtering -- unlike the general
-      // `Sample2D` path below, only the narrow shape a real CTS case
-      // (`dEQP-VK.mesh_shader.ext.synchronization.*.sampled_image.*`)
-      // needs is accepted for now: a plain (non-arrayed, non-cube,
-      // non-1D/3D) `Plain2D` image, no `Bias`/`Grad` (SPIR-V forbids both
-      // alongside the mandatory `NEAREST` filtering in every case this
-      // pass has needed to support so far), and no `MinLod` clamp
-      // (`createSample2DI32` has no such operand). Roadmap L125(a) widens
-      // this from explicit-LOD-only to also accept an *implicit*-LOD
-      // sample (`OpImageSampleImplicitLod`, GLSL's/HLSL's ordinary
-      // `texture()`/`Sample()` call against an integer-format texture,
-      // e.g. `dEQP-VK.pipeline.monolithic.image.*.format.r8_[su]int.*`):
+      // Roadmap L109/L125(a)/L125(b): an ordinary sample against an
+      // integer-channel (`_UINT`/`_SINT`) image is legal SPIR-V
+      // (`OpImageSampleExplicitLod`/`OpImageSampleImplicitLod` against a
+      // `usampler2D`/`isampler2D`/`usampler1D`/`isampler1D`), just
+      // restricted, per the Vulkan spec, to `NEAREST` filtering: no
+      // `Bias`/`Grad` (SPIR-V forbids both alongside the mandatory
+      // `NEAREST` filtering in every case this pass has needed to
+      // support so far), and no `MinLod` clamp (neither
+      // `createSample2DI32` nor `createSample1DI32` has such an
+      // operand). `Plain2D` (roadmap H109, widened to implicit-LOD by
+      // L125(a)) and `Plain1D` (roadmap L125(b), mirroring `Plain2D`'s
+      // own widening exactly) are the only shapes accepted so far;
       // `lowerImageAccesses` below already defaults `Lod` to a constant
-      // `0.0` whenever `ExplicitLod` is false (see its own comment), which
-      // is exactly right here too -- every real CTS case this widening
-      // covers samples a single-mip-level image, so the true
+      // `0.0` whenever `ExplicitLod` is false (see its own comment),
+      // which is exactly right here too -- every real CTS case either
+      // widening covers samples a single-mip-level image, so the true
       // (unimplemented) derivative-based implicit-LOD computation would
       // clamp to mip 0 regardless.
       if (IsInteger) {
-        if (Shape != ImageShape::Plain2D || HasMinLodClamp || HasBias ||
-            HasGrad)
+        if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D) ||
+            HasMinLodClamp || HasBias || HasGrad)
           return false;
         unsigned OffsetIdx =
             getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
@@ -1576,7 +1573,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                       /*Float=*/true) ||
             !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape,
                                /*AllowArray2D=*/false,
-                               /*AllowPlain1DArray1D=*/false) ||
+                               /*AllowPlain1DArray1D=*/Shape ==
+                                   ImageShape::Plain1D) ||
             !isV4I32(CI->getType()))
           return false;
         continue;
@@ -3534,13 +3532,30 @@ void lowerImageAccesses(
         Value *ExplicitLodFlag = Builder.getInt1(ExplicitLod);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
-        // Roadmap H109: an integer-channel sample is only ever accepted
-        // by `hasOnlySupportedImageUses` as a `Plain2D`, explicit-LOD,
+        // Roadmap H109/L125(b): an integer-channel sample is only ever
+        // accepted by `hasOnlySupportedImageUses` as a `Plain2D`/`Plain1D`,
         // no-`Bias`/`Grad`/`MinLod` call (see its own comment) -- so this
         // narrower emission runs before, and instead of, the general
         // float-sample shape dispatch below, which would otherwise need
         // an `IsInteger` branch threaded through every shape's own case.
         if (isV4I32(CI->getType())) {
+          // Roadmap L125(b): `Plain1D`'s own coordinate/offset are bare
+          // scalars (see `isCoordN`'s/`isSupportedOffset`'s own comments
+          // on why SPIR-V never vector-wraps a single-component
+          // coordinate/offset), unlike `Plain2D`'s 2-wide
+          // `CreateExtractElement` pair below -- so this is handled as
+          // its own case rather than falling through to the generic
+          // `Plain2D` extraction.
+          if (Shape == ImageShape::Plain1D) {
+            Value *IntOffset = CI->getArgOperand(
+                getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+            CallInst *NewSampleI32Call =
+                createSample1DI32(Builder, Env, ImageIndex, SamplerIndex,
+                                  Coord, Lod, IntOffset, Mask, CI->getName());
+            CI->replaceAllUsesWith(NewSampleI32Call);
+            CI->eraseFromParent();
+            continue;
+          }
           Value *IntC0 = Builder.CreateExtractElement(Coord, uint64_t{0});
           Value *IntC1 = Builder.CreateExtractElement(Coord, uint64_t{1});
           Value *IntOffset = CI->getArgOperand(

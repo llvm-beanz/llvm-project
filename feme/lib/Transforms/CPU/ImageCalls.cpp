@@ -154,6 +154,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.gathercmp.cube.v4f32";
   case ImageCallKind::GatherCube:
     return "feme.cpu.image.gather.cube.v4f32";
+  case ImageCallKind::Sample1DI32:
+    return "feme.cpu.image.sample.1d.v4i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -821,6 +823,18 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                              F32Ty, F32Ty, I32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
+  case ImageCallKind::Sample1DI32:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, lod, offset, mask) -> <4 x i32>
+    // (roadmap L125(b)): the `Plain1D` counterpart of `Sample2DI32`'s own
+    // operand list, minus `v` (a bare scalar `u` coordinate, mirroring
+    // `Sample1D`'s own relationship to `Sample2D`) and with a single
+    // scalar `offset` in place of `offset_x`/`offset_y`.
+    FTy = FunctionType::get(
+        V4I32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -899,6 +913,20 @@ CallInst *feme::cpu::createSample2DI32(IRBuilderBase &Builder,
       F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
           Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, Lod, OffsetX,
           OffsetY, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createSample1DI32(IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       Value *ImageIndex, Value *SamplerIndex,
+                                       Value *U, Value *Lod, Value *Offset,
+                                       Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample1DI32);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+          Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, Lod, Offset,
+          Mask},
       Name);
 }
 
@@ -1905,7 +1933,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::GatherArray2D,
       ImageCallKind::Sample2DI32,
       ImageCallKind::GatherCmpCube,
-      ImageCallKind::GatherCube};
+      ImageCallKind::GatherCube,
+      ImageCallKind::Sample1DI32};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2660,6 +2689,20 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.W = CI.getArgOperand(8);
     Result.Component = CI.getArgOperand(9);
     Result.Mask = CI.getArgOperand(10);
+    break;
+  case ImageCallKind::Sample1DI32:
+    if (CI.arg_size() != 10)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.Lod = CI.getArgOperand(7);
+    Result.OffsetX = CI.getArgOperand(8);
+    Result.Mask = CI.getArgOperand(9);
     break;
   }
   return Result;

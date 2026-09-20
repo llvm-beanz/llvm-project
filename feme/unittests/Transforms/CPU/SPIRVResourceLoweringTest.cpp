@@ -5268,15 +5268,47 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-     LeavesA1DIntegerSampledImageHandleUsedForSampleAlone) {
-  // Roadmap L125(a): unlike `Plain2D` (see `LowersImplicitLodIntegerSampled
-  // ImageToImageSampleV4I32` and `LowersIntegerSampledImageToImageSampleV4
-  // I32` below, both now accepted), a `Plain1D` integer-sampled image is
-  // still rejected -- no `createSample1DI32` runtime helper exists yet
-  // (only `createSample2DI32` does), so every non-`Plain2D` shape remains
-  // out of scope for now. The whole handle (and therefore the whole
-  // function) is left unrewritten, matching `LeavesAnArrayedImageHandle
-  // Alone`'s own "no partial lowering" contract.
+     LeavesAnArray1DIntegerSampledImageHandleUsedForSampleAlone) {
+  // Roadmap L125(b): `Plain1D` (see `LowersImplicitLodIntegerSampledImage1D
+  // ToImageSampleV4I32` below) is now accepted, but `Array1D` -- and every
+  // other non-`Plain1D`/`Plain2D` shape -- is still rejected: no
+  // `createSample1DArrayI32`-style runtime helper exists for any arrayed
+  // or higher-dimensional shape yet. The whole handle (and therefore the
+  // whole function) is left unrewritten, matching `LeavesAnArrayedImage
+  // HandleAlone`'s own "no partial lowering" contract.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<2 x float> %uandlayer) {
+      %img = call target("spirv.Image", i32, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.sample(
+          target("spirv.Image", i32, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %uandlayer, <2 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1darray.v4i32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersImplicitLodIntegerSampledImage1DToImageSampleV4I32) {
+  // Roadmap L125(b): widens `LowersIntegerSampledImage1DToImageSampleV4I32`
+  // below's explicit-LOD acceptance to also accept an ordinary implicit-LOD
+  // sample against a `Plain1D` integer-channel (`usampler1D`/`isampler1D`)
+  // sampled image, mirroring `LowersImplicitLodIntegerSampledImageToImage
+  // SampleV4I32`'s own identical `Plain2D` widening (roadmap L125(a)).
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x i32> @main(float %coord) {
@@ -5299,8 +5331,54 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4i32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, lod, offset, mask). Implicit LOD defaults to 0.0.
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(7))->isZero());
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerSampledImage1DToImageSampleV4I32) {
+  // Roadmap L125(b): an *explicit*-LOD `OpImageSampleExplicitLod` against a
+  // `Plain1D` integer-channel (`usampler1D`/`isampler1D`) sampled image is
+  // legal SPIR-V (restricted, per the Vulkan spec, to `NEAREST` filtering)
+  // -- mirrors `LowersIntegerSampledImageToImageSampleV4I32`'s own
+  // `Plain2D` case (roadmap H109), lowering to `createSample1DI32` instead
+  // of `createSample2DI32`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(float %coord) {
+      %img = call target("spirv.Image", i32, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.samplelevel(
+          target("spirv.Image", i32, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %coord, float 0.0, i32 0)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, lod, offset, mask).
+  EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(7))->isZero());
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
 }
 
 TEST(SPIRVResourceLoweringTest,
