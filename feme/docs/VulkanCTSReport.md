@@ -5191,3 +5191,93 @@ surface, so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
 and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
 unchanged and still accurate. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## Session: L124(b) fixed -- `initial_value` attribute plus whole-array wrapper access chain, closes `compute.*`'s `remove_global_load_pass`
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` (as required
+at the start of every session) before making any changes:
+
+```
+# => FeMe CPU Vulkan Device
+```
+
+Picked up **L124(b)**: `dEQP-VK.compute.pipeline.basic.remove_global_load_pass`,
+which turned out to need two distinct, separately-root-caused fixes layered
+one atop the other.
+
+**Fix 1 -- `spirv.GlobalVariable`'s `initial_value` attribute (3 commits,
+upstream MLIR files).** The real shader's `%count = OpVariable
+%_ptr_Private_uint Private %uint_0` -- a plain (non-spec) `OpConstant` used
+directly as a module-scope global's Initializer -- was entirely unmodeled:
+the deserializer's `processGlobalVariable` only recognized a symbol-bearing
+initializer (`getGlobalVariable`/`getSpecConstant`/
+`getSpecConstantComposite`) or the symbol-less `OpConstantNull` special
+case (`zero_initialized`). Added a new `initial_value` attribute
+(`AnyAttr`, matching `spirv.Constant`'s own `value` attribute's typing,
+since a composite constant's SPIR-V representation is an untyped
+`ArrayAttr` with type tracked separately) across ODS, parser/printer/
+verifier (`SPIRVOps.cpp`), deserializer (`Deserializer.cpp`, reusing
+`getConstant`), serializer (`SerializeOps.cpp`, reusing the existing
+`prepareConstant` machinery `spirv.Constant`/spec-constant-composite
+constituents already share), and `SPIRVToLLVM` lowering (a new
+`convertInitialValueForGlobal` helper mirroring
+`ConstantScalarAndVectorPattern`'s sign-stripping logic; scalar/vector
+only -- a composite `initial_value` deserializes/serializes correctly but
+lowering to LLVM is deliberately out of scope until a real CTS case needs
+it, failing cleanly via `notifyMatchFailure` rather than silently
+mishandling it). New/updated lit tests at all three layers
+(`structure-ops.mlir`, `global-variable.mlir`,
+`memory-ops-to-llvm.mlir`).
+
+**Fix 2 -- whole-array access chain through a wrapper block (1 commit,
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`).** Fixing the
+deserialization error above surfaced a second, deeper failure one layer
+down: `spirv.AccessChain` legalization failed for
+`%15 = OpAccessChain %_ptr_StorageBuffer__runtimearr_int %outputs %uint_0`
+-- a single-index access chain into a `Block`-decorated, one-member
+wrapper struct that selects the wrapper's sole member (its runtime array)
+directly, producing a pointer to the *entire* array rather than any one
+element within it. `BlockAccessChainPattern` unconditionally required a
+real per-element index following the wrapper-selecting one, declining
+this legal, if degenerate, shape outright ("not enough indices"). Tint's
+own compiler output for this exact test emits precisely this access chain
+as a dead value (computed but never loaded from) -- confirmed via
+`--deqp-log-decompiled-spirv=enable` against the real failing case.
+Fixed by reusing the wrapper-selecting index itself (always the constant
+0) as the `llvm.spv.resource.getpointer` operand when no further index
+follows it; `rewriteBlockAccess`'s own pre-existing `AllIndices.size() ==
+Selector + 1` early return then produces the correct whole-array pointer
+with no further changes needed there. New lit test
+(`spirv-to-llvm-wrapper-whole-array-access-chain.mlir`), plus a minimal
+`.mlir` repro built and verified directly against `feme-opt` before
+writing the test, matching the real shader's exact shape.
+
+Results:
+
+- `ninja check-feme`: **3,218/3,221 Passed, 3 Unsupported, 0 Failed**
+  (+1 from the new access-chain lit test on top of the prior session's
+  count, which itself already included the 3 `initial_value` lit tests;
+  0 regressions throughout both fixes).
+- Re-confirmed `FeMe CPU Vulkan Device` again before running any CTS
+  cases, with the freshly-built ICD.
+- The originally-failing test,
+  `dEQP-VK.compute.pipeline.basic.remove_global_load_pass`: now
+  **Passes** (confirmed by running it directly via
+  `deqp-vk --deqp-case=...` after each of the two fixes; failed
+  deserialization after fix 1 alone had not yet landed, then failed
+  `AccessChain` legalization after fix 1 alone, then passed once fix 2
+  landed).
+- `compute.*` (61,460 cases): **681 Pass / 4 Fail / 60,775 NotSupported**
+  -- was 680/5/60,775 before this session's fixes: **+1 Pass, 0
+  regressions**. The remaining 4 fails are exactly L124(c)
+  (`undefined_values`), L124(d) (`device_index`), and the 2 still-open
+  `zero_initialize_workgroup_memory` cases (`composites.2`,
+  `types.bool`) -- all previously known, unchanged.
+
+This session's fix is a new deserializer/serializer/lowering capability
+(`initial_value`) plus an internal `AccessChain`-legalization correctness
+fix, not new Vulkan feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
