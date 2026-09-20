@@ -93704,3 +93704,90 @@ own log.
    L124(u) closing this last case would make **both** `ubo.*` and
    `ssbo.*` families fully clean -- highest-value single item left on
    the L124 series.
+
+# Session: L124(u) fixed -- ssbo.* and ubo.* both fully clean
+
+## State right now
+
+- Working tree: code fix + regression test committed (`a1f63be03a5a`),
+  docs committed (`26ece700b127`); this file's own commit is next.
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start (using `VK_DRIVER_FILES` pointed at the
+  local build's `feme_icd.json`).
+- `ninja check-feme`: 3,216/3,219 Passed, 3 Unsupported, 0 Failed (+1
+  new lit test, 0 regressions).
+- `dEQP-VK.ssbo.layout.random.nested_structs_instance_arrays.8` (the
+  last `ssbo.*` fail): now **Passes**, confirmed by running the real
+  CTS case directly.
+- `ssbo.*` full sweep: **3,242 Pass / 0 Fail / 8,983 NotSupported** (of
+  12,225) -- **fully clean**.
+- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression.
+- **Both `ubo.*` and `ssbo.*` CTS families are now fully clean.** This
+  closes the entire L124 roadmap series.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface).
+
+## What the bug was (10-second version)
+
+A nested struct's own interior layout gets force-tightened only when
+its *enclosing* struct's conversion needed a certain retry tier -- not
+based on anything about the nested struct itself. The old code
+re-derived the nested struct's layout standalone and got it wrong.
+
+## What I did (in order)
+
+1. Added a new function, `getStructMemberPhysicalIndexInRealType`, that
+   reads the correct index mapping off the already-known-correct real
+   type instead of re-deriving it.
+2. Rewired `remapNestedStructMemberIndices` to use it for nested
+   levels, keeping old behavior for the top level and for array
+   crossings.
+3. Wrote a minimal lit test, confirmed it fails pre-fix (`git stash`)
+   and passes post-fix.
+4. Ran `ninja check-feme` -- clean.
+5. Ran the real failing CTS case directly -- passed.
+6. Ran full `ssbo.*` and `ubo.random.*` sweeps -- `ssbo.*` fully clean,
+   `ubo.random.*` unchanged.
+7. Updated `Roadmap.md` (struck through L124(u)) and
+   `VulkanCTSReport.md` (new session narrative).
+8. Committed code+test, then docs, as two separate commits.
+
+## A detour that cost time (so the next session doesn't repeat it)
+
+I built a hand-rolled `feme-run` numeric harness (a heap file + a
+Python verify script) to try to isolate the bug outside the CTS
+runner. The verify script itself had an offset bug and produced a
+false "FAIL" on a field the real fix already made correct. Lesson: for
+this class of bug, trust the real CTS test over a hand-built numeric
+harness once the LLVM IR diff already shows the expected index change
+-- the harness's own arithmetic is itself an extra source of bugs, not
+a shortcut. If a future session builds a similar harness, double- and
+triple-check its offset math against the struct's own declared
+`Offset` decorations before trusting a "FAIL" verdict from it.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/l124u_*` and `/tmp/ctsrun/l124u_*`/
+   `/tmp/ctsrun/l124t_*` scratch files -- none referenced by anything
+   committed. The hand-rolled verify harness (`/tmp/l124u_verify.py`,
+   `/tmp/l124u_verify2.py`, `/tmp/l124u_build_heap.py`) is not needed
+   again now that the real CTS test passes.
+2. **The entire L124 roadmap series is now closed** (`ssbo.*` and
+   `ubo.*` both fully clean, 0 `Fail` each). There is no obvious next
+   L124 sub-item to pick up -- check `Roadmap.md` for the next
+   unstarted milestone item instead (search for the next un-struck-
+   through `P2`/`P1` row near where L124 was).
+3. `ninja check-feme` and the CTS build directories are both
+   incremental from here -- reuse them, no reconfigure needed.
+4. If a future session wants extra confidence beyond `ssbo.*`/
+   `ubo.random.*`, consider a full `ubo.*` sweep (13,240 cases, not run
+   this session since no `Uniform`/`Block`-specific code was touched)
+   -- low priority, this session's fix only touches struct-member-index
+   remapping shared by both `ubo.*` and `ssbo.*` paths, and
+   `ubo.random.*` already confirms no regression there.
+5. Consider whether the array-of-struct case this fix deliberately left
+   out of scope (`RealStructTy` resets to null across Array/
+   RuntimeArray levels) could hide the same bug class for a struct
+   nested *inside* an array -- not tested this session, not currently
+   known to be a live CTS failure (both families are fully clean), so
+   low priority unless a future regression surfaces there.
