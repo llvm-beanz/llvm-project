@@ -95180,3 +95180,38 @@ No feature/extension inventory changes needed -- pure correctness fix, no new ca
 2. **L125(c)** remains the largest untouched scope: ASTC/EAC/ETC2 image mismatches, two distinct `VK_ERROR_INITIALIZATION_FAILED` sites (one at `createGraphicsPipelines`, confirmed this session to be the same bucket hit throughout `cube.*` gather tests; a separate one at `createComputePipelines`), and a `vktPipelineBindPointTests.cpp` bucket. None individually triaged yet -- a good next pick if L125(i) stays blocked on missing CTS coverage.
 3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 4. Clean up `/tmp/ctsrun/l125j_v2/` (this session's own scratch QPA/console/PNG files) before ending a future session, if not already gone.
+
+# Session: Completing L125(k) (integer-format Gather) + docs
+
+**FeMe CPU Vulkan Device confirmed** via `vulkaninfo --summary | grep deviceName` at session start.
+
+Picked up mid-implementation work from a prior compaction: L125(k) (integer-sampled `Gather*` support) had partial scaffolding in place (widened `hasOnlySupportedImageUses`, 3 new `ImageCallKind` enum entries + declarations) but no definitions, no dispatch, no runtime, no tests, no commits.
+
+## What got done, in order
+
+1. Finished `ImageCalls.cpp`: 3 new `create*I32` functions + 4 integration points (symbol names, `FunctionType`, `matchImageCall`, `AllKinds`).
+2. Wired dispatch in `SPIRVResourceLowering.cpp`'s `lowerImageAccesses` (`isV4I32(CI->getType())` check, mirroring the existing `Sample*I32` pattern).
+3. Added runtime functions in `FeMeRuntimeCPU.c`: `femeCpuImageGather2DV4I32`/`GatherArray2DV4I32`/`GatherCubeV4I32`, plus a new `femeRTFetchCubeSeamlessTexelI32` helper (integer counterpart of L125(j)'s cube seam-remap fetch).
+4. Full `ninja check-feme`: 3,247/3,250 passed, 3 unsupported, 0 failed.
+5. CTS: original repro (`...cube.rgba8ui.texture_swizzle.zero_one_red_green`) now Passes. Broader `basic.*.rgba8ui.*`/`*.rgba8i.*` samples (126 cases each): 51 Pass/75 NotSupported/**0 Fail** in both.
+6. Committed in 3 small commits (`ImageCalls`, `SPIRVResourceLowering`, `FeMeRuntimeCPU`).
+7. Added 10 unit tests across all 3 translation phases (match/lower/execute). Hit one self-inflicted bug: an edit accidentally deleted a `TEST(...) {` line while inserting a new test before it -- 14 compile errors, fixed by restoring the line. Full re-run: 3,257/3,260 passed, 0 failed, 0 regressions. Committed.
+8. Docs this session:
+   - `Roadmap.md`: filed and closed `L125(k)`; updated `L7g`'s own closing text to note Cube/Array2D gather and the integer-format gap are no longer open; filed a new **`L125(l)`** row (not started) for a freshly-discovered side finding -- `ConstOffsets` (plural `TextureGatherOffsets`) fails pipeline creation identically for both integer and float formats. Distinct from L125(k)'s own scope.
+   - `VulkanCTSReport.md`: new `## Roadmap L125(k)` section with full root-cause/fix/test/CTS numbers.
+   - `FeMeVulkanDesign.md`: appended a paragraph in the `VkComponentMapping`/`Gather*` narrative noting L125(k) closed the integer-format gap, leaving only L125(i)'s depth-compare swizzle question open in that sub-area.
+   - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no change needed (`shaderImageGatherExtended` was already flipped in the L125(g) session; no new feature/extension surface touched this session).
+
+## Wins visible right now
+
+- `dEQP-VK.glsl.texture_gather.graphics.basic.*.rgba8ui.*` and `*.rgba8i.*`: 0 failures (was previously entirely `VK_ERROR_INITIALIZATION_FAILED`).
+- `ninja check-feme`: 3,257/3,260 passed, 0 regressions.
+- 5 commits landed this session (3 code, 2 docs), each independently buildable/testable.
+
+## Next steps
+
+1. **(~20-30 min)** Pick up **L125(i)**: `SampleCmp*`/`GatherCmp*` depth-compare swizzle semantics, still blocked as of the last 2 sessions on missing CTS coverage (`vktTextureShadowTests.cpp`/`vktPipelineSamplerTests.cpp` searched, nothing found combining depth-compare with a non-identity swizzle). If still nothing, this row stays deferred rather than guessed at from spec text alone.
+2. **(~15-20 min)** Pick up the newly-filed **L125(l)**: `ConstOffsets` (plural `TextureGatherOffsets`) gather fails pipeline creation for both formats. Not yet root-caused whether the fix belongs in `ImageCalls.cpp` (new 4-offset-array `ImageCallKind`) or `SPIRVResourceLowering.cpp` (classification/dispatch widening) -- start there. Concrete repro already known (`dEQP-VK.glsl.texture_gather.graphics.offsets.*`).
+3. **L125(c)** remains the largest untouched scope: ASTC/EAC/ETC2 image mismatches, two distinct `VK_ERROR_INITIALIZATION_FAILED` sites (`createGraphicsPipelines` vs. `createComputePipelines`), and a `vktPipelineBindPointTests.cpp` bucket -- a good pick if both L125(i) and L125(l) stall.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+5. Clean up `/tmp/ctsrun/l125k/*.qpa` (this session's own scratch CTS logs) before ending a future session, if not already gone.
