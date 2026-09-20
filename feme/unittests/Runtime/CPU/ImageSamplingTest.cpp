@@ -311,6 +311,17 @@ using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 /// `Sample` operand (roadmap H19g), like `LoadFn`'s own.
 using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                            int32_t, int32_t, uint32_t, uint32_t, bool, void *);
+/// `feme.cpu.image.sample.2d.v4i32`'s own operand shape (roadmap H109):
+/// unlike `SampleFn`, an integer-channel sample is always explicit-LOD,
+/// nearest-filtered only -- no `DUdX`/`DUdY`/`DVdX`/`DVdY`/
+/// `UseExplicitLod`/`Bias`/`MinLodClamp` operand at all, just `(U, V,
+/// Lod, OffsetX, OffsetY, Mask)` and a `<4 x i32>`-shaped `out` (roadmap
+/// L125(h) uses this to verify the in-bounds-swizzle fix's own integer
+/// counterpart).
+using SampleI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
+                             uint32_t, float, float, float, int32_t, int32_t,
+                             bool, void *);
 /// The roadmap H7b-a `Texture2DArray` counterpart of `SampleFn`, adding a
 /// float `ArrayLayer` coordinate (rounded to nearest, clamped) before the
 /// four screen-space partial derivatives of `(U, V)` -- also gains
@@ -1178,6 +1189,66 @@ TEST_F(ImageSamplingTest, LoadNeverAppliesImageViewSwizzle) {
   EXPECT_FLOAT_EQ(Out[1], 0.2f); // Unswizzled: raw G.
   EXPECT_FLOAT_EQ(Out[2], 0.3f); // Unswizzled: raw B.
   EXPECT_FLOAT_EQ(Out[3], 0.4f); // Unswizzled: raw A.
+}
+
+// (Roadmap L125(h)) The integer-sampled (`*.v4i32`) counterpart of
+// `SampleAppliesImageViewSwizzleToInBoundsTexel` above: an integer-format
+// image (`R32G32B32A32_SINT`) sampled via `feme.cpu.image.sample.2d.v4i32`
+// (always nearest-filtered, explicit-LOD-only per that call kind's own
+// doc) must also apply the image view's own component swizzle to an
+// in-bounds texel, exactly like the float path -- this is a wholly
+// separate, non-shared function family from `femeRTFetchTexel2D`, so
+// this is this family's own first swizzle-correctness test rather than a
+// shared regression guard.
+TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToInBoundsTexel) {
+  int32_t Storage[1][1][4] = {{{1, 2, 3, 4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleI32Fn Fn = resolve<SampleI32Fn>(
+      addWrapper("sample_i32", "feme.cpu.image.sample.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*Lod=*/0.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, true, Out);
+  EXPECT_EQ(Out[0], 3); // R <- B
+  EXPECT_EQ(Out[1], 4); // G <- A
+  EXPECT_EQ(Out[2], 1); // B <- R
+  EXPECT_EQ(Out[3], 0); // A <- Zero
+}
+
+// (Roadmap L125(h)) The integer-sampled counterpart of
+// `LoadNeverAppliesImageViewSwizzle` above: `feme.cpu.image.load.2d.v4i32`
+// (Vulkan's `OpImageRead` against a storage image) must never apply
+// `FemeImageDescriptor::Swizzle` either, exactly like its float
+// counterpart.
+TEST_F(ImageSamplingTest, LoadI32NeverAppliesImageViewSwizzle) {
+  int32_t Storage[1][1][4] = {{{1, 2, 3, 4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], 1); // Unswizzled: raw R.
+  EXPECT_EQ(Out[1], 2); // Unswizzled: raw G.
+  EXPECT_EQ(Out[2], 3); // Unswizzled: raw B.
+  EXPECT_EQ(Out[3], 4); // Unswizzled: raw A.
 }
 
 TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
