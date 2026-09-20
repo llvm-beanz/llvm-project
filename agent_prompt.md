@@ -55,24 +55,24 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-### Suggested next steps
+## Suggested next steps
 
 1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
-   logs (all under `/tmp/ctsrun/l125b_plain3d_*`) are already deleted;
+   logs (all under `/tmp/ctsrun/l125b_cube_*`) are already deleted;
    only prior sessions' own leftover `l124*` files remain there,
    untouched (not this session's to clean).
-2. Pick up **`Cube`** next (the next shape in L125(b)'s own established
-   ordering) -- start by confirming whether `femeRTComputeCubeClampedLod`
-   can be called with `UseExplicitLod=1`/zero derivatives the same way
-   every prior shape's I32 function calls `femeRTComputeClampedLod`, per
-   the scoping notes just above.
-3. **`CubeArray`** last -- adds an `ArrayLayer` operand on top of
-   `Cube`'s own direction-vector coordinate (mirroring `Array2D`'s own
-   relationship to `Plain2D`), so should be a smaller follow-on once
-   `Cube` itself is done and its own pattern is established.
-4. Once all 6 shapes are done, strike through L125(b) in `Roadmap.md`
-   and consider whether `L125(c)`/`L125(d)` (the other, not-yet-root-
-   caused fail buckets from L125(a)'s own original triage) or **L125's
-   next fresh sample** is the better next pick.
-5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+2. Pick up **`CubeArray`** next -- the final remaining L125(b) shape.
+   Adds an `ArrayLayer` operand on top of `Cube`'s own direction-vector
+   coordinate (mirroring `Array2D`'s own relationship to `Plain2D`), so
+   should be a smaller follow-on now that `Cube`'s own pattern (face
+   selection, forced `ClampToEdge`, no offset) is established. Check
+   whether `femeRTSelectCubeFace` needs an array-layer-base parameter
+   or whether the existing `LayerBase` convention from
+   `femeRTSampleFilteredCube`'s own `CubeArray` call site already
+   covers it.
+3. Once `CubeArray` lands, strike through L125(b) in `Roadmap.md`
+   entirely and pick between `L125(c)`/`L125(d)` (the other,
+   not-yet-root-caused fail buckets from L125(a)'s original triage) or
+   **L125's next fresh sample**.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
