@@ -6562,6 +6562,69 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGather2DV4F32(
   return Result;
 }
 
+// `feme.cpu.image.gather.2d.v4i32` (roadmap L125(k)): the integer-channel
+// (`usampler2D`/`isampler2D`) counterpart of `femeCpuImageGather2DV4F32`
+// above -- identical bilinear-footprint/result-ordering/mip-level-0-only
+// structure, but each tap reads through `femeRTFetchTexel2DI32` and
+// returns `<4 x i32>`. Roadmap H109's own "no integer border-color
+// storage" limitation (see `femeCpuImageSample2DV4I32`'s own comment)
+// applies per-tap here too: any tap whose `FemeRTBilinearSupport` marks
+// it `CLAMP_TO_BORDER`-out-of-bounds falls back to the same fixed
+// `{0, 0, 0, 1}` default that function uses, rather than reading an
+// address `femeRTApplyAddressMode` has already clamped in place.
+FemeRTv4i32 femeCpuImageGather2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    int32_t Component, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) asm("feme.cpu.image.gather.2d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageGather2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    int32_t Component, int32_t OffsetX, int32_t OffsetY, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  FemeRTv4i32 IntBorder = {0, 0, 0, 1};
+  FemeRTv4i32 T00 = (S.BorderX0 || S.BorderY0)
+                        ? IntBorder
+                        : femeRTFetchTexel2DI32(&Img, /*Level=*/0, /*Layer=*/0,
+                                                S.X0, S.Y0, /*Sample=*/0,
+                                                /*ApplySwizzle=*/1);
+  FemeRTv4i32 T10 = (S.BorderX1 || S.BorderY0)
+                        ? IntBorder
+                        : femeRTFetchTexel2DI32(&Img, /*Level=*/0, /*Layer=*/0,
+                                                S.X1, S.Y0, /*Sample=*/0,
+                                                /*ApplySwizzle=*/1);
+  FemeRTv4i32 T01 = (S.BorderX0 || S.BorderY1)
+                        ? IntBorder
+                        : femeRTFetchTexel2DI32(&Img, /*Level=*/0, /*Layer=*/0,
+                                                S.X0, S.Y1, /*Sample=*/0,
+                                                /*ApplySwizzle=*/1);
+  FemeRTv4i32 T11 = (S.BorderX1 || S.BorderY1)
+                        ? IntBorder
+                        : femeRTFetchTexel2DI32(&Img, /*Level=*/0, /*Layer=*/0,
+                                                S.X1, S.Y1, /*Sample=*/0,
+                                                /*ApplySwizzle=*/1);
+  FemeRTv4i32 Result;
+  Result[0] = T01[Chan];
+  Result[1] = T11[Chan];
+  Result[2] = T10[Chan];
+  Result[3] = T00[Chan];
+  return Result;
+}
+
 // `feme.cpu.image.load.2d.v4f32`: reads one texel of a 2D image (sampled or
 // storage) at integer coordinates `(X, Y)`, sample `Sample` (roadmap F8c;
 // always `0` for a single-sample image or a caller with no per-sample
@@ -7436,6 +7499,65 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherArray2DV4F32(
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
                                        Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 Result;
+  Result[0] = T01[Chan];
+  Result[1] = T11[Chan];
+  Result[2] = T10[Chan];
+  Result[3] = T00[Chan];
+  return Result;
+}
+
+// `feme.cpu.image.gather.array2d.v4i32` (roadmap L125(k)): the
+// integer-channel counterpart of `femeCpuImageGatherArray2DV4F32` above,
+// adding `ArrayLayer` the same way `femeCpuImageGather2DV4I32` mirrors
+// `femeCpuImageGather2DV4F32`.
+FemeRTv4i32 femeCpuImageGatherArray2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, int32_t Component, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) asm("feme.cpu.image.gather.array2d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageGatherArray2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, int32_t Component, int32_t OffsetX, int32_t OffsetY,
+    _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  FemeRTv4i32 IntBorder = {0, 0, 0, 1};
+  FemeRTv4i32 T00 =
+      (S.BorderX0 || S.BorderY0)
+          ? IntBorder
+          : femeRTFetchTexel2DI32(&Img, /*Level=*/0, Layer, S.X0, S.Y0,
+                                  /*Sample=*/0, /*ApplySwizzle=*/1);
+  FemeRTv4i32 T10 =
+      (S.BorderX1 || S.BorderY0)
+          ? IntBorder
+          : femeRTFetchTexel2DI32(&Img, /*Level=*/0, Layer, S.X1, S.Y0,
+                                  /*Sample=*/0, /*ApplySwizzle=*/1);
+  FemeRTv4i32 T01 =
+      (S.BorderX0 || S.BorderY1)
+          ? IntBorder
+          : femeRTFetchTexel2DI32(&Img, /*Level=*/0, Layer, S.X0, S.Y1,
+                                  /*Sample=*/0, /*ApplySwizzle=*/1);
+  FemeRTv4i32 T11 =
+      (S.BorderX1 || S.BorderY1)
+          ? IntBorder
+          : femeRTFetchTexel2DI32(&Img, /*Level=*/0, Layer, S.X1, S.Y1,
+                                  /*Sample=*/0, /*ApplySwizzle=*/1);
+  FemeRTv4i32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
   Result[2] = T10[Chan];
@@ -8368,6 +8490,31 @@ femeRTFetchCubeSeamlessTexel(const FemeRTImageDescriptor *Img, uint32_t Level,
                            ApplySwizzle);
 }
 
+// (Roadmap L125(k)) The integer-channel counterpart of
+// `femeRTFetchCubeSeamlessTexel` above, for `femeCpuImageGatherCubeV4I32`
+// -- identical face-edge remap via `femeRTRemapCubeEdgeCoords`, but reads
+// through `femeRTFetchTexel2DI32` (no `UseBorder`/`BorderColor` operand
+// to pass at all, mirroring every other `*I32` texel-fetch caller's own
+// no-border-color-storage limitation -- a cube gather footprint never
+// clamps to a border in the first place, so this is a non-issue here
+// regardless).
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTFetchCubeSeamlessTexelI32(const FemeRTImageDescriptor *Img,
+                                uint32_t Level, uint32_t LayerBase,
+                                uint32_t BaseFace, int32_t X, int32_t Y,
+                                int32_t Size, _Bool *Ambiguous,
+                                _Bool ApplySwizzle) {
+  FemeRTCubeEdgeCoords C = femeRTRemapCubeEdgeCoords(BaseFace, X, Y, Size);
+  if (C.Ambiguous) {
+    *Ambiguous = 1;
+    FemeRTv4i32 Zero = {0, 0, 0, 0};
+    return Zero;
+  }
+  *Ambiguous = 0;
+  return femeRTFetchTexel2DI32(Img, Level, LayerBase + C.Face, C.X, C.Y,
+                               /*Sample=*/0, ApplySwizzle);
+}
+
 // The four raw (unblended) integer texel coordinates and fractional
 // bilinear weights a seamless cube tap at normalized `(U, V)` needs --
 // deliberately *not* reusing `femeRTComputeBilinearSupport` above, since
@@ -8932,6 +9079,73 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCubeV4F32(
   else if (Amb11)
     T11 = (T00 + T10 + T01) * (1.0f / 3.0f);
   FemeRTv4f32 Result;
+  Result[0] = T01[Chan];
+  Result[1] = T11[Chan];
+  Result[2] = T10[Chan];
+  Result[3] = T00[Chan];
+  return Result;
+}
+
+// `feme.cpu.image.gather.cube.v4i32` (roadmap L125(k)): the
+// integer-channel counterpart of `femeCpuImageGatherCubeV4F32` above --
+// identical seamless-cross-face footprint/result-ordering structure (see
+// that function's own doc comment), but each tap reads through
+// `femeRTFetchCubeSeamlessTexelI32` and returns `<4 x i32>`. The
+// doubly-out-of-bounds corner tap is still resolved by averaging the
+// other three raw texel values, using integer division here instead of
+// a `1.0f / 3.0f` float multiply.
+FemeRTv4i32 femeCpuImageGatherCubeV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, int32_t Component,
+    _Bool Mask) asm("feme.cpu.image.gather.cube.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageGatherCubeV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, int32_t Component, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) ||
+      Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  (void)Samp; // See femeCpuImageGatherCubeV4F32's own doc comment.
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
+  int32_t Size;
+  FemeRTCubeBilinearSupport S =
+      femeRTComputeCubeBilinearSupport(&Img, CF.U, CF.V, /*Level=*/0, &Size);
+  _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
+  FemeRTv4i32 T00 = femeRTFetchCubeSeamlessTexelI32(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X0, S.Y0, Size, &Amb00,
+      /*ApplySwizzle=*/1);
+  FemeRTv4i32 T10 = femeRTFetchCubeSeamlessTexelI32(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X1, S.Y0, Size, &Amb10,
+      /*ApplySwizzle=*/1);
+  FemeRTv4i32 T01 = femeRTFetchCubeSeamlessTexelI32(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X0, S.Y1, Size, &Amb01,
+      /*ApplySwizzle=*/1);
+  FemeRTv4i32 T11 = femeRTFetchCubeSeamlessTexelI32(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X1, S.Y1, Size, &Amb11,
+      /*ApplySwizzle=*/1);
+  // At most one of the four taps can ever be the doubly-out-of-bounds
+  // corner -- see femeRTSampleCubeLinearAtLevel's own identical comment.
+  if (Amb00)
+    T00 = (T10 + T01 + T11) / 3;
+  else if (Amb10)
+    T10 = (T00 + T01 + T11) / 3;
+  else if (Amb01)
+    T01 = (T00 + T10 + T11) / 3;
+  else if (Amb11)
+    T11 = (T00 + T10 + T01) / 3;
+  FemeRTv4i32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
   Result[2] = T10[Chan];
