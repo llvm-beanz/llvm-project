@@ -6829,3 +6829,79 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   through, marked fixed and CTS-verified, noting the simpler-than-scoped
   no-new-ABI-storage design); see `agent_thoughts.md` for the full
   narrative and next steps.
+
+## Roadmap L125(p): compressed-format (ASTC/BC/ETC2) array-layer / 3D-slice decode gap
+
+### Root cause
+
+`CommandBuffer.cpp`'s host-side software decoders for the three
+block-compressed format families (`decodeASTCImageForSampling`,
+`decodeBCImageForSampling`, `decodeETC2ImageForSampling`) were originally
+scoped (roadmap E23/H8j/H8n) to decode only array layer 0 / depth slice 0
+of a compressed image, with `materializeImageDescriptor` explicitly early
+-returning an all-zero descriptor for any view with a nonzero
+`baseArrayLayer` or a layer/slice count other than 1. This was a real,
+intentional-at-the-time scope limitation that had never been revisited.
+
+Investigation for this roadmap row started from a narrower "4 specific
+formats" theory left over from the prior triaging session
+(`eac_r11g11_snorm_block`, `astc_8x8_srgb_block`, `astc_10x8_srgb_block`,
+`astc_12x10_srgb_block`), but isolated single-case CTS runs showed
+`eac_r11g11_unorm_block` -- not one of the 4 -- also failed once viewed as
+a `2d_array`, while the same format passed under a plain `2d` view. A
+full `view_type.2d_array.format.astc*` sweep (2,464 cases) then showed
+**2,016 Fail / 0 Pass** on real samples: the actual bug affected nearly
+every ASTC format under any array/cube-array/3D view, not just 4 specific
+ones.
+
+### Fix
+
+Widened all three decode functions to accept `(BaseSlice, SliceCount,
+Is3D)` and loop over every requested array layer (or depth slice, for
+3D) into consecutive `SlicePitch`-sized chunks per mip level, computing a
+per-level slice count (`Is3D ? max(1, Img->depth() >> Level) :
+SliceCount`) that mirrors `Image.cpp`'s own `computeSubresourceLayouts`
+exactly. `Image::blockPointer`'s existing "ArrayLayer + Z as one unified
+slice index" design, plus the CPU runtime's already-generic
+`Layer * SlicePitch` / `Z * SlicePitch` addressing in
+`femeRTFetchTexel2D`/`femeRTFetchTexel3D`, meant **no runtime-side change
+was needed at all** -- the fix is entirely host-side, in
+`CommandBuffer.cpp`'s decode/materialization layer. The three early
+-return guards in `materializeImageDescriptor` were removed and replaced
+with a shared `IsDecodedImage3D`/`DecodeBaseSlice`/`DecodeSliceCount`
+computation feeding all three decode call sites.
+
+A first fix attempt crashed (segfault in `decodeASTCBlock` on a
+multi-mip 3D ASTC case) because a `Texture3D`'s depth halves per mip
+level while the initial patch reused one fixed base-level slice count
+across all levels, causing out-of-bounds `Z` at deeper mips. Diagnosed
+via `gdb` register inspection (`x0=0` null `Block` pointer) plus a
+temporary `fprintf` trace (the shared `libfeme_vulkan.so` lacks the debug
+info needed for reliable `gdb break <function-name>`), then fixed by
+computing the per-level slice count *inside* each decode function rather
+than at the call site.
+
+`ninja check-feme`: 3,263/3,266 Passed, 3 Unsupported, 0 Failed (+1 new
+regression test `ASTCSecondArrayLayerSampledImageDispatchTest`, 0
+regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `image.suballocation.*.view_type.2d_array.format.astc*` (2,464 cases):
+  **0 Fail** (was 2,016 Fail).
+- `...view_type.3d.format.astc*` (4,176 cases): **0 Fail**.
+- `...view_type.2d_array.format.eac*` (352 cases): **0 Fail**.
+- The entire `view_type.cube_array.*` bucket (5,024 cases, all formats):
+  **0 Fail**.
+- The original triaging `image.*` 1/50-fraction sample (2,340 cases, was
+  232 Fail): **0 Fail**.
+- A smaller, unrelated residual surfaced separately: a
+  `sampler.view_type.*` 1/30-fraction sample (2,768 cases) showed 21
+  fails under `2d_unnormalized` coordinate mode combined with
+  border-color/mag-filter/compressed-format edge cases (plus one
+  unrelated `cube_array` case) -- a distinct pattern, filed as new
+  roadmap row `L125(w)` rather than investigated further this session.
+- `Roadmap.md`'s `L125(p)` row updated to reflect the fix (struck
+  through, marked fixed and CTS-verified); see `agent_thoughts.md` for
+  the full narrative and next steps.
