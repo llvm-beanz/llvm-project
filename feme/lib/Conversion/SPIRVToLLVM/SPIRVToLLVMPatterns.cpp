@@ -6108,6 +6108,64 @@ getStructMemberPhysicalFieldType(mlir::spirv::StructType Struct,
   return LLVMStructTy.getBody()[Physical];
 }
 
+/// (Roadmap L124u) Returns \p Struct's declared member \p DeclaredIndex's
+/// physical (post-padding) field index within \p RealStructTy -- the
+/// *actual* LLVM type already substituted for \p Struct wherever it is
+/// really embedded (typically obtained via getStructMemberPhysicalFieldType
+/// called on \p Struct's own *enclosing* struct, never by re-deriving \p
+/// Struct's own conversion from scratch via getStructMemberPhysicalIndex).
+///
+/// getStructMemberPhysicalIndex's own "redo" (independently re-running
+/// convertOffsetStructTypeIgnoringDecorations on \p Struct alone) silently
+/// disagrees with reality for a *nested* struct member: whether a nested
+/// struct's own interior vector members get tight-substituted (and an
+/// interior gap inserted before a following member) is a property of
+/// whichever retry tier its *enclosing* struct's own conversion actually
+/// needed (see getTightNestedStructType's own comment), not an intrinsic,
+/// context-free property of the nested struct type alone -- a nested
+/// struct that would trivially succeed with no substitution when
+/// re-converted *in isolation* (as getStructMemberPhysicalIndex's redo
+/// does) can still have been embedded, for real, via a fully
+/// tight-substituted form instead, whenever its own enclosing struct's
+/// natural (unsubstituted) attempt failed and a later retry tier forced
+/// every nested struct member tight regardless. This function instead
+/// recovers the mapping by walking \p RealStructTy's own already-known-
+/// correct body in declared-offset order (matching
+/// getOffsetSortedMemberIndices/layOutStructIfOffsetsMatch's own
+/// construction order exactly: every declared member appears in
+/// ascending-offset order, with only extra, easily-skipped padding-only
+/// elements interspersed) and returning whichever physical slot's own
+/// running byte offset lands on \p DeclaredIndex's declared offset --
+/// this works regardless of which retry tier actually produced \p
+/// RealStructTy, since it never re-derives that choice at all.
+///
+/// Falls back to \p DeclaredIndex unchanged if \p Struct has no explicit
+/// `Offset` decorations (no reordering is ever needed in that case) or if
+/// the walk somehow doesn't land on every declared offset (should not
+/// happen for a real, successfully-converted \p RealStructTy, but
+/// degrades safely rather than returning a wrong-but-plausible index).
+unsigned getStructMemberPhysicalIndexInRealType(
+    mlir::spirv::StructType Struct, unsigned DeclaredIndex,
+    mlir::LLVM::LLVMStructType RealStructTy) {
+  if (!Struct.hasOffset())
+    return DeclaredIndex;
+  mlir::DataLayout DL;
+  llvm::ArrayRef<mlir::Type> Body = RealStructTy.getBody();
+  llvm::SmallVector<unsigned, 8> Order = getOffsetSortedMemberIndices(Struct);
+  uint64_t Cursor = 0;
+  unsigned OrderPos = 0;
+  for (unsigned Physical = 0, E = Body.size(); Physical != E; ++Physical) {
+    if (OrderPos < Order.size() &&
+        Cursor == Struct.getMemberOffset(Order[OrderPos])) {
+      if (Order[OrderPos] == DeclaredIndex)
+        return Physical;
+      ++OrderPos;
+    }
+    Cursor += DL.getTypeSize(Body[Physical]);
+  }
+  return DeclaredIndex;
+}
+
 /// (Roadmap H133) See this function's own forward-declaration comment.
 /// \p CurrentType is the SPIR-V type \p Op's own index at \p StartIndex
 /// selects into (already resolved by the caller's own first-level remap
@@ -6160,6 +6218,14 @@ bool remapNestedStructMemberIndices(
     mlir::ConversionPatternRewriter &Rewriter,
     llvm::SmallVectorImpl<mlir::Value> &Indices) {
   unsigned Pos = StartIndex;
+  // (Roadmap L124u) The *real*, already-known-correct LLVM struct type
+  // substituted for CurrentType, whenever CurrentType was itself reached
+  // by selecting a struct member one level up (null only for the very
+  // first/outermost struct level, which has no such ambiguity: see
+  // getStructMemberPhysicalIndexInRealType's own comment for why a
+  // *nested* struct's own physical layout cannot safely be re-derived
+  // from scratch the way the outermost struct's can).
+  mlir::LLVM::LLVMStructType RealStructTy = nullptr;
   while (Pos < Op.getIndices().size()) {
     mlir::Type ElementType;
     if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(CurrentType)) {
@@ -6170,31 +6236,52 @@ bool remapNestedStructMemberIndices(
       unsigned Declared = static_cast<unsigned>(*DeclaredIndex);
       if (Declared >= StructTy.getNumElements())
         return false;
-      {
-        unsigned Physical =
-            getStructMemberPhysicalIndex(StructTy, Declared, Converter);
-        if (Physical != Declared) {
-          mlir::Type LLVMIndexType = Indices[Pos].getType();
-          Indices[Pos] = mlir::LLVM::ConstantOp::create(
-              Rewriter, Op.getLoc(), LLVMIndexType,
-              Rewriter.getIntegerAttr(LLVMIndexType, Physical));
-        }
+      unsigned Physical =
+          RealStructTy
+              ? getStructMemberPhysicalIndexInRealType(StructTy, Declared,
+                                                       RealStructTy)
+              : getStructMemberPhysicalIndex(StructTy, Declared, Converter);
+      if (Physical != Declared) {
+        mlir::Type LLVMIndexType = Indices[Pos].getType();
+        Indices[Pos] = mlir::LLVM::ConstantOp::create(
+            Rewriter, Op.getLoc(), LLVMIndexType,
+            Rewriter.getIntegerAttr(LLVMIndexType, Physical));
       }
       // (Roadmap H124o) `Declared`'s own member may itself be a vector
       // that needed `getTightVectorArrayType`'s marker-struct
       // substitution (see this function's own comment above) -- checked
       // here, against \p StructTy's own *real* converted field type
-      // (via getStructMemberPhysicalFieldType), rather than against a
-      // standalone reconversion of the vector type in isolation:
-      // `getTightVectorArrayType`'s substitution is a struct-context-
-      // driven retry (does this member's own natural LLVM vector size
-      // overshoot the room \p StructTy's declared layout leaves for
-      // it?), not an intrinsic property of the vector type on its own,
-      // so a bare `Converter.convertType(VectorTy)` call never reports
-      // it. Only relevant when a further (component-selecting) index
-      // still remains -- a vector is always a leaf, so this is the last
-      // possible insertion point on this path.
+      // (via getStructMemberPhysicalFieldType, or -- when \p StructTy
+      // is itself a nested struct -- directly against \p RealStructTy's
+      // own already-known-correct body, for exactly the same reason
+      // \p Physical itself is computed that way above), rather than
+      // against a standalone reconversion of the vector type in
+      // isolation: `getTightVectorArrayType`'s substitution is a
+      // struct-context-driven retry (does this member's own natural
+      // LLVM vector size overshoot the room \p StructTy's declared
+      // layout leaves for it?), not an intrinsic property of the vector
+      // type on its own, so a bare `Converter.convertType(VectorTy)`
+      // call never reports it. Only relevant when a further
+      // (component-selecting) index still remains -- a vector is always
+      // a leaf, so this is the last possible insertion point on this
+      // path.
       ElementType = StructTy.getElementType(Declared);
+      mlir::Type PhysicalFieldTy =
+          RealStructTy
+              ? (Physical < RealStructTy.getBody().size()
+                     ? RealStructTy.getBody()[Physical]
+                     : nullptr)
+              : getStructMemberPhysicalFieldType(StructTy, Declared,
+                                                 Converter);
+      // (Roadmap L124u) Whatever this member's own real field type turns
+      // out to be, remember it (if it is itself a struct) so the *next*
+      // loop iteration -- should this member itself be selected into
+      // further -- uses it as \p RealStructTy, rather than re-deriving
+      // that nested struct's own conversion from scratch the way
+      // getStructMemberPhysicalIndex's ordinary (non-\p RealStructTy)
+      // path would.
+      RealStructTy =
+          mlir::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(PhysicalFieldTy);
       // (Roadmap L104) No longer gated on StructTy.hasOffset(): a
       // non-offset struct's own layout (layOutStructIfOffsetsMatch's
       // non-offset branch) now also substitutes a non-power-of-two-lane
@@ -6204,8 +6291,6 @@ bool remapNestedStructMemberIndices(
       // comment.
       if (Pos + 1 < Op.getIndices().size()) {
         if (mlir::isa<mlir::VectorType>(ElementType)) {
-          mlir::Type PhysicalFieldTy =
-              getStructMemberPhysicalFieldType(StructTy, Declared, Converter);
           if (PhysicalFieldTy && getTightVectorMarkerInnerType(PhysicalFieldTy)) {
             mlir::Type LLVMIndexType = Indices[Pos + 1].getType();
             mlir::Value Zero = mlir::LLVM::ConstantOp::create(
@@ -6238,9 +6323,15 @@ bool remapNestedStructMemberIndices(
       }
     } else if (auto ArrayTy =
                    mlir::dyn_cast<mlir::spirv::ArrayType>(CurrentType)) {
+      // (Roadmap L124u) An array element's own conversion is not tracked
+      // by \p RealStructTy above -- fall back to the ordinary (non-
+      // \p RealStructTy) path the next time a struct level is reached,
+      // exactly as before this roadmap item.
+      RealStructTy = nullptr;
       ElementType = ArrayTy.getElementType();
     } else if (auto RTArrayTy =
                    mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(CurrentType)) {
+      RealStructTy = nullptr;
       ElementType = RTArrayTy.getElementType();
     } else {
       // A matrix/vector/scalar leaf: no further struct-member selector
