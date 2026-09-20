@@ -7135,3 +7135,63 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   fixes (struck through, marked fixed and CTS-verified); the
   blend+sRGB gap filed as a new `L125(y)` row; see `agent_thoughts.md`
   for the full narrative and next steps.
+
+## Roadmap L125(y): blend Min/Max op ignoring blend-factor rule
+
+Investigated the `L125(y)` row filed in the prior session
+(`pipeline.monolithic.blend.format.r8g8b8a8_srgb.*`, 94/100 fails,
+suspected blend+sRGB interaction gap). Isolating a single failing case
+and diffing `--deqp-log-images=enable` PNGs against the reference found
+every RGB channel matched exactly, with only the alpha channel wrong --
+immediately ruling out an sRGB gamma-curve cause (which would show up as
+an RGB divergence, not alpha-only). Confirmed the same case name fails
+identically (94/100) on a plain, non-sRGB `r8g8b8a8_unorm` attachment,
+proving this was never sRGB-related at all.
+
+### Root cause
+
+Per the Vulkan/Direct3D spec, `VK_BLEND_OP_MIN`/`VK_BLEND_OP_MAX` ignore
+both the source and destination blend factors entirely and compute a
+raw `min`/`max` of the unscaled operands. `Executor.cpp`'s
+`applyBlendOp`/`blendColor` unconditionally pre-multiplied both operands
+by their blend factors before taking the min/max, for every op
+including `Min`/`Max` -- correct for `Add`/`Subtract`/
+`ReverseSubtract`, wrong for `Min`/`Max`.
+
+### Fix
+
+`applyBlendOp` now takes both the raw (`Src`/`Dst`) and factor-scaled
+(`SrcTerm`/`DstTerm`) operand pairs, using the raw pair for `Min`/`Max`
+and the scaled pair for every other op. Corrected two pre-existing unit
+tests whose hand-computed expected values had encoded the *buggy*
+factor-scaled `Min` result as "expected" (a latent test bug matching the
+code bug); added a new `MinAndMaxBlendOpsIgnoreBothBlendFactorsEntirely`
+regression test using zeroed blend factors specifically to make the
+pre-fix bug's wrong answer (always 0) maximally distinguishable from the
+correct result.
+
+### Build/test
+
+`ninja check-feme`: 3,268/3,271 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `pipeline.monolithic.blend.format.r8g8b8a8_srgb.*` (100 cases):
+  **100 Pass, 0 Fail** (was 94 Fail).
+- `pipeline.monolithic.blend.format.r8g8b8a8_unorm.*` (100 cases):
+  **100 Pass, 0 Fail** (was 94 Fail -- same underlying bug, confirmed
+  unrelated to sRGB).
+- `pipeline.monolithic.blend.*` regression sweep (8,073 of a much
+  larger full family; timed out after 30 minutes on this session's own
+  time budget before finishing the entire set): 3,927 Pass, 4 Fail, the
+  remainder `NotSupported`. All 4 fails are `blend.clamp.*`
+  (`b8g8r8a8_unorm`/`r16g16b16a16_snorm`/`r16g16b16a16_unorm`/
+  `r8g8b8a8_unorm`), confirmed **pre-existing and unrelated** via a
+  revert-and-rerun (fails identically before this fix) -- not
+  investigated further this session. 0 new regressions found in the
+  portion completed.
+- `Roadmap.md`'s `L125(y)` row updated to reflect the fix (struck
+  through, marked fixed and CTS-verified); see `agent_thoughts.md` for
+  the full narrative and next steps.
