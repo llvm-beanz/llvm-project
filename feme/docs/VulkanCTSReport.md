@@ -6905,3 +6905,130 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
 - `Roadmap.md`'s `L125(p)` row updated to reflect the fix (struck
   through, marked fixed and CTS-verified); see `agent_thoughts.md` for
   the full narrative and next steps.
+
+## Roadmap L125(w): unnormalized-coordinate double-scaling and ETC2/BC border-component-mask gap
+
+### Repro
+
+The `L125(p)` session's 1/30-fraction `sampler.view_type.*` sample found
+a 21-fail residual, all under `view_type.2d_unnormalized` plus a handful
+of format/mag-filter/border-color edge cases, and filed it as this row
+without further investigation. Re-running the full
+`sampler.view_type.2d_unnormalized.*` bucket (2,994 cases, not a
+fraction) found the real count was far larger: **814 Fail**, not 21 --
+the fractional sample had badly undercounted.
+
+### Root cause (1): unnormalized-coordinate double-scaling (~810 of 814 fails)
+
+`VkSamplerCreateInfo::unnormalizedCoordinates` was never read anywhere
+in the codebase (confirmed via a zero-hit grep across the whole tree).
+Every CPU-runtime sampling function unconditionally computed
+`U * (float)LevelWidth`, assuming the shader-supplied coordinate was
+always normalized `[0, 1)`. With `unnormalizedCoordinates = VK_TRUE`,
+the shader instead supplies a coordinate already in texel space
+`[0, extent)`, so this unconditional multiply double-scaled it,
+producing wildly wrong texel addresses.
+
+### Fix (1)
+
+Added a `FEME_SAMPLER_UNNORMALIZED_COORDINATES` flag bit
+(`FemeSamplerDescriptorFlagBits`, `RuntimeABI.h`), set from
+`CreateInfo.unnormalizedCoordinates` in `Sampler::Sampler`
+(`Image.cpp`). Added a new `femeRTUnnormalizeCoord` helper
+(`FeMeRuntimeCPU.c`) that divides the incoming coordinate by the level-0
+extent when the flag is set, converting it back to the normalized
+convention every downstream addressing/filtering computation already
+assumes -- done once, immediately after loading the sampler descriptor,
+so no other sampling code needs to change. Wired into the only 4 sample
+entry points the Vulkan spec ever permits this bit to reach:
+`femeCpuImageSample2DV4F32`, `femeCpuImageSample2DV4I32`,
+`femeCpuImageSample1DV4I32`, `femeCpuImageSample1DV4F32` -- the spec
+forbids mipmapping, anisotropy, `compareEnable`, and any
+Gather/derivative-LOD/array/cube addressing alongside this bit, so no
+other entry point can ever see it set.
+
+### Root cause (2): ETC2/BC border-component-mask gap (the remaining 4 fails, pre-existing and unrelated)
+
+Isolated to `etc2_r8g8b8_{unorm,srgb}_block` + `CLAMP_TO_BORDER` +
+`VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK`, and confirmed via a standalone
+`2d`-view repro to be entirely unrelated to `2d_unnormalized` -- a
+pre-existing bug this session happened to surface while re-triaging.
+`femeRTImageFormatComponentMask` (`FeMeRuntimeCPU.c`) had no case at all
+for any BC/ETC2/EAC format, falling through to the `0xf` (raw
+all-4-channels) default rather than forcing alpha to `1` for these
+alpha-less formats.
+
+A first fix attempt (new switch cases keyed on the *original* compressed
+`ResourceFormat` ordinal, e.g. `ETC2_RGB8_UNORM`) turned out to be dead
+code: re-running the CTS sweep afterward showed the exact same 4 fails,
+unchanged. Tracing further found `CommandBuffer.cpp`'s
+`materializeImageDescriptor` always decodes narrow-channel BC/ETC2/EAC
+formats (`BC1_RGB`, `BC6H`, `ETC2_RGB8`, `BC4`, `BC5`, `EAC_R11`,
+`EAC_R11G11`) into a *widened* uncompressed target format (e.g.
+`R8G8B8A8_UNORM`) for texel-fetch convenience before the descriptor ever
+reaches the runtime -- so `Img.Format` at border-color-fallback time is
+never the original narrow-channel format code, only ever the widened
+target. The reverted attempt is left with no trace in the final diff.
+
+### Fix (2)
+
+Added a `BorderComponentMask` field to `FemeImageDescriptor`
+(`RuntimeABI.h`, and its C mirror `FemeRTImageDescriptor` in
+`FeMeRuntimeCPU.c`), consuming one `Reserved` word. `0` means "no
+override, derive from `Format` as before" (every uncompressed image and
+every already-4-channel BC/ETC2 family). Added
+`compressedFormatBorderComponentMask` (`CommandBuffer.cpp`), a switch
+over the *original* `Img->format()` -- still available at materialization
+time, unlike the already-widened runtime `Format` -- mapping
+`BC1_RGB`/`BC6H`/`ETC2_RGB8` to `0x7` (RGB), `BC4`/`EAC_R11` to `0x1`
+(R only), `BC5`/`EAC_R11G11` to `0x3` (RG), and everything else
+(including all ASTC) to `0` (no override). Called from both the BC and
+ETC2 decode branches of `materializeImageDescriptor`, populating
+`Dst.BorderComponentMask`. `femeRTExpandBorderColorForFormat` gained a
+`BorderComponentMaskOverride` parameter, preferring it over the
+`Format`-derived mask whenever nonzero, at both call sites
+(`femeRTFetchTexel2D`/`femeRTFetchTexel3D`). The integer (`I32`)
+border-color path was left untouched -- compressed formats are never
+integer-sampled.
+
+### Unit tests
+
+- `UnnormalizedCoordinatesSampledImageDispatchTest.TexelSpaceCoordinateSelectsTheCorrectTexelWithoutDoubleScaling`
+  (`CommandBufferTest.cpp`): a sampler with `unnormalizedCoordinates =
+  VK_TRUE` sampling a 2x2 image at texel-space `uv = (0.5, 0.5)` must
+  select texel (0, 0), not the double-scaled texel (1, 1).
+- `ETC2RGB8BorderColorSampledImageDispatchTest.ForcesAlphaToOneRatherThanTheRawTransparentBlackZero`
+  (`CommandBufferTest.cpp`): a single-block `ETC2_RGB8_UNORM` image
+  sampled out-of-range with `CLAMP_TO_BORDER` +
+  `VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK` must read alpha back as
+  `1.0`, not the border color's own raw `0.0`.
+
+Both tests were independently confirmed to fail against a pre-fix build
+(via a `git apply -R`/rebuild/re-run round-trip keeping only the new
+tests) and pass against the fix, before being counted as valid
+regression coverage.
+
+`ninja check-feme`: 3,265/3,268 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `sampler.view_type.2d_unnormalized.*` (2,994 cases): **0 Fail** (was
+  814 Fail before any fix in this session; 4 Fail after fix (1) alone;
+  0 Fail after fix (2)).
+- `sampler.view_type.*.format.*etc2*.address_modes.*clamp_to_border*`
+  (996 cases, across every view type, not just `2d_unnormalized`):
+  **432 Pass, 0 Fail, 564 NotSupported** -- confirms fix (2) generalizes
+  beyond the one bucket it was found in.
+- `sampler.view_type.*.format.*bc*.address_modes.*clamp_to_border*`: 0/0
+  matched -- BC formats are not exercised under this glob in this CTS
+  tree at all, a pre-existing coverage gap noted but not investigated.
+- A regression sweep, `sampler.*` at 1/40-fraction (4,772 cases): 28
+  fails, all in the pre-existing `border_swizzle.*` SNORM-format
+  `gather_N` bucket. Confirmed unrelated to this session's changes via a
+  stash/rebuild/re-run round-trip: the same 12 representative case IDs
+  fail identically on the pre-session build.
+- `Roadmap.md`'s `L125(w)` row updated to reflect the fix (struck
+  through, marked fixed and CTS-verified); see `agent_thoughts.md` for
+  the full narrative and next steps.
