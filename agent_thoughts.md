@@ -95783,3 +95783,137 @@ deviceName` first, per standing instruction.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 6. This session's own scratch CTS logs (`/tmp/ctsrun/l125p/*`) are
    already cleaned up -- nothing to do here.
+
+# Session: L125(w) fix -- unnormalized-coordinate double-scaling + ETC2/BC border-mask gap
+
+## State
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep
+deviceName` at session start, per standing instructions. Started from
+a clean `check-feme` baseline (3,263/3,266 Passed, 3 Unsupported, 0
+Failed -- the state the prior `L125(p)` session left).
+
+## What happened
+
+1. **Reproduced `L125(w)` for real.** The prior session's 21-fail
+   estimate came from a 1/30-fraction CTS sample and badly undercounted
+   -- the actual full `sampler.view_type.2d_unnormalized.*` bucket
+   (2,994 cases) had **814 Fail**, not 21. Always re-run the full
+   bucket before trusting a fractional-sample estimate.
+
+2. **Found bug #1, the dominant one (~810 of 814 fails):**
+   `VkSamplerCreateInfo::unnormalizedCoordinates` was never read
+   anywhere -- a zero-hit grep confirmed it. Every CPU-runtime sampling
+   function assumed the incoming coordinate was normalized `[0, 1)` and
+   multiplied it by the level-0 extent unconditionally. An
+   unnormalized-coordinate sampler's shader-supplied coordinate is
+   already texel-space, so this double-scaled it.
+
+3. **Fixed bug #1** with a single up-front rescale
+   (`femeRTUnnormalizeCoord`, dividing by the level-0 extent when a new
+   `FEME_SAMPLER_UNNORMALIZED_COORDINATES` flag is set), applied at
+   sampler-descriptor-load time in the only 4 entry points the Vulkan
+   spec ever lets this bit reach. Every downstream addressing/filtering
+   computation needed zero changes -- same "convert once at the
+   boundary" shape as several prior sessions' fixes.
+
+4. **Verified fix #1**: 814 Fail -> 4 Fail. Not 0 -- a second, smaller,
+   unrelated bug remained.
+
+5. **Found bug #2 (the remaining 4 fails):** `etc2_r8g8b8_{unorm,srgb}`
+   + `CLAMP_TO_BORDER` + `transparent_black`. Confirmed via a
+   standalone plain-`2d`-view repro that this has nothing to do with
+   unnormalized coordinates -- a pre-existing bug this session happened
+   to stumble onto. `femeRTImageFormatComponentMask` had no BC/ETC2/EAC
+   cases at all, defaulting to "use all 4 raw channels" instead of
+   forcing alpha to 1 for these alpha-less formats.
+
+6. **First fix attempt for bug #2 was dead code.** Added switch cases
+   keyed on the original compressed `ResourceFormat` ordinal
+   (`ETC2_RGB8_UNORM`, etc.) to `femeRTImageFormatComponentMask` --
+   looked right, built clean, but re-running CTS showed the exact same
+   4 fails, byte-for-byte unchanged. That mismatch was the tell.
+   Traced deeper and found `CommandBuffer.cpp`'s
+   `materializeImageDescriptor` always decodes narrow-channel BC/ETC2
+   formats into a *widened* uncompressed target format
+   (`R8G8B8A8_UNORM` etc.) before the descriptor reaches the runtime --
+   so the runtime's `Img.Format` is never the original narrow format
+   code at border-fallback time. The switch cases could never fire.
+   Reverted cleanly (confirmed via `git diff` that no trace remained).
+
+7. **Fixed bug #2 for real**: threaded a `BorderComponentMask` override
+   through the ABI (`FemeImageDescriptor`/`FemeRTImageDescriptor`),
+   computed from the *original* format at materialization time (where
+   it's still available) rather than trying to recover it from the
+   already-widened runtime format. `0` means "no override" so every
+   uncompressed/already-4-channel/ASTC image is unaffected.
+
+8. **Verified fix #2**: 4 Fail -> 0 Fail on the `2d_unnormalized`
+   bucket. Broadened the check to
+   `sampler.view_type.*.format.*etc2*.address_modes.*clamp_to_border*`
+   across every view type (996 cases): 432 Pass, 0 Fail -- confirms the
+   fix generalizes, not just a narrow patch for one bucket.
+
+9. **Ran a 1/40-fraction `sampler.*` regression sweep** (4,772 cases,
+   since I'd touched shared sampling code used by many entry points):
+   28 fails, all in `border_swizzle.*` on SNORM formats with
+   `gather_N`. Confirmed pre-existing and unrelated by stashing this
+   session's fix, rebuilding, re-running just those 12 case IDs (they
+   failed identically), then restoring the fix. Worth the ~10 minutes
+   given how broad the shared-code touch was.
+
+10. **Added 2 new regression tests** (`CommandBufferTest.cpp`), one per
+    bug. Verified both actually catch the regression: reverted just
+    the runtime/ABI fix (kept the new tests), rebuilt, confirmed both
+    tests fail with the exact expected wrong values, then restored the
+    fix and confirmed both pass. Cheap insurance against a test that
+    looks right but doesn't actually exercise the bug.
+
+11. **Also fixed a code-style nit** caught during final diff review: a
+    stray double-blank-line and two 82-character lines in
+    `CommandBuffer.cpp` from the original edit -- wrapped to fit 80
+    columns before committing.
+
+12. Committed in 5 small pieces: bug #1's fix, bug #2's fix, the two
+    new unit tests, the `Roadmap.md` strikethrough, and the
+    `VulkanCTSReport.md` section -- each independently buildable and
+    testable (verified bug #1's commit alone builds clean before
+    moving on to bug #2).
+
+## Wins
+
+- Two independent, previously-undiagnosed bugs closed in one session,
+  found because a routine "re-verify the fix" step turned up a residual
+  that didn't match the first fix's own shape.
+- Caught a dead-code fix attempt via CTS re-verification rather than
+  shipping a plausible-looking no-op change -- the standing "always
+  re-run CTS after a change" discipline paid for itself directly here.
+- Both new unit tests were confirmed, via an explicit revert-rebuild
+  round-trip, to actually fail without the fix -- not just pass with it.
+
+## Suggested next steps
+
+1. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, bind-point
+   bucket, exact_sampling bucket) remain untouched from several
+   sessions back -- good next picks, still not started.
+2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session with the upstream
+   repo(s) properly budgeted.
+3. `L115(b)` (pull-model interpolation, `InterpolateAtCentroid`/
+   `InterpolateAtSample`) remains flagged from several sessions ago as
+   a larger, not-yet-started item needing a new runtime-callback ABI
+   surface (barycentric/interpolant-plane data doesn't exist in
+   `FemeFragmentInvocation` today) -- also not a quick pick.
+4. The BC-format CTS coverage gap noted again this session
+   (`sampler.view_type.*.format.*bc*.address_modes.*clamp_to_border*`
+   matches 0 cases in this CTS tree) has now been seen at least twice
+   across sessions without investigation -- worth a quick dedicated
+   look next time nothing else is more pressing, just to confirm
+   whether it's a real gap in this CTS build or expected/gated
+   behavior.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+6. This session's own scratch CTS logs (`/tmp/ctsrun/l125w/*`) and
+   temporary probe files (`/tmp/print_enum*.cpp`, `/tmp/print_astc*`)
+   are already cleaned up -- nothing to do here.
