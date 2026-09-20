@@ -55,31 +55,24 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## Suggested next steps
+## Next steps
 
-1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
-   logs (all under `/tmp/ctsrun/l125b_cubearray_*`) are already
-   deleted; only prior sessions' own leftover `l124*` files remain
-   there, untouched (not this session's to clean).
-2. **L125(b) is fully closed.** Two candidates for what's next, from
-   L125(a)'s own original triage:
-   - **L125(c)** (larger, not yet individually triaged): `Image
-     mismatch` (ASTC/EAC/ETC2 compressed-format decoding), a
-     `vk.queueSubmit`/`VK_ERROR_INITIALIZATION_FAILED` bucket
-     (`vertex_input.single_attribute.*` and scattered
-     `sampler.border_swizzle.*`), a separate
-     `vk.createComputePipelines`-site `VK_ERROR_INITIALIZATION_FAILED`
-     bucket heavy in `sampler.border_swizzle.*` (confirmed *not* the
-     same integer-sampling root cause), and a
-     `vktPipelineBindPointTests.cpp` bucket. None root-caused yet --
-     each needs its own `--deqp-log-decompiled-spirv=enable`/
-     `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1` trace before estimating
-     further.
-   - **L125(d)** (smaller, more sharply scoped): `sampler.border_swizzle.*`'s
-     own already-decoded `Ref:`/`Color:` mismatch bucket -- looks like a
-     border-color value read back with the wrong component swizzle
-     applied (`VK_EXT_border_color_swizzle`'s `components` mapping not
-     yet applied to synthesized border colors). A reasonable first pick
-     given its narrower scope.
-3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
-   `llvm-project`) are incremental from here -- no reconfigure needed.
+1. **(~20 min)** Pick up **L125(e)**: add a per-format "channel count"
+   query (`femeRTUnpackImageTexel`'s own per-format switch already has
+   this info per-case, FeMeRuntimeCPU.c ~line 2591) and use it in
+   `femeRTFetchTexel2D`/`femeRTFetchTexel3D`'s `UseBorder` branch to
+   override missing channels (alpha to `1`, or G/B to `0`/`1` per the
+   same rule) before `femeRTApplyImageSwizzle` runs. Check whether
+   `d16_unorm` (a depth-only format) shares this root cause or needs
+   separate handling -- not triaged yet.
+2. Once L125(e) lands, re-run the 150-case sample (or a fresh larger
+   one) and confirm the whole `sampler.border_swizzle.*`
+   `Ref:`/`Color:`-mismatch family (minus the already-tracked L125(c)
+   `VK_ERROR_INITIALIZATION_FAILED` bucket and the `custom`/`opaque_black`
+   extension-gated `NotSupported` cases) is fully green.
+3. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
+   distinct `VK_ERROR_INITIALIZATION_FAILED` sites, `vktPipelineBind
+   PointTests.cpp`) remain untouched and untriaged -- a good pick after
+   L125(e), or pick **L125's next fresh sample** instead.
+4. `ninja check-feme` and both CTS build directories are incremental
+   from here -- no reconfigure needed.
