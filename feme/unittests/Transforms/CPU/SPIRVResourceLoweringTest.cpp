@@ -5268,14 +5268,47 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-     LeavesAnArray2DIntegerSampledImageHandleUsedForSampleAlone) {
-  // Roadmap L125(b): `Plain1D`/`Array1D` (see the "lowers" tests below) are
-  // now accepted alongside `Plain2D`, but `Array2D` -- and every other
-  // remaining shape (`Plain3D`/`Cube`/`CubeArray`) -- is still rejected:
-  // no `createSample2DArrayI32`-style runtime helper exists for any of
-  // them yet. The whole handle (and therefore the whole function) is left
-  // unrewritten, matching `LeavesAnArrayedImageHandleAlone`'s own "no
-  // partial lowering" contract.
+     LeavesAPlain3DIntegerSampledImageHandleUsedForSampleAlone) {
+  // Roadmap L125(b): `Plain1D`/`Array1D`/`Array2D` (see the "lowers" tests
+  // below) are now accepted alongside `Plain2D`, but `Plain3D` -- and
+  // `Cube`/`CubeArray` -- are still rejected: no `createSample3DI32`-style
+  // runtime helper exists for any of them yet. The whole handle (and
+  // therefore the whole function) is left unrewritten, matching
+  // `LeavesAnArrayedImageHandleAlone`'s own "no partial lowering" contract.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<3 x float> %uvw) {
+      %img = call target("spirv.Image", i32, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.sample(
+          target("spirv.Image", i32, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %uvw, <3 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4i32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersImplicitLodIntegerSampledImage2DArrayToImageSampleV4I32) {
+  // Roadmap L125(b): widens `LowersIntegerSampledImage2DArrayToImageSample
+  // V4I32` below's explicit-LOD acceptance to also accept an ordinary
+  // implicit-LOD sample against an `Array2D` integer-channel
+  // (`usampler2DArray`/`isampler2DArray`) sampled image, mirroring
+  // `LowersImplicitLodIntegerSampledImage1DArrayToImageSampleV4I32`'s own
+  // identical `Array1D` widening.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x i32> @main(<3 x float> %uvandlayer) {
@@ -5298,8 +5331,60 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4i32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, array_layer, lod, offset_x, offset_y, mask). Implicit LOD
+  //  defaults to 0.0.
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerSampledImage2DArrayToImageSampleV4I32) {
+  // Roadmap L125(b): an *explicit*-LOD `OpImageSampleExplicitLod` against
+  // an `Array2D` integer-channel (`usampler2DArray`/`isampler2DArray`)
+  // sampled image is legal SPIR-V (restricted, per the Vulkan spec, to
+  // `NEAREST` filtering) -- mirrors `LowersIntegerSampledImage1DArrayToImage
+  // SampleV4I32`'s own `Array1D` case, lowering to `createSample2DArrayI32`
+  // instead of `createSample1DArrayI32`, and threading a real, nonzero
+  // `ConstOffset` (2-wide, excluding the array layer, per
+  // `isSupportedOffset`'s `AllowArray2D` comment).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<3 x float> %uvandlayer) {
+      %img = call target("spirv.Image", i32, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.samplelevel(
+          target("spirv.Image", i32, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %uvandlayer, float 0.0,
+          <2 x i32> <i32 1, i32 -1>)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, array_layer, lod, offset_x, offset_y, mask).
+  EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(10))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(11))->getSExtValue(), -1);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
 }
 
 TEST(SPIRVResourceLoweringTest,

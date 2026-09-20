@@ -669,6 +669,12 @@ enum class ImageCallKind : uint8_t {
   /// a constant `0.0` at the call site for an ordinary implicit-LOD
   /// sample, and no `Bias`/`Grad`/`MinLod` operand exists.
   Sample1DArrayI32,
+  /// `feme.cpu.image.sample.2darray.v4i32` (roadmap L125(b)): the
+  /// `Array2D` counterpart of `Sample2DI32`, mirroring `Sample2DArray`'s
+  /// own relationship to `Sample2D`. Like `Sample2DI32`, `Lod` defaults to
+  /// a constant `0.0` at the call site for an ordinary implicit-LOD
+  /// sample, and no `Bias`/`Grad`/`MinLod` operand exists.
+  Sample2DArrayI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -940,6 +946,19 @@ llvm::CallInst *createSample1DArrayI32(llvm::IRBuilderBase &Builder,
                                        llvm::Value *Lod, llvm::Value *Offset,
                                        llvm::Value *Mask,
                                        const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.2darray.v4i32` call (roadmap L125(b)):
+/// the `Array2D` counterpart of `createSample2DI32`, mirroring
+/// `createSample2DArray`'s own relationship to `createSample2D`. \p
+/// ArrayLayer joins \p U/\p V as a third coordinate operand; \p OffsetX/
+/// \p OffsetY stay a 2-wide `ConstOffset` (excluding the array layer),
+/// mirroring `createSample2DArray`'s own identical operand.
+llvm::CallInst *createSample2DArrayI32(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *Lod,
+    llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY
 /// (roadmap L50d) are the same `ConstOffset` image operand
