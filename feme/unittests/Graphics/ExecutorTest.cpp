@@ -10123,6 +10123,99 @@ TEST(ExecutorTest, RendersAnSIntFragmentOutputToAUnsignedIntegerAttachment) {
   }
 }
 
+constexpr char UIntHighBitConstantFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.i32(i32 0, i32 0, i32 0, i32 3000000000, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+// (Roadmap L125u) The same `SInt`-reported-but-really-unsigned fragment
+// output shape as the sibling test above, but with a raw value at or above
+// `2^31` (`3000000000`, `0xB2D05E00`) written to a real `R32_UINT`
+// attachment -- the exact case `readFragmentColorInt` previously got
+// wrong: reinterpreting that raw bit pattern as a signed `int32_t` (since
+// `Elem.ComponentType` is always `SInt` for a real SPIR-V-sourced stage,
+// see `isCompatibleColorComponentType`'s own comment in `Pipeline.h`)
+// produced a negative `double`, which `packClearColor`'s own unsigned-
+// range `std::clamp` (`ImageFixture.cpp`) then floored to `0` --
+// exactly the hard cutoff `dEQP-VK.pipeline.monolithic.sampler.
+// exact_sampling.r32_uint.*` caught. `readFragmentColorInt` must instead
+// derive signedness from the attachment's own format
+// (`cpu::isUnsignedIntegerColorAttachmentFormat`), not from `Elem`.
+TEST(ExecutorTest,
+    RendersAnSIntFragmentOutputWithTheSignBitSetToAnUnsignedIntegerAttachment) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement SOut =
+      makeElement(0, SignatureDirection::Output, 1, /*Location=*/0);
+  SOut.ComponentType = SignatureComponentType::SInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {SOut};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, UIntHighBitConstantFragmentShaderIR, "fs_main", FSSig,
+                   ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32_UINT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<float, 9> VertexData = {
+      -1.0f, -1.0f, 0.0f, //
+      3.0f,  -1.0f, 0.0f, //
+      -1.0f, 3.0f,  0.0f,
+  };
+  std::vector<VertexAttribute> Attrs = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attrs}};
+
+  std::array<uint8_t, 16 * 4> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R32_UINT, 4, 4};
+  std::array<AttachmentView, 1> Attach = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    uint32_t R;
+    memcpy(&R, AttachmentStorage.data() + I * 4, 4);
+    EXPECT_EQ(R, 3000000000u) << "texel " << I;
+  }
+}
+
 // (Roadmap H8p) A `Float`-typed fragment output is still rejected for an
 // integer-format attachment (mirroring the original hard-rejection this
 // row widened, not removed): the expected type is now format-dependent
