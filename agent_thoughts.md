@@ -94513,3 +94513,80 @@ next session can start faster:
    next fresh sample** is the better next pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+# Session: L125(b) continued -- widen integer-sampled implicit-LOD fix to `Cube`
+
+Confirmed `FeMe CPU Vulkan Device` via vulkaninfo at session start (required every session).
+
+## What got done
+
+1. Investigated `Cube`'s structural differences before writing any code
+   (per the prior session's own explicit caution): confirmed
+   `femeRTComputeCubeClampedLod(UseExplicitLod=1)` bypasses derivative
+   logic exactly like every other shape, `femeRTSelectCubeFace` already
+   gives a face index + face-local `(U, V)` ready for
+   `femeRTFetchTexel2DI32`, `NEAREST` filtering needs no seamless
+   cross-face blending, forced `ClampToEdge` addressing means no
+   border-color fallback branch is needed, and SPIR-V's `Dim::Cube` ban
+   on `ConstOffset` means `isSupportedOffset` already requires (and
+   accepts) an all-zero offset with zero code changes.
+2. Added `ImageCallKind::SampleCubeI32`/`createSampleCubeI32`
+   (`ImageCalls.h`/`.cpp`): 11-arg call, no offset, no derivatives, no
+   `Bias`/`MinLodClamp`.
+3. Added `femeCpuImageSampleCubeV4I32` (`FeMeRuntimeCPU.c`), placed
+   after `femeCpuImageSampleCubeV4F32`'s own definition to satisfy the
+   `femeRTSelectCubeFace`/`femeRTComputeCubeClampedLod` static-ordering
+   constraint. Reuses `femeRTFetchTexel2DI32` directly -- no new
+   low-level texel-fetch helper needed (same streak as `Array2D`/
+   `Plain3D`).
+4. Widened `SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
+   (`IsInteger` shape check) and `lowerImageAccesses` (new `Cube` case
+   extracting `DirX`/`DirY`/`DirZ`, no offset extraction).
+5. Converted `LeavesACubeIntegerSampledImageHandleUsedForSampleAlone`
+   into an implicit-LOD/explicit-LOD "lowers" test pair, added
+   `LeavesACubeArrayIntegerSampledImageHandleUsedForSampleAlone` (the
+   final remaining shape, kept covered as still rejected), and added
+   `MatchesSampleCubeI32Call`.
+
+## Verified
+
+- `FeMeTransformsCPUTests`: 538/538 pass (+3 vs. `Plain3D` commit).
+- `check-feme`: 3,235/3,238 Passed, 3 Unsupported, 0 Failed (0
+  regressions).
+- Real CTS: `pipeline.monolithic...view_type.cube.format.*_[su]int.*`,
+  20-case sample -- 18 Pass / 0 Fail / 2 NotSupported (unrelated
+  `shaderSampledImageArrayDynamicIndexing` feature gap). A broader
+  mixed sample confirmed `cube_array` cases still correctly fail with
+  the same pre-existing `VK_ERROR_INITIALIZATION_FAILED` (expected --
+  `CubeArray` isn't lowered yet, not a regression from this session).
+
+## Commits (3, each small)
+
+1. Code + tests: `Cube` `SampleCubeI32` widening.
+2. `Roadmap.md`/`VulkanCTSReport.md` update.
+3. This `agent_thoughts.md` entry (below).
+
+No new Vulkan feature/extension surface -- `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` unchanged.
+
+## Suggested next steps
+
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (all under `/tmp/ctsrun/l125b_cube_*`) are already deleted;
+   only prior sessions' own leftover `l124*` files remain there,
+   untouched (not this session's to clean).
+2. Pick up **`CubeArray`** next -- the final remaining L125(b) shape.
+   Adds an `ArrayLayer` operand on top of `Cube`'s own direction-vector
+   coordinate (mirroring `Array2D`'s own relationship to `Plain2D`), so
+   should be a smaller follow-on now that `Cube`'s own pattern (face
+   selection, forced `ClampToEdge`, no offset) is established. Check
+   whether `femeRTSelectCubeFace` needs an array-layer-base parameter
+   or whether the existing `LayerBase` convention from
+   `femeRTSampleFilteredCube`'s own `CubeArray` call site already
+   covers it.
+3. Once `CubeArray` lands, strike through L125(b) in `Roadmap.md`
+   entirely and pick between `L125(c)`/`L125(d)` (the other,
+   not-yet-root-caused fail buckets from L125(a)'s original triage) or
+   **L125's next fresh sample**.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
