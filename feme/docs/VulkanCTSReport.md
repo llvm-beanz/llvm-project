@@ -5695,3 +5695,58 @@ unchanged.
 L125(b) row is updated to reflect `Plain1D`/`Array1D`/`Array2D` done and
 the remaining two/three shapes still to go. See `agent_thoughts.md` for
 the full narrative and next steps.
+
+## L125(b) continued: widen integer-sampled implicit-LOD fix to `Plain3D`
+
+Continuing this same milestone's `Plain1D`/`Array1D`/`Array2D` widening,
+picked up `Plain3D` next: added `ImageCallKind::Sample3DI32` /
+`createSample3DI32` / `feme.cpu.image.sample.3d.v4i32` (`ImageCalls.h`/
+`.cpp`, including `getImageCallName`/`getOrInsertImageCall`/
+`matchImageCall`'s `AllKinds` array and switch-case), the
+`femeCpuImageSample3DV4I32` CPU runtime implementation
+(`FeMeRuntimeCPU.c`, no static-ordering constraint this time since
+`Plain3D` has no array layer to resolve via `femeRTRoundClampLayer`), and
+`SPIRVResourceLowering.cpp` acceptance (`hasOnlySupportedImageUses`'s
+`IsInteger` branch widened to accept `Plain3D`) plus lowering
+(`lowerImageAccesses` extracts `U`/`V`/`W` from `Plain3D`'s own real
+3-wide coordinate and `OffsetX`/`OffsetY`/`OffsetZ` from its genuine
+3-wide `ConstOffset`, then calls `createSample3DI32`).
+
+Like `Array2D`, `Plain3D` needed **no new low-level texel-fetch helper**:
+`femeRTFetchTexel3DI32` already existed (reused by
+`feme.cpu.image.load.3d.v4i32`, roadmap H19c), so the new sampling entry
+point only had to resolve the mip level and address each of the three
+axes before calling straight through. `isSupportedOffset` also already
+unconditionally accepted a genuine 3-wide `Plain3D` offset (added by the
+earlier float-sampling L67(c) work) -- no change needed there either,
+unlike `Array2D`'s own `AllowArray2D` gating.
+
+Converted the previous
+`LeavesAPlain3DIntegerSampledImageHandleUsedForSampleAlone` rejection
+test into a pair of "lowers" tests for `Plain3D` (implicit-LOD
+defaulting `Lod` to `0.0`, and explicit-LOD threading a real nonzero
+3-wide `ConstOffset`), added a new
+`LeavesACubeIntegerSampledImageHandleUsedForSampleAlone` rejection test
+so the next unaddressed shape stays covered as still out of scope, and
+added `MatchesSample3DI32Call` to `ImageCallsTest.cpp`.
+
+- `ninja FeMeTransformsCPUTests`: all 535 tests pass (+3 net vs. the
+  `Array2D` commit).
+- `ninja check-feme`: **3,232/3,235 Passed, 3 Unsupported, 0 Failed** (0
+  regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: a 20-case sample of
+  `dEQP-VK.pipeline.monolithic.image.suballocation.sampling_type.combined.
+  view_type.3d.format.r32_sint.*` (several sizes, both the `combined`
+  graphics variant and its `_compute` counterpart) -- **0 Fail / 20
+  Pass**.
+
+Internal correctness fix again, not new Vulkan feature/extension surface
+-- [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`Cube`/`CubeArray` remain unaddressed -- `Roadmap.md`'s L125(b) row is
+updated to reflect `Plain1D`/`Array1D`/`Array2D`/`Plain3D` done and the
+final two shapes still to go. See `agent_thoughts.md` for the full
+narrative and next steps.
