@@ -57,22 +57,26 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Next steps
 
-1. **(~20 min)** Pick up **L125(e)**: add a per-format "channel count"
-   query (`femeRTUnpackImageTexel`'s own per-format switch already has
-   this info per-case, FeMeRuntimeCPU.c ~line 2591) and use it in
-   `femeRTFetchTexel2D`/`femeRTFetchTexel3D`'s `UseBorder` branch to
-   override missing channels (alpha to `1`, or G/B to `0`/`1` per the
-   same rule) before `femeRTApplyImageSwizzle` runs. Check whether
-   `d16_unorm` (a depth-only format) shares this root cause or needs
-   separate handling -- not triaged yet.
-2. Once L125(e) lands, re-run the 150-case sample (or a fresh larger
-   one) and confirm the whole `sampler.border_swizzle.*`
-   `Ref:`/`Color:`-mismatch family (minus the already-tracked L125(c)
-   `VK_ERROR_INITIALIZATION_FAILED` bucket and the `custom`/`opaque_black`
-   extension-gated `NotSupported` cases) is fully green.
-3. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
-   distinct `VK_ERROR_INITIALIZATION_FAILED` sites, `vktPipelineBind
-   PointTests.cpp`) remain untouched and untriaged -- a good pick after
-   L125(e), or pick **L125's next fresh sample** instead.
-4. `ninja check-feme` and both CTS build directories are incremental
+1. **(~15 min)** Pick up **L125(f)**: find or construct a CTS case
+   proving the in-bounds-texel gap (check
+   `dEQP-VK.pipeline.image_view.*` first, or write a minimal repro).
+2. Once reproduced, wire `femeRTApplyImageSwizzle`/`Img->Swizzle` into
+   the in-bounds return path of `femeRTFetchTexel2D`/
+   `femeRTFetchTexel3D` (and their siblings that funnel through them)
+   -- likely the single highest-leverage remaining L125(f) change,
+   since the helper already exists and is already correct.
+3. Watch for a **double-swizzle** risk: `femeRTFetchTexel2D`/`3D`'s
+   in-bounds branch is shared by both the float-sampling path (which
+   should get the swizzle) and any raw `feme.cpu.image.load.*` path
+   that bypasses a sampler entirely -- check whether Vulkan's
+   `vkCmdCopyImage`/`OpImageRead`-style raw loads are also supposed to
+   swizzle (they likely are not, since a load has no `VkSampler`/image
+   view swizzle applied per spec -- confirm before assuming the shared
+   helper is safe to change unconditionally for every caller).
+4. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
+   distinct `VK_ERROR_INITIALIZATION_FAILED` sites,
+   `vktPipelineBindPointTests.cpp`) remain untouched and untriaged --
+   a good alternative pick if L125(f)'s CTS repro search doesn't pan
+   out quickly.
+5. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
