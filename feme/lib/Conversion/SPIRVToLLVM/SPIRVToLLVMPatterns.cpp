@@ -111,12 +111,31 @@ getSubgroupMaskBuiltIn(mlir::spirv::GlobalVariableOp Global) {
   }
 }
 
+/// Returns true if \p Global is the `DeviceIndex` builtin (`gl_DeviceIndex`,
+/// `SPV_KHR_device_group`) -- a scalar naming which physical device in a
+/// `VkDeviceGroup` the current invocation runs on. LLVM's SPIRV backend has
+/// no `llvm.spv.*` intrinsic for it (unlike every `BuiltInMappings[]`
+/// entry), and FeMe's CPU backend never models more than one physical
+/// device at all (there is exactly one, always index 0) -- so, unlike a
+/// real per-invocation value, this always legally resolves to the constant
+/// `0` (roadmap L124(d)), with no intrinsic call needed.
+bool isDeviceIndexBuiltIn(mlir::spirv::GlobalVariableOp Global) {
+  std::optional<llvm::StringRef> Name = Global.getBuiltIn();
+  if (!Name)
+    return false;
+  std::optional<mlir::spirv::BuiltIn> BuiltIn =
+      mlir::spirv::symbolizeBuiltIn(*Name);
+  return BuiltIn && *BuiltIn == mlir::spirv::BuiltIn::DeviceIndex;
+}
+
 /// Returns true if \p Global is a builtin variable this conversion models as
-/// a *value* -- either one `BuiltInMappings[]` reads with a single intrinsic
-/// or one of `getSubgroupMaskBuiltIn`'s computed masks -- rather than as the
-/// interface memory an ordinary stage-IO variable converts to.
+/// a *value* -- either one `BuiltInMappings[]` reads with a single
+/// intrinsic, one of `getSubgroupMaskBuiltIn`'s computed masks, or the
+/// always-zero `DeviceIndex` constant -- rather than as the interface
+/// memory an ordinary stage-IO variable converts to.
 bool isValueModeledBuiltIn(mlir::spirv::GlobalVariableOp Global) {
-  return getBuiltInMapping(Global) || getSubgroupMaskBuiltIn(Global);
+  return getBuiltInMapping(Global) || getSubgroupMaskBuiltIn(Global) ||
+         isDeviceIndexBuiltIn(Global);
 }
 
 /// Returns the global variable \p Op takes the address of, or a null op if
@@ -2467,7 +2486,8 @@ public:
       return Rewriter.notifyMatchFailure(Op, "no such global variable");
     const BuiltInMapping *Mapping = getBuiltInMapping(Global);
     std::optional<SubgroupMaskKind> MaskKind = getSubgroupMaskBuiltIn(Global);
-    if (!Mapping && !MaskKind)
+    bool IsDeviceIndex = isDeviceIndexBuiltIn(Global);
+    if (!Mapping && !MaskKind && !IsDeviceIndex)
       return Rewriter.notifyMatchFailure(
           Op, "not a builtin variable with an LLVM equivalent");
 
@@ -2481,6 +2501,19 @@ public:
     if (MaskKind) {
       Rewriter.replaceOp(
           Op, buildSubgroupMask(Rewriter, Loc, *MaskKind, ResultType));
+      return mlir::success();
+    }
+    if (IsDeviceIndex) {
+      // `DeviceIndex` is always a scalar integer type per the SPIR-V spec
+      // (`gl_DeviceIndex` is `int`/`uint`, never a vector) -- no per-
+      // component decomposition is needed, unlike `BuiltInMappings[]`'s own
+      // vector-valued entries.
+      auto IntTy = mlir::dyn_cast<mlir::IntegerType>(ResultType);
+      if (!IntTy)
+        return Rewriter.notifyMatchFailure(
+            Op, "DeviceIndex builtin is not a scalar integer");
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(
+          Op, IntTy, Rewriter.getIntegerAttr(IntTy, 0));
       return mlir::success();
     }
 

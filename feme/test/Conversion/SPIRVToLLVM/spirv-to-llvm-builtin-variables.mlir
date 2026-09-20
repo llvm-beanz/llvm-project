@@ -98,3 +98,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %7 : vector<3xi32>
   }
 }
+
+// -----
+
+// (Roadmap L124(d)) `DeviceIndex` (`gl_DeviceIndex`, `SPV_KHR_device_group`)
+// has no `llvm.spv.*` intrinsic equivalent in LLVM's SPIRV backend, unlike
+// every other builtin above -- FeMe's CPU backend never models more than
+// one physical device, so it always legally resolves to the constant `0`
+// instead of any intrinsic call.
+
+// CHECK-NOT: llvm.mlir.global{{.*}}@dev
+// CHECK-LABEL: llvm.func @read_device_index
+// CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: llvm.return %[[ZERO]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DeviceGroup], [SPV_KHR_device_group]> {
+  spirv.GlobalVariable @dev built_in("DeviceIndex") : !spirv.ptr<i32, Input>
+  spirv.func @read_device_index() -> i32 "None" {
+    %0 = spirv.mlir.addressof @dev : !spirv.ptr<i32, Input>
+    %1 = spirv.Load "Input" %0 : i32
+    spirv.ReturnValue %1 : i32
+  }
+}
