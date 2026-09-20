@@ -8774,24 +8774,32 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeV4I32(
 // `feme.cpu.image.gathercmp.cube.v4f32` (roadmap H124r): `TextureCube`
 // depth-comparison gather -- SPIR-V's `OpImageDrefGather`, HLSL's
 // `TextureCube::GatherCmp()`. Structurally identical to
-// `femeCpuImageGatherCmp2DV4F32` (same fixed bilinear "footprint" via
-// `femeRTComputeBilinearSupport`, same fixed result ordering, same
+// `femeCpuImageGatherCmp2DV4F32` (same fixed result ordering, same
 // mip-level-0-only restriction), except the direction vector
 // `(DirX, DirY, DirZ)` is first resolved to a face and face-local
 // `(U, V)` coordinate by `femeRTSelectCubeFace` (the same helper
-// `femeCpuImageSampleCubeV4F32` above uses), and that face is addressed
-// as the fetch's own `Layer` (mirroring how `femeCpuImageSampleCubeV4F32`
-// threads `CF.Face` into `femeRTSampleFilteredCube`'s own `Layer`
-// parameter). Address mode is unconditionally forced to `ClampToEdge`
-// (`Samp.AddressU`/`Samp.AddressV`), matching
-// `femeCpuImageSampleCubeV4F32`'s own identical forcing: a cube face has
-// no "next" face along a U/V axis to wrap or mirror into, and (unlike
-// that function's own seamless-edge-blending `femeRTSampleFilteredCube`
-// path) a discrete gather footprint that straddles a face edge is left
-// simply clamped to that face's own edge texel, since no real
-// `offload-test-suite`/CTS case yet exercises a face-edge-straddling
-// cube gather to motivate the same cross-face remap
-// `femeRTSampleFilteredCube` implements for a blended sample.
+// `femeCpuImageSampleCubeV4F32` above uses). Roadmap L125(j): a gather
+// footprint that straddles a cube face edge must remap into the
+// adjacent face exactly like a seamless blended sample does -- Vulkan
+// (unlike desktop GL) makes cube-map seamless filtering mandatory, and
+// `dEQP-VK.glsl.texture_gather.graphics.basic.cube.*` genuinely
+// exercises footprints that straddle a face edge (confirmed via a
+// `filter_mode` sanity case, identity-swizzle, that failed before this
+// fix and passes after). Fixed by switching from
+// `femeRTComputeBilinearSupport`/`femeRTFetchTexel2D` (this row's own
+// prior "clamped in place" approximation, documented above as
+// unmotivated by any known CTS case -- now known to be wrong) to
+// `femeRTComputeCubeBilinearSupport`/`femeRTFetchCubeSeamlessTexel`,
+// the exact same seamless cross-face remap
+// `femeRTSampleCubeLinearAtLevel` already uses for a blended sample,
+// including its doubly-out-of-bounds corner-averaging rule -- mirroring
+// VK-GL-CTS's own `TextureCubeView::gather`, which reuses its sampling
+// path's own `getCubeLinearSamples` verbatim rather than a separate
+// gather-specific footprint. A cube face has no sampler-controlled
+// address mode to force to `ClampToEdge` any more, since
+// `femeRTFetchCubeSeamlessTexel` never consults one at all (a cube
+// gather footprint remaps across faces unconditionally, the same way a
+// sample does).
 FemeRTv4f32 femeCpuImageGatherCmpCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
@@ -8814,24 +8822,34 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpCubeV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  Samp.AddressU = 2; // ClampToEdge -- see comment above.
-  Samp.AddressV = 2;
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img.Format);
-  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
-      &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
-  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
-                                       /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
-  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
-                                       /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
-  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
-                                       /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
-  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
-                                       /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+  int32_t Size;
+  FemeRTCubeBilinearSupport S =
+      femeRTComputeCubeBilinearSupport(&Img, CF.U, CF.V, /*Level=*/0, &Size);
+  _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
+  FemeRTv4f32 T00 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X0, S.Y0, Size, &Amb00,
+      /*ApplySwizzle=*/0);
+  FemeRTv4f32 T10 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X1, S.Y0, Size, &Amb10,
+      /*ApplySwizzle=*/0);
+  FemeRTv4f32 T01 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X0, S.Y1, Size, &Amb01,
+      /*ApplySwizzle=*/0);
+  FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X1, S.Y1, Size, &Amb11,
+      /*ApplySwizzle=*/0);
+  // At most one of the four taps can ever be the doubly-out-of-bounds
+  // corner -- see femeRTSampleCubeLinearAtLevel's own identical comment.
+  if (Amb00)
+    T00 = (T10 + T01 + T11) * (1.0f / 3.0f);
+  else if (Amb10)
+    T10 = (T00 + T01 + T11) * (1.0f / 3.0f);
+  else if (Amb01)
+    T01 = (T00 + T10 + T11) * (1.0f / 3.0f);
+  else if (Amb11)
+    T11 = (T00 + T10 + T01) * (1.0f / 3.0f);
   FemeRTv4f32 Result;
   Result[0] =
       femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0], IsFixedPointDepth);

@@ -2284,6 +2284,43 @@ TEST_F(ImageSamplingTest, GatherCubeIsolatesNamedFace) {
   EXPECT_FLOAT_EQ(Face1[3], 0.1f); // T(X0,Y0)
 }
 
+// The depth-comparison counterpart of `GatherCubeSeamlessBlendsAcrossFace
+// Edge` above, mirroring `SampleCmpCubeSeamlessBlendsAcrossFaceEdge`'s
+// own relationship to `SampleCubeSeamlessBlendsAcrossFaceEdge`: face 0
+// uniformly a depth of `1.0`, face 4 uniformly `0.0`, `Dref=0.5` with
+// `LessEqual` passes (`1.0`) on face 0's own texels but fails (`0.0`) on
+// face 4's -- so the same two low-`U` corners that
+// `GatherCubeSeamlessBlendsAcrossFaceEdge` observes reading face 4's
+// color must here instead observe a failed comparison.
+TEST_F(ImageSamplingTest, GatherCmpCubeSeamlessBlendsAcrossFaceEdge) {
+  float Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face)
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = (Face == 0) ? 1.0f : 0.0f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                                             ResourceFormat::R32G32B32A32_FLOAT,
+                                             Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCmpCubeFn Fn = resolve<GatherCmpCubeFn>(addWrapper(
+      "gathercmp_cube_seamless", "feme.cpu.image.gathercmp.cube.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.6f, /*Dref=*/0.5f, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f); // T(X0,Y1) remapped onto face 4, fails.
+  EXPECT_FLOAT_EQ(Out[1], 1.0f); // T(X1,Y1), still face 0, passes.
+  EXPECT_FLOAT_EQ(Out[2], 1.0f); // T(X1,Y0), still face 0, passes.
+  EXPECT_FLOAT_EQ(Out[3], 0.0f); // T(X0,Y0) remapped onto face 4, fails.
+}
+
 TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
   float Storage[2][2][4] = {{{1, 2, 3, 4}, {5, 6, 7, 8}},
                             {{9, 10, 11, 12}, {13, 14, 15, 16}}};
