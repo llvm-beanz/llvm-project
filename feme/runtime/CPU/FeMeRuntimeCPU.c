@@ -8704,6 +8704,70 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
                                 /*LayerBase=*/CubeIndex * 6, CF.Face,
                                 ClampedLod);
 }
+
+// (Roadmap L125(b)) The `CubeArray` counterpart of
+// `femeCpuImageSampleCubeV4I32` above, for
+// `feme.cpu.image.sample.cubearray.v4i32` -- mirrors
+// `femeCpuImageSampleCubeArrayV4F32`'s own relationship to
+// `femeCpuImageSampleCubeV4F32` immediately above: adds a float
+// `ArrayLayer` operand, rounded to nearest and clamped to a valid cube
+// element via the same `femeRTRoundClampLayer` helper, then folded into
+// `femeRTFetchTexel2DI32`'s own `Layer` as `CubeIndex * 6 + CF.Face`
+// (mirroring `femeRTSampleFilteredCube`'s own identical `LayerBase +
+// BaseFace` addition for its `NEAREST` path). Otherwise identical to
+// `femeCpuImageSampleCubeV4I32`: `UseExplicitLod=1`/zero derivatives (no
+// implicit-LOD derivative logic needed), forced `ClampToEdge` addressing
+// (so no border-color fallback branch), and a direct
+// `femeRTFetchTexel2DI32` point-sample (no seamless cross-face blending
+// needed for `NEAREST`).
+FemeRTv4i32 femeCpuImageSampleCubeArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float ArrayLayer, float Lod,
+    _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float ArrayLayer, float Lod, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) || Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
+  Samp.AddressV = 2;
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  float ClampedLod = femeRTComputeCubeClampedLod(
+      &Img, &Samp, CF, Lod, /*UseExplicitLod=*/1, 0.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, -__builtin_inff(), 0.0f);
+  uint32_t NumCubes = Img.ArrayLayers / 6;
+  uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  uint32_t Level = femeRTNearestMipLevel(MipPlan);
+  uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
+  uint32_t LevelHeight = femeRTMipExtent(Img.Height, Level);
+  int32_t X = (int32_t)__builtin_floorf(CF.U * (float)LevelWidth);
+  int32_t Y = (int32_t)__builtin_floorf(CF.V * (float)LevelHeight);
+  _Bool BorderX = 0, BorderY = 0;
+  // `Samp.AddressU`/`AddressV` are forced to `ClampToEdge` (mode 2) just
+  // above, which `femeRTApplyAddressMode` never treats as
+  // out-of-bounds -- see `femeCpuImageSampleCubeV4I32`'s own identical
+  // comment.
+  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                         Samp.AddressU, &BorderX);
+  int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
+                                         Samp.AddressV, &BorderY);
+  return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/CubeIndex * 6 + CF.Face,
+                               AddrX, AddrY, /*Sample=*/0);
+}
+
 // `feme.cpu.image.samplecmp.cube.f32` (roadmap L48): the `TextureCube`
 // counterpart of `feme.cpu.image.samplecmp.2d.f32` above, converting the
 // direction vector `(DirX, DirY, DirZ)` to a face index and 2D UV via

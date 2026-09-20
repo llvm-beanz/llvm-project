@@ -5353,14 +5353,15 @@ TEST(SPIRVResourceLoweringTest,
 }
 
 TEST(SPIRVResourceLoweringTest,
-     LeavesACubeArrayIntegerSampledImageHandleUsedForSampleAlone) {
-  // Roadmap L125(b): `Plain1D`/`Array1D`/`Array2D`/`Plain3D`/`Cube` (see
-  // the "lowers" tests above) are now accepted alongside `Plain2D`, but
-  // `CubeArray` -- the final remaining shape -- is still rejected: no
-  // `createSampleCubeArrayI32`-style runtime helper exists for it yet.
-  // The whole handle (and therefore the whole function) is left
-  // unrewritten, matching `LeavesAnArrayedImageHandleAlone`'s own "no
-  // partial lowering" contract.
+     LowersImplicitLodIntegerSampledImageCubeArrayToImageSampleV4I32) {
+  // Roadmap L125(b): widens the integer-sampled path to `CubeArray`, the
+  // final remaining shape, mirroring
+  // `LowersImplicitLodIntegerSampledImageCubeToImageSampleV4I32`'s own
+  // `Cube` widening. `CubeArray`'s coordinate is `Cube`'s direction
+  // vector `(DirX, DirY, DirZ)` plus a fourth `ArrayLayer` lane
+  // (`SampleCoordWidth == 4`), and (like `Cube`) carries no `ConstOffset`
+  // operand at all -- SPIR-V forbids one against `Dim::Cube` (arrayed or
+  // not) outright.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x i32> @main(<4 x float> %dirandlayer) {
@@ -5383,8 +5384,58 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cubearray.v4i32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, array_layer, lod, mask). Implicit LOD defaults
+  //  to 0.0.
+  EXPECT_EQ(Sample->arg_size(), 12u);
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(10))->isZero());
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerSampledImageCubeArrayToImageSampleV4I32) {
+  // Roadmap L125(b): an *explicit*-LOD `OpImageSampleExplicitLod` against
+  // a `CubeArray` integer-channel (`usamplerCubeArray`/`isamplerCubeArray`)
+  // sampled image is legal SPIR-V (restricted, per the Vulkan spec, to
+  // `NEAREST` filtering) -- mirrors
+  // `LowersIntegerSampledImageCubeToImageSampleV4I32`'s own `Cube` case,
+  // lowering to `createSampleCubeArrayI32` instead of `createSampleCubeI32`
+  // and threading a real (nonzero) `ArrayLayer`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<4 x float> %dirandlayer) {
+      %img = call target("spirv.Image", i32, 3, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timgcubearray(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsampcubearray(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.samplelevel(
+          target("spirv.Image", i32, 3, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %dirandlayer, float 0.0,
+          <4 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 3, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timgcubearray(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsampcubearray(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, array_layer, lod, mask).
+  EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(10))->isZero());
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32"));
 }
 
 TEST(SPIRVResourceLoweringTest,

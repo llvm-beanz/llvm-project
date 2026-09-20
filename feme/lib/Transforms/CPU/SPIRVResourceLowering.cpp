@@ -1558,18 +1558,20 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // `createSample1DArrayI32`/`createSample2DArrayI32`/
       // `createSample3DI32` has such an operand). `Plain2D` (roadmap
       // H109, widened to implicit-LOD by L125(a)), `Plain1D`, `Array1D`,
-      // `Array2D`, `Plain3D`, and `Cube` (all roadmap L125(b), mirroring
-      // `Plain2D`'s own widening exactly) are the only shapes accepted so
-      // far; `lowerImageAccesses` below already defaults `Lod` to a
-      // constant `0.0` whenever `ExplicitLod` is false (see its own
-      // comment), which is exactly right here too -- every real CTS case
-      // either widening covers samples a single-mip-level image, so the
-      // true (unimplemented) derivative-based implicit-LOD computation
-      // would clamp to mip 0 regardless.
+      // `Array2D`, `Plain3D`, `Cube`, and `CubeArray` (all roadmap
+      // L125(b), mirroring `Plain2D`'s own widening exactly) are the
+      // only shapes accepted so far; `lowerImageAccesses` below already
+      // defaults `Lod` to a constant `0.0` whenever `ExplicitLod` is
+      // false (see its own comment), which is exactly right here too --
+      // every real CTS case either widening covers samples a
+      // single-mip-level image, so the true (unimplemented)
+      // derivative-based implicit-LOD computation would clamp to mip 0
+      // regardless.
       if (IsInteger) {
         if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D &&
              Shape != ImageShape::Array1D && Shape != ImageShape::Array2D &&
-             Shape != ImageShape::Plain3D && Shape != ImageShape::Cube) ||
+             Shape != ImageShape::Plain3D && Shape != ImageShape::Cube &&
+             Shape != ImageShape::CubeArray) ||
             HasMinLodClamp || HasBias || HasGrad)
           return false;
         unsigned OffsetIdx =
@@ -3653,6 +3655,28 @@ void lowerImageAccesses(
             CallInst *NewSampleI32Call = createSampleCubeI32(
                 Builder, Env, ImageIndex, SamplerIndex, IntDirX, IntDirY,
                 IntDirZ, Lod, Mask, CI->getName());
+            CI->replaceAllUsesWith(NewSampleI32Call);
+            CI->eraseFromParent();
+            continue;
+          }
+          // Roadmap L125(b): `CubeArray`'s own coordinate is `Cube`'s
+          // direction vector `(DirX, DirY, DirZ)` plus a fourth
+          // `ArrayLayer` lane (mirroring `Array2D`'s own relationship to
+          // `Plain2D`) -- `createSampleCubeArrayI32` resolves the
+          // direction vector the same way `createSampleCubeI32` does,
+          // plus rounds/clamps `ArrayLayer` to a valid cube element
+          // (mirroring `createSampleCubeArray`'s own identical
+          // `ArrayLayer` handling). No offset extraction here either,
+          // for the same reason `Cube` has none above.
+          if (Shape == ImageShape::CubeArray) {
+            Value *IntDirX = Builder.CreateExtractElement(Coord, uint64_t{0});
+            Value *IntDirY = Builder.CreateExtractElement(Coord, uint64_t{1});
+            Value *IntDirZ = Builder.CreateExtractElement(Coord, uint64_t{2});
+            Value *IntArrayLayer =
+                Builder.CreateExtractElement(Coord, uint64_t{3});
+            CallInst *NewSampleI32Call = createSampleCubeArrayI32(
+                Builder, Env, ImageIndex, SamplerIndex, IntDirX, IntDirY,
+                IntDirZ, IntArrayLayer, Lod, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;

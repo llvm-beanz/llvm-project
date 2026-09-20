@@ -164,6 +164,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.sample.3d.v4i32";
   case ImageCallKind::SampleCubeI32:
     return "feme.cpu.image.sample.cube.v4i32";
+  case ImageCallKind::SampleCubeArrayI32:
+    return "feme.cpu.image.sample.cubearray.v4i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -891,6 +893,19 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
          I1Ty},
         /*isVarArg=*/false);
     break;
+  case ImageCallKind::SampleCubeArrayI32:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, dir_x, dir_y, dir_z, array_layer,
+    //  lod, mask) -> <4 x i32> (roadmap L125(b)): the `CubeArray`
+    // counterpart of `SampleCubeI32`, adding a float `array_layer`
+    // operand (mirroring `SampleCubeArray`'s own identical relationship
+    // to `SampleCube`).
+    FTy = FunctionType::get(
+        V4I32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         F32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -1041,6 +1056,19 @@ CallInst *feme::cpu::createSampleCubeI32(IRBuilderBase &Builder,
       F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
           Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
           Lod, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createSampleCubeArrayI32(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ,
+    Value *ArrayLayer, Value *Lod, Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCubeArrayI32);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+          Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
+          ArrayLayer, Lod, Mask},
       Name);
 }
 
@@ -2052,7 +2080,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Sample1DArrayI32,
       ImageCallKind::Sample2DArrayI32,
       ImageCallKind::Sample3DI32,
-      ImageCallKind::SampleCubeI32};
+      ImageCallKind::SampleCubeI32,
+      ImageCallKind::SampleCubeArrayI32};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -2886,6 +2915,22 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.W = CI.getArgOperand(8);
     Result.Lod = CI.getArgOperand(9);
     Result.Mask = CI.getArgOperand(10);
+    break;
+  case ImageCallKind::SampleCubeArrayI32:
+    if (CI.arg_size() != 12)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.ArrayLayer = CI.getArgOperand(9);
+    Result.Lod = CI.getArgOperand(10);
+    Result.Mask = CI.getArgOperand(11);
     break;
   }
   return Result;
