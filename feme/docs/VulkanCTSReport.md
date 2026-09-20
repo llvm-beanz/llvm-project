@@ -7286,3 +7286,84 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
 - `Roadmap.md`'s `L125(z)` row updated to reflect the fix (struck
   through, marked fixed and CTS-verified); see `agent_thoughts.md` for
   the full narrative and next steps.
+
+## Roadmap L125(s): vertex-input matrix AccessChain legalization and integer signedness gaps
+
+### Bug 1: matrix-typed vertex-input attribute AccessChain legalization crash
+
+Any `mat2`/`mat3`/`mat4`-typed vertex-input attribute (e.g.
+`dEQP-VK.pipeline.monolithic.vertex_input.multiple_attributes.
+binding_one_to_many.attributes.float.mat2.mat3`) crashed with `error:
+failed to legalize operation 'spirv.AccessChain' that was explicitly
+marked illegal`. `SPIRVToLLVMPatterns.cpp`'s `isCompositeStageIOType`
+(checked on the *original* SPIR-V pointee type, used by
+`isInputArrayAccessChain` to route `AccessChain` pattern selection)
+recognized `spirv.array`/`spirv.struct` but not `spirv.matrix` -- a pure
+oversight, since `isCompositeLLVMType` (checked on the *converted* LLVM
+type) already treated a matrix's address as a real pointer (a matrix
+converts to an `!llvm.array` of column vectors).
+
+Fixed by adding `mlir::spirv::MatrixType` to `isCompositeStageIOType`'s
+`isa<>` check. The existing `StageIOArrayAccessChainPattern` GEP-building
+logic worked correctly unmodified once routed there: `remapNestedStruct
+MemberIndices` hits its matrix/vector/scalar-leaf `break` case
+immediately for a bare (non-struct-nested) matrix, leaving the
+column/row indices unmodified -- correct, since RowMajor/MatrixStride
+decorations only apply to struct members per the SPIR-V spec, never to
+standalone Input/Output matrix variables.
+
+New unit test `SPIRVToLLVMTest.
+InputStorageMatrixAccessChainConvertsInsteadOfFailing`, confirmed via a
+stash/rebuild round-trip to fail identically to the real bug pre-fix
+and pass post-fix.
+
+### Bug 2: integer-signedness false-positive rejection of `uint` vertex attributes
+
+A genuinely `uint`-typed vertex shader input bound to a `*_UINT`-format
+vertex attribute (e.g. the real CTS case `...attributes.int.ivec2.
+uint`) was unconditionally rejected at `vkQueueSubmit` with "vertex
+attribute format is UInt but the shader input is not". This is the same
+architectural limitation `L125(u)` already found and fixed on the
+fragment-output side: LLVM IR's integer types are signless, so
+`CanonicalizeStage.cpp`'s `getComponentType` (which runs after
+SPIRVToLLVM conversion) can never recover a SPIR-V scalar's original
+`si32`/`ui32` distinction -- every integer scalar unconditionally maps
+to `SignatureComponentType::SInt`. `Executor.cpp`'s `decodeAttribute`
+had 6 integer-format validation checks requiring an exact `WantType ==
+UInt`/`SInt` match, which the `*_UINT` half could never satisfy.
+
+Fixed via a new `isIntegerComponentType(SignatureComponentType)` helper
+accepting either `SInt` or `UInt` for `*_UINT`/`*_SINT`-format
+validation, since the raw byte-decode logic itself is bit-identical
+regardless of signedness (a raw memcpy or zero/sign-extend, with no
+`WantType`-dependent step) -- only genuine `Float`/`Bool` mismatches
+remain rejected.
+
+New unit test `ExecutorTest.
+RendersTriangleFromAUintVertexAttributeBoundToAUintFormat`, using a
+custom vertex shader whose scalar `uint` input is compared via `icmp`
+so both the fix's own error-avoidance and the actual decoded byte value
+are exercised; also confirmed via a stash/rebuild round-trip to fail
+identically to the real bug pre-fix and pass post-fix.
+
+### Build/test
+
+`ninja check-feme`: 3,271/3,274 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `pipeline.monolithic.vertex_input.*` full sweep (13,296 cases): **4
+  Fail** (was 1,571 pre-session) -- 2,484 Pass (was 917), 10,805
+  NotSupported (unchanged).
+- The isolated repro cases for both bugs (`...float.mat2.mat3` and
+  `...attributes.int.ivec2.uint`) individually confirmed to now Pass.
+- The remaining 4 fails (`max_attributes.query_max_attributes.*` x3,
+  `misc.unused_binding` x1) are a distinct, unrelated, newly-surfaced
+  residual, not yet root-caused -- filed as `L127` in `Roadmap.md`.
+- `Roadmap.md`'s `L125(s)` row updated to reflect both fixes (struck
+  through, marked fixed and CTS-verified); `L127` added for the
+  remaining 4-fail residual; `L125(t)` left untouched (not
+  investigated this session). See `agent_thoughts.md` for the full
+  narrative and next steps.
