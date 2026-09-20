@@ -58,21 +58,28 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 ## Suggested next steps
 
 1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
-   logs (all under `/tmp/ctsrun/l125b_cube_*`) are already deleted;
-   only prior sessions' own leftover `l124*` files remain there,
-   untouched (not this session's to clean).
-2. Pick up **`CubeArray`** next -- the final remaining L125(b) shape.
-   Adds an `ArrayLayer` operand on top of `Cube`'s own direction-vector
-   coordinate (mirroring `Array2D`'s own relationship to `Plain2D`), so
-   should be a smaller follow-on now that `Cube`'s own pattern (face
-   selection, forced `ClampToEdge`, no offset) is established. Check
-   whether `femeRTSelectCubeFace` needs an array-layer-base parameter
-   or whether the existing `LayerBase` convention from
-   `femeRTSampleFilteredCube`'s own `CubeArray` call site already
-   covers it.
-3. Once `CubeArray` lands, strike through L125(b) in `Roadmap.md`
-   entirely and pick between `L125(c)`/`L125(d)` (the other,
-   not-yet-root-caused fail buckets from L125(a)'s original triage) or
-   **L125's next fresh sample**.
-4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   logs (all under `/tmp/ctsrun/l125b_cubearray_*`) are already
+   deleted; only prior sessions' own leftover `l124*` files remain
+   there, untouched (not this session's to clean).
+2. **L125(b) is fully closed.** Two candidates for what's next, from
+   L125(a)'s own original triage:
+   - **L125(c)** (larger, not yet individually triaged): `Image
+     mismatch` (ASTC/EAC/ETC2 compressed-format decoding), a
+     `vk.queueSubmit`/`VK_ERROR_INITIALIZATION_FAILED` bucket
+     (`vertex_input.single_attribute.*` and scattered
+     `sampler.border_swizzle.*`), a separate
+     `vk.createComputePipelines`-site `VK_ERROR_INITIALIZATION_FAILED`
+     bucket heavy in `sampler.border_swizzle.*` (confirmed *not* the
+     same integer-sampling root cause), and a
+     `vktPipelineBindPointTests.cpp` bucket. None root-caused yet --
+     each needs its own `--deqp-log-decompiled-spirv=enable`/
+     `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1` trace before estimating
+     further.
+   - **L125(d)** (smaller, more sharply scoped): `sampler.border_swizzle.*`'s
+     own already-decoded `Ref:`/`Color:` mismatch bucket -- looks like a
+     border-color value read back with the wrong component swizzle
+     applied (`VK_EXT_border_color_swizzle`'s `components` mapping not
+     yet applied to synthesized border colors). A reasonable first pick
+     given its narrower scope.
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
