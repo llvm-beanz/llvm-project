@@ -5585,3 +5585,60 @@ this session.
 remaining five shapes still to go, one small commit per shape following
 this same session's own pattern. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## L125(b) continued: widen integer-sampled implicit-LOD fix to `Array1D`
+
+Continuing this same session's `Plain1D` commit, picked up `Array1D` next
+(the second-smallest remaining shape per the roadmap's own scoping).
+
+Added `ImageCallKind::Sample1DArrayI32` (`feme.cpu.image.sample.1darray.
+v4i32`), mirroring `Sample1DI32`'s own operand shape plus an added
+`ArrayLayer` operand alongside `U`, matching `Sample1DArray`'s own
+relationship to `Sample1D`. `Offset` stays a bare scalar (excluding the
+array layer), matching `Array1D`'s own `ConstOffset` dimensionality
+already established by the float-sampling path's own precedent
+(`createSample1DArray`).
+
+Wired through `getImageCallName`/`getOrInsertImageCall`/
+`createSample1DArrayI32`/`matchImageCall`'s `AllKinds` table and per-kind
+switch (`ImageCalls.h`/`.cpp`), a new `femeCpuImageSample1DArrayV4I32`
+runtime implementation (`FeMeRuntimeCPU.c`, reusing the pre-existing
+`femeRTFetchTexel1DArrayI32`/`femeRTRoundClampLayer` helpers -- placed
+after `femeRTRoundClampLayer`'s own definition in the file to satisfy C's
+forward-declaration ordering, since that helper is `static`), and
+`SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`/
+`lowerImageAccesses` to accept and lower an `Array1D` integer-channel
+sample the same way `Plain1D`'s was widened by this same session's prior
+commit.
+
+### Unit tests
+
+Converted the previous `LeavesAnArray1DIntegerSampledImageHandleUsedFor
+SampleAlone` rejection test into a pair of "lowers" tests for `Array1D`
+(mirroring the `Plain1D` test pair), added a new
+`LeavesAnArray2DIntegerSampledImageHandleUsedForSampleAlone` rejection
+test to keep the next remaining shape (`Array2D`) covered as still
+correctly out of scope, and added a `matchImageCall` unit test
+(`MatchesSample1DArrayI32Call`).
+
+### Results
+
+- `ninja FeMeTransformsCPUTests`: all 529 tests pass (+3 net vs. the
+  `Plain1D` commit).
+- `ninja check-feme`: **3,226/3,229 Passed, 3 Unsupported, 0 Failed** (0
+  regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: `dEQP-VK.pipeline.monolithic.image.suballocation.
+  sampling_type.combined.view_type.1d_array.format.r8_sint.*` — **0 Fail
+  / 72 Pass** (16 `NotSupported`, the same unrelated
+  `shaderSampledImageArrayDynamicIndexing` feature gate seen for `Plain1D`).
+
+Internal correctness fix again, not new Vulkan feature/extension surface
+-- [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`Array2D`/`Plain3D`/`Cube`/`CubeArray` remain unaddressed --
+`Roadmap.md`'s L125(b) row is updated to reflect `Plain1D`/`Array1D` done
+and the remaining three shapes still to go. See `agent_thoughts.md` for
+the full narrative and next steps.
