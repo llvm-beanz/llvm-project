@@ -684,6 +684,19 @@ enum class ImageCallKind : uint8_t {
   /// `Sample3D`'s own genuine three-component offset, unlike
   /// `Sample2DI32`'s two-component `OffsetX`/`OffsetY`.
   Sample3DI32,
+  /// `feme.cpu.image.sample.cube.v4i32` (roadmap L125(b)): the `Cube`
+  /// counterpart of `Sample2DI32`, mirroring `SampleCube`'s own
+  /// relationship to `Sample2D`. Like `Sample2DI32`, `Lod` defaults to a
+  /// constant `0.0` at the call site for an ordinary implicit-LOD sample,
+  /// and no `Bias`/`Grad`/`MinLod` operand exists. `U`/`V`/`W` carry the
+  /// same `(DirX, DirY, DirZ)` direction vector `SampleCube`'s own
+  /// identically-positioned parameters do -- no screen-space derivative
+  /// operands are needed (unlike `SampleCube`'s own `DDirXdX`/etc.),
+  /// since `Lod`'s own constant-`0.0` default makes them unreachable the
+  /// same way every other `*I32` kind's own implicit-LOD default does. No
+  /// `ConstOffset` operand exists either -- SPIR-V forbids one against
+  /// `Dim::Cube` entirely, matching `SampleCube`'s own identical absence.
+  SampleCubeI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -982,6 +995,23 @@ llvm::CallInst *createSample3DI32(
     llvm::Value *V, llvm::Value *W, llvm::Value *Lod, llvm::Value *OffsetX,
     llvm::Value *OffsetY, llvm::Value *OffsetZ, llvm::Value *Mask,
     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.cube.v4i32` call (roadmap L125(b)):
+/// the `Cube` counterpart of `createSample2DI32`, mirroring
+/// `createSampleCube`'s own relationship to `createSample2D`. \p DirX/
+/// \p DirY/\p DirZ carry the same direction-vector coordinate
+/// `createSampleCube`'s own identically-named parameters do -- no
+/// derivative, `Bias`, `MinLodClamp`, or offset operand exists (mirroring
+/// every other `*I32` kind's own restriction, and `Dim::Cube`'s own
+/// blanket `ConstOffset` prohibition besides).
+llvm::CallInst *createSampleCubeI32(llvm::IRBuilderBase &Builder,
+                                    const ImageCallEnv &Env,
+                                    llvm::Value *ImageIndex,
+                                    llvm::Value *SamplerIndex,
+                                    llvm::Value *DirX, llvm::Value *DirY,
+                                    llvm::Value *DirZ, llvm::Value *Lod,
+                                    llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY
 /// (roadmap L50d) are the same `ConstOffset` image operand

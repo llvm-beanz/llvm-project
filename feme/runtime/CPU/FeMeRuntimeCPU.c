@@ -8450,6 +8450,79 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
                                 CF.Face, ClampedLod);
 }
 
+// (Roadmap L125(b)) The `Cube` counterpart of `femeCpuImageSample2DV4I32`
+// above, for `feme.cpu.image.sample.cube.v4i32` -- mirrors
+// `femeCpuImageSampleCubeV4F32`'s own face-selection/address-forcing
+// structure immediately above (hence its placement here, after
+// `femeRTSelectCubeFace`/`femeRTComputeCubeClampedLod`'s own definitions,
+// both `static` and required by C to precede any caller), but simplified
+// to `NEAREST`-only fetch, no `Bias`/`MinLodClamp`/derivative operands
+// (mirroring every other `*I32` kind's own restriction -- `Lod` already
+// defaults to a constant `0.0` at the call site for an implicit-LOD
+// caller, so `femeRTComputeCubeClampedLod`'s own derivative-based
+// implicit-LOD branch is never reached; `UseExplicitLod=1` unconditionally
+// selects its simple bias-and-clamp branch instead, exactly like every
+// prior `*I32` kind's identical choice). Reuses `femeRTFetchTexel2DI32`
+// directly (with `CF.Face` as `Layer`) rather than
+// `femeRTSampleFilteredCube`, since a `NEAREST` cube fetch needs no
+// seamless cross-face blending at all (a single nearest texel is already
+// spec-correct, mirroring `femeRTSampleFilteredCube`'s own `NEAREST`
+// short-circuit to the non-seamless `femeRTSamplePoint2D` path) -- so, as
+// with `Array2D`/`Plain3D` before it, no new low-level texel-fetch helper
+// is needed here either.
+FemeRTv4i32 femeCpuImageSampleCubeV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float Lod,
+    _Bool Mask) asm("feme.cpu.image.sample.cube.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float Lod, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) || Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
+  Samp.AddressV = 2;
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
+  // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above;
+  // `UseExplicitLod=1` makes `femeRTComputeCubeClampedLod` ignore every
+  // derivative argument, so zero constants are passed for those too.
+  float ClampedLod = femeRTComputeCubeClampedLod(
+      &Img, &Samp, CF, Lod, /*UseExplicitLod=*/1, 0.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, -__builtin_inff(), 0.0f);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  uint32_t Level = femeRTNearestMipLevel(MipPlan);
+  uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
+  uint32_t LevelHeight = femeRTMipExtent(Img.Height, Level);
+  int32_t X = (int32_t)__builtin_floorf(CF.U * (float)LevelWidth);
+  int32_t Y = (int32_t)__builtin_floorf(CF.V * (float)LevelHeight);
+  _Bool BorderX = 0, BorderY = 0;
+  // `Samp.AddressU`/`AddressV` are forced to `ClampToEdge` (mode 2) just
+  // above, which `femeRTApplyAddressMode` never treats as
+  // out-of-bounds -- only `ClampToBorder` (mode 3) ever sets
+  // `BorderX`/`BorderY`, so both stay `0` here unconditionally; no
+  // integer border-color fallback is needed the way `Plain2D`'s/
+  // `Array2D`'s/`Plain1D`'s/`Array1D`'s/`Plain3D`'s own sampler-controlled
+  // address mode requires.
+  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                         Samp.AddressU, &BorderX);
+  int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
+                                         Samp.AddressV, &BorderY);
+  return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/CF.Face, AddrX, AddrY,
+                               /*Sample=*/0);
+}
+
 // `feme.cpu.image.gathercmp.cube.v4f32` (roadmap H124r): `TextureCube`
 // depth-comparison gather -- SPIR-V's `OpImageDrefGather`, HLSL's
 // `TextureCube::GatherCmp()`. Structurally identical to

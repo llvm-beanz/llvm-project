@@ -1558,7 +1558,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // `createSample1DArrayI32`/`createSample2DArrayI32`/
       // `createSample3DI32` has such an operand). `Plain2D` (roadmap
       // H109, widened to implicit-LOD by L125(a)), `Plain1D`, `Array1D`,
-      // `Array2D`, and `Plain3D` (all roadmap L125(b), mirroring
+      // `Array2D`, `Plain3D`, and `Cube` (all roadmap L125(b), mirroring
       // `Plain2D`'s own widening exactly) are the only shapes accepted so
       // far; `lowerImageAccesses` below already defaults `Lod` to a
       // constant `0.0` whenever `ExplicitLod` is false (see its own
@@ -1569,7 +1569,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       if (IsInteger) {
         if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D &&
              Shape != ImageShape::Array1D && Shape != ImageShape::Array2D &&
-             Shape != ImageShape::Plain3D) ||
+             Shape != ImageShape::Plain3D && Shape != ImageShape::Cube) ||
             HasMinLodClamp || HasBias || HasGrad)
           return false;
         unsigned OffsetIdx =
@@ -3632,6 +3632,27 @@ void lowerImageAccesses(
                 Builder, Env, ImageIndex, SamplerIndex, IntU, IntV, IntW,
                 Lod, IntOffsetX, IntOffsetY, IntOffsetZ, Mask,
                 CI->getName());
+            CI->replaceAllUsesWith(NewSampleI32Call);
+            CI->eraseFromParent();
+            continue;
+          }
+          // Roadmap L125(b): `Cube`'s own coordinate is a 3-component
+          // direction vector `(DirX, DirY, DirZ)` rather than a spatial
+          // `(U, V[, W])` triple -- `createSampleCubeI32` resolves it to
+          // a face + face-local `(U, V)` internally
+          // (`femeRTSelectCubeFace`), mirroring `createSampleCube`'s own
+          // identical resolution. No offset extraction at all here,
+          // unlike every other shape above: SPIR-V forbids `ConstOffset`
+          // against `Dim::Cube` outright, so `createSampleCubeI32` has no
+          // such operand (matching `createSampleCube`'s own identical
+          // absence).
+          if (Shape == ImageShape::Cube) {
+            Value *IntDirX = Builder.CreateExtractElement(Coord, uint64_t{0});
+            Value *IntDirY = Builder.CreateExtractElement(Coord, uint64_t{1});
+            Value *IntDirZ = Builder.CreateExtractElement(Coord, uint64_t{2});
+            CallInst *NewSampleI32Call = createSampleCubeI32(
+                Builder, Env, ImageIndex, SamplerIndex, IntDirX, IntDirY,
+                IntDirZ, Lod, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
