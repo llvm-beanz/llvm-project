@@ -93592,3 +93592,115 @@ own log.
    family fully clean too -- worth prioritizing, though each of the 3
    remaining issues may need its own dedicated debugging session (a
    crash needs a debugger, not a CTS trace).
+
+# Session: L124(t) closed -- runtime-array-of-matrix conversion gap, ssbo.* down to 1 fail
+
+## Confirmed at session start
+
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+## What I did
+
+1. Re-triaged the 2 unexplained `all_shared_buffer.13`/
+   `nested_structs_instance_arrays.8` fails via
+   `--deqp-log-decompiled-spirv=enable`. Both still fail.
+2. Built 2 minimal `feme-opt` repros for `all_shared_buffer.13`'s
+   candidate blocks. The second (a trailing runtime array of `mat4x3`,
+   `RowMajor`) reproduced the bug: that member's content type stayed
+   column-major/untransposed.
+3. Cross-checked against `all_shared_buffer.41`'s real shape (from a
+   prior session, previously marked "unresolved, not the wrapper
+   shape") — **exact same bug**. Both tests share one root cause.
+4. Root cause: `peelArraysToMatrixType` never peeled through a
+   `spirv::RuntimeArrayType` (reasoning: it's always a struct's last
+   member, so no nesting case needed — true, but missed it can
+   directly *wrap* a matrix itself). This silently skipped the
+   RowMajor/MatrixStride substitution for that member, corrupting
+   addressing for non-square matrices like `mat4x3`.
+5. Fixed `peelArraysToMatrixType` + its inverse
+   `wrapPhysicalMatrixInArrays` to handle `RuntimeArrayType`. New lit
+   test, verified fail-pre-fix/pass-post-fix.
+6. Verified with a further repro that the fix also handles the
+   **square**-matrix case (`mat3`) correctly, not just non-square.
+
+## Wins
+
+- `ninja check-feme`: **3,215/3,218 Passed, 3 Unsupported, 0 Failed**
+  (+1 new test, 0 regressions).
+- `ssbo.*`: **3,241 Pass / 1 Fail / 8,983 NotSupported** (of 12,225) --
+  up from 3,238/4/8,983. **+3 Pass** in one fix:
+  `all_shared_buffer.41`, `all_shared_buffer.13`, and (unexpected
+  bonus) `all_per_block_buffers.20`'s own pipeline-creation crash — it
+  turned out to share the same root cause, not a separate compiler
+  crash class as previously suspected.
+- `ubo.random.*`: 607/0/1,643, unchanged, confirmed no regression
+  (checked carefully — the fixed helpers are shared with the
+  uniform-block path too).
+- 3 commits this session: the fix + lit test, the Roadmap update
+  (L124(t) struck through, residual re-scoped as L124(u)), and the
+  VulkanCTSReport update.
+
+## State right now
+
+- Working tree clean before this file's own commit, HEAD at
+  `105d572ad9cd`.
+- `ssbo.*` down to **1 fail of 12,225 (0.008%)**:
+  `dEQP-VK.ssbo.layout.random.nested_structs_instance_arrays.8`
+  ("Result comparison and counter values are incorrect").
+- Investigated this residual: it's a considerably more complex shader
+  (3 blocks, 6 nested struct types `sA`-`sF`, several matrix shapes).
+  Built a faithful repro of its own `BlockD.n[]` member (a *square*
+  `mat3` runtime array, matching this test's exact real offsets/
+  decorations including a preceding `sF{bool}` struct member) and
+  confirmed **this session's own fix already handles it correctly** --
+  ruling that member out. The real mismatch is elsewhere in the
+  shader, not yet isolated.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface) -- verified, not just assumed.
+- Build directories left in place, warm/incremental. `/tmp/ctsrun` has
+  this session's fresh scratch logs (`l124t_41.qpa`/`.stdout`,
+  `l124t_confirm.qpa`/`.stdout`, `l124t_nsia8.qpa`/`.stdout`,
+  `l124t_triage1.qpa`/`.stdout`, `ssbo_l124t.qpa`/`.stdout`,
+  `ubo_random_l124t.qpa`/`.stdout`) and `/tmp/l124t_*.mlir` repros
+  (`blockB_repro`, `blockC_repro` -- the one that found the bug,
+  `mat3_repro`, `blockD_full` -- confirms the fix already covers
+  `nested_structs_instance_arrays.8`'s own `BlockD.n[]`, `minimal` --
+  redundant with the committed lit test) -- none referenced by
+  anything committed.
+
+## Suggested next steps
+
+1. **(~5 min)** Delete `/tmp/ctsrun/l124t_*.qpa`/`.stdout`,
+   `/tmp/ctsrun/ssbo_l124t.*`, `/tmp/ctsrun/ubo_random_l124t.*`, and
+   `/tmp/l124t_*.mlir` if a future session doesn't need them -- none
+   referenced by anything committed. Worth keeping
+   `/tmp/ctsrun/l124t_nsia8.qpa` a little longer: it has the full
+   decompiled SPIR-V/GLSL source for `nested_structs_instance_arrays.8`
+   already extracted (3 blocks, 6 struct types), saving a re-run.
+2. Start **L124(u)** (`nested_structs_instance_arrays.8`, the sole
+   remaining `ssbo.*` fail). This session already ruled out `BlockD.n[]`
+   (the trailing `mat3` runtime array) as the cause -- the fix from
+   this session handles it fine. Recommended order for what's left to
+   check, cheapest first:
+   - `BlockB`'s `sA d[]` (runtime array of struct containing a `mat4`,
+     `RowMajor`) -- this goes through the nested-struct-type conversion
+     path (not `peelArraysToMatrixType` at all), which should already be
+     correct via `TypeConverter.addConversion` for `StructType`, but
+     hasn't been directly repro-verified for this specific runtime-array-
+     of-struct-with-matrix combination.
+   - `BlockC`'s doubly-nested `sD.mA` (a `sB` struct containing a
+     `mat3x2`, `RowMajor`) and `sE.mB` (a direct `mat3` member) -- both
+     ordinary nested-struct matrix members, should be well-trodden but
+     not yet individually repro-verified in this exact combination.
+   - Consider whether `bool`/`bvec3`/`bvec4` members (present in `sC`,
+     `sD.mC`) interacting with a following matrix member's offset could
+     be the gap -- not investigated at all this session.
+   - If none of the above isolate it, consider binary-search by editing
+     the real GLSL shader source directly (nulling out unrelated block
+     members) rather than another guess-based `feme-opt` repro.
+3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
+   -- reuse the existing build directories, no reconfigure needed.
+4. With `ssbo.*` at 1 fail of 12,225 and `ubo.random.*` fully clean,
+   L124(u) closing this last case would make **both** `ubo.*` and
+   `ssbo.*` families fully clean -- highest-value single item left on
+   the L124 series.
