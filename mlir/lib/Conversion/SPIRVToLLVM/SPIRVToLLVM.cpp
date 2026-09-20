@@ -993,6 +993,27 @@ public:
   }
 };
 
+/// Converts a `spirv.GlobalVariable`'s `initial_value` attribute (a plain
+/// scalar or vector constant, as produced by
+/// `spirv::Deserializer::getConstant`) into an attribute usable directly as
+/// `GlobalVariablePattern`'s new `llvm.mlir.global`'s own scalar/vector
+/// `value` -- converting a signed/unsigned SPIR-V integer (or vector
+/// thereof) to the signless integer type the LLVM dialect requires, the
+/// same sign-stripping `ConstantScalarAndVectorPattern` above already
+/// performs for an ordinary `spirv.Constant` use (roadmap L124(b)).
+static Attribute convertInitialValueForGlobal(Type srcType, Attribute srcAttr,
+                                              OpBuilder &builder) {
+  if (isSignedIntegerOrVector(srcType) || isUnsignedIntegerOrVector(srcType)) {
+    auto signlessType = builder.getIntegerType(getBitWidth(srcType));
+    if (auto vecAttr = dyn_cast<DenseIntElementsAttr>(srcAttr))
+      return vecAttr.mapValues(signlessType,
+                               [](const APInt &value) { return value; });
+    auto intAttr = cast<IntegerAttr>(srcAttr);
+    return builder.getIntegerAttr(signlessType, intAttr.getValue());
+  }
+  return srcAttr;
+}
+
 /// Converts `spirv.GlobalVariable` to `llvm.mlir.global`. Note that SPIR-V
 /// global returns a pointer, whereas in LLVM dialect the global holds an actual
 /// value. This difference is handled by `spirv.mlir.addressof` and
@@ -1018,6 +1039,26 @@ public:
     auto dstType = getTypeConverter()->convertType(srcType.getPointeeType());
     if (!dstType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    // `initial_value` (roadmap L124(b)): a plain (non-spec)
+    // `OpConstant`/`OpConstantComposite` Initializer -- e.g.
+    // `dEQP-VK.compute.pipeline.basic.remove_global_load_pass`'s own
+    // `%count = OpVariable %ptr Private %uint_0`. Only a scalar or vector
+    // pointee is supported for now (an array/struct composite's own
+    // `ArrayAttr` representation would need an initializer region built
+    // leaf-by-leaf, not yet needed by any known CTS case); a composite
+    // `initial_value` fails the pattern with a clear diagnostic rather than
+    // silently dropping the initial value or asserting.
+    Attribute initializerAttr;
+    if (Attribute initialValue = op.getInitialValueAttr()) {
+      Type pointeeType = srcType.getPointeeType();
+      if (!isa<VectorType>(pointeeType) && !pointeeType.isIntOrFloat())
+        return rewriter.notifyMatchFailure(
+            op, "initial_value lowering only supports a scalar or vector "
+                "pointee type");
+      initializerAttr =
+          convertInitialValueForGlobal(pointeeType, initialValue, rewriter);
+    }
 
     // Limit conversion to the current invocation only or `StorageBuffer`
     // required by SPIR-V runner.
@@ -1050,7 +1091,7 @@ public:
     StringAttr locationAttrName = op.getLocationAttrName();
     IntegerAttr locationAttr = op.getLocationAttr();
     auto newGlobalOp = rewriter.replaceOpWithNewOp<LLVM::GlobalOp>(
-        op, dstType, isConstant, linkage, op.getSymName(), Attribute(),
+        op, dstType, isConstant, linkage, op.getSymName(), initializerAttr,
         /*alignment=*/0, storageClassToAddressSpace(clientAPI, storageClass));
 
     // Attach location attribute if applicable

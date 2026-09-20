@@ -308,3 +308,15 @@ spirv.func @variable_array() "None" {
   %0 = spirv.Variable : !spirv.ptr<!spirv.array<10 x i32>, Function>
   spirv.Return
 }
+
+// `initial_value` (roadmap L124(b)): a plain constant Initializer lowers
+// straight to `llvm.mlir.global`'s own scalar `value` attribute -- unlike
+// every other `spirv.GlobalVariable` case above, whose global carries no
+// initializer at all. A `ui32`-typed constant (SPIR-V keeps signedness on
+// the type, not the value) round-trips through the same sign-stripping
+// `spirv.Constant` itself already goes through, becoming a plain signless
+// `i32` value here.
+spirv.module Logical GLSL450 {
+  // CHECK: llvm.mlir.global private @count(0 : i32) {addr_space = 0 : i32} : i32
+  spirv.GlobalVariable @count initial_value(0 : i32) : !spirv.ptr<i32, Private>
+}
