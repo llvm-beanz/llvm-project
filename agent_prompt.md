@@ -57,26 +57,21 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Next steps
 
-1. **(~15 min)** Pick up **L125(f)**: find or construct a CTS case
-   proving the in-bounds-texel gap (check
-   `dEQP-VK.pipeline.image_view.*` first, or write a minimal repro).
-2. Once reproduced, wire `femeRTApplyImageSwizzle`/`Img->Swizzle` into
-   the in-bounds return path of `femeRTFetchTexel2D`/
-   `femeRTFetchTexel3D` (and their siblings that funnel through them)
-   -- likely the single highest-leverage remaining L125(f) change,
-   since the helper already exists and is already correct.
-3. Watch for a **double-swizzle** risk: `femeRTFetchTexel2D`/`3D`'s
-   in-bounds branch is shared by both the float-sampling path (which
-   should get the swizzle) and any raw `feme.cpu.image.load.*` path
-   that bypasses a sampler entirely -- check whether Vulkan's
-   `vkCmdCopyImage`/`OpImageRead`-style raw loads are also supposed to
-   swizzle (they likely are not, since a load has no `VkSampler`/image
-   view swizzle applied per spec -- confirm before assuming the shared
-   helper is safe to change unconditionally for every caller).
-4. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (`/tmp/ctsrun/l125f_*`) are already deleted.
+2. Pick between **L125(g)** (SampleCmp*/Gather* swizzle semantics --
+   needs spec research first: does a depth-compare's single-channel
+   read honor a non-identity swizzle at all? does `OpImageGather`'s
+   `Component` select before or after swizzle applies?) and **L125(h)**
+   (the integer `*I32` path -- structurally simpler, mechanically
+   similar to this session's own fix, and already has concrete failing
+   CTS cases identified above to start from). **L125(h) is probably
+   the faster win** since it reuses this session's exact pattern with
+   no open spec question to resolve first; L125(g) needs research
+   before any code changes.
+3. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
    distinct `VK_ERROR_INITIALIZATION_FAILED` sites,
    `vktPipelineBindPointTests.cpp`) remain untouched and untriaged --
-   a good alternative pick if L125(f)'s CTS repro search doesn't pan
-   out quickly.
-5. `ninja check-feme` and both CTS build directories are incremental
+   an alternative pick if both L125(g) and L125(h) feel blocked.
+4. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
