@@ -2056,6 +2056,42 @@ TEST_F(ImageSamplingTest, GatherNonzeroOffsetShiftsFetchedFootprint) {
   EXPECT_FLOAT_EQ(Offset[3], 0.6f); // T(X0,Y0) == texel 1.
 }
 
+// (Roadmap L125(g)) `feme.cpu.image.gather.2d.v4f32` must swizzle each
+// gathered neighbor texel through the image view's own `VkComponentMapping`
+// *before* `Component` selects a channel from it -- per the Vulkan spec's
+// "Texel Gathering" section ("Each texel is then converted to an RGBA
+// value according to component substitution and then swizzled"), mirroring
+// `SampleAppliesImageViewSwizzleToInBoundsTexel`'s own proof technique but
+// for the gather path. A raw-red/raw-green swap swizzle plus
+// `Component=1` (green) should read what's stored in the *red* channel.
+TEST_F(ImageSamplingTest, GatherAppliesImageViewSwizzleToEachTexel) {
+  float Storage[2][2][4] = {{{0.4f, 9.0f, 0, 0}, {0.6f, 9.0f, 0, 0}},
+                            {{0.3f, 9.0f, 0, 0}, {0.7f, 9.0f, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 2, 2, ResourceFormat::R32G32B32A32_FLOAT,
+      Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::G, ImageComponentSwizzle::R,
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherFn Fn =
+      resolve<GatherFn>(addWrapper("gather", "feme.cpu.image.gather.2d.v4f32"));
+  float Out[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+  // Post-swizzle green (`Component=1`) reads the raw red channel: T(X0,Y0)
+  // =0.4, T(X1,Y0)=0.6, T(X0,Y1)=0.3, T(X1,Y1)=0.7.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*Component=*/1, 0, 0,
+     true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.3f); // T(X0,Y1)
+  EXPECT_FLOAT_EQ(Out[1], 0.7f); // T(X1,Y1)
+  EXPECT_FLOAT_EQ(Out[2], 0.6f); // T(X1,Y0)
+  EXPECT_FLOAT_EQ(Out[3], 0.4f); // T(X0,Y0)
+}
+
 TEST_F(ImageSamplingTest, GatherCmpArray2DIsolatesNamedLayer) {
   // Roadmap H124q: `feme.cpu.image.gathercmp.array2d.v4f32` must gather
   // its 2x2 depth-comparison footprint from the requested `ArrayLayer`

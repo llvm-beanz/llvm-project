@@ -6531,22 +6531,29 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGather2DV4F32(
   uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  // Roadmap L125(g): each gathered neighbor now goes through the same
+  // per-texel component-substitution + swizzle pipeline a plain sample
+  // would (`ApplySwizzle=1`), per the Vulkan spec's "Texel Gathering"
+  // section ("Each texel is then converted to an RGBA value according to
+  // component substitution and then swizzled") -- `Chan` (SPIR-V's
+  // `Component` operand) selects a channel of that already-swizzled RGBA
+  // result, not the raw unswizzled texel.
   FemeRTv4f32 T00 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y0,
                         /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                        Samp.BorderColor, /*ApplySwizzle=*/0);
+                        Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T10 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y0,
                         /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                        Samp.BorderColor, /*ApplySwizzle=*/0);
+                        Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T01 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X0, S.Y1,
                         /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                        Samp.BorderColor, /*ApplySwizzle=*/0);
+                        Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T11 =
       femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X1, S.Y1,
                         /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                        Samp.BorderColor, /*ApplySwizzle=*/0);
+                        Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
@@ -7414,18 +7421,20 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherArray2DV4F32(
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
+  // Roadmap L125(g): see femeCpuImageGather2DV4F32's own comment above --
+  // each gathered neighbor is swizzled before `Chan` selects from it.
   FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y0,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y0,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X0, S.Y1,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X1, S.Y1,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
@@ -8872,18 +8881,20 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCubeV4F32(
   uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
+  // Roadmap L125(g): see femeCpuImageGather2DV4F32's own comment above --
+  // each gathered neighbor is swizzled before `Chan` selects from it.
   FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
                                        /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
                                        /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/0);
+                                       Samp.BorderColor, /*ApplySwizzle=*/1);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
