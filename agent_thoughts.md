@@ -94737,3 +94737,84 @@ unrelated to this fix.
    L125(e), or pick **L125's next fresh sample** instead.
 4. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
+
+# Session: L125(e) -- border-color missing-channel defaulting, closes the sampler.border_swizzle.* mismatch family
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary`. Done.
+
+## What's fixed
+
+Picked up exactly where the last session left off: L125(d)'s own
+residual gap. A `Sampler`'s `BorderColor` is baked as a fixed,
+format-independent `float[4]` at *sampler*-creation time -- but core
+Vulkan requires a component the *sampled image's own format* doesn't
+store to be re-defaulted (`0` for missing R/G/B, `1` for missing A),
+not read from the border color verbatim. `TRANSPARENT_BLACK`'s nominal
+`(0,0,0,0)` therefore actually samples as `(0,0,0,1)` through an
+alpha-less format like `R32G32B32_FLOAT`.
+
+1. `FeMeRuntimeCPU.c`: `femeRTImageFormatComponentMask(Format)` -- a
+   4-bit R/G/B/A mask of which components a format really stores,
+   mirroring `femeRTUnpackImageTexel`'s own per-case fill values one
+   case at a time.
+2. `femeRTExpandBorderColorForFormat`: re-defaults any missing
+   component before the swizzle from L125(d) runs.
+3. Both `femeRTFetchTexel2D`'s and `femeRTFetchTexel3D`'s border
+   branches call it now instead of using `BorderColor` raw.
+4. One new unit test: `ClampToBorderExpandsMissingComponentsForFormat`.
+
+`ninja check-feme`: 3240/3243 Passed, 3 Unsupported, 0 Failed.
+
+## CTS proof
+
+- Targeted 224-case sample (`d16_unorm`/`r16_sfloat`/`r16g16_sfloat`/
+  `r32_sfloat`/`r32g32b32_sfloat`, `transparent_black`/`opaque_white`):
+  **160 Pass / 0 Fail / 64 NotSupported**. Every one of these used to
+  fail on exactly the alpha channel.
+- Re-ran the same 150-case random sample (same shuffle seed) used to
+  verify L125(d): 35 -> 42 Pass, the 7 previously-mismatched cases now
+  all pass, the remaining 26 fails are entirely the already-tracked,
+  separate L125(c) `VK_ERROR_INITIALIZATION_FAILED` bucket.
+
+**This closes the entire `sampler.border_swizzle.*` `Ref:`/`Color:`
+mismatch family L125(d) and L125(e) together set out to fix.**
+
+Depth/stencil-only formats (`d16_unorm` etc.) turned out to share the
+exact same root cause as `R32_FLOAT` -- no separate handling was
+needed, resolving the open question from last session's next-steps.
+
+## What's still open (new row L125(f))
+
+Only the border-color path applies an image view's own component
+swizzle today. An **in-bounds texel fetch** doesn't consult
+`Img->Swizzle`/`femeRTApplyImageSwizzle` at all -- any non-identity
+`VkImageViewCreateInfo::components` on an ordinary sampled/loaded image
+silently does nothing. Not yet reproduced against a specific CTS case
+this session (didn't have time to hunt one down) -- split out as
+`L125(f)`, `not yet started`.
+
+## Next steps
+
+1. **(~15 min)** Pick up **L125(f)**: find or construct a CTS case
+   proving the in-bounds-texel gap (check
+   `dEQP-VK.pipeline.image_view.*` first, or write a minimal repro).
+2. Once reproduced, wire `femeRTApplyImageSwizzle`/`Img->Swizzle` into
+   the in-bounds return path of `femeRTFetchTexel2D`/
+   `femeRTFetchTexel3D` (and their siblings that funnel through them)
+   -- likely the single highest-leverage remaining L125(f) change,
+   since the helper already exists and is already correct.
+3. Watch for a **double-swizzle** risk: `femeRTFetchTexel2D`/`3D`'s
+   in-bounds branch is shared by both the float-sampling path (which
+   should get the swizzle) and any raw `feme.cpu.image.load.*` path
+   that bypasses a sampler entirely -- check whether Vulkan's
+   `vkCmdCopyImage`/`OpImageRead`-style raw loads are also supposed to
+   swizzle (they likely are not, since a load has no `VkSampler`/image
+   view swizzle applied per spec -- confirm before assuming the shared
+   helper is safe to change unconditionally for every caller).
+4. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
+   distinct `VK_ERROR_INITIALIZATION_FAILED` sites,
+   `vktPipelineBindPointTests.cpp`) remain untouched and untriaged --
+   a good alternative pick if L125(f)'s CTS repro search doesn't pan
+   out quickly.
+5. `ninja check-feme` and both CTS build directories are incremental
+   from here -- no reconfigure needed.
