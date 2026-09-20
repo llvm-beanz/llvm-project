@@ -5352,3 +5352,64 @@ extension surface, so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
 and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
 unchanged and still accurate. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## L124(v): allow bool/bvec members in Workgroup globals
+
+This session closed the last 2 `compute.*` fails, and with them, the
+entire L124 series.
+
+`dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.{composites.2,
+types.bool}` (misnamed `shader_object_spirv.*` in the prior session's own
+scoping -- corrected here: the `shader_object_spirv.*` variant is
+`NotSupported`, `VK_EXT_shader_object` unimplemented on this driver, so it
+was never actually failing) both crashed with `error: failed to legalize
+operation 'spirv.GlobalVariable' that was explicitly marked illegal`.
+Root-caused via `--deqp-log-decompiled-spirv=enable`: `types.bool` has
+several bare scalar `i1` `Workgroup` globals loaded directly (no
+`AccessChain`); `composites.2` has one `Workgroup` struct global mixing a
+plain `i1` member with `bvec2`/`bvec3`/`bvec4` members. Both were rejected
+outright by `WorkgroupGlobalVariablePattern`'s own `containsAddressableBool`
+guard, which assumed any `i1` inside a `Workgroup` aggregate is unaddressable
+by `getelementptr`.
+
+That assumption turned out to be wrong for every shape FeMe's own struct/
+array conversion actually produces -- confirmed via a direct
+`mlir-translate -mlir-to-llvmir` + `opt -passes=verify` repro: a struct
+member's own `getelementptr` index is always a fixed byte offset baked into
+the struct's layout (never a runtime multiply-by-element-size the way
+array/vector indexing is), and LLVM's data layout already reserves a full
+byte for an `i1` array element's own stride. The one shape that genuinely
+can't use `getelementptr` -- indexing a single lane out of a `bool`
+*vector* -- was never even covered by this guard's own struct/array-only
+recursion in the first place, and is already handled correctly by the
+pre-existing `BoolVectorLaneAccessChainPattern`/`BoolVectorLaneLoadPattern`/
+`BoolVectorLaneStorePattern` (full-vector load/store plus
+`extractelement`/`insertelement`). Fixed by removing the guard entirely.
+
+Results:
+
+- `ninja check-feme`: **3,219/3,222 Passed, 3 Unsupported, 0 Failed** (0
+  regressions; same total as before, since the rewritten
+  `spirv-to-llvm-workgroup-bool.mlir` -- now a positive test covering a
+  bare scalar `i1` global, a struct member `i1`, and a struct member
+  `bvec2` -- replaces the old negative test 1-for-1).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Both originally-failing tests now **Pass** when run directly.
+- `compute.*` (61,460 cases): **685 Pass / 0 Fail / 60,775 NotSupported**
+  -- was 683/2/60,775 before this session's fix: **+2 Pass, 0
+  regressions**. **`compute.*` is now fully clean.**
+- `ssbo.*` (12,225 cases, re-swept since the struct-conversion code path
+  this fix touches is shared): **3,242 Pass / 0 Fail / 8,983 NotSupported**
+  -- unchanged, still fully clean, confirming no regressions from this
+  fix's shared code path either.
+
+This session's fix is an internal correctness fix (a `Workgroup`-storage
+global lowering pattern that was overly conservative), not new Vulkan
+feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate.
+
+**The entire L124 series (`compute.*` and `ssbo.*`) is now fully closed:
+both families are 100% clean of `Fail`s.** See `agent_thoughts.md` for the
+full narrative and next steps.
