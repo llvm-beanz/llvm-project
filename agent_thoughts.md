@@ -95136,3 +95136,47 @@ gather+swizzle found this session):
 5. Clean up `/tmp/ctsrun/l125g_*` and the two scratch spec-fetch files
    (`/tmp/1789914627854-copilot-tool-output-....txt`, `/tmp/images.adoc`)
    before ending a future session, if not already gone.
+
+# Session: L125(j) closed -- Cube/CubeArray Gather* seamless cross-face remap
+
+**Device check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed.
+
+**Done this session**: fixed L125(j), the Cube-gather correctness bug split out at the end of the prior L125(g) session. Both `femeCpuImageGatherCmpCubeV4F32` and `femeCpuImageGatherCubeV4F32` (FeMeRuntimeCPU.c) now remap a gather footprint across a cube face edge instead of clamping it in place -- the same seamless-filtering machinery plain cube `Sample` already used.
+
+## What was wrong
+
+1. Vulkan requires seamless cube-map filtering (unlike desktop GL, where it's optional): a bilinear/gather footprint straddling a face edge must remap the out-of-face tap onto the correct neighboring face.
+2. `femeRTSampleCubeLinearAtLevel` (plain cube `Sample`) already did this correctly via `femeRTComputeCubeBilinearSupport`/`femeRTFetchCubeSeamlessTexel`.
+3. Both Gather Cube functions instead used `femeRTComputeBilinearSupport`/`femeRTFetchTexel2D` with a forced `ClampToEdge` -- clamping in place, producing wrong texels near any face edge.
+4. This was a known, documented gap from the prior session ("no CTS case exercises this yet") -- this session found one does.
+
+## How it was found and fixed
+
+1. Ran the repro (`dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.filter_mode.min_linear_mag_linear`), confirmed `Result verification failed`.
+2. Extracted the QPA log's embedded `Rendered`/`Reference` PNGs (base64-decoded via a small Python script), diffed pixel-by-pixel with `pillow` (`pip install --break-system-packages pillow`). 226/4096 pixels differed, clustered at face edges/corners -- a seam bug signature, not a broad ordering/swizzle bug.
+3. Cross-checked VK-GL-CTS's own reference (`framework/common/tcuTexture.cpp`): `TextureCubeView::gather` reuses its sampling path's `getCubeLinearSamples` verbatim, confirming gather and sample should share identical seamless-remap machinery, and that FeMe's existing result ordering already matched CTS's own `sampleIndices` mapping (no ordering change needed).
+4. Fixed both functions by swapping in `femeRTComputeCubeBilinearSupport`/`femeRTFetchCubeSeamlessTexel` plus the doubly-out-of-bounds corner-averaging rule, mirroring `femeRTSampleCubeLinearAtLevel` exactly.
+5. Added two new unit tests (`GatherCubeSeamlessBlendsAcrossFaceEdge`, `GatherCmpCubeSeamlessBlendsAcrossFaceEdge`) reusing the existing `SampleCubeSeamlessBlendsAcrossFaceEdge` test's two-face layout and direction vector.
+
+## Verification
+
+- `ninja check-feme`: 3,247/3,250 Passed, 3 Unsupported, 0 Failed (+2 new tests, 0 regressions).
+- CTS repro: now **Passes** (was failing).
+- Broader `dEQP-VK.glsl.texture_gather.graphics.basic.cube.*` bucket (220 cases): 42 fails remain, but every one is confirmed to be the pre-existing, unrelated L125(c) `VK_ERROR_INITIALIZATION_FAILED`-at-pipeline-creation bucket -- **zero** `Result verification failed` fails remain.
+- `cube.rgba8.texture_swizzle.*` subset (the original discovery point for this bug): 6/6 supported cases pass.
+
+## Commits (4, each built+tested before committing)
+
+1. `[feme] L125(j): remap GatherCmp Cube footprint seamlessly across face edges` -- Cmp function + its test.
+2. `[feme] L125(j): remap plain Gather Cube footprint seamlessly across face edges` -- non-Cmp function + its test.
+3. `[feme] docs: close L125(j) Cube-gather seam bug, update design + CTS report` -- Roadmap.md struck through, VulkanCTSReport.md session added, FeMeVulkanDesign.md updated.
+4. This `agent_thoughts.md` append (below).
+
+No feature/extension inventory changes needed -- pure correctness fix, no new capability advertised.
+
+## Next steps
+
+1. **(~20-30 min)** Pick up **L125(i)**: `SampleCmp*`/`GatherCmp*` (depth-compare) swizzle semantics, deferred from L125(g). Search `vktTextureShadowTests.cpp`/`vktPipelineSamplerTests.cpp` for any real CTS coverage combining depth-compare with a non-identity swizzle before writing code -- none was found as of the L125(g)/L125(h) sessions. If still none exists, this row may need to stay deferred (spec-only reasoning isn't a substitute for this project's CTS-driven verification philosophy).
+2. **L125(c)** remains the largest untouched scope: ASTC/EAC/ETC2 image mismatches, two distinct `VK_ERROR_INITIALIZATION_FAILED` sites (one at `createGraphicsPipelines`, confirmed this session to be the same bucket hit throughout `cube.*` gather tests; a separate one at `createComputePipelines`), and a `vktPipelineBindPointTests.cpp` bucket. None individually triaged yet -- a good next pick if L125(i) stays blocked on missing CTS coverage.
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+4. Clean up `/tmp/ctsrun/l125j_v2/` (this session's own scratch QPA/console/PNG files) before ending a future session, if not already gone.
