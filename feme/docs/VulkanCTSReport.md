@@ -6734,3 +6734,98 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   rather than folded into this fix. `Roadmap.md`'s `L125(q)` row updated
   accordingly; see `agent_thoughts.md` for the full narrative and next
   steps.
+
+## Roadmap L125(v): integer `CLAMP_TO_BORDER` default now uses the sampler's real `borderColor`
+
+### Repro
+
+`dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16_sint.argb.
+opaque_white.no_gather.no_swizzle_hint`, isolated standalone:
+`Fail (Ref:(1, 1, 0, 0) Threshold:(0, 0, 0, 0) Color:(1, 0, 0, 0))`.
+
+### Root cause
+
+L125(q)'s own swizzle-order fix closed exactly the fails whose border
+color was `transparent_black` (232 of 864), leaving 632 residual fails.
+Sampling 10 of them showed every one combined a non-`transparent_black`
+border color (`opaque_white` in the isolated repro above) with a
+non-identity swizzle on the same 6 integer formats.
+
+Hand-traced the CTS's own expected math: for `r16_sint` (1 real stored
+channel) + `opaque_white` (nominal `(1, 1, 1, 1)`) + `argb` swizzle
+(`R<-A, G<-R, B<-G, A<-B`), Vulkan's border-color "conversion to RGBA"
+rule keeps only the border color's own real value for a stored channel
+and forces every other channel to its fixed default (`0` for R/G/B, `1`
+for A) -- pre-swizzle border is therefore `(1, 0, 0, 1)`, not
+`opaque_white`'s own nominal `(1, 1, 1, 1)`; post-`argb`-swizzle:
+`(1, 1, 0, 0)`, matching the CTS's own `Ref` exactly.
+
+`FeMeRuntimeCPU.c`'s integer `CLAMP_TO_BORDER` fallback used a single
+hardcoded `{0, 0, 0, 1}` literal at all 7 call sites, entirely ignoring
+the sampler's own `VkBorderColor` -- correct only when that border
+color's own per-format-masked default happens to coincide with
+`{0, 0, 0, 1}` (`transparent_black`), and wrong for anything else
+(`opaque_white`/`opaque_black`/any future custom border color).
+
+### Fix
+
+No new integer-typed ABI storage was needed, unlike the prior session's
+own speculative scoping: `mapBorderColor` (Image.cpp) already bakes
+every `VkBorderColor` this ICD accepts (it advertises no
+`VK_EXT_custom_border_color`, so every enumerator -- float or int variant
+alike -- is representable as a binary `0.0f`/`1.0f`-per-channel pattern)
+onto `FemeSamplerDescriptor::BorderColor`, the identical pattern an
+equivalent int32 border color would have. Truncating that existing float
+value to `int32_t` recovers the real border color exactly.
+
+Added:
+- `femeRTImageFormatComponentMaskI32`: the integer-format counterpart of
+  `femeRTImageFormatComponentMask` -- the existing float-only mask
+  function covers no `_UINT`/`_SINT` format code at all (its case labels
+  are for `R32_FLOAT`/`R16_UNORM`/etc., numerically distinct formats), so
+  a dedicated switch over the format codes `femeRTUnpackImageTexelI32`
+  itself decodes was written.
+- `femeRTExpandBorderColorForFormatI32`: truncates `Samp.BorderColor` to
+  `int32_t` and masks it via the above, mirroring the float path's own
+  `femeRTExpandBorderColorForFormat`.
+
+Applied at all 7 `femeCpuImage{Sample,Gather}*V4I32` `CLAMP_TO_BORDER`
+sites in place of the fixed `{0, 0, 0, 1}` literal.
+
+### Unit tests
+
+New: `ImageSamplingTest.
+SampleI32BorderColorFallbackVariesByFormatAndBorderColor` -- an
+`R16_SINT` image (1 real stored channel) with an explicit
+`VK_BORDER_COLOR_INT_OPAQUE_WHITE`-equivalent `BorderColor` and an
+`argb` swizzle, confirming the masked-then-swizzled result matches the
+hand-traced CTS math above.
+
+Updated: the two existing L125(q) border-swizzle tests
+(`SampleI32AppliesImageViewSwizzleToBorderColorFallback`,
+`Gather2DI32AppliesImageViewSwizzleToBorderColorFallback`) now set an
+explicit `VK_BORDER_COLOR_INT_OPAQUE_BLACK` rather than relying on
+`makeSampler`'s zero-initialized (`transparent_black`-shaped) default --
+this fix correctly stopped forcing a *4-real-channel* format's alpha to
+`1` unconditionally (it now only forces a component the format doesn't
+actually store), so those tests' own prior expectations (written against
+the still-buggy hardcoded default) needed updating to remain correct.
+
+`ninja check-feme`: 3,262/3,265 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions vs. this session's own earlier L125(q)-follow-up
+build of 3,261/3,264).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- The isolated `opaque_white` repro now **Passes** (was Fail); the
+  `transparent_black` repro from L125(q) continues to Pass.
+- A full `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16*`
+  re-sweep (25,600 cases): **5,550 Pass / 0 Fail / 20,050 NotSupported**
+  -- every one of the 632 residual fails left after L125(q)'s own partial
+  fix is now gone, 0 regressions on the 4,918 cases already passing
+  before this fix.
+- `Roadmap.md`'s `L125(v)` row updated to reflect the fix (struck
+  through, marked fixed and CTS-verified, noting the simpler-than-scoped
+  no-new-ABI-storage design); see `agent_thoughts.md` for the full
+  narrative and next steps.
