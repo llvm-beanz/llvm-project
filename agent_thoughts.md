@@ -95035,3 +95035,104 @@ gap.
    doesn't pan out quickly.
 5. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
+
+# Session: L125(g) -- plain-Gather* swizzle fix + shaderImageGatherExtended enablement
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed via `vulkaninfo
+--summary | grep deviceName` (with the usual `export
+VK_ICD_FILENAMES=.../build/tools/feme/tools/feme-vulkan/feme_icd.json`
+override -- the shell default points at llvmpipe).
+
+## What shipped
+
+1. **Spec research (resolved, no code change)**: fetched
+   `KhronosGroup/Vulkan-Docs`'s `textures.adoc`/`images.adoc` directly
+   from GitHub (the rendered `docs.vulkan.org` page only shows a
+   summary bullet list, not the real prose). Found the definitive
+   per-texel operation order -- Validation -> Border Replacement ->
+   Texel Reads -> Depth comparison -> Component swizzle -- and the
+   "Texel Gathering" section's own explicit sentence: each gathered
+   texel is substituted and **swizzled**, then `Component` selects a
+   channel from the already-swizzled result. Answered both open
+   questions from prior sessions: depth-compare swizzles like any
+   texel; Gather's `Component` is post-swizzle.
+2. **Code fix**: `femeCpuImageGather2DV4F32`/`GatherArray2DV4F32`/
+   `GatherCubeV4F32` (`FeMeRuntimeCPU.c`) now pass `ApplySwizzle=1` to
+   each of the four gathered-neighbor `femeRTFetchTexel2D` calls,
+   instead of `0`. `SampleCmp*`/`GatherCmp*` intentionally untouched
+   (still `ApplySwizzle=0`) -- see "what's still open" below.
+3. **Found and fixed an unrelated enabler bug**: `Info.Features.
+   shaderImageGatherExtended` had never been advertised (default
+   `VK_FALSE`), even though the runtime and MLIR lowering
+   (`ImageGatherPattern`) already handle any `Component` value
+   generically -- flipping it to `VK_TRUE` cost nothing and is what
+   unlocked the CTS group needed to verify step 2 at all (previously
+   100% `NotSupported`).
+4. **New unit test**: `ImageSamplingTest.
+   GatherAppliesImageViewSwizzleToEachTexel`.
+5. **Docs updated**: `Roadmap.md` (L125(g) done for plain-Gather*;
+   new L125(i)/L125(j) rows for what's left), `VulkanCTSReport.md` (new
+   section), `FeMeVulkanDesign.md` (updated design note),
+   `Vulkan14FeatureInventory.md` (`shaderImageGatherExtended` -> yes).
+
+## Proof it works
+
+`ninja check-feme`: 3,245/3,248 Passed, 3 Unsupported, 0 Failed (+1
+test, 0 regressions).
+
+CTS: the newly-unlocked `dEQP-VK.glsl.texture_gather.graphics.basic.*.
+texture_swizzle.*` bucket (108 cases, the only real CTS coverage for
+gather+swizzle found this session):
+- **12/12 Pass** on every genuinely-testable case (`rgba8` `2d`/
+  `2d_array`, every swizzle permutation).
+- `rgba8i`/`rgba8ui`: pre-existing L125(c) integer-pipeline-creation
+  bug, unrelated (`VK_ERROR_INITIALIZATION_FAILED`).
+- `cube`: fails, but so does a plain identity-swizzle cube-gather
+  sanity check -- a real, separate, pre-existing cube-gather bug, not
+  caused by this session. Now L125(j).
+- 800-case regression sample of `pipeline.monolithic.{image_view,
+  sampler.border_swizzle}.*`: same 77/800 fails whether or not a case
+  uses `gather*` vs `no_gather` -- confirms zero regressions.
+
+## What's still open (not done this session, don't assume otherwise)
+
+- **L125(i)** -- `SampleCmp*`/`GatherCmp*` swizzle. Spec confirms the
+  semantics (depth-compare result swizzles like any texel), but **no
+  CTS case combining depth-compare with a non-identity swizzle was
+  found** (`vktPipelineImageViewTests.cpp`'s `component_swizzle` group
+  is always `COMPARE_OP_NEVER`; `vktShaderRenderTextureGatherTests.cpp`'s
+  compare-mode group always uses identity swizzle for depth formats).
+  Implementing without a CTS repro would be spec-only, against this
+  project's CTS-driven norm -- search further first (see next steps).
+- **L125(j)** -- Cube gather (any component, even identity swizzle)
+  returns wrong results. Newly discovered, not root-caused. Likely in
+  `femeRTSelectCubeFace`/`femeRTComputeBilinearSupport`'s own
+  interaction with `femeCpuImageGatherCubeV4F32`, or a face-winding
+  mismatch (recall L124(r)/L125(b)'s own history of cube-face
+  convention bugs).
+- **L125(c)**'s original buckets (ASTC/EAC/ETC2 image mismatches, two
+  distinct `VK_ERROR_INITIALIZATION_FAILED` sites,
+  `vktPipelineBindPointTests.cpp`) remain untouched.
+
+## Suggested next steps
+
+1. **(~15 min)** Root-cause **L125(j)** first: run
+   `dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.filter_mode.
+   min_linear_mag_linear` with `--deqp-log-decompiled-spirv=enable`
+   and `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`, compare the expected
+   vs. actual face/texel indices against `femeRTSelectCubeFace`'s own
+   face-numbering convention. It's a plain correctness bug (not
+   swizzle-related), so likely the fastest win of the three open items.
+2. **(~20-30 min)** For **L125(i)**, search
+   `vktTextureShadowTests.cpp` and `vktPipelineSamplerTests.cpp`'s own
+   compare-mode tests for any depth-compare + non-identity-swizzle
+   coverage before writing any code. If none exists, this row may need
+   to stay deferred rather than implemented on spec-reasoning alone.
+3. **L125(c)**'s own four buckets are still the biggest remaining
+   scope in this series -- a good pick once L125(j)/L125(i) are
+   resolved or confirmed blocked.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. Clean up `/tmp/ctsrun/l125g_*` and the two scratch spec-fetch files
+   (`/tmp/1789914627854-copilot-tool-output-....txt`, `/tmp/images.adoc`)
+   before ending a future session, if not already gone.
