@@ -163,6 +163,31 @@ float halfBitsToFloat(uint16_t Bits) {
 /// 32-bit words matching \p WantType's storage convention (an IEEE-754 bit
 /// pattern for `Float`, a sign/zero-extended 32-bit integer otherwise). See
 /// the file comment above for the supported format subset.
+///
+/// (Roadmap L125s) \p WantType's own `UInt` vs `SInt` distinction cannot be
+/// trusted for an integer format's own validation check below: per
+/// `CanonicalizeStage.cpp`'s `getComponentType` (see its own comment, and
+/// L125(u)'s prior fix for the identical limitation on the fragment-output
+/// side), a SPIR-V-sourced signature's scalar integer element is *always*
+/// reported as `SInt`, regardless of whether the real shader source
+/// declared it `int` or `uint` -- LLVM IR's own integer types are signless,
+/// so that distinction is lost by the time this pass ever sees the value.
+/// A `*_UINT`/`*_SINT`-format attribute bound to a genuinely `uint`-typed
+/// shader input therefore always reported `WantType == SInt`, never the
+/// `UInt` these checks used to require -- a false-positive rejection of a
+/// perfectly valid binding (reduced from
+/// `dEQP-VK.pipeline.monolithic.vertex_input.multiple_attributes.
+/// binding_one_to_many.attributes.int.ivec2.uint`'s own `uint`-typed
+/// `attr2`). Every integer-format branch below therefore accepts *either*
+/// `SInt` or `UInt` (the decode itself is bit-identical either way, a
+/// plain `memcpy`/zero-extend with no sign-dependent step), while still
+/// rejecting `Float`/`Bool` -- the one distinction this signature can
+/// still reliably make.
+bool isIntegerComponentType(SignatureComponentType Type) {
+  return Type == SignatureComponentType::SInt ||
+        Type == SignatureComponentType::UInt;
+}
+
 Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                       uint32_t WantComponents, SignatureComponentType WantType,
                       std::array<uint32_t, 4> &Out) {
@@ -187,10 +212,10 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   case cpu::ResourceFormat::R32G32_UINT:
   case cpu::ResourceFormat::R32G32B32_UINT:
   case cpu::ResourceFormat::R32G32B32A32_UINT: {
-    if (WantType != SignatureComponentType::UInt)
+    if (!isIntegerComponentType(WantType))
       return createStringError(inconvertibleErrorCode(),
                                "vertex attribute format is UInt but the "
-                               "shader input is not");
+                               "shader input is not an integer type");
     for (uint32_t I = 0; I != WantComponents; ++I)
       memcpy(&Out[I], Src + I * 4, 4);
     return Error::success();
@@ -199,10 +224,10 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   case cpu::ResourceFormat::R32G32_SINT:
   case cpu::ResourceFormat::R32G32B32_SINT:
   case cpu::ResourceFormat::R32G32B32A32_SINT: {
-    if (WantType != SignatureComponentType::SInt)
+    if (!isIntegerComponentType(WantType))
       return createStringError(inconvertibleErrorCode(),
                                "vertex attribute format is SInt but the "
-                               "shader input is not");
+                               "shader input is not an integer type");
     for (uint32_t I = 0; I != WantComponents; ++I)
       memcpy(&Out[I], Src + I * 4, 4);
     return Error::success();
@@ -249,9 +274,9 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   case cpu::ResourceFormat::R8_UINT:
   case cpu::ResourceFormat::R8G8_UINT:
   case cpu::ResourceFormat::R8G8B8A8_UINT: {
-    if (WantType != SignatureComponentType::UInt)
+    if (!isIntegerComponentType(WantType))
       return createStringError(inconvertibleErrorCode(),
-                               "*_UINT vertex attribute requires a UInt "
+                               "*_UINT vertex attribute requires an integer "
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
       Out[I] = Src[I];
@@ -260,9 +285,9 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   case cpu::ResourceFormat::R8_SINT:
   case cpu::ResourceFormat::R8G8_SINT:
   case cpu::ResourceFormat::R8G8B8A8_SINT: {
-    if (WantType != SignatureComponentType::SInt)
+    if (!isIntegerComponentType(WantType))
       return createStringError(inconvertibleErrorCode(),
-                               "*_SINT vertex attribute requires a SInt "
+                               "*_SINT vertex attribute requires an integer "
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
       Out[I] = static_cast<uint32_t>(
@@ -303,9 +328,9 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   case cpu::ResourceFormat::R16_UINT:
   case cpu::ResourceFormat::R16G16_UINT:
   case cpu::ResourceFormat::R16G16B16A16_UINT: {
-    if (WantType != SignatureComponentType::UInt)
+    if (!isIntegerComponentType(WantType))
       return createStringError(inconvertibleErrorCode(),
-                               "*_UINT vertex attribute requires a UInt "
+                               "*_UINT vertex attribute requires an integer "
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       uint16_t V;
@@ -317,9 +342,9 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   case cpu::ResourceFormat::R16_SINT:
   case cpu::ResourceFormat::R16G16_SINT:
   case cpu::ResourceFormat::R16G16B16A16_SINT: {
-    if (WantType != SignatureComponentType::SInt)
+    if (!isIntegerComponentType(WantType))
       return createStringError(inconvertibleErrorCode(),
-                               "*_SINT vertex attribute requires a SInt "
+                               "*_SINT vertex attribute requires an integer "
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       int16_t V;
