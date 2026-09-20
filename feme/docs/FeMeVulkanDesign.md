@@ -3768,6 +3768,32 @@ intrinsics exist), so every `*I32` call site is now fully covered --
 the only remaining gap** in this milestone's `VkComponentMapping`
 support.
 
+**Roadmap L125(g)** closed the plain-`Gather*` (non-Cmp) portion of
+that remaining gap: per the Vulkan spec (`Vulkan-Docs`'s own
+`textures.adoc`), a plain gather independently converts, substitutes,
+and **swizzles** each of the four gathered neighbor texels first, and
+only then does `OpImageGather`'s `Component` operand select a channel
+from each already-swizzled result -- i.e. `Component` is post-swizzle,
+not pre-swizzle. `femeCpuImageGather2DV4F32`/`GatherArray2DV4F32`/
+`GatherCubeV4F32` now pass `ApplySwizzle=1` to each gathered-neighbor
+`femeRTFetchTexel2D` call, so `Chan` indexes the already-swizzled
+result. `SampleCmp*`/`GatherCmp*` remain deferred (now tracked as
+roadmap row L125(i)): the spec confirms a depth-compare result flows
+through the same substitution/swizzle pipeline as any texel's own
+depth channel, but no CTS coverage combining a non-identity swizzle
+with depth-compare was found, so implementing it would be spec-only
+reasoning without a verifiable CTS repro.
+
+This same investigation also found `shaderImageGatherExtended` had
+never been advertised at all (default `VK_FALSE`), despite the runtime
+and MLIR lowering already handling `Component` fully generically --
+flipping it to `VK_TRUE` was a pure advertisement fix with no runtime
+change, and is what unlocked the `dEQP-VK.glsl.texture_gather.*` CTS
+group used to verify this row (previously entirely `NotSupported`).
+That same CTS group also surfaced a **pre-existing, swizzle-unrelated**
+Cube-gather correctness bug (reproduces with an identity swizzle too),
+tracked separately as roadmap row L125(j).
+
 **Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
 could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This
 milestone's own `feme::vulkan::Image` never gained (and still does not

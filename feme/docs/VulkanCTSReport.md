@@ -6189,3 +6189,84 @@ unchanged.
 entire L125(f)/(g)/(h) in-bounds-swizzle sub-tree except for L125(g)'s
 own deferred `SampleCmp*`/`Gather*`/`GatherCmp*` scope. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L125(g): plain-`Gather*` post-swizzle `Component` fix + `shaderImageGatherExtended` enablement
+
+Resolved the spec question L125(f) deliberately deferred: per the
+authoritative `KhronosGroup/Vulkan-Docs` source (`textures.adoc`'s
+"Sampling Operations" and "Texel Gathering" sections -- the rendered
+`docs.vulkan.org` page only exposes a summary bullet list, not the
+detailed prose), a depth-compare result replaces the depth component
+and then flows through the ordinary substitution/swizzle steps like
+any texel; and for a plain (non-Cmp) gather, each of the four gathered
+neighbor texels is independently converted, substituted, and
+**swizzled** first, and only then does `OpImageGather`'s `Component`
+operand select a channel from each already-swizzled result. This means
+`Component` operates post-swizzle.
+
+Implemented the post-swizzle-`Component` half for the three non-Cmp
+gather shapes that exist (`femeCpuImageGather2DV4F32`/
+`GatherArray2DV4F32`/`GatherCubeV4F32`, `FeMeRuntimeCPU.c`): each
+gathered-neighbor `femeRTFetchTexel2D` call now passes
+`ApplySwizzle=1`. `SampleCmp*`/`GatherCmp*` are deliberately left at
+`ApplySwizzle=0`, split out as roadmap row L125(i) -- no CTS coverage
+combining depth-compare with a non-identity swizzle was found this
+session.
+
+While researching this row, also found and fixed a real, independent
+enabler bug: `Info.Features.shaderImageGatherExtended`
+(`PhysicalDeviceInfo.cpp`) had never been advertised (default
+`VK_FALSE`), even though `ImageGatherPattern`'s own MLIR-to-LLVM
+lowering (`SPIRVToLLVMPatterns.cpp`) already forwards `OpImageGather`'s
+`Component` operand as a fully generic runtime value with no
+restriction to 0, and the CPU runtime already indexes any of the four
+channels unconditionally -- there was no real capability gap, only a
+missing advertisement. This silently made *every*
+`dEQP-VK.glsl.texture_gather.*` CTS case report `NotSupported` (even
+ones using only the implicit `Component=0`, since dEQP-VK's own
+`TextureGatherInstance::init` always declares an explicit SPIR-V
+`Component` operand), which is the only real CTS coverage for
+gather+swizzle at all. Flipping the bit to `VK_TRUE` (with
+`PhysicalDeviceInfoTest.cpp`'s own truthful-capability whitelist test
+updated to match) is what made this row's own CTS verification
+possible.
+
+New unit test: `ImageSamplingTest.GatherAppliesImageViewSwizzleToEachTexel`
+(a red/green-swapping swizzle plus `Component=1` (green) must read the
+raw red channel of each gathered neighbor).
+
+`ninja check-feme`: 3,245/3,248 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+CTS: the newly-unlocked `dEQP-VK.glsl.texture_gather.graphics.basic.*.
+texture_swizzle.*` bucket (108 cases):
+- Passed: 12/12 (100%) of the genuinely-testable non-integer,
+  non-cube cases -- every `rgba8` `2d`/`2d_array` swizzle permutation.
+- `rgba8i`/`rgba8ui` cases: `VK_ERROR_INITIALIZATION_FAILED` at
+  pipeline creation -- a **pre-existing, already-tracked** L125(c)
+  integer-sampling bucket, confirmed unrelated to this fix (same
+  failure mode independently reproduced against a plain, non-swizzle,
+  non-gather integer-sampling case in a prior session).
+- `cube` cases (with and without a non-identity swizzle): `Result
+  verification failed` -- reproduced on a plain identity-swizzle
+  sanity case too
+  (`dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.filter_mode.
+  min_linear_mag_linear`), confirming a **pre-existing, separate
+  Cube-gather correctness bug**, newly exposed by the feature-bit flip
+  rather than caused by this row's own swizzle change. Re-scoped as
+  roadmap row L125(j).
+- An 800-case regression sample of `pipeline.monolithic.{image_view,
+  sampler.border_swizzle}.*` shows the identical fail set (77/800)
+  whether or not a case uses `gather*`/`no_gather` (confirmed via
+  matching `no_gather` cases failing the same way) -- zero regressions
+  from this row's own change.
+
+`Vulkan14FeatureInventory.md` updated: `shaderImageGatherExtended` now
+advertised `VK_TRUE`.
+
+`Roadmap.md`'s L125(g) row is marked done for the plain-`Gather*` case;
+new sibling rows L125(i) (`SampleCmp*`/`GatherCmp*` swizzle, still
+deferred pending CTS coverage) and L125(j) (the newly-discovered
+Cube-gather correctness bug, unrelated to swizzle) capture the
+remaining open work. See `agent_thoughts.md` for the full narrative
+and next steps.
