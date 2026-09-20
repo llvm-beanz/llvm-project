@@ -2248,6 +2248,137 @@ public:
   }
 };
 
+/// Forward declaration: defined below (`getStructMemberPhysicalIndex`'s own
+/// primary definition, alongside `convertOffsetStructTypeIgnoringDecorations`
+/// whose own struct-layout decision this recovers) -- used here by
+/// convertCopyLogicalValue to translate a struct's own *declared* member
+/// index into the real physical LLVM field index a reordered-and/or-padded
+/// struct's conversion actually placed it at, exactly as rewriteBlockAccess
+/// already needs to for `spirv.AccessChain`'s own struct member selector
+/// (see that forward declaration's own comment for the full rationale).
+unsigned getStructMemberPhysicalIndex(mlir::spirv::StructType Struct,
+                                      unsigned DeclaredIndex,
+                                      const mlir::TypeConverter &Converter);
+
+/// Rebuilds \p Value (already converted, of type \p SrcLLVMType) into
+/// \p DstType's own converted LLVM type, for `spirv.CopyLogical`'s two
+/// SPIR-V types \p SrcType/\p DstType, already confirmed "logically
+/// compatible" by `spirv::CopyLogicalOp::verify` (recursively the same
+/// shape, ignoring per-member layout decorations) -- but whose *converted*
+/// LLVM types may still differ, since FeMe's own struct conversion embeds
+/// each member's real byte offset (see convertOffsetStructTypeIgnoringDecorations)
+/// and the source/destination SPIR-V struct types were deserialized with
+/// different (or absent) `Offset` decorations in the first place (e.g. one
+/// side is a `Function`-storage local with no explicit layout at all, the
+/// other a `StorageBuffer` block member with an explicit std430 one, whose
+/// own alignment rules may insert a synthetic padding member the source
+/// side has no equivalent of at all) -- so each struct level's own
+/// declared-to-physical member index is remapped independently on both
+/// sides via getStructMemberPhysicalIndex, exactly as a real
+/// `spirv.AccessChain` into either struct already would need to.
+///
+/// Returns a null `Value` (rather than failing outright) if some leaf pair
+/// this recursion reaches converts to two genuinely different LLVM types
+/// even after this whole-structure rebuild -- e.g. a pointer or runtime
+/// array leaf, where FeMe's own conversion embeds more than plain value
+/// shape into the LLVM type and no shape-preserving rebuild is possible
+/// here; the caller reports that case as an explicit, out-of-scope
+/// diagnostic instead of asserting or miscompiling silently.
+mlir::Value convertCopyLogicalValue(mlir::ConversionPatternRewriter &Rewriter,
+                                    mlir::Location Loc,
+                                    const mlir::TypeConverter &TypeConverter,
+                                    mlir::Value Value, mlir::Type SrcType,
+                                    mlir::Type DstType) {
+  mlir::Type SrcLLVMType = Value.getType();
+  mlir::Type DstLLVMType = TypeConverter.convertType(DstType);
+  if (!DstLLVMType)
+    return nullptr;
+  if (SrcLLVMType == DstLLVMType)
+    return Value;
+
+  if (auto SrcStruct = mlir::dyn_cast<mlir::spirv::StructType>(SrcType)) {
+    auto DstStruct = mlir::dyn_cast<mlir::spirv::StructType>(DstType);
+    if (!DstStruct ||
+        SrcStruct.getNumElements() != DstStruct.getNumElements())
+      return nullptr;
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstLLVMType);
+    for (unsigned I = 0, E = SrcStruct.getNumElements(); I != E; ++I) {
+      unsigned SrcPhysical =
+          getStructMemberPhysicalIndex(SrcStruct, I, TypeConverter);
+      unsigned DstPhysical =
+          getStructMemberPhysicalIndex(DstStruct, I, TypeConverter);
+      mlir::Value Member = mlir::LLVM::ExtractValueOp::create(
+          Rewriter, Loc, Value, SrcPhysical);
+      mlir::Value ConvertedMember = convertCopyLogicalValue(
+          Rewriter, Loc, TypeConverter, Member, SrcStruct.getElementType(I),
+          DstStruct.getElementType(I));
+      if (!ConvertedMember)
+        return nullptr;
+      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                                 ConvertedMember,
+                                                 DstPhysical);
+    }
+    return Result;
+  }
+
+  if (auto SrcArray = mlir::dyn_cast<mlir::spirv::ArrayType>(SrcType)) {
+    auto DstArray = mlir::dyn_cast<mlir::spirv::ArrayType>(DstType);
+    if (!DstArray || SrcArray.getNumElements() != DstArray.getNumElements())
+      return nullptr;
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstLLVMType);
+    for (int64_t I = 0, E = SrcArray.getNumElements(); I != E; ++I) {
+      mlir::Value Element =
+          mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Value, I);
+      mlir::Value ConvertedElement = convertCopyLogicalValue(
+          Rewriter, Loc, TypeConverter, Element, SrcArray.getElementType(),
+          DstArray.getElementType());
+      if (!ConvertedElement)
+        return nullptr;
+      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                                 ConvertedElement, I);
+    }
+    return Result;
+  }
+
+  // A leaf (scalar/vector) pair, a runtime array, or a pointer whose
+  // converted LLVM types still differ despite being logically compatible
+  // SPIR-V types -- out of scope, see this function's own comment.
+  return nullptr;
+}
+
+/// Converts `spirv.CopyLogical` (roadmap L124(c): opcode 400, added in
+/// SPIR-V 1.4, entirely unmodeled upstream before this fix's own new
+/// `spirv.CopyLogical` op) by rebuilding the operand's already-converted
+/// LLVM value into the result type's own converted LLVM type,
+/// leaf-by-leaf, whenever the two aren't already identical (mirroring
+/// L116(a)'s masked load/store decomposition's own per-leaf
+/// `extractvalue`/`insertvalue` approach) -- see convertCopyLogicalValue's
+/// own comment for why the two converted types can differ at all despite
+/// `spirv.CopyLogical`'s own verifier already requiring the two SPIR-V
+/// types to be logically compatible.
+class CopyLogicalConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CopyLogicalOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CopyLogicalOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CopyLogicalOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Value Result = convertCopyLogicalValue(
+        Rewriter, Op.getLoc(), *getTypeConverter(), Adaptor.getOperand(),
+        Op.getOperand().getType(), Op.getType());
+    if (!Result)
+      return Rewriter.notifyMatchFailure(
+          Op, "operand/result shape needs a leaf conversion this pattern "
+              "does not yet support");
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -13138,7 +13269,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
       ControlBarrierConversionPattern, MemoryBarrierConversionPattern,
-      CopyObjectConversionPattern,
+      CopyObjectConversionPattern, CopyLogicalConversionPattern,
       DemoteToHelperInvocationConversionPattern, DotConversionPattern,
       ElectConversionPattern, AllEqualConversionPattern,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAllOp>,
