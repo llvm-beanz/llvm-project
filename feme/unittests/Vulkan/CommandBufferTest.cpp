@@ -4182,6 +4182,112 @@ TEST_F(ASTCSampledImageDispatchTest,
 
 namespace {
 
+/// (Roadmap L125(p)) The same scenario as `SecondArrayLayerSampledImageDispatchTest`
+/// (a `VK_IMAGE_VIEW_TYPE_2D` view with a nonzero `baseArrayLayer` over a
+/// multi-layer image, reusing `kSampledImageShader` as-is since
+/// `ImageView::dimension()` reports `Texture2D` regardless of the
+/// underlying image's own layer count), but over a two-layer
+/// `VK_FORMAT_ASTC_4x4_UNORM_BLOCK` image instead of an uncompressed one:
+/// `decodeASTCImageForSampling` used to hardcode array layer 0 only (see
+/// this file's `ASTCSampledImageDispatchTest` comment on the original,
+/// narrower roadmap E23 scope), rejecting any nonzero base layer or
+/// multi-layer range outright the same all-zero way an unsupported
+/// dimension already did -- this proves the roadmap L125(p) widening
+/// actually decodes and addresses layer 1's own distinct block, not
+/// layer 0's or an all-zero read.
+class ASTCSecondArrayLayerSampledImageDispatchTest
+    : public SampledImageDispatchTest {
+protected:
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    ImageInfo.extent = {4, 4, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 2;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = 32; // Two 4x4 ASTC blocks, 128 bits each.
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // Layer 0 is the same void-extent (solid-fill) block
+    // `ASTCSampledImageDispatchTest` uses (decodes to R=255, G=0, B=127,
+    // A=255); layer 1 is a second, distinguishable void-extent block
+    // (decodes to R=0, G=255, B=63, A=255) -- a materialized descriptor
+    // that (wrongly) kept pointing at layer 0, or read all-zero, is
+    // caught the same obviously-wrong way
+    // `SecondArrayLayerSampledImageDispatchTest`'s own +100-offset values
+    // are.
+    auto *Bytes = static_cast<uint8_t *>(Texels);
+    std::memset(Bytes, 0, 32);
+    setASTCBits(Bytes, 0, 9, 0x1FC);
+    setASTCBits(Bytes, 9, 1, 0); // LDR.
+    setASTCBits(Bytes, 10, 2, 0x3);
+    setASTCBits(Bytes, 64, 16, 65535);
+    setASTCBits(Bytes, 80, 16, 0);
+    setASTCBits(Bytes, 96, 16, 32767);
+    setASTCBits(Bytes, 112, 16, 65535);
+
+    setASTCBits(Bytes + 16, 0, 9, 0x1FC);
+    setASTCBits(Bytes + 16, 9, 1, 0); // LDR.
+    setASTCBits(Bytes + 16, 10, 2, 0x3);
+    setASTCBits(Bytes + 16, 64, 16, 0);
+    setASTCBits(Bytes + 16, 80, 16, 65535);
+    setASTCBits(Bytes + 16, 96, 16, 16383);
+    setASTCBits(Bytes + 16, 112, 16, 65535);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.baseArrayLayer = 1;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+};
+
+} // namespace
+
+TEST_F(ASTCSecondArrayLayerSampledImageDispatchTest,
+       SamplesTheBoundLayerRatherThanLayerZeroOrAllZero) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // Layer 1's own void-extent block: R=0, G=255, B=63 (16383 -> 255 scale,
+  // truncated), A=255 -- distinct from layer 0's R=255, G=0, B=127 (and
+  // from an all-zero read).
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 0.0f);
+  EXPECT_FLOAT_EQ(Result[1], 1.0f);
+  EXPECT_FLOAT_EQ(Result[2], 63.0f / 255.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
+}
+
+namespace {
+
 /// (Roadmap H8n) The same scenario as `ASTCSampledImageDispatchTest`, but
 /// for a single-block `VK_FORMAT_BC1_RGBA_UNORM_BLOCK` image, verifying
 /// `materializeImageDescriptor`'s new BC decode branch (`BCSamplingBridge.h`)
