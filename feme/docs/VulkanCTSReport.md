@@ -5642,3 +5642,56 @@ unchanged.
 `Roadmap.md`'s L125(b) row is updated to reflect `Plain1D`/`Array1D` done
 and the remaining three shapes still to go. See `agent_thoughts.md` for
 the full narrative and next steps.
+
+## L125(b) continued: widen integer-sampled implicit-LOD fix to `Array2D`
+
+Continuing this same milestone's `Plain1D`/`Array1D` widening, picked up
+`Array2D` next: added `ImageCallKind::Sample2DArrayI32` /
+`createSample2DArrayI32` / `feme.cpu.image.sample.2darray.v4i32`
+(`ImageCalls.h`/`.cpp`, including `getImageCallName`/`getOrInsertImageCall`/
+`matchImageCall`'s `AllKinds` array and switch-case), the
+`femeCpuImageSample2DArrayV4I32` CPU runtime implementation
+(`FeMeRuntimeCPU.c`, placed after `femeRTRoundClampLayer`'s own definition
+to satisfy that helper's static-function-ordering requirement, mirroring
+the `Array1D` commit's identical placement reasoning), and
+`SPIRVResourceLowering.cpp` acceptance (`hasOnlySupportedImageUses`'s
+`IsInteger` branch widened to accept `Array2D`, with
+`isSupportedOffset`'s existing `AllowArray2D=true` now passed for that
+shape) plus lowering (`lowerImageAccesses` extracts `U`/`V`/`ArrayLayer`
+from `Array2D`'s own real 3-wide coordinate and `OffsetX`/`OffsetY` from
+its 2-wide `ConstOffset`, then calls `createSample2DArrayI32`).
+
+Unlike `Plain1D`/`Array1D`, `Array2D` needed **no new low-level
+texel-fetch helper**: `femeRTFetchTexel2DI32` already accepts a real
+`Layer` parameter (the same helper `femeCpuImageSample2DV4I32` calls with
+`Layer=0`), so the new sampling entry point only needed to resolve the
+layer via `femeRTRoundClampLayer` and pass it straight through.
+
+Converted the previous `LeavesAnArray2DIntegerSampledImageHandleUsedFor
+SampleAlone` rejection test into a pair of "lowers" tests for `Array2D`
+(implicit-LOD defaulting `Lod` to `0.0`, and explicit-LOD threading a
+real nonzero `ConstOffset`), added a new
+`LeavesAPlain3DIntegerSampledImageHandleUsedForSampleAlone` rejection test
+so the next unaddressed shape stays covered as still out of scope, and
+added `MatchesSample2DArrayI32Call` to `ImageCallsTest.cpp`.
+
+- `ninja FeMeTransformsCPUTests`: all 532 tests pass (+3 net vs. the
+  `Array1D` commit).
+- `ninja check-feme`: **3,229/3,232 Passed, 3 Unsupported, 0 Failed** (0
+  regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: a 20-case sample of
+  `dEQP-VK.pipeline.monolithic.image.suballocation.sampling_type.combined.
+  view_type.2d_array.format.r32_sint.*` (several sizes/array counts,
+  both the `combined` graphics variant and its `_compute` counterpart) --
+  **0 Fail / 20 Pass**.
+
+Internal correctness fix again, not new Vulkan feature/extension surface
+-- [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`Plain3D`/`Cube`/`CubeArray` remain unaddressed -- `Roadmap.md`'s
+L125(b) row is updated to reflect `Plain1D`/`Array1D`/`Array2D` done and
+the remaining two/three shapes still to go. See `agent_thoughts.md` for
+the full narrative and next steps.
