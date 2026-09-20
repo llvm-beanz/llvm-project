@@ -55,30 +55,35 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~20-30 min, good next pick)** `L125(y)`: `pipeline.monolithic.
-   blend.format.r8g8b8a8_srgb.*` still fails 94/100 even after this
-   session's sRGB gamma-curve fix. Start with a single isolated case
-   (`--deqp-log-images=enable`) and trace values at each stage: raw
-   blend inputs, `blendColor`'s math output, final packed bytes --
-   look for whether blending is happening in the wrong color space
-   (linear vs sRGB-encoded) relative to what the spec requires.
-2. `L125(s)`/`L125(t)` (vertex_input format gaps, bind-point bucket)
+1. **(~20-30 min)** `L125(z)`: the `blend.clamp.*` 4/6-fail bucket,
+   including the unreconciled contradiction with the old `H99a` row's
+   own "21/21 pass" claim -- start with a `--deqp-log-images=enable`
+   trace on one case (e.g. `blend.clamp.r8g8b8a8_unorm`) following
+   this session's own methodology, and specifically check whether the
+   "clamp" group's own semantics (blending past `[0, 1]` and expecting
+   the packed result to be clamped) reveals a missing clamp somewhere
+   in `mergeColor`'s own pipeline.
+2. Finish the `pipeline.monolithic.blend.*` regression sweep this
+   session only got 8,073 of the way through (timed out at 30 min) --
+   worth letting run to completion in the background at the start of a
+   future session, purely as extra regression confidence (no fails
+   found yet beyond the already-known 4 `blend.clamp.*` ones).
+3. `L125(s)`/`L125(t)` (vertex_input format gaps, bind-point bucket)
    remain untouched from several sessions back -- good alternative
-   picks if `L125(y)` stalls.
-3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   picks if `L125(z)` stalls.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the other large, not-yet-started cross-repo item -- not a
    quick pick, needs its own dedicated session.
-4. `L115(b)` (pull-model interpolation) remains flagged from several
+5. `L115(b)` (pull-model interpolation) remains flagged from several
    sessions ago as a larger, not-yet-started item needing a new
    runtime-callback ABI surface -- also not a quick pick.
-5. The BC-format CTS coverage gap noted again across multiple prior
-   sessions (`sampler.view_type.*.format.*bc*.address_modes.
+6. The BC-format CTS coverage gap noted across multiple prior sessions
+   (`sampler.view_type.*.format.*bc*.address_modes.
    *clamp_to_border*` matches 0 cases) still hasn't been investigated
    -- worth a quick dedicated look next time nothing else is more
    pressing.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's own scratch CTS logs (`/tmp/ctsrun/l125u*`,
-   `/tmp/ctsrun/l125x/*`) need cleanup before ending a future session
-   (not yet done as of this write-up -- see below).
-
+8. This session's own scratch CTS logs are already cleaned up (along
+   with two prior sessions' leftover `l125u*`/`l125x` directories) --
+   nothing to do here.
