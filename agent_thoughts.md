@@ -95917,3 +95917,134 @@ Failed -- the state the prior `L125(p)` session left).
 6. This session's own scratch CTS logs (`/tmp/ctsrun/l125w/*`) and
    temporary probe files (`/tmp/print_enum*.cpp`, `/tmp/print_astc*`)
    are already cleaned up -- nothing to do here.
+
+# Session: L125(u)/L125(x) fix -- fragment-output integer signedness + sRGB attachment gamma curve
+
+## Start-of-session check
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` (with `VK_ICD_FILENAMES` exported first, as every session
+needs -- it does not persist across shell calls).
+
+## What I did
+
+1. **Picked `L125(u)`** from the prior session's next-steps list
+   (`sampler.exact_sampling`'s "Pixel mismatch" bucket, estimated 6
+   fails) -- smallest of the three untouched rows offered.
+
+2. **Established a clean baseline**: `ninja check-feme` -- 3,265/3,268
+   Passed, 0 Failed, matching the prior session's end state.
+
+3. **Re-ran the full bucket, not the fractional sample**: 18 fails,
+   not 6 -- the same "fractional-sample undercount" pattern several
+   prior sessions have now hit. Split into two unrelated buckets: 6
+   `r32_uint.gradient.*`, 12 `r8g8b8a8_srgb.*`.
+
+4. **Root-caused the `r32_uint` bug** via `--deqp-log-images=enable` +
+   an ad hoc PNG decode: values were correct up to `2^31 - 1`, then
+   hard-cut to `0` above it. Traced to `Executor.cpp`'s
+   `readFragmentColorInt`, which used `Elem.ComponentType` to decide
+   signedness -- but `Pipeline.h`'s own comment already documents that
+   a real SPIR-V-sourced stage's signature can *never* actually report
+   `UInt` (LLVM integers are signless, so `CanonicalizeStage.cpp`
+   always maps to `SInt`). So every raw value at/above `2^31` got
+   reinterpreted as negative, then floored to `0` by
+   `packClearColor`'s own clamp.
+
+5. **Fixed it**: derive signedness from the real attachment format
+   (`cpu::isUnsignedIntegerColorAttachmentFormat(Att.Format)`) instead
+   of the always-`SInt` signature field.
+
+6. **Wrote a regression test** targeting the exact failure shape (a
+   raw `i32` value at `3000000000`, above `2^31`, written to a real
+   `R32_UINT` attachment). Confirmed it fails pre-fix (reads back `0`)
+   via a `git stash`/rebuild round-trip, then confirmed it passes
+   post-fix.
+
+7. **Rebuilt and re-ran `check-feme`**: 3,266/3,269 Passed, 0 Failed
+   (+1 test, 0 regressions). Re-ran the CTS bucket: 6 of 18 fails gone
+   (all `r32_uint.*`), 12 remain.
+
+8. **Regression-swept the fix**: `image.load_store.*uint*` (772
+   cases, 0 Fail) and `pipeline.monolithic.render_to_image.*` (1,325
+   cases, 80 pre-existing Fails, confirmed unrelated via a
+   revert-and-rerun of one case -- a pre-existing 3D-mipmap
+   `vkCreateImage` failure, not a pixel mismatch).
+
+9. **Committed the r32_uint fix in 2 pieces**: the `Executor.cpp` fix,
+   then the new regression test.
+
+10. **Investigated the remaining `r8g8b8a8_srgb` bucket** (same PNG
+    decode methodology): every output channel equaled
+    `round(srgbToLinear(input) * 255)` -- an sRGB decode with no
+    corresponding re-encode. Traced to `ImageFixture.cpp`'s
+    `packClearColor`/`unpackColor`: their `_UNORM_SRGB` branches were
+    bucketed with plain `_UNORM`, applying no gamma curve at all -- a
+    gap a prior unit test had even explicitly documented as
+    intentional (it wasn't; it was untested).
+
+11. **Fixed it**: added `srgbToLinear`/`linearToSRGB` helpers
+    (mirroring the runtime's own `femeRTSRGBToLinear`) and applied them
+    to R/G/B (never alpha) in both pack and unpack, for both
+    `R8G8B8A8_UNORM_SRGB` and `B8G8R8A8_UNORM_SRGB`.
+
+12. **Updated the bug-documenting unit test** to its correct expected
+    values, and added a same-shape test for the other format.
+    `check-feme`: 3,267/3,270 Passed, 0 Failed (+1 test, 0
+    regressions). Full CTS bucket: 372/708 Pass, **0 Fail**.
+
+13. **Regression-swept the sRGB fix**: `sampler.view_type.*.format.
+    *srgb*` (10,296 cases, 0 Fail). Also tried
+    `pipeline.monolithic.blend.format.r8g8b8a8_srgb.*` (100 cases) and
+    found 94 Fail -- but confirmed via revert-and-rerun that this was
+    **already 100% failing before either of this session's fixes**, so
+    not a regression; my fix improves it (100 -> 94 Fail) but doesn't
+    close it. Filed as a new roadmap row (`L125(y)`) rather than
+    chased further -- clearly a separate, larger blend+sRGB bug.
+
+14. **Committed the sRGB fix in 2 pieces**, then updated `Roadmap.md`
+    (struck through `L125(u)` and `L125(x)`, filed `L125(y)`) and
+    `VulkanCTSReport.md` (one combined narrative section for both
+    bugs), each as its own commit.
+
+## Wins
+
+- Two independent, previously-undiagnosed bugs closed in one session --
+  both caught by the same "run the full bucket, decode the PNGs,
+  compare pixel-by-pixel" methodology, reused directly from prior
+  sessions.
+- Found and reported (without chasing) a third, larger, genuinely
+  pre-existing bug (`L125(y)`) during routine regression-sweeping --
+  confirmed it wasn't a regression before filing it, so the next
+  session can trust the "not caused by this fix" claim.
+- Every new/updated unit test was confirmed, via an explicit
+  revert-rebuild round-trip, to actually fail without its matching fix.
+
+## Suggested next steps
+
+1. **(~20-30 min, good next pick)** `L125(y)`: `pipeline.monolithic.
+   blend.format.r8g8b8a8_srgb.*` still fails 94/100 even after this
+   session's sRGB gamma-curve fix. Start with a single isolated case
+   (`--deqp-log-images=enable`) and trace values at each stage: raw
+   blend inputs, `blendColor`'s math output, final packed bytes --
+   look for whether blending is happening in the wrong color space
+   (linear vs sRGB-encoded) relative to what the spec requires.
+2. `L125(s)`/`L125(t)` (vertex_input format gaps, bind-point bucket)
+   remain untouched from several sessions back -- good alternative
+   picks if `L125(y)` stalls.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. The BC-format CTS coverage gap noted again across multiple prior
+   sessions (`sampler.view_type.*.format.*bc*.address_modes.
+   *clamp_to_border*` matches 0 cases) still hasn't been investigated
+   -- worth a quick dedicated look next time nothing else is more
+   pressing.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l125u*`,
+   `/tmp/ctsrun/l125x/*`) need cleanup before ending a future session
+   (not yet done as of this write-up -- see below).
