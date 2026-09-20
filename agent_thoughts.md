@@ -93883,3 +93883,119 @@ scoping directly rather than re-deriving it.
    this session and their root cause is unconfirmed.
 5. `ninja check-feme` and the CTS build directories are both
    incremental from here -- reuse them, no reconfigure needed.
+
+# Session: L124(b) fixed -- initial_value attribute + whole-array wrapper access chain, compute.* down to 4 fails
+
+## State right now
+
+- Working tree: code fix + tests committed (`13646b543a94`), docs
+  committed (`6fa99815bb12`); this file's own commit is next. (The
+  `initial_value` attribute's own 3 commits, `5553e039f0c8`/
+  `cecf7b93f9a6`/`2f74cb7b9083`, landed earlier this session before
+  compaction.)
+- `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+  Device` at session start and again mid-session after each rebuild
+  (`VK_DRIVER_FILES` pointed at the local build's `feme_icd.json`).
+- `ninja check-feme`: **3,218/3,221 Passed, 3 Unsupported, 0 Failed**
+  (0 regressions).
+- `dEQP-VK.compute.pipeline.basic.remove_global_load_pass`: now
+  **Passes**, confirmed by running the real CTS case directly.
+- `compute.*` full sweep: **681 Pass / 4 Fail / 60,775 NotSupported**
+  (of 61,460) -- was 680/5/60,775. Remaining 4 fails confirmed to be
+  exactly L124(c)/(d) plus the 2 still-open
+  `zero_initialize_workgroup_memory` cases, all previously known.
+- No feature/extension inventory changes needed (internal correctness
+  fix, no new Vulkan surface).
+
+## What the bug was (10-second version)
+
+Two distinct bugs stacked on top of each other, both needed to make
+this one CTS case pass:
+
+1. `spirv.GlobalVariable` had no way to represent a plain constant
+   used directly as a module-scope initializer (only a
+   symbol-referencing initializer or the symbol-less
+   `OpConstantNull` special case). The real shader has
+   `%count = OpVariable %_ptr_Private_uint Private %uint_0` -- legal
+   SPIR-V, unmodeled in MLIR.
+2. Once that was fixed, a second bug surfaced: `BlockAccessChainPattern`
+   required a real per-element index after a wrapper block's dummy
+   selector index, rejecting a legal "whole array" access chain
+   (`OpAccessChain ... %outputs %uint_0` with no further index) that
+   Tint's own output emits as dead code in this shader.
+
+## What I did (in order)
+
+1. Designed and implemented a new `initial_value` attribute on
+   `spirv.GlobalVariable` across ODS, parser/printer/verifier,
+   deserializer, serializer, and `SPIRVToLLVM` lowering -- 3 separate
+   commits, each with its own lit test, all passing before moving on.
+2. Ran the real CTS case directly -- original error gone, but a new
+   `AccessChain` legalization failure appeared one layer deeper.
+3. Found `BlockAccessChainPattern` (`SPIRVToLLVMPatterns.cpp`) was the
+   culprit: it bails with "not enough indices" whenever a wrapper
+   block's access chain has only the wrapper-selecting index and
+   nothing further.
+4. Fixed it to reuse that same index as the `getpointer` operand in
+   that specific case, relying on `rewriteBlockAccess`'s own
+   pre-existing single-index early return to produce the correct
+   whole-array pointer -- no changes needed inside `rewriteBlockAccess`
+   itself.
+5. Built and verified a minimal `.mlir` repro directly against
+   `feme-opt` before writing the real lit test, to iterate faster than
+   a full CTS run.
+6. Added the lit test
+   (`spirv-to-llvm-wrapper-whole-array-access-chain.mlir`); committed
+   the fix + test together.
+7. Ran `ninja check-feme` -- clean, +1 from the new test, 0
+   regressions.
+8. Re-confirmed `FeMe CPU Vulkan Device`, ran the real CTS case
+   directly -- passed.
+9. Ran a full `compute.*` sweep (61,460 cases) -- +1 pass, 0
+   regressions, confirmed the remaining 4 fails are all previously
+   known/unrelated.
+10. Updated `Roadmap.md` (struck through L124(b)) and
+    `VulkanCTSReport.md` (new session narrative covering both fixes).
+11. This commit: `agent_thoughts.md`.
+
+## Why this needed two fixes, not one
+
+The roadmap's own L124(b) scoping (from before this session) only
+anticipated the deserializer/ODS gap -- reasonable, since that's what
+the original error message pointed straight at. The `AccessChain` bug
+was invisible until the first fix was in place and the real shader
+could legalize far enough to reach it. This is the same pattern the
+L124(q)->(r)/(s)/(t)/(u) series hit repeatedly: fixing the first
+visible error frequently reveals another, previously-masked one
+underneath in the same test case.
+
+## Suggested next steps
+
+1. **(~5 min)** Scratch files from this session:
+   `/tmp/l124b_wholearray.mlir` (superseded by the committed lit test,
+   safe to delete) and `/tmp/ctsrun/l124b_confirm2.qpa`/
+   `l124b_final.qpa`/`l124b_test_glob.qpa`/`l124b_compute_full.qpa`
+   (+`.stdout`) -- none referenced by anything committed.
+2. Pick up **L124(c)** next
+   (`dEQP-VK.compute.pipeline.basic.undefined_values`): `OpCopyLogical`
+   (opcode 400, SPIR-V 1.4) is entirely unmodeled in MLIR's SPIR-V
+   dialect -- needs a new `spirv.CopyLogical` ODS op, verifier,
+   deserializer/serializer autogen wiring, and an `SPIRVToLLVM`
+   lowering pattern (likely per-leaf `extractvalue`/`insertvalue`
+   decomposition between two logically-compatible-but-not-identical
+   aggregate types, mirroring L116(a)'s masked load/store
+   decomposition). Roadmap has this scoped already; start there.
+3. Alternatively, **L124(d)**
+   (`dEQP-VK.compute.pipeline.device_group.device_index`):
+   `gl_DeviceIndex` isn't wired up anywhere in feme's CPU compute
+   pipeline (`grep -rl DeviceIndex feme/lib` only finds graphics-stage
+   hits). Likely trivial to report `DeviceIndex = 0` unconditionally
+   if feme's CPU backend never models more than one physical device,
+   but not yet confirmed -- needs a little research into
+   `VK_KHR_device_group` support first.
+4. The 2 `zero_initialize_workgroup_memory` fails (`composites.2`,
+   `types.bool`) still aren't broken out as their own roadmap letter --
+   worth adding one if picked up, since neither this nor prior sessions
+   have touched them and their root cause is unconfirmed.
+5. `ninja check-feme` and the CTS build directories are both
+   incremental from here -- reuse them, no reconfigure needed.
