@@ -4130,6 +4130,93 @@ femeRTApplyImageSwizzle(FemeRTv4f32 Color, uint32_t Swizzle) {
   return Result;
 }
 
+// Returns a 4-bit mask (bit 0 = R, bit 1 = G, bit 2 = B, bit 3 = A) of
+// which components of `Format` are actually backed by real texel data, as
+// opposed to a fixed fill value `femeRTUnpackImageTexel` supplies for a
+// component the format doesn't store (`0.0` for a missing R/G/B, `1.0`
+// for a missing A -- mirror the exact per-case fill values that function
+// already returns, one entry per case in its own switch). `A8_UNORM`
+// (case 27) is the one format whose single real channel is A, not R --
+// every other partial format's real channels start from R and extend
+// rightward, matching `femeRTUnpackImageTexel`'s own per-case literal
+// list. An unrecognized format conservatively returns "all four present"
+// (`0xf`), the same as this function not existing, so it never narrows an
+// already-correct border color for a format this switch doesn't know.
+//
+// Roadmap L125(e): used to re-expand a `Sampler`'s format-independent
+// baked `BorderColor` per the *sampled image's own* format before
+// `femeRTApplyImageSwizzle` runs, mirroring core Vulkan's border-color
+// "conversion to RGBA" rule (a component the image format doesn't store
+// is not read from the border-color value at all, and instead gets the
+// same fixed fill an in-bounds texel of that format would get) --
+// `VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK`'s nominal `(0,0,0,0)`
+// therefore actually samples as `(0,0,0,1)` through an alpha-less format
+// like `R32G32B32_FLOAT`, exactly like a real in-bounds texel of that
+// format would.
+__attribute__((always_inline)) static uint32_t
+femeRTImageFormatComponentMask(uint32_t Format) {
+  switch (Format) {
+  case 1:  // R32_FLOAT
+  case 31: // D16_UNORM
+  case 32: // D32_FLOAT
+  case 35: // S8_UINT
+  case 85: // R8_UNORM
+  case 86: // R8_SNORM
+  case 93: // R16_FLOAT
+  case 94: // R16_UNORM
+  case 95: // R16_SNORM
+    return 0x1u; // R only.
+  case 2:  // R32G32_FLOAT
+  case 89: // R8G8_UNORM
+  case 90: // R8G8_SNORM
+  case 98: // R16G16_FLOAT
+  case 99: // R16G16_UNORM
+  case 100: // R16G16_SNORM
+    return 0x3u; // R, G.
+  case 3:   // R32G32B32_FLOAT
+  case 23:  // R11G11B10_FLOAT
+  case 80:  // R5G6B5_UNORM
+  case 81:  // B5G6R5_UNORM
+  case 131: // E5B9G9R9_UFLOAT
+    return 0x7u; // R, G, B.
+  case 27: // A8_UNORM
+    return 0x8u; // A only.
+  case 4:   // R32G32B32A32_FLOAT
+  case 13:  // R8G8B8A8_UNORM
+  case 14:  // R8G8B8A8_SNORM
+  case 17:  // R8G8B8A8_UNORM_SRGB
+  case 18:  // R16G16B16A16_FLOAT
+  case 19:  // R16G16B16A16_UNORM
+  case 20:  // R16G16B16A16_SNORM
+  case 24:  // R10G10B10A2_UNORM
+  case 26:  // B8G8R8A8_UNORM
+  case 28:  // A1B5G5R5_UNORM
+  case 79:  // B4G4R4A4_UNORM
+  case 84:  // A1R5G5B5_UNORM
+  case 103: // R10G10B10A2_SNORM
+  case 132: // B8G8R8A8_UNORM_SRGB
+    return 0xfu; // R, G, B, A.
+  default:
+    return 0xfu;
+  }
+}
+
+// Re-expands `BorderColor` per `femeRTImageFormatComponentMask(Format)`:
+// a component the format doesn't store is replaced with the same fixed
+// fill `femeRTUnpackImageTexel` would supply for it (`0.0` for R/G/B,
+// `1.0` for A), rather than trusting `Sampler`'s own format-independent
+// baked value for that component -- see `femeRTImageFormatComponentMask`'s
+// own roadmap L125(e) comment above for why this is needed at fetch time,
+// not sampler-creation time.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTExpandBorderColorForFormat(const float BorderColor[4], uint32_t Format) {
+  uint32_t Mask = femeRTImageFormatComponentMask(Format);
+  FemeRTv4f32 Result;
+  for (int I = 0; I != 4; ++I)
+    Result[I] = (Mask & (1u << I)) ? BorderColor[I] : (I == 3 ? 1.0f : 0.0f);
+  return Result;
+}
+
 // Reads one texel at integer coordinates `(X, Y)`, array layer `Layer`,
 // sample `Sample`, of mip level `Level` of `Img`, or `BorderColor` if
 // `UseBorder` is set (a `ClampToBorder` axis resolved out of range), or
@@ -4166,8 +4253,8 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    _Bool UseBorder, const float BorderColor[4]) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
-    FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
-                          BorderColor[3]};
+    FemeRTv4f32 Border =
+        femeRTExpandBorderColorForFormat(BorderColor, Img->Format);
     return femeRTApplyImageSwizzle(Border, Img->Swizzle);
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
@@ -4603,8 +4690,8 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    const float BorderColor[4]) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
-    FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
-                          BorderColor[3]};
+    FemeRTv4f32 Border =
+        femeRTExpandBorderColorForFormat(BorderColor, Img->Format);
     return femeRTApplyImageSwizzle(Border, Img->Swizzle);
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
