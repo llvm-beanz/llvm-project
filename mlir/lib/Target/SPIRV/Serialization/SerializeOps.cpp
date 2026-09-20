@@ -770,6 +770,25 @@ Serializer::processGlobalVariableOp(spirv::GlobalVariableOp varOp) {
                           {pointeeTypeID, nullID});
     operands.push_back(nullID);
     elidedAttrs.push_back(varOp.getZeroInitializedAttrName().getValue());
+  } else if (Attribute initialValue = varOp.getInitialValueAttr()) {
+    // `initial_value` (roadmap L124(b)) likewise has no symbol of its own
+    // to reference -- unlike `zero_initialized`, it carries a real literal
+    // value, so reuse the same `prepareConstant` machinery every ordinary
+    // `spirv.Constant`/spec-constant-composite constituent already goes
+    // through to emit (and dedupe against any other use of the identical
+    // constant elsewhere in the module) the `OpConstant`/
+    // `OpConstantComposite` this Initializer operand needs. Pass the
+    // variable's own pointee type as the constant's type (rather than
+    // `initialValue`'s own type, since a composite constant's `ArrayAttr`
+    // representation has no type of its own -- see `verify()`'s own
+    // comment on this attribute).
+    Type pointeeType = cast<spirv::PointerType>(varOp.getType()).getPointeeType();
+    uint32_t initialValueID =
+        prepareConstant(varOp.getLoc(), pointeeType, initialValue);
+    if (!initialValueID)
+      return failure();
+    operands.push_back(initialValueID);
+    elidedAttrs.push_back(varOp.getInitialValueAttrName().getValue());
   }
 
   if (failed(emitDebugLine(typesGlobalValues, varOp.getLoc())))

@@ -1057,6 +1057,7 @@ spirv::Deserializer::processGlobalVariable(ArrayRef<uint32_t> operands) {
   // Initializer.
   FlatSymbolRefAttr initializer = nullptr;
   bool zeroInitialized = false;
+  Attribute initialValue = nullptr;
 
   if (wordIndex < operands.size()) {
     Operation *op = nullptr;
@@ -1075,6 +1076,16 @@ spirv::Deserializer::processGlobalVariable(ArrayRef<uint32_t> operands) {
       // `initializer` symbol reference every other case above uses (see
       // `spirv.GlobalVariable`'s own `zero_initialized` attribute).
       zeroInitialized = true;
+    else if (std::optional<std::pair<Attribute, Type>> constInfo =
+                 getConstant(operands[wordIndex]))
+      // A plain (non-spec) `OpConstant`/`OpConstantComposite` initializer
+      // (roadmap L124(b)) likewise has no symbol of its own -- unlike the
+      // spec-constant cases above, whose symbols this deserializer already
+      // tracks in `specConstMap`/`specConstCompositeMap`, an ordinary
+      // constant's attribute/type pair is only ever recorded in
+      // `constantMap` for later per-use materialization (see
+      // `spirv.GlobalVariable`'s own `initial_value` attribute).
+      initialValue = constInfo->first;
     else
       return emitError(unknownLoc, "unknown <id> ")
              << operands[wordIndex] << "used as initializer";
@@ -1095,6 +1106,8 @@ spirv::Deserializer::processGlobalVariable(ArrayRef<uint32_t> operands) {
       opBuilder.getStringAttr(variableName), initializer);
   if (zeroInitialized)
     varOp.setZeroInitializedAttr(opBuilder.getUnitAttr());
+  if (initialValue)
+    varOp.setInitialValueAttr(initialValue);
 
   // Decorations.
   if (decorations.count(variableID)) {

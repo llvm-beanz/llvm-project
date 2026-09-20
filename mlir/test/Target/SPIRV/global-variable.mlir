@@ -84,3 +84,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.3, [Shader], []> {
   // CHECK: spirv.GlobalVariable @mat zero_initializer : !spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Workgroup>
   spirv.GlobalVariable @mat zero_initializer : !spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Workgroup>
 }
+
+// -----
+
+// `initial_value` (roadmap L124(b)): round trips through a plain
+// `OpConstant`/`OpConstantComposite` Initializer operand with no symbol of
+// its own (see `spirv.GlobalVariable`'s own doc comment) -- unlike
+// `zero_initializer`, this carries the literal value itself, for both a
+// scalar and a composite (array) pointee, and for both the `Private` and
+// `StorageBuffer` storage classes SPIR-V allows an ordinary constant
+// initializer for (`dEQP-VK.compute.pipeline.basic.remove_global_load_pass`'s
+// own real shape uses `Private`).
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
+  // CHECK: spirv.GlobalVariable @count initial_value(0 : i32) : !spirv.ptr<i32, Private>
+  spirv.GlobalVariable @count initial_value(0 : i32) : !spirv.ptr<i32, Private>
+  // CHECK: spirv.GlobalVariable @arr initial_value([1 : i32, 2 : i32, 3 : i32]) : !spirv.ptr<!spirv.array<3 x i32>, Private>
+  spirv.GlobalVariable @arr initial_value([1 : i32, 2 : i32, 3 : i32]) : !spirv.ptr<!spirv.array<3 x i32>, Private>
+}
