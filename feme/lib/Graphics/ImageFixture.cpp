@@ -84,6 +84,28 @@ int32_t floorLog2(double X) {
   return Exp - 1;
 }
 
+/// Decodes one sRGB-encoded component (`[0, 1]`) to linear light, the IEC
+/// 61966-2-1 piecewise transfer function "Texture layout and formats"
+/// calls for -- the read/blend-side counterpart of `linearToSRGB` below.
+/// Mirrors `FeMeRuntimeCPU.c`'s own `femeRTSRGBToLinear` (used there for
+/// sampling an `_UNORM_SRGB`-format texture); reimplemented here since
+/// this file has no dependency on that runtime translation unit. Alpha is
+/// never sRGB-encoded by convention, so callers apply this to color
+/// channels only.
+double srgbToLinear(double C) {
+  return C <= 0.04045 ? C / 12.92 : std::pow((C + 0.055) / 1.055, 2.4);
+}
+
+/// The inverse of `srgbToLinear`: encodes one linear-light component
+/// (`[0, 1]`) to its sRGB-encoded representation -- needed when *writing*
+/// a fragment's linear-space color to an `_UNORM_SRGB`-format color
+/// attachment (roadmap L125x), matching `srgbToLinear`'s own "alpha is
+/// never sRGB-encoded" convention.
+double linearToSRGB(double C) {
+  return C <= 0.0031308 ? C * 12.92
+                       : 1.055 * std::pow(C, 1.0 / 2.4) - 0.055;
+}
+
 /// (Roadmap H8q) Encodes an RGB triple (`Clear[0..2]`, each expected
 /// non-negative -- `packClearColor`'s caller clamps below) into
 /// `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`'s shared-exponent word: three
@@ -984,8 +1006,14 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
 
   if (Format == ResourceFormat::R8G8B8A8_UNORM ||
       Format == ResourceFormat::R8G8B8A8_UNORM_SRGB) {
+    bool IsSRGB = Format == ResourceFormat::R8G8B8A8_UNORM_SRGB;
     for (unsigned I = 0; I != Info->Components; ++I) {
       double Clamped = std::clamp(Clear[I], 0.0, 1.0);
+      // (Roadmap L125x) Alpha (component 3) is never sRGB-encoded, per
+      // `linearToSRGB`'s own convention (mirroring `_UNORM_SRGB`'s
+      // sampling-side `femeRTSRGBToLinear` decode, `FeMeRuntimeCPU.c`).
+      if (IsSRGB && I != 3)
+        Clamped = linearToSRGB(Clamped);
       Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
     }
     return Error::success();
@@ -997,8 +1025,13 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     // `Clear` is always logical [R, G, B, A] (matching
     // `VkClearColorValue::float32`).
     static const unsigned Swizzle[4] = {2, 1, 0, 3};
+    bool IsSRGB = Format == ResourceFormat::B8G8R8A8_UNORM_SRGB;
     for (unsigned I = 0; I != Info->Components; ++I) {
       double Clamped = std::clamp(Clear[Swizzle[I]], 0.0, 1.0);
+      // (Roadmap L125x) `Swizzle[I] == 3` is alpha (logical index 3,
+      // regardless of memory position `I`), never sRGB-encoded.
+      if (IsSRGB && Swizzle[I] != 3)
+        Clamped = linearToSRGB(Clamped);
       Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
     }
     return Error::success();
@@ -1704,16 +1737,25 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
 
   if (Format == ResourceFormat::R8G8B8A8_UNORM ||
       Format == ResourceFormat::R8G8B8A8_UNORM_SRGB) {
-    for (unsigned I = 0; I != Info->Components; ++I)
-      Out[I] = Texel[I] / 255.0;
+    bool IsSRGB = Format == ResourceFormat::R8G8B8A8_UNORM_SRGB;
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double V = Texel[I] / 255.0;
+      // (Roadmap L125x) Alpha (component 3) is never sRGB-encoded, so it
+      // is never decoded here either -- mirrors `packClearColor`'s own
+      // convention above.
+      Out[I] = (IsSRGB && I != 3) ? srgbToLinear(V) : V;
+    }
     return Error::success();
   }
 
   if (Format == ResourceFormat::B8G8R8A8_UNORM ||
       Format == ResourceFormat::B8G8R8A8_UNORM_SRGB) {
     static const unsigned Swizzle[4] = {2, 1, 0, 3};
-    for (unsigned I = 0; I != Info->Components; ++I)
-      Out[Swizzle[I]] = Texel[I] / 255.0;
+    bool IsSRGB = Format == ResourceFormat::B8G8R8A8_UNORM_SRGB;
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double V = Texel[I] / 255.0;
+      Out[Swizzle[I]] = (IsSRGB && Swizzle[I] != 3) ? srgbToLinear(V) : V;
+    }
     return Error::success();
   }
 
