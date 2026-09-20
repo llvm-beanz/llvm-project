@@ -5972,3 +5972,68 @@ behavior for the two extension-independent border-color kinds).
 `Roadmap.md`'s L125(d) row is marked done, with its own residual gap
 split to new row L125(e) rather than left implicit. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L125(e): border-color missing-channel defaulting
+
+Root cause (found while verifying L125(d) above): `mapBorderColor`/
+`Sampler::Sampler` (Image.cpp) bakes a fixed, format-independent
+`float[4]` `BorderColor` at *sampler* creation time -- a real
+`VkSampler` genuinely has no knowledge of which image format it will
+ever sample against, so it cannot itself apply core Vulkan's
+"conversion to RGBA" rule, which requires a component the *sampled
+image's own format* doesn't store to be re-defaulted (`0` for a missing
+R/G/B, `1` for a missing A) rather than read from the border-color
+value verbatim. `VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK` (nominally
+`(0,0,0,0)`) therefore actually samples as `(0,0,0,1)` through an
+alpha-less format like `R32G32B32_FLOAT` -- exactly like a real
+in-bounds texel of that format would.
+
+Fixed by: `femeRTImageFormatComponentMask(Format)` (FeMeRuntimeCPU.c), a
+4-bit R/G/B/A mask of which components a format actually stores,
+mirroring `femeRTUnpackImageTexel`'s own per-case fill values one case
+at a time (`A8_UNORM` is the sole format whose one real channel is A,
+not R; every other partial format fills left-to-right starting from
+R -- confirmed by reading every case in that function's own switch);
+and `femeRTExpandBorderColorForFormat`, which re-defaults any component
+the mask says is missing before `femeRTApplyImageSwizzle` runs. Both
+`femeRTFetchTexel2D`'s and `femeRTFetchTexel3D`'s border branches now
+call it instead of taking `BorderColor`'s 4 raw components verbatim.
+Depth/stencil-only formats (`D16_UNORM`, `D32_FLOAT`, `S8_UINT`) turned
+out to share the exact same root cause as `R32_FLOAT` (they already
+fill G/B/A identically in `femeRTUnpackImageTexel`), so no separate
+handling was needed for them, resolving this row's own open question.
+
+New unit test: `ImageSamplingTest.ClampToBorderExpandsMissingComponentsForFormat`
+(`R32G32B32_FLOAT`, sampler bakes alpha `0.4`, fetch must read back
+`1.0` instead).
+
+- `ninja check-feme`: **3,240/3,243 Passed, 3 Unsupported, 0 Failed** (+1
+  new test vs. the L125(d) commit above, 0 regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- A targeted 224-case sample of every `d16_unorm`/`r16_sfloat`/
+  `r16g16_sfloat`/`r32_sfloat`/`r32g32b32_sfloat` `transparent_black`/
+  `opaque_white` `no_gather.no_swizzle_hint` case -- **160 Pass / 0 Fail
+  / 64 NotSupported** (every one of these was `Fail` on exactly the
+  alpha channel before this fix; the `NotSupported` cases are an
+  unrelated, pre-existing feature gap).
+- Re-ran the identical 150-case random sample used to verify L125(d)
+  above (same shuffle seed, so the same 150 cases): **35 -> 42 Pass**,
+  the 7 previously-mismatched cases (the ones that motivated this row)
+  now all pass, and the remaining 26 fails are entirely the
+  already-tracked, separate L125(c) `VK_ERROR_INITIALIZATION_FAILED`
+  bucket (unaffected by this fix, as expected).
+
+**This closes the entire `sampler.border_swizzle.*` `Ref:`/`Color:`
+mismatch family L125(d) and L125(e) together set out to fix.** A
+distinct, still-open gap was found and split out separately: an
+in-bounds texel fetch does not yet apply an image view's own component
+swizzle at all (only the border-color path does, as of L125(d)) --
+tracked as new roadmap row **L125(f)**.
+
+Internal correctness fix, not new Vulkan feature/extension surface --
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`Roadmap.md`'s L125(e) row is marked done. See `agent_thoughts.md` for
+the full narrative and next steps.
