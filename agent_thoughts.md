@@ -94590,3 +94590,82 @@ No new Vulkan feature/extension surface -- `Vulkan14FeatureInventory.md`/
    **L125's next fresh sample**.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+# Session: L125(b) closed -- widen integer-sampled implicit-LOD fix to `CubeArray`
+
+Confirmed `FeMe CPU Vulkan Device` via vulkaninfo at session start (required every session).
+
+## What got done
+
+1. Investigated `CubeArray`'s design as a direct follow-on to the prior
+   session's own `Cube` work: confirmed `femeRTRoundClampLayer` (already
+   used by `Array1D`/`Array2D`) handles the array-index rounding/clamp,
+   `femeCpuImageSampleCubeArrayV4F32`'s own `LayerBase + BaseFace`
+   folding pattern carries over directly to `femeRTFetchTexel2DI32`, the
+   SPIR-V coordinate is a 4-wide `(DirX, DirY, DirZ, ArrayLayer)` vector
+   (`SampleCoordWidth == 4`, already correctly set), and `isSupportedOffset`
+   already required a zero offset for `CubeArray` via the same generic
+   fallback `Cube` uses.
+2. Added `ImageCallKind::SampleCubeArrayI32`/`createSampleCubeArrayI32`
+   (`ImageCalls.h`/`.cpp`): 12-arg call, no offset, no derivatives, no
+   `Bias`/`MinLodClamp`.
+3. Added `femeCpuImageSampleCubeArrayV4I32` (`FeMeRuntimeCPU.c`), placed
+   after `femeCpuImageSampleCubeArrayV4F32`'s own definition. Reuses
+   `femeRTFetchTexel2DI32` directly with `Layer = CubeIndex * 6 +
+   CF.Face` -- no new low-level texel-fetch helper needed.
+4. Widened `SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
+   (`IsInteger` shape check) and `lowerImageAccesses` (new `CubeArray`
+   case extracting `DirX`/`DirY`/`DirZ`/`ArrayLayer` from `Coord`'s four
+   lanes, no offset extraction).
+5. Converted `LeavesACubeArrayIntegerSampledImageHandleUsedForSampleAlone`
+   into an implicit-LOD/explicit-LOD "lowers" test pair (no further
+   rejection test needed -- `CubeArray` was the final remaining shape),
+   and added `MatchesSampleCubeArrayI32Call`.
+
+## Verified
+
+- `FeMeTransformsCPUTests`: 540/540 pass (+2 vs. `Cube` commit).
+- `check-feme`: 3,237/3,240 Passed, 3 Unsupported, 0 Failed (0
+  regressions).
+- Real CTS: two independent 20-case samples of
+  `pipeline.monolithic...view_type.cube_array.format.*_[su]int.*` --
+  18 Pass / 0 Fail / 22 NotSupported combined (unrelated feature gap).
+
+## Commits (3, each small)
+
+1. Code + tests: `CubeArray` `SampleCubeArrayI32` widening.
+2. `Roadmap.md`/`VulkanCTSReport.md` update -- **struck through L125(b)
+   entirely**, all six shapes done.
+3. This `agent_thoughts.md` entry (below).
+
+No new Vulkan feature/extension surface -- `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` unchanged.
+
+## Suggested next steps
+
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (all under `/tmp/ctsrun/l125b_cubearray_*`) are already
+   deleted; only prior sessions' own leftover `l124*` files remain
+   there, untouched (not this session's to clean).
+2. **L125(b) is fully closed.** Two candidates for what's next, from
+   L125(a)'s own original triage:
+   - **L125(c)** (larger, not yet individually triaged): `Image
+     mismatch` (ASTC/EAC/ETC2 compressed-format decoding), a
+     `vk.queueSubmit`/`VK_ERROR_INITIALIZATION_FAILED` bucket
+     (`vertex_input.single_attribute.*` and scattered
+     `sampler.border_swizzle.*`), a separate
+     `vk.createComputePipelines`-site `VK_ERROR_INITIALIZATION_FAILED`
+     bucket heavy in `sampler.border_swizzle.*` (confirmed *not* the
+     same integer-sampling root cause), and a
+     `vktPipelineBindPointTests.cpp` bucket. None root-caused yet --
+     each needs its own `--deqp-log-decompiled-spirv=enable`/
+     `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1` trace before estimating
+     further.
+   - **L125(d)** (smaller, more sharply scoped): `sampler.border_swizzle.*`'s
+     own already-decoded `Ref:`/`Color:` mismatch bucket -- looks like a
+     border-color value read back with the wrong component swizzle
+     applied (`VK_EXT_border_color_swizzle`'s `components` mapping not
+     yet applied to synthesized border colors). A reasonable first pick
+     given its narrower scope.
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
