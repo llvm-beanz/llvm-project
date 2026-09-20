@@ -55,29 +55,22 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain the untouched rows
-   from the `L125(c)` decomposition several sessions back -- good next
-   picks. `L125(p)` (440 fails, "Image mismatch" across
-   `image.suballocation`/`image_view.view_type`/`sampler.view_type`) is
-   the single largest remaining bucket by far but needs its own
-   `--deqp-log-decompiled-spirv=enable` trace per area before
-   estimating -- start there only with a full session budgeted, not a
-   quick pick.
-2. `L115(b)` (pull-model interpolation, `InterpolateAtCentroid`/
-   `InterpolateAtSample`) remains the other real, larger,
-   not-yet-started item flagged several sessions ago -- needs a new
-   runtime-callback ABI surface (barycentric/interpolant-plane data
-   doesn't exist in `FemeFragmentInvocation` today), properly budgeted
-   as its own 1-2 session item, not squeezed in alongside smaller
-   fixes.
-3. Given this session's own "the ABI already had what we needed"
-   surprise, it may be worth a quick sanity pass the next time any
-   future roadmap row's own scoping text asserts "needs new ABI
-   storage" -- confirm that claim genuinely holds (by reading the
-   relevant mapping/resolution code, the way `mapBorderColor` was
-   checked here) before committing to the larger design, since it may
-   again turn out the existing fields already suffice.
-4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~20-30 min)** Pick up `L125(w)`: the new 21-fail
+   `sampler.view_type.2d_unnormalized` + border-color/mag-filter/
+   compressed-format residual found while verifying this fix. Not yet
+   triaged past the raw fail list -- start with
+   `--deqp-log-decompiled-spirv=enable` on 2-3 individual cases to see
+   if it's one bug or several.
+2. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, bind-point
+   bucket, exact_sampling bucket) remain untouched from several
+   sessions back -- good alternative picks if `L125(w)` stalls.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. This session's own scratch CTS logs (`/tmp/ctsrun/l125v/*`) are
+6. This session's own scratch CTS logs (`/tmp/ctsrun/l125p/*`) are
    already cleaned up -- nothing to do here.
