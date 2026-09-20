@@ -3794,6 +3794,19 @@ That same CTS group also surfaced a **pre-existing, swizzle-unrelated**
 Cube-gather correctness bug (reproduces with an identity swizzle too),
 tracked separately as roadmap row L125(j).
 
+**Roadmap L125(j)** closed that Cube-gather bug: `Gather*`/`GatherCmp*`
+against a `Cube`/`CubeArray` view now share the exact same seamless
+cross-face footprint remap that plain cube `Sample` already used
+(`femeRTComputeCubeBilinearSupport`/`femeRTFetchCubeSeamlessTexel`,
+including doubly-out-of-bounds corner averaging), replacing the
+`femeRTComputeBilinearSupport`/`femeRTFetchTexel2D`-with-forced-
+`ClampToEdge` approximation that clamped an edge-straddling footprint
+in place instead of remapping it onto the correct neighboring face --
+a real correctness gap under Vulkan's spec-mandated seamless cube
+filtering, confirmed via VK-GL-CTS's own reference implementation
+(`TextureCubeView::gather` reuses its sampling path's
+`getCubeLinearSamples` verbatim) and a genuinely-failing CTS case.
+
 **Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
 could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This
 milestone's own `feme::vulkan::Image` never gained (and still does not

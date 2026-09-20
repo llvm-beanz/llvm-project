@@ -6270,3 +6270,79 @@ deferred pending CTS coverage) and L125(j) (the newly-discovered
 Cube-gather correctness bug, unrelated to swizzle) capture the
 remaining open work. See `agent_thoughts.md` for the full narrative
 and next steps.
+
+## Roadmap L125(j): Cube/CubeArray Gather* seamless cross-face remap fix
+
+**Root cause**: `femeCpuImageGatherCubeV4F32`/`femeCpuImageGatherCmpCubeV4F32`
+computed their 2x2 gather footprint via `femeRTComputeBilinearSupport`/
+`femeRTFetchTexel2D` with a forced `ClampToEdge` address mode -- any tap
+that fell outside the current cube face was clamped back onto that
+same face's own edge texel. Vulkan mandates seamless cube-map filtering
+(unlike desktop GL, where it is optional): a footprint that straddles a
+face edge must remap the out-of-face taps onto the correct neighboring
+face, exactly as `femeRTSampleCubeLinearAtLevel` (used by plain cube
+`Sample`) already does via `femeRTComputeCubeBilinearSupport`/
+`femeRTFetchCubeSeamlessTexel`. This was a known, previously-documented
+gap ("no real CTS case yet exercises a face-edge-straddling cube
+gather") from the prior L125(g) session -- this session found and
+confirmed a real CTS case that does.
+
+**Investigation method**: extracted the failing repro's embedded
+`Rendered`/`Reference`/`ErrorMask` PNGs from its QPA log (a small Python
+script decoding the base64-embedded images), diffed them pixel-by-pixel
+with `pillow`. The 226-of-4096 differing pixels clustered along
+diagonal/edge regions with values matching *different* rows of the
+color ramp -- consistent with a face-boundary sampling error, not a
+broad ordering or swizzle bug. Cross-checked against VK-GL-CTS's own
+reference (`framework/common/tcuTexture.cpp`): `TextureCubeView::gather`
+reuses its sampling path's own `getCubeLinearSamples` helper verbatim,
+including the same doubly-out-of-bounds corner-averaging rule -- and its
+`sampleIndices[4] = {2, 3, 1, 0}` result mapping already matched FeMe's
+existing `Result[0]=T01/Result[1]=T11/Result[2]=T10/Result[3]=T00`
+ordering exactly, so only the fetch/footprint mechanism needed to
+change, not the ordering.
+
+**Fix**: both `femeCpuImageGatherCmpCubeV4F32` and
+`femeCpuImageGatherCubeV4F32` (FeMeRuntimeCPU.c) switched from
+`femeRTComputeBilinearSupport`/`femeRTFetchTexel2D`-with-forced-
+`ClampToEdge` to `femeRTComputeCubeBilinearSupport`/
+`femeRTFetchCubeSeamlessTexel`, including the same three-way
+doubly-out-of-bounds corner-averaging chain
+`femeRTSampleCubeLinearAtLevel` already uses. `ApplySwizzle` values are
+unchanged from the already-committed L125(g) fix (`0` for the Cmp path,
+deferred to L125(i); `1` for the plain path). A cube gather no longer
+needs its sampler's address mode or border color at all, since
+`femeRTFetchCubeSeamlessTexel` never consults either.
+
+New unit tests: `GatherCubeSeamlessBlendsAcrossFaceEdge`,
+`GatherCmpCubeSeamlessBlendsAcrossFaceEdge` (ImageSamplingTest.cpp),
+reusing `SampleCubeSeamlessBlendsAcrossFaceEdge`'s own two-face layout
+(face 0 uniformly one value, face 4 uniformly another) and direction
+vector (`DirX=1, DirY=0, DirZ=0.6`, placing the footprint's low-`U` tap
+one texel below `u==0`) to prove two of the four gathered corners
+(`T00`/`T01`) now read face 4's own value instead of a clamped-in-place
+face-0 value.
+
+`ninja check-feme`: 3,247/3,250 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions).
+
+CTS (`dEQP-VK.glsl.texture_gather.*`, `feme_icd.json`,
+`FeMe CPU Vulkan Device`):
+- The original repro,
+  `dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.filter_mode.min_linear_mag_linear`,
+  now **Passes** (was `Result verification failed`).
+- The broader `dEQP-VK.glsl.texture_gather.graphics.basic.cube.*`
+  bucket (220 cases): 25 Pass, 153 NotSupported (unrelated
+  format-support gating), 42 Fail -- every one of the 42 fails is the
+  pre-existing, already-tracked L125(c)
+  `vk.createGraphicsPipelines`/`VK_ERROR_INITIALIZATION_FAILED` bucket
+  (confirmed via grepping every failure message: all 42 are the
+  identical `VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37`
+  pipeline-creation error, zero `Result verification failed` fails
+  remain).
+- `dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.texture_swizzle.*`
+  (the L125(g) session's own original discovery point for this bug):
+  6 Pass, 6 NotSupported, **0 Fail**.
+
+`Roadmap.md`'s L125(j) row is now struck through and marked done. See
+`agent_thoughts.md` for the full narrative and next steps.
