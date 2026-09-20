@@ -5750,3 +5750,85 @@ unchanged.
 updated to reflect `Plain1D`/`Array1D`/`Array2D`/`Plain3D` done and the
 final two shapes still to go. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## L125(b) continued: widen integer-sampled implicit-LOD fix to `Cube`
+
+`Cube` was structurally deferred by the prior `Plain3D` session because
+its sample coordinate is a 3-component direction vector rather than a
+spatial `(U, V[, W])` triple, and it needed its own investigation before
+committing to the established `SampleXI32` pattern. Confirmed all of the
+following before writing any code:
+
+- `femeRTComputeCubeClampedLod` can be called with `UseExplicitLod=1`
+  exactly like every other shape's `femeRTComputeClampedLod` call --
+  when `UseExplicitLod` is true it short-circuits directly to the
+  simple bias-and-clamp path and never touches its own derivative
+  parameters, so no new implicit-LOD-derivative logic is needed (`Lod`
+  already defaults to a constant `0.0` at the call site, same as every
+  prior shape).
+- `femeRTSelectCubeFace` already resolves a direction vector to a face
+  index (Vulkan's own `+X,-X,+Y,-Y,+Z,-Z` layer order) plus a
+  `[0, 1]`-normalized face-local `(U, V)` -- exactly the shape needed to
+  feed straight into `femeRTFetchTexel2DI32` with `Layer=CF.Face`, so no
+  new low-level texel-fetch helper is needed (continuing the streak
+  `Array2D`/`Plain3D` already established).
+- A cube's `NEAREST` filter never has a fractional footprint that could
+  straddle a face edge, so the new I32 function can point-sample
+  directly rather than reusing `femeRTSampleFilteredCube`'s own seamless
+  bilinear cross-face-edge logic.
+- Cube sampling unconditionally forces `ClampToEdge` addressing before
+  any cube sample, which never sets `UseBorder` -- so the new I32
+  function needs no border-color fallback branch at all, unlike every
+  prior shape's own sampler-controlled address mode.
+- SPIR-V forbids `ConstOffset` against `Dim::Cube` entirely, so
+  `createSampleCubeI32` (mirroring `createSampleCube`'s own identical
+  absence) carries no offset operand -- and `isSupportedOffset` already
+  required an all-zero offset for `Cube` via its existing generic
+  `isZeroOffset` fallback, so no change was needed there either.
+
+Implemented `ImageCallKind::SampleCubeI32`/`createSampleCubeI32`
+(11-arg call: image/sampler heap operands, `DirX`/`DirY`/`DirZ`, `Lod`,
+`Mask` -- no offset, no derivatives, no `Bias`/`MinLodClamp`),
+`femeCpuImageSampleCubeV4I32` (placed after
+`femeCpuImageSampleCubeV4F32`'s own definition to satisfy
+`femeRTSelectCubeFace`/`femeRTComputeCubeClampedLod`'s static-function
+ordering), and widened `hasOnlySupportedImageUses`'s `IsInteger` shape
+check plus `lowerImageAccesses`'s integer-sample emission branch (a new
+`Cube` case extracting `DirX`/`DirY`/`DirZ` from `Coord`'s three lanes,
+no offset extraction at all).
+
+Converted the previous
+`LeavesACubeIntegerSampledImageHandleUsedForSampleAlone` rejection test
+into a pair of "lowers" tests for `Cube` (implicit-LOD defaulting `Lod`
+to `0.0`, and explicit-LOD with an all-zero `ConstOffset` since `Cube`
+accepts no nonzero one), added a new
+`LeavesACubeArrayIntegerSampledImageHandleUsedForSampleAlone` rejection
+test so the final remaining shape stays covered as still out of scope,
+and added `MatchesSampleCubeI32Call` to `ImageCallsTest.cpp`.
+
+- `ninja FeMeTransformsCPUTests`: all 538 tests pass (+3 net vs. the
+  `Plain3D` commit).
+- `ninja check-feme`: **3,235/3,238 Passed, 3 Unsupported, 0 Failed** (0
+  regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: a 20-case sample of
+  `dEQP-VK.pipeline.monolithic.image.suballocation.sampling_type.combined.
+  view_type.cube.format.*_[su]int.*` (several sizes/formats, both the
+  `combined` graphics variant and its `_compute` counterpart) -- **0
+  Fail / 18 Pass / 2 NotSupported** (the 2 NotSupported an unrelated
+  `shaderSampledImageArrayDynamicIndexing`-feature gap, not this fix's
+  concern). A broader 20-case sample mixing in `cube_array` cases
+  confirmed those still correctly fail with the same pre-existing
+  `VK_ERROR_INITIALIZATION_FAILED` (CubeArray is not yet lowered at all
+  -- expected, unrelated to this session's Cube-only change, not a
+  regression).
+
+Internal correctness fix again, not new Vulkan feature/extension surface
+-- [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`CubeArray` remains the final unaddressed shape -- `Roadmap.md`'s
+L125(b) row is updated to reflect `Plain1D`/`Array1D`/`Array2D`/
+`Plain3D`/`Cube` done and `CubeArray` still to go. See
+`agent_thoughts.md` for the full narrative and next steps.
