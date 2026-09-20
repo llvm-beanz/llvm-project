@@ -5897,3 +5897,78 @@ accept integer-channel implicit-LOD/explicit-LOD sampling. `Roadmap.md`'s
 L125(b) row is struck through. See `agent_thoughts.md` for the full
 narrative and next steps (picking between `L125(c)`/`L125(d)` or
 L125's next fresh sample).
+
+## Roadmap L125(d): `sampler.border_swizzle.*` component-swizzle fix
+
+Root cause: `feme::vulkan::ImageView` (Image.h) never stored
+`VkImageViewCreateInfo::components` at all -- `vkCreateImageView`
+silently dropped it -- so a synthesized `ClampToBorder` border color
+(from `SamplerAddressMode::ClampToBorder` resolving an out-of-range
+coordinate) was never swizzled, even though core Vulkan requires it for
+`VK_BORDER_COLOR_FLOAT/INT_TRANSPARENT_BLACK` and
+`VK_BORDER_COLOR_FLOAT/INT_OPAQUE_WHITE` with **no**
+`VK_EXT_border_color_swizzle` needed (only `OPAQUE_BLACK`/custom colors
+need that extension for a non-identity mapping, per
+`vktPipelineSamplerBorderSwizzleTests.cpp`'s own `checkSupport`).
+
+Fixed by: `ImageView` now stores the mapping (`Image.h`/`Image.cpp`);
+`materializeImageDescriptor` (CommandBuffer.cpp) packs it into a new
+`FemeImageDescriptor::Swizzle` field (`RuntimeABI.h`'s
+`ImageComponentSwizzle` enum, deliberately numbered to match
+`VkComponentSwizzle`'s own values so `resolveImageSwizzle`'s per-channel
+resolution is a direct `static_cast`, with `Identity == 0` so a
+zero-initialized descriptor still decodes as full identity);
+`femeRTFetchTexel2D`/`femeRTFetchTexel3D` (FeMeRuntimeCPU.c) apply it to
+the border-color branch via a new `femeRTApplyImageSwizzle` helper --
+the two functions every other sampled shape (1D, 1D-array, cube via
+2D-array reuse) funnels through, confirmed via grep no other
+border-color code path exists.
+
+New unit tests: `ImageSamplingTest.ClampToBorderAppliesImageViewSwizzle`
+(direct runtime-level `Img.Swizzle` manipulation, a `BARG`+`Zero`
+mapping against a distinguishable border color) and
+`CommandBufferTest.cpp`'s new `BorderSwizzleSampledImageDispatchTest`
+fixture (`AppliesImageViewSwizzleToSynthesizedBorderColor`, full
+Vulkan-level dispatch: `vkCreateImageView` with a `VK_COMPONENT_SWIZZLE_
+ONE` R-channel override, `ClampToBorder` addressing,
+`VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK`, an out-of-range-`uv` shader).
+
+- `ninja check-feme`: **3,239/3,242 Passed, 3 Unsupported, 0 Failed** (0
+  regressions; +2 new tests vs. the L125(b) commit above).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- A 48-case sample of every real 4-component-format
+  `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.*.transparent_black
+  .no_gather.no_swizzle_hint` case (`r8g8b8a8_unorm`/`r32g32b32a32_sfloat`,
+  every non-identity component mapping CTS generates for those two
+  formats) -- **48/48 Pass**, every `Ref:`/`Color:` value matching
+  exactly (was universally `Color:(0,0,0,0)` before this fix, since the
+  border color was never swizzled at all).
+- A broader 150-case random sample across `opaque_black`/`opaque_white`/
+  `transparent_black` (every format CTS generates a border-swizzle case
+  for) -- **35 Pass / 33 Fail / 82 NotSupported**. Of the 33 fails, 26
+  are `VK_ERROR_INITIALIZATION_FAILED` at pipeline/compute-pipeline
+  creation, an already-tracked, separate L125(c) bucket (confirmed not
+  the same root cause -- this fix never touches pipeline creation), and
+  7 are a **newly-discovered, distinct** root cause: a format lacking a
+  full alpha (or full RGB) channel -- `d16_unorm`, `r16_sfloat`,
+  `r16g16_sfloat`, `r32_sfloat`, `r32g32b32_sfloat` -- doesn't get its
+  border color's missing channels re-defaulted (alpha to `1`, per core
+  Vulkan's "conversion to RGBA" rule) before the swizzle applies, since
+  `mapBorderColor`/`Sampler::Sampler` (Image.cpp) bakes a fixed,
+  format-independent `float[4]` at *sampler* creation time -- before
+  which image it will ever sample is even known. Split out as new
+  roadmap row **L125(e)**, since it's a genuinely separate bug (a
+  missing-channel default, not a swizzle-application gap) discovered
+  only while verifying this fix, not part of this fix's own original
+  scope.
+
+Internal correctness fix, not new Vulkan feature/extension surface --
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged (`VK_EXT_border_color_swizzle` itself is still not
+implemented; this fix is purely the core-spec-mandated swizzle/alpha
+behavior for the two extension-independent border-color kinds).
+
+`Roadmap.md`'s L125(d) row is marked done, with its own residual gap
+split to new row L125(e) rather than left implicit. See
+`agent_thoughts.md` for the full narrative and next steps.

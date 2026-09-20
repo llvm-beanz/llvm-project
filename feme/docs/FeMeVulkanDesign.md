@@ -3709,6 +3709,32 @@ block-aligned extent and a bytes-per-block stride first. Tracked as part
 of roadmap E20's scope rather than a narrowing of this milestone, since no
 compressed format was ever in V5's own goals above.
 
+**Roadmap L125(d)** closed another pre-existing narrowing: `ImageView`
+used to drop `VkImageViewCreateInfo::components` entirely (every image
+view was, in effect, always identity-swizzled). It now stores the mapping
+verbatim (`ImageView::components()`, Image.h), and
+`materializeImageDescriptor` (CommandBuffer.cpp) packs it into
+`FemeImageDescriptor::Swizzle` (`resolveImageSwizzle`), which
+`femeRTFetchTexel2D`/`femeRTFetchTexel3D` (FeMeRuntimeCPU.c) apply to a
+synthesized border color (`SamplerAddressMode::ClampToBorder` resolving
+out of range) via `femeRTApplyImageSwizzle` -- matching core Vulkan's own
+rule that a `VK_BORDER_COLOR_*_TRANSPARENT_BLACK`/`*_OPAQUE_WHITE` border
+is swizzled by the image view's own component mapping with no
+`VK_EXT_border_color_swizzle` needed (`*_OPAQUE_BLACK`/custom border
+colors do need that extension for a non-identity swizzle -- still
+unimplemented, `vkCreateSampler` still rejects both border-color
+extensions' `pNext` structs unconditionally, see above). **Still
+narrower than full `VkComponentMapping` support**: an in-bounds texel
+fetch does not yet apply this swizzle at all (tracked as roadmap
+L125(e)), and the border color itself is not yet re-expanded per the
+sampled format's own channel count before the swizzle applies -- core
+Vulkan's "conversion to RGBA" rule defaults a format's *missing* channels
+(e.g. alpha, for a 3-component format) to `0`/`1` based on the *sampled
+image's* format, not the nominally-named border color
+(`VK_BORDER_COLOR_*_TRANSPARENT_BLACK` is conceptually `(0,0,0,0)`, but
+samples as `(0,0,0,1)` through an alpha-less format) -- also tracked as
+part of L125(e), discovered by this same investigation.
+
 **Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
 could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This
 milestone's own `feme::vulkan::Image` never gained (and still does not
