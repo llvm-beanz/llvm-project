@@ -57,28 +57,31 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Suggested next steps
 
-1. **(~5 min)** No scratch files created this session outside
-   `/tmp/l124a_repro.mlir` (already existed from before compaction) --
-   nothing new to clean up.
-2. Pick up **L124(b)** next
-   (`dEQP-VK.compute.pipeline.basic.remove_global_load_pass`): a plain
-   `OpConstant`/`OpConstantComposite` used as a module-scope
-   `OpVariable`'s initializer isn't modeled anywhere in the deserializer
-   -- needs a new attribute on `spirv.GlobalVariable` (alongside
-   `initializer`/`zero_initialized`) plus matching serializer/
-   `SPIRVToLLVM` lowering support. Not yet scoped in more detail than
-   the roadmap entry itself -- start there.
-3. Alternatively, **L124(c)**
-   (`dEQP-VK.compute.pipeline.basic.undefined_values`, `OpCopyLogical`
-   entirely unmodeled) or **L124(d)**
-   (`dEQP-VK.compute.pipeline.device_group.device_index`, `gl_DeviceIndex`
-   not wired up in the CPU compute pipeline) are the other two
-   remaining `compute.*` items -- each is a standalone feature gap, not
-   yet started, roughly similar scope to L124(b).
-4. The 2 `zero_initialize_workgroup_memory` fails
-   (`composites.2`, `types.bool`) seen in this session's sweep aren't
-   yet broken out as their own roadmap letter -- worth adding a new
-   L124 sub-item for them if picked up, since they weren't touched
-   this session and their root cause is unconfirmed.
+1. **(~5 min)** Scratch files from this session:
+   `/tmp/l124b_wholearray.mlir` (superseded by the committed lit test,
+   safe to delete) and `/tmp/ctsrun/l124b_confirm2.qpa`/
+   `l124b_final.qpa`/`l124b_test_glob.qpa`/`l124b_compute_full.qpa`
+   (+`.stdout`) -- none referenced by anything committed.
+2. Pick up **L124(c)** next
+   (`dEQP-VK.compute.pipeline.basic.undefined_values`): `OpCopyLogical`
+   (opcode 400, SPIR-V 1.4) is entirely unmodeled in MLIR's SPIR-V
+   dialect -- needs a new `spirv.CopyLogical` ODS op, verifier,
+   deserializer/serializer autogen wiring, and an `SPIRVToLLVM`
+   lowering pattern (likely per-leaf `extractvalue`/`insertvalue`
+   decomposition between two logically-compatible-but-not-identical
+   aggregate types, mirroring L116(a)'s masked load/store
+   decomposition). Roadmap has this scoped already; start there.
+3. Alternatively, **L124(d)**
+   (`dEQP-VK.compute.pipeline.device_group.device_index`):
+   `gl_DeviceIndex` isn't wired up anywhere in feme's CPU compute
+   pipeline (`grep -rl DeviceIndex feme/lib` only finds graphics-stage
+   hits). Likely trivial to report `DeviceIndex = 0` unconditionally
+   if feme's CPU backend never models more than one physical device,
+   but not yet confirmed -- needs a little research into
+   `VK_KHR_device_group` support first.
+4. The 2 `zero_initialize_workgroup_memory` fails (`composites.2`,
+   `types.bool`) still aren't broken out as their own roadmap letter --
+   worth adding one if picked up, since neither this nor prior sessions
+   have touched them and their root cause is unconfirmed.
 5. `ninja check-feme` and the CTS build directories are both
    incremental from here -- reuse them, no reconfigure needed.
