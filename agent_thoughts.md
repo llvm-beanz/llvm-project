@@ -94118,3 +94118,104 @@ from before.)
    `compute.*`.
 4. `ninja check-feme` and the CTS build directories are both
    incremental from here -- reuse them, no reconfigure needed.
+
+# Session: L124(v) -- bool/bvec Workgroup globals, closing the L124 series
+
+Confirmed `FeMe CPU Vulkan Device` first, cleaned up prior session's
+scratch files (`/tmp/l124c_*.mlir`, `/tmp/l124c_undef.qpa`,
+`/tmp/ctsrun/l124c_compute_sweep.*`).
+
+## What got fixed
+
+`dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.{composites.2,
+types.bool}` -- the last 2 `compute.*` fails, closing out the entire
+L124 series.
+
+**Note**: the prior session's own scoping mis-tagged these as
+`shader_object_spirv.*` cases. Re-confirmed via a direct sweep that
+`shader_object_spirv.*` is `NotSupported` (VK_EXT_shader_object
+unimplemented) -- the real failing variant is `compute.pipeline.*`.
+Corrected in `Roadmap.md`.
+
+## Root cause
+
+`WorkgroupGlobalVariablePattern`'s own `containsAddressableBool` guard
+outright rejected any `Workgroup`-storage global containing an `i1`
+anywhere (scalar, struct member, or array element), on the assumption
+that `getelementptr` into an `i1` is unsound (1-bit, "not byte-
+addressable"). Empirically tested this assumption directly -- built a
+minimal repro (scalar `i1` global, struct with an `i1` member, struct
+with a `bvec2` member) with the guard temporarily disabled, converted
+it all the way to LLVM IR via `mlir-translate -mlir-to-llvmir`, and
+ran LLVM's own IR verifier (`opt -passes=verify`) on it: **clean, no
+errors**. The assumption was wrong: a struct member's `getelementptr`
+index is a fixed byte offset baked into the struct's own layout
+(never a runtime multiply-by-element-size the way array/vector
+indexing is), and LLVM's data layout already reserves a full byte for
+an `i1`'s own storage. Confirmed both real CTS cases pass directly
+once the guard is removed, before committing anything.
+
+The one shape that genuinely can't use `getelementptr` -- indexing a
+single lane out of a `bool` *vector* -- was never even covered by this
+guard's own struct/array-only recursion in the first place (it never
+checked `VectorType`), and turns out to already be handled correctly
+by pre-existing infrastructure
+(`BoolVectorLaneAccessChainPattern`/`BoolVectorLaneLoadPattern`/
+`BoolVectorLaneStorePattern`, added for an earlier roadmap item,
+L102) -- full-vector load/store plus `extractelement`/`insertelement`,
+never a lane-indexing GEP.
+
+## Why I trust removing this guard
+
+I didn't just delete it and hope -- I:
+1. Built 3 separate empirical repros (scalar `i1`, struct member `i1`,
+   struct member array-of-`i1`) and verified each one translates to
+   valid, verifier-clean LLVM IR.
+2. Confirmed both real CTS cases pass directly with the guard removed,
+   before writing any test or committing.
+3. Ran the full `ninja check-feme` regression suite (3,219/3,222,
+   0 regressions).
+4. Re-swept **both** `compute.*` (61,460 cases) and `ssbo.*` (12,225
+   cases, since the struct-conversion code this touches is shared) --
+   0 regressions in either, both fully clean now.
+
+## Docs updated
+
+- `Roadmap.md`: struck through L124(v). **The entire L124 series
+  (`compute.*` and `ssbo.*`) is now closed** -- both families are
+  100% `Fail`-free.
+- `VulkanCTSReport.md`: new session narrative with both sweep results.
+- No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+  changes needed -- an internal correctness fix, no new Vulkan
+  surface.
+
+## Commits this session (3, each small/separate)
+
+1. `[feme] Allow bool/bvec members in Workgroup globals (L124(v))` --
+   the fix itself + rewritten lit test.
+2. `[feme] Update Roadmap/VulkanCTSReport for L124(v)`.
+3. This commit: `agent_thoughts.md`.
+
+## Suggested next steps
+
+1. **(~2 min)** No scratch files left behind this session -- all
+   cleaned up as part of this same commit's work (repro `.mlir`/`.ll`
+   files, CTS sweep logs already deleted since their results are fully
+   captured in `VulkanCTSReport.md`).
+2. **The L124 series is fully closed.** Two candidates for what's
+   next, by priority:
+   - **L125** (P2, higher priority): triage `pipeline.monolithic.*`
+     (465,554 cases, never sampled at all this milestone series --
+     large, needs its own first bucketing pass before any concrete
+     repro can be picked, mirroring how L106/L123 approached
+     `subgroups.*`/`compute.*`).
+   - **L126** (P3, quick win): finish (or formally re-scope)
+     `subgroups.ballot_broadcast.*`'s own sweep, abandoned mid-run in
+     a prior session -- likely under an hour to close out, probably
+     folds into L106's existing "no real bugs in `subgroups.*`"
+     conclusion but not yet confirmed for this specific subfamily.
+   Given L125's size, a future session might want to knock out L126
+   first (quick, bounded) before committing to L125's larger triage
+   effort.
+3. `ninja check-feme` and the CTS build directories are both
+   incremental from here -- reuse them, no reconfigure needed.
