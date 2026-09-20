@@ -5106,3 +5106,88 @@ surface, so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
 and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
 unchanged and still accurate. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## Session: L124(a) fixed -- `spirv.ArrayLength` against a real multi-field storage block, closes `compute.*`'s `read_unbound_ssbo`
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` (as required
+at the start of every session) before making any changes:
+
+```
+# => FeMe CPU Vulkan Device
+```
+
+With the entire L124 `ssbo.*`/`ubo.*` triage series closed by the prior
+session's L124(u) fix, surveyed `Roadmap.md` for the next unstarted item
+and picked **L124(a)**: `dEQP-VK.compute.pipeline.basic.read_unbound_ssbo`,
+failing because `spirv.ArrayLength`'s `ArrayLengthPattern`
+(`SPIRVToLLVMPatterns.cpp`) rejected any `array_member != 0`, on the false
+assumption (like a similar one L119 corrected) that a runtime array is
+always its enclosing struct's sole member. The real CTS shader is
+`SSBO_1 { vec4 data; uint not_set[]; }`, a genuine multi-field block whose
+runtime array is legally member 1 -- the struct's own *last* member, the
+only position SPIR-V/Vulkan validation rules ever allow a runtime array to
+occupy.
+
+Fixed across three layers, exactly as the roadmap's own prior scoping
+(from an earlier session) had already laid out:
+
+1. **`ArrayLengthPattern`** (`SPIRVToLLVMPatterns.cpp`): relaxed the check
+   from "member 0 only" to "member must be the pointee struct's own last
+   element index" -- 0 for a one-member wrapper, or the real last index
+   for a multi-field block. Both are legal; no other value ever is.
+2. **`SPIRVResourceLowering.cpp`**: extended `hasOnlySupportedUses`'s and
+   `lowerAccesses`'s `isGetArrayLengthIntrinsic` special-cases from
+   `HandleKind::Storage`-only to also accept `HandleKind::StorageStruct`.
+   For the `StorageStruct` case, `lowerAccesses` now derives the runtime
+   array's element stride and byte prefix fresh from `BH.ElementStruct`'s
+   own last member (its `ArrayType` element's store size, and
+   `StructLayout::getElementOffset` for the prefix) instead of reusing
+   `BH.Stride`/`0` as the pre-existing `Storage` case does.
+3. **`ResourceCalls.h`/`.cpp` and `FeMeRuntimeCPU.c`**: threaded a new
+   `PrefixOffset` operand through `createGetDimensionsRaw` and the shared
+   `createCall` helper (all ~10 call sites updated to pass `nullptr`
+   except this one), and updated `femeCpuResourceGetDimensionsRawI32` to
+   compute `(SizeInBytes - PrefixOffset) / Stride` *inside* the runtime
+   function itself, with an explicit underflow guard
+   (`SizeInBytes < PrefixOffset`). This is deliberate, not incidental:
+   doing the subtraction via ordinary IR arithmetic around the call
+   would make an unbound descriptor's `0 - PrefixOffset` wrap around to
+   a huge value instead of staying `0`, silently breaking the existing
+   "reads as 0 if invalid" convention every other resource-dimension
+   query already relies on.
+
+New/updated tests: a second case in
+`spirv-to-llvm-array-length.mlir` (conversion layer, the real multi-field
+block shape); a new `spirv-resource-lowering-array-length-struct.ll`
+(resource-lowering layer, `HandleKind::StorageStruct` shape, confirming
+the derived stride=4/prefix=16 values match the real struct's own
+layout); and an updated `CHECK` line in the pre-existing
+`spirv-resource-lowering-array-length.ll` (the one-member-wrapper
+`HandleKind::Storage` case) for the new prefix operand, confirming no
+regression to that shape.
+
+Results:
+
+- `ninja check-feme`: **3,217/3,220 Passed, 3 Unsupported, 0 Failed**
+  (+1 from the new lit test, 0 regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` again before running any CTS
+  cases, with the freshly-built ICD.
+- The originally-failing test,
+  `dEQP-VK.compute.pipeline.basic.read_unbound_ssbo`: now **Passes**
+  (was failing `spirv.ArrayLength` legalization), confirmed by running
+  it directly via `deqp-vk --deqp-case=...`.
+- `compute.*` (61,460 cases): **680 Pass / 5 Fail / 60,775 NotSupported**
+  -- was 679/6/60,775 before this session's fix: **+1 Pass, 0
+  regressions**. The remaining 5 fails are exactly L124(b)
+  (`remove_global_load_pass`), L124(c) (`undefined_values`), L124(d)
+  (`device_index`), and the 2 still-open `zero_initialize_workgroup_memory`
+  cases (`composites.2`, `types.bool`) -- all previously known, unchanged.
+
+No feature or extension inventory changes: this session's fix is an
+internal SPIR-V-to-LLVM/resource-lowering correctness fix (a
+previously-too-narrow legality check plus a missing byte-prefix
+capability in an existing runtime call), not new Vulkan feature/extension
+surface, so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
+and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
+unchanged and still accurate. See `agent_thoughts.md` for the full
+narrative and next steps.
