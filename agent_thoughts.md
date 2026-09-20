@@ -95215,3 +95215,39 @@ Picked up mid-implementation work from a prior compaction: L125(k) (integer-samp
 3. **L125(c)** remains the largest untouched scope: ASTC/EAC/ETC2 image mismatches, two distinct `VK_ERROR_INITIALIZATION_FAILED` sites (`createGraphicsPipelines` vs. `createComputePipelines`), and a `vktPipelineBindPointTests.cpp` bucket -- a good pick if both L125(i) and L125(l) stall.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 5. Clean up `/tmp/ctsrun/l125k/*.qpa` (this session's own scratch CTS logs) before ending a future session, if not already gone.
+
+# Session: L125(l) re-scope, L125(i) closed, L125(o) pipeline-cache-key fix
+
+**FeMe CPU Vulkan Device confirmed** via `vulkaninfo --summary | grep deviceName` at session start.
+
+Continued from the prior session's 3-item next-steps list (L125(i), L125(l), L125(c)). Worked all three in order; the third turned into the real find.
+
+## What got done, in order
+
+1. **L125(l)** (`ConstOffsets`/plural gather offsets): root-caused to the *shared upstream* MLIR+LLVM SPIR-V target layer, not feme's own code -- `ImageGatherPattern` only accepts singular `ConstOffset`, `int_spv_resource_gather` has a fixed single-offset shape, and `SPIRVInstructionSelector::selectGatherIntrinsic` never emits `ConstOffsets` at all. Confirmed via a whole-backend grep that the bit exists in td files but has zero lowering consumers anywhere. Re-scoped `Roadmap.md`'s L125(l) row and split the remaining work into **L125(m)** (upstream plumbing) and **L125(n)** (feme's own consumption, blocked on L125(m)). Committed.
+2. **L125(i)** (`SampleCmp*`/`GatherCmp*` depth-compare swizzle): did the decisive final search. `vktShaderRenderTextureGatherTests.cpp`'s swizzle branch only generates for non-depth formats; its separate compare-mode branch always hardcodes identity swizzle -- structurally mutually exclusive, not just under-tested. Combined with 2 prior sessions' negative searches elsewhere: **no CTS version anywhere combines depth-compare with a non-identity swizzle.** Struck through L125(i) in `Roadmap.md` as decisively deferred. Committed.
+3. **L125(c)** (largest untriaged bucket): ran `sampler.border_swizzle.r8g8b8a8_unorm.*` (1,280 cases): 357 Pass, 13 Fail. All 13 fails were `no_gather.no_swizzle_hint` cases. Isolating one failing case made it Pass; running it after another test made it Fail -- **test-order-dependent**, not stateless. Bisected to a 2-test repro. The failing test's wrong `Color` was byte-identical to the *preceding* test's correct `Color` -- proof of stale cached compiled code.
+
+## The real find: L125(o)
+
+Root cause: `computeGraphicsPipelineCacheKey` (`PipelineCache.cpp`) never hashed a stage's `VkSpecializationInfo` at all -- unlike its compute sibling, which already hashes an `Overrides` list. `compileGraphicsStage` genuinely folds spec constants into compiled code, contradicting `PipelineCache.h`'s own stale doc comment claiming graphics stages have none to fold in. Two pipelines sharing a module/entry point but different spec-constant values collided on the same cache key.
+
+Fix: added a shared `hashSpecializationOverrides` helper (now used by both cache-key functions), threaded a `SpecializationOverride` list per stage (7 stages) through `computeGraphicsPipelineCacheKey`, updated the one call site in `GraphicsPipeline.cpp` to build each stage's overrides via the existing `buildSpecializationOverrides` helper (a validation failure falls back to an empty list -- caching skipped, `compileGraphicsStage` surfaces the real error later, same pattern already used for inline shader modules). Corrected the stale doc comment.
+
+New test: `GraphicsPipelineTest.DifferingSpecializationDataIsACacheMiss`.
+
+`ninja check-feme`: 3,258/3,261 Passed, 3 Unsupported, 0 Failed (+1 test, 0 regressions).
+
+## Wins visible right now
+
+- `sampler.border_swizzle.r8g8b8a8_unorm.*`: **370/370 Pass, 0 Fail** (was 357/13).
+- Full `sampler.border_swizzle.*` across every format: **619/619 Pass, 0 Fail**.
+- This is a general correctness bug (any graphics pipeline pair sharing a module with differing spec constants), not scoped to swizzles -- likely explains some of L125(c)'s other still-open buckets too.
+- 5 commits landed this session (2 roadmap re-scope/closure, 1 code fix, 1 test, 1 docs), each independently buildable/testable.
+
+## Next steps
+
+1. **(~15-20 min)** Re-sample `L125(c)`'s remaining buckets now that the cache-key bug is fixed: ASTC/EAC/ETC2 image mismatches, the two `VK_ERROR_INITIALIZATION_FAILED` sites (`createGraphicsPipelines` vs `createComputePipelines`), and `vktPipelineBindPointTests.cpp` -- some may have been this same cache bug in disguise; re-triage before assuming the old counts still hold.
+2. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is the next real scoped-out gather gap -- larger, cross-repo work, not a quick pick.
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+4. This session's own scratch CTS logs (`/tmp/ctsrun/l125o/*`, `/tmp/ctsrun/l125c/*`) and the regenerated `dEQP-VK-cases.xml` build artifact are already cleaned up -- nothing to do here.
