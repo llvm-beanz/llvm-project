@@ -2454,15 +2454,20 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
           DimsCI && isGetDimensions1Intrinsic(*DimsCI))
         continue;
     }
-    // (Roadmap H160) A storage buffer's own bare `getarraylength` call is
-    // likewise not a `getpointer`-mediated access -- see
-    // `isGetArrayLengthIntrinsic`'s comment. Scoped to `HandleKind::Storage`
-    // only (the one-member runtime-array wrapper `StructuredBuffer`/
-    // `ByteAddressBuffer` classify as) -- `StorageStruct`'s own direct-field
-    // struct block has no single well-defined element `Stride` the way
-    // `Storage` already tracks, and neither `dxc` nor glslang is known to
-    // emit `OpArrayLength` against that shape.
-    if (Kind == HandleKind::Storage) {
+    // (Roadmap H160, extended by L124(a)) A storage buffer's own bare
+    // `getarraylength` call is likewise not a `getpointer`-mediated access
+    // -- see `isGetArrayLengthIntrinsic`'s comment. Scoped to
+    // `HandleKind::Storage` (the one-member runtime-array wrapper
+    // `StructuredBuffer`/`ByteAddressBuffer` classify as) and
+    // `HandleKind::StorageStruct` (a real, multi-field storage-buffer
+    // block whose own last member is the runtime array, e.g. `struct
+    // SSBO_1 { vec4 data; uint not_set[]; }`, confirmed via `dEQP-VK.
+    // compute.pipeline.basic.read_unbound_ssbo`'s own real shader) --
+    // `lowerAccesses` below computes `StorageStruct`'s own element stride
+    // and byte-prefix directly from `BH.ElementStruct`'s own last member,
+    // rather than relying on a single, whole-handle `Stride` the way
+    // `Storage` already does.
+    if (Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct) {
       if (const auto *LenCI = dyn_cast<CallInst>(U);
           LenCI && isGetArrayLengthIntrinsic(*LenCI))
         continue;
@@ -3261,18 +3266,46 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
         continue;
       }
     }
-    // (Roadmap H160) A storage buffer's own bare `getarraylength` call --
-    // see `hasOnlySupportedUses`'s matching special-case comment -- reads
-    // no element either: lower it directly to `createGetDimensionsRaw`,
-    // dividing the descriptor's own byte size by this handle's already-
-    // known element `Stride`, and move on to the handle's next user.
-    if (BH.Kind == HandleKind::Storage) {
+    // (Roadmap H160, extended by L124(a)) A storage buffer's own bare
+    // `getarraylength` call -- see `hasOnlySupportedUses`'s matching
+    // special-case comment -- reads no element either: lower it directly
+    // to `createGetDimensionsRaw`. `HandleKind::Storage`'s own one-member
+    // wrapper has no other fields ahead of its runtime array, so the
+    // whole descriptor's byte size divides straight by the handle's
+    // already-known element `Stride` with no prefix to subtract first.
+    // `HandleKind::StorageStruct`'s own real, multi-field block instead
+    // needs both derived fresh here: the runtime array's own element
+    // stride (from `BH.ElementStruct`'s own last member -- always an
+    // `ArrayType`, the substituted runtime-array shape
+    // `convertBufferBlockType` produces) and that same last member's own
+    // declared byte offset (from `BH.ElementStruct`'s `StructLayout`),
+    // subtracted from the descriptor's whole byte size before dividing
+    // by the stride -- computed inside the runtime call itself (not via
+    // ordinary IR arithmetic around it), since an unbound descriptor's
+    // `SizeInBytes` reads as `0` and naive post-hoc subtraction would
+    // wrap around to a huge value instead of staying `0`.
+    if (BH.Kind == HandleKind::Storage || BH.Kind == HandleKind::StorageStruct) {
       if (auto *LenCI = dyn_cast<CallInst>(U);
           LenCI && isGetArrayLengthIntrinsic(*LenCI)) {
         IRBuilder<> Builder(LenCI);
-        Value *Stride = ConstantInt::get(I64Ty, BH.Stride);
-        CallInst *Len = createGetDimensionsRaw(
-            Builder, Env, DescriptorIndex, Stride, Mask, LenCI->getName());
+        Value *Stride;
+        Value *PrefixOffset;
+        if (BH.Kind == HandleKind::Storage) {
+          Stride = ConstantInt::get(I64Ty, BH.Stride);
+          PrefixOffset = ConstantInt::get(I64Ty, 0);
+        } else {
+          unsigned LastIdx = BH.ElementStruct->getNumElements() - 1;
+          auto *ArrTy =
+              cast<ArrayType>(BH.ElementStruct->getElementType(LastIdx));
+          const StructLayout *SL = DL.getStructLayout(BH.ElementStruct);
+          Stride =
+              ConstantInt::get(I64Ty, DL.getTypeStoreSize(ArrTy->getElementType()));
+          PrefixOffset =
+              ConstantInt::get(I64Ty, SL->getElementOffset(LastIdx));
+        }
+        CallInst *Len =
+            createGetDimensionsRaw(Builder, Env, DescriptorIndex, Stride,
+                                   PrefixOffset, Mask, LenCI->getName());
         LenCI->replaceAllUsesWith(Len);
         LenCI->eraseFromParent();
         continue;

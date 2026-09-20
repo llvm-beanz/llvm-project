@@ -181,14 +181,18 @@ Function *feme::cpu::getOrInsertResourceCall(Module &M, ResourceCallKind Kind,
   // takes no element index/byte offset at all, since it addresses no
   // particular element (`GetDimensionsRaw`, roadmap H160, still takes this
   // operand, but repurposed to carry a stride rather than an offset -- see
-  // that kind's own doc); loads return `ElementType` with no trailing value
-  // operand, an ordinary store instead takes it as a trailing value operand
-  // ahead of the mask (see "Lowering"), and an atomic (roadmap H8w/H8x)
-  // takes it too but *also* returns `ElementType` (the pre-op value) --
-  // `isCompareExchange(Kind)` alone takes a second, leading comparator
-  // operand ahead of the value.
+  // that kind's own doc, and takes a *second* trailing `i64` operand of its
+  // own, a byte prefix to subtract before dividing, roadmap L124(a));
+  // loads return `ElementType` with no trailing value operand, an ordinary
+  // store instead takes it as a trailing value operand ahead of the mask
+  // (see "Lowering"), and an atomic (roadmap H8w/H8x) takes it too but
+  // *also* returns `ElementType` (the pre-op value) -- `isCompareExchange
+  // (Kind)` alone takes a second, leading comparator operand ahead of the
+  // value.
   SmallVector<Type *, 6> Params = {PtrTy, I32Ty, I32Ty};
   if (Kind != ResourceCallKind::GetDimensionsTyped)
+    Params.push_back(I64Ty);
+  if (Kind == ResourceCallKind::GetDimensionsRaw)
     Params.push_back(I64Ty);
   Type *RetTy = Type::getVoidTy(Ctx);
   if (isLoad(Kind)) {
@@ -232,8 +236,8 @@ Function *feme::cpu::getOrInsertResourceCall(Module &M, ResourceCallKind Kind,
 
 static CallInst *createCall(IRBuilderBase &Builder, ResourceCallKind Kind,
                             const ResourceCallEnv &Env, Value *DescriptorIndex,
-                            Value *Offset, Value *Comparator,
-                            Value *StoredValue, Value *Mask,
+                            Value *Offset, Value *PrefixOffset,
+                            Value *Comparator, Value *StoredValue, Value *Mask,
                             Type *ElementType, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertResourceCall(*M, Kind, ElementType);
@@ -241,6 +245,8 @@ static CallInst *createCall(IRBuilderBase &Builder, ResourceCallKind Kind,
                                   DescriptorIndex};
   if (Kind != ResourceCallKind::GetDimensionsTyped)
     Args.push_back(Offset);
+  if (Kind == ResourceCallKind::GetDimensionsRaw)
+    Args.push_back(PrefixOffset);
   if (isCompareExchange(Kind))
     Args.push_back(Comparator);
   if (!isLoad(Kind))
@@ -255,7 +261,8 @@ CallInst *feme::cpu::createTypedLoad(IRBuilderBase &Builder,
                                      Value *ElementIndex, Value *Mask,
                                      Type *ElementType, const Twine &Name) {
   return createCall(Builder, ResourceCallKind::LoadTyped, Env, DescriptorIndex,
-                    ElementIndex, /*Comparator=*/nullptr,
+                    ElementIndex, /*PrefixOffset=*/nullptr,
+                    /*Comparator=*/nullptr,
                     /*StoredValue=*/nullptr, Mask, ElementType, Name);
 }
 
@@ -265,7 +272,8 @@ CallInst *feme::cpu::createTypedStore(IRBuilderBase &Builder,
                                       Value *ElementIndex, Value *StoredValue,
                                       Value *Mask) {
   return createCall(Builder, ResourceCallKind::StoreTyped, Env, DescriptorIndex,
-                    ElementIndex, /*Comparator=*/nullptr, StoredValue, Mask,
+                    ElementIndex, /*PrefixOffset=*/nullptr,
+                    /*Comparator=*/nullptr, StoredValue, Mask,
                     StoredValue->getType(), "");
 }
 
@@ -275,18 +283,21 @@ CallInst *feme::cpu::createGetDimensionsTyped(IRBuilderBase &Builder,
                                               Value *Mask, const Twine &Name) {
   Type *I32Ty = Type::getInt32Ty(Builder.getContext());
   return createCall(Builder, ResourceCallKind::GetDimensionsTyped, Env,
-                    DescriptorIndex, /*Offset=*/nullptr, /*Comparator=*/nullptr,
+                    DescriptorIndex, /*Offset=*/nullptr,
+                    /*PrefixOffset=*/nullptr, /*Comparator=*/nullptr,
                     /*StoredValue=*/nullptr, Mask, I32Ty, Name);
 }
 
 CallInst *feme::cpu::createGetDimensionsRaw(IRBuilderBase &Builder,
                                             const ResourceCallEnv &Env,
                                             Value *DescriptorIndex,
-                                            Value *Stride, Value *Mask,
+                                            Value *Stride,
+                                            Value *PrefixOffset, Value *Mask,
                                             const Twine &Name) {
   Type *I32Ty = Type::getInt32Ty(Builder.getContext());
   return createCall(Builder, ResourceCallKind::GetDimensionsRaw, Env,
-                    DescriptorIndex, /*Offset=*/Stride, /*Comparator=*/nullptr,
+                    DescriptorIndex, /*Offset=*/Stride, PrefixOffset,
+                    /*Comparator=*/nullptr,
                     /*StoredValue=*/nullptr, Mask, I32Ty, Name);
 }
 
@@ -296,7 +307,8 @@ CallInst *feme::cpu::createRawLoad(IRBuilderBase &Builder,
                                    Value *Mask, Type *ElementType,
                                    const Twine &Name) {
   return createCall(Builder, ResourceCallKind::LoadRaw, Env, DescriptorIndex,
-                    ByteOffset, /*Comparator=*/nullptr,
+                    ByteOffset, /*PrefixOffset=*/nullptr,
+                    /*Comparator=*/nullptr,
                     /*StoredValue=*/nullptr, Mask, ElementType, Name);
 }
 
@@ -305,7 +317,8 @@ CallInst *feme::cpu::createRawStore(IRBuilderBase &Builder,
                                     Value *DescriptorIndex, Value *ByteOffset,
                                     Value *StoredValue, Value *Mask) {
   return createCall(Builder, ResourceCallKind::StoreRaw, Env, DescriptorIndex,
-                    ByteOffset, /*Comparator=*/nullptr, StoredValue, Mask,
+                    ByteOffset, /*PrefixOffset=*/nullptr,
+                    /*Comparator=*/nullptr, StoredValue, Mask,
                     StoredValue->getType(), "");
 }
 
@@ -318,8 +331,8 @@ static CallInst *createAtomicTyped(IRBuilderBase &Builder,
                                    Value *ElementIndex, Value *Val,
                                    Value *Mask, const Twine &Name) {
   return createCall(Builder, Kind, Env, DescriptorIndex, ElementIndex,
-                    /*Comparator=*/nullptr, Val, Mask, Val->getType(),
-                    Name);
+                    /*PrefixOffset=*/nullptr, /*Comparator=*/nullptr, Val,
+                    Mask, Val->getType(), Name);
 }
 
 CallInst *feme::cpu::createAtomicAddTyped(IRBuilderBase &Builder,
@@ -418,8 +431,8 @@ CallInst *feme::cpu::createAtomicCompareExchangeTyped(
     Value *DescriptorIndex, Value *ElementIndex, Value *Comparator,
     Value *Val, Value *Mask, const Twine &Name) {
   return createCall(Builder, ResourceCallKind::AtomicCompareExchangeTyped, Env,
-                    DescriptorIndex, ElementIndex, Comparator, Val, Mask,
-                    Val->getType(), Name);
+                    DescriptorIndex, ElementIndex, /*PrefixOffset=*/nullptr,
+                    Comparator, Val, Mask, Val->getType(), Name);
 }
 
 /// Shared body for every `createAtomic*Raw` builder (roadmap H8x): they
@@ -429,7 +442,8 @@ static CallInst *createAtomicRaw(IRBuilderBase &Builder, ResourceCallKind Kind,
                                  Value *DescriptorIndex, Value *ByteOffset,
                                  Value *Val, Value *Mask, const Twine &Name) {
   return createCall(Builder, Kind, Env, DescriptorIndex, ByteOffset,
-                    /*Comparator=*/nullptr, Val, Mask, Val->getType(), Name);
+                    /*PrefixOffset=*/nullptr, /*Comparator=*/nullptr, Val,
+                    Mask, Val->getType(), Name);
 }
 
 CallInst *feme::cpu::createAtomicAddRaw(IRBuilderBase &Builder,
@@ -527,8 +541,8 @@ CallInst *feme::cpu::createAtomicCompareExchangeRaw(
     Value *DescriptorIndex, Value *ByteOffset, Value *Comparator, Value *Val,
     Value *Mask, const Twine &Name) {
   return createCall(Builder, ResourceCallKind::AtomicCompareExchangeRaw, Env,
-                    DescriptorIndex, ByteOffset, Comparator, Val, Mask,
-                    Val->getType(), Name);
+                    DescriptorIndex, ByteOffset, /*PrefixOffset=*/nullptr,
+                    Comparator, Val, Mask, Val->getType(), Name);
 }
 
 std::optional<MatchedResourceCall>

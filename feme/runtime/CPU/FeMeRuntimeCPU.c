@@ -1074,40 +1074,30 @@ __attribute__((always_inline)) uint32_t femeCpuResourceGetDimensionsTypedI32(
   return (uint32_t)(Desc.SizeInBytes / ElemSize);
 }
 
-// `feme.cpu.resource.getdimensions.raw.i32` (roadmap H160): a raw or
-// structured buffer's own `GetDimensions` -- `ByteAddressBuffer`'s
-// `GetDimensions(out uint numBytes)` and `StructuredBuffer<T>`'s
-// `GetDimensions(out uint numStructs, out uint stride)` both reduce to
-// this single call (SPIR-V `OpArrayLength`, `ArrayLengthPattern` in
-// SPIRVToLLVMPatterns.cpp), unlike
-// `femeCpuResourceGetDimensionsTypedI32`'s own format-based sibling above:
-// a raw/structured buffer's descriptor likewise carries no separate
-// element-count field, but its element stride is not recoverable from the
-// descriptor's own `Format` (raw/structured views carry none) -- the
-// caller (`SPIRVResourceLowering.cpp`'s `lowerAccesses`) instead passes
-// the already-known element `Stride` (`BoundHandle::Stride`, the same
-// value ordinary element load/store byte-offset arithmetic already uses)
-// directly as an operand. `ByteAddressBuffer`'s own byte-count result
-// needs no distinct handling here: a real `dxc -spirv` reduction confirmed
-// `dxc`'s own codegen already emits an explicit `OpIMul` by the element
-// size after `OpArrayLength`, so this function's raw element-count return
-// value is exactly what every caller (`ByteAddressBuffer`'s
-// `dxc`-synthesized multiply, or `StructuredBuffer<T>`'s direct
-// `numStructs` use) expects unscaled. An unbound handle (`!Data`), an
-// inactive lane, or a zero `Stride` all read as `0`, mirroring
-// `femeCpuResourceGetDimensionsTypedI32`'s own all-zero convention; no
-// bounds check applies, for the same reason that function has none.
+// `feme.cpu.resource.getdimensions.raw.i32` (roadmap H160, extended by
+// L124(a)): a raw or structured buffer's own `GetDimensions` -- see
+// `feme::cpu::ResourceCallKind::GetDimensionsRaw`'s own doc for the
+// operand shape. `PrefixOffset` (`0` for a one-member wrapper handle
+// whose runtime array starts at byte 0, or the array member's own
+// declared byte offset for a real, multi-field storage-buffer block --
+// `SPIRVResourceLowering.cpp`'s `lowerAccesses` computes whichever
+// applies) is subtracted from the descriptor's own declared byte size
+// before dividing by `Stride`, computed here (not by the caller via
+// ordinary IR arithmetic around this call) so an unbound handle's `0`
+// `SizeInBytes` reads as `0` rather than wrapping around to a huge
+// value the naive subtraction would otherwise produce.
 uint32_t femeCpuResourceGetDimensionsRawI32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
-    uint64_t Stride, _Bool Mask) asm("feme.cpu.resource.getdimensions.raw.i32");
+    uint64_t Stride, uint64_t PrefixOffset,
+    _Bool Mask) asm("feme.cpu.resource.getdimensions.raw.i32");
 
 __attribute__((always_inline)) uint32_t femeCpuResourceGetDimensionsRawI32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
-    uint64_t Stride, _Bool Mask) {
+    uint64_t Stride, uint64_t PrefixOffset, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  if (!Mask || !Desc.Data || Stride == 0)
+  if (!Mask || !Desc.Data || Stride == 0 || Desc.SizeInBytes < PrefixOffset)
     return 0;
-  return (uint32_t)(Desc.SizeInBytes / Stride);
+  return (uint32_t)((Desc.SizeInBytes - PrefixOffset) / Stride);
 }
 
 //--- Raw/structured-buffer views ----------------------------------------------

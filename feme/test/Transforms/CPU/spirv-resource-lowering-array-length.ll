@@ -10,8 +10,11 @@
 ; directly to `feme.cpu.resource.getdimensions.raw.i32` against the
 ; handle's own descriptor, with this handle's known per-element `Stride`
 ; (4, from `float`'s store size) passed through as that call's stride
-; operand -- no `getpointer` indirection, and no `ElementIndex`/`Offset`
-; computation, either.
+; operand, and a `0` byte prefix (roadmap L124(a): this one-member wrapper
+; handle's own runtime array starts at byte 0, unlike a real multi-field
+; block's -- see spirv-resource-lowering-array-length-struct.ll) -- no
+; `getpointer` indirection, and no `ElementIndex`/`Offset` computation,
+; either.
 
 target triple = "spirv-unknown-vulkan-compute"
 
@@ -23,7 +26,7 @@ define void @main(i32 %idx) {
   %len = call i32 @llvm.spv.resource.getarraylength.tspirv.VulkanBuffer_a0f32_12_1t(
       target("spirv.VulkanBuffer", [0 x float], 12, 1) %h)
   ; CHECK: call i32 @feme.cpu.resource.getdimensions.raw.i32(
-  ; CHECK-SAME: ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 4, i1 true)
+  ; CHECK-SAME: ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 4, i64 0, i1 true)
   %ptr = call ptr
       @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 %idx)
   %v = sitofp i32 %len to float

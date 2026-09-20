@@ -167,26 +167,27 @@ enum class ResourceCallKind : uint8_t {
   /// own per-lane-masking machinery (which `matchResourceCall` feeds) has
   /// no real case to handle today -- widen this scope if one is found.
   GetDimensionsTyped,
-  /// `feme.cpu.resource.getdimensions.raw.i32` (roadmap H160): a raw or
-  /// structured buffer's own (`ByteAddressBuffer`/`StructuredBuffer<T>`,
-  /// and their `RW`/`Append`/`Consume` variants) `GetDimensions` --
-  /// SPIR-V `OpArrayLength` against the bound storage-buffer handle's own
-  /// runtime-array member. Shaped identically to `LoadRaw` (leading
-  /// (heap, heap_count, descriptor_index) operands, one trailing `i64`
-  /// operand ahead of the mask, no stored value) except that trailing
-  /// operand is the runtime array's element stride in bytes (a
-  /// compile-time constant threaded through from `BoundHandle::Stride`,
-  /// `0` for an unstructured `ByteAddressBuffer`'s own always-`i32`-
-  /// stride view) rather than a byte offset into a particular element,
-  /// and the result is always `i32` (the element count) regardless of
-  /// the buffer's own declared element type, exactly like
-  /// `GetDimensionsTyped`'s own return-type override -- see
-  /// `getOrInsertResourceCall`'s shared operand-building logic, which
-  /// needs no `Kind`-specific special-casing for this kind at all since
-  /// its shape already matches `LoadRaw`'s. Left out of
-  /// `matchResourceCall`'s own `AllKinds` list for the same reason
-  /// `GetDimensionsTyped` is: no known CTS case calls it from inside
-  /// divergent control flow yet.
+  /// `feme.cpu.resource.getdimensions.raw.i32` (roadmap H160, extended by
+  /// L124(a)): a raw or structured buffer's own (`ByteAddressBuffer`/
+  /// `StructuredBuffer<T>`, and their `RW`/`Append`/`Consume` variants)
+  /// `GetDimensions` -- SPIR-V `OpArrayLength` against the bound
+  /// storage-buffer handle's own runtime-array member. Shaped like
+  /// `LoadRaw` (leading (heap, heap_count, descriptor_index) operands, no
+  /// stored value) but with *two* trailing `i64` operands ahead of the
+  /// mask instead of one: the runtime array's own element stride in
+  /// bytes (a compile-time constant threaded through from
+  /// `BoundHandle::Stride` for a one-member wrapper handle, or derived
+  /// fresh from the array's own element type for a real multi-field
+  /// block -- see `createGetDimensionsRaw`'s own doc), and a byte prefix
+  /// to subtract from the descriptor's own declared size before dividing
+  /// by that stride (`0` for a one-member wrapper handle, whose runtime
+  /// array starts at byte 0; the array member's own declared byte offset
+  /// for a real multi-field block, whose array does not). The result is
+  /// always `i32` (the element count) regardless of the buffer's own
+  /// declared element type, exactly like `GetDimensionsTyped`'s own
+  /// return-type override. Left out of `matchResourceCall`'s own
+  /// `AllKinds` list for the same reason `GetDimensionsTyped` is: no
+  /// known CTS case calls it from inside divergent control flow yet.
   GetDimensionsRaw,
 };
 
@@ -296,17 +297,23 @@ llvm::CallInst *createGetDimensionsTyped(llvm::IRBuilderBase &Builder,
                                          llvm::Value *Mask,
                                          const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.resource.getdimensions.raw.i32` call (roadmap H160):
-/// a raw or structured buffer's own element count through descriptor
-/// \p DescriptorIndex, computed at runtime as the descriptor's declared
-/// byte size divided by \p Stride -- see
-/// `ResourceCallKind::GetDimensionsRaw`'s own doc for why this takes a
-/// stride operand (rather than a byte offset, as `createRawLoad`/
-/// `createRawStore` do) and always returns `i32`.
+/// Builds a `feme.cpu.resource.getdimensions.raw.i32` call (roadmap H160,
+/// extended by L124(a)): a raw or structured buffer's own element count
+/// through descriptor \p DescriptorIndex, computed at runtime as
+/// `(descriptor's declared byte size - \p PrefixOffset) / \p Stride`
+/// (clamped to `0` if the subtraction would underflow) -- see
+/// `ResourceCallKind::GetDimensionsRaw`'s own doc for why this takes both a
+/// stride and a prefix-byte-offset operand (rather than a byte offset, as
+/// `createRawLoad`/`createRawStore` do) and always returns `i32`. Pass `0`
+/// for \p PrefixOffset when the handle's runtime array starts at the very
+/// beginning of the descriptor (`HandleKind::Storage`'s own one-member
+/// wrapper shape).
 llvm::CallInst *createGetDimensionsRaw(llvm::IRBuilderBase &Builder,
                                        const ResourceCallEnv &Env,
                                        llvm::Value *DescriptorIndex,
-                                       llvm::Value *Stride, llvm::Value *Mask,
+                                       llvm::Value *Stride,
+                                       llvm::Value *PrefixOffset,
+                                       llvm::Value *Mask,
                                        const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.resource.load.raw.*` call reading a value of type
