@@ -94818,3 +94818,110 @@ this session (didn't have time to hunt one down) -- split out as
    out quickly.
 5. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
+
+# Session: L125(f) -- in-bounds texel fetch component-swizzle fix
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary`. Done.
+
+## What's fixed
+
+Picked up exactly where the last session's L125(f) row left off: only
+the border-color path (L125(d)/(e)) applied an image view's own
+`VkComponentMapping`; an ordinary in-range texel read never consulted
+`Img->Swizzle` at all.
+
+1. **Found a real CTS bucket first** (last session's own next step).
+   `vktPipelineSamplerTests.cpp`'s `SamplerTest` always uses identity
+   mapping -- dead end. The `mag_reduce`/`min_reduce` `comp_*` group is
+   entirely gated behind `VK_EXT_sampler_filter_minmax`'s
+   `filterMinmaxImageComponentMapping`, which FeMe doesn't advertise --
+   all 10 probed cases came back `NotSupported`, also a dead end.
+   `vktPipelineImageViewTests.cpp`'s own `ImageViewTest::swizzle` group
+   was the real one: `dEQP-VK.pipeline.monolithic.image_view.*.
+   component_swizzle.*`, 5,496 non-identity cases. A 42-case probe
+   (`r8g8b8a8_unorm`, all non-identity mappings, all 7 view types) came
+   back **0/42 Pass** -- confirmed a real, sizable, reproducible gap.
+2. **Traced every caller** of `femeRTFetchTexel2D`/`3D`/`1D`/
+   `1DArray`/`femeRTFetchCubeSeamlessTexel` in `FeMeRuntimeCPU.c` (a
+   Python regex scan, iterated a couple of times to catch functions
+   whose return type sits on the previous line and to avoid
+   `femeRTFetchTexel1D(` substring-matching inside
+   `femeRTFetchTexel1DArray(`). Split callers into: `Sample*`-family
+   (needs the swizzle), `Load*`-family (must never swizzle, per spec:
+   `OpImageRead` has no `VkComponentMapping`), and a deferred
+   `SampleCmp*`/`Gather*`/`GatherCmp*` bucket (swizzle interaction with
+   depth-compare and `Component` selection not yet resolved).
+3. **The fix**: a new `ApplySwizzle` bool threaded through the four
+   low-level fetch helpers. `Sample*`-family call sites pass `1`;
+   `Load*`-family and the deferred Cmp/Gather bucket pass `0`. The
+   border branch is gated by the same flag (a no-op change, since
+   `UseBorder` is only ever true for `Sample*`-family callers anyway).
+4. Confirmed Cube/CubeArray storage images don't exist per the Vulkan
+   spec (VUID disallows `Cube` dim for storage images) -- so
+   `femeRTFetchCubeSeamlessTexel` has zero sampled-vs-storage
+   ambiguity, safe to include this session rather than defer it.
+5. Two new unit tests: `SampleAppliesImageViewSwizzleToInBoundsTexel`,
+   `LoadNeverAppliesImageViewSwizzle` (the double-swizzle regression
+   guard flagged as a risk in last session's next-steps -- confirmed
+   *not* an issue, since `Load*` never even reaches the border/swizzle
+   code with a true flag).
+
+`ninja check-feme`: 3,242/3,245 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions vs. the 3,240/3,243 baseline).
+
+## CTS proof
+
+- `dEQP-VK.pipeline.monolithic.image_view.*.component_swizzle.*`: the
+  42-case probe above went from 0/42 to **42/42 Pass**.
+- `dEQP-VK.texture.swizzle.component_mapping.*` (a second, independent
+  bucket): a 100-case float-format sample went from 6/100 fails (all
+  `_sint`/`_uint`) to its float-format subset going **39/39 Pass**.
+- 400-case random `image-view.txt` sample: 32 remaining
+  `component_swizzle.*` fails, all pre-existing (ASTC/EAC/ETC2 =
+  L125(c), integer formats = the deferred I32 path) -- no unexplained
+  fails, confirming correct scoping.
+- 150-case storage-image `load_store_lod`/`store_load_consistency`
+  sample: 3/3 pass, confirming the double-swizzle risk flagged last
+  session never materialized.
+
+**This closes the plain-Sample-family, float-format portion of the
+in-bounds swizzle gap.** Two deferred pieces split out as their own
+roadmap rows, each exactly one letter deep:
+
+- **L125(g)**: `SampleCmp*`/`Gather*`/`GatherCmp*` swizzle semantics --
+  unresolved whether a depth-compare's dref read or `OpImageGather`'s
+  `Component` selector should see pre- or post-swizzle data.
+- **L125(h)**: the wholly separate integer-sampled (`*I32`) fetch
+  family -- not sharing any code with the float path fixed this
+  session, so needs its own parameter-threading pass. A few concrete
+  failing cases already surfaced in this session's own 400-case sample
+  (e.g. `dEQP-VK.texture.swizzle.component_mapping.color.
+  r16_sint_2d_npot_rgba`) -- real starting points, not yet triaged
+  further.
+
+Internal correctness fix, no new Vulkan feature/extension surface --
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` unchanged.
+`Roadmap.md`'s L125(f) row is marked done; `FeMeVulkanDesign.md`'s
+L125(d)/(e) design note updated to reflect this fix and point at
+L125(g)/(h) for what's left.
+
+## Next steps
+
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (`/tmp/ctsrun/l125f_*`) are already deleted.
+2. Pick between **L125(g)** (SampleCmp*/Gather* swizzle semantics --
+   needs spec research first: does a depth-compare's single-channel
+   read honor a non-identity swizzle at all? does `OpImageGather`'s
+   `Component` select before or after swizzle applies?) and **L125(h)**
+   (the integer `*I32` path -- structurally simpler, mechanically
+   similar to this session's own fix, and already has concrete failing
+   CTS cases identified above to start from). **L125(h) is probably
+   the faster win** since it reuses this session's exact pattern with
+   no open spec question to resolve first; L125(g) needs research
+   before any code changes.
+3. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
+   distinct `VK_ERROR_INITIALIZATION_FAILED` sites,
+   `vktPipelineBindPointTests.cpp`) remain untouched and untriaged --
+   an alternative pick if both L125(g) and L125(h) feel blocked.
+4. `ninja check-feme` and both CTS build directories are incremental
+   from here -- no reconfigure needed.
