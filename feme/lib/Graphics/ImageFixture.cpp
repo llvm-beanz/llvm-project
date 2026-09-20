@@ -253,9 +253,8 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     return FormatInfo{1, 2, false};
   case ResourceFormat::R16_UINT:
   case ResourceFormat::R16_SINT:
-    // (Roadmap H8p) A real integer color-attachment format, unlike its
-    // `R16_UNORM`/`_SNORM` (H8j) neighbors above (an `EAC_R11` sampling-
-    // bridge target only, never a color attachment) -- needs a real
+    // (Roadmap H8p) A real integer color-attachment format, same
+    // rationale as `R16_UNORM`/`_SNORM` below -- needs a real
     // `FormatInfo` entry here since `getFixtureFormatElementSize` (used
     // by `executeDraws`'s own attachment-extent validation) reaches this
     // table, unlike `packClearColor`/`unpackColor`'s own dedicated
@@ -265,6 +264,26 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
   case ResourceFormat::R16G16_SINT:
     // (Roadmap H8p) The two-channel sibling of `R16_UINT`/`_SINT` above,
     // same rationale.
+    return FormatInfo{2, 2, false};
+  case ResourceFormat::R16_UNORM:
+  case ResourceFormat::R16_SNORM:
+    // (Roadmap L125(q)) H8j's own note that this pair is "an `EAC_R11`
+    // sampling-bridge target only, never a color attachment" is now
+    // stale: `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.
+    // r16_snorm.*` samples a real `VkImage` in this format directly (not
+    // through an EAC decode bridge), and `parseFixtureFormat` above
+    // already accepts `"r16-unorm"`/`"r16-snorm"` as ordinary fixture
+    // spellings -- only `getFormatInfo` itself, reached by
+    // `getFixtureFormatElementSize`, was missing an entry, unlike
+    // `packClearColor`/`unpackColor`'s own dedicated `if`-blocks for this
+    // format (both already handle it, see their own H8j comments), which
+    // return before ever reaching this switch. Same 2-byte-per-component,
+    // non-float shape as `R16_UINT`/`_SINT` above.
+    return FormatInfo{1, 2, false};
+  case ResourceFormat::R16G16_UNORM:
+  case ResourceFormat::R16G16_SNORM:
+    // (Roadmap L125(q)) The two-channel sibling of `R16_UNORM`/`_SNORM`
+    // above, same rationale.
     return FormatInfo{2, 2, false};
   case ResourceFormat::R8_UNORM:
   case ResourceFormat::R8_SNORM:
@@ -297,11 +316,8 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // same rationale.
     return FormatInfo{2, 1, false};
   case ResourceFormat::R16_FLOAT:
-    // (Roadmap H99a) A real color-attachment format, unlike its
-    // `R16_UNORM`/`_SNORM` (H8j) and `R16_UINT`/`_SINT` (H8p) neighbors
-    // above -- same "missing `FormatInfo` entry entirely" rationale
-    // those already document, needed since `getFixtureFormatElementSize`
-    // reaches this table.
+    // (Roadmap H99a) A real color-attachment format, needed since
+    // `getFixtureFormatElementSize` reaches this table.
     return FormatInfo{1, 2, true};
   case ResourceFormat::R16G16_FLOAT:
     // (Roadmap H99a) The two-channel sibling of `R16_FLOAT` above, same

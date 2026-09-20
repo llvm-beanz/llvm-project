@@ -737,6 +737,41 @@ TEST(ImageFixtureTest,
   EXPECT_EQ(*R16G16, 4u);
 }
 
+/// Roadmap L125(q): `getFormatInfo` (`ImageFixture.cpp`) originally had no
+/// case at all for `R16_UNORM`/`R16_SNORM`/`R16G16_UNORM`/`R16G16_SNORM` --
+/// a stale assumption (recorded in that switch's own now-corrected comment)
+/// that these four formats were only ever an `EAC_R11`/`EAC_R11G11`
+/// sampling-bridge target, never a real sampled color image -- even though
+/// `packClearColor`/`unpackColor` already handled them, and
+/// `parseFixtureFormat` already accepted their `"r16-unorm"`/`"r16-snorm"`/
+/// `"r16g16-unorm"`/`"r16g16-snorm"` spellings. This left
+/// `getFixtureFormatElementSize` failing outright for a real
+/// `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16_snorm.*`-style
+/// image, surfaced as `vkQueueSubmit`'s own "image fixture format is not
+/// yet supported" error.
+TEST(ImageFixtureTest,
+     GetFixtureFormatElementSizeCoversR16UnormSnormAndR16G16UnormSnorm) {
+  Expected<uint32_t> R16Unorm =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R16_UNORM);
+  ASSERT_THAT_EXPECTED(R16Unorm, Succeeded());
+  EXPECT_EQ(*R16Unorm, 2u);
+
+  Expected<uint32_t> R16Snorm =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R16_SNORM);
+  ASSERT_THAT_EXPECTED(R16Snorm, Succeeded());
+  EXPECT_EQ(*R16Snorm, 2u);
+
+  Expected<uint32_t> R16G16Unorm =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R16G16_UNORM);
+  ASSERT_THAT_EXPECTED(R16G16Unorm, Succeeded());
+  EXPECT_EQ(*R16G16Unorm, 4u);
+
+  Expected<uint32_t> R16G16Snorm =
+      getFixtureFormatElementSize(cpu::ResourceFormat::R16G16_SNORM);
+  ASSERT_THAT_EXPECTED(R16G16Snorm, Succeeded());
+  EXPECT_EQ(*R16G16Snorm, 4u);
+}
+
 TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8Uint) {
   std::array<uint8_t, 4> Texel{};
   ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_UINT,
