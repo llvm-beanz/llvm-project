@@ -5587,6 +5587,68 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
   return femeRTFetchTexel1DI32(&Img, Level, AddrX);
 }
 
+// (Roadmap L125(b)) The `Plain3D` counterpart of `femeCpuImageSample2DV4I32`
+// above, for `feme.cpu.image.sample.3d.v4i32` -- mirrors that function's
+// structure exactly, but addresses a third (`Z`, depth) axis too,
+// matching `femeCpuImageSample3DV4F32`'s own relationship to
+// `femeCpuImageSample2DV4F32`. No array layer to resolve (SPIR-V forbids
+// an arrayed `Dim::3D` image), and `femeRTFetchTexel3DI32` already exists
+// (reused by `feme.cpu.image.load.3d.v4i32`, roadmap H19c), so -- like
+// `Array2D` before it -- no new low-level texel-fetch helper is needed
+// here either.
+FemeRTv4i32 femeCpuImageSample3DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
+    float Lod, int32_t OffsetX, int32_t OffsetY, int32_t OffsetZ,
+    _Bool Mask) asm("feme.cpu.image.sample.3d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample3DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
+    float Lod, int32_t OffsetX, int32_t OffsetY, int32_t OffsetZ,
+    _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+
+  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
+  // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above.
+  float ClampedLod = femeRTComputeClampedLod(
+      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  uint32_t Level = femeRTNearestMipLevel(MipPlan);
+  uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
+  uint32_t LevelHeight = femeRTMipExtent(Img.Height, Level);
+  uint32_t LevelDepth = femeRTMipExtent(Img.Depth, Level);
+  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + OffsetX;
+  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight) + OffsetY;
+  int32_t Z = (int32_t)__builtin_floorf(W * (float)LevelDepth) + OffsetZ;
+  _Bool BorderX = 0, BorderY = 0, BorderZ = 0;
+  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                         Samp.AddressU, &BorderX);
+  int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
+                                         Samp.AddressV, &BorderY);
+  int32_t AddrZ = femeRTApplyAddressMode(Z, (int32_t)LevelDepth,
+                                         Samp.AddressW, &BorderZ);
+  if (BorderX || BorderY || BorderZ) {
+    // Roadmap L125(b): same documented, narrow limitation as
+    // `femeCpuImageSample2DV4I32`'s own identical fallback above -- no
+    // real CTS case is known to exercise `CLAMP_TO_BORDER` addressing
+    // against an integer-sampled `Plain3D` image either.
+    FemeRTv4i32 Border = {0, 0, 0, 1};
+    return Border;
+  }
+  return femeRTFetchTexel3DI32(&Img, Level, AddrX, AddrY, AddrZ);
+}
+
 // (Roadmap L52e) The raw, unclamped LOD `OpImageQueryLod`'s own second
 // (`calculate.lod.unclamped`) lane reports, computed from the same
 // texel-space "scale factor" construction `femeRTPlanImplicitLod` already

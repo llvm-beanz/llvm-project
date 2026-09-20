@@ -1078,6 +1078,45 @@ TEST_F(ImageCallsTest, MatchesSample2DArrayI32Call) {
   EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
 }
 
+TEST_F(ImageCallsTest, MatchesSample3DI32Call) {
+  // Roadmap L125(b): the `Plain3D` counterpart of `MatchesSample2DArrayI32
+  // Call` above, confirming `matchImageCall`'s new `Sample3DI32` case
+  // extracts `W`/`OffsetZ` alongside `U`/`V`/`OffsetX`/`OffsetY` (no
+  // `ArrayLayer`, unlike `Sample2DArrayI32`), mirroring `Sample3D`'s own
+  // relationship to `Sample2D`.
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createSample3DI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.25),
+      ConstantFP::get(Builder.getFloatTy(), 0.125),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(1),
+      Builder.getInt32(-1), Builder.getInt32(2), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample3DI32);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->Env.SamplerHeap, Env.SamplerHeap);
+  EXPECT_EQ(Matched->Env.SamplerHeapCount, Env.SamplerHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(4));
+  EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
+  EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.25));
+  EXPECT_EQ(Matched->W, ConstantFP::get(Builder.getFloatTy(), 0.125));
+  EXPECT_EQ(Matched->Lod, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->OffsetX, Builder.getInt32(1));
+  EXPECT_EQ(Matched->OffsetY, Builder.getInt32(-1));
+  EXPECT_EQ(Matched->OffsetZ, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+  EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
+  EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
+}
+
 // `ImageCallKind::GatherCmp2D`, with an extra `ArrayLayer` operand.
 TEST_F(ImageCallsTest, MatchesGatherCmpArray2DCall) {
   IRBuilder<> Builder(BB);

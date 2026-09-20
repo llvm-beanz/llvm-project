@@ -675,6 +675,15 @@ enum class ImageCallKind : uint8_t {
   /// a constant `0.0` at the call site for an ordinary implicit-LOD
   /// sample, and no `Bias`/`Grad`/`MinLod` operand exists.
   Sample2DArrayI32,
+  /// `feme.cpu.image.sample.3d.v4i32` (roadmap L125(b)): the `Plain3D`
+  /// counterpart of `Sample2DI32`, mirroring `Sample3D`'s own
+  /// relationship to `Sample2D`. Like `Sample2DI32`, `Lod` defaults to a
+  /// constant `0.0` at the call site for an ordinary implicit-LOD sample,
+  /// and no `Bias`/`Grad`/`MinLod` operand exists. `OffsetX`/`OffsetY`/
+  /// `OffsetZ` (SPIR-V's own `ConstOffset` image operand) mirror
+  /// `Sample3D`'s own genuine three-component offset, unlike
+  /// `Sample2DI32`'s two-component `OffsetX`/`OffsetY`.
+  Sample3DI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -958,6 +967,20 @@ llvm::CallInst *createSample2DArrayI32(
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
     llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *Lod,
     llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.3d.v4i32` call (roadmap L125(b)): the
+/// `Plain3D` counterpart of `createSample2DI32`, mirroring
+/// `createSample3D`'s own relationship to `createSample2D`. \p W joins
+/// \p U/\p V as a third coordinate operand; \p OffsetX/\p OffsetY/
+/// \p OffsetZ stay a genuine 3-wide `ConstOffset` (mirroring
+/// `createSample3D`'s own identical offset triple), unlike
+/// `createSample2DI32`'s 2-wide `OffsetX`/`OffsetY`.
+llvm::CallInst *createSample3DI32(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *V, llvm::Value *W, llvm::Value *Lod, llvm::Value *OffsetX,
+    llvm::Value *OffsetY, llvm::Value *OffsetZ, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY

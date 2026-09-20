@@ -5268,13 +5268,48 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-     LeavesAPlain3DIntegerSampledImageHandleUsedForSampleAlone) {
-  // Roadmap L125(b): `Plain1D`/`Array1D`/`Array2D` (see the "lowers" tests
-  // below) are now accepted alongside `Plain2D`, but `Plain3D` -- and
-  // `Cube`/`CubeArray` -- are still rejected: no `createSample3DI32`-style
-  // runtime helper exists for any of them yet. The whole handle (and
+     LeavesACubeIntegerSampledImageHandleUsedForSampleAlone) {
+  // Roadmap L125(b): `Plain1D`/`Array1D`/`Array2D`/`Plain3D` (see the
+  // "lowers" tests below) are now accepted alongside `Plain2D`, but
+  // `Cube`/`CubeArray` are still rejected: no `createSampleCubeI32`-style
+  // runtime helper exists for either of them yet. The whole handle (and
   // therefore the whole function) is left unrewritten, matching
-  // `LeavesAnArrayedImageHandleAlone`'s own "no partial lowering" contract.
+  // `LeavesAnArrayedImageHandleAlone`'s own "no partial lowering"
+  // contract.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<3 x float> %dir) {
+      %img = call target("spirv.Image", i32, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timgcube(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsampcube(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.sample(
+          target("spirv.Image", i32, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %dir, <3 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timgcube(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsampcube(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cube.v4i32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersImplicitLodIntegerSampledImage3DToImageSampleV4I32) {
+  // Roadmap L125(b): widens `LowersIntegerSampledImage3DToImageSampleV4I32`
+  // below's explicit-LOD acceptance to also accept an ordinary
+  // implicit-LOD sample against a `Plain3D` integer-channel
+  // (`usampler3D`/`isampler3D`) sampled image, mirroring
+  // `LowersImplicitLodIntegerSampledImage2DArrayToImageSampleV4I32`'s own
+  // identical `Array2D` widening.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x i32> @main(<3 x float> %uvw) {
@@ -5297,9 +5332,63 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4i32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, w, lod, offset_x, offset_y, offset_z, mask). Implicit LOD
+  //  defaults to 0.0.
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
 }
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerSampledImage3DToImageSampleV4I32) {
+  // Roadmap L125(b): an *explicit*-LOD `OpImageSampleExplicitLod` against
+  // a `Plain3D` integer-channel (`usampler3D`/`isampler3D`) sampled image
+  // is legal SPIR-V (restricted, per the Vulkan spec, to `NEAREST`
+  // filtering) -- mirrors `LowersIntegerSampledImage2DArrayToImageSample
+  // V4I32`'s own `Array2D` case, lowering to `createSample3DI32` instead
+  // of `createSample2DArrayI32`, and threading a real, nonzero
+  // `ConstOffset` (genuinely 3-wide here, unlike `Array2D`'s own 2-wide
+  // one, per `isSupportedOffset`'s `Plain3D` comment).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<3 x float> %uvw) {
+      %img = call target("spirv.Image", i32, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.samplelevel(
+          target("spirv.Image", i32, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %uvw, float 0.0,
+          <3 x i32> <i32 1, i32 -1, i32 2>)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4i32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, w, lod, offset_x, offset_y, offset_z, mask).
+  EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(10))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(11))->getSExtValue(), -1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(12))->getSExtValue(), 2);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
+}
+
 
 TEST(SPIRVResourceLoweringTest,
      LowersImplicitLodIntegerSampledImage2DArrayToImageSampleV4I32) {

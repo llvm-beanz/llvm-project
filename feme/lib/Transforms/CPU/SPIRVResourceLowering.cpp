@@ -1550,25 +1550,26 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // (`OpImageSampleExplicitLod`/`OpImageSampleImplicitLod` against a
       // `usampler2D`/`isampler2D`/`usampler1D`/`isampler1D`/
       // `usampler1DArray`/`isampler1DArray`/`usampler2DArray`/
-      // `isampler2DArray`), just restricted, per the Vulkan spec, to
-      // `NEAREST` filtering: no `Bias`/`Grad` (SPIR-V forbids both
-      // alongside the mandatory `NEAREST` filtering in every case this
-      // pass has needed to support so far), and no `MinLod` clamp (none
-      // of `createSample2DI32`/`createSample1DI32`/
-      // `createSample1DArrayI32`/`createSample2DArrayI32` has such an
-      // operand). `Plain2D` (roadmap H109, widened to implicit-LOD by
-      // L125(a)), `Plain1D`, `Array1D`, and `Array2D` (all roadmap
-      // L125(b), mirroring `Plain2D`'s own widening exactly) are the only
-      // shapes accepted so far; `lowerImageAccesses` below already
-      // defaults `Lod` to a constant `0.0` whenever `ExplicitLod` is
-      // false (see its own comment), which is exactly right here too --
-      // every real CTS case either widening covers samples a
-      // single-mip-level image, so the true (unimplemented)
-      // derivative-based implicit-LOD computation would clamp to mip 0
-      // regardless.
+      // `isampler2DArray`/`usampler3D`/`isampler3D`), just restricted,
+      // per the Vulkan spec, to `NEAREST` filtering: no `Bias`/`Grad`
+      // (SPIR-V forbids both alongside the mandatory `NEAREST` filtering
+      // in every case this pass has needed to support so far), and no
+      // `MinLod` clamp (none of `createSample2DI32`/`createSample1DI32`/
+      // `createSample1DArrayI32`/`createSample2DArrayI32`/
+      // `createSample3DI32` has such an operand). `Plain2D` (roadmap
+      // H109, widened to implicit-LOD by L125(a)), `Plain1D`, `Array1D`,
+      // `Array2D`, and `Plain3D` (all roadmap L125(b), mirroring
+      // `Plain2D`'s own widening exactly) are the only shapes accepted so
+      // far; `lowerImageAccesses` below already defaults `Lod` to a
+      // constant `0.0` whenever `ExplicitLod` is false (see its own
+      // comment), which is exactly right here too -- every real CTS case
+      // either widening covers samples a single-mip-level image, so the
+      // true (unimplemented) derivative-based implicit-LOD computation
+      // would clamp to mip 0 regardless.
       if (IsInteger) {
         if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D &&
-             Shape != ImageShape::Array1D && Shape != ImageShape::Array2D) ||
+             Shape != ImageShape::Array1D && Shape != ImageShape::Array2D &&
+             Shape != ImageShape::Plain3D) ||
             HasMinLodClamp || HasBias || HasGrad)
           return false;
         unsigned OffsetIdx =
@@ -3603,6 +3604,33 @@ void lowerImageAccesses(
             CallInst *NewSampleI32Call = createSample2DArrayI32(
                 Builder, Env, ImageIndex, SamplerIndex, IntU, IntV,
                 IntArrayLayer, Lod, IntOffsetX, IntOffsetY, Mask,
+                CI->getName());
+            CI->replaceAllUsesWith(NewSampleI32Call);
+            CI->eraseFromParent();
+            continue;
+          }
+          // Roadmap L125(b): `Plain3D`'s own coordinate is a real 3-wide
+          // `(U, V, W)` vector (no array layer, unlike `Array2D`'s own
+          // above), and its `Offset` is a genuine 3-wide `(OffsetX,
+          // OffsetY, OffsetZ)` vector (mirroring `createSample3D`'s own
+          // real third offset component, unlike `Plain2D`'s/`Array2D`'s
+          // own 2-wide offset) -- so both the coordinate and offset
+          // extraction differ from `Plain2D`'s generic case just below.
+          if (Shape == ImageShape::Plain3D) {
+            Value *IntU = Builder.CreateExtractElement(Coord, uint64_t{0});
+            Value *IntV = Builder.CreateExtractElement(Coord, uint64_t{1});
+            Value *IntW = Builder.CreateExtractElement(Coord, uint64_t{2});
+            Value *IntOffset = CI->getArgOperand(
+                getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+            Value *IntOffsetX =
+                Builder.CreateExtractElement(IntOffset, uint64_t{0});
+            Value *IntOffsetY =
+                Builder.CreateExtractElement(IntOffset, uint64_t{1});
+            Value *IntOffsetZ =
+                Builder.CreateExtractElement(IntOffset, uint64_t{2});
+            CallInst *NewSampleI32Call = createSample3DI32(
+                Builder, Env, ImageIndex, SamplerIndex, IntU, IntV, IntW,
+                Lod, IntOffsetX, IntOffsetY, IntOffsetZ, Mask,
                 CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
