@@ -2284,6 +2284,45 @@ TEST_F(ImageSamplingTest, GatherCubeIsolatesNamedFace) {
   EXPECT_FLOAT_EQ(Face1[3], 0.1f); // T(X0,Y0)
 }
 
+// Roadmap L125(j): `TextureCube::Gather`'s own 2x2 footprint must remap
+// across a cube face edge the same way a `LINEAR` `Sample` already does
+// (`SampleCubeSeamlessBlendsAcrossFaceEdge` above), not clamp in place --
+// reusing that same test's exact direction vector and two-face layout
+// (face 0 uniformly 100.0, face 4 uniformly 0.0, `(DirX=1, DirY=0,
+// DirZ=0.6)` placing the footprint's low-`U` tap one texel below `u==0`,
+// remapping onto face 4). Pre-L125(j), `femeRTComputeBilinearSupport`'s
+// own forced `ClampToEdge` addressing would have clamped every tap back
+// onto face 0, reading `100.0` in every one of the four gathered
+// corners; this test requires two of the four (`T00`/`T01`, the two
+// low-`U` taps) to instead read face 4's own `0.0`.
+TEST_F(ImageSamplingTest, GatherCubeSeamlessBlendsAcrossFaceEdge) {
+  float Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face)
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = (Face == 0) ? 100.0f : 0.0f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherCubeFn Fn = resolve<GatherCubeFn>(addWrapper(
+      "gather_cube_seamless", "feme.cpu.image.gather.cube.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.6f, /*Component=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);   // T(X0,Y1) remapped onto face 4.
+  EXPECT_FLOAT_EQ(Out[1], 100.0f); // T(X1,Y1), still face 0.
+  EXPECT_FLOAT_EQ(Out[2], 100.0f); // T(X1,Y0), still face 0.
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);   // T(X0,Y0) remapped onto face 4.
+}
+
+
 // The depth-comparison counterpart of `GatherCubeSeamlessBlendsAcrossFace
 // Edge` above, mirroring `SampleCmpCubeSeamlessBlendsAcrossFaceEdge`'s
 // own relationship to `SampleCubeSeamlessBlendsAcrossFaceEdge`: face 0

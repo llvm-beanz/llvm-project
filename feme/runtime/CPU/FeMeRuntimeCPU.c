@@ -8866,11 +8866,17 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpCubeV4F32(
 // non-depth-comparison gather -- SPIR-V's `OpImageGather`, HLSL's
 // `TextureCube::Gather{,Red,Green,Blue,Alpha}()`. Structurally identical
 // to `femeCpuImageGatherCmpCubeV4F32` above (same face-selection/
-// footprint/result ordering/mip-level-0-only restriction), but each
-// result component is one of the four sampled texel's own `Component`
-// channel (0=R, 1=G, 2=B, 3=A), never a depth comparison -- mirroring
-// `femeCpuImageGather2DV4F32`'s own relationship to
-// `femeCpuImageGatherCmp2DV4F32`.
+// seamless cross-face footprint/result ordering/mip-level-0-only
+// restriction, including roadmap L125(j)'s own seamless-remap fix), but
+// each result component is one of the four sampled texel's own
+// `Component` channel (0=R, 1=G, 2=B, 3=A), never a depth comparison --
+// mirroring `femeCpuImageGather2DV4F32`'s own relationship to
+// `femeCpuImageGatherCmp2DV4F32`. `SamplerIndex`'s own descriptor is
+// loaded (SPIR-V's `OpImageGather` always carries a sampled-image
+// operand) but otherwise unused, since `femeRTFetchCubeSeamlessTexel`
+// consults neither an address mode (a cube gather footprint always
+// remaps across faces, never clamps/wraps/borders) nor a border color
+// (a cube has none).
 FemeRTv4f32 femeCpuImageGatherCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
@@ -8893,26 +8899,38 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCubeV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageGatherCmpCubeV4F32.
-  Samp.AddressV = 2;
+  (void)Samp; // See doc comment above.
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
-  FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
-      &Img, CF.U, CF.V, &Samp, /*Level=*/0, /*OffsetX=*/0, /*OffsetY=*/0);
-  // Roadmap L125(g): see femeCpuImageGather2DV4F32's own comment above --
-  // each gathered neighbor is swizzled before `Chan` selects from it.
-  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y0,
-                                       /*Sample=*/0, S.BorderX0 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/1);
-  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y0,
-                                       /*Sample=*/0, S.BorderX1 || S.BorderY0,
-                                       Samp.BorderColor, /*ApplySwizzle=*/1);
-  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X0, S.Y1,
-                                       /*Sample=*/0, S.BorderX0 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/1);
-  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, /*Level=*/0, CF.Face, S.X1, S.Y1,
-                                       /*Sample=*/0, S.BorderX1 || S.BorderY1,
-                                       Samp.BorderColor, /*ApplySwizzle=*/1);
+  int32_t Size;
+  FemeRTCubeBilinearSupport S =
+      femeRTComputeCubeBilinearSupport(&Img, CF.U, CF.V, /*Level=*/0, &Size);
+  _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
+  // Roadmap L125(g)/L125(j): each gathered neighbor is swizzled before
+  // `Chan` selects from it, and its footprint is remapped seamlessly
+  // across a cube face edge instead of being clamped in place.
+  FemeRTv4f32 T00 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X0, S.Y0, Size, &Amb00,
+      /*ApplySwizzle=*/1);
+  FemeRTv4f32 T10 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X1, S.Y0, Size, &Amb10,
+      /*ApplySwizzle=*/1);
+  FemeRTv4f32 T01 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X0, S.Y1, Size, &Amb01,
+      /*ApplySwizzle=*/1);
+  FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(
+      &Img, /*Level=*/0, /*LayerBase=*/0, CF.Face, S.X1, S.Y1, Size, &Amb11,
+      /*ApplySwizzle=*/1);
+  // At most one of the four taps can ever be the doubly-out-of-bounds
+  // corner -- see femeRTSampleCubeLinearAtLevel's own identical comment.
+  if (Amb00)
+    T00 = (T10 + T01 + T11) * (1.0f / 3.0f);
+  else if (Amb10)
+    T10 = (T00 + T01 + T11) * (1.0f / 3.0f);
+  else if (Amb01)
+    T01 = (T00 + T10 + T11) * (1.0f / 3.0f);
+  else if (Amb11)
+    T11 = (T00 + T10 + T01) * (1.0f / 3.0f);
   FemeRTv4f32 Result;
   Result[0] = T01[Chan];
   Result[1] = T11[Chan];
