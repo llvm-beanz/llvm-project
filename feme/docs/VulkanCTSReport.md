@@ -6118,3 +6118,74 @@ unchanged.
 (`SampleCmp*`/`Gather*`/`GatherCmp*` swizzle) and L125(h) (integer
 `*I32` path swizzle) capture the deferred remainder. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L125(h): integer-sampled texel fetch component-swizzle fix
+
+The mechanically-similar, wholly-separate follow-on to L125(f) above:
+the integer-channel fetch family (`femeRTFetchTexel2DI32`/
+`femeRTFetchTexel1DI32`/`femeRTFetchTexel1DArrayI32`/
+`femeRTFetchTexel3DI32`) shares no code with its float counterpart, so
+never picked up L125(f)'s `ApplySwizzle` parameter at all.
+
+### Fix
+
+Added `femeRTApplyImageSwizzleI32` (the `FemeRTv4i32` counterpart of
+`femeRTApplyImageSwizzle`) and threaded the same `ApplySwizzle` bool
+through all four `*I32` fetch helpers, following L125(f)'s design
+exactly. Every `femeCpuImageSample*V4I32` call site now passes
+`ApplySwizzle=1`; every `femeCpuImageLoad*V4I32` call site passes
+`ApplySwizzle=0`. There is no integer `SampleCmp*`/`Gather*`/
+`GatherCmp*` family at all (no such intrinsics exist), so unlike
+L125(f) there is no deferred bucket left behind here -- every `*I32`
+call site is now fully covered.
+
+### Unit tests
+
+- `ImageSamplingTest.SampleI32AppliesImageViewSwizzleToInBoundsTexel`
+  and `ImageSamplingTest.LoadI32NeverAppliesImageViewSwizzle` mirror
+  L125(f)'s own float-path tests. These are also the **first
+  runtime-execution unit tests for `feme.cpu.image.sample.2d.v4i32`
+  at all** -- no prior test in `ImageSamplingTest.cpp` exercised this
+  intrinsic (only compile-time/lowering tests in
+  `Transforms/CPU/ImageCallsTest.cpp` and
+  `Transforms/CPU/SPIRVResourceLoweringTest.cpp` did). A new
+  `SampleI32Fn` typedef captures the intrinsic's own explicit-LOD-only
+  operand shape (no `DUdX`/`DUdY`/`DVdX`/`DVdY`/`UseExplicitLod`/
+  `Bias`/`MinLodClamp`, unlike the float `SampleFn`).
+
+`ninja check-feme`: 3,244/3,247 Passed, 3 Unsupported, 0 Failed (+2
+new tests, 0 regressions).
+
+### Results
+
+- A 60-case sample of `dEQP-VK.pipeline.monolithic.image_view.*.
+  component_swizzle.*` restricted to `_sint`/`_uint` formats: **32/32
+  of the supported cases Pass** (28 `NotSupported`, unrelated
+  format-support gating -- e.g. `VK_FORMAT_B8G8R8A8_UINT` isn't a
+  sampleable format on this driver).
+- A 60-case `_sint` and a separate 60-case `_uint` sample of
+  `dEQP-VK.texture.swizzle.component_mapping.*`: every `_uint`
+  supported case passes (**19/19**). Every `_sint` case that reaches
+  pipeline creation instead hits a pre-existing, unrelated
+  `VK_ERROR_INITIALIZATION_FAILED` (`vk.createGraphicsPipelines`/
+  `vk.createComputePipelines`) -- confirmed **not** a swizzle-
+  correctness failure (no `Image mismatch` seen at all in this sample);
+  this is the same `VK_ERROR_INITIALIZATION_FAILED` family already
+  flagged as an untriaged L125(c) bucket, now with a new data point
+  that it also affects plain (non-border-swizzle) `_sint` sampling,
+  not just `sampler.border_swizzle.*` -- left for L125(c)'s own triage,
+  out of scope here.
+- A follow-up 400-case random `image-view.txt` sample: 95 fails, all
+  entirely ASTC/EAC/ETC2/BC compressed-format decoding (L125(c),
+  unrelated) -- zero `component_swizzle`/plain-format fails, confirming
+  no regressions from this fix.
+
+Internal correctness fix, not new Vulkan feature/extension surface --
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`Roadmap.md`'s L125(h) row is marked done -- this closes out the
+entire L125(f)/(g)/(h) in-bounds-swizzle sub-tree except for L125(g)'s
+own deferred `SampleCmp*`/`Gather*`/`GatherCmp*` scope. See
+`agent_thoughts.md` for the full narrative and next steps.

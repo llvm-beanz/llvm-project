@@ -3749,10 +3749,24 @@ now passes `ApplySwizzle=1` and every `Load*`-family call site passes
 `ApplySwizzle=0`. **Still narrower than full `VkComponentMapping`
 support**: `SampleCmp*`/`Gather*`/`GatherCmp*` (depth-compare and
 four-tap gather, whose swizzle interaction with a single-channel dref
-read or a `Component` selector is not yet resolved) and the wholly
-separate integer-sampled (`*I32`) path both still pass an explicit
-`ApplySwizzle=0`/apply no swizzle at all -- tracked as new roadmap rows
-L125(g) and L125(h) respectively.
+read or a `Component` selector is not yet resolved) still pass an
+explicit `ApplySwizzle=0` -- tracked as new roadmap row L125(g).
+
+**Roadmap L125(h)** closed the remaining gap noted above: the
+integer-sampled (`*I32`) fetch family shares no code with the float
+path L125(f) fixed, so it never picked up that fix at all. Mirroring
+L125(f)'s exact design, a new `femeRTApplyImageSwizzleI32` (the
+`FemeRTv4i32` counterpart of `femeRTApplyImageSwizzle`) and the same
+`ApplySwizzle` bool now thread through `femeRTFetchTexel2DI32`/
+`femeRTFetchTexel1DI32`/`femeRTFetchTexel1DArrayI32`/
+`femeRTFetchTexel3DI32`, with every `femeCpuImageSample*V4I32` call
+site passing `ApplySwizzle=1` and every `femeCpuImageLoad*V4I32` call
+site passing `ApplySwizzle=0`. Unlike the float path, there is no
+integer `SampleCmp*`/`Gather*`/`GatherCmp*` family at all (no such
+intrinsics exist), so every `*I32` call site is now fully covered --
+**L125(g)'s own deferred `SampleCmp*`/`Gather*`/`GatherCmp*` scope is
+the only remaining gap** in this milestone's `VkComponentMapping`
+support.
 
 **Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
 could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This
