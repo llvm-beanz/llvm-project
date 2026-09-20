@@ -2905,6 +2905,77 @@ TEST_F(GraphicsPipelineTest, DifferingFixedFunctionStateIsACacheMiss) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap L125(o): two pipelines built from the identical shader module
+/// and entry point but disagreeing `VkSpecializationInfo` data must not
+/// share a cache entry either -- `compileGraphicsStage` (see
+/// `TranslatesGraphicsStageSpecializationConstants` above) really does
+/// fold each stage's specialization data into the compiled result, so
+/// `computeGraphicsPipelineCacheKey` omitting it (as it originally did)
+/// let a second, differently-specialized pipeline silently reuse the
+/// first's stale compiled artifact -- the specialization-data counterpart
+/// of `DifferingFixedFunctionStateIsACacheMiss` above.
+TEST_F(GraphicsPipelineTest, DifferingSpecializationDataIsACacheMiss) {
+  constexpr llvm::StringLiteral SpecConstantFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.SpecConstant @kMul spec_id(0) = 1.0 : f32
+  spirv.func @main() -> () "None" {
+    %one = spirv.Constant 1.0 : f32
+    %mul = spirv.mlir.referenceof @kMul : f32
+    %c = spirv.CompositeConstruct %mul, %one, %one, %one : (f32, f32, f32, f32) -> vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(SpecConstantFragmentSource);
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkSpecializationMapEntry MapEntry{/*constantID=*/0, /*offset=*/0,
+                                    /*size=*/sizeof(float)};
+
+  float FirstValue = 0.25f;
+  VkSpecializationInfo FirstSpecInfo{};
+  FirstSpecInfo.mapEntryCount = 1;
+  FirstSpecInfo.pMapEntries = &MapEntry;
+  FirstSpecInfo.dataSize = sizeof(float);
+  FirstSpecInfo.pData = &FirstValue;
+  VkGraphicsPipelineCreateInfo FirstInfo = makeCreateInfo(Vertex, Fragment);
+  Stages[1].pSpecializationInfo = &FirstSpecInfo;
+  VkPipeline First = VK_NULL_HANDLE;
+  ASSERT_EQ(create(FirstInfo, First, Cache), VK_SUCCESS);
+
+  float SecondValue = 0.75f;
+  VkSpecializationInfo SecondSpecInfo{};
+  SecondSpecInfo.mapEntryCount = 1;
+  SecondSpecInfo.pMapEntries = &MapEntry;
+  SecondSpecInfo.dataSize = sizeof(float);
+  SecondSpecInfo.pData = &SecondValue;
+  VkGraphicsPipelineCreateInfo SecondInfo = makeCreateInfo(Vertex, Fragment);
+  Stages[1].pSpecializationInfo = &SecondSpecInfo;
+  VkPipeline Second = VK_NULL_HANDLE;
+  ASSERT_EQ(create(SecondInfo, Second, Cache), VK_SUCCESS);
+
+  auto *FirstPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
+  auto *SecondPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
+  EXPECT_NE(&FirstPipe->fragmentStage(), &SecondPipe->fragmentStage());
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap E9: `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`
 /// with no cache at all must always report `VK_PIPELINE_COMPILE_REQUIRED`
 /// and leave the pipeline null, the same as the compute path (see
