@@ -1491,6 +1491,17 @@ ParseResult spirv::GlobalVariableOp::parse(OpAsmParser &parser,
     result.addAttribute(
         spirv::GlobalVariableOp::getZeroInitializedAttrName(result.name),
         parser.getBuilder().getUnitAttr());
+  } else if (succeeded(parser.parseOptionalKeyword(
+                 spirv::GlobalVariableOp::getInitialValueAttrName(
+                     result.name)))) {
+    Attribute initialValue;
+    if (parser.parseLParen() ||
+        parser.parseAttribute(
+            initialValue,
+            spirv::GlobalVariableOp::getInitialValueAttrName(result.name),
+            result.attributes) ||
+        parser.parseRParen())
+      return failure();
   }
 
   if (parseVariableDecorations(parser, result)) {
@@ -1539,6 +1550,14 @@ void spirv::GlobalVariableOp::print(OpAsmPrinter &printer) {
     elidedAttrs.push_back(zeroInitializedAttrName);
   }
 
+  StringRef initialValueAttrName = this->getInitialValueAttrName();
+  if (Attribute initialValue = this->getInitialValueAttr()) {
+    printer << " " << initialValueAttrName << '(';
+    printer.printAttribute(initialValue);
+    printer << ')';
+    elidedAttrs.push_back(initialValueAttrName);
+  }
+
   StringRef typeAttrName = this->getTypeAttrName();
   elidedAttrs.push_back(typeAttrName);
   spirv::printVariableDecorations(*this, printer, elidedAttrs);
@@ -1565,16 +1584,19 @@ LogicalResult spirv::GlobalVariableOp::verify() {
   if (std::optional<spirv::LinkageAttributesAttr> linkage =
           getLinkageAttributes()) {
     if (linkage->getLinkageType().getValue() == spirv::LinkageType::Import &&
-        (getInitializer() || getZeroInitialized())) {
+        (getInitializer() || getZeroInitialized() || getInitialValueAttr())) {
       return emitOpError(
           "with Import linkage type must not have an initializer");
     }
   }
 
-  if (getInitializer() && getZeroInitialized()) {
+  if (static_cast<bool>(getInitializer()) +
+          static_cast<bool>(getZeroInitialized()) +
+          static_cast<bool>(getInitialValueAttr()) >
+      1) {
     return emitOpError(
-        "cannot have both an 'initializer' and a 'zero_initialized' "
-        "attribute");
+        "can have at most one of an 'initializer', a 'zero_initialized', "
+        "and an 'initial_value' attribute");
   }
 
   // `zero_initialized` represents an `OpConstantNull` Initializer operand
@@ -1585,6 +1607,26 @@ LogicalResult spirv::GlobalVariableOp::verify() {
   if (getZeroInitialized() && storageClass != spirv::StorageClass::Workgroup) {
     return emitOpError(
         "'zero_initialized' is only valid for the 'Workgroup' storage class");
+  }
+
+  // `initial_value` (roadmap L124(b)) represents a plain (non-spec)
+  // `OpConstant`/`OpConstantComposite` Initializer operand. A scalar or
+  // vector constant carries its own type directly and must match the
+  // variable's pointee type exactly, mirroring the same requirement the
+  // SPIR-V spec places on `initializer`; a composite (array/struct)
+  // constant, like `spirv.Constant`'s own `value` attribute, is an
+  // untyped `ArrayAttr` of per-element attributes instead (see
+  // `spirv::Deserializer::processConstantComposite`), so there is no
+  // attribute-side type to compare against for that case.
+  if (Attribute initialValue = getInitialValueAttr()) {
+    if (auto typedInitialValue = dyn_cast<TypedAttr>(initialValue)) {
+      Type pointeeType = cast<spirv::PointerType>(getType()).getPointeeType();
+      if (typedInitialValue.getType() != pointeeType) {
+        return emitOpError("'initial_value' must have the same type as the "
+                           "variable's pointee type, expected ")
+               << pointeeType << " but found " << typedInitialValue.getType();
+      }
+    }
   }
 
   if (FlatSymbolRefAttr init = getInitializerAttr()) {

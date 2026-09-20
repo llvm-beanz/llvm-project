@@ -784,9 +784,23 @@ spirv.module Logical GLSL450 {
 
 spirv.module Logical GLSL450 {
   spirv.SpecConstant @sc = 4.0 : f32
-  // expected-error @+1 {{cannot have both an 'initializer' and a 'zero_initialized' attribute}}
+  // expected-error @+1 {{can have at most one of an 'initializer', a 'zero_initialized', and an 'initial_value' attribute}}
   "spirv.GlobalVariable"() {sym_name = "var0", type = !spirv.ptr<f32, Workgroup>,
                             initializer = @sc, zero_initialized} : () -> ()
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+  // CHECK: spirv.GlobalVariable @count initial_value(0 : i32) : !spirv.ptr<i32, Private>
+  spirv.GlobalVariable @count initial_value(0 : i32) : !spirv.ptr<i32, Private>
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+  // expected-error @+1 {{'initial_value' must have the same type as the variable's pointee type, expected 'i32' but found 'f32'}}
+  spirv.GlobalVariable @var0 initial_value(0.0 : f32) : !spirv.ptr<i32, Private>
 }
 
 // -----

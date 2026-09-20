@@ -504,7 +504,7 @@ def SPIRV_GlobalVariableOp
     `spirv.GlobalVariable` operation in module scope. Initializer must
     have the same type as the type of the defined symbol.
 
-    `zero_initialized` is the one other Initializer shape SPIR-V allows: a
+    `zero_initialized` is one other Initializer shape SPIR-V allows: a
     plain `OpConstantNull`, the only value a `Workgroup`-storage-class
     variable's own Initializer may hold
     (`SPV_KHR_zero_initialize_workgroup_memory`/`VK_KHR_zero_initialize_workgroup_memory`).
@@ -513,21 +513,35 @@ def SPIRV_GlobalVariableOp
     is represented as a unit attribute instead. `zero_initialized` and
     `initializer` are mutually exclusive.
 
+    `initial_value` is a third Initializer shape (roadmap L124(b)): a plain
+    (non-spec) `OpConstant`/`OpConstantComposite` literal used directly as
+    an Initializer -- e.g. `%v = OpVariable %ptr Private %uint_0`, entirely
+    legal SPIR-V (a `Private` or module-scope `StorageBuffer`/`Uniform`
+    global with a real literal-constant initializer is a common pattern,
+    not just a `Workgroup` zero-initializer or a spec-constant symbol).
+    Like `zero_initialized`, a plain constant has no symbol of its own
+    to reference with `initializer`, so it is carried as an attribute
+    directly holding the literal value instead. `initial_value` is
+    mutually exclusive with both `initializer` and `zero_initialized`,
+    and its own type must match the variable's pointee type exactly.
+
     <!-- End of AutoGen section -->
 
     ```
     variable-op ::= `spirv.GlobalVariable` spirv-type symbol-ref-id
                     (`initializer(` symbol-ref-id `)`)?
                     (`zero_initializer`)?
+                    (`initial_value(` attribute-value `)`)?
                     (`bind(` integer-literal, integer-literal `)`)?
                     (`built_in(` string-literal `)`)?
                     attribute-dict?
     ```
 
     where `initializer` specifies initializer, `zero_initializer` specifies
-    a null-constant initializer and `bind` specifies the descriptor set and
-    binding number. `built_in` specifies SPIR-V BuiltIn decoration
-    associated with the op.
+    a null-constant initializer, `initial_value` specifies a literal-constant
+    initializer, and `bind` specifies the descriptor set and binding
+    number. `built_in` specifies SPIR-V BuiltIn decoration associated with
+    the op.
 
     #### Example:
 
@@ -545,6 +559,7 @@ def SPIRV_GlobalVariableOp
     StrAttr:$sym_name,
     OptionalAttr<FlatSymbolRefAttr>:$initializer,
     OptionalAttr<UnitAttr>:$zero_initialized,
+    OptionalAttr<AnyAttr>:$initial_value,
     OptionalAttr<I32Attr>:$location,
     OptionalAttr<I32Attr>:$binding,
     OptionalAttr<I32Attr>:$descriptor_set,
