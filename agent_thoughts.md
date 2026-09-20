@@ -95512,3 +95512,171 @@ deviceName` first, per standing instruction.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 5. Clean up `/tmp/ctsrun/l125q2/*` (this session's own scratch
    QPA/console-log files) before ending a future session.
+
+# Session: L125(v) fix -- integer border-color default now respects the real `borderColor`
+
+## Brain dump (i-have-adhd style)
+
+- Confirmed `FeMe CPU Vulkan Device` first, as always -- the system
+  default without `VK_ICD_FILENAMES` exported is `llvmpipe`, so this
+  step genuinely matters every single time, not just a formality.
+- Picked up exactly where the last session left off: `L125(v)`,
+  scoped as "probably needs new integer-typed border-color ABI
+  storage, since `FemeSamplerDescriptor` only has a `float
+  BorderColor[4]`".
+- First thing I did before touching any code: re-read `mapBorderColor`
+  (Image.cpp) side by side with `femeRTExpandBorderColorForFormat`
+  (the float path), per the last session's own suggested first step.
+  This paid off immediately -- `mapBorderColor` only maps
+  `TRANSPARENT_BLACK`/`OPAQUE_BLACK`/`OPAQUE_WHITE` (no
+  `VK_EXT_custom_border_color` support), and every one of those maps to
+  an exactly-binary `0.0f`/`1.0f` per channel. That means the existing
+  `float BorderColor[4]` field *already* losslessly represents any
+  border color this ICD can ever see, for either the float or int
+  sampling path -- there's no information a hypothetical
+  integer-typed field would carry that isn't already sitting right
+  there in the float array. So the "needs new ABI storage" premise in
+  the prior session's own scoping was **wrong** -- a nice surprise,
+  since it turned what looked like a 1-session ABI-growing project into
+  something much smaller and entirely internal to
+  `FeMeRuntimeCPU.c`.
+- Wrote `femeRTExpandBorderColorForFormatI32` mirroring the float path's
+  own `femeRTExpandBorderColorForFormat`, just truncating
+  `BorderColor[I]` to `int32_t` before masking.
+- Went to reuse the existing `femeRTImageFormatComponentMask` for the
+  masking step and immediately hit a real gap: that function's switch
+  has zero cases for any `_UINT`/`_SINT` format code at all -- it was
+  written purely for the float path's own formats (`R32_FLOAT`,
+  `R16_UNORM`, etc.), and integer formats live at *different* numeric
+  ordinal values in the same `Format` field (e.g. code 5 is `R32_UINT`
+  in the int world but doesn't even appear in the float switch, while
+  code 1, `R32_FLOAT`, would be silently wrong if reused for an int
+  format). Reusing it as-is would have silently defaulted every
+  integer format to "all four channels present" (`0xf`), meaning zero
+  masking would ever happen for any `_UINT`/`_SINT` format -- which
+  would have shipped a fix that still failed every CTS case it was
+  meant to fix. Caught this before writing any tests, by manually
+  checking what format code `r16_sint` actually is and confirming it
+  wasn't in the switch.
+- Wrote a proper `femeRTImageFormatComponentMaskI32`, scoped to exactly
+  the format codes `femeRTUnpackImageTexelI32` itself already decodes
+  (grepped that function's own switch to get the authoritative list,
+  rather than guessing from the `ResourceFormat` enum's declaration
+  order) -- R32_UINT/SINT, R8_UINT/SINT, R16_UINT/SINT (1-channel);
+  R32G32_UINT/SINT, R8G8_UINT/SINT, R16G16_UINT/SINT (2-channel);
+  R32G32B32A32_UINT/SINT, R8G8B8A8_UINT/SINT, R16G16B16A16_UINT/SINT,
+  R10G10B10A2_UINT/SINT (4-channel). Deliberately left out
+  R32G32B32_UINT/SINT (3-channel) since `femeRTUnpackImageTexelI32`
+  itself doesn't decode that format at all yet -- consistent with the
+  "unrecognized format conservatively returns all four present" policy
+  both mask functions already use.
+- Applied the new helper at all 7 call sites, same shape as last
+  session's swizzle-order fix.
+- `ninja FeMeRuntimeCPU` -- clean build both times (once before adding
+  the int-specific mask function, to confirm the compound-literal/
+  vector-extension plumbing was fine; once after).
+- Added a new unit test
+  (`SampleI32BorderColorFallbackVariesByFormatAndBorderColor`) using
+  `R16_SINT` + an explicit `opaque_white`-equivalent `BorderColor` +
+  an `argb` swizzle, hand-computing the expected masked-then-swizzled
+  result the same way I traced the CTS's own math.
+- Ran `ninja check-feme` and got 2 *pre-existing* test failures I
+  didn't expect: the two L125(q) border-swizzle tests from last
+  session, both using `R32G32B32A32_SINT` (a genuine 4-real-channel
+  format) with the *default* zero-initialized sampler (implicitly
+  `transparent_black`, `BorderColor = {0,0,0,0}`). Their own
+  hand-written expected values assumed alpha always defaults to `1`
+  regardless of format -- which was true of the *old*, buggy, fixed
+  `{0,0,0,1}` literal, but is not true anymore now that masking
+  correctly only forces a default for a channel the format doesn't
+  actually store. Since `R32G32B32A32_SINT` stores all 4 channels for
+  real, `transparent_black`'s true alpha (`0`) now correctly comes
+  through, not the old forced `1`. This is not a regression -- it's
+  the fix working exactly as intended -- so I updated both tests to
+  set an explicit `VK_BORDER_COLOR_INT_OPAQUE_BLACK`-equivalent
+  `BorderColor` (alpha=1 for real this time, not as a mask-forced
+  default) so their own swizzle-order-focused assertions stay
+  meaningful and correct. Good reminder that "a previously-passing
+  test starts failing" isn't automatically a red flag -- have to
+  actually check whether the test's own assumption was the thing that
+  was wrong, which in this case it clearly was (baked-in assumption
+  about the *old*, since-fixed bug's own behavior).
+- Re-ran `ninja check-feme`: 3,262/3,265 Passed, 3 Unsupported, 0
+  Failed (+1 net new test vs. the prior session's 3,261/3,264 --
+  net delta looks like "+1" rather than "+1 new, 2 modified" because
+  gtest counts distinct test names, and the 2 modified tests kept
+  their original names).
+- Verified via CTS: both the `opaque_white` isolated repro from this
+  session and the `transparent_black` one from last session both Pass.
+- Ran the full `border_swizzle.r16*` sweep again (25,600 cases, ~11
+  min): **5,550 Pass / 0 Fail / 20,050 NotSupported** -- every single
+  one of the 632 residual fails left after last session's partial fix
+  is now gone. Zero fails left in this entire test area for any `r16*`
+  format.
+- Tried also kicking off a full `sampler.border_swizzle.*` sweep (all
+  formats, not just `r16*`) as an extra-cautious regression check, but
+  it turned out to be a much bigger case set than I expected (still
+  grinding through early-alphabet formats after 6+ minutes, nowhere
+  near done) -- stopped it rather than let it run indefinitely, since
+  the `r16*`-scoped sweep already fully covers this fix's own actual
+  changed code paths (the fix touches format-agnostic helper functions,
+  but the specific *values* it's expected to get right were all
+  verified against the exact formats/border-colors/swizzles this
+  bucket's own CTS cases exercise). This matches the verification depth
+  prior sessions in this same row's history already established as
+  sufficient (their own `r16*`-scoped sweeps, not full-suite ones).
+- Checked `FeMeGraphicsDesign.md` for any "border color" design text
+  that might need updating given this fix -- found only a generic,
+  still-accurate `FemeSamplerDescriptor` field sketch (`border color`,
+  no float/int qualifier) -- no deviation to record, since this fix
+  didn't touch the ABI struct's shape at all (confirming the "no new
+  ABI storage needed" finding above kept this fix fully inside the
+  already-documented design).
+- Committed in 2 pieces: (1) the runtime fix (2 new helpers + 7 call
+  sites) + the 1 new/2 updated unit tests, (2) the doc updates
+  (Roadmap.md + VulkanCTSReport.md). No Vulkan14FeatureInventory/
+  VulkanExtensionInventory changes needed -- this session added no new
+  Vulkan feature/extension surface, purely an internal runtime
+  correctness fix.
+
+## Wins visible right now
+
+- All 632 residual `border_swizzle.r16*` fails from last session are
+  now fixed -- this test area (for `r16*` formats at least) is at
+  **0 fails**.
+- `ninja check-feme`: 0 regressions, +1 net new test (plus 2 existing
+  tests corrected to reflect the fix's own more-accurate behavior).
+- The fix turned out simpler than scoped -- no ABI growth needed at
+  all, which also means no follow-on churn for anything else that
+  reads `FemeSamplerDescriptor`'s layout.
+- `L125(q)` and `L125(v)` are now both fully closed rows on the
+  roadmap.
+
+## Next steps
+
+1. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain the untouched rows
+   from the `L125(c)` decomposition several sessions back -- good next
+   picks. `L125(p)` (440 fails, "Image mismatch" across
+   `image.suballocation`/`image_view.view_type`/`sampler.view_type`) is
+   the single largest remaining bucket by far but needs its own
+   `--deqp-log-decompiled-spirv=enable` trace per area before
+   estimating -- start there only with a full session budgeted, not a
+   quick pick.
+2. `L115(b)` (pull-model interpolation, `InterpolateAtCentroid`/
+   `InterpolateAtSample`) remains the other real, larger,
+   not-yet-started item flagged several sessions ago -- needs a new
+   runtime-callback ABI surface (barycentric/interpolant-plane data
+   doesn't exist in `FemeFragmentInvocation` today), properly budgeted
+   as its own 1-2 session item, not squeezed in alongside smaller
+   fixes.
+3. Given this session's own "the ABI already had what we needed"
+   surprise, it may be worth a quick sanity pass the next time any
+   future roadmap row's own scoping text asserts "needs new ABI
+   storage" -- confirm that claim genuinely holds (by reading the
+   relevant mapping/resolution code, the way `mapBorderColor` was
+   checked here) before committing to the larger design, since it may
+   again turn out the existing fields already suffice.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. This session's own scratch CTS logs (`/tmp/ctsrun/l125v/*`) are
+   already cleaned up -- nothing to do here.
