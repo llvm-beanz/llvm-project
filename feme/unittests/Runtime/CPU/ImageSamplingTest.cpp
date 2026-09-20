@@ -1119,6 +1119,67 @@ TEST_F(ImageSamplingTest, ClampToBorderExpandsMissingComponentsForFormat) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f); // Defaulted, not the sampler's baked 0.4.
 }
 
+// (Roadmap L125(f)) Unlike a synthesized border color (L125(d)/(e) above),
+// an in-bounds sampled texel previously bypassed `femeRTApplyImageSwizzle`
+// entirely -- this is the first shape (`Sample2D`, nearest filtering) to
+// close that gap. Uses the same `BARG` mapping and distinguishable-channel
+// philosophy as `ClampToBorderAppliesImageViewSwizzle` above, but samples
+// a real, in-bounds texel (`U=V=0.5` on a single-texel image, never
+// touching the address mode's `ClampToBorder` path) so a regression that
+// only re-breaks the in-bounds branch (while leaving the already-covered
+// border branch correct) cannot coincidentally still pass.
+TEST_F(ImageSamplingTest, SampleAppliesImageViewSwizzleToInBoundsTexel) {
+  float Storage[1][1][4] = {{{0.1f, 0.2f, 0.3f, 0.4f}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.3f); // R <- B
+  EXPECT_FLOAT_EQ(Out[1], 0.4f); // G <- A
+  EXPECT_FLOAT_EQ(Out[2], 0.1f); // B <- R
+  EXPECT_FLOAT_EQ(Out[3], 0.0f); // A <- Zero
+}
+
+// (Roadmap L125(f)) The mirror-image regression test: a storage-image
+// load (`feme.cpu.image.load.2d.v4f32`, Vulkan's `OpImageRead`) must
+// *never* apply `FemeImageDescriptor::Swizzle`, even when non-identity --
+// per the Vulkan spec, only a sampled-image access (`OpImageSample*`/
+// `OpImageFetch`) honors an image view's own `VkComponentMapping`.
+// Protects the storage-image semantics `femeRTFetchTexel2D`'s own new
+// `ApplySwizzle` parameter is meant to preserve going forward.
+TEST_F(ImageSamplingTest, LoadNeverAppliesImageViewSwizzle) {
+  float Storage[1][1][4] = {{{0.1f, 0.2f, 0.3f, 0.4f}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.1f); // Unswizzled: raw R.
+  EXPECT_FLOAT_EQ(Out[1], 0.2f); // Unswizzled: raw G.
+  EXPECT_FLOAT_EQ(Out[2], 0.3f); // Unswizzled: raw B.
+  EXPECT_FLOAT_EQ(Out[3], 0.4f); // Unswizzled: raw A.
+}
+
 TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
   // A single R8G8B8A8_UNORM_SRGB texel with R=G=B=188/255 (~0.7372549), the
   // sRGB encoding of linear 0.5 (matching sRGB's well-known midpoint
