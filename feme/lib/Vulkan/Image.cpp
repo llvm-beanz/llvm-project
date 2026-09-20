@@ -333,6 +333,8 @@ Sampler::Sampler(const VkSamplerCreateInfo &CreateInfo) : Descriptor{} {
     Flags |= FEME_SAMPLER_ANISOTROPY_ENABLE;
     Descriptor.MaxAnisotropy = CreateInfo.maxAnisotropy;
   }
+  if (CreateInfo.unnormalizedCoordinates)
+    Flags |= FEME_SAMPLER_UNNORMALIZED_COORDINATES;
   Descriptor.Flags = Flags;
   mapBorderColor(CreateInfo.borderColor, Descriptor.BorderColor);
 }

@@ -742,6 +742,14 @@ enum FemeSamplerDescriptorFlagBits : uint32_t {
   /// Set if anisotropic filtering is enabled, in which case `MaxAnisotropy`
   /// bounds the sample count; clear to use `MinFilter`/`MagFilter` only.
   FEME_SAMPLER_ANISOTROPY_ENABLE = 1u << 1,
+  /// Set if `VkSamplerCreateInfo::unnormalizedCoordinates` was `VK_TRUE`:
+  /// the shader-supplied `U`/`V` coordinates are already in `[0, extent)`
+  /// texel space (level 0 only -- the Vulkan spec forbids mipmapping,
+  /// anisotropy, and any derivative-based implicit LOD alongside this bit)
+  /// rather than the usual normalized `[0, 1)` range, and must be divided
+  /// by the level-0 extent before any addressing-mode/filtering math that
+  /// assumes a normalized input (roadmap L125(w)).
+  FEME_SAMPLER_UNNORMALIZED_COORDINATES = 1u << 2,
 };
 
 /// One sampler descriptor: the unit the sampler heap is an array of. Unlike

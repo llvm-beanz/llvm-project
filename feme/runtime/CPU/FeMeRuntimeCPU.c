@@ -2034,6 +2034,26 @@ femeRTLoadSamplerDescriptor(const FemeRTSamplerDescriptor *Heap,
   return Heap[Index];
 }
 
+// (Roadmap L125(w)) `VkSamplerCreateInfo::unnormalizedCoordinates` makes
+// the shader-supplied coordinate along one axis already a texel-space
+// value in `[0, LevelExtent)` (level 0 only -- the Vulkan spec forbids
+// mipmapping/anisotropy alongside this bit) rather than the usual
+// normalized `[0, 1)` value every addressing-mode/filtering computation
+// in this file (`femeRTSamplePoint2D` and friends) assumes. Converting
+// once, here, back to the normalized convention -- rather than teaching
+// every one of those downstream functions a second unit system -- means
+// no other sampling code needs to change. `LevelExtent == 0` (an empty
+// image) maps to `0.0f` rather than dividing by zero; the resulting
+// out-of-range sample is no worse than what an empty image already
+// produces via any other addressing path.
+__attribute__((always_inline)) static float
+femeRTUnnormalizeCoord(float Coord, uint32_t LevelExtent,
+                       _Bool IsUnnormalized) {
+  if (!IsUnnormalized)
+    return Coord;
+  return LevelExtent ? Coord / (float)LevelExtent : 0.0f;
+}
+
 // The byte size of one texel of `Format` (`feme::cpu::ResourceFormat`), or 0
 // for a format this file does not (yet) decode -- see the file header
 // comment's format-table scope note.
@@ -5735,6 +5755,13 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  // Roadmap L125(w): an unnormalized-coordinate sampler's `U`/`V` are
+  // already texel-space (level 0 only), not the `[0, 1)` range every
+  // computation below assumes -- rescale once, up front.
+  _Bool IsUnnormalized =
+      (Samp.Flags & 4u) != 0; // FEME_SAMPLER_UNNORMALIZED_COORDINATES.
+  U = femeRTUnnormalizeCoord(U, Img.Width, IsUnnormalized);
+  V = femeRTUnnormalizeCoord(V, Img.Height, IsUnnormalized);
 
   if (UseExplicitLod) {
     // SPIR-V's `MinLod`/`Bias` image operands only ever combine with an
@@ -5804,6 +5831,13 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  // Roadmap L125(w): rescale texel-space `U`/`V` back to normalized
+  // `[0, 1)` for an unnormalized-coordinate sampler -- see
+  // `femeCpuImageSample2DV4F32`'s own identical rescale above.
+  _Bool IsUnnormalized =
+      (Samp.Flags & 4u) != 0; // FEME_SAMPLER_UNNORMALIZED_COORDINATES.
+  U = femeRTUnnormalizeCoord(U, Img.Width, IsUnnormalized);
+  V = femeRTUnnormalizeCoord(V, Img.Height, IsUnnormalized);
 
   // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
   // `0.0f`), mirroring `femeCpuImageSample2DV4F32`'s own explicit-LOD
@@ -5867,6 +5901,12 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  // Roadmap L125(w): rescale texel-space `U` back to normalized `[0, 1)`
+  // for an unnormalized-coordinate sampler -- see
+  // `femeCpuImageSample2DV4F32`'s own identical rescale above.
+  U = femeRTUnnormalizeCoord(
+      U, Img.Width,
+      (Samp.Flags & 4u) != 0); // FEME_SAMPLER_UNNORMALIZED_COORDINATES.
 
   // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
   // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above.
@@ -7781,6 +7821,12 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  // Roadmap L125(w): rescale texel-space `U` back to normalized `[0, 1)`
+  // for an unnormalized-coordinate sampler -- see
+  // `femeCpuImageSample2DV4F32`'s own identical rescale above.
+  U = femeRTUnnormalizeCoord(
+      U, Img.Width,
+      (Samp.Flags & 4u) != 0); // FEME_SAMPLER_UNNORMALIZED_COORDINATES.
   float RawLod =
       UseExplicitLod ? Lod : femeRTPlanImplicitLod1D(&Img, DUdX, DUdY);
   // `UseExplicitLod=1` always, mirroring `femeRTPlanImplicitLod`'s own
