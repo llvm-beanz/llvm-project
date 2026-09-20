@@ -560,6 +560,54 @@ static uint32_t resolveImageSwizzle(const VkComponentMapping &Components) {
       Cast(Components.a));
 }
 
+/// (Roadmap L125(w)) The component mask a `CLAMP_TO_BORDER` fallback
+/// should use for \p Format's *own* channel count, or `0` ("no override,
+/// derive from the descriptor's `Format` field the normal way") for a
+/// format the ASTC/BC/ETC2 decode bridges above widen to a 4-channel
+/// uncompressed target that already matches (or for any non-block
+/// -compressed format, which never reaches this function at all --
+/// see the two call sites below). Needed because `decodeBCImageForSampling`/
+/// `decodeETC2ImageForSampling` decode several narrower-than-4-channel
+/// source families (`BC1_RGB`/`BC6H`/`ETC2_RGB8`'s opaque RGB, `BC4`/
+/// `EAC_R11`'s single channel, `BC5`/`EAC_R11G11`'s two channels) into a
+/// wider uncompressed storage format purely for texel-fetch convenience
+/// (e.g. `R8G8B8A8_UNORM`) -- once decoded, `Dst.Format` alone can no
+/// longer tell `femeRTExpandBorderColorForFormat` (FeMeRuntimeCPU.c)
+/// which components the *original* compressed format actually stored, so
+/// this mask travels alongside it via `FemeImageDescriptor::
+/// BorderComponentMask`. ASTC is not covered here: every ASTC LDR format
+/// already stores (or synthesizes, for `void-extent`/border-less blocks)
+/// a full 4-channel result, so its existing `0` default is already
+/// correct. A format not covered by either switch (including every
+/// already-4-channel BC/ETC2 family: `BC1_RGBA`, `BC2`, `BC3`, `BC7`,
+/// `ETC2_RGB8A1`, `ETC2_RGBA8`) returns `0` too, since `0xf` is already
+/// what the normal `Format`-derived path would compute for their own
+/// (4-channel) decode targets.
+static uint32_t
+compressedFormatBorderComponentMask(feme::cpu::ResourceFormat Format) {
+  switch (Format) {
+  case feme::cpu::ResourceFormat::BC1_RGB_UNORM:
+  case feme::cpu::ResourceFormat::BC1_RGB_SRGB:
+  case feme::cpu::ResourceFormat::BC6H_UFLOAT:
+  case feme::cpu::ResourceFormat::BC6H_SFLOAT:
+  case feme::cpu::ResourceFormat::ETC2_RGB8_UNORM:
+  case feme::cpu::ResourceFormat::ETC2_RGB8_SRGB:
+    return 0x7u; // R, G, B.
+  case feme::cpu::ResourceFormat::BC4_UNORM:
+  case feme::cpu::ResourceFormat::BC4_SNORM:
+  case feme::cpu::ResourceFormat::EAC_R11_UNORM:
+  case feme::cpu::ResourceFormat::EAC_R11_SNORM:
+    return 0x1u; // R only.
+  case feme::cpu::ResourceFormat::BC5_UNORM:
+  case feme::cpu::ResourceFormat::BC5_SNORM:
+  case feme::cpu::ResourceFormat::EAC_R11G11_UNORM:
+  case feme::cpu::ResourceFormat::EAC_R11G11_SNORM:
+    return 0x3u; // R, G.
+  default:
+    return 0u; // Already 4-channel (or ASTC/uncompressed): no override.
+  }
+}
+
 void materializeImageDescriptor(const DescriptorImageBinding &Src,
                                 VkDescriptorType Type,
                                 MaterializedBoundResources &Result,
@@ -690,6 +738,8 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
     Dst.Format = static_cast<uint32_t>(Target.Format);
     Dst.MipLayouts = Result.DecodedImageLayoutStorage.back().data();
     Dst.MipLayoutCount = LevelCount;
+    Dst.BorderComponentMask =
+        compressedFormatBorderComponentMask(Img->format());
     return;
   }
 
@@ -705,6 +755,8 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
     Dst.Format = static_cast<uint32_t>(Target.Format);
     Dst.MipLayouts = Result.DecodedImageLayoutStorage.back().data();
     Dst.MipLayoutCount = LevelCount;
+    Dst.BorderComponentMask =
+        compressedFormatBorderComponentMask(Img->format());
     return;
   }
 

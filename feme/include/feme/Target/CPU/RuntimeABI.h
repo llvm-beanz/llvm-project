@@ -687,10 +687,23 @@ struct FemeImageDescriptor {
   /// narrower border-color scope. Taken from this struct's own former
   /// `Reserved[3]` headroom (now `Reserved[2]`).
   uint32_t Swizzle;
-  /// ABI headroom for later image-descriptor extensions. Was `Reserved[3]`
-  /// before roadmap L125(d) donated one slot's worth of space to
-  /// `Swizzle` above.
-  uint32_t Reserved[2];
+  /// (Roadmap L125(w)) Overrides the component mask
+  /// `femeRTExpandBorderColorForFormat`/`femeRTExpandBorderColorForFormatI32`
+  /// would otherwise derive from `Format` alone -- `0` (the default for
+  /// every uncompressed image) means "no override, derive from `Format`
+  /// as before". Needed because a block-compressed format whose original
+  /// channel count is narrower than 4 (e.g. `BC1_RGB`/`BC6H`/
+  /// `ETC2_RGB8`'s opaque RGB, or `BC4`/`EAC_R11`'s single channel) still
+  /// decodes, host-side, into a wider uncompressed storage format for
+  /// texel-fetch convenience (e.g. `R8G8B8A8_UNORM`) -- so `Format` alone
+  /// can no longer tell a border-color fallback which components the
+  /// *original* format actually stored. Taken from this struct's own
+  /// former `Reserved[2]` headroom (now `Reserved[1]`).
+  uint32_t BorderComponentMask;
+  /// ABI headroom for later image-descriptor extensions. Was `Reserved[2]`
+  /// before roadmap L125(w) donated one slot's worth of space to
+  /// `BorderComponentMask` above.
+  uint32_t Reserved[1];
 };
 
 /// The minification/magnification/mip filter a `FemeSamplerDescriptor`

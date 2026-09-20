@@ -1978,7 +1978,13 @@ typedef struct {
   // from this struct's own former `Reserved[3]` headroom (now
   // `Reserved[2]`).
   uint32_t Swizzle;
-  uint32_t Reserved[2];
+  // (Roadmap L125(w)) Overrides the border-color component mask
+  // `femeRTImageFormatComponentMask`/`femeRTImageFormatComponentMaskI32`
+  // would otherwise derive from `Format` alone; `0` means "no override".
+  // See RuntimeABI.h's own comment on this field for why a
+  // block-compressed format's widened decode-target `Format` needs this.
+  uint32_t BorderComponentMask;
+  uint32_t Reserved[1];
 } FemeRTImageDescriptor;
 
 // Mirrors `feme::cpu::FemeSamplerDescriptor` (RuntimeABI.h) field for field.
@@ -4261,9 +4267,21 @@ femeRTImageFormatComponentMask(uint32_t Format) {
 // baked value for that component -- see `femeRTImageFormatComponentMask`'s
 // own roadmap L125(e) comment above for why this is needed at fetch time,
 // not sampler-creation time.
+//
+// (Roadmap L125(w)) \p BorderComponentMaskOverride wins over
+// `femeRTImageFormatComponentMask(Format)` whenever nonzero -- needed for
+// a block-compressed image, whose `Format` here is the wider uncompressed
+// decode target (e.g. `R8G8B8A8_UNORM`), not the original format's own
+// (possibly narrower) channel count `FemeRTImageDescriptor::
+// BorderComponentMask` was populated from at materialization time. See
+// that field's own RuntimeABI.h comment for why `Format` alone can no
+// longer answer this question for such an image.
 __attribute__((always_inline)) static FemeRTv4f32
-femeRTExpandBorderColorForFormat(const float BorderColor[4], uint32_t Format) {
-  uint32_t Mask = femeRTImageFormatComponentMask(Format);
+femeRTExpandBorderColorForFormat(const float BorderColor[4], uint32_t Format,
+                                 uint32_t BorderComponentMaskOverride) {
+  uint32_t Mask = BorderComponentMaskOverride
+                      ? BorderComponentMaskOverride
+                      : femeRTImageFormatComponentMask(Format);
   FemeRTv4f32 Result;
   for (int I = 0; I != 4; ++I)
     Result[I] = (Mask & (1u << I)) ? BorderColor[I] : (I == 3 ? 1.0f : 0.0f);
@@ -4397,7 +4415,8 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border =
-        femeRTExpandBorderColorForFormat(BorderColor, Img->Format);
+        femeRTExpandBorderColorForFormat(BorderColor, Img->Format,
+                                         Img->BorderComponentMask);
     return ApplySwizzle ? femeRTApplyImageSwizzle(Border, Img->Swizzle)
                         : Border;
   }
@@ -4853,7 +4872,8 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border =
-        femeRTExpandBorderColorForFormat(BorderColor, Img->Format);
+        femeRTExpandBorderColorForFormat(BorderColor, Img->Format,
+                                         Img->BorderComponentMask);
     return ApplySwizzle ? femeRTApplyImageSwizzle(Border, Img->Swizzle)
                         : Border;
   }
