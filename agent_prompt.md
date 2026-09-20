@@ -85,37 +85,28 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Suggested next steps
 
-1. **(~5 min)** Delete `/tmp/ctsrun/l124t_*.qpa`/`.stdout`,
-   `/tmp/ctsrun/ssbo_l124t.*`, `/tmp/ctsrun/ubo_random_l124t.*`, and
-   `/tmp/l124t_*.mlir` if a future session doesn't need them -- none
-   referenced by anything committed. Worth keeping
-   `/tmp/ctsrun/l124t_nsia8.qpa` a little longer: it has the full
-   decompiled SPIR-V/GLSL source for `nested_structs_instance_arrays.8`
-   already extracted (3 blocks, 6 struct types), saving a re-run.
-2. Start **L124(u)** (`nested_structs_instance_arrays.8`, the sole
-   remaining `ssbo.*` fail). This session already ruled out `BlockD.n[]`
-   (the trailing `mat3` runtime array) as the cause -- the fix from
-   this session handles it fine. Recommended order for what's left to
-   check, cheapest first:
-   - `BlockB`'s `sA d[]` (runtime array of struct containing a `mat4`,
-     `RowMajor`) -- this goes through the nested-struct-type conversion
-     path (not `peelArraysToMatrixType` at all), which should already be
-     correct via `TypeConverter.addConversion` for `StructType`, but
-     hasn't been directly repro-verified for this specific runtime-array-
-     of-struct-with-matrix combination.
-   - `BlockC`'s doubly-nested `sD.mA` (a `sB` struct containing a
-     `mat3x2`, `RowMajor`) and `sE.mB` (a direct `mat3` member) -- both
-     ordinary nested-struct matrix members, should be well-trodden but
-     not yet individually repro-verified in this exact combination.
-   - Consider whether `bool`/`bvec3`/`bvec4` members (present in `sC`,
-     `sD.mC`) interacting with a following matrix member's offset could
-     be the gap -- not investigated at all this session.
-   - If none of the above isolate it, consider binary-search by editing
-     the real GLSL shader source directly (nulling out unrelated block
-     members) rather than another guess-based `feme-opt` repro.
-3. `ninja check-feme` and `ninja deqp-vk` are both incremental from here
-   -- reuse the existing build directories, no reconfigure needed.
-4. With `ssbo.*` at 1 fail of 12,225 and `ubo.random.*` fully clean,
-   L124(u) closing this last case would make **both** `ubo.*` and
-   `ssbo.*` families fully clean -- highest-value single item left on
-   the L124 series.
+1. **(~5 min)** Delete `/tmp/l124u_*` and `/tmp/ctsrun/l124u_*`/
+   `/tmp/ctsrun/l124t_*` scratch files -- none referenced by anything
+   committed. The hand-rolled verify harness (`/tmp/l124u_verify.py`,
+   `/tmp/l124u_verify2.py`, `/tmp/l124u_build_heap.py`) is not needed
+   again now that the real CTS test passes.
+2. **The entire L124 roadmap series is now closed** (`ssbo.*` and
+   `ubo.*` both fully clean, 0 `Fail` each). There is no obvious next
+   L124 sub-item to pick up -- check `Roadmap.md` for the next
+   unstarted milestone item instead (search for the next un-struck-
+   through `P2`/`P1` row near where L124 was).
+3. `ninja check-feme` and the CTS build directories are both
+   incremental from here -- reuse them, no reconfigure needed.
+4. If a future session wants extra confidence beyond `ssbo.*`/
+   `ubo.random.*`, consider a full `ubo.*` sweep (13,240 cases, not run
+   this session since no `Uniform`/`Block`-specific code was touched)
+   -- low priority, this session's fix only touches struct-member-index
+   remapping shared by both `ubo.*` and `ssbo.*` paths, and
+   `ubo.random.*` already confirms no regression there.
+5. Consider whether the array-of-struct case this fix deliberately left
+   out of scope (`RealStructTy` resets to null across Array/
+   RuntimeArray levels) could hide the same bug class for a struct
+   nested *inside* an array -- not tested this session, not currently
+   known to be a live CTS failure (both families are fully clean), so
+   low priority unless a future regression surfaces there.
+
