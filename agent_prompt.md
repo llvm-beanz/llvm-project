@@ -55,27 +55,22 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~20-30 min)** `L125(r)` (`InterpolateAtCentroid`/`InterpolateAtSample`
-   legalization gap, 27 fails) is likely the fastest win of the six: a missing
-   SPIR-V-to-LLVM conversion pattern for two GLSL.std.450 extended instructions,
-   mechanically similar in shape to other "operation not legalized" gaps this
-   roadmap has already closed. Start in `SPIRVToLLVMPatterns.cpp`.
-2. **(~15 min)** `L125(q)`'s sub-bucket (1) (80 fails, `border_swizzle`'s
-   single/dual-channel non-8-bit gather formats reporting "image fixture format
-   is not yet supported") already has its root cause identified this session --
-   a mechanical format-support gap, likely a good second pick alongside L125(r).
-3. `L125(p)` (440 fails, "Image mismatch" across
-   `image.suballocation`/`image_view.view_type`/`sampler.view_type`) is the
-   single largest bucket by far but needs its own
-   `--deqp-log-decompiled-spirv=enable` trace per area before estimating --
-   start here only with more time budgeted.
-4. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, the bind-point
-   bucket, and the small exact_sampling bucket) are all not yet started at all
-   -- good picks once the above three are underway or blocked.
-5. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) remains the other
-   open, larger cross-repo item from before this session -- not touched, not a
-   quick pick.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~20-30 min)** `L125(q)` sub-bucket (2) is now the more clearly
+   scoped pick in this row: 864 fails (not 64), `Ref`-vs-`Color`
+   mismatches combining a non-identity swizzle + non-default border
+   color + `gather_N`, across `r16_uint`/`_sint`, `r16g16_uint`/`_sint`,
+   `r16g16b16a16_uint`/`_sint`. Start by isolating one case (e.g.
+   `r16_sint.barg.transparent_black.gather_3.no_swizzle_hint`,
+   already confirmed to fail identically standalone) and tracing the
+   swizzle/border-color application order for `Gather*` specifically.
+2. **(~1-2 sessions)** `L115(b)` (pull-model interpolation) remains the
+   real, larger, not-yet-started item behind `L125(r)`'s duplicate row
+   -- worth a dedicated session with the new-ABI-surface work properly
+   budgeted, not squeezed in alongside smaller fixes.
+3. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain untouched from the
+   prior session's decomposition -- good alternative picks if
+   sub-bucket (2) above stalls.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's own scratch CTS logs (`/tmp/ctsrun/l125c2/*`) are already
-   cleaned up -- nothing to do here.
+5. Clean up `/tmp/ctsrun/l125q_verify/*` (this session's own scratch
+   QPA/fails.txt files) before ending a future session.
