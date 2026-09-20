@@ -651,6 +651,26 @@ enum class ImageCallKind : uint8_t {
   /// `GatherCmpCube`'s own direction-vector coordinate and lack of an
   /// offset operand.
   GatherCube,
+  /// `feme.cpu.image.gather.2d.v4i32` (roadmap L125(k)): the
+  /// integer-channel (`usampler2D`/`isampler2D`) counterpart of
+  /// `Gather2D` above, returning `<4 x i32>` instead of `<4 x float>` --
+  /// otherwise identical fixed gather footprint/result ordering/
+  /// mip-level-0-only restriction. Unlike `GatherCmp2D`'s own `Dref`
+  /// (always a float depth-compare value, so an integer-sampled image
+  /// never legitimately reaches it), a plain gather's `Component`
+  /// selector is equally meaningful against an integer image
+  /// (`TextureCube<uint4>::Gather()` et al.), so this kind -- unlike
+  /// `GatherCmp2D` -- has a real integer counterpart.
+  Gather2DI32,
+  /// `feme.cpu.image.gather.array2d.v4i32` (roadmap L125(k)): the
+  /// `Array2D` counterpart of `Gather2DI32` above, adding `ArrayLayer`
+  /// the same way `GatherArray2D` does to `Gather2D`.
+  GatherArray2DI32,
+  /// `feme.cpu.image.gather.cube.v4i32` (roadmap L125(k)): the
+  /// `TextureCube` counterpart of `Gather2DI32` above, mirroring
+  /// `GatherCube`'s own direction-vector coordinate and lack of an
+  /// offset operand.
+  GatherCubeI32,
   /// `feme.cpu.image.sample.1d.v4i32` (roadmap L125(b)): the `Plain1D`
   /// counterpart of `Sample2DI32`, mirroring `Sample1D`'s own relationship
   /// to `Sample2D` -- a `Texture1D` nearest-filtered sample against an
@@ -1152,6 +1172,41 @@ llvm::CallInst *createGatherCube(llvm::IRBuilderBase &Builder,
                                  llvm::Value *DirY, llvm::Value *DirZ,
                                  llvm::Value *Component, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gather.2d.v4i32` call (roadmap L125(k)): the
+/// integer-channel (`usampler2D`/`isampler2D`) counterpart of
+/// `createGather2D` above, returning `<4 x i32>` instead of
+/// `<4 x float>` -- otherwise identical operand shape.
+llvm::CallInst *
+createGather2DI32(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                  llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                  llvm::Value *U, llvm::Value *V, llvm::Value *Component,
+                  llvm::Value *OffsetX, llvm::Value *OffsetY,
+                  llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gather.array2d.v4i32` call (roadmap
+/// L125(k)): the `Array2D` counterpart of `createGather2DI32` above,
+/// adding \p ArrayLayer the same way `createGatherArray2D` does to
+/// `createGather2D`.
+llvm::CallInst *
+createGatherArray2DI32(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                       llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                       llvm::Value *U, llvm::Value *V,
+                       llvm::Value *ArrayLayer, llvm::Value *Component,
+                       llvm::Value *OffsetX, llvm::Value *OffsetY,
+                       llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gather.cube.v4i32` call (roadmap L125(k)):
+/// the `TextureCube` counterpart of `createGather2DI32` above, mirroring
+/// `createGatherCube`'s own direction-vector coordinate and lack of an
+/// offset parameter.
+llvm::CallInst *
+createGatherCubeI32(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                    llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                    llvm::Value *DirX, llvm::Value *DirY, llvm::Value *DirZ,
+                    llvm::Value *Component, llvm::Value *Mask,
+                    const llvm::Twine &Name = "");
+
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
 /// selects which sample of a multisampled image to read; pass a constant

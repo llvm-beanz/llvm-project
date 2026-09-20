@@ -154,6 +154,12 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.gathercmp.cube.v4f32";
   case ImageCallKind::GatherCube:
     return "feme.cpu.image.gather.cube.v4f32";
+  case ImageCallKind::Gather2DI32:
+    return "feme.cpu.image.gather.2d.v4i32";
+  case ImageCallKind::GatherArray2DI32:
+    return "feme.cpu.image.gather.array2d.v4i32";
+  case ImageCallKind::GatherCubeI32:
+    return "feme.cpu.image.gather.cube.v4i32";
   case ImageCallKind::Sample1DI32:
     return "feme.cpu.image.sample.1d.v4i32";
   case ImageCallKind::Sample1DArrayI32:
@@ -833,6 +839,39 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                              F32Ty, F32Ty, I32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
+  case ImageCallKind::Gather2DI32:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, component, offset_x, offset_y,
+    //  mask) -> <4 x i32> (roadmap L125(k)): identical operand shape to
+    // `Gather2D` above, but returning `<4 x i32>` for an integer-channel
+    // (`usampler2D`/`isampler2D`) sampled image.
+    FTy = FunctionType::get(V4I32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::GatherArray2DI32:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, array_layer, component,
+    //  offset_x, offset_y, mask) -> <4 x i32> (roadmap L125(k)): the
+    // `Array2D` counterpart of `Gather2DI32` above, adding `array_layer`
+    // the same way `GatherArray2D` does to `Gather2D`.
+    FTy = FunctionType::get(V4I32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::GatherCubeI32:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, dir_x, dir_y, dir_z, component, mask)
+    //  -> <4 x i32> (roadmap L125(k)): the `TextureCube` counterpart of
+    // `Gather2DI32` above, mirroring `GatherCube`'s own direction-vector
+    // coordinate and lack of an offset operand.
+    FTy = FunctionType::get(V4I32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
   case ImageCallKind::Sample1DI32:
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, u, lod, offset, mask) -> <4 x i32>
@@ -1204,6 +1243,59 @@ CallInst *feme::cpu::createGatherCube(IRBuilderBase &Builder,
                                       const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::GatherCube);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex,
+                             DirX, DirY, DirZ, Component, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createGather2DI32(IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       Value *ImageIndex, Value *SamplerIndex,
+                                       Value *U, Value *V, Value *Component,
+                                       Value *OffsetX, Value *OffsetY,
+                                       Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Gather2DI32);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap,
+                             Env.ImageHeapCount,
+                             Env.SamplerHeap,
+                             Env.SamplerHeapCount,
+                             ImageIndex,
+                             SamplerIndex,
+                             U,
+                             V,
+                             Component,
+                             OffsetX,
+                             OffsetY,
+                             Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createGatherArray2DI32(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *U, Value *V, Value *ArrayLayer,
+    Value *Component, Value *OffsetX, Value *OffsetY, Value *Mask,
+    const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::GatherArray2DI32);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
+                             V, ArrayLayer, Component, OffsetX, OffsetY, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createGatherCubeI32(IRBuilderBase &Builder,
+                                         const ImageCallEnv &Env,
+                                         Value *ImageIndex, Value *SamplerIndex,
+                                         Value *DirX, Value *DirY, Value *DirZ,
+                                         Value *Component, Value *Mask,
+                                         const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::GatherCubeI32);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex,
@@ -2076,6 +2168,9 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Sample2DI32,
       ImageCallKind::GatherCmpCube,
       ImageCallKind::GatherCube,
+      ImageCallKind::Gather2DI32,
+      ImageCallKind::GatherArray2DI32,
+      ImageCallKind::GatherCubeI32,
       ImageCallKind::Sample1DI32,
       ImageCallKind::Sample1DArrayI32,
       ImageCallKind::Sample2DArrayI32,
@@ -2823,6 +2918,54 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(10);
     break;
   case ImageCallKind::GatherCube:
+    if (CI.arg_size() != 11)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.Component = CI.getArgOperand(9);
+    Result.Mask = CI.getArgOperand(10);
+    break;
+  case ImageCallKind::Gather2DI32:
+    if (CI.arg_size() != 12)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.Component = CI.getArgOperand(8);
+    Result.OffsetX = CI.getArgOperand(9);
+    Result.OffsetY = CI.getArgOperand(10);
+    Result.Mask = CI.getArgOperand(11);
+    break;
+  case ImageCallKind::GatherArray2DI32:
+    if (CI.arg_size() != 13)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.ArrayLayer = CI.getArgOperand(8);
+    Result.Component = CI.getArgOperand(9);
+    Result.OffsetX = CI.getArgOperand(10);
+    Result.OffsetY = CI.getArgOperand(11);
+    Result.Mask = CI.getArgOperand(12);
+    break;
+  case ImageCallKind::GatherCubeI32:
     if (CI.arg_size() != 11)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
