@@ -4899,3 +4899,114 @@ feature/extension surface, so
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Session: L124(t) fixed -- runtime-array-of-matrix conversion gap, closes 3 of `ssbo.*`'s remaining 4; residual 1 re-scoped as L124(u)
+
+Triaged and fixed roadmap L124(t) (the 4 `ssbo.*` fails left after
+L124(s)): `all_per_block_buffers.20`'s own pipeline-creation crash,
+`all_shared_buffer.13`/`nested_structs_instance_arrays.8`'s unexplained
+`ac_numPassed` mismatches, and `all_shared_buffer.41`'s "Result
+comparison failed" (previously investigated but unresolved, since the
+prior session's own repro had mirrored the wrong member).
+
+Re-triaged `all_shared_buffer.13` and `nested_structs_instance_arrays.8`
+via `--deqp-log-decompiled-spirv=enable` and confirmed both still fail.
+Built two minimal `feme-opt` repros mirroring `all_shared_buffer.13`'s
+own two candidate blocks: `BlockB` (a runtime array of struct with a
+`ColMajor` matrix -- converted correctly, no bug) and `BlockC` (`mat2`,
+`mat4`, and a trailing runtime array of `mat4x3`, all `RowMajor`) -- the
+second repro revealed the actual bug: the trailing runtime-array-of-
+`mat4x3` member's content type stayed in its natural, untransposed,
+column-major shape instead of the `RowMajor`-substituted physical shape,
+while the two preceding direct matrix members widened correctly. Cross-
+checked this shape against `all_shared_buffer.41`'s own real decompiled
+SPIR-V and found an exact match: **both tests share the same root
+cause**, a trailing `spirv::RuntimeArrayType` directly wrapping a matrix
+(`buffer Block { ...; matCxR m[]; };`, no fixed-array nesting).
+
+Root-caused to `peelArraysToMatrixType` (the helper used by
+`convertOffsetStructTypeIgnoringDecorations`'s own per-member
+representability check, L124(g)): it deliberately never peeled through
+a `spirv::RuntimeArrayType` at all, reasoning that since a runtime array
+can only ever be a struct's own last member (per SPIR-V/Vulkan
+validation), no *nesting* case was needed for it -- true, but this
+missed that the runtime array can still *directly* wrap a matrix itself
+(not merely nest one deeper). Because the peel returned null for this
+shape, the per-member loop fell back to
+`isMatrixMemberLayoutRepresentable`, which only recognizes a member as
+needing the check if it is *directly* a `MatrixType` (false for a
+`RuntimeArrayType`), so it always (silently) reported the member
+representable regardless of its real decorations, entirely skipping the
+`RowMajor`/`MatrixStride` physical substitution. For a non-square matrix
+(`mat4x3`: physical `RowMajor` layout is 48 bytes; natural column-major
+layout, once LLVM pads each column vector, is 64 bytes), this silently
+corrupts every array element's addressing -- exactly matching both
+tests' own symptoms.
+
+Fixed by extending `peelArraysToMatrixType` to peel a single leading
+`spirv::RuntimeArrayType` before its existing fixed-`ArrayType` peel
+loop, and its inverse, `wrapPhysicalMatrixInArrays`, to symmetrically
+re-wrap in an unsized `!llvm.array<0 x T>` (matching
+`RuntimeArrayType`'s own type-conversion shape) when the original type
+was a `RuntimeArrayType`. New
+`spirv-to-llvm-matrix-rowmajor-runtime-array-block.mlir` regression
+test, confirmed to fail pre-fix (`git stash` on the source) and pass
+post-fix (`FileCheck`), following the project's established
+regression-test verification pattern.
+
+Also verified via a further targeted `feme-opt` repro (mirroring
+`nested_structs_instance_arrays.8`'s own `BlockD.n[]` member, a
+*square* `mat3` `RowMajor` runtime array with an `sF{bool}` preceding
+struct member matching the real offsets) that this fix already
+correctly widens/transposes a square-matrix runtime array too (not just
+the non-square case that motivated the fix) -- `isMatrixLayoutRepresentable`
+unconditionally rejects any `RowMajor` decoration regardless of size
+match, so the fix's physical substitution correctly fires for both.
+
+Results:
+
+- `ninja check-feme`: **3,215/3,218 Passed, 3 Unsupported, 0 Failed**
+  (+1 from the new test, 0 regressions). `libfeme_vulkan.so` confirmed
+  freshly rebuilt as a `check-feme` dependency before any CTS
+  verification.
+- Re-confirmed `FeMe CPU Vulkan Device` via `vulkaninfo` with the
+  freshly-built ICD.
+- The originally-failing test, `dEQP-VK.ssbo.layout.random.all_shared_buffer.41`:
+  now **Passes** (was "Result comparison failed").
+- `ssbo.*` (12,225 cases): **3,241 Pass / 1 Fail / 8,983 NotSupported**
+  -- was 3,238/4/8,983 before this session's fix: **+3 Pass**
+  (`all_shared_buffer.41` and `all_shared_buffer.13` directly, both
+  sharing the same trailing-runtime-array-of-matrix root cause;
+  `all_per_block_buffers.20`'s own `VK_ERROR_INITIALIZATION_FAILED`
+  pipeline-creation crash also collaterally closed -- it was itself
+  downstream of the same bad type, not a separate compiler-crash class
+  as previously suspected), 0 regressions.
+- `ubo.random.*` (2,250 cases): **607 Pass / 0 Fail / 1,643 NotSupported**
+  -- unchanged, confirmed by a re-sweep, no regression (checked with
+  extra care this session since `peelArraysToMatrixType`/
+  `wrapPhysicalMatrixInArrays` are shared helpers also used by the
+  uniform-block conversion path).
+
+**Remaining 1 `ssbo.*` fail, re-scoped as roadmap L124(u)**:
+`dEQP-VK.ssbo.layout.random.nested_structs_instance_arrays.8` ("Result
+comparison and counter values are incorrect"). Its own shape is
+considerably more complex than any other L124 repro so far -- three
+buffer blocks (`BlockB`/`BlockC`/`BlockD`), six distinct nested struct
+types (`sA`-`sF`), and several distinct matrix shapes (direct
+`mat2x3`/`mat3x2`/`mat3` block/struct members, a `mat4` inside an
+array-of-struct, and `BlockD`'s own trailing `mat3` runtime array).
+This session ruled out this session's own fix as the cause (a faithful
+repro of `BlockD.n[]`'s exact real shape, including its preceding
+`sF{bool}` struct member at the real offsets, converts and
+transposes correctly) -- the real mismatch must be a value-level or
+interaction bug elsewhere in this shader, not yet isolated.
+
+FeMe source revision under test: this session's own commits (see
+`agent_thoughts.md` for the exact commit list). No feature or extension
+inventory changes: this session's fix is an internal SPIR-V-to-LLVM
+matrix-access recognition correctness fix, not new Vulkan
+feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+and still accurate. See `agent_thoughts.md` for the full narrative and
+next steps.
