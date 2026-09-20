@@ -475,6 +475,21 @@ DecodedASTCImage decodeETC2ImageForSampling(const Image *Img,
 /// unsupported the same "reads as all-zero" way it already was -- outside
 /// this row's own LDR-only scope (`decodeASTCBlockHDR`'s float-producing
 /// interface does not fit this RGBA8 bridge).
+/// (Roadmap L125(d)) Resolves one `VkImageViewCreateInfo::components`
+/// mapping to a packed `feme::cpu::FemeImageDescriptor::Swizzle` word.
+/// `VkComponentSwizzle` and `feme::cpu::ImageComponentSwizzle` share the
+/// same numeric ordering (`Identity`/`Zero`/`One`/`R`/`G`/`B`/`A`, in that
+/// order) by design, so this is a direct value cast, not a per-channel
+/// remap -- see `ImageComponentSwizzle`'s own comment.
+static uint32_t resolveImageSwizzle(const VkComponentMapping &Components) {
+  auto Cast = [](VkComponentSwizzle Swizzle) {
+    return static_cast<feme::cpu::ImageComponentSwizzle>(Swizzle);
+  };
+  return feme::cpu::packImageSwizzle(
+      Cast(Components.r), Cast(Components.g), Cast(Components.b),
+      Cast(Components.a));
+}
+
 void materializeImageDescriptor(const DescriptorImageBinding &Src,
                                 VkDescriptorType Type,
                                 MaterializedBoundResources &Result,
@@ -557,6 +572,12 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   Dst.SampleCount = Img->sampleCount();
   Dst.Flags = isReadOnlyDescriptorType(Type) ? feme::cpu::FEME_IMAGE_SAMPLED
                                              : feme::cpu::FEME_IMAGE_STORAGE;
+  // (Roadmap L125(d)) Only meaningful for a synthesized border color
+  // today (`femeRTFetchTexel2D`/`femeRTFetchTexel3D`, FeMeRuntimeCPU.c) --
+  // an in-bounds texel fetch does not yet apply it (see
+  // `feme::cpu::FemeImageDescriptor::Swizzle`'s own comment), but every
+  // format branch below shares this one assignment either way.
+  Dst.Swizzle = resolveImageSwizzle(View->components());
 
   if (feme::cpu::isASTCLdrFormat(Img->format())) {
     // (Roadmap E23 scope, unchanged by H7b) ASTC decode only ever

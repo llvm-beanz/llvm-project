@@ -293,13 +293,22 @@ class ImageView {
 public:
   ImageView(Image *Img, VkImageViewType ViewType,
             feme::cpu::ResourceFormat Format,
-            const VkImageSubresourceRange &Range)
-      : Img(Img), ViewType(ViewType), Format(Format), Range(Range) {}
+            const VkImageSubresourceRange &Range,
+            const VkComponentMapping &Components = {})
+      : Img(Img), ViewType(ViewType), Format(Format), Range(Range),
+        Components(Components) {}
 
   Image *image() const { return Img; }
   VkImageViewType viewType() const { return ViewType; }
   feme::cpu::ResourceFormat format() const { return Format; }
   const VkImageSubresourceRange &range() const { return Range; }
+  /// (Roadmap L125(d)) This view's own `VkComponentMapping`, verbatim from
+  /// `VkImageViewCreateInfo::components` (i.e. `VK_COMPONENT_SWIZZLE_R`'s
+  /// numeric value `0` still means "unset"/identity here, not yet resolved
+  /// to a concrete per-channel source -- see
+  /// `feme::vulkan::materializeImageDescriptor`'s comment, CommandBuffer.cpp,
+  /// for where that resolution happens).
+  const VkComponentMapping &components() const { return Components; }
 
   /// The `feme::cpu::ImageDimension` this view's `VkImageViewType`
   /// corresponds to.
@@ -310,6 +319,7 @@ private:
   VkImageViewType ViewType;
   feme::cpu::ResourceFormat Format;
   VkImageSubresourceRange Range;
+  VkComponentMapping Components;
 };
 
 /// A `VkSampler`: pure filtering/addressing state translated once, at

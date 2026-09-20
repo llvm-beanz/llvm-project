@@ -734,9 +734,9 @@ vkCreateImageView(VkDevice, const VkImageViewCreateInfo *pCreateInfo,
     return VK_ERROR_INITIALIZATION_FAILED;
 
   Allocator Alloc(pAllocator);
-  ImageView *Obj =
-      Alloc.create<ImageView>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Img,
-                              pCreateInfo->viewType, *Format, Range);
+  ImageView *Obj = Alloc.create<ImageView>(
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Img, pCreateInfo->viewType, *Format,
+      Range, pCreateInfo->components);
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pView = toHandle<VkImageView>(Obj);
