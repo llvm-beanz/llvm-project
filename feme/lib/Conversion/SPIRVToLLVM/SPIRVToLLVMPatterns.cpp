@@ -7789,13 +7789,19 @@ public:
 /// `HandleKind::Storage`/`StorageStruct` handle later and rewrites it to the
 /// CPU runtime's own `feme.cpu.resource.getdimensions.raw.i32` call.
 ///
-/// DXC/glslang only ever emit `OpArrayLength` with member index 0 against a
-/// `StructuredBuffer`/`ByteAddressBuffer`'s own SPIR-V representation: a
-/// storage-buffer block whose sole member is the runtime array itself (see
-/// `HandleKind::Storage`'s own doc) -- so a nonzero member index here would
-/// mean either a shape this pattern does not yet support (a runtime array
-/// nested alongside other fields in the same block) or a malformed module;
-/// either way, decline rather than silently mis-lower it.
+/// Roadmap L124(a): DXC/glslang emit `OpArrayLength` in two shapes -- member
+/// index 0 against a `StructuredBuffer`/`ByteAddressBuffer`'s own one-member
+/// wrapper struct (`HandleKind::Storage`'s own doc), and a nonzero member
+/// index against a real, multi-field storage-buffer block whose *last*
+/// member happens to be the runtime array (e.g. `struct SSBO_1 { vec4 data;
+/// uint not_set[]; }`, confirmed via `dEQP-VK.compute.pipeline.basic.
+/// read_unbound_ssbo`'s own real shader). Per the SPIR-V spec (`OpTypeRuntimeArray`
+/// may only ever be a struct's own last member), the array member index is
+/// always either 0 (a one-member wrapper) or the pointee struct's own final
+/// index (a real multi-member block) -- so any other value would indicate a
+/// malformed module, not a shape this pattern is missing; the op's own
+/// verifier already guarantees `array_member`'s type is a runtime array, so
+/// only its *position* needs checking here.
 class ArrayLengthPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ArrayLengthOp> {
 public:
@@ -7805,9 +7811,13 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ArrayLengthOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (Op.getArrayMember() != 0)
+    auto PtrTy = llvm::cast<mlir::spirv::PointerType>(Op.getStructure().getType());
+    auto StructTy =
+        llvm::cast<mlir::spirv::StructType>(PtrTy.getPointeeType());
+    if (Op.getArrayMember() != StructTy.getNumElements() - 1)
       return Rewriter.notifyMatchFailure(
-          Op, "only a leading (member 0) runtime array is supported");
+          Op, "only the struct's own last member is supported as a runtime "
+              "array");
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
