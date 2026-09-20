@@ -1401,6 +1401,38 @@ void readFragmentColorInt(const StageStorage &FSOutput,
   }
 }
 
+/// (Roadmap L125z) Returns the value range Vulkan's own blend-clamping
+/// rule requires \p Format's blend inputs (fragment/attachment colors,
+/// and blend-constant factors) be clamped to before evaluating the
+/// blend equation -- `[0, 1]` for a `_UNORM` format or `[-1, 1]` for a
+/// `_SNORM` format -- or `std::nullopt` for a floating-point format
+/// (per spec: "If the color attachment is floating-point, no clamping
+/// occurs"). Every blend-eligible format `mergeColor` can reach here
+/// (`RenderPass.cpp`'s own `isSupportedColorAttachmentFormat`) is
+/// either float (checked first) or a fixed-point normalized format --
+/// and of those, only `R16G16B16A16_SNORM` is signed (that same
+/// predicate never admits `R8G8B8A8_SNORM`/`B8G8R8A8_SNORM` at all,
+/// confirmed by CTS itself reporting both `NotSupported` for
+/// blending), so this can be a short, explicit check rather than a
+/// fully enumerated per-format table.
+std::optional<std::pair<double, double>>
+blendClampRange(cpu::ResourceFormat Format) {
+  switch (Format) {
+  case cpu::ResourceFormat::R32_FLOAT:
+  case cpu::ResourceFormat::R32G32_FLOAT:
+  case cpu::ResourceFormat::R32G32B32_FLOAT:
+  case cpu::ResourceFormat::R32G32B32A32_FLOAT:
+  case cpu::ResourceFormat::R16G16B16A16_FLOAT:
+  case cpu::ResourceFormat::R16_FLOAT:
+  case cpu::ResourceFormat::R16G16_FLOAT:
+    return std::nullopt;
+  case cpu::ResourceFormat::R16G16B16A16_SNORM:
+    return std::make_pair(-1.0, 1.0);
+  default:
+    return std::make_pair(0.0, 1.0);
+  }
+}
+
 /// Merges a fragment's new color \p Src into \p Texel (the attachment's
 /// existing texel, read and overwritten in place) per \p Pipeline's blend/
 /// logic-op/write-mask state (roadmap R33). A logic op, when enabled,
@@ -1450,7 +1482,32 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
     std::array<double, 4> Dst{};
     if (Error E = unpackColor(Format, Texel, Dst))
       return E;
-    Final = blendColor(Blend, Src, Dst, BlendConstants, Src1);
+    // (Roadmap L125z) Per spec, a fixed-point (normalized) attachment's
+    // source/destination colors and blend-constant factors are each
+    // clamped to the format's own `[0, 1]`/`[-1, 1]` range *before* the
+    // blend equation runs -- not just clamped once at the very end when
+    // the result is packed back to bits (`packClearColor`'s own clamp,
+    // still needed for the *result*, is not a substitute: clamping the
+    // inputs first changes the product/sum that clamp then sees, e.g.
+    // `clamp(2.0)*0.5 = 0.5` vs the unclamped `2.0*0.5 = 1.0`).
+    std::array<double, 4> ClampedSrc = Src;
+    std::array<double, 4> ClampedDst = Dst;
+    std::array<double, 4> ClampedSrc1 = Src1;
+    std::array<float, 4> ClampedConstants = BlendConstants;
+    if (std::optional<std::pair<double, double>> Range =
+            blendClampRange(Format)) {
+      for (unsigned C = 0; C != 4; ++C) {
+        ClampedSrc[C] = std::clamp(ClampedSrc[C], Range->first, Range->second);
+        ClampedDst[C] = std::clamp(ClampedDst[C], Range->first, Range->second);
+        ClampedSrc1[C] =
+            std::clamp(ClampedSrc1[C], Range->first, Range->second);
+        ClampedConstants[C] = static_cast<float>(std::clamp(
+            static_cast<double>(ClampedConstants[C]), Range->first,
+            Range->second));
+      }
+    }
+    Final = blendColor(Blend, ClampedSrc, ClampedDst, ClampedConstants,
+                       ClampedSrc1);
   }
   if (Blend.WriteMask != 0xF) {
     std::array<double, 4> Dst{};
