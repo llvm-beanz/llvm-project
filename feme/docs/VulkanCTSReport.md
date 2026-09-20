@@ -6346,3 +6346,81 @@ CTS (`dEQP-VK.glsl.texture_gather.*`, `feme_icd.json`,
 
 `Roadmap.md`'s L125(j) row is now struck through and marked done. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L125(k): integer-format (non-Cmp) `Gather*` widening
+
+**Root cause**: `hasOnlySupportedImageUses`'s `isGatherIntrinsic` branch
+(`SPIRVResourceLowering.cpp`) unconditionally rejected any
+integer-sampled (`IsInteger`) image outright, with a comment noting
+this as unstarted follow-on work with no concrete repro yet (L7g's own
+original closing text). Triaging L125(c)'s own `createGraphicsPipelines`/
+`VK_ERROR_INITIALIZATION_FAILED` bucket this session with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (a previously-unused-across-this-
+whole-roadmap opt-in diagnostic, `feme/lib/Vulkan/Diagnostics.h`)
+revealed the real underlying error behind
+`dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8ui.texture_swizzle.zero_one_red_green`'s
+bare `VK_ERROR_INITIALIZATION_FAILED`: an "unsupported raised operation"
+naming an `llvm.spv.resource.handlefrombinding` handle the CPU target
+could not normalize -- exactly this rejection.
+
+**Fix**: widened `hasOnlySupportedImageUses`'s `isGatherIntrinsic` check
+to accept either `<4 x i32>` (`IsInteger`) or `<4 x float>` (the
+existing case) as `OpImageGather`'s result type. Added three new
+`ImageCallKind`s -- `Gather2DI32`/`GatherArray2DI32`/`GatherCubeI32`
+(`ImageCalls.h`/`.cpp`), mirroring the existing float `Gather2D`/
+`GatherArray2D`/`GatherCube` call builders exactly -- and routed
+integer gathers to them via an `isV4I32(CI->getType())` check in
+`lowerImageAccesses` (mirroring the existing `Sample*I32` dispatch
+precedent). Added the matching runtime entry points
+`femeCpuImageGather2DV4I32`/`GatherArray2DV4I32`/`GatherCubeV4I32`
+(FeMeRuntimeCPU.c), each reading through `femeRTFetchTexel2DI32` (the
+L125(h)-added integer texel-fetch helper) with `ApplySwizzle=1`
+preserved at every tap (matching L125(g)/L125(h)'s own post-swizzle-
+`Component`-selection convention). The cube shape needed a new
+`femeRTFetchCubeSeamlessTexelI32` helper -- the integer counterpart of
+`femeRTFetchCubeSeamlessTexel` (L125(j)'s own fix) -- since a cube
+gather's footprint must remap seamlessly across a face edge regardless
+of the sampled image's integer-ness; the doubly-out-of-bounds corner
+tap is still resolved by averaging the other three, using integer
+division in place of the float path's `1.0f / 3.0f` multiply. Per-tap
+`CLAMP_TO_BORDER` handling in the `Plain2D`/`Array2D` variants falls
+back to the same fixed `{0, 0, 0, 1}` default the existing `*I32`
+`Sample` family already uses (roadmap H109's own no-integer-border-
+color-storage limitation). `GatherCmp*` (depth-compare) is deliberately
+untouched: depth-format images are never integer-sampled in Vulkan, so
+that rejection remains correct, permanent behavior.
+
+New unit tests across all three translation phases:
+`ImageCallsTest.MatchesGather2DI32Call`/`MatchesGatherArray2DI32Call`/
+`MatchesGatherCubeI32Call` (create/match round-trip);
+`SPIRVResourceLoweringTest.LowersIntegerGatherToImageGatherI32`/
+`LowersIntegerGatherCubeToImageGatherCubeI32`/
+`LowersIntegerGatherArray2DToImageGatherArray2DI32` (end-to-end
+lowering); `ImageSamplingTest.Gather2DI32ReturnsFourTexelsInGatherOrder`/
+`GatherArray2DI32IsolatesNamedLayer`/`GatherCubeI32IsolatesNamedFace`/
+`GatherCubeI32SeamlessBlendsAcrossFaceEdge` (runtime execution,
+including the cube seamless-remap proof).
+
+`ninja check-feme`: 3,257/3,260 Passed, 3 Unsupported, 0 Failed (+10 new
+tests, 0 regressions).
+
+CTS (`dEQP-VK.glsl.texture_gather.*`, `feme_icd.json`,
+`FeMe CPU Vulkan Device`):
+- The original repro,
+  `dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8ui.texture_swizzle.zero_one_red_green`,
+  now **Passes** (was `VK_ERROR_INITIALIZATION_FAILED`).
+- `dEQP-VK.glsl.texture_gather.graphics.basic.*.rgba8ui.*` (126 cases):
+  51 Pass, 75 NotSupported (sparse residency, unrelated), **0 Fail**.
+- `dEQP-VK.glsl.texture_gather.graphics.basic.*.rgba8i.*` (126 cases):
+  51 Pass, 75 NotSupported, **0 Fail** (matches the `ui` bucket exactly).
+- A separate `dEQP-VK.glsl.texture_gather.graphics.offsets.*` sample
+  confirmed `ConstOffsets` (`TextureGatherOffsets`, a 4-independent-
+  offset array) fails identically with
+  `VK_ERROR_INITIALIZATION_FAILED` for **both** integer and float
+  formats (`spirv.ImageGather`'s own
+  `<{image_operands = #spirv.image_operands<ConstOffsets>}>` shape is
+  not yet legalized at all) -- a distinct, pre-existing, still-unfiled
+  gap, confirmed unrelated to this row's own integer-format scope.
+
+`Roadmap.md`'s L125(k) row is now struck through and marked done. See
+`agent_thoughts.md` for the full narrative and next steps.

@@ -3807,6 +3807,24 @@ filtering, confirmed via VK-GL-CTS's own reference implementation
 (`TextureCubeView::gather` reuses its sampling path's
 `getCubeLinearSamples` verbatim) and a genuinely-failing CTS case.
 
+**Roadmap L125(k) closed a third, previously-unfiled gap in this same
+milestone: plain `Gather*` against an integer-sampled (`usampler*`/
+`isampler*`) image was rejected outright**, since
+`hasOnlySupportedImageUses` only ever recognized a `<4 x float>`
+`OpImageGather` result. Widened that classification (and added the
+matching `Gather2DI32`/`GatherArray2DI32`/`GatherCubeI32` call-builder
+plumbing and `femeCpuImageGather*V4I32` runtime entries) to accept
+`<4 x i32>` as well, reusing `femeRTFetchTexel2DI32` (L125(h)) for the
+`Plain2D`/`Array2D` shapes and a new `femeRTFetchCubeSeamlessTexelI32`
+(the integer counterpart of L125(j)'s own seamless cube-remap fetch)
+for the `Cube` shape. `GatherCmp*` has no integer counterpart at all
+(depth-format images are never integer-sampled in Vulkan), so that
+family's rejection is unaffected and remains correct, permanent
+behavior. With this row closed, **the only remaining gap in this
+milestone's `VkComponentMapping`/`Gather*` coverage is L125(i)'s own
+deferred `SampleCmp*`/`GatherCmp*` depth-compare swizzle question**,
+still blocked on the same missing-CTS-coverage finding noted above.
+
 **Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
 could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This
 milestone's own `feme::vulkan::Image` never gained (and still does not
