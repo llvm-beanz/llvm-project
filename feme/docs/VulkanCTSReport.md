@@ -7195,3 +7195,94 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
 - `Roadmap.md`'s `L125(y)` row updated to reflect the fix (struck
   through, marked fixed and CTS-verified); see `agent_thoughts.md` for
   the full narrative and next steps.
+
+## Roadmap L125(z): missing pre-blend clamp for fixed-point attachments
+
+Investigated the `L125(z)` row filed in the prior session
+(`pipeline.monolithic.blend.clamp.*`, 4-of-6 fail bucket across
+`b8g8r8a8_unorm`/`r16g16b16a16_snorm`/`r16g16b16a16_unorm`/
+`r8g8b8a8_unorm`, confirmed pre-existing and unrelated to `L125(y)`'s
+own Min/Max fix). Read the real CTS test source
+(`vktPipelineBlendTests.cpp`'s `ClampTest`/`ClampTestInstance`), which
+embeds the exact Vulkan spec text this test is checking: for a
+fixed-point (UNORM/SNORM) color attachment, the source/destination
+values *and blend factors* (including the blend-constant color) must
+each be clamped to `[0, 1]` or `[-1, 1]` respectively **before** the
+blend equation is evaluated; no clamping applies for a floating-point
+attachment. The test deliberately supplies out-of-range `quadColor`/
+`blendConstants` values and computes its reference as
+`clamp(blendConstants) * clamp(quadColor)` (clamp-then-multiply) --
+which differs numerically from multiply-then-clamp for any
+out-of-range operand (e.g. `clamp(2.0, 0, 1) * 0.5 = 0.5` vs.
+`2.0 * 0.5 = 1.0`, and `1.0` survives a final `[0, 1]` clamp unchanged,
+so a final-result-only clamp cannot substitute for a pre-blend input
+clamp).
+
+### Root cause
+
+`Executor.cpp`'s `mergeColor` fed `Src`/`Dst`/`Src1`/`BlendConstants`
+straight into `blendColor` with no pre-blend clamp at all -- only the
+final packed result was ever clamped (by `packClearColor`'s existing
+normalization), which is not equivalent to the spec's required
+per-operand pre-blend clamp.
+
+### Fix
+
+Added a `blendClampRange(cpu::ResourceFormat) ->
+std::optional<std::pair<double, double>>` helper, derived from
+`RenderPass.cpp`'s `isSupportedColorAttachmentFormat` (the authoritative
+list of formats `mergeColor` can ever reach with `BlendEnable=true`): 7
+floating-point formats return `std::nullopt` (no clamp, per spec); the
+one blend-eligible SNORM format (`R16G16B16A16_SNORM`) returns
+`{-1.0, 1.0}`; every other reachable format returns `{0.0, 1.0}`.
+`mergeColor`'s `BlendEnable` branch now clamps `Src`/`Dst`/`Src1`/
+`BlendConstants` to this range (when present) before calling
+`blendColor`, replacing the previous unclamped pass-through. New unit
+test `BlendClampsSourceColorAndConstantFactorBeforeEvaluatingTheEquation`
+reproduces the real CTS `blend.clamp.r8g8b8a8_unorm` case's exact input
+shape (`Src=(2.0, 0.5, 1.0, -1.0)`,
+`BlendConstants=(0.5, 2.0, -1.0, 1.0)`,
+`SrcColorFactor=ConstantColor`/`DstColorFactor=Zero`/`Add`) and expected
+clamp-then-multiply result; confirmed via a stash/rebuild round-trip to
+fail identically to the real bug pre-fix (`255`/`255` instead of
+`128`/`128` in R/G) and pass post-fix.
+
+### Build/test
+
+`ninja check-feme`: 3,269/3,272 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `pipeline.monolithic.blend.clamp.*` (6 cases): **0 Fail** (was 4
+  Fail) -- 4 Pass, 2 NotSupported (both `_SNORM` formats this ICD
+  doesn't support for blending at all, unchanged and unrelated).
+- `pipeline.monolithic.blend.format.r16g16b16a16_snorm.*` (100 cases,
+  the one blend-eligible SNORM format, spot-checking the `[-1, 1]`
+  clamp branch specifically): **100 Pass, 0 Fail**, 0 regressions.
+- `pipeline.*.blend.clamp.*` (42 cases, all 7 pipeline-construction-type
+  variants): **12 Pass, 0 Fail, 30 NotSupported** (most
+  construction-type variants report `NotSupported` in this build for
+  unrelated extension-support reasons -- `VK_EXT_shader_object`,
+  graphics-pipeline-library, etc. -- not a clamp-bug artifact).
+- `pipeline.monolithic.blend.*` full-family regression sweep: hit the
+  same ~25-minute timeout ceiling the prior `L125(y)` session's own
+  sweep hit, again not completing the entire family. Got through 3,927
+  cases with **0 Fail**, 0 new regressions found in the portion
+  completed.
+- An old `H99a` roadmap entry's own closing note claims a full re-run
+  once found `blend.clamp.*` **21/21 pass** (of the non-`NotSupported`
+  cases) -- a count that matches neither this session's
+  `pipeline.monolithic.blend.clamp.*` total (6 cases) nor its
+  cross-construction-type `pipeline.*.blend.clamp.*` total (42 cases,
+  12 non-`NotSupported`). This discrepancy is **not fully reconciled**;
+  most likely explanation is a different CTS build/extension-support
+  snapshot at the time `H99a` was written (e.g. more pipeline
+  construction types reporting `Supported` then than now), rather than
+  a residual bug -- the fix itself is independently confirmed correct
+  against both the real Vulkan spec text and the actual CTS
+  reference-value computation, regardless of the historical count.
+- `Roadmap.md`'s `L125(z)` row updated to reflect the fix (struck
+  through, marked fixed and CTS-verified); see `agent_thoughts.md` for
+  the full narrative and next steps.
