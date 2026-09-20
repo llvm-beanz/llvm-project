@@ -1352,21 +1352,31 @@ void readFragmentColor(const StageStorage &FSOutput,
                   : (C == 3 ? 1.0 : 0.0);
 }
 
-/// (Roadmap H8p) The integer counterpart of `readFragmentColor` above,
-/// for one of `isIntegerColorAttachmentFormat`'s (RuntimeABI.h) 7 real
-/// integer color-attachment formats -- reads \p Elem's raw `UInt`/`SInt`
-/// value directly (via `readRaw`, reinterpreting its bit pattern per
-/// \p Elem's own `ComponentType` rather than `readFloat`'s IEEE-754
-/// interpretation), matching `ImageFixture.cpp`'s own "an integer
-/// attachment value is a raw reference value, not a normalized fraction"
-/// convention (`S8_UINT`'s clear-color precedent). \p Elem must already
-/// be known to be a `UInt`- or `SInt`-typed output matching its own
-/// attachment's signedness (checked once by `executeDraws`' own
-/// `expectedColorComponentType`-based validation below).
+/// (Roadmap H8p/L125u) The integer counterpart of `readFragmentColor`
+/// above, for one of `isIntegerColorAttachmentFormat`'s (RuntimeABI.h) 7
+/// real integer color-attachment formats -- reads \p Elem's raw `UInt`/
+/// `SInt` value directly (via `readRaw`, reinterpreting its bit pattern
+/// per \p Unsigned rather than `readFloat`'s IEEE-754 interpretation),
+/// matching `ImageFixture.cpp`'s own "an integer attachment value is a
+/// raw reference value, not a normalized fraction" convention (`S8_UINT`'s
+/// clear-color precedent). \p Elem must already be known to be an integer-
+/// typed output matching its own attachment's width (checked once by
+/// `executeDraws`' own `expectedColorComponentType`-based validation
+/// below); \p Unsigned must come from the *attachment's own format*
+/// (`cpu::isUnsignedIntegerColorAttachmentFormat`), not \p Elem's own
+/// `ComponentType` -- a SPIR-V-sourced stage's signature can never
+/// actually report `UInt` (`isCompatibleColorComponentType`'s own comment,
+/// `Pipeline.h`), so `Elem.ComponentType` is always `SInt` regardless of
+/// whether the real shader value is signed or unsigned. Reinterpreting an
+/// unsigned attachment's own raw value as signed here previously turned
+/// every value at or above `2^31` negative, which `packClearColor`'s own
+/// unsigned-range clamp (`ImageFixture.cpp`) then floored to `0` --
+/// exactly the hard cutoff `dEQP-VK.pipeline.monolithic.sampler.
+/// exact_sampling.r32_uint.*` caught.
 void readFragmentColorInt(const StageStorage &FSOutput,
                           const SignatureElement &Elem, uint32_t Invocation,
-                          std::array<double, 4> &RGBA) {
-  bool Signed = Elem.ComponentType == SignatureComponentType::SInt;
+                          bool Unsigned, std::array<double, 4> &RGBA) {
+  bool Signed = !Unsigned;
   for (unsigned C = 0; C != 4; ++C) {
     if (C >= Elem.ComponentCount) {
       RGBA[C] = C == 3 ? 1.0 : 0.0;
@@ -3777,8 +3787,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               // numeric format per spec, matching why blending and a
               // logic op are restricted the same way elsewhere.
               if (FSColors[AttIdx]->ComponentType != SignatureComponentType::Float) {
-                readFragmentColorInt(*FSOutput, *FSColors[AttIdx],
-                                     Q * 4 + Lane, RGBA);
+                readFragmentColorInt(
+                    *FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
+                    cpu::isUnsignedIntegerColorAttachmentFormat(Att.Format),
+                    RGBA);
               } else {
                 readFragmentColor(*FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
                                   RGBA);
