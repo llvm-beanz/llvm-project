@@ -4103,9 +4103,14 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
 // border color, always well-defined regardless of
 // `VK_EXT_border_color_swizzle` support -- unlike `*_OPAQUE_BLACK`/custom
 // border colors, which need that extension for a non-identity swizzle,
-// per `vktPipelineSamplerBorderSwizzleTests.cpp`'s own gating). An
-// in-bounds texel fetch does not yet apply this swizzle -- a separate,
-// broader gap tracked as roadmap L125(e), out of scope here.
+// per `vktPipelineSamplerBorderSwizzleTests.cpp`'s own gating). Roadmap
+// L125(f) widened this to also cover an ordinary in-bounds texel fetch
+// (`femeRTFetchTexel2D`/`femeRTFetchTexel3D`'s own `ApplySwizzle`
+// parameter) for the float-sampled path. The integer-sampled (`*I32`)
+// path has its own counterpart, `femeRTApplyImageSwizzleI32` below
+// (roadmap L125(h)) -- kept as a separate function rather than a shared
+// one since `FemeRTv4f32`/`FemeRTv4i32` are distinct vector types with
+// different "Zero"/"One" fill values (`0.0f`/`1.0f` vs. `0`/`1`).
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTApplyImageSwizzle(FemeRTv4f32 Color, uint32_t Swizzle) {
   FemeRTv4f32 Result = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -4121,6 +4126,34 @@ femeRTApplyImageSwizzle(FemeRTv4f32 Color, uint32_t Swizzle) {
       break;
     case 2: // One
       Result[I] = 1.0f;
+      break;
+    default: // R, G, B, A (3..6).
+      Result[I] = Color[Channel - 3 < 4 ? Channel - 3 : 0];
+      break;
+    }
+  }
+  return Result;
+}
+
+// The integer counterpart of `femeRTApplyImageSwizzle` above, for
+// `feme.cpu.image.sample.*.v4i32` (roadmap L125(h)). Identical channel
+// semantics, just over `FemeRTv4i32` with integer `0`/`1` fill values
+// instead of `0.0f`/`1.0f`.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTApplyImageSwizzleI32(FemeRTv4i32 Color, uint32_t Swizzle) {
+  FemeRTv4i32 Result = {0, 0, 0, 0};
+  for (int I = 0; I != 4; ++I) {
+    uint32_t Channel = (Swizzle >> (I * 8)) & 0xffu;
+    switch (Channel) {
+    case 0: // Identity: this output channel reads its own same-named
+            // input channel.
+      Result[I] = Color[I];
+      break;
+    case 1: // Zero
+      Result[I] = 0;
+      break;
+    case 2: // One
+      Result[I] = 1;
       break;
     default: // R, G, B, A (3..6).
       Result[I] = Color[Channel - 3 < 4 ? Channel - 3 : 0];
@@ -4302,10 +4335,18 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
 // H7b-a array-layer widening (see that function's own comments). Takes a
 // `Sample` operand (roadmap H19g), like `femeRTFetchTexel2D`'s own --
 // `Sample` is `0` for every caller before this row (a single-sample image,
-// or a caller with no per-sample index of its own).
+// or a caller with no per-sample index of its own). Roadmap L125(h) added
+// the `ApplySwizzle` parameter, mirroring `femeRTFetchTexel2D`'s own
+// L125(f) parameter of the same name and for the same reason: this helper
+// is shared between `femeCpuImageSample*V4I32` (an `OpImageSample*`/
+// `OpImageFetch`-lowered call, which must apply the image view's own
+// `VkComponentMapping`) and `femeCpuImageLoad*V4I32` (an `OpImageRead`
+// storage-image load, which must not) -- see `femeRTFetchTexel2D`'s own
+// comment for the full rationale, identical here.
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
-                      uint32_t Layer, int32_t X, int32_t Y, uint32_t Sample) {
+                      uint32_t Layer, int32_t X, int32_t Y, uint32_t Sample,
+                      _Bool ApplySwizzle) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
     return Zero;
@@ -4323,7 +4364,9 @@ femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
-  return femeRTUnpackImageTexelI32(Img->Format, Ptr);
+  FemeRTv4i32 Texel = femeRTUnpackImageTexelI32(Img->Format, Ptr);
+  return ApplySwizzle ? femeRTApplyImageSwizzleI32(Texel, Img->Swizzle)
+                      : Texel;
 }
 
 // Writes \p Texel to the texel at integer coordinates `(X, Y)`, mip level
@@ -4620,11 +4663,14 @@ femeRTFetchTexel1D(const FemeRTImageDescriptor *Img, uint32_t Level,
 }
 
 // The integer counterpart of `femeRTFetchTexel1D` above, for
-// `feme.cpu.image.load.1d.v4i32` (roadmap H19c).
+// `feme.cpu.image.load.1d.v4i32` (roadmap H19c). Roadmap L125(h) added
+// the `ApplySwizzle` parameter, forwarded straight through to
+// `femeRTFetchTexel2DI32` -- see that function's own comment.
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel1DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
-                      int32_t X) {
-  return femeRTFetchTexel2DI32(Img, Level, /*Layer=*/0, X, /*Y=*/0, /*Sample=*/0);
+                      int32_t X, _Bool ApplySwizzle) {
+  return femeRTFetchTexel2DI32(Img, Level, /*Layer=*/0, X, /*Y=*/0,
+                               /*Sample=*/0, ApplySwizzle);
 }
 
 // The plain-1D counterpart of `femeRTStoreTexel2D` above, for
@@ -4664,11 +4710,14 @@ femeRTFetchTexel1DArray(const FemeRTImageDescriptor *Img, uint32_t Level,
 }
 
 // The integer counterpart of `femeRTFetchTexel1DArray` above, for
-// `feme.cpu.image.load.1darray.v4i32` (roadmap H19e).
+// `feme.cpu.image.load.1darray.v4i32` (roadmap H19e). Roadmap L125(h)
+// added the `ApplySwizzle` parameter, forwarded straight through to
+// `femeRTFetchTexel2DI32` -- see that function's own comment.
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel1DArrayI32(const FemeRTImageDescriptor *Img, uint32_t Level,
-                          int32_t X, uint32_t Layer) {
-  return femeRTFetchTexel2DI32(Img, Level, Layer, X, /*Y=*/0, /*Sample=*/0);
+                          int32_t X, uint32_t Layer, _Bool ApplySwizzle) {
+  return femeRTFetchTexel2DI32(Img, Level, Layer, X, /*Y=*/0, /*Sample=*/0,
+                               ApplySwizzle);
 }
 
 // The arrayed-1D counterpart of `femeRTStoreTexel1D` above, for
@@ -4733,10 +4782,12 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
 }
 
 // The integer counterpart of `femeRTFetchTexel3D` above, for
-// `feme.cpu.image.load.3d.v4i32` (roadmap H19c).
+// `feme.cpu.image.load.3d.v4i32` (roadmap H19c). Roadmap L125(h) added
+// the `ApplySwizzle` parameter -- see `femeRTFetchTexel2DI32`'s own
+// comment for the shared-helper rationale.
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel3DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
-                      int32_t X, int32_t Y, int32_t Z) {
+                      int32_t X, int32_t Y, int32_t Z, _Bool ApplySwizzle) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
     return Zero;
@@ -4754,7 +4805,9 @@ femeRTFetchTexel3DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
-  return femeRTUnpackImageTexelI32(Img->Format, Ptr);
+  FemeRTv4i32 Texel = femeRTUnpackImageTexelI32(Img->Format, Ptr);
+  return ApplySwizzle ? femeRTApplyImageSwizzleI32(Texel, Img->Swizzle)
+                      : Texel;
 }
 
 // The plain-3D counterpart of `femeRTStoreTexel2D` above, for
@@ -5703,7 +5756,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
     return Border;
   }
   return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/0, AddrX, AddrY,
-                               /*Sample=*/0);
+                               /*Sample=*/0, /*ApplySwizzle=*/1);
 }
 
 // (Roadmap L125(b)) The `Plain1D` counterpart of `femeCpuImageSample2DV4I32`
@@ -5751,7 +5804,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
     FemeRTv4i32 Border = {0, 0, 0, 1};
     return Border;
   }
-  return femeRTFetchTexel1DI32(&Img, Level, AddrX);
+  return femeRTFetchTexel1DI32(&Img, Level, AddrX, /*ApplySwizzle=*/1);
 }
 
 // (Roadmap L125(b)) The `Plain3D` counterpart of `femeCpuImageSample2DV4I32`
@@ -5813,7 +5866,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample3DV4I32(
     FemeRTv4i32 Border = {0, 0, 0, 1};
     return Border;
   }
-  return femeRTFetchTexel3DI32(&Img, Level, AddrX, AddrY, AddrZ);
+  return femeRTFetchTexel3DI32(&Img, Level, AddrX, AddrY, AddrZ,
+                               /*ApplySwizzle=*/1);
 }
 
 // (Roadmap L52e) The raw, unclamped LOD `OpImageQueryLod`'s own second
@@ -6558,7 +6612,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
     return Zero;
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
-  return femeRTFetchTexel2DI32(&Img, Mip, /*Layer=*/0, X, Y, Sample);
+  return femeRTFetchTexel2DI32(&Img, Mip, /*Layer=*/0, X, Y, Sample,
+                               /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.store.2d.v4f32` (roadmap H19a): writes one texel of a 2D
@@ -7032,7 +7087,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DV4I32(
     return Zero;
   if (X < 0 || (uint32_t)X >= Img.Width)
     return Zero;
-  return femeRTFetchTexel1DI32(&Img, Mip, X);
+  return femeRTFetchTexel1DI32(&Img, Mip, X, /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.store.1d.v4f32` (roadmap H19c): writes one texel of a 1D
@@ -7120,7 +7175,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DArrayV4I32(
   if (X < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
       (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
-  return femeRTFetchTexel1DArrayI32(&Img, Mip, X, (uint32_t)Layer);
+  return femeRTFetchTexel1DArrayI32(&Img, Mip, X, (uint32_t)Layer,
+                                    /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.store.1darray.v4f32` (roadmap H19e): writes one texel of
@@ -7213,7 +7269,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad3DV4I32(
     return Zero;
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
-  return femeRTFetchTexel3DI32(&Img, Mip, X, Y, Z);
+  return femeRTFetchTexel3DI32(&Img, Mip, X, Y, Z, /*ApplySwizzle=*/0);
 }
 
 // `feme.cpu.image.store.3d.v4f32` (roadmap H19c): writes one texel of a 3D
@@ -7612,7 +7668,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
     FemeRTv4i32 Border = {0, 0, 0, 1};
     return Border;
   }
-  return femeRTFetchTexel1DArrayI32(&Img, Level, AddrX, Layer);
+  return femeRTFetchTexel1DArrayI32(&Img, Level, AddrX, Layer,
+                                    /*ApplySwizzle=*/1);
 }
 
 // (Roadmap L125(b)) The `Array2D` counterpart of `femeCpuImageSample2DV4I32`
@@ -7671,7 +7728,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DArrayV4I32(
     return Border;
   }
   return femeRTFetchTexel2DI32(&Img, Level, Layer, AddrX, AddrY,
-                               /*Sample=*/0);
+                               /*Sample=*/0, /*ApplySwizzle=*/1);
 }
 
 // (Roadmap L54) The single-level body of `femeCpuImageSampleCmp1DF32`/
@@ -7965,7 +8022,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
   if (X < 0 || Y < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
       (uint32_t)Y >= Img.Height || (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
-  return femeRTFetchTexel2DI32(&Img, Mip, (uint32_t)Layer, X, Y, Sample);
+  return femeRTFetchTexel2DI32(&Img, Mip, (uint32_t)Layer, X, Y, Sample,
+                               /*ApplySwizzle=*/0);
 }
 
 // The classic "major axis" cube-face-selection algorithm (Vulkan spec
@@ -8701,7 +8759,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeV4I32(
   int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                          Samp.AddressV, &BorderY);
   return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/CF.Face, AddrX, AddrY,
-                               /*Sample=*/0);
+                               /*Sample=*/0, /*ApplySwizzle=*/1);
 }
 
 // `feme.cpu.image.gathercmp.cube.v4f32` (roadmap H124r): `TextureCube`
@@ -8946,7 +9004,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeArrayV4I32(
   int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                          Samp.AddressV, &BorderY);
   return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/CubeIndex * 6 + CF.Face,
-                               AddrX, AddrY, /*Sample=*/0);
+                               AddrX, AddrY, /*Sample=*/0,
+                               /*ApplySwizzle=*/1);
 }
 
 // `feme.cpu.image.samplecmp.cube.f32` (roadmap L48): the `TextureCube`
