@@ -58,20 +58,29 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 ## Next steps
 
 1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
-   logs (`/tmp/ctsrun/l125f_*`) are already deleted.
-2. Pick between **L125(g)** (SampleCmp*/Gather* swizzle semantics --
-   needs spec research first: does a depth-compare's single-channel
-   read honor a non-identity swizzle at all? does `OpImageGather`'s
-   `Component` select before or after swizzle applies?) and **L125(h)**
-   (the integer `*I32` path -- structurally simpler, mechanically
-   similar to this session's own fix, and already has concrete failing
-   CTS cases identified above to start from). **L125(h) is probably
-   the faster win** since it reuses this session's exact pattern with
-   no open spec question to resolve first; L125(g) needs research
-   before any code changes.
-3. `L125(c)`'s own buckets (ASTC/EAC/ETC2 image mismatches, the two
-   distinct `VK_ERROR_INITIALIZATION_FAILED` sites,
-   `vktPipelineBindPointTests.cpp`) remain untouched and untriaged --
-   an alternative pick if both L125(g) and L125(h) feel blocked.
-4. `ninja check-feme` and both CTS build directories are incremental
+   logs (`/tmp/ctsrun/l125h_*`) are already deleted.
+2. **L125(g)** is the last item in this sub-tree: `SampleCmp*`/
+   `Gather*`/`GatherCmp*` swizzle semantics. Needs spec research
+   *before* any code change -- specifically: (a) does a depth-compare's
+   single-channel dref read honor a non-identity `VkComponentMapping`
+   at all, or is depth-compare exempt since it reads a specific
+   depth-format channel rather than an RGBA color? (b) does
+   `OpImageGather`'s `Component` (0-3) selector operate on the
+   pre-swizzle or post-swizzle channel layout? Check the Vulkan spec's
+   own "Image Operations" chapter and `vktPipelineImageViewTests.cpp`/
+   `vktImageGatherTests.cpp` for any existing coverage before assuming
+   either answer.
+3. Consider the new `VK_ERROR_INITIALIZATION_FAILED`-on-plain-`_sint`-
+   sampling data point discovered this session as a fresh lead for
+   L125(c)'s own untriaged buckets -- it may share a root cause with
+   the already-known `sampler.border_swizzle.*`-heavy
+   `VK_ERROR_INITIALIZATION_FAILED` bucket from that row's original
+   triage, worth checking before assuming they're the same or
+   different bugs.
+4. `L125(c)`'s own remaining buckets (ASTC/EAC/ETC2/BC image
+   mismatches, the two distinct `VK_ERROR_INITIALIZATION_FAILED`
+   sites, `vktPipelineBindPointTests.cpp`) remain untouched and
+   untriaged -- a good alternative pick if L125(g)'s spec research
+   doesn't pan out quickly.
+5. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
