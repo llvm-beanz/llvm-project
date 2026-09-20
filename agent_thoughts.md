@@ -94428,3 +94428,88 @@ definition.
    next fresh sample** is the better next pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+## L125(b) continued: widened integer-sampled implicit-LOD fix to `Plain3D`
+
+**Confirmed `FeMe CPU Vulkan Device` first, as required every session.**
+
+**Done this session:**
+1. Widened L125(a)/L125(b)'s integer-sampled implicit-LOD fix to
+   `Plain3D` -- new `Sample3DI32` call kind, `createSample3DI32`,
+   `femeCpuImageSample3DV4I32` runtime function, `hasOnlySupportedImageUses`/
+   `lowerImageAccesses` wiring (code + test commit `726268ca`).
+2. Updated `Roadmap.md` (commit `132cbfd1`) and `VulkanCTSReport.md`
+   (commit `75a59baf`) -- 3 commits total this session.
+3. Directly re-verified: a 20-case sample of `view_type.3d.
+   format.r32_sint.*` (combined + compute, several sizes) -- 0 Fail /
+   20 Pass.
+4. `ninja check-feme`: 3,232/3,235 Passed, 3 Unsupported, 0 Failed, 0
+   regressions (started at 3,229/3,232 before this session).
+5. `FeMeTransformsCPUTests`: all 535 tests pass (+3 net).
+
+**Another pleasant surprise, same as `Array2D`'s**: `Plain3D` needed no
+new low-level texel-fetch helper -- `femeRTFetchTexel3DI32` already
+existed (reused from `feme.cpu.image.load.3d.v4i32`, roadmap H19c). Also
+no static-function-ordering gotcha this time (unlike every arrayed
+shape): `Plain3D` has no array layer, so it never calls
+`femeRTRoundClampLayer`, and could be placed right next to
+`femeCpuImageSample1DV4I32` without needing to hunt for a
+later-in-the-file insertion point. `isSupportedOffset` also already
+unconditionally accepted `Plain3D`'s genuine 3-wide offset (from the
+earlier float-sampling L67(c) work) -- zero changes needed there,
+unlike `Array2D`'s own `AllowArray2D` gating.
+
+**Deliberately did NOT attempt `Cube`/`CubeArray` this session**, despite
+having time left, because they are structurally different enough to
+warrant their own careful investigation first (per the prior session's
+own explicit caution). Scoped what I found on a first read below so the
+next session can start faster:
+- `femeCpuImageSampleCubeV4F32` (runtime, ~line 8419) resolves a
+  direction vector `(DirX, DirY, DirZ)` to a face + face-local `(U, V)`
+  via `femeRTSelectCubeFace` (~line 7818), forces `ClampToEdge`
+  addressing unconditionally (cube sampling never uses the sampler's
+  own configured address mode), then calls `femeRTComputeCubeClampedLod`
+  (~line 8321) for mip selection and `femeRTSampleFilteredCube` for the
+  actual (bilinear) fetch.
+- `femeRTComputeCubeClampedLod` takes real derivative operands
+  (`DDirXdX`/`DDirXdY`/etc.) for its own implicit-LOD estimation branch --
+  unlike every other shape's I32 counterpart so far, which all pass
+  `UseExplicitLod=1` unconditionally and skip derivative-based LOD
+  estimation entirely (since `Lod` already defaults to a constant `0.0`
+  at the call site for implicit-LOD callers, per `hasOnlySupportedImageUses`'s
+  own comment). Whether `Sample CubeI32` can get away with the same
+  trick (call `femeRTComputeCubeClampedLod` with `UseExplicitLod=1` and
+  zero derivatives, same as every prior shape) or needs something
+  cube-specific isn't yet confirmed -- check this first.
+- No `ConstOffset` operand exists for `Cube`/`CubeArray` at all (SPIR-V
+  forbids it), so `createSampleCubeI32`'s own signature will have one
+  fewer operand category than every prior shape's own new function.
+- The fetch itself should likely reuse `femeRTFetchTexel2DI32` with
+  `CF.Face` as the `Layer` argument (mirroring how
+  `femeCpuImageGatherCmpCubeV4F32` already does this for its own
+  gather path) rather than `femeRTSampleFilteredCube`, since the new
+  I32 function only needs nearest-filtering, not `Cube`'s own bilinear
+  path -- worth confirming no new low-level helper is needed here
+  either, continuing this milestone's own streak.
+
+### Suggested next steps
+
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (all under `/tmp/ctsrun/l125b_plain3d_*`) are already deleted;
+   only prior sessions' own leftover `l124*` files remain there,
+   untouched (not this session's to clean).
+2. Pick up **`Cube`** next (the next shape in L125(b)'s own established
+   ordering) -- start by confirming whether `femeRTComputeCubeClampedLod`
+   can be called with `UseExplicitLod=1`/zero derivatives the same way
+   every prior shape's I32 function calls `femeRTComputeClampedLod`, per
+   the scoping notes just above.
+3. **`CubeArray`** last -- adds an `ArrayLayer` operand on top of
+   `Cube`'s own direction-vector coordinate (mirroring `Array2D`'s own
+   relationship to `Plain2D`), so should be a smaller follow-on once
+   `Cube` itself is done and its own pattern is established.
+4. Once all 6 shapes are done, strike through L125(b) in `Roadmap.md`
+   and consider whether `L125(c)`/`L125(d)` (the other, not-yet-root-
+   caused fail buckets from L125(a)'s own original triage) or **L125's
+   next fresh sample** is the better next pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
