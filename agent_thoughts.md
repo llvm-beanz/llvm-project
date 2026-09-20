@@ -96048,3 +96048,164 @@ needs -- it does not persist across shell calls).
 7. This session's own scratch CTS logs (`/tmp/ctsrun/l125u*`,
    `/tmp/ctsrun/l125x/*`) need cleanup before ending a future session
    (not yet done as of this write-up -- see below).
+
+# Session: L125(y) fix -- blend Min/Max ops wrongly applying blend factors
+
+## What I did (numbered, so future-me can skim)
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep
+   deviceName` (with `VK_ICD_FILENAMES` re-exported fresh, as always --
+   every shell call is a new process with no persisted env).
+2. Picked up `L125(y)` from the prior session's next-steps: a
+   `pipeline.monolithic.blend.format.r8g8b8a8_srgb.*` bucket, 94/100
+   fails, suspected (by the filing session) to be a blend+sRGB
+   interaction gap.
+3. Isolated one failing case with `--deqp-log-images=enable`,
+   base64-decoded the QPA's embedded `Result`/`Reference` PNGs, and
+   diffed them pixel-by-pixel with PIL/numpy (the same ad hoc
+   methodology several prior sessions have reused -- still no
+   reusable script exists for this, worth writing one eventually).
+4. **Surprise finding #1**: every RGB channel matched the reference
+   exactly. Only alpha was wrong (e.g. `102` where the reference said
+   `255`). That's the opposite of what an sRGB gamma-curve bug would
+   produce (which would show up as RGB divergence, never alpha-only,
+   since alpha is never sRGB-encoded by convention). This immediately
+   ruled out the sRGB-interaction hypothesis the filing session had
+   proposed.
+5. **Surprise finding #2**: re-ran the *exact same* blend-state case
+   name against a plain, non-sRGB `r8g8b8a8_unorm` attachment instead
+   -- same 94/100 fail rate, same alpha-only mismatch pattern. This is
+   not an sRGB bug at all; it's a general blend-equation bug that
+   happened to surface first via an sRGB-format CTS group.
+6. Went back to first principles and looked up the Vulkan spec's own
+   text for `VK_BLEND_OP_MIN`/`VK_BLEND_OP_MAX`: both ops are defined
+   to **ignore the blend factors entirely** and compute a raw
+   `min`/`max` of the unscaled source/destination values -- not
+   `min(Src*SrcFactor, Dst*DstFactor)` the way `Add`/`Subtract` do.
+   Confirmed this reading against `VK-GL-CTS`'s own reference-renderer
+   source (`rrFragmentOperations.cpp`), which computes the blend math
+   the same unscaled way (only applying blend factors for the additive
+   ops upstream of the min/max case).
+7. Found the bug immediately in `Executor.cpp`'s `applyBlendOp`: it
+   always received the *already factor-scaled* `SrcTerm`/`DstTerm`
+   operands from `blendColor`, regardless of `Op`, so `Min`/`Max` were
+   computing `min(Src*SF, Dst*DF)` instead of `min(Src, Dst)`.
+8. Fixed by widening `applyBlendOp`'s signature to take both the raw
+   (`Src`/`Dst`) and factor-scaled (`SrcTerm`/`DstTerm`) operand pairs;
+   `Min`/`Max` now use the raw pair, every other op still uses the
+   scaled pair unchanged.
+9. Went to update `ExecutorTest.cpp`'s existing Min-op tests and
+   discovered they'd encoded the *buggy* behavior as "expected" --
+   `MatchesHandComputedBlendEquationForMinAndReverseSubtract` and
+   `SequentialDrawsWithDifferentBlendStatesCorrectlyAccumulate` both
+   had hand-computed comments showing `min(Src*SF, Dst*DF)` math and
+   asserted on that wrong result. These tests were themselves latent
+   evidence of the bug, just never exercised against real CTS geometry
+   that would have caught the mismatch (the tests only ever checked
+   internal consistency of the *implementation's own* formula, not
+   against the Vulkan spec's actual definition). Corrected both to the
+   real (factor-ignoring) expected values.
+10. Added a new, more surgical regression test,
+    `MinAndMaxBlendOpsIgnoreBothBlendFactorsEntirely`, using
+    `SrcColorFactor=Zero`/`DstColorFactor=Zero` (and alpha
+    equivalents) specifically because that choice makes the two
+    formulas maximally distinguishable: the buggy formula collapses to
+    "always 0" when both factors are zeroed, while the correct formula
+    still produces the real min/max of the actual operands. This test
+    would have caught the bug far more directly than the two
+    pre-existing ones (which used non-trivial factors, making the
+    right-vs-wrong-answer gap a matter of arithmetic rather than an
+    obvious zero-vs-nonzero tell).
+11. Built and ran `check-feme`: 3,268/3,271 Passed, 3 Unsupported, 0
+    Failed (+1 new test, 0 regressions).
+12. Re-ran CTS: both `pipeline.monolithic.blend.format.r8g8b8a8_srgb.*`
+    and `.r8g8b8a8_unorm.*` are now 100/100 Pass (was 94 Fail on each).
+13. Kicked off a broader `pipeline.monolithic.blend.*` regression
+    sweep. It's a huge family (spans every color format x every
+    blend-factor/op combination x dual-source x multi-attachment
+    variants) and hit a 30-minute time budget I'd set before finishing
+    the whole thing -- but got through 8,073 cases (3,927 Pass, 4
+    Fail, rest NotSupported) with zero new fails beyond 4 pre-existing
+    ones.
+14. Those 4 fails are all `pipeline.monolithic.blend.clamp.*`
+    (`b8g8r8a8_unorm`/`r16g16b16a16_snorm`/`r16g16b16a16_unorm`/
+    `r8g8b8a8_unorm`). Confirmed pre-existing via a git-stash-rebuild-
+    rerun round-trip (fails identically before this session's fix
+    too) -- **not** something this session's change introduced.
+15. Noticed something worth flagging rather than silently ignoring: an
+    old `H99a` roadmap row's own closing note (from a much earlier
+    session) claims a full re-run once found `blend.clamp.*` **21/21
+    pass**. That's a direct, unreconciled contradiction with this
+    session's 4/6-fail finding. I didn't have time budget left this
+    session to dig into whether that's a real regression introduced
+    somewhere in between, or a difference in case sets/CTS versions --
+    filed as `L125(z)` with the contradiction called out explicitly so
+    a future session doesn't have to rediscover it from scratch.
+16. Updated `Roadmap.md` (struck through `L125(y)`, filed `L125(z)`),
+    `VulkanCTSReport.md` (new section), determined no
+    `Vulkan14FeatureInventory`/`VulkanExtensionInventory` update was
+    needed (pure correctness fix, no new feature/extension -- same
+    precedent as every other bug-fix-only session).
+17. Committed in 5 pieces: the `Executor.cpp` fix, the
+    `ExecutorTest.cpp` test updates, the `Roadmap.md` L125(y)
+    strikethrough, the `VulkanCTSReport.md` section, the `Roadmap.md`
+    L125(z) filing.
+18. Cleaned up this session's own `/tmp/ctsrun/l125y/*` scratch logs,
+    plus some leftover `l125u*`/`l125x` directories a prior session's
+    next-steps had flagged as not-yet-cleaned-up.
+
+## Wins
+
+- Followed the data instead of the prior session's hypothesis: the
+  filing session's own "likely blend+sRGB interaction" guess turned
+  out to be wrong in a genuinely interesting way (RGB-matches/
+  alpha-only-wrong is a strong, checkable signal that rules out a
+  whole class of hypotheses fast) -- worth remembering as a technique:
+  when a PNG diff shows *some* channels perfectly correct and others
+  not, that's a much stronger clue than "X% of pixels differ" alone.
+- The Vulkan-spec-first approach (read the actual `VK_BLEND_OP_MIN`/
+  `MAX` definition before touching code) found the bug in minutes once
+  I stopped assuming it was sRGB-specific -- a reminder that when a
+  "fixed" roadmap row from a prior session turns out incompletely
+  fixed, it's worth re-deriving the hypothesis from the spec rather
+  than trusting the prior session's own framing uncritically.
+- Found and fixed a second-order bug: two *existing* unit tests had
+  silently encoded the wrong behavior as correct. This is a good
+  reminder to actually read a test's own hand-computed-expected-value
+  comments against the spec, not just trust "there's already a test
+  covering this" as proof of correctness.
+
+## Suggested next steps
+
+1. **(~20-30 min)** `L125(z)`: the `blend.clamp.*` 4/6-fail bucket,
+   including the unreconciled contradiction with the old `H99a` row's
+   own "21/21 pass" claim -- start with a `--deqp-log-images=enable`
+   trace on one case (e.g. `blend.clamp.r8g8b8a8_unorm`) following
+   this session's own methodology, and specifically check whether the
+   "clamp" group's own semantics (blending past `[0, 1]` and expecting
+   the packed result to be clamped) reveals a missing clamp somewhere
+   in `mergeColor`'s own pipeline.
+2. Finish the `pipeline.monolithic.blend.*` regression sweep this
+   session only got 8,073 of the way through (timed out at 30 min) --
+   worth letting run to completion in the background at the start of a
+   future session, purely as extra regression confidence (no fails
+   found yet beyond the already-known 4 `blend.clamp.*` ones).
+3. `L125(s)`/`L125(t)` (vertex_input format gaps, bind-point bucket)
+   remain untouched from several sessions back -- good alternative
+   picks if `L125(z)` stalls.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+5. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+6. The BC-format CTS coverage gap noted across multiple prior sessions
+   (`sampler.view_type.*.format.*bc*.address_modes.
+   *clamp_to_border*` matches 0 cases) still hasn't been investigated
+   -- worth a quick dedicated look next time nothing else is more
+   pressing.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+8. This session's own scratch CTS logs are already cleaned up (along
+   with two prior sessions' leftover `l125u*`/`l125x` directories) --
+   nothing to do here.
