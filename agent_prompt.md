@@ -55,23 +55,16 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~20-30 min)** Pick up **L125(i)**: `SampleCmp*`/`GatherCmp*` depth-compare
-   swizzle semantics, still blocked as of the last 2 sessions on missing CTS
-   coverage (`vktTextureShadowTests.cpp`/`vktPipelineSamplerTests.cpp` searched,
-   nothing found combining depth-compare with a non-identity swizzle). If still
-   nothing, this row stays deferred rather than guessed at from spec text alone.
-2. **(~15-20 min)** Pick up the newly-filed **L125(l)**: `ConstOffsets` (plural
-   `TextureGatherOffsets`) gather fails pipeline creation for both formats. Not
-   yet root-caused whether the fix belongs in `ImageCalls.cpp` (new
-   4-offset-array `ImageCallKind`) or `SPIRVResourceLowering.cpp`
-   (classification/dispatch widening) -- start there. Concrete repro already
-   known (`dEQP-VK.glsl.texture_gather.graphics.offsets.*`).
-3. **L125(c)** remains the largest untouched scope: ASTC/EAC/ETC2 image
-   mismatches, two distinct `VK_ERROR_INITIALIZATION_FAILED` sites
-   (`createGraphicsPipelines` vs. `createComputePipelines`), and a
-   `vktPipelineBindPointTests.cpp` bucket -- a good pick if both L125(i) and
-   L125(l) stall.
-4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~15-20 min)** Re-sample `L125(c)`'s remaining buckets now that the
+   cache-key bug is fixed: ASTC/EAC/ETC2 image mismatches, the two
+   `VK_ERROR_INITIALIZATION_FAILED` sites (`createGraphicsPipelines` vs
+   `createComputePipelines`), and `vktPipelineBindPointTests.cpp` -- some may
+   have been this same cache bug in disguise; re-triage before assuming the old
+   counts still hold.
+2. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is the next real
+   scoped-out gather gap -- larger, cross-repo work, not a quick pick.
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. Clean up `/tmp/ctsrun/l125k/*.qpa` (this session's own scratch CTS logs)
-   before ending a future session, if not already gone.
+4. This session's own scratch CTS logs (`/tmp/ctsrun/l125o/*`,
+   `/tmp/ctsrun/l125c/*`) and the regenerated `dEQP-VK-cases.xml` build artifact
+   are already cleaned up -- nothing to do here.
