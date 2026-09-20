@@ -187,25 +187,59 @@ TEST(ImageFixtureTest, PacksAndUnpacksB8G8R8A8Unorm) {
   EXPECT_NEAR(Unpacked[3], 0.25, 0.01);
 }
 
-// (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`, an entirely unmapped format H8g's
-// own audit split off. `packClearColor`/`unpackColor` treat it exactly
-// like `B8G8R8A8_UNORM` above -- no gamma curve is applied here, mirroring
-// `R8G8B8A8_UNORM_SRGB`'s own precedent (the sRGB decode only happens on
-// the real sampling path, `femeRTUnpackImageTexel`).
+// (Roadmap L125x) `B8G8R8A8_UNORM_SRGB`: unlike `B8G8R8A8_UNORM` above,
+// `packClearColor`/`unpackColor` apply a linear<->sRGB gamma curve to the
+// R/G/B channels (never alpha, per `linearToSRGB`'s own convention) --
+// this mirrors the real sampling path's own `femeRTSRGBToLinear` decode
+// (`FeMeRuntimeCPU.c`), needed here too since writing/reading a real
+// `_UNORM_SRGB` color attachment must apply the same curve on the
+// fragment-output/blend side, not just when sampling one as a texture.
+// (Previously this format was wrongly treated identically to plain
+// `_UNORM`, which `dEQP-VK.pipeline.monolithic.sampler.exact_sampling.
+// r8g8b8a8_srgb.*` caught as a 12-case "Pixel mismatch" bucket.)
 TEST(ImageFixtureTest, PacksAndUnpacksB8G8R8A8UnormSrgb) {
   std::array<uint8_t, 4> Texel{};
   ASSERT_THAT_ERROR(
       packClearColor(cpu::ResourceFormat::B8G8R8A8_UNORM_SRGB,
                      {1.0, 0.5, 0.0, 0.25}, Texel),
       Succeeded());
-  // Memory order is B, G, R, A: B=0x00, G=~0x80, R=0xff, A=~0x40.
+  // Memory order is B, G, R, A: B=0x00 (sRGB-encode(0.0) == 0.0),
+  // G=~188 (sRGB-encode(0.5)), R=0xff (sRGB-encode(1.0) == 1.0),
+  // A=~64 (never sRGB-encoded, same as `B8G8R8A8_UNORM` above).
   EXPECT_EQ(Texel[0], 0);
-  EXPECT_NEAR(Texel[1], 128, 2);
+  EXPECT_NEAR(Texel[1], 188, 2);
   EXPECT_EQ(Texel[2], 255);
   EXPECT_NEAR(Texel[3], 64, 2);
 
   std::array<double, 4> Unpacked{};
   ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::B8G8R8A8_UNORM_SRGB,
+                                Texel, Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[3], 0.25, 0.01);
+}
+
+// (Roadmap L125x) `R8G8B8A8_UNORM_SRGB`'s own counterpart of the
+// `B8G8R8A8_UNORM_SRGB` test above -- same gamma curve, memory order
+// R, G, B, A instead of B, G, R, A.
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8UnormSrgb) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB,
+                     {1.0, 0.5, 0.0, 0.25}, Texel),
+      Succeeded());
+  // Memory order is R, G, B, A: R=0xff (sRGB-encode(1.0) == 1.0),
+  // G=~188 (sRGB-encode(0.5)), B=0x00 (sRGB-encode(0.0) == 0.0),
+  // A=~64 (never sRGB-encoded).
+  EXPECT_EQ(Texel[0], 255);
+  EXPECT_NEAR(Texel[1], 188, 2);
+  EXPECT_EQ(Texel[2], 0);
+  EXPECT_NEAR(Texel[3], 64, 2);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB,
                                 Texel, Unpacked),
                     Succeeded());
   EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
