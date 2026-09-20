@@ -3168,21 +3168,96 @@ TEST(ExecutorTest, MatchesHandComputedBlendEquationForMinAndReverseSubtract) {
   PreparedDraw Draw = Scene.prepare();
   ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
 
-  // Color: Result[C] = min(Src[C]*(1-Constant[C]), Dst[C]*Src[C]).
-  //   R: min(0.6*0.9, 0.25*0.6) = min(0.54, 0.15) = 0.15 -> round(0.15*255)
-  //      = 38
-  //   G: min(0.4*0.8, 0.55*0.4) = min(0.32, 0.22) = 0.22 -> round(0.22*255)
-  //      = 56
-  //   B: min(0.7*0.7, 0.35*0.7) = min(0.49, 0.245) = 0.245 ->
-  //      round(0.245*255) = 62
-  // Alpha (ReverseSubtract, DstTerm - SrcTerm):
-  //   Result = Dst[3]*(1-Constant[3]) - Src[3]*0 = 0.85*0.6 - 0 = 0.51 ->
-  //     round(0.51*255) = 130
+  // Color (Roadmap L125y): `Min` ignores both blend factors entirely per
+  // the Vulkan/Direct3D spec -- Result[C] = min(Src[C], Dst[C]), using
+  // the raw operands, not `min(Src[C]*(1-Constant[C]), Dst[C]*Src[C])`.
+  //   R: min(0.6, 0.25) = 0.25 -> round(0.25*255) = 64
+  //   G: min(0.4, 0.55) = 0.4 -> round(0.4*255) = 102
+  //   B: min(0.7, 0.35) = 0.35 -> round(0.35*255) = 89
+  // Alpha (ReverseSubtract, unaffected by the Min-only fix, DstTerm -
+  //   SrcTerm): Result = Dst[3]*(1-Constant[3]) - Src[3]*0 = 0.85*0.6 - 0
+  //   = 0.51 -> round(0.51*255) = 130
   for (uint32_t I = 0; I != 16; ++I) {
-    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 38, 1) << "texel " << I;
-    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 56, 1) << "texel " << I;
-    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 62, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 64, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 102, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 89, 1) << "texel " << I;
     EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 3], 130, 1) << "texel " << I;
+  }
+}
+
+// (Roadmap L125y) Confirms `Min`/`Max` ignore *both* blend factors
+// entirely, per the Vulkan/Direct3D spec ("the blend operations MIN and
+// MAX ... ignore the blend factor"), using `SrcColorFactor=Zero`/
+// `DstColorFactor=Zero` (and the alpha equivalents) specifically because
+// that choice makes the pre-fix bug's wrong answer maximally obvious:
+// with both factors zeroed, the old (incorrect) `min(Src[C]*SF,
+// Dst[C]*DF)`/`max(...)` formula collapses to `min(0, 0)`/`max(0, 0)` =
+// 0 for every channel, regardless of the real Src/Dst values, while the
+// correct, factor-ignoring formula produces the real `min`/`max` of the
+// two operands. This test was found necessary when `L125(y)`'s CTS
+// investigation traced a 94/100-failing `pipeline.monolithic.blend.
+// format.*` bucket to exactly this gap -- also discovered to be
+// unrelated to sRGB despite surfacing during that row's sRGB
+// investigation, since the same failure reproduces identically on a
+// plain (non-sRGB) `r8g8b8a8_unorm` attachment.
+TEST(ExecutorTest, MinAndMaxBlendOpsIgnoreBothBlendFactorsEntirely) {
+  Context Ctx;
+
+  BlendState Replace;
+  Replace.BlendEnable = true;
+  Replace.SrcColorFactor = BlendFactor::One;
+  Replace.DstColorFactor = BlendFactor::Zero;
+  Replace.SrcAlphaFactor = BlendFactor::One;
+  Replace.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> ReplacePipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Replace);
+  ASSERT_THAT_EXPECTED(ReplacePipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Dst = (0.2, 0.6, 0.8, 0.3), a full-viewport quad.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.2f, 0.6f, 0.8f, 0.3f,
+      3.0f,  -1.0f, 0.0f, 0.2f, 0.6f, 0.8f, 0.3f,
+      -1.0f, 3.0f,  0.0f, 0.2f, 0.6f, 0.8f, 0.3f,
+  };
+  PreparedDraw ReplaceDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*ReplacePipeline, ReplaceDraw),
+                    Succeeded());
+
+  BlendState MinMax;
+  MinMax.BlendEnable = true;
+  MinMax.SrcColorFactor = BlendFactor::Zero;
+  MinMax.DstColorFactor = BlendFactor::Zero;
+  MinMax.ColorOp = BlendOp::Min;
+  MinMax.SrcAlphaFactor = BlendFactor::Zero;
+  MinMax.DstAlphaFactor = BlendFactor::Zero;
+  MinMax.AlphaOp = BlendOp::Max;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, MinMax);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Src = (0.5, 0.5, 0.5, 0.5).
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f,
+      3.0f,  -1.0f, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f,
+      -1.0f, 3.0f,  0.0f, 0.5f, 0.5f, 0.5f, 0.5f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Color (Min, factors ignored): min(Src[C], Dst[C]):
+  //   R: min(0.5, 0.2) = 0.2 -> round(0.2*255) = 51
+  //   G: min(0.5, 0.6) = 0.5 -> round(0.5*255) = 128
+  //   B: min(0.5, 0.8) = 0.5 -> round(0.5*255) = 128
+  // Alpha (Max, factors ignored): max(0.5, 0.3) = 0.5 -> round(0.5*255) =
+  //   128
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 51, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 128, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 128, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 3], 128, 1) << "texel " << I;
   }
 }
 
@@ -3274,16 +3349,19 @@ TEST(ExecutorTest,
   ASSERT_THAT_ERROR(executeDraws(*MinPipeline, MinDraw), Succeeded());
 
   // Dst2 = (176, 138, 187, 0) / 255 = (0.6902, 0.5412, 0.7333, 0.0).
-  // Color: min(Src[C]*(1-Constant[C]), Dst2[C]*Src[C]):
-  //   R: min(0.54, 0.6902*0.6=0.41412) = 0.41412 -> round(*255) = 106
-  //   G: min(0.32, 0.5412*0.4=0.21648) = 0.21648 -> round(*255) = 55
-  //   B: min(0.49, 0.7333*0.7=0.51333) = 0.49 -> round(*255) = 125
-  // Alpha (ReverseSubtract): Dst2[3]*(1-Constant[3]) - Src[3]*0 = 0 - 0 =
-  //   0.
+  // Color (Roadmap L125y): `Min` ignores both blend factors -- Result[C]
+  // = min(Src[C], Dst2[C]), not `min(Src[C]*(1-Constant[C]),
+  // Dst2[C]*Src[C])`:
+  //   R: min(0.6, 0.6902) = 0.6 -> round(0.6*255) = 153
+  //   G: min(0.4, 0.5412) = 0.4 -> round(0.4*255) = 102
+  //   B: min(0.7, 0.7333) = 0.7 -> round(0.7*255) = 179 (178.5 rounded
+  //      away from zero)
+  // Alpha (ReverseSubtract, unaffected by the Min-only fix): Dst2[3]*(1-
+  //   Constant[3]) - Src[3]*0 = 0 - 0 = 0.
   for (uint32_t I = 0; I != 16; ++I) {
-    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 106, 1) << "texel " << I;
-    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 55, 1) << "texel " << I;
-    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 125, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 153, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 102, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 179, 1) << "texel " << I;
     EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 3], 0) << "texel " << I;
   }
 }
