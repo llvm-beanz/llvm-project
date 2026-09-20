@@ -3734,9 +3734,25 @@ image's* format, not the nominally-named border color
 (`VK_BORDER_COLOR_*_TRANSPARENT_BLACK` is conceptually `(0,0,0,0)`, but
 samples as `(0,0,0,1)` through an alpha-less format like
 `R32G32B32_FLOAT`, exactly like a real in-bounds texel of that format
-would). **Still narrower than full `VkComponentMapping` support**: an
-in-bounds texel fetch does not yet apply an image view's own component
-swizzle at all -- this remains open, tracked as new roadmap row L125(f).
+would).
+
+**Roadmap L125(f)** closed the residual gap noted above: an in-bounds
+texel fetch now applies the image view's own component swizzle too, via
+a new `ApplySwizzle` bool threaded through `femeRTFetchTexel2D`/
+`femeRTFetchTexel3D` (and the `femeRTFetchTexel1D`/
+`femeRTFetchTexel1DArray`/`femeRTFetchCubeSeamlessTexel` wrappers over
+them). These helpers are shared between two different Vulkan semantics
+-- a sampled-image fetch (`OpImageSample*`/`OpImageFetch`) must apply the
+component mapping, while a storage-image load (`OpImageRead`,
+`feme.cpu.image.load.*`) must not -- so every `Sample*`-family call site
+now passes `ApplySwizzle=1` and every `Load*`-family call site passes
+`ApplySwizzle=0`. **Still narrower than full `VkComponentMapping`
+support**: `SampleCmp*`/`Gather*`/`GatherCmp*` (depth-compare and
+four-tap gather, whose swizzle interaction with a single-channel dref
+read or a `Component` selector is not yet resolved) and the wholly
+separate integer-sampled (`*I32`) path both still pass an explicit
+`ApplySwizzle=0`/apply no swizzle at all -- tracked as new roadmap rows
+L125(g) and L125(h) respectively.
 
 **Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
 could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This

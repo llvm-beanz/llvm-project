@@ -6037,3 +6037,84 @@ unchanged.
 
 `Roadmap.md`'s L125(e) row is marked done. See `agent_thoughts.md` for
 the full narrative and next steps.
+
+## Roadmap L125(f): in-bounds texel fetch component-swizzle fix
+
+L125(d)/(e) above only fixed a *synthesized border color*'s own
+swizzle handling; an ordinary in-range texel read never consulted
+`Img->Swizzle` at all, a real and independently-observable gap (any
+non-identity `VkImageViewCreateInfo::components` on an ordinary
+sampled image silently did nothing). Investigation established the
+root cause is architectural: `femeRTFetchTexel2D`/`femeRTFetchTexel3D`
+(and their `femeRTFetchTexel1D`/`femeRTFetchTexel1DArray`/
+`femeRTFetchCubeSeamlessTexel` wrappers) are shared between two
+different Vulkan semantics -- a sampled-image fetch (`OpImageSample*`/
+`OpImageFetch`) must apply the image view's own `VkComponentMapping`,
+while a storage-image load (`OpImageRead`, `feme.cpu.image.load.*`)
+must never be swizzled, per spec and per
+`femeCpuImageLoad2DV4F32`'s own doc comment ("reads one texel ...
+sampled or storage").
+
+### Fix
+
+Added a new `ApplySwizzle` bool parameter to the four low-level fetch
+helpers above. Every plain `Sample2D`/`Sample1D`/`Sample1DArray`/
+`Sample3D`/`SampleCube`/`SampleCubeArray` call site (point and linear
+filtering) now passes `ApplySwizzle=1`; every `Load*`-family call site
+passes `ApplySwizzle=0` (unchanged, already-correct behavior).
+`SampleCmp*`/`Gather*`/`GatherCmp*` call sites also pass
+`ApplySwizzle=0` for now -- deliberately deferred to new roadmap row
+**L125(g)**, since a depth-compare's single-channel dref read and
+`OpImageGather`'s `Component` selector both have swizzle-interaction
+questions not yet resolved against a real CTS case. The (wholly
+separate, non-shared) integer-sampled `*I32` path is similarly
+deferred to new roadmap row **L125(h)**.
+
+### Unit tests
+
+- `ImageSamplingTest.SampleAppliesImageViewSwizzleToInBoundsTexel`:
+  `Sample2D` (nearest) with a `BARG` mapping against a real, in-bounds
+  (not border) texel -- every output channel differs from its
+  identity-mapped counterpart, so a regression that only re-breaks the
+  in-bounds branch cannot coincidentally still pass.
+- `ImageSamplingTest.LoadNeverAppliesImageViewSwizzle`: the
+  mirror-image regression guard -- `feme.cpu.image.load.2d.v4f32`
+  must read back unswizzled even with a non-identity `Img.Swizzle`,
+  protecting the storage-image semantics going forward.
+
+`ninja check-feme`: 3,242/3,245 Passed, 3 Unsupported, 0 Failed (+2
+new tests, 0 regressions).
+
+### Results
+
+Two independent, real CTS buckets confirmed the gap and the fix:
+
+- `dEQP-VK.pipeline.monolithic.image_view.*.component_swizzle.*` (a
+  5,496-non-identity-case bucket, distinct from the
+  `sampler.border_swizzle.*` family L125(d)/(e) fixed) -- a 42-case
+  sample spanning every non-cmp/gather view type (`1d`/`1d_array`/
+  `2d`/`2d_array`/`3d`/`cube`/`cube_array`) at `r8g8b8a8_unorm` went
+  from **0/42 Fail to 42/42 Pass**.
+- `dEQP-VK.texture.swizzle.component_mapping.*` (a second, wholly
+  independent bucket exercising the same gap) -- a 100-case
+  float-format sample went from 6/100 Fail (all `_sint`/`_uint`, the
+  deferred I32 path) to its float-format subset going **39/39 Pass**
+  (0 fails).
+- A 400-case random `image-view.txt` sample's remaining 32
+  `component_swizzle.*` fails are entirely ASTC/EAC/ETC2
+  compressed-format decoding (L125(c), unrelated) or integer-format
+  (`_sint`/`_uint`, deferred to L125(h)) -- no unexplained fails in
+  this fix's own float, non-compressed scope.
+- A 150-case storage-image `load_store_lod`/`store_load_consistency`
+  sample shows no regressions (the `Load*`-family's `ApplySwizzle=0`
+  correctly preserves its pre-existing unswizzled behavior).
+
+Internal correctness fix, not new Vulkan feature/extension surface --
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) remain
+unchanged.
+
+`Roadmap.md`'s L125(f) row is marked done; new sibling rows L125(g)
+(`SampleCmp*`/`Gather*`/`GatherCmp*` swizzle) and L125(h) (integer
+`*I32` path swizzle) capture the deferred remainder. See
+`agent_thoughts.md` for the full narrative and next steps.
