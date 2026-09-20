@@ -58,22 +58,18 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 ### Suggested next steps
 
 1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
-   logs (all under `/tmp/ctsrun/l125b_array2d_*`) are already deleted;
+   logs (all under `/tmp/ctsrun/l125b_plain3d_*`) are already deleted;
    only prior sessions' own leftover `l124*` files remain there,
    untouched (not this session's to clean).
-2. Pick up **`Plain3D`** next (the next shape in L125(b)'s own
-   established ordering): 3-component `(U, V, W)` coordinate, real
-   3-wide `ConstOffset` per L67(c)'s own precedent -- similar shape to
-   `Array2D` but no array layer to resolve. Check whether a
-   `femeRTFetchTexel3DI32`-equivalent already exists (mirroring
-   `Array2D`'s own pleasant surprise) before assuming a new low-level
-   fetch helper is needed.
-3. **`Cube`/`CubeArray`** last -- structurally different
-   (direction-vector coordinate resolved via `femeRTSelectCubeFace`, no
-   `ConstOffset` at all per SPIR-V spec) -- worth its own careful read
-   of `createSampleCube`'s/`createSampleCubeArray`'s own float
-   counterparts before starting, rather than assuming the same 3-step
-   pattern applies unchanged.
+2. Pick up **`Cube`** next (the next shape in L125(b)'s own established
+   ordering) -- start by confirming whether `femeRTComputeCubeClampedLod`
+   can be called with `UseExplicitLod=1`/zero derivatives the same way
+   every prior shape's I32 function calls `femeRTComputeClampedLod`, per
+   the scoping notes just above.
+3. **`CubeArray`** last -- adds an `ArrayLayer` operand on top of
+   `Cube`'s own direction-vector coordinate (mirroring `Array2D`'s own
+   relationship to `Plain2D`), so should be a smaller follow-on once
+   `Cube` itself is done and its own pattern is established.
 4. Once all 6 shapes are done, strike through L125(b) in `Roadmap.md`
    and consider whether `L125(c)`/`L125(d)` (the other, not-yet-root-
    caused fail buckets from L125(a)'s own original triage) or **L125's
