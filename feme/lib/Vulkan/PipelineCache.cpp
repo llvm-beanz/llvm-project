@@ -37,6 +37,22 @@ template <typename T> void appendPOD(std::vector<uint8_t> &Out, const T &V) {
   Out.insert(Out.end(), Bytes, Bytes + sizeof(T));
 }
 
+/// Hashes \p Overrides (one stage's resolved `VkSpecializationInfo`, see
+/// `buildSpecializationOverrides`) into \p Hash, in `(ConstantID, Value)`
+/// order per override -- shared by `computePipelineCacheKey`'s single
+/// compute-stage override list and `computeGraphicsPipelineCacheKey`'s own
+/// per-stage lists below (roadmap L125(o)).
+void hashSpecializationOverrides(SHA256 &Hash,
+                                 ArrayRef<SpecializationOverride> Overrides) {
+  for (const SpecializationOverride &Override : Overrides) {
+    Hash.update(
+        ArrayRef(reinterpret_cast<const uint8_t *>(&Override.ConstantID),
+                 sizeof(Override.ConstantID)));
+    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Override.Value),
+                         sizeof(Override.Value)));
+  }
+}
+
 /// Hashes \p SetLayouts' binding maps and \p PushConstantRanges into
 /// \p Hash, the part of a pipeline's identity every stage's key (compute or
 /// graphics) shares: the pipeline layout's own binding/push-constant shape.
@@ -82,13 +98,7 @@ PipelineCacheKey feme::vulkan::computePipelineCacheKey(
   Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(ShaderWords.data()),
                        ShaderWords.size() * sizeof(uint32_t)));
   Hash.update(EntryPoint);
-  for (const SpecializationOverride &Override : Overrides) {
-    Hash.update(
-        ArrayRef(reinterpret_cast<const uint8_t *>(&Override.ConstantID),
-                 sizeof(Override.ConstantID)));
-    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Override.Value),
-                         sizeof(Override.Value)));
-  }
+  hashSpecializationOverrides(Hash, Overrides);
   hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
   // (roadmap E7) `requiredSubgroupSize`/`VK_PIPELINE_SHADER_STAGE_CREATE_
   // REQUIRE_FULL_SUBGROUPS_BIT` both change what `compileComputePipeline`
@@ -103,50 +113,64 @@ PipelineCacheKey feme::vulkan::computePipelineCacheKey(
 PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
     const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
     ArrayRef<uint32_t> VertexShaderWords, StringRef VertexEntry,
+    ArrayRef<SpecializationOverride> VertexSpecOverrides,
     ArrayRef<uint32_t> FragmentShaderWords, StringRef FragmentEntry,
+    ArrayRef<SpecializationOverride> FragmentSpecOverrides,
     ArrayRef<const DescriptorSetLayout *> SetLayouts,
     ArrayRef<VkPushConstantRange> PushConstantRanges,
     ArrayRef<uint8_t> FixedFunctionState,
     ArrayRef<uint32_t> TessControlShaderWords, StringRef TessControlEntry,
+    ArrayRef<SpecializationOverride> TessControlSpecOverrides,
     ArrayRef<uint32_t> TessEvalShaderWords, StringRef TessEvalEntry,
+    ArrayRef<SpecializationOverride> TessEvalSpecOverrides,
     ArrayRef<uint32_t> GeometryShaderWords, StringRef GeometryEntry,
+    ArrayRef<SpecializationOverride> GeometrySpecOverrides,
     ArrayRef<uint32_t> MeshShaderWords, StringRef MeshEntry,
-    ArrayRef<uint32_t> TaskShaderWords, StringRef TaskEntry) {
+    ArrayRef<SpecializationOverride> MeshSpecOverrides,
+    ArrayRef<uint32_t> TaskShaderWords, StringRef TaskEntry,
+    ArrayRef<SpecializationOverride> TaskSpecOverrides) {
   SHA256 Hash;
   Hash.update(ArrayRef(DeviceUUID, VK_UUID_SIZE));
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(VertexShaderWords.data()),
                VertexShaderWords.size() * sizeof(uint32_t)));
   Hash.update(VertexEntry);
+  hashSpecializationOverrides(Hash, VertexSpecOverrides);
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(FragmentShaderWords.data()),
                FragmentShaderWords.size() * sizeof(uint32_t)));
   Hash.update(FragmentEntry);
+  hashSpecializationOverrides(Hash, FragmentSpecOverrides);
   // (roadmap H4b) Empty for a pipeline with no tessellation stages, exactly
   // like `FragmentShaderWords`/`FragmentEntry` are for a fragment-less one.
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(TessControlShaderWords.data()),
                TessControlShaderWords.size() * sizeof(uint32_t)));
   Hash.update(TessControlEntry);
+  hashSpecializationOverrides(Hash, TessControlSpecOverrides);
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(TessEvalShaderWords.data()),
                TessEvalShaderWords.size() * sizeof(uint32_t)));
   Hash.update(TessEvalEntry);
+  hashSpecializationOverrides(Hash, TessEvalSpecOverrides);
   // (roadmap H5e) Empty for a pipeline with no geometry stage, the same way.
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(GeometryShaderWords.data()),
                GeometryShaderWords.size() * sizeof(uint32_t)));
   Hash.update(GeometryEntry);
+  hashSpecializationOverrides(Hash, GeometrySpecOverrides);
   // (roadmap H6f) Empty for a "primitive" pipeline (no mesh stage) or a
   // mesh pipeline with no task stage, the same way.
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(MeshShaderWords.data()),
                MeshShaderWords.size() * sizeof(uint32_t)));
   Hash.update(MeshEntry);
+  hashSpecializationOverrides(Hash, MeshSpecOverrides);
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(TaskShaderWords.data()),
                TaskShaderWords.size() * sizeof(uint32_t)));
   Hash.update(TaskEntry);
+  hashSpecializationOverrides(Hash, TaskSpecOverrides);
   hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
   Hash.update(FixedFunctionState);
   return Hash.final();

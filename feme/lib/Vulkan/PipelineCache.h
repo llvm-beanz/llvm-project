@@ -102,34 +102,48 @@ computePipelineCacheKey(const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
 /// \p FragmentShaderWords/\p FragmentEntry are for a fragment-less pipeline
 /// (roadmap H2j) -- and (roadmap H5e) the geometry stage's own words and
 /// entry point, empty the same way for a pipeline with no geometry stage --
-/// (a graphics stage has no specialization data to fold
-/// in -- it is rejected outright at creation, see GraphicsPipeline.cpp's
-/// `compileGraphicsStage`), the pipeline layout's binding map and
-/// push-constant ranges, \p DeviceUUID (as `computePipelineCacheKey`
-/// above), and \p FixedFunctionState -- a caller-serialized encoding of
-/// every piece of translated fixed-function pipeline state (topology,
-/// vertex input, raster/viewport/depth-stencil/blend state, dynamic-state
-/// selection, sample count, attachment formats, and the tessellation
-/// input control point count): a hit must be identical in everything a
-/// draw through either pipeline could observe, not only in the stages'
-/// bytes.
+/// each stage's own \p *SpecOverrides (roadmap L125(o): every graphics stage
+/// *does* fold specialization data in, exactly like a compute stage --
+/// `compileGraphicsStage`, GraphicsPipeline.cpp, has always called
+/// `buildSpecializationOverrides` and applied the result via
+/// `patchSpecializationConstants`; this key must include it too, or two
+/// pipelines built from the identical shader module and entry point but
+/// different `VkSpecializationInfo` -- e.g. a `constant_id`-driven
+/// gather-vs-plain-sample branch selected at pipeline-creation time, not
+/// shader-module-creation time -- collide on the same cached artifact and
+/// silently reuse the wrong one's compiled code), the pipeline layout's
+/// binding map and push-constant ranges, \p DeviceUUID (as
+/// `computePipelineCacheKey` above), and \p FixedFunctionState -- a
+/// caller-serialized encoding of every piece of translated fixed-function
+/// pipeline state (topology, vertex input, raster/viewport/depth-stencil/
+/// blend state, dynamic-state selection, sample count, attachment formats,
+/// and the tessellation input control point count): a hit must be
+/// identical in everything a draw through either pipeline could observe,
+/// not only in the stages' bytes.
 PipelineCacheKey computeGraphicsPipelineCacheKey(
     const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
     llvm::ArrayRef<uint32_t> VertexShaderWords, llvm::StringRef VertexEntry,
+    llvm::ArrayRef<SpecializationOverride> VertexSpecOverrides,
     llvm::ArrayRef<uint32_t> FragmentShaderWords, llvm::StringRef FragmentEntry,
+    llvm::ArrayRef<SpecializationOverride> FragmentSpecOverrides,
     llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts,
     llvm::ArrayRef<VkPushConstantRange> PushConstantRanges,
     llvm::ArrayRef<uint8_t> FixedFunctionState,
     llvm::ArrayRef<uint32_t> TessControlShaderWords = {},
     llvm::StringRef TessControlEntry = {},
+    llvm::ArrayRef<SpecializationOverride> TessControlSpecOverrides = {},
     llvm::ArrayRef<uint32_t> TessEvalShaderWords = {},
     llvm::StringRef TessEvalEntry = {},
+    llvm::ArrayRef<SpecializationOverride> TessEvalSpecOverrides = {},
     llvm::ArrayRef<uint32_t> GeometryShaderWords = {},
     llvm::StringRef GeometryEntry = {},
+    llvm::ArrayRef<SpecializationOverride> GeometrySpecOverrides = {},
     llvm::ArrayRef<uint32_t> MeshShaderWords = {},
     llvm::StringRef MeshEntry = {},
+    llvm::ArrayRef<SpecializationOverride> MeshSpecOverrides = {},
     llvm::ArrayRef<uint32_t> TaskShaderWords = {},
-    llvm::StringRef TaskEntry = {});
+    llvm::StringRef TaskEntry = {},
+    llvm::ArrayRef<SpecializationOverride> TaskSpecOverrides = {});
 
 /// Whether persistent (serialized) pipeline-cache data is ever trusted as
 /// `vkCreatePipelineCache` input, per `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA`

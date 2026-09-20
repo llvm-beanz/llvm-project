@@ -2537,12 +2537,53 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
     llvm::StringRef TaskEntry =
         TaskInfo ? (TaskInfo->pName ? TaskInfo->pName : "main")
                  : llvm::StringRef();
+    // (roadmap L125(o)) Each stage's own specialization data is folded into
+    // the compiled code by `compileGraphicsStage` below, exactly like a
+    // compute stage's; the cache key must include it too, or two pipelines
+    // sharing a module/entry point but differing `VkSpecializationInfo`
+    // collide on the same cached artifact. A stage with no info (a null
+    // `*Info`) or a malformed `VkSpecializationInfo` (an `Expected` error,
+    // which `compileGraphicsStage` will independently surface as a real
+    // pipeline-creation failure once it gets there) both fall back to an
+    // empty override list here -- for the error case this only means
+    // caching is skipped for that malformed creation, the same honest
+    // simplification already used above for an inline shader module.
+    auto StageOverrides =
+        [](const VkPipelineShaderStageCreateInfo *Info)
+        -> SmallVector<SpecializationOverride, 4> {
+      if (!Info)
+        return {};
+      Expected<SmallVector<SpecializationOverride, 4>> Overrides =
+          buildSpecializationOverrides(Info->pSpecializationInfo);
+      if (!Overrides) {
+        consumeError(Overrides.takeError());
+        return {};
+      }
+      return std::move(*Overrides);
+    };
+    SmallVector<SpecializationOverride, 4> VertexSpecOverrides =
+        StageOverrides(VertexInfo);
+    SmallVector<SpecializationOverride, 4> FragmentSpecOverrides =
+        StageOverrides(FragmentInfo);
+    SmallVector<SpecializationOverride, 4> TessControlSpecOverrides =
+        StageOverrides(TessControlInfo);
+    SmallVector<SpecializationOverride, 4> TessEvalSpecOverrides =
+        StageOverrides(TessEvalInfo);
+    SmallVector<SpecializationOverride, 4> GeometrySpecOverrides =
+        StageOverrides(GeometryInfo);
+    SmallVector<SpecializationOverride, 4> MeshSpecOverrides =
+        StageOverrides(MeshInfo);
+    SmallVector<SpecializationOverride, 4> TaskSpecOverrides =
+        StageOverrides(TaskInfo);
     Key = computeGraphicsPipelineCacheKey(
         DeviceInfo.Properties.pipelineCacheUUID, VertexWords, VertexEntry,
-        FragmentWords, FragmentEntry, Layout.setLayouts(),
+        VertexSpecOverrides, FragmentWords, FragmentEntry,
+        FragmentSpecOverrides, Layout.setLayouts(),
         Layout.pushConstantRanges(), FixedFunctionState, TessControlWords,
-        TessControlEntry, TessEvalWords, TessEvalEntry, GeometryWords,
-        GeometryEntry, MeshWords, MeshEntry, TaskWords, TaskEntry);
+        TessControlEntry, TessControlSpecOverrides, TessEvalWords,
+        TessEvalEntry, TessEvalSpecOverrides, GeometryWords, GeometryEntry,
+        GeometrySpecOverrides, MeshWords, MeshEntry, MeshSpecOverrides,
+        TaskWords, TaskEntry, TaskSpecOverrides);
   }
 
   // (roadmap L89c) The app's own cache is consulted first and is the only
