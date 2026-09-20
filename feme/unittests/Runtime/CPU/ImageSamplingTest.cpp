@@ -1044,6 +1044,46 @@ TEST_F(ImageSamplingTest, ClampToBorderReadsBorderColor) {
   EXPECT_FLOAT_EQ(Out[3], 0.4f);
 }
 
+// (Roadmap L125(d)) A non-identity `FemeImageDescriptor::Swizzle` must
+// apply to a synthesized border color exactly as it would to an in-bounds
+// texel, mirroring core Vulkan's own "conversion to RGBA" rule for
+// `VK_BORDER_COLOR_*_TRANSPARENT_BLACK`/`*_OPAQUE_WHITE` (no
+// `VK_EXT_border_color_swizzle` needed for those two -- see
+// `vktPipelineSamplerBorderSwizzleTests.cpp`'s own gating, upstream
+// VK-GL-CTS). Uses a `BARG` mapping (output R reads input B, output G
+// reads input A, output B reads input R, output A is the constant `Zero`)
+// against a distinguishable `{0.1, 0.2, 0.3, 0.4}` border color: every
+// output channel should differ from its identity-mapped counterpart, so a
+// regression that silently drops `Swizzle` (reverting to identity) cannot
+// coincidentally still pass.
+TEST_F(ImageSamplingTest, ClampToBorderAppliesImageViewSwizzle) {
+  float Storage[1][1][4] = {{{1, 1, 1, 1}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToBorder);
+  Samp.BorderColor[0] = 0.1f;
+  Samp.BorderColor[1] = 0.2f;
+  Samp.BorderColor[2] = 0.3f;
+  Samp.BorderColor[3] = 0.4f;
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.3f); // R <- B
+  EXPECT_FLOAT_EQ(Out[1], 0.4f); // G <- A
+  EXPECT_FLOAT_EQ(Out[2], 0.1f); // B <- R
+  EXPECT_FLOAT_EQ(Out[3], 0.0f); // A <- Zero
+}
+
 TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
   // A single R8G8B8A8_UNORM_SRGB texel with R=G=B=188/255 (~0.7372549), the
   // sRGB encoding of linear 0.5 (matching sRGB's well-known midpoint

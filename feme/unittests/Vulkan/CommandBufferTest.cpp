@@ -3871,6 +3871,215 @@ TEST_F(SampledImageDispatchTest, RejectsAPipelineLayoutOfTheWrongClass) {
 
 namespace {
 
+/// (Roadmap L125(d)) Same shape as `kSampledImageShader`, but samples at
+/// `uv = (2.0, 2.0)` -- well outside `[0, 1)` on both axes -- so a
+/// `ClampToBorder`-addressed sampler resolves to the synthesized border
+/// color rather than an in-bounds texel.
+const char *kBorderSampledImageShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %1 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %sampler = spirv.Load "UniformConstant" %1 : !spirv.sampler
+    %si = spirv.SampledImage %image, %sampler : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %uv = spirv.Constant dense<[2.000000e+00, 2.000000e+00]> : vector<2xf32>
+    %lod = spirv.Constant 0.000000e+00 : f32
+    %texel = spirv.ImageSampleExplicitLod %si, %uv ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32 -> vector<4xf32>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %c2 = spirv.Constant 2 : i32
+    %c3 = spirv.Constant 3 : i32
+    %r = spirv.CompositeExtract %texel[0 : i32] : vector<4xf32>
+    %g = spirv.CompositeExtract %texel[1 : i32] : vector<4xf32>
+    %b = spirv.CompositeExtract %texel[2 : i32] : vector<4xf32>
+    %a = spirv.CompositeExtract %texel[3 : i32] : vector<4xf32>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac0, %r : f32
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac1, %g : f32
+    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac2, %b : f32
+    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac3, %a : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @img, @samp, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
+} // namespace
+
+/// (Roadmap L125(d)) The same bound-image/bound-sampler dispatch
+/// `SampledImageDispatchTest` exercises, but the image view carries a
+/// non-identity component mapping (`VK_COMPONENT_SWIZZLE_ONE` on R) and
+/// the sampler addresses `ClampToBorder` with the well-known
+/// `VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK` (`{0, 0, 0, 0}`) at an
+/// out-of-range `uv`. Per core Vulkan (no `VK_EXT_border_color_swizzle`
+/// needed for `TRANSPARENT_BLACK`/`OPAQUE_WHITE` -- see
+/// `vktPipelineSamplerBorderSwizzleTests.cpp`'s own gating, upstream
+/// VK-GL-CTS), the swizzle must still apply to the synthesized border
+/// color: R reads the constant `One`, so the result is `{1, 0, 0, 0}`
+/// rather than `{0, 0, 0, 0}`.
+class BorderSwizzleSampledImageDispatchTest : public SampledImageDispatchTest {
+protected:
+  const char *getShaderSource() override {
+    return kBorderSampledImageShader;
+  }
+
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ImageInfo.extent = {Extent, Extent, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = ImageSize;
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+    auto *F = static_cast<float *>(Texels);
+    for (uint32_t I = 0; I != Extent * Extent; ++I)
+      for (uint32_t C = 0; C != 4; ++C)
+        F[I * 4 + C] = static_cast<float>(I * 4 + C);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ViewInfo.components.r = VK_COMPONENT_SWIZZLE_ONE;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+
+  void createSampler() {
+    VkSamplerCreateInfo SamplerInfo{};
+    SamplerInfo.magFilter = VK_FILTER_NEAREST;
+    SamplerInfo.minFilter = VK_FILTER_NEAREST;
+    SamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    SamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    SamplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp),
+              VK_SUCCESS);
+  }
+
+  void SetUp() override {
+    // Reimplemented rather than calling the base class's own `SetUp`:
+    // `SampledImageDispatchTest::SetUp` calls `createImage`/`createSampler`
+    // non-virtually through its own body, so a derived override of either
+    // (this fixture overrides both) would otherwise never run.
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    createImage();
+    createSampler();
+    createOutputBuffer();
+
+    VkDescriptorSetLayoutBinding Bindings[3]{};
+    Bindings[0].binding = 0;
+    Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    Bindings[0].descriptorCount = 1;
+    Bindings[1].binding = 1;
+    Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    Bindings[1].descriptorCount = 1;
+    Bindings[2].binding = 2;
+    Bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[2].descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.bindingCount = 3;
+    SetLayoutInfo.pBindings = Bindings;
+    ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                          &SetLayout),
+              VK_SUCCESS);
+
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words = assembleSPIRV(getShaderSource());
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkDescriptorPoolSize PoolSizes[3] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo PoolInfo{};
+    PoolInfo.maxSets = 1;
+    PoolInfo.poolSizeCount = 3;
+    PoolInfo.pPoolSizes = PoolSizes;
+    ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+              VK_SUCCESS);
+
+    VkDescriptorSetAllocateInfo DSAllocInfo{};
+    DSAllocInfo.descriptorPool = DescPool;
+    DSAllocInfo.descriptorSetCount = 1;
+    DSAllocInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+};
+
+TEST_F(BorderSwizzleSampledImageDispatchTest,
+      AppliesImageViewSwizzleToSynthesizedBorderColor) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 1.0f); // R <- constant One (the view's swizzle).
+  EXPECT_FLOAT_EQ(Result[1], 0.0f);
+  EXPECT_FLOAT_EQ(Result[2], 0.0f);
+  EXPECT_FLOAT_EQ(Result[3], 0.0f);
+}
+
+namespace {
+
 /// Sets bits `[Start, Start + Len)` of \p Block (bit 0 the LSB of byte 0,
 /// matching ASTCDecode.cpp's own convention -- see ASTCDecodeTest.cpp's
 /// identical helper) to \p Value's low \p Len bits, used here only to
