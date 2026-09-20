@@ -95251,3 +95251,36 @@ New test: `GraphicsPipelineTest.DifferingSpecializationDataIsACacheMiss`.
 2. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is the next real scoped-out gather gap -- larger, cross-repo work, not a quick pick.
 3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 4. This session's own scratch CTS logs (`/tmp/ctsrun/l125o/*`, `/tmp/ctsrun/l125c/*`) and the regenerated `dEQP-VK-cases.xml` build artifact are already cleaned up -- nothing to do here.
+
+# Session: Re-triage L125(c) post-cache-fix -- split into L125(p) through L125(u)
+
+**FeMe CPU Vulkan Device confirmed** via `vulkaninfo --summary | grep deviceName` at session start.
+
+Picked up the prior session's #1 next step: re-sample L125(c) now that L125(o)'s cache-key fix has landed, in case some of its old fail counts were the cache bug in disguise.
+
+## What got done, in order
+
+1. `ninja check-feme` first to confirm the build is still clean from the prior session: 3,258/3,261 Passed, 0 Failed.
+2. Re-ran the exact same `--deqp-fraction=0,50` sample of `dEQP-VK.pipeline.monolithic.*` (8,007 cases) L125(c)'s original triage used: **655 Fail** (was 1,165 pre-`L125(a)`/`(b)`, ~650 expected residual after those landed -- so L125(o)'s fix did **not** measurably move this sample; its own repro needs a specific adjacent test ordering a random fraction rarely hits).
+3. Grouped all 655 fails by test area + failure message. Verified each bucket with a standalone single-case isolation re-run (fails identically alone -- real bugs, not cache artifacts).
+4. Found 9 distinct buckets, 2 of them **new** (not in L125(c)'s original description): `multisample_interpolation.*`'s `InterpolateAtCentroid`/`InterpolateAtSample` legalization gap (27 fails), and `sampler.exact_sampling`'s pixel-mismatch bucket (6 fails).
+5. Split `L125(c)` into 6 new rows (`L125(p)` through `L125(u)`) in `Roadmap.md`, one per bucket, each with fail count and whatever root-cause depth this session reached (one bucket, `border_swizzle`'s format-not-supported half, got a full root cause via `FEME_VULKAN_LOG_CREATION_ERRORS=1`; the rest are filed with a fail count and a starting hypothesis, not yet fixed).
+6. Wrote a `VulkanCTSReport.md` section with the full breakdown.
+7. Committed docs-only (no code change this session -- this was a triage pass, not a fix pass).
+8. Cleaned up scratch CTS logs (`/tmp/ctsrun/l125c2/*`).
+
+## Wins visible right now
+
+- L125(c)'s previously-opaque "not yet individually triaged" bucket is now 6 precisely scoped, independently pickable rows, each with a fail count and (for one) a full root cause.
+- Confirmed L125(o)'s cache fix is genuinely isolated -- none of these 655 fails share its root cause.
+- Found 2 previously-unknown bugs (`InterpolateAtCentroid`/`InterpolateAtSample`, `exact_sampling`) that a narrower fix-only session would likely never have surfaced.
+
+## Next steps
+
+1. **(~20-30 min)** `L125(r)` (`InterpolateAtCentroid`/`InterpolateAtSample` legalization gap, 27 fails) is likely the fastest win of the six: a missing SPIR-V-to-LLVM conversion pattern for two GLSL.std.450 extended instructions, mechanically similar in shape to other "operation not legalized" gaps this roadmap has already closed. Start in `SPIRVToLLVMPatterns.cpp`.
+2. **(~15 min)** `L125(q)`'s sub-bucket (1) (80 fails, `border_swizzle`'s single/dual-channel non-8-bit gather formats reporting "image fixture format is not yet supported") already has its root cause identified this session -- a mechanical format-support gap, likely a good second pick alongside L125(r).
+3. `L125(p)` (440 fails, "Image mismatch" across `image.suballocation`/`image_view.view_type`/`sampler.view_type`) is the single largest bucket by far but needs its own `--deqp-log-decompiled-spirv=enable` trace per area before estimating -- start here only with more time budgeted.
+4. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, the bind-point bucket, and the small exact_sampling bucket) are all not yet started at all -- good picks once the above three are underway or blocked.
+5. `L125(m)` (upstream MLIR+LLVM `ConstOffsets` plumbing) remains the other open, larger cross-repo item from before this session -- not touched, not a quick pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l125c2/*`) are already cleaned up -- nothing to do here.
