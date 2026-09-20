@@ -96353,3 +96353,106 @@ needs -- it does not persist across shell calls).
    `llvm-project`) are incremental from here -- no reconfigure needed.
 7. This session's own scratch CTS logs (`/tmp/ctsrun/l125z/*`) are
    already cleaned up -- nothing to do here.
+
+# Session: L125(s) vertex-input matrix legalization and integer signedness fixes
+
+## Brain dump (i-have-adhd style: what happened, in order)
+
+- Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+  Vulkan Device` before touching anything, per the standing
+  requirement.
+- Picked up `L125(s)` from the last session's suggested next steps
+  (originally estimated "28 of 655 fails: 16 `multiple_attributes`, 12
+  `single_attribute`"). Ran the *full* `vertex_input.*` sweep instead
+  of trusting the old fractional estimate (this is now a repeated
+  lesson across many prior sessions -- `L125(c)`/`L125(p)`/`L125(w)`
+  all undercounted the same way) and found **1,568** real fails, not
+  28. Two completely distinct bugs were hiding in that bucket.
+- **Bug 1** (matrix vertex attributes crash entirely): traced a
+  `mat2.mat3` case's "failed to legalize operation 'spirv.AccessChain'"
+  crash to `isCompositeStageIOType` in `SPIRVToLLVMPatterns.cpp` simply
+  never having a case for `spirv.MatrixType` -- a one-line oversight,
+  not a design gap. `isCompositeLLVMType` (the converted-type check)
+  already handled matrices fine; only the SPIR-V-type-side routing
+  check was missing the case. One-line fix, one unit test, verified
+  via stash/rebuild round-trip that it reproduces the exact real bug.
+- **Bug 2** (uint vertex attributes rejected): traced via a debug
+  `llvm::errs()` trace in `Executor.cpp` that `WantType` is *always*
+  `SInt`, never `UInt`, for any integer scalar vertex-shader input --
+  because LLVM IR integers are signless and `CanonicalizeStage.cpp`'s
+  `getComponentType` runs after SPIR-V's own signedness bit is already
+  gone. This is the *exact same* bug `L125(u)` (a prior session)
+  already found and fixed on the fragment-output side -- I found the
+  vertex-input twin of it. Fixed by relaxing `decodeAttribute`'s
+  integer-format checks to accept either `SInt` or `UInt` (the actual
+  byte-decode logic doesn't care), since the only real thing worth
+  rejecting is a `Float`/`Bool` mismatch.
+- Built `check-feme` after each fix: 0 regressions both times, ended
+  at 3,271/3,274 Passed (+2 new tests total).
+- Re-ran the full `vertex_input.*` sweep after both fixes: 1,571 fails
+  down to **4**. Those 4 are a completely different, unrelated,
+  newly-surfaced bucket (`max_attributes.*` x3, `misc.unused_binding`
+  x1) -- didn't investigate further this session, filed as a new
+  roadmap row (`L127`, not `L125(aa)` -- ran out of `L125` letters at
+  `z`, and doubling letters would violate this session's own
+  no-deep-nesting instruction, so bumped to a fresh top-level number
+  instead).
+- Updated `Roadmap.md` (struck through and re-scoped `L125(s)`, added
+  `L127`), `VulkanCTSReport.md` (new section), left the inventories
+  alone (neither fix touches feature/extension support, both are pure
+  correctness fixes -- confirmed, not just assumed).
+- Did not touch `L125(t)` at all this session -- stayed focused on the
+  vertex_input area since it turned out to contain two substantial
+  bugs on its own.
+
+## Wins
+
+- Two real, previously-invisible correctness bugs fixed with small,
+  surgical, well-tested changes -- neither required touching MLIR
+  conversion infrastructure broadly, just closing narrow gaps.
+- `vertex_input.*`'s CTS pass rate went from 917/13,296 (6.9%) to
+  2,484/13,296 (18.7%), with the fail count dropping by ~99.7%
+  (1,571 -> 4).
+- Both bugs' unit tests were verified with a stash/rebuild round-trip
+  against the real pre-fix behavior, not just "test passes now" --
+  confirmed each fails with the *exact* real-bug diagnostic
+  beforehand.
+- Recognized bug 2 as a duplicate-shape bug of `L125(u)` quickly by
+  reading that row's own roadmap text, instead of re-deriving the root
+  cause from scratch -- reusing prior sessions' documented findings
+  paid off.
+
+## Suggested next steps
+
+1. **(~15-20 min)** `L127`: the new 4-fail `vertex_input.max_attributes.*`
+   / `misc.unused_binding` residual surfaced only once this session's
+   two bigger bugs were fixed. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on each of the 4 cases
+   individually -- `max_attributes` likely probes the device's own
+   `maxVertexInputAttributes`/`maxVertexInputBindings` limits (a
+   different code path from ordinary decode), `unused_binding` likely
+   probes a binding declared but never referenced by any attribute.
+2. `L125(t)` (`bind_point.graphics_compute`'s "Invalid value found in
+   graphics buffer" bucket, 10 of 655 fails) remains completely
+   untouched -- not investigated at all this session or several before
+   it. Good next pick if `L127` stalls.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. The BC-format CTS coverage gap noted across multiple prior sessions
+   (`sampler.view_type.*.format.*bc*.address_modes.
+   *clamp_to_border*` matches 0 cases) still hasn't been investigated
+   -- worth a quick dedicated look next time nothing else is more
+   pressing.
+6. The `pipeline.monolithic.blend.*` full-family regression sweep
+   (flagged as a two-session-running timeout pattern previously) was
+   not attempted again this session -- still worth raising the
+   timeout or splitting into sub-family chunks whenever picked back
+   up.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+8. This session's own scratch CTS logs (`/tmp/ctsrun/l125s/*`) are
+   already cleaned up -- nothing to do here.
