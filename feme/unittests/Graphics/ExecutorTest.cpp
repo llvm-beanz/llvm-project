@@ -3261,6 +3261,71 @@ TEST(ExecutorTest, MinAndMaxBlendOpsIgnoreBothBlendFactorsEntirely) {
   }
 }
 
+// (Roadmap L125z) Reproduces the real, previously-failing
+// `pipeline.monolithic.blend.clamp.r8g8b8a8_unorm` CTS case's own shape
+// (`vktPipelineBlendTests.cpp`'s `ClampTest`): an out-of-`[0, 1]`-range
+// fragment color and blend constant, blended with `SrcColorFactor=
+// ConstantColor`/`DstColorFactor=Zero`/`Add` (and the alpha equivalent).
+// Per the Vulkan spec, a fixed-point attachment's source color and
+// blend-constant factor must each be clamped to `[0, 1]` (or `[-1, 1]`
+// for a signed-normalized format) *before* the blend equation runs, not
+// only once at the very end when the result is packed to bits: this
+// test's own R/G channels would compute `1.0`/`1.0` (255/255 once
+// packed) if the unclamped operands (`2.0`/`0.5*2.0=1.0`) are multiplied
+// first and only the final *product* is clamped, but the correct,
+// spec-mandated result -- clamping each operand first, then
+// multiplying -- is `0.5`/`0.5` (128/128 once packed). The B/A channels
+// don't distinguish the two orderings here (both land on `0` either
+// way, since one operand is already negative before any clamping), so
+// this test's R/G channels are what actually exercises the fix.
+TEST(ExecutorTest,
+    BlendClampsSourceColorAndConstantFactorBeforeEvaluatingTheEquation) {
+  Context Ctx;
+
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  Blend.SrcColorFactor = BlendFactor::ConstantColor;
+  Blend.DstColorFactor = BlendFactor::Zero;
+  Blend.ColorOp = BlendOp::Add;
+  Blend.SrcAlphaFactor = BlendFactor::ConstantAlpha;
+  Blend.DstAlphaFactor = BlendFactor::Zero;
+  Blend.AlphaOp = BlendOp::Add;
+  // Blend constants: (0.5, 2.0, -1.0, 1.0) -- G and B are out of [0, 1].
+  std::array<float, 4> BlendConstants{0.5f, 2.0f, -1.0f, 1.0f};
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Blend,
+      /*LogicOpEnable=*/false, LogicOp::Copy, BlendConstants);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Src (a full-viewport quad's color): (2.0, 0.5, 1.0, -1.0) -- R and A
+  // are out of [0, 1]. Dst is irrelevant (DstColorFactor/DstAlphaFactor
+  // are both Zero); the attachment starts zero-initialized.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 2.0f, 0.5f, 1.0f, -1.0f,
+      3.0f,  -1.0f, 0.0f, 2.0f, 0.5f, 1.0f, -1.0f,
+      -1.0f, 3.0f,  0.0f, 2.0f, 0.5f, 1.0f, -1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Clamp both operands to [0, 1] (R8G8B8A8_UNORM) before multiplying:
+  //   ClampedSrc = (1.0, 0.5, 1.0, 0.0)
+  //   ClampedConstant = (0.5, 1.0, 0.0, 1.0)
+  // Result[C] = ClampedSrc[C] * ClampedConstant[C] (DstFactor=Zero):
+  //   R: 1.0*0.5 = 0.5 -> round(0.5*255) = 128
+  //   G: 0.5*1.0 = 0.5 -> round(0.5*255) = 128
+  //   B: 1.0*0.0 = 0.0 -> 0
+  //   A: 0.0*1.0 = 0.0 -> 0
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 128, 1) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 128, 1) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 2], 0) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 3], 0) << "texel " << I;
+  }
+}
+
 // (Roadmap H103) Chains `MatchesHandComputedBlendEquationForConstantColor
 // Factors`'s own Add-op draw and `...ForMinAndReverseSubtract`'s own
 // Min-op draw back to back over the *same* attachment -- reusing both
