@@ -55,27 +55,23 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-## Suggested next steps
+## Next steps (ranked)
 
-1. **(~2 min)** No scratch files left behind this session -- all
-   cleaned up as part of this same commit's work (repro `.mlir`/`.ll`
-   files, CTS sweep logs already deleted since their results are fully
-   captured in `VulkanCTSReport.md`).
-2. **The L124 series is fully closed.** Two candidates for what's
-   next, by priority:
-   - **L125** (P2, higher priority): triage `pipeline.monolithic.*`
-     (465,554 cases, never sampled at all this milestone series --
-     large, needs its own first bucketing pass before any concrete
-     repro can be picked, mirroring how L106/L123 approached
-     `subgroups.*`/`compute.*`).
-   - **L126** (P3, quick win): finish (or formally re-scope)
-     `subgroups.ballot_broadcast.*`'s own sweep, abandoned mid-run in
-     a prior session -- likely under an hour to close out, probably
-     folds into L106's existing "no real bugs in `subgroups.*`"
-     conclusion but not yet confirmed for this specific subfamily.
-   Given L125's size, a future session might want to knock out L126
-   first (quick, bounded) before committing to L125's larger triage
-   effort.
-3. `ninja check-feme` and the CTS build directories are both
-   incremental from here -- reuse them, no reconfigure needed.
-
+1. **(~2 min)** Nothing to clean up -- this session's own `/tmp/ctsrun/
+   l125_*`/`l126_ballot_broadcast.*` scratch files are already deleted;
+   only prior sessions' own leftover `l124*` files remain there,
+   untouched (not this session's to clean).
+2. Pick up **L125(b)** next: widen L125(a)'s fix one shape at a time
+   (`Plain1D` is probably the smallest first step -- `Array1D`/
+   `Array2D`/`Plain3D`/`Cube`/`CubeArray` after). Each shape is its own
+   small commit, mirroring how the float-sampling path was widened
+   shape-by-shape historically (L52a, L61c, L65, L66a, L67a).
+3. Alternatively, **L125(d)** is a good quick, sharply-scoped pick if
+   L125(b)'s multi-shape runtime-helper work looks too big for the
+   time available -- start with `--deqp-log-decompiled-spirv=enable`
+   on one `sampler.border_swizzle.*` repro from the `Ref:`/`Color:`
+   mismatch bucket.
+4. **L126(a)** needs real debugging tooling (gdb/perf), not just CTS
+   triage -- pick this up only when there's time for that kind of dig.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
