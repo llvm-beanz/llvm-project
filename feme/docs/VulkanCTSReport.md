@@ -5518,3 +5518,70 @@ to root-cause properly.
 No code change for L126 this session -- purely an investigation, captured
 in `Roadmap.md` for the next session to pick up. See `agent_thoughts.md`
 for the full narrative and next steps.
+
+## L125(b): widen integer-sampled implicit-LOD fix to `Plain1D`
+
+This session resumed **L125(b)**, widening L125(a)'s `Plain2D`
+integer-channel implicit-LOD-sampling fix one shape at a time. Picked up
+`Plain1D` first (the smallest/simplest remaining shape), per the prior
+session's own scoping.
+
+Added `ImageCallKind::Sample1DI32` (`feme.cpu.image.sample.1d.v4i32`),
+mirroring `Sample2DI32`'s operand shape but narrowed to a bare scalar
+`U`/`Offset` the same way `Sample1D` narrows `Sample2D`'s own 2-component
+coordinate/offset. Wired through `getImageCallName`/
+`getOrInsertImageCall`/`createSample1DI32`/`matchImageCall`'s `AllKinds`
+table and per-kind switch (`ImageCalls.h`/`.cpp`), a new
+`femeCpuImageSample1DV4I32` runtime implementation (`FeMeRuntimeCPU.c`,
+reusing the pre-existing `femeRTFetchTexel1DI32` texel-fetch helper — no
+new low-level fetch code needed), and `SPIRVResourceLowering.cpp`'s
+`hasOnlySupportedImageUses`/`lowerImageAccesses` to accept and lower a
+`Plain1D` integer-channel sample the same way `Plain2D`'s was widened by
+L125(a).
+
+Also fixed a stale doc comment on `ImageCallKind::Sample2DI32` itself
+(`ImageCalls.h`), left over from before L125(a)'s own fix: it still
+claimed this call kind was "scoped, for now, to an explicit-LOD sample
+only" with a nonexistent `UseExplicitLod` parameter, both no longer true
+since L125(a) widened acceptance to implicit-LOD sampling too.
+
+### Unit tests
+
+Converted the previous `LeavesA1DIntegerSampledImageHandleUsedForSample
+Alone` rejection test into a pair of "lowers" tests for `Plain1D`
+(`LowersImplicitLodIntegerSampledImage1DToImageSampleV4I32`/
+`LowersIntegerSampledImage1DToImageSampleV4I32`, mirroring L125(a)'s own
+`Plain2D` test pair), added a new `LeavesAnArray1DIntegerSampledImage
+HandleUsedForSampleAlone` rejection test to keep the next remaining shape
+(`Array1D`) covered as still correctly out of scope, and added a
+`matchImageCall` unit test (`MatchesSample1DI32Call`) for the new call
+kind.
+
+### Results
+
+- `ninja FeMeTransformsCPUTests`: all 526 tests pass (+3 net vs. before
+  this session: 2 new "lowers" tests + 1 new `matchImageCall` test, minus
+  the 1 converted rejection test, plus the still-present
+  `LeavesAnArray1DIntegerSampledImageHandleUsedForSampleAlone` replacement
+  for it).
+- `ninja check-feme`: **3,223/3,226 Passed, 3 Unsupported, 0 Failed** (0
+  regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` before running any CTS cases.
+- Direct re-verification: `dEQP-VK.pipeline.monolithic.image.suballocation.
+  sampling_type.combined.view_type.1d.format.r8_sint.*` — **0 Fail / 36
+  Pass** (16 `NotSupported`, an unrelated
+  `shaderSampledImageArrayDynamicIndexing` feature gate, not this fix's
+  concern).
+
+This session's fix is an internal correctness fix (widening an existing,
+narrowly-scoped resource-lowering acceptance check to one more image
+shape), not new Vulkan feature/extension surface, so
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
+this session.
+
+`Array1D`/`Array2D`/`Plain3D`/`Cube`/`CubeArray` remain unaddressed --
+`Roadmap.md`'s L125(b) row is updated to reflect `Plain1D` done and the
+remaining five shapes still to go, one small commit per shape following
+this same session's own pattern. See `agent_thoughts.md` for the full
+narrative and next steps.
