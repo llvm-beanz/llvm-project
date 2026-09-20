@@ -57,21 +57,25 @@ Can you continue the work on feme? The last agent's suggested next steps are:
 
 ## Suggested next steps
 
-1. **(~5 min)** Clean up this session's scratch files: `/tmp/l124c_*.mlir`
-   (superseded by the committed lit test) and `/tmp/l124c_undef.qpa`,
-   `/tmp/ctsrun/l124c_compute_sweep.qpa`/`.stdout` -- none referenced
-   by anything committed.
-2. **The entire L124 series is now closed** except **L124(v)**
-   (the 2 `zero_initialize_workgroup_memory` fails,
-   `composites.2`/`types.bool`) -- not yet root-caused at all. Start
-   with `--deqp-log-decompiled-spirv=enable` on both cases to see
-   their exact `Workgroup`-storage global's type shape (likely `i1`/
-   `struct`-typed, since matrix/vector/plain-integer shapes already
-   pass per this milestone's own opening fix).
-3. Beyond L124(v), the next unstarted milestone is **L125**: triage
-   `pipeline.monolithic.*` (465,554 cases, never sampled) -- large,
-   needs its own first bucketing pass before any concrete repro can be
-   picked, mirroring how L106/L123 approached `subgroups.*`/
-   `compute.*`.
-4. `ninja check-feme` and the CTS build directories are both
+1. **(~2 min)** No scratch files left behind this session -- all
+   cleaned up as part of this same commit's work (repro `.mlir`/`.ll`
+   files, CTS sweep logs already deleted since their results are fully
+   captured in `VulkanCTSReport.md`).
+2. **The L124 series is fully closed.** Two candidates for what's
+   next, by priority:
+   - **L125** (P2, higher priority): triage `pipeline.monolithic.*`
+     (465,554 cases, never sampled at all this milestone series --
+     large, needs its own first bucketing pass before any concrete
+     repro can be picked, mirroring how L106/L123 approached
+     `subgroups.*`/`compute.*`).
+   - **L126** (P3, quick win): finish (or formally re-scope)
+     `subgroups.ballot_broadcast.*`'s own sweep, abandoned mid-run in
+     a prior session -- likely under an hour to close out, probably
+     folds into L106's existing "no real bugs in `subgroups.*`"
+     conclusion but not yet confirmed for this specific subfamily.
+   Given L125's size, a future session might want to knock out L126
+   first (quick, bounded) before committing to L125's larger triage
+   effort.
+3. `ninja check-feme` and the CTS build directories are both
    incremental from here -- reuse them, no reconfigure needed.
+
