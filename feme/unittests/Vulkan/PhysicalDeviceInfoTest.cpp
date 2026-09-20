@@ -245,6 +245,12 @@ TEST(PhysicalDeviceInfo,
   // `dEQP-VK.clipping.user_defined.*` cases now passing).
   EXPECT_EQ(Info.Features.shaderClipDistance, VK_TRUE);
   EXPECT_EQ(Info.Features.shaderCullDistance, VK_TRUE);
+  // (Roadmap L125(g)) `ImageGatherPattern`'s own MLIR-to-LLVM lowering
+  // already forwards `OpImageGather`'s `Component` operand as a fully
+  // generic runtime value, and `femeCpuImageGather2DV4F32`/
+  // `Array2DV4F32`/`CubeV4F32` already handle any of the four channels
+  // unconditionally -- see PhysicalDeviceInfo.cpp's own comment.
+  EXPECT_EQ(Info.Features.shaderImageGatherExtended, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -280,6 +286,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.shaderResourceMinLod = VK_FALSE;
   Cleared.shaderClipDistance = VK_FALSE;
   Cleared.shaderCullDistance = VK_FALSE;
+  Cleared.shaderImageGatherExtended = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

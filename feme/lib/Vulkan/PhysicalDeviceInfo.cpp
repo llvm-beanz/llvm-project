@@ -964,6 +964,24 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // measured per-case breakdown and Roadmap.md's L66 row for the
   // conclusion that closes out this entire flip/measure/revert chain.
   Info.Features.shaderResourceMinLod = VK_TRUE;
+  // `shaderImageGatherExtended` (roadmap L125(g)): gates SPIR-V's
+  // `OpImage{,Sparse}Gather`'s `Component` image operand (any of R/G/B/A,
+  // not just the implicit 0/R) and the `Offset`/`ConstOffsets` image
+  // operands on a gather. `ImageGatherPattern`'s own MLIR-to-LLVM lowering
+  // (`SPIRVToLLVMPatterns.cpp`) already forwards `Component` as a fully
+  // generic runtime value with no restriction to 0, and
+  // `femeCpuImageGather2DV4F32`/`Array2DV4F32`/`CubeV4F32` (`FeMeRuntimeCPU.
+  // c`) already clamp and index by any of the four channels unconditionally
+  // -- there is no capability gap to close in the runtime, only the
+  // advertised feature bit, which was previously left at its default-zero
+  // `VK_FALSE` and caused every `dEQP-VK.glsl.texture_gather.*` CTS case
+  // (even ones using only the implicit `Component=0`, since dEQP-VK's own
+  // `TextureGatherInstance::init` always declares the SPIR-V `Component`
+  // operand explicitly) to report `NotSupported` rather than exercising the
+  // gather path at all. Flipping this to `VK_TRUE` is what makes the L125(g)
+  // gather-swizzle fix below (`femeCpuImageGather2DV4F32` et al.'s own
+  // `ApplySwizzle=1` change) newly CTS-verifiable.
+  Info.Features.shaderImageGatherExtended = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

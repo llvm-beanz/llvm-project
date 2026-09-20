@@ -64,7 +64,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderTessellationAndGeometryPointSize` | no |  |
-| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | no |  |
+| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | Roadmap L125(g): `OpImageGather`'s `Component` operand was already forwarded generically by `ImageGatherPattern`/handled by every `femeCpuImageGather*V4F32` runtime entry point; only the advertisement was missing, which had silently gated the entire `dEQP-VK.glsl.texture_gather.*` CTS group as `NotSupported`. |
 | feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageMultisample` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageReadWithoutFormat` | yes |  |
