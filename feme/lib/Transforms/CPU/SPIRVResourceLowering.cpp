@@ -1912,29 +1912,35 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L7g/H124q/H124r: `spirv.ImageGather` (HLSL's
+    // Roadmap L7g/H124q/H124r/L125(k): `spirv.ImageGather` (HLSL's
     // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`/`Texture2DArray::
     // Gather{,Red,Green,Blue,Alpha}()`/`TextureCube::Gather{,Red,Green,
-    // Blue,Alpha}()`), scoped to `Plain2D`/`Array2D`/`Cube`, non-integer
-    // only for now -- identical scope to `isGatherCmpIntrinsic`'s own
-    // just above (`CubeArray` and an integer-format image, both legal
-    // per the op's own SPIR-V type constraints, remain unstarted
-    // follow-on work, no real repro having reached either yet). Its own
-    // fixed `(image, sampler, coord, component, offset)` operand shape
-    // is identical to `isGatherCmpIntrinsic`'s own, except the
-    // `DrefSampleDrefIdx` position holds an integer component selector
-    // rather than a float `Dref`, so it needs its own
+    // Blue,Alpha}()`), scoped to `Plain2D`/`Array2D`/`Cube` -- identical
+    // scope to `isGatherCmpIntrinsic`'s own just above (`CubeArray`
+    // remains unstarted follow-on work, no real repro having reached it
+    // yet). Its own fixed `(image, sampler, coord, component, offset)`
+    // operand shape is identical to `isGatherCmpIntrinsic`'s own, except
+    // the `DrefSampleDrefIdx` position holds an integer component
+    // selector rather than a float `Dref`, so it needs its own
     // `isCoordN(..., /*Float=*/false)`-style integer check there
     // instead. `AllowArray2D` is `true` here too, mirroring
     // `isGatherCmpIntrinsic`'s own identical widening just above, for
     // consistency even though no real `Array.Gather.test` overload
-    // currently exercises a nonzero offset.
+    // currently exercises a nonzero offset. Roadmap L125(k) lifted the
+    // prior `IsInteger` rejection: unlike `isGatherCmpIntrinsic` (whose
+    // `Dref` is always a float depth-compare value, so an integer-
+    // sampled image never legitimately reaches it), a plain gather
+    // against an integer-channel (`usampler*`/`isampler*`) image is a
+    // real, legal SPIR-V/HLSL shape (`TextureCube<uint4>::Gather()` et
+    // al.) that returns `<4 x i32>` instead of `<4 x float>` -- so the
+    // result-type check now accepts either width, keyed off `IsInteger`
+    // itself (SPIR-V's own sampled-type already determines which of the
+    // two the op produces, so there is no ambiguity to resolve).
     if (isGatherIntrinsic(*CI)) {
-      if (IsInteger ||
-          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
-           Shape != ImageShape::Cube))
-        return false; // No gather over an integer format; CubeArray
-                      // remains unstarted follow-on work (roadmap L7g).
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
+          Shape != ImageShape::Cube)
+        return false; // CubeArray remains unstarted follow-on work
+                      // (roadmap L7g).
       if (CI->getArgOperand(0) != &Handle)
         return false;
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
@@ -1942,7 +1948,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
                              Shape, /*AllowArray2D=*/true,
                              /*AllowPlain1DArray1D=*/false) ||
-          !isV4F32(CI->getType()))
+          (IsInteger ? !isV4I32(CI->getType()) : !isV4F32(CI->getType())))
         return false;
       continue;
     }
@@ -4402,19 +4408,24 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L7g/H124q/H124r: `spirv.ImageGather` (HLSL's
+      // Roadmap L7g/H124q/H124r/L125(k): `spirv.ImageGather` (HLSL's
       // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`/`Texture2DArray::
       // Gather{,Red,Green,Blue,Alpha}()`/`TextureCube::Gather{,Red,Green,
       // Blue,Alpha}()`), `hasOnlySupportedImageUses` already restricting
-      // this to `Plain2D`/`Array2D`/`Cube`, non-integer. Structurally
-      // identical to the `isGatherCmpIntrinsic` case just above (same
-      // bilinear-footprint reuse, same lack of a `Lod`/`Bias`/`Grad`/
-      // `MinLod` operand, same `Array2D`/`Cube` 3-wide-coordinate
-      // handling, same `Cube`-has-no-offset handling), but threads the
-      // integer component selector through to `createGather2D`/
-      // `createGatherArray2D`/`createGatherCube`/
-      // `femeCpuImageGather2DV4F32`/`femeCpuImageGatherArray2DV4F32`/
-      // `femeCpuImageGatherCubeV4F32` in place of a float `Dref`.
+      // this to `Plain2D`/`Array2D`/`Cube`. Structurally identical to the
+      // `isGatherCmpIntrinsic` case just above (same bilinear-footprint
+      // reuse, same lack of a `Lod`/`Bias`/`Grad`/`MinLod` operand, same
+      // `Array2D`/`Cube` 3-wide-coordinate handling, same `Cube`-has-no-
+      // offset handling), but threads the integer component selector
+      // through to `createGather2D`/`createGatherArray2D`/
+      // `createGatherCube`/`femeCpuImageGather2DV4F32`/
+      // `femeCpuImageGatherArray2DV4F32`/`femeCpuImageGatherCubeV4F32` in
+      // place of a float `Dref` -- or, roadmap L125(k), to their `*I32`
+      // counterparts when `CI`'s own result type is `<4 x i32>`
+      // (`hasOnlySupportedImageUses` already ties that result width to
+      // the image's own integer-sampled-type-ness, so `isV4I32` is a
+      // reliable, self-contained test here without needing `IsInteger`
+      // itself threaded down into this loop).
       if (isGatherIntrinsic(*CI)) {
         if (CI->getArgOperand(0) != Handle)
           continue;
@@ -4425,11 +4436,17 @@ void lowerImageAccesses(
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
         Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        bool ResultIsInteger = isV4I32(CI->getType());
         CallInst *NewCall;
         if (Shape == ImageShape::Cube) {
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
-          NewCall = createGatherCube(Builder, Env, ImageIndex, SamplerIndex, C0,
-                                     C1, C2, Component, Mask, CI->getName());
+          NewCall = ResultIsInteger
+                        ? createGatherCubeI32(Builder, Env, ImageIndex,
+                                             SamplerIndex, C0, C1, C2,
+                                             Component, Mask, CI->getName())
+                        : createGatherCube(Builder, Env, ImageIndex,
+                                           SamplerIndex, C0, C1, C2, Component,
+                                           Mask, CI->getName());
         } else {
           Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
           Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
@@ -4437,13 +4454,26 @@ void lowerImageAccesses(
           if (Shape == ImageShape::Array2D) {
             Value *ArrayLayer =
                 Builder.CreateExtractElement(Coord, uint64_t{2});
-            NewCall = createGatherArray2D(
-                Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
-                Component, OffsetX, OffsetY, Mask, CI->getName());
+            NewCall =
+                ResultIsInteger
+                    ? createGatherArray2DI32(Builder, Env, ImageIndex,
+                                            SamplerIndex, C0, C1, ArrayLayer,
+                                            Component, OffsetX, OffsetY, Mask,
+                                            CI->getName())
+                    : createGatherArray2D(Builder, Env, ImageIndex,
+                                         SamplerIndex, C0, C1, ArrayLayer,
+                                         Component, OffsetX, OffsetY, Mask,
+                                         CI->getName());
           } else {
-            NewCall = createGather2D(Builder, Env, ImageIndex, SamplerIndex, C0,
-                                     C1, Component, OffsetX, OffsetY, Mask,
-                                     CI->getName());
+            NewCall = ResultIsInteger
+                          ? createGather2DI32(Builder, Env, ImageIndex,
+                                             SamplerIndex, C0, C1, Component,
+                                             OffsetX, OffsetY, Mask,
+                                             CI->getName())
+                          : createGather2D(Builder, Env, ImageIndex,
+                                          SamplerIndex, C0, C1, Component,
+                                          OffsetX, OffsetY, Mask,
+                                          CI->getName());
           }
         }
         CI->replaceAllUsesWith(NewCall);
