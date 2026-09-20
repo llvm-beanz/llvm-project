@@ -6650,3 +6650,87 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   (1) struck through and marked fixed; sub-bucket (2) left open with the
   corrected, larger scope noted. See `agent_thoughts.md` for the full
   narrative and next steps.
+
+## Roadmap L125(q) sub-bucket (2): integer `CLAMP_TO_BORDER` swizzle order (partial fix; residual re-scoped as L125(v))
+
+### Repro
+
+`dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16_sint.barg.
+transparent_black.gather_3.no_swizzle_hint` (and its `no_gather`
+counterpart), isolated standalone: `Fail (Ref:(0, 0, 0, 0)
+Threshold:(0, 0, 0, 0) Color:(1, 1, 1, 1))`.
+
+### Root cause
+
+`FeMeRuntimeCPU.c`'s integer-sampled (`v4i32`) `CLAMP_TO_BORDER` fallback
+(a fixed `{0, 0, 0, 1}` default, used because `FemeRTSamplerDescriptor`
+has no integer border-color storage at all -- roadmap H109) was used
+**directly, unswizzled**, at all 7 call sites:
+`femeCpuImageSample{1D,2D,3D,Array1D,Array2D}V4I32`'s own border branch,
+and `femeCpuImageGather{2D,Array2D}V4I32`'s own per-tap border fallback.
+This bypassed the image view's own `VkComponentMapping` entirely for any
+border-fallback texel, unlike every in-bounds-texel code path (already
+routed through `femeRTApplyImageSwizzleI32`) and unlike the float path's
+own border branch (`femeRTFetchTexel2D`, which already applies
+`femeRTApplyImageSwizzle` to its border default).
+
+Manually traced the CTS's own `getExpectedColor` order
+(`vktPipelineSamplerBorderSwizzleTests.cpp`): swizzle is always applied to
+the (format-defaulted) border/texel value **before** `Gather*`'s
+`Component` operand selects one channel -- the same "post-swizzle
+Component selection" convention already established by L125(g)/L125(h).
+For `r16_sint` (1 stored channel) + `transparent_black` + `barg` swizzle +
+`gather_3`: pre-swizzle border defaults to `(0, 0, 0, 1)` (alpha forced to
+1 for any format storing fewer than 4 real channels, matching Vulkan's own
+"conversion to RGBA" rule); post-`barg`-swizzle this becomes `(0, 1, 0,
+0)`; `gather_3` (alpha) selects index 3 from the swizzled result for all
+4 output slots = `(0, 0, 0, 0)`, matching the CTS's own `Ref`. The
+production code instead selected index 3 from the **unswizzled**
+`(0, 0, 0, 1)` = `1` for all 4 slots, matching the observed
+`Color:(1, 1, 1, 1)`.
+
+### Fix
+
+Route all 7 sites through the existing `femeRTApplyImageSwizzleI32`
+helper before returning/using the fixed default (the two `Gather*` sites
+apply it once and reuse the swizzled result across all 4 border-fallback
+taps). Corrected 5 stale "no real CTS case is known to exercise
+`CLAMP_TO_BORDER` against an integer-sampled image yet" doc comments on
+the `Sample*I32` sites, since the `no_gather` repro above disproves that
+claim.
+
+### Unit tests
+
+`ImageSamplingTest.SampleI32AppliesImageViewSwizzleToBorderColorFallback`
+and `.Gather2DI32AppliesImageViewSwizzleToBorderColorFallback`: force
+`ClampToBorder` on both axes (`U=V=5.0`, out of `[0, 1)`), configure a
+`BARG` view swizzle, and confirm the returned/gathered value is the
+swizzled border default, not the raw one.
+
+`ninja check-feme`: 3,261/3,264 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions vs. the prior session's 3,259/3,262).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- The isolated repro pair (`gather_3` and `no_gather` variants of
+  `r16_sint.barg.transparent_black`) both now **Pass** (previously both
+  Fail).
+- A full `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r16*`
+  re-sweep (25,600 cases): **4,918 Pass / 632 Fail / 20,050 NotSupported**
+  (up from the pre-fix 4,686 Pass / 864 Fail) -- **232 fails fixed**, 0
+  regressions on previously-passing cases.
+- The remaining 632 fails are a **second, distinct root cause** under the
+  same H109 umbrella: an isolated repro on a non-`transparent_black`
+  border color (`r16_sint.argb.opaque_white.no_gather.no_swizzle_hint`:
+  `Ref:(1, 1, 0, 0)` vs `Color:(1, 0, 0, 0)`) shows the fixed `{0, 0, 0,
+  1}` default is not just a swizzle-order bug but **factually wrong** for
+  any border color whose per-format-masked value doesn't coincide with
+  `{0, 0, 0, 1}` -- the integer path never reads the sampler's actual
+  `borderColor` enum at all. This is a materially larger, ABI-touching
+  fix (new integer border-color storage on `FemeSamplerDescriptor`, a
+  resolver in `Image.cpp`, and a `femeRTExpandBorderColorForFormatI32`
+  counterpart), so it is re-scoped as its own roadmap row, `L125(v)`,
+  rather than folded into this fix. `Roadmap.md`'s `L125(q)` row updated
+  accordingly; see `agent_thoughts.md` for the full narrative and next
+  steps.
