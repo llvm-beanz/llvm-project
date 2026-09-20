@@ -55,22 +55,27 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~20-30 min)** Pick up `L125(w)`: the new 21-fail
-   `sampler.view_type.2d_unnormalized` + border-color/mag-filter/
-   compressed-format residual found while verifying this fix. Not yet
-   triaged past the raw fail list -- start with
-   `--deqp-log-decompiled-spirv=enable` on 2-3 individual cases to see
-   if it's one bug or several.
-2. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, bind-point
+1. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, bind-point
    bucket, exact_sampling bucket) remain untouched from several
-   sessions back -- good alternative picks if `L125(w)` stalls.
-3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   sessions back -- good next picks, still not started.
+2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the other large, not-yet-started cross-repo item -- not a
-   quick pick, needs its own dedicated session.
-4. `L115(b)` (pull-model interpolation) remains flagged from several
-   sessions ago as a larger, not-yet-started item needing a new
-   runtime-callback ABI surface -- also not a quick pick.
+   quick pick, needs its own dedicated session with the upstream
+   repo(s) properly budgeted.
+3. `L115(b)` (pull-model interpolation, `InterpolateAtCentroid`/
+   `InterpolateAtSample`) remains flagged from several sessions ago as
+   a larger, not-yet-started item needing a new runtime-callback ABI
+   surface (barycentric/interpolant-plane data doesn't exist in
+   `FemeFragmentInvocation` today) -- also not a quick pick.
+4. The BC-format CTS coverage gap noted again this session
+   (`sampler.view_type.*.format.*bc*.address_modes.*clamp_to_border*`
+   matches 0 cases in this CTS tree) has now been seen at least twice
+   across sessions without investigation -- worth a quick dedicated
+   look next time nothing else is more pressing, just to confirm
+   whether it's a real gap in this CTS build or expected/gated
+   behavior.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-6. This session's own scratch CTS logs (`/tmp/ctsrun/l125p/*`) are
-   already cleaned up -- nothing to do here.
+6. This session's own scratch CTS logs (`/tmp/ctsrun/l125w/*`) and
+   temporary probe files (`/tmp/print_enum*.cpp`, `/tmp/print_astc*`)
+   are already cleaned up -- nothing to do here.
