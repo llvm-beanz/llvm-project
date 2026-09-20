@@ -1084,6 +1084,41 @@ TEST_F(ImageSamplingTest, ClampToBorderAppliesImageViewSwizzle) {
   EXPECT_FLOAT_EQ(Out[3], 0.0f); // A <- Zero
 }
 
+// (Roadmap L125(e)) A synthesized border color's components missing from
+// the *sampled image's own* format must be re-defaulted the same way an
+// in-bounds texel of that format would be, before any swizzle applies --
+// core Vulkan's "conversion to RGBA" rule. `R32G32B32_FLOAT` has no alpha
+// channel, so `VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK`'s nominal all-zero
+// border must sample with alpha forced to `1.0`, exactly like a real
+// in-bounds `R32G32B32_FLOAT` texel would (see `femeRTUnpackImageTexel`'s
+// own `R32G32B32_FLOAT` case) -- even though the `FemeSamplerDescriptor`
+// itself still bakes a literal `0.4` in `BorderColor[3]` below, since a
+// real `VkSampler` has no format to consult at creation time.
+TEST_F(ImageSamplingTest, ClampToBorderExpandsMissingComponentsForFormat) {
+  float Storage[1][1][3] = {{{1, 1, 1}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToBorder);
+  Samp.BorderColor[0] = 0.1f;
+  Samp.BorderColor[1] = 0.2f;
+  Samp.BorderColor[2] = 0.3f;
+  Samp.BorderColor[3] = 0.4f; // Baked, format-independent -- must be
+                              // overridden to 1.0 at fetch time.
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.1f);
+  EXPECT_FLOAT_EQ(Out[1], 0.2f);
+  EXPECT_FLOAT_EQ(Out[2], 0.3f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f); // Defaulted, not the sampler's baked 0.4.
+}
+
 TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
   // A single R8G8B8A8_UNORM_SRGB texel with R=G=B=188/255 (~0.7372549), the
   // sRGB encoding of linear 0.5 (matching sRGB's well-known midpoint
