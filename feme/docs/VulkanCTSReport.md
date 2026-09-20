@@ -6506,3 +6506,57 @@ own remaining buckets (ASTC/EAC/ETC2 image mismatches, the
 `createComputePipelines`-site `VK_ERROR_INITIALIZATION_FAILED`,
 `vktPipelineBindPointTests.cpp`) are unaffected by this fix and remain
 untriaged. See `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L125(c) re-triage (post-L125(o)): decomposed into L125(p)-(u)
+
+Re-ran the same `--deqp-fraction=0,50` sample of `dEQP-VK.pipeline.monolithic.*`
+(8,007 cases) used for L125(c)'s original triage, now that L125(o)'s
+pipeline-cache-key fix has landed: **655 Fail / 2,125 Pass / 5,227
+NotSupported** (was 1,165 Fail pre-`L125(a)`/`(b)`; ~650 expected residual
+after those two integer-sampling fixes landed, confirming L125(o)'s own
+fix did not measurably move this particular fractional sample -- its
+repro needed a specific adjacent test ordering a random 1/50 fraction
+rarely reproduces).
+
+Grouped all 655 fails by test area and failure-message signature (each
+of the 9 resulting buckets below cross-checked against a standalone,
+single-case isolation re-run to confirm it fails identically alone, not
+only after a preceding test -- ruling out any remaining cache-style
+artifact):
+
+- **440 fails, "Image mismatch"** (244 `image.suballocation`, 134
+  `image_view.view_type`, 62 `sampler.view_type`) -- filed as **L125(p)**,
+  not yet root-caused past prior sessions' suspicion of ASTC/EAC/ETC2
+  compressed-format decoding.
+- **144 fails, `sampler.border_swizzle.*`** -- filed as **L125(q)**, two
+  distinct sub-causes: (1) 80 `vk.queueSubmit`/`VK_ERROR_INITIALIZATION_
+  FAILED` fails, root-caused via `FEME_VULKAN_LOG_CREATION_ERRORS=1` to
+  "image fixture format is not yet supported" for single/dual-channel
+  non-8-bit formats (`r16_snorm`, `r16_sint`, etc.) combined with a
+  `gather_N` sub-case; (2) 64 `Ref`-vs-`Color` value-mismatch fails
+  (e.g. `r16_sint.barg.transparent_black.gather_3.no_swizzle_hint`,
+  confirmed to fail identically standalone) combining a single/dual-
+  channel format, a custom swizzle, a non-default border color, and
+  `gather_N` -- likely a border-color-defaulting-through-swizzle gap
+  specific to `Gather*`.
+- **27 fails, `multisample_interpolation.*`** -- filed as **L125(r)**, a
+  newly-identified bucket (not present in L125(c)'s original
+  description): an `error: failed to legalize operation
+  'spirv.GL.InterpolateAtCentroid'`/`'spirv.GL.InterpolateAtSample'` MLIR
+  diagnostic immediately precedes each `VK_ERROR_INITIALIZATION_FAILED`
+  -- a missing SPIR-V-to-LLVM conversion pattern for these two GLSL
+  extended instructions.
+- **28 fails, `vertex_input.*`** (16 `multiple_attributes`, 12
+  `single_attribute`) -- filed as **L125(s)**, matching L125(c)'s own
+  original description; still present, unaffected by any fix since.
+- **10 fails, `bind_point.graphics_compute`**, "Invalid value found in
+  graphics buffer" -- filed as **L125(t)**, matching L125(c)'s own
+  `vktPipelineBindPointTests.cpp` bucket exactly; still present.
+- **6 fails, `sampler.exact_sampling`**, "Pixel mismatch" -- filed as
+  **L125(u)**, a newly-identified small bucket.
+
+None of these 9 buckets were affected by L125(o)'s cache-key fix. No code
+changes made this session; `Roadmap.md`'s L125(c) row is struck through
+(re-triaged and decomposed) and 6 new rows (L125(p) through L125(u)) file
+the residual work with per-bucket root-cause notes and fail counts, ready
+to be picked up individually in a future session.
