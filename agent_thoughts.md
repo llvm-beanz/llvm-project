@@ -95680,3 +95680,106 @@ deviceName` first, per standing instruction.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 5. This session's own scratch CTS logs (`/tmp/ctsrun/l125v/*`) are
    already cleaned up -- nothing to do here.
+
+# Session: L125(p) fix -- ASTC/BC/ETC2 array-layer and 3D-slice decode gap
+
+**Start here next time:** pick up `L125(w)` (21-fail `sampler.view_type.2d_unnormalized` residual) -- see step 1 below.
+
+## What happened, in order
+
+1. Inherited a narrow "4 specific formats" theory from the prior
+   session's triaging of `L125(p)` (`eac_r11g11_snorm_block`,
+   `astc_8x8_srgb_block`, `astc_10x8_srgb_block`,
+   `astc_12x10_srgb_block`).
+2. Disproved it fast (~10 min): an isolated `eac_r11g11_unorm_block`
+   case -- not one of the 4 -- passed as `2d` but failed as `2d_array`.
+   The real axis was **view type**, not format.
+3. Confirmed the real scope with a full sweep:
+   `view_type.2d_array.format.astc*` (2,464 cases) came back **2,016
+   Fail / 0 Pass**. Nearly every ASTC format failed under array views.
+4. Root-caused by reading `CommandBuffer.cpp`: all three compressed
+   -format decoders (`decodeASTCImageForSampling`,
+   `decodeBCImageForSampling`, `decodeETC2ImageForSampling`) were
+   hardcoded to array-layer-0/depth-slice-0 only, with
+   `materializeImageDescriptor` early-returning an all-zero descriptor
+   for anything wider. A real, intentional-at-the-time scope limit
+   (roadmap E23/H8j/H8n) that had never been revisited.
+5. Fixed it: widened all three decoders to `(BaseSlice, SliceCount,
+   Is3D)`, looping over every requested layer/slice into
+   `SlicePitch`-sized chunks per mip level. Key discovery that made
+   this a host-only fix: `Image::blockPointer` already treats
+   `ArrayLayer + Z` as one unified slice index, and the CPU runtime's
+   `femeRTFetchTexel2D`/`femeRTFetchTexel3D` already generically index
+   via `Layer * SlicePitch` / `Z * SlicePitch` -- so laying out
+   consecutive slices correctly in the decode buffer was enough. Zero
+   runtime-side changes needed.
+6. Hit a crash on the first attempt: segfault in `decodeASTCBlock` on a
+   multi-mip 3D case. Cause: a `Texture3D`'s depth halves per mip level
+   (unlike array-layer count, which stays constant), and the initial
+   patch reused one fixed base-level slice count across every mip,
+   overrunning `Z` at deeper levels. `gdb` couldn't break by function
+   name (stripped shared lib), so used a temporary `fprintf` trace to
+   confirm the hypothesis, then fixed it properly by computing the
+   slice count **per level, inside** each decode function (matching
+   `computeSubresourceLayouts`'s own formula).
+7. Verified: `ninja check-feme` clean (3,262/3,265, 0 regressions)
+   before adding a unit test; **0 Fail** across
+   `view_type.2d_array.format.astc*` (2,464 cases, was 2,016 Fail),
+   `view_type.3d.format.astc*` (4,176 cases), `view_type.2d_array.
+   format.eac*` (352 cases), and the entire `view_type.cube_array.*`
+   bucket (5,024 cases, all formats). The original 1/50-fraction triage
+   sample (2,340 cases, was 232 Fail) also came back **0 Fail**.
+8. Added a regression unit test
+   (`ASTCSecondArrayLayerSampledImageDispatchTest`) mirroring the
+   existing `SecondArrayLayerSampledImageDispatchTest` pattern, using a
+   2-layer ASTC void-extent image with two distinct solid colors per
+   layer. Built and ran it standalone (passes), then reran full
+   `check-feme`: **3,263/3,266 Passed, 3 Unsupported, 0 Failed** (+1
+   new test, 0 regressions).
+9. Found a smaller, separate residual while verifying: a
+   `sampler.view_type.*` 1/30-fraction sample (2,768 cases) showed 21
+   fails, all `2d_unnormalized` coordinate mode combined with
+   border-color/mag-filter/compressed-format edge cases (plus one
+   `cube_array` outlier). Not investigated further -- filed as new row
+   `L125(w)`, not started.
+10. Updated `Roadmap.md` (struck through `L125(p)`, filed `L125(w)`) and
+    `VulkanCTSReport.md` (new dated section with the root cause, fix,
+    crash-and-recovery detour, and CTS numbers above).
+11. Confirmed no BC-format-specific CTS coverage under `2d_array` in
+    this tree (`view_type.2d_array.format.bc*` glob matched 0 cases) --
+    not investigated, since the BC code path is structurally identical
+    to the already-verified ASTC/ETC2 fix and this was out of scope for
+    this session.
+
+## Wins
+
+- `L125(p)` -- the single largest untouched "Image mismatch" bucket
+  left in the roadmap -- is closed. Thousands of previously-failing CTS
+  cases across ASTC/EAC array, 3D, and cube-array views now pass.
+- Found this was a much bigger bug than previously scoped (whole
+  view-type class, not 4 formats) *before* writing any code, avoiding a
+  narrow fix that would have left most of the bug in place.
+- Turned a segfault into a same-session fix via a disciplined
+  hypothesize-trace-confirm-fix loop rather than guessing.
+
+## Suggested next steps
+
+1. **(~20-30 min)** Pick up `L125(w)`: the new 21-fail
+   `sampler.view_type.2d_unnormalized` + border-color/mag-filter/
+   compressed-format residual found while verifying this fix. Not yet
+   triaged past the raw fail list -- start with
+   `--deqp-log-decompiled-spirv=enable` on 2-3 individual cases to see
+   if it's one bug or several.
+2. `L125(s)`/`L125(t)`/`L125(u)` (vertex_input format gaps, bind-point
+   bucket, exact_sampling bucket) remain untouched from several
+   sessions back -- good alternative picks if `L125(w)` stalls.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+6. This session's own scratch CTS logs (`/tmp/ctsrun/l125p/*`) are
+   already cleaned up -- nothing to do here.
