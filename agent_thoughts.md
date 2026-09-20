@@ -94301,3 +94301,74 @@ Confirmed `FeMe CPU Vulkan Device` first, per standing instructions.
    triage -- pick this up only when there's time for that kind of dig.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+## L125(b): widened integer-sampled implicit-LOD fix to `Plain1D` and `Array1D`
+
+**Confirmed `FeMe CPU Vulkan Device` first, as required every session.**
+
+**Done this session:**
+1. Widened L125(a)'s `Plain2D`-only integer-sampled implicit-LOD fix to
+   `Plain1D` (commit `5191ddb6`) -- new `Sample1DI32` call kind, runtime
+   helper, resource-lowering wiring, 3 new/converted unit tests.
+2. Widened it again to `Array1D` (commit `17b7348e`) -- same pattern,
+   new `Sample1DArrayI32` call kind, 3 more new/converted unit tests.
+3. Updated `Roadmap.md`/`VulkanCTSReport.md` after each shape (commits
+   `55c340b9`, `71de35cc`) -- 4 code/doc commits total this session.
+4. Directly re-verified both shapes against real `deqp-vk` cases:
+   - `view_type.1d.format.r8_sint.*`: 0 Fail / 36 Pass.
+   - `view_type.1d_array.format.r8_sint.*`: 0 Fail / 72 Pass.
+5. `ninja check-feme`: 3,226/3,229 Passed, 3 Unsupported, 0 Failed, 0
+   regressions (started at 3,220/3,223 before this session).
+
+**Why only 2 of the 6 remaining shapes**: each shape needs its own
+runtime function, its own `matchImageCall`/`AllKinds` wiring, its own
+`hasOnlySupportedImageUses`/`lowerImageAccesses` case (coordinate/offset
+shape differs per dimensionality), and its own test pair -- roughly
+20-30 minutes of careful, mechanical work per shape once the pattern is
+established, plus a CTS re-run to confirm. `Array2D`/`Plain3D` are next
+in line by roadmap ordering; `Cube`/`CubeArray` (direction-vector
+coordinates, no `ConstOffset` at all per SPIR-V) are structurally
+different enough to warrant extra care when their turn comes.
+
+**One gotcha worth flagging for whoever picks this up next**: the new
+`femeCpuImageSample1DArrayV4I32` runtime function had to be placed
+*after* `femeRTRoundClampLayer`'s own definition in `FeMeRuntimeCPU.c`
+(around line 7077), not right next to `femeCpuImageSample1DV4I32`
+(around line 5490) where it would naturally belong by "keep related
+functions together" convention -- `femeRTRoundClampLayer` is `static`
+and this is C, so calling it before its own definition doesn't compile.
+Every other arrayed shape's own integer-sampling runtime function will
+likely hit the same ordering constraint; check where the float
+counterpart's own array-layer clamp call sits before placing the new
+function.
+
+### Suggested next steps
+
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (`/tmp/ctsrun/l125b_*.qpa`) are already deleted; only prior
+   sessions' own leftover `l124*` files remain there, untouched (not
+   this session's to clean).
+2. Pick up **`Array2D`** next (the next shape in L125(b)'s own
+   established ordering) -- mirror this session's `Array1D` pattern
+   exactly: new `Sample2DArrayI32` call kind, `createSample2DArrayI32`,
+   `femeCpuImageSample2DArrayV4I32` runtime function (check
+   `femeRTFetchTexel2DArrayI32`/`femeRTRoundClampLayer` for what already
+   exists to reuse -- likely everything needed is already there, same as
+   both shapes this session), and the `hasOnlySupportedImageUses`/
+   `lowerImageAccesses` wiring. Remember the `femeRTRoundClampLayer`
+   placement gotcha above.
+3. Then **`Plain3D`** (3-component `(U, V, W)` coordinate, real 3-wide
+   `ConstOffset` per L67(c)'s own precedent) -- similar shape to
+   `Array2D` but no array layer.
+4. **`Cube`/`CubeArray`** last -- structurally different (direction-vector
+   coordinate resolved via `femeRTSelectCubeFace`, no `ConstOffset` at
+   all per SPIR-V spec) -- worth its own careful read of
+   `createSampleCube`'s/`createSampleCubeArray`'s own float counterparts
+   before starting, rather than assuming the same 3-step pattern applies
+   unchanged.
+5. Once all 6 shapes are done, strike through L125(b) in `Roadmap.md` and
+   consider whether `L125(c)`/`L125(d)` (the other, not-yet-root-caused
+   fail buckets from L125(a)'s own original triage) or **L125's next
+   fresh sample** is the better next pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
