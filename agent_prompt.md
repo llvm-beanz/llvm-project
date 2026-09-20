@@ -55,22 +55,27 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~20-30 min)** `L125(q)` sub-bucket (2) is now the more clearly
-   scoped pick in this row: 864 fails (not 64), `Ref`-vs-`Color`
-   mismatches combining a non-identity swizzle + non-default border
-   color + `gather_N`, across `r16_uint`/`_sint`, `r16g16_uint`/`_sint`,
-   `r16g16b16a16_uint`/`_sint`. Start by isolating one case (e.g.
-   `r16_sint.barg.transparent_black.gather_3.no_swizzle_hint`,
-   already confirmed to fail identically standalone) and tracing the
-   swizzle/border-color application order for `Gather*` specifically.
-2. **(~1-2 sessions)** `L115(b)` (pull-model interpolation) remains the
-   real, larger, not-yet-started item behind `L125(r)`'s duplicate row
-   -- worth a dedicated session with the new-ABI-surface work properly
-   budgeted, not squeezed in alongside smaller fixes.
-3. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain untouched from the
-   prior session's decomposition -- good alternative picks if
-   sub-bucket (2) above stalls.
+1. **(~1 session, ABI-touching)** Implement `L125(v)`: add real integer
+   border-color storage to `FemeSamplerDescriptor` (`RuntimeABI.h`,
+   growing the struct since the existing `Reserved[3]` headroom is one
+   word short of 4 more `int32_t`s), a `mapBorderColorInt`-style
+   resolver in `Image.cpp`'s `Sampler` construction (mirroring
+   `mapBorderColor`'s own `TRANSPARENT_BLACK`/`OPAQUE_BLACK`/
+   `OPAQUE_WHITE` cases as integer 0/1 literals), and a
+   `femeRTExpandBorderColorForFormatI32` counterpart to the float
+   path's `femeRTExpandBorderColorForFormat` in `FeMeRuntimeCPU.c`,
+   applied at all 7 sites in place of today's hardcoded `{0, 0, 0, 1}`.
+   Start by re-reading `mapBorderColor`/`femeRTExpandBorderColorForFormat`
+   side by side to confirm the exact per-format masking rule (numComp
+   truncation + forced alpha=1) applies identically to the int path
+   before touching the ABI struct.
+2. Once `L125(v)` is fixed, re-run the full `border_swizzle.r16*` sweep
+   to confirm the remaining 632 fails close (or reveal a third,
+   still-narrower root cause).
+3. `L125(p)`/`L125(s)`/`L125(t)`/`L125(u)` remain untouched from prior
+   sessions' decomposition -- good alternative picks if `L125(v)`'s
+   ABI work stalls or needs a design pause.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. Clean up `/tmp/ctsrun/l125q_verify/*` (this session's own scratch
-   QPA/fails.txt files) before ending a future session.
+5. Clean up `/tmp/ctsrun/l125q2/*` (this session's own scratch
+   QPA/console-log files) before ending a future session.
