@@ -3871,6 +3871,192 @@ TEST_F(SampledImageDispatchTest, RejectsAPipelineLayoutOfTheWrongClass) {
 
 namespace {
 
+/// (Roadmap L125(w)) Same shape as `kSampledImageShader`, but samples at
+/// `uv = (0.5, 0.5)` -- a value only ever meaningful as an already-texel
+/// -space coordinate for a `VkSamplerCreateInfo::unnormalizedCoordinates`
+/// sampler over `SampledImageDispatchTest`'s 2x2 image. A sampler that
+/// forgets to convert this back to the normalized `[0, 1)` convention
+/// every downstream addressing computation assumes would instead treat
+/// `0.5` as already-normalized and multiply it by the image width again,
+/// selecting texel (1, 1) rather than the correct (0, 0).
+const char *kUnnormalizedSampledImageShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %1 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %sampler = spirv.Load "UniformConstant" %1 : !spirv.sampler
+    %si = spirv.SampledImage %image, %sampler : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %uv = spirv.Constant dense<[5.000000e-01, 5.000000e-01]> : vector<2xf32>
+    %lod = spirv.Constant 0.000000e+00 : f32
+    %texel = spirv.ImageSampleExplicitLod %si, %uv ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32 -> vector<4xf32>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %c2 = spirv.Constant 2 : i32
+    %c3 = spirv.Constant 3 : i32
+    %r = spirv.CompositeExtract %texel[0 : i32] : vector<4xf32>
+    %g = spirv.CompositeExtract %texel[1 : i32] : vector<4xf32>
+    %b = spirv.CompositeExtract %texel[2 : i32] : vector<4xf32>
+    %a = spirv.CompositeExtract %texel[3 : i32] : vector<4xf32>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac0, %r : f32
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac1, %g : f32
+    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac2, %b : f32
+    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac3, %a : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @img, @samp, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
+} // namespace
+
+/// (Roadmap L125(w)) The same bound-image/bound-sampler dispatch
+/// `SampledImageDispatchTest` exercises, but the sampler sets
+/// `unnormalizedCoordinates = VK_TRUE` and the shader samples at texel
+/// -space `uv = (0.5, 0.5)` (`kUnnormalizedSampledImageShader`) rather
+/// than the base fixture's normalized `(0.75, 0.75)`. Per the Vulkan
+/// spec, an unnormalized-coordinate sampler forbids mipmapping and
+/// anisotropy (already true of the base fixture's `NEAREST`/
+/// `mipmapMode = NEAREST` sampler) and only ever permits
+/// `CLAMP_TO_EDGE`/`CLAMP_TO_BORDER` addressing (already true of the
+/// base fixture's `CLAMP_TO_EDGE`), so only the new flag itself needs
+/// setting here.
+class UnnormalizedCoordinatesSampledImageDispatchTest
+    : public SampledImageDispatchTest {
+protected:
+  const char *getShaderSource() override {
+    return kUnnormalizedSampledImageShader;
+  }
+
+  void createSampler() {
+    VkSamplerCreateInfo SamplerInfo{};
+    SamplerInfo.magFilter = VK_FILTER_NEAREST;
+    SamplerInfo.minFilter = VK_FILTER_NEAREST;
+    SamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    SamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    SamplerInfo.unnormalizedCoordinates = VK_TRUE;
+    ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp),
+              VK_SUCCESS);
+  }
+
+  void SetUp() override {
+    // Reimplemented rather than calling the base class's own `SetUp`:
+    // `SampledImageDispatchTest::SetUp` calls `createSampler`
+    // non-virtually through its own body (mirrors
+    // `BorderSwizzleSampledImageDispatchTest`'s own identical rationale
+    // above), so this override would otherwise never run.
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    createImage();
+    createSampler();
+    createOutputBuffer();
+
+    VkDescriptorSetLayoutBinding Bindings[3]{};
+    Bindings[0].binding = 0;
+    Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    Bindings[0].descriptorCount = 1;
+    Bindings[1].binding = 1;
+    Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    Bindings[1].descriptorCount = 1;
+    Bindings[2].binding = 2;
+    Bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[2].descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.bindingCount = 3;
+    SetLayoutInfo.pBindings = Bindings;
+    ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                          &SetLayout),
+              VK_SUCCESS);
+
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words = assembleSPIRV(getShaderSource());
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkDescriptorPoolSize PoolSizes[3] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo PoolInfo{};
+    PoolInfo.maxSets = 1;
+    PoolInfo.poolSizeCount = 3;
+    PoolInfo.pPoolSizes = PoolSizes;
+    ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+              VK_SUCCESS);
+
+    VkDescriptorSetAllocateInfo DSAllocInfo{};
+    DSAllocInfo.descriptorPool = DescPool;
+    DSAllocInfo.descriptorSetCount = 1;
+    DSAllocInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+};
+
+TEST_F(UnnormalizedCoordinatesSampledImageDispatchTest,
+       TexelSpaceCoordinateSelectsTheCorrectTexelWithoutDoubleScaling) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // With `unnormalizedCoordinates`, texel-space `uv = (0.5, 0.5)` selects
+  // `floor(0.5) = 0` on both axes, i.e. texel (0, 0) -- linear index 0,
+  // whose channels the fixture filled with 0, 1, 2, 3. Without the fix
+  // (treating `0.5` as already-normalized and multiplying by the 2-wide
+  // image's extent again), the wrongly-doubled address would instead
+  // select texel (1, 1) (12, 13, 14, 15).
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 0.0f);
+  EXPECT_FLOAT_EQ(Result[1], 1.0f);
+  EXPECT_FLOAT_EQ(Result[2], 2.0f);
+  EXPECT_FLOAT_EQ(Result[3], 3.0f);
+}
+
+namespace {
+
 /// (Roadmap L125(d)) Same shape as `kSampledImageShader`, but samples at
 /// `uv = (2.0, 2.0)` -- well outside `[0, 1)` on both axes -- so a
 /// `ClampToBorder`-addressed sampler resolves to the synthesized border
@@ -4448,6 +4634,138 @@ TEST_F(ETC2RGB8SampledImageDispatchTest,
   EXPECT_FLOAT_EQ(Result[0], 90.0f / 255.0f);
   EXPECT_FLOAT_EQ(Result[1], 49.0f / 255.0f);
   EXPECT_FLOAT_EQ(Result[2], 24.0f / 255.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
+}
+
+/// (Roadmap L125(w)) The same `ETC2_RGB8_UNORM` block
+/// `ETC2RGB8SampledImageDispatchTest` decodes, but sampled at an
+/// out-of-range `uv` (`kBorderSampledImageShader`'s `(2.0, 2.0)`) with a
+/// `ClampToBorder`-addressed sampler and
+/// `VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK`. `ETC2_RGB8` has no alpha
+/// channel, so the synthesized border color's alpha must read back as
+/// the forced `1.0`, not the border color's own raw `0.0` -- before this
+/// fix, `femeRTImageFormatComponentMask` had no case for any BC/ETC2/EAC
+/// format (having always been keyed on the pre-decode-bridge `Format`,
+/// which is never reached at border-color-fallback time -- see
+/// `FemeImageDescriptor::BorderComponentMask`'s own RuntimeABI.h
+/// comment), so it fell through to its `0xf` (`all 4 channels raw`)
+/// default and this read back as `0.0`.
+class ETC2RGB8BorderColorSampledImageDispatchTest
+    : public ETC2RGB8SampledImageDispatchTest {
+protected:
+  const char *getShaderSource() override {
+    return kBorderSampledImageShader;
+  }
+
+  void createSampler() {
+    VkSamplerCreateInfo SamplerInfo{};
+    SamplerInfo.magFilter = VK_FILTER_NEAREST;
+    SamplerInfo.minFilter = VK_FILTER_NEAREST;
+    SamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    SamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    SamplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp),
+              VK_SUCCESS);
+  }
+
+  void SetUp() override {
+    // Reimplemented rather than calling the base class's own `SetUp`:
+    // `SampledImageDispatchTest::SetUp` calls `createSampler`
+    // non-virtually through its own body (mirrors
+    // `BorderSwizzleSampledImageDispatchTest`'s own identical rationale
+    // above), so this override would otherwise never run.
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    createImage();
+    createSampler();
+    createOutputBuffer();
+
+    VkDescriptorSetLayoutBinding Bindings[3]{};
+    Bindings[0].binding = 0;
+    Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    Bindings[0].descriptorCount = 1;
+    Bindings[1].binding = 1;
+    Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    Bindings[1].descriptorCount = 1;
+    Bindings[2].binding = 2;
+    Bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[2].descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.bindingCount = 3;
+    SetLayoutInfo.pBindings = Bindings;
+    ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                          &SetLayout),
+              VK_SUCCESS);
+
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words = assembleSPIRV(getShaderSource());
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkDescriptorPoolSize PoolSizes[3] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo PoolInfo{};
+    PoolInfo.maxSets = 1;
+    PoolInfo.poolSizeCount = 3;
+    PoolInfo.pPoolSizes = PoolSizes;
+    ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+              VK_SUCCESS);
+
+    VkDescriptorSetAllocateInfo DSAllocInfo{};
+    DSAllocInfo.descriptorPool = DescPool;
+    DSAllocInfo.descriptorSetCount = 1;
+    DSAllocInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+};
+
+TEST_F(ETC2RGB8BorderColorSampledImageDispatchTest,
+       ForcesAlphaToOneRatherThanTheRawTransparentBlackZero) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 0.0f);
+  EXPECT_FLOAT_EQ(Result[1], 0.0f);
+  EXPECT_FLOAT_EQ(Result[2], 0.0f);
   EXPECT_FLOAT_EQ(Result[3], 1.0f);
 }
 
