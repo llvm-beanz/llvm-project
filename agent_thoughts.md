@@ -94925,3 +94925,113 @@ L125(g)/(h) for what's left.
    an alternative pick if both L125(g) and L125(h) feel blocked.
 4. `ninja check-feme` and both CTS build directories are incremental
    from here -- no reconfigure needed.
+
+# Session: L125(h) -- integer-sampled texel fetch component-swizzle fix
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary`. Done --
+note: the shell's own `VK_ICD_FILENAMES` defaulted to the system's
+`lvp_icd.json` (llvmpipe) this session; had to explicitly export
+`VK_ICD_FILENAMES=.../build/tools/feme/tools/feme-vulkan/feme_icd.json`
+before the check (and before every later CTS run) to get the right
+device. Worth calling out in case a future session hits the same
+surprise.
+
+## What's fixed
+
+Picked up exactly where the last session's own next-steps left off:
+L125(h), the faster of the two picks (no open spec question, unlike
+L125(g)'s SampleCmp*/Gather* semantics).
+
+1. `femeRTFetchTexel2DI32`/`femeRTFetchTexel1DI32`/
+   `femeRTFetchTexel1DArrayI32`/`femeRTFetchTexel3DI32` are a wholly
+   separate function family from the float path L125(f) fixed --
+   confirmed via `grep`, no shared code at all. Mirrored L125(f)'s
+   design exactly: a new `ApplySwizzle` bool parameter, plus a new
+   `femeRTApplyImageSwizzleI32` (the `FemeRTv4i32` counterpart of
+   `femeRTApplyImageSwizzle` -- same channel logic, integer `0`/`1`
+   fill values instead of `0.0f`/`1.0f`).
+2. Traced all 14 call sites (12 direct + 2 thin-wrapper forwards) via
+   `grep`, classified each by its containing function name
+   (`femeCpuImageSample*V4I32` -> `ApplySwizzle=1`,
+   `femeCpuImageLoad*V4I32` -> `ApplySwizzle=0`) -- same mechanical
+   process as L125(f), faster this time since the pattern was already
+   established.
+3. Confirmed there's no integer `SampleCmp*`/`Gather*`/`GatherCmp*`
+   family at all (no such intrinsics exist in the codebase) -- so
+   unlike L125(f), this fix leaves **no deferred bucket behind**; every
+   `*I32` call site is now fully covered.
+4. Added two new unit tests, `SampleI32AppliesImageViewSwizzleToInBoundsTexel`
+   and `LoadI32NeverAppliesImageViewSwizzle`, mirroring L125(f)'s own
+   float-path tests. Along the way discovered these are the **first
+   runtime-execution unit tests for `feme.cpu.image.sample.2d.v4i32`
+   at all** -- despite L125(a)/(b)'s own extensive integer-sampling
+   work being CTS-verified, no unit test in `ImageSamplingTest.cpp` had
+   ever exercised this intrinsic before (only compile-time/lowering
+   tests elsewhere did). Added a new `SampleI32Fn` typedef for its
+   explicit-LOD-only operand shape (no `DUdX`/`DUdY`/`DVdX`/`DVdY`/
+   `UseExplicitLod`/`Bias`/`MinLodClamp`, unlike the float `SampleFn`).
+
+`ninja check-feme`: 3,244/3,247 Passed, 3 Unsupported, 0 Failed (+2
+new tests, 0 regressions vs. the 3,242/3,245 baseline).
+
+## CTS proof
+
+- 60-case `_sint`/`_uint` sample of `dEQP-VK.pipeline.monolithic.
+  image_view.*.component_swizzle.*`: **32/32 of the supported cases
+  Pass** (28 `NotSupported`, unrelated format-support gating).
+- 60-case `_uint` sample of `dEQP-VK.texture.swizzle.
+  component_mapping.*`: **19/19 supported cases Pass**.
+- 60-case `_sint` sample of the same bucket: every case that reaches
+  pipeline creation hits a **pre-existing, unrelated**
+  `VK_ERROR_INITIALIZATION_FAILED` (confirmed *not* a swizzle-
+  correctness failure -- zero `Image mismatch` seen). This is the same
+  family already flagged as an untriaged L125(c) bucket, now with a
+  new data point: it also affects plain `_sint` sampling, not just
+  `sampler.border_swizzle.*` as previously scoped. Recorded in
+  `VulkanCTSReport.md` for whoever picks up L125(c) next, not
+  addressed this session (out of scope for L125(h)).
+- 400-case random `image-view.txt` regression sample: 95 fails, every
+  one ASTC/EAC/ETC2/BC compressed-format decoding (L125(c), unrelated)
+  -- zero `component_swizzle`/plain-format fails, confirming no
+  regressions.
+
+**This closes L125(h) entirely** -- no deferred sub-bucket left behind,
+unlike L125(f). Only **L125(g)** (`SampleCmp*`/`Gather*`/`GatherCmp*`
+swizzle semantics, still blocked on unresolved spec questions) remains
+open in the L125(f)/(g)/(h) in-bounds-swizzle sub-tree.
+
+Internal correctness fix, no new Vulkan feature/extension surface --
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` unchanged.
+`Roadmap.md`'s L125(h) row is marked done; `FeMeVulkanDesign.md`'s
+L125(f) design note updated to point at L125(g) as the sole remaining
+gap.
+
+## Next steps
+
+1. **(~2 min)** Nothing to clean up -- this session's own scratch CTS
+   logs (`/tmp/ctsrun/l125h_*`) are already deleted.
+2. **L125(g)** is the last item in this sub-tree: `SampleCmp*`/
+   `Gather*`/`GatherCmp*` swizzle semantics. Needs spec research
+   *before* any code change -- specifically: (a) does a depth-compare's
+   single-channel dref read honor a non-identity `VkComponentMapping`
+   at all, or is depth-compare exempt since it reads a specific
+   depth-format channel rather than an RGBA color? (b) does
+   `OpImageGather`'s `Component` (0-3) selector operate on the
+   pre-swizzle or post-swizzle channel layout? Check the Vulkan spec's
+   own "Image Operations" chapter and `vktPipelineImageViewTests.cpp`/
+   `vktImageGatherTests.cpp` for any existing coverage before assuming
+   either answer.
+3. Consider the new `VK_ERROR_INITIALIZATION_FAILED`-on-plain-`_sint`-
+   sampling data point discovered this session as a fresh lead for
+   L125(c)'s own untriaged buckets -- it may share a root cause with
+   the already-known `sampler.border_swizzle.*`-heavy
+   `VK_ERROR_INITIALIZATION_FAILED` bucket from that row's original
+   triage, worth checking before assuming they're the same or
+   different bugs.
+4. `L125(c)`'s own remaining buckets (ASTC/EAC/ETC2/BC image
+   mismatches, the two distinct `VK_ERROR_INITIALIZATION_FAILED`
+   sites, `vktPipelineBindPointTests.cpp`) remain untouched and
+   untriaged -- a good alternative pick if L125(g)'s spec research
+   doesn't pan out quickly.
+5. `ninja check-feme` and both CTS build directories are incremental
+   from here -- no reconfigure needed.
