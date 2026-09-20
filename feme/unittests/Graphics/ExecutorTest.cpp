@@ -1031,6 +1031,138 @@ TEST(ExecutorTest, RendersTriangleWithColorFromAMatrixVertexAttribute) {
   }
 }
 
+// (Roadmap L125s) A vertex shader's `uint`-typed scalar input always
+// reports `SignatureElement::ComponentType == SInt`, never `UInt` -- see
+// `decodeAttribute`'s own comment in `Executor.cpp` for why (LLVM's
+// integer types are signless, so the real SPIR-V/HLSL `uint`-vs-`int`
+// distinction is already lost by the time a stage-IO global's element
+// type reaches `CanonicalizeStage.cpp`'s `getComponentType`). Before this
+// fix, `decodeAttribute` unconditionally rejected any `*_UINT`-format
+// attribute whose declared shader-input `ComponentType` was not the
+// (unreachable) literal `UInt`, so *every* genuinely `uint`-typed vertex
+// attribute bound to a `*_UINT` format failed at `executeDraws` time with
+// a "vertex attribute format is UInt but the shader input is not" error --
+// reproducing the real
+// `dEQP-VK.pipeline.monolithic.vertex_input.multiple_attributes.
+// binding_one_to_many.attributes.int.ivec2.uint` CTS failure (whose own
+// `uint`-typed third attribute hit exactly this rejection).
+constexpr char UIntVertexAttributeVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %v = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+    %eq = icmp eq i32 %v, 305419896
+    %g = select i1 %eq, float 1.0, float 0.0
+    %r = select i1 %eq, float 0.0, float 1.0
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %g, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+TEST(ExecutorTest,
+    RendersTriangleFromAUintVertexAttributeBoundToAUintFormat) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, /*ComponentCount=*/1,
+                  /*Location=*/1)};
+  // A real SPIR-V-sourced `uint`-typed scalar element always reports
+  // `SInt` (see this test's own comment above) -- set it explicitly here,
+  // overriding `makeElement`'s default `Float`, to model that real shape
+  // rather than the ordinarily-`Float` shader inputs this file's other
+  // tests use.
+  VSSig.Elements[1].ComponentType = SignatureComponentType::SInt;
+  VSSig.Elements.push_back(makeElement(2, SignatureDirection::Output, 4,
+                                       /*Location=*/std::nullopt,
+                                       SignatureSystemValue::Position));
+  VSSig.Elements.push_back(
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0));
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, UIntVertexAttributeVertexShaderIR, "vs_main", VSSig,
+      ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // pos (xyz), uintAttr (one R32_UINT word) -- 4 floats/vtx, 16 bytes.
+  const uint32_t UintValue = 0x12345678;
+  struct Vertex {
+    float Pos[3];
+    uint32_t Attr;
+  };
+  std::array<Vertex, 3> VertexData = {
+      Vertex{{-1.0f, -1.0f, 0.0f}, UintValue},
+      Vertex{{3.0f, -1.0f, 0.0f}, UintValue},
+      Vertex{{-1.0f, 3.0f, 0.0f}, UintValue}};
+  std::array<VertexAttribute, 2> VertexAttributes = {
+      VertexAttribute{0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{1, cpu::ResourceFormat::R32_UINT, 12}};
+  std::array<uint8_t, 64> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                       4, 4};
+  std::array<AttachmentView, 1> ColorAttachments = {Color};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, sizeof(Vertex),
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(Vertex)),
+      VertexAttributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = ColorAttachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Green everywhere confirms the `R32_UINT` attribute's raw bytes were
+  // decoded and compared correctly -- not just that no error was thrown.
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
 TEST(ExecutorTest, RendersTheSameTriangleThroughAnIndexBuffer) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
