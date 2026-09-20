@@ -909,6 +909,52 @@ TEST(SPIRVToLLVMTest, InputStorageStructVec3MemberStaysAtDeclaredIndex) {
   EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
 }
 
+// (Roadmap L125s) A directly `spirv.matrix`-typed `Input` variable (the
+// shape a vertex-input attribute declared `layout(location = N) in mat2 M`
+// takes) failed to legalize its own column- then row-selecting
+// `spirv.AccessChain` entirely -- reproducing the real
+// `dEQP-VK.pipeline.monolithic.vertex_input.multiple_attributes.
+// binding_one_to_many.attributes.float.mat2.mat3` CTS failure
+// (`VK_ERROR_INITIALIZATION_FAILED` at pipeline-creation time, from a
+// generic MLIR "failed to legalize operation 'spirv.AccessChain' that was
+// explicitly marked illegal" diagnostic). Root cause: `isCompositeStageIOType`
+// -- which `isInputArrayAccessChain` consults to decide whether
+// `StageIOArrayAccessChainPattern` should handle this AccessChain at all --
+// only recognized `spirv.array`/`spirv.struct` pointee types, not
+// `spirv.matrix`, even though `StageIOAddressOfPattern`'s own
+// `isCompositeLLVMType` check (applied to the *converted* LLVM type, which
+// a matrix always becomes an `!llvm.array` of column vectors under) already
+// kept such a variable's own address as a real pointer rather than an
+// eagerly-loaded value -- leaving no pattern able to legalize an
+// AccessChain into that real pointer at all.
+TEST(SPIRVToLLVMTest, InputStorageMatrixAccessChainConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @in_mat2 : "
+      "!spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Input> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @in_mat2 : "
+      "!spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Input> "
+      "%1 = spirv.Constant 1 : i32 "
+      "%2 = spirv.Constant 0 : i32 "
+      "%3 = spirv.AccessChain %0[%1, %2] : "
+      "!spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Input>, i32, i32 -> "
+      "!spirv.ptr<f32, Input> "
+      "%4 = spirv.Load \"Input\" %3 : f32 "
+      "spirv.Return "
+      "} spirv.EntryPoint \"Vertex\" @entry }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The matrix's own address stays a real pointer (an `llvm.mlir.addressof`
+  // feeding a `getelementptr`), not an eagerly-loaded value: the leading
+  // `0` index dereferences the pointer itself, the column index (`1`) and
+  // row index (`0`) select the scalar lane, matching the declared SPIR-V
+  // indices unchanged (no struct-member remap applies to a standalone
+  // matrix -- see remapNestedStructMemberIndices's own "matrix/vector/
+  // scalar leaf" break case).
+  EXPECT_NE(Result.find("llvm.getelementptr %0[%3, %1, %2]"), std::string::npos)
+      << Result;
+}
+
 // (Roadmap L104) A non-offset struct with a `vec3` member immediately
 // followed by another member needs that trailing member placed 12 bytes
 // (the vec3's own real, tight alloc size) after the vec3's own start, not
