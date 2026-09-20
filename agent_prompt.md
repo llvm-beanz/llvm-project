@@ -55,23 +55,21 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~15 min)** Root-cause **L125(j)** first: run
-   `dEQP-VK.glsl.texture_gather.graphics.basic.cube.rgba8.filter_mode.
-   min_linear_mag_linear` with `--deqp-log-decompiled-spirv=enable`
-   and `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1`, compare the expected
-   vs. actual face/texel indices against `femeRTSelectCubeFace`'s own
-   face-numbering convention. It's a plain correctness bug (not
-   swizzle-related), so likely the fastest win of the three open items.
-2. **(~20-30 min)** For **L125(i)**, search
-   `vktTextureShadowTests.cpp` and `vktPipelineSamplerTests.cpp`'s own
-   compare-mode tests for any depth-compare + non-identity-swizzle
-   coverage before writing any code. If none exists, this row may need
-   to stay deferred rather than implemented on spec-reasoning alone.
-3. **L125(c)**'s own four buckets are still the biggest remaining
-   scope in this series -- a good pick once L125(j)/L125(i) are
-   resolved or confirmed blocked.
-4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~20-30 min)** Pick up **L125(i)**: `SampleCmp*`/`GatherCmp*`
+   (depth-compare) swizzle semantics, deferred from L125(g). Search
+   `vktTextureShadowTests.cpp`/`vktPipelineSamplerTests.cpp` for any real CTS
+   coverage combining depth-compare with a non-identity swizzle before writing
+   code -- none was found as of the L125(g)/L125(h) sessions. If still none
+   exists, this row may need to stay deferred (spec-only reasoning isn't a
+   substitute for this project's CTS-driven verification philosophy).
+2. **L125(c)** remains the largest untouched scope: ASTC/EAC/ETC2 image
+   mismatches, two distinct `VK_ERROR_INITIALIZATION_FAILED` sites (one at
+   `createGraphicsPipelines`, confirmed this session to be the same bucket hit
+   throughout `cube.*` gather tests; a separate one at
+   `createComputePipelines`), and a `vktPipelineBindPointTests.cpp` bucket. None
+   individually triaged yet -- a good next pick if L125(i) stays blocked on
+   missing CTS coverage.
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. Clean up `/tmp/ctsrun/l125g_*` and the two scratch spec-fetch files
-   (`/tmp/1789914627854-copilot-tool-output-....txt`, `/tmp/images.adoc`)
-   before ending a future session, if not already gone.
+4. Clean up `/tmp/ctsrun/l125j_v2/` (this session's own scratch QPA/console/PNG
+   files) before ending a future session, if not already gone.
