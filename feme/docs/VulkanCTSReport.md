@@ -7032,3 +7032,106 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
 - `Roadmap.md`'s `L125(w)` row updated to reflect the fix (struck
   through, marked fixed and CTS-verified); see `agent_thoughts.md` for
   the full narrative and next steps.
+
+## Roadmap L125(u)/L125(x): fragment-output integer-signedness and sRGB attachment write/read gaps
+
+### Investigation
+
+`sampler.exact_sampling.*` (708 cases) was re-run in full (not the
+1/50-fraction sample earlier sessions' triage estimates were based on)
+and found 18 fails, not the 6 the roadmap's own stale estimate carried
+forward: 6 `r32_uint.gradient.*` and 12 `r8g8b8a8_srgb.*` -- the
+"fractional-sample undercount" pattern several prior sessions have now
+independently hit.
+
+`--deqp-log-images=enable` on the isolated `r32_uint.gradient.
+normalized_coords.centered` repro, decoded via an ad hoc Python/PIL
+script, showed sampled-back values increasing linearly up to exactly
+`2^31 - 1`, then hard-cutting to `0` for every value at or above `2^31`
+-- the classic signature of an unsigned value reinterpreted as signed
+somewhere, then clamped to a non-negative range. Traced to
+`Executor.cpp`'s `readFragmentColorInt`, which derived the raw value's
+signedness from `Elem.ComponentType`. `Pipeline.h`'s own
+`isCompatibleColorComponentType` comment already documents that a real
+SPIR-V-sourced fragment stage's signature can *never* actually report
+`UInt`: LLVM's integer types are signless, and
+`CanonicalizeStage.cpp`'s `getComponentType` maps every SPIR-V integer
+to `SInt` regardless of `OpTypeInt`'s own signedness bit. So
+`Elem.ComponentType` was always `SInt`, and every raw `uint32_t`
+fragment-output value with its top bit set got reinterpreted as
+negative, then floored to `0` by `packClearColor`'s own unsigned-range
+`std::clamp`.
+
+The same PNG-decode-and-compare methodology on an isolated
+`r8g8b8a8_srgb.solid_color.normalized_coords.centered` repro found
+every output channel equal to `round(srgbToLinear(input) * 255)` -- an
+sRGB decode applied on read with no corresponding re-encode on write.
+Traced to `ImageFixture.cpp`'s `packClearColor`/`unpackColor`, whose
+`R8G8B8A8_UNORM_SRGB`/`B8G8R8A8_UNORM_SRGB` branches were bucketed with
+their plain `_UNORM` siblings, applying no linear<->sRGB gamma curve at
+all -- a gap a prior `H8r`-row unit test had even explicitly documented
+as intentional ("no gamma curve is applied here"), contradicted by the
+real sampling path's own already-correct `femeRTSRGBToLinear` decode
+(`FeMeRuntimeCPU.c`).
+
+### Fixes
+
+1. `readFragmentColorInt` now derives signedness from the real
+   attachment format (`cpu::isUnsignedIntegerColorAttachmentFormat(
+   Att.Format)`, always known correctly regardless of what the
+   signature reports), not from `Elem.ComponentType`.
+2. Added `srgbToLinear`/`linearToSRGB` helpers to `ImageFixture.cpp`
+   (mirroring `femeRTSRGBToLinear`'s own formula) and applied them to
+   the R/G/B channels only (alpha is never sRGB-encoded, by convention)
+   in both `packClearColor` and `unpackColor` for both `_UNORM_SRGB`
+   formats.
+
+### Unit tests
+
+- `ExecutorTest.RendersAnSIntFragmentOutputWithTheSignBitSetToAnUnsignedIntegerAttachment`
+  (`ExecutorTest.cpp`): writes a raw `i32` value at/above `2^31`
+  (`3000000000`) from a fragment output reported as `SInt` (the only
+  shape a real SPIR-V-sourced stage ever produces) to a real
+  `R32_UINT` color attachment, and checks the exact raw value
+  round-trips.
+- Updated `ImageFixtureTest.PacksAndUnpacksB8G8R8A8UnormSrgb` to its
+  correct sRGB-encoded expected values (previously asserting the bug's
+  own behavior), and added
+  `ImageFixtureTest.PacksAndUnpacksR8G8B8A8UnormSrgb`.
+
+Both the new `ExecutorTest` and the updated/new `ImageFixtureTest`
+cases were independently confirmed to fail against a pre-fix build
+(via a `git stash`/rebuild/re-run round-trip) and pass against the
+fix, before being counted as valid regression coverage.
+
+`ninja check-feme`: 3,267/3,270 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `sampler.exact_sampling.*` (708 cases): **372 Pass, 0 Fail, 336
+  NotSupported** (was 18 Fail before either fix: 6 after fixing the
+  `r32_uint` half alone, 0 after both).
+- `image.load_store.*uint*` (772 cases): 610 Pass, 0 Fail -- no
+  regression from the `readFragmentColorInt` fix.
+- `sampler.view_type.*.format.*srgb*` (10,296 cases): 2,056 Pass, 0
+  Fail -- no regression from the sRGB pack/unpack fix.
+- `pipeline.monolithic.render_to_image.*` (1,325 cases): 1,050 Pass, 80
+  Fail. Confirmed **pre-existing and unrelated** via a revert-and-rerun
+  of one failing case (`render_to_image.core.3d.mipmap.r16g16_sint`):
+  it fails identically before either of this session's fixes, with a
+  `VK_ERROR_INITIALIZATION_FAILED` at `vkCreateImage` (a 3D-mipmap
+  image-creation gap, not a pixel mismatch) -- not investigated
+  further this session.
+- `pipeline.monolithic.blend.format.r8g8b8a8_srgb.*` (100 cases): 6
+  Pass, 94 Fail. Confirmed **pre-existing** (100/100 failed before
+  either fix too, via the same revert-and-rerun method) -- the sRGB
+  pack/unpack fix improves this from 100/100 to 94/100 but does not
+  close it, indicating a separate, larger blend+sRGB interaction gap.
+  Filed as `Roadmap.md`'s new `L125(y)` row rather than chased further
+  this session.
+- `Roadmap.md`'s `L125(u)` and `L125(x)` rows updated to reflect both
+  fixes (struck through, marked fixed and CTS-verified); the
+  blend+sRGB gap filed as a new `L125(y)` row; see `agent_thoughts.md`
+  for the full narrative and next steps.
