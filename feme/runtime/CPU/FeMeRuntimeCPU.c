@@ -5748,12 +5748,15 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
   if (BorderX || BorderY) {
     // Roadmap H109: `FemeRTSamplerDescriptor` has no integer border-color
     // storage (only a float `BorderColor[4]`) -- fall back to a fixed
-    // `{0, 0, 0, 1}` default. Documented, narrow limitation: no real CTS
-    // case is known to exercise `CLAMP_TO_BORDER` addressing against an
-    // integer-sampled image yet (this call kind's own motivating case
-    // always addresses an in-bounds coordinate).
+    // `{0, 0, 0, 1}` default. (Roadmap L125(q)): this default must still
+    // go through the image view's own swizzle like any other tap
+    // (`femeRTFetchTexel2DI32`'s own in-bounds branch already does this,
+    // via `ApplySwizzle`) -- confirmed via a real CTS case,
+    // `sampler.border_swizzle.r16_sint.barg.transparent_black.no_gather.*`,
+    // that this row's own former "no real CTS case is known" claim no
+    // longer holds.
     FemeRTv4i32 Border = {0, 0, 0, 1};
-    return Border;
+    return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel2DI32(&Img, Level, /*Layer=*/0, AddrX, AddrY,
                                /*Sample=*/0, /*ApplySwizzle=*/1);
@@ -5797,12 +5800,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
   int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
                                          Samp.AddressU, &BorderX);
   if (BorderX) {
-    // Roadmap L125(b): same documented, narrow limitation as
-    // `femeCpuImageSample2DV4I32`'s own identical fallback above -- no
-    // real CTS case is known to exercise `CLAMP_TO_BORDER` addressing
-    // against an integer-sampled `Plain1D` image either.
+    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // `femeCpuImageSample2DV4I32`'s own identical fallback above.
     FemeRTv4i32 Border = {0, 0, 0, 1};
-    return Border;
+    return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel1DI32(&Img, Level, AddrX, /*ApplySwizzle=*/1);
 }
@@ -5859,12 +5860,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample3DV4I32(
   int32_t AddrZ = femeRTApplyAddressMode(Z, (int32_t)LevelDepth,
                                          Samp.AddressW, &BorderZ);
   if (BorderX || BorderY || BorderZ) {
-    // Roadmap L125(b): same documented, narrow limitation as
-    // `femeCpuImageSample2DV4I32`'s own identical fallback above -- no
-    // real CTS case is known to exercise `CLAMP_TO_BORDER` addressing
-    // against an integer-sampled `Plain3D` image either.
+    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // `femeCpuImageSample2DV4I32`'s own identical fallback above.
     FemeRTv4i32 Border = {0, 0, 0, 1};
-    return Border;
+    return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel3DI32(&Img, Level, AddrX, AddrY, AddrZ,
                                /*ApplySwizzle=*/1);
@@ -6596,7 +6595,16 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageGather2DV4I32(
   uint32_t Chan = (uint32_t)Component > 3u ? 3u : (uint32_t)Component;
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
-  FemeRTv4i32 IntBorder = {0, 0, 0, 1};
+  // Roadmap L125(q): the fixed `{0, 0, 0, 1}` integer border default (see
+  // `femeCpuImageSample2DV4I32`'s own identical fallback) must go through
+  // the image view's own swizzle just like every in-bounds tap already
+  // does (`ApplySwizzle=1` below) -- previously returned unswizzled,
+  // confirmed via a real CTS case,
+  // `sampler.border_swizzle.r16_sint.barg.transparent_black.gather_3.*`,
+  // to select the wrong (pre-swizzle) channel whenever every tap in the
+  // gather footprint fell on the border.
+  FemeRTv4i32 IntBorder =
+      femeRTApplyImageSwizzleI32((FemeRTv4i32){0, 0, 0, 1}, Img.Swizzle);
   FemeRTv4i32 T00 = (S.BorderX0 || S.BorderY0)
                         ? IntBorder
                         : femeRTFetchTexel2DI32(&Img, /*Level=*/0, /*Layer=*/0,
@@ -7536,7 +7544,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageGatherArray2DV4I32(
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   FemeRTBilinearSupport S = femeRTComputeBilinearSupport(
       &Img, U, V, &Samp, /*Level=*/0, OffsetX, OffsetY);
-  FemeRTv4i32 IntBorder = {0, 0, 0, 1};
+  // Roadmap L125(q): see `femeCpuImageGather2DV4I32`'s own identical fix
+  // above -- the integer border default must be swizzled too.
+  FemeRTv4i32 IntBorder =
+      femeRTApplyImageSwizzleI32((FemeRTv4i32){0, 0, 0, 1}, Img.Swizzle);
   FemeRTv4i32 T00 =
       (S.BorderX0 || S.BorderY0)
           ? IntBorder
@@ -7792,12 +7803,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
   int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
                                          Samp.AddressU, &BorderX);
   if (BorderX) {
-    // Roadmap L125(b): same documented, narrow limitation as
-    // `femeCpuImageSample1DV4I32`'s own identical fallback above -- no
-    // real CTS case is known to exercise `CLAMP_TO_BORDER` addressing
-    // against an integer-sampled `Array1D` image either.
+    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // `femeCpuImageSample2DV4I32`'s own identical fallback above.
     FemeRTv4i32 Border = {0, 0, 0, 1};
-    return Border;
+    return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel1DArrayI32(&Img, Level, AddrX, Layer,
                                     /*ApplySwizzle=*/1);
@@ -7851,12 +7860,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DArrayV4I32(
   int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                          Samp.AddressV, &BorderY);
   if (BorderX || BorderY) {
-    // Roadmap L125(b): same documented, narrow limitation as
-    // `femeCpuImageSample2DV4I32`'s own identical fallback above -- no
-    // real CTS case is known to exercise `CLAMP_TO_BORDER` addressing
-    // against an integer-sampled `Array2D` image either.
+    // Roadmap L125(q): same swizzle-the-border-default fix as
+    // `femeCpuImageSample2DV4I32`'s own identical fallback above.
     FemeRTv4i32 Border = {0, 0, 0, 1};
-    return Border;
+    return femeRTApplyImageSwizzleI32(Border, Img.Swizzle);
   }
   return femeRTFetchTexel2DI32(&Img, Level, Layer, AddrX, AddrY,
                                /*Sample=*/0, /*ApplySwizzle=*/1);

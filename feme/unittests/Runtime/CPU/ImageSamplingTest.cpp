@@ -1248,6 +1248,40 @@ TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToInBoundsTexel) {
   EXPECT_EQ(Out[3], 0); // A <- Zero
 }
 
+// (Roadmap L125(q)) Unlike the float path (`ClampToBorderAppliesImage
+// ViewSwizzle` above), the integer-sampled `CLAMP_TO_BORDER` fallback
+// (`FemeRTSamplerDescriptor` has no integer border-color storage, so a
+// fixed `{0, 0, 0, 1}` default is used instead -- roadmap H109) previously
+// returned that default unswizzled, bypassing the image view's own
+// component mapping entirely. Confirmed via a real CTS regression
+// (`sampler.border_swizzle.r16_sint.barg.transparent_black.no_gather.*`)
+// that this is reachable, not merely a theoretical gap. `U`/`V` far
+// outside `[0, 1]` force every axis onto the border.
+TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToBorderColorFallback) {
+  int32_t Storage[1][1][4] = {{{9, 9, 9, 9}}}; // Never read: always border.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp = makeSampler(SamplerFilter::Nearest,
+                                           SamplerAddressMode::ClampToBorder);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleI32Fn Fn = resolve<SampleI32Fn>(
+      addWrapper("sample_i32_border", "feme.cpu.image.sample.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, /*Lod=*/0.0f,
+     /*OffsetX=*/0, /*OffsetY=*/0, true, Out);
+  EXPECT_EQ(Out[0], 0); // R <- B (pre-swizzle border B is 0)
+  EXPECT_EQ(Out[1], 1); // G <- A (pre-swizzle border A is 1)
+  EXPECT_EQ(Out[2], 0); // B <- R (pre-swizzle border R is 0)
+  EXPECT_EQ(Out[3], 0); // A <- Zero
+}
+
 // (Roadmap L125(h)) The integer-sampled counterpart of
 // `LoadNeverAppliesImageViewSwizzle` above: `feme.cpu.image.load.2d.v4i32`
 // (Vulkan's `OpImageRead` against a storage image) must never apply
@@ -2142,6 +2176,41 @@ TEST_F(ImageSamplingTest, Gather2DI32ReturnsFourTexelsInGatherOrder) {
   EXPECT_EQ(Out[1], 7); // T(X1,Y1)
   EXPECT_EQ(Out[2], 6); // T(X1,Y0)
   EXPECT_EQ(Out[3], 4); // T(X0,Y0)
+}
+
+// (Roadmap L125(q)) Same "integer border default must be swizzled" gap
+// as `SampleI32AppliesImageViewSwizzleToBorderColorFallback` above, but
+// for `Gather*` -- confirmed via a real CTS regression
+// (`sampler.border_swizzle.r16_sint.barg.transparent_black.gather_3.*`)
+// where the whole 2x2 gather footprint landed on the border. Every one
+// of the 4 gathered corners must go through the same swizzle an
+// in-bounds tap would, not the unswizzled `{0, 0, 0, 1}` default.
+TEST_F(ImageSamplingTest, Gather2DI32AppliesImageViewSwizzleToBorderColorFallback) {
+  int32_t Storage[1][1][4] = {{{9, 9, 9, 9}}}; // Never read: always border.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  Img.Swizzle = packImageSwizzle(
+      ImageComponentSwizzle::B, ImageComponentSwizzle::A,
+      ImageComponentSwizzle::R, ImageComponentSwizzle::Zero);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp = makeSampler(SamplerFilter::Linear,
+                                           SamplerAddressMode::ClampToBorder);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  GatherI32Fn Fn = resolve<GatherI32Fn>(
+      addWrapper("gather_i32_border", "feme.cpu.image.gather.2d.v4i32"));
+  int32_t Out[4] = {-1, -1, -1, -1};
+  // Component 1 (green): post-swizzle border is {0, 1, 0, 0} (G <- A,
+  // pre-swizzle border A is 1), so every one of the 4 gathered corners
+  // (all on the border) must read 1, not the pre-swizzle green (0).
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, /*Component=*/1, 0, 0,
+     true, Out);
+  EXPECT_EQ(Out[0], 1);
+  EXPECT_EQ(Out[1], 1);
+  EXPECT_EQ(Out[2], 1);
+  EXPECT_EQ(Out[3], 1);
 }
 
 TEST_F(ImageSamplingTest, GatherCmpArray2DIsolatesNamedLayer) {
