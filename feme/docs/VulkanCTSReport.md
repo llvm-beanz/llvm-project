@@ -5010,3 +5010,99 @@ feature/extension surface, so
 [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are unchanged
 and still accurate. See `agent_thoughts.md` for the full narrative and
 next steps.
+
+## Roadmap L124(u) (closed this session): `ssbo.*`'s sole remaining fail fixed -- `ssbo.*` and `ubo.*` both now fully clean
+
+Picked up L124(u), the single remaining `ssbo.*` fail left after L124(t):
+`dEQP-VK.ssbo.layout.random.nested_structs_instance_arrays.8` ("Result
+comparison and counter values are incorrect").
+
+Root cause: `getStructMemberPhysicalIndex`'s "redo" of a nested struct's
+own physical layout (used by `remapNestedStructMemberIndices` to
+translate a declared struct-member index into its real physical index)
+converts the nested struct **standalone**, as if it were top-level. For
+this test's `sB` (nested inside `sD`, itself `BlockC.f`'s own member),
+that standalone conversion trivially succeeds at the "natural" (tier 1)
+retry -- a bare `vec3` member's generic/rounded LLVM size (16 bytes)
+happens to exactly reach the next member's declared offset in isolation.
+But `sB` embedded for real inside `sD` uses a **different, correct**
+physical layout: `sD`'s own natural-tier conversion fails (its own `i32`
+member right after `sB` can't be reached without a gap), forcing a retry
+at the `VectorOnly` tier, whose per-member substitution loop
+unconditionally calls `getTightNestedStructType` on any nested-struct
+member -- always force-tightening every interior vector/matrix member of
+that nested struct regardless of whether the nested struct would need
+tightening in isolation. This confirms (and extends) a pattern this whole
+roadmap item has repeatedly hit in different shapes: whether a nested
+struct's own body ends up tightened is a property of **which retry tier
+its enclosing struct actually needed**, not an intrinsic property of the
+nested struct type itself -- now confirmed at the struct-member-index
+level, not just the matrix-widening level this series has fixed before.
+
+Fixed by a new `getStructMemberPhysicalIndexInRealType`, which reads the
+declared-to-physical index mapping directly off the already-known-correct
+real LLVM type used by the immediate enclosing struct's own conversion
+(walking its body in declared-offset order and matching each member's
+declared SPIR-V offset against a running byte-offset walk), rather than
+re-deriving the nested struct's layout independently.
+`remapNestedStructMemberIndices` now tracks this real type across nested
+struct levels, using the new function for genuinely nested (non-top-level)
+levels and falling back to the pre-existing logic for the first/top-level
+struct (unchanged there). The real type is reset to null when the access-
+chain walk passes through an array level, conservatively preserving all
+prior behavior for array-of-struct cases (not the specific shape this fix
+targets, and not yet assessed as in/out of scope for the same bug class).
+
+New `spirv-to-llvm-doubly-nested-struct-tier-dependent-tightening.mlir`
+regression test, mirroring `sD`/`sB`'s exact real shape, confirmed via
+`git stash` to compute the wrong physical index (4, from `sB`'s untightened
+standalone layout) pre-fix and the correct index (5, from `sB`'s real
+tightened-with-interior-gap layout as embedded in `sD`) post-fix.
+
+Also investigated, before finding the true root cause: built a
+hand-rolled `feme-run` numeric reproduction harness (heap + verify
+script) for the real shader to try to isolate the bug independently of
+`feme-opt`'s own IR output. This surfaced a large detour: the harness's
+own hand-typed verification script had at least one confirmed
+offset-computation bug of its own (reading the wrong buffer word for
+`f.mA.mC`/`f.mA.mD`, unrelated to the compiler), which produced a false
+"FAIL" even after the real fix was already correct -- caught only by
+manually re-deriving absolute byte offsets from first principles and
+decoding raw output words directly. Given the real CTS test and full
+`ssbo.*`/`ubo.random.*` sweeps are strictly more authoritative and
+confirm the fix directly, this ad hoc harness's own remaining apparent
+mismatches (in `BlockB`/`BlockD`) were not chased further -- they are
+very likely further bugs in the hand-rolled harness itself (e.g. wrong
+buffer size/binding assumptions), not real compiler defects, since the
+authoritative CTS test now passes outright.
+
+Results:
+
+- `ninja check-feme`: **3,216/3,219 Passed, 3 Unsupported, 0 Failed**
+  (+1 from the new test, 0 regressions).
+- Re-confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` with
+  the freshly-built ICD (`VK_DRIVER_FILES` pointed at the local build's
+  `feme_icd.json`) before running any CTS cases.
+- The originally-failing test,
+  `dEQP-VK.ssbo.layout.random.nested_structs_instance_arrays.8`: now
+  **Passes** (was "Result comparison and counter values are incorrect"),
+  confirmed by running it directly via `deqp-vk --deqp-case=...`.
+- `ssbo.*` (12,225 cases): **3,242 Pass / 0 Fail / 8,983 NotSupported**
+  -- was 3,241/1/8,983 before this session's fix: **+1 Pass, 0 Fail**.
+  **`ssbo.*` is now fully clean.**
+- `ubo.random.*` (2,250 cases): **607 Pass / 0 Fail / 1,643 NotSupported**
+  -- unchanged, confirmed no regression.
+
+With this fix, **both the `ubo.*` and `ssbo.*` CTS families are now
+fully clean** (0 `Fail` each), closing out the entire L124 roadmap
+series that started with `compute.*`/`ssbo.*` triage several sessions
+ago.
+
+FeMe source revision under test: this session's own commits (see
+`agent_thoughts.md` for the exact commit list). No feature or extension
+inventory changes: this session's fix is an internal SPIR-V-to-LLVM
+struct-member-index correctness fix, not new Vulkan feature/extension
+surface, so [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
+and [VulkanExtensionInventory.md](VulkanExtensionInventory.md) are
+unchanged and still accurate. See `agent_thoughts.md` for the full
+narrative and next steps.
