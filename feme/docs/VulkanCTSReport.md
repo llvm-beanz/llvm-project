@@ -7778,3 +7778,115 @@ pre-existing-bug/pre-existing-invariant fixes, not new regressions).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed -- pure correctness fix, no new feature/extension surface. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L128: dynamic-vertex-index misclassification fix (partial); L128(a) filed for a new nondeterministic JIT crash
+
+### What changed
+
+`isDynamicIndexedArrayGlobal` (`CanonicalizeStage.cpp`), used by both
+`getDynamicVertexIndexedAccess` and (via its own exclusion)
+`getDynamicRowIndexedAccess`, had no `ShaderStage` restriction at all --
+unlike its two already-stage-scoped sibling helpers
+(`isPerVertexArrayInputGlobal`, `isPerVertexArrayMeshOutputGlobal`,
+restricted to Hull/Domain/Geometry or Mesh respectively). This let a
+plain (non-per-vertex-arrayed) Vertex/Fragment-stage arrayed stage-IO
+global -- e.g. `layout(location = 1) in vec4 attr[N];`, the
+`vertex_input.max_attributes.query_max_attributes.*` shape `L128`
+targets -- get wrongly claimed by `getDynamicVertexIndexedAccess`,
+threading its array index through as a bogus `Vertex` operand instead
+of `getDynamicRowIndexedAccess`'s `Row` (the operand this shape
+actually belongs on, since `addElement` already models such an array as
+one `SignatureElement` with `RowCount == N`, exactly like a real
+matrix's own rows).
+
+Fixed: `isDynamicIndexedArrayGlobal` now takes `ShaderStage Stage` and
+only matches Hull/Domain/Geometry/Mesh, threaded through
+`getDynamicVertexIndexedAccess`/`getDynamicRowIndexedAccess`/
+`getStageIOGlobal`'s own signatures and every call site (two call
+sites -- `usesSPIRVStageIO`/`classifyTessControlOutputStoreFrequency`
+-- are only ever reachable for Hull-stage tessellation-control
+splitting, hardcoded to `ShaderStage::Hull` accordingly;
+`canonicalizeSPIRVStage`'s own discovery loop already had `Stage` in
+scope). Confirmed via `FEME_DUMP_IR` that a *constant* (post-unroll)
+`attr[k]` access now correctly resolves to `(Element, Row=k, Component,
+Vertex=0)` instead of the pre-fix `(Element, Row=0, Component,
+Vertex=k)`.
+
+This fix alone does not close `L128`: the original, non-unrolled
+loop's genuinely-non-constant index still cannot resolve through
+`getDynamicRowIndexedAccess`'s existing `collectDynamicRowTerms`
+recursion either (confirmed: without a loop-unrolling pass, this now
+fails with a *different* error, "unresolved stage-IO global-variable
+access", at the same 3 cases). A `!llvm.loop.unroll.full`-forced
+full-unroll pass (gated on `ScalarEvolution::getSmallConstantTripCount`
+being nonzero and below a small cap) was prototyped in
+`Pipeline.cpp` and, combined with this fix, got all 3 target CTS cases
+past pipeline creation for the first time -- but surfaced a new,
+**nondeterministic** JIT runtime SIGSEGV (roughly 2-in-3 reruns of the
+identical compiled IR) once actually executed. This prototype was
+**reverted** rather than landed in this unverified, crash-prone state;
+see `L128(a)` (`Roadmap.md`) for the crash itself, not yet localized.
+
+### Testing
+
+Three existing unit tests had mistagged
+`"feme.shader.stage"="vertex"` function attributes (never checked
+before this fix, since the code path was previously stage-blind)
+corrected to the real stage each test's own shape represents:
+
+- `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`
+  (`gl_in[]`, a genuine Geometry-stage shape) -> `geometry`.
+- `ThreadsDynamicVertexIndexIntoOutputStore` and
+  `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`
+  (per-vertex/per-primitive Mesh output arrays) -> `mesh`.
+
+Retagging `ThreadsDynamicVertexIndexIntoOutputStore` to the real
+`mesh` stage also, for the first time, legitimately exercised
+`addElements`'s own, separately-added `PerInvocationOutputArray`
+Mesh-stage peeling (added after this test was originally written, and
+unreachable under the old, incorrect `vertex` tag) -- its own
+`RowCount` expectation was stale (`3`, from before that peeling
+existed) and is corrected to the now-actually-produced, already-correct
+`1`.
+
+`ninja check-feme`: **3,276/3,279 Passed, 3 Unsupported, 0 Failed** (0
+regressions once the 3 stale-tag/stale-assertion tests were
+corrected).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `pipeline.monolithic.vertex_input.*` (13,296 cases): **2,485 Pass, 3
+  Fail, 10,805 NotSupported, 3 Warnings** -- unchanged from the prior
+  session's baseline; the same 3 `max_attributes.query_max_attributes.*`
+  cases, not a new or different fail count. `L128` itself is not
+  closed by this session's change alone.
+- `tessellation.user_defined_io.*` (9 `per_patch_array.*` cases run
+  clean; `per_patch_block.*` hits a pre-existing, unrelated assertion
+  crash in `resolveNestedStageIOField` confirmed via revert-and-rerun
+  to predate this session entirely, unrelated to this fix) and
+  `clipping.user_defined.*` (256 cases): **256/256 Pass** -- both swept
+  as regression guards for the Hull/Domain/Geometry/Mesh stage
+  restriction (the only stages this fix's classification narrowing
+  could plausibly affect); no regression found.
+- `pipeline.monolithic.blend.*` (the long-pending, two-session-running
+  full-family sweep first flagged in `L128`'s own prior session):
+  kicked off again this session in the background, still running at
+  the time this report was written (32,000+ of an eventual much
+  larger total already Pass, 0 Fail so far) -- see `agent_thoughts.md`
+  for this session's final status/next-step note on whether it
+  completed before the session ended.
+
+### Results
+
+`Roadmap.md`'s `L128` row updated (not struck through -- still open):
+root cause corrected (a stage-classification bug, not "no ABI operand
+can express this at all" as originally framed) and the classification
+bug itself fixed and CTS-verified (no behavior change to any
+currently-passing case). New row `L128(a)` filed for the
+nondeterministic JIT crash discovered while prototyping the
+loop-unrolling half of this fix -- not yet localized, needs
+ASan/valgrind/`rr`-class tooling in a future dedicated session. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- pure compiler-internals correctness fix, no new
+feature/extension surface. See `agent_thoughts.md` for the full
+narrative and next steps.
