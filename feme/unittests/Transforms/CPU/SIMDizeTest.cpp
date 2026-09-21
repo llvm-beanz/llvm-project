@@ -2433,6 +2433,69 @@ TEST(SIMDizeTest, WidensDivergentIndexIntoMaskedAllocaArray) {
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap L134(c): `FunctionWidener::widenInstruction`'s ordinary
+// `UI.isDivergentAtDef` uniformity gate cannot see that an
+// `extractelement`'s vector operand -- a `load` through a `MaskedAllocas`
+// base that looks uniform to that same naive analysis (its own address
+// is uniform, exactly why `widenMaskedAllocaLoad` is exempted from this
+// gate in the first place) -- carries genuinely per-lane-divergent
+// *values*, only a uniform *address*. Left to fall through to the
+// general gate, this `extractelement` used to be misclassified "uniform:
+// leave it exactly as it is" and never rewritten: a dangling reference to
+// the load once `widenMaskedAllocaLoad` erases it, silently replaced with
+// `poison` by `eraseFromParent`. Found reducing `dEQP-VK.draw.renderpass.
+// multiple_interpolation.*`'s own all-transparent-black-pixel failure (a
+// fragment shader's local `vec4[4]` interpolation-qualifier lookup table,
+// assembled from four separately-declared, per-lane-divergent varyings,
+// then read back through a single uniform push-constant-derived index)
+// to this exact shape.
+TEST(SIMDizeTest, DecomposesExtractElementFromUniformlyIndexedMaskedAllocaLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out, i32 %index) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %v0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %v1 = insertelement <4 x float> poison, float 0.0, i32 0
+      %a = alloca [2 x <4 x float>], align 4
+      %p0 = getelementptr [2 x <4 x float>], ptr %a, i32 0, i32 0
+      store <4 x float> %v0, ptr %p0, align 4
+      %p1 = getelementptr [2 x <4 x float>], ptr %a, i32 0, i32 1
+      store <4 x float> %v1, ptr %p1, align 4
+      %elt = getelementptr [2 x <4 x float>], ptr %a, i32 0, i32 %index
+      %v = load <4 x float>, ptr %elt, align 4
+      %e0 = extractelement <4 x float> %v, i32 0
+      %e1 = extractelement <4 x float> %v, i32 1
+      %off = zext i32 %tid to i64
+      %outp = getelementptr float, ptr %out, i64 %off
+      store float %e0, ptr %outp, align 4
+      %sum = fadd float %e0, %e1
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Neither `extractelement` may end up reading out of `poison` -- the
+  // exact shape a dangling reference to the erased `load` took before
+  // this fix.
+  unsigned FoundExtract = 0;
+  for (Instruction &I : instructions(F)) {
+    if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
+      EXPECT_FALSE(isa<PoisonValue>(EE->getVectorOperand()));
+      ++FoundExtract;
+    }
+  }
+  EXPECT_GT(FoundExtract, 0u);
+}
+
 // Roadmap L118: `FunctionWidener::widenMaskedStore`'s own governing mask
 // must be `Env.EntryMask`, not `Env.SideEffectMask`, whenever the masked
 // store's own address is a `MaskedAllocas`-tracked local variable. Unlike
