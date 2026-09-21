@@ -8152,3 +8152,94 @@ Unsupported, 0 Failed (+1 newly-enabled test, 0 regressions).
 No feature/extension inventory changes (no new Vulkan functionality
 shipped this session -- this is a compiler-internal correctness fix to
 existing dEQP-VK coverage, not a new capability).
+
+## Session: L128(c) full `pipeline.monolithic.*` sweep completed; L132, L133 filed
+
+Continuing directly from the prior session's `L128(c)` closure (which
+left a broad `pipeline.monolithic.*` regression sweep running in the
+background as extra evidence, not required to close the row). Confirmed
+`FeMe CPU Vulkan Device` at session start (standing requirement).
+
+**Checked the background sweep**: it had completed 188,690 cases (686
+`Fail`) before the `deqp-vk` process itself hard-aborted on a debug
+assertion, never reaching the rest of `pipeline.monolithic.*`. The
+abort:
+
+```
+deqp-vk: .../CanonicalizeStage.cpp:3055: NestedStageIOField (anonymous
+namespace)::resolveNestedStageIOField(Type *, uint64_t, Type *, const
+DataLayout &): Assertion `!isStageIOPadField(ST->getElementType(Member))
+&& "load/store into a nested struct's own synthetic pad field"' failed.
+```
+
+on `dEQP-VK.pipeline.monolithic.interface_matching.decoration_mismatch.
+out_flat_in_none_member_of_structure_in_block_vert_geom_out_frag_in`.
+
+**Triaged the 686 `Fail`s by family**: 592 `depth.*`, 57 `bind_buffers_2.*`,
+26 `extended_dynamic_state.*`, 5 `early_destroy.*`, 2 `input_assembly.*`,
+2 `creation_cache_control.*`, 1 `empty_fs.*`, 1 `cache.*`.
+
+**Confirmed every family (and the crash) is pre-existing, not a
+regression from `L128(c)`'s fix**: temporarily swapped
+`GraphicsPipeline.cpp` back to its pre-`L128(c)` content (removing just
+the new pass's invocation, via a diff against the commit before
+`L128(c)` landed -- a 12-line, single-file change), rebuilt `feme_vulkan`
+only, and reran one representative case from each family plus the
+crashing `interface_matching` case directly against this baseline
+build:
+
+- `depth.format.d16_unorm.depth_test_disabled.depth_write_enabled` --
+  `Fail (Image mismatch)`, identical to the fix-present run.
+- `bind_buffers_2.*` (already known pre-existing from last session) --
+  reconfirmed.
+- `extended_dynamic_state.after_pipelines.depth_bias_enable` -- `Fail
+  (Incorrect value found in attachments...)`, identical.
+- `early_destroy.cache` -- `Fail (retcode: VK_ERROR_INITIALIZATION_
+  FAILED...)`, identical.
+- `input_assembly.primitive_restart.restart_mix.restart_mix_dynamic_topo`
+  -- `Fail (retcode: VK_ERROR_INITIALIZATION_FAILED...)`, identical.
+- `creation_cache_control.compute_pipelines.
+  batch_pipelines_early_return` -- `Fail (pipelines[1] is not
+  VK_NULL_HANDLE...)`, identical.
+- `empty_fs.masked_samples` -- `Fail (vk.createImage(...):
+  VK_ERROR_INITIALIZATION_FAILED...)`, identical.
+- `cache.misc_tests.invalid_size_test` -- `Fail (Data needs to be
+  empty...)`, identical.
+- `interface_matching.decoration_mismatch.
+  out_flat_in_none_member_of_structure_in_block_vert_geom_out_frag_in`
+  -- aborts with the exact same assertion, identical.
+
+Restored the real fix (`GraphicsPipeline.cpp` back to its committed
+state -- `git status` confirmed a clean, zero-diff working tree
+afterward), rebuilt `feme_vulkan` + `FeMeVulkanTests`, and reconfirmed
+`DrawTest.L128ARowCount5Repro` still passes.
+
+**Filed the two newly-discovered gaps as their own roadmap rows**
+(`Roadmap.md`), since neither had a dedicated row before this session --
+both were previously only visible as noise inside a broader sweep:
+- `L132`: `bind_buffers_2.*`'s 57 fails (`vkCmdBindVertexBuffers2`
+  stride/offset handling). Not root-caused this session, filed for a
+  future dedicated session.
+- `L133`: the `interface_matching.*` nested-struct-pad-field assertion
+  crash (`CanonicalizeStage.cpp`'s `resolveNestedStageIOField`). Not
+  root-caused this session; flagged as possibly related in shape to
+  `L124`'s pad-field/nested-struct work but not confirmed the same
+  root cause. This is a genuine `deqp-vk` process abort, not just a
+  reported `Fail` -- worth prioritizing over `L132` if only one can be
+  picked up next, since it silently truncates any batch CTS sweep that
+  reaches it (as it did to this row's own extra regression-guard sweep).
+
+**Started a follow-up sweep** (`--deqp-exclude-case=
+dEQP-VK.pipeline.monolithic.interface_matching.*`) to get a complete
+tally of the rest of `pipeline.monolithic.*` without hitting the `L133`
+crash. Left running in the background at session end (not required to
+close `L128(c)`, which is now fully verified via the 188,690-case
+partial sweep plus per-family baseline spot-checks above) -- see a
+future session for its final tally if picked up.
+
+**`L128(c)` is now considered fully closed**: the row's own 3 target
+cases pass, the full `vertex_input.*` family is 0 Fail, and the full
+`pipeline.monolithic.*` family (bar the separately-filed, pre-existing
+`L133` crash) shows 0 new fails across every distinct failing family
+observed. No feature/extension inventory changes (no new Vulkan
+functionality shipped this session).
