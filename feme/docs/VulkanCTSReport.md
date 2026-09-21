@@ -9366,3 +9366,97 @@ so `L134` itself is struck through as fully fixed. No feature/extension
 inventory changes (a compiler/runtime correctness fix, no new Vulkan
 functionality shipped this session). `L135`/`L136` remain open, filed
 but not yet investigated.
+
+## Session: `L136` closed -- stage-IO load-through-`select`-of-globals fix
+
+### Bug
+
+`dEQP-VK.draw.renderpass.output_location.shuffle.inputs-outputs` fails
+at pipeline creation with `JIT session error: Symbols not found: [
+spirv_var_36, spirv_var_33 ]` / `vkCreateGraphicsPipelines: Failed to
+materialize symbols`. The test's own Amber fragment shader
+conditionally swaps two `vec4` inputs to two outputs based on a
+per-pixel checkerboard condition:
+
+```glsl
+if (((int(gl_FragCoord.x)/5)%2) == ((int(gl_FragCoord.y)/5)%2)) {
+    frag_out0 = color_in0; frag_out1 = color_in1;
+} else {
+    frag_out0 = color_in1; frag_out1 = color_in0;
+}
+```
+
+An `FEME_DUMP_IR`-based (pre-existing, documented) IR dump of the
+compiled fragment shader showed the final load reading `color_in0`/
+`color_in1` takes the shape `load <4 x float>, ptr (select i1 %cond,
+ptr @spirv_var_33, ptr @spirv_var_36)` -- a `select` *between two raw
+stage-IO global pointers* rather than two separately-convertible
+loads, one per if/else branch. A temporary dump immediately after
+`CanonicalizeStagePass` (reverted before commit) confirmed this exact
+shape is already present that early -- SPIR-V-to-LLVM import itself
+produces the `select` directly (this simple, side-effect-free two-arm
+shape has no real control-flow divergence to preserve), so
+`CanonicalizeStage.cpp` genuinely needed to handle it, not some later
+pass.
+
+Root cause, in two parts:
+
+1. `CanonicalizeStage.cpp`'s discovery loop (which builds
+   `InputGlobals`/`OutputGlobals`, later used to assign each global its
+   own `ElementID`) calls `getStageIOGlobal` on every load/store's
+   pointer operand, which resolves to at most *one* `GlobalVariable*`.
+   A `select`-typed pointer has no single base for any of its three
+   helper functions to walk to, so it returned `nullptr` -- silently
+   dropping *both* `@spirv_var_33`/`@spirv_var_36` out of
+   `InputGlobals` entirely; neither ever received an `ElementID`.
+2. Even had they been discovered, `resolveStageIOAccess`'s own
+   `getStageIOBaseAndOffset` (`Value::stripAndAccumulateConstantOffsets`)
+   only strips constant-offset `getelementptr` chains, with no
+   `SelectInst` handling either -- the load itself would still have
+   been left unconverted.
+
+Either gap alone is enough to leave the underlying globals as
+never-rewritten, permanently-unresolved `external` symbols at
+JIT-link time.
+
+### Fix
+
+Added two new helpers in `CanonicalizeStage.cpp`:
+
+- `collectStageIOGlobalsThroughSelect`: a `getStageIOGlobal`
+  counterpart that recurses through a `select`-of-`select` chain (an
+  `if`/`else if`/`else` ladder's own folded shape) and appends every
+  global it can reach, wired into the discovery loop so both globals a
+  `select` reaches get their own `ElementID`.
+- `resolveSelectedStageIOLoad`: rewrites a load whose pointer is (or
+  recurses through) such a `select` into a value-level `select`
+  between two independently-resolved `feme.stage.input.load` calls
+  (one per arm), rather than leaving a pointer-level `select` to a raw
+  global. Wired into the main load-rewrite loop, tried before the
+  task-payload read fallback (which cannot handle a `select` pointer
+  either, for the same reason).
+
+New unit test:
+`CanonicalizeStageTest.RewritesLoadThroughSelectOfDistinctInputGlobals`
+(a minimal `select i1 %cond, ptr @color_in0, ptr @color_in1` load/store
+repro, confirming both inputs keep distinct `Location`s, no load/store
+references either raw global directly anymore, and the resulting
+`feme.stage.output.store`'s value operand is a `select` between the
+two `feme.stage.input.load` results on the original condition).
+
+### Verification
+
+- `ninja check-feme`: 3,296/3,299 Passed, 3 Unsupported, 0 Failed (+1
+  new test, 0 regressions).
+- CTS: the isolated case is now **1/1 Pass** (was 0/1, JIT-link
+  failure).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **42 Fail**
+  (was 43) -- confirmed to be exactly the remaining `L135`
+  (`linear_interpolation.*`) cases, 0 other regressions.
+
+### Results
+
+`L136` is now **fully closed and CTS-verified**, struck through in
+`Roadmap.md`. No feature/extension inventory changes (a compiler
+correctness fix, no new Vulkan functionality shipped this session).
+`L135` remains open, filed but not yet investigated.
