@@ -97090,3 +97090,131 @@ compiler-internals fix.
    the still-running blend sweep's log) should be cleaned up by
    whichever future session confirms the blend sweep's final result
    and no longer needs the raw log.
+
+## Session: L128(a) crash localization -- valgrind + GDB, stack-overflow theory ruled out
+
+**Confirmed device first**: `vulkaninfo --summary` → `FeMe CPU Vulkan
+Device`, per standing instruction.
+
+**TL;DR**: No functional code change lands this session. Spent the
+whole session getting real tooling onto `L128(a)` (the nondeterministic
+JIT crash blocking `L128`'s loop-unroll fix), found and ruled out a
+tempting-but-wrong "stack overflow via runaway recursion" theory, and
+landed on a much more precise diagnosis: a genuine, heap-layout-dependent
+wild-pointer read inside the *compiled shader body itself*, at draw
+time. Still not localized to a specific IR construct -- that's the
+next session's job.
+
+**What I did, in order**:
+
+1. Installed `valgrind` (`apt install valgrind`) -- wasn't present,
+   flagged by a prior session as needed.
+2. Reinstated the (previously-reverted) forced-full-loop-unroll
+   prototype in `Pipeline.cpp` from scratch, purely to reproduce
+   `L128(a)` -- explicitly not for landing, matching the prior
+   session's own precedent of using-then-reverting this same code.
+3. Confirmed the crash reproduces directly (exit 139, no valgrind
+   needed) on `binding_one_to_many.interleaved`. Learned the hard way
+   that piping `deqp-vk`'s output through `tail` can silently eat the
+   real exit code -- redirect to a file and check `$?` directly.
+4. Ran under `valgrind --track-origins=yes`. This is where it got
+   interesting: found an "Invalid read of size 4" inside unsymbolized
+   JIT code, landing at a wild address that happened to be inside an
+   unrelated CTS-internal heap allocation in one run, and near-null
+   in another. Different address each time, same underlying compiled
+   IR (verified via `FEME_DUMP_IR_PREUNROLL`, a debug dump I added to
+   the prototype) -- **that's the whole nondeterminism story right
+   there**: it's not the code that changes between runs, it's the
+   garbage value being read (heap/ASLR state differs per process
+   launch).
+5. Went looking for a symbolized backtrace and found something I
+   should have looked for on session 1 of this bug: `CompiledStage.cpp`
+   already has a `FEME_CPU_JIT_DEBUG_SUPPORT=1` env var that registers
+   the JIT's object files with GDB via `orc::ELFDebugObjectPlugin`.
+   Someone built this specifically for crash-triage sessions like this
+   one. With it on, `gdb -batch` finally showed real symbol names:
+   crash is inside `main` (the compiled vertex shader), called from
+   `feme_cpu_entry_main` (the per-invocation wrapper).
+6. **The wrong turn**: `bt full` showed `feme_cpu_entry_main` repeated
+   ~15,000 times, looking exactly like runaway self-recursion blowing
+   the stack. Got excited, started grepping `EntryWrapper.cpp` for
+   `musttail`/tail-call markers (found none -- seemed to confirm the
+   theory). **Then double-checked by looking at `$sp` directly** at
+   the crash instead of trusting `bt full`, and the numbers didn't add
+   up: `$sp` was only ~20KB below the top of its stack region, with
+   ~114KB of headroom still available below that, nowhere near the
+   process's real 8&nbsp;MiB `ulimit -s`. A genuine 15,000-deep
+   recursion would have used *way* more stack than 20KB even at a
+   tiny frame size. So the "15,000 frames" was fake -- an artifact of
+   `gdb`'s frame-pointer-chasing unwinder getting lost on
+   frame-pointer-omitted (optimized) JIT code and just re-finding the
+   same nearby symbol over and over on garbage stack contents. Glad I
+   checked before writing this into the roadmap as fact.
+7. Reverted `Pipeline.cpp` back to the committed baseline (rebuilt to
+   confirm), updated `Roadmap.md`'s `L128(a)` row with the corrected,
+   much more detailed diagnosis and concrete next steps, and updated
+   `VulkanCTSReport.md`.
+8. Checked on the long-running `pipeline.monolithic.blend.*` background
+   sweep (PID 40501, carried over from 2 prior sessions) repeatedly
+   throughout -- climbed from ~32,300 to ~41,800 cases over this
+   session, 0 Fail throughout, **still not finished** by session end.
+   Left running again.
+
+**Commits** (2, each with the Copilot co-author trailer):
+1. `Roadmap.md` -- `L128(a)` row rewritten with the valgrind/gdb
+   findings, corrected stack-overflow-theory-ruled-out narrative, and
+   next-step guidance.
+2. `VulkanCTSReport.md` -- new session section documenting the same.
+(No `feme/lib` commit this session -- the diagnostic prototype was
+reverted, not landed.)
+
+**Roadmap**: `L128(a)` updated in place (still one level of nesting,
+per the "no more than one lowercase letter deep" rule -- unchanged).
+`L128` itself untouched, still open. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no update needed, diagnostic-only
+session.
+
+**A note for whoever reads GDB backtraces on this JIT next**: don't
+trust `bt full`'s frame count at face value on JIT-compiled code built
+without frame pointers -- cross-check with `info registers sp` and the
+process's actual `ulimit -s` / stack VMA size before concluding
+"stack overflow." I nearly wrote a wrong root cause into the roadmap
+this session; the 30-second sanity check caught it.
+
+## Suggested next steps
+
+1. **Pick up `L128(a)` with tooling already in place**: `valgrind` is
+   now installed, and `FEME_CPU_JIT_DEBUG_SUPPORT=1` is the right GDB
+   flag to reach for -- both are confirmed to work well together on
+   this bug. Reinstate the same (unlanded, described-in-`Roadmap.md`
+   but not preserved elsewhere) forced-unroll prototype to reproduce
+   it, and this time build a **hand-minimized 2-3-attribute repro
+   shader** first, so each valgrind iteration doesn't take minutes --
+   the full 15-attribute CTS shader is way too slow to bisect by hand
+   under valgrind.
+2. Once localized to a specific IR construct, compare its generated
+   code shape against the known-working `RowCount<=4` matrix case
+   (which exercises the same `computeStageStorageAddress`/
+   `feme.stage.input.load` machinery successfully today) to find what
+   specifically breaks at `RowCount`~15.
+3. **Check `/tmp/ctsrun/l128/blend_full.qpa`** (PID 40501 if still
+   alive) for the `pipeline.monolithic.blend.*` sweep's final tally --
+   still running after 3 sessions now (41,800+ of 0 Fail as of this
+   session's end). If it finally finished, update
+   `VulkanCTSReport.md` and close out this long-standing check. If
+   still running, it's fine to just let it keep going in the
+   background across sessions -- it's not blocking anything, just
+   worth eventually confirming.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its
+   own dedicated session, not a quick pick.
+5. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's scratch logs at `/tmp/ctsrun/l128a/*` (valgrind
+   logs, gdb logs/backtraces, IR dumps) can be cleaned up once a
+   future session has re-derived what it needs from them -- kept for
+   now since they contain the actual crash addresses referenced in
+   this entry.
