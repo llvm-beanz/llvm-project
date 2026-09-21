@@ -98487,3 +98487,38 @@ session's own scoping; none are quick picks.
 1. **`L115(b)`** (pull-model interpolation, now covering both its own original scope and the former `L135`) -- the only interesting open item this session found. Needs a new runtime-callback ABI surface, not a quick pick: (a) a new stage op (e.g. `feme.stage.input.interpolate`) carrying resolved element/row/component plus a runtime mode and operand(s); (b) a new per-invocation runtime-callback mechanism in `Executor.cpp` (modeled on `ImageCalls.cpp`'s existing texture-sampling precedent) exposing enough of `Executor.cpp`'s own per-lane triangle data (`Tri.Pos`/`InvW`/`Varyings`, `Area`, `Quad.PixelX`/`PixelY`) to recompute barycentric weights at a runtime-supplied point; (c) `SPIRVToLLVMPatterns.cpp` conversion patterns for `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` themselves. Estimated 1-2 full sessions given the new ABI surface -- start a fresh session dedicated to just this, don't try to squeeze it into a continuation.
 2. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 3. No scratch left over to clean up this session (`/tmp/ctsrun/l136/` and its contents already deleted).
+
+# Session: L115(b) closed (two bugs: SPIR-V materialization + ABI stride mismatch)
+
+**Confirmed `FeMe CPU Vulkan Device` first, as required every session.**
+
+## What's done now
+
+1. `L115(b)` (pull-model interpolation: `InterpolateAtCentroid`/`AtSample`/`AtOffset`) is **fixed and CTS-verified**. Two distinct bugs, found in sequence:
+   - **Bug 1 (compile-time)**: `resolveInterpolantAddress()` added to `SPIRVToLLVMPatterns.cpp`. The first attempt (special-casing `StageIOAddressOfPattern` to keep a real pointer) compiled and unit-tested fine but silently failed at MLIR-conversion runtime -- the dialect-conversion driver re-materialized the special-cased pointer back to the type converter's own canonical eagerly-loaded value for any `Adaptor`-based consumer. Fixed by accepting that canonical value and reaching back through its own `llvm.load`'s address operand instead of fighting the materialization.
+   - **Bug 2 (runtime)**: `lowerFragmentInterpolateAt` addressed `FEnv.VertexInputs` (built with `InvocationCount = QuadCount * 3`) using `FEnv.InputLayout` (built with `InvocationCount = QuadCount * 4`) -- two different strides for the same signature. Found via CTS pixel-diff: Red always right, Green/Blue/Alpha often wrong. Fixed by threading a new `VertexInputLayout` field through the whole ABI stack (`RuntimeABI.h`/`StageArgsLayout.h`/`ResourceHeap.h`/`.cpp`/`Executor.cpp`/`FragmentWrapper.cpp`), consuming `FemeFragmentArgs`'s last `Reserved[1]` slot.
+2. New tests: `spirv-to-llvm-gl-interpolate-at.mlir` (FileCheck, all 3 ops), `FragmentWrapperTest.InterpolateAtAddressesVertexInputsWithOwnLayout` (confirmed to fail pre-fix by temporarily reverting the fix line and re-running, passes post-fix).
+3. `ninja check-feme`: 3,298/3,301 Passed, 3 Unsupported, 0 Failed (+2 tests, 0 regressions).
+4. CTS: `linear_interpolation.*` 12/12 previously-failing now Pass; `multiple_interpolation.*` (the old `L134(c)`, same root cause) 16/16 non-skipped now Pass; full `dEQP-VK.draw.*` sweep (29,451 cases): **0 Fail**.
+5. `Roadmap.md`: struck through `L115(b)` and `L135` (resolved as duplicate discoveries of the same gap); updated `L125(r)`'s status note to point at this fix, flagging its own `multisample_interpolation.*` family as not yet re-swept.
+6. `VulkanCTSReport.md`: new session write-up appended.
+7. Committed in 3 pieces: SPIR-V pattern fix + its test, ABI-threading fix + its test, docs update.
+
+## Debugging technique that mattered here
+
+Extracting embedded base64 PNG images from a CTS `.qpa` log (`<Image Name="...">...</Image>` regex + `base64.b64decode`) and sampling pixel values with PIL revealed an "only component 0 ever matches, others diverge worse further from origin" pattern -- directly pointing at a stride/offset bug proportional to component index and invocation index, rather than a semantic bug. Reusable technique for any future "wrong pixel colors, not a compile error" CTS failure.
+
+## Not done / still open
+
+- `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
+- `L125(r)`'s own `multisample_interpolation.*` family -- shares this session's exact root-cause gap but was not directly re-swept (only `linear_interpolation.*`/`multiple_interpolation.*`/full `draw.*` were); very likely now passes too, worth a quick confirmation sweep.
+- `AtCentroid`'s own documented simplification (pixel center, not true coverage-weighted centroid) still stands -- needs per-sample coverage-mask plumbing into `FemeFragmentPrimitive` to fix properly, not attempted this session (no CTS case currently exercises the difference).
+- `InterpolateAtOffset`'s DXIL-side `EvalSnapped` 1/16-pixel-snapped-units conversion is a bare int-to-float cast, not the real snapped-units scale -- not yet exercised by any CTS case, flagged as a follow-up in the code's own comment.
+
+## Suggested next steps
+
+1. **(~15 min, quick confirmation)** Re-sweep `dEQP-VK.draw.*.multisample_interpolation.*` to confirm this fix also closes `L125(r)`'s own tracked bucket -- very likely yes, given the identical root-cause legalization gap, but not directly verified this session.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
+3. **(~1 session, follow-up not blocking anything)** `AtCentroid`'s pixel-center simplification -- needs per-sample coverage-mask data threaded into `FemeFragmentPrimitive` for a true coverage-weighted centroid; no CTS case currently distinguishes this, so low urgency.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+5. No scratch left over to clean up this session (`/tmp/interp_test.mlir`, `/tmp/ctsrun/l115b*` already deleted).
