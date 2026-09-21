@@ -98175,3 +98175,89 @@ was in scope this session.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 5. This session's scratch (`/tmp/ctsrun/l134d/`) has already been cleaned
    up; nothing left over to delete.
+
+# Session: L134(b) -- multi-row array-output color-attachment binding fixed
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` first, per
+standing instructions.
+
+## What I did
+
+1. Picked up `L134(b)` (`output_location.array.*`), next-smallest open
+   `L134` sub-row per the last session's suggested next steps.
+2. Reproduced: 28/28 Fail, not the roadmap's 24-case estimate. Split into
+   3 shapes by CTS failure text:
+   - 4 cases crash (`feme-cpu-simdize: ... divergent value '.bc' ...`),
+     only on vector-wider-than-scalar array outputs (e.g. `vec2[3]`).
+   - 24 cases genuine value-mismatch (`Probe failed at: 0, 0`).
+3. Used a temporary `FEME_DEBUG_DUMP_STAGE_IR`-gated IR dump (reverted
+   before commit) to rule out the compiler front end for the 24-case
+   bug -- the fragment shader's compiled IR was already correct.
+4. Root-caused: `StageStorage.cpp`'s `findElementByLocation` does an
+   *exact* `Location` match. An array output (`RowCount > 1`) is one
+   `SignatureElement` spanning several locations -- only the first bound
+   attachment ever resolved; the rest silently got no fragment output at
+   all.
+5. Fixed: added `findElementCoveringLocation` (finds the element whose
+   `[Location, Location+RowCount)` span covers a queried location, plus
+   the resolved `Row`), threaded a new `FSColorRows` vector through
+   `Executor.cpp`'s attachment-binding loop, and gave
+   `readFragmentColor`/`readFragmentColorInt` a `Row` parameter (default
+   `0`) reading through `StageStorage`'s existing `Row`-aware
+   `readFloat`/`readRaw`.
+6. Wrote `ExecutorTest.RendersMultiRowArrayOutputToSeparateColorAttachments`,
+   confirmed via stash/rebuild round-trip to fail pre-fix and pass
+   post-fix.
+7. `ninja check-feme`: 3,285/3,288 Passed, 3 Unsupported, 0 Failed (+1
+   test, 0 regressions).
+8. CTS: `output_location.array.*` now **18/28 Pass** (was 0/28). Full
+   `dEQP-VK.draw.*` sweep (29,451 cases): **181 Fail** (was 199, exactly
+   `199 - 18`), 0 regressions -- confirmed the sweep's own fail list
+   contains exactly the same 10 unresolved cases the isolated repro
+   found (6 `b10g11r11-ufloat-pack32.*` format-unsupported, 4
+   `feme-cpu-simdize` crashes), nothing new.
+
+Committed in 5 pieces (`StageStorage` helper, `Executor.cpp` fix, its
+unit test, `Roadmap.md` + `VulkanCTSReport.md` together), all with the
+Copilot co-author trailer. Split the row's 2 remaining bugs into new,
+independent rows `L134(h)` (simdize crash) and `L134(i)`
+(`B10G11R11_UFLOAT_PACK32` missing `isSupportedColorAttachmentFormat`
+case) rather than reopen `L134(b)` itself, since both are genuinely
+separate root causes discovered only once the routing fix let them
+surface their own distinct symptoms.
+
+## What I did NOT do this session
+
+`L134(h)`/`L134(i)` (the 2 new bugs this session's own investigation
+found and filed) -- neither attempted, both need their own session.
+`L134(a)`/`L134(c)` (the other 2 open `L134` sub-rows), `L125(m)`/
+`L125(n)`, `L115(b)` -- all left untouched on purpose, per every prior
+session's own scoping.
+
+## Suggested next steps
+
+1. **(~15-20 min, smallest pick)** `L134(i)` -- `B10G11R11_UFLOAT_PACK32`
+   missing an `unpackColor` case (`ImageFixture.cpp`) and its
+   `isSupportedColorAttachmentFormat` (`RenderPass.cpp`) entry. A real
+   `packClearColor` encode already exists for this format to mirror in
+   reverse; the 6 CTS cases this session isolated
+   (`b10g11r11-ufloat-pack32-{highp,mediump}`, plain/`-output-{float,vec2}`)
+   are ready to re-verify against once fixed.
+2. **`L134(h)`** -- the 4-case `feme-cpu-simdize` crash on a
+   vector-wider-than-scalar array-output shape. Not root-caused; the
+   crash's `.bc`-named divergent value suggests a bitcast `SIMDize.cpp`'s
+   divergence allowlist doesn't recognize -- needs its own IR-dump-based
+   trace (reuse this session's `FEME_DEBUG_DUMP_STAGE_IR` technique, or a
+   targeted look at `SIMDize.cpp` directly).
+3. **`L134(c)`** (`multiple_interpolation`, 64 cases) and **`L134(a)`**
+   (`indexed_draw`/`maintenance6`, 64 cases) -- the 2 still-open original
+   `L134` sub-rows, in that size order.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+5. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's scratch (`/tmp/ctsrun/l134b/`, `/tmp/l134b/`) has
+   already been cleaned up; nothing left over to delete.
