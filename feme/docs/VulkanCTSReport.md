@@ -9167,3 +9167,109 @@ suggested next steps.
 the deeper interpolation-qualifier value-mismatch bug remains open. No
 feature/extension inventory changes (a compiler correctness fix, no new
 Vulkan functionality shipped this session).
+
+## Session: `L134(c)` closed -- SIMDize `MaskedAllocas`-load `extractelement` divergence-gate gap fixed
+
+Continuing directly from the previous session's `L134(c)` write-up above
+(the single-member-block `Location`-fold sub-bug already fixed there),
+this session root-caused and fixed the remaining "smooth produced
+different results" value-mismatch, closing `L134(c)` entirely.
+
+### Root cause
+
+Reproduced the smallest case,
+`dEQP-VK.draw.renderpass.multiple_interpolation.separate.no_sample_decoration.1_sample`.
+Extracting and diffing the CTS QPA's own embedded PNG images (`Result`
+vs `Reference`) confirmed triangle rasterization/coverage was
+pixel-identical, but every covered result pixel was exactly `(0,0,0,0)`
+-- not a rounding issue, a hard "reads as zero" bug for one
+interpolation-qualifier selection.
+
+The failing shader (`frag_multi`) is CTS's own combined-varyings shape:
+four separately-declared, per-lane-divergent varyings
+(`smooth`/`flat`/`noperspective`/`centroid`) get assembled into a local
+`vec4[4]` lookup table, then read back through a single fragment-stage
+push-constant index (`out_color = in_colors[pc.interpolationIndex]`).
+`CanonicalizeStage.cpp`'s signature construction, `StageLink.cpp`'s
+varying linking, and `Executor.cpp`'s interpolation loop were all
+confirmed correct for this shape by direct inspection and temporary
+`FEME_DEBUG_DUMP_STAGE_IR`-gated dumps (reverted before commit).
+
+A temporary `FEME_DEBUG_DUMP_PRE_SIMDIZE`/`FEME_DEBUG_DUMP_POST_SIMDIZE`-
+gated dump (both reverted before commit) bracketing `SIMDizePass` in
+`Pipeline.cpp` isolated it to `SIMDizePass` itself: the pre-widen IR
+stores the four varyings into a `[4 x <4 x float>]` local `alloca`
+(unconditional, plain stores -- correctly classified a `MaskedAllocas`
+base by `collectMaskedAllocas`, since the *values* stored are per-lane
+divergent even though the *address* is uniform), then reads one back
+via a dynamic-offset `getelementptr`/`load` gated behind a
+push-constant-bounds check, then four `extractelement`s pull the four
+components out for the masked output store.
+
+The post-widen IR showed `widenMaskedAllocaLoad` correctly building the
+load's four widened components (`WidenedVectorComponents`) -- but the
+four `extractelement`s reading them back showed
+`extractelement <4 x float> poison, i64 N` instead. Root cause:
+`FunctionWidener::widenInstruction`'s ordinary `UI.isDivergentAtDef`
+uniformity gate classifies the `MaskedAllocas` load itself as *uniform*
+(its address is genuinely uniform; only the value it reads back is
+divergent, which the generic LLVM divergence analysis has no way to
+see -- exactly the reason `widenMaskedAllocaLoad` is special-cased
+*ahead* of that gate in the first place). But its `extractelement`
+consumers were *not* given the same exemption: falling through to the
+general gate, each was misclassified "uniform: leave it exactly as it
+is" and left unrewritten -- a dangling reference to the load, which
+`widenMaskedAllocaLoad` had already queued for erasure. `eraseFromParent`
+silently replaces a dangling use with `poison`, reproducing the observed
+all-`(0,0,0,0)` result exactly.
+
+### Fix
+
+`SIMDize.cpp`: added a check, alongside the existing `MaskedAllocas`
+alloca/GEP/store/load special cases in `widenInstruction`, routing any
+`extractelement` whose vector operand is already present in
+`WidenedVectorComponents` (i.e. already decomposed by a preceding
+special case, regardless of what the naive `UI.isDivergentAtDef` gate
+says) through `widenExtractElement`, *before* that general gate is ever
+consulted.
+
+New regression test:
+`SIMDizeTest.DecomposesExtractElementFromUniformlyIndexedMaskedAllocaLoad`
+(a minimal `MaskedAllocas` array built from per-lane-divergent stores,
+read back through a uniform index, then `extractelement`ed -- confirmed
+via a stash/rebuild round-trip to fail identically to the real bug
+pre-fix).
+
+### Verification
+
+- `ninja check-feme`: 3,292/3,295 Passed, 3 Unsupported, 0 Failed (+1
+  new test, 0 regressions).
+- CTS: `separate.no_sample_decoration.1_sample` now **Pass**es. Full
+  `dEQP-VK.draw.renderpass.multiple_interpolation.*` re-sweep: **0
+  Fail** (16 Pass, 12 NotSupported -- unsupported 32/64-sample
+  multisample counts).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): 107 `Fail`
+  remain, all confirmed **pre-existing and unrelated** via a
+  stash/rebuild/rerun/restore round-trip (byte-for-byte identical fail
+  set with and without this session's fix): 64 `indexed_draw.*`/
+  `maintenance6` cases (`L134(a)`, still open, untouched this session),
+  42 `linear_interpolation.*` cases (a separate, pre-existing
+  `spirv.GL.InterpolateAtOffset` legalization gap, not yet filed as its
+  own roadmap row), and 1 `output_location.shuffle.inputs-outputs` case
+  (a separate, pre-existing JIT symbol-resolution gap, `JIT session
+  error: Symbols not found`, also not yet filed).
+
+### Results
+
+`L134(c)` is now **fully closed** (both sub-bugs fixed and
+CTS-verified). No feature/extension inventory changes (a compiler
+correctness fix, no new Vulkan functionality shipped this session).
+`L134`'s only remaining open sub-row is `L134(a)` (`indexed_draw.*`/
+`maintenance6`, 64 cases, untouched this session).
+
+Two new, previously-undiscovered failure families surfaced by this
+session's full `dEQP-VK.draw.*` sweep -- `linear_interpolation.*`'s
+`InterpolateAtOffset` legalization gap (42 cases) and
+`output_location.shuffle.inputs-outputs`'s JIT symbol-resolution gap (1
+case) -- are **not yet filed as their own roadmap rows**; see
+`agent_thoughts.md`'s suggested next steps for filing them.
