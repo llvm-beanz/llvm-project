@@ -3319,6 +3319,72 @@ TEST_F(PushConstantDispatchTest,
   vkFreeMemory(Device, Buf.Memory, nullptr);
 }
 
+/// (roadmap L129) Regression test for the push-constant state-isolation
+/// bug this milestone found while fixing `L125(t)`'s own descriptor-set
+/// equivalent: per Vulkan spec ("Descriptor Model"), "Graphics and Compute
+/// bind points maintain separate push constant state", so a push recorded
+/// with a `stageFlags` mask naming only graphics stages (e.g.
+/// `VK_SHADER_STAGE_VERTEX_BIT`) must never be visible to -- or clobber --
+/// the compute bind point's own separately-tracked push-constant bytes
+/// (and vice versa). No real graphics pipeline or draw is needed to
+/// reproduce this: `vkCmdPushConstants` performs no validation against any
+/// currently-bound pipeline layout (see its own comment), so a
+/// graphics-only-stage push can be recorded and its isolation observed
+/// purely through a compute dispatch. This pushes a real value at the
+/// compute bind point, then (mirroring `L125(t)`'s own interleaving style)
+/// pushes an unrelated sentinel at a graphics-only stage to the *same*
+/// byte range, and confirms the dispatch that follows still reads the
+/// compute-pushed value rather than the interleaved graphics-only push
+/// clobbering it (the bug this session found: both bind points previously
+/// shared one `PushConstants` buffer with no `stageFlags`-based routing at
+/// all).
+TEST_F(PushConstantDispatchTest,
+       GraphicsOnlyPushDoesNotClobberComputeBoundPushConstants) {
+  HostBuffer Buf = createStorageBuffer(4);
+  uint32_t InitialValue = 10;
+  std::memcpy(Buf.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo BufInfo{Buf.Buf, 0, 4};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+
+  uint32_t ComputePushValue = 32;
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                     sizeof(ComputePushValue), &ComputePushValue);
+
+  // A graphics-only push to the same byte range: must land in the
+  // graphics bind point's own push-constant state, not overwrite the
+  // compute push above.
+  uint32_t GraphicsSentinel = 0xCAFEF00D;
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                     sizeof(GraphicsSentinel), &GraphicsSentinel);
+
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Buf.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + ComputePushValue);
+
+  vkDestroyBuffer(Device, Buf.Buf, nullptr);
+  vkFreeMemory(Device, Buf.Memory, nullptr);
+}
+
 TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
   VkQueryPoolCreateInfo PoolInfo{};
   PoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
