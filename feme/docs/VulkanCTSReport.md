@@ -8619,3 +8619,111 @@ Passed (0 regressions).
 through `L134(e)`) remain open. No feature/extension inventory changes
 (a correctness fix to existing `VK_KHR_maintenance5` handling, no new
 Vulkan functionality shipped this session).
+
+## Session: `L134(e)` -- 32-bit layer-clear-mask truncation fixed
+
+### Summary
+
+Picked up `L134(e)` (`dEQP-VK.draw.renderpass.shader_layer.
+{vertex_shader_256,tessellation_shader_256}`, 8 of `L134`'s originally-
+filed 224 pre-existing `dEQP-VK.draw.*` fails), the smallest of its 5
+then-remaining open sub-rows, per the prior session's own next-steps
+ordering.
+
+**Reproduced the exact failure first** (per the standing instruction to
+check each `L134` sub-row's CTS message text before assuming a root
+cause): `Fail (Rendered image is not correct at
+vktDrawShaderLayerTests.cpp:941)` -- a real image-content mismatch, not
+an "expected: X, got: X" near-miss, confirming this is **not** another
+instance of the `L132`/`L134(f)` barycentric-sum-precision bug class,
+and needs its own distinct root-cause investigation.
+
+**Root cause**: `vktDrawShaderLayerTests.cpp`'s `testVertexShader`/
+`testTessellationShader` render into a 256-array-layer image (16x16
+grid of 16x16-pixel rectangles across a 256x256 image, one rectangle
+per layer routed via `gl_Layer`), then compare every layer's rendered
+rectangle-and-background against a reference. Extracting and
+pixel-diffing the QPA's embedded `Result`/`Reference` PNGs isolated the
+first divergence to layer 32 (the 33rd layer, the first past a 32-bit
+boundary): the layer's own drawn rectangle was correct, but its
+background was fully transparent `(0,0,0,0)` instead of the test's
+clear color `(128,128,128,255)` -- i.e. the layer's own
+`VK_ATTACHMENT_LOAD_OP_CLEAR` was silently never applied. Traced to
+`CommandBuffer.cpp`'s `fullLayerMask(uint32_t Layers)` helper, which
+used a `uint32_t` bitmask to record "which array layers of a plain,
+non-multiview layered render target still need a clear applied,"
+reusing the exact same machinery as genuine Vulkan multiview view
+masks (spec-capped at 32 bits by `VkRenderPassMultiviewCreateInfo`/
+`VkRenderingInfo::viewMask`). For layer counts >=32, `fullLayerMask`
+"saturated" to `~0u` -- but a 32-bit `~0u` can only ever represent
+layers 0-31; layers 32-255 were left permanently unrepresented and
+therefore never cleared. This bug was never previously caught because
+the CTS test's own `numLayersToTest[]` array jumps straight from `8` to
+`256` (`MIN_MAX_FRAMEBUFFER_LAYERS`, this ICD's own advertised
+`maxFramebufferLayers`/`maxImageArrayLayers` limit), so no intermediate
+layer count (9-255) was ever exercised, and the ICD's own advertised
+limit happens to be exactly the value this one CTS case uses.
+
+### Fix
+
+Replaced the `uint32_t`-mask-based clear-tracking machinery in
+`CommandBuffer.cpp` with `llvm::BitVector`-based tracking, which has no
+fixed width:
+- `GraphicsState::LoadedAttachmentViewMask` changed from
+  `llvm::DenseMap<uintptr_t, uint32_t>` to
+  `llvm::DenseMap<uintptr_t, llvm::BitVector>`.
+- `applyClear` now takes `const llvm::BitVector &ViewsToClear` and
+  `llvm::DenseMap<uintptr_t, llvm::BitVector> &AlreadyLoaded`, using
+  `BitVector::reset(const BitVector&)` (and-not semantics) and
+  `operator|=` (auto-resizing union) in place of the old raw
+  bit-shift-loop arithmetic.
+- `fullLayerMask` removed entirely, replaced by a new
+  `viewsToClear(const RenderTargetBinding &Binding)` helper: for
+  genuine multiview (`Binding.ViewMask != 0`), builds a 32-bit-bounded
+  `BitVector` from the mask bits (still spec-correct, since real
+  multiview is itself capped at 32 bits); for plain layered rendering
+  (`Binding.ViewMask == 0`), returns an all-set `BitVector` sized to
+  the render target's *actual* layer count, with no 32-bit cap.
+- `applyLoadOps` updated to call the new helper and pass the resulting
+  `BitVector` through to all three (`Color`/`Depth`/`Stencil`)
+  `applyClear` call sites.
+
+The genuine-multiview per-view draw-replication loop in `runDraw`
+(a separate, correctly-32-bit-bounded concept, since real multiview
+view counts are themselves spec-capped at 32) was confirmed out of
+scope and left untouched.
+
+### Testing
+
+Added `DrawTest.ClearsEveryLayerOfALayeredRenderTargetPastThirtyTwo`
+(`DrawTest.cpp`): a 40-array-layer plain (non-multiview) render target
+whose backing memory is deliberately poisoned with `0xAB` via `memset`
+before rendering (so a zero-initialized allocator can't make an
+unfixed clear-skip bug indistinguishable from a correctly-applied
+clear), draws a single triangle whose vertex shader outputs a constant
+`gl_Layer = 33`, and asserts layer 35 (untouched, past the old 32-bit
+boundary) reads back as the render pass's own clear color rather than
+the poison bytes, while layer 33 (the actual draw target) reads back
+as the fragment shader's color. Confirmed via a source-swap-to-baseline
+round-trip (`git show HEAD:...CommandBuffer.cpp` swapped in place of
+the fix, rebuilt, retested, restored) to fail with the fix removed
+(poison bytes leak through the untouched layer) and pass cleanly
+restored.
+
+`ninja check-feme`: 3,282/3,285 Passed, 3 Unsupported, 0 Failed (+2
+newly-discovered tests, 0 regressions). `FeMeVulkanTests` standalone:
+721/721 Passed (0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.*shader_layer*` (56 cases): **0 Fail** (was 8).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **211 Fail**
+  (was 219 pre-`L134(e)`, exactly `219 - 8`), 0 `shader_layer` fails
+  remaining, 0 regressions in every other pre-existing fail.
+
+### Results
+
+`L134(e)` is now fully closed. `L134`'s other 4 sub-rows (`L134(a)`
+through `L134(d)`) remain open. No feature/extension inventory changes
+(a correctness fix to existing layered-render-target clear handling,
+no new Vulkan functionality shipped this session).
