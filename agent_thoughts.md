@@ -97613,3 +97613,83 @@ read its final tally.
    uncommitted work, no full second build tree needed. Always `git
    status --short` afterward to confirm a clean, zero-diff restore
    before committing anything else.
+
+# Session: L133 fixed -- nested non-offset struct interior-pad remap gap
+
+**Confirmed `FeMe CPU Vulkan Device`** first, as required every session.
+
+## What's done
+
+`L133` (the `interface_matching.*` `deqp-vk` process-abort crash filed
+last session) is fixed, tested, and committed. It's no longer a
+standing item -- struck through in `Roadmap.md`.
+
+Root cause: `SPIRVToLLVMPatterns.cpp`'s `getStructMemberPhysicalIndexInRealType`
+returned a struct member's index unchanged whenever the *nested* struct
+being resolved had no explicit SPIR-V `Offset` decorations -- even
+though such a struct can still need an interior alignment pad
+(`layOutStructIfOffsetsMatch`'s non-offset branch, L103). This produced
+a GEP landing 8 bytes short of the real member, inside the struct's own
+synthetic pad -- which `CanonicalizeStage.cpp`'s own assertion then
+(correctly) rejected as unreachable.
+
+## How it was found (15 min, for next time you hit a similar crash)
+
+1. GDB against the `Release`-with-assertions `deqp-vk`/`feme_vulkan`
+   build showed a backtrace but no locals (no `-g`). Don't bother with
+   GDB `info locals` on this build -- go straight to source-level
+   `errs()` instrumentation instead.
+2. Added a temporary `getenv("FEME_DEBUG_L133")`-gated dump inside the
+   crashing function, plus a full module-IR dump right before
+   `CanonicalizeStagePass` runs (`GraphicsPipeline.cpp`). Both reverted
+   before committing (`git status --short` confirmed a clean diff on
+   both files afterward).
+3. The IR dump showed the exact bad GEP byte offset directly -- much
+   faster than reasoning abstractly about which remap pattern *should*
+   apply. Do this before guessing next time.
+
+## Verified
+
+1. `ninja check-feme`: 3,278/3,281 Passed, 3 Unsupported, 0 Failed
+   (one new unit test added, zero regressions).
+2. New regression test `SPIRVToLLVMTest.
+   NestedNonOffsetStructInteriorPadRemapsInnerMember` reproduces the
+   exact shape in isolation (no CTS/Vulkan runtime needed) -- confirmed
+   it fails pre-fix (`git stash` round-trip on just the one source
+   file) and passes post-fix.
+3. The exact crashing CTS case now **Pass**es.
+4. Full `interface_matching.*` re-sweep (1,589 cases, previously
+   impossible to complete due to the abort): **0 Fail**.
+
+## Commits (4, each with the Copilot co-author trailer)
+
+1. The fix itself (`SPIRVToLLVMPatterns.cpp`).
+2. The new regression test.
+3. `Roadmap.md` strikethrough.
+4. `VulkanCTSReport.md` session write-up.
+
+(This `agent_thoughts.md` entry is commit 5, on its own, per standing
+instructions.)
+
+## Suggested next steps
+
+1. **Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`** (PID 12156,
+   still alive as of this session's end, ~28 min runtime, mid-
+   `blend.dual_source.*`) for its final tally before doing anything else
+   CTS-related -- 0 fails through the `blend.*` sub-family so far. This
+   is the *same* multi-hour `interface_matching`-excluded sweep two
+   sessions ago started; if it's finally done, record the tally in
+   `VulkanCTSReport.md` and clean up `/tmp/ctsrun/l128fix/`,
+   `/tmp/ctsrun/l133/`, `/tmp/ctsrun/l127/`, `/tmp/ctsrun/vulkan/` (all
+   scratch, nothing committed references them).
+2. **`L132`** (`bind_buffers_2.*`, 57 fails, `vkCmdBindVertexBuffers2`
+   stride/offset handling) -- still not root-caused. Good next pick: no
+   known crash, no known blocker, just needs a dedicated session to
+   start from a minimized repro the way `L133` was worked this session.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing
+   a new runtime-callback ABI surface, not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
