@@ -53,33 +53,22 @@ file.
 
 # Request
 
-The last session seems to have stalled out. You can restore any intermediate
-state it left behind with `git stash pop`.
-
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~1-2 hrs, quick-ish)** `L136` (`output_location.shuffle.inputs-outputs`, 1
-   case) -- smallest of the two newly-filed items. `JIT session error: Symbols
-   not found: [ spirv_var_36, spirv_var_33 ]` -- start by finding where
-   `spirv_var_NN`-named symbols are declared/resolved (likely
-   `SPIRVToLLVMPatterns.cpp` or the JIT linking layer) and compare against this
-   test's own "shuffle" input/output swizzle shape to see what's different about
-   its global-variable naming/linkage vs. every passing case.
-2. **(~2-4 hrs)** `L135` (`linear_interpolation.*`, 42 cases) -- `error: failed
-   to legalize operation 'spirv.GL.InterpolateAtOffset' that was explicitly
-   marked illegal`. `InterpolateAtOffset` has no lowering pattern registered at
-   all; likely needs a new `SPIRVToLLVMPatterns.cpp` pattern (or a
-   `feme.stage.*` runtime intrinsic) mirroring however
-   `InterpolateAtSample`/`InterpolateAtCentroid` (if those exist) are already
-   handled, or a from-scratch implementation if this is the first
-   `InterpolateAt*` variant this compiler supports at all -- check that first.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
-   the largest not-yet-started cross-repo item, needs its own dedicated session.
-4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new
-   runtime-callback ABI surface, not a quick pick.
-5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **`L115(b)`** (pull-model interpolation, now covering both its own original
+   scope and the former `L135`) -- the only interesting open item this session
+   found. Needs a new runtime-callback ABI surface, not a quick pick: (a) a new
+   stage op (e.g. `feme.stage.input.interpolate`) carrying resolved
+   element/row/component plus a runtime mode and operand(s); (b) a new
+   per-invocation runtime-callback mechanism in `Executor.cpp` (modeled on
+   `ImageCalls.cpp`'s existing texture-sampling precedent) exposing enough of
+   `Executor.cpp`'s own per-lane triangle data (`Tri.Pos`/`InvW`/`Varyings`,
+   `Area`, `Quad.PixelX`/`PixelY`) to recompute barycentric weights at a
+   runtime-supplied point; (c) `SPIRVToLLVMPatterns.cpp` conversion patterns for
+   `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` themselves. Estimated 1-2
+   full sessions given the new ABI surface -- start a fresh session dedicated to
+   just this, don't try to squeeze it into a continuation.
+2. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-6. **(~2 min)** `/tmp/ctsrun/l134a/` (this session's scratch:
-   `list.qpa`/`one.qpa`/`fix.qpa`/`fix_all.qpa`/`full.qpa`) can be deleted once
-   a future session no longer needs them -- nothing in it is referenced by
-   anything committed.
+3. No scratch left over to clean up this session (`/tmp/ctsrun/l136/` and its
+   contents already deleted).
