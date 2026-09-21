@@ -2559,6 +2559,24 @@ this way needs no separate `vkCreateShaderModule` call at all. See
 `VulkanCTSReport.md` for the real before/after `dEQP-VK.pipeline.
 pipeline_library.*` figures and the remaining named gaps (H29e, H29f).
 
+**(Roadmap L137 correction)** A prior session speculated that the 108-case
+`fast_linked_library`/`pipeline_library`
+`multisample_interpolation.centroid_interpolation_consistency.pushc_component_*`
+`VK_ERROR_INITIALIZATION_FAILED` failures were caused by this row's own
+honestly-`VK_FALSE`
+`graphicsPipelineLibraryIndependentInterpolationDecoration` gap, since
+they occurred exclusively under the pipeline-library construction types.
+This was **wrong**: `FEME_VULKAN_LOG_CREATION_ERRORS=1` tracing revealed
+the real error is an unrelated, purely compiler-side
+`feme-graphics-validate-stage` "unresolved stage-IO global-variable
+access" diagnostic (see `L137`'s own roadmap entry) -- nothing to do with
+pipeline-library linking at all; the construction-type restriction was
+coincidental (only those construction types happened to compile this
+particular shader shape down this particular path in practice). Recorded
+here as a caution against trusting a failure bucket's own construction-
+type/extension correlation as proof of causation without first checking
+the real underlying error via `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+
 
 ### Draw commands and vertex data
 

@@ -9659,3 +9659,95 @@ mismatches and 108 pipeline-library-construction fails are re-scoped,
 the latter as new row `L137`. No feature/extension inventory changes
 (compiler correctness fixes only -- no new Vulkan functionality
 shipped this session).
+
+## Session: `L137` closed -- dynamic vector-lane-select `Component` discovery gap (real shape byte-flattened, not typed)
+
+### Summary
+
+Investigated `L137` (the prior session's own next step): traced its
+108-case `VK_ERROR_INITIALIZATION_FAILED` bucket
+(`fast_linked_library`/`pipeline_library` construction types,
+`centroid_interpolation_consistency.pushc_component_*`) with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`. The prior session's own H29
+(`graphicsPipelineLibraryIndependentInterpolationDecoration`) hypothesis
+was **wrong**: the real error is `feme-graphics-validate-stage`'s
+"unresolved stage-IO global-variable access" diagnostic, a purely
+compiler-side gap unrelated to pipeline-library linking (see
+`FeMeVulkanDesign.md`'s new H29 correction note).
+
+Root cause: `centroid in vec2 fs_in_pos_screen_centroid[2];` read via
+`fs_in_pos_screen_centroid[1][component]`, where `component` is a
+genuinely dynamic (push-constant-loaded) value selecting a *lane within
+a vector*, not a further array row. `CanonicalizeStage.cpp`'s
+`getDynamicRowIndexedAccess`/`collectDynamicRowTerms` only ever
+recognized a non-constant index applying to a further `ArrayType`/
+`StructType` (folding it into `Row`), never one applying to a
+`FixedVectorType` (a `Component`).
+
+The natural fix (extend `collectDynamicRowTerms` to also recognize a
+dynamic vector-lane index, over the typed multi-index `getelementptr`
+shape that implies) was implemented first, but real compiled IR for
+this exact shape does **not** take that path: independently recompiling
+this CTS shader's own extracted SPIR-V via `feme-opt
+--feme-convert-spirv-to-llvm` confirmed the MLIR `llvm` dialect level
+*does* produce the expected typed, multi-index GEP -- but MLIR's own
+`LLVM::GEPOp`-to-`llvm::GetElementPtrInst` translation cannot express a
+non-constant index navigating through a fixed-vector type, so it
+instead peels that one final index off into its own, separate,
+byte-scaled `getelementptr` (source element type a synthetic `[N x
+i8]`, `N` == the lane's own byte size, e.g. `[4 x i8]` for an `f32`
+lane) wrapping an ordinary constant-offset `getelementptr` chain into
+the real stage-IO global -- confirmed against the real driver's own
+compiled LLVM IR via a temporary debug print in `ValidateStage.cpp`
+(reverted before committing).
+
+Added a new, dedicated recognizer for this real byte-flattened shape to
+`getDynamicRowIndexedAccess` (tried first, ahead of the typed-GEP
+walk): peels the `[N x i8]`-typed wrapper, resolves the inner
+constant-offset chain via the existing `getStageIOBaseAndOffset`, and
+walks the global's own array levels to fold the residual byte offset
+into a constant `Row` plus the peeled dynamic index as `Component`
+(zext/trunc'd to i32 at the one call site that builds IR, since the
+real IR's own dynamic index is i64). Kept the typed-GEP
+`FixedVectorType` branch in `collectDynamicRowTerms` too, as a
+defensive fallback for a hypothetical direct typed shape (not currently
+reachable from real compiled IR, but harmless to keep and exercised by
+its own dedicated synthetic-IR unit test).
+
+New unit test `CanonicalizeStageTest.
+ThreadsDynamicComponentIndexIntoCentroidInputLoadThroughByteGEP`, built
+directly against the real byte-flattened shape (not the idealized typed
+one a naive implementation might assume).
+
+### Verification
+
+- `ninja check-feme`: 3,299/3,302 Passed, 3 Unsupported, 0 Failed (+1
+  new test, 0 regressions).
+- CTS `dEQP-VK.pipeline.fast_linked_library.multisample_interpolation.
+  centroid_interpolation_consistency.pushc_component_0.*` (12 cases,
+  `--deqp-shadercache=disable`): was 6 Fail (creation crash) / 6
+  NotSupported, now **0 crashes** -- all 6 executable cases run to
+  completion (still fail on a numerical-mismatch basis, see below).
+- CTS `dEQP-VK.pipeline.*.multisample_interpolation.
+  centroid_interpolation_consistency.pushc_component_*` (full 168-case
+  bucket across `fast_linked_library`/`pipeline_library`/
+  `shader_object_unlinked_spirv`): **0 Pass / 36 Fail / 132
+  NotSupported** (mostly `shader_object_unlinked_spirv`'s own unrelated
+  `VK_EXT_shader_object`-not-supported skips). All 36 executable cases
+  are "Fail (Failed)" (an image/value comparison mismatch, not a
+  crash) -- **0 remaining `VK_ERROR_INITIALIZATION_FAILED`/"unresolved
+  stage-IO" failures**, confirming the compile-time crash this session
+  targeted is fully closed across the whole 108-case (of the original
+  108, 72 not executed in this bucket's cross-section are the ones the
+  narrower `fast_linked_library`-only bucket above already covers)
+  `L137` bucket.
+
+### Results
+
+`L137` struck through in `Roadmap.md` as fixed and CTS-verified (0
+remaining pipeline-creation crashes). The residual 36-case numerical
+mismatch (a distinct issue from the crash this row was about, plausibly
+the already-documented `AtCentroid` pixel-center simplification, but not
+yet directly confirmed) is re-scoped as new roadmap row `L138`. No
+feature/extension inventory changes (compiler correctness fix only --
+no new Vulkan functionality shipped this session).
