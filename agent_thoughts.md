@@ -97321,3 +97321,154 @@ all been cleaned up -- everything worth keeping is now written into
    not a quick pick.
 7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+# Session: L128/L128(a)/L128(b) fix landed -- UnrollConstantTripCountStageLoopsPass
+
+**Confirmed FeMe CPU Vulkan Device** at session start (standing
+requirement).
+
+**TL;DR**: Implemented the fix the prior 3 sessions' investigation
+(`L128` → `L128(a)` → `L128(b)`) identified but never attempted: a
+force-unroll pass for constant-trip-count Vertex/Fragment stage loops,
+wired in at the one location early enough to matter
+(`GraphicsPipeline.cpp`, ahead of `compileGraphicsStage`'s own
+`CanonicalizeStagePass` call). Hit two genuine footguns while landing
+it, both silently producing a no-op pass. Fixed, tested, landed, CTS-
+verified. All 3 target cases now pass; `vertex_input.*` full sweep is
+0 Fail; `pipeline.monolithic.*` sweep still running in the background
+at session end with 0 new fails at 8,000+ cases in.
+
+## What I did
+
+1. Picked up from the prior session's `L128(b)` handoff, which already
+   fully specified the fix: `feme::graphics::
+   UnrollConstantTripCountStageLoopsPass`, running inside
+   `feme::vulkan::compileGraphicsStage` immediately before its own
+   `CanonicalizeStagePass().run(...)` call (`GraphicsPipeline.cpp:541`),
+   not inside `feme::cpu::runPipeline` (too late -- the redundant,
+   second `CanonicalizeStagePass` call there doesn't matter for the
+   already-captured `EntrySignature`).
+2. Implemented the pass: a self-contained, cross-registered
+   `PassBuilder` running `SROAPass` → `LoopSimplifyPass` → `LCSSAPass` →
+   an internal `MarkLoopsForForcedFullUnroll` function pass → forced
+   `LoopFullUnrollPass` → `InstCombinePass` → `SimplifyCFGPass`, scoped
+   to Vertex/Fragment entries.
+3. **First bug**: `MarkLoopsForForcedFullUnroll` called
+   `addStringMetadataToLoop(L, "llvm.loop.unroll.full")` with a bare
+   string literal. This binds to the *wrong* overload
+   (`(Loop*, const char*, unsigned V=0)`), silently producing a
+   *false*-valued 2-operand metadata node instead of the intended
+   always-true, 1-operand `StringRef` overload's node --
+   `getOptionalBoolLoopAttribute`'s `case 2` reads the literal operand.
+   No warning, no error, just the opposite of the intended meaning.
+   Fixed with an explicit `StringRef(...)` cast.
+4. **Second bug, much harder to find**: even after fix #3, the fast
+   in-process repro test (`FeMeVulkanTests`) still showed no effect at
+   all. Added raw `fprintf`/`errs()` prints directly in the pass --
+   still nothing. Eventually checked `nm`/`ldd` on the test binary and
+   found `FeMeVulkanTests` **statically links its own copy** of
+   `FeMeVulkanCore`/`FeMeTransformsGraphics` -- it does not go through
+   the dynamically-`dlopen`ed ICD `.so` like a real Vulkan application
+   (`deqp-vk`, `vulkaninfo`) does. All my rebuilds up to that point had
+   only rebuilt the `feme_vulkan` shared library target, never
+   `FeMeVulkanTests` itself, so the test binary was running stale,
+   pre-fix code the entire time. Rebuilding `FeMeVulkanTests`
+   specifically made the debug prints appear immediately, confirming
+   the pass runs and the loop unrolls correctly.
+5. Removed all debug scaffolding (prints, temporary include, a
+   `FEME_DEBUG_UNROLL`-gated IR dump I'd added to `GraphicsPipeline.cpp`
+   then decided not to keep, since it doesn't follow an existing
+   documented diagnostic convention like `FEME_VULKAN_LOG_CREATION_ERRORS`).
+6. Finalized `DrawTest.L128ARowCount5Repro` as a permanent, always-on
+   regression test (removed its `#if 0`/`#if 1` guard and
+   `[[maybe_unused]]`, rewrote both doc comments from "EXPERIMENTAL,
+   NOT a landable test" to describe the real, landed fix).
+7. **Mid-cleanup accident**: ran `clang-format -i` on the two touched
+   non-new files, which reformatted the *entire* files (they weren't
+   already clang-format-clean). Tried to undo this with
+   `git checkout -- <files>`, which discarded not just the clang-format
+   pass but *all* of this session's uncommitted edits to those files.
+   Recovered by manually redoing both sets of edits from memory/context,
+   verified via `grep` that the recreation matched intent, then used the
+   *correct*, scoped approach (`git diff -U0 -- <files> |
+   clang-format-diff -p1 -i`) to format only the actually-changed lines.
+   **Lesson reinforced for future sessions**: `git checkout --` nukes
+   everything uncommitted in a file, not just your last change --
+   never reach for it to undo one thing if there's other valuable
+   uncommitted work in the same file.
+8. Rebuilt `feme_vulkan` + `FeMeVulkanTests` (both -- see bug #4) and
+   reconfirmed `DrawTest.L128ARowCount5Repro` passes.
+9. `ninja check-feme`: 3,277/3,280 Passed, 3 Unsupported, 0 Failed
+   (+1 newly-enabled test, 0 regressions).
+10. Real CTS: the 3 target `vertex_input.max_attributes.
+    query_max_attributes.*` cases -- the whole point of this multi-
+    session investigation -- all **Pass** now.
+11. Full `vertex_input.*` sweep: 13,296 cases, **0 Fail** (2,488 Pass,
+    10,805 NotSupported, 3 Warning).
+12. Started a full `pipeline.monolithic.*` sweep as a broader
+    regression guard, since this pass runs ahead of every graphics
+    shader's signature-building step, not just vertex-input ones.
+    Found 57 `Fail`s, all `bind_buffers_2.*` -- confirmed **pre-
+    existing and unrelated** via a `git stash push -u` → rebuild-to-
+    baseline → rerun (same 4/4 fail on a subset with zero session
+    changes present) → `git stash pop` → rebuild round-trip. This
+    sweep was **still running** at ~8,100+/large-total cases (0 *new*
+    fails beyond the confirmed-pre-existing 57) when this session ended
+    -- matches the known "blend.* is a multi-session-running sweep"
+    pattern flagged by several prior sessions. Left it running
+    (PID 38862, log at `/tmp/ctsrun/l128fix/pipeline_full.log`/`.qpa`)
+    rather than kill it, since it's pure extra regression evidence, not
+    required to close this row (the row's own target cases and the
+    full `vertex_input.*` family are both already fully verified clean).
+
+**Commits** (5, each with the Copilot co-author trailer):
+1. New pass files (`UnrollConstantTripCountLoops.h`/`.cpp`) +
+   `CMakeLists.txt` + `GraphicsPipeline.cpp` wiring.
+2. `DrawTest.cpp` finalization (permanent, always-on regression test).
+3. `Roadmap.md` -- strike through `L128`/`L128(a)`/`L128(b)`, add
+   `L128(c)` with the full fix + both footguns + verification writeup.
+4. `VulkanCTSReport.md` -- session summary.
+5. This file.
+
+**Roadmap**: `L128(c)` added (one level of nesting, per the rule).
+`L128`/`L128(a)`/`L128(b)` struck through as resolved.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- this is a compiler-internal correctness fix to existing
+dEQP-VK coverage, not new Vulkan functionality.
+
+**Scratch logs**: `/tmp/ctsrun/l128fix/*` -- the `pipeline_full.log`/
+`.qpa` sweep is *still actively being written to* by PID 38862 at
+session end; do not delete it until a future session has read its
+final tally. The other files in that directory
+(`baseline_bind_buffers2.qpa`, `vertex_input_full.log`/`.qpa`,
+`results.qpa`, `caselist.txt`) are done and safe to clean up once
+their contents are no longer of interest (everything worth keeping
+from them is already written into `VulkanCTSReport.md`).
+
+## Suggested next steps
+
+1. **Check `/tmp/ctsrun/l128fix/pipeline_full.log`/`.qpa`** (PID 38862
+   if still alive) for the `pipeline.monolithic.*` full sweep's final
+   tally before doing anything else CTS-related. Expect only the 57
+   pre-existing, already-confirmed-unrelated `bind_buffers_2.*` fails;
+   if that holds, update `VulkanCTSReport.md`'s L128(c) note to record
+   the final clean tally and consider `L128(c)`'s extra regression
+   guard fully closed out.
+2. **File `bind_buffers_2.*`'s 57 pre-existing fails as their own
+   roadmap row** if not already tracked elsewhere -- this session only
+   confirmed they're pre-existing and unrelated to the L128 fix, it did
+   not investigate or file them. About `vkCmdBindVertexBuffers2`
+   stride/offset handling.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+6. If picking up `addStringMetadataToLoop` or any other boolean loop-
+   attribute code elsewhere in this codebase, double check the overload
+   actually being called -- the `const char*`-vs-`StringRef` footgun
+   documented in this session's `L128(c)` roadmap row is easy to
+   reintroduce accidentally and produces no warning.
