@@ -97888,3 +97888,95 @@ a shallow attempt.
    scratch logs) can be deleted once a future session no longer needs its
    raw `.qpa`/`.log` files -- nothing in it is referenced by anything
    committed.
+
+
+# Session: L134(g) fixed -- VK_KHR_maintenance5 flags2 override gap
+
+Confirmed `FeMe CPU Vulkan Device` at start (`vulkaninfo --summary`).
+Picked `L134(g)` first, per the prior session's own ordering (smallest of
+the 6 remaining open `L134` sub-rows, 1 case).
+
+## Step 1: reproduced and ruled out the L132/L134(f) bug class (~5 min)
+
+Ran the case directly: `Fail (vk.queueSubmit(...): VK_ERROR_
+INITIALIZATION_FAILED at vkCmdUtil.cpp:338)`. A real submission failure,
+not an "expected: X, got: X" mismatch -- confirmed this is **not** another
+barycentric-sum-precision case, per the prior session's own check-first
+instruction.
+
+## Step 2: root-caused via the CTS source (~30 min)
+
+`vktBasicDrawTests.cpp`'s `maintenance5` case deliberately sets
+`VkGraphicsPipelineCreateInfo::flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR`
+(intentionally wrong, with a code comment citing real Mesa crash history)
+while chaining the *real* value via `VkPipelineCreateFlags2CreateInfoKHR::
+flags = VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR`. Per
+`VK_KHR_maintenance5`, the chained flags2 struct overrides the legacy field
+whenever present.
+
+`GraphicsPipeline.cpp` read only the legacy field everywhere, so it
+misclassified this call as a pipeline-library-creation request instead of
+a real, executable pipeline -- the returned handle later failed at
+`vkQueueSubmit`. Grepped the whole file: zero references to
+`VkPipelineCreateFlags2CreateInfo` anywhere, despite `VK_KHR_maintenance5`
+(`E5`) being marked closed already -- a genuine gap in that row's own
+scope, not a regression.
+
+## Step 3: fixed every call site, not just the one this case hits (~1 hr)
+
+Added `getEffectivePipelineCreateFlags()`: resolves a chained flags2
+struct, falling back to the legacy field widened to 64-bit
+`VkPipelineCreateFlags2`. Applied it at all 6 legacy-`flags`-reading call
+sites in the file (library-bit check, two view-index-from-device-index
+checks, the fail-on-compile-required check, the synthesized-linked-info's
+own stored flags, and every `Pipeline` subclass's stored `createFlags()`)
+-- every site shares the identical gap, so fixed them together rather than
+patching only the one case currently exercises.
+
+## Step 4: verified (~30 min)
+
+1. New unit test `Flags2CreateInfoOverridesLegacyLibraryBit` first --
+   confirms a real `GraphicsPipeline` (not a `GraphicsLibrary`) comes back,
+   and the legacy library bit doesn't leak into `createFlags()`.
+2. `ninja check-feme`: 3,280/3,283 Passed, 0 Failed (+1 test).
+   `FeMeVulkanTests` standalone: 720/720.
+3. CTS: the exact case now **Pass** (was `Fail`).
+4. Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **219 Fail** --
+   exactly `224 - 4 (L134(f)) - 1 (L134(g))`, confirming both this fix and
+   the earlier `L134(f)` fix hold at full-sweep scale with 0 regressions.
+
+Committed in 4 pieces (fix, test, Roadmap.md, VulkanCTSReport.md), all with
+the Copilot co-author trailer. `L134`'s parent row now reads 2 of 7
+sub-rows fixed, 5 remain open.
+
+## What I did NOT do this session
+
+`L125(m)`/`L125(n)` and `L115(b)` -- both still flagged "not a quick pick,
+needs a dedicated session" by multiple prior sessions -- left untouched on
+purpose. `L134`'s other 5 sub-rows (`a`-`e`) also untouched; only `L134(g)`
+was in scope this session.
+
+## Suggested next steps
+
+1. **(~30-60 min each, quick picks)** `L134`'s 5 remaining open sub-rows,
+   smallest first: `L134(e)` (`shader_layer` at layer 256, 8 cases) and
+   `L134(d)` (`implicit_sample_shading`, 12 cases, 3 shapes) are smallest;
+   `L134(b)` (`output_location.array`, 24 cases) and `L134(c)`
+   (`multiple_interpolation`, 64 cases) mid-sized; `L134(a)`
+   (`indexed_draw`/`maintenance6`, 64 cases) likely most involved. Check
+   each one's own CTS failure message text first -- an "expected: X, got:
+   X" pattern may be another `L132`/`L134(f)`-class barycentric-sum bug; a
+   genuinely different message (crash, wrong-format rejection, a real
+   value mismatch) needs its own investigation, as `L134(g)` turned out to.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+3. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. **(~2 min)** `/tmp/ctsrun/l134g/` (this session's scratch sweep log) and
+   `/tmp/ctsrun/l132fix/` (127MB, carried over from prior sessions) can
+   both be deleted once a future session no longer needs their raw
+   `.qpa`/`.log` files -- nothing in either is referenced by anything
+   committed.
