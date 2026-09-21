@@ -55,27 +55,28 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Implement the real `L128`/`L128(a)` fix**: add a loop-unrolling (or
-   constant-GEP-recognition) pass inside `feme::vulkan::compileGraphicsStage`,
-   immediately *before* its `CanonicalizeStagePass().run(...)` call at
-   `GraphicsPipeline.cpp:541`. This is the concrete, now-confirmed fix
-   location -- not inside `feme::cpu::runPipeline`/`Pipeline.cpp`, which
-   is too late (see `L128(b)` in `Roadmap.md` for the full why).
-2. **Validate against `DrawTest.L128ARowCount5Repro`** (flip its `#if 0`
-   to `#if 1`): should reproduce the crash before the fix and pass
-   cleanly after. Much faster than CTS/valgrind for iterating.
-3. **Then confirm against the real CTS cases**: the 3
-   `vertex_input.max_attributes.query_max_attributes.*` fails should
-   finally pass once the fix lands.
-4. **Regression-test broadly** once a fix is in place: `ninja
-   check-feme`, plus at minimum a `vertex_input.*` and `pipeline.*`
-   sweep, since this pass sits ahead of the signature-building step
-   every graphics shader compile goes through.
-5. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+1. **Check `/tmp/ctsrun/l128fix/pipeline_full.log`/`.qpa`** (PID 38862
+   if still alive) for the `pipeline.monolithic.*` full sweep's final
+   tally before doing anything else CTS-related. Expect only the 57
+   pre-existing, already-confirmed-unrelated `bind_buffers_2.*` fails;
+   if that holds, update `VulkanCTSReport.md`'s L128(c) note to record
+   the final clean tally and consider `L128(c)`'s extra regression
+   guard fully closed out.
+2. **File `bind_buffers_2.*`'s 57 pre-existing fails as their own
+   roadmap row** if not already tracked elsewhere -- this session only
+   confirmed they're pre-existing and unrelated to the L128 fix, it did
+   not investigate or file them. About `vkCmdBindVertexBuffers2`
+   stride/offset handling.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the largest not-yet-started cross-repo item -- needs its own
    dedicated session.
-6. `L115(b)` (pull-model interpolation) remains flagged from several
+4. `L115(b)` (pull-model interpolation) remains flagged from several
    sessions ago as needing a new runtime-callback ABI surface -- also
    not a quick pick.
-7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+6. If picking up `addStringMetadataToLoop` or any other boolean loop-
+   attribute code elsewhere in this codebase, double check the overload
+   actually being called -- the `const char*`-vs-`StringRef` footgun
+   documented in this session's `L128(c)` roadmap row is easy to
+   reintroduce accidentally and produces no warning.
