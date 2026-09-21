@@ -98091,3 +98091,87 @@ was in scope this session.
    prior sessions) can all be deleted once a future session no longer
    needs their raw `.qpa`/`.log` files -- nothing in any of them is
    referenced by anything committed.
+
+# Session: L134(d) -- implicit-sample-shading, two distinct bugs
+
+Confirmed `FeMe CPU Vulkan Device` this session (had to export
+`VK_ICD_FILENAMES` explicitly again -- environment default still points at
+llvmpipe).
+
+## What I did
+
+Picked up `L134(d)` (`implicit_sample_shading.*`, 12 of `L134`'s 224
+originally-filed fails), the smallest remaining sub-row per the prior
+session's ordering.
+
+1. Reproduced first, per standing practice: all 12 fail as
+   `Atomic counter value lower than expected: 20` -- a real invocation-count
+   deficit, not the `L132`/`L134(e)`/`L134(f)` precision-bug class. Needed
+   its own root cause.
+2. Found **two distinct bugs**, both required to close all 12 cases:
+   - **Bug 1** (8 cases, `sample_id_static_use`/`sample_position_static_use`):
+     glslang emits a `SampleId`/`SamplePosition`-decorated `OpVariable` in
+     the entry's interface list, but never an `OpLoad` for it (the CTS
+     shader's own bare `gl_SampleID;` statement discards the value).
+     `CanonicalizeStage.cpp`'s stage-IO discovery only walks
+     `LoadInst`/`StoreInst` operands, so this variable was invisible to it,
+     never got a `SignatureElement`, and `PerSampleShading` never saw it.
+   - **Bug 2** (4 cases, `sample_decoration_dynamic_use`): a `Sample`-
+     decorated ordinary varying *is* loaded/used and correctly gets an
+     `Interpolation == PerspectiveSample` element, but `Executor.cpp`'s
+     `PerSampleShading` check only ever looked for the two system-value
+     builtins, never for any ordinary varying carrying per-sample
+     interpolation.
+3. Confirmed via the Vulkan spec (`primsrast.adoc`'s "Sample Shading"
+   section) that both are genuine spec-required triggers this
+   implementation was missing, not CTS-artificial corner cases.
+4. **Fix A** (`Executor.cpp`): extended `PerSampleShading`'s OR-chain with
+   an `llvm::any_of` check over `FSSig.Elements` for any `Input`-direction
+   element with `PerspectiveSample`/`NoPerspectiveSample` interpolation.
+5. **Fix B** (`CanonicalizeStage.cpp`): added a second, narrowly-scoped
+   discovery pass over the module's globals that finds any not-yet-`Seen`
+   `Input` stage-IO global decorated `BuiltIn SampleId`(18)/`SamplePosition`
+   (19) and adds it to `InputGlobals` too -- scoped to just these two
+   builtins, not every unused stage-IO global, to stay minimal.
+6. Wrote and verified two new regression tests
+   (`CanonicalizeStageTest.RecordsUnusedSampleIdAndSamplePositionBuiltInsAsInputSignatureElements`,
+   `ExecutorTest.SampleDecoratedVaryingForcesPerSampleShading`), each
+   confirmed via a source-swap-to-baseline round-trip to fail without its
+   fix and pass with it restored.
+7. `ninja check-feme`: 3,284/3,287 Passed, 3 Unsupported, 0 Failed.
+8. CTS: `dEQP-VK.draw.*implicit_sample_shading*` (39 cases) now **0 Fail**
+   (was 12). Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **199
+   Fail** -- exactly `211 - 12`, confirming both fixes together hold at
+   full-sweep scale with 0 regressions.
+
+Committed in 6 pieces (Fix A, its test, Fix B, its test, `Roadmap.md`,
+`VulkanCTSReport.md`), all with the Copilot co-author trailer. `L134`'s
+parent row now reads 4 of 7 sub-rows fixed, 3 remain open.
+
+## What I did NOT do this session
+
+`L125(m)`/`L125(n)` and `L115(b)` -- both still flagged "not a quick pick,
+needs a dedicated session" by multiple prior sessions -- left untouched on
+purpose. `L134`'s other 3 sub-rows (`a`-`c`) also untouched; only `L134(d)`
+was in scope this session.
+
+## Suggested next steps
+
+1. **(~30-60 min each, quick picks)** `L134`'s 3 remaining open sub-rows,
+   smallest first: `L134(b)` (`output_location.array`, 24 cases) is
+   smallest; `L134(c)` (`multiple_interpolation`, 64 cases) mid-sized;
+   `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases) likely most
+   involved. Check each one's own CTS failure message text first -- an
+   "expected: X, got: X" pattern may be another
+   `L132`/`L134(d)`/`L134(f)`-class bug; a genuinely different message
+   (crash, wrong-format rejection, a real value mismatch) needs its own
+   investigation, as `L134(d)`/`L134(e)`/`L134(g)` all turned out to.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+3. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. This session's scratch (`/tmp/ctsrun/l134d/`) has already been cleaned
+   up; nothing left over to delete.
