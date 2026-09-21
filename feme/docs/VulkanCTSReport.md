@@ -8727,3 +8727,144 @@ newly-discovered tests, 0 regressions). `FeMeVulkanTests` standalone:
 through `L134(d)`) remain open. No feature/extension inventory changes
 (a correctness fix to existing layered-render-target clear handling,
 no new Vulkan functionality shipped this session).
+
+## Session: `L134(d)` -- two distinct implicit-sample-shading gaps fixed
+
+### Summary
+
+Picked up `L134(d)` (`dEQP-VK.draw.*.implicit_sample_shading.
+{sample_decoration_dynamic_use,sample_id_static_use,
+sample_position_static_use}`, 12 of `L134`'s originally-filed 224
+pre-existing `dEQP-VK.draw.*` fails), the next-smallest remaining
+sub-row per the prior session's own ordering.
+
+**Reproduced the exact failure first**: all 12 cases fail as
+`Fail (Atomic counter value lower than expected: 20)` in
+`vktDrawSampleAttributeTests.cpp` -- a genuine per-invocation-count
+deficit (the fragment shader isn't running at sample rate when it
+should be), not the `L132`/`L134(e)`/`L134(f)` "expected: X, got: X"
+barycentric-precision bug class, confirming this needs its own
+distinct root-cause investigation.
+
+The CTS test renders a 4x4, 4x-multisampled target with an
+oversized full-coverage triangle, using a fragment shader that
+(depending on a `Trigger` enum) either statically references
+`gl_SampleID`/`gl_SamplePosition` as a bare, result-discarded
+statement, or reads an ordinary `sample in float verify` (SPIR-V
+`Sample`-decorated) varying, then atomically increments a counter;
+the test asserts the counter reaches `sampleCount * width * height =
+64`, i.e. that per-sample-rate shading was forced.
+
+### Root cause (two distinct bugs)
+
+**Bug 1** (`sample_id_static_use`/`sample_position_static_use`, 8 of
+12 cases): extracting and disassembling the actual SPIR-V
+(`--deqp-log-decompiled-spirv=enable`) confirmed glslang emits a
+`BuiltIn SampleId`-decorated `OpVariable` that genuinely appears in
+`OpEntryPoint`'s own interface list, but -- since the CTS shader's
+bare `gl_SampleID;` statement discards the loaded value without ever
+consuming it -- **no `OpLoad` instruction anywhere reads it**.
+`CanonicalizeStage.cpp`'s `canonicalizeSPIRVStage` stage-IO discovery
+loop walks only `LoadInst`/`StoreInst` pointer operands within the
+entry function's own instructions to find stage-IO globals worth a
+`SignatureElement`; since no load instruction exists for this
+global, it's never discovered, never gets an element, and
+`Executor.cpp`'s `PerSampleShading` check (which looks for
+`SignatureSystemValue::SampleIndex`/`SamplePosition` via
+`findElement`) never sees it, so per-sample shading never gets
+forced. Confirmed via the Vulkan spec
+(`primsrast.adoc`'s "Sample Shading" section,
+`external/vulkan-docs/src/chapters/` in the CTS checkout) that
+"statically uses" an input decorated `SampleId`/`SamplePosition`
+means present in the entry's interface, regardless of whether the
+loaded value is ever consumed -- confirming a genuine architectural
+gap in the discovery mechanism, not a CTS-artificial corner case.
+
+**Bug 2** (`sample_decoration_dynamic_use`, 4 of 12 cases): SPIR-V
+disassembly confirmed this variant's `verify` varying *is* genuinely
+loaded and used (`uint(ceil(verify))` drives the atomic-increment
+condition), decorated `Sample` (not `NoPerspective`), so it correctly
+gets a normal `SignatureElement` with
+`Interpolation == SignatureInterpolationMode::PerspectiveSample` via
+the existing, unmodified `getInterpolationMode` machinery. However,
+`Executor.cpp`'s `PerSampleShading` boolean only checked
+`Pipeline.getSampleShadingEnable()` plus `findElement` lookups for
+the two system values -- it never checked whether any *ordinary*
+varying (not a system value) carried per-sample interpolation, so a
+`Sample`-decorated ordinary input never forced per-sample shading,
+despite the same spec section requiring it.
+
+### Fix
+
+**Fix A** (`feme/lib/Graphics/Executor.cpp`, `PerSampleShading`'s
+OR-chain): added an `llvm::any_of(FSSig.Elements, ...)` check for any
+`Input`-direction element whose `Interpolation` is `PerspectiveSample`
+or `NoPerspectiveSample`, with a doc comment distinguishing this from
+the pre-existing `SampleIndex`/`SamplePosition` system-value checks.
+
+**Fix B** (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`,
+inside `canonicalizeSPIRVStage`, right after the existing load/store
+discovery loop): added a second, narrowly-scoped discovery pass over
+`F.getParent()->globals()` that finds any not-yet-`Seen`,
+address-space-7 (`Input`) stage-IO global decorated `BuiltIn`
+code 18 (`SampleId`) or 19 (`SamplePosition`) and adds it to
+`InputGlobals` too, so it still gets a `SignatureElement` via the
+existing `addElements`/`addElement` machinery even though no load
+instruction ever referenced it. Deliberately scoped only to these two
+specific builtins (not every unused stage-IO global) to keep the
+change minimal and avoid perturbing `ElementID` numbering or
+cross-stage linkage assumptions for any other unused-but-declared
+interface variable.
+
+### Testing
+
+Added two new regression tests:
+
+- `CanonicalizeStageTest.RecordsUnusedSampleIdAndSamplePositionBuiltInsAsInputSignatureElements`
+  (Fix B): an LLVM-IR module declaring `@gl_SampleID` (genuinely
+  loaded, to keep the test's own IR plausible) and
+  `@gl_SamplePosition` (declared and `BuiltIn`-decorated, but never
+  loaded anywhere -- the actual thing under test), plus an ordinary
+  used `@gl_FragDepth` output so the fragment entry has a valid
+  signature at all. Asserts `findElement` finds both `SampleIndex`
+  and `SamplePosition` system-value elements in the resulting
+  `EntrySignature`.
+- `ExecutorTest.SampleDecoratedVaryingForcesPerSampleShading` (Fix A):
+  builds a `GraphicsPipeline` with an ordinary, `Location`-based
+  `SignatureElement` (not a system value) whose `Interpolation` is
+  set to `PerspectiveSample`, with `SampleShadingEnable=false` and no
+  `SampleIndex`/`SamplePosition` elements anywhere in the signature.
+  The fragment shader writes the varying (a per-vertex affine
+  screen-space-position formula, matching pixel (0, 0)'s own real
+  per-sample offsets) directly to its color output; the test checks,
+  the same way `SamplePositionForcesPerSampleShadingAndReadsRealOffset`
+  does for the builtin case, that all 4 samples' written values match
+  the expected per-sample offset table and that no two samples'
+  written values coincide -- proving a real per-sample re-evaluation
+  reached storage, not a single shared pixel-center-broadcast value.
+
+Both new tests confirmed via a source-swap-to-baseline round-trip
+(`git show HEAD:...` swapped in place of each fix, rebuilt, retested,
+restored) to fail identically to the real bug pre-fix, then pass
+cleanly once the fix was restored; `git status --short` confirmed
+clean/matching after each restore.
+
+`ninja check-feme`: 3,284/3,287 Passed, 3 Unsupported, 0 Failed (+2
+newly-discovered tests, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.*implicit_sample_shading*` (39 cases): **0 Fail**
+  (was 12).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **199 Fail**
+  (was 211 pre-`L134(d)`, exactly `211 - 12`), 0
+  `implicit_sample_shading` fails remaining, 0 regressions in every
+  other pre-existing fail.
+
+### Results
+
+`L134(d)` is now fully closed (both of its two distinct root causes
+fixed). `L134`'s other 3 sub-rows (`L134(a)`, `L134(b)`, `L134(c)`)
+remain open. No feature/extension inventory changes (a correctness
+fix to existing per-sample-shading trigger detection, no new Vulkan
+functionality shipped this session).
