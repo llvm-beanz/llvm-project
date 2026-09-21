@@ -6336,16 +6336,31 @@ getStructMemberPhysicalFieldType(mlir::spirv::StructType Struct,
 /// this works regardless of which retry tier actually produced \p
 /// RealStructTy, since it never re-derives that choice at all.
 ///
-/// Falls back to \p DeclaredIndex unchanged if \p Struct has no explicit
-/// `Offset` decorations (no reordering is ever needed in that case) or if
-/// the walk somehow doesn't land on every declared offset (should not
-/// happen for a real, successfully-converted \p RealStructTy, but
-/// degrades safely rather than returning a wrong-but-plausible index).
+/// Falls back to getStructMemberPhysicalIndex's own isolated re-derivation
+/// (roadmap L133) if \p Struct has no explicit `Offset` decorations:
+/// `getOffsetSortedMemberIndices` (used by the walk below) requires
+/// `hasOffset()` (it sorts by declared `Offset` values, which a non-offset
+/// struct has none of -- Roadmap H96), but a non-offset struct can still
+/// need an interior *natural-alignment* pad inserted between two members
+/// (`layOutStructIfOffsetsMatch`'s own `!Type.hasOffset()` branch, Roadmap
+/// L103) -- unlike the offset-decorated case's member *permutation*, this
+/// never depends on any enclosing struct's own retry tier (a plain
+/// natural-alignment gap before declared member \p DeclaredIndex is fully
+/// determined by the members *before* it, which this function's own
+/// context-sensitivity concern above never touches), so re-deriving it via
+/// \p Struct's own isolated conversion is exactly as safe here as it is
+/// for the *outermost* struct level (getStructMemberPhysicalIndex's own
+/// ordinary, non-\p RealStructTy-aware path). Falls back to \p
+/// DeclaredIndex unchanged if the walk somehow doesn't land on every
+/// declared offset (should not happen for a real, successfully-converted
+/// \p RealStructTy, but degrades safely rather than returning a
+/// wrong-but-plausible index).
 unsigned getStructMemberPhysicalIndexInRealType(
     mlir::spirv::StructType Struct, unsigned DeclaredIndex,
-    mlir::LLVM::LLVMStructType RealStructTy) {
+    mlir::LLVM::LLVMStructType RealStructTy,
+    const mlir::TypeConverter &Converter) {
   if (!Struct.hasOffset())
-    return DeclaredIndex;
+    return getStructMemberPhysicalIndex(Struct, DeclaredIndex, Converter);
   mlir::DataLayout DL;
   llvm::ArrayRef<mlir::Type> Body = RealStructTy.getBody();
   llvm::SmallVector<unsigned, 8> Order = getOffsetSortedMemberIndices(Struct);
@@ -6435,8 +6450,8 @@ bool remapNestedStructMemberIndices(
         return false;
       unsigned Physical =
           RealStructTy
-              ? getStructMemberPhysicalIndexInRealType(StructTy, Declared,
-                                                       RealStructTy)
+              ? getStructMemberPhysicalIndexInRealType(
+                    StructTy, Declared, RealStructTy, Converter)
               : getStructMemberPhysicalIndex(StructTy, Declared, Converter);
       if (Physical != Declared) {
         mlir::Type LLVMIndexType = Indices[Pos].getType();
