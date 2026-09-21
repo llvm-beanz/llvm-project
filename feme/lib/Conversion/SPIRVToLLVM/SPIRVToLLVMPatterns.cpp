@@ -3137,6 +3137,32 @@ bool isCompositeLLVMType(mlir::Type Type) {
       Type);
 }
 
+/// (Roadmap L115(b)) True if any use of \p Op -- an `spirv.mlir.addressof`
+/// of an `Input`-storage-class scalar/vector variable -- is one of the
+/// pull-model interpolation ops' own `Interpolant` operand. Unlike an
+/// ordinary `spirv.Load`, which `StageIOAddressOfPattern` eagerly folds
+/// this addressof into (there being no real memory access left to model
+/// once the value is already loaded, see that pattern's own comment),
+/// `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` need the real
+/// *address* itself: `GLInterpolateAtCentroidPattern`/
+/// `GLInterpolateAtSamplePattern`/`GLInterpolateAtOffsetPattern` (below)
+/// pass it through, opaque, to a new `feme.spirv.interpolate_at_*` marker
+/// call, which `feme::graphics::canonicalizeSPIRVStage` later resolves
+/// back to a `(ElementID, Component)` pair the same way it already
+/// resolves an ordinary stage-IO load's own pointer operand
+/// (`resolveStageIOAccess`). So this addressof must stay a real pointer
+/// instead of eagerly loading, whenever it feeds one of these three ops --
+/// mirroring how isCompositeLLVMType already keeps an array/struct/matrix-
+/// typed one a real pointer for the analogous "a later op needs the real
+/// address, not the eagerly-loaded value" reason.
+bool isInterpolantAddressOf(mlir::spirv::AddressOfOp Op) {
+  return llvm::any_of(Op->getUsers(), [](mlir::Operation *User) {
+    return mlir::isa<mlir::spirv::GLInterpolateAtCentroidOp,
+                     mlir::spirv::GLInterpolateAtSampleOp,
+                     mlir::spirv::GLInterpolateAtOffsetOp>(User);
+  });
+}
+
 /// \p StageIOVariables must have been collected by
 /// feme::spirv::prepareStageIOVariables, before the conversion ran: by the
 /// time an `Input`/`Output` variable's own use is legalized, an earlier
@@ -3187,7 +3213,10 @@ public:
     // stays a real pointer instead of an eagerly-loaded value -- see this
     // class's own comment and isCompositeStageIOType/isCompositeLLVMType
     // above.
-    if (isCompositeLLVMType(ValueType)) {
+    // (Roadmap L115(b)) See isInterpolantAddressOf's own comment: a
+    // pull-model interpolation op's own Interpolant operand needs this
+    // same real-pointer treatment, for the analogous reason.
+    if (isCompositeLLVMType(ValueType) || isInterpolantAddressOf(Op)) {
       Rewriter.replaceOp(Op, Address);
       return mlir::success();
     }
@@ -11535,6 +11564,184 @@ public:
   }
 };
 
+/// Appends a short, unambiguous type suffix for \p Ty to \p Out, in the
+/// same spirit as `feme::appendTypeSuffix` (StageOps.cpp, not visible
+/// here) and `dx.op.*`'s own per-type callee suffix: scalar element
+/// width, prefixed with the vector length when \p Ty is a vector. Only
+/// ever called with the (converted) result type of a
+/// `spirv.GL.InterpolateAt*` op, which SPIR-V restricts to a scalar or
+/// vector of 32-bit float (SPIRV_ScalarOrVectorOf<SPIRV_Float>, and this
+/// codebase's own `RuntimeABI.h` types are all 32-bit), so only that one
+/// shape is handled.
+void appendInterpolateTypeSuffix(llvm::raw_ostream &OS, mlir::Type Ty) {
+  if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(Ty)) {
+    OS << 'v' << VecTy.getNumElements();
+  }
+  OS << "f32";
+}
+
+/// Declares (or finds) the `feme.spirv.interpolate_at_{centroid,sample,
+/// offset}.<suffix>` marker function \p Kind's own pattern below calls,
+/// with argument types \p ArgTys (whichever of `(ptr)`/`(ptr, i32)`/
+/// `(ptr, f32, f32)` matches \p Kind) and result type \p ResultTy.
+///
+/// This is *not* the real `feme.stage.interpolate_at_*` op
+/// (`feme::createStageInterpolateAt{Centroid,Sample,Offset}`,
+/// StageOps.h) those calls eventually become: unlike DXIL's own
+/// `EvalCentroid`/`EvalSampleIndex`/`EvalSnapped` (raised directly to the
+/// real op by `CanonicalizeStage.cpp`'s own `raiseEval`, since a DXIL
+/// numeric signature ID is already resolvable to an `ElementID` right
+/// there), this op's own `Interpolant` pointer operand resolves to an
+/// `ElementID` only by the same whole-module decoration-scanning
+/// `feme::graphics::canonicalizeSPIRVStage` pass every ordinary stage-IO
+/// `spirv.Load`/`spirv.Store` also needs -- which does not run until
+/// well after this file's own SPIR-V-to-LLVM conversion has finished, and
+/// operates on a real `llvm::Module`, not this pass's MLIR LLVM dialect.
+/// So this marker call is a placeholder `canonicalizeSPIRVStage` itself
+/// recognizes by name prefix and rewrites into the real op, exactly the
+/// same two-step shape an ordinary stage-IO load already takes (a
+/// `spirv.Load` of an `Input` global, converted to a plain `llvm.load`
+/// here, only later rewritten into `feme.stage.input.load` by that same
+/// pass). Named per-\p Kind (unlike `getOrInsertSubpassLoadFunc`'s single
+/// always-`f32` declaration) and per-type-suffix, mirroring
+/// `feme::getOrInsertStageOp`'s own overload-suffix convention, so two
+/// call sites with different `Interpolant` shapes (e.g. `float` vs.
+/// `vec3`) in the same module do not collide under one declared function
+/// type.
+mlir::LLVM::LLVMFuncOp getOrInsertInterpolateAtFunc(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::ModuleOp Module,
+    llvm::StringRef Kind, mlir::Type ResultTy,
+    llvm::ArrayRef<mlir::Type> ArgTys) {
+  llvm::SmallString<64> Name("feme.spirv.interpolate_at_");
+  Name += Kind;
+  Name.push_back('.');
+  {
+    llvm::raw_svector_ostream OS(Name);
+    appendInterpolateTypeSuffix(OS, ResultTy);
+  }
+  if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+    return Existing;
+  mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+  Rewriter.setInsertionPointToStart(Module.getBody());
+  auto FuncTy = mlir::LLVM::LLVMFunctionType::get(ResultTy, ArgTys);
+  return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name,
+                                        FuncTy, mlir::LLVM::Linkage::External);
+}
+
+/// Converts `spirv.GL.InterpolateAtCentroid` (roadmap L115(b)) into a
+/// call to the `feme.spirv.interpolate_at_centroid.<suffix>` marker
+/// function -- see getOrInsertInterpolateAtFunc's own comment for why
+/// this is a placeholder rather than the real `feme.stage.*` op directly.
+/// `Adaptor.getInterpolant()` is the real pointer
+/// `isInterpolantAddressOf`'s fix to `StageIOAddressOfPattern` (above)
+/// keeps `Op`'s own `Interpolant` operand as, rather than the eagerly-
+/// loaded value an ordinary read of the same `Input` variable would
+/// produce.
+class GLInterpolateAtCentroidPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLInterpolateAtCentroidOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLInterpolateAtCentroidOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLInterpolateAtCentroidOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Ptr = Adaptor.getInterpolant();
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Ptr.getType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "Interpolant did not convert to a real pointer");
+
+    auto Module = Op->getParentOfType<mlir::ModuleOp>();
+    mlir::LLVM::LLVMFuncOp Func = getOrInsertInterpolateAtFunc(
+        Rewriter, Module, "centroid", ResultTy, {Ptr.getType()});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(Op, Func,
+                                                    mlir::ValueRange{Ptr});
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.InterpolateAtSample` (roadmap L115(b)) the same way
+/// GLInterpolateAtCentroidPattern converts `spirv.GL.InterpolateAtCentroid`
+/// above, passing \p Op's own (converted) `Sample` operand through as the
+/// marker call's second argument.
+class GLInterpolateAtSamplePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLInterpolateAtSampleOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLInterpolateAtSampleOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLInterpolateAtSampleOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Ptr = Adaptor.getInterpolant();
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Ptr.getType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "Interpolant did not convert to a real pointer");
+    mlir::Value Sample = Adaptor.getSample();
+
+    auto Module = Op->getParentOfType<mlir::ModuleOp>();
+    mlir::LLVM::LLVMFuncOp Func = getOrInsertInterpolateAtFunc(
+        Rewriter, Module, "sample", ResultTy, {Ptr.getType(), Sample.getType()});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
+        Op, Func, mlir::ValueRange{Ptr, Sample});
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.InterpolateAtOffset` (roadmap L115(b)) the same way
+/// GLInterpolateAtCentroidPattern converts `spirv.GL.InterpolateAtCentroid`
+/// above. \p Op's own `Offset` operand is a `vector<2xf32>`; it is split
+/// into two scalar `f32` marker-call arguments here (rather than passed
+/// through as one vector) to match
+/// `feme::createStageInterpolateAtOffset`'s own two-scalar-operand shape
+/// (`OffsetX`, `OffsetY`) that `canonicalizeSPIRVStage` builds this
+/// marker call into -- one `extractelement` apiece, done once here rather
+/// than left for that later pass to redo from a vector it would
+/// otherwise have to re-split itself.
+class GLInterpolateAtOffsetPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLInterpolateAtOffsetOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLInterpolateAtOffsetOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLInterpolateAtOffsetOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Ptr = Adaptor.getInterpolant();
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Ptr.getType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "Interpolant did not convert to a real pointer");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Offset = Adaptor.getOffset();
+    mlir::Type F32 = Rewriter.getF32Type();
+    mlir::Value OffsetX = mlir::LLVM::ExtractElementOp::create(
+        Rewriter, Loc, F32, Offset, mlir::LLVM::ConstantOp::create(
+            Rewriter, Loc, Rewriter.getI32Type(),
+            Rewriter.getI32IntegerAttr(0)));
+    mlir::Value OffsetY = mlir::LLVM::ExtractElementOp::create(
+        Rewriter, Loc, F32, Offset, mlir::LLVM::ConstantOp::create(
+            Rewriter, Loc, Rewriter.getI32Type(),
+            Rewriter.getI32IntegerAttr(1)));
+
+    auto Module = Op->getParentOfType<mlir::ModuleOp>();
+    mlir::LLVM::LLVMFuncOp Func = getOrInsertInterpolateAtFunc(
+        Rewriter, Module, "offset", ResultTy, {Ptr.getType(), F32, F32});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
+        Op, Func, mlir::ValueRange{Ptr, OffsetX, OffsetY});
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.GL.Distance` (roadmap H124j) into the GLSL.std.450
 /// spec's own definition, `Length(p0 - p1)`, reusing the same
 /// `sqrt(dot(x, x))` computation `GLLengthPattern` above uses. This op
@@ -13436,6 +13643,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // illegal".
   Patterns.add<IsNanPattern, IsInfPattern, GLLengthPattern, GLNormalizePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
+  // `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` (roadmap L115(b)):
+  // pull-model interpolation, needed by e.g. `linear_interpolation.*`'s
+  // `interpolateAtOffset`/`interpolateAtSample` shaders. Neither op had a
+  // conversion pattern at all before this fix (the same "no conversion
+  // pattern at all" gap H124f/H124j/H124k/L119 each fixed for a different
+  // GLSL.std.450 op subset), failing every one of these shapes' pipeline
+  // creation with "failed to legalize operation ... that was explicitly
+  // marked illegal".
+  Patterns.add<GLInterpolateAtCentroidPattern, GLInterpolateAtSamplePattern,
+               GLInterpolateAtOffsetPattern>(Patterns.getContext(),
+                                             TypeConverter, FeMeBenefit);
   // `spirv.GL.{Cross,Reflect,Distance,FindUMsb,FindSMsb,FindILsb}`
   // (roadmap H124j): the same "no conversion pattern at all" gap H124f
   // fixed above for `Normalize`/`Length`/`IsNan`/`IsInf`, for a different

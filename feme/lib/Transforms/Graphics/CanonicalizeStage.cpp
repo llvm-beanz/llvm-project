@@ -1408,6 +1408,75 @@ void storeStageIOBlockValue(IRBuilderBase &B, Value *Val, Type *Ty,
                       MemberIDs[I], Row, Component, Zero, Shadow);
 }
 
+/// (Roadmap L115(b)) Recognizes a `feme.spirv.interpolate_at_{centroid,
+/// sample,offset}.*` marker call -- the placeholder
+/// `GLInterpolateAt{Centroid,Sample,Offset}Pattern` (SPIRVToLLVMPatterns.cpp)
+/// convert their own SPIR-V ops into, since this pass (not that one) is
+/// where an `Interpolant` pointer operand actually resolves to an
+/// `ElementID` -- returning which `StageOpKind` it stands in for, or
+/// `std::nullopt` if \p CI is not one.
+std::optional<StageOpKind> getSPIRVInterpolateAtMarkerKind(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  if (!Callee)
+    return std::nullopt;
+  StringRef Name = Callee->getName();
+  if (Name.starts_with("feme.spirv.interpolate_at_centroid."))
+    return StageOpKind::InterpolateAtCentroid;
+  if (Name.starts_with("feme.spirv.interpolate_at_sample."))
+    return StageOpKind::InterpolateAtSample;
+  if (Name.starts_with("feme.spirv.interpolate_at_offset."))
+    return StageOpKind::InterpolateAtOffset;
+  return std::nullopt;
+}
+
+/// Builds the real `feme.stage.interpolate.at.*` call(s) \p Kind stands
+/// for, reading element \p ElementID at base component \p Component -- the
+/// pull-model-interpolation counterpart of `loadStageIOValue`: decomposes
+/// a vector-typed \p Ty into one scalar `feme::createStageInterpolateAt*`
+/// call per component (mirroring that op's own per-component `feme.
+/// stage.*` convention -- see `FragmentWrapper.cpp`'s
+/// `lowerFragmentInterpolateAt`, which expects exactly this shape),
+/// rebuilt with `insertelement`. Unlike `loadStageIOValue`'s full
+/// generality, no struct/array recursion is needed here: SPIR-V restricts
+/// an `Interpolant`'s pointee to a scalar or vector float
+/// (`SPIRV_ScalarOrVectorOf<SPIRV_Float>`), so \p Ty is always one or the
+/// other. \p ExtraOperand0/\p ExtraOperand1 are `Kind`'s own extra
+/// operand(s) (unused for `InterpolateAtCentroid`; `Sample` for
+/// `InterpolateAtSample`; `OffsetX`/`OffsetY` for `InterpolateAtOffset`),
+/// forwarded unchanged to every per-component leaf call.
+Value *interpolateStageIOValue(IRBuilderBase &B, Type *Ty, StageOpKind Kind,
+                               uint32_t ElementID, Value *Component,
+                               Value *ExtraOperand0, Value *ExtraOperand1,
+                               const Twine &Name) {
+  auto BuildScalar = [&](Value *Comp) -> Value * {
+    switch (Kind) {
+    case StageOpKind::InterpolateAtCentroid:
+      return createStageInterpolateAtCentroid(B, B.getFloatTy(), ElementID,
+                                              Comp);
+    case StageOpKind::InterpolateAtSample:
+      return createStageInterpolateAtSample(B, B.getFloatTy(), ElementID,
+                                            Comp, ExtraOperand0);
+    case StageOpKind::InterpolateAtOffset:
+      return createStageInterpolateAtOffset(B, B.getFloatTy(), ElementID,
+                                            Comp, ExtraOperand0,
+                                            ExtraOperand1);
+    default:
+      llvm_unreachable("not an interpolate-at StageOpKind");
+    }
+  };
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    Value *New = PoisonValue::get(VecTy);
+    for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C) {
+      Value *CombinedComponent =
+          Component ? B.CreateAdd(Component, B.getInt32(C)) : B.getInt32(C);
+      Value *Elt = BuildScalar(CombinedComponent);
+      New = B.CreateInsertElement(New, Elt, C, Name);
+    }
+    return New;
+  }
+  return BuildScalar(Component ? Component : B.getInt32(0));
+}
+
 /// The stage-IO global \p Ptr addresses, and the byte offset within it:
 /// unwraps any chain of (possibly `ConstantExpr`) `getelementptr`s via
 /// `Value::stripAndAccumulateConstantOffsets`, since LLVM canonicalizes a
@@ -3842,6 +3911,17 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       else if (auto *SI = dyn_cast<StoreInst>(&I))
         collectStageIOGlobalsThroughSelect(SI->getPointerOperand(), DL, Stage,
                                            GVs);
+      else if (auto *CI = dyn_cast<CallInst>(&I)) {
+        // (Roadmap L115(b)) A pull-model interpolation marker call's own
+        // `Interpolant` pointer operand (its first argument -- see
+        // `GLInterpolateAt*Pattern`, SPIRVToLLVMPatterns.cpp) reaches a
+        // stage-IO global exactly like an ordinary load's pointer
+        // operand does, and must be discovered here the same way, or it
+        // would never receive an `ElementID` at all.
+        if (getSPIRVInterpolateAtMarkerKind(*CI))
+          collectStageIOGlobalsThroughSelect(CI->getArgOperand(0), DL, Stage,
+                                             GVs);
+      }
       for (GlobalVariable *GV : GVs) {
         unsigned AddrSpace = 0;
         if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
@@ -5052,6 +5132,48 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
                                Component, Vertex, &ShadowValues);
         SI->eraseFromParent();
+        EraseIfNowDead(Ptr);
+        Changed = true;
+      } else if (auto *CI = dyn_cast<CallInst>(&I)) {
+        // (Roadmap L115(b)) A `feme.spirv.interpolate_at_*` marker call
+        // (see `getSPIRVInterpolateAtMarkerKind`'s own comment) resolves
+        // its own `Interpolant` operand (argument 0) exactly like an
+        // ordinary load's pointer operand, then decomposes into one real
+        // `feme.stage.interpolate.at.*` call per component via
+        // `interpolateStageIOValue` -- the pull-model-interpolation
+        // counterpart of the `LoadInst` case above.
+        std::optional<StageOpKind> Kind = getSPIRVInterpolateAtMarkerKind(*CI);
+        if (!Kind)
+          continue;
+        Value *Ptr = CI->getArgOperand(0);
+        std::optional<StageIOAccess> Access = resolveStageIOAccess(
+            B, Ptr, CI->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
+        if (!Access)
+          continue;
+        // (Roadmap L94(h)) See the load-side mirror of this above.
+        Value *Component = Access->Component
+                               ? Access->Component
+                               : B.getInt32(resolveElementBaseComponent(
+                                     Sig, Access->ElementIDs));
+        Value *ExtraOperand0 = nullptr;
+        Value *ExtraOperand1 = nullptr;
+        if (*Kind == StageOpKind::InterpolateAtSample) {
+          ExtraOperand0 = CI->getArgOperand(1);
+        } else if (*Kind == StageOpKind::InterpolateAtOffset) {
+          ExtraOperand0 = CI->getArgOperand(1);
+          ExtraOperand1 = CI->getArgOperand(2);
+        }
+        // `Interpolant` is always a single scalar/vector-typed Input
+        // variable (never an interface-block member), so it always
+        // resolves to exactly one ElementID -- see
+        // `interpolateStageIOValue`'s own comment for why no
+        // `loadStageIOBlockValue`-style multi-member fan-out is needed
+        // here.
+        Value *New = interpolateStageIOValue(
+            B, CI->getType(), *Kind, Access->ElementIDs[0], Component,
+            ExtraOperand0, ExtraOperand1, CI->getName());
+        CI->replaceAllUsesWith(New);
+        CI->eraseFromParent();
         EraseIfNowDead(Ptr);
         Changed = true;
       }
