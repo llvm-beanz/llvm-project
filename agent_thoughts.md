@@ -98552,3 +98552,98 @@ Of the 165 remaining fails: 57 (54 "Fail (Failed)" + 3 "Fail (Fail)") are genuin
 3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 5. No scratch left over to clean up this session (`/tmp/interp_accesschain.mlir`, `/tmp/interp_sample_accesschain.mlir`, `/tmp/ctsrun/l125r*` already deleted).
+
+# Session: L137 fixed (dynamic vector-lane-select Component, byte-flattened GEP shape) -- L138 filed
+
+**Start here:** `L137` is fixed and CTS-verified. Read on for what's next.
+
+## What's done
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo` (required every session).
+2. Investigated `L137` (prior session's own next step). **The prior
+   session's H29 hypothesis was wrong** -- `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   showed the real error is a compiler-side "unresolved stage-IO
+   global-variable access" diagnostic, nothing to do with pipeline-library
+   linking. Corrected `FeMeVulkanDesign.md`'s H29 write-up to say so.
+3. Root-caused it: `centroid in vec2 fs_in_pos_screen_centroid[2];` read via
+   `fs_in_pos_screen_centroid[1][component]` where `component` is a
+   genuinely dynamic (push-constant) value selecting a *lane within a
+   vector*, not a further array row. `CanonicalizeStage.cpp` never had a
+   case for that.
+4. Built the "obvious" fix first (extend `collectDynamicRowTerms` to walk
+   a typed `getelementptr` into a `FixedVectorType`). Verified against a
+   synthetic unit test -- worked. Verified against the real CTS repro --
+   **did not work**, same error.
+5. Dug into why: extracted the real shader's SPIR-V, ran it through
+   `feme-opt --feme-convert-spirv-to-llvm` to see the MLIR `llvm`-dialect
+   IR (typed GEP, as expected) and then added a temporary debug print to
+   `ValidateStage.cpp` to see the *actual* compiled LLVM IR the real
+   driver produces. They're different: MLIR's own translation to real
+   LLVM IR can't express a dynamic index into a vector type, so it
+   flattens that one step into a separate byte-scaled GEP wrapping the
+   rest of the chain. **This is the actual, load-bearing lesson of this
+   session**: a synthetic unit-test repro built by hand can be wrong
+   about what real compiled IR looks like, even when it's a reasonable
+   guess -- always cross-check against the real pipeline's own output
+   before trusting a hand-written repro.
+6. Added a second, dedicated recognizer for the real (byte-flattened)
+   shape in `getDynamicRowIndexedAccess`, tried first. Kept the first
+   (typed-GEP) fix too as a defensive fallback with its own unit test,
+   even though it's not reachable from real IR right now.
+7. Rebuilt, `ninja check-feme` clean (3299/3302, +1 test, 0 regressions).
+8. Re-ran CTS: the 108-case `L137` bucket **no longer crashes** at
+   pipeline creation. All 36 executable cases in the bucket now run to
+   completion -- but all 36 still fail on a **numerical mismatch**
+   (image/value comparison, not a crash). That's a different, pre-existing
+   bug this session did not cause and did not fix -- filed as `L138`.
+9. Updated `Roadmap.md` (struck `L137`, filed `L138`), `FeMeVulkanDesign.md`
+   (H29 correction note), `VulkanCTSReport.md` (session write-up).
+10. Committed in 2 pieces: (a) the `CanonicalizeStage.cpp` fix + unit
+    test, (b) the 3 docs files.
+11. Cleaned up all session scratch (`/tmp/l137dbg/`, `/tmp/l137_*.qpa`,
+    `/tmp/vectest*.ll`) -- nothing left over.
+
+## What's NOT done (this session ran out of scope, not out of ideas)
+
+- **`L138`** (new, filed this session): the 36-case numerical mismatch
+  `L137`'s fix just exposed. Not investigated at all beyond confirming
+  it's real and reproducible. Best guess: the already-documented
+  `AtCentroid` pixel-center-vs-coverage-weighted-centroid simplification
+  (flagged as low-urgency in an earlier session precisely because "no
+  CTS case currently distinguishes this" -- these 36 cases might be
+  exactly such a case, now that they can run at all). Not confirmed.
+- `getDynamicVertexIndexedAccess` still has its own identical,
+  already-documented dynamic-vector-lane gap (probe call site declines
+  safely, doesn't fix it) -- still deferred, still no CTS case hits it
+  that anyone's found yet.
+- `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+  still the largest not-yet-started cross-repo item, still needs its own
+  dedicated session.
+- `L115(b)`'s own earlier residual (57 numerical mismatches from the
+  `L125(r)` sweep two sessions ago) -- still not triaged. May turn out to
+  overlap with `L138`; worth checking together.
+
+## Suggested next steps
+
+1. **(~30-60 min, natural next pick)** Investigate `L138`. Isolate one of
+   the 36 failing cases (`dEQP-VK.pipeline.fast_linked_library.
+   multisample_interpolation.centroid_interpolation_consistency.
+   pushc_component_0.128_128_1.samples_4` reproduces it), look at the
+   actual numeric values compared (the test log's own pixel/value dump)
+   to see how far off `AtCentroid`'s result is from the direct read --
+   if it's a small, consistent offset near a pixel-center-vs-centroid
+   boundary, that confirms the known simplification; if it's wildly off,
+   there's a real bug in this session's own fix (e.g. Row/Component
+   swapped, or the byte-GEP recognizer misfiring on a shape it shouldn't
+   match) and needs its own investigation.
+2. **(~30-60 min)** While there: also check whether `L138` overlaps with
+   the still-untriaged 57-case numerical-mismatch residual from the
+   `L125(r)` session two sessions back -- same `AtCentroid` suspicion,
+   never confirmed either.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. No scratch left over to clean up this session (everything under
+   `/tmp/l137dbg/`, `/tmp/l137_*.qpa`, `/tmp/vectest*.ll` already deleted).
