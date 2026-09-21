@@ -98647,3 +98647,44 @@ Of the 165 remaining fails: 57 (54 "Fail (Failed)" + 3 "Fail (Fail)") are genuin
    `llvm-project`) are incremental from here -- no reconfigure needed.
 5. No scratch left over to clean up this session (everything under
    `/tmp/l137dbg/`, `/tmp/l137_*.qpa`, `/tmp/vectest*.ll` already deleted).
+
+# Session: L138 root cause and fix (InterpolateAt* missing Row operand)
+
+**Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` first, per standing instructions.
+
+## Do this first
+
+Nothing pending -- `L138` is fixed and CTS-verified. If picking this up cold, jump to "Suggested next steps" below.
+
+## What happened (in order)
+
+1. Isolated `L138`'s single repro case, decoded its own result image: **100% of pixels wrong** (16,384/16,384), not a partial/edge mismatch. This ruled out the initially-suspected `AtCentroid` pixel-center simplification early -- a real bug, not an approximation.
+2. First hypothesis: per-sample shading wrongly re-evaluating a `centroid`-qualified varying's direct read at each pass's real sample position instead of holding it fixed. Implemented in `Executor.cpp`, built clean, 0 regressions -- but **zero effect** on the CTS failure. Wrong hypothesis for this bug (kept the fix anyway -- it's independently spec-correct).
+3. Broadened the repro to every construction type and every `component`/`pushc_component` variant: **all 30/30 executable cases failed**, including variants with no push constant at all. Ruled out anything push-constant-specific.
+4. Root cause found: `CanonicalizeStage.cpp`'s `interpolateStageIOValue` (backing `InterpolateAtCentroid`/`AtSample`/`AtOffset`) had **no `Row` operand at all** -- only `ElementID`/`Component`, unlike `InputLoad`'s `ElementID`/`Row`/`Component`/`Vertex`. This test's own shader reads an *array* of vec2 (`fs_in_pos_screen_centroid[2]`) via `[1][component]` -- row 1 has the real value, row 0 has a deliberately-planted garbage sentinel (`vec2(-70.3, 42.1)`) the vertex shader writes specifically to catch a bug like this. Every `InterpolateAt*` call silently always read row 0's garbage; the comparison's ordinary direct-read (through `InputLoad`, which *does* have `Row`) correctly read row 1. 100%-wrong-pixel mismatch explained exactly.
+5. Fix: added `Row` to `createStageInterpolateAt{Centroid,Sample,Offset}` (`StageOps.h/.cpp`), threaded `Access->Row` through both raising paths in `CanonicalizeStage.cpp` (SPIR-V marker-call path and the pre-existing DXIL `EvalCentroid`/`EvalSampleIndex`/`EvalSnapped` path -- the latter was already reading a row operand off the DXIL call and throwing it away), and made `FragmentWrapper.cpp`'s `lowerFragmentInterpolateAt` use the real `Row` operand instead of a hardcoded `0`. Added `Row` validation to `ValidateStage.cpp`. Updated `StageOpsTest`, `FragmentWrapperTest`, `dxil-canonicalize-stage.ll`.
+6. `ninja check-feme`: 3,299/3,299 Passed, 3 Unsupported, 0 Failed.
+7. CTS: isolated case now Pass. Full `centroid_interpolation_consistency.*` bucket: **90/90 executable cases Pass, 0 Fail** (was 36 Fail). Broader `multisample_interpolation.*` sweep (1,699 cases): 0 regressions, surfaced 12 pre-existing unrelated failures.
+8. Committed in 5 pieces: `Executor.cpp` fix, `StageOps` ABI change, `CanonicalizeStage` callers, `FragmentWrapper` consumer, `ValidateStage` validation. Docs commit separately.
+9. Filed `Roadmap.md`/`VulkanCTSReport.md` write-up, struck `L138`, filed `L139` (`centroid_qualifier_inside_primitive`, 6 cases, likely the real `AtCentroid` simplification this time) and `L140` (`nonuniform_interpolant_indexing`, 3 cases, a `SIMDize` divergent-call gap).
+
+## Wins this session
+
+- Closed `L138` for real (not a partial fix like the first hypothesis).
+- Found and fixed a genuine ABI gap in the pull-model-interpolation op family that had been silently wrong since it was introduced (`L115(b)`).
+- 0 regressions across 3,299 unit tests and a 1,699-case CTS sweep.
+
+## Still open (not touched this session)
+
+- `L139` -- `centroid_qualifier_inside_primitive.137_191_1.samples_{2,4,8}` (6 cases). Likely the real `AtCentroid` pixel-center-vs-coverage-weighted-centroid simplification (`L115(b)`'s own follow-up note) -- a non-power-of-two framebuffer size might be exactly what surfaces it. Not confirmed.
+- `L140` -- `nonuniform_interpolant_indexing.{centroid,sample,offset}` (3 cases). Fails at compile time: `error: feme-cpu-simdize: unsupported divergent call to 'feme.spirv.interpolate_at_centroid.f32'`. `SIMDize.cpp`'s `widenStageOp` has no handling for a genuinely per-lane-divergent `Interpolant` pointer.
+- `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, still needs its own dedicated session.
+- `L115(b)`'s own earlier residual (57 numerical mismatches from the `L125(r)` sweep, several sessions ago) -- still not triaged. Worth checking whether any of it overlaps with `L139`.
+
+## Suggested next steps
+
+1. **(~30-45 min, quick pick)** Investigate `L140` first -- smaller, more self-contained (a `SIMDize.cpp` gap, not a rendering-correctness question). Isolate `dEQP-VK.pipeline.monolithic.multisample_interpolation.nonuniform_interpolant_indexing.centroid`, look at `SIMDize.cpp`'s `widenStageOp` (around the `FirstOperandIsElementID` logic) to see what a per-lane-divergent `feme.spirv.interpolate_at_centroid` call would actually need -- probably decomposing into per-lane scalar calls the same way `Derivative*`/`QuadRead`'s vector-result path already does for a different reason, or deferring the marker-call resolution until after `CanonicalizeStage` runs (order-of-passes question, check whether `SIMDize` could just run after `CanonicalizeStage` instead).
+2. **(~1 hr)** `L139` -- isolate `centroid_qualifier_inside_primitive.137_191_1.samples_4`, dump its own numeric comparison values (not just pass/fail color, if the test log has them) to confirm or rule out the `AtCentroid` simplification hypothesis before assuming it.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+5. No scratch left over to clean up this session (all `/tmp/l138_*.qpa` deleted).
