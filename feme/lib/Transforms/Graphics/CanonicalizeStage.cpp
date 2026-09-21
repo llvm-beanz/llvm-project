@@ -4543,7 +4543,10 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     addElements(OutputGlobals);
     dxil::setEntrySignature(F, Sig);
     Changed = true;
-  } else if (Stage == ShaderStage::Geometry || Stage == ShaderStage::Mesh) {
+  } else if (Stage == ShaderStage::Geometry || Stage == ShaderStage::Mesh ||
+             ((Stage == ShaderStage::Vertex ||
+               Stage == ShaderStage::Fragment) &&
+              !dxil::getEntrySignature(F))) {
     // (Roadmap H5e-d) A geometry entry compiled from an `emit`-count shape
     // that ends its primitive without ever emitting on that particular
     // stream/count combination (e.g. a CTS `dEQP-VK.geometry.emit.*_emit_
@@ -4557,15 +4560,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // elsewhere does: any geometry entry that uses so much as one stage op
     // -- a stream cut included -- hard-requires an attached signature to
     // look element IDs up in, so it errors out instead of quietly treating
-    // a missing one as empty. Attach an explicit empty signature here,
-    // scoped to `Geometry`/`Mesh` only: unlike `Vertex`/`Fragment`
-    // (dispatched to both `canonicalizeDXILStage` and this function by
-    // `CanonicalizeStagePass::run`, so an empty-globals function reaching
-    // here could still be a DXIL-origin entry deliberately left
-    // signature-less, exactly the ambiguity roadmap H4g's own rejected fix
-    // ran into), a geometry or mesh entry is only ever routed through this
-    // (SPIR-V-only) function, so there is no DXIL-origin ambiguity to
-    // preserve.
+    // a missing one as empty. Attach an explicit empty signature here.
     //
     // (Roadmap H91) A mesh entry that calls `SetMeshOutputsEXT(0, 0)` --
     // i.e. genuinely emits zero vertices/primitives, the real shape a CTS
@@ -4583,6 +4578,45 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // included, hard-requires one to look element IDs up in), so it hits
     // the identical "requires attached feme.signature metadata" diagnostic
     // this row's own missing-mesh-case left unhandled.
+    //
+    // (Roadmap L131) A Fragment (or Vertex) entry with genuinely zero
+    // stage-IO globals of its own -- e.g. a fragment shader that only
+    // reads a push constant and writes a bound storage image via
+    // `imageStore`, never a real `in`/`out` interface variable
+    // (`dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
+    // overwrite`'s own shape) -- hits this identical gap for the same
+    // reason: the discovery loop above finds both `InputGlobals`/
+    // `OutputGlobals` empty, so the main `if` branch's own
+    // `dxil::setEntrySignature` call never runs, leaving the entry with no
+    // `!feme.signature` metadata at all; `feme::cpu::FragmentWrapperPass`'s
+    // `lowerFragmentStageOps` (`FragmentWrapper.cpp`) is exactly as strict
+    // as `GeometryWrapperPass`/`MeshOutputWrapperPass` about requiring one
+    // once an entry uses any stage op at all -- and every fragment entry
+    // unconditionally does, via the masked-output-store/return-masks calls
+    // `SPIRVToLLVMPatterns` always emits for helper-invocation/quad
+    // semantics, regardless of whether the shader has any real interface
+    // I/O -- so it hits the identical "requires attached feme.signature
+    // metadata" diagnostic.
+    //
+    // Unlike Geometry/Mesh (only ever routed through this SPIR-V-only
+    // function, so no DXIL-origin ambiguity to preserve), a genuine
+    // DXIL-origin Vertex/Fragment entry is *also* dispatched here (this
+    // function runs unconditionally for every Vertex/Fragment entry,
+    // alongside `canonicalizeDXILStage`) -- attaching a fresh empty
+    // signature to one unconditionally would silently clobber its real,
+    // already-correct signature (attached far earlier, by
+    // `feme::dxil::MetadataRaisingPass`, from the entry's own `!dx.
+    // entryPoints` metadata) with an incorrectly-empty one, exactly the
+    // ambiguity roadmap H4g's own rejected fix ran into. The
+    // `!dxil::getEntrySignature(F)` guard above sidesteps this safely:
+    // `MetadataRaisingPass` unconditionally calls `dxil::setEntrySignature`
+    // for every DXIL-origin entry it processes (even one with a trivially
+    // empty signature), so by the time this pass runs, a real DXIL-origin
+    // entry always already has one attached (`getEntrySignature` returns
+    // non-`nullopt`) -- only a SPIR-V-origin entry (never touched by the
+    // DXIL metadata-raising path at all) can still be signature-less here,
+    // making the guard an exact origin discriminator, not merely a
+    // best-effort heuristic.
     Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
     dxil::setEntrySignature(F, Sig);
     Changed = true;
