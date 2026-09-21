@@ -251,21 +251,31 @@ llvm::CallInst *createStageDerivative(llvm::IRBuilderBase &B, StageOpKind Kind,
 llvm::CallInst *createStageQuadRead(llvm::IRBuilderBase &B, llvm::Value *Val,
                                     uint8_t Direction);
 
+/// \p Row selects which array/matrix row of \p ElementID this pull-model
+/// interpolation reads (roadmap L138) -- the same `Row` operand
+/// `createStageInputLoad` above already threads through for ordinary
+/// loads; a `centroid`/`sample`-qualified varying that is itself an array
+/// (e.g. `in vec2 v[2];`) needs the exact same non-zero-Row addressing an
+/// ordinary `v[1]` load gets, or it silently reads row 0 instead of
+/// whichever row the source `InterpolateAt*` call actually indexed.
 llvm::CallInst *createStageInterpolateAtCentroid(llvm::IRBuilderBase &B,
                                                  llvm::Type *ResultTy,
                                                  uint32_t ElementID,
+                                                 llvm::Value *Row,
                                                  llvm::Value *Component);
 
 llvm::CallInst *createStageInterpolateAtSample(llvm::IRBuilderBase &B,
                                                llvm::Type *ResultTy,
                                                uint32_t ElementID,
+                                               llvm::Value *Row,
                                                llvm::Value *Component,
                                                llvm::Value *Sample);
 
 llvm::CallInst *
 createStageInterpolateAtOffset(llvm::IRBuilderBase &B, llvm::Type *ResultTy,
-                               uint32_t ElementID, llvm::Value *Component,
-                               llvm::Value *OffsetX, llvm::Value *OffsetY);
+                               uint32_t ElementID, llvm::Value *Row,
+                               llvm::Value *Component, llvm::Value *OffsetX,
+                               llvm::Value *OffsetY);
 
 /// `feme.stage.stream.emit(stream)`, where \p Stream is the output stream
 /// index (an ordinary `i32` constant, typically 0 unless the geometry stage

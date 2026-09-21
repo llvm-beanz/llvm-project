@@ -116,19 +116,20 @@ TEST_F(StageOpsTest, InterpolateAtVariants) {
   Type *I32 = B.getInt32Ty();
   Value *Zero = ConstantInt::get(I32, 0);
   CallInst *Centroid =
-      createStageInterpolateAtCentroid(B, B.getFloatTy(), 4, Zero);
+      createStageInterpolateAtCentroid(B, B.getFloatTy(), 4, Zero, Zero);
   CallInst *Sample =
-      createStageInterpolateAtSample(B, B.getFloatTy(), 4, Zero, Zero);
-  CallInst *Offset =
-      createStageInterpolateAtOffset(B, B.getFloatTy(), 4, Zero, Zero, Zero);
+      createStageInterpolateAtSample(B, B.getFloatTy(), 4, Zero, Zero, Zero);
+  CallInst *Offset = createStageInterpolateAtOffset(B, B.getFloatTy(), 4, Zero,
+                                                    Zero, Zero, Zero);
   EXPECT_EQ(Centroid->getCalledFunction()->getName(),
             "feme.stage.interpolate.at.centroid.f32");
   EXPECT_EQ(Sample->getCalledFunction()->getName(),
             "feme.stage.interpolate.at.sample.f32");
   EXPECT_EQ(Offset->getCalledFunction()->getName(),
             "feme.stage.interpolate.at.offset.f32");
-  EXPECT_EQ(Sample->arg_size(), 3u);
-  EXPECT_EQ(Offset->arg_size(), 4u);
+  EXPECT_EQ(Centroid->arg_size(), 3u);
+  EXPECT_EQ(Sample->arg_size(), 4u);
+  EXPECT_EQ(Offset->arg_size(), 5u);
 }
 
 TEST_F(StageOpsTest, StreamEmitAndCutCarryStreamIndex) {

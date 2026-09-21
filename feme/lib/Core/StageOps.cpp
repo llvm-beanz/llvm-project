@@ -219,28 +219,29 @@ CallInst *feme::createStageQuadRead(IRBuilderBase &B, Value *Val,
 CallInst *feme::createStageInterpolateAtCentroid(IRBuilderBase &B,
                                                  Type *ResultTy,
                                                  uint32_t ElementID,
+                                                 Value *Row,
                                                  Value *Component) {
   Value *Element = ConstantInt::get(B.getInt32Ty(), ElementID);
   return createCall(B, StageOpKind::InterpolateAtCentroid, ResultTy,
-                    {Element, Component});
+                    {Element, Row, Component});
 }
 
 CallInst *feme::createStageInterpolateAtSample(IRBuilderBase &B, Type *ResultTy,
-                                               uint32_t ElementID,
+                                               uint32_t ElementID, Value *Row,
                                                Value *Component,
                                                Value *Sample) {
   Value *Element = ConstantInt::get(B.getInt32Ty(), ElementID);
   return createCall(B, StageOpKind::InterpolateAtSample, ResultTy,
-                    {Element, Component, Sample});
+                    {Element, Row, Component, Sample});
 }
 
 CallInst *feme::createStageInterpolateAtOffset(IRBuilderBase &B, Type *ResultTy,
-                                               uint32_t ElementID,
+                                               uint32_t ElementID, Value *Row,
                                                Value *Component, Value *OffsetX,
                                                Value *OffsetY) {
   Value *Element = ConstantInt::get(B.getInt32Ty(), ElementID);
   return createCall(B, StageOpKind::InterpolateAtOffset, ResultTy,
-                    {Element, Component, OffsetX, OffsetY});
+                    {Element, Row, Component, OffsetX, OffsetY});
 }
 
 CallInst *feme::createStageStreamEmit(IRBuilderBase &B, uint32_t Stream) {
