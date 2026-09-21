@@ -723,27 +723,26 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
-/// EXPERIMENTAL/DIAGNOSTIC ONLY (roadmap L128(a)): a hand-minimized
-/// stand-in for `dEQP-VK.pipeline.monolithic.vertex_input.max_attributes.
-/// query_max_attributes.*`'s own `attr[numAttributes-1]` shader, reduced
-/// from the CTS test's real `numAttributes==16` (`RowCount==15`) down to
-/// `RowCount==5` -- still one past the largest `RowCount` any
-/// currently-passing test exercises (real matrices, capped at
-/// `RowCount==4`) -- specifically to make each `valgrind`/`gdb` iteration
-/// fast enough for real bisection (the full CTS shader takes several
-/// minutes per run under `valgrind`; this reduced form should take
-/// seconds). Sums `attr[0..4].x` in a compile-time-constant-trip-count
-/// loop (5 iterations, a plain `spirv.Constant`, not a specialization
-/// constant, since the forced-unroll prototype only needs
-/// `ScalarEvolution::getSmallConstantTripCount` to succeed) and writes
-/// the sum into `gl_Position.x` so the loop is not dead-code-eliminated.
-/// NOT a landable test on its own -- exists purely so a future session
-/// can reinstate the (also not-landed) loop-unrolling prototype needed
-/// ahead of `feme::vulkan::compileGraphicsStage`'s `CanonicalizeStagePass`
-/// call (see the `L128ARowCount5Repro` test's own comment below for the
-/// full, now disassembly-confirmed root-cause writeup) and get a fast,
-/// small repro for `L128(a)`.
-[[maybe_unused]] constexpr llvm::StringLiteral L128ARowCount5VertexSource = R"mlir(
+/// A hand-minimized stand-in for `dEQP-VK.pipeline.monolithic.
+/// vertex_input.max_attributes.query_max_attributes.*`'s own
+/// `attr[numAttributes-1]` shader, reduced from the CTS test's real
+/// `numAttributes==16` (`RowCount==15`) down to `RowCount==5` -- still one
+/// past the largest `RowCount` any other test exercises (real matrices,
+/// capped at `RowCount==4`) -- specifically to keep each debugging
+/// iteration on this shape fast (the full CTS shader takes much longer to
+/// bisect). Sums `attr[0..4].x` in a compile-time-constant-trip-count loop
+/// (5 iterations, a plain `spirv.Constant`, not a specialization constant,
+/// so `ScalarEvolution::getSmallConstantTripCount` can prove the trip
+/// count) and writes the sum into `gl_Position.x` so the loop is not
+/// dead-code-eliminated. Used by `L128ARowCount5Repro` below to exercise
+/// `feme::graphics::UnrollConstantTripCountStageLoopsPass`
+/// (UnrollConstantTripCountLoops.h/.cpp), which forces this loop to fully
+/// unroll ahead of `feme::vulkan::compileGraphicsStage`'s
+/// `CanonicalizeStagePass` call so its `RowCount>4` arrayed stage-IO
+/// access is resolved into per-row constant-indexed accesses rather than
+/// silently dropped from the built `EntrySignature` (roadmap `L128(b)`'s
+/// full root-cause writeup).
+constexpr llvm::StringLiteral L128ARowCount5VertexSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @attr {location = 1 : i32} : !spirv.ptr<!spirv.array<5 x vector<4xf32>>, Input>
   spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
@@ -9175,45 +9174,34 @@ TEST_F(DrawTest, FragmentShaderReadsBackViewportIndex) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// EXPERIMENTAL/DIAGNOSTIC ONLY -- roadmap L128(a) fast-iteration repro.
-/// NOT a landable test as-is: reproduces the crash today because
-/// `feme::vulkan::compileGraphicsStage` (GraphicsPipeline.cpp) runs
+/// Regression test for roadmap `L128`/`L128(a)`/`L128(b)`: before
+/// `feme::graphics::UnrollConstantTripCountStageLoopsPass` existed,
+/// `feme::vulkan::compileGraphicsStage` (GraphicsPipeline.cpp) ran
 /// `CanonicalizeStagePass` -- which builds the `EntrySignature` this
 /// pipeline exports for the *executor* to bind vertex-input storage
-/// against -- before any pass exists that could recognize a compile-time-
-/// constant-trip-count loop over an array-typed (`RowCount > 4`)
-/// `Input`/`Output` global as a set of per-row constant-indexed accesses.
-/// (A `RowCount <= 4` real matrix never hits this: SPIR-V/glslang always
-/// emits its row accesses as separate, already-unrolled loads, with no
-/// loop for `CanonicalizeStagePass` to fail to see through.) The result:
-/// this element is silently missing from the exported `EntrySignature`
-/// (confirmed directly this session, both by disassembling the crash --
-/// a null-pointer read of `FemeVertexArgs::InputLayout->Elements`, the
-/// signature's `Elements` array itself, empty because `StageStorage`'s
-/// `Any` flag never becomes true for this direction -- and by tracing
-/// `Sig.Elements.size()` through `CanonicalizeStage.cpp`/
-/// `StageStorage.cpp` with ad hoc debug prints), even though the compiled
-/// shader body still references its `ElementID` directly (`CompiledStage`'s
-/// own *internal* `runPipeline`, called later, runs a second, later
-/// `CanonicalizeStagePass` that *would* find it once a loop-unrolling fix
-/// exists ahead of it -- but that second pass's metadata update happens
-/// too late to affect the `EntrySignature` bytes `CompiledStage.cpp`
-/// already serialized into the artifact info at construction time).
+/// against -- with no pass able to recognize a compile-time-constant-
+/// trip-count loop over an array-typed (`RowCount > 4`) `Input`/`Output`
+/// global as a set of per-row constant-indexed accesses. (A `RowCount <=
+/// 4` real matrix never hits this: SPIR-V/glslang always emits its row
+/// accesses as separate, already-unrolled loads, with no loop for
+/// `CanonicalizeStagePass` to fail to see through.) The result: this
+/// element was silently missing from the exported `EntrySignature`
+/// (confirmed by disassembling the crash -- a null-pointer read of
+/// `FemeVertexArgs::InputLayout->Elements`, the signature's `Elements`
+/// array itself, empty because `StageStorage`'s `Any` flag never became
+/// true for this direction -- and by tracing `Sig.Elements.size()`
+/// through `CanonicalizeStage.cpp`/`StageStorage.cpp`), even though the
+/// compiled shader body still referenced its `ElementID` directly.
 ///
-/// Exercising this repro requires reinstating two pieces of scaffolding
-/// this session prototyped and then reverted, not landed here:
-///  1. A loop-unrolling (or equivalent constant-GEP-recognition) pass,
-///     run inside `feme::vulkan::compileGraphicsStage`
-///     *before* its `CanonicalizeStagePass().run(...)` call
-///     (GraphicsPipeline.cpp) -- not inside `feme::cpu::runPipeline`
-///     (Pipeline.cpp), which is too late, as explained above.
-///  2. Once (1) exists, this test alone is sufficient to confirm the fix:
-///     it reproduces the crash reliably (~3/3 runs) today and should pass
-///     cleanly once the real fix lands.
-/// Left in place (`#if 0`) so a future session doesn't have to re-derive
-/// the shader/pipeline setup from scratch. See roadmap `L128(a)` for the
-/// full writeup.
-#if 0
+/// `UnrollConstantTripCountStageLoopsPass` (run inside
+/// `compileGraphicsStage`, immediately *before* its own
+/// `CanonicalizeStagePass().run(...)` call -- not inside
+/// `feme::cpu::runPipeline`/Pipeline.cpp, whose own, later
+/// `CanonicalizeStagePass` call is too late to affect the
+/// `EntrySignature` bytes `CompiledStage::create` already captured)
+/// fixes this by forcing exactly this shape's loop to fully unroll ahead
+/// of time. This test exercises that fix end-to-end: it crashed
+/// reliably before the fix landed and passes cleanly now.
 TEST_F(DrawTest, L128ARowCount5Repro) {
   VkShaderModule Vertex = createModule(L128ARowCount5VertexSource);
   VkShaderModule Fragment = createModule(RedFragmentSource);
@@ -9303,6 +9291,5 @@ TEST_F(DrawTest, L128ARowCount5Repro) {
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
-#endif
 
 } // namespace
