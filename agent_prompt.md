@@ -53,6 +53,9 @@ file.
 
 # Request
 
+The last session seems to have stalled out. You can restore any intermediate
+state it left behind with `git stash pop`.
+
 Can you continue the work on feme? The last agent's suggested next steps are:
 
 1. **(~15-20 min, smallest pick)** `L134(i)` -- `B10G11R11_UFLOAT_PACK32`
