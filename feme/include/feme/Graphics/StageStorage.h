@@ -179,6 +179,25 @@ const SignatureElement *findElementByLocation(const EntrySignature &Sig,
                                               uint32_t Index = 0,
                                               uint32_t Component = 0);
 
+/// (Roadmap L134(b)) The first non-system-value \p Direction element of
+/// \p Sig whose own consecutive-location span
+/// `[Elt.Location, Elt.Location + Elt.RowCount)` contains \p Location --
+/// unlike `findElementByLocation`'s exact match (right for linking a
+/// whole varying/matrix at its own single declared base `Location`),
+/// per-color-attachment binding is inherently per-*location*: each bound
+/// color attachment index corresponds to exactly one Vulkan `location`,
+/// so a fragment-output *array* (`RowCount > 1`, e.g. GLSL's
+/// `layout(location = 0) out vec4 frag_out[3];`) spanning several
+/// consecutive locations must resolve each of those locations to the
+/// correct `Row` within its own single `SignatureElement`, not just that
+/// element's base `Location`. Without this, every color attachment past
+/// an array output's base location was silently left unbound. On a
+/// match, `*OutRow` is set to `Location - Elt.Location`; left unmodified
+/// otherwise.
+const SignatureElement *findElementCoveringLocation(
+    const EntrySignature &Sig, SignatureDirection Direction, uint32_t Location,
+    uint32_t &OutRow, uint32_t Index = 0, uint32_t Component = 0);
+
 } // namespace feme::graphics
 
 #endif // FEME_GRAPHICS_STAGESTORAGE_H

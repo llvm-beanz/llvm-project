@@ -214,4 +214,21 @@ const SignatureElement *findElementByLocation(const EntrySignature &Sig,
   return nullptr;
 }
 
+const SignatureElement *findElementCoveringLocation(
+    const EntrySignature &Sig, SignatureDirection Direction, uint32_t Location,
+    uint32_t &OutRow, uint32_t Index, uint32_t Component) {
+  for (const SignatureElement &Elt : Sig.Elements) {
+    if (Elt.Direction != Direction ||
+        Elt.SystemValue != SignatureSystemValue::None ||
+        Elt.Index != Index || Elt.FirstComponent != Component || !Elt.Location)
+      continue;
+    uint32_t Base = *Elt.Location;
+    if (Location >= Base && Location - Base < Elt.RowCount) {
+      OutRow = Location - Base;
+      return &Elt;
+    }
+  }
+  return nullptr;
+}
+
 } // namespace feme::graphics
