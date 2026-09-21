@@ -96598,3 +96598,151 @@ seen repeatedly in past sessions.
 8. No scratch CTS logs from this session needed cleanup (this session's
    CTS runs didn't write to `/tmp/ctsrun` under a session-specific
    subdirectory) -- nothing to do here.
+
+# Session: L129 push-constant repro search + L130 BC-format CTS gap investigation
+
+## TL;DR
+
+Investigation-only session, no code changes. Confirmed `vulkaninfo
+--summary | grep deviceName` shows `FeMe CPU Vulkan Device`. Noticed
+the prior session's suggested next steps ("L127... good next pick")
+were stale -- `git log` confirmed `L127` was already fixed in a
+commit that landed *before* last session's `L125(t)` work, so I
+skipped straight to the still-open items: closed out two
+long-standing backlog investigation items (`L129`'s push-constant CTS
+repro search, and the multi-session "BC-format CTS coverage gap")
+with definitive findings, neither of which needed a code fix.
+
+## What I did
+
+1. Confirmed the Vulkan ICD device, per standing instructions.
+2. Checked `git log` for `L127`/`L128` history before picking a task --
+   found `L127` (the item the pasted next-steps list called "a good
+   next pick") had already been fully fixed 2 commits before last
+   session's `L125(t)` work even started. The pasted next-steps list
+   was stale (probably captured before that fix landed). Skipped it
+   and moved down the list to item 5 (BC-format CTS gap).
+3. **BC-format investigation (`L130`, filed new)**: tried to reproduce
+   the claimed `sampler.view_type.*.format.*bc*.address_modes.
+   *clamp_to_border*` bucket directly -- got 0/0 matches. Chased this
+   down through several dead ends (my `deqp-vk` invocations were
+   missing required setup):
+   - `--deqp-runmode=xml-caselist` run from `/tmp` crashed partway
+     through (silently, non-zero exit swallowed by a shell pipe) with
+     `Failed to open file: './vulkan/glsl/440/linkage.test'` -- deqp-vk
+     needs relative data files resolved from its own module directory,
+     confirmed by `VulkanCTSReport.md`'s own documented reproduction
+     recipe (`cd .../modules/vulkan && ./deqp-vk ...`), which I'd
+     skipped this time.
+   - Even after fixing the CWD, `dEQP-VK.sampler.*` still matched
+     zero cases -- turned out the real top-level module is `pipeline`,
+     not `sampler` (`vktPipelineSamplerTests.cpp` registers `view_type`
+     under `pipeline.<construction_type>.sampler.view_type...`, not a
+     bare top-level `sampler.*` group). Every prior session's own
+     documented sweeps already used the correct `pipeline.*.sampler.*`
+     prefix; I'd just mis-typed it without matching a prior session's
+     literal invocation).
+   - Once corrected, the real question resolved cleanly by reading
+     `vktPipelineSamplerTests.cpp`'s source directly instead of trying
+     more CTS invocations: its `formats[]` array (feeding every
+     `pipeline.*.sampler.view_type.*.format.*` case) has ETC2/EAC/ASTC
+     entries but **zero** `VK_FORMAT_BC*` entries at all -- confirmed
+     via `grep`. A repo-wide search for any file combining a BC format
+     reference with border/address-mode testing also found nothing.
+   - This is a **genuine CTS-side test-coverage gap**, not a feme bug:
+     no test anywhere in dEQP-VK exercises BC-format sampling with
+     border-color addressing. Cross-checked (by code inspection, no
+     CTS case exists to test it directly) that feme's own BC
+     border-color handling is already correct via the
+     `compressedFormatBorderComponentMask` helper the unrelated
+     `L125(w)` fix added -- every non-4-channel BC format already has
+     a case there matching the equivalent ETC2/EAC ones `L125(w)`
+     verified via real CTS runs.
+   - Filed as new `L130`, marked investigated-and-closed in the same
+     edit (nothing to fix, nothing to re-investigate).
+4. **`L129` push-constant repro search**: searched
+   `vktPipelinePushConstantTests.cpp` for any case interleaving
+   graphics/compute binds with push constants. Found exactly one
+   candidate group, `push_constant.lifetime.*`
+   (`PushConstantLifetimeTest`), with two cases
+   (`pipeline_change_same_range_bind_push_vert_and_comp` /
+   `..._diff_range_...`) that do combine a graphics bind, compute
+   bind, and push constants in one command buffer. Read their
+   `CommandData` sequences closely: both push once with a combined
+   `VERTEX|COMPUTE` stage mask, draw, push again (different value),
+   then dispatch -- sequential, not interleaved in a way that would
+   expose cross-bind-point state bleed (the draw always consumes its
+   own push before the compute push ever lands). Ran the full 63-case
+   bucket as a sanity check: 27 Pass, 0 Fail, 36 NotSupported
+   (unrelated shader-object construction types) -- confirms no
+   regression, but also confirms this bucket can't detect the `L129`
+   gap even after a real fix.
+5. Updated `Roadmap.md`'s `L129` row with this finding (still correctly
+   "not yet started," now with the specific bucket ruled out) and
+   added the new `L130` row for the BC-format finding.
+6. Updated `VulkanCTSReport.md` with a matching investigation-only
+   section covering both findings.
+7. No code changed this session, so `ninja check-feme` was not
+   re-run (nothing to validate).
+8. Committed docs in one commit (both investigations share a single
+   "no code change" theme, so didn't split further).
+9. Cleaned up this session's own scratch CTS logs at
+   `/tmp/ctsrun/l125bc/*`.
+
+## Wins
+
+- Corrected my own path to two dead-end CTS invocation mistakes
+  (wrong CWD, wrong top-level module prefix) by going back to the
+  CTS's own documented reproduction recipe and reading the test
+  source directly, rather than guessing at more `--deqp-case` syntax
+  variations.
+- Definitively closed two long-standing, repeatedly-reflagged backlog
+  items with real evidence (source-code `grep`, not just "still
+  haven't looked at this") rather than carrying them forward
+  unexamined into yet another session's next-steps list.
+- Caught a stale next-steps list early (via `git log`) before wasting
+  a session re-doing already-landed `L127` work.
+
+## Suggested next steps
+
+1. `L129` (push-constant bind-point isolation) is confirmed to have
+   no CTS-driven repro anywhere in the current dEQP-VK checkout. If
+   picked up again, a hand-written `feme` unit test (mirroring
+   `L125(t)`'s own `GraphicsBindDoesNotClobberComputeBoundDescriptorSets`
+   test methodology: push distinct values at each bind point, bind/
+   draw/dispatch interleaved, assert isolation) is now the *only*
+   path to verify a fix -- do not spend more time searching CTS for a
+   repro, this session's search was thorough.
+2. `L130` (BC-format CTS gap) is closed -- confirmed CTS-side, not
+   feme's. No further action needed; do not re-investigate under the
+   assumption it's an unfixed feme bug.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
+   vertex-input-array gap, 3 fails) is root-caused but not attempted --
+   needs a dedicated session to prototype and compare the two
+   candidate fixes (loop-unrolling vs. a new dynamic-element-index
+   ABI) described in its own roadmap row.
+6. The `pipeline.monolithic.blend.*` full-family regression sweep
+   (flagged as a two-session-running timeout pattern previously) still
+   hasn't been reattempted -- still worth raising the timeout or
+   splitting into sub-family chunks whenever picked back up.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+8. **Reminder for future sessions**: `deqp-vk` must be invoked with
+   CWD set to its own module directory
+   (`VK-GL-CTS/build/external/vulkancts/modules/vulkan`), not an
+   arbitrary scratch directory -- it resolves shader/test data files
+   via relative paths and silently produces a truncated caselist (or
+   `FATAL ERROR: Failed to initialize dEQP`) otherwise. Also remember
+   the correct case-name prefix for sampler/view-type tests is
+   `dEQP-VK.pipeline.<construction_type>.sampler.view_type.*`, *not*
+   a bare `dEQP-VK.sampler.*` -- `view_type` groups are registered
+   inside the `pipeline` module (`vktPipelineSamplerTests.cpp`), not
+   as their own top-level module.
+9. This session's own scratch CTS logs (`/tmp/ctsrun/l125bc/*`) are
+   already cleaned up -- nothing to do here.
