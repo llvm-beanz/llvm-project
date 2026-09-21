@@ -11604,34 +11604,103 @@ mlir::LLVM::LLVMFuncOp getOrInsertInterpolateAtFunc(
 /// \p Interpolant stands for.
 ///
 /// SPIR-V restricts `Interpolant` to "an object of pointer type, which
-/// must be a variable of Input storage class" -- always a bare
-/// `spirv.mlir.addressof` of a scalar/vector `Input` global, never a
-/// composite/array one (`isCompositeStageIOType` never applies here).
-/// `StageIOAddressOfPattern` (above) therefore always takes that
-/// addressof's *eager-load* branch for it, producing an `llvm.load`
-/// reading an `llvm.mlir.addressof` -- exactly the value an ordinary
-/// `spirv.Load` of the same variable would also produce, since there is
-/// no way to tell the two apart once conversion has run. So, unlike
-/// every other operand `Adaptor` provides, \p Interpolant is never
-/// itself a genuine pointer once converted (attempting to instead keep
-/// `spirv.mlir.addressof` a real pointer here, mirroring
-/// `isCompositeLLVMType`'s composite-type case, was tried and rejected:
-/// the surrounding dialect-conversion driver detects the resulting
-/// mismatch against the type converter's own official answer for a
-/// scalar/vector `Input` pointer type -- the eagerly-loaded value type,
-/// not a pointer -- and silently re-materializes it back to that loaded
-/// value for any consumer expecting the canonical type, undoing the
-/// special-case entirely). Instead, this simply reaches one level
-/// further back through that same `llvm.load`'s own pointer operand
-/// (`getAddr()`), which is exactly the `llvm.mlir.addressof` this
-/// function needs -- recovering the real address without fighting the
-/// materialization system at all. Returns null if \p Interpolant is not
-/// this expected shape (a genuine pointer already, or an `llvm.load`).
-mlir::Value resolveInterpolantAddress(mlir::Value Interpolant) {
+/// must be a variable of Input storage class" -- always either a bare
+/// `spirv.mlir.addressof` of a scalar/vector `Input` global, or a
+/// `spirv.AccessChain` leaf reaching a scalar/vector element of an
+/// array/struct-typed `Input` global (`isCompositeStageIOType` never
+/// applies to `Interpolant` itself). `StageIOAddressOfPattern` (above)
+/// therefore always takes the eager-load branch for a bare addressof,
+/// while `StageIOArrayAccessChainPattern`'s own leaf keeps a genuine
+/// pointer -- but either way, the type converter's canonical answer for
+/// a scalar/vector `Input` pointer type is the eagerly-loaded value
+/// type, not a pointer, so \p Interpolant is never itself a genuine
+/// pointer once converted (attempting to instead special-case either
+/// producer to keep a real pointer here was tried and rejected: the
+/// surrounding dialect-conversion driver detects the resulting mismatch
+/// against the type converter's own official answer and silently
+/// re-materializes it back to that canonical type for any consumer
+/// expecting it, undoing the special-case entirely).
+///
+/// What that re-materialization actually looks like at the point this
+/// function runs is itself two different shapes, not one:
+/// - For the `StageIOAddressOfPattern` eager-load case, the
+///   `Adaptor`-provided value is already the real `llvm.load` the
+///   framework eagerly emitted right at the addressof site -- reaching
+///   one level further back through that load's own pointer operand
+///   (`getAddr()`) recovers the address directly.
+/// - For the `StageIOArrayAccessChainPattern` leaf case, no `llvm.load`
+///   exists yet at the point this pattern runs at all: the type
+///   converter's own `addTargetMaterialization` callback (registered in
+///   `populateSPIRVToLLVMTargetPatterns`, see its own "Roadmap H7y"
+///   comment) is what *would* eventually synthesize that same
+///   `llvm.load`, but the dialect-conversion driver only invokes
+///   materialization callbacks lazily, during its own final
+///   cast-reconciliation pass -- not immediately when a mid-conversion
+///   pattern like this one asks for a remapped operand. What this
+///   pattern actually observes instead is a placeholder
+///   `builtin.unrealized_conversion_cast` (address-space-7 pointer ->
+///   the canonical eagerly-loaded type) standing in for that
+///   not-yet-performed materialization. Unwrapping that cast's own
+///   single operand recovers the address exactly as directly as the
+///   `llvm.load` case above -- no need to wait for or force the
+///   deferred materialization to actually run.
+/// - A fourth, genuinely different shape: `Interpolant` addressing one
+///   *component* of a bare vector-typed (not array/struct) `Input`
+///   variable (e.g. GLSL's own `interpolateAtSample(color.x, ...)`,
+///   compiled to a `spirv.AccessChain` directly on the still-un-loaded
+///   `Input` pointer, unlike every case above). Since a whole vector
+///   `Input` variable is itself eagerly loaded as a single value (not
+///   treated as composite the way an array/struct is), this `AccessChain`
+///   converts not to a GEP but to an `llvm.extractelement` reading one
+///   lane straight out of the already-loaded vector -- by this point in
+///   conversion there is no pointer anywhere in the IR at all, only a
+///   scalar value. Recovering an address here means reconstructing one:
+///   recursively resolve the extracted vector operand's own address
+///   (through whichever of the three cases above produced it), then GEP
+///   into it by the extraction's own lane index, using the scalar result
+///   type as the synthesized GEP's element type -- exactly the same
+///   byte-offset shape `getStageIOBaseAndOffset()`
+///   (`CanonicalizeStage.cpp`) already expects from every other stage-IO
+///   access, so no changes are needed on that side to understand it.
+///
+/// Returns null if \p Interpolant is not one of these four expected
+/// shapes (a genuine pointer already, an `llvm.load`, a pointer-typed
+/// `unrealized_conversion_cast`, or an `llvm.extractelement` of one of
+/// the first three).
+mlir::Value resolveInterpolantAddress(mlir::OpBuilder &Builder,
+                                      mlir::Location Loc,
+                                      mlir::Value Interpolant) {
   if (mlir::isa<mlir::LLVM::LLVMPointerType>(Interpolant.getType()))
     return Interpolant;
   if (auto Load = Interpolant.getDefiningOp<mlir::LLVM::LoadOp>())
     return Load.getAddr();
+  if (auto Cast =
+          Interpolant.getDefiningOp<mlir::UnrealizedConversionCastOp>()) {
+    if (Cast.getInputs().size() == 1 &&
+        mlir::isa<mlir::LLVM::LLVMPointerType>(
+            Cast.getInputs().front().getType()))
+      return Cast.getInputs().front();
+  }
+  if (auto Extract =
+          Interpolant.getDefiningOp<mlir::LLVM::ExtractElementOp>()) {
+    mlir::Value VecAddr =
+        resolveInterpolantAddress(Builder, Loc, Extract.getVector());
+    if (!VecAddr)
+      return nullptr;
+    // Mirrors `buildBoolVectorGEP`'s own "leading zero index to go
+    // through the base pointer, base element type is the base pointer's
+    // own pointee type" GEP shape: `ElementType` here is the *vector's*
+    // own type (`VecAddr`'s pointee), addressed like a one-element array
+    // so the extraction's own lane index becomes the GEP's second index.
+    mlir::Type ElementType = Extract.getVector().getType();
+    mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+        Builder, Loc, Extract.getPosition().getType(),
+        Builder.getIntegerAttr(Extract.getPosition().getType(), 0));
+    return mlir::LLVM::GEPOp::create(
+        Builder, Loc, VecAddr.getType(), ElementType, VecAddr,
+        mlir::ValueRange{Zero, Extract.getPosition()},
+        mlir::LLVM::GEPNoWrapFlags::none);
+  }
   return nullptr;
 }
 
@@ -11653,7 +11722,7 @@ public:
     mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
     if (!ResultTy)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    mlir::Value Ptr = resolveInterpolantAddress(Adaptor.getInterpolant());
+    mlir::Value Ptr = resolveInterpolantAddress(Rewriter, Op.getLoc(), Adaptor.getInterpolant());
     if (!Ptr)
       return Rewriter.notifyMatchFailure(
           Op, "Interpolant did not resolve to a real address");
@@ -11683,7 +11752,7 @@ public:
     mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
     if (!ResultTy)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    mlir::Value Ptr = resolveInterpolantAddress(Adaptor.getInterpolant());
+    mlir::Value Ptr = resolveInterpolantAddress(Rewriter, Op.getLoc(), Adaptor.getInterpolant());
     if (!Ptr)
       return Rewriter.notifyMatchFailure(
           Op, "Interpolant did not resolve to a real address");
@@ -11720,7 +11789,7 @@ public:
     mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
     if (!ResultTy)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    mlir::Value Ptr = resolveInterpolantAddress(Adaptor.getInterpolant());
+    mlir::Value Ptr = resolveInterpolantAddress(Rewriter, Op.getLoc(), Adaptor.getInterpolant());
     if (!Ptr)
       return Rewriter.notifyMatchFailure(
           Op, "Interpolant did not resolve to a real address");
