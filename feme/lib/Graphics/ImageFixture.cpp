@@ -165,6 +165,48 @@ void decodeRGB9E5(uint32_t Word, double &R, double &G, double &B) {
   B = static_cast<double>((Word >> 18) & 0x1FFu) * Scale;
 }
 
+/// (Roadmap L134(i)) Encodes an RGB triple into
+/// `VK_FORMAT_B10G11R11_UFLOAT_PACK32`'s packed word: from the LSB up, an
+/// 11-bit unsigned float for R (6-bit mantissa, 5-bit exponent), another
+/// 11-bit float for G, then a 10-bit unsigned float for B (5-bit
+/// mantissa, 5-bit exponent) -- mirrors
+/// `runtime/CPU/FeMeRuntimeCPU.c`'s `femeRTPackR11G11B10Float`: clamp each
+/// channel non-negative, round to binary16 via `floatToHalfBits`, then
+/// right-shift each binary16 result down (4 bits for the 11-bit R/G
+/// fields' 6-bit mantissa, 5 bits for the 10-bit B field's 5-bit
+/// mantissa) to recover each field's own narrower exponent+mantissa bit
+/// pattern.
+uint32_t encodeR11G11B10Float(double R, double G, double B) {
+  uint32_t R11 = (static_cast<uint32_t>(
+                     floatToHalfBits(static_cast<float>(std::max(R, 0.0)))) >>
+                 4) &
+                0x7FFu;
+  uint32_t G11 = (static_cast<uint32_t>(
+                     floatToHalfBits(static_cast<float>(std::max(G, 0.0)))) >>
+                 4) &
+                0x7FFu;
+  uint32_t B10 = (static_cast<uint32_t>(
+                     floatToHalfBits(static_cast<float>(std::max(B, 0.0)))) >>
+                 5) &
+                0x3FFu;
+  return R11 | (G11 << 11) | (B10 << 22);
+}
+
+/// The inverse of `encodeR11G11B10Float` above: decodes
+/// `VK_FORMAT_B10G11R11_UFLOAT_PACK32`'s packed word into an RGB triple
+/// (each field's own narrower exponent+mantissa bit pattern is
+/// left-shifted back up into binary16's own layout before decoding via
+/// `halfBitsToFloat`, mirroring
+/// `femeRTUnpackR11G11B10Float`'s own shift amounts).
+void decodeR11G11B10Float(uint32_t Word, double &R, double &G, double &B) {
+  uint32_t R10 = ((Word & 0x7FFu) << 4) & 0xFFFFu;
+  uint32_t G10 = (((Word >> 11) & 0x7FFu) << 4) & 0xFFFFu;
+  uint32_t B10 = (((Word >> 22) & 0x3FFu) << 5) & 0xFFFFu;
+  R = halfBitsToFloat(static_cast<uint16_t>(R10));
+  G = halfBitsToFloat(static_cast<uint16_t>(G10));
+  B = halfBitsToFloat(static_cast<uint16_t>(B10));
+}
+
 /// The component count/width and encoding (hex vs. decimal) one
 /// `ResourceFormat` uses in a fixture. Only the formats
 /// `runtime/CPU/FeMeRuntimeCPU.c`'s image helpers and feme-run's own
@@ -976,6 +1018,21 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap L134(i)) `R11G11B10_FLOAT` (`VK_FORMAT_B10G11R11_UFLOAT_
+  // PACK32`): the same single-packed-word convention as `E5B9G9R9_UFLOAT`
+  // just above, but with `encodeR11G11B10Float`'s independent
+  // per-channel minifloat encode rather than a shared exponent -- alpha
+  // (`Clear[3]`) is likewise ignored, this format has no alpha channel.
+  if (Format == ResourceFormat::R11G11B10_FLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    uint32_t Word = encodeR11G11B10Float(Clear[0], Clear[1], Clear[2]);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -1642,9 +1699,7 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
 
   // (Roadmap H8q) `E5B9G9R9_UFLOAT`: the inverse of `packClearColor`'s
   // own `encodeRGB9E5` special case above, via `decodeRGB9E5`. Alpha
-  // always reads `1.0` (this format carries no alpha channel), the same
-  // convention `R11G11B10_FLOAT` would use if it had an `unpackColor`
-  // case (it does not -- only sampling/storage, not clear-color/blit).
+  // always reads `1.0` (this format carries no alpha channel).
   if (Format == ResourceFormat::E5B9G9R9_UFLOAT) {
     if (Out.size() != 4)
       return createStringError(inconvertibleErrorCode(),
@@ -1654,6 +1709,23 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     uint32_t Word;
     memcpy(&Word, Texel.data(), sizeof(Word));
     decodeRGB9E5(Word, Out[0], Out[1], Out[2]);
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap L134(i)) `R11G11B10_FLOAT`: the inverse of `packClearColor`'s
+  // own `encodeR11G11B10Float` special case above, via
+  // `decodeR11G11B10Float`. Alpha always reads `1.0` (this format
+  // carries no alpha channel either).
+  if (Format == ResourceFormat::R11G11B10_FLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    decodeR11G11B10Float(Word, Out[0], Out[1], Out[2]);
     Out[3] = 1.0;
     return Error::success();
   }
