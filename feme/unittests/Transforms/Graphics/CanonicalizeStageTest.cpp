@@ -5786,5 +5786,103 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(In->Interpolation, SignatureInterpolationMode::PerspectiveSample);
 }
 
+/// (Roadmap L136) A load whose pointer operand is a `select` between two
+/// distinct stage-IO `Input` globals -- the shape LLVM folds a per-branch
+/// "read a different varying" `if`/`else` into (`dEQP-VK.draw.renderpass.
+/// output_location.shuffle.inputs-outputs`'s own fragment shader:
+/// `frag_out0 = cond ? color_in0 : color_in1;`) -- is rewritten into a
+/// value-level `select` between two independently-resolved
+/// `feme.stage.input.load` calls, rather than left an unconverted load
+/// through a raw pointer `select` that references both globals directly
+/// (surviving, unresolved, all the way to JIT-link time as two undefined
+/// external symbols before this fix).
+TEST(CanonicalizeStageTest, RewritesLoadThroughSelectOfDistinctInputGlobals) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @color_in0 = external addrspace(7) constant float, !spirv.Decorations !0
+    @color_in1 = external addrspace(7) constant float, !spirv.Decorations !1
+    @frag_out0 = external addrspace(8) global float, !spirv.Decorations !2
+    define void @main(i1 %cond) #0 {
+      %p = select i1 %cond, ptr addrspace(7) @color_in0, ptr addrspace(7) @color_in1
+      %v = load float, ptr addrspace(7) %p
+      store float %v, ptr addrspace(8) @frag_out0
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!10}
+    !10 = !{i32 30, i32 0}
+    !1 = !{!11}
+    !11 = !{i32 30, i32 1}
+    !2 = !{!12}
+    !12 = !{i32 30, i32 2}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  Argument *Cond = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+  const SignatureElement *In0 = nullptr, *In1 = nullptr, *Out = nullptr;
+  for (const SignatureElement &E : Sig->Elements) {
+    if (E.Direction == SignatureDirection::Output) {
+      Out = &E;
+      continue;
+    }
+    if (!In0)
+      In0 = &E;
+    else
+      In1 = &E;
+  }
+  ASSERT_TRUE(In0 && In1 && Out);
+  // Both inputs keep their own distinct `Location`, matched up below by
+  // whichever one each `feme.stage.input.load` call actually reads.
+  ASSERT_TRUE(In0->Location.has_value());
+  ASSERT_TRUE(In1->Location.has_value());
+  EXPECT_NE(*In0->Location, *In1->Location);
+
+  // No load/store references either raw global directly anymore.
+  for (Instruction &I : instructions(F)) {
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(LI->getPointerOperand()));
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
+  }
+
+  // Exactly two `feme.stage.input.load` calls (one per selected global,
+  // each independently resolved), value-selected on the original
+  // condition, and exactly one `feme.stage.output.store` for the result.
+  SmallVector<CallInst *, 2> InputLoads;
+  CallInst *OutputStore = nullptr;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind))
+      continue;
+    if (Kind == StageOpKind::InputLoad)
+      InputLoads.push_back(CI);
+    else if (Kind == StageOpKind::OutputStore)
+      OutputStore = CI;
+  }
+  ASSERT_EQ(InputLoads.size(), 2u);
+  ASSERT_TRUE(OutputStore);
+  EXPECT_NE(cast<ConstantInt>(InputLoads[0]->getArgOperand(0))->getZExtValue(),
+            cast<ConstantInt>(InputLoads[1]->getArgOperand(0))->getZExtValue());
+
+  // Operand 3 is `Val` -- see `storeStageIOValue`'s own
+  // `createStageOutputStore(B, ElementID, Row, Component, StoredVal,
+  // Zero)` call order.
+  auto *Sel = dyn_cast<SelectInst>(OutputStore->getArgOperand(3));
+  ASSERT_TRUE(Sel);
+  EXPECT_EQ(Sel->getCondition(), Cond);
+  EXPECT_TRUE(
+      (Sel->getTrueValue() == InputLoads[0] &&
+       Sel->getFalseValue() == InputLoads[1]) ||
+      (Sel->getTrueValue() == InputLoads[1] &&
+       Sel->getFalseValue() == InputLoads[0]));
+}
+
 } // namespace
 
