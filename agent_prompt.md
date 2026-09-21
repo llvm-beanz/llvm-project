@@ -58,28 +58,23 @@ state it left behind with `git stash pop`.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~15-20 min, smallest pick)** `L134(i)` -- `B10G11R11_UFLOAT_PACK32`
-   missing an `unpackColor` case (`ImageFixture.cpp`) and its
-   `isSupportedColorAttachmentFormat` (`RenderPass.cpp`) entry. A real
-   `packClearColor` encode already exists for this format to mirror in
-   reverse; the 6 CTS cases this session isolated
-   (`b10g11r11-ufloat-pack32-{highp,mediump}`, plain/`-output-{float,vec2}`)
-   are ready to re-verify against once fixed.
-2. **`L134(h)`** -- the 4-case `feme-cpu-simdize` crash on a
-   vector-wider-than-scalar array-output shape. Not root-caused; the
-   crash's `.bc`-named divergent value suggests a bitcast `SIMDize.cpp`'s
-   divergence allowlist doesn't recognize -- needs its own IR-dump-based
-   trace (reuse this session's `FEME_DEBUG_DUMP_STAGE_IR` technique, or a
-   targeted look at `SIMDize.cpp` directly).
-3. **`L134(c)`** (`multiple_interpolation`, 64 cases) and **`L134(a)`**
-   (`indexed_draw`/`maintenance6`, 64 cases) -- the 2 still-open original
-   `L134` sub-rows, in that size order.
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+1. **(~30-60 min, quick pick)** `L134(c)` (`multiple_interpolation.*`, 64
+   cases: `separate`/`structured` x `with`/`no_sample_decoration` x
+   1/2/4/8 samples) -- check its own CTS failure message text first; an
+   "expected: X, got: X" pattern may be another `L132`-class
+   barycentric-sum bug (already fixed for 2 other shapes this
+   milestone), a genuinely different message needs its own
+   investigation.
+2. **`L134(a)`** (`indexed_draw.*`/`maintenance6`, 64 cases) -- the other
+   remaining `L134` sub-row, likely most involved of the two per every
+   prior session's own sizing estimate.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
    still the largest not-yet-started cross-repo item, needs its own
    dedicated session.
-5. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
    new runtime-callback ABI surface, not a quick pick.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's scratch (`/tmp/ctsrun/l134b/`, `/tmp/l134b/`) has
-   already been cleaned up; nothing left over to delete.
+6. This session's scratch (`/tmp/ctsrun/l134h/`, `/tmp/l134h_dump.log`,
+   `/tmp/ctsrun/l134i/`) has already been cleaned up; nothing left over
+   to delete.
