@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: 6e011932-a46a-43ae-97b3-283c96c999ff
+model: gpt-5.6-sol
 ---
 # Initial Guidelines
 
@@ -53,27 +52,10 @@ file.
 
 # Request
 
-Can you continue the work on feme? The last agent's suggested next steps are:
+Can you run a full CTS run against the feme ICD, then analyze the results to
+update the VulkanCTSReport and Roadmap?
 
-1. **(~30-45 min, quick pick)** Investigate `L140` first -- smaller, more
-   self-contained (a `SIMDize.cpp` gap, not a rendering-correctness question).
-   Isolate
-   `dEQP-VK.pipeline.monolithic.multisample_interpolation.nonuniform_interpolant_indexing.centroid`,
-   look at `SIMDize.cpp`'s `widenStageOp` (around the `FirstOperandIsElementID`
-   logic) to see what a per-lane-divergent `feme.spirv.interpolate_at_centroid`
-   call would actually need -- probably decomposing into per-lane scalar calls
-   the same way `Derivative*`/`QuadRead`'s vector-result path already does for a
-   different reason, or deferring the marker-call resolution until after
-   `CanonicalizeStage` runs (order-of-passes question, check whether `SIMDize`
-   could just run after `CanonicalizeStage` instead).
-2. **(~1 hr)** `L139` -- isolate
-   `centroid_qualifier_inside_primitive.137_191_1.samples_4`, dump its own
-   numeric comparison values (not just pass/fail color, if the test log has
-   them) to confirm or rule out the `AtCentroid` simplification hypothesis
-   before assuming it.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
-   the largest not-yet-started cross-repo item, needs its own dedicated session.
-4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
-   `llvm-project`) are incremental from here -- no reconfigure needed.
-5. No scratch left over to clean up this session (all `/tmp/l138_*.qpa`
-   deleted).
+When you update the roadmap please re-triage all the open milestones and resort
+milestone lists so that closed milestones are at the top of the milestone tables
+and open milestones are at the bottom. Please pay particular attention to the L
+and H series milestones as they are most focused on the CTS.
