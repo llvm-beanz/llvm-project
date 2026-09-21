@@ -8064,3 +8064,91 @@ canonicalize into a 'feme.stage.*' call`, `VK_ERROR_INITIALIZATION_FAILED`
 at pipeline creation) -- expected, since no functional fix was attempted
 this session. No feature/extension inventory changes (no new Vulkan
 functionality shipped this session).
+
+## Session: L128/L128(a)/L128(b) closed -- `UnrollConstantTripCountStageLoopsPass` implemented and landed
+
+Picked up directly from the prior session's `L128(b)` writeup: the fix
+location was fully identified (`GraphicsPipeline.cpp`, immediately ahead
+of `compileGraphicsStage`'s own `CanonicalizeStagePass().run(...)` call)
+but not attempted. This session implemented, debugged, and landed it.
+
+**The pass**: `feme::graphics::UnrollConstantTripCountStageLoopsPass`
+(`feme/include/feme/Transforms/Graphics/UnrollConstantTripCountLoops.h`,
+`feme/lib/Transforms/Graphics/UnrollConstantTripCountLoops.cpp`) builds a
+self-contained, cross-registered `PassBuilder` (its own analysis
+managers, not the caller's incomplete one) and runs `SROAPass` →
+`LoopSimplifyPass` → `LCSSAPass` → an internal `MarkLoopsForForcedFullUnroll`
+function pass (attaches `!llvm.loop.unroll.full` to any loop whose
+`ScalarEvolution::getSmallConstantTripCount` is nonzero and ≤ 64) →
+`createFunctionToLoopPassAdaptor(LoopFullUnrollPass(OptLevel=2,
+OnlyWhenForced=true))` → `InstCombinePass` → `SimplifyCFGPass`, scoped to
+Vertex/Fragment entry points only. Wired into `GraphicsPipeline.cpp`
+immediately before the existing `CanonicalizeStagePass().run(...)` call.
+
+**Two real bugs found and fixed while landing this** (both silently
+produced a no-op pass on the first attempt):
+
+1. `MarkLoopsForForcedFullUnroll` initially called
+   `addStringMetadataToLoop(L, "llvm.loop.unroll.full")` with a bare
+   `const char*` string literal. C++ overload resolution binds this
+   exactly to `addStringMetadataToLoop(Loop*, const char*, unsigned V =
+   0)` (an exact-type match beats the intended `StringRef` overload's
+   implicit conversion), silently producing a *false*-valued
+   `!{!"llvm.loop.unroll.full", i32 0}` "key = value" node instead of a
+   bare, name-only "attribute set" node (always `true`) --
+   `llvm::getOptionalBoolLoopAttribute`'s own `case 2` reads the literal
+   operand value, so this loop was marked "unroll.full = false" the
+   whole time. Fixed by explicitly constructing a `StringRef` at the call
+   site.
+2. Even after fix (1), the loop still visibly failed to unroll when
+   traced via a temporary IR dump. Root-caused to **`FeMeVulkanTests`
+   (and every other in-process Vulkan unit-test binary) statically
+   linking its own separate copy of `FeMeVulkanCore`/
+   `FeMeTransformsGraphics`**, distinct from the copy dynamically
+   `dlopen`ed via `feme_icd.json`'s `library_path` when a real Vulkan
+   application (including `deqp-vk`) creates an instance through the
+   loader. Rebuilding only the `feme_vulkan` CMake target (the shared
+   ICD library) left the *test binary's* own statically-linked copy
+   stale, so the fix appeared entirely inert against `FeMeVulkanTests`
+   even though the loaded `.so` was correct. `cmake --build . --target
+   FeMeVulkanTests` (not just `feme_vulkan`) is required after any
+   change to code reachable from a Vulkan-core in-process unit test --
+   worth remembering for any future in-process debugging session.
+
+**Validated the fix**: confirmed via direct IR inspection (temporary
+`errs()`-based tracing, since removed) that the `RowCount==5` repro's
+loop fully unrolls into 5 separate `feme.stage.input.load.f32` calls
+ahead of `CanonicalizeStagePass`. `DrawTest.L128ARowCount5Repro`
+(finalized as a permanent, always-enabled regression test; its header
+comment rewritten from "NOT a landable test" to describe the now-landed
+fix) passes cleanly and repeatably (previously crashed with `SIGSEGV`
+before any fix existed, and failed pipeline creation with an
+"unresolved stage-IO global-variable access" error with only `L128(b)`'s
+misclassification fix in place).
+
+**Regression check**: `ninja check-feme` -- 3,277/3,280 Passed, 3
+Unsupported, 0 Failed (+1 newly-enabled test, 0 regressions).
+
+**CTS verification**:
+- The 3 target cases this row exists for --
+  `vertex_input.max_attributes.query_max_attributes.{binding_one_to_many.
+  interleaved,binding_one_to_many.sequential,binding_one_to_one.
+  interleaved}` -- all **Pass** for the first time.
+- Full `vertex_input.*` re-sweep: **0 Fail** (13,296 cases: 2,488 Pass,
+  10,805 NotSupported, 3 Warning), confirming no regression across the
+  entire vertex-input test family this pass runs ahead of.
+- A full `pipeline.monolithic.*` sweep was additionally started as a
+  broader regression guard, since this new pass runs ahead of the
+  signature-building step for every graphics shader compiled through
+  `compileGraphicsStage`, not just vertex-input ones. It was still
+  in progress at several thousand cases in with 0 new fails (the small
+  number of `Fail`s observed are `bind_buffers_2.*`, confirmed via a
+  stash/rebuild-to-baseline round-trip to be pre-existing and unrelated
+  to this session's change) -- see this file's own later note (if any)
+  or a future session for the final tally; not required to close this
+  row, since the row's own target cases and the full `vertex_input.*`
+  family are both already fully verified clean.
+
+No feature/extension inventory changes (no new Vulkan functionality
+shipped this session -- this is a compiler-internal correctness fix to
+existing dEQP-VK coverage, not a new capability).
