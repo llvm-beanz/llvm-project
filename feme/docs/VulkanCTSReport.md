@@ -9075,3 +9075,95 @@ fail belongs to one of `L134`'s two still-open sub-rows
 `L134(c)`, 64 fails, plus `renderpass`/`dynamic_rendering` construction-
 type variants of both); 0 fails remain in `output_location.*`, and no
 new fail appeared anywhere else in the sweep.
+
+## L134(c): `multiple_interpolation.*` -- single-member-block `Location` fix, deeper value-mismatch still open
+
+### What was investigated
+
+`L134(c)` (`multiple_interpolation.{separate,structured}.{with,no}_
+sample_decoration.{1,2,4,8}_sample(s)`, 64 of `L134`'s original 224
+cases) was filed as a single value-mismatch failure class. Reproducing
+the isolated repro found the real CTS failure text split into two
+distinct classes:
+
+1. `Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED
+   at vkRefUtil.cpp:37)` -- a pipeline-creation-time rejection, at least
+   in `structured.with_sample_decoration.{4,8}_samples`.
+2. `Fail (smooth produced different results)` -- a genuine render-value
+   mismatch.
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` surfaced the real message behind (1):
+`"vkCreateGraphicsPipelines: fragment input element 0 has no location to
+link against a vertex output"`.
+
+### Root cause (class 1, fixed)
+
+A temporary, env-var-gated `errs()` dump of each entry's computed
+`EntrySignature` (added to `CanonicalizeStagePass::run`, reverted before
+committing) against the real compiled shaders confirmed the affected
+entry is a single-real-member `Block`-decorated interface block whose
+one member carries its own per-member `Location`/interpolation-qualifier
+decorations -- the shape `structured` mode's fragment shader compiles to
+once a "reference"/simplified pipeline variant only needs one of the
+5 interpolation-qualified varyings. `CanonicalizeStage.cpp`'s
+`TakeBlockPath` only decomposes a block into several `SignatureElement`s
+when it has more than one real member or a `BuiltIn`-decorated one
+(roadmap H101b); a single-real-member block instead falls to the "plain"
+path just below, which (per roadmap H101l) already folds the member's
+own `XfbOffset` in when the whole variable lacks one, but never did the
+same for `Location`/`Component`/`Index`/`NoPerspective`/`Flat`/
+`Centroid`/`Sample`/`PerPrimitive` -- leaving every such element's
+`Location` permanently `std::nullopt`.
+
+### Fix
+
+`CanonicalizeStage.cpp`'s plain (non-`TakeBlockPath`) path now folds
+every decoration `D` itself lacks in from the single member's own parsed
+decorations, one field at a time (mirroring the pre-existing `XfbOffset`
+fold immediately above it), so a whole-variable decoration (never
+observed for this shape, but not structurally impossible) is never
+overwritten.
+
+### Testing
+
+New regression test `CanonicalizeStageTest.
+PreservesLocationForSingleMemberBlockWithPerMemberDecoration` (a
+single-member, `Sample`-decorated, `Location=3`-decorated `Input` block,
+confirmed via a stash/rebuild round-trip to fail identically to the real
+bug -- `Location` reads back `std::nullopt` -- pre-fix).
+
+`ninja check-feme`: 3,291/3,294 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.renderpass.multiple_interpolation.*` (28 supported-
+  sample-count cases): still **0 Pass, 16 Fail, 12 NotSupported** --
+  unchanged in raw pass count, but the failure *class* is now uniform:
+  every one of the 16 fails is now `"smooth produced different results"`,
+  where before this fix a subset instead hit the pipeline-creation crash.
+  The crash class itself is confirmed gone (re-ran `structured.
+  with_sample_decoration.{4,8}_samples`, the two cases the crash was
+  isolated against; both now reach the value-mismatch class instead).
+
+### Remaining work (class 2, not fixed this session)
+
+The "smooth produced different results" value mismatch reproduces even
+on `dEQP-VK.draw.renderpass.multiple_interpolation.separate.
+no_sample_decoration.1_sample` -- no interface block, no multisampling,
+no sample decoration at all. Since class 1's fix only touches the
+single-member-block `Location` path, and this simplest case never takes
+that path at all, class 2 is confirmed **not** a block/`Location`-
+routing bug: it's a more fundamental, pre-existing gap in how this
+implementation distinguishes `smooth`/`flat`/`noperspective`/`centroid`/
+`sample` interpolation for `separate`-mode (individually declared, non-
+block) fragment varyings, not yet root-caused. This needs its own
+dedicated investigation next session -- see `agent_thoughts.md` for
+suggested next steps.
+
+### Results
+
+`L134(c)`'s pipeline-creation-crash sub-bug is fixed and CTS-verified;
+the deeper interpolation-qualifier value-mismatch bug remains open. No
+feature/extension inventory changes (a compiler correctness fix, no new
+Vulkan functionality shipped this session).
