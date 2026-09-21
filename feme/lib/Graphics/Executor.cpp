@@ -1383,10 +1383,10 @@ uint8_t applyLogicOp(LogicOp Op, uint8_t Src, uint8_t Dst) {
 /// looked it up), so no further type check is done here.
 void readFragmentColor(const StageStorage &FSOutput,
                        const SignatureElement &Elem, uint32_t Invocation,
-                       std::array<double, 4> &RGBA) {
+                       std::array<double, 4> &RGBA, uint32_t Row = 0) {
   for (unsigned C = 0; C != 4; ++C)
     RGBA[C] = C < Elem.ComponentCount
-                  ? FSOutput.readFloat(Elem.ElementID, C, Invocation)
+                  ? FSOutput.readFloat(Elem.ElementID, C, Invocation, Row)
                   : (C == 3 ? 1.0 : 0.0);
 }
 
@@ -1413,14 +1413,15 @@ void readFragmentColor(const StageStorage &FSOutput,
 /// exact_sampling.r32_uint.*` caught.
 void readFragmentColorInt(const StageStorage &FSOutput,
                           const SignatureElement &Elem, uint32_t Invocation,
-                          bool Unsigned, std::array<double, 4> &RGBA) {
+                          bool Unsigned, std::array<double, 4> &RGBA,
+                          uint32_t Row = 0) {
   bool Signed = !Unsigned;
   for (unsigned C = 0; C != 4; ++C) {
     if (C >= Elem.ComponentCount) {
       RGBA[C] = C == 3 ? 1.0 : 0.0;
       continue;
     }
-    uint32_t Raw = FSOutput.readRaw(Elem.ElementID, C, Invocation);
+    uint32_t Raw = FSOutput.readRaw(Elem.ElementID, C, Invocation, Row);
     RGBA[C] = Signed ? static_cast<double>(static_cast<int32_t>(Raw))
                      : static_cast<double>(Raw);
   }
@@ -2173,6 +2174,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     return std::nullopt;
   };
   SmallVector<const SignatureElement *, 4> FSColors;
+  // (Roadmap L134(b)) The `Row` within each `FSColors[I]` element that
+  // this attachment's own location resolves to -- distinct from index 0
+  // whenever a single fragment-output *array* element (`RowCount > 1`)
+  // spans several consecutive locations, each bound to a different color
+  // attachment. Always `0` for a plain (non-array, `RowCount == 1`)
+  // output, matching every prior behavior.
+  SmallVector<uint32_t, 4> FSColorRows;
   // (roadmap H9a) A fragment-less pipeline (`GraphicsPipeline.cpp`'s own
   // pipeline-creation-time rejection of this shape removed by this same
   // row) has no fragment output to link against any color attachment at
@@ -2191,6 +2199,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // write here, so no output is required (or consulted) at this
         // location either.
         FSColors.push_back(nullptr);
+        FSColorRows.push_back(0);
         continue;
       }
       std::optional<uint32_t> Loc = locationForAttachment(I);
@@ -2199,10 +2208,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // attachment: it keeps whatever it already held, exactly like an
         // unused `VkRenderingAttachmentInfo` slot above.
         FSColors.push_back(nullptr);
+        FSColorRows.push_back(0);
         continue;
       }
-      const SignatureElement *FSColor =
-          findElementByLocation(FSSig, SignatureDirection::Output, *Loc);
+      // (Roadmap L134(b)) `findElementCoveringLocation`, not
+      // `findElementByLocation`: a fragment-output *array* (`RowCount >
+      // 1`) declares one `SignatureElement` spanning several consecutive
+      // locations, so an exact `Location` match alone would only ever
+      // resolve this attachment when `*Loc` equals that element's own
+      // base location, leaving every other location it covers unbound.
+      uint32_t Row = 0;
+      const SignatureElement *FSColor = findElementCoveringLocation(
+          FSSig, SignatureDirection::Output, *Loc, Row);
       // (roadmap H11) A genuinely bound color attachment whose location
       // the fragment stage simply never declares an output for is legal
       // per the Vulkan spec's own fragment-output-interface rules (the
@@ -2219,6 +2236,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // possibly-bound attachment format occupies).
       if (!FSColor) {
         FSColors.push_back(nullptr);
+        FSColorRows.push_back(0);
         continue;
       }
       // (Roadmap H8p) An integer color attachment (one of
@@ -2240,6 +2258,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             Want == SignatureComponentType::Float ? " floating-point"
                                                   : "n integer");
       FSColors.push_back(FSColor);
+      FSColorRows.push_back(Row);
     }
   }
 
@@ -3944,10 +3963,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 readFragmentColorInt(
                     *FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
                     cpu::isUnsignedIntegerColorAttachmentFormat(Att.Format),
-                    RGBA);
+                    RGBA, FSColorRows[AttIdx]);
               } else {
                 readFragmentColor(*FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
-                                  RGBA);
+                                  RGBA, FSColorRows[AttIdx]);
                 // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
                 // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
                 // triangle) multiplies into the written alpha so a
