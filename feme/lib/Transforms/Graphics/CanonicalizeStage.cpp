@@ -3753,6 +3753,40 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     }
   }
 
+  // (Roadmap L134(d)) A fragment shader can statically use `gl_SampleID`/
+  // `gl_SamplePosition` (SPIR-V `BuiltIn SampleId`/`SamplePosition`)
+  // purely by referencing the builtin without ever consuming its loaded
+  // value (e.g. a bare `gl_SampleID;` expression statement, which
+  // `dEQP-VK.draw.*.implicit_sample_shading.sample_{id,position}_static_
+  // use` deliberately does) -- per the Vulkan spec, this still counts as
+  // "statically uses an input variable decorated with SampleId or
+  // SamplePosition" and must force per-sample shading (see
+  // `Executor.cpp`'s own `PerSampleShading` check), but the load/store-
+  // instruction walk above can never discover it: with no consumer for
+  // the loaded value, SPIR-V-to-LLVM import never materializes a load
+  // instruction referencing the global's pointer operand at all, so the
+  // global is never visited above. Walk every remaining (not yet `Seen`)
+  // module-scope stage-IO global directly and add any `SampleId`/
+  // `SamplePosition` input found this way too, so it still gets a
+  // `SignatureElement` `Executor.cpp`'s `findElement` can see. Narrowly
+  // scoped to just these two builtins (rather than every unused stage-IO
+  // global) since they are the only ones the spec ties to an implicit
+  // pipeline-state change a *later* consumer (the executor, not this
+  // entry's own body) must react to.
+  for (GlobalVariable &GV : F.getParent()->globals()) {
+    if (Seen.contains(&GV))
+      continue;
+    unsigned AddrSpace = 0;
+    if (!isSPIRVStageIOGlobal(&GV, AddrSpace) || AddrSpace != 7)
+      continue;
+    ParsedSPIRVDecorations D =
+        parseSPIRVDecorations(GV.getMetadata("spirv.Decorations"));
+    if (!D.BuiltIn || (*D.BuiltIn != 18 && *D.BuiltIn != 19))
+      continue;
+    Seen.insert(&GV);
+    InputGlobals.push_back(&GV);
+  }
+
   DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
   // Hoisted out of the `if` below (rather than left a block-local, as
   // every other `Sig` in this file is) so the element-building loop
