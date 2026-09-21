@@ -53,36 +53,30 @@ file.
 
 # Request
 
-The last session lost internet connection, can you please retry?
-
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. The 9 `pipeline.monolithic.push_constant.*` pre-existing failures
-   (`JIT session error: Symbols not found: [ spirv_var_NN ]` /
-   `OpTypeArray count <id> ... must come from a constant, specialization
-   constant, or supported specialization constant operation`) are
-   **not yet filed as their own roadmap row** -- worth filing and
-   root-causing next time nothing more pressing is queued; these look
-   like a real gap in how the JIT/SPIR-V-legalization path resolves
-   specialization-constant-sized arrays or exported symbols, possibly
-   related in shape to `L128`'s own specialization-constant array-size
-   finding, but not yet confirmed as the same root cause.
-2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   remains the other large, not-yet-started cross-repo item -- not a
-   quick pick, needs its own dedicated session.
-3. `L115(b)` (pull-model interpolation) remains flagged from several
-   sessions ago as a larger, not-yet-started item needing a new
-   runtime-callback ABI surface -- also not a quick pick.
-4. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
+1. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session, not a quick pick.
+2. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also not
+   a quick pick.
+3. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
    vertex-input-array gap, 3 fails) is root-caused but not attempted --
-   needs a dedicated session to prototype and compare the two
-   candidate fixes (loop-unrolling vs. a new dynamic-element-index
-   ABI) described in its own roadmap row.
-5. The `pipeline.monolithic.blend.*` full-family regression sweep
+   needs a dedicated session to prototype and compare the two candidate
+   fixes (loop-unrolling vs. a new dynamic-element-index ABI) described in
+   its own roadmap row.
+4. The `pipeline.monolithic.blend.*` full-family regression sweep
    (flagged as a two-session-running timeout pattern previously) still
-   hasn't been reattempted -- still worth raising the timeout or
-   splitting into sub-family chunks whenever picked back up.
+   hasn't been reattempted -- still worth raising the timeout or splitting
+   into sub-family chunks whenever picked back up.
+5. **Note for future sessions**: when a CTS bucket's own error text seems
+   to point at a specific known limitation (e.g. `hasOnlyConstantIndices`),
+   don't take that at face value -- get an isolated
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` trace on at least one repro case
+   before writing it into the roadmap as a root cause. This session found
+   a prior session's speculative diagnosis was wrong once actually traced.
 6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's own scratch CTS logs (`/tmp/ctsrun/l129/*`) are
-   already cleaned up -- nothing to do here.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l131/*`) are already
+   cleaned up -- nothing to do here.
