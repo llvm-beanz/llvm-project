@@ -1205,6 +1205,15 @@ struct GraphicsState {
   // `runDraw`'s vertex-fetch loop.
   std::vector<VkDeviceSize> VertexBufferStrides;
   Buffer *IndexBuffer = nullptr;
+  /// (Roadmap L134(a)) Whether `vkCmdBindIndexBuffer`/`vkCmdBindIndexBuffer2`
+  /// has ever been called, distinct from `IndexBuffer` being non-null:
+  /// `VK_KHR_maintenance6` legalizes binding `VK_NULL_HANDLE` as an index
+  /// buffer (in which case `IndexBuffer` above is null, exactly as it is
+  /// before any bind at all), so this flag alone tells "genuinely never
+  /// bound" (an error for an indexed draw) apart from "explicitly bound to
+  /// nothing" (legal, and a no-op index fetch as long as no index is
+  /// actually read from it).
+  bool IndexBufferBound = false;
   VkDeviceSize IndexBufferOffset = 0;
   /// (Roadmap E5) `vkCmdBindIndexBuffer2`'s `size`, or `VK_WHOLE_SIZE` for
   /// a plain `vkCmdBindIndexBuffer` -- matching that command's own "bind
@@ -2186,7 +2195,7 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
 
   feme::graphics::IndexBufferBinding IndexBinding;
   if (Draw.Indexed) {
-    if (!Gfx.IndexBuffer || !Gfx.IndexBuffer->isBound())
+    if (!Gfx.IndexBufferBound)
       return createStringError(inconvertibleErrorCode(),
                                "an indexed draw has no bound index buffer");
     if (Gfx.IndexType != VK_INDEX_TYPE_UINT8 &&
@@ -2195,32 +2204,48 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
       return createStringError(inconvertibleErrorCode(),
                                "only 8-, 16-, and 32-bit index types are "
                                "implemented");
-    if (Gfx.IndexBufferOffset > Gfx.IndexBuffer->size())
-      return createStringError(inconvertibleErrorCode(),
-                               "the index buffer's offset is out of range of "
-                               "its buffer");
-    // (Roadmap E5) `vkCmdBindIndexBuffer2`'s `size` bounds how much of the
-    // buffer past `offset` is actually bound; `VK_WHOLE_SIZE` (also what a
-    // plain `vkCmdBindIndexBuffer` bind always uses) means "through the
-    // end of the buffer", matching that command's pre-existing "whole
-    // buffer" assumption.
-    VkDeviceSize BoundSize =
-        Gfx.IndexBufferSize == VK_WHOLE_SIZE
-            ? Gfx.IndexBuffer->size() - Gfx.IndexBufferOffset
-            : Gfx.IndexBufferSize;
-    if (Gfx.IndexBufferOffset + BoundSize > Gfx.IndexBuffer->size())
-      return createStringError(inconvertibleErrorCode(),
-                               "the index buffer's bound offset/size range "
-                               "is out of range of its buffer");
     IndexBinding.Type = Gfx.IndexType == VK_INDEX_TYPE_UINT8
                             ? feme::graphics::IndexType::UInt8
                         : Gfx.IndexType == VK_INDEX_TYPE_UINT16
                             ? feme::graphics::IndexType::UInt16
                             : feme::graphics::IndexType::UInt32;
-    IndexBinding.Data = llvm::ArrayRef<uint8_t>(
-        static_cast<const uint8_t *>(Gfx.IndexBuffer->data()) +
-            Gfx.IndexBufferOffset,
-        static_cast<size_t>(BoundSize));
+    // (Roadmap L134(a)) `VK_KHR_maintenance6` legalizes binding
+    // `VK_NULL_HANDLE` as an index buffer (`Gfx.IndexBuffer` null, but
+    // `Gfx.IndexBufferBound` true, unlike a genuine "never bound" state):
+    // leave `IndexBinding.Data` empty in that case rather than
+    // dereferencing a null `Gfx.IndexBuffer`. `Executor.cpp`'s own index
+    // fetch already rejects any actual out-of-bounds read against an
+    // empty span, so this is only reachable at all when the draw's own
+    // index count is `0` (this device does not advertise `nullDescriptor`,
+    // the only feature that would make a real fetch against a null-bound
+    // index buffer legal Vulkan usage in the first place).
+    if (Gfx.IndexBuffer) {
+      if (!Gfx.IndexBuffer->isBound())
+        return createStringError(inconvertibleErrorCode(),
+                                 "an indexed draw's bound index buffer has "
+                                 "no memory bound to it");
+      if (Gfx.IndexBufferOffset > Gfx.IndexBuffer->size())
+        return createStringError(inconvertibleErrorCode(),
+                                 "the index buffer's offset is out of range "
+                                 "of its buffer");
+      // (Roadmap E5) `vkCmdBindIndexBuffer2`'s `size` bounds how much of
+      // the buffer past `offset` is actually bound; `VK_WHOLE_SIZE` (also
+      // what a plain `vkCmdBindIndexBuffer` bind always uses) means
+      // "through the end of the buffer", matching that command's
+      // pre-existing "whole buffer" assumption.
+      VkDeviceSize BoundSize =
+          Gfx.IndexBufferSize == VK_WHOLE_SIZE
+              ? Gfx.IndexBuffer->size() - Gfx.IndexBufferOffset
+              : Gfx.IndexBufferSize;
+      if (Gfx.IndexBufferOffset + BoundSize > Gfx.IndexBuffer->size())
+        return createStringError(inconvertibleErrorCode(),
+                                 "the index buffer's bound offset/size range "
+                                 "is out of range of its buffer");
+      IndexBinding.Data = llvm::ArrayRef<uint8_t>(
+          static_cast<const uint8_t *>(Gfx.IndexBuffer->data()) +
+              Gfx.IndexBufferOffset,
+          static_cast<size_t>(BoundSize));
+    }
   }
 
   // (Roadmap H21c) `VK_EXT_transform_feedback` capture targets: one entry
@@ -2314,9 +2339,17 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
                               const GraphicsState &Gfx,
                               const feme::graphics::DrawCommand &Draw) {
   if (Draw.Indexed) {
-    if (!Gfx.IndexBuffer || !Gfx.IndexBuffer->isBound())
+    if (!Gfx.IndexBufferBound)
       return createStringError(inconvertibleErrorCode(),
                                "an indexed draw has no bound index buffer");
+    // (Roadmap L134(a)) A `VK_KHR_maintenance6`-legal `VK_NULL_HANDLE`
+    // index-buffer bind (`Gfx.IndexBufferBound` true, `Gfx.IndexBuffer`
+    // itself null) has no real buffer to range-check an index fetch
+    // against; `Executor.cpp`'s own fetch already rejects reading from
+    // the resulting empty `IndexBufferBinding::Data` span, so there is
+    // nothing further to validate here.
+    if (!Gfx.IndexBuffer)
+      return Error::success();
     // (Roadmap E5) A `vkCmdBindIndexBuffer2` bind narrows the readable
     // range to `offset + size` rather than the whole buffer; `VK_WHOLE_
     // SIZE` (also what a plain `vkCmdBindIndexBuffer` bind always uses)
@@ -2930,6 +2963,7 @@ Error executeCommandsInto(
     }
     case RecordedCommand::Kind::BindIndexBuffer:
       Gfx.IndexBuffer = Cmd.SrcBuffer;
+      Gfx.IndexBufferBound = true;
       Gfx.IndexBufferOffset = Cmd.IndirectOffset;
       Gfx.IndexType = Cmd.IndexType;
       Gfx.IndexBufferSize = Cmd.DstSize;
