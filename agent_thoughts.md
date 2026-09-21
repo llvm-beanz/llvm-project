@@ -96952,3 +96952,141 @@ needed -- pure correctness fix, no new feature/extension surface.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 7. This session's own scratch CTS logs (`/tmp/ctsrun/l131/*`) are already
    cleaned up -- nothing to do here.
+
+# Session: L128 root-cause correction + partial fix; L128(a) filed (new nondeterministic JIT crash)
+
+**Confirmed device first**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`. Good.
+
+Picked up mid-`L128` from a prior compacted summary: the prior session
+had root-caused the 3 `vertex_input.max_attributes.query_max_attributes.*`
+CTS fails as needing a full-loop-unroll pass and had drafted (but not
+tested) one in `Pipeline.cpp`.
+
+**What I found once I actually traced it**:
+
+1. Built and ran the drafted unroll pass. Progress -- the earlier
+   `ValidateStagePass` rejection was gone, but a *new* error appeared:
+   `synthetic vertex layouts only support vertex operand 0`. That was
+   the real clue.
+2. `FEME_DUMP_IR` showed the unrolled `attr[k]` accesses were routing
+   through the `Vertex` operand (`Vertex=k`) instead of `Row`. That's
+   backwards -- `SignatureElement::RowCount`'s own doc comment says it
+   models "an array element count" too, so a plain arrayed input should
+   go through `Row`, not `Vertex` (`Vertex` is only for genuine
+   per-vertex/per-primitive Geometry/Mesh/Hull/Domain addressing).
+3. Found the actual bug: `isDynamicIndexedArrayGlobal` had **zero**
+   `ShaderStage` awareness, unlike its own already-stage-scoped
+   siblings (`isPerVertexArrayInputGlobal` etc., restricted to
+   Hull/Domain/Geometry/Mesh). So it was claiming Vertex-stage plain
+   arrays too, when it should only ever match those 4 stages.
+
+**This reframes `L128` significantly** from the prior session's
+"no ABI operand can express this at all" -- the ABI already can, via
+`Row`; the bug was pure misclassification.
+
+**Fixed** `isDynamicIndexedArrayGlobal` + threaded `Stage` through
+`getDynamicVertexIndexedAccess`/`getDynamicRowIndexedAccess`/
+`getStageIOGlobal` and call sites. Confirmed via `FEME_DUMP_IR`: a
+constant post-unroll `attr[k]` now correctly resolves to `Row=k,
+Vertex=0`.
+
+**Still not enough to close `L128`**: with the unroll pass disabled,
+the same 3 cases fail differently ("unresolved stage-IO
+global-variable access") -- confirming a compile-time-constant index is
+still a hard requirement, this fix alone doesn't provide one.
+
+**Then the scary part**: with both the stage-fix and the unroll pass
+in place, all 3 cases got through pipeline creation for the first
+time ever -- but crashed with a SIGSEGV in unsymbolized JIT code on
+~2 of 3 reruns of the *identical* IR (confirmed via repeated
+`FEME_DUMP_IR` -- byte-identical input, different outcome). Spent real
+time on this:
+- Checked `StageStorage` allocation math -- looked fine, generic.
+- Checked `Executor.cpp`'s vertex-fetch loop -- already handles
+  `RowCount > 1` (existing matrix support), no obvious bound bug.
+- Added a `ScalarEvolution`-based trip-count cap (<=64) to the unroll
+  pass in case an unrelated large/unbounded loop elsewhere was the
+  real culprit -- crash persisted.
+- No `valgrind` in this environment to actually localize it (worth
+  installing next time: `apt install valgrind`).
+
+**Decision**: reverted the entire `Pipeline.cpp` unroll-pass prototype.
+Landing something with a 2-in-3 nondeterministic crash is not
+acceptable, and I'd burned my realistic time budget trying to pin it
+down by inspection alone. Kept only the `CanonicalizeStage.cpp`
+stage-restriction fix, which is independently correct and verified.
+
+**Fixing the stage-restriction exposed 3 mistagged unit tests**
+(`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`/`Store`,
+`ThreadsDynamicVertexIndexIntoOutputStore`) -- all tagged
+`"vertex"` for shapes that are actually Geometry/Mesh-only. Retagged
+correctly (`geometry`/`mesh`); one also needed a real `RowCount`
+expectation fix (`3`->`1`) since retagging it to `mesh` newly exercised
+a pre-existing Mesh-stage output-array-peeling path it had never
+reached before under the wrong tag.
+
+`ninja check-feme`: **3,276/3,279 Passed, 3 Unsupported, 0 Failed**, 0
+regressions.
+
+CTS regression sweeps: `vertex_input.*` (13,296 cases) unchanged at 3
+Fail (same 3 target cases, not closed by this fix alone);
+`clipping.user_defined.*` (256) 100% Pass;
+`tessellation.user_defined_io.per_patch_array.*` (9) 100% Pass. Also
+confirmed (via stash/rebuild) that `per_patch_block.*`'s own assertion
+crash predates this session entirely -- not a regression, just noting
+it for the roadmap.
+
+Kicked off the long-pending `pipeline.monolithic.blend.*` full sweep
+again in the background (flagged across 2+ prior sessions as a slow
+family worth reconfirming clean) -- **still running** at the time
+this entry is being written (32,000+ cases in, 0 Fail so far). Did
+not wait for it to finish this session; a future session should check
+`/tmp/ctsrun/l128/blend_full.qpa` for the final tally (or just rerun
+if the process is gone) before assuming it's done.
+
+**Commits** (3, each with the Copilot co-author trailer):
+1. `CanonicalizeStage.cpp` stage-restriction fix + the 3 test
+   corrections (same 2 files, tightly coupled).
+2. `Roadmap.md` (`L128` updated, `L128(a)` filed) +
+   `VulkanCTSReport.md` section.
+3. This `agent_thoughts.md` entry.
+
+**Roadmap**: `L128` updated (not struck through -- still open, root
+cause corrected, partial fix landed). New row `L128(a)` filed for the
+nondeterministic crash (one level of nesting, per the "no more than
+one lowercase letter deep" rule). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no update needed -- pure
+compiler-internals fix.
+
+## Suggested next steps
+
+1. **Check `/tmp/ctsrun/l128/blend_full.qpa`** (PID 40501 if still
+   alive) for the `pipeline.monolithic.blend.*` sweep's final tally
+   before doing anything else CTS-related -- it was still running (0
+   Fail through 32,000+ cases) when this session ended. If clean,
+   update `VulkanCTSReport.md`'s note on this and consider the
+   long-standing "is `blend.*` actually clean" question finally
+   closed for good.
+2. **`L128(a)` (the nondeterministic JIT crash) needs real
+   memory-instrumentation tooling** before anyone re-attempts the
+   loop-unrolling half of `L128` -- `apt install valgrind` (not present
+   this session) or an ASan-instrumented build of the CPU JIT path is
+   the natural next step. Do not re-attempt the unroll pass by pure
+   inspection again; that approach is exhausted for this bug.
+3. Once `L128(a)` is understood, `L128` itself just needs the
+   (now-reverted) unroll pass re-derived on top of a fix for whatever
+   `L128(a)` turns out to be, plus a final CTS check of the 3 target
+   `query_max_attributes.*` cases.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session, not a quick pick.
+5. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's scratch CTS logs at `/tmp/ctsrun/l128/*` (including
+   the still-running blend sweep's log) should be cleaned up by
+   whichever future session confirms the blend sweep's final result
+   and no longer needs the raw log.
