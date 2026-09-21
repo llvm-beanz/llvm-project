@@ -265,7 +265,10 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
       validateComponent(CI, /*ComponentOperand=*/2, *Elt, OpName);
       validateVertex(CI, /*VertexOperand=*/3, Stage, OpName);
     } else {
-      validateComponent(CI, /*ComponentOperand=*/1, *Elt, OpName);
+      // (Roadmap L138) A pull-model interpolation op now carries its own
+      // `Row` operand too, just like `InputLoad` above.
+      validateRow(CI, /*RowOperand=*/1, *Elt, OpName);
+      validateComponent(CI, /*ComponentOperand=*/2, *Elt, OpName);
     }
     break;
   }
