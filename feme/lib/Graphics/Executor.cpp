@@ -3467,8 +3467,20 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                     B2 = Quad.Bary2[Lane];
               float InvW =
                   B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
-              float Depth =
-                  B0 * Tri.Depth[0] + B1 * Tri.Depth[1] + B2 * Tri.Depth[2];
+              // (Roadmap L134(f)) Same fix as L132's varying-interpolation
+              // short-circuit: a triangle with an identical depth at all
+              // 3 vertices (e.g. a full-viewport quad clipped from two
+              // coplanar triangles) must interpolate to exactly that
+              // depth, but `B0*Z0+B1*Z1+B2*Z2` isn't provably exact when
+              // `B0+B1+B2` isn't provably `== 1.0f` (three independently
+              // rounded divisions). `dEQP-VK.draw.*.depth_clamp.*`
+              // compares against a near-zero (`float epsilon`) tolerance
+              // that a several-ULP drift can exceed.
+              float Depth = (Tri.Depth[0] == Tri.Depth[1] &&
+                             Tri.Depth[1] == Tri.Depth[2])
+                                ? Tri.Depth[0]
+                                : B0 * Tri.Depth[0] + B1 * Tri.Depth[1] +
+                                      B2 * Tri.Depth[2];
               // (roadmap H7d) `depthClampEnable`'s single choke point:
               // clamps the *interpolated* per-fragment depth, not any
               // per-vertex value -- see `projectVertex`'s comment.
