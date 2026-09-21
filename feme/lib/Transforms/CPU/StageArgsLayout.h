@@ -116,7 +116,13 @@ enum FragmentArgsField : unsigned {
   FragmentArgsFieldOutputs = 7,
   FragmentArgsFieldInvocations = 8,
   FragmentArgsFieldResults = 9,
-  FragmentArgsFieldReserved = 10,
+  // (Roadmap L115(b)) Consumed from this struct's own former
+  // `Reserved[4]` (now `Reserved[1]`) -- see `FemeFragmentArgs::
+  // Primitives`'s own comment.
+  FragmentArgsFieldPrimitives = 10,
+  FragmentArgsFieldVertexInputs = 11,
+  FragmentArgsFieldSamplePositions = 12,
+  FragmentArgsFieldReserved = 13,
 };
 
 enum PatchArgsField : unsigned {
@@ -278,7 +284,18 @@ inline llvm::StructType *getFragmentArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(
       Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
-            PtrTy, PtrTy, PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
+            PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+            llvm::ArrayType::get(PtrTy, 1)});
+}
+
+/// (Roadmap L115(b)) Builds the LLVM struct type mirroring
+/// `FemeFragmentPrimitive`: a `[3][2] x float` vertex-position array
+/// followed by a `[3] x float` reciprocal-`w` array, field-for-field.
+inline llvm::StructType *getFragmentPrimitiveType(llvm::LLVMContext &Ctx) {
+  llvm::Type *F32Ty = llvm::Type::getFloatTy(Ctx);
+  return llvm::StructType::get(
+      Ctx, {llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 2), 3),
+            llvm::ArrayType::get(F32Ty, 3)});
 }
 
 inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {

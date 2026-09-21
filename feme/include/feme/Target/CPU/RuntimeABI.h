@@ -1071,6 +1071,25 @@ struct FemeFragmentResult {
   uint32_t Reserved[6];
 };
 
+/// (Roadmap L115(b)) One fragment-stage quad's own primitive geometry, the
+/// data pull-model interpolation (`InterpolateAt{Centroid,Sample,Offset}`)
+/// needs to recompute an ordinary varying's barycentric weights at a
+/// caller-chosen point instead of `Executor.cpp`'s own fixed shading
+/// location. Mirrors `Executor.cpp`'s internal `ScreenTriangle`'s own
+/// `Pos`/`InvW` fields exactly, since pull-model interpolation is the
+/// identical barycentric math `Executor.cpp` already does for ordinary
+/// push-model varyings, just evaluated at a caller-chosen point rather
+/// than a fixed one.
+struct FemeFragmentPrimitive {
+  /// Screen-space `{x, y}` position of each of this quad's primitive's 3
+  /// vertices (mirrors `ScreenTriangle::Pos`).
+  float VertexPositionXY[3][2];
+  /// Reciprocal clip-space `w` of each of the same 3 vertices (mirrors
+  /// `ScreenTriangle::InvW`), needed for perspective-correct
+  /// interpolation.
+  float VertexInvW[3];
+};
+
 /// The single argument a compiled vertex-stage entry point takes:
 ///
 /// \code
@@ -1132,8 +1151,35 @@ struct FemeFragmentArgs {
   const FemeFragmentInvocation *Invocations;
   /// Per-quad final masks written by the fragment wrapper.
   FemeFragmentResult *Results;
-  /// ABI headroom for later fragment-batch metadata.
-  void *Reserved[4];
+  /// (Roadmap L115(b)) Per-quad primitive geometry (`FemeFragmentPrimitive`)
+  /// `InterpolateAt{Centroid,Sample,Offset}` need to recompute an ordinary
+  /// varying's barycentric weights at a caller-chosen point, rather than
+  /// reading back the single value `Inputs` already carries at this quad's
+  /// own fixed shading location. Null when the fragment stage never calls
+  /// one of those (the common case, and every fragment stage compiled
+  /// before this roadmap item), since nothing below reads it then. Taken
+  /// from this struct's own former `Reserved[4]` (now `Reserved[1]`).
+  const FemeFragmentPrimitive *Primitives;
+  /// (Roadmap L115(b)) Structure-of-arrays storage for each covered
+  /// primitive's own 3 vertices' raw (pre-interpolation) input values,
+  /// addressed with `InputLayout` exactly like `Inputs` above, but with 3
+  /// invocation slots per quad (vertex 0/1/2, in that order, i.e.
+  /// invocation index `3 * QuadIndex + VertexIndex`) rather than 4 (one
+  /// per lane). Null under the same condition as `Primitives`.
+  const void *VertexInputs;
+  /// (Roadmap L115(b)) Fixed per-sample offsets within a pixel (`{x, y}`
+  /// pairs, mirroring `Executor.cpp`'s own `samplePositions` table exactly
+  /// -- roadmap R33's "fixed sample locations" determinism requirement)
+  /// `InterpolateAtSample` resolves its own runtime sample-index operand
+  /// against; unlike `Executor.cpp`'s own use of this table, no count is
+  /// threaded through here -- an out-of-range sample index is the calling
+  /// shader's own undefined behavior, matching real hardware, not a
+  /// condition this ABI defends against. Null under the same condition as
+  /// `Primitives`.
+  const float *SamplePositions;
+  /// ABI headroom for later fragment-batch metadata. Was `Reserved[4]`
+  /// before roadmap L115(b) consumed 3 slots for the fields above.
+  void *Reserved[1];
 };
 
 /// The single argument a compiled control (hull) stage's control-point entry

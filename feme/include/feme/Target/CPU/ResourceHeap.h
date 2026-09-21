@@ -199,6 +199,21 @@ struct FragmentResources {
   /// `ImageHeap` above: there is no compile-time-declared bound range to
   /// materialize a reserved prefix for.
   llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap;
+  /// (Roadmap L115(b)) Per-quad primitive geometry for pull-model
+  /// interpolation (`InterpolateAt{Centroid,Sample,Offset}`); empty when
+  /// the fragment stage never calls one of those -- see
+  /// `FemeFragmentArgs::Primitives`'s own comment.
+  llvm::ArrayRef<FemeFragmentPrimitive> Primitives;
+  /// (Roadmap L115(b)) Raw (pre-interpolation) per-vertex input storage,
+  /// `3 * Invocations.size()` slots addressed by `InputLayout`; null under
+  /// the same condition as `Primitives` -- see `FemeFragmentArgs::
+  /// VertexInputs`'s own comment.
+  const void *VertexInputs = nullptr;
+  /// (Roadmap L115(b)) Fixed per-sample offsets `InterpolateAtSample`
+  /// resolves its own sample-index operand against; empty under the same
+  /// condition as `Primitives` -- see `FemeFragmentArgs::SamplePositions`'s
+  /// own comment.
+  llvm::ArrayRef<std::array<float, 2>> SamplePositions;
 };
 
 /// One prepared fragment batch: materialized resources plus borrowed stage
@@ -219,7 +234,10 @@ private:
                         const FemeStageLayout *OutputLayout, void *Outputs,
                         llvm::ArrayRef<FemeFragmentInvocation> Invocations,
                         llvm::MutableArrayRef<FemeFragmentResult> Results,
-                        llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap);
+                        llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap,
+                        llvm::ArrayRef<FemeFragmentPrimitive> Primitives,
+                        const void *VertexInputs,
+                        llvm::ArrayRef<std::array<float, 2>> SamplePositions);
 
   std::vector<FemeDescriptor> ResourceHeap;
   std::vector<FemeImageDescriptor> ImageHeap;
@@ -233,6 +251,12 @@ private:
   llvm::ArrayRef<FemeFragmentInvocation> Invocations;
   llvm::MutableArrayRef<FemeFragmentResult> Results;
   llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap;
+  /// (Roadmap L115(b)) Mirrors `FragmentResources`'s own fields of the
+  /// same name -- see `FemeFragmentArgs::Primitives`/`VertexInputs`/
+  /// `SamplePositions`'s own comments.
+  llvm::ArrayRef<FemeFragmentPrimitive> Primitives;
+  const void *VertexInputs = nullptr;
+  llvm::ArrayRef<std::array<float, 2>> SamplePositions;
 };
 
 /// Caller-owned storage for one control-point batch (roadmap R34's
