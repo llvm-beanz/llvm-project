@@ -2201,6 +2201,36 @@ GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL,
   return nullptr;
 }
 
+/// (Roadmap L136) `getStageIOGlobal`'s multi-global counterpart for a
+/// load/store whose pointer operand is -- directly, or through a chain of
+/// `select`s -- a runtime choice between more than one stage-IO global:
+/// the shape LLVM folds a per-branch "read a different varying" `if`/
+/// `else` (each arm a single, side-effect-free load of its own distinct
+/// global) into (`dEQP-VK.draw.renderpass.output_location.shuffle.
+/// inputs-outputs`'s own fragment shader is exactly this: `frag_out0 =
+/// cond ? color_in0 : color_in1;`). `getStageIOGlobal` itself only ever
+/// resolves to a *single* `GlobalVariable*`, so a `select`-typed pointer
+/// (having no one base for any of its three helpers to walk to) resolves
+/// to none at all -- silently omitting every global it could still reach
+/// from this discovery loop's own `InputGlobals`/`OutputGlobals` entirely,
+/// which then never receive an `ElementID` for `resolveSelectedStageIOLoad`
+/// (or anything else) to look up later, however that later rewrite itself
+/// might handle the `select`. Appends every global reachable through \p
+/// Ptr to \p Out, recursing through a nested `select`-of-`select` chain
+/// (an `if`/`else if`/`else` ladder's own folded shape) to cover more than
+/// two arms.
+void collectStageIOGlobalsThroughSelect(Value *Ptr, const DataLayout &DL,
+                                        ShaderStage Stage,
+                                        SmallVectorImpl<GlobalVariable *> &Out) {
+  if (auto *Sel = dyn_cast<SelectInst>(Ptr)) {
+    collectStageIOGlobalsThroughSelect(Sel->getTrueValue(), DL, Stage, Out);
+    collectStageIOGlobalsThroughSelect(Sel->getFalseValue(), DL, Stage, Out);
+    return;
+  }
+  if (GlobalVariable *GV = getStageIOGlobal(Ptr, DL, Stage))
+    Out.push_back(GV);
+}
+
 /// One load/store's resolved stage-IO target: the `ElementID` it
 /// addresses and the `Row`/`Component` operands to seed
 /// `loadStageIOValue`/`storeStageIOValue`'s own recursion with (`nullptr`
@@ -3563,6 +3593,67 @@ std::optional<StageIOAccess> resolveStageIOAccess(
                                     AllowBlockArrayInstanceFold);
 }
 
+/// (Roadmap L136) Builds the loaded value for a load whose pointer operand
+/// is -- directly, or through a chain of `select`s -- one or more
+/// resolvable stage-IO accesses: LLVM's own early canonicalization
+/// commonly turns a two-arm `if (cond) tmp = a; else tmp = b;` shape, when
+/// both arms are a single, side-effect-free load apiece, into one `load
+/// ptr (select cond, %a, %b)` instead -- selecting *which address* to
+/// read from at the pointer level, not which *value* the read produces
+/// (exactly the shape `dEQP-VK.draw.renderpass.output_location.shuffle.
+/// inputs-outputs`'s own fragment shader takes: `frag_out0 = cond ?
+/// color_in0 : color_in1;`, each of `color_in0`/`color_in1` its own
+/// distinct stage-IO global). `resolveStageIOAccess` above only ever
+/// walks a `getelementptr`/`ConstantExpr` chain down to a single
+/// `GlobalVariable` base (`getStageIOBaseAndOffset`'s own
+/// `stripAndAccumulateConstantOffsets`); a `select`-typed pointer has no
+/// single base for that walk to find, so it returns `std::nullopt` and
+/// (before this fix) left the load -- and both stage-IO globals its
+/// selected pointer could still reach -- entirely unconverted, surviving
+/// unresolved all the way to JIT-link time as undefined external symbols
+/// (`"Symbols not found: [ spirv_var_N, spirv_var_M ]"`). Recurses through
+/// a `select`-of-`select` chain (the shape an `if`/`else if`/`else` ladder
+/// folds into) to support more than two arms; returns `nullptr` if any
+/// leaf fails to resolve to a stage-IO access, leaving the caller free to
+/// fall back to its own other, non-stage-IO interpretations exactly as if
+/// this helper had never been tried.
+Value *resolveSelectedStageIOLoad(
+    IRBuilderBase &B, Value *Ptr, Type *ValueTy, const DataLayout &DL,
+    const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
+    const DenseSet<GlobalVariable *> &OutputGlobals, ShaderStage Stage,
+    const EntrySignature &Sig, ShadowValueMap &ShadowValues) {
+  if (auto *Sel = dyn_cast<SelectInst>(Ptr)) {
+    Value *TrueVal =
+        resolveSelectedStageIOLoad(B, Sel->getTrueValue(), ValueTy, DL,
+                                   ElementIDs, OutputGlobals, Stage, Sig,
+                                   ShadowValues);
+    if (!TrueVal)
+      return nullptr;
+    Value *FalseVal =
+        resolveSelectedStageIOLoad(B, Sel->getFalseValue(), ValueTy, DL,
+                                   ElementIDs, OutputGlobals, Stage, Sig,
+                                   ShadowValues);
+    if (!FalseVal)
+      return nullptr;
+    return B.CreateSelect(Sel->getCondition(), TrueVal, FalseVal);
+  }
+  std::optional<StageIOAccess> Access =
+      resolveStageIOAccess(B, Ptr, ValueTy, DL, ElementIDs, OutputGlobals,
+                           Stage);
+  if (!Access)
+    return nullptr;
+  Value *Zero = B.getInt32(0);
+  Value *Row = Access->Row ? Access->Row : Zero;
+  Value *Component =
+      Access->Component
+          ? Access->Component
+          : B.getInt32(resolveElementBaseComponent(Sig, Access->ElementIDs));
+  Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
+  return loadStageIOBlockValue(B, ValueTy, Access->ElementIDs, Row, Component,
+                               Vertex, Ptr->getName(),
+                               Access->IsOutput ? &ShadowValues : nullptr);
+}
+
 /// Rewrites \p F's already-legalized `llvm.spv.discard`/`.demote.to.helper.
 /// invocation`/derivative/quad-read intrinsic calls into their `feme.
 /// stage.*` peers (mirroring `canonicalizeDXILStage`'s handling of the same
@@ -3738,18 +3829,29 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   const DataLayout &DL = F.getParent()->getDataLayout();
   for (Function *Fn : Functions) {
     for (Instruction &I : instructions(Fn)) {
-      GlobalVariable *GV = nullptr;
+      // (Roadmap L136) A `select`-typed pointer operand can reach more
+      // than one distinct stage-IO global at once (see
+      // `collectStageIOGlobalsThroughSelect`'s own comment); collect
+      // every one of them here rather than the single `GlobalVariable*`
+      // `getStageIOGlobal` alone would resolve to (`nullptr` for a
+      // `select`, silently dropping every global it reaches).
+      SmallVector<GlobalVariable *, 2> GVs;
       if (auto *LI = dyn_cast<LoadInst>(&I))
-        GV = getStageIOGlobal(LI->getPointerOperand(), DL, Stage);
+        collectStageIOGlobalsThroughSelect(LI->getPointerOperand(), DL, Stage,
+                                           GVs);
       else if (auto *SI = dyn_cast<StoreInst>(&I))
-        GV = getStageIOGlobal(SI->getPointerOperand(), DL, Stage);
-      unsigned AddrSpace = 0;
-      if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
-        continue;
-      ParsedSPIRVDecorations D =
-          parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-      SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
-      (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
+        collectStageIOGlobalsThroughSelect(SI->getPointerOperand(), DL, Stage,
+                                           GVs);
+      for (GlobalVariable *GV : GVs) {
+        unsigned AddrSpace = 0;
+        if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
+          continue;
+        ParsedSPIRVDecorations D =
+            parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+        SPIRVElementInfo Info =
+            classifySPIRVElement(Stage, Phase, AddrSpace, D);
+        (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
+      }
     }
   }
 
@@ -4772,6 +4874,27 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         std::optional<StageIOAccess> Access = resolveStageIOAccess(
             B, Ptr, LI->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
         if (!Access) {
+          // (Roadmap L136) A `select`-typed pointer operand (LLVM's own
+          // fold of a two-arm "load a different stage-IO global per
+          // branch" `if`/`else` into one shared load) resolves no
+          // `StageIOAccess` above either -- try rewriting it into a
+          // value-level select between the two independently-resolved
+          // loads instead, before falling through to the task-payload
+          // read fallback below (which cannot handle it: a `select`
+          // pointer has no single constant byte offset for
+          // `getStageIOBaseAndOffset` to recover). See
+          // `resolveSelectedStageIOLoad`'s own comment.
+          if (isa<SelectInst>(Ptr)) {
+            if (Value *New = resolveSelectedStageIOLoad(
+                    B, Ptr, LI->getType(), DL, ElementIDs, OutputGlobalSet,
+                    Stage, Sig, ShadowValues)) {
+              LI->replaceAllUsesWith(New);
+              LI->eraseFromParent();
+              EraseIfNowDead(Ptr);
+              Changed = true;
+              continue;
+            }
+          }
           // (Roadmap L30) A mesh entry's bounded payload read -- the
           // load-side counterpart of the task entry's own payload write
           // fallback below -- an ordinary load through a (possibly GEP'd)
