@@ -1853,7 +1853,8 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
 std::optional<uint32_t>
 collectDynamicRowTerms(Type *Ty, User::op_iterator &It, User::op_iterator End,
                        uint32_t &IDStart,
-                       SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms);
+                       SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms,
+                       Value *&DynamicComponent);
 
 struct DynamicVertexIndexedAccess {
   GlobalVariable *GV;
@@ -1930,9 +1931,19 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
     ++ProbeIt;
     uint32_t IDStart = 0;
     SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
-    std::optional<uint32_t> RowCount =
-        collectDynamicRowTerms(CurTy, ProbeIt, GEP->idx_end(), IDStart, Terms);
-    if (RowCount && !Terms.empty())
+    Value *ProbeComponent = nullptr;
+    std::optional<uint32_t> RowCount = collectDynamicRowTerms(
+        CurTy, ProbeIt, GEP->idx_end(), IDStart, Terms, ProbeComponent);
+    // (Roadmap L138) A trailing dynamic vector-lane select
+    // (`ProbeComponent` set) is not yet modeled by
+    // `DynamicVertexIndexedAccess` at all (no `Component` field exists
+    // here, unlike `DynamicRowIndexedAccess`'s own sibling handling
+    // below) -- deliberately declines this shape rather than silently
+    // dropping the lane selection, falling through to the plain walk
+    // below (which will, in turn, correctly decline too, since a
+    // per-vertex-arrayed global reaching this far with a dynamic
+    // component select is not yet a supported combination).
+    if (RowCount && !Terms.empty() && !ProbeComponent)
       return DynamicVertexIndexedAccess{GV, VertexIndex, 0, nullptr,
                                         IDStart, std::move(Terms)};
   }
@@ -2067,11 +2078,32 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
 /// needed by an enclosing recursive call the same way
 /// `resolveNestedStageIOField` needs it), or `std::nullopt` if the
 /// remaining indices are not a supported shape (a non-constant index into
-/// anything but an array, or a constant index into anything but a struct
-/// or array).
+/// anything but an array or vector, or a constant index into anything
+/// but a struct or array).
+///
+/// (Roadmap L138) A non-constant index whose current type \p Ty is a
+/// `FixedVectorType` -- selecting a dynamically-computed *lane* within an
+/// array element's own vector, rather than a row within a further array
+/// dimension -- is recognized too, via \p DynamicComponent: e.g.
+/// `fs_in_pos_screen_centroid[1][component]`, the real shape a
+/// `dEQP-VK.pipeline.*.multisample_interpolation.
+/// centroid_interpolation_consistency.*` fragment shader's own
+/// push-constant-selected component read compiles into (array index `1`
+/// constant, component index dynamic). Unlike an array row index, a
+/// vector lane index is not folded into \p Terms/`Row` at all -- it has
+/// its own, separate `StageIOAccess::Component` operand downstream (see
+/// `resolveStageIOAccess`'s own `getDynamicRowIndexedAccess` branch) -- so
+/// this must be the final index (a vector has no further nesting to walk
+/// into), and only one such lane-select is recognized per access (\p
+/// DynamicComponent must still be null on entry). Left unset (null)
+/// whenever no vector-lane index is found, matching every existing caller
+/// that does not yet expect one (`getDynamicVertexIndexedAccess`'s own
+/// probe declines this shape outright rather than silently dropping it,
+/// see that call site's own comment).
 std::optional<uint32_t> collectDynamicRowTerms(
     Type *Ty, User::op_iterator &It, User::op_iterator End,
-    uint32_t &IDStart, SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms) {
+    uint32_t &IDStart, SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms,
+    Value *&DynamicComponent) {
   if (It == End)
     return getStageIORowShape(Ty).RowCount;
   Value *Idx = It->get();
@@ -2084,20 +2116,30 @@ std::optional<uint32_t> collectDynamicRowTerms(
       for (unsigned J = 0; J != I; ++J)
         IDStart += getStageIOLeafElementCount(ST->getElementType(J));
       return collectDynamicRowTerms(ST->getElementType(I), It, End, IDStart,
-                                    Terms);
+                                    Terms, DynamicComponent);
     }
     if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
       return collectDynamicRowTerms(ArrTy->getElementType(), It, End, IDStart,
-                                    Terms);
+                                    Terms, DynamicComponent);
     return std::nullopt;
   }
-  // A non-constant index must directly select a row within an array.
+  // (Roadmap L138) A non-constant index into a vector selects a lane, not
+  // a row -- must be the final index, and only one such lane-select is
+  // supported per access.
+  if (isa<FixedVectorType>(Ty)) {
+    if (DynamicComponent || std::next(It) != End)
+      return std::nullopt;
+    ++It;
+    DynamicComponent = Idx;
+    return getStageIORowShape(Ty).RowCount;
+  }
+  // A non-constant index must otherwise select a row within an array.
   auto *ArrTy = dyn_cast<ArrayType>(Ty);
   if (!ArrTy)
     return std::nullopt;
   ++It;
   std::optional<uint32_t> InnerRowCount = collectDynamicRowTerms(
-      ArrTy->getElementType(), It, End, IDStart, Terms);
+      ArrTy->getElementType(), It, End, IDStart, Terms, DynamicComponent);
   if (!InnerRowCount)
     return std::nullopt;
   Terms.emplace_back(Idx, *InnerRowCount);
@@ -2135,11 +2177,103 @@ struct DynamicRowIndexedAccess {
   /// own comment for why summing `Terms[i].first * Terms[i].second` is
   /// order-independent and always yields the correct flattened `Row`.
   SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
+  /// (Roadmap L138) The final index, if any, that dynamically selects a
+  /// lane within a vector-typed leaf (rather than a row within a further
+  /// array dimension) -- e.g. `fs_in_pos_screen_centroid[1][component]`'s
+  /// own `component` operand. Null for every shape with no such lane
+  /// select, matching every existing caller's expectations.
+  Value *DynamicComponent = nullptr;
 };
 
 std::optional<DynamicRowIndexedAccess>
 getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
                           ShaderStage Stage) {
+  // (Roadmap L138) `SPIRVToLLVMPatterns.cpp`'s `StageIOArrayAccessChainPattern`
+  // builds one single, uniformly-typed `getelementptr` for an entire
+  // `spirv.AccessChain` -- including a final index that dynamically
+  // selects a lane within a vector-typed leaf (e.g.
+  // `fs_in_pos_screen_centroid[1][component]`) -- at the MLIR `llvm`-
+  // dialect level. But translating that particular shape on to a real
+  // `llvm::GetElementPtrInst` does not preserve it: MLIR's own
+  // `LLVM::GEPOp`-to-`llvm::GetElementPtrInst` translation cannot express
+  // a *non-constant* index navigating through a fixed-vector type (only
+  // array/struct levels survive that translation with a dynamic index
+  // intact), so it instead peels that one final index off into its own,
+  // separate, byte-scaled `getelementptr` wrapping an otherwise-ordinary
+  // constant-offset chain into the real stage-IO global
+  // (`getStageIOBaseAndOffset`'s own shape) -- confirmed against this
+  // exact CTS shader's own real compiled IR (`dEQP-VK.pipeline.
+  // fast_linked_library.multisample_interpolation.
+  // centroid_interpolation_consistency.pushc_component_0`, roadmap
+  // L137): `getelementptr [4 x i8], ptr (getelementptr inbounds nuw (i8,
+  // ptr @spirv_var_31, i64 8)), i64 %component`. The wrapper's own
+  // "source element type" is a synthetic `[N x i8]` array, `N` == that
+  // vector's own per-lane byte size (`4` for an `f32`/`i32` lane); the
+  // single GEP index it carries is *already* exactly the raw lane
+  // (`Component`) index `StageIOAccess` needs, unscaled, since indexing
+  // "lane `i`" is already this whole shape's own meaning (the byte
+  // scaling itself comes from `[N x i8]`'s own per-element size, not from
+  // any further transform this code needs to apply).
+  //
+  // This is tried first, ahead of the ordinary typed-GEP walk below,
+  // since real compiled IR for this shape never takes that ordinary path
+  // at all (a genuinely typed, dynamically-vector-indexed `getelementptr`
+  // like `collectDynamicRowTerms`'s own `FixedVectorType` branch expects
+  // is not what this translation produces in practice) -- only a
+  // synthetic, non-stage-IO test IR module could construct that shape
+  // directly, which is why `collectDynamicRowTerms`'s own branch is kept
+  // too, rather than replaced by this one.
+  if (auto *OuterGEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+    auto *ByteArrTy = dyn_cast<ArrayType>(OuterGEP->getSourceElementType());
+    Value *DynamicLane = nullptr;
+    if (OuterGEP->getNumIndices() == 1 && ByteArrTy &&
+        ByteArrTy->getElementType()->isIntegerTy(8))
+      DynamicLane = *OuterGEP->idx_begin();
+    if (DynamicLane && !isa<ConstantInt>(DynamicLane)) {
+      std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
+          getStageIOBaseAndOffset(OuterGEP->getPointerOperand(), DL);
+      if (!BaseAndOffset)
+        return std::nullopt;
+      auto [GV, ByteOffset] = *BaseAndOffset;
+      unsigned AddrSpace = 0;
+      if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
+          isDynamicIndexedArrayGlobal(GV, AddrSpace, Stage))
+        return std::nullopt;
+      // Walk `GV`'s own array levels (the common shape for a plain,
+      // non-block arrayed varying -- e.g. `centroid in vec2
+      // fs_in_pos_screen_centroid[2]`) folding each level's own instance
+      // index into `Row`, until landing exactly on a vector-typed leaf
+      // with no byte residual left over -- the vector `DynamicLane`
+      // itself selects a lane within. A block member (more than one
+      // `ElementID`) or any other shape is left for a future extension
+      // (out of `L137`'s own scope): returns `std::nullopt`, exactly
+      // like every other unrecognized pointer this function rejects.
+      Type *Ty = GV->getValueType();
+      uint64_t Row = 0;
+      uint64_t Residual = ByteOffset;
+      while (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+        uint64_t ElemSize =
+            DL.getTypeAllocSize(ArrTy->getElementType()).getFixedValue();
+        if (!ElemSize)
+          return std::nullopt;
+        uint64_t Idx = Residual / ElemSize;
+        if (Idx >= ArrTy->getNumElements())
+          return std::nullopt;
+        Row = Row * ArrTy->getNumElements() + Idx;
+        Residual -= Idx * ElemSize;
+        Ty = ArrTy->getElementType();
+      }
+      if (!isa<FixedVectorType>(Ty) || Residual != 0)
+        return std::nullopt;
+      SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
+      if (Row)
+        Terms.emplace_back(
+            ConstantInt::get(Type::getInt32Ty(Ptr->getContext()), Row), 1);
+      return DynamicRowIndexedAccess{GV, /*Member=*/0, std::move(Terms),
+                                     DynamicLane};
+    }
+  }
+
   auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
   if (!GEP)
     return std::nullopt;
@@ -2157,11 +2291,20 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
 
   uint32_t IDStart = 0;
   SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
-  std::optional<uint32_t> RowCount = collectDynamicRowTerms(
-      GV->getValueType(), IdxIt, GEP->idx_end(), IDStart, Terms);
-  if (!RowCount || Terms.empty())
+  Value *DynamicComponent = nullptr;
+  std::optional<uint32_t> RowCount =
+      collectDynamicRowTerms(GV->getValueType(), IdxIt, GEP->idx_end(),
+                             IDStart, Terms, DynamicComponent);
+  // (Roadmap L138) At least one of `Terms`/`DynamicComponent` must be
+  // non-empty/non-null -- an access with no dynamic index in it at all
+  // would have already resolved via the ordinary constant-offset path
+  // (`getStageIOBaseAndOffset`), so reaching here with neither means
+  // something else entirely failed to legalize, not a shape this function
+  // itself should claim.
+  if (!RowCount || (Terms.empty() && !DynamicComponent))
     return std::nullopt;
-  return DynamicRowIndexedAccess{GV, IDStart, std::move(Terms)};
+  return DynamicRowIndexedAccess{GV, IDStart, std::move(Terms),
+                                 DynamicComponent};
 }
 
 /// (Roadmap L47) A task/mesh entry's own bounded payload
@@ -3572,8 +3715,19 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       if (Dyn->Member >= It->second.size())
         return std::nullopt;
       Value *RowIndex = combineDynamicRowTerms(B, Dyn->Terms);
+      // (Roadmap L138) `Dyn->DynamicComponent` may still carry whatever
+      // integer width the original `getelementptr`'s own dynamic index
+      // happened to use (e.g. `i64`, matching the real compiled CTS
+      // shape this fixes) -- normalize it to `i32` here, exactly like
+      // every other `Value*` operand `StageIOAccess`'s consumers
+      // (`loadStageIOValue`/`storeStageIOValue`) build `add`/`mul` IR
+      // against, which all assume a uniform `i32` width.
+      Value *Component = Dyn->DynamicComponent
+                             ? B.CreateZExtOrTrunc(Dyn->DynamicComponent,
+                                                   B.getInt32Ty())
+                             : nullptr;
       return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1),
-                           RowIndex, nullptr, nullptr,
+                           RowIndex, Component, nullptr,
                            OutputGlobals.contains(Dyn->GV)};
     }
     return std::nullopt;

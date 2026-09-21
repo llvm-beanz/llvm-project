@@ -2324,6 +2324,74 @@ TEST(CanonicalizeStageTest, ThreadsDynamicRowIndexIntoClipDistanceOutputStore) {
       EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
 }
 
+/// (Roadmap L138) The real shape `SPIRVToLLVMPatterns.cpp`'s
+/// `StageIOArrayAccessChainPattern` -- combined with MLIR's own
+/// `LLVM::GEPOp`-to-`llvm::GetElementPtrInst` translation -- actually
+/// produces for a dynamically-selected lane within a vector-typed leaf
+/// (e.g. `centroid in vec2 fs_in_pos_screen_centroid[2];`'s own
+/// `fs_in_pos_screen_centroid[1][component]`, `dEQP-VK.pipeline.
+/// fast_linked_library.multisample_interpolation.
+/// centroid_interpolation_consistency.pushc_component_0`'s own real
+/// shader): unlike a genuinely typed, dynamically-vector-indexed
+/// `getelementptr` (which `collectDynamicRowTerms`'s own `FixedVectorType`
+/// branch handles, but which real compiled IR never actually produces,
+/// confirmed against this exact CTS shader's own decompiled SPIR-V and
+/// LLVM IR this session), the *real* shape peels the dynamic lane-select
+/// index off into its own, separate, byte-scaled `getelementptr` (source
+/// element type a synthetic `[4 x i8]`, `4` == an `f32` lane's own byte
+/// size) wrapping an ordinary constant-offset `getelementptr` chain into
+/// the real stage-IO global. Before this row, `getDynamicRowIndexedAccess`
+/// only recognized the array/struct-typed multi-index shape at all,
+/// leaving this real shape's own `Load` an "unresolved stage-IO
+/// global-variable access" (`ValidateStagePass`'s own diagnostic) --
+/// `L137`'s own root cause, a `VK_ERROR_INITIALIZATION_FAILED` at
+/// pipeline-creation time for all 108 of its own CTS cases.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicComponentIndexIntoCentroidInputLoadThroughByteGEP) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @fs_in_pos_screen_centroid = external addrspace(7) global [2 x <2 x float>], !spirv.Decorations !0
+    define float @main(i64 %component) #0 {
+      %base = getelementptr inbounds nuw i8, ptr addrspace(7) @fs_in_pos_screen_centroid, i64 8
+      %p = getelementptr [4 x i8], ptr addrspace(7) %base, i64 %component
+      %v = load float, ptr addrspace(7) %p
+      ret float %v
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 2}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *ComponentArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    // `Row` (operand 1) is the constant `1` from the outer byte offset
+    // (`8` bytes == one `<2 x float>` row).
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 1u);
+    // `Component` (operand 2) is `%component` itself, zext/trunc'd to
+    // i32 -- not a further constant, unlike every access this pass
+    // recognized before L138.
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(2)));
+  }
+  EXPECT_EQ(SeenLoads, 1u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+  (void)ComponentArg;
+}
+
 /// (Roadmap H6k) A multi-`ElementID` builtin interface block whose own
 /// value type is an arrayed `StructType` (a mesh entry's own
 /// `PerPrimitiveEXT`/`PerVertexEXT`-decorated block, e.g.
