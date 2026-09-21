@@ -98381,3 +98381,37 @@ session's own scoping; none are quick picks.
 4. `L115(b)` (pull-model interpolation) — still flagged as needing a new runtime-callback ABI surface, not a quick pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here — no reconfigure needed.
 6. **(~2 min)** `/tmp/ctsrun/l134c/` (this session's scratch: `dump.txt`/`dump2.txt`/`dump3.txt`/`sweep.qpa`/`one.qpa`) and `/tmp/l134c_frag.frag`/`.spv` can be deleted once a future session no longer needs them — nothing in either is referenced by anything committed.
+
+## Session: L134(c) class 2 fixed -- SIMDize `MaskedAllocas` extractelement divergence-gate gap
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. No stash to restore; working tree clean, continuing directly from the prior session's own `L134(c)` write-up above.
+
+**Done this session:**
+
+1. Root-caused the "smooth produced different results" bug: pixel-diffed the CTS QPA's own embedded PNGs, found every covered result pixel is exactly `(0,0,0,0)` (not a rounding issue -- a hard "reads as zero" bug).
+2. Traced it via temporary `FEME_DEBUG_DUMP_PRE_SIMDIZE`/`POST_SIMDIZE` dumps to `SIMDizePass`: `frag_multi`'s local `vec4[4]` interpolation-qualifier lookup table (built from 4 per-lane-divergent varyings, read back through a uniform push-constant index) got its `extractelement` reads turned into `extractelement <4 x float> poison, i64 N` post-widen.
+3. Root cause: `widenInstruction`'s `UI.isDivergentAtDef` gate can't see that a `MaskedAllocas` load's value is divergent (only its address looks uniform) -- so `extractelement` consumers of that load fell through to "uniform: leave as-is" and became dangling references, silently replaced with `poison` once the load was erased.
+4. Fixed `SIMDize.cpp`: route any `extractelement` whose vector operand is already in `WidenedVectorComponents` through `widenExtractElement`, before the general uniformity gate.
+5. New test `SIMDizeTest.DecomposesExtractElementFromUniformlyIndexedMaskedAllocaLoad`, confirmed to fail identically pre-fix via stash/rebuild round-trip.
+6. `ninja check-feme`: 3,292/3,295 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+7. CTS: `separate.no_sample_decoration.1_sample` now Passes. Full `multiple_interpolation.*`: 0 Fail (16 Pass, 12 NotSupported). Full `dEQP-VK.draw.*` sweep (29,451 cases): 107 pre-existing Fails, all confirmed unrelated via stash/rebuild round-trip (64 `L134(a)` indexed_draw, 42 `linear_interpolation` InterpolateAtOffset gap, 1 `output_location.shuffle` JIT symbol gap -- the latter two newly surfaced, not yet filed).
+8. Struck through `L134(c)` on `Roadmap.md` (both sub-bugs now fixed); updated the parent `L134` summary row (7 of 7 sub-rows now fixed, only `L134(a)` remains).
+9. Updated `VulkanCTSReport.md` with this session's write-up.
+10. Committed in 4 pieces: the SIMDize.cpp fix, the new test, the Roadmap strikethrough, the CTS report update.
+
+**Not done / still open:**
+
+- `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases) -- untouched, `L134`'s only remaining open sub-row.
+- Two newly-surfaced failure families from this session's full sweep are **not yet filed as their own roadmap rows**: `linear_interpolation.*`'s `spirv.GL.InterpolateAtOffset` legalization gap (42 cases, `error: failed to legalize operation`), and `output_location.shuffle.inputs-outputs`'s JIT symbol-resolution gap (1 case, `Symbols not found: [ spirv_var_36, spirv_var_33 ]`).
+- `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets`) not started.
+- `L115(b)` (pull-model interpolation) not started.
+
+## Suggested next steps
+
+1. **(~5-10 min, quick pick)** File `linear_interpolation.*`'s 42-case `InterpolateAtOffset` legalization gap as a new roadmap row (e.g. `L135`) -- error text `error: failed to legalize operation 'spirv.GL.InterpolateAtOffset' that was explicitly marked illegal` at pipeline creation, confirmed pre-existing this session. Not investigated beyond confirming it's real and pre-existing.
+2. **(~5-10 min, quick pick)** File `output_location.shuffle.inputs-outputs`'s 1-case JIT symbol-resolution gap as its own roadmap row too (e.g. `L136`) -- `JIT session error: Symbols not found: [ spirv_var_36, spirv_var_33 ]`, also confirmed pre-existing, not yet investigated.
+3. **(~1-2 hrs)** `L134(a)` (`indexed_draw.*`/`maintenance6`, 64 cases) -- the last open `L134` sub-row. Every failing case name contains `maintenance6`/`bindindexbuffer2_maintenance6`; plain `draw_indexed`/`draw_indexed_indirect` without that suffix are not in the fail list, so start there.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
+5. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new runtime-callback ABI surface, not a quick pick.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+7. **(~2 min)** `/tmp/ctsrun/l134c2/` (this session's scratch: `repro.qpa`/`dbg.qpa`/`ir.qpa`/`simd.qpa`/`simd.txt`/`post.qpa`/`post.txt`/`fixverify.qpa`/`full.qpa`/`draw_full.qpa`/`draw_full.log`/`before_linear.qpa`/`before_shuffle.qpa`) can be deleted once a future session no longer needs them -- nothing in it is referenced by anything committed.
