@@ -97980,3 +97980,114 @@ was in scope this session.
    both be deleted once a future session no longer needs their raw
    `.qpa`/`.log` files -- nothing in either is referenced by anything
    committed.
+
+# Session: L134(e) fixed -- 32-bit layer-clear-mask truncation
+
+Confirmed `FeMe CPU Vulkan Device` at start (`vulkaninfo --summary`).
+Picked `L134(e)` first, per the prior session's own ordering (smallest of
+the 5 remaining open `L134` sub-rows, 8 cases:
+`shader_layer.{vertex,tessellation}_shader_256`).
+
+## Step 1: reproduced and ruled out the L132/L134(f) bug class (~10 min)
+
+Ran the 4 `vertex_shader_256` cases directly: `Fail (Rendered image is not
+correct at vktDrawShaderLayerTests.cpp:941)`. A real image-content
+mismatch, not an "expected: X, got: X" near-miss -- confirmed this is
+**not** another barycentric-sum-precision case, per the prior session's
+own check-first instruction.
+
+## Step 2: root-caused via pixel-diffing the QPA's own embedded PNGs (~45 min)
+
+Read `vktDrawShaderLayerTests.cpp`: renders 256 layers (16x16 grid of
+16x16px rectangles across a 256x256 image), one rectangle per layer via
+`gl_Layer`, then compares every layer against a reference. Its own
+`numLayersToTest[]` array jumps straight from `8` to `256` -- no
+intermediate count (9-255) is ever exercised.
+
+Extracted and diffed the embedded `Result`/`Reference` PNGs from the QPA
+log: first divergence at layer 32 (the 33rd layer, first past a 32-bit
+boundary). The layer's own drawn rectangle was correct, but its
+background was fully transparent instead of the clear color -- the
+layer's `VK_ATTACHMENT_LOAD_OP_CLEAR` was silently skipped.
+
+Traced to `CommandBuffer.cpp`'s `fullLayerMask(uint32_t Layers)`: a
+`uint32_t` bitmask reused for two different things -- genuine multiview
+view masks (spec-capped at 32 bits, so `uint32_t` is always correct
+there) and a synthetic "clear every layer of a plain, non-multiview
+layered target" mask (no such spec cap, can need up to
+`maxFramebufferLayers` = 256 on this ICD). For layer counts >=32,
+`fullLayerMask` "saturated" to `~0u` -- which only ever represents layers
+0-31; layers 32-255 were permanently unrepresented and never cleared.
+
+## Step 3: fixed with llvm::BitVector, unbounded width (~1 hr)
+
+Replaced the `uint32_t`-mask machinery with `llvm::BitVector`-based
+tracking (no fixed width):
+- `GraphicsState::LoadedAttachmentViewMask`:
+  `DenseMap<uintptr_t, uint32_t>` -> `DenseMap<uintptr_t, BitVector>`.
+- `applyClear` now takes `const BitVector &ViewsToClear` and
+  `DenseMap<uintptr_t, BitVector> &AlreadyLoaded`, using `BitVector::
+  reset()`/`operator|=`/`find_first()`/`find_next()` instead of raw
+  bit-shift arithmetic.
+- `fullLayerMask` removed, replaced by `viewsToClear(Binding)`: 32-bit-
+  bounded for genuine multiview (still correct, spec-capped there too),
+  but `Binding.Layers`-wide and unbounded for plain layered rendering.
+
+Confirmed the genuine-multiview per-view draw-replication loop in
+`runDraw` (a separate, correctly-32-bit-bounded concept) was out of
+scope and left untouched.
+
+## Step 4: verified (~45 min)
+
+1. New unit test `ClearsEveryLayerOfALayeredRenderTargetPastThirtyTwo`
+   first -- 40-layer target, backing memory poisoned with `0xAB` via
+   `memset` before rendering (so an unfixed clear-skip can't be mistaken
+   for a correct clear against zeroed memory), draws a constant
+   `gl_Layer = 33` triangle, asserts layer 35 reads back as the clear
+   color (not poison) and layer 33 as the draw color.
+2. Source-swap-to-baseline round-trip (`git show HEAD:...CommandBuffer.cpp`
+   swapped in, rebuilt, retested, restored): test **fails** with the fix
+   removed (poison bytes leak through), **passes** with it restored --
+   confirms the test actually exercises the bug.
+3. `ninja check-feme`: 3,282/3,285 Passed, 0 Failed (+2 tests).
+   `FeMeVulkanTests` standalone: 721/721.
+4. CTS: `dEQP-VK.draw.*shader_layer*` (56 cases) now **0 Fail** (was 8).
+5. Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **211 Fail** --
+   exactly `219 - 8`, confirming the fix holds at full-sweep scale with 0
+   regressions.
+
+Committed in pieces (fix, test, Roadmap.md, VulkanCTSReport.md), all with
+the Copilot co-author trailer. `L134`'s parent row now reads 3 of 7
+sub-rows fixed, 4 remain open.
+
+## What I did NOT do this session
+
+`L125(m)`/`L125(n)` and `L115(b)` -- both still flagged "not a quick pick,
+needs a dedicated session" by multiple prior sessions -- left untouched on
+purpose. `L134`'s other 4 sub-rows (`a`-`d`) also untouched; only `L134(e)`
+was in scope this session.
+
+## Suggested next steps
+
+1. **(~30-60 min each, quick picks)** `L134`'s 4 remaining open sub-rows,
+   smallest first: `L134(d)` (`implicit_sample_shading`, 12 cases, 3
+   shapes) is smallest; `L134(b)` (`output_location.array`, 24 cases) and
+   `L134(c)` (`multiple_interpolation`, 64 cases) mid-sized; `L134(a)`
+   (`indexed_draw`/`maintenance6`, 64 cases) likely most involved. Check
+   each one's own CTS failure message text first -- an "expected: X, got:
+   X" pattern may be another `L132`/`L134(f)`-class barycentric-sum bug; a
+   genuinely different message (crash, wrong-format rejection, a real
+   value mismatch) needs its own investigation, as `L134(e)`/`L134(g)`
+   both turned out to.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+3. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. **(~2 min)** `/tmp/ctsrun/l134e/` (this session's scratch sweep log)
+   and `/tmp/ctsrun/l134g/`/`/tmp/ctsrun/l132fix/` (carried over from
+   prior sessions) can all be deleted once a future session no longer
+   needs their raw `.qpa`/`.log` files -- nothing in any of them is
+   referenced by anything committed.
