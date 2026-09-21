@@ -55,32 +55,12 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Check `/tmp/ctsrun/l128/blend_full.qpa`** (PID 40501 if still
-   alive) for the `pipeline.monolithic.blend.*` sweep's final tally
-   before doing anything else CTS-related -- it was still running (0
-   Fail through 32,000+ cases) when this session ended. If clean,
-   update `VulkanCTSReport.md`'s note on this and consider the
-   long-standing "is `blend.*` actually clean" question finally
-   closed for good.
-2. **`L128(a)` (the nondeterministic JIT crash) needs real
-   memory-instrumentation tooling** before anyone re-attempts the
-   loop-unrolling half of `L128` -- `apt install valgrind` (not present
-   this session) or an ASan-instrumented build of the CPU JIT path is
-   the natural next step. Do not re-attempt the unroll pass by pure
-   inspection again; that approach is exhausted for this bug.
-3. Once `L128(a)` is understood, `L128` itself just needs the
-   (now-reverted) unroll pass re-derived on top of a fix for whatever
-   `L128(a)` turns out to be, plus a final CTS check of the 3 target
-   `query_max_attributes.*` cases.
-4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   remains the largest not-yet-started cross-repo item -- needs its own
-   dedicated session, not a quick pick.
-5. `L115(b)` (pull-model interpolation) remains flagged from several
-   sessions ago as needing a new runtime-callback ABI surface -- also
-   not a quick pick.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
-   `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's scratch CTS logs at `/tmp/ctsrun/l128/*` (including
-   the still-running blend sweep's log) should be cleaned up by
-   whichever future session confirms the blend sweep's final result
-   and no longer needs the raw log.
+1. **Pick up `L128(a)` with tooling already in place**: `valgrind` is
+   now installed, and `FEME_CPU_JIT_DEBUG_SUPPORT=1` is the right GDB
+   flag to reach for -- both are confirmed to work well together on
+   this bug. Reinstate the same (unlanded, described-in-`Roadmap.md`
+   but not preserved elsewhere) forced-unroll prototype to reproduce
+   it, and this time build a **hand-minimized 2-3-attribute repro
+   shader** first, so each valgrind iteration doesn't take minutes --
+   the full 15-attribute CTS shader is way too slow to bisect by hand
+   under valgrind.
