@@ -2431,6 +2431,33 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   return Artifact;
 }
 
+/// (Roadmap L134(g)) `VK_KHR_maintenance5`'s `VkPipelineCreateFlags2CreateInfo`
+/// (chained onto `VkGraphicsPipelineCreateInfo::pNext`) supersedes that same
+/// struct's own legacy 32-bit `flags` field whenever present -- the whole
+/// point of the newer, 64-bit `VkPipelineCreateFlags2` type this extension
+/// introduces is to let an application populate the wider field once
+/// `flags` itself runs out of room, with `flags` then free to hold any
+/// legacy-compatible/placeholder value (real CTS coverage,
+/// `dEQP-VK.draw.*.basic_draw.misc.maintenance5`, deliberately sets `flags`
+/// to `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` -- a value that would otherwise
+/// wrongly divert this pipeline into `vkCreateGraphicsPipelines`'s own
+/// pipeline-library branch -- while chaining the *real*
+/// `VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR` via this struct).
+/// Returns \p CreateInfo's own `flags`, widened, when no such struct is
+/// chained.
+VkPipelineCreateFlags2
+getEffectivePipelineCreateFlags(const VkGraphicsPipelineCreateInfo &CreateInfo) {
+  for (const auto *Next =
+           static_cast<const VkBaseInStructure *>(CreateInfo.pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType != VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
+      continue;
+    return reinterpret_cast<const VkPipelineCreateFlags2CreateInfo *>(Next)
+        ->flags;
+  }
+  return static_cast<VkPipelineCreateFlags2>(CreateInfo.flags);
+}
+
 Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
@@ -2618,7 +2645,10 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
     // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
     // BIT`: this pipeline missed the cache (or none was given), and the
     // caller asked to be told rather than pay for a real compile here.
-    if (CreateInfo.flags &
+    // (roadmap L134(g)) Consult `VK_KHR_maintenance5`'s own flags2
+    // override, not just the legacy field, per
+    // `getEffectivePipelineCreateFlags`'s own comment.
+    if (getEffectivePipelineCreateFlags(CreateInfo) &
         VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
       return std::nullopt;
     Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
@@ -3060,7 +3090,15 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
 
   VkGraphicsPipelineCreateInfo Result{};
   Result.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  Result.flags = CreateInfo.flags;
+  // (roadmap L134(g)) `Result` itself never carries a chained
+  // `VkPipelineCreateFlags2CreateInfo` (nothing downstream of this
+  // synthesis point looks for one), so resolve `CreateInfo`'s own
+  // flags2-vs-legacy value once here and store the *effective* result --
+  // every bit this file currently interprets fits within the legacy
+  // field's 32 bits, so this truncation loses nothing any call site
+  // reads today.
+  Result.flags =
+      static_cast<VkPipelineCreateFlags>(getEffectivePipelineCreateFlags(CreateInfo));
 
   // Layout/RenderPass/Subpass are shared by every part per the spec's own
   // "Multiple Pipeline Creation" table; prefer this call's own value when
@@ -3169,7 +3207,7 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
     Result.pRasterizationState = CreateInfo.pRasterizationState;
     Result.pTessellationState = CreateInfo.pTessellationState;
     PreRasterViewIndexIsDeviceIndex =
-        (CreateInfo.flags &
+        (getEffectivePipelineCreateFlags(CreateInfo) &
          VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
   }
 
@@ -3195,7 +3233,7 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
         Storage.Stages.push_back(CreateInfo.pStages[I]);
     Result.pDepthStencilState = CreateInfo.pDepthStencilState;
     FragmentViewIndexIsDeviceIndex =
-        (CreateInfo.flags &
+        (getEffectivePipelineCreateFlags(CreateInfo) &
          VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
   }
 
@@ -3398,6 +3436,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
+    // (roadmap L134(g)) `VK_KHR_maintenance5`'s flags2 override, resolved
+    // once per call and used everywhere this loop body would otherwise
+    // read `pCreateInfos[I].flags` directly -- see
+    // `getEffectivePipelineCreateFlags`'s own comment.
+    VkPipelineCreateFlags2 EffectiveFlags =
+        getEffectivePipelineCreateFlags(pCreateInfos[I]);
     // (roadmap H29b) `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` marks this call
     // as creating a `VK_EXT_graphics_pipeline_library` pipeline library
     // rather than a complete, executable pipeline: capture whichever
@@ -3411,7 +3455,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     // "decoder complete but unwired" struct was, since the extension
     // itself stays unadvertised (H29a) regardless of what this call
     // recognizes.
-    if (pCreateInfos[I].flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) {
+    if (EffectiveFlags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) {
       VkGraphicsPipelineLibraryFlagsEXT LibraryFlags = 0;
       for (const auto *Next =
                static_cast<const VkBaseInStructure *>(pCreateInfos[I].pNext);
@@ -3431,7 +3475,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
       GraphicsPipelineLibrary *Obj = Alloc.create<GraphicsPipelineLibrary>(
           VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
           captureGraphicsPipelineLibraryState(pCreateInfos[I], LibraryFlags),
-          pCreateInfos[I].flags);
+          static_cast<VkPipelineCreateFlags>(EffectiveFlags));
       if (!Obj) {
         Result = VK_ERROR_OUT_OF_HOST_MEMORY;
         continue;
@@ -3464,7 +3508,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     // pipeline_library` parts (see `synthesizeLinkedGraphicsPipelineCreateInfo`'s
     // own comment).
     bool PreRasterViewIndexIsDeviceIndex =
-        (pCreateInfos[I].flags &
+        (EffectiveFlags &
          VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
     bool FragmentViewIndexIsDeviceIndex = PreRasterViewIndexIsDeviceIndex;
     if (LinkInfo && LinkInfo->libraryCount != 0) {
@@ -3510,7 +3554,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                                  pCreateInfos[I].stageCount, CacheHit);
     GraphicsPipeline *Obj = Alloc.create<GraphicsPipeline>(
         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Compiled),
-        pCreateInfos[I].flags);
+        static_cast<VkPipelineCreateFlags>(EffectiveFlags));
     if (!Obj) {
       Result = VK_ERROR_OUT_OF_HOST_MEMORY;
       continue;
