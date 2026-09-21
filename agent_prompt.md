@@ -55,22 +55,16 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~30-60 min each, quick picks)** `L134`'s 6 remaining open sub-rows,
-   roughly by expected size: `L134(g)` (1 case, `basic_draw.misc.
-   maintenance5`) is the smallest; `L134(d)` (`implicit_sample_shading`, 12
-   cases, 3 distinct shapes) and `L134(e)` (`shader_layer` at layer 256, 8
-   cases) are next; `L134(b)` (`output_location.array`, 24 cases across
-   many formats) and `L134(c)` (`multiple_interpolation`, 64 cases) are
-   mid-sized; `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases, the
-   largest single family) is likely the most involved. **Before starting
-   any of them, check their CTS failure message text first** -- if it's
-   another "expected: X, got: X" exact-value mismatch, it may be the same
-   `L132`/`L134(f)` barycentric-sum-not-exactly-1.0 class of bug in yet
-   another consumer of `Bary0/1/2` (there may be more beyond depth and
-   color -- `EdgeDist`/line antialiasing at ~3453 hasn't been checked for
-   this same gap yet). If the message is something else entirely (a real
-   `Fail` with visibly different values, a crash, a wrong-format rejection,
-   etc.), it's a genuinely separate bug needing its own investigation.
+1. **(~30-60 min each, quick picks)** `L134`'s 5 remaining open sub-rows,
+   smallest first: `L134(e)` (`shader_layer` at layer 256, 8 cases) and
+   `L134(d)` (`implicit_sample_shading`, 12 cases, 3 shapes) are smallest;
+   `L134(b)` (`output_location.array`, 24 cases) and `L134(c)`
+   (`multiple_interpolation`, 64 cases) mid-sized; `L134(a)`
+   (`indexed_draw`/`maintenance6`, 64 cases) likely most involved. Check
+   each one's own CTS failure message text first -- an "expected: X, got:
+   X" pattern may be another `L132`/`L134(f)`-class barycentric-sum bug; a
+   genuinely different message (crash, wrong-format rejection, a real
+   value mismatch) needs its own investigation, as `L134(g)` turned out to.
 2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
    still the largest not-yet-started cross-repo item, needs its own
    dedicated session.
@@ -78,7 +72,8 @@ Can you continue the work on feme? The last agent's suggested next steps are:
    new runtime-callback ABI surface, not a quick pick.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. **(~2 min)** `/tmp/ctsrun/l132fix/` (127MB, this and the prior session's
-   scratch logs) can be deleted once a future session no longer needs its
-   raw `.qpa`/`.log` files -- nothing in it is referenced by anything
+5. **(~2 min)** `/tmp/ctsrun/l134g/` (this session's scratch sweep log) and
+   `/tmp/ctsrun/l132fix/` (127MB, carried over from prior sessions) can
+   both be deleted once a future session no longer needs their raw
+   `.qpa`/`.log` files -- nothing in either is referenced by anything
    committed.
