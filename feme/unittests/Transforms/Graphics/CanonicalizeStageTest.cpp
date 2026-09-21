@@ -80,6 +80,26 @@ TEST(CanonicalizeStageTest, LeavesNonGraphicsStagesAlone) {
 /// `loadInput`/`storeOutput` whose signature-ID operand cannot be resolved
 /// (e.g. a fragment entry point with no `!feme.signature` at all) is left
 /// unmodified, rather than crashing or guessing an ElementID.
+///
+/// (Roadmap L131) This test's module is a hand-constructed edge case that
+/// does not arise in real production use: a genuine DXIL-origin fragment
+/// entry always already has a (possibly empty) signature attached by
+/// `feme::dxil::MetadataRaisingPass` well before `CanonicalizeStagePass`
+/// ever runs (see `MetadataRaising.cpp`'s own unconditional
+/// `setEntrySignature` call), so this module's "fragment stage, raw
+/// `dx.op.loadInput`, but no signature at all" combination only exists
+/// here to probe the graceful-no-op path directly. This is also, by
+/// construction, indistinguishable from the shape `CanonicalizeStage.cpp`'s
+/// own `L131` fix now recognizes and attaches an empty signature to (a
+/// Vertex/Fragment entry with no SPIR-V stage-IO globals and no signature
+/// yet) -- so `run(*M)` now legitimately returns `true` here (an empty
+/// signature gets attached as a side effect), where it previously returned
+/// `false` (this test's original assertion, now stale). The real invariant
+/// this test exists to protect -- that an unresolvable `loadInput` is left
+/// unrewritten rather than crashing or guessing an `ElementID` -- is
+/// unaffected either way, so only the now-incidental `EXPECT_FALSE(run(*M))`
+/// return-value check is dropped; `SawLoadInput` still confirms the load
+/// itself was untouched.
 TEST(CanonicalizeStageTest, UnresolvableLoadInputIsLeftAlone) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -91,7 +111,7 @@ TEST(CanonicalizeStageTest, UnresolvableLoadInputIsLeftAlone) {
     attributes #0 = { "feme.shader.stage"="fragment" }
   )");
   ASSERT_TRUE(M);
-  EXPECT_FALSE(run(*M));
+  run(*M);
   Function *F = M->getFunction("main");
   bool SawLoadInput = false;
   for (Instruction &I : instructions(F))
@@ -3266,6 +3286,80 @@ TEST(CanonicalizeStageTest, MeshSetOutputsOnlyEntryStillGetsASignature) {
   std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
   ASSERT_TRUE(Sig.has_value());
   EXPECT_TRUE(Sig->Elements.empty());
+}
+
+/// (Roadmap L131) A Fragment (or Vertex) entry that reads/writes no
+/// stage-IO global at all -- e.g. a fragment shader that only reads a
+/// push constant and writes a bound storage image via `imageStore`
+/// (`dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
+/// overwrite`'s own shape), or, as tested most minimally here, one that
+/// does nothing at all -- hits the exact same "discovery loop found
+/// nothing, signature-building branch above never ran" gap
+/// `GeometryStreamCutOnlyEntryStillGetsASignature` above already covers
+/// for geometry's own analogous stream-cut-only shape. Before this fix,
+/// this left the entry with no `!feme.signature` metadata at all, later
+/// hitting `feme::cpu::FragmentWrapperPass`'s own "requires attached
+/// feme.signature metadata" diagnostic once it reached a stage op (every
+/// fragment entry unconditionally uses one, via the masked-output-store/
+/// return-masks calls `SPIRVToLLVMPatterns` always emits for
+/// helper-invocation/quad semantics).
+TEST(CanonicalizeStageTest, FragmentWithNoStageIOStillGetsASignature) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  EXPECT_TRUE(Sig->Elements.empty());
+}
+
+/// (Roadmap L131) Unlike Geometry/Mesh (only ever routed through
+/// `canonicalizeSPIRVStage`, with no DXIL-origin ambiguity to preserve), a
+/// genuine DXIL-origin Vertex/Fragment entry is *also* dispatched here
+/// (`CanonicalizeStagePass::run` always runs this function for every
+/// Vertex/Fragment entry, alongside `canonicalizeDXILStage`) -- so
+/// `FragmentWithNoStageIOStillGetsASignature`'s own fix must not clobber a
+/// signature a DXIL-origin entry already has attached (e.g. from
+/// `feme::dxil::MetadataRaisingPass`) with a fresh, incorrectly-empty one.
+/// This test attaches a real, non-empty signature directly (standing in
+/// for what `MetadataRaisingPass` would have already done for a genuine
+/// DXIL-origin entry) before running the pass, and confirms it survives
+/// unmodified.
+TEST(CanonicalizeStageTest,
+    FragmentWithPreAttachedSignatureIsNotClobbered) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  EntrySignature Existing;
+  SignatureElement Elt;
+  Elt.Direction = SignatureDirection::Output;
+  Elt.Location = 0;
+  Elt.ComponentCount = 4;
+  Elt.ComponentType = SignatureComponentType::Float;
+  Existing.Elements.push_back(Elt);
+  dxil::setEntrySignature(*F, Existing);
+
+  run(*M);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].Direction, SignatureDirection::Output);
+  ASSERT_TRUE(Sig->Elements[0].Location.has_value());
+  EXPECT_EQ(*Sig->Elements[0].Location, 0u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
 }
 
 /// (Roadmap H92) A mesh entry's own per-vertex `Output` block whose one

@@ -2184,10 +2184,27 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// A fragment stage writing no `SV_Target0` cannot fill the render pass's
-/// one color attachment; the mismatch is a creation failure, not a draw-time
-/// surprise.
-TEST_F(GraphicsPipelineTest, RejectsMissingFragmentOutput) {
+/// A fragment stage writing no `SV_Target0` at all is legal per the
+/// Vulkan spec's own fragment-output-interface rules (an unwritten
+/// declared color-attachment location simply keeps its prior content, not
+/// an error) -- `GraphicsPipeline.cpp`'s own `validateStageInterfaces`
+/// already relaxed this exact check to match the spec (roadmap H11: "an
+/// unwritten declared location simply keeps its prior content, not an
+/// error"). This test's name/original assertion predates that relaxation
+/// and had been accidentally still passing for the wrong reason ever
+/// since: a fragment entry with a completely empty body (no stage-IO
+/// globals, no stage ops at all) never got a `!feme.signature` attached
+/// (`CanonicalizeStage.cpp`'s own discovery loop only ran the
+/// `dxil::setEntrySignature` call when it found at least one real
+/// stage-IO global), so pipeline creation failed at
+/// `feme::cpu::FragmentWrapperPass`'s own "requires attached
+/// feme.signature metadata" crash before ever reaching the
+/// (already-relaxed) missing-output check this test's docstring
+/// describes. `L131`'s fix (attaching an empty signature to a
+/// Vertex/Fragment entry with no stage-IO globals, mirroring the
+/// Geometry/Mesh precedent) closes that crash, so creation now correctly
+/// succeeds, matching H11's own established, spec-accurate behavior.
+TEST_F(GraphicsPipelineTest, AcceptsFragmentWithNoOutputAtAll) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
@@ -2202,8 +2219,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
   VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
   VkPipeline Pipe = VK_NULL_HANDLE;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(create(Info, Pipe), VK_SUCCESS);
 
+  if (Pipe != VK_NULL_HANDLE)
+    vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
