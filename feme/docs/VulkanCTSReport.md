@@ -9273,3 +9273,96 @@ session's full `dEQP-VK.draw.*` sweep -- `linear_interpolation.*`'s
 `output_location.shuffle.inputs-outputs`'s JIT symbol-resolution gap (1
 case) -- are **not yet filed as their own roadmap rows**; see
 `agent_thoughts.md`'s suggested next steps for filing them.
+
+## Session: `L134(a)` closed -- `VK_KHR_maintenance6` null index-buffer bind fix; `L135`/`L136` filed
+
+Continuing from the previous session's `L134(c)` closure write-up above,
+this session filed the two newly-surfaced failure families that
+session's own full sweep found, then root-caused and fixed `L134(a)`
+-- the last remaining open `L134` sub-row -- fully closing `L134`.
+
+### Filed: `L135`/`L136`
+
+Two new roadmap rows for the previously-undocumented, pre-existing
+failure families the `L134(c)` session's own full `dEQP-VK.draw.*`
+sweep surfaced (neither investigated beyond confirming they are real
+and reproducible):
+
+- `L135`: `dEQP-VK.draw.*.linear_interpolation.*` (42 cases) --
+  `error: failed to legalize operation 'spirv.GL.InterpolateAtOffset'
+  that was explicitly marked illegal` at pipeline creation.
+- `L136`: `dEQP-VK.draw.renderpass.output_location.shuffle.inputs-outputs`
+  (1 case) -- `JIT session error: Symbols not found: [ spirv_var_36,
+  spirv_var_33 ]`.
+
+### `L134(a)`: root cause
+
+Reproduced `dEQP-VK.draw.renderpass.indexed_draw.draw_indexed_maintenance6`
+directly: fails with `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`
+and (with `FEME_VULKAN_LOG_CREATION_ERRORS=1`) the underlying message
+`vkQueueSubmit: an indexed draw has no bound index buffer`.
+
+CTS's own `DrawIndexedMaintenance6::iterate` (`vktDrawIndexedTest.cpp`)
+binds `VK_NULL_HANDLE` as the index buffer via `vkCmdBindIndexBuffer`/
+`vkCmdBindIndexBuffer2` -- legal per `VK_KHR_maintenance6`'s own spec
+text ("`VK_NULL_HANDLE` is allowed to be used when binding an index
+buffer ... When the `nullDescriptor` feature is enabled, every index
+fetched results in a value of zero") -- then issues an indexed draw
+with an index count of `0` unless `nullDescriptor` is *also* enabled,
+in which case it uses `3`. The `nullDescriptor`-enabled variants are
+already correctly rejected as `NotSupported` on this ICD (`robustness2
+nullDescriptor is not supported`) well before reaching this bug, so
+every one of the 64 genuinely-failing cases only ever needs the `0`-
+count, no-real-fetch shape to work correctly.
+
+Root cause: `CommandBuffer.cpp`'s `GraphicsState::IndexBuffer` is left
+null both when no bind command has ever been issued for the current
+draw *and* when one was issued explicitly naming `VK_NULL_HANDLE` --
+the two states are indistinguishable to `runDraw`/
+`validateDrawFetchBounds`'s own `!Gfx.IndexBuffer` check, which
+rejected the legal `maintenance6` null bind exactly like the illegal
+"never bound at all" case.
+
+### Fix
+
+Added `GraphicsState::IndexBufferBound`, set by either
+`vkCmdBindIndexBuffer`/`vkCmdBindIndexBuffer2` regardless of which
+buffer (if any) it names, and gated the "no bound index buffer"
+rejection on that flag instead of on `IndexBuffer` being non-null. A
+null-bound index buffer now produces an empty `IndexBufferBinding::Data`
+span in `runDraw`; `Executor.cpp`'s own pre-existing out-of-bounds check
+already safely rejects a real index fetch against it, so the (currently
+unreachable on this ICD, since `nullDescriptor` is unsupported) nonzero-
+count case still fails safely rather than reading past the end of an
+empty span.
+
+Three new regression tests (`DrawTest.
+RendersZeroCountIndexedDrawWithNullBoundIndexBuffer2`/
+`RendersZeroCountIndexedDrawWithNullBoundIndexBuffer`/
+`RejectsIndexedDrawWithNoIndexBufferBoundAtAll`, the last confirming the
+fix does not overcorrect and legalize a genuine never-bound draw too):
+confirmed via a stash/rebuild round-trip that the first two fail
+identically to the real bug pre-fix, the third already passed both
+before and after.
+
+### Verification
+
+- `ninja check-feme`: 3,295/3,298 Passed, 3 Unsupported, 0 Failed (+3
+  new tests, 0 regressions).
+- CTS: the isolated `indexed_draw.*maintenance6*` repro is now **64/64
+  Pass across all 4 construction types** (`renderpass`/
+  `dynamic_rendering.{primary,partial_secondary,complete_secondary}_cmd_buff`)
+  -- was 0/64 (16 genuine `Fail`s + 48 `NotSupported` `nullDescriptor`/
+  `multi_draw` cases) per construction type.
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **43 Fail**
+  (was 107) -- confirmed to be exactly the 42 `L135` + 1 `L136` cases,
+  0 other regressions.
+
+### Results
+
+`L134(a)` is now **fully closed and CTS-verified**. This closes out all
+7 original `L134` sub-rows (plus `L134(b)`'s own further 2-way split),
+so `L134` itself is struck through as fully fixed. No feature/extension
+inventory changes (a compiler/runtime correctness fix, no new Vulkan
+functionality shipped this session). `L135`/`L136` remain open, filed
+but not yet investigated.
