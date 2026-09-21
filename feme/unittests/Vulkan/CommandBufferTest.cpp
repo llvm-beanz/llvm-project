@@ -1687,6 +1687,11 @@ TEST_F(PushDescriptorSetDispatchTest, WithTemplateReadsAndWrites) {
   TemplateInfo.pDescriptorUpdateEntries = Entries;
   TemplateInfo.templateType =
       VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS;
+  // This template's push targets a compute dispatch below, so its own
+  // bind point must say so -- `vkCmdPushDescriptorSetWithTemplate` itself
+  // takes no `pipelineBindPoint` argument and instead reads it from here
+  // (see `DescriptorUpdateTemplate::bindPoint`'s own comment).
+  TemplateInfo.pipelineBindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
   VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
   ASSERT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
                                              &Template),

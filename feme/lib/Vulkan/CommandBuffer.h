@@ -180,6 +180,13 @@ struct RecordedCommand {
   uint32_t FirstSet = 0;
   std::vector<DescriptorSet *> DescriptorSets;
   std::vector<uint32_t> DynamicOffsets;
+  /// `BindDescriptorSets`: which bind point's own bound-set state this bind
+  /// updates -- Vulkan maintains a fully separate set of bound descriptor
+  /// sets per pipeline bind point ("There is a separate set of bound
+  /// descriptor sets for each of graphics and compute", Vulkan spec
+  /// "Descriptor Set Binding"), so a bind recorded for one bind point must
+  /// never be visible to a draw/dispatch issued against the other.
+  VkPipelineBindPoint BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   /// `CopyBuffer`: source/destination buffers and the copy regions.
   Buffer *SrcBuffer = nullptr;
   Buffer *DstBuffer = nullptr;
@@ -417,12 +424,14 @@ public:
     Commands.push_back(Cmd);
   }
   void bindDescriptorSets(uint32_t FirstSet, std::vector<DescriptorSet *> Sets,
-                          std::vector<uint32_t> DynamicOffsets) {
+                          std::vector<uint32_t> DynamicOffsets,
+                          VkPipelineBindPoint BindPoint) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BindDescriptorSets;
     Cmd.FirstSet = FirstSet;
     Cmd.DescriptorSets = std::move(Sets);
     Cmd.DynamicOffsets = std::move(DynamicOffsets);
+    Cmd.BindPoint = BindPoint;
     Commands.push_back(std::move(Cmd));
   }
   /// (roadmap F12) `vkCmdPushDescriptorSet`: applies \p Writes (per
@@ -435,13 +444,21 @@ public:
   /// path. Writes to the same slot accumulate across calls ("can be updated
   /// incrementally", `vkCmdPushDescriptorSet`'s own spec text) for as long
   /// as \p Layout keeps agreeing with whatever slot \p Set last held --
-  /// see `getOrCreatePushDescriptorSet`.
+  /// see `getOrCreatePushDescriptorSet`. \p BindPoint selects which bind
+  /// point's own bound-set state the resulting bind updates (see
+  /// `RecordedCommand::BindPoint`'s own comment).
   void pushDescriptorSet(uint32_t Set, const DescriptorSetLayout &Layout,
-                         llvm::ArrayRef<VkWriteDescriptorSet> Writes);
+                         llvm::ArrayRef<VkWriteDescriptorSet> Writes,
+                         VkPipelineBindPoint BindPoint);
   /// (roadmap F12) `vkCmdPushDescriptorSetWithTemplate`: same as
   /// `pushDescriptorSet` above, but applying \p Template's entries against
   /// \p Data (per `vkUpdateDescriptorSetWithTemplate`'s own dispatch)
-  /// instead of a `VkWriteDescriptorSet` array.
+  /// instead of a `VkWriteDescriptorSet` array. Unlike `pushDescriptorSet`,
+  /// the caller's own entry point (`vkCmdPushDescriptorSetWithTemplate`)
+  /// takes no `pipelineBindPoint` argument at all -- the bind point is
+  /// instead read from \p Template's own creation-time
+  /// `VkDescriptorUpdateTemplateCreateInfo::pipelineBindPoint` (see
+  /// `DescriptorUpdateTemplate::bindPoint`).
   void pushDescriptorSetWithTemplate(uint32_t Set,
                                      const DescriptorSetLayout &Layout,
                                      const DescriptorUpdateTemplate &Template,

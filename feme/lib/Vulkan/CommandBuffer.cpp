@@ -2533,13 +2533,19 @@ Expected<uint32_t> readIndirectByteCountVertices(Buffer *Buf, uint64_t Offset,
   return (ByteCount - CounterOffset) / VertexStride;
 }
 
-/// Interprets \p Commands into \p BoundPipeline/\p BoundSets/
-/// \p PushConstants -- shared, mutable execution state a primary command
-/// buffer's own commands and every `vkCmdExecuteCommands`-referenced
-/// secondary command buffer's commands are interpreted into alike, per
-/// "Command Buffers": "Secondary command buffers are interpreted into the
-/// primary execution state ... no cursor or bound state may be stored back
-/// into the command buffer during execution." \p DeviceInfo is threaded
+/// Interprets \p Commands into \p BoundPipeline/\p BoundGraphicsSets/
+/// \p BoundComputeSets/\p PushConstants -- shared, mutable execution state a
+/// primary command buffer's own commands and every
+/// `vkCmdExecuteCommands`-referenced secondary command buffer's commands
+/// are interpreted into alike, per "Command Buffers": "Secondary command
+/// buffers are interpreted into the primary execution state ... no cursor
+/// or bound state may be stored back into the command buffer during
+/// execution." \p BoundGraphicsSets/\p BoundComputeSets are kept as two
+/// fully independent vectors, matching the Vulkan spec's own requirement
+/// that "there is a separate set of bound descriptor sets for each of
+/// graphics and compute" -- a bind recorded for one bind point (see
+/// `RecordedCommand::BindPoint`) must never become visible to a
+/// draw/dispatch issued against the other. \p DeviceInfo is threaded
 /// through for `validateGroupCount`, which does not otherwise have access
 /// to a secondary command buffer's own (possibly null, if never set)
 /// `PhysicalDeviceInfo`.
@@ -2547,7 +2553,9 @@ Error executeCommandsInto(
     llvm::ArrayRef<RecordedCommand> Commands,
     const PhysicalDeviceInfo *DeviceInfo, ComputePipeline *&BoundPipeline,
     GraphicsPipeline *&BoundGraphicsPipeline, GraphicsState &Gfx,
-    std::vector<BoundSetState> &BoundSets, std::vector<uint8_t> &PushConstants,
+    std::vector<BoundSetState> &BoundGraphicsSets,
+    std::vector<BoundSetState> &BoundComputeSets,
+    std::vector<uint8_t> &PushConstants,
     std::vector<ActiveOcclusionQuery> &ActiveOcclusionQueries,
     std::vector<ActivePipelineStatsQuery> &ActivePipelineStatsQueries) {
   for (const RecordedCommand &Cmd : Commands) {
@@ -2559,6 +2567,12 @@ Error executeCommandsInto(
         BoundPipeline = static_cast<ComputePipeline *>(Cmd.Pipeline);
       break;
     case RecordedCommand::Kind::BindDescriptorSets: {
+      // Each bind point keeps a fully independent set of bound descriptor
+      // sets (see `RecordedCommand::BindPoint`'s own comment) -- route this
+      // bind into whichever one `Cmd.BindPoint` selects.
+      std::vector<BoundSetState> &BoundSets =
+          Cmd.BindPoint == VK_PIPELINE_BIND_POINT_COMPUTE ? BoundComputeSets
+                                                          : BoundGraphicsSets;
       uint32_t Required = Cmd.FirstSet + Cmd.DescriptorSets.size();
       if (BoundSets.size() < Required)
         BoundSets.resize(Required);
@@ -2582,8 +2596,9 @@ Error executeCommandsInto(
                                  "dispatch with no bound compute pipeline");
       if (Error E = validateGroupCount(DeviceInfo, Cmd.Count))
         return E;
-      if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count, BoundSets,
-                                PushConstants, ActivePipelineStatsQueries))
+      if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count,
+                                BoundComputeSets, PushConstants,
+                                ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -2606,8 +2621,9 @@ Error executeCommandsInto(
                   sizeof(Count));
       if (Error E = validateGroupCount(DeviceInfo, Count))
         return E;
-      if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count, BoundSets,
-                                PushConstants, ActivePipelineStatsQueries))
+      if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count,
+                                BoundComputeSets, PushConstants,
+                                ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -2730,7 +2746,8 @@ Error executeCommandsInto(
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
         if (Error E = executeCommandsInto(Secondary->commands(), DeviceInfo,
                                           BoundPipeline, BoundGraphicsPipeline,
-                                          Gfx, BoundSets, PushConstants,
+                                          Gfx, BoundGraphicsSets,
+                                          BoundComputeSets, PushConstants,
                                           ActiveOcclusionQueries,
                                           ActivePipelineStatsQueries))
           return E;
@@ -3132,7 +3149,7 @@ Error executeCommandsInto(
         Draw.FirstVertex = Cmd.FirstVertexOrIndex;
       }
       if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
-                                     DeviceInfo, BoundSets, PushConstants,
+                                     DeviceInfo, BoundGraphicsSets, PushConstants,
                                      ActiveOcclusionQueries,
                                      ActivePipelineStatsQueries))
         return E;
@@ -3181,7 +3198,7 @@ Error executeCommandsInto(
         return Draws.takeError();
       for (const feme::graphics::DrawCommand &Draw : *Draws)
         if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
-                                       DeviceInfo, BoundSets, PushConstants,
+                                       DeviceInfo, BoundGraphicsSets, PushConstants,
                                        ActiveOcclusionQueries,
                                        ActivePipelineStatsQueries))
           return E;
@@ -3198,7 +3215,7 @@ Error executeCommandsInto(
       feme::graphics::MeshDrawCommand MeshDraw;
       MeshDraw.GroupCount = Cmd.Count;
       if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
-                               BoundSets, PushConstants,
+                               BoundGraphicsSets, PushConstants,
                                ActiveOcclusionQueries,
                                ActivePipelineStatsQueries))
         return E;
@@ -3228,7 +3245,7 @@ Error executeCommandsInto(
         return MeshDraws.takeError();
       for (const feme::graphics::MeshDrawCommand &MeshDraw : *MeshDraws)
         if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
-                                 BoundSets, PushConstants,
+                                 BoundGraphicsSets, PushConstants,
                                  ActiveOcclusionQueries,
                                  ActivePipelineStatsQueries))
           return E;
@@ -3249,7 +3266,7 @@ Error executeCommandsInto(
       Draw.FirstInstance = Cmd.FirstInstance;
       if (Error E =
               runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw, DeviceInfo,
-                               BoundSets, PushConstants, ActiveOcclusionQueries,
+                               BoundGraphicsSets, PushConstants, ActiveOcclusionQueries,
                                ActivePipelineStatsQueries))
         return E;
       break;
@@ -3265,7 +3282,12 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   ComputePipeline *BoundPipeline = nullptr;
   GraphicsPipeline *BoundGraphicsPipeline = nullptr;
   GraphicsState Gfx;
-  std::vector<BoundSetState> BoundSets;
+  // Two fully independent bound-descriptor-set vectors, one per pipeline
+  // bind point (see `executeCommandsInto`'s own comment) -- a real
+  // `VkCommandBuffer` begins with both empty, matching "the initial state
+  // of a newly allocated command buffer" for both bind points alike.
+  std::vector<BoundSetState> BoundGraphicsSets;
+  std::vector<BoundSetState> BoundComputeSets;
   // Push-constant state, sized to the device's full advertised
   // `maxPushConstantsSize` and zero-initialized: a byte a `vkCmdPushConstants`
   // never wrote reads as zero, matching every other "declared but never
@@ -3276,8 +3298,9 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   std::vector<ActiveOcclusionQuery> ActiveOcclusionQueries;
   std::vector<ActivePipelineStatsQuery> ActivePipelineStatsQueries;
   return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
-                             BoundGraphicsPipeline, Gfx, BoundSets,
-                             PushConstants, ActiveOcclusionQueries,
+                             BoundGraphicsPipeline, Gfx, BoundGraphicsSets,
+                             BoundComputeSets, PushConstants,
+                             ActiveOcclusionQueries,
                              ActivePipelineStatsQueries);
 }
 
@@ -3419,9 +3442,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
   if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_COMPUTE &&
       pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS)
     return; // Ray tracing is V8.
-  // Both bind points share one set of bound descriptor sets here, matching
-  // how a draw and a dispatch both materialize their resources from the
-  // same `buildBoundResources` (see "Descriptor Model").
+  // Each bind point keeps its own set of bound descriptor sets (see
+  // `RecordedCommand::BindPoint`'s own comment) -- \p pipelineBindPoint
+  // selects which one this bind updates.
   std::vector<DescriptorSet *> Sets;
   Sets.reserve(descriptorSetCount);
   for (uint32_t I = 0; I != descriptorSetCount; ++I)
@@ -3429,7 +3452,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
   std::vector<uint32_t> Offsets(pDynamicOffsets,
                                 pDynamicOffsets + dynamicOffsetCount);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->bindDescriptorSets(firstSet, std::move(Sets), std::move(Offsets));
+      ->bindDescriptorSets(firstSet, std::move(Sets), std::move(Offsets),
+                           pipelineBindPoint);
 }
 
 // (roadmap E6) `VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2`: the same
@@ -3437,11 +3461,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
 // `pNext`-extensible `VkBindDescriptorSetsInfo` in place of a
 // `pipelineBindPoint` argument plus five flat array arguments. Unlike
 // `vkCmdBindDescriptorSets`'s own `pipelineBindPoint`, this struct instead
-// carries a `stageFlags` mask -- but `CommandBuffer::bindDescriptorSets`
-// already stores one shared set of bound descriptor sets for every bind
-// point (see the non-`2` command's own comment above), so neither
-// `stageFlags` nor `layout` changes what gets recorded here, the same way
-// `vkCmdPushConstants`'s own `stageFlags`/`layout` need no validation.
+// carries a `stageFlags` mask -- the bind point this bind targets is
+// derived from it (`VK_SHADER_STAGE_COMPUTE_BIT` selects compute,
+// otherwise graphics, matching "Descriptor Model": ray tracing stage bits
+// never appear here since this ICD advertises no ray-tracing bind point).
 VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
     VkCommandBuffer commandBuffer,
     const VkBindDescriptorSetsInfo *pBindDescriptorSetsInfo) {
@@ -3454,9 +3477,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
       pBindDescriptorSetsInfo->pDynamicOffsets,
       pBindDescriptorSetsInfo->pDynamicOffsets +
           pBindDescriptorSetsInfo->dynamicOffsetCount);
+  VkPipelineBindPoint BindPoint =
+      (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+          ? VK_PIPELINE_BIND_POINT_COMPUTE
+          : VK_PIPELINE_BIND_POINT_GRAPHICS;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet, std::move(Sets),
-                           std::move(Offsets));
+                           std::move(Offsets), BindPoint);
 }
 
 // (roadmap F12) `VK_KHR_push_descriptor`'s own binding-to-heap-slot
@@ -3487,10 +3514,11 @@ void CommandBuffer::clearPushDescriptorSets() {
 
 void CommandBuffer::pushDescriptorSet(
     uint32_t Set, const DescriptorSetLayout &Layout,
-    llvm::ArrayRef<VkWriteDescriptorSet> Writes) {
+    llvm::ArrayRef<VkWriteDescriptorSet> Writes,
+    VkPipelineBindPoint BindPoint) {
   DescriptorSet *Target = getOrCreatePushDescriptorSet(Set, Layout);
   applyDescriptorWrites(*Target, Writes);
-  bindDescriptorSets(Set, {Target}, {});
+  bindDescriptorSets(Set, {Target}, {}, BindPoint);
 }
 
 void CommandBuffer::pushDescriptorSetWithTemplate(
@@ -3498,7 +3526,7 @@ void CommandBuffer::pushDescriptorSetWithTemplate(
     const DescriptorUpdateTemplate &Template, const void *Data) {
   DescriptorSet *Target = getOrCreatePushDescriptorSet(Set, Layout);
   applyDescriptorUpdateTemplate(*Target, Template, Data);
-  bindDescriptorSets(Set, {Target}, {});
+  bindDescriptorSets(Set, {Target}, {}, Template.bindPoint());
 }
 
 // (roadmap F12) `VK_KHR_push_descriptor`'s `vkCmdPushDescriptorSet`: unlike
@@ -3521,7 +3549,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSet(
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->pushDescriptorSet(
           set, *Layout->setLayouts()[set],
-          llvm::ArrayRef(pDescriptorWrites, descriptorWriteCount));
+          llvm::ArrayRef(pDescriptorWrites, descriptorWriteCount),
+          pipelineBindPoint);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate(
@@ -3577,7 +3606,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplateKHR(
 // `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2` already share
 // `vkCmdBindDescriptorSets`/`vkCmdPushConstants`'s own recording above.
 // `stageFlags` needs no validation here, the same way `vkCmdBindDescriptorSets2
-// `'s own comment documents for its sibling field.
+// `'s own comment documents for its sibling field -- but it does select
+// which bind point's own bound-set state this push targets, the same way
+// `vkCmdBindDescriptorSets2`'s does.
 VKAPI_ATTR void VKAPI_CALL
 vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
                         const VkPushDescriptorSetInfo *pPushDescriptorSetInfo) {
@@ -3585,12 +3616,17 @@ vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
       fromHandle<PipelineLayout>(pPushDescriptorSetInfo->layout);
   if (pPushDescriptorSetInfo->set >= Layout->setLayouts().size())
     return;
+  VkPipelineBindPoint BindPoint =
+      (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+          ? VK_PIPELINE_BIND_POINT_COMPUTE
+          : VK_PIPELINE_BIND_POINT_GRAPHICS;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->pushDescriptorSet(
           pPushDescriptorSetInfo->set,
           *Layout->setLayouts()[pPushDescriptorSetInfo->set],
           llvm::ArrayRef(pPushDescriptorSetInfo->pDescriptorWrites,
-                         pPushDescriptorSetInfo->descriptorWriteCount));
+                         pPushDescriptorSetInfo->descriptorWriteCount),
+          BindPoint);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(

@@ -331,15 +331,26 @@ private:
 class DescriptorUpdateTemplate {
 public:
   explicit DescriptorUpdateTemplate(
-      std::vector<VkDescriptorUpdateTemplateEntry> Entries)
-      : Entries(std::move(Entries)) {}
+      std::vector<VkDescriptorUpdateTemplateEntry> Entries,
+      VkPipelineBindPoint BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS)
+      : Entries(std::move(Entries)), BindPoint(BindPoint) {}
 
   llvm::ArrayRef<VkDescriptorUpdateTemplateEntry> entries() const {
     return Entries;
   }
 
+  /// This template's own creation-time
+  /// `VkDescriptorUpdateTemplateCreateInfo::pipelineBindPoint` -- only
+  /// meaningful for a `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS`
+  /// template (the only kind `vkCmdPushDescriptorSetWithTemplate` ever
+  /// applies), which `CommandBuffer::pushDescriptorSetWithTemplate` reads
+  /// this from since that entry point itself takes no
+  /// `pipelineBindPoint` argument (unlike `vkCmdPushDescriptorSet`).
+  VkPipelineBindPoint bindPoint() const { return BindPoint; }
+
 private:
   std::vector<VkDescriptorUpdateTemplateEntry> Entries;
+  VkPipelineBindPoint BindPoint;
 };
 
 /// Applies every entry of \p Writes to \p Set, exactly as

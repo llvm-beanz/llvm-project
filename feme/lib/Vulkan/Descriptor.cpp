@@ -605,7 +605,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
 
   Allocator Alloc(pAllocator);
   DescriptorUpdateTemplate *Obj = Alloc.create<DescriptorUpdateTemplate>(
-      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(Entries));
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(Entries),
+      pCreateInfo->pipelineBindPoint);
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pDescriptorUpdateTemplate = toHandle<VkDescriptorUpdateTemplate>(Obj);
