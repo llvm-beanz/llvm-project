@@ -1348,6 +1348,93 @@ TEST(ImageFixtureTest, RoundTripsE5B9G9R9UfloatFixtureFormat) {
   EXPECT_EQ(Printed, Text);
 }
 
+// (Roadmap L134(i)) `R11G11B10_FLOAT` (`VK_FORMAT_B10G11R11_UFLOAT_
+// PACK32`) previously had a `packClearColor` case but no `unpackColor`
+// case at all -- a real CTS regression
+// (`dEQP-VK.draw.renderpass.output_location.array.b10g11r11-ufloat-
+// pack32-*`) found this made the format unusable as a color attachment
+// at all (`isSupportedColorAttachmentFormat` also never listed it).
+// Mirrors `PacksAndUnpacksE5B9G9R9Ufloat*` above's coverage shape for
+// this format's own independent-per-channel (not shared-exponent)
+// minifloat encoding.
+TEST(ImageFixtureTest, PacksAndUnpacksR11G11B10FloatMidRange) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                                   {1.0, 0.5, 0.25, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.25, 0.02); // 10-bit B has a coarser mantissa.
+  EXPECT_DOUBLE_EQ(Unpacked[3], 1.0); // No alpha channel -- always 1.0.
+}
+
+// All-zero input should round-trip to all-zero.
+TEST(ImageFixtureTest, PacksAndUnpacksR11G11B10FloatZero) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                                   {0.0, 0.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[1], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[2], 0.0);
+}
+
+// A negative input should clamp to zero (this format is unsigned, no
+// sign bit in any of its three fields), unlike a signed format's own
+// round-trip tests elsewhere in this file.
+TEST(ImageFixtureTest, PacksAndUnpacksR11G11B10FloatClampsNegativeToZero) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                                   {-1.0, -0.5, -0.25, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[1], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[2], 0.0);
+}
+
+// The fixture text format also round-trips `R11G11B10_FLOAT`, the same
+// opaque hex-word encoding `E5B9G9R9_UFLOAT`/`R10G10B10A2_UNORM` already
+// established for a packed format.
+TEST(ImageFixtureTest, RoundTripsR11G11B10FloatFixtureFormat) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                                   {1.0, 0.5, 0.25, 1.0}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  std::string HexWord;
+  raw_string_ostream HexOS(HexWord);
+  HexOS << format_hex_no_prefix(Word, 8);
+  std::string Text = "image i0 1x1 r11g11b10-float\n  y=0: " + HexWord + "\n";
+
+  Expected<std::vector<ImageFixture>> Images = parseImageFixtures(Text);
+  ASSERT_THAT_EXPECTED(Images, Succeeded());
+  ASSERT_EQ(Images->size(), 1u);
+  const ImageFixture &Img = (*Images)[0];
+  EXPECT_EQ(Img.Format, cpu::ResourceFormat::R11G11B10_FLOAT);
+  ASSERT_EQ(Img.Data.size(), 4u);
+  uint32_t RoundTripped;
+  memcpy(&RoundTripped, Img.Data.data(), 4);
+  EXPECT_EQ(RoundTripped, Word);
+
+  std::string Printed;
+  raw_string_ostream OS(Printed);
+  ASSERT_THAT_ERROR(printImageFixture(OS, Img), Succeeded());
+  EXPECT_EQ(Printed, Text);
+}
+
 // (Roadmap H170) `R8_UINT`/`R8_SINT`/`R8G8_UINT`/`R8G8_SINT`/
 // `R16G16B16A16_UINT`/`R16G16B16A16_SINT`/`R32G32B32A32_UINT`/
 // `R32G32B32A32_SINT`: the four remaining `isIntegerColorAttachmentFormat`
