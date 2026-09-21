@@ -1762,6 +1762,11 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoInputLoad) {
 /// further out): `gl_in[i].gl_Position` decomposes into member 0's own
 /// `ElementID`, `Row`/`Component` both left at their default constant 0
 /// (a whole-vector access), and `%i` itself threaded through as `Vertex`.
+/// (Roadmap L128) Tagged the real stage this shape occurs in
+/// (`geometry`), not `vertex` as before `isDynamicIndexedArrayGlobal`
+/// started checking `Stage` (see that function's own comment) --
+/// `gl_in[]` never occurs in a real Vertex-stage entry, and a `vertex`
+/// tag no longer reaches `getDynamicVertexIndexedAccess` at all here.
 TEST(CanonicalizeStageTest,
      ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad) {
   LLVMContext Ctx;
@@ -1772,7 +1777,7 @@ TEST(CanonicalizeStageTest,
       %v = load <4 x float>, ptr addrspace(7) %p
       ret <4 x float> %v
     }
-    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #0 = { "feme.shader.stage"="geometry" }
     !10 = !{!11, !12, !13, !14}
     !11 = !{i32 0, !15}
     !12 = !{i32 1, !16}
@@ -2061,9 +2066,23 @@ TEST(CanonicalizeStageTest,
 /// `RewritesSPIRVArrayOutputStorePerElementByteOffset` above), so
 /// `RowCountIsVertexArray` stays `false` here even though this global is
 /// structurally identical to `ThreadsDynamicVertexIndexIntoInputLoad`'s own
-/// `Input` one; only the *access itself* routes through `Vertex`, not (yet) the
-/// signature's own description of the element. See "Roadmap H6: what H6b found,
-/// and why it stops here" in VulkanCTSReport.md.
+/// `Input` one.
+///
+/// (Roadmap L128) This test's own function is tagged the real stage this
+/// shape actually occurs in (`mesh`), not `vertex` as it was tagged
+/// before: `isDynamicIndexedArrayGlobal` now checks \p Stage (see that
+/// function's own comment), so a `vertex`-tagged tag no longer reaches
+/// `getDynamicVertexIndexedAccess` at all here. Retagging to `mesh` also
+/// now legitimately exercises `addElements`'s own, separately-added
+/// `PerInvocationOutputArray` peeling (`Stage == Mesh && AddrSpace == 8
+/// && !D.Patch`) for the first time in this test -- previously
+/// unreachable under the old `vertex` tag -- which collapses this
+/// element's own `RowCount` down to `1` (the peeled-off outer array
+/// dimension is this invocation's own per-vertex/per-primitive output
+/// slot, addressed by `Vertex` below, not a real per-row dimension of
+/// its own) instead of this test's original `RowCount == 3` expectation
+/// (written before `PerInvocationOutputArray` existed, and never
+/// exercised end-to-end until this stage-tag correction).
 TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -2073,7 +2092,7 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
       store <4 x float> %v, ptr addrspace(8) %p
       ret void
     }
-    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #0 = { "feme.shader.stage"="mesh" }
     !0 = !{!1}
     !1 = !{i32 30, i32 0}
   )");
@@ -2085,7 +2104,7 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
   std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
   ASSERT_TRUE(Sig.has_value());
   ASSERT_EQ(Sig->Elements.size(), 1u);
-  EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
   EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
   EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
 
@@ -2117,6 +2136,9 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
 /// own structural recognition (deliberately, matching
 /// `isPerVertexArrayInputGlobal`'s own precedent) does not distinguish the
 /// two.
+/// (Roadmap L128) Tagged the real stage this shape occurs in (`mesh`),
+/// not `vertex` as before `isDynamicIndexedArrayGlobal` started checking
+/// `Stage` (see that function's own comment).
 TEST(CanonicalizeStageTest,
      ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore) {
   LLVMContext Ctx;
@@ -2127,7 +2149,7 @@ TEST(CanonicalizeStageTest,
       store i32 %v, ptr addrspace(8) %p
       ret void
     }
-    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #0 = { "feme.shader.stage"="mesh" }
     !10 = !{!11, !12}
     !11 = !{i32 0, !13}
     !12 = !{i32 1, !14}

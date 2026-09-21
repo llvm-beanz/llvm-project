@@ -1603,8 +1603,33 @@ bool isPerVertexArrayMeshOutputGlobal(const GlobalVariable *GV,
 /// `external`/unresolved at JIT-link time (`"Symbols not found: [
 /// spirv_var_N ]"`, `dEQP-VK.tessellation.user_defined_io.
 /// per_patch_block_array`/`per_vertex_block`'s own crash).
+///
+/// (Roadmap L128) \p Stage is checked against the same
+/// Hull/Domain/Geometry/Mesh set `isPerVertexArrayInputGlobal`/
+/// `isPerVertexArrayMeshOutputGlobal` already restrict their own,
+/// constant-index-fold counterpart classification to: only those stages
+/// have a genuine per-vertex/per-primitive addressing scheme (a `Vertex`
+/// operand-bearing storage layout, `FemeGeometryArgs`) for a dynamic
+/// index into this shape to thread through at all. A Vertex- or
+/// Fragment-stage plain arrayed input (e.g. `layout(location = 1) in
+/// vec4 attr[N];`, `dEQP-VK.pipeline.monolithic.vertex_input.
+/// max_attributes.*`'s own shape) has no such per-vertex dimension --
+/// its `N` array elements are `N` ordinary, consecutive-`Location`
+/// varyings, addressed exactly like a real matrix's own rows
+/// (`RowCount`, see `Signature.h`'s own comment). Before this exclusion,
+/// a *dynamic* (but, after full loop unrolling, ultimately constant)
+/// index into such an array was still wrongly claimed here instead of
+/// `getDynamicRowIndexedAccess`, threading the array index through as a
+/// bogus non-zero `Vertex` operand -- rejected by `VertexWrapper.cpp`'s
+/// `lowerVertexInputLoad`/`lowerVertexOutputStore` ("synthetic vertex
+/// layouts only support vertex operand 0"), since neither Vertex nor
+/// Fragment stage's own synthetic storage layout has a `Vertex`
+/// dimension to address at all.
 bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
-                                 unsigned &AddrSpace) {
+                                 unsigned &AddrSpace, ShaderStage Stage) {
+  if (Stage != ShaderStage::Hull && Stage != ShaderStage::Domain &&
+      Stage != ShaderStage::Geometry && Stage != ShaderStage::Mesh)
+    return false;
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
       (AddrSpace != 7 && AddrSpace != 8))
     return false;
@@ -1792,13 +1817,14 @@ struct DynamicVertexIndexedAccess {
 
 /// Returns `std::nullopt` if \p Ptr is not this exact shape.
 std::optional<DynamicVertexIndexedAccess>
-getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
+getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
+                              ShaderStage Stage) {
   auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
   if (!GEP)
     return std::nullopt;
   auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
   unsigned AddrSpace = 0;
-  if (!isDynamicIndexedArrayGlobal(GV, AddrSpace))
+  if (!isDynamicIndexedArrayGlobal(GV, AddrSpace, Stage))
     return std::nullopt;
   auto *ArrTy = cast<ArrayType>(GV->getValueType());
   if (GEP->getNumIndices() < 2)
@@ -2043,14 +2069,15 @@ struct DynamicRowIndexedAccess {
 };
 
 std::optional<DynamicRowIndexedAccess>
-getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL) {
+getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
+                          ShaderStage Stage) {
   auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
   if (!GEP)
     return std::nullopt;
   auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
   unsigned AddrSpace = 0;
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
-      isDynamicIndexedArrayGlobal(GV, AddrSpace))
+      isDynamicIndexedArrayGlobal(GV, AddrSpace, Stage))
     return std::nullopt;
 
   auto IdxIt = GEP->idx_begin();
@@ -2163,12 +2190,13 @@ getTaskPayloadDynamicOffsetAccess(IRBuilderBase &B, Value *Ptr,
 /// resolution) goes through this so no discovery loop below misses a
 /// geometry entry's own `gl_in[i]`-shaped access or a
 /// `gl_ClipDistance[i]`-shaped one.
-GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL) {
+GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL,
+                                 ShaderStage Stage) {
   if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL))
     return BaseAndOffset->first;
-  if (auto Dyn = getDynamicVertexIndexedAccess(Ptr, DL))
+  if (auto Dyn = getDynamicVertexIndexedAccess(Ptr, DL, Stage))
     return Dyn->GV;
-  if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL))
+  if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL, Stage))
     return Dyn->GV;
   return nullptr;
 }
@@ -2356,9 +2384,9 @@ bool usesSPIRVStageIO(Function &F) {
   for (Instruction &I : instructions(F)) {
     GlobalVariable *GV = nullptr;
     if (auto *LI = dyn_cast<LoadInst>(&I))
-      GV = getStageIOGlobal(LI->getPointerOperand(), DL);
+      GV = getStageIOGlobal(LI->getPointerOperand(), DL, ShaderStage::Hull);
     else if (auto *SI = dyn_cast<StoreInst>(&I))
-      GV = getStageIOGlobal(SI->getPointerOperand(), DL);
+      GV = getStageIOGlobal(SI->getPointerOperand(), DL, ShaderStage::Hull);
     unsigned AddrSpace = 0;
     if (isSPIRVStageIOGlobal(GV, AddrSpace))
       return true;
@@ -2422,7 +2450,8 @@ MDNode *createLocationDecoration(LLVMContext &Ctx, uint32_t Location) {
 /// interface-block members, and so never reach this branch at all.
 std::optional<bool>
 classifyTessControlOutputStoreFrequency(StoreInst &SI, const DataLayout &DL) {
-  GlobalVariable *GV = getStageIOGlobal(SI.getPointerOperand(), DL);
+  GlobalVariable *GV =
+      getStageIOGlobal(SI.getPointerOperand(), DL, ShaderStage::Hull);
   if (!GV)
     return std::nullopt;
   unsigned AddrSpace = 0;
@@ -3383,7 +3412,7 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
     const DenseSet<GlobalVariable *> &OutputGlobals, ShaderStage Stage) {
   if (std::optional<DynamicVertexIndexedAccess> Dyn =
-          getDynamicVertexIndexedAccess(Ptr, DL)) {
+          getDynamicVertexIndexedAccess(Ptr, DL, Stage)) {
     auto It = ElementIDs.find(Dyn->GV);
     if (It == ElementIDs.end())
       return std::nullopt;
@@ -3437,7 +3466,7 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     // element, so it builds its own `StageIOAccess` rather than routing
     // through `resolveOffsetWithinElement`'s byte-offset-based recursion,
     // which has no way to represent a non-constant `Row` mid-recursion.
-    if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL)) {
+    if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL, Stage)) {
       auto It = ElementIDs.find(Dyn->GV);
       if (It == ElementIDs.end())
         return std::nullopt;
@@ -3711,9 +3740,9 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     for (Instruction &I : instructions(Fn)) {
       GlobalVariable *GV = nullptr;
       if (auto *LI = dyn_cast<LoadInst>(&I))
-        GV = getStageIOGlobal(LI->getPointerOperand(), DL);
+        GV = getStageIOGlobal(LI->getPointerOperand(), DL, Stage);
       else if (auto *SI = dyn_cast<StoreInst>(&I))
-        GV = getStageIOGlobal(SI->getPointerOperand(), DL);
+        GV = getStageIOGlobal(SI->getPointerOperand(), DL, Stage);
       unsigned AddrSpace = 0;
       if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
         continue;
