@@ -3714,21 +3714,59 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             SampleOffset = (*SamplePositions)[PassSample];
           }
           for (unsigned Lane = 0; Lane != 4; ++Lane) {
-            float B0, B1, B2;
+            // (Roadmap L138) `SampleB0`/`SampleB1`/`SampleB2` are this
+            // pass's own real per-sample-location weights (identical to
+            // what the single, undifferentiated `B0`/`B1`/`B2` used to
+            // be, pre-L138); `Quad.Bary0`/`Bary1`/`Bary2` remain this
+            // lane's fixed pixel-center weights regardless of pass. Per
+            // the GLSL/SPIR-V spec, a `centroid`-qualified input's value
+            // must stay fixed across every sample within one pixel even
+            // under per-sample shading -- only a *non*-`centroid`
+            // varying (the L114(a) "any input at all" per-sample
+            // evaluation this implementation already applies) is meant
+            // to vary per pass. Before this fix, every varying
+            // (`centroid`-qualified or not) used the identical
+            // per-sample weights whenever `PerSampleShading` was active,
+            // so a `centroid in vec2 v[2];`-qualified varying's value
+            // changed from pass to pass -- directly observed via
+            // `dEQP-VK.pipeline.*.multisample_interpolation.
+            // centroid_interpolation_consistency.*`'s own 100%-of-pixels
+            // failure (comparing a per-sample-shaded direct `centroid`
+            // read, which should stay fixed, against
+            // `interpolateAtCentroid`'s own always-pixel-center-fixed
+            // result, `L115(b)`'s documented simplification -- the two
+            // never agreed since one silently tracked the sample offset
+            // and the other didn't).
+            float SampleB0 = Quad.Bary0[Lane];
+            float SampleB1 = Quad.Bary1[Lane];
+            float SampleB2 = Quad.Bary2[Lane];
             if (PerSampleShading) {
               std::array<float, 2> P{Quad.PixelX[Lane] + SampleOffset[0],
                                      Quad.PixelY[Lane] + SampleOffset[1]};
-              B0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P) / Area;
-              B1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P) / Area;
-              B2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P) / Area;
-            } else {
-              B0 = Quad.Bary0[Lane];
-              B1 = Quad.Bary1[Lane];
-              B2 = Quad.Bary2[Lane];
+              SampleB0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P) / Area;
+              SampleB1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P) / Area;
+              SampleB2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P) / Area;
             }
             uint32_t Invocation = Q * 4 + Lane;
             size_t Idx = 0;
             for (const LinkedVarying &LV : Varyings) {
+              // (Roadmap L138) A `centroid`-qualified varying always uses
+              // the fixed pixel-center weights (`Quad.Bary0/1/2`), the
+              // same simplified evaluation point
+              // `lowerFragmentInterpolateAt`'s own `AtCentroid` case uses
+              // (see that function's own comment) -- keeping both paths
+              // in agreement is exactly what
+              // `centroid_interpolation_consistency` checks for. Every
+              // other interpolation mode keeps using `SampleB0/1/2`
+              // (identical to pixel-center when `!PerSampleShading`).
+              bool IsCentroid =
+                  LV.Interpolation ==
+                      SignatureInterpolationMode::PerspectiveCentroid ||
+                  LV.Interpolation ==
+                      SignatureInterpolationMode::NoPerspectiveCentroid;
+              float B0 = IsCentroid ? Quad.Bary0[Lane] : SampleB0;
+              float B1 = IsCentroid ? Quad.Bary1[Lane] : SampleB1;
+              float B2 = IsCentroid ? Quad.Bary2[Lane] : SampleB2;
               for (uint32_t Row = 0; Row != LV.RowCount; ++Row) {
                 for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
                   uint32_t Bits;
