@@ -604,7 +604,8 @@ Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *InvocationIndex = getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
     Value *QuadIndex = Builder.CreateUDiv(InvocationIndex, Builder.getInt32(4));
-    Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+    Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+    Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
 
     Value *PrimBase =
         Builder.CreateBitCast(FEnv.Primitives, PointerType::get(Ctx, 0));
@@ -649,8 +650,8 @@ Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
     Value *PointX, *PointY;
     switch (Kind) {
     case StageOpKind::InterpolateAtOffset: {
-      Value *OffX = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
-      Value *OffY = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+      Value *OffX = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+      Value *OffY = extractLaneOrScalar(Builder, CI.getArgOperand(4), Lane);
       // SPIR-V's `InterpolateAtOffset` operand is already a float, in
       // pixels, relative to the pixel center. (Roadmap L115(b) follow-up)
       // DXIL's `EvalSnapped` instead raises an integer 1/16-pixel-snapped
@@ -671,7 +672,7 @@ Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
       break;
     }
     case StageOpKind::InterpolateAtSample: {
-      Value *SampleIdx = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+      Value *SampleIdx = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
       Value *SampleBase = Builder.CreateBitCast(FEnv.SamplePositions, PtrTy);
       Value *SampleOff = Builder.CreateInBoundsGEP(
           ArrayType::get(F32Ty, 2), SampleBase, SampleIdx);
@@ -721,9 +722,13 @@ Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
       // `VertexInputLayout` here, not `FEnv.InputLayout` -- see
       // `FemeFragmentArgs::VertexInputLayout`'s own comment for why the
       // two differ even though they describe the same signature.
+      // (Roadmap L138) `Row` used to be hardcoded to 0 here regardless of
+      // which array/matrix row the source `InterpolateAt*` call actually
+      // indexed -- now threaded through from the real `Row` operand, the
+      // same as an ordinary `InputLoad`'s own `Row` operand.
       Value *Addr = computeStageStorageAddress(
           Builder, FEnv.VertexInputLayout, FEnv.VertexInputs, Elt.ElementID,
-          Elt, /*Row=*/Builder.getInt32(0), Component, InvIdx);
+          Elt, Row, Component, InvIdx);
       Value *TypedPtr = Builder.CreateBitCast(Addr, PtrTy);
       return Builder.CreateLoad(F32Ty, TypedPtr);
     };

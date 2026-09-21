@@ -383,11 +383,11 @@ TEST(FragmentWrapperTest, InterpolateAtAddressesVertexInputsWithOwnLayout) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @ps_main() #0 {
-      %v = call float @feme.stage.interpolate.at.offset.f32(i32 0, i32 0, i32 0, i32 0)
+      %v = call float @feme.stage.interpolate.at.offset.f32(i32 0, i32 0, i32 0, i32 0, i32 0)
       call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
       ret void
     }
-    declare float @feme.stage.interpolate.at.offset.f32(i32, i32, i32, i32)
+    declare float @feme.stage.interpolate.at.offset.f32(i32, i32, i32, i32, i32)
     declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
     attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="4" }
   )");
