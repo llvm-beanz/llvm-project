@@ -31,6 +31,7 @@
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/bit.h"
 
@@ -1189,7 +1190,12 @@ struct GraphicsState {
   /// Reset empty by `beginRenderPass`/`vkCmdBeginRendering` (a fresh
   /// render-pass instance); `vkCmdBeginRendering` has no `nextSubpass`
   /// equivalent to revisit it, so it is always harmlessly write-once there.
-  llvm::DenseMap<uintptr_t, uint32_t> LoadedAttachmentViewMask;
+  /// A `llvm::BitVector`, not a `uint32_t`, since a plain (non-multiview)
+  /// layered render target's own "clear every layer" mask (roadmap L134(e))
+  /// covers `RenderTargetBinding::Layers` bits, which can exceed 32 --
+  /// unlike a genuine `SubpassDescription::ViewMask`/`VkRenderingInfo::
+  /// viewMask`, which the Vulkan spec itself caps at 32 bits.
+  llvm::DenseMap<uintptr_t, llvm::BitVector> LoadedAttachmentViewMask;
 
   std::vector<Buffer *> VertexBuffers;
   std::vector<VkDeviceSize> VertexBufferOffsets;
@@ -1391,21 +1397,23 @@ uintptr_t loadedViewMaskKey(ImageView *View, AttachmentKind Kind) {
 /// which is the render area rather than the whole attachment: Vulkan clears
 /// exactly what the render pass instance covers.
 ///
-/// (Roadmap H2i) Only the views in \p ViewMask (`RenderTargetBinding::
-/// ViewMask`, normalized to `1u` outside multiview) that \p AlreadyLoaded
+/// (Roadmap H2i) Only the views in \p ViewsToClear (built by
+/// `applyLoadOps` from `RenderTargetBinding::ViewMask`, or every one of
+/// `RenderTargetBinding::Layers` outside multiview) that \p AlreadyLoaded
 /// does not yet mark as loaded for this attachment (`loadedViewMaskKey`)
 /// are cleared, matching a real attachment's own array layer this view
 /// writes to (`sliceAttachmentLayer`) -- see `GraphicsState::
 /// LoadedAttachmentViewMask`'s own comment for why a classic multi-subpass
-/// render pass needs this at all. \p ViewMask is recorded into \p
+/// render pass needs this at all. \p ViewsToClear is recorded into \p
 /// AlreadyLoaded unconditionally, even where `LoadOp != CLEAR` (a no-op
 /// either way): once a view is used by any subpass, no later subpass
 /// referencing the same attachment (which always shares the same `LoadOp`
 /// -- fixed per-attachment for the whole render pass) may clear over it
 /// again.
 Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
-                 const VkRect2D &Area, AttachmentKind Kind, uint32_t ViewMask,
-                 llvm::DenseMap<uintptr_t, uint32_t> &AlreadyLoaded) {
+                 const VkRect2D &Area, AttachmentKind Kind,
+                 const llvm::BitVector &ViewsToClear,
+                 llvm::DenseMap<uintptr_t, llvm::BitVector> &AlreadyLoaded) {
   if (!View.View)
     // (Roadmap E5) `VK_KHR_maintenance5`: an unused
     // (`VK_NULL_HANDLE`-imageView) dynamic-rendering attachment performs no
@@ -1418,10 +1426,11 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
     return Error::success();
 
-  uint32_t &Loaded = AlreadyLoaded[loadedViewMaskKey(View.View, Kind)];
-  uint32_t ToClear = ViewMask & ~Loaded;
-  Loaded |= ViewMask;
-  if (ToClear == 0)
+  llvm::BitVector &Loaded = AlreadyLoaded[loadedViewMaskKey(View.View, Kind)];
+  llvm::BitVector ToClear = ViewsToClear;
+  ToClear.reset(Loaded);
+  Loaded |= ViewsToClear;
+  if (ToClear.none())
     return Error::success();
 
   Expected<feme::graphics::AttachmentView> Attachment =
@@ -1453,12 +1462,10 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
       std::min<uint64_t>(Attachment->Width, uint64_t(MinX) + Area.extent.width);
   uint32_t MaxY = std::min<uint64_t>(Attachment->Height,
                                      uint64_t(MinY) + Area.extent.height);
-  for (uint32_t Mask = ToClear, ViewIndex = 0; Mask != 0;
-       ++ViewIndex, Mask >>= 1) {
-    if ((Mask & 1u) == 0)
-      continue;
+  for (int ViewIndex = ToClear.find_first(); ViewIndex != -1;
+       ViewIndex = ToClear.find_next(ViewIndex)) {
     feme::graphics::AttachmentView Sliced =
-        sliceAttachmentLayer(*Attachment, ViewIndex);
+        sliceAttachmentLayer(*Attachment, static_cast<uint32_t>(ViewIndex));
     for (uint32_t Y = MinY; Y < MaxY; ++Y)
       for (uint32_t X = MinX; X < MaxX; ++X)
         for (uint32_t S = 0; S != SampleCount; ++S) {
@@ -1488,22 +1495,31 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   return Error::success();
 }
 
-/// The mask `applyClear` should clear when this render-pass instance is
-/// *not* multiview (`RenderTargetBinding::ViewMask == 0`): every layer
-/// `Binding.Layers` covers, not just the single implicit "view 0" a
-/// multiview-shaped mask of `1u` would otherwise imply. A plain layered
-/// render target (no multiview) still lets a geometry stage route each
-/// primitive to any layer via `gl_Layer` (roadmap H5e-e), and Vulkan
-/// defines `VK_ATTACHMENT_LOAD_OP_CLEAR` as clearing the whole attachment
-/// view up front regardless of which layers a draw goes on to touch --
-/// leaving every layer past the first uninitialized (as `1u` alone did)
-/// is what let `dEQP-VK.geometry.layered.*`'s "expecting empty image"
-/// layers observe leftover garbage instead. Saturates at 32 layers, the
-/// same width `RenderTargetBinding::ViewMask` itself is limited to.
-uint32_t fullLayerMask(uint32_t Layers) {
-  if (Layers >= 32)
-    return ~0u;
-  return (1u << Layers) - 1;
+/// The set of views `applyClear` should clear for this render-pass
+/// instance: either the genuine multiview bits of `Binding.ViewMask`
+/// (`SubpassDescription::ViewMask`/`VkRenderingInfo::viewMask`, which the
+/// Vulkan spec itself caps at 32 bits, so a plain `uint32_t` mask is always
+/// exact for it), or -- outside multiview (`Binding.ViewMask == 0`) --
+/// every one of `Binding.Layers` array layers, which is **not** bounded to
+/// 32: a plain layered render target (no multiview) still lets a geometry
+/// stage route each primitive to any layer via `gl_Layer` (roadmap H5e-e),
+/// and Vulkan defines `VK_ATTACHMENT_LOAD_OP_CLEAR` as clearing the whole
+/// attachment view up front regardless of which layers a draw goes on to
+/// touch. (Roadmap L134(e)) A `uint32_t`-mask predecessor of this function
+/// clamped every layer count above 32 into the same 32 bits, silently
+/// leaving every layer from 32 up uncleared -- exactly the gap
+/// `dEQP-VK.draw.*.shader_layer.{vertex,tessellation}_shader_256` (256
+/// layers, the maximum this ICD advertises via `maxFramebufferLayers`)
+/// exposed. A `llvm::BitVector` has no such width limit.
+llvm::BitVector viewsToClear(const RenderTargetBinding &Binding) {
+  if (Binding.ViewMask) {
+    llvm::BitVector Views(32);
+    for (uint32_t I = 0; I != 32; ++I)
+      if (Binding.ViewMask & (1u << I))
+        Views.set(I);
+    return Views;
+  }
+  return llvm::BitVector(Binding.Layers, /*t=*/true);
 }
 
 /// Applies every attachment's load op for the current subpass -- once when
@@ -1511,22 +1527,22 @@ uint32_t fullLayerMask(uint32_t Layers) {
 /// `vkCmdNextSubpass`, so a later subpass's own new views of an
 /// already-referenced attachment still get their own share of the clear.
 Error applyLoadOps(const RenderTargetBinding &Binding,
-                   llvm::DenseMap<uintptr_t, uint32_t> &AlreadyLoaded) {
-  uint32_t ViewMask =
-      Binding.ViewMask ? Binding.ViewMask : fullLayerMask(Binding.Layers);
+                   llvm::DenseMap<uintptr_t, llvm::BitVector> &AlreadyLoaded) {
+  llvm::BitVector ViewsToClear = viewsToClear(Binding);
   for (const RenderTargetView &View : Binding.Colors)
     if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea,
-                             AttachmentKind::Color, ViewMask, AlreadyLoaded))
+                             AttachmentKind::Color, ViewsToClear,
+                             AlreadyLoaded))
       return E;
   if (Binding.Depth)
     if (Error E = applyClear(*Binding.Depth, Binding.Depth->SampleCount,
                              Binding.RenderArea, AttachmentKind::Depth,
-                             ViewMask, AlreadyLoaded))
+                             ViewsToClear, AlreadyLoaded))
       return E;
   if (Binding.Stencil)
     if (Error E = applyClear(*Binding.Stencil, Binding.Stencil->SampleCount,
                              Binding.RenderArea, AttachmentKind::Stencil,
-                             ViewMask, AlreadyLoaded))
+                             ViewsToClear, AlreadyLoaded))
       return E;
   return Error::success();
 }
