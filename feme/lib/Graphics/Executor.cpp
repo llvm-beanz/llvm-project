@@ -3586,12 +3586,34 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // per-spec requirement -- a shader statically reading it must also
       // execute at least once per covered sample, exactly like
       // `SampleIndex`.
+      //
+      // (Roadmap L134(d)) An ordinary varying decorated `Sample` (GLSL's
+      // `sample in`/SPIR-V's `Sample` decoration, distinct from the
+      // `SampleIndex`/`SamplePosition` *builtins* above) carries the
+      // identical spec requirement ("If a fragment shader entry point
+      // statically uses an input variable decorated with Sample, sample
+      // shading may be enabled and a value of 1.0 will be used instead of
+      // minSampleShading if it is" -- this implementation always enables
+      // it, matching its own choice to always shade at the full sample
+      // rate whenever any of these three triggers apply, rather than
+      // track `minSampleShading`'s fractional rate). Checked by
+      // `Interpolation` (`getInterpolationMode`'s `*Sample` pairing),
+      // since a `Sample`-decorated varying is an ordinary user-defined
+      // input element, not a `SignatureSystemValue` `findElement` can
+      // look up directly.
       bool PerSampleShading =
           Pipeline.getSampleShadingEnable() ||
           findElement(FSSig, SignatureDirection::Input,
                       SignatureSystemValue::SampleIndex) ||
           findElement(FSSig, SignatureDirection::Input,
-                      SignatureSystemValue::SamplePosition);
+                      SignatureSystemValue::SamplePosition) ||
+          llvm::any_of(FSSig.Elements, [](const SignatureElement &Elt) {
+            return Elt.Direction == SignatureDirection::Input &&
+                   (Elt.Interpolation ==
+                        SignatureInterpolationMode::PerspectiveSample ||
+                    Elt.Interpolation ==
+                        SignatureInterpolationMode::NoPerspectiveSample);
+          });
       // This project always shades at the full sample rate rather than
       // tracking `minSampleShading`'s fractional value (see
       // `GraphicsPipeline::getSampleShadingEnable`'s comment in
