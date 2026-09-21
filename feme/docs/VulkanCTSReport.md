@@ -8513,3 +8513,109 @@ regression sweep confirms the fail-count delta matches exactly with 0
 side effects. `L134`'s other 6 sub-rows remain open. No feature/
 extension inventory changes (a correctness fix to existing
 interpolation, no new Vulkan functionality shipped this session).
+
+## Session: `L134(g)` -- `VK_KHR_maintenance5` flags2-override gap fixed
+
+### Summary
+
+Picked up `L134(g)` (`dEQP-VK.draw.renderpass.basic_draw.misc.
+maintenance5`, 1 of `L134`'s originally-filed 224 pre-existing
+`dEQP-VK.draw.*` fails), the smallest of its 6 then-remaining open
+sub-rows, per the prior session's own next-steps ordering.
+
+**Reproduced the exact failure first** (per the prior session's own
+instruction to check each `L134` sub-row's CTS message text before
+assuming a root cause): `Fail (vk.queueSubmit(queue, 1u, &submitInfo,
+*fence): VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338)` -- a
+real submission failure, not an "expected: X, got: X" mismatch,
+confirming this is **not** another instance of the `L132`/`L134(f)`
+barycentric-sum-precision bug class, and needs its own distinct
+root-cause investigation.
+
+**Root cause**: this CTS case (`vktBasicDrawTests.cpp`'s
+`IndexedIndirectCase` with `useMaintenance5 = true`) deliberately sets
+`VkGraphicsPipelineCreateInfo::flags = VK_PIPELINE_CREATE_LIBRARY_BIT_
+KHR` (a legacy, "wrong" value with real-world Mesa-crash-history
+significance per the CTS source's own comment), while chaining the
+*real* intended value via `VK_KHR_maintenance5`'s
+`VkPipelineCreateFlags2CreateInfoKHR::flags = VK_PIPELINE_CREATE_2_
+ALLOW_DERIVATIVES_BIT_KHR`. Per the extension's own spec, the chained
+flags2 struct must take priority over the legacy field whenever
+present -- this is the exact mechanism the test deliberately probes,
+to confirm a conformant implementation reads the override rather than
+the legacy field. `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines`
+read only the legacy `flags` field, so it misclassified this call as a
+`VK_EXT_graphics_pipeline_library` library-creation request instead of
+building the real, complete, executable pipeline the app intended --
+the returned (non-executable "library") handle later failed at
+`vkQueueSubmit` instead of drawing.
+
+Confirmed via a targeted grep that this is a genuine,
+previously-entirely-unhandled gap: no code anywhere in
+`feme/lib/Vulkan/` ever referenced `VkPipelineCreateFlags2CreateInfo`/
+`VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO` at all, despite
+`VK_KHR_maintenance5` (`Roadmap.md`'s `E5` row) being marked closed --
+`E5`'s own row text never mentioned either `Flags2CreateInfo` struct,
+confirming this was never in scope for that row, not a regression.
+
+### Fix
+
+Added `getEffectivePipelineCreateFlags(const VkGraphicsPipelineCreateInfo
+&)` (`GraphicsPipeline.cpp`, anonymous namespace): scans `pNext` for a
+chained `VkPipelineCreateFlags2CreateInfo` and returns its `flags` (a
+64-bit `VkPipelineCreateFlags2`/`VkFlags64`) when present, else returns
+the legacy `flags` field widened to 64 bits. Every flag bit this file
+currently interprets fits within the legacy field's 32 bits, so this
+widening/truncation loses nothing any call site reads today.
+
+Applied the helper at every legacy-`flags`-reading call site in the
+file, not just the one this specific CTS case's failure traces to (the
+task's own coding-change guidance favors complete-not-just-minimal
+fixes, and every site shares the identical underlying gap):
+- The `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` check that misroutes a call
+  into the pipeline-library branch (the fix this case's own failure
+  needed).
+- Both `VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT` checks in
+  `synthesizeLinkedGraphicsPipelineCreateInfo` (roadmap L110).
+- The `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` check
+  in `compileGraphicsPipeline` (roadmap E9).
+- `synthesizeLinkedGraphicsPipelineCreateInfo`'s own `Result.flags =
+  CreateInfo.flags` (the synthesized create-info's `pNext` never
+  carries a flags2 struct of its own, so this call resolves the
+  top-level call's own flags2-vs-legacy value once and stores the
+  *effective* result, keeping a later `compileGraphicsPipeline` call
+  against the synthesized info correct even without re-scanning).
+- Every `Pipeline`/`GraphicsPipeline`/`GraphicsPipelineLibrary`
+  object's own stored `createFlags()` value, so a pipeline's own
+  recorded flags reflect the effective, not raw legacy, value for any
+  later query.
+
+### Testing
+
+Added `GraphicsPipelineTest.Flags2CreateInfoOverridesLegacyLibraryBit`
+(`GraphicsPipelineTest.cpp`): a `VkGraphicsPipelineCreateInfo` with a
+legacy `flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` but a chained
+`VkPipelineCreateFlags2CreateInfoKHR` with a real, non-library flags
+value; asserts the resulting `VkPipeline` is a real `GraphicsPipeline`
+(`Pipeline::Kind::Graphics`), not a `GraphicsLibrary`, and that its
+recorded `createFlags()` does not carry the legacy library bit.
+
+`ninja check-feme`: 3,280/3,283 Passed, 3 Unsupported, 0 Failed (+1
+newly-added test, 0 regressions). `FeMeVulkanTests` standalone: 720/720
+Passed (0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.renderpass.basic_draw.misc.maintenance5`: **Pass** (was
+  `Fail`).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **219 Fail**
+  (was 224 pre-`L134(f)`/`(g)`, exactly `224 - 4 (L134(f)) - 1
+  (L134(g))`), 0 `maintenance5` fails remaining, 0 regressions in every
+  other pre-existing fail.
+
+### Results
+
+`L134(g)` is now fully closed. `L134`'s other 5 sub-rows (`L134(a)`
+through `L134(e)`) remain open. No feature/extension inventory changes
+(a correctness fix to existing `VK_KHR_maintenance5` handling, no new
+Vulkan functionality shipped this session).
