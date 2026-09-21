@@ -206,7 +206,16 @@ struct RecordedCommand {
   /// offset, `UpdateData` reused as the owned payload copy -- see "Command
   /// Buffers": "Push constants" is its own row of the first command set,
   /// but needs no new payload shape beyond what `UpdateBuffer` already
-  /// carries).
+  /// carries). `StageFlags` below is the `stageFlags` mask the push
+  /// targeted, needed to route the write into the correct bind point's own
+  /// independent push-constant state (see "Descriptor Model": "Graphics
+  /// and Compute bind points maintain separate push constant state") --
+  /// unlike a descriptor-set bind, whose `BindPoint` above always selects
+  /// exactly one, a single push can legitimately span both bind points at
+  /// once (e.g. `VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT`),
+  /// so this is a mask consulted at execution time rather than a single
+  /// enumerator.
+  VkShaderStageFlags StageFlags = 0;
   /// `SetEvent`/`ResetEvent`: the single target event.
   /// `WaitEvents`: every event this command waits on.
   std::vector<Event *> Events;
@@ -529,15 +538,20 @@ public:
     Cmd.ImageBarriers = std::move(ImageBarriers);
     Commands.push_back(std::move(Cmd));
   }
-  /// `vkCmdPushConstants`: records \p Offset and an owned copy of \p Data,
-  /// consumed at execution time into the command buffer's push-constant
-  /// state (see "Descriptor Model": "Push constants are copied into
-  /// command-buffer state by `vkCmdPushConstants`").
-  void pushConstants(uint32_t Offset, std::vector<uint8_t> Data) {
+  /// `vkCmdPushConstants`: records \p Offset, an owned copy of \p Data, and
+  /// \p StageFlags (the stage mask the push targeted, needed at execution
+  /// time to route the write into the right bind point(s)' own independent
+  /// push-constant state -- see `RecordedCommand::StageFlags`'s own
+  /// comment), consumed at execution time into the command buffer's
+  /// push-constant state (see "Descriptor Model": "Push constants are
+  /// copied into command-buffer state by `vkCmdPushConstants`").
+  void pushConstants(uint32_t Offset, std::vector<uint8_t> Data,
+                     VkShaderStageFlags StageFlags) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::PushConstants;
     Cmd.DstOffset = Offset;
     Cmd.UpdateData = std::move(Data);
+    Cmd.StageFlags = StageFlags;
     Commands.push_back(std::move(Cmd));
   }
   /// `vkCmdSetEvent`/`vkCmdResetEvent`.

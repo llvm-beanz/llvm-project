@@ -2534,28 +2534,31 @@ Expected<uint32_t> readIndirectByteCountVertices(Buffer *Buf, uint64_t Offset,
 }
 
 /// Interprets \p Commands into \p BoundPipeline/\p BoundGraphicsSets/
-/// \p BoundComputeSets/\p PushConstants -- shared, mutable execution state a
-/// primary command buffer's own commands and every
-/// `vkCmdExecuteCommands`-referenced secondary command buffer's commands
-/// are interpreted into alike, per "Command Buffers": "Secondary command
-/// buffers are interpreted into the primary execution state ... no cursor
-/// or bound state may be stored back into the command buffer during
-/// execution." \p BoundGraphicsSets/\p BoundComputeSets are kept as two
-/// fully independent vectors, matching the Vulkan spec's own requirement
-/// that "there is a separate set of bound descriptor sets for each of
-/// graphics and compute" -- a bind recorded for one bind point (see
-/// `RecordedCommand::BindPoint`) must never become visible to a
-/// draw/dispatch issued against the other. \p DeviceInfo is threaded
-/// through for `validateGroupCount`, which does not otherwise have access
-/// to a secondary command buffer's own (possibly null, if never set)
-/// `PhysicalDeviceInfo`.
+/// \p BoundComputeSets/\p PushConstantsGraphics/\p PushConstantsCompute --
+/// shared, mutable execution state a primary command buffer's own commands
+/// and every `vkCmdExecuteCommands`-referenced secondary command buffer's
+/// commands are interpreted into alike, per "Command Buffers": "Secondary
+/// command buffers are interpreted into the primary execution state ... no
+/// cursor or bound state may be stored back into the command buffer during
+/// execution." \p BoundGraphicsSets/\p BoundComputeSets (and, likewise,
+/// \p PushConstantsGraphics/\p PushConstantsCompute) are kept as two fully
+/// independent vectors, matching the Vulkan spec's own requirement that
+/// "there is a separate set of bound descriptor sets for each of graphics
+/// and compute" (and, identically, "Graphics and Compute bind points
+/// maintain separate push constant state") -- a bind (or push) recorded
+/// for one bind point (see `RecordedCommand::BindPoint`/`StageFlags`) must
+/// never become visible to a draw/dispatch issued against the other.
+/// \p DeviceInfo is threaded through for `validateGroupCount`, which does
+/// not otherwise have access to a secondary command buffer's own (possibly
+/// null, if never set) `PhysicalDeviceInfo`.
 Error executeCommandsInto(
     llvm::ArrayRef<RecordedCommand> Commands,
     const PhysicalDeviceInfo *DeviceInfo, ComputePipeline *&BoundPipeline,
     GraphicsPipeline *&BoundGraphicsPipeline, GraphicsState &Gfx,
     std::vector<BoundSetState> &BoundGraphicsSets,
     std::vector<BoundSetState> &BoundComputeSets,
-    std::vector<uint8_t> &PushConstants,
+    std::vector<uint8_t> &PushConstantsGraphics,
+    std::vector<uint8_t> &PushConstantsCompute,
     std::vector<ActiveOcclusionQuery> &ActiveOcclusionQueries,
     std::vector<ActivePipelineStatsQuery> &ActivePipelineStatsQueries) {
   for (const RecordedCommand &Cmd : Commands) {
@@ -2565,6 +2568,7 @@ Error executeCommandsInto(
         BoundGraphicsPipeline = static_cast<GraphicsPipeline *>(Cmd.Pipeline);
       else
         BoundPipeline = static_cast<ComputePipeline *>(Cmd.Pipeline);
+
       break;
     case RecordedCommand::Kind::BindDescriptorSets: {
       // Each bind point keeps a fully independent set of bound descriptor
@@ -2597,7 +2601,7 @@ Error executeCommandsInto(
       if (Error E = validateGroupCount(DeviceInfo, Cmd.Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count,
-                                BoundComputeSets, PushConstants,
+                                BoundComputeSets, PushConstantsCompute,
                                 ActivePipelineStatsQueries))
         return E;
       break;
@@ -2622,7 +2626,7 @@ Error executeCommandsInto(
       if (Error E = validateGroupCount(DeviceInfo, Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count,
-                                BoundComputeSets, PushConstants,
+                                BoundComputeSets, PushConstantsCompute,
                                 ActivePipelineStatsQueries))
         return E;
       break;
@@ -2652,14 +2656,36 @@ Error executeCommandsInto(
                                Barrier.Range.baseArrayLayer,
                                Barrier.Range.layerCount, Barrier.NewLayout);
       break;
-    case RecordedCommand::Kind::PushConstants:
-      if (Cmd.DstOffset + Cmd.UpdateData.size() > PushConstants.size())
-        return createStringError(inconvertibleErrorCode(),
-                                 "push constant range is out of range of "
-                                 "maxPushConstantsSize");
-      std::memcpy(PushConstants.data() + Cmd.DstOffset, Cmd.UpdateData.data(),
-                  Cmd.UpdateData.size());
+    case RecordedCommand::Kind::PushConstants: {
+      // A push's `StageFlags` mask selects which bind point(s)' own
+      // independent push-constant state this write lands in -- unlike a
+      // descriptor-set bind, whose `BindPoint` always selects exactly one,
+      // a single push can legitimately target both at once (e.g.
+      // `VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT`), so
+      // both masks are checked independently and either, both, or (if
+      // `StageFlags` is somehow empty) neither vector is written.
+      bool ToCompute = (Cmd.StageFlags & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+      bool ToGraphics = (Cmd.StageFlags & ~VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+      if (ToGraphics) {
+        if (Cmd.DstOffset + Cmd.UpdateData.size() >
+            PushConstantsGraphics.size())
+          return createStringError(inconvertibleErrorCode(),
+                                   "push constant range is out of range of "
+                                   "maxPushConstantsSize");
+        std::memcpy(PushConstantsGraphics.data() + Cmd.DstOffset,
+                    Cmd.UpdateData.data(), Cmd.UpdateData.size());
+      }
+      if (ToCompute) {
+        if (Cmd.DstOffset + Cmd.UpdateData.size() >
+            PushConstantsCompute.size())
+          return createStringError(inconvertibleErrorCode(),
+                                   "push constant range is out of range of "
+                                   "maxPushConstantsSize");
+        std::memcpy(PushConstantsCompute.data() + Cmd.DstOffset,
+                    Cmd.UpdateData.data(), Cmd.UpdateData.size());
+      }
       break;
+    }
     case RecordedCommand::Kind::SetEvent:
       Cmd.Events[0]->set();
       break;
@@ -2747,7 +2773,9 @@ Error executeCommandsInto(
         if (Error E = executeCommandsInto(Secondary->commands(), DeviceInfo,
                                           BoundPipeline, BoundGraphicsPipeline,
                                           Gfx, BoundGraphicsSets,
-                                          BoundComputeSets, PushConstants,
+                                          BoundComputeSets,
+                                          PushConstantsGraphics,
+                                          PushConstantsCompute,
                                           ActiveOcclusionQueries,
                                           ActivePipelineStatsQueries))
           return E;
@@ -3149,7 +3177,8 @@ Error executeCommandsInto(
         Draw.FirstVertex = Cmd.FirstVertexOrIndex;
       }
       if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
-                                     DeviceInfo, BoundGraphicsSets, PushConstants,
+                                     DeviceInfo, BoundGraphicsSets,
+                                     PushConstantsGraphics,
                                      ActiveOcclusionQueries,
                                      ActivePipelineStatsQueries))
         return E;
@@ -3198,7 +3227,8 @@ Error executeCommandsInto(
         return Draws.takeError();
       for (const feme::graphics::DrawCommand &Draw : *Draws)
         if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
-                                       DeviceInfo, BoundGraphicsSets, PushConstants,
+                                       DeviceInfo, BoundGraphicsSets,
+                                       PushConstantsGraphics,
                                        ActiveOcclusionQueries,
                                        ActivePipelineStatsQueries))
           return E;
@@ -3215,7 +3245,7 @@ Error executeCommandsInto(
       feme::graphics::MeshDrawCommand MeshDraw;
       MeshDraw.GroupCount = Cmd.Count;
       if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
-                               BoundGraphicsSets, PushConstants,
+                               BoundGraphicsSets, PushConstantsGraphics,
                                ActiveOcclusionQueries,
                                ActivePipelineStatsQueries))
         return E;
@@ -3245,7 +3275,7 @@ Error executeCommandsInto(
         return MeshDraws.takeError();
       for (const feme::graphics::MeshDrawCommand &MeshDraw : *MeshDraws)
         if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
-                                 BoundGraphicsSets, PushConstants,
+                                 BoundGraphicsSets, PushConstantsGraphics,
                                  ActiveOcclusionQueries,
                                  ActivePipelineStatsQueries))
           return E;
@@ -3266,7 +3296,8 @@ Error executeCommandsInto(
       Draw.FirstInstance = Cmd.FirstInstance;
       if (Error E =
               runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw, DeviceInfo,
-                               BoundGraphicsSets, PushConstants, ActiveOcclusionQueries,
+                               BoundGraphicsSets, PushConstantsGraphics,
+                               ActiveOcclusionQueries,
                                ActivePipelineStatsQueries))
         return E;
       break;
@@ -3288,19 +3319,24 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   // of a newly allocated command buffer" for both bind points alike.
   std::vector<BoundSetState> BoundGraphicsSets;
   std::vector<BoundSetState> BoundComputeSets;
-  // Push-constant state, sized to the device's full advertised
-  // `maxPushConstantsSize` and zero-initialized: a byte a `vkCmdPushConstants`
-  // never wrote reads as zero, matching every other "declared but never
-  // written" resource in this ICD (see "Descriptor Model").
+  // Two fully independent push-constant byte buffers, one per pipeline
+  // bind point (see "Descriptor Model": "Graphics and Compute bind points
+  // maintain separate push constant state"), each sized to the device's
+  // full advertised `maxPushConstantsSize` and zero-initialized: a byte
+  // neither bind point's own `vkCmdPushConstants` ever wrote reads as
+  // zero, matching every other "declared but never written" resource in
+  // this ICD (see "Descriptor Model").
   const PhysicalDeviceInfo *DeviceInfo = CmdBuf.getPhysicalDeviceInfo();
-  std::vector<uint8_t> PushConstants(
+  std::vector<uint8_t> PushConstantsGraphics(
+      DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
+  std::vector<uint8_t> PushConstantsCompute(
       DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
   std::vector<ActiveOcclusionQuery> ActiveOcclusionQueries;
   std::vector<ActivePipelineStatsQuery> ActivePipelineStatsQueries;
   return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
                              BoundGraphicsPipeline, Gfx, BoundGraphicsSets,
-                             BoundComputeSets, PushConstants,
-                             ActiveOcclusionQueries,
+                             BoundComputeSets, PushConstantsGraphics,
+                             PushConstantsCompute, ActiveOcclusionQueries,
                              ActivePipelineStatsQueries);
 }
 
@@ -3857,28 +3893,34 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier2(
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
-                                              VkPipelineLayout, uint32_t,
+                                              VkPipelineLayout,
+                                              uint32_t stageFlags,
                                               uint32_t offset, uint32_t size,
                                               const void *pValues) {
   // The Vulkan specification requires both a 4-byte-aligned offset and
   // size (`VUID-vkCmdPushConstants-offset-00368`/`-size-00369`); `layout`
-  // and `stageFlags` need no validation here -- V3's single compute stage
-  // means every push constant is compute-visible, and coverage against the
-  // pipeline layout's declared ranges is instead checked once, at
-  // `vkCreateComputePipelines` time (see `pushConstantsCoverRootConstantSize`
-  // in Pipeline.cpp), not per push here.
+  // needs no validation here, and coverage against the pipeline layout's
+  // declared ranges is instead checked once, at `vkCreateComputePipelines`/
+  // `vkCreateGraphicsPipelines` time (see
+  // `pushConstantsCoverRootConstantSize` in Pipeline.cpp), not per push
+  // here. `stageFlags` *is* consulted, though (unlike the comment this one
+  // replaces once claimed) -- it selects which bind point's own
+  // independent push-constant state (see `RecordedCommand::StageFlags`'s
+  // own comment) this push writes into at execution time.
   if (size == 0 || offset % 4 != 0 || size % 4 != 0)
     return;
   const auto *Bytes = static_cast<const uint8_t *>(pValues);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->pushConstants(offset, std::vector<uint8_t>(Bytes, Bytes + size));
+      ->pushConstants(offset, std::vector<uint8_t>(Bytes, Bytes + size),
+                      static_cast<VkShaderStageFlags>(stageFlags));
 }
 
 // (roadmap E6) `VK_KHR_maintenance6`'s `vkCmdPushConstants2`: the same
 // `offset`/`size`/`pValues` triple as `vkCmdPushConstants` above, wrapped in
 // a single `pNext`-extensible `VkPushConstantsInfo` in place of the
-// `layout`/`stageFlags` argument pair -- both of which need no validation
-// here for the same reason the non-`2` command's own comment gives.
+// `layout`/`stageFlags` argument pair -- `stageFlags` is read from the
+// struct instead, for the same reason the non-`2` command's own comment
+// gives.
 VKAPI_ATTR void VKAPI_CALL
 vkCmdPushConstants2(VkCommandBuffer commandBuffer,
                     const VkPushConstantsInfo *pPushConstantsInfo) {
@@ -3889,7 +3931,8 @@ vkCmdPushConstants2(VkCommandBuffer commandBuffer,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->pushConstants(
           pPushConstantsInfo->offset,
-          std::vector<uint8_t>(Bytes, Bytes + pPushConstantsInfo->size));
+          std::vector<uint8_t>(Bytes, Bytes + pPushConstantsInfo->size),
+          pPushConstantsInfo->stageFlags);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent(VkCommandBuffer commandBuffer,
