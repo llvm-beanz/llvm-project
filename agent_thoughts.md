@@ -96746,3 +96746,129 @@ with definitive findings, neither of which needed a code fix.
    as their own top-level module.
 9. This session's own scratch CTS logs (`/tmp/ctsrun/l125bc/*`) are
    already cleaned up -- nothing to do here.
+
+# Session: L129 fix -- push-constant state not isolated per pipeline bind point
+
+## TL;DR
+
+Confirmed `vulkaninfo --summary | grep deviceName` shows `FeMe CPU
+Vulkan Device`. Picked up `L129` from the prior session's next-steps
+(push-constant state shared across graphics/compute bind points,
+same architectural bug `L125(t)` fixed for descriptor sets). Fixed
+it, wrote a hand-written regression test (no CTS repro exists, as the
+prior session already confirmed), verified via stash/rebuild
+round-trip, ran full `check-feme` and a CTS regression sweep, and
+found (then confirmed pre-existing and unrelated) 9 incidental
+`pipeline.monolithic.push_constant.*` failures along the way.
+
+## What I did
+
+1. Confirmed the Vulkan ICD device, per standing instructions.
+2. Read `L129`'s roadmap row and `CommandBuffer.cpp`/`.h` to confirm
+   the bug: `executeCommandsInto` threaded one shared
+   `std::vector<uint8_t> &PushConstants` through both the
+   compute-dispatch path and the graphics-draw path.
+   `vkCmdPushConstants`'s `stageFlags` argument was discarded
+   entirely (unnamed parameter, stale comment claiming "V3's single
+   compute stage means every push constant is compute-visible" --
+   false now that graphics support exists).
+3. Fixed it:
+   - Added `VkShaderStageFlags StageFlags` to `RecordedCommand`.
+   - `vkCmdPushConstants`/`vkCmdPushConstants2` now capture and
+     thread the real stage mask.
+   - Split `executeCommandsInto`'s single `PushConstants` vector into
+     `PushConstantsGraphics`/`PushConstantsCompute`. The
+     `PushConstants` execution case checks `Cmd.StageFlags` and
+     writes into one or both, since (unlike a descriptor-set bind) a
+     single push's mask can legitimately span both bind points at
+     once -- the one wrinkle `L125(t)`'s own fix never had to handle.
+   - Updated every Dispatch/Draw/MeshDraw call site,
+     `ExecuteCommands`, and the top-level `executeCommandBuffer` entry
+     point accordingly.
+4. `ninja check-feme` (implementation only): 3,273/3,276 Passed, 3
+   Unsupported, 0 Failed -- no regressions from the code change alone.
+5. Wrote `PushConstantDispatchTest.
+   GraphicsOnlyPushDoesNotClobberComputeBoundPushConstants`, mirroring
+   `L125(t)`'s own test methodology: pushes a real value at
+   `VK_SHADER_STAGE_COMPUTE_BIT`, an unrelated sentinel at
+   `VK_SHADER_STAGE_VERTEX_BIT` to the same bytes (no real graphics
+   pipeline/draw needed -- `vkCmdPushConstants` validates nothing
+   against a bound layout), dispatches, asserts only the compute push
+   survives.
+6. Verified the test's validity via the project's stash/rebuild
+   round-trip convention: stashed the implementation files, rebuilt,
+   ran the new test in isolation -- **failed exactly as expected**
+   (`Result == 0xCAFEF00D`, the sentinel, instead of `42`). Popped the
+   stash, rebuilt, reran -- **passed**.
+7. Full `check-feme`: 3,274/3,277 Passed, 3 Unsupported, 0 Failed (+1
+   new test, 0 regressions).
+8. CTS regression checks (`FeMe CPU Vulkan Device`, from the
+   `VK-GL-CTS` module directory):
+   - `pipeline.*.push_constant.lifetime.*` (63 cases): unchanged at
+     27 Pass / 0 Fail / 36 NotSupported, matching the prior session's
+     baseline exactly.
+   - Ran a broader `pipeline.monolithic.push_constant.*` sweep (65
+     cases) for extra confidence, since this fix touches shared
+     dispatch/draw code paths broadly -- found **9 unexpected fails**.
+     Traced them to pipeline-*creation* failures (`JIT session error:
+     Symbols not found`, `OpTypeArray count <id> ... must come from a
+     constant...`) -- nothing to do with push-constant routing.
+     Confirmed **pre-existing and unrelated** via a revert-and-rerun
+     (stashed the implementation fix, rebuilt, reran): identical 9
+     fails without this fix too. Restored the fix and rebuilt.
+9. Updated `Roadmap.md` (`L129` struck through, rewritten as fixed)
+   and `VulkanCTSReport.md` (new section). No
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+   needed -- pure correctness fix, no new feature/extension surface.
+10. Cleaned up this session's scratch CTS logs at `/tmp/ctsrun/l129/*`.
+11. Committing in small separate pieces: implementation, test, docs,
+    this file.
+
+## Wins
+
+- Closed `L129`, the last of the three bind-point-isolation gaps
+  `L125(t)` originally flagged (descriptor sets fixed then, push
+  constants fixed now) -- confirmed via a from-scratch unit test with
+  a clean stash/rebuild-verified repro, exactly as the prior session's
+  roadmap entry called for.
+- Caught the fix's one real design wrinkle (a push's `stageFlags` can
+  span both bind points at once, unlike a descriptor-set bind) and
+  handled it correctly (write into both vectors when the mask spans
+  both) instead of assuming a 1:1 mirror of `L125(t)`'s own fix shape.
+- Found 9 incidental CTS fails in a broader confidence sweep and
+  immediately ran them down to confirm they're pre-existing and
+  unrelated (via revert-and-rerun) rather than leaving them as an
+  unexplained new-looking regression for a future session to worry
+  about.
+
+## Suggested next steps
+
+1. The 9 `pipeline.monolithic.push_constant.*` pre-existing failures
+   (`JIT session error: Symbols not found: [ spirv_var_NN ]` /
+   `OpTypeArray count <id> ... must come from a constant, specialization
+   constant, or supported specialization constant operation`) are
+   **not yet filed as their own roadmap row** -- worth filing and
+   root-causing next time nothing more pressing is queued; these look
+   like a real gap in how the JIT/SPIR-V-legalization path resolves
+   specialization-constant-sized arrays or exported symbols, possibly
+   related in shape to `L128`'s own specialization-constant array-size
+   finding, but not yet confirmed as the same root cause.
+2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+3. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+4. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
+   vertex-input-array gap, 3 fails) is root-caused but not attempted --
+   needs a dedicated session to prototype and compare the two
+   candidate fixes (loop-unrolling vs. a new dynamic-element-index
+   ABI) described in its own roadmap row.
+5. The `pipeline.monolithic.blend.*` full-family regression sweep
+   (flagged as a two-session-running timeout pattern previously) still
+   hasn't been reattempted -- still worth raising the timeout or
+   splitting into sub-family chunks whenever picked back up.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l129/*`) are
+   already cleaned up -- nothing to do here.
