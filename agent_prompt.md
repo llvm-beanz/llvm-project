@@ -57,18 +57,19 @@ The last session lost internet connection, can you please retry?
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~15-20 min)** `L127`: the new 4-fail `vertex_input.max_attributes.*`
-   / `misc.unused_binding` residual surfaced only once this session's
-   two bigger bugs were fixed. Start with
+1. **(~15-20 min, good next pick)** `L127`: the 4-fail
+   `vertex_input.max_attributes.*` / `misc.unused_binding` residual
+   flagged by a prior session remains untouched -- start with
    `FEME_VULKAN_LOG_CREATION_ERRORS=1` on each of the 4 cases
-   individually -- `max_attributes` likely probes the device's own
-   `maxVertexInputAttributes`/`maxVertexInputBindings` limits (a
-   different code path from ordinary decode), `unused_binding` likely
-   probes a binding declared but never referenced by any attribute.
-2. `L125(t)` (`bind_point.graphics_compute`'s "Invalid value found in
-   graphics buffer" bucket, 10 of 655 fails) remains completely
-   untouched -- not investigated at all this session or several before
-   it. Good next pick if `L127` stalls.
+   individually.
+2. `L129` (new, filed this session): push-constant state has the
+   identical shared-across-bind-points architectural bug that
+   descriptor-set state had before this fix, but no concrete CTS
+   failure has been found to repro it against yet -- worth a dedicated
+   search for a CTS bucket that actually exercises push constants
+   across both bind points in the same command buffer before attempting
+   a fix (fixing speculatively, without a failing test to verify
+   against, isn't a good use of a session).
 3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the other large, not-yet-started cross-repo item -- not a
    quick pick, needs its own dedicated session.
@@ -81,11 +82,11 @@ Can you continue the work on feme? The last agent's suggested next steps are:
    -- worth a quick dedicated look next time nothing else is more
    pressing.
 6. The `pipeline.monolithic.blend.*` full-family regression sweep
-   (flagged as a two-session-running timeout pattern previously) was
-   not attempted again this session -- still worth raising the
-   timeout or splitting into sub-family chunks whenever picked back
-   up.
+   (flagged as a two-session-running timeout pattern previously) still
+   hasn't been reattempted -- still worth raising the timeout or
+   splitting into sub-family chunks whenever picked back up.
 7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-8. This session's own scratch CTS logs (`/tmp/ctsrun/l125s/*`) are
-   already cleaned up -- nothing to do here.
+8. No scratch CTS logs from this session needed cleanup (this session's
+   CTS runs didn't write to `/tmp/ctsrun` under a session-specific
+   subdirectory) -- nothing to do here.
