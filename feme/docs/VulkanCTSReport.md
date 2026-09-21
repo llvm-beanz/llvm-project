@@ -8424,3 +8424,92 @@ fails, run both with and without the fix for a byte-for-byte identical
 224-case pre-existing fail set. No feature/extension inventory changes
 (a correctness fix to existing interpolation, no new Vulkan
 functionality shipped this session).
+
+## Session: L134(f) root-caused and fixed -- same barycentric-sum gap, depth path
+
+Continuing directly from filing `L134` at the end of the prior session.
+Confirmed `FeMe CPU Vulkan Device` at session start.
+
+**Checked the background `pipeline.monolithic.*` sweep** (PID 12156):
+found it had loaded FeMe's ICD `.so` into its process memory *before*
+`L132`'s fix was rebuilt this session, meaning it had been running on
+stale, pre-`L132`-fix code the whole time (a dlopen'd ICD library is
+mapped once at process start and does not reload mid-process). Killed
+it -- it could never have confirmed `L132` at full-sweep scale, and its
+now-4+-session runtime was no longer worth continuing on stale code.
+This session's own targeted `bind_buffers_2.*` re-sweep already
+confirmed `L132` at full-family scale, so nothing was lost by killing
+it. Cleaned up its now-orphaned scratch log (`/tmp/ctsrun/l128fix/`,
+~1GB).
+
+**Checked whether the 224 `dEQP-VK.draw.*` fails found while landing
+`L132` were already filed anywhere**: they were not. Filed them as a
+new roadmap row (`L134`), broken into 7 sub-rows by CTS sub-family
+(`indexed_draw`/`maintenance6`, `output_location.array`,
+`multiple_interpolation`, `implicit_sample_shading`, `shader_layer` at
+layer 256, `depth_clamp`, and `basic_draw.misc`).
+
+**Picked up `L134(f)` (`depth_clamp.*_clamp_four_viewports`, 4 cases)
+immediately after filing it**, since its own CTS failure message --
+`"Depth value mismatch, expected: 0.66, got: 0.66"` -- was
+unmistakably the exact same visible-precision-but-not-bit-exact
+pattern `L132` had just been fixed for. Confirmed via the CTS source
+(`vktDrawDepthClampTests.cpp`): the comparison tolerance for
+`D32_SFLOAT`/`D32_SFLOAT_S8_UINT` is `std::numeric_limits<float>::
+epsilon()` -- a near-zero, ULP-scale tolerance, not a real fuzz margin.
+
+**Root cause**: `Executor.cpp`'s per-pixel depth computation (`Depth =
+B0*Tri.Depth[0] + B1*Tri.Depth[1] + B2*Tri.Depth[2]`) has the identical
+gap `L132` fixed for varyings -- `B0`/`B1`/`B2` are three independently
+rounded divisions, not provably summing to exactly `1.0f`. A
+four-viewport depth-clamp draw's underlying quad has an identical
+depth at all 3 vertices of each of its constituent triangles, so the
+same few-ULP drift that broke `bind_buffers_2.*`'s exact color check
+also breaks this test's near-zero-tolerance depth check.
+
+**Fix**: applied the identical `Tri.Depth[0] == Tri.Depth[1] &&
+Tri.Depth[1] == Tri.Depth[2]` short-circuit `L132` added to the
+varying-interpolation loop, at depth computation's own single
+consumption site (~line 3470). Confirmed via a source-swap-to-baseline
+round-trip.
+
+### Testing
+
+Added `ExecutorTest.InterpolatesAGenuinelyConstantDepthExactly`
+(depth-analogue of `L132`'s own
+`InterpolatesAGenuinelyConstantColorExactly`): an oversized CCW
+triangle, every vertex at NDC Z `0.1f` (no exact binary representation,
+matching `L132`'s own choice of awkward constant), depth test/write
+enabled with `CompareOp::Always`, asserting a bit-exact `0.1f` readback
+via `Scene.DepthStorage`. Confirmed via source-swap-to-baseline
+round-trip that this test fails (1 ULP off at texel 15) with the fix
+removed, and passes cleanly restored. (An initial attempt at NDC Z
+`0.32f` passed even without the fix -- not every "awkward" constant
+actually exposes a visible ULP drift for a given triangle geometry, so
+`0.1f` was chosen instead, matching `L132`'s own precedent value.)
+
+`ninja check-feme`: 3,280/3,283 Passed, 3 Unsupported, 0 Failed (+1
+newly-added test, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- Full `dEQP-VK.draw.*.depth_clamp.*` re-sweep (268 cases): **0 Fail**
+  (54 Pass, 214 NotSupported) -- was 4 Fail before this fix. All 4
+  originally-filed fails are now fixed, 0 exceptions.
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases, run both with
+  and without the fix): fail count drops from 224 to 220, and `diff`
+  of the two full fail-name lists confirms the removed 4 case names
+  are exactly `dEQP-VK.draw.{renderpass,dynamic_rendering.primary_
+  cmd_buff}.depth_clamp.{d32_sfloat,d32_sfloat_s8_uint}_clamp_four_
+  viewports` -- every other pre-existing fail is unchanged, 0
+  regressions.
+
+### Results
+
+`L134(f)` is now considered fully closed: all 4 originally-filed
+`depth_clamp.*_clamp_four_viewports` fails are fixed, confirmed via a
+clean re-sweep of the full sub-family, and the broader `dEQP-VK.draw.*`
+regression sweep confirms the fail-count delta matches exactly with 0
+side effects. `L134`'s other 6 sub-rows remain open. No feature/
+extension inventory changes (a correctness fix to existing
+interpolation, no new Vulkan functionality shipped this session).
