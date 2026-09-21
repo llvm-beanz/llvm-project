@@ -98450,3 +98450,40 @@ session's own scoping; none are quick picks.
 4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new runtime-callback ABI surface, not a quick pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 6. **(~2 min)** `/tmp/ctsrun/l134a/` (this session's scratch: `list.qpa`/`one.qpa`/`fix.qpa`/`fix_all.qpa`/`full.qpa`) can be deleted once a future session no longer needs them -- nothing in it is referenced by anything committed.
+
+# Session: L136 fixed (stage-IO load-through-select-of-globals); L135 re-scoped as duplicate of L115(b)
+
+**Confirmed `FeMe CPU Vulkan Device` first, as required every session.**
+
+## What's done now
+
+1. `L136` (`dEQP-VK.draw.renderpass.output_location.shuffle.inputs-outputs`) is **fixed and CTS-verified**: 1/1 Pass (was 0/1, JIT-link failure).
+2. Root cause: a fragment shader's checkerboard-conditional swap of two `vec4` inputs compiles (already at SPIR-V-to-LLVM import time, before any feme pass runs) to a load whose pointer is a `select` between two distinct stage-IO globals -- `CanonicalizeStage.cpp` had zero `SelectInst` handling in either its global-discovery loop (`getStageIOGlobal`) or its per-load resolver (`getStageIOBaseAndOffset`), so both globals were silently dropped and the load left unconverted, surviving to JIT-link time as two undefined symbols.
+3. Fix: two new helpers in `CanonicalizeStage.cpp` -- `collectStageIOGlobalsThroughSelect` (discovery-side, recurses through a `select`-of-`select` chain) and `resolveSelectedStageIOLoad` (rewrite-side, builds a value-level `select` between two independently-resolved `feme.stage.input.load` calls). New unit test `CanonicalizeStageTest.RewritesLoadThroughSelectOfDistinctInputGlobals`.
+4. `L135` (`linear_interpolation.*`, 42 cases, `InterpolateAtOffset` legalization gap) was investigated far enough to discover it's **not a new bug** -- it's the exact same gap `L115(b)` already tracks (a whole new runtime-callback ABI surface for `InterpolateAt{Centroid,Sample,Offset}`, not a quick `SPIRVToLLVMPatterns.cpp` pattern addition: `StageOpKind::InterpolateAt*`/`createStageInterpolateAt*` already exist and are wired through `ValidateStage`/`SIMDize`/`FragmentWrapper`/`WaveUniformity`, but only ever reached via the DXIL `EvalCentroid`/`EvalSampleIndex`/`EvalSnapped` raising path -- `SPIRVToLLVMPatterns.cpp` has no conversion pattern for any of the 3 `spirv.GL.InterpolateAt*` MLIR ops at all). Re-scoped `L135` in `Roadmap.md` as a duplicate of `L115(b)` rather than attempting a rushed partial implementation this session.
+
+## Verification
+
+- `ninja check-feme`: 3,296/3,299 Passed, 3 Unsupported, 0 Failed (+1 new test, 0 regressions).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **42 Fail** (was 43) -- confirmed to be exactly the remaining `L135`/`L115(b)` cases, 0 other regressions.
+- `Roadmap.md`: `L136` struck through as fixed; `L135` re-scoped (not struck through -- genuinely not fixed, cross-referenced to `L115(b)`).
+- `VulkanCTSReport.md`: new `L136` session write-up appended.
+- No feature/extension inventory changes needed (compiler correctness fix, no new Vulkan functionality).
+
+## Debugging technique that mattered here
+
+`FEME_DUMP_IR=1` (pre-existing, documented in `feme/.instructions.md`) works directly around a `deqp-vk` invocation, not just the `offloader` tool -- much lower friction than reconstructing an isolated repro. For this bug specifically, a *temporary* second dump point (right after `CanonicalizeStagePass` runs, reverted before commit) was needed to distinguish "the select already exists before canonicalization" from "some later pass introduces it" -- the former turned out to be true, which is what made this a `CanonicalizeStage.cpp` bug rather than a pipeline-ordering one. Worth remembering for any future "raw global survives to JIT-link" bug: check *where in the pipeline* the offending IR shape first appears before assuming the fix belongs wherever the final dump shows it.
+
+## Commits this session (5, each separate)
+
+1. `CanonicalizeStage.cpp` fix (`collectStageIOGlobalsThroughSelect`/`resolveSelectedStageIOLoad`).
+2. New regression test (`CanonicalizeStageTest.RewritesLoadThroughSelectOfDistinctInputGlobals`).
+3. `Roadmap.md`: strike through `L136`.
+4. `Roadmap.md`: re-scope `L135` as duplicate of `L115(b)`.
+5. `VulkanCTSReport.md`: `L136` session write-up.
+
+## Suggested next steps
+
+1. **`L115(b)`** (pull-model interpolation, now covering both its own original scope and the former `L135`) -- the only interesting open item this session found. Needs a new runtime-callback ABI surface, not a quick pick: (a) a new stage op (e.g. `feme.stage.input.interpolate`) carrying resolved element/row/component plus a runtime mode and operand(s); (b) a new per-invocation runtime-callback mechanism in `Executor.cpp` (modeled on `ImageCalls.cpp`'s existing texture-sampling precedent) exposing enough of `Executor.cpp`'s own per-lane triangle data (`Tri.Pos`/`InvW`/`Varyings`, `Area`, `Quad.PixelX`/`PixelY`) to recompute barycentric weights at a runtime-supplied point; (c) `SPIRVToLLVMPatterns.cpp` conversion patterns for `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` themselves. Estimated 1-2 full sessions given the new ABI surface -- start a fresh session dedicated to just this, don't try to squeeze it into a continuation.
+2. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+3. No scratch left over to clean up this session (`/tmp/ctsrun/l136/` and its contents already deleted).
