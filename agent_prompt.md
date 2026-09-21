@@ -55,25 +55,25 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~30-60 min, natural next pick)** Investigate `L138`. Isolate one of
-   the 36 failing cases (`dEQP-VK.pipeline.fast_linked_library.
-   multisample_interpolation.centroid_interpolation_consistency.
-   pushc_component_0.128_128_1.samples_4` reproduces it), look at the
-   actual numeric values compared (the test log's own pixel/value dump)
-   to see how far off `AtCentroid`'s result is from the direct read --
-   if it's a small, consistent offset near a pixel-center-vs-centroid
-   boundary, that confirms the known simplification; if it's wildly off,
-   there's a real bug in this session's own fix (e.g. Row/Component
-   swapped, or the byte-GEP recognizer misfiring on a shape it shouldn't
-   match) and needs its own investigation.
-2. **(~30-60 min)** While there: also check whether `L138` overlaps with
-   the still-untriaged 57-case numerical-mismatch residual from the
-   `L125(r)` session two sessions back -- same `AtCentroid` suspicion,
-   never confirmed either.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
-   still the largest not-yet-started cross-repo item, needs its own
-   dedicated session.
+1. **(~30-45 min, quick pick)** Investigate `L140` first -- smaller, more
+   self-contained (a `SIMDize.cpp` gap, not a rendering-correctness question).
+   Isolate
+   `dEQP-VK.pipeline.monolithic.multisample_interpolation.nonuniform_interpolant_indexing.centroid`,
+   look at `SIMDize.cpp`'s `widenStageOp` (around the `FirstOperandIsElementID`
+   logic) to see what a per-lane-divergent `feme.spirv.interpolate_at_centroid`
+   call would actually need -- probably decomposing into per-lane scalar calls
+   the same way `Derivative*`/`QuadRead`'s vector-result path already does for a
+   different reason, or deferring the marker-call resolution until after
+   `CanonicalizeStage` runs (order-of-passes question, check whether `SIMDize`
+   could just run after `CanonicalizeStage` instead).
+2. **(~1 hr)** `L139` -- isolate
+   `centroid_qualifier_inside_primitive.137_191_1.samples_4`, dump its own
+   numeric comparison values (not just pass/fail color, if the test log has
+   them) to confirm or rule out the `AtCentroid` simplification hypothesis
+   before assuming it.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+   the largest not-yet-started cross-repo item, needs its own dedicated session.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. No scratch left over to clean up this session (everything under
-   `/tmp/l137dbg/`, `/tmp/l137_*.qpa`, `/tmp/vectest*.ll` already deleted).
+5. No scratch left over to clean up this session (all `/tmp/l138_*.qpa`
+   deleted).
