@@ -8868,3 +8868,80 @@ fixed). `L134`'s other 3 sub-rows (`L134(a)`, `L134(b)`, `L134(c)`)
 remain open. No feature/extension inventory changes (a correctness
 fix to existing per-sample-shading trigger detection, no new Vulkan
 functionality shipped this session).
+
+## Session: `L134(b)` -- multi-row array-output color-attachment binding fixed (partial)
+
+### Change
+
+`dEQP-VK.draw.renderpass.output_location.array.*` fails 28/28 (roadmap's
+own prior estimate of 24 was short by 4). Split into 3 distinct bugs by
+investigation this session:
+
+1. **Fixed**: 18 of 24 genuine value-mismatch (`Probe failed at: 0, 0`)
+   cases. Root cause: `StageStorage.cpp`'s `findElementByLocation` does an
+   *exact* `Location` match, with no `RowCount` awareness. A GLSL array
+   output (`layout(location=0) out highp float frag_out[3]`) is a single
+   `SignatureElement` with `Location=0, RowCount=3` spanning locations
+   0-2 -- `Executor.cpp`'s per-color-attachment `FSColors[]`-building loop
+   only ever resolved attachment 0 (querying `Location=0`); attachments 1
+   and 2 found nothing and were silently never written. A
+   `FEME_DEBUG_DUMP_STAGE_IR`-gated (temporary, reverted) LLVM-IR dump
+   confirmed the fragment shader's own compiled IR is already correct
+   post-canonicalization, ruling out the compiler front end.
+
+   Fixed by adding `findElementCoveringLocation` (`StageStorage.h`/`.cpp`),
+   which finds the element whose `[Location, Location+RowCount)` span
+   contains the queried location and reports the resolved `Row`
+   (`findElementByLocation` itself deliberately left unchanged -- its
+   other 3 call sites, varying/matrix linking and dual-source blend, need
+   exact single-location matching, a genuinely different semantic). A new
+   parallel `FSColorRows` vector threads the resolved row through to
+   `readFragmentColor`/`readFragmentColorInt` (both gain a `Row`
+   parameter, default `0`, already backed by `StageStorage::readFloat`/
+   `readRaw`'s existing `Row` parameter).
+
+2. **Not fixed, re-scoped as `L134(h)`**: 4 cases crash in
+   `feme-cpu-simdize` (`... has a divergent value '.bc' of vector type
+   ...`) on a vector-wider-than-scalar array-output shape (e.g.
+   `vec2[3]`). Not root-caused this session.
+
+3. **Not fixed, re-scoped as `L134(i)`**: 6 cases
+   (`b10g11r11-ufloat-pack32-{highp,mediump}`, plain and
+   `-output-{float,vec2}`) now fail with an explicit `"Vulkan color
+   attachment format is not supported"` -- `RenderPass.cpp`'s
+   `isSupportedColorAttachmentFormat` never lists
+   `ResourceFormat::R11G11B10_FLOAT`. This gap was previously masked
+   behind the routing bug's own generic "Probe failed" symptom and only
+   surfaced as its own distinct failure once the routing fix let these 6
+   cases reach real attachment binding. `ImageFixture.cpp` already has a
+   `packClearColor` case for this format but no `unpackColor` case.
+
+New unit test `ExecutorTest.RendersMultiRowArrayOutputToSeparateColorAttachments`
+(a `RowCount == 2` fragment output at `Location == 0`, row 0 to
+attachment 0, row 1 to attachment 1) confirmed via a stash/rebuild
+round-trip to fail identically to the real bug pre-fix.
+
+`ninja check-feme`: 3,285/3,288 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.*output_location.array*` (28 cases): **18 Pass, 10 Fail**
+  (was 0 Pass, 28 Fail -- the 24-case original roadmap estimate having
+  undercounted the real 28-case sub-family by 4).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **181 Fail**
+  (was 199 pre-this-session, exactly `199 - 18`), 0 regressions in every
+  other pre-existing fail (spot-checked: the 6 `b10g11r11-ufloat-pack32.*`
+  and 4 `feme-cpu-simdize`-crash cases in the full sweep's own fail list
+  match exactly the 10 cases isolated in the standalone repro above, and
+  no other `output_location.*` case newly failed).
+
+### Results
+
+`L134(b)`'s array-*routing* bug is fixed and CTS-verified; the 4-case
+simdize crash and 6-case `B10G11R11_UFLOAT_PACK32` color-attachment-
+format gap it uncovered are re-scoped as `L134(h)`/`L134(i)`, neither
+attempted this session. `L134`'s other 2 sub-rows (`L134(a)`, `L134(c)`)
+remain open. No feature/extension inventory changes (a correctness fix
+to existing color-attachment binding, no new Vulkan functionality
+shipped this session).
