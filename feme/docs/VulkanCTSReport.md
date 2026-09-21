@@ -7890,3 +7890,66 @@ ASan/valgrind/`rr`-class tooling in a future dedicated session. No
 needed -- pure compiler-internals correctness fix, no new
 feature/extension surface. See `agent_thoughts.md` for the full
 narrative and next steps.
+
+## Session: L128(a) crash localization with valgrind + GDB JIT-debug support
+
+No functional code change landed this session (the `Pipeline.cpp`
+forced-unroll prototype used to reproduce `L128(a)` was reinstated
+locally, used purely for diagnosis, and reverted again -- `git diff`
+against the prior commit is empty for anything under `feme/lib`).
+This session's CTS activity was entirely diagnostic:
+
+- Installed `valgrind` (previously absent) and used
+  `valgrind --track-origins=yes` against the 3
+  `vertex_input.max_attributes.query_max_attributes.*` target cases
+  (with the forced-unroll prototype temporarily reinstated) to
+  localize the `L128(a)` crash: an "Invalid read of size 4" inside
+  unsymbolized JIT-compiled code, at a wild address landing inside
+  an unrelated, coincidentally-adjacent CTS-internal heap allocation
+  in one run and near-null in another -- a genuine memory-safety bug,
+  not a compile-time/logic error, and its address-dependent nature on
+  otherwise byte-identical compiled IR explains the previously-observed
+  run-to-run nondeterminism.
+- Used this project's own existing `FEME_CPU_JIT_DEBUG_SUPPORT=1` GDB
+  JIT-registration hook (`CompiledStage.cpp`, previously undiscovered
+  by recent sessions) to get real function-symbol backtraces for the
+  first time: confirmed the crash is inside `main` (the compiled
+  vertex-shader entry), called from `feme_cpu_entry_main` (the
+  per-invocation wrapper) -- i.e. a draw-time execution crash inside
+  the compiled shader body, not a pipeline-creation-time bug.
+- Ruled out an initial "runaway self-recursion / stack overflow"
+  theory (suggested by a `bt full` showing ~15,000 `feme_cpu_entry_main`
+  frames) by checking `$sp` directly at the crash: it was only ~20KB
+  below the top of a stack region with ~114KB of unused headroom below
+  it, nowhere near the process's 8&nbsp;MiB `ulimit -s` -- the deep
+  "recursion" was an artifact of `gdb`'s naive frame-pointer-chasing
+  failing on frame-pointer-omitted (optimized) JIT code, not a real
+  call chain.
+- Confirmed (via `FEME_DUMP_IR_PREUNROLL`, a debug hook added to the
+  now-reverted prototype) that the forced-full-loop-unroll mechanism
+  itself is correct: all 15 loop iterations became distinct,
+  compile-time-constant-offset GEP+load pairs with zero residual phi
+  nodes -- the unrolling is not the bug; the bug is downstream of it,
+  likely an LLVM IR-construction or codegen defect specific to a
+  `RowCount`-15 plain Vertex-stage input (far larger than any
+  previously-exercised `RowCount`, which topped out at 4 for real
+  matrices).
+- `pipeline.monolithic.blend.*` full-family sweep (PID 40501, running
+  since a prior session): checked repeatedly through this session,
+  climbing from 32,326 to 41,122+ cases completed, 0 Fail throughout;
+  still running at the time this report was written -- carried
+  forward again, see `agent_thoughts.md` for this session's final
+  status note.
+
+### Results
+
+`Roadmap.md`'s `L128(a)` row updated with this session's much more
+precise diagnosis (genuine wild-pointer read inside JIT-executed
+compiled-shader code, heap-layout-dependent, not a stack overflow,
+not yet localized to a specific IR construct) and concrete next-step
+guidance (reinstate the same prototype with `valgrind` +
+`FEME_CPU_JIT_DEBUG_SUPPORT=1` from the start; build a hand-minimized
+few-attribute repro shader to make bisection tractable). `L128` itself
+remains open/not struck through. No `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` update needed -- diagnostic-only session,
+no feature/extension surface changed.
