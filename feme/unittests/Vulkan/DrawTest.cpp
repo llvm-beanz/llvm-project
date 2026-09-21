@@ -2172,6 +2172,113 @@ TEST_F(DrawTest, RendersPerInstanceVertexAttribute) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap L127) A `VkVertexInputBindingDescription` no attribute
+/// actually references (binding 1 below, declared alongside binding 0 --
+/// the one `PerInstanceColorVertexSource`'s own location-1 `aColor`
+/// attribute reads from -- but never itself pointed to by any
+/// `VkVertexInputAttributeDescription`) must not require a bound vertex
+/// buffer at draw time: the Vulkan spec permits leaving such a binding
+/// entirely unbound, matching the real
+/// `dEQP-VK.pipeline.monolithic.vertex_input.misc.unused_binding` CTS
+/// case's own shape (two declared bindings, only one ever consumed).
+/// Before this fix, `runDraw`'s own per-binding fetch loop rejected
+/// *every* declared binding with "vertex binding %u is not bound to a
+/// buffer" if nothing was bound to it, regardless of whether any
+/// attribute referenced it at all.
+TEST_F(DrawTest, RendersWithAnUnusedVertexInputBindingLeftUnbound) {
+  VkShaderModule Vertex = createModule(PerInstanceColorVertexSource);
+  VkShaderModule Fragment = createModule(PassthroughColorFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  // Binding 1 is declared but never referenced by any attribute below --
+  // the "unused binding" shape this test exercises.
+  VkVertexInputBindingDescription BindingDescs[2] = {
+      {0, sizeof(float) * 4, VK_VERTEX_INPUT_RATE_INSTANCE},
+      {1, sizeof(float) * 4, VK_VERTEX_INPUT_RATE_VERTEX}};
+  VkVertexInputAttributeDescription AttrDesc{1, 0,
+                                             VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VertexInput.vertexBindingDescriptionCount = 2;
+  VertexInput.pVertexBindingDescriptions = BindingDescs;
+  VertexInput.vertexAttributeDescriptionCount = 1;
+  VertexInput.pVertexAttributeDescriptions = &AttrDesc;
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkDeviceMemory InstanceMemory = VK_NULL_HANDLE;
+  VkBuffer InstanceBuffer = createBuffer(sizeof(float) * 4, InstanceMemory,
+                                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  float Color[4] = {1.0f, 0.0f, 0.0f, 1.0f}; // red
+  std::memcpy(fromHandle<Buffer>(InstanceBuffer)->data(), Color,
+              sizeof(Color));
+
+  // Only binding 0 (the one an attribute actually references) is ever
+  // bound to a buffer -- binding 1 is left entirely unbound.
+  VkDeviceSize Offset = 0;
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindVertexBuffers(Cmd, 0, 1, &InstanceBuffer, &Offset);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0xFF);
+  EXPECT_EQ(texel(2, 2)[1], 0x00);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
+
+  vkDestroyBuffer(Device, InstanceBuffer, nullptr);
+  vkFreeMemory(Device, InstanceMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap F10) An out-of-bounds vertex attribute fetch must read as zero
 /// and let the draw finish, matching `robustBufferAccess`'s unconditional
 /// "on" state (`PhysicalDeviceInfo.cpp`) and, once opted into per pipeline,
