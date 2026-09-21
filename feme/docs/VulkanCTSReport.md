@@ -8243,3 +8243,80 @@ cases pass, the full `vertex_input.*` family is 0 Fail, and the full
 `L133` crash) shows 0 new fails across every distinct failing family
 observed. No feature/extension inventory changes (no new Vulkan
 functionality shipped this session).
+
+## Session: L133 root-caused and fixed -- nested-struct interior-pad remap gap
+
+Continuing directly from the prior session's `L133` filing. Confirmed
+`FeMe CPU Vulkan Device` at session start (standing requirement).
+
+**Checked the still-running background sweep** (PID 12156, the
+`interface_matching`-excluded `pipeline.monolithic.*` follow-up from the
+prior session): still running, 0 new fails past the already-known
+`bind_buffers_2.*` (`L132`) fails, mid-`blend.*` (a known multi-hour
+sub-family). Left running throughout this session; not required to
+close anything.
+
+**Root-caused `L133`** using a temporary, env-var-gated `errs()` dump
+inside `resolveNestedStageIOField` (`CanonicalizeStage.cpp`, reverted
+before committing) plus a full module IR dump immediately before
+`CanonicalizeStagePass` runs (`GraphicsPipeline.cpp`, also reverted).
+The captured IR for the crashing fragment shader showed the exact
+faulty GEP:
+
+```
+%1 = load float, ptr addrspace(7) getelementptr inbounds nuw
+       (i8, ptr addrspace(7) @spirv_var_15, i64 24), align 4
+```
+
+against `@spirv_var_15`'s real (correctly padded) type `<{ <2 x float>,
+[8 x i8], <{ <2 x float>, [8 x i8], <4 x float> }> }>` -- byte 24 lands
+inside the *inner* struct's own interior pad (bytes 24-32 absolute);
+`variableInStruct` actually starts at byte 32. The outer struct's own
+member selection (`structInBlock` at byte 16) was computed correctly;
+only the *recursive, one-level-deeper* remap into `TestStruct` itself
+was wrong.
+
+**Root cause**: `SPIRVToLLVMPatterns.cpp`'s
+`getStructMemberPhysicalIndexInRealType` (called by
+`remapNestedStructMemberIndices` for any struct-member selector *below*
+the outermost struct level) unconditionally returned `DeclaredIndex`
+unchanged whenever the nested struct had no explicit SPIR-V `Offset`
+decorations. That is correct for member *permutation* (impossible
+without declared offsets to sort by), but wrong for a plain
+*natural-alignment interior pad* (`layOutStructIfOffsetsMatch`'s own
+`!Type.hasOffset()` branch, roadmap L103, still inserts one before a
+member needing wider alignment than its predecessor leaves room for --
+exactly `TestStruct`'s own `vec2 dummy; vec4 variableInStruct;` shape).
+
+**Fix**: `getStructMemberPhysicalIndexInRealType` now falls back to
+`getStructMemberPhysicalIndex`'s own isolated re-derivation (the same
+path the outermost-struct level already uses unconditionally) when
+`!Struct.hasOffset()`, rather than assuming no remap is ever needed --
+safe because a natural-alignment gap's position depends only on the
+members strictly before the one being resolved, never on any enclosing
+struct's own retry-tier choice (unlike the separate tight-vector-marker-
+struct substitution concern this function's own doc comment discusses,
+which is unaffected by this change).
+
+### Testing
+
+`ninja check-feme`: 3,277/3,280 Passed, 3 Unsupported, 0 Failed (no
+regressions; no new unit test added this session -- see "Suggested next
+steps" below).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- The exact crashing case now **Pass**es:
+  `dEQP-VK.pipeline.monolithic.interface_matching.decoration_mismatch.
+  out_flat_in_none_member_of_structure_in_block_vert_geom_out_frag_in`.
+- Full `dEQP-VK.pipeline.monolithic.interface_matching.*` re-sweep
+  (previously impossible to complete due to the abort): **0 Fail**,
+  1,445 Pass, 144 NotSupported, 1,589 total.
+
+### Results
+
+`L133` is now considered fully closed: the crashing case passes, and a
+full re-sweep of its entire CTS family completes cleanly with no
+sibling regressions. No feature/extension inventory changes (a
+correctness fix to existing lowering, no new Vulkan functionality
+shipped this session).
