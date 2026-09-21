@@ -3842,6 +3842,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
         cpu::FemeStageLayout FSInLayout = FSInput->layout();
         cpu::FemeStageLayout FSOutLayout = FSOutput->layout();
+        // (Roadmap L115(b) follow-up) `FSVertexInputs` above was built
+        // with `QuadCount * 3` invocations, not `FSInput`'s own
+        // `QuadCount * 4` -- its own `FemeStageElement::ComponentStride`/
+        // `RowStride` (baked from that invocation count by
+        // `buildStageStorage`) are therefore genuinely different from
+        // `FSInLayout`'s, even though both describe the very same
+        // `FSSig` elements. A distinct layout, addressing this distinct
+        // storage block, is required -- see `FemeFragmentArgs::
+        // VertexInputLayout`'s own comment for the bug this fixes.
+        cpu::FemeStageLayout FSVertexInLayout = FSVertexInputs->layout();
         std::vector<cpu::FemeFragmentResult> Results(QuadCount);
 
         cpu::FragmentResources FRes;
@@ -3861,6 +3871,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         FRes.Results = Results;
         FRes.Primitives = Primitives;
         FRes.VertexInputs = FSVertexInputs->Data.data();
+        FRes.VertexInputLayout = &FSVertexInLayout;
         FRes.SamplePositions = *SamplePositions;
         const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
         cpu::PreparedFragmentBatch PFB =

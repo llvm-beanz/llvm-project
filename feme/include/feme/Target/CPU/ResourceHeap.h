@@ -205,10 +205,15 @@ struct FragmentResources {
   /// `FemeFragmentArgs::Primitives`'s own comment.
   llvm::ArrayRef<FemeFragmentPrimitive> Primitives;
   /// (Roadmap L115(b)) Raw (pre-interpolation) per-vertex input storage,
-  /// `3 * Invocations.size()` slots addressed by `InputLayout`; null under
-  /// the same condition as `Primitives` -- see `FemeFragmentArgs::
-  /// VertexInputs`'s own comment.
+  /// `3 * Invocations.size()` slots -- addressed with `VertexInputLayout`
+  /// below, *not* `InputLayout` above (they describe the same signature
+  /// but different invocation counts, hence different byte strides) --
+  /// see `FemeFragmentArgs::VertexInputs`'s own comment. Null under the
+  /// same condition as `Primitives`.
   const void *VertexInputs = nullptr;
+  /// (Roadmap L115(b) follow-up) Layout describing `VertexInputs` above.
+  /// Null under the same condition as `Primitives`/`VertexInputs`.
+  const FemeStageLayout *VertexInputLayout = nullptr;
   /// (Roadmap L115(b)) Fixed per-sample offsets `InterpolateAtSample`
   /// resolves its own sample-index operand against; empty under the same
   /// condition as `Primitives` -- see `FemeFragmentArgs::SamplePositions`'s
@@ -237,6 +242,7 @@ private:
                         llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap,
                         llvm::ArrayRef<FemeFragmentPrimitive> Primitives,
                         const void *VertexInputs,
+                        const FemeStageLayout *VertexInputLayout,
                         llvm::ArrayRef<std::array<float, 2>> SamplePositions);
 
   std::vector<FemeDescriptor> ResourceHeap;
@@ -256,6 +262,7 @@ private:
   /// `SamplePositions`'s own comments.
   llvm::ArrayRef<FemeFragmentPrimitive> Primitives;
   const void *VertexInputs = nullptr;
+  const FemeStageLayout *VertexInputLayout = nullptr;
   llvm::ArrayRef<std::array<float, 2>> SamplePositions;
 };
 

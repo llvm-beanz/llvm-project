@@ -117,12 +117,12 @@ enum FragmentArgsField : unsigned {
   FragmentArgsFieldInvocations = 8,
   FragmentArgsFieldResults = 9,
   // (Roadmap L115(b)) Consumed from this struct's own former
-  // `Reserved[4]` (now `Reserved[1]`) -- see `FemeFragmentArgs::
+  // `Reserved[4]` (now fully consumed) -- see `FemeFragmentArgs::
   // Primitives`'s own comment.
   FragmentArgsFieldPrimitives = 10,
   FragmentArgsFieldVertexInputs = 11,
-  FragmentArgsFieldSamplePositions = 12,
-  FragmentArgsFieldReserved = 13,
+  FragmentArgsFieldVertexInputLayout = 12,
+  FragmentArgsFieldSamplePositions = 13,
 };
 
 enum PatchArgsField : unsigned {
@@ -284,8 +284,7 @@ inline llvm::StructType *getFragmentArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(
       Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
-            PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
-            llvm::ArrayType::get(PtrTy, 1)});
+            PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
 }
 
 /// (Roadmap L115(b)) Builds the LLVM struct type mirroring

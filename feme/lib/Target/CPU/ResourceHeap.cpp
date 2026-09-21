@@ -207,13 +207,15 @@ PreparedFragmentBatch::PreparedFragmentBatch(
     MutableArrayRef<FemeFragmentResult> Results,
     ArrayRef<FemeImageDescriptor> SubpassInputHeap,
     ArrayRef<FemeFragmentPrimitive> Primitives, const void *VertexInputs,
+    const FemeStageLayout *VertexInputLayout,
     ArrayRef<std::array<float, 2>> SamplePositions)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
       Outputs(Outputs), Invocations(Invocations), Results(Results),
       SubpassInputHeap(SubpassInputHeap), Primitives(Primitives),
-      VertexInputs(VertexInputs), SamplePositions(SamplePositions) {
+      VertexInputs(VertexInputs), VertexInputLayout(VertexInputLayout),
+      SamplePositions(SamplePositions) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -243,7 +245,8 @@ PreparedFragmentBatch::create(const ResourceInfo &Info,
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.OutputLayout, Resources.Outputs, Resources.Invocations,
       Resources.Results, Resources.SubpassInputHeap, Resources.Primitives,
-      Resources.VertexInputs, Resources.SamplePositions);
+      Resources.VertexInputs, Resources.VertexInputLayout,
+      Resources.SamplePositions);
 }
 
 FemeFragmentArgs PreparedFragmentBatch::args() const {
@@ -259,6 +262,7 @@ FemeFragmentArgs PreparedFragmentBatch::args() const {
   Args.Results = Results.data();
   Args.Primitives = Primitives.data();
   Args.VertexInputs = VertexInputs;
+  Args.VertexInputLayout = VertexInputLayout;
   Args.SamplePositions =
       reinterpret_cast<const float *>(SamplePositions.data());
   return Args;

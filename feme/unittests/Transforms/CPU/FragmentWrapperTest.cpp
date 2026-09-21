@@ -362,4 +362,127 @@ TEST(FragmentWrapperTest, LowersSamplePositionSystemValueInput) {
          "the SamplePosition system value";
 }
 
+// Regression test for roadmap L115(b): `lowerFragmentInterpolateAt()`'s own
+// per-vertex raw-varying reload previously reused `FEnv.InputLayout` (the
+// per-invocation-count-4 layout table built for `FSInput`/ordinary
+// `feme.stage.input.load`) to address `FEnv.VertexInputs` (a *separate*
+// per-invocation-count-3 storage block built from `FSVertexInputs` for pull-
+// model interpolation's own raw per-vertex data). Since
+// `feme::graphics::buildStageStorage()`'s own `ComponentStride`/`RowStride`
+// fields are baked directly from its `InvocationCount` parameter, two
+// storage blocks with different invocation counts for the very same
+// signature are structurally incompatible for cross-addressing, even though
+// they share `ElementID`s -- found via a real `deqp-vk` reproduction of
+// `dEQP-VK.draw.renderpass.linear_interpolation.*`, whose green/blue/alpha
+// channels (any component other than 0) came out wrong while red (component
+// 0, where the wrong stride's multiplier is a harmless no-op) always
+// matched. Verify the vertex-input reload's layout-table address computation
+// is rooted at the dedicated `stage_fragment_vertex_input_layout` parameter,
+// not `stage_input_layout`.
+TEST(FragmentWrapperTest, InterpolateAtAddressesVertexInputsWithOwnLayout) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main() #0 {
+      %v = call float @feme.stage.interpolate.at.offset.f32(i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
+      ret void
+    }
+    declare float @feme.stage.interpolate.at.offset.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  In.FirstComponent = 0;
+  In.ComponentCount = 1;
+  SignatureElement Out = In;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Sig.Elements = {In, Out};
+  dxil::setEntrySignature(*M->getFunction("ps_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  FragmentWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  // `appendFragmentStageParams()`'s new parameter lands on the per-lane
+  // "wave body" function (the one `lowerFragmentInterpolateAt()` itself
+  // rewrites), not on `feme_cpu_entry_ps_main` (the ABI-struct-taking outer
+  // wrapper, which instead loads it from the struct and forwards it by
+  // name via `CallArgs`) -- find whichever function actually declares the
+  // parameter rather than assuming a fixed name.
+  Function *Entry = nullptr;
+  for (Function &F : *M) {
+    for (Argument &Arg : F.args()) {
+      if (Arg.getName() == "stage_fragment_vertex_input_layout") {
+        Entry = &F;
+        break;
+      }
+    }
+    if (Entry)
+      break;
+  }
+  ASSERT_TRUE(Entry) << "no function in the module declared a "
+                        "stage_fragment_vertex_input_layout parameter";
+
+  // The entry point must have gained a dedicated `stage_fragment_vertex_
+  // input_layout` parameter, distinct from `stage_input_layout`.
+  Argument *VertexInputLayoutArg = nullptr;
+  Argument *InputLayoutArg = nullptr;
+  for (Argument &Arg : Entry->args()) {
+    if (Arg.getName() == "stage_fragment_vertex_input_layout")
+      VertexInputLayoutArg = &Arg;
+    else if (Arg.getName() == "stage_input_layout")
+      InputLayoutArg = &Arg;
+  }
+  ASSERT_TRUE(VertexInputLayoutArg);
+  ASSERT_TRUE(InputLayoutArg);
+  EXPECT_NE(VertexInputLayoutArg, InputLayoutArg);
+
+  // Every layout-table lookup GEP reachable from `%v`'s own worker-function
+  // callee must ultimately be rooted at `VertexInputLayoutArg`, never
+  // `InputLayoutArg` -- walk the (small) def-use graph from
+  // `VertexInputLayoutArg`/`InputLayoutArg` themselves instead of the call
+  // site, since `lowerFragmentInterpolateAt()` lowers into a per-lane loop
+  // body that may live in a separate helper function after `SIMDize`/
+  // `WaveLowering`.
+  bool VertexInputLayoutUsed = false;
+  for (const Use &U : VertexInputLayoutArg->uses()) {
+    if (isa<BitCastInst>(U.getUser()) || isa<GetElementPtrInst>(U.getUser()) ||
+        isa<CallInst>(U.getUser())) {
+      VertexInputLayoutUsed = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(VertexInputLayoutUsed)
+      << "expected the new stage_fragment_vertex_input_layout parameter to "
+         "actually be consumed (bitcast/GEP'd/forwarded) somewhere in the "
+         "module, not left dead";
+
+  // The regression itself: this test's shader has no ordinary
+  // `feme.stage.input.load` call, only `interpolate.at.offset` -- so under
+  // the bug (`FEnv.InputLayout` reused to address `FEnv.VertexInputs`),
+  // `InputLayoutArg` would *also* end up dereferenced (bitcast/GEP'd) even
+  // though nothing in this shader legitimately needs it. Under the fix, it
+  // must stay entirely unused.
+  bool InputLayoutDereferenced = false;
+  for (const Use &U : InputLayoutArg->uses())
+    if (isa<BitCastInst>(U.getUser()) || isa<GetElementPtrInst>(U.getUser()))
+      InputLayoutDereferenced = true;
+  EXPECT_FALSE(InputLayoutDereferenced)
+      << "stage_input_layout was dereferenced even though this shader has "
+         "no ordinary feme.stage.input.load call -- regression for roadmap "
+         "L115(b)'s VertexInputs/InputLayout stride-mismatch bug: "
+         "lowerFragmentInterpolateAt() must address FEnv.VertexInputs with "
+         "FEnv.VertexInputLayout, not FEnv.InputLayout";
+}
+
 } // namespace

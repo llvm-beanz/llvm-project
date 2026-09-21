@@ -1161,12 +1161,29 @@ struct FemeFragmentArgs {
   /// from this struct's own former `Reserved[4]` (now `Reserved[1]`).
   const FemeFragmentPrimitive *Primitives;
   /// (Roadmap L115(b)) Structure-of-arrays storage for each covered
-  /// primitive's own 3 vertices' raw (pre-interpolation) input values,
-  /// addressed with `InputLayout` exactly like `Inputs` above, but with 3
-  /// invocation slots per quad (vertex 0/1/2, in that order, i.e.
-  /// invocation index `3 * QuadIndex + VertexIndex`) rather than 4 (one
-  /// per lane). Null under the same condition as `Primitives`.
+  /// primitive's own 3 vertices' raw (pre-interpolation) input values, with
+  /// 3 invocation slots per quad (vertex 0/1/2, in that order, i.e.
+  /// invocation index `3 * QuadIndex + VertexIndex`) rather than 4 (one per
+  /// lane) -- addressed with `VertexInputLayout` below, *not* `InputLayout`
+  /// above: `feme::graphics::buildStageStorage` bakes each element's own
+  /// `ComponentStride`/`RowStride` directly from the invocation count it
+  /// is called with (`QuadCount * 3` here vs. `Inputs`'s own
+  /// `QuadCount * 4`), so the two storage blocks' layouts are only
+  /// identical in which `ElementID`s exist, never in their byte strides --
+  /// reusing `InputLayout` to address this block silently computed the
+  /// wrong byte offset for every non-zero `Component`/invocation index
+  /// (confirmed against a real `dEQP-VK.draw.renderpass.
+  /// linear_interpolation.*` failure: only interpolated component 0 ever
+  /// read back correctly, matching `RelComponent == 0` making the wrong
+  /// stride's multiplication a no-op). Null under the same condition as
+  /// `Primitives`.
   const void *VertexInputs;
+  /// (Roadmap L115(b) follow-up) Layout describing `VertexInputs` above --
+  /// see that field's own comment for why this must be a distinct table
+  /// from `InputLayout`, built from the same signature but against
+  /// `VertexInputs`'s own `QuadCount * 3` invocation count. Null under the
+  /// same condition as `Primitives`/`VertexInputs`.
+  const FemeStageLayout *VertexInputLayout;
   /// (Roadmap L115(b)) Fixed per-sample offsets within a pixel (`{x, y}`
   /// pairs, mirroring `Executor.cpp`'s own `samplePositions` table exactly
   /// -- roadmap R33's "fixed sample locations" determinism requirement)
@@ -1177,9 +1194,6 @@ struct FemeFragmentArgs {
   /// condition this ABI defends against. Null under the same condition as
   /// `Primitives`.
   const float *SamplePositions;
-  /// ABI headroom for later fragment-batch metadata. Was `Reserved[4]`
-  /// before roadmap L115(b) consumed 3 slots for the fields above.
-  void *Reserved[1];
 };
 
 /// The single argument a compiled control (hull) stage's control-point entry

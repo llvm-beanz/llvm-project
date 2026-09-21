@@ -45,6 +45,11 @@ constexpr StringLiteral ResultsParamName = "stage_fragment_results";
 // `SamplePositions`'s own comments.
 constexpr StringLiteral PrimitivesParamName = "stage_fragment_primitives";
 constexpr StringLiteral VertexInputsParamName = "stage_fragment_vertex_inputs";
+// (Roadmap L115(b) follow-up) Distinct from `InputLayoutParamName` --
+// see `FemeFragmentArgs::VertexInputLayout`'s own comment for why
+// `VertexInputs` cannot be addressed with `InputLayout`.
+constexpr StringLiteral VertexInputLayoutParamName =
+    "stage_fragment_vertex_input_layout";
 constexpr StringLiteral SamplePositionsParamName =
     "stage_fragment_sample_positions";
 
@@ -68,6 +73,7 @@ struct FragmentStageEnv {
   /// own comments.
   Value *Primitives = nullptr;
   Value *VertexInputs = nullptr;
+  Value *VertexInputLayout = nullptr;
   Value *SamplePositions = nullptr;
 };
 
@@ -91,6 +97,8 @@ std::optional<FragmentStageEnv> getFragmentStageEnv(Function &F) {
       Env.Primitives = &Arg, Found = true;
     else if (Arg.getName() == VertexInputsParamName)
       Env.VertexInputs = &Arg, Found = true;
+    else if (Arg.getName() == VertexInputLayoutParamName)
+      Env.VertexInputLayout = &Arg, Found = true;
     else if (Arg.getName() == SamplePositionsParamName)
       Env.SamplePositions = &Arg, Found = true;
   }
@@ -104,7 +112,7 @@ Function *appendFragmentStageParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
   ParamTypes.append(
-      {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+      {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -132,6 +140,7 @@ Function *appendFragmentStageParams(Function &F) {
   (&*ArgIt++)->setName(ResultsParamName);
   (&*ArgIt++)->setName(PrimitivesParamName);
   (&*ArgIt++)->setName(VertexInputsParamName);
+  (&*ArgIt++)->setName(VertexInputLayoutParamName);
   (&*ArgIt++)->setName(SamplePositionsParamName);
 
   NewF->takeName(&F);
@@ -708,9 +717,13 @@ Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
     auto LoadVertexValue = [&](unsigned V) {
       Value *InvIdx =
           Builder.CreateAdd(VertexBase, Builder.getInt32(V));
+      // (Roadmap L115(b) follow-up) `FEnv.VertexInputs` needs its own
+      // `VertexInputLayout` here, not `FEnv.InputLayout` -- see
+      // `FemeFragmentArgs::VertexInputLayout`'s own comment for why the
+      // two differ even though they describe the same signature.
       Value *Addr = computeStageStorageAddress(
-          Builder, FEnv.InputLayout, FEnv.VertexInputs, Elt.ElementID, Elt,
-          /*Row=*/Builder.getInt32(0), Component, InvIdx);
+          Builder, FEnv.VertexInputLayout, FEnv.VertexInputs, Elt.ElementID,
+          Elt, /*Row=*/Builder.getInt32(0), Component, InvIdx);
       Value *TypedPtr = Builder.CreateBitCast(Addr, PtrTy);
       return Builder.CreateLoad(F32Ty, TypedPtr);
     };
@@ -920,6 +933,7 @@ struct WrapperEnv {
   /// own comments.
   Value *Primitives = nullptr;
   Value *VertexInputs = nullptr;
+  Value *VertexInputLayout = nullptr;
   Value *SamplePositions = nullptr;
 };
 
@@ -947,6 +961,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
                                    FragmentArgsFieldPrimitives, PtrTy);
   Env.VertexInputs = loadStructField(Builder, ArgsTy, Args,
                                      FragmentArgsFieldVertexInputs, PtrTy);
+  Env.VertexInputLayout = loadStructField(
+      Builder, ArgsTy, Args, FragmentArgsFieldVertexInputLayout, PtrTy);
   Env.SamplePositions = loadStructField(
       Builder, ArgsTy, Args, FragmentArgsFieldSamplePositions, PtrTy);
 
@@ -1132,6 +1148,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.Primitives);
     else if (Arg.getName() == VertexInputsParamName)
       CallArgs.push_back(Env.VertexInputs);
+    else if (Arg.getName() == VertexInputLayoutParamName)
+      CallArgs.push_back(Env.VertexInputLayout);
     else if (Arg.getName() == SamplePositionsParamName)
       CallArgs.push_back(Env.SamplePositions);
     else
