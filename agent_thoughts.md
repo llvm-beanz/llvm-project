@@ -97792,3 +97792,99 @@ PID-12156 sweep's own live log) in place.
    new runtime-callback ABI surface, not a quick pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+# Session: L134 filed, L134(f) fixed same session
+
+Confirmed `FeMe CPU Vulkan Device` at start (`vulkaninfo --summary`).
+Continued from the prior session's next steps.
+
+## Step 1: killed the stale background sweep (~2 min, as estimated)
+
+PID 12156 had dlopen'd FeMe's ICD `.so` into its own process memory *before*
+this session's `L132` fix was even built. A dlopen'd library doesn't reload
+mid-process, so it had been running on **stale, pre-fix code** for its whole
+4+-session, 80+-minute runtime -- it could never have confirmed `L132` at
+full-sweep scale, no matter how long it ran. Killed it, cleaned up its ~1GB
+scratch log. This session's own targeted `bind_buffers_2.*` re-sweep already
+confirmed `L132` fully, so nothing was lost.
+
+**Lesson for future sessions**: if you leave a long-running `deqp-vk` sweep
+in the background across a fix, and then rebuild `feme_vulkan.so` again
+*within the same still-running sweep's lifetime*, the sweep keeps using
+whatever code was loaded at its own start -- check this before trusting a
+long-running sweep to confirm a fix landed mid-run.
+
+## Step 2: filed the 224 draw.* fails as L134 (~10 min)
+
+None of them were previously tracked. Filed as `L134`, broken into 7
+sub-rows by CTS sub-family so a future session (or this one) can pick one
+directly instead of re-deriving the same breakdown.
+
+## Bonus: picked off L134(f) immediately (~45 min, not in the plan)
+
+While filing `L134(f)` (`depth_clamp.*_clamp_four_viewports`, 4 cases), its
+CTS failure text -- `"expected: 0.66, got: 0.66"` -- was an unmistakable
+match for `L132`'s exact signature (displayed values identical, `Fail`
+anyway). Checked the CTS source: this family's tolerance is
+`std::numeric_limits<float>::epsilon()`, i.e. no real fuzz margin at all.
+
+Root cause: identical to `L132`, just in `Executor.cpp`'s **depth**
+computation (`Depth = B0*Z0+B1*Z1+B2*Z2`) rather than the varying loop --
+same three-independently-rounded-divisions gap, same fix (a
+`Tri.Depth[0]==Tri.Depth[1]==Tri.Depth[2]` short-circuit).
+
+Proof, same discipline as `L132`:
+1. New unit test `InterpolatesAGenuinelyConstantDepthExactly` first.
+2. First attempt at NDC Z = 0.32f **passed even without the fix** -- not
+   every constant value exposes a visible drift for a given geometry.
+   Switched to 0.1f (matching `L132`'s own precedent choice) -- this one
+   **did** fail pre-fix (1 ULP off, texel 15), confirming the test was
+   actually exercising the bug, not just passing by luck.
+3. `ninja check-feme`: 3,280/3,283, 0 regressions.
+4. CTS: `depth_clamp.*` 4->0 Fail. Full `draw.*` regression sweep (both with
+   and without the fix): fail count drops by exactly 4, `diff` of the two
+   224/220-line fail lists confirms it's exactly these 4 cases and nothing
+   else.
+
+Committed in 4 pieces (fix, test, Roadmap.md, VulkanCTSReport.md), all with
+the Copilot co-author trailer. `L134`'s parent row updated to note 1 of 7
+sub-rows closed; the depth_clamp+basic_draw.misc bundle split into a closed
+`L134(f)` and a new open `L134(g)` (the 1 remaining `basic_draw.misc.
+maintenance5` case).
+
+## What I did NOT do this session
+
+`L125(m)`/`L125(n)` and `L115(b)` (items 3/4 from the prior session's own
+next steps) were both explicitly flagged "not a quick pick, needs a
+dedicated session" -- left untouched again, on purpose, rather than forcing
+a shallow attempt.
+
+## Suggested next steps
+
+1. **(~30-60 min each, quick picks)** `L134`'s 6 remaining open sub-rows,
+   roughly by expected size: `L134(g)` (1 case, `basic_draw.misc.
+   maintenance5`) is the smallest; `L134(d)` (`implicit_sample_shading`, 12
+   cases, 3 distinct shapes) and `L134(e)` (`shader_layer` at layer 256, 8
+   cases) are next; `L134(b)` (`output_location.array`, 24 cases across
+   many formats) and `L134(c)` (`multiple_interpolation`, 64 cases) are
+   mid-sized; `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases, the
+   largest single family) is likely the most involved. **Before starting
+   any of them, check their CTS failure message text first** -- if it's
+   another "expected: X, got: X" exact-value mismatch, it may be the same
+   `L132`/`L134(f)` barycentric-sum-not-exactly-1.0 class of bug in yet
+   another consumer of `Bary0/1/2` (there may be more beyond depth and
+   color -- `EdgeDist`/line antialiasing at ~3453 hasn't been checked for
+   this same gap yet). If the message is something else entirely (a real
+   `Fail` with visibly different values, a crash, a wrong-format rejection,
+   etc.), it's a genuinely separate bug needing its own investigation.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+3. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+5. **(~2 min)** `/tmp/ctsrun/l132fix/` (127MB, this and the prior session's
+   scratch logs) can be deleted once a future session no longer needs its
+   raw `.qpa`/`.log` files -- nothing in it is referenced by anything
+   committed.
