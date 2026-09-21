@@ -9579,3 +9579,83 @@ confirmation re-sweep in a future session, though it shares the
 identical root-cause legalization gap and should very likely also now
 pass. No feature/extension inventory changes (both fixes are compiler
 correctness fixes -- no new Vulkan functionality shipped this session).
+
+## L125(r) re-sweep: two further `Interpolant`-AccessChain shapes (session N+1)
+
+Per the prior session's own flagged follow-up, re-swept
+`multisample_interpolation.*` to confirm `L115(b)`'s fix also closed
+`L125(r)`. It did not fully close it: the family had **not moved at
+all** (still 134 Pass / 237 Fail on a first re-run) until a stale
+`deqp-vk` shader cache (`shadercache.bin`, on by default) was
+diagnosed and disabled via `--deqp-shadercache=disable` -- a rebuild's
+effect can be silently masked by this cache during re-verification;
+future sessions re-testing after a rebuild should always pass this
+flag or delete the cache file first.
+
+With the cache correctly disabled, two further, distinct `Interpolant`
+shapes were found and fixed in `SPIRVToLLVMPatterns.cpp`'s
+`resolveInterpolantAddress`, both `spirv.AccessChain`-derived (as
+opposed to `L115(b)`'s own bare `spirv.mlir.addressof` shape):
+
+1. **AccessChain into an array/struct-typed `Input` global's leaf**
+   (`StageIOArrayAccessChainPattern`'s own domain): converts to a real
+   `llvm.getelementptr`, but the dialect-conversion driver only
+   materializes the type converter's canonical (eagerly-loaded) answer
+   for that leaf *lazily* -- what our pattern actually observes at
+   query time is an as-yet-unresolved `builtin.unrealized_conversion_cast`
+   wrapping the real address, not a load. Fixed by unwrapping this cast
+   directly.
+2. **AccessChain selecting one component of a bare vector-typed
+   `Input` global** (e.g. `interpolateAtSample(vColor.x, ...)`):
+   converts to an `llvm.extractelement` on the whole eagerly-loaded
+   vector, with no pointer/address surviving anywhere in the IR at all.
+   Fixed by recursively resolving the extracted vector's own address,
+   then synthesizing a fresh `getelementptr` into it using the
+   extraction's own lane index -- mirroring the existing
+   `buildBoolVectorGEP` "leading zero index" GEP shape already used
+   elsewhere in this file for an identical vector-as-array addressing
+   need. `CanonicalizeStage.cpp`'s `getStageIOBaseAndOffset` already
+   understands this GEP shape unmodified (via its existing
+   `stripAndAccumulateConstantOffsets` walk), so no changes were needed
+   on that side.
+
+Two new FileCheck regression cases added to
+`spirv-to-llvm-gl-interpolate-at.mlir` covering both shapes.
+
+### Verification
+
+- `ninja check-feme`: 3,298/3,301 Passed, 3 Unsupported, 0 Failed (0
+  regressions).
+- CTS `dEQP-VK.pipeline.*.multisample_interpolation.*` (1,699 cases,
+  `--deqp-shadercache=disable`): **206 Pass / 165 Fail / 1,328
+  NotSupported** (was 134 Pass / 237 Fail before this session's two
+  fixes).
+
+Of the remaining 165 fails:
+
+- **54 "Fail (Failed)" + 3 "Fail (Fail)"**: genuine numerical
+  mismatches, unchanged by this session's fix, not yet triaged --
+  plausibly the already-documented `AtCentroid` pixel-center-vs-true-
+  coverage-weighted-centroid simplification (see `L115(b)`'s own
+  follow-up note) or the `AtOffset` DXIL-snapped-units gap, but not
+  confirmed.
+- **108**: a newly-*exposed* (not newly-caused) `VK_ERROR_INITIALIZATION_FAILED`
+  at `vkPipelineConstructionUtil.cpp:176`, exclusively on
+  `centroid_interpolation_consistency.pushc_component_*` cases under
+  the `fast_linked_library`/`pipeline_library` construction types --
+  previously masked by the legalization failure occurring earlier in
+  the same pipeline-creation call. `FeMeVulkanDesign.md`'s own H29
+  write-up already documents `graphicsPipelineLibraryIndependentInterpolationDecoration`
+  as honestly `VK_FALSE`, which this bucket plausibly requires. Filed
+  as new roadmap row `L137` rather than investigated further this
+  session.
+
+### Results
+
+`L125(r)` updated in `Roadmap.md`: both newly-discovered AccessChain
+sub-bugs fixed and CTS-verified (134/237 -> 206/165 on the full
+`multisample_interpolation.*` sweep). The residual 57 numerical
+mismatches and 108 pipeline-library-construction fails are re-scoped,
+the latter as new row `L137`. No feature/extension inventory changes
+(compiler correctness fixes only -- no new Vulkan functionality
+shipped this session).
