@@ -55,20 +55,17 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **`L115(b)`** (pull-model interpolation, now covering both its own original
-   scope and the former `L135`) -- the only interesting open item this session
-   found. Needs a new runtime-callback ABI surface, not a quick pick: (a) a new
-   stage op (e.g. `feme.stage.input.interpolate`) carrying resolved
-   element/row/component plus a runtime mode and operand(s); (b) a new
-   per-invocation runtime-callback mechanism in `Executor.cpp` (modeled on
-   `ImageCalls.cpp`'s existing texture-sampling precedent) exposing enough of
-   `Executor.cpp`'s own per-lane triangle data (`Tri.Pos`/`InvW`/`Varyings`,
-   `Area`, `Quad.PixelX`/`PixelY`) to recompute barycentric weights at a
-   runtime-supplied point; (c) `SPIRVToLLVMPatterns.cpp` conversion patterns for
-   `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` themselves. Estimated 1-2
-   full sessions given the new ABI surface -- start a fresh session dedicated to
-   just this, don't try to squeeze it into a continuation.
-2. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **(~15 min, quick confirmation)** Re-sweep
+   `dEQP-VK.draw.*.multisample_interpolation.*` to confirm this fix also closes
+   `L125(r)`'s own tracked bucket -- very likely yes, given the identical
+   root-cause legalization gap, but not directly verified this session.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+   the largest not-yet-started cross-repo item, needs its own dedicated session.
+3. **(~1 session, follow-up not blocking anything)** `AtCentroid`'s pixel-center
+   simplification -- needs per-sample coverage-mask data threaded into
+   `FemeFragmentPrimitive` for a true coverage-weighted centroid; no CTS case
+   currently distinguishes this, so low urgency.
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-3. No scratch left over to clean up this session (`/tmp/ctsrun/l136/` and its
-   contents already deleted).
+5. No scratch left over to clean up this session (`/tmp/interp_test.mlir`,
+   `/tmp/ctsrun/l115b*` already deleted).
