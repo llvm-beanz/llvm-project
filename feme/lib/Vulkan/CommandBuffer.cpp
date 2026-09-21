@@ -2090,6 +2090,24 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
   return Error::success();
 }
 
+/// (Roadmap L127) Whether any of \p Pipeline's own `VkVertexInputAttribute
+/// Description`s actually reads from \p Binding. The Vulkan spec permits a
+/// `VkVertexInputBindingDescription` with no attribute referencing it at
+/// all (`dEQP-VK.pipeline.monolithic.vertex_input.misc.unused_binding`'s
+/// own shape: two bindings declared, but every attribute reads from
+/// binding 0 only) -- such a binding is simply never fetched from, so it
+/// need not actually be bound to a buffer at draw time either. Shared
+/// between `runDraw`'s own per-binding fetch loop and
+/// `validateDrawFetchBounds`'s pre-draw check so the two can never
+/// disagree on which bindings are actually load-bearing.
+bool bindingHasAnyAttribute(const GraphicsPipeline &Pipeline,
+                            uint32_t Binding) {
+  for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes())
+    if (Attr.Binding == Binding)
+      return true;
+  return false;
+}
+
 /// Builds and runs a vertex-pipeline draw (`vkCmdDraw`/`vkCmdDrawIndexed`, or
 /// one command read back from an indirect buffer): resolves the render
 /// target's attachments (`resolveDrawAttachments`), fetches every bound
@@ -2113,6 +2131,10 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
   std::vector<std::vector<feme::graphics::VertexAttribute>> AttributeStorage;
   std::vector<feme::graphics::VertexBufferBinding> VertexBuffers;
   for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings()) {
+    // (Roadmap L127) A binding no attribute reads from is never fetched
+    // from, so it need not be bound at all -- see `bindingHasAnyAttribute`.
+    if (!bindingHasAnyAttribute(Pipeline, BindingDecl.Binding))
+      continue;
     if (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
         !Gfx.VertexBuffers[BindingDecl.Binding] ||
         !Gfx.VertexBuffers[BindingDecl.Binding]->isBound())
@@ -2301,9 +2323,12 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
   if (Draw.VertexCount == 0 || Draw.InstanceCount == 0)
     return Error::success();
   for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings())
-    if (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
-        !Gfx.VertexBuffers[BindingDecl.Binding] ||
-        !Gfx.VertexBuffers[BindingDecl.Binding]->isBound())
+    // (Roadmap L127) A binding no attribute reads from is never fetched
+    // from, so it need not be bound at all -- see `bindingHasAnyAttribute`.
+    if (bindingHasAnyAttribute(Pipeline, BindingDecl.Binding) &&
+        (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
+         !Gfx.VertexBuffers[BindingDecl.Binding] ||
+         !Gfx.VertexBuffers[BindingDecl.Binding]->isBound()))
       return createStringError(inconvertibleErrorCode(),
                                "vertex binding %u is not bound to a buffer",
                                BindingDecl.Binding);
