@@ -58,28 +58,28 @@ state it left behind with `git stash pop`.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~5-10 min, quick pick)** File `linear_interpolation.*`'s 42-case
-   `InterpolateAtOffset` legalization gap as a new roadmap row (e.g. `L135`) --
-   error text `error: failed to legalize operation
-   'spirv.GL.InterpolateAtOffset' that was explicitly marked illegal` at
-   pipeline creation, confirmed pre-existing this session. Not investigated
-   beyond confirming it's real and pre-existing.
-2. **(~5-10 min, quick pick)** File `output_location.shuffle.inputs-outputs`'s
-   1-case JIT symbol-resolution gap as its own roadmap row too (e.g. `L136`) --
-   `JIT session error: Symbols not found: [ spirv_var_36, spirv_var_33 ]`, also
-   confirmed pre-existing, not yet investigated.
-3. **(~1-2 hrs)** `L134(a)` (`indexed_draw.*`/`maintenance6`, 64 cases) -- the
-   last open `L134` sub-row. Every failing case name contains
-   `maintenance6`/`bindindexbuffer2_maintenance6`; plain
-   `draw_indexed`/`draw_indexed_indirect` without that suffix are not in the
-   fail list, so start there.
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+1. **(~1-2 hrs, quick-ish)** `L136` (`output_location.shuffle.inputs-outputs`, 1
+   case) -- smallest of the two newly-filed items. `JIT session error: Symbols
+   not found: [ spirv_var_36, spirv_var_33 ]` -- start by finding where
+   `spirv_var_NN`-named symbols are declared/resolved (likely
+   `SPIRVToLLVMPatterns.cpp` or the JIT linking layer) and compare against this
+   test's own "shuffle" input/output swizzle shape to see what's different about
+   its global-variable naming/linkage vs. every passing case.
+2. **(~2-4 hrs)** `L135` (`linear_interpolation.*`, 42 cases) -- `error: failed
+   to legalize operation 'spirv.GL.InterpolateAtOffset' that was explicitly
+   marked illegal`. `InterpolateAtOffset` has no lowering pattern registered at
+   all; likely needs a new `SPIRVToLLVMPatterns.cpp` pattern (or a
+   `feme.stage.*` runtime intrinsic) mirroring however
+   `InterpolateAtSample`/`InterpolateAtCentroid` (if those exist) are already
+   handled, or a from-scratch implementation if this is the first
+   `InterpolateAt*` variant this compiler supports at all -- check that first.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
    the largest not-yet-started cross-repo item, needs its own dedicated session.
-5. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new
    runtime-callback ABI surface, not a quick pick.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. **(~2 min)** `/tmp/ctsrun/l134c2/` (this session's scratch:
-   `repro.qpa`/`dbg.qpa`/`ir.qpa`/`simd.qpa`/`simd.txt`/`post.qpa`/`post.txt`/`fixverify.qpa`/`full.qpa`/`draw_full.qpa`/`draw_full.log`/`before_linear.qpa`/`before_shuffle.qpa`)
-   can be deleted once a future session no longer needs them -- nothing in it is
-   referenced by anything committed.
+6. **(~2 min)** `/tmp/ctsrun/l134a/` (this session's scratch:
+   `list.qpa`/`one.qpa`/`fix.qpa`/`fix_all.qpa`/`full.qpa`) can be deleted once
+   a future session no longer needs them -- nothing in it is referenced by
+   anything committed.
