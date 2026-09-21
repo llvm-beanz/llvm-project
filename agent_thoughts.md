@@ -98415,3 +98415,38 @@ session's own scoping; none are quick picks.
 5. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new runtime-callback ABI surface, not a quick pick.
 6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 7. **(~2 min)** `/tmp/ctsrun/l134c2/` (this session's scratch: `repro.qpa`/`dbg.qpa`/`ir.qpa`/`simd.qpa`/`simd.txt`/`post.qpa`/`post.txt`/`fixverify.qpa`/`full.qpa`/`draw_full.qpa`/`draw_full.log`/`before_linear.qpa`/`before_shuffle.qpa`) can be deleted once a future session no longer needs them -- nothing in it is referenced by anything committed.
+
+## Session: L135/L136 filed; L134(a) fixed -- VK_KHR_maintenance6 null index-buffer bind
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. No stash to restore; working tree clean, continuing directly from the prior session's own `L134(c)` closure.
+
+**Done this session:**
+
+1. **(quick pick)** Filed `L135` (`linear_interpolation.*`, 42 cases, `InterpolateAtOffset` legalization gap) and `L136` (`output_location.shuffle.inputs-outputs`, 1 case, JIT symbol-resolution gap) as their own roadmap rows -- both confirmed real/pre-existing last session, neither investigated further.
+2. Reproduced `L134(a)` (`indexed_draw.*`/`maintenance6`, 64 cases): `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`, underlying message `vkQueueSubmit: an indexed draw has no bound index buffer`.
+3. Root-caused: CTS's `DrawIndexedMaintenance6::iterate` binds `VK_NULL_HANDLE` as the index buffer (legal per `VK_KHR_maintenance6`'s own spec text) then draws with index count `0` (unless `nullDescriptor` is also enabled, in which case those variants are already correctly `NotSupported` on this ICD before reaching this bug). `CommandBuffer.cpp`'s `GraphicsState::IndexBuffer` is null both for "never bound" and "bound to `VK_NULL_HANDLE`" -- indistinguishable states to the existing `!Gfx.IndexBuffer` check, which rejected the legal case identically to the illegal one.
+4. Fixed: added `GraphicsState::IndexBufferBound`, set by either bind command regardless of buffer; gated the rejection on that flag instead. Null-bound index buffer now produces an empty `IndexBufferBinding::Data`, safely caught by `Executor.cpp`'s existing out-of-bounds check if a real fetch is ever attempted.
+5. Three new regression tests in `DrawTest.cpp`, confirmed via stash/rebuild round-trip: two fail identically pre-fix, one (the "genuinely never bound" guard) already passed both before and after.
+6. `ninja check-feme`: 3,295/3,298 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+7. CTS: isolated repro now 64/64 Pass across all 4 construction types (was 0/64 x4). Full `dEQP-VK.draw.*` sweep: 43 Fail (was 107) -- confirmed exactly the 42 `L135` + 1 `L136` cases, 0 other regressions.
+8. Struck through `L134(a)` and `L134` itself on `Roadmap.md` (all 7 original sub-rows + `L134(b)`'s split now fully closed).
+9. Updated `VulkanCTSReport.md` with this session's write-up.
+10. Committed in 5 pieces: roadmap L135/L136 filing, the CommandBuffer.cpp fix, the new tests, the L134/L134(a) roadmap strikethrough, the CTS report update.
+
+**Not done / still open:**
+
+- `L135` (`linear_interpolation.*`/`InterpolateAtOffset` legalization gap) -- filed, not investigated.
+- `L136` (`output_location.shuffle.inputs-outputs`/JIT symbol gap) -- filed, not investigated.
+- `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets`) -- not started.
+- `L115(b)` (pull-model interpolation) -- not started.
+
+**Milestone status**: `L134` (the whole `dEQP-VK.draw.*` 224-case pre-existing-failure family found while landing `L132`) is now **fully closed** -- all 7 sub-rows fixed and CTS-verified across many sessions. The two failure families it indirectly led to discovering (`L135`/`L136`) are new, smaller, independent items.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, quick-ish)** `L136` (`output_location.shuffle.inputs-outputs`, 1 case) -- smallest of the two newly-filed items. `JIT session error: Symbols not found: [ spirv_var_36, spirv_var_33 ]` -- start by finding where `spirv_var_NN`-named symbols are declared/resolved (likely `SPIRVToLLVMPatterns.cpp` or the JIT linking layer) and compare against this test's own "shuffle" input/output swizzle shape to see what's different about its global-variable naming/linkage vs. every passing case.
+2. **(~2-4 hrs)** `L135` (`linear_interpolation.*`, 42 cases) -- `error: failed to legalize operation 'spirv.GL.InterpolateAtOffset' that was explicitly marked illegal`. `InterpolateAtOffset` has no lowering pattern registered at all; likely needs a new `SPIRVToLLVMPatterns.cpp` pattern (or a `feme.stage.*` runtime intrinsic) mirroring however `InterpolateAtSample`/`InterpolateAtCentroid` (if those exist) are already handled, or a from-scratch implementation if this is the first `InterpolateAt*` variant this compiler supports at all -- check that first.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new runtime-callback ABI surface, not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
+6. **(~2 min)** `/tmp/ctsrun/l134a/` (this session's scratch: `list.qpa`/`one.qpa`/`fix.qpa`/`fix_all.qpa`/`full.qpa`) can be deleted once a future session no longer needs them -- nothing in it is referenced by anything committed.
