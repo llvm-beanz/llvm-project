@@ -55,12 +55,27 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Pick up `L128(a)` with tooling already in place**: `valgrind` is
-   now installed, and `FEME_CPU_JIT_DEBUG_SUPPORT=1` is the right GDB
-   flag to reach for -- both are confirmed to work well together on
-   this bug. Reinstate the same (unlanded, described-in-`Roadmap.md`
-   but not preserved elsewhere) forced-unroll prototype to reproduce
-   it, and this time build a **hand-minimized 2-3-attribute repro
-   shader** first, so each valgrind iteration doesn't take minutes --
-   the full 15-attribute CTS shader is way too slow to bisect by hand
-   under valgrind.
+1. **Implement the real `L128`/`L128(a)` fix**: add a loop-unrolling (or
+   constant-GEP-recognition) pass inside `feme::vulkan::compileGraphicsStage`,
+   immediately *before* its `CanonicalizeStagePass().run(...)` call at
+   `GraphicsPipeline.cpp:541`. This is the concrete, now-confirmed fix
+   location -- not inside `feme::cpu::runPipeline`/`Pipeline.cpp`, which
+   is too late (see `L128(b)` in `Roadmap.md` for the full why).
+2. **Validate against `DrawTest.L128ARowCount5Repro`** (flip its `#if 0`
+   to `#if 1`): should reproduce the crash before the fix and pass
+   cleanly after. Much faster than CTS/valgrind for iterating.
+3. **Then confirm against the real CTS cases**: the 3
+   `vertex_input.max_attributes.query_max_attributes.*` fails should
+   finally pass once the fix lands.
+4. **Regression-test broadly** once a fix is in place: `ninja
+   check-feme`, plus at minimum a `vertex_input.*` and `pipeline.*`
+   sweep, since this pass sits ahead of the signature-building step
+   every graphics shader compile goes through.
+5. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session.
+6. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
