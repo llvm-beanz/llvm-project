@@ -55,19 +55,25 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~20-30 min, quick pick)** `L137` -- run one isolated
-   `centroid_interpolation_consistency.pushc_component_0` case under
-   `fast_linked_library` with `FEME_VULKAN_LOG_CREATION_ERRORS=1` to see the
-   real underlying error before assuming it's the H29
-   independent-interpolation-decoration gap.
-2. **(~30-60 min)** Triage the 57 numerical-mismatch residual (54 "Fail
-   (Failed)" + 3 "Fail (Fail)") -- isolate one case, compare its own failure
-   text/pixel pattern against the already-documented `AtCentroid`/`AtOffset`
-   simplifications to confirm or rule those out.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
-   the largest not-yet-started cross-repo item, needs its own dedicated session.
+1. **(~30-60 min, natural next pick)** Investigate `L138`. Isolate one of
+   the 36 failing cases (`dEQP-VK.pipeline.fast_linked_library.
+   multisample_interpolation.centroid_interpolation_consistency.
+   pushc_component_0.128_128_1.samples_4` reproduces it), look at the
+   actual numeric values compared (the test log's own pixel/value dump)
+   to see how far off `AtCentroid`'s result is from the direct read --
+   if it's a small, consistent offset near a pixel-center-vs-centroid
+   boundary, that confirms the known simplification; if it's wildly off,
+   there's a real bug in this session's own fix (e.g. Row/Component
+   swapped, or the byte-GEP recognizer misfiring on a shape it shouldn't
+   match) and needs its own investigation.
+2. **(~30-60 min)** While there: also check whether `L138` overlaps with
+   the still-untriaged 57-case numerical-mismatch residual from the
+   `L125(r)` session two sessions back -- same `AtCentroid` suspicion,
+   never confirmed either.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. No scratch left over to clean up this session
-   (`/tmp/interp_accesschain.mlir`, `/tmp/interp_sample_accesschain.mlir`,
-   `/tmp/ctsrun/l125r*` already deleted).
+5. No scratch left over to clean up this session (everything under
+   `/tmp/l137dbg/`, `/tmp/l137_*.qpa`, `/tmp/vectest*.ll` already deleted).
