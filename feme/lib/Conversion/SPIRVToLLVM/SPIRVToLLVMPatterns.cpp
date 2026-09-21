@@ -3137,32 +3137,6 @@ bool isCompositeLLVMType(mlir::Type Type) {
       Type);
 }
 
-/// (Roadmap L115(b)) True if any use of \p Op -- an `spirv.mlir.addressof`
-/// of an `Input`-storage-class scalar/vector variable -- is one of the
-/// pull-model interpolation ops' own `Interpolant` operand. Unlike an
-/// ordinary `spirv.Load`, which `StageIOAddressOfPattern` eagerly folds
-/// this addressof into (there being no real memory access left to model
-/// once the value is already loaded, see that pattern's own comment),
-/// `spirv.GL.InterpolateAt{Centroid,Sample,Offset}` need the real
-/// *address* itself: `GLInterpolateAtCentroidPattern`/
-/// `GLInterpolateAtSamplePattern`/`GLInterpolateAtOffsetPattern` (below)
-/// pass it through, opaque, to a new `feme.spirv.interpolate_at_*` marker
-/// call, which `feme::graphics::canonicalizeSPIRVStage` later resolves
-/// back to a `(ElementID, Component)` pair the same way it already
-/// resolves an ordinary stage-IO load's own pointer operand
-/// (`resolveStageIOAccess`). So this addressof must stay a real pointer
-/// instead of eagerly loading, whenever it feeds one of these three ops --
-/// mirroring how isCompositeLLVMType already keeps an array/struct/matrix-
-/// typed one a real pointer for the analogous "a later op needs the real
-/// address, not the eagerly-loaded value" reason.
-bool isInterpolantAddressOf(mlir::spirv::AddressOfOp Op) {
-  return llvm::any_of(Op->getUsers(), [](mlir::Operation *User) {
-    return mlir::isa<mlir::spirv::GLInterpolateAtCentroidOp,
-                     mlir::spirv::GLInterpolateAtSampleOp,
-                     mlir::spirv::GLInterpolateAtOffsetOp>(User);
-  });
-}
-
 /// \p StageIOVariables must have been collected by
 /// feme::spirv::prepareStageIOVariables, before the conversion ran: by the
 /// time an `Input`/`Output` variable's own use is legalized, an earlier
@@ -3213,10 +3187,7 @@ public:
     // stays a real pointer instead of an eagerly-loaded value -- see this
     // class's own comment and isCompositeStageIOType/isCompositeLLVMType
     // above.
-    // (Roadmap L115(b)) See isInterpolantAddressOf's own comment: a
-    // pull-model interpolation op's own Interpolant operand needs this
-    // same real-pointer treatment, for the analogous reason.
-    if (isCompositeLLVMType(ValueType) || isInterpolantAddressOf(Op)) {
+    if (isCompositeLLVMType(ValueType)) {
       Rewriter.replaceOp(Op, Address);
       return mlir::success();
     }
@@ -11628,15 +11599,48 @@ mlir::LLVM::LLVMFuncOp getOrInsertInterpolateAtFunc(
                                         FuncTy, mlir::LLVM::Linkage::External);
 }
 
+/// Recovers the real `Input`-address-space pointer a pull-model
+/// interpolation op's own (already-converted) `Interpolant` operand
+/// \p Interpolant stands for.
+///
+/// SPIR-V restricts `Interpolant` to "an object of pointer type, which
+/// must be a variable of Input storage class" -- always a bare
+/// `spirv.mlir.addressof` of a scalar/vector `Input` global, never a
+/// composite/array one (`isCompositeStageIOType` never applies here).
+/// `StageIOAddressOfPattern` (above) therefore always takes that
+/// addressof's *eager-load* branch for it, producing an `llvm.load`
+/// reading an `llvm.mlir.addressof` -- exactly the value an ordinary
+/// `spirv.Load` of the same variable would also produce, since there is
+/// no way to tell the two apart once conversion has run. So, unlike
+/// every other operand `Adaptor` provides, \p Interpolant is never
+/// itself a genuine pointer once converted (attempting to instead keep
+/// `spirv.mlir.addressof` a real pointer here, mirroring
+/// `isCompositeLLVMType`'s composite-type case, was tried and rejected:
+/// the surrounding dialect-conversion driver detects the resulting
+/// mismatch against the type converter's own official answer for a
+/// scalar/vector `Input` pointer type -- the eagerly-loaded value type,
+/// not a pointer -- and silently re-materializes it back to that loaded
+/// value for any consumer expecting the canonical type, undoing the
+/// special-case entirely). Instead, this simply reaches one level
+/// further back through that same `llvm.load`'s own pointer operand
+/// (`getAddr()`), which is exactly the `llvm.mlir.addressof` this
+/// function needs -- recovering the real address without fighting the
+/// materialization system at all. Returns null if \p Interpolant is not
+/// this expected shape (a genuine pointer already, or an `llvm.load`).
+mlir::Value resolveInterpolantAddress(mlir::Value Interpolant) {
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(Interpolant.getType()))
+    return Interpolant;
+  if (auto Load = Interpolant.getDefiningOp<mlir::LLVM::LoadOp>())
+    return Load.getAddr();
+  return nullptr;
+}
+
 /// Converts `spirv.GL.InterpolateAtCentroid` (roadmap L115(b)) into a
 /// call to the `feme.spirv.interpolate_at_centroid.<suffix>` marker
 /// function -- see getOrInsertInterpolateAtFunc's own comment for why
-/// this is a placeholder rather than the real `feme.stage.*` op directly.
-/// `Adaptor.getInterpolant()` is the real pointer
-/// `isInterpolantAddressOf`'s fix to `StageIOAddressOfPattern` (above)
-/// keeps `Op`'s own `Interpolant` operand as, rather than the eagerly-
-/// loaded value an ordinary read of the same `Input` variable would
-/// produce.
+/// this is a placeholder rather than the real `feme.stage.*` op directly,
+/// and resolveInterpolantAddress's own comment for how `Op`'s own
+/// `Interpolant` operand recovers the real address it needs.
 class GLInterpolateAtCentroidPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLInterpolateAtCentroidOp> {
 public:
@@ -11649,10 +11653,10 @@ public:
     mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
     if (!ResultTy)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    mlir::Value Ptr = Adaptor.getInterpolant();
-    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Ptr.getType()))
+    mlir::Value Ptr = resolveInterpolantAddress(Adaptor.getInterpolant());
+    if (!Ptr)
       return Rewriter.notifyMatchFailure(
-          Op, "Interpolant did not convert to a real pointer");
+          Op, "Interpolant did not resolve to a real address");
 
     auto Module = Op->getParentOfType<mlir::ModuleOp>();
     mlir::LLVM::LLVMFuncOp Func = getOrInsertInterpolateAtFunc(
@@ -11679,10 +11683,10 @@ public:
     mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
     if (!ResultTy)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    mlir::Value Ptr = Adaptor.getInterpolant();
-    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Ptr.getType()))
+    mlir::Value Ptr = resolveInterpolantAddress(Adaptor.getInterpolant());
+    if (!Ptr)
       return Rewriter.notifyMatchFailure(
-          Op, "Interpolant did not convert to a real pointer");
+          Op, "Interpolant did not resolve to a real address");
     mlir::Value Sample = Adaptor.getSample();
 
     auto Module = Op->getParentOfType<mlir::ModuleOp>();
@@ -11716,10 +11720,10 @@ public:
     mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
     if (!ResultTy)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    mlir::Value Ptr = Adaptor.getInterpolant();
-    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Ptr.getType()))
+    mlir::Value Ptr = resolveInterpolantAddress(Adaptor.getInterpolant());
+    if (!Ptr)
       return Rewriter.notifyMatchFailure(
-          Op, "Interpolant did not convert to a real pointer");
+          Op, "Interpolant did not resolve to a real address");
 
     mlir::Location Loc = Op.getLoc();
     mlir::Value Offset = Adaptor.getOffset();
@@ -11741,6 +11745,7 @@ public:
     return mlir::success();
   }
 };
+
 
 /// Converts `spirv.GL.Distance` (roadmap H124j) into the GLSL.std.450
 /// spec's own definition, `Length(p0 - p1)`, reusing the same
