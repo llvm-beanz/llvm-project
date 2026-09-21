@@ -2088,19 +2088,28 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
 /// `resolveNestedStageIOField` needs it), or `std::nullopt` if the
 /// remaining indices are not a supported shape (a non-constant index into
 /// anything but an array or vector, or a constant index into anything
-/// but a struct or array).
+/// but a struct, array, or vector).
 ///
-/// (Roadmap L138) A non-constant index whose current type \p Ty is a
-/// `FixedVectorType` -- selecting a dynamically-computed *lane* within an
-/// array element's own vector, rather than a row within a further array
-/// dimension -- is recognized too, via \p DynamicComponent: e.g.
+/// (Roadmap L138) Any index -- constant or non-constant -- whose current
+/// type \p Ty is a `FixedVectorType` selects a *lane* within an array
+/// element's own vector, rather than a row within a further array
+/// dimension, and is recognized via \p DynamicComponent: e.g.
 /// `fs_in_pos_screen_centroid[1][component]`, the real shape a
 /// `dEQP-VK.pipeline.*.multisample_interpolation.
 /// centroid_interpolation_consistency.*` fragment shader's own
 /// push-constant-selected component read compiles into (array index `1`
-/// constant, component index dynamic). Unlike an array row index, a
-/// vector lane index is not folded into \p Terms/`Row` at all -- it has
-/// its own, separate `StageIOAccess::Component` operand downstream (see
+/// constant, component index dynamic). (Roadmap L140) A *constant* lane
+/// select following a *dynamic* array index -- e.g.
+/// `inPosScreenArr[index].y`'s trailing `.y`, where `index` is itself
+/// loop/computation-carried -- takes this same branch too (checked ahead
+/// of the plain constant-index-into-struct/array branch below, which has
+/// no notion of a vector lane and would otherwise reject it): \p
+/// DynamicComponent, despite its name, may end up holding either a
+/// `ConstantInt` or a genuinely dynamic `Value*` lane index -- every
+/// consumer already normalizes it via a plain `CreateZExtOrTrunc`, which
+/// works identically for both. Unlike an array row index, a vector lane
+/// index is not folded into \p Terms/`Row` at all -- it has its own,
+/// separate `StageIOAccess::Component` operand downstream (see
 /// `resolveStageIOAccess`'s own `getDynamicRowIndexedAccess` branch) -- so
 /// this must be the final index (a vector has no further nesting to walk
 /// into), and only one such lane-select is recognized per access (\p
@@ -2116,6 +2125,21 @@ std::optional<uint32_t> collectDynamicRowTerms(
   if (It == End)
     return getStageIORowShape(Ty).RowCount;
   Value *Idx = It->get();
+  // (Roadmap L140) An index into a vector -- constant or non-constant --
+  // selects a lane, not a row: must be the final index, and only one such
+  // lane-select is supported per access. Checked ahead of the
+  // constant-index branch below so a *constant* lane select (e.g. the
+  // trailing `.y` in `inPosScreenArr[index].y`, where `index` is itself
+  // dynamic) is recognized the same way a dynamic one already is, rather
+  // than falling into the constant-index branch's `StructType`/`ArrayType`-
+  // only handling and spuriously returning `std::nullopt` for a vector.
+  if (isa<FixedVectorType>(Ty)) {
+    if (DynamicComponent || std::next(It) != End)
+      return std::nullopt;
+    ++It;
+    DynamicComponent = Idx;
+    return getStageIORowShape(Ty).RowCount;
+  }
   if (auto *CI = dyn_cast<ConstantInt>(Idx)) {
     uint64_t I = CI->getZExtValue();
     ++It;
@@ -2131,16 +2155,6 @@ std::optional<uint32_t> collectDynamicRowTerms(
       return collectDynamicRowTerms(ArrTy->getElementType(), It, End, IDStart,
                                     Terms, DynamicComponent);
     return std::nullopt;
-  }
-  // (Roadmap L138) A non-constant index into a vector selects a lane, not
-  // a row -- must be the final index, and only one such lane-select is
-  // supported per access.
-  if (isa<FixedVectorType>(Ty)) {
-    if (DynamicComponent || std::next(It) != End)
-      return std::nullopt;
-    ++It;
-    DynamicComponent = Idx;
-    return getStageIORowShape(Ty).RowCount;
   }
   // A non-constant index must otherwise select a row within an array.
   auto *ArrTy = dyn_cast<ArrayType>(Ty);

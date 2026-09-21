@@ -2392,6 +2392,67 @@ TEST(CanonicalizeStageTest,
   (void)ComponentArg;
 }
 
+/// (Roadmap L140) `dEQP-VK.pipeline.monolithic.multisample_interpolation.
+/// nonuniform_interpolant_indexing.centroid`'s own real compiled shape:
+/// `interpolateAtCentroid(inPosScreenArr[index].y)`, a *dynamic* array
+/// index (`index`, per-fragment-computed) immediately followed by a
+/// *constant* trailing vector-lane index (`.y`) into a plain (non-block)
+/// arrayed `Interpolant` global -- one single, uniformly-typed
+/// `getelementptr` with three indices (outer zero, dynamic row, constant
+/// lane), unlike `ThreadsDynamicComponentIndexIntoCentroidInputLoadThroughByteGEP`'s
+/// byte-GEP-wrapped shape (which only ever carries a *dynamic* trailing
+/// lane). Before this row, `collectDynamicRowTerms`'s constant-index
+/// branch checked `StructType`/`ArrayType` only and fell through to
+/// `std::nullopt` for a constant index into a `FixedVectorType`, so this
+/// whole access -- and the `feme.spirv.interpolate_at_centroid.f32` marker
+/// call built on it -- was left unresolved, reaching `feme-cpu-simdize`
+/// still named as the SPIR-V marker call, diagnosed there as an
+/// "unsupported divergent call" instead.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicRowWithConstantComponentIntoInterpolantArrayLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @inPosScreenArr = external addrspace(7) global [10 x <2 x float>], !spirv.Decorations !0
+    define float @main(i32 %index) #0 {
+      %p = getelementptr [10 x <2 x float>], ptr addrspace(7) @inPosScreenArr, i32 0, i32 %index, i32 1
+      %v = load float, ptr addrspace(7) %p
+      ret float %v
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IndexArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 10u);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    // `Row` (operand 1) is `%index` itself, not a constant.
+    EXPECT_EQ(CI->getArgOperand(1), IndexArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(1)));
+    // `Component` (operand 2) is the constant lane `1` (`.y`) -- folded
+    // in via the same `DynamicComponent` slot a genuinely dynamic lane
+    // uses, just holding a `ConstantInt` here instead.
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Component=*/2), 1u);
+  }
+  EXPECT_EQ(SeenLoads, 1u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
 /// (Roadmap H6k) A multi-`ElementID` builtin interface block whose own
 /// value type is an arrayed `StructType` (a mesh entry's own
 /// `PerPrimitiveEXT`/`PerVertexEXT`-decorated block, e.g.
