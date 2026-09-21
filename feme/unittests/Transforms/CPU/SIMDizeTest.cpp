@@ -1663,6 +1663,74 @@ TEST(SIMDizeTest, DecomposesVectorComparisonIntoReduceAnd) {
   EXPECT_EQ(AndCount, 3u);
 }
 
+TEST(SIMDizeTest, WidensNarrowingVectorBitCastFromBooleanReduction) {
+  // Roadmap L134h: a GLSL/SPIR-V-origin boolean-vector reduction idiom
+  // (e.g. `any(notEqual(a.xy, b.xy))`, reduced from a real
+  // `dEQP-VK.draw.renderpass.output_location.array` crash) packs a
+  // divergent, per-lane-decomposed `fcmp`'s `<4 x i1>` result pairwise
+  // into a `<2 x i2>` before pulling the one component actually needed
+  // back out with `extractelement` -- `isVectorNarrowingBitCast`/
+  // `widenVectorNarrowingBitCast` in SIMDize.cpp give this its own
+  // lowering (generalizing `widenVectorToScalarBitCast`'s zext/shift/or
+  // recomposition to a vector, rather than fully scalar, destination),
+  // rather than the `feme-cpu-simdize: ... has a divergent value '.bc' of
+  // vector type` diagnostic this shape used to hit.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %a0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %b0 = insertelement <4 x float> poison, float 1.000000e+00, i32 0
+      %cond = fcmp one <4 x float> %a0, %b0
+      %bc = bitcast <4 x i1> %cond to <2 x i2>
+      %ex = extractelement <2 x i2> %bc, i64 0
+      %isz = icmp eq i2 %ex, 0
+      %sel = select i1 %isz, float 1.000000e+00, float 0.000000e+00
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned FCmpCount = 0;
+  unsigned BitCastCount = 0;
+  unsigned ZExtCount = 0;
+  for (Instruction &I : instructions(F)) {
+    // Never build an illegal vector-of-vector type.
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (isa<FCmpInst>(&I))
+      ++FCmpCount;
+    // `widenVectorNarrowingBitCast` (like `widenVectorToScalarBitCast`)
+    // never materializes an actual widened `bitcast`: it reconstructs
+    // each destination component directly from zero-extended, shifted
+    // source components instead, so no `BitCastInst` survives into the
+    // widened function at all.
+    if (isa<BitCastInst>(&I))
+      ++BitCastCount;
+    if (auto *ZE = dyn_cast<ZExtInst>(&I))
+      if (ZE->getDestTy() == FixedVectorType::get(
+                                  IntegerType::get(Ctx, 2), 4))
+        ++ZExtCount;
+  }
+  EXPECT_EQ(FCmpCount, 4u);
+  EXPECT_EQ(BitCastCount, 0u);
+  // `widenVectorNarrowingBitCast` reconstructs both `<2 x i2>` destination
+  // components (index 0, which `extractelement` actually reads, and the
+  // otherwise-unused index 1) up front, exactly like
+  // `widenScalarToVectorBitCast`'s own eager per-component reconstruction
+  // -- each of the 2 destination components packs 2 source components,
+  // for 4 `zext`s in total.
+  EXPECT_EQ(ZExtCount, 4u);
+}
+
 TEST(SIMDizeTest, DecomposesHomogeneousVectorizableIntrinsicCall) {
   // Roadmap H6g-b-a-i-a-i-b: `llvm.maxnum` (and `llvm.minnum`/`llvm.smin`/
   // `llvm.smax`/...) over an already-decomposed divergent vector operand --
