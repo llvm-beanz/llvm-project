@@ -55,17 +55,19 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~15 min, quick confirmation)** Re-sweep
-   `dEQP-VK.draw.*.multisample_interpolation.*` to confirm this fix also closes
-   `L125(r)`'s own tracked bucket -- very likely yes, given the identical
-   root-cause legalization gap, but not directly verified this session.
-2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+1. **(~20-30 min, quick pick)** `L137` -- run one isolated
+   `centroid_interpolation_consistency.pushc_component_0` case under
+   `fast_linked_library` with `FEME_VULKAN_LOG_CREATION_ERRORS=1` to see the
+   real underlying error before assuming it's the H29
+   independent-interpolation-decoration gap.
+2. **(~30-60 min)** Triage the 57 numerical-mismatch residual (54 "Fail
+   (Failed)" + 3 "Fail (Fail)") -- isolate one case, compare its own failure
+   text/pixel pattern against the already-documented `AtCentroid`/`AtOffset`
+   simplifications to confirm or rule those out.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
    the largest not-yet-started cross-repo item, needs its own dedicated session.
-3. **(~1 session, follow-up not blocking anything)** `AtCentroid`'s pixel-center
-   simplification -- needs per-sample coverage-mask data threaded into
-   `FemeFragmentPrimitive` for a true coverage-weighted centroid; no CTS case
-   currently distinguishes this, so low urgency.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. No scratch left over to clean up this session (`/tmp/interp_test.mlir`,
-   `/tmp/ctsrun/l115b*` already deleted).
+5. No scratch left over to clean up this session
+   (`/tmp/interp_accesschain.mlir`, `/tmp/interp_sample_accesschain.mlir`,
+   `/tmp/ctsrun/l125r*` already deleted).
