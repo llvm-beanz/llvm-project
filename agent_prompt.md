@@ -55,24 +55,30 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~2 min)** Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`
-   (PID 12156 if still alive) for its final tally. It now includes
-   `bind_buffers_2.*` in its scope, so once it finishes it should also
-   independently confirm this session's `L132` fix at full-sweep scale, not
-   just the isolated `bind_buffers_2.*` re-run this session already did.
-2. **(~30 min, no-crash quick pick)** `L131`'s sibling row or check whether
-   the 224 pre-existing `dEQP-VK.draw.*` fails found this session
-   (`indexed_draw`/`maintenance6`, `multiple_interpolation`,
-   `implicit_sample_shading`, `shader_layer`, `depth_clamp`, others) are
-   already filed anywhere in `Roadmap.md` -- this session only confirmed
-   they're pre-existing and unrelated to `L132`, it did not investigate or
-   file them. If not filed, file as a new row before someone re-investigates
-   the same "which of these existed before my change" question from
-   scratch.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+1. **(~30-60 min each, quick picks)** `L134`'s 6 remaining open sub-rows,
+   roughly by expected size: `L134(g)` (1 case, `basic_draw.misc.
+   maintenance5`) is the smallest; `L134(d)` (`implicit_sample_shading`, 12
+   cases, 3 distinct shapes) and `L134(e)` (`shader_layer` at layer 256, 8
+   cases) are next; `L134(b)` (`output_location.array`, 24 cases across
+   many formats) and `L134(c)` (`multiple_interpolation`, 64 cases) are
+   mid-sized; `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases, the
+   largest single family) is likely the most involved. **Before starting
+   any of them, check their CTS failure message text first** -- if it's
+   another "expected: X, got: X" exact-value mismatch, it may be the same
+   `L132`/`L134(f)` barycentric-sum-not-exactly-1.0 class of bug in yet
+   another consumer of `Bary0/1/2` (there may be more beyond depth and
+   color -- `EdgeDist`/line antialiasing at ~3453 hasn't been checked for
+   this same gap yet). If the message is something else entirely (a real
+   `Fail` with visibly different values, a crash, a wrong-format rejection,
+   etc.), it's a genuinely separate bug needing its own investigation.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
    still the largest not-yet-started cross-repo item, needs its own
    dedicated session.
-4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+3. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
    new runtime-callback ABI surface, not a quick pick.
-5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+5. **(~2 min)** `/tmp/ctsrun/l132fix/` (127MB, this and the prior session's
+   scratch logs) can be deleted once a future session no longer needs its
+   raw `.qpa`/`.log` files -- nothing in it is referenced by anything
+   committed.
