@@ -377,6 +377,65 @@ TEST(CanonicalizeStageTest, MapsSPIRVBuiltInsToSystemValues) {
   EXPECT_EQ(*Varying.Location, 0u);
 }
 
+/// (Roadmap L134(d)) Per the Vulkan spec (`primsrast.adoc`'s "Sample
+/// Shading" section), a fragment shader entry point that *statically
+/// uses* an input variable decorated `BuiltIn SampleId`/`SamplePosition`
+/// must force per-sample shading, even if the loaded value is never
+/// actually consumed by anything (e.g. a bare `gl_SampleID;` expression
+/// statement -- exactly the shape `dEQP-VK.draw.*.implicit_sample_
+/// shading.sample_{id,position}_static_use` compiles to: glslang still
+/// emits the `BuiltIn`-decorated global and lists it in `OpEntryPoint`'s
+/// own interface operand, but generates no `OpLoad` for it at all, since
+/// the loaded value has no further use). `canonicalizeSPIRVStage`'s
+/// primary discovery walk (over the entry's own load/store instructions)
+/// can never find such a global, since no load instruction referencing it
+/// exists to walk -- this must still produce a `SignatureElement` so
+/// `Executor.cpp`'s `PerSampleShading` check (which looks for exactly
+/// this system value) can see it. `@gl_FragDepth` here is an ordinary,
+/// genuinely-used `BuiltIn` output included only so this fragment entry
+/// has a valid signature at all (matching every other fragment-stage
+/// test in this file); it is not itself under test.
+TEST(CanonicalizeStageTest,
+    RecordsUnusedSampleIdAndSamplePositionBuiltInsAsInputSignatureElements) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_SampleID = external addrspace(7) constant i32, !spirv.Decorations !0
+    @gl_SamplePosition = external addrspace(7) constant <2 x float>, !spirv.Decorations !1
+    @gl_FragDepth = external addrspace(8) global float, !spirv.Decorations !2
+    define void @main() #0 {
+      %sid = load i32, ptr addrspace(7) @gl_SampleID
+      store float 0.0, ptr addrspace(8) @gl_FragDepth
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!3}
+    !1 = !{!4}
+    !2 = !{!5}
+    !3 = !{i32 11, i32 18}
+    !4 = !{i32 11, i32 19}
+    !5 = !{i32 11, i32 22}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+
+  // `gl_SampleID` is genuinely loaded above (so this element's own
+  // discovery does not depend on this fix), used only to make the test's
+  // own IR plausible/well-formed. `gl_SamplePosition` has no load at all
+  // anywhere in the module -- its own `SignatureElement` can only come
+  // from this fix's own additional module-globals walk.
+  const SignatureElement *SampleID = findElement(
+      *Sig, SignatureDirection::Input, SignatureSystemValue::SampleIndex);
+  ASSERT_NE(SampleID, nullptr);
+
+  const SignatureElement *SamplePosition =
+      findElement(*Sig, SignatureDirection::Input,
+                  SignatureSystemValue::SamplePosition);
+  ASSERT_NE(SamplePosition, nullptr);
+}
+
 /// (Roadmap H21a) `VK_EXT_transform_feedback`'s own `XfbBuffer` (36),
 /// `Offset` (35, reused for its transform-feedback meaning) and
 /// `XfbStride` (37) decorations map onto `SignatureElement::XfbBuffer`/
