@@ -326,6 +326,46 @@ buildPipeline(Context &Ctx, RasterState Raster,
                           Logic, BlendConstants, PrimitiveRestartEnable);
 }
 
+/// Like `buildPipeline` above, but with an `R32G32B32A32_FLOAT` color
+/// attachment instead of `R8G8B8A8_UNORM`, so a test can read back its
+/// fragment output's exact bit pattern rather than an 8-bit-quantized
+/// byte (roadmap L132 -- quantization masks the ULP-level interpolation
+/// drift a full-precision readback needs to catch).
+Expected<GraphicsPipeline>
+buildPipelineWithFloatAttachment(Context &Ctx, RasterState Raster) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32G32B32A32_FLOAT, 4, 4}};
+  return GraphicsPipeline(std::move(*VS), std::move(*FS),
+                          PrimitiveTopology::TriangleList, Raster, DepthState{},
+                          BlendMode::Replace,
+                          /*SampleCount=*/1, std::move(Attachments),
+                          StencilState{}, std::vector<BlendState>{BlendState{}},
+                          /*LogicOpEnable=*/false, LogicOp::Copy,
+                          std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+                          /*PrimitiveRestartEnable=*/false);
+}
+
 /// (roadmap H7h) Builds a `TriangleList` pipeline using
 /// `ClipCullDistanceVertexShaderIR`: like `buildPipeline`'s own
 /// color-passthrough pair, but with two extra per-vertex scalar inputs
@@ -2399,6 +2439,80 @@ TEST(ExecutorTest, InterpolatesColorAcrossTheTriangle) {
       EXPECT_NEAR(Texel[2], std::lround(B * 255.0f), 2)
           << "pixel (" << PX << "," << PY << ")";
     }
+  }
+}
+
+/// (Roadmap L132) A genuinely constant color varying (every vertex writes
+/// the exact same, not-exactly-representable-in-binary value, 0.1f) over
+/// a triangle big enough that most pixels land at non-trivial (neither
+/// 0 nor 1) barycentric weights -- the same shape
+/// `dEQP-VK.pipeline.monolithic.bind_buffers_2.*`'s instance-rate color
+/// attribute exercises (every vertex of one triangle-strip instance
+/// shares one fetched value) and which that CTS family's *own*
+/// pixel check requires reproducing bit-for-bit, not just "close enough":
+/// per IEEE 754, linear interpolation of a constant across any convex
+/// combination of weights must yield that exact constant back, but
+/// `Executor.cpp`'s barycentric weights are three *independently*
+/// rounded divisions (`edgeFn(...) / Area`), so `B0+B1+B2` (and, for the
+/// perspective path below, its `InvW`-weighted analogue) isn't provably
+/// `== 1.0f` -- without the `V0 == V1 && V1 == V2` shortcut in the
+/// interpolation loop, `Numerator / InvW` (or `B0*V+B1*V+B2*V`) can drift
+/// off the constant by a few ULPs, invisible through an 8-bit UNORM
+/// attachment's own quantization (as every other constant-color test in
+/// this file uses) but very visible through a full-precision float
+/// readback, which is why this test binds an `R32G32B32A32_FLOAT`
+/// attachment and checks the raw bit pattern rather than a rounded byte.
+TEST(ExecutorTest, InterpolatesAGenuinelyConstantColorExactly) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipelineWithFloatAttachment(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Same oversized CCW triangle shape used elsewhere in this file, but
+  // every vertex writes the identical (0.1, 0.2, 0.3, 0.4) color -- 0.1f
+  // and 0.3f in particular have no exact binary representation, so any
+  // rounding asymmetry between the three per-vertex contributions would
+  // show up directly in the readback.
+  std::array<float, 21> VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.1f, 0.2f, 0.3f, 0.4f, // v0
+      3.0f,  -1.0f, 0.0f, 0.1f, 0.2f, 0.3f, 0.4f, // v1
+      -1.0f, 3.0f,  0.0f, 0.1f, 0.2f, 0.3f, 0.4f, // v2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::array<float, 16 * 4> AttachmentStorage{};
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(AttachmentStorage.data()),
+                      AttachmentStorage.size() * sizeof(float)),
+      cpu::ResourceFormat::R32G32B32A32_FLOAT, 4, 4};
+  std::array<AttachmentView, 1> Attachments = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const float *Texel = AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0.1f) << "texel " << I;
+    EXPECT_EQ(Texel[1], 0.2f) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0.3f) << "texel " << I;
+    EXPECT_EQ(Texel[3], 0.4f) << "texel " << I;
   }
 }
 
