@@ -55,33 +55,35 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. `L125(s)`/`L125(t)` (vertex_input format gaps, bind-point bucket)
-   remain untouched from several sessions back -- good next picks,
-   still not started.
-2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+1. **(~15-20 min)** `L127`: the new 4-fail `vertex_input.max_attributes.*`
+   / `misc.unused_binding` residual surfaced only once this session's
+   two bigger bugs were fixed. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on each of the 4 cases
+   individually -- `max_attributes` likely probes the device's own
+   `maxVertexInputAttributes`/`maxVertexInputBindings` limits (a
+   different code path from ordinary decode), `unused_binding` likely
+   probes a binding declared but never referenced by any attribute.
+2. `L125(t)` (`bind_point.graphics_compute`'s "Invalid value found in
+   graphics buffer" bucket, 10 of 655 fails) remains completely
+   untouched -- not investigated at all this session or several before
+   it. Good next pick if `L127` stalls.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the other large, not-yet-started cross-repo item -- not a
-   quick pick, needs its own dedicated session with the upstream
-   repo(s) properly budgeted.
-3. `L115(b)` (pull-model interpolation, `InterpolateAtCentroid`/
-   `InterpolateAtSample`) remains flagged from several sessions ago as
-   a larger, not-yet-started item needing a new runtime-callback ABI
-   surface (barycentric/interpolant-plane data doesn't exist in
-   `FemeFragmentInvocation` today) -- also not a quick pick.
-4. The BC-format CTS coverage gap noted across multiple prior sessions
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. The BC-format CTS coverage gap noted across multiple prior sessions
    (`sampler.view_type.*.format.*bc*.address_modes.
    *clamp_to_border*` matches 0 cases) still hasn't been investigated
    -- worth a quick dedicated look next time nothing else is more
    pressing.
-5. Finishing the `pipeline.monolithic.blend.*` full-family regression
-   sweep is now a **two-session-running pattern** (both this session
-   and the prior `L125(y)` session hit the same ~25-30 minute timeout
-   without completing it) -- worth either raising the timeout
-   substantially (e.g. `timeout 6000`) or explicitly splitting the
-   sweep into smaller sub-family chunks (`blend.format.*`,
-   `blend.dual_source.*`, `blend.clamp.*`, etc. individually) next
-   time this is picked up, rather than repeating the same
-   whole-family attempt a third time.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+6. The `pipeline.monolithic.blend.*` full-family regression sweep
+   (flagged as a two-session-running timeout pattern previously) was
+   not attempted again this session -- still worth raising the
+   timeout or splitting into sub-family chunks whenever picked back
+   up.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's own scratch CTS logs (`/tmp/ctsrun/l125z/*`) are
+8. This session's own scratch CTS logs (`/tmp/ctsrun/l125s/*`) are
    already cleaned up -- nothing to do here.
