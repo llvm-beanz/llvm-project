@@ -7674,3 +7674,107 @@ passes post-fix.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed -- pure correctness fix, no new feature/extension surface. See
 `agent_thoughts.md` for the full narrative and next steps.
+
+## Roadmap L131: missing `!feme.signature` for zero-stage-IO Vertex/Fragment entries
+
+Root-caused and fixed the 9 `pipeline.monolithic.push_constant.*`
+failures `L129` above flagged but deferred as out-of-scope.
+
+### Root cause
+
+`CanonicalizeStage.cpp`'s `canonicalizeSPIRVStage` only calls
+`dxil::setEntrySignature` inside its
+`if (!InputGlobals.empty() || !OutputGlobals.empty())` branch. A
+Vertex or Fragment entry with **zero** genuine stage-IO globals (only
+push-constant reads plus resource writes -- e.g. `overwrite`'s
+`imageStore`-only fragment shader) never enters that branch, so it
+never gets `!feme.signature` metadata attached at all.
+`feme::cpu::FragmentWrapperPass::lowerFragmentStageOps`
+(`FragmentWrapper.cpp`) hard-requires an attached signature once an
+entry uses *any* stage op (every fragment entry does, unconditionally,
+via masked-output-store/return-mask calls `SPIRVToLLVMPatterns` always
+emits) -- the missing metadata surfaced downstream as a JIT
+symbol-resolution failure
+(`JIT session error: Symbols not found: [ spirv_var_NN ]`), confirmed
+via an isolated `FEME_VULKAN_LOG_CREATION_ERRORS=1` trace on
+`dynamic_index_frag` pre-fix. This is **not** a rejection by
+`SPIRVPushConstantLowering.cpp`'s `hasOnlyConstantIndices` scope
+limitation, as the prior session's surface-level error-text triage had
+speculated -- that limitation remains real and undisturbed, but an
+isolated trace confirms it is not actually exercised by any of these 9
+cases.
+
+A prior fix (`H5e-d`/`H91`) already solved this exact shape for
+Geometry/Mesh entries (an `else if (Stage == Geometry || Stage ==
+Mesh)` branch attaching an empty signature) but deliberately excluded
+Vertex/Fragment: a genuine DXIL-origin Vertex/Fragment entry (also
+dispatched through `canonicalizeDXILStage`) always has empty SPIR-V
+-style globals, so a blind empty-signature attach there could clobber
+its real, already-correct signature -- the reason a prior rejected fix
+attempt (`H4g`) had failed.
+
+### Fix
+
+Confirmed via code inspection that `feme::dxil::MetadataRaisingPass`
+(`MetadataRaising.cpp`) unconditionally calls `dxil::setEntrySignature`
+for every DXIL-origin entry point before `CanonicalizeStagePass` ever
+runs (even for a trivially-empty converted signature), and that
+`canonicalizeDXILStage` never itself writes signature metadata (only
+reads it) -- making `!dxil::getEntrySignature(F)` a safe, exact
+SPIR-V/DXIL origin discriminator. Extended the `else if` to:
+
+```
+Stage == Geometry || Stage == Mesh ||
+    ((Stage == Vertex || Stage == Fragment) && !dxil::getEntrySignature(F))
+```
+
+Fixing this surfaced two stale, unrelated test assertions that had
+only ever passed because this bug's own crash masked an already-correct,
+separately-relaxed validation:
+
+- `GraphicsPipelineTest.RejectsMissingFragmentOutput` (renamed
+  `AcceptsFragmentWithNoOutputAtAll`, now expects `VK_SUCCESS`): its
+  premise was invalidated by the pre-existing, unrelated `H11` fix,
+  which already made "fragment declares no output at a real
+  color-attachment location" spec-legal.
+- `CanonicalizeStageTest.UnresolvableLoadInputIsLeftAlone`'s stale
+  `EXPECT_FALSE(run(*M))` assertion no longer holds now that its exact
+  test shape (no signature, no stage IO) legitimately gets an empty
+  signature attached by this fix; the real invariant check
+  (`SawLoadInput`) is retained.
+
+### Testing
+
+Two new regression tests added to `CanonicalizeStageTest.cpp`:
+`FragmentWithNoStageIOStillGetsASignature` and
+`FragmentWithPreAttachedSignatureIsNotClobbered` (the latter standing
+in for genuine DXIL origin, confirming it is not clobbered). Both
+confirmed via a stash/rebuild round-trip to fail identically to the
+real bug pre-fix, then pass post-fix.
+
+`ninja check-feme`: **3,276/3,279 Passed, 3 Unsupported, 0 Failed**
+(+2 new tests, 0 regressions -- the 2 stale-test corrections are
+pre-existing-bug/pre-existing-invariant fixes, not new regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `pipeline.*.push_constant.*` (437 cases, every pipeline-construction
+  type): **409 Pass, 0 Fail, 28 NotSupported**, confirmed reproducible
+  across 3 consecutive full reruns -- all 9 originally-reported
+  failures, and their `fast_linked_library`/`pipeline_library`
+  construction-type counterparts (24 total), are fixed. A
+  substantially larger scope than this row's own original 9-case
+  framing (`L129`'s sweep only covered the `monolithic` construction
+  type).
+- `pipeline.*.push_constant.lifetime.*` (63 cases): **63 Pass, 0
+  Fail, 0 NotSupported** (100%) -- re-checked as a regression guard.
+- `dEQP-VK.geometry.emit.*` (23 cases, the original `H5e-d` motivating
+  family): **23 Pass, 0 Fail** -- confirms the shared code path this
+  fix touches is unaffected for Geometry.
+
+### Results
+
+`Roadmap.md`'s `L131` row added, fixed and CTS-verified. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- pure correctness fix, no new feature/extension surface. See
+`agent_thoughts.md` for the full narrative and next steps.
