@@ -30,6 +30,7 @@
 #include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/ResourceInfo.h"
 #include "feme/Transforms/Graphics/CanonicalizeStage.h"
+#include "feme/Transforms/Graphics/UnrollConstantTripCountLoops.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -538,6 +539,17 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   patchUnboundedResourceRanges(AsLLVMIR->getLLVMModule(), Layout);
 
   ModuleAnalysisManager MAM;
+  // (Roadmap L128/L128(a)/L128(b)) Must run *before* `CanonicalizeStagePass`
+  // below, not after and not deferred to `feme::cpu::runPipeline` -- this
+  // is the authoritative signature-building pass for a graphics-pipeline
+  // shader (`feme::cpu::CompiledStage::create`'s own, later
+  // `CanonicalizeStagePass` invocation inside `runPipeline` is a no-op
+  // repeat of work this one already did, too late to affect the
+  // `EntrySignature` bytes `CompiledStage::create` captures before ever
+  // calling `runPipeline`). See `UnrollConstantTripCountLoops.h`'s own
+  // header comment for the full rationale.
+  feme::graphics::UnrollConstantTripCountStageLoopsPass().run(
+      AsLLVMIR->getLLVMModule(), MAM);
   feme::graphics::CanonicalizeStagePass().run(AsLLVMIR->getLLVMModule(), MAM);
 
   if (OutState || OutGeometryState || OutMeshState) {
