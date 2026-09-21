@@ -55,23 +55,24 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`** (PID 12156,
-   still alive as of this session's end, ~28 min runtime, mid-
-   `blend.dual_source.*`) for its final tally before doing anything else
-   CTS-related -- 0 fails through the `blend.*` sub-family so far. This
-   is the *same* multi-hour `interface_matching`-excluded sweep two
-   sessions ago started; if it's finally done, record the tally in
-   `VulkanCTSReport.md` and clean up `/tmp/ctsrun/l128fix/`,
-   `/tmp/ctsrun/l133/`, `/tmp/ctsrun/l127/`, `/tmp/ctsrun/vulkan/` (all
-   scratch, nothing committed references them).
-2. **`L132`** (`bind_buffers_2.*`, 57 fails, `vkCmdBindVertexBuffers2`
-   stride/offset handling) -- still not root-caused. Good next pick: no
-   known crash, no known blocker, just needs a dedicated session to
-   start from a minimized repro the way `L133` was worked this session.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   -- still the largest not-yet-started cross-repo item, needs its own
+1. **(~2 min)** Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`
+   (PID 12156 if still alive) for its final tally. It now includes
+   `bind_buffers_2.*` in its scope, so once it finishes it should also
+   independently confirm this session's `L132` fix at full-sweep scale, not
+   just the isolated `bind_buffers_2.*` re-run this session already did.
+2. **(~30 min, no-crash quick pick)** `L131`'s sibling row or check whether
+   the 224 pre-existing `dEQP-VK.draw.*` fails found this session
+   (`indexed_draw`/`maintenance6`, `multiple_interpolation`,
+   `implicit_sample_shading`, `shader_layer`, `depth_clamp`, others) are
+   already filed anywhere in `Roadmap.md` -- this session only confirmed
+   they're pre-existing and unrelated to `L132`, it did not investigate or
+   file them. If not filed, file as a new row before someone re-investigates
+   the same "which of these existed before my change" question from
+   scratch.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
    dedicated session.
-4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing
-   a new runtime-callback ABI surface, not a quick pick.
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
