@@ -201,23 +201,27 @@ bool canonicalizeDXILStage(Function &F, const EntrySignature &Sig) {
       return false;
     IRBuilder<> B(&CI);
     // Operand 2 (row) always selects the same row an ordinary input load
-    // of this element would; the pull model still evaluates one signature
-    // element, just at a different location than its declared
-    // interpolation, so it does not appear as a separate `feme.stage.*`
-    // operand (see StageOpKind::InterpolateAt*'s comment).
+    // of this element would -- now threaded through as its own `Row`
+    // operand (roadmap L138) rather than silently dropped: the pull
+    // model still evaluates one signature element, just at a different
+    // location than its declared interpolation, but an array/matrix
+    // element still needs its row selected the same way an ordinary load
+    // does.
+    Value *Row = toI32(B, CI.getArgOperand(2));
     Value *Col = toI32(B, CI.getArgOperand(3));
     CallInst *New = nullptr;
     switch (Kind) {
     case StageOpKind::InterpolateAtCentroid:
-      New = createStageInterpolateAtCentroid(B, CI.getType(), *ElementID, Col);
+      New = createStageInterpolateAtCentroid(B, CI.getType(), *ElementID, Row,
+                                             Col);
       break;
     case StageOpKind::InterpolateAtSample:
-      New = createStageInterpolateAtSample(B, CI.getType(), *ElementID, Col,
-                                           toI32(B, CI.getArgOperand(4)));
+      New = createStageInterpolateAtSample(B, CI.getType(), *ElementID, Row,
+                                           Col, toI32(B, CI.getArgOperand(4)));
       break;
     case StageOpKind::InterpolateAtOffset:
-      New = createStageInterpolateAtOffset(B, CI.getType(), *ElementID, Col,
-                                           toI32(B, CI.getArgOperand(4)),
+      New = createStageInterpolateAtOffset(B, CI.getType(), *ElementID, Row,
+                                           Col, toI32(B, CI.getArgOperand(4)),
                                            toI32(B, CI.getArgOperand(5)));
       break;
     default:
@@ -1430,34 +1434,39 @@ std::optional<StageOpKind> getSPIRVInterpolateAtMarkerKind(const CallInst &CI) {
 }
 
 /// Builds the real `feme.stage.interpolate.at.*` call(s) \p Kind stands
-/// for, reading element \p ElementID at base component \p Component -- the
-/// pull-model-interpolation counterpart of `loadStageIOValue`: decomposes
-/// a vector-typed \p Ty into one scalar `feme::createStageInterpolateAt*`
-/// call per component (mirroring that op's own per-component `feme.
-/// stage.*` convention -- see `FragmentWrapper.cpp`'s
-/// `lowerFragmentInterpolateAt`, which expects exactly this shape),
-/// rebuilt with `insertelement`. Unlike `loadStageIOValue`'s full
-/// generality, no struct/array recursion is needed here: SPIR-V restricts
-/// an `Interpolant`'s pointee to a scalar or vector float
-/// (`SPIRV_ScalarOrVectorOf<SPIRV_Float>`), so \p Ty is always one or the
-/// other. \p ExtraOperand0/\p ExtraOperand1 are `Kind`'s own extra
-/// operand(s) (unused for `InterpolateAtCentroid`; `Sample` for
-/// `InterpolateAtSample`; `OffsetX`/`OffsetY` for `InterpolateAtOffset`),
-/// forwarded unchanged to every per-component leaf call.
+/// for, reading element \p ElementID's array/matrix row \p Row at base
+/// component \p Component -- the pull-model-interpolation counterpart of
+/// `loadStageIOValue`: decomposes a vector-typed \p Ty into one scalar
+/// `feme::createStageInterpolateAt*` call per component (mirroring that
+/// op's own per-component `feme. stage.*` convention -- see
+/// `FragmentWrapper.cpp`'s `lowerFragmentInterpolateAt`, which expects
+/// exactly this shape), rebuilt with `insertelement`. Unlike
+/// `loadStageIOValue`'s full generality, no struct recursion is needed
+/// here: SPIR-V restricts an `Interpolant`'s pointee to a scalar or vector
+/// float (`SPIRV_ScalarOrVectorOf<SPIRV_Float>`), so \p Ty is always one
+/// or the other -- but the `Interpolant` variable itself can still be an
+/// array (e.g. `in vec2 v[2];`), which is exactly what \p Row addresses
+/// (roadmap L138: this used to be dropped entirely, silently always
+/// reading row 0 regardless of which array element the source
+/// `InterpolateAt*` call actually indexed). \p ExtraOperand0/\p
+/// ExtraOperand1 are `Kind`'s own extra operand(s) (unused for
+/// `InterpolateAtCentroid`; `Sample` for `InterpolateAtSample`;
+/// `OffsetX`/`OffsetY` for `InterpolateAtOffset`), forwarded unchanged to
+/// every per-component leaf call.
 Value *interpolateStageIOValue(IRBuilderBase &B, Type *Ty, StageOpKind Kind,
-                               uint32_t ElementID, Value *Component,
+                               uint32_t ElementID, Value *Row, Value *Component,
                                Value *ExtraOperand0, Value *ExtraOperand1,
                                const Twine &Name) {
   auto BuildScalar = [&](Value *Comp) -> Value * {
     switch (Kind) {
     case StageOpKind::InterpolateAtCentroid:
       return createStageInterpolateAtCentroid(B, B.getFloatTy(), ElementID,
-                                              Comp);
+                                              Row, Comp);
     case StageOpKind::InterpolateAtSample:
-      return createStageInterpolateAtSample(B, B.getFloatTy(), ElementID,
+      return createStageInterpolateAtSample(B, B.getFloatTy(), ElementID, Row,
                                             Comp, ExtraOperand0);
     case StageOpKind::InterpolateAtOffset:
-      return createStageInterpolateAtOffset(B, B.getFloatTy(), ElementID,
+      return createStageInterpolateAtOffset(B, B.getFloatTy(), ElementID, Row,
                                             Comp, ExtraOperand0,
                                             ExtraOperand1);
     default:
@@ -5304,6 +5313,13 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             B, Ptr, CI->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
         if (!Access)
           continue;
+        // (Roadmap L138) See the load-side mirror of this above -- an
+        // `Interpolant` that is itself an array (e.g. `in vec2 v[2];`)
+        // needs its accessed row threaded through exactly like an
+        // ordinary load's `Row` operand, or every `InterpolateAt*` call
+        // silently reads row 0 regardless of which array element the
+        // source SPIR-V op actually indexed.
+        Value *Row = Access->Row ? Access->Row : B.getInt32(0);
         // (Roadmap L94(h)) See the load-side mirror of this above.
         Value *Component = Access->Component
                                ? Access->Component
@@ -5324,7 +5340,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // `loadStageIOBlockValue`-style multi-member fan-out is needed
         // here.
         Value *New = interpolateStageIOValue(
-            B, CI->getType(), *Kind, Access->ElementIDs[0], Component,
+            B, CI->getType(), *Kind, Access->ElementIDs[0], Row, Component,
             ExtraOperand0, ExtraOperand1, CI->getName());
         CI->replaceAllUsesWith(New);
         CI->eraseFromParent();

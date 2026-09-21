@@ -32,13 +32,13 @@ define void @main() {
   ; CHECK: call i1 @feme.stage.is_helper()
   %h = call i1 @dx.op.isHelperLane.i1(i32 221)
 
-  ; CHECK: call float @feme.stage.interpolate.at.centroid.f32(i32 0, i32 1)
+  ; CHECK: call float @feme.stage.interpolate.at.centroid.f32(i32 0, i32 0, i32 1)
   %c = call float @dx.op.evalCentroid.f32(i32 89, i32 0, i32 0, i8 1)
 
-  ; CHECK: call float @feme.stage.interpolate.at.sample.f32(i32 0, i32 1, i32 2)
+  ; CHECK: call float @feme.stage.interpolate.at.sample.f32(i32 0, i32 0, i32 1, i32 2)
   %s = call float @dx.op.evalSampleIndex.f32(i32 88, i32 0, i32 0, i8 1, i32 2)
 
-  ; CHECK: call float @feme.stage.interpolate.at.offset.f32(i32 0, i32 1, i32 2, i32 3)
+  ; CHECK: call float @feme.stage.interpolate.at.offset.f32(i32 0, i32 0, i32 1, i32 2, i32 3)
   %o = call float @dx.op.evalSnapped.f32(i32 87, i32 0, i32 0, i8 1, i32 2, i32 3)
 
   ret void
