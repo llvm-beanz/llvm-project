@@ -4076,6 +4076,122 @@ TEST(ExecutorTest, RendersToMultipleColorAttachments) {
   }
 }
 
+// (roadmap L134(b)) A single fragment-shader output *array* element
+// (`out float frag_out[2]` in GLSL terms -- one `SignatureElement` with
+// `RowCount == 2` at `Location == 0`) spans two consecutive Vulkan
+// locations, unlike `RendersToMultipleColorAttachments` above where each
+// attachment is written by its own distinct single-row `SignatureElement`.
+// A real CTS regression (`dEQP-VK.draw.renderpass.output_location.array.*`)
+// found that `Executor.cpp`'s per-color-attachment binding loop used to
+// resolve attachment 1's `SignatureElement` via an *exact* `Location`
+// match (`findElementByLocation`), which only ever matches the array
+// element's own base `Location == 0` -- so attachment 1 (and any further
+// attachment covered by the same multi-row element) silently got no
+// fragment-shader-output binding at all, leaving it unwritten. This test
+// renders row 0 (red) to attachment 0 and row 1 (green) to attachment 1
+// from that single two-row element, confirming both attachments receive
+// their own row's distinct color.
+constexpr char ArrayOutputFragmentShaderIR[] = R"(
+  define void @fs_array_out() #0 {
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 1, i32 0, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 1, i32 1, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 1, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 1, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, RendersMultiRowArrayOutputToSeparateColorAttachments) {
+  Context Ctx;
+  constexpr char PositionOnlyVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {makeElement(1, SignatureDirection::Output, 4,
+                                /*Location=*/0, SignatureSystemValue::None,
+                                /*RowCount=*/2)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, ArrayOutputFragmentShaderIR, "fs_array_out", FSSig,
+                  ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4},
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments),
+      StencilState{}, std::vector<BlendState>{BlendState{}, BlendState{}});
+
+  std::array<uint8_t, 64> Color0Storage{};
+  std::array<uint8_t, 64> Color1Storage{};
+  AttachmentView Color0{Color0Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4,
+                        4};
+  AttachmentView Color1{Color1Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4,
+                        4};
+  std::array<AttachmentView, 2> Attachs{Color0, Color1};
+
+  std::vector<float> VertexData = {-1.0f, -1.0f, 0.0f, 3.0f, -1.0f,
+                                   0.0f,  -1.0f, 3.0f,  0.0f};
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    // Attachment 0 gets row 0's red...
+    EXPECT_EQ(Color0Storage[I * 4], 255) << "texel " << I;
+    EXPECT_EQ(Color0Storage[I * 4 + 1], 0) << "texel " << I;
+    // ...and attachment 1 gets row 1's green -- prior to the L134(b) fix
+    // this attachment was never written at all (still the clear value).
+    EXPECT_EQ(Color1Storage[I * 4], 0) << "texel " << I;
+    EXPECT_EQ(Color1Storage[I * 4 + 1], 255) << "texel " << I;
+  }
+}
+
 /// (roadmap F8) `PreparedDraw::ColorAttachmentLocations`, the same shape
 /// `VkRenderingAttachmentLocationInfo::pColorAttachmentLocations` uses:
 /// swapping which fragment output location writes which attachment swaps
