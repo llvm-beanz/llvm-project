@@ -7442,3 +7442,94 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   filing (struck through, marked partially fixed); `L128` added with
   the full root-cause writeup. See `agent_thoughts.md` for the full
   narrative and next steps.
+
+## Roadmap L125(t): descriptor-set bind-point state isolation fix
+
+### Fix: graphics and compute bind points no longer share bound-descriptor-set state
+
+`bind_point.graphics_compute.*`'s original roadmap description ("10 of
+655 fails") badly undercounted the real scope: a full sweep across all
+three pipeline-construction types (3,024 cases) found **1,296 Fail**,
+another instance of this roadmap's own recurring fractional-sample
+undercount pattern.
+
+`vktPipelineBindPointTests.cpp` (read directly from the CTS source
+tree) interleaves graphics/compute pipeline and descriptor-set binds
+in various orders, then issues both a draw and a dispatch, checking
+each one's own SSBO ends up with only its own bind point's expected
+value. Root cause: `CommandBuffer.cpp`'s `vkCmdBindDescriptorSets`/
+`vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate` (and
+their `2`-suffixed/`*Info`-struct siblings) all accepted a bind-point
+selector of some form (a flat `pipelineBindPoint` argument, a
+`stageFlags` mask, or -- for the template-based push variants, which
+take no bind-point argument of their own at all -- the target
+`DescriptorUpdateTemplate`'s own creation-time `pipelineBindPoint`) but
+discarded it entirely. `executeCommandsInto`'s shared command-buffer
+interpreter threaded one single `std::vector<BoundSetState> &BoundSets`
+used identically by the compute-dispatch path and the graphics-draw
+path -- a direct violation of the Vulkan spec's "there is a separate
+set of bound descriptor sets for each of graphics and compute"
+(`BoundPipeline`/`BoundGraphicsPipeline` were already correctly split
+by bind point; only the descriptor-set state was not).
+
+Fixed by threading a real bind point through the whole recording/
+execution path: a new `BindPoint` field on `RecordedCommand`'s
+`BindDescriptorSets` payload; a new `DescriptorUpdateTemplate::
+bindPoint()` accessor (captured at `vkCreateDescriptorUpdateTemplate`
+time, since `vkCmdPushDescriptorSetWithTemplate` itself has no
+bind-point argument to read one from); and splitting
+`executeCommandsInto`'s single `BoundSets` parameter into two fully
+independent vectors (`BoundGraphicsSets`/`BoundComputeSets`), with
+every draw-family case consuming only the former and every
+dispatch-family case consuming only the latter.
+
+Push-constant state was investigated and confirmed **out of scope**
+for this fix: the CTS bucket's own `SetUpdateType` enum is purely
+about descriptor-set population method (`vkUpdateDescriptorSets` vs.
+`vkCmdPushDescriptorSet(WithTemplate)`), and the test source has zero
+push-constant references. Vulkan's spec separately requires
+push-constant state to be tracked per bind point too, and `feme` still
+shares one `PushConstants` vector across both -- a real, latent,
+still-open gap, filed as a new roadmap row (`L129`) rather than fixed
+here, since no CTS bucket currently exercises it (no concrete repro to
+drive or verify a fix from yet).
+
+Fixing this surfaced one pre-existing test bug as a direct
+consequence: `CommandBufferTest.cpp`'s `PushDescriptorSetDispatchTest.
+WithTemplateReadsAndWrites` never set its own
+`VkDescriptorUpdateTemplateCreateInfo::pipelineBindPoint` (defaulting
+to `0` = `VK_PIPELINE_BIND_POINT_GRAPHICS`) despite pushing into a
+compute dispatch -- harmless before this fix (bind point was ignored
+everywhere), a real bug once it wasn't. Fixed by setting it to
+`VK_PIPELINE_BIND_POINT_COMPUTE` explicitly.
+
+New regression test `StorageBufferDispatchTest.
+GraphicsBindDoesNotClobberComputeBoundDescriptorSets` reproduces the
+bug's exact shape without needing a real graphics pipeline/draw at
+all: bind a real descriptor set at the compute bind point, interleave
+an unrelated bind at the graphics bind point to the same set index
+(mirroring the CTS family's own interleaving), dispatch, and confirm
+the dispatch's own reads/writes are untouched by the interleaved
+graphics bind. Confirmed via a stash/rebuild round-trip to fail
+identically to the real bug pre-fix and pass post-fix.
+
+### Build/test
+
+`ninja check-feme`: 3,273/3,276 Passed, 3 Unsupported, 0 Failed (+2 new
+tests, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `pipeline.*.bind_point.graphics_compute.*` full sweep (3,024 cases,
+  all three pipeline-construction types): now **1,296 Pass / 0 Fail /
+  1,728 NotSupported** (was 1,296 Fail).
+- `pipeline.monolithic.push_descriptor.*` regression sweep (76 cases,
+  exercising the same `bindDescriptorSets`/`pushDescriptorSet*` code
+  paths this fix's refactor ran through): **76/76 Pass, 0 Fail** -- no
+  regression to the ordinary (single-bind-point) push-descriptor paths.
+- `Roadmap.md`'s `L125(t)` row updated to reflect the fix (struck
+  through, marked fixed and CTS-verified); a new `L129` row filed for
+  the related, still-open push-constant-state bind-point-separation
+  gap (no concrete CTS repro found yet). See `agent_thoughts.md` for
+  the full narrative and next steps.
