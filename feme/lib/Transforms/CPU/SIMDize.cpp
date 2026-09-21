@@ -500,6 +500,42 @@ bool isScalarToVectorIntBitCast(const Instruction &I) {
   return BC->getSrcTy()->isIntegerTy();
 }
 
+/// Returns true if \p I is a `bitcast` reinterpreting a narrower-element
+/// integer vector as a wider-element one with proportionally fewer
+/// elements (`bitcast <4 x i1> %v to <2 x i2>`) -- the shape a GLSL/SPIR-V-
+/// origin boolean-vector reduction idiom takes (e.g. `any(notEqual(a.xy,
+/// b.xy))`, reduced from a real `dEQP-VK.draw.renderpass.output_location.
+/// array` failure, roadmap L134h): the source's `fcmp`/`icmp` result is
+/// packed pairwise into a smaller vector of wider integers before the one
+/// component actually needed is pulled back out with `extractelement`.
+///
+/// Like `isVectorToScalarIntBitCast`, this is a `CastInst` shape whose
+/// operand has a different element count than its result, so
+/// `widenVectorElementwise`'s component-for-component rule cannot express
+/// it (there is no 1:1 pairing between the `N` source components and `M`
+/// destination ones); `widenVectorNarrowingBitCast` gives it its own
+/// lowering instead, generalizing `widenVectorToScalarBitCast`'s
+/// zext/shift/or recomposition to a *vector* (rather than a fully scalar)
+/// destination.
+bool isVectorNarrowingBitCast(const Instruction &I) {
+  const auto *BC = dyn_cast<BitCastInst>(&I);
+  if (!BC)
+    return false;
+  auto *SrcTy = dyn_cast<FixedVectorType>(BC->getSrcTy());
+  auto *DestTy = dyn_cast<FixedVectorType>(BC->getDestTy());
+  if (!SrcTy || !DestTy || !SrcTy->getElementType()->isIntegerTy() ||
+      !DestTy->getElementType()->isIntegerTy())
+    return false;
+  unsigned SrcElts = SrcTy->getNumElements();
+  unsigned DestElts = DestTy->getNumElements();
+  // Only the "pack more, narrower elements into fewer, wider ones" shape
+  // is handled -- the destination must have strictly fewer, evenly
+  // divisible, elements than the source (a genuine 1-to-1 or
+  // widening/unpacking bitcast, e.g. `<2 x i2>` to `<4 x i1>`, has no
+  // known real-world shape to justify the extra complexity yet).
+  return DestElts > 0 && DestElts < SrcElts && SrcElts % DestElts == 0;
+}
+
 /// Whether \p Ty is a pointer into groupshared (`addrspace(3)`) memory --
 /// the address space `feme::cpu::GroupSharedAddressSpace` names (see
 /// GroupShared.h). A divergent access through one of these needs its own
@@ -866,6 +902,7 @@ private:
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenVectorToScalarBitCast(BitCastInst &BC, IRBuilder<> &Builder);
   void widenScalarToVectorBitCast(BitCastInst &BC, IRBuilder<> &Builder);
+  void widenVectorNarrowingBitCast(BitCastInst &BC, IRBuilder<> &Builder);
   void widenVectorReduce(CallInst &CI, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
@@ -1116,10 +1153,13 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       // one vector-producing cast whose operand is a *scalar*
       // (`bitcast i128 to <4 x i32>`, roadmap L89g), which has no
       // component-for-component reading at all and gets its own lowering
-      // in `widenScalarToVectorBitCast`.
+      // in `widenScalarToVectorBitCast` -- plus the "pack narrower
+      // elements into fewer, wider ones" vector-to-vector bitcast
+      // (`bitcast <4 x i1> to <2 x i2>`, roadmap L134h) `widenVector
+      // NarrowingBitCast` handles the same way.
       Value *Op = Cast->getOperand(0);
       IsSupportedProducer =
-          isScalarToVectorIntBitCast(I) ||
+          isScalarToVectorIntBitCast(I) || isVectorNarrowingBitCast(I) ||
           (Op->getType()->isVectorTy() &&
            cast<FixedVectorType>(Op->getType())->getNumElements() ==
                cast<FixedVectorType>(I.getType())->getNumElements());
@@ -4128,6 +4168,58 @@ void FunctionWidener::widenScalarToVectorBitCast(BitCastInst &BC,
   ToErase.push_back(&BC);
 }
 
+// (Roadmap L134h) `bitcast <N x iA> %v to <M x iB> (M < N, N % M == 0,
+// B == A * (N/M))` over a divergent, per-lane-decomposed vector: the
+// shape a GLSL/SPIR-V-origin boolean-vector reduction idiom takes (e.g.
+// `any(notEqual(a.xy, b.xy))`), reduced from a real `dEQP-VK.draw.
+// renderpass.output_location.array` failure whose verify shader packs an
+// `fcmp`'s `<4 x i1>` result pairwise into a `<2 x i2>` before pulling the
+// one component actually needed back out with `extractelement`.
+//
+// This generalizes `widenVectorToScalarBitCast`'s recomposition (itself
+// this shape's `M == 1` special case, whose destination is a bare
+// scalar rather than a length-1 vector) to a genuinely vector
+// destination: the `N` already-decomposed `<W x iA>` source components
+// are grouped into `M` runs of `N/M`, each recomposed into one `<W x iB>`
+// destination component by zero-extending and OR-ing every run member
+// into place at its own bit offset -- lane-wise exactly what the scalar
+// `bitcast` meant for one lane, and the same little/big-endian
+// component-to-byte ordering `widenVectorToScalarBitCast`/
+// `widenScalarToVectorBitCast` already use.
+void FunctionWidener::widenVectorNarrowingBitCast(BitCastInst &BC,
+                                                  IRBuilder<> &Builder) {
+  SmallVector<Value *, 4> SrcComponents =
+      getVectorComponents(BC.getOperand(0), Builder);
+  auto *DestTy = cast<FixedVectorType>(BC.getDestTy());
+  unsigned DestElts = DestTy->getNumElements();
+  unsigned SrcElts = SrcComponents.size();
+  unsigned Ratio = SrcElts / DestElts;
+  unsigned ElemBits = BC.getSrcTy()->getScalarSizeInBits();
+  auto *WideElemTy = FixedVectorType::get(DestTy->getElementType(), WaveSize);
+  bool IsLittleEndian = NewF->getDataLayout().isLittleEndian();
+
+  SmallVector<Value *, 4> DestComponents;
+  for (unsigned D = 0; D != DestElts; ++D) {
+    Value *Acc = Constant::getNullValue(WideElemTy);
+    for (unsigned R = 0; R != Ratio; ++R) {
+      unsigned SrcIdx = D * Ratio + R;
+      Value *Wide = Builder.CreateZExt(SrcComponents[SrcIdx], WideElemTy);
+      unsigned Shift = (IsLittleEndian ? R : Ratio - 1 - R) * ElemBits;
+      if (Shift != 0)
+        Wide = Builder.CreateShl(
+            Wide, ConstantInt::get(
+                      WideElemTy,
+                      APInt(DestTy->getScalarSizeInBits(), Shift)));
+      Acc = R == 0 ? Wide : Builder.CreateOr(Acc, Wide);
+    }
+    Acc->setName(BC.getName() + ".wide" + Twine(D));
+    DestComponents.push_back(Acc);
+  }
+
+  WidenedVectorComponents[&BC] = std::move(DestComponents);
+  ToErase.push_back(&BC);
+}
+
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   if (auto *CI = dyn_cast<CallInst>(&I)) {
     // A divergent call to a "trivially vectorizable" LLVM intrinsic (see
@@ -4574,6 +4666,12 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   if (auto *BC = dyn_cast<BitCastInst>(&I);
       BC && isScalarToVectorIntBitCast(*BC)) {
     widenScalarToVectorBitCast(*BC, Builder);
+    return true;
+  }
+
+  if (auto *BC = dyn_cast<BitCastInst>(&I);
+      BC && isVectorNarrowingBitCast(*BC)) {
+    widenVectorNarrowingBitCast(*BC, Builder);
     return true;
   }
 
