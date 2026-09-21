@@ -55,28 +55,32 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+1. **Check `/tmp/ctsrun/l128/blend_full.qpa`** (PID 40501 if still
+   alive) for the `pipeline.monolithic.blend.*` sweep's final tally
+   before doing anything else CTS-related -- it was still running (0
+   Fail through 32,000+ cases) when this session ended. If clean,
+   update `VulkanCTSReport.md`'s note on this and consider the
+   long-standing "is `blend.*` actually clean" question finally
+   closed for good.
+2. **`L128(a)` (the nondeterministic JIT crash) needs real
+   memory-instrumentation tooling** before anyone re-attempts the
+   loop-unrolling half of `L128` -- `apt install valgrind` (not present
+   this session) or an ASan-instrumented build of the CPU JIT path is
+   the natural next step. Do not re-attempt the unroll pass by pure
+   inspection again; that approach is exhausted for this bug.
+3. Once `L128(a)` is understood, `L128` itself just needs the
+   (now-reverted) unroll pass re-derived on top of a fix for whatever
+   `L128(a)` turns out to be, plus a final CTS check of the 3 target
+   `query_max_attributes.*` cases.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the largest not-yet-started cross-repo item -- needs its own
    dedicated session, not a quick pick.
-2. `L115(b)` (pull-model interpolation) remains flagged from several
-   sessions ago as needing a new runtime-callback ABI surface -- also not
-   a quick pick.
-3. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
-   vertex-input-array gap, 3 fails) is root-caused but not attempted --
-   needs a dedicated session to prototype and compare the two candidate
-   fixes (loop-unrolling vs. a new dynamic-element-index ABI) described in
-   its own roadmap row.
-4. The `pipeline.monolithic.blend.*` full-family regression sweep
-   (flagged as a two-session-running timeout pattern previously) still
-   hasn't been reattempted -- still worth raising the timeout or splitting
-   into sub-family chunks whenever picked back up.
-5. **Note for future sessions**: when a CTS bucket's own error text seems
-   to point at a specific known limitation (e.g. `hasOnlyConstantIndices`),
-   don't take that at face value -- get an isolated
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` trace on at least one repro case
-   before writing it into the roadmap as a root cause. This session found
-   a prior session's speculative diagnosis was wrong once actually traced.
+5. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick.
 6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. This session's own scratch CTS logs (`/tmp/ctsrun/l131/*`) are already
-   cleaned up -- nothing to do here.
+7. This session's scratch CTS logs at `/tmp/ctsrun/l128/*` (including
+   the still-running blend sweep's log) should be cleaned up by
+   whichever future session confirms the blend sweep's final result
+   and no longer needs the raw log.
