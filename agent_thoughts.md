@@ -98688,3 +98688,81 @@ Nothing pending -- `L138` is fixed and CTS-verified. If picking this up cold, ju
 3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest not-yet-started cross-repo item, needs its own dedicated session.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here -- no reconfigure needed.
 5. No scratch left over to clean up this session (all `/tmp/l138_*.qpa` deleted).
+
+# Session: L140 closed (constant-lane-after-dynamic-row gap); L139 closed as a side effect
+
+**Do this first if you're picking this up:** nothing -- both `L139` and
+`L140` are closed, CTS-verified, and committed. Read on only for context
+or if you want to double-check the work.
+
+## What happened, in one line
+
+`L140`'s "unsupported divergent call" error at `SIMDize.cpp` was a red
+herring -- the real bug was one line's worth of missing logic in
+`CanonicalizeStage.cpp`'s `collectDynamicRowTerms`, and fixing it also
+silently closed `L139` (never independently root-caused, just empirically
+confirmed fixed).
+
+## The bug, in plain terms
+
+1. `interpolateAtCentroid(inPosScreenArr[index])` (dynamic array index,
+   no trailing lane) -- already worked.
+2. `interpolateAtCentroid(inPosScreenArr[index].y)` (dynamic array index
+   *plus* a constant trailing `.y`) -- did NOT work. The constant-index
+   branch of `collectDynamicRowTerms` only knew how to step into a
+   `StructType` or `ArrayType`; a constant index into a `FixedVectorType`
+   fell through to `std::nullopt` with no further handling.
+3. Fix: check "is this a vector lane select" *before* checking "is this
+   index constant" -- so a constant lane select is recognized the same
+   way a dynamic one already was (both feed the same `DynamicComponent`
+   out-param; every consumer already normalizes it identically either
+   way).
+
+## How I actually found it (useful for next time)
+
+Building a standalone repro of `CanonicalizeStage.cpp`'s behavior outside
+the full CTS pipeline is fiddly. Two dead ends, one working path:
+
+- ❌ `mlir-translate --deserialize-spirv` → `feme-opt
+  --feme-convert-spirv-to-llvm` → generic upstream `mlir-translate
+  --mlir-to-llvmir`: silently **drops `feme.spirv.decorations`**, so
+  `CanonicalizeStagePass` never converts *anything*, not even
+  `gl_FragCoord`. Useless for testing this pass.
+- ✅ `feme-translate --import-spirv frag.spv -o frag.mlir` then
+  `feme-translate --no-implicit-module --spirv-to-llvmir frag.mlir -o
+  frag.ll` -- uses feme's own dedicated importer/translator, preserves
+  decorations correctly. **The `--no-implicit-module` flag is the trick**
+  -- without it you get `error: expected a 'spirv.module' op, got
+  'builtin.module'`.
+
+## Wins this session
+
+- `L140` (3 CTS cases, `nonuniform_interpolant_indexing.*`): fixed,
+  100% pass.
+- `L139` (9 CTS cases, `centroid_qualifier_inside_primitive.*`): also
+  now 100% pass, closed as a side effect of the same fix.
+- Found a genuinely reusable standalone-repro recipe for
+  `CanonicalizeStage.cpp` (the `--import-spirv` /
+  `--no-implicit-module --spirv-to-llvmir` combo above) -- worth reaching
+  for directly next time instead of rediscovering it.
+- 0 regressions: `ninja check-feme` (3,300/3,300 Passed, 3 Unsupported),
+  full `multisample_interpolation.*` CTS sweep (1,699 cases, 0 Fail).
+
+## Suggested next steps
+
+1. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+2. **(~15-20 min, worth doing before starting something new)** `L139`
+   was never actually root-caused -- it was just confirmed fixed by
+   re-running its CTS cases after the `L140` fix landed. If a future
+   session has spare time, it would be worth briefly tracing *why*
+   `L139`'s shader hits the same `collectDynamicRowTerms` code path (the
+   `centroid_qualifier_inside_primitive` shader likely also has a
+   dynamic-row-plus-constant-lane shape somewhere), just so the roadmap
+   entry's own root-cause note is accurate rather than "closed by
+   correlation."
+3. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+4. No scratch left over to clean up this session (`/tmp/l140dbg/`,
+   `/tmp/l140_repro.qpa`, `/tmp/ctsrun/l140/` all deleted).
