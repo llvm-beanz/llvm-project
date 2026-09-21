@@ -9751,3 +9751,111 @@ the already-documented `AtCentroid` pixel-center simplification, but not
 yet directly confirmed) is re-scoped as new roadmap row `L138`. No
 feature/extension inventory changes (compiler correctness fix only --
 no new Vulkan functionality shipped this session).
+
+## L138: `centroid_interpolation_consistency` numerical mismatch (root cause and fix)
+
+### Investigation
+
+Isolated `dEQP-VK.pipeline.fast_linked_library.multisample_interpolation.
+centroid_interpolation_consistency.pushc_component_0.128_128_1.samples_4`
+and decoded its own embedded result image (base64 PNG in the `.qpa` log)
+directly: **100% of pixels (16,384/16,384) were the shader's own "fail"
+color**, not a partial/edge-only mismatch -- ruling out the
+initially-suspected `AtCentroid` pixel-center-vs-true-coverage-weighted-
+centroid simplification (`L115(b)`'s own follow-up note) early, since that
+would only affect edge/partial-coverage pixels.
+
+A first hypothesis (per-sample shading, `L114(a)`, incorrectly
+re-evaluating a `centroid`-qualified varying's direct read at each pass's
+real per-sample position instead of holding it fixed at the pixel center)
+was implemented in `Executor.cpp` and built/tested clean (`ninja
+check-feme`: 0 regressions) but had **zero effect** on the CTS failure --
+byte-identical 100%-fail pattern before and after. This ruled the
+hypothesis out as the actual root cause of this specific test's failure
+(though it remains independently spec-correct and was kept).
+
+Broadened the repro to every `centroid_interpolation_consistency` variant
+(`monolithic` construction type, not just `fast_linked_library`): **all
+30/30 executable cases failed**, including `all_components`/`component_0`/
+`component_1` (no push constant involved at all) -- ruling out anything
+push-constant-specific and pointing at something more fundamental to
+*every* variant of this test.
+
+Traced `CanonicalizeStage.cpp`'s pull-model-interpolation family
+(`InterpolateAtCentroid`/`AtSample`/`AtOffset`) end to end and found
+`interpolateStageIOValue` -- the function that builds the real
+`feme.stage.interpolate.at.*` call -- only ever took an `ElementID` and a
+`Component`, with **no `Row` parameter at all**, unlike the ordinary
+`InputLoad` op's `ElementID`/`Row`/`Component`/`Vertex` shape. Both call
+sites (the SPIR-V `feme.spirv.interpolate_at_*` marker-call resolution
+path, and the pre-existing DXIL `EvalCentroid`/`EvalSampleIndex`/
+`EvalSnapped` raising path) silently dropped `Access->Row`/the DXIL row
+operand on the floor.
+
+This test's own shader reads `centroid in vec2
+fs_in_pos_screen_centroid[2];` via `fs_in_pos_screen_centroid[1][component]`
+-- an *array* index (`[1]`) as well as a vector-lane index (`[component]`).
+The vertex shader deliberately writes garbage (`vec2(-70.3, 42.1)`) into
+row 0 and the real value into row 1, specifically so a bug like this one
+would be caught by a naive implementation that always reads row 0. Every
+`InterpolateAtCentroid` call on this varying was doing exactly that --
+silently always addressing row 0 -- while the test's own comparison
+direct-read went through the ordinary `InputLoad` path, which *does*
+carry a `Row` operand and correctly read row 1. This explains the
+100%-mismatch pattern exactly: not a small numerical error near a
+threshold, but a comparison between two *entirely different, unrelated*
+values.
+
+### Fix
+
+- `StageOps.h`/`StageOps.cpp`: added a `Row` operand to
+  `createStageInterpolateAt{Centroid,Sample,Offset}`, in the same
+  position/order `InputLoad`'s own `Row` operand occupies
+  (`ElementID, Row, Component, ...`).
+- `CanonicalizeStage.cpp`: both raising paths now forward the real `Row`
+  value instead of dropping it -- `Access->Row` (SPIR-V path, falling
+  back to a constant `0` the same way the store-side code a few lines up
+  already does) and the DXIL call's own row operand (already being read
+  off the call for no reason before this fix -- a leftover from before
+  this op family had anywhere to put it).
+- `FragmentWrapper.cpp`'s `lowerFragmentInterpolateAt`: reads the real
+  `Row` operand (shifting `Component`/`Sample`/`OffsetX`/`OffsetY`'s own
+  operand indices by one) and forwards it to `computeStageStorageAddress`
+  instead of a hardcoded `Builder.getInt32(0)`.
+- `ValidateStage.cpp`: validates the new `Row` operand the same way
+  `InputLoad`'s own `Row` operand is validated.
+- Kept (but did not revert) the `Executor.cpp` `SampleB0/1/2` vs
+  `Quad.Bary0/1/2` per-sample-shading split from the disproven first
+  hypothesis: independently spec-correct (a `centroid`-qualified varying
+  must not vary across samples in one pixel), even though it was not the
+  actual root cause of this bug.
+
+Updated `StageOpsTest`, `FragmentWrapperTest`, and
+`dxil-canonicalize-stage.ll`'s `CHECK` lines for the new operand.
+
+### Verification
+
+- `ninja check-feme`: 3,299/3,299 Passed, 3 Unsupported, 0 Failed (0
+  regressions).
+- CTS `dEQP-VK.pipeline.fast_linked_library.multisample_interpolation.
+  centroid_interpolation_consistency.pushc_component_0.128_128_1.
+  samples_4` (the originally isolated case): **Pass** (was Fail, 100%
+  wrong pixels).
+- CTS `dEQP-VK.pipeline.*.multisample_interpolation.
+  centroid_interpolation_consistency.*` (full bucket across all
+  construction types, 420 cases): **90 Pass / 0 Fail / 330 NotSupported**
+  -- every executable case now passes (was 36 Fail).
+- A broader `dEQP-VK.pipeline.*.multisample_interpolation.*` sweep (1,699
+  cases) confirms **0 regressions** from this fix and surfaces 12
+  pre-existing, unrelated failures (`centroid_qualifier_inside_primitive`,
+  `nonuniform_interpolant_indexing`), filed as new roadmap rows
+  `L139`/`L140`.
+
+### Results
+
+`L138` struck through in `Roadmap.md` as fixed and CTS-verified. Two
+newly-surfaced, previously-undocumented failure families
+(`L139`/`L140`) were filed as their own rows, unrelated to this fix, the
+same way `L138` itself was filed during `L137`'s closure. No feature/
+extension inventory changes (compiler correctness fix only -- no new
+Vulkan functionality shipped this session).
