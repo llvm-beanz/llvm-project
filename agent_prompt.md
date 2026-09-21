@@ -55,35 +55,23 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`** (PID 12156
-   if still alive) for the `interface_matching`-excluded
-   `pipeline.monolithic.*` sweep's final tally. Not required to close
-   anything, but worth recording in `VulkanCTSReport.md` if it finished,
-   and worth killing + noting as still-running-forever if it hasn't
-   (this family appears to genuinely take multiple hours end to end).
-2. **`L133` (the `interface_matching.*` pad-field assertion crash) is a
-   real process abort, not just a `Fail`** -- consider picking this up
-   before `L132`, since it's the one that actively breaks batch CTS
-   sweeps that reach it. Start from a minimized in-process repro (in
-   the `DrawTest.cpp`/`FeMeVulkanTests` style established across many
-   `L128`-family sessions) rather than iterating against the full CTS
-   case directly.
-3. **`L132` (`bind_buffers_2.*`, 57 fails)** -- not root-caused yet,
-   about `vkCmdBindVertexBuffers2` stride/offset handling. Needs its
-   own dedicated session.
-4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   remains the largest not-yet-started cross-repo item -- needs its own
-   dedicated session, not a quick pick. Untouched again this session.
-5. `L115(b)` (pull-model interpolation) remains flagged from several
-   sessions ago as needing a new runtime-callback ABI surface -- also
-   not a quick pick. Untouched again this session.
-6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+1. **Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`** (PID 12156,
+   still alive as of this session's end, ~28 min runtime, mid-
+   `blend.dual_source.*`) for its final tally before doing anything else
+   CTS-related -- 0 fails through the `blend.*` sub-family so far. This
+   is the *same* multi-hour `interface_matching`-excluded sweep two
+   sessions ago started; if it's finally done, record the tally in
+   `VulkanCTSReport.md` and clean up `/tmp/ctsrun/l128fix/`,
+   `/tmp/ctsrun/l133/`, `/tmp/ctsrun/l127/`, `/tmp/ctsrun/vulkan/` (all
+   scratch, nothing committed references them).
+2. **`L132`** (`bind_buffers_2.*`, 57 fails, `vkCmdBindVertexBuffers2`
+   stride/offset handling) -- still not root-caused. Good next pick: no
+   known crash, no known blocker, just needs a dedicated session to
+   start from a minimized repro the way `L133` was worked this session.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing
+   a new runtime-callback ABI surface, not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-7. **Reminder for future sessions doing a source-swap-to-baseline
-   check**: `git show <commit>:<path> > <tmpfile>` + `cp` over the
-   working copy + rebuild + test + `cp` back the saved "with-fix"
-   version is faster and safer than `git stash`/`git worktree` for a
-   single-file, already-committed change -- no risk of losing
-   uncommitted work, no full second build tree needed. Always `git
-   status --short` afterward to confirm a clean, zero-diff restore
-   before committing anything else.
