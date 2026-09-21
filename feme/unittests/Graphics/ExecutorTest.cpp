@@ -2516,6 +2516,46 @@ TEST(ExecutorTest, InterpolatesAGenuinelyConstantColorExactly) {
   }
 }
 
+/// (Roadmap L134(f)) The same bit-exactness requirement as
+/// `InterpolatesAGenuinelyConstantColorExactly` above, but for
+/// depth rather than a fragment-shader varying: a triangle whose 3
+/// vertices all share the same, not-exactly-representable-in-binary NDC
+/// Z (0.1f) must write back that exact depth to every covered texel
+/// (this executor's default `[0,1]` depth-range viewport maps NDC Z to
+/// window depth via the identity `MinDepth + NdcZ*(MaxDepth-MinDepth)`,
+/// so the expected depth is exactly `0.1f`). `Executor.cpp`'s per-pixel
+/// `Depth = B0*Z0+B1*Z1+B2*Z2` computation isn't provably exact when
+/// `B0+B1+B2` isn't provably `== 1.0f` (three independently rounded
+/// divisions) -- this drifts a genuinely constant depth by a few ULPs,
+/// exactly the failure `dEQP-VK.draw.*.depth_clamp.*`'s near-zero-epsilon
+/// depth comparison caught for real multi-viewport clamp cases.
+TEST(ExecutorTest, InterpolatesAGenuinelyConstantDepthExactly) {
+  Context Ctx;
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Always;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, Depth);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Same oversized CCW triangle shape as elsewhere in this file, every
+  // vertex at the same NDC z (0.1f).
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.1f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.1f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.1f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_EQ(Scene.DepthStorage[I], 0.1f) << "texel " << I;
+}
+
 TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
