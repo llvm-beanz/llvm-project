@@ -9063,3 +9063,15 @@ fix this same session, `L134(b)`'s entire `output_location.array.*`
 family is now closed end to end. No feature/extension inventory changes
 (a compiler correctness fix, no new Vulkan functionality shipped this
 session).
+
+### Full-sweep confirmation (both sessions above)
+
+A full `dEQP-VK.draw.*` regression sweep (29,451 cases) run after both
+`L134(i)` and `L134(h)`'s fixes landed: **171 Fail** (was 181 before this
+session, exactly `181 - 10` -- the combined `output_location.array.*`
+improvement of 18-Pass to 28-Pass across both fixes). Every remaining
+fail belongs to one of `L134`'s two still-open sub-rows
+(`indexed_draw.*`/`L134(a)`, 64 fails; `multiple_interpolation.*`/
+`L134(c)`, 64 fails, plus `renderpass`/`dynamic_rendering` construction-
+type variants of both); 0 fails remain in `output_location.*`, and no
+new fail appeared anywhere else in the sweep.
