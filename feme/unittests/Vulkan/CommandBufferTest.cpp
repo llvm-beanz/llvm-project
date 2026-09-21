@@ -1084,6 +1084,134 @@ TEST_F(StorageBufferDispatchTest, ReadsAndWritesThroughBoundDescriptorSet) {
   vkFreeMemory(Device, Out.Memory, nullptr);
 }
 
+/// (roadmap L125(t)) Regression test for the bind-point state-isolation
+/// bug VK-GL-CTS's `pipeline.monolithic.bind_point.graphics_compute.*`
+/// family exists to catch: per Vulkan spec ("Descriptor Set Binding"),
+/// "there is a separate set of bound descriptor sets for each of graphics
+/// and compute", so a bind recorded against `VK_PIPELINE_BIND_POINT_
+/// GRAPHICS` must never be visible to a dispatch against `_COMPUTE`
+/// (or vice versa), even when both target the same set index. This test
+/// binds the real (in/out) descriptor set at the compute bind point,
+/// then -- interleaved, exactly like the CTS family's own draw/dispatch
+/// interleaving -- binds a second, unrelated descriptor set at the
+/// *graphics* bind point to the very same set index, and confirms the
+/// dispatch that follows still reads/writes through its own compute-bind-
+/// point set rather than the interleaved graphics bind clobbering it (the
+/// bug this session found: both bind points previously shared one
+/// `BoundSets` vector with no bind-point routing at all).
+TEST_F(StorageBufferDispatchTest,
+       GraphicsBindDoesNotClobberComputeBoundDescriptorSets) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out = createStorageBuffer(4);
+  uint32_t InitialValue = 41;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[0].pBufferInfo = &InInfo;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+  Writes[1].pBufferInfo = &OutInfo;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  // A second, unrelated descriptor set -- from its own pool, so the fixture's
+  // own `maxSets=1` pool need not change -- that a real application would
+  // never legally read through this pipeline layout at all (it targets
+  // `VK_PIPELINE_BIND_POINT_GRAPHICS`, and no graphics pipeline is ever
+  // bound in this test), but which must still land in a completely
+  // separate bind-point slot than `Set` above.
+  HostBuffer GraphicsIn = createStorageBuffer(4);
+  HostBuffer GraphicsOut = createStorageBuffer(4);
+  uint32_t GraphicsSentinel = 0xDEAD;
+  std::memcpy(GraphicsIn.Data, &GraphicsSentinel, sizeof(GraphicsSentinel));
+  // A distinct, easily-recognized sentinel written before the dispatch --
+  // this buffer's memory isn't otherwise zero-initialized, so checking for
+  // "untouched" below needs a known starting value to compare back against
+  // rather than assuming zero.
+  uint32_t GraphicsOutSentinel = 0xCAFEF00D;
+  std::memcpy(GraphicsOut.Data, &GraphicsOutSentinel,
+             sizeof(GraphicsOutSentinel));
+  VkDescriptorPoolSize GraphicsPoolSizes[2] = {
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1},
+  };
+  VkDescriptorPoolCreateInfo GraphicsPoolInfo{};
+  GraphicsPoolInfo.maxSets = 1;
+  GraphicsPoolInfo.poolSizeCount = 2;
+  GraphicsPoolInfo.pPoolSizes = GraphicsPoolSizes;
+  VkDescriptorPool GraphicsPool = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorPool(Device, &GraphicsPoolInfo, nullptr, &GraphicsPool),
+      VK_SUCCESS);
+  VkDescriptorSetAllocateInfo GraphicsDSAllocInfo{};
+  GraphicsDSAllocInfo.descriptorPool = GraphicsPool;
+  GraphicsDSAllocInfo.descriptorSetCount = 1;
+  GraphicsDSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet GraphicsSet = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &GraphicsDSAllocInfo,
+                                     &GraphicsSet),
+            VK_SUCCESS);
+  VkDescriptorBufferInfo GraphicsInInfo{GraphicsIn.Buf, 0, 4};
+  VkDescriptorBufferInfo GraphicsOutInfo{GraphicsOut.Buf, 0, 4};
+  VkWriteDescriptorSet GraphicsWrites[2]{};
+  GraphicsWrites[0].dstSet = GraphicsSet;
+  GraphicsWrites[0].dstBinding = 0;
+  GraphicsWrites[0].descriptorCount = 1;
+  GraphicsWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  GraphicsWrites[0].pBufferInfo = &GraphicsInInfo;
+  GraphicsWrites[1].dstSet = GraphicsSet;
+  GraphicsWrites[1].dstBinding = 1;
+  GraphicsWrites[1].descriptorCount = 1;
+  GraphicsWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+  GraphicsWrites[1].pBufferInfo = &GraphicsOutInfo;
+  vkUpdateDescriptorSets(Device, 2, GraphicsWrites, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  uint32_t DynamicOffset = 0;
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 1, &DynamicOffset);
+  // Interleave a bind for the *other* bind point at the same set index,
+  // exactly like the CTS family's own scenario -- this must not disturb
+  // the compute bind just recorded above.
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Layout, 0,
+                          1, &GraphicsSet, 1, &DynamicOffset);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + 1);
+  // The graphics-bind-point set must be entirely untouched by the dispatch
+  // -- if the bind-point bug regressed, the dispatch would have run
+  // against `GraphicsSet` instead, overwriting the sentinel here.
+  uint32_t GraphicsOutResult = 0;
+  std::memcpy(&GraphicsOutResult, GraphicsOut.Data, sizeof(GraphicsOutResult));
+  EXPECT_EQ(GraphicsOutResult, GraphicsOutSentinel);
+
+  vkDestroyDescriptorPool(Device, GraphicsPool, nullptr);
+  vkDestroyBuffer(Device, GraphicsIn.Buf, nullptr);
+  vkDestroyBuffer(Device, GraphicsOut.Buf, nullptr);
+  vkFreeMemory(Device, GraphicsIn.Memory, nullptr);
+  vkFreeMemory(Device, GraphicsOut.Memory, nullptr);
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
 TEST_F(StorageBufferDispatchTest, DynamicOffsetShiftsBoundBinding) {
   // Two i32 elements; the descriptor declares a 4-byte range starting at
   // buffer offset 0, and the dynamic offset shifts it to the second
