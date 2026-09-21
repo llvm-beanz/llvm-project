@@ -57,44 +57,32 @@ The last session lost internet connection, can you please retry?
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. `L129` (push-constant bind-point isolation) is confirmed to have
-   no CTS-driven repro anywhere in the current dEQP-VK checkout. If
-   picked up again, a hand-written `feme` unit test (mirroring
-   `L125(t)`'s own `GraphicsBindDoesNotClobberComputeBoundDescriptorSets`
-   test methodology: push distinct values at each bind point, bind/
-   draw/dispatch interleaved, assert isolation) is now the *only*
-   path to verify a fix -- do not spend more time searching CTS for a
-   repro, this session's search was thorough.
-2. `L130` (BC-format CTS gap) is closed -- confirmed CTS-side, not
-   feme's. No further action needed; do not re-investigate under the
-   assumption it's an unfixed feme bug.
-3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+1. The 9 `pipeline.monolithic.push_constant.*` pre-existing failures
+   (`JIT session error: Symbols not found: [ spirv_var_NN ]` /
+   `OpTypeArray count <id> ... must come from a constant, specialization
+   constant, or supported specialization constant operation`) are
+   **not yet filed as their own roadmap row** -- worth filing and
+   root-causing next time nothing more pressing is queued; these look
+   like a real gap in how the JIT/SPIR-V-legalization path resolves
+   specialization-constant-sized arrays or exported symbols, possibly
+   related in shape to `L128`'s own specialization-constant array-size
+   finding, but not yet confirmed as the same root cause.
+2. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the other large, not-yet-started cross-repo item -- not a
    quick pick, needs its own dedicated session.
-4. `L115(b)` (pull-model interpolation) remains flagged from several
+3. `L115(b)` (pull-model interpolation) remains flagged from several
    sessions ago as a larger, not-yet-started item needing a new
    runtime-callback ABI surface -- also not a quick pick.
-5. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
+4. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
    vertex-input-array gap, 3 fails) is root-caused but not attempted --
    needs a dedicated session to prototype and compare the two
    candidate fixes (loop-unrolling vs. a new dynamic-element-index
    ABI) described in its own roadmap row.
-6. The `pipeline.monolithic.blend.*` full-family regression sweep
+5. The `pipeline.monolithic.blend.*` full-family regression sweep
    (flagged as a two-session-running timeout pattern previously) still
    hasn't been reattempted -- still worth raising the timeout or
    splitting into sub-family chunks whenever picked back up.
-7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-8. **Reminder for future sessions**: `deqp-vk` must be invoked with
-   CWD set to its own module directory
-   (`VK-GL-CTS/build/external/vulkancts/modules/vulkan`), not an
-   arbitrary scratch directory -- it resolves shader/test data files
-   via relative paths and silently produces a truncated caselist (or
-   `FATAL ERROR: Failed to initialize dEQP`) otherwise. Also remember
-   the correct case-name prefix for sampler/view-type tests is
-   `dEQP-VK.pipeline.<construction_type>.sampler.view_type.*`, *not*
-   a bare `dEQP-VK.sampler.*` -- `view_type` groups are registered
-   inside the `pipeline` module (`vktPipelineSamplerTests.cpp`), not
-   as their own top-level module.
-9. This session's own scratch CTS logs (`/tmp/ctsrun/l125bc/*`) are
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l129/*`) are
    already cleaned up -- nothing to do here.
