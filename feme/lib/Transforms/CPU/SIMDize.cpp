@@ -4586,6 +4586,30 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
   }
 
+  // (Roadmap L134(c)) An `extractelement` reading a vector `LI` a
+  // preceding `MaskedAllocas` special case (`widenMaskedAllocaLoad` just
+  // above) has *already* decomposed into `WidenedVectorComponents` must
+  // be routed through `widenExtractElement` too, even though the ordinary
+  // `UI.isDivergentAtDef` gate below cannot see it: that analysis judges
+  // `LI` itself uniform from its (genuinely uniform) *address* alone, for
+  // exactly the reason `widenMaskedAllocaLoad`'s own comment gives, with
+  // no way to see that the per-lane *values* `LI` reads back now
+  // genuinely differ. Left to fall through to that general gate, this
+  // `extractelement` would be misclassified "uniform: leave it exactly as
+  // it is" and never rewritten -- a dangling reference to `LI` once the
+  // masked-alloca load producing it is erased, silently replaced with
+  // `poison` by `eraseFromParent` (found reducing
+  // `dEQP-VK.draw.renderpass.multiple_interpolation.*`'s own
+  // all-transparent-black-pixel failure to this exact shape: a per-lane
+  // dynamically-indexed local array read back through a runtime,
+  // push-constant-derived index).
+  if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
+    if (WidenedVectorComponents.contains(EE->getVectorOperand())) {
+      widenExtractElement(*EE, Builder);
+      return true;
+    }
+  }
+
   if (!UI.isDivergentAtDef(&I))
     return true; // Uniform: leave it exactly as it is.
 
