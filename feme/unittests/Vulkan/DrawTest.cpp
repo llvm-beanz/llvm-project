@@ -2141,6 +2141,75 @@ TEST_F(DrawTest, RejectsIndexRangeBeyondBindIndexBuffer2Size) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap L134(a): `VK_KHR_maintenance6` legalizes binding
+/// `VK_NULL_HANDLE` as an index buffer via `vkCmdBindIndexBuffer2`. An
+/// indexed draw with a `0` index count against such a bind performs no
+/// actual index fetch, so it must succeed -- distinct from never having
+/// called a bind command at all (still rejected, see
+/// `RejectsIndexedDrawWithNoIndexBufferBoundAtAll` below).
+TEST_F(DrawTest, RendersZeroCountIndexedDrawWithNullBoundIndexBuffer2) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer2(Cmd, VK_NULL_HANDLE, 0, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(Cmd, 0, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// The same null-bound-index-buffer shape as
+/// `RendersZeroCountIndexedDrawWithNullBoundIndexBuffer2` above, but through
+/// the plain (non-`2`) `vkCmdBindIndexBuffer`, which `VK_KHR_maintenance6`
+/// legalizes a `VK_NULL_HANDLE` bind through identically.
+TEST_F(DrawTest, RendersZeroCountIndexedDrawWithNullBoundIndexBuffer) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer(Cmd, VK_NULL_HANDLE, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(Cmd, 0, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// The genuine "never bound at all" case `L134(a)`'s fix must still reject:
+/// unlike the two tests above, no `vkCmdBindIndexBuffer{,2}` call of any
+/// kind precedes this indexed draw, so it is invalid usage regardless of
+/// the index count being `0` -- confirming the new `IndexBufferBound` flag
+/// distinguishes "bound to nothing" from "never bound" rather than
+/// accidentally legalizing the latter too.
+TEST_F(DrawTest, RejectsIndexedDrawWithNoIndexBufferBoundAtAll) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawIndexed(Cmd, 0, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// rather than once per vertex: `firstInstance` selects the buffer's second
 /// element (green), not its first (red) -- a per-vertex-rate fetch would
 /// instead read vertex index 0 and always see the first element.
