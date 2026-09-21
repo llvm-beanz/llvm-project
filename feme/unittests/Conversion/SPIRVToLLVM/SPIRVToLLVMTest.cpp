@@ -909,6 +909,65 @@ TEST(SPIRVToLLVMTest, InputStorageStructVec3MemberStaysAtDeclaredIndex) {
   EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
 }
 
+// (Roadmap L133) A plain (non-`Block`, no `Offset` decorations) struct
+// nested *two* levels deep -- an outer struct's own member is itself a
+// struct with a member needing its own interior natural-alignment gap
+// (roadmap L103) -- used to compute the wrong physical field index for
+// that innermost member, landing squarely inside the nested struct's own
+// synthetic pad instead. Modeled directly on the real `dEQP-VK.pipeline.
+// monolithic.interface_matching.decoration_mismatch.
+// out_flat_in_none_member_of_structure_in_block_vert_geom_out_frag_in`
+// CTS repro's own shape: `struct TestStruct { vec2 dummy; vec4
+// variableInStruct; }; in block { vec2 dummy; TestStruct structInBlock;
+// } testBlock;`, accessed via `testBlock.structInBlock.variableInStruct`.
+//
+// Root cause: `remapNestedStructMemberIndices`'s own recursive,
+// one-level-deeper remap (into `TestStruct`, once `structInBlock` itself
+// has already been correctly remapped by the outermost level) calls
+// `getStructMemberPhysicalIndexInRealType`, which used to return its
+// `DeclaredIndex` argument unchanged whenever the nested struct had no
+// explicit SPIR-V `Offset` decorations -- correct for member
+// *permutation* (impossible without declared offsets), but wrong for a
+// plain natural-alignment gap, which a non-offset struct can still need
+// (`layOutStructIfOffsetsMatch`'s own `!Type.hasOffset()` branch, roadmap
+// L103). The fix falls back to `getStructMemberPhysicalIndex`'s own
+// isolated re-derivation in that case, exactly as the outermost struct
+// level's own path already does unconditionally.
+TEST(SPIRVToLLVMTest, NestedNonOffsetStructInteriorPadRemapsInnerMember) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @in_block : "
+      "!spirv.ptr<!spirv.struct<(vector<2xf32>, "
+      "!spirv.struct<(vector<2xf32>, vector<4xf32>)>)>, Input> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @in_block : "
+      "!spirv.ptr<!spirv.struct<(vector<2xf32>, "
+      "!spirv.struct<(vector<2xf32>, vector<4xf32>)>)>, Input> "
+      "%1 = spirv.Constant 1 : i32 "
+      "%2 = spirv.AccessChain %0[%1, %1] : "
+      "!spirv.ptr<!spirv.struct<(vector<2xf32>, "
+      "!spirv.struct<(vector<2xf32>, vector<4xf32>)>)>, Input>, i32, i32 -> "
+      "!spirv.ptr<vector<4xf32>, Input> "
+      "%3 = spirv.Load \"Input\" %2 : vector<4xf32> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"Fragment\" @entry "
+      "spirv.ExecutionMode @entry \"OriginUpperLeft\" }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // Both the outer struct's own `structInBlock` member and the nested
+  // struct's own `variableInStruct` member need an 8-byte interior pad
+  // ahead of them (a `vector<4xf32>`'s host-natural 16-byte alignment
+  // leaves no room in either struct's own preceding 8-byte `vector<2xf32>`
+  // member) -- both must land at *physical* index 2, not the *declared*
+  // index 1 either was declared at.
+  EXPECT_NE(Result.find("!llvm.struct<packed (vector<2xf32>, "
+                        "array<8 x i8>, struct<packed "
+                        "(vector<2xf32>, array<8 x i8>, vector<4xf32>)>)>"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("getelementptr %0[%2, 2, 2]"), std::string::npos)
+      << Result;
+}
+
 // (Roadmap L125s) A directly `spirv.matrix`-typed `Input` variable (the
 // shape a vertex-input attribute declared `layout(location = N) in mat2 M`
 // takes) failed to legalize its own column- then row-selecting
