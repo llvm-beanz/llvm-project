@@ -58,23 +58,28 @@ state it left behind with `git stash pop`.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(next real work, ~1-2 hrs)** Root-cause `L134(c)`'s class 2. Start with
-   `dEQP-VK.draw.renderpass.multiple_interpolation.separate.no_sample_decoration.1_sample`
-   — smallest, simplest repro (no multisampling, no block, no sample
-   decoration). The CTS test (`vktDrawMultipleInterpolationTests.cpp` line ~801)
-   compares a combined-shader render against 4-5 single-varying reference
-   renders; check whether `Executor.cpp`'s per-varying `Interpolation` field is
-   actually distinct per element for `separate` mode's individually-declared
-   (non-block) varyings, or whether they're all silently defaulting to smooth.
-2. `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases) — still untouched, the
-   other open `L134` sub-row.
-3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) — still the
-   largest not-yet-started cross-repo item, needs its own dedicated session.
-4. `L115(b)` (pull-model interpolation) — still flagged as needing a new
+1. **(~5-10 min, quick pick)** File `linear_interpolation.*`'s 42-case
+   `InterpolateAtOffset` legalization gap as a new roadmap row (e.g. `L135`) --
+   error text `error: failed to legalize operation
+   'spirv.GL.InterpolateAtOffset' that was explicitly marked illegal` at
+   pipeline creation, confirmed pre-existing this session. Not investigated
+   beyond confirming it's real and pre-existing.
+2. **(~5-10 min, quick pick)** File `output_location.shuffle.inputs-outputs`'s
+   1-case JIT symbol-resolution gap as its own roadmap row too (e.g. `L136`) --
+   `JIT session error: Symbols not found: [ spirv_var_36, spirv_var_33 ]`, also
+   confirmed pre-existing, not yet investigated.
+3. **(~1-2 hrs)** `L134(a)` (`indexed_draw.*`/`maintenance6`, 64 cases) -- the
+   last open `L134` sub-row. Every failing case name contains
+   `maintenance6`/`bindindexbuffer2_maintenance6`; plain
+   `draw_indexed`/`draw_indexed_indirect` without that suffix are not in the
+   fail list, so start there.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+   the largest not-yet-started cross-repo item, needs its own dedicated session.
+5. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a new
    runtime-callback ABI surface, not a quick pick.
-5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
-   `llvm-project`) are incremental from here — no reconfigure needed.
-6. **(~2 min)** `/tmp/ctsrun/l134c/` (this session's scratch:
-   `dump.txt`/`dump2.txt`/`dump3.txt`/`sweep.qpa`/`one.qpa`) and
-   `/tmp/l134c_frag.frag`/`.spv` can be deleted once a future session no longer
-   needs them — nothing in either is referenced by anything committed.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. **(~2 min)** `/tmp/ctsrun/l134c2/` (this session's scratch:
+   `repro.qpa`/`dbg.qpa`/`ir.qpa`/`simd.qpa`/`simd.txt`/`post.qpa`/`post.txt`/`fixverify.qpa`/`full.qpa`/`draw_full.qpa`/`draw_full.log`/`before_linear.qpa`/`before_shuffle.qpa`)
+   can be deleted once a future session no longer needs them -- nothing in it is
+   referenced by anything committed.
