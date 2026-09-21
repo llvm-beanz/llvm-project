@@ -98261,3 +98261,91 @@ session's own scoping.
    `llvm-project`) are incremental from here -- no reconfigure needed.
 7. This session's scratch (`/tmp/ctsrun/l134b/`, `/tmp/l134b/`) has
    already been cleaned up; nothing left over to delete.
+
+# Session: L134(i)/L134(h) fixed -- output_location.array.* fully closed
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` first, per
+standing instructions.
+
+## What I did
+
+1. Restarted from the prior session's own next steps. Picked
+   `L134(i)` first (smallest pick): `B10G11R11_UFLOAT_PACK32` missing
+   color-attachment support.
+2. **`L134(i)` fixed**: a stale comment had claimed `ImageFixture.cpp`
+   already had a `packClearColor` case for this format -- verified via
+   `grep`/`awk` that neither `packClearColor` nor `unpackColor` actually
+   had one. Added `encodeR11G11B10Float`/`decodeR11G11B10Float` (mirroring
+   `FeMeRuntimeCPU.c`'s authoritative shift amounts), wired into new
+   `packClearColor`/`unpackColor` special cases (modeled on the adjacent
+   `E5B9G9R9_UFLOAT` case), plus the new `RenderPass.cpp` `case` arm.
+   4 new unit tests, confirmed via stash/rebuild round-trip to fail
+   pre-fix. `ninja check-feme`: 3,289/3,292 Passed, 0 Failed, +4 tests, 0
+   regressions. CTS repro: **18/28 -> 23/28 Pass**.
+3. **`L134(h)` root-caused and fixed**: added a temporary
+   `FEME_DEBUG_DUMP_PRE_SIMDIZE`-gated IR dump right before `SIMDizePass`
+   runs (reverted before commit), took an IR dump of one crashing case.
+   Confirmed the crashing `.bc`-named value is `bitcast <4 x i1> %cond to
+   <2 x i2>` -- the shape a GLSL `any(notEqual(a.xy, b.xy))`-style
+   2-component boolean reduction compiles to (`fcmp une <4 x float>`
+   produces a real `<4 x i1>`, then pairs of it get packed into a
+   `<2 x i2>` before `extractelement`/`icmp eq 0` pulls the needed pair
+   back out). `SIMDize.cpp`'s `IsSupportedProducer` only recognized
+   same-element-count casts plus the L89g scalar<->vector special cases
+   -- this narrowing vector-to-vector bitcast (fewer, wider destination
+   elements) had no case at all.
+4. Fixed by adding `isVectorNarrowingBitCast`/`widenVectorNarrowingBitCast`,
+   generalizing `widenVectorToScalarBitCast`'s zext/shift/or
+   recomposition (its own `M == 1` special case) to a genuinely vector
+   destination: each of the `M` destination components is rebuilt from
+   its own run of `N/M` source components. New unit test
+   `SIMDizeTest.WidensNarrowingVectorBitCastFromBooleanReduction`,
+   confirmed via stash/rebuild round-trip to fail pre-fix.
+   `ninja check-feme`: 3,290/3,293 Passed, 0 Failed, +1 test, 0
+   regressions. CTS repro: **23/28 -> 28/28 Pass** -- the whole
+   `output_location.array.*` family (originally estimated 24 cases, grew
+   to 28 across `L134(b)`/`L134(h)`/`L134(i)`) is now fully closed.
+5. Ran a full `dEQP-VK.draw.*` sweep (29,451 cases) after both fixes:
+   **171 Fail** (was 181, exactly `181 - 10`). Every remaining fail is
+   `L134(a)` (`indexed_draw.*`) or `L134(c)` (`multiple_interpolation.*`)
+   -- 0 fails left in `output_location.*`, 0 regressions elsewhere.
+6. Struck through `L134(h)`/`L134(i)` on `Roadmap.md`, added
+   `VulkanCTSReport.md` session write-ups for both plus the combined
+   full-sweep confirmation. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` changes needed (both are compiler/
+   runtime correctness fixes to existing format/IR-widening support, not
+   new Vulkan functionality) -- confirmed via `grep` finding no
+   `R11G11B10`/`B10G11R11` references in either inventory file.
+
+Committed in 7 pieces (2 `L134(i)` code commits + 1 test, 2 `L134(h)`
+code/test commits, 1 `Roadmap.md`, 2 `VulkanCTSReport.md`), all with the
+Copilot co-author trailer.
+
+## What I did NOT do this session
+
+`L134(a)`/`L134(c)` (the 2 remaining open `L134` sub-rows), `L125(m)`/
+`L125(n)`, `L115(b)` -- all left untouched on purpose, per every prior
+session's own scoping; none are quick picks.
+
+## Suggested next steps
+
+1. **(~30-60 min, quick pick)** `L134(c)` (`multiple_interpolation.*`, 64
+   cases: `separate`/`structured` x `with`/`no_sample_decoration` x
+   1/2/4/8 samples) -- check its own CTS failure message text first; an
+   "expected: X, got: X" pattern may be another `L132`-class
+   barycentric-sum bug (already fixed for 2 other shapes this
+   milestone), a genuinely different message needs its own
+   investigation.
+2. **`L134(a)`** (`indexed_draw.*`/`maintenance6`, 64 cases) -- the other
+   remaining `L134` sub-row, likely most involved of the two per every
+   prior session's own sizing estimate.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+6. This session's scratch (`/tmp/ctsrun/l134h/`, `/tmp/l134h_dump.log`,
+   `/tmp/ctsrun/l134i/`) has already been cleaned up; nothing left over
+   to delete.
