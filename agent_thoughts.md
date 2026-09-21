@@ -96456,3 +96456,145 @@ needs -- it does not persist across shell calls).
    `llvm-project`) are incremental from here -- no reconfigure needed.
 8. This session's own scratch CTS logs (`/tmp/ctsrun/l125s/*`) are
    already cleaned up -- nothing to do here.
+
+# Session: L125(t) fix -- descriptor-set state not isolated per pipeline bind point
+
+## TL;DR
+
+Fixed a real correctness bug: `feme` shared one `BoundSets` vector across
+both the graphics and compute pipeline bind points, so a descriptor-set
+bind recorded against one bind point could be visible to (or clobber)
+draws/dispatches on the other. This violated the Vulkan spec's explicit
+per-bind-point separation requirement. Fixed, tested, and CTS-verified.
+The roadmap's original "10 of 655 fails" estimate for this bucket was
+off by two orders of magnitude -- the real number was 1,296 of 3,024
+(42.9%), the same "fractional-sample undercount" estimation pattern
+seen repeatedly in past sessions.
+
+## What I did
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` shows
+   `FeMe CPU Vulkan Device` (per standing instructions, every session).
+2. Root-caused `L125(t)` (picked up mid-investigation from the prior
+   session's compaction checkpoint): `executeCommandsInto` in
+   `CommandBuffer.cpp` used a single `std::vector<BoundSetState>
+   BoundSets` for both graphics and compute, even though every
+   descriptor-set entry point (`vkCmdBindDescriptorSets(2)`,
+   `vkCmdPushDescriptorSet(2)`, `vkCmdPushDescriptorSetWithTemplate(2)`)
+   carries (directly or derivably) which bind point it targets.
+   `BoundPipeline`/`BoundGraphicsPipeline` were already correctly split;
+   only descriptor-set state was not.
+3. Checked scope: does push-constant state need the same fix? Vulkan
+   spec says yes in general, but `grep`ing the CTS bucket's own source
+   (`vktPipelineBindPointTests.cpp`) found zero push-constant
+   references -- this bucket only exercises descriptor sets. Decided to
+   fix descriptor-set state only, and filed the push-constant gap as a
+   new roadmap row (`L129`) rather than silently expanding this fix's
+   scope without a concrete CTS repro to verify against.
+4. Implemented the fix: split `BoundSets` into `BoundGraphicsSets` /
+   `BoundComputeSets`; added a `BindPoint` field to `RecordedCommand`'s
+   bind-descriptor-sets payload; updated every entry point to derive/pass
+   bind point (`vkCmdBindDescriptorSets2`/`vkCmdPushDescriptorSet2` derive
+   it from `stageFlags & VK_SHADER_STAGE_COMPUTE_BIT` since those `_2`
+   APIs don't carry a flat `pipelineBindPoint` argument).
+5. Handled a genuine API quirk: `vkCmdPushDescriptorSetWithTemplate(2)`
+   take **no** bind-point argument at all in the real Vulkan API -- the
+   bind point is baked into `VkDescriptorUpdateTemplateCreateInfo::
+   pipelineBindPoint` at template-creation time. Added a `BindPoint`
+   member + `bindPoint()` accessor to `DescriptorUpdateTemplate` to
+   capture this.
+6. Rebuilt/ran `check-feme`, found one regression: a pre-existing test
+   bug in `PushDescriptorSetDispatchTest.WithTemplateReadsAndWrites`,
+   which never set `pipelineBindPoint` on its template despite pushing
+   into a compute dispatch (harmless before this fix, real once bind
+   point routing became meaningful). Fixed directly, since it's a bug
+   tightly coupled to this change.
+7. Wrote a new regression test,
+   `StorageBufferDispatchTest.GraphicsBindDoesNotClobberComputeBound
+   DescriptorSets`, and verified it via the project's established
+   stash/rebuild round-trip: reverting just the implementation fix makes
+   the new test fail with the exact real-bug shape; restoring the fix
+   makes it pass.
+8. Ran full `check-feme`: 3,273/3,276 passed, 3 unsupported, 0 failed
+   (+2 new/fixed tests, 0 regressions).
+9. Ran full Vulkan CTS verification:
+   - `pipeline.*.bind_point.graphics_compute.*` (3,024 cases, all three
+     pipeline-construction types): **1,296 Pass / 0 Fail / 1,728
+     NotSupported** (was 1,296 Fail / 0 Pass before the fix).
+   - `pipeline.monolithic.push_descriptor.*` (76 cases, regression
+     sweep since this fix touches shared descriptor-binding code):
+     **76/76 Pass, 0 Fail**, no regressions.
+10. Updated `Roadmap.md`: struck through/rewrote `L125(t)` with the
+    full writeup; discovered `L125(a)`-`L125(z)` had fully exhausted the
+    26-letter suffix space (first time this has happened in this
+    project), so -- per the standing "never nest milestone letters more
+    than one deep" instruction -- opened a new top-level `L129` row for
+    the related, still-open push-constant bind-point gap instead of
+    inventing a deeper-nested `L125`-adjacent scheme.
+11. Updated `VulkanCTSReport.md` with a new `L125(t)` section matching
+    the established per-fix format.
+12. Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+    -- confirmed no feature/extension surface changed (pure correctness
+    fix), so no updates needed there.
+13. Committed in three pieces (via a checkout/reapply split so the
+    pre-existing test-bug fix landed with the implementation, and the
+    new regression test landed on its own):
+    - Implementation fix + required test-bug fix (`CommandBuffer.{h,cpp}`,
+      `Descriptor.{h,cpp}`, the `pipelineBindPoint` line in
+      `CommandBufferTest.cpp`).
+    - New regression test, on its own.
+    - `Roadmap.md` + `VulkanCTSReport.md` docs, together.
+
+## Wins
+
+- A real, previously-invisible correctness bug fixed with a scoped,
+  well-tested change -- no MLIR conversion changes needed, purely a
+  Vulkan-layer command-buffer-interpreter fix.
+- `bind_point.graphics_compute.*`'s CTS pass rate went from 0/1,296
+  (0%) to 1,296/1,296 (100%) of the supported cases.
+- Correctly recognized and deferred a related-but-out-of-scope gap
+  (push-constant bind-point separation) rather than either ignoring it
+  entirely or scope-creeping the fix without a concrete repro to test
+  against -- filed as `L129` instead.
+- Handled the first-ever full exhaustion of a milestone's 26-letter
+  suffix space cleanly, per the user's explicit anti-nesting
+  instruction, by opening a new top-level number instead of any
+  deeper-nested scheme.
+- New regression test verified via the project's established
+  stash/rebuild round-trip methodology, not just "test passes now."
+
+## Suggested next steps
+
+1. **(~15-20 min, good next pick)** `L127`: the 4-fail
+   `vertex_input.max_attributes.*` / `misc.unused_binding` residual
+   flagged by a prior session remains untouched -- start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on each of the 4 cases
+   individually.
+2. `L129` (new, filed this session): push-constant state has the
+   identical shared-across-bind-points architectural bug that
+   descriptor-set state had before this fix, but no concrete CTS
+   failure has been found to repro it against yet -- worth a dedicated
+   search for a CTS bucket that actually exercises push constants
+   across both bind points in the same command buffer before attempting
+   a fix (fixing speculatively, without a failing test to verify
+   against, isn't a good use of a session).
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the other large, not-yet-started cross-repo item -- not a
+   quick pick, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as a larger, not-yet-started item needing a new
+   runtime-callback ABI surface -- also not a quick pick.
+5. The BC-format CTS coverage gap noted across multiple prior sessions
+   (`sampler.view_type.*.format.*bc*.address_modes.
+   *clamp_to_border*` matches 0 cases) still hasn't been investigated
+   -- worth a quick dedicated look next time nothing else is more
+   pressing.
+6. The `pipeline.monolithic.blend.*` full-family regression sweep
+   (flagged as a two-session-running timeout pattern previously) still
+   hasn't been reattempted -- still worth raising the timeout or
+   splitting into sub-family chunks whenever picked back up.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+8. No scratch CTS logs from this session needed cleanup (this session's
+   CTS runs didn't write to `/tmp/ctsrun` under a session-specific
+   subdirectory) -- nothing to do here.
