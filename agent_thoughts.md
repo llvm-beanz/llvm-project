@@ -96872,3 +96872,83 @@ found (then confirmed pre-existing and unrelated) 9 incidental
    `llvm-project`) are incremental from here -- no reconfigure needed.
 7. This session's own scratch CTS logs (`/tmp/ctsrun/l129/*`) are
    already cleaned up -- nothing to do here.
+
+# Session: fixing L131 (missing signature for zero-stage-IO Vertex/Fragment entries)
+
+**Start check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed.
+
+**What got done**: picked up the prior session's #1 next step -- root-cause
+and fix the 9 `pipeline.monolithic.push_constant.*` failures found while
+verifying `L129`.
+
+1. Traced all 9 failures to one root cause, not the several the prior
+   session's error-text speculated: a Vertex/Fragment entry with zero
+   ordinary stage-IO (`in`/`out`) globals never gets `!feme.signature`
+   metadata attached, so `FragmentWrapperPass` later crashes at JIT
+   symbol-resolution time. Confirmed via an isolated
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` trace -- the `hasOnlyConstantIndices`
+   dynamic-index theory from the prior session was a misdiagnosis, not a
+   confirmed bug.
+2. Fixed it in `CanonicalizeStage.cpp`: extended an existing
+   Geometry/Mesh-only empty-signature branch to also cover Vertex/Fragment,
+   gated on `!dxil::getEntrySignature(F)` -- a safe, exact SPIR-V/DXIL
+   origin discriminator (confirmed via code inspection of
+   `MetadataRaisingPass`) that avoids clobbering a real DXIL-origin
+   signature.
+3. Fixing this exposed 2 stale tests that only ever passed because this
+   bug's own crash was masking a separately-already-correct behavior
+   (`H11`'s fragment-output relaxation). Corrected both.
+4. Added 2 new regression tests, both confirmed via stash/rebuild
+   round-trip to fail pre-fix and pass post-fix.
+5. `ninja check-feme`: **3,276/3,279 Passed, 3 Unsupported, 0 Failed**
+   (+2 new tests, 0 regressions).
+6. CTS: full `pipeline.*.push_constant.*` sweep (437 cases, all
+   construction types) went from 9+ fails to **0 Fail** -- confirmed
+   reproducible across 3 consecutive full reruns. This fixed not just the
+   `monolithic` construction type but `fast_linked_library`/
+   `pipeline_library` too (24 total cases fixed, bigger than the original
+   9-case framing). `push_constant.lifetime.*` (63 cases) and
+   `geometry.emit.*` (23 cases) both stayed 100% Pass as regression guards.
+
+**Win**: the entire `pipeline.*.push_constant.*` CTS family is now 100%
+Pass (0 Fail) across every pipeline-construction type. This closes out
+what 3 prior sessions had left as an open, partially-scoped gap.
+
+**Commits** (4, each with the Copilot co-author trailer):
+1. `CanonicalizeStage.cpp` fix.
+2. Test corrections + 2 new regression tests (same 2 files).
+3. `Roadmap.md` (`L131` row) + `VulkanCTSReport.md` section.
+4. This `agent_thoughts.md` entry.
+
+**Roadmap**: added `L131` (struck through as fixed) documenting root
+cause, fix, collateral test fixes, and full CTS verification.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- pure correctness fix, no new feature/extension surface.
+
+## Suggested next steps
+
+1. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session, not a quick pick.
+2. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also not
+   a quick pick.
+3. `L128` (`vertex_input.max_attributes.*`'s dynamically-indexed
+   vertex-input-array gap, 3 fails) is root-caused but not attempted --
+   needs a dedicated session to prototype and compare the two candidate
+   fixes (loop-unrolling vs. a new dynamic-element-index ABI) described in
+   its own roadmap row.
+4. The `pipeline.monolithic.blend.*` full-family regression sweep
+   (flagged as a two-session-running timeout pattern previously) still
+   hasn't been reattempted -- still worth raising the timeout or splitting
+   into sub-family chunks whenever picked back up.
+5. **Note for future sessions**: when a CTS bucket's own error text seems
+   to point at a specific known limitation (e.g. `hasOnlyConstantIndices`),
+   don't take that at face value -- get an isolated
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` trace on at least one repro case
+   before writing it into the roadmap as a root cause. This session found
+   a prior session's speculative diagnosis was wrong once actually traced.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. This session's own scratch CTS logs (`/tmp/ctsrun/l131/*`) are already
+   cleaned up -- nothing to do here.
