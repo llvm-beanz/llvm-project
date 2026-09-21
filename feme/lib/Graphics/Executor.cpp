@@ -3794,6 +3794,47 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           }
         }
 
+        // (Roadmap L115(b)) Pull-model interpolation
+        // (`InterpolateAt{Centroid,Sample,Offset}`) needs each covered
+        // primitive's own raw (pre-interpolation) per-vertex varying
+        // values and screen-space geometry to recompute barycentric
+        // weights at a caller-chosen point, rather than reading back the
+        // single value `FSInput` above already interpolated at this
+        // quad's fixed shading location. Built unconditionally (rather
+        // than only when the fragment stage statically uses one of those
+        // ops) for simplicity -- the cost is the same order as the
+        // `FSInput` loop just above, and this is a reference, correctness-
+        // focused CPU implementation, not a performance-tuned one; see
+        // `FragmentWrapper.cpp`'s own consumer of these fields for the
+        // actual interpolation math.
+        Expected<StageStorage> FSVertexInputs =
+            buildStageStorage(FSSig, SignatureDirection::Input, QuadCount * 3);
+        if (!FSVertexInputs)
+          return FSVertexInputs.takeError();
+        std::vector<cpu::FemeFragmentPrimitive> Primitives(QuadCount);
+        for (uint32_t Q = 0; Q != QuadCount; ++Q) {
+          const PendingQuad &Quad = Quads[Q];
+          const ScreenTriangle &Tri = ScreenTris[Quad.TriIdx];
+          cpu::FemeFragmentPrimitive &Prim = Primitives[Q];
+          for (unsigned V = 0; V != 3; ++V) {
+            Prim.VertexPositionXY[V][0] = Tri.Pos[V][0];
+            Prim.VertexPositionXY[V][1] = Tri.Pos[V][1];
+            Prim.VertexInvW[V] = Tri.InvW[V];
+            uint32_t Invocation = Q * 3 + V;
+            size_t Idx = 0;
+            for (const LinkedVarying &LV : Varyings) {
+              for (uint32_t Row = 0; Row != LV.RowCount; ++Row) {
+                for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
+                  FSVertexInputs->writeRaw(LV.FSElementID,
+                                           LV.DestFirstComponent + C,
+                                           Invocation, Tri.Varyings[V][Idx],
+                                           Row);
+                }
+              }
+            }
+          }
+        }
+
         Expected<StageStorage> FSOutput =
             buildStageStorage(FSSig, SignatureDirection::Output, QuadCount * 4);
         if (!FSOutput)
@@ -3818,6 +3859,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         FRes.Outputs = FSOutput->Data.data();
         FRes.Invocations = PassInvocations;
         FRes.Results = Results;
+        FRes.Primitives = Primitives;
+        FRes.VertexInputs = FSVertexInputs->Data.data();
+        FRes.SamplePositions = *SamplePositions;
         const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
         cpu::PreparedFragmentBatch PFB =
             cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
