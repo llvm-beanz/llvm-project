@@ -3694,6 +3694,31 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                             SignatureInterpolationMode::NoPerspectiveSample;
                     if (LV.Interpolation == SignatureInterpolationMode::Flat) {
                       Value = V0;
+                    } else if (V0 == V1 && V1 == V2) {
+                      // (Roadmap L132) A genuinely constant varying (e.g.
+                      // every vertex of this primitive shares one
+                      // instance-rate-fetched attribute value) must
+                      // interpolate to exactly that same constant --
+                      // linear interpolation of a constant is that
+                      // constant, for *any* convex combination of
+                      // weights, exact rounding included. The general
+                      // perspective/non-perspective paths below don't
+                      // guarantee this bit-for-bit: `B0+B1+B2` (and, for
+                      // the perspective case, the analogous `InvW`-
+                      // weighted sum) is a *separately rounded* floating-
+                      // point sum, not provably `== 1.0f`/cancelling
+                      // exactly against the numerator's own rounding, so
+                      // a `Numerator / InvW` (or `B0*V+B1*V+B2*V`) can
+                      // land a few ULPs off `V` even though every input
+                      // vertex agrees exactly. That epsilon was invisible
+                      // to any CTS case using a fuzzy/thresholded pixel
+                      // comparison, but broke every one of
+                      // `dEQP-VK.pipeline.monolithic.bind_buffers_2.*`'s
+                      // exact (`!=`) per-pixel color checks, which this
+                      // shortcut fixes without changing any genuinely
+                      // varying (non-constant) attribute's own
+                      // interpolation at all.
+                      Value = V0;
                     } else if (Perspective) {
                       float InvW = B0 * Tri.InvW[0] + B1 * Tri.InvW[1] +
                                    B2 * Tri.InvW[2];
