@@ -55,16 +55,15 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~30-60 min each, quick picks)** `L134`'s 4 remaining open sub-rows,
-   smallest first: `L134(d)` (`implicit_sample_shading`, 12 cases, 3
-   shapes) is smallest; `L134(b)` (`output_location.array`, 24 cases) and
-   `L134(c)` (`multiple_interpolation`, 64 cases) mid-sized; `L134(a)`
-   (`indexed_draw`/`maintenance6`, 64 cases) likely most involved. Check
-   each one's own CTS failure message text first -- an "expected: X, got:
-   X" pattern may be another `L132`/`L134(f)`-class barycentric-sum bug; a
-   genuinely different message (crash, wrong-format rejection, a real
-   value mismatch) needs its own investigation, as `L134(e)`/`L134(g)`
-   both turned out to.
+1. **(~30-60 min each, quick picks)** `L134`'s 3 remaining open sub-rows,
+   smallest first: `L134(b)` (`output_location.array`, 24 cases) is
+   smallest; `L134(c)` (`multiple_interpolation`, 64 cases) mid-sized;
+   `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases) likely most
+   involved. Check each one's own CTS failure message text first -- an
+   "expected: X, got: X" pattern may be another
+   `L132`/`L134(d)`/`L134(f)`-class bug; a genuinely different message
+   (crash, wrong-format rejection, a real value mismatch) needs its own
+   investigation, as `L134(d)`/`L134(e)`/`L134(g)` all turned out to.
 2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
    still the largest not-yet-started cross-repo item, needs its own
    dedicated session.
@@ -72,8 +71,5 @@ Can you continue the work on feme? The last agent's suggested next steps are:
    new runtime-callback ABI surface, not a quick pick.
 4. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-5. **(~2 min)** `/tmp/ctsrun/l134e/` (this session's scratch sweep log)
-   and `/tmp/ctsrun/l134g/`/`/tmp/ctsrun/l132fix/` (carried over from
-   prior sessions) can all be deleted once a future session no longer
-   needs their raw `.qpa`/`.log` files -- nothing in any of them is
-   referenced by anything committed.
+5. This session's scratch (`/tmp/ctsrun/l134d/`) has already been cleaned
+   up; nothing left over to delete.
