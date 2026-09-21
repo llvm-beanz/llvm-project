@@ -7367,3 +7367,78 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   remaining 4-fail residual; `L125(t)` left untouched (not
   investigated this session). See `agent_thoughts.md` for the full
   narrative and next steps.
+
+## Roadmap L127: unused vertex-input binding fix; L128 filed for dynamic-index gap
+
+### Fix: unused vertex-input binding no longer requires a bound buffer
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` traces on all 4 of `L127`'s own
+residual fails found two unrelated root causes. `misc.unused_binding`'s
+own "vertex binding %u is not bound to a buffer" came from `runDraw`/
+`validateDrawFetchBounds` requiring *every* declared
+`VkVertexInputBindingDescription` to have an actual buffer bound to it
+at draw time -- even one no `VkVertexInputAttributeDescription` ever
+references at all. The real CTS case's own binding 1 is declared
+alongside binding 0 but never consumed by any attribute; the Vulkan
+spec permits leaving such a binding entirely unbound.
+
+Fixed via a new shared `bindingHasAnyAttribute` helper, used at both
+call sites to skip/relax the bound-buffer requirement for any binding
+it reports as unreferenced. New unit test `DrawTest.
+RendersWithAnUnusedVertexInputBindingLeftUnbound`, confirmed via a
+stash/rebuild round-trip to fail identically to the real bug pre-fix
+and pass post-fix.
+
+### Filed, not fixed: `max_attributes.*`'s dynamic vertex-input-array gap
+
+The other 3 of `L127`'s own residual fails
+(`max_attributes.query_max_attributes.*`) share one different, larger,
+not-yet-fixed root cause: `error: feme-graphics-validate-stage:
+'feme.stage.input.load' ... has a non-constant vertex operand`. The
+real CTS shader source (read from the QPA log's own embedded
+`ShaderSource`) declares `layout(location = 1) in vec4
+attr[numAttributes-1];` (`numAttributes` a specialization constant)
+and reads it inside a genuine, non-unrolled `for` loop
+(`attr[checkNdx-1]`). `SpecializationPatch.h` already resolves
+`numAttributes` to a concrete value before deserialization (fixing the
+array's own declared length correctly), but glslang itself never
+unrolls the loop at SPIR-V-generation time, so the array index reaches
+`CanonicalizeStagePass` as a genuine non-constant SSA value (an
+`OpPhi`-derived loop induction variable).
+
+This is a fundamentally different shape from every currently-supported
+dynamic-`Vertex`-operand case (`getDynamicVertexIndexedAccess`'s
+geometry/mesh per-vertex-array support): those all select a row/slot
+*within* one already-fixed element (e.g. `gl_in[i]`), never *among*
+several distinct, separately-`Location`d elements the way this array's
+own slots are. `feme.stage.input.load`'s `(Element, Row, Component,
+Vertex)` call convention has no operand that can express "which
+Element" as a runtime value at all -- a real ABI gap, not a quick
+pattern-add.
+
+Filed as its own roadmap row, `L128`, with two candidate fix
+directions sketched (a pre-canonicalization full-loop-unroll pass for
+compile-time-constant trip counts, vs. a new dynamic-element-index ABI
+operand) but neither attempted or spiked this session; needs its own
+dedicated session to prototype and compare.
+
+### Build/test
+
+`ninja check-feme`: 3,272/3,275 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### Results
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `pipeline.monolithic.vertex_input.misc.unused_binding` (1 case): now
+  **Pass** (was Fail).
+- `pipeline.monolithic.vertex_input.*` full sweep (13,296 cases): **3
+  Fail** (was 4) -- 2,485 Pass (was 2,484), 10,805 NotSupported
+  unchanged.
+- The remaining 3 fails (`max_attributes.query_max_attributes.*`) are
+  the distinct, larger, not-yet-fixed dynamic-index gap filed as
+  `L128`.
+- `Roadmap.md`'s `L127` row updated to reflect the fix and the `L128`
+  filing (struck through, marked partially fixed); `L128` added with
+  the full root-cause writeup. See `agent_thoughts.md` for the full
+  narrative and next steps.
