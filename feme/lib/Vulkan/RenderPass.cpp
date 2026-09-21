@@ -55,6 +55,16 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
     // any `Float`-typed output width, so no new pack/unpack or
     // executor code is needed here, unlike the integer cluster below.
     return true;
+  case feme::cpu::ResourceFormat::R11G11B10_FLOAT:
+    // (Roadmap L134(i)) `VK_FORMAT_B10G11R11_UFLOAT_PACK32`: a real CTS
+    // regression (`dEQP-VK.draw.renderpass.output_location.array.
+    // b10g11r11-ufloat-pack32-*`) found this format entirely missing
+    // both `COLOR_ATTACHMENT_BIT` here and any `unpackColor` case at all
+    // (`ImageFixture.cpp` already had a real `packClearColor` encode for
+    // it, `encodeR11G11B10Float`, but no inverse) -- fixed alongside this
+    // entry by adding `decodeR11G11B10Float` and wiring both into
+    // `unpackColor`/`packClearColor`.
+    return true;
   case feme::cpu::ResourceFormat::A8_UNORM:
   case feme::cpu::ResourceFormat::A1B5G5R5_UNORM:
     // (Roadmap E5) `VK_KHR_maintenance5`'s two new formats are both
