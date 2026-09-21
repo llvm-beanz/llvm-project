@@ -25,6 +25,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 
 using namespace llvm;
@@ -39,6 +40,13 @@ constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InvocationsParamName = "stage_fragment_invocations";
 constexpr StringLiteral ResultsParamName = "stage_fragment_results";
+// (Roadmap L115(b)) Pull-model interpolation's own three new fragment-batch
+// parameters -- see `FemeFragmentArgs::Primitives`/`VertexInputs`/
+// `SamplePositions`'s own comments.
+constexpr StringLiteral PrimitivesParamName = "stage_fragment_primitives";
+constexpr StringLiteral VertexInputsParamName = "stage_fragment_vertex_inputs";
+constexpr StringLiteral SamplePositionsParamName =
+    "stage_fragment_sample_positions";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -56,6 +64,11 @@ struct FragmentStageEnv {
   Value *Outputs = nullptr;
   Value *Invocations = nullptr;
   Value *Results = nullptr;
+  /// (Roadmap L115(b)) See the corresponding `FemeFragmentArgs` fields'
+  /// own comments.
+  Value *Primitives = nullptr;
+  Value *VertexInputs = nullptr;
+  Value *SamplePositions = nullptr;
 };
 
 std::optional<FragmentStageEnv> getFragmentStageEnv(Function &F) {
@@ -74,6 +87,12 @@ std::optional<FragmentStageEnv> getFragmentStageEnv(Function &F) {
       Env.Invocations = &Arg, Found = true;
     else if (Arg.getName() == ResultsParamName)
       Env.Results = &Arg, Found = true;
+    else if (Arg.getName() == PrimitivesParamName)
+      Env.Primitives = &Arg, Found = true;
+    else if (Arg.getName() == VertexInputsParamName)
+      Env.VertexInputs = &Arg, Found = true;
+    else if (Arg.getName() == SamplePositionsParamName)
+      Env.SamplePositions = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -84,7 +103,8 @@ Function *appendFragmentStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+  ParamTypes.append(
+      {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -110,6 +130,9 @@ Function *appendFragmentStageParams(Function &F) {
   (&*ArgIt++)->setName(OutputsParamName);
   (&*ArgIt++)->setName(InvocationsParamName);
   (&*ArgIt++)->setName(ResultsParamName);
+  (&*ArgIt++)->setName(PrimitivesParamName);
+  (&*ArgIt++)->setName(VertexInputsParamName);
+  (&*ArgIt++)->setName(SamplePositionsParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -515,6 +538,211 @@ void lowerFragmentOutputStore(CallInst &CI, const SignatureElement &Elt,
   }
 }
 
+/// (Roadmap L115(b)) `(P.x-A.x)*(B.y-A.y) - (P.y-A.y)*(B.x-A.x)`: the same
+/// directed-edge function `Executor.cpp`'s own `edgeFn` computes (see its
+/// comment there), rebuilt here as scalar float IR since this pass runs
+/// entirely at compile time -- pull-model interpolation is ordinary
+/// arithmetic over already-resolved (`Primitives`/`VertexInputs`) runtime
+/// data, needing no new native runtime call.
+Value *buildEdgeFn(IRBuilder<> &Builder, Value *Ax, Value *Ay, Value *Bx,
+                   Value *By, Value *Px, Value *Py) {
+  Value *T1 = Builder.CreateFMul(Builder.CreateFSub(Px, Ax),
+                                 Builder.CreateFSub(By, Ay));
+  Value *T2 = Builder.CreateFMul(Builder.CreateFSub(Py, Ay),
+                                 Builder.CreateFSub(Bx, Ax));
+  return Builder.CreateFSub(T1, T2);
+}
+
+/// (Roadmap L115(b)) Lowers one of the three pull-model interpolation
+/// stage ops (`InterpolateAt{Centroid,Sample,Offset}`) for the whole wave,
+/// mirroring `lowerFragmentInputLoad`'s own per-lane loop shape exactly.
+/// Recomputes barycentric weights at a caller-chosen point (pixel center
+/// plus a shader offset for `AtOffset`; a fixed sample's own table entry
+/// for `AtSample`; the pixel center itself for `AtCentroid` -- see this
+/// function's own `AtCentroid` comment below for why that is a documented
+/// simplification, not yet a true coverage-weighted centroid), then
+/// re-runs `Executor.cpp`'s own per-varying interpolation formula
+/// (flat/perspective/non-perspective) against that point's weights and
+/// this primitive's raw per-vertex values in `FEnv.VertexInputs`.
+Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
+                                  const SignatureElement &Elt,
+                                  const WaveBodyEnv &WEnv,
+                                  const FragmentStageEnv &FEnv) {
+  LLVMContext &Ctx = CI.getContext();
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
+  if (!ScalarTy->isFloatTy()) {
+    CI.getContext().emitError(
+        &CI, "feme-cpu-wrap-fragment: pull-model interpolation only "
+             "supports floating-point varyings");
+    return nullptr;
+  }
+  IRBuilder<> Builder(&CI);
+  Type *F32Ty = Builder.getFloatTy();
+  Type *PtrTy = PointerType::get(Ctx, 0);
+  StructType *PrimTy = getFragmentPrimitiveType(Ctx);
+  Type *VertexPosArrTy = PrimTy->getElementType(0);
+  Type *VertexInvWArrTy = PrimTy->getElementType(1);
+
+  bool Perspective =
+      Elt.Interpolation != SignatureInterpolationMode::NoPerspective &&
+      Elt.Interpolation != SignatureInterpolationMode::NoPerspectiveCentroid &&
+      Elt.Interpolation != SignatureInterpolationMode::NoPerspectiveSample;
+
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *InvocationIndex = getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
+    Value *QuadIndex = Builder.CreateUDiv(InvocationIndex, Builder.getInt32(4));
+    Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+
+    Value *PrimBase =
+        Builder.CreateBitCast(FEnv.Primitives, PointerType::get(Ctx, 0));
+    Value *PrimPtr = Builder.CreateInBoundsGEP(PrimTy, PrimBase, QuadIndex);
+    Value *VPosBase = Builder.CreateStructGEP(PrimTy, PrimPtr, 0);
+    Value *VInvWBase = Builder.CreateStructGEP(PrimTy, PrimPtr, 1);
+    auto LoadVPos = [&](unsigned V, unsigned C) {
+      Value *P = Builder.CreateInBoundsGEP(
+          VertexPosArrTy, VPosBase,
+          {Builder.getInt32(0), Builder.getInt32(V), Builder.getInt32(C)});
+      return Builder.CreateLoad(F32Ty, P);
+    };
+    auto LoadVInvW = [&](unsigned V) {
+      Value *P = Builder.CreateInBoundsGEP(
+          VertexInvWArrTy, VInvWBase,
+          {Builder.getInt32(0), Builder.getInt32(V)});
+      return Builder.CreateLoad(F32Ty, P);
+    };
+    Value *X0 = LoadVPos(0, 0), *Y0 = LoadVPos(0, 1);
+    Value *X1 = LoadVPos(1, 0), *Y1 = LoadVPos(1, 1);
+    Value *X2 = LoadVPos(2, 0), *Y2 = LoadVPos(2, 1);
+    Value *InvW0 = LoadVInvW(0), *InvW1 = LoadVInvW(1), *InvW2 = LoadVInvW(2);
+
+    // Pixel center, derived from `gl_FragCoord.xy` rather than threaded
+    // separately: `floor(FragCoord) + 0.5` is the pixel center regardless
+    // of whether this invocation's own `FragCoord` was already shifted to
+    // a per-sample position (roadmap L114's `PerSampleShading` re-
+    // evaluation), matching the spec's "offset from pixel center"
+    // convention for `InterpolateAtOffset` (validated against the CTS's
+    // own `interpolateAtSample(v, gl_SampleID) == interpolateAtOffset(v,
+    // gl_SamplePosition - vec2(0.5))` self-consistency check).
+    Value *FragX = loadFragmentPositionComponent(Builder, FEnv.Invocations,
+                                                 InvocationIndex, Lane, 0);
+    Value *FragY = loadFragmentPositionComponent(Builder, FEnv.Invocations,
+                                                 InvocationIndex, Lane, 1);
+    Value *Half = ConstantFP::get(F32Ty, 0.5);
+    Value *PixelCenterX = Builder.CreateFAdd(
+        Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragX), Half);
+    Value *PixelCenterY = Builder.CreateFAdd(
+        Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragY), Half);
+
+    Value *PointX, *PointY;
+    switch (Kind) {
+    case StageOpKind::InterpolateAtOffset: {
+      Value *OffX = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+      Value *OffY = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+      // SPIR-V's `InterpolateAtOffset` operand is already a float, in
+      // pixels, relative to the pixel center. (Roadmap L115(b) follow-up)
+      // DXIL's `EvalSnapped` instead raises an integer 1/16-pixel-snapped
+      // offset (`CanonicalizeStage.cpp`'s `raiseEval` converts it to
+      // `i32` via `toI32`) -- not yet exercised by any CTS case this
+      // implementation runs, so converting that convention's own
+      // 16-units-per-pixel scale is left as a follow-up rather than
+      // guessed at here; only a bare integer-to-float conversion (correct
+      // for a hypothetical already-in-pixels integer offset, but not
+      // DXIL's actual snapped units) is applied so this path is not
+      // silently wrong-typed.
+      if (OffX->getType()->isIntegerTy())
+        OffX = Builder.CreateSIToFP(OffX, F32Ty);
+      if (OffY->getType()->isIntegerTy())
+        OffY = Builder.CreateSIToFP(OffY, F32Ty);
+      PointX = Builder.CreateFAdd(PixelCenterX, OffX);
+      PointY = Builder.CreateFAdd(PixelCenterY, OffY);
+      break;
+    }
+    case StageOpKind::InterpolateAtSample: {
+      Value *SampleIdx = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+      Value *SampleBase = Builder.CreateBitCast(FEnv.SamplePositions, PtrTy);
+      Value *SampleOff = Builder.CreateInBoundsGEP(
+          ArrayType::get(F32Ty, 2), SampleBase, SampleIdx);
+      Value *OffX = Builder.CreateLoad(
+          F32Ty, Builder.CreateInBoundsGEP(ArrayType::get(F32Ty, 2), SampleOff,
+                                           {Builder.getInt32(0),
+                                            Builder.getInt32(0)}));
+      Value *OffY = Builder.CreateLoad(
+          F32Ty, Builder.CreateInBoundsGEP(ArrayType::get(F32Ty, 2), SampleOff,
+                                           {Builder.getInt32(0),
+                                            Builder.getInt32(1)}));
+      PointX = Builder.CreateFAdd(
+          Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragX), OffX);
+      PointY = Builder.CreateFAdd(
+          Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragY), OffY);
+      break;
+    }
+    case StageOpKind::InterpolateAtCentroid:
+      // (Roadmap L115(b) follow-up) A true coverage-weighted centroid
+      // needs this quad's per-sample coverage mask threaded through, not
+      // yet plumbed into `FemeFragmentPrimitive` -- the pixel center is
+      // this implementation's own documented simplification for now
+      // (correct whenever every covered sample's own weighted average
+      // happens to equal the pixel center, e.g. no multisampling, or
+      // full coverage with a symmetric sample pattern).
+      PointX = PixelCenterX;
+      PointY = PixelCenterY;
+      break;
+    default:
+      llvm_unreachable("not an interpolate-at StageOpKind");
+    }
+
+    Value *Area = buildEdgeFn(Builder, X0, Y0, X1, Y1, X2, Y2);
+    Value *B0 = Builder.CreateFDiv(
+        buildEdgeFn(Builder, X1, Y1, X2, Y2, PointX, PointY), Area);
+    Value *B1 = Builder.CreateFDiv(
+        buildEdgeFn(Builder, X2, Y2, X0, Y0, PointX, PointY), Area);
+    Value *B2 = Builder.CreateFDiv(
+        buildEdgeFn(Builder, X0, Y0, X1, Y1, PointX, PointY), Area);
+
+    Value *VertexBase =
+        Builder.CreateMul(QuadIndex, Builder.getInt32(3));
+    auto LoadVertexValue = [&](unsigned V) {
+      Value *InvIdx =
+          Builder.CreateAdd(VertexBase, Builder.getInt32(V));
+      Value *Addr = computeStageStorageAddress(
+          Builder, FEnv.InputLayout, FEnv.VertexInputs, Elt.ElementID, Elt,
+          /*Row=*/Builder.getInt32(0), Component, InvIdx);
+      Value *TypedPtr = Builder.CreateBitCast(Addr, PtrTy);
+      return Builder.CreateLoad(F32Ty, TypedPtr);
+    };
+    Value *V0 = LoadVertexValue(0);
+    Value *V1 = LoadVertexValue(1);
+    Value *V2 = LoadVertexValue(2);
+
+    Value *LaneResult;
+    if (Perspective) {
+      Value *B0W0 = Builder.CreateFMul(B0, InvW0);
+      Value *B1W1 = Builder.CreateFMul(B1, InvW1);
+      Value *B2W2 = Builder.CreateFMul(B2, InvW2);
+      Value *InvWSum = Builder.CreateFAdd(Builder.CreateFAdd(B0W0, B1W1), B2W2);
+      Value *Num = Builder.CreateFAdd(
+          Builder.CreateFAdd(Builder.CreateFMul(B0W0, V0),
+                             Builder.CreateFMul(B1W1, V1)),
+          Builder.CreateFMul(B2W2, V2));
+      LaneResult = Builder.CreateFDiv(Num, InvWSum);
+    } else {
+      LaneResult = Builder.CreateFAdd(
+          Builder.CreateFAdd(Builder.CreateFMul(B0, V0),
+                             Builder.CreateFMul(B1, V1)),
+          Builder.CreateFMul(B2, V2));
+    }
+    LaneResult = Builder.CreateSelect(Active, LaneResult,
+                                      Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 void lowerReturnMasks(CallInst &CI, const WaveBodyEnv &WEnv,
                       const FragmentStageEnv &FEnv) {
   IRBuilder<> Builder(&CI);
@@ -639,11 +867,26 @@ bool lowerFragmentStageOps(Function &F) {
     }
     case StageOpKind::InterpolateAtCentroid:
     case StageOpKind::InterpolateAtSample:
-    case StageOpKind::InterpolateAtOffset:
-      F.getContext().emitError(
-          CI, "feme-cpu-wrap-fragment: pull-model interpolation "
-              "is not implemented yet");
-      return false;
+    case StageOpKind::InterpolateAtOffset: {
+      const SignatureElement *Elt =
+          EltID
+              ? findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                            SignatureDirection::Input)
+              : nullptr;
+      if (!Elt) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-fragment: pull-model interpolation refers "
+                "to an unknown signature element");
+        return false;
+      }
+      Value *Lowered =
+          lowerFragmentInterpolateAt(*CI, Kind, *Elt, *WEnv, *FEnv);
+      if (!Lowered)
+        return false;
+      CI->replaceAllUsesWith(Lowered);
+      CI->eraseFromParent();
+      break;
+    }
     default:
       F.getContext().emitError(
           CI, "feme-cpu-wrap-fragment: unexpected stage op left "
@@ -673,6 +916,11 @@ struct WrapperEnv {
   Value *Invocations = nullptr;
   Value *Results = nullptr;
   Value *QuadCount = nullptr;
+  /// (Roadmap L115(b)) See the corresponding `FemeFragmentArgs` fields'
+  /// own comments.
+  Value *Primitives = nullptr;
+  Value *VertexInputs = nullptr;
+  Value *SamplePositions = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -695,6 +943,12 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
                                     FragmentArgsFieldInvocations, PtrTy);
   Env.Results =
       loadStructField(Builder, ArgsTy, Args, FragmentArgsFieldResults, PtrTy);
+  Env.Primitives = loadStructField(Builder, ArgsTy, Args,
+                                   FragmentArgsFieldPrimitives, PtrTy);
+  Env.VertexInputs = loadStructField(Builder, ArgsTy, Args,
+                                     FragmentArgsFieldVertexInputs, PtrTy);
+  Env.SamplePositions = loadStructField(
+      Builder, ArgsTy, Args, FragmentArgsFieldSamplePositions, PtrTy);
 
   Value *ResourcesRaw =
       loadStructField(Builder, ArgsTy, Args, FragmentArgsFieldResources, PtrTy);
@@ -874,6 +1128,12 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.Invocations);
     else if (Arg.getName() == ResultsParamName)
       CallArgs.push_back(Env.Results);
+    else if (Arg.getName() == PrimitivesParamName)
+      CallArgs.push_back(Env.Primitives);
+    else if (Arg.getName() == VertexInputsParamName)
+      CallArgs.push_back(Env.VertexInputs);
+    else if (Arg.getName() == SamplePositionsParamName)
+      CallArgs.push_back(Env.SamplePositions);
     else
       llvm_unreachable("unexpected parameter for FragmentWrapperPass");
   }
