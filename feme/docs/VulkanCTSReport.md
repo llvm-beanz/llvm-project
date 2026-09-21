@@ -7978,3 +7978,89 @@ regression, no partial coverage gap, nothing further needed here. The
 device legitimately doesn't advertise support for, not a feme gap).
 No roadmap or feature-inventory change needed -- this was a
 regression-confirmation sweep, not new work.
+
+## Session: L128(a) root-caused to CanonicalizeStagePass ordering (source-level, not just disassembly)
+
+Continuing directly from the prior section's `pipeline.monolithic.blend.*`
+closure, this session picked up `L128(a)` (the nondeterministic JIT
+SIGSEGV blocking `L128`'s 3 `vertex_input.max_attributes.query_max_attributes.*`
+fails) with `valgrind`/`FEME_CPU_JIT_DEBUG_SUPPORT=1` already in place from
+the prior session.
+
+**New fast repro vehicle**: built a hand-minimized `RowCount==5` vertex
+shader (`attr[0..4]`, past the `RowCount<=4` real-matrix ceiling but far
+smaller than the real CTS shader's `RowCount==15`) in MLIR SPIR-V dialect
+text, exercised directly through `feme/unittests/Vulkan/DrawTest.cpp`'s
+own in-process `FeMeVulkanTests` GTest harness rather than the full
+`deqp-vk`/CTS path -- seconds per run instead of minutes, and reproduces
+the crash reliably (~3/3 direct runs, ~3/3 under `gdb`). Landed as a
+disabled (`#if 0`) test, `DrawTest.L128ARowCount5Repro`, for reuse by
+whichever session implements the real fix below.
+
+**Disassembled the exact crash site** (`disassemble feme_cpu_entry_main`
+at the crash PC): a genuine, deterministic null-pointer-plus-offset
+dereference at `feme_cpu_entry_main+80` (`ldr w17, [x15, #108]`), where
+`x15` is `FemeVertexArgs::InputLayout->Elements` (confirmed against
+`RuntimeABI.h`'s own struct layout: offset 24 is `InputLayout`, and
+offsets 108/116/120 land exactly on `Elements[1].{InvocationStride,
+RowStride,DataOffset}`) -- i.e. the shader's own `InputLayout` has a
+**null `Elements` array**, not a wild/heap-adjacent read as the prior
+session's `valgrind`-based characterization had it.
+
+**Traced why with temporary, reverted `FEME_DEBUG_SIG`-gated prints**
+through `StageStorage.cpp`/`CanonicalizeStage.cpp`/`CompiledStage.cpp`:
+the vertex shader's *exported* `EntrySignature` -- the one
+`Executor.cpp`'s `buildStageStorage` actually uses at draw time via
+`CompiledStage::getArtifactInfo().Signature` -- never contains an entry
+for `attr` at all, even though the compiled shader body correctly
+references its `ElementID` directly (`FEME_DUMP_IR` confirms 5 separate,
+already-unrolled `feme.stage.input.load.v4f32` calls, rows 0-4, one
+`ElementID`). Root cause: `feme::cpu::createStage` (`CompiledStage.cpp`)
+serializes `!feme.signature` metadata into the artifact's exported
+`Signature` bytes **before** calling `runPipeline` (deliberately, to
+dodge `EntryWrapperPass`'s function-erasing/renaming paths -- confirmed
+a naive post-`runPipeline` re-read finds *no* `!feme.signature` metadata
+on the final wrapper function at all). But the *real*, authoritative
+signature-building `CanonicalizeStagePass` call for a graphics-pipeline
+shader is not inside `runPipeline` at all -- it is
+`feme::vulkan::compileGraphicsStage`'s own separate, *earlier* call
+(`GraphicsPipeline.cpp:541`), run before `createStage` is ever invoked.
+No pass anywhere ahead of *that* call ever unrolls a compile-time-
+constant-trip-count loop over an array-typed (`RowCount>4`) stage-IO
+global, so `CanonicalizeStagePass`'s raw-SPIR-V-global scan can't trace
+`attr`'s loop-carried GEP and silently omits it. `L128`'s previously-
+prototyped forced-unroll pass, placed inside `runPipeline` (Pipeline.cpp),
+is too late to help -- it only fixes the *redundant*, ineffective second
+`CanonicalizeStagePass` call inside `runPipeline`, not the real one in
+`GraphicsPipeline.cpp` that the exported signature is actually captured
+from. A `RowCount<=4` real matrix never hits this, since SPIR-V/glslang
+always emits its row accesses as separate, already-unrolled loads with
+no loop to fail to see through.
+
+**Concrete fix identified, not attempted this session**: move (or
+duplicate) a loop-unrolling/constant-GEP-recognition pass to run inside
+`feme::vulkan::compileGraphicsStage`, immediately ahead of its own
+`CanonicalizeStagePass().run(...)` call at `GraphicsPipeline.cpp:541` --
+not inside `feme::cpu::runPipeline`. Deferred to a dedicated session:
+this touches a core, shared pipeline stage used by every graphics shader
+compile and needs full regression testing (`check-feme` plus a broad CTS
+sweep) beyond what was safe to rush here.
+
+All diagnostic-only scaffolding this session added (the `Pipeline.cpp`
+forced-unroll prototype, the `FEME_DEBUG_SIG` prints, the post-
+`runPipeline` metadata-propagation check) was reverted
+(`git checkout --`); nothing landed except the disabled
+`DrawTest.L128ARowCount5Repro` test and comments. `Roadmap.md`'s new
+`L128(b)` row has the full writeup.
+
+**Regression check**: `ninja check-feme` -- 3,276/3,279 Passed, 3
+Unsupported, 0 Failed (no functional code changed this session, so no
+change from baseline). Reran the 3 target `vertex_input.max_attributes.
+query_max_attributes.*` cases directly against `deqp-vk` to confirm no
+regression: all 3 still `Fail` identically to before this session
+(`error: feme-graphics-validate-stage: ... has an unresolved stage-IO
+global-variable access ... a shape CanonicalizeStagePass does not yet
+canonicalize into a 'feme.stage.*' call`, `VK_ERROR_INITIALIZATION_FAILED`
+at pipeline creation) -- expected, since no functional fix was attempted
+this session. No feature/extension inventory changes (no new Vulkan
+functionality shipped this session).
