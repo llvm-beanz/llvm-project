@@ -97693,3 +97693,102 @@ instructions.)
    a new runtime-callback ABI surface, not a quick pick.
 5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
+
+# Session: L132 fixed -- constant-varying interpolation precision
+
+Confirmed `FeMe CPU Vulkan Device` at start (`vulkaninfo --summary`, apiVersion
+1.4.0). Picked up `L132` from the prior session's filing:
+`dEQP-VK.pipeline.monolithic.bind_buffers_2.*`, 57 pre-existing `Fail`s.
+
+## What was wrong
+
+56 `single.*`/`separate.*` stride/offset/count cases + 1
+`dynamic_stride.binding_stride_index_mismatch` -- literally every case of that
+test shape, 0 exceptions. The sibling `maintenance5.*` shape (same
+`vkCmdBindVertexBuffers2` command, different test class) was 100% passing.
+
+Ruled out first (dead end, ~30 min): Vulkan-loader entry-point resolution.
+FeMe's ICD only implements `vkCmdBindVertexBuffers2EXT`, not the core name.
+Wrote `/tmp/checkproc.c` against the real loader to confirm this. Turned out
+not to matter -- CTS's own generated `vkInitDeviceFunctionPointers.inl`
+already falls back `vkCmdBindVertexBuffers2` &rarr; `...EXT` on its own.
+
+Actual root cause: the failing shape's pixel check
+(`BindBuffers2Instance::iterate`) uses **exact** float equality, unlike the
+passing sibling's 0.2-epsilon threshold. The test's color varying is a
+genuinely constant per-instance attribute (same value on all 4 triangle-strip
+vertices, instance-rate fetch). `Executor.cpp`'s varying-interpolation loop
+computed `B0*V0+B1*V1+B2*V2` (or the perspective `Numerator/InvW` form) where
+`B0/B1/B2` are three *independently rounded* divisions, not provably summing
+to exactly `1.0f`. A constant `V0==V1==V2` can come back a few ULPs off --
+invisible at 2-decimal log precision or through any 8-bit UNORM readback
+(every existing constant-color unit test in this file uses one), but caught
+dead by an exact-equality check.
+
+## The fix (~10 lines)
+
+Added a `V0 == V1 && V1 == V2` short-circuit to the interpolation loop, right
+next to the existing `Flat` branch's `Value = V0`. A genuinely constant
+varying is now interpolated by definition, not by arithmetic that can round
+unevenly.
+
+## Proof it's real, not a guess
+
+1. Wrote `ExecutorTest.InterpolatesAGenuinelyConstantColorExactly` first --
+   new `R32G32B32A32_FLOAT`-attachment helper (`buildPipelineWithFloatAttachment`)
+   so the readback is bit-exact, not UNORM-quantized.
+2. Source-swapped `Executor.cpp` back to pre-fix, rebuilt, ran the new test:
+   **failed** (3 of 4 channels off by exactly 1 ULP). Restored the fix,
+   rebuilt, reran: **passed**. This is the same round-trip discipline used
+   for `L128(c)`/`L133`.
+3. `ninja check-feme`: 3,279/3,282 Passed, 3 Unsupported, 0 Failed (+1 test).
+4. CTS `bind_buffers_2.*` full re-sweep: **0 Fail** (was 57). All 57 fixed.
+5. Regression-swept `dEQP-VK.draw.*` (29,451 cases, picked because this fix
+   sits in the varying-interpolation path every non-`Flat`-varying draw
+   exercises) **twice** -- once with the fix, once source-swapped back to
+   baseline. Both runs: 224 Fail. `diff`'d the two 224-line fail-name lists:
+   byte-for-byte identical. Zero regressions, confirmed, not assumed.
+
+Committed in 4 pieces: the `Executor.cpp` fix, the new regression test,
+`Roadmap.md` (struck through `L132`), `VulkanCTSReport.md` session write-up.
+All with the `Co-authored-by: Copilot` trailer.
+
+## State of the long-running background sweep
+
+PID 12156 (`pipeline.monolithic.*` minus `interface_matching.*`) is now in
+its **4th+ session**, still running, still mid-`blend.*`, still 0 new fails.
+Left it running again. At this point it may just be a genuinely multi-hour
+sweep (188,690+ cases) -- worth deciding in a future session whether to let
+it keep running unattended in the background across sessions (detached) or
+accept it will never realistically finish inside one session's checked-in
+time and stop relying on it for anything beyond "no news is good news."
+
+Cleaned up all previous sessions' stale `/tmp/ctsrun/*` scratch (l124*/l125j*/
+l127/l128/l132/l133/vulkan/old deqp-vk copy, ~250MB) -- none of it was
+referenced by anything committed. Left this session's own `/tmp/ctsrun/l132fix/`
+(229MB) and the still-actively-written `/tmp/ctsrun/l128fix/` (917MB, the
+PID-12156 sweep's own live log) in place.
+
+## Suggested next steps
+
+1. **(~2 min)** Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`
+   (PID 12156 if still alive) for its final tally. It now includes
+   `bind_buffers_2.*` in its scope, so once it finishes it should also
+   independently confirm this session's `L132` fix at full-sweep scale, not
+   just the isolated `bind_buffers_2.*` re-run this session already did.
+2. **(~30 min, no-crash quick pick)** `L131`'s sibling row or check whether
+   the 224 pre-existing `dEQP-VK.draw.*` fails found this session
+   (`indexed_draw`/`maintenance6`, `multiple_interpolation`,
+   `implicit_sample_shading`, `shader_layer`, `depth_clamp`, others) are
+   already filed anywhere in `Roadmap.md` -- this session only confirmed
+   they're pre-existing and unrelated to `L132`, it did not investigate or
+   file them. If not filed, file as a new row before someone re-investigates
+   the same "which of these existed before my change" question from
+   scratch.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, needs its own
+   dedicated session.
+4. **`L115(b)`** (pull-model interpolation) -- still flagged as needing a
+   new runtime-callback ABI surface, not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
