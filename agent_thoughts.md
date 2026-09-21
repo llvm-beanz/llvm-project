@@ -97472,3 +97472,144 @@ from them is already written into `VulkanCTSReport.md`).
    actually being called -- the `const char*`-vs-`StringRef` footgun
    documented in this session's `L128(c)` roadmap row is easy to
    reintroduce accidentally and produces no warning.
+
+# Session: L128(c) full-sweep closure; L132/L133 filed
+
+**Confirmed FeMe CPU Vulkan Device** at session start (standing
+requirement).
+
+**TL;DR**: Picked up exactly where the last session left off -- checked
+on its background `pipeline.monolithic.*` regression sweep. It had
+actually finished (well, crashed) hours ago: 188,690 cases in, 686
+`Fail`s, then a hard process abort on a pre-existing assertion in
+`interface_matching.*`. Triaged every failing family and the crash
+itself against a temporary baseline rebuild -- all confirmed
+pre-existing, none caused by `L128(c)`'s fix. Filed the two
+previously-unfiled gaps (`bind_buffers_2.*`, the `interface_matching.*`
+crash) as their own roadmap rows. `L128(c)` is now fully closed.
+
+## What I did
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`,
+   confirmed.
+2. Checked `/tmp/ctsrun/l128fix/pipeline_full.log` (PID 38862 from last
+   session) -- the process was no longer running. It had gotten through
+   188,690 `Test case` entries (686 `Fail`) before **hard-aborting** on
+   a debug assertion:
+   ```
+   CanonicalizeStage.cpp:3055: resolveNestedStageIOField: Assertion
+   `!isStageIOPadField(ST->getElementType(Member)) && "load/store into
+   a nested struct's own synthetic pad field"' failed.
+   ```
+   on `interface_matching.decoration_mismatch.
+   out_flat_in_none_member_of_structure_in_block_vert_geom_out_frag_in`.
+   This is new -- the last session's writeup only saw 57 fails at the
+   point it stopped watching; the full run surfaced a lot more once it
+   got further into the alphabet.
+3. Triaged the 686 fails by family: 592 `depth.*`, 57 `bind_buffers_2.*`
+   (already known/expected), 26 `extended_dynamic_state.*`, 5
+   `early_destroy.*`, 2 `input_assembly.*`, 2 `creation_cache_control.*`,
+   1 `empty_fs.*`, 1 `cache.*`. That's a lot of new-looking fails and a
+   process abort -- I did not want to just assume "probably fine" and
+   move on, given how large and varied this looked at first glance.
+4. **Verified every single family, not just a couple**, against a
+   temporary baseline rebuild: found the pre-`L128(c)` version of
+   `GraphicsPipeline.cpp` (`git show <parent-commit>:...`), swapped it
+   in over the working copy (a clean 12-line diff -- just the pass's
+   `#include` and its `.run(...)` call), rebuilt `feme_vulkan` only, and
+   reran one representative case from every family plus the crashing
+   `interface_matching` case directly. **Every single one failed/aborted
+   identically on the baseline build**, with `L128(c)`'s fix completely
+   absent. Restored the fix, rebuilt `feme_vulkan` + `FeMeVulkanTests`
+   (remembering last session's hard-won lesson about needing both
+   targets), confirmed a zero-diff clean working tree, and reconfirmed
+   `DrawTest.L128ARowCount5Repro` still passes.
+5. Filed `L132` (`bind_buffers_2.*`, 57 fails,
+   `vkCmdBindVertexBuffers2` stride/offset) and `L133`
+   (`interface_matching.*`'s pad-field assertion crash, possibly related
+   in shape to `L124`'s pad-field work but not confirmed same root
+   cause) as their own `Roadmap.md` rows, neither of which had one
+   before -- both were previously just noise inside a broader sweep,
+   never individually tracked. Flagged `L133` as worth prioritizing
+   over `L132` if only one gets picked up next, since it's a genuine
+   process abort that silently truncates any batch CTS run that reaches
+   it (as it did to this row's own sweep).
+6. Updated `L128(c)`'s own status note in `Roadmap.md` to record the
+   sweep's actual final tally and close out the "still in progress"
+   language from last time.
+7. Started a follow-up sweep excluding `interface_matching.*` to get a
+   complete tally of the rest of `pipeline.monolithic.*` without
+   hitting the `L133` abort. Left it running in the background at
+   session end (PID 12156, `/tmp/ctsrun/l128fix/pipeline_full2.log`/
+   `.qpa`) -- not required to close anything this session, since
+   `L128(c)` is already fully verified via the partial sweep plus
+   per-family baseline spot-checks, but useful extra evidence for
+   whoever picks up `L132`/`L133` next.
+
+**Why I didn't just trust the last session's "0 new fails at 6,275+"
+note and move on**: that was a true, honest snapshot at the time it was
+written, but the sweep kept running well past that point and found a
+lot more before it died. Given the standing instruction to actually run
+CTS after each change and keep the report accurate, checking the *real*
+final state (even though it meant re-verifying 8 different failing
+families one at a time) felt like the right level of rigor here rather
+than repeating the same "some fails observed, presumed pre-existing"
+framing without re-checking.
+
+**Commits** (3, each with the Copilot co-author trailer):
+1. `Roadmap.md` -- close out `L128(c)`'s status note, add `L132`/`L133`.
+2. `VulkanCTSReport.md` -- full session writeup with all 9 spot-check
+   results.
+3. This file.
+
+**Roadmap**: `L132`, `L133` added (both zero-level, no nesting needed --
+they're new top-level IDs, not sub-breakdowns of an existing one).
+`L128(c)`'s existing row edited in place (its own trailing sentence
+only, not a new row) since it was still describing an in-progress sweep
+from last session, not a new independent finding.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- no new Vulkan functionality this session.
+
+**Scratch logs**: `/tmp/ctsrun/l128fix/pipeline_full.log`/`.qpa` (last
+session's completed-then-aborted sweep) and `/tmp/ctsrun/l128fix/
+baseline_check/*` (this session's spot-check qpa/log files) are done
+and safe to clean up -- everything worth keeping from them is now in
+`VulkanCTSReport.md`. `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`
+(this session's follow-up sweep) is **still being actively written to**
+by PID 12156 at session end -- do not delete until a future session has
+read its final tally.
+
+## Suggested next steps
+
+1. **Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`** (PID 12156
+   if still alive) for the `interface_matching`-excluded
+   `pipeline.monolithic.*` sweep's final tally. Not required to close
+   anything, but worth recording in `VulkanCTSReport.md` if it finished,
+   and worth killing + noting as still-running-forever if it hasn't
+   (this family appears to genuinely take multiple hours end to end).
+2. **`L133` (the `interface_matching.*` pad-field assertion crash) is a
+   real process abort, not just a `Fail`** -- consider picking this up
+   before `L132`, since it's the one that actively breaks batch CTS
+   sweeps that reach it. Start from a minimized in-process repro (in
+   the `DrawTest.cpp`/`FeMeVulkanTests` style established across many
+   `L128`-family sessions) rather than iterating against the full CTS
+   case directly.
+3. **`L132` (`bind_buffers_2.*`, 57 fails)** -- not root-caused yet,
+   about `vkCmdBindVertexBuffers2` stride/offset handling. Needs its
+   own dedicated session.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session, not a quick pick. Untouched again this session.
+5. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick. Untouched again this session.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
+7. **Reminder for future sessions doing a source-swap-to-baseline
+   check**: `git show <commit>:<path> > <tmpfile>` + `cp` over the
+   working copy + rebuild + test + `cp` back the saved "with-fix"
+   version is faster and safer than `git stash`/`git worktree` for a
+   single-file, already-committed change -- no risk of losing
+   uncommitted work, no full second build tree needed. Always `git
+   status --short` afterward to confirm a clean, zero-diff restore
+   before committing anything else.
