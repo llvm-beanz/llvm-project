@@ -9859,3 +9859,114 @@ newly-surfaced, previously-undocumented failure families
 same way `L138` itself was filed during `L137`'s closure. No feature/
 extension inventory changes (compiler correctness fix only -- no new
 Vulkan functionality shipped this session).
+
+## Session: `L140` closed -- constant-vector-lane-after-dynamic-row gap in `collectDynamicRowTerms`; `L139` closed as a side effect
+
+### Investigation
+
+Isolated `dEQP-VK.pipeline.monolithic.multisample_interpolation.
+nonuniform_interpolant_indexing.centroid` and confirmed the exact error:
+`error: feme-cpu-simdize: unsupported divergent call to
+'feme.spirv.interpolate_at_centroid.f32' (roadmap milestone 7 does not
+cover a generic vector-call rewrite)` -- a *compile-time* failure, not a
+rendering mismatch.
+
+Read the test's own source: an Amber-script test
+(`external/vulkancts/data/vulkan/amber/pipeline/
+nonuniform_interpolant_indexing/centroid.amber`) whose fragment shader
+calls `interpolateAtCentroid(inPosScreenArr[index])` (and
+`inPosScreenArr[index].y` in another statement) where `index =
+int(gl_FragCoord.x) % 10` is a genuinely per-fragment-varying array index
+into a `layout(location=0) sample in vec2 inPosScreenArr[10];` --  a
+*dynamically-indexed array of interpolants*, distinct from `L138`'s own
+dynamic-*component*-only shape.
+
+Despite the error surfacing at `SIMDize.cpp`'s generic-divergent-call
+fallback, traced this to a `CanonicalizeStage.cpp` bug instead:
+`CanonicalizeStagePass` runs before `SIMDizePass` in the pipeline, so a
+marker call reaching `SIMDize` still named
+`feme.spirv.interpolate_at_centroid.f32` (rather than the real
+`feme.stage.interpolate.at.centroid.f32`) means `CanonicalizeStage.cpp`
+silently failed to resolve it, and `SIMDize.cpp`'s fallback (which has no
+notion of what an unresolved SPIR-V marker call even is) is just the
+first place downstream that trips over it.
+
+Built a minimal standalone repro via `glslangValidator -V` +
+`mlir-translate --deserialize-spirv`, confirming the SPIR-V shows a
+genuinely dynamic (non-constant, loaded-from-local) `AccessChain` index,
+exactly matching the CTS shader's shape. An initial attempt to chain this
+through `feme-opt --feme-convert-spirv-to-llvm` and generic upstream
+`mlir-translate --mlir-to-llvmir` proved unusable: the generic translator
+silently drops the `feme.spirv.decorations` MLIR attribute needed for
+`CanonicalizeStagePass`'s own SPIR-V signature discovery, so *zero*
+stage-IO globals converted at all through that path (not even the
+trivial `gl_FragCoord` load) -- a dead end for isolating this bug.
+
+Found the correct working path instead: `feme-translate --import-spirv`
+(feme's own `SPIRVImporter`, not generic `mlir-translate --deserialize-
+spirv`) followed by `feme-translate --no-implicit-module --spirv-to-
+llvmir` (feme's own dedicated `SPIRVToLLVMTranslator`, which *does*
+preserve decorations as real LLVM `!spirv.Decorations`/`!feme.spirv.
+MemberDecorations` metadata) -- the `--no-implicit-module` flag was the
+missing piece: without it, `mlir-translate`-style tools wrap already-
+top-level `spirv.module` text in an extra implicit `builtin.module`,
+which the translation entry point (`TranslateFromMLIRRegistration`,
+expecting the parsed root op to literally *be* `spirv.module`) rejects
+with `error: expected a 'spirv.module' op, got 'builtin.module'`.
+
+With a real, correctly-decorated LLVM IR repro in hand, ran it through
+`feme-opt --llvm -passes=feme-graphics-canonicalize-stage` directly and
+found the actual bug: `inPosScreenArr[index]` (2-index GEP: dynamic row
+only) resolved fine, but `inPosScreenArr[index].y` (3-index GEP: dynamic
+row *followed by* a constant trailing vector-lane index `1`) did not.
+`collectDynamicRowTerms`'s constant-index branch only checked its
+current type against `StructType`/`ArrayType`, falling through to
+`std::nullopt` for a constant index into a `FixedVectorType` -- the
+`L138` fix had only taught this function to recognize a *dynamic* trailing
+lane select (`isa<FixedVectorType>(Ty)` checked strictly after the
+constant-index branch), not a *constant* one following a *dynamic* row.
+
+### Fix
+
+`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`: moved the
+`FixedVectorType` lane-select check in `collectDynamicRowTerms` ahead of
+the constant-index branch, so it applies uniformly to both a dynamic and
+a constant trailing lane index -- both now populate the same
+`DynamicComponent` out-parameter (a `ConstantInt` or a genuine dynamic
+`Value*`), which every existing consumer already normalizes identically
+via a plain `CreateZExtOrTrunc`.
+
+Added `CanonicalizeStageTest.cpp`'s
+`ThreadsDynamicRowWithConstantComponentIntoInterpolantArrayLoad`, a
+direct unit test of this exact shape (dynamic array row index, constant
+trailing vector-lane index, plain non-block `Interpolant` global).
+
+### Verification
+
+- `ninja check-feme`: 3,300/3,300 Passed, 3 Unsupported, 0 Failed (0
+  regressions).
+- CTS `dEQP-VK.pipeline.monolithic.multisample_interpolation.
+  nonuniform_interpolant_indexing.*` (the originally isolated 3 cases):
+  **3/3 Pass** (was 3/3 compile-time Fail).
+- CTS `dEQP-VK.pipeline.fast_linked_library.multisample_interpolation.
+  centroid_interpolation_consistency.*` (`L138`'s own bucket, regression
+  check for this shared code path): **20/20 executable cases Pass, 0
+  Fail** (unchanged from `L138`'s own close).
+- CTS `dEQP-VK.pipeline.*.multisample_interpolation.*` (the full 1,699-
+  case sweep `L139`/`L140` were originally filed from): **0 Fail** across
+  the entire group (was 12 Fail at filing time: `L140`'s own 3, plus
+  `L139`'s 9 executable `centroid_qualifier_inside_primitive.
+  137_191_1.samples_{4,8}` cases). `L139` was never independently
+  root-caused this session -- its own suspected `AtCentroid`
+  pixel-center-simplification hypothesis was not directly tested -- but
+  a direct re-run of its own 9 executable cases in isolation confirms
+  **0 Fail**, so it is struck through as resolved by this same fix
+  (likely sharing `collectDynamicRowTerms`'s code path some other way not
+  directly traced).
+
+### Results
+
+`L140` and `L139` both struck through in `Roadmap.md` as fixed and
+CTS-verified. No feature/extension inventory changes (compiler
+correctness fix only -- no new Vulkan functionality shipped this
+session).
