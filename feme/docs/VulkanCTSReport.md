@@ -9460,3 +9460,122 @@ two `feme.stage.input.load` results on the original condition).
 `Roadmap.md`. No feature/extension inventory changes (a compiler
 correctness fix, no new Vulkan functionality shipped this session).
 `L135` remains open, filed but not yet investigated.
+
+## Session: `L115(b)` closed -- pull-model interpolation ABI + a second stride bug, `L135`/`L125(r)` resolved as duplicates
+
+### Summary
+
+`L115(b)` (`spirv.GL.InterpolateAtCentroid`/`InterpolateAtSample`/
+`InterpolateAtOffset`, pull-model interpolation) needed two genuinely
+separate fixes to fully close, discovered in sequence:
+
+1. **Compile-time**: a new `SPIRVToLLVMPatterns.cpp` conversion-pattern
+   bug (dialect-conversion materialization silently undoing a
+   special-cased real pointer back to the type converter's own
+   canonical eagerly-loaded value).
+2. **Runtime**: a stride/layout mismatch (`FEnv.VertexInputs`
+   addressed with the wrong layout table) surfaced only once (1) was
+   fixed and CTS could actually execute past pipeline creation.
+
+### Bug 1: SPIR-V conversion pattern materialization
+
+`GLInterpolateAt{Centroid,Sample,Offset}Pattern`'s first working draft
+special-cased `StageIOAddressOfPattern` to keep a real pointer for an
+`Interpolant` operand's own `spirv.mlir.addressof`, rather than the
+type converter's usual eager-load conversion for a scalar/vector
+`Input` global. This compiled and unit-tested cleanly, but failed at
+actual MLIR-conversion runtime: a debug print in
+`GLInterpolateAtOffsetPattern::matchAndRewrite` showed
+`Adaptor.getInterpolant()`'s runtime type was `vector<4xf32>` (the
+eagerly-loaded value), not a pointer -- MLIR's dialect-conversion
+driver had silently re-materialized the special-cased result back to
+the type converter's own canonical answer for any downstream
+`Adaptor`-based consumer, even though the special-casing pattern's own
+`matchAndRewrite` reported `SUCCESS`.
+
+**Fix**: abandoned special-casing `StageIOAddressOfPattern` entirely.
+Added `resolveInterpolantAddress(mlir::Value)`, which accepts
+whatever canonical (eagerly-loaded) value the framework provides and
+reaches one level further back through that load's own address operand
+(`LoadOp::getAddr()`) to recover the real pointer directly -- no
+special-casing needed anywhere upstream. All three patterns updated to
+call this helper instead of requiring `Adaptor.getInterpolant()` to
+already be a pointer.
+
+New test: `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-gl-interpolate-at.mlir`,
+exercising all three ops' own conversion pattern end to end (FileCheck).
+
+### Bug 2: `VertexInputs`/`InputLayout` stride mismatch
+
+With bug 1 fixed, `dEQP-VK.draw.renderpass.linear_interpolation.*`
+(21 cases after multisampling `NotSupported` exclusions) ran to
+completion with 0 legalization failures, but 12/21 failed with
+"Rendered color image is not correct" -- a genuine numerical bug.
+
+Diagnosis: extracted and decoded the failing test's embedded base64
+PNG images (`Result.png`/`Reference.png`) from the `.qpa` log via a
+small Python/PIL script, sampling pixel values across the render
+target. Pattern: Red (component 0) always matched exactly;
+Green/Blue/Alpha (components 1-3) frequently diverged, worse further
+from the origin.
+
+Root cause: `lowerFragmentInterpolateAt`'s per-vertex raw-varying
+reload called `computeStageStorageAddress(Builder, FEnv.InputLayout,
+FEnv.VertexInputs, ...)` -- reusing `FEnv.InputLayout` (built from
+`FSInput->layout()`, `InvocationCount = QuadCount * 4`) to address
+`FEnv.VertexInputs` (built from `FSVertexInputs`, `InvocationCount =
+QuadCount * 3`). `feme::graphics::buildStageStorage`'s
+`ComponentStride`/`RowStride` fields are baked directly from the
+`InvocationCount` parameter, so the two storage blocks have genuinely
+different byte strides despite sharing `ElementID`s/signature shape --
+addressing one with the other's layout table computes wrong byte
+offsets for any non-zero `RelComponent` or invocation index, exactly
+matching the "component 0 always right, others often wrong" pixel
+pattern (component 0's `RelComponent == 0` makes the wrong stride's
+multiplier a no-op).
+
+**Fix**: threaded a new, dedicated `VertexInputLayout` field (built
+from `FSVertexInputs->layout()`) through the whole ABI stack --
+`RuntimeABI.h`, `StageArgsLayout.h`, `ResourceHeap.h`/`.cpp`,
+`Executor.cpp`, `FragmentWrapper.cpp` -- consuming
+`FemeFragmentArgs`'s last `Reserved[1]` slot per this codebase's
+existing `PatchArgsField` reuse convention (no `StageArgsAbiVersion`
+bump, matching that precedent).
+
+New unit test:
+`FragmentWrapperTest.InterpolateAtAddressesVertexInputsWithOwnLayout`
+-- confirmed by temporarily reverting the fix line and re-running that
+it fails against the pre-fix code (both because
+`stage_fragment_vertex_input_layout` goes unused, and because
+`stage_input_layout` gets spuriously dereferenced despite the test
+shader having no ordinary `feme.stage.input.load` call at all) and
+passes with the fix restored.
+
+### Verification
+
+- `ninja check-feme`: 3,298/3,301 Passed, 3 Unsupported, 0 Failed (+2
+  new tests, 0 regressions).
+- CTS `dEQP-VK.draw.renderpass.linear_interpolation.*`: **12/12
+  previously-failing cases now Pass** (9 NotSupported for unrelated
+  multisampling-capability reasons, unchanged).
+- CTS `dEQP-VK.draw.renderpass.multiple_interpolation.*` (the
+  previously-tracked `L134(c)` family, sharing this same root cause):
+  **16/16 non-NotSupported cases now Pass, 0 Fail** (12 NotSupported,
+  unrelated).
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases): **0 Fail**
+  (3,258 Pass / 26,193 NotSupported) -- 0 regressions, and the
+  previously-open 42 `L135` fails are now all Pass.
+
+### Results
+
+`L115(b)` is now **fully closed and CTS-verified**, struck through in
+`Roadmap.md`. `L135` and `L125(r)` -- both prior sessions' own
+duplicate discoveries of this exact gap -- are resolved and struck
+through/updated accordingly; `L125(r)`'s own `multisample_interpolation.*`
+family (a distinct, multisampling-specific CTS group not directly
+exercised by this session's `linear_interpolation.*`/
+`multiple_interpolation.*` re-sweeps) is flagged as needing its own
+confirmation re-sweep in a future session, though it shares the
+identical root-cause legalization gap and should very likely also now
+pass. No feature/extension inventory changes (both fixes are compiler
+correctness fixes -- no new Vulkan functionality shipped this session).
