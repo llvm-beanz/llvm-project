@@ -4387,6 +4387,46 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // is never double-counted.
         if (PeekedST && MemberMD && !D.XfbOffset)
           D.XfbOffset = PeekedMemberDecorations.lookup(0).XfbOffset;
+        // (Roadmap L134(c)) A single-real-member `Block`-decorated
+        // interface block whose one member is decorated directly (e.g.
+        // `layout(location = 3) in InterfaceBlock { layout(location = 3)
+        // noperspective vec4 in_color_noperspective; } ifb;`, one member
+        // of a `multiple_interpolation.structured.*` CTS shader's own
+        // per-interpolation-qualifier interface block) carries its
+        // `Location`/`Component`/`NoPerspective`/`Flat`/`Centroid`/
+        // `Sample`/`PerPrimitive`/`Index` only on the member itself, the
+        // same way `XfbOffset` above can -- glslang never repeats any of
+        // these at the whole-variable level for this shape (unlike
+        // `XfbBuffer`/`XfbStride`, always whole-variable). `TakeBlockPath`
+        // above only decomposes a block into several `SignatureElement`s
+        // when it has more than one real member (or a `BuiltIn`-decorated
+        // one), so a single-real-member block always reaches this plain
+        // path instead (roadmap H101b) -- leaving `D` with none of the
+        // member's own decorations folded in left every such element's
+        // `Location` unset (`std::nullopt`), the exact
+        // "fragment input element N has no location to link against a
+        // vertex output" `vkCreateGraphicsPipelines` rejection this
+        // milestone's own CTS sweep isolated for this shader shape. Fold
+        // every decoration `D` itself lacks in from the member's own
+        // parsed decorations, exactly mirroring the `XfbOffset` fold just
+        // above, one field at a time so any decoration the whole variable
+        // *does* already carry (never observed for this shape, but not
+        // structurally impossible) is never overwritten.
+        if (PeekedST && MemberMD) {
+          const ParsedSPIRVDecorations &MemberD =
+              PeekedMemberDecorations.lookup(0);
+          if (!D.Location)
+            D.Location = MemberD.Location;
+          if (!D.Component)
+            D.Component = MemberD.Component;
+          if (D.Index == 0)
+            D.Index = MemberD.Index;
+          D.NoPerspective |= MemberD.NoPerspective;
+          D.Flat |= MemberD.Flat;
+          D.Centroid |= MemberD.Centroid;
+          D.Sample |= MemberD.Sample;
+          D.PerPrimitive |= MemberD.PerPrimitive;
+        }
         Type *ValueTy = GV->getValueType();
         bool RowCountIsVertexArray =
             isPerVertexArrayInputGlobal(GV, UnusedAddrSpace, Stage);

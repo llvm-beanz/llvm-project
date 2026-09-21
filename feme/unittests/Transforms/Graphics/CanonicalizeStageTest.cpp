@@ -5738,4 +5738,53 @@ TEST(CanonicalizeStageTest, ThreadsDynamicRowIndexIntoSampleMaskOutputStore) {
       EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
 }
 
+/// (Roadmap L134(c)) A single-real-member `Block`-decorated interface
+/// block whose one member carries its own `Location`/interpolation-
+/// qualifier decorations (rather than the whole variable itself, the
+/// shape a `dEQP-VK.draw.renderpass.multiple_interpolation.structured.*`
+/// CTS case's own per-interpolation-qualifier fragment input takes once
+/// only one qualifier variant survives compile-time member folding) still
+/// gets a real `Location` -- not left `std::nullopt`, the "fragment input
+/// element N has no location to link against a vertex output"
+/// `vkCreateGraphicsPipelines` rejection this milestone's own CTS sweep
+/// isolated for this exact shape, before this fix.
+TEST(CanonicalizeStageTest,
+     PreservesLocationForSingleMemberBlockWithPerMemberDecoration) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @ifb = external addrspace(7) constant { <4 x float> }, !feme.spirv.MemberDecorations !10
+    @out_color = external addrspace(8) global <4 x float>, !spirv.Decorations !3
+    define void @main() #0 {
+      %v = load { <4 x float> }, ptr addrspace(7) @ifb
+      %e0 = extractvalue { <4 x float> } %v, 0
+      store <4 x float> %e0, ptr addrspace(8) @out_color
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !3 = !{!4}
+    !4 = !{i32 30, i32 0}
+    !10 = !{!12}
+    !12 = !{i32 0, !121}
+    !121 = !{!122, !123}
+    !122 = !{i32 17}
+    !123 = !{i32 30, i32 3}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  const SignatureElement *In = nullptr;
+  for (const SignatureElement &E : Sig->Elements)
+    if (E.Direction == SignatureDirection::Input)
+      In = &E;
+  ASSERT_TRUE(In);
+  ASSERT_TRUE(In->Location.has_value());
+  EXPECT_EQ(*In->Location, 3u);
+  EXPECT_EQ(In->Interpolation, SignatureInterpolationMode::PerspectiveSample);
+}
+
 } // namespace
+
