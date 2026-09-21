@@ -723,6 +723,71 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// EXPERIMENTAL/DIAGNOSTIC ONLY (roadmap L128(a)): a hand-minimized
+/// stand-in for `dEQP-VK.pipeline.monolithic.vertex_input.max_attributes.
+/// query_max_attributes.*`'s own `attr[numAttributes-1]` shader, reduced
+/// from the CTS test's real `numAttributes==16` (`RowCount==15`) down to
+/// `RowCount==5` -- still one past the largest `RowCount` any
+/// currently-passing test exercises (real matrices, capped at
+/// `RowCount==4`) -- specifically to make each `valgrind`/`gdb` iteration
+/// fast enough for real bisection (the full CTS shader takes several
+/// minutes per run under `valgrind`; this reduced form should take
+/// seconds). Sums `attr[0..4].x` in a compile-time-constant-trip-count
+/// loop (5 iterations, a plain `spirv.Constant`, not a specialization
+/// constant, since the forced-unroll prototype only needs
+/// `ScalarEvolution::getSmallConstantTripCount` to succeed) and writes
+/// the sum into `gl_Position.x` so the loop is not dead-code-eliminated.
+/// NOT a landable test on its own -- exists purely so a future session
+/// can reinstate the (also not-landed) loop-unrolling prototype needed
+/// ahead of `feme::vulkan::compileGraphicsStage`'s `CanonicalizeStagePass`
+/// call (see the `L128ARowCount5Repro` test's own comment below for the
+/// full, now disassembly-confirmed root-cause writeup) and get a fast,
+/// small repro for `L128(a)`.
+[[maybe_unused]] constexpr llvm::StringLiteral L128ARowCount5VertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @attr {location = 1 : i32} : !spirv.ptr<!spirv.array<5 x vector<4xf32>>, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %c5 = spirv.Constant 5 : i32
+    %f0 = spirv.Constant 0.0 : f32
+    %f1 = spirv.Constant 1.0 : f32
+    %sumVar = spirv.Variable init(%f0) : !spirv.ptr<f32, Function>
+    %iVar = spirv.Variable init(%c0) : !spirv.ptr<i32, Function>
+    spirv.mlir.loop {
+      spirv.Branch ^header
+    ^header:
+      %ival = spirv.Load "Function" %iVar : i32
+      %cmp = spirv.SLessThan %ival, %c5 : i32
+      spirv.BranchConditional %cmp, ^body, ^merge
+    ^body:
+      %ival2 = spirv.Load "Function" %iVar : i32
+      %attrp = spirv.mlir.addressof @attr : !spirv.ptr<!spirv.array<5 x vector<4xf32>>, Input>
+      %elemp = spirv.AccessChain %attrp[%ival2, %c0] : !spirv.ptr<!spirv.array<5 x vector<4xf32>>, Input>, i32, i32 -> !spirv.ptr<f32, Input>
+      %elem = spirv.Load "Input" %elemp : f32
+      %sumv = spirv.Load "Function" %sumVar : f32
+      %newsum = spirv.FAdd %sumv, %elem : f32
+      spirv.Store "Function" %sumVar, %newsum : f32
+      spirv.Branch ^continue
+    ^continue:
+      %ival3 = spirv.Load "Function" %iVar : i32
+      %inext = spirv.IAdd %ival3, %c1 : i32
+      spirv.Store "Function" %iVar, %inext : i32
+      spirv.Branch ^header
+    ^merge:
+      spirv.mlir.merge
+    }
+    %finalsum = spirv.Load "Function" %sumVar : f32
+    %posv = spirv.CompositeConstruct %finalsum, %f0, %f0, %f1 : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %posv : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @attr, @pos
+}
+)mlir";
+
 /// A fragment stage passing its location-0 input straight through to
 /// SV_Target0, for `PerInstanceColorVertexSource`'s varying.
 constexpr llvm::StringLiteral PassthroughColorFragmentSource = R"mlir(
@@ -9109,5 +9174,135 @@ TEST_F(DrawTest, FragmentShaderReadsBackViewportIndex) {
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
+
+/// EXPERIMENTAL/DIAGNOSTIC ONLY -- roadmap L128(a) fast-iteration repro.
+/// NOT a landable test as-is: reproduces the crash today because
+/// `feme::vulkan::compileGraphicsStage` (GraphicsPipeline.cpp) runs
+/// `CanonicalizeStagePass` -- which builds the `EntrySignature` this
+/// pipeline exports for the *executor* to bind vertex-input storage
+/// against -- before any pass exists that could recognize a compile-time-
+/// constant-trip-count loop over an array-typed (`RowCount > 4`)
+/// `Input`/`Output` global as a set of per-row constant-indexed accesses.
+/// (A `RowCount <= 4` real matrix never hits this: SPIR-V/glslang always
+/// emits its row accesses as separate, already-unrolled loads, with no
+/// loop for `CanonicalizeStagePass` to fail to see through.) The result:
+/// this element is silently missing from the exported `EntrySignature`
+/// (confirmed directly this session, both by disassembling the crash --
+/// a null-pointer read of `FemeVertexArgs::InputLayout->Elements`, the
+/// signature's `Elements` array itself, empty because `StageStorage`'s
+/// `Any` flag never becomes true for this direction -- and by tracing
+/// `Sig.Elements.size()` through `CanonicalizeStage.cpp`/
+/// `StageStorage.cpp` with ad hoc debug prints), even though the compiled
+/// shader body still references its `ElementID` directly (`CompiledStage`'s
+/// own *internal* `runPipeline`, called later, runs a second, later
+/// `CanonicalizeStagePass` that *would* find it once a loop-unrolling fix
+/// exists ahead of it -- but that second pass's metadata update happens
+/// too late to affect the `EntrySignature` bytes `CompiledStage.cpp`
+/// already serialized into the artifact info at construction time).
+///
+/// Exercising this repro requires reinstating two pieces of scaffolding
+/// this session prototyped and then reverted, not landed here:
+///  1. A loop-unrolling (or equivalent constant-GEP-recognition) pass,
+///     run inside `feme::vulkan::compileGraphicsStage`
+///     *before* its `CanonicalizeStagePass().run(...)` call
+///     (GraphicsPipeline.cpp) -- not inside `feme::cpu::runPipeline`
+///     (Pipeline.cpp), which is too late, as explained above.
+///  2. Once (1) exists, this test alone is sufficient to confirm the fix:
+///     it reproduces the crash reliably (~3/3 runs) today and should pass
+///     cleanly once the real fix lands.
+/// Left in place (`#if 0`) so a future session doesn't have to re-derive
+/// the shader/pipeline setup from scratch. See roadmap `L128(a)` for the
+/// full writeup.
+#if 0
+TEST_F(DrawTest, L128ARowCount5Repro) {
+  VkShaderModule Vertex = createModule(L128ARowCount5VertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkVertexInputBindingDescription BindingDesc{0, sizeof(float) * 4 * 5,
+                                              VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription AttrDescs[5] = {
+      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
+      {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 4},
+      {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 8},
+      {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 12},
+      {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 16},
+  };
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VertexInput.vertexAttributeDescriptionCount = 5;
+  VertexInput.pVertexAttributeDescriptions = AttrDescs;
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkDeviceMemory VertexMemory = VK_NULL_HANDLE;
+  VkBuffer VertexBuffer = createBuffer(sizeof(float) * 4 * 5, VertexMemory,
+                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  // attr[0].x..attr[4].x = 1,2,3,4,5; every other component unused.
+  float Data[20] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0};
+  std::memcpy(fromHandle<Buffer>(VertexBuffer)->data(), Data, sizeof(Data));
+
+  VkDeviceSize Offset = 0;
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindVertexBuffers(Cmd, 0, 1, &VertexBuffer, &Offset);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  vkDestroyBuffer(Device, VertexBuffer, nullptr);
+  vkFreeMemory(Device, VertexMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+#endif
 
 } // namespace
