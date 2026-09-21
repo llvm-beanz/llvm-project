@@ -7533,3 +7533,66 @@ CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
   the related, still-open push-constant-state bind-point-separation
   gap (no concrete CTS repro found yet). See `agent_thoughts.md` for
   the full narrative and next steps.
+
+## Roadmap L129/L130: push-constant bind-point repro search + BC-format CTS coverage gap investigation
+
+Investigation-only session (no code changes) closing out two backlog
+items from prior sessions' suggested-next-steps lists.
+
+### L129: searching for a concrete CTS repro of the push-constant
+bind-point isolation gap
+
+`vktPipelinePushConstantTests.cpp`'s `push_constant.lifetime.*` group
+is the only CTS bucket combining a graphics bind, a compute bind, and
+push constants in one command buffer
+(`pipeline_change_same_range_bind_push_vert_and_comp` /
+`pipeline_change_diff_range_bind_push_vert_and_comp`). Read both
+cases' `CommandData` sequences: each pushes once with a `stageFlags`
+mask already spanning `VERTEX|COMPUTE`, draws, pushes again with a
+different value, then dispatches -- the draw always consumes its push
+before the compute one lands, so a single shared `PushConstants`
+buffer (today's actual shape) produces the same observable result a
+correctly-isolated implementation would. Ran the full bucket anyway as
+a sanity check.
+
+CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`):
+- `pipeline.*.push_constant.lifetime.*` (63 cases, all
+  `PipelineConstructionType`s): **27 Pass, 0 Fail, 36 NotSupported**
+  (shader-object construction types, unrelated).
+
+No regression, and no repro found -- confirms `L129` remains
+correctly filed as "not yet started, no concrete CTS repro." A future
+fix attempt will need a hand-written `feme` unit test (same
+stash/rebuild-round-trip methodology as `L125(t)`'s own regression
+test) rather than a CTS-driven one.
+
+### L130: BC-format sampler-addressing CTS coverage gap
+
+Root-caused the "`sampler.view_type.*.format.*bc*.address_modes.
+*clamp_to_border*` matches 0 cases" gap flagged across several prior
+sessions. Confirmed via `grep` that `vktPipelineSamplerTests.cpp`'s own
+`formats[]` array (source of every `pipeline.*.sampler.view_type.*`
+case) includes `ETC2`/`EAC`/`ASTC` but zero `VK_FORMAT_BC*` entries; a
+repo-wide search for any file combining a BC format with
+border/address-mode testing also found nothing. This is a genuine
+upstream CTS coverage gap, not a feme bug -- no test anywhere in
+dEQP-VK exercises BC-format sampling with border-color addressing.
+
+Cross-checked feme's own BC-format border-color handling (`Command
+Buffer.cpp`'s `compressedFormatBorderComponentMask`, added by the
+unrelated `L125(w)` fix) by code inspection: every non-4-channel BC
+format (`BC1_RGB`, `BC4`, `BC5`, `BC6H`) already has a correct
+component-mask case, mirroring the equivalent ETC2/EAC cases that fix
+verified via CTS. No code change made or needed.
+
+### Build/test
+
+No code changes this session -- `ninja check-feme` not re-run (no
+functional change to validate).
+
+### Results
+
+`Roadmap.md`'s `L129` row updated with this session's investigation
+result; new `L130` row filed and closed in the same edit (investigated,
+confirmed CTS-side gap, no feme action needed). See `agent_thoughts.md`
+for the full narrative and next steps.
