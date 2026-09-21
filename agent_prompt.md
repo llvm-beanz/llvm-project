@@ -55,28 +55,35 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **Check `/tmp/ctsrun/l128fix/pipeline_full.log`/`.qpa`** (PID 38862
-   if still alive) for the `pipeline.monolithic.*` full sweep's final
-   tally before doing anything else CTS-related. Expect only the 57
-   pre-existing, already-confirmed-unrelated `bind_buffers_2.*` fails;
-   if that holds, update `VulkanCTSReport.md`'s L128(c) note to record
-   the final clean tally and consider `L128(c)`'s extra regression
-   guard fully closed out.
-2. **File `bind_buffers_2.*`'s 57 pre-existing fails as their own
-   roadmap row** if not already tracked elsewhere -- this session only
-   confirmed they're pre-existing and unrelated to the L128 fix, it did
-   not investigate or file them. About `vkCmdBindVertexBuffers2`
-   stride/offset handling.
-3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+1. **Check `/tmp/ctsrun/l128fix/pipeline_full2.log`/`.qpa`** (PID 12156
+   if still alive) for the `interface_matching`-excluded
+   `pipeline.monolithic.*` sweep's final tally. Not required to close
+   anything, but worth recording in `VulkanCTSReport.md` if it finished,
+   and worth killing + noting as still-running-forever if it hasn't
+   (this family appears to genuinely take multiple hours end to end).
+2. **`L133` (the `interface_matching.*` pad-field assertion crash) is a
+   real process abort, not just a `Fail`** -- consider picking this up
+   before `L132`, since it's the one that actively breaks batch CTS
+   sweeps that reach it. Start from a minimized in-process repro (in
+   the `DrawTest.cpp`/`FeMeVulkanTests` style established across many
+   `L128`-family sessions) rather than iterating against the full CTS
+   case directly.
+3. **`L132` (`bind_buffers_2.*`, 57 fails)** -- not root-caused yet,
+   about `vkCmdBindVertexBuffers2` stride/offset handling. Needs its
+   own dedicated session.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
    remains the largest not-yet-started cross-repo item -- needs its own
-   dedicated session.
-4. `L115(b)` (pull-model interpolation) remains flagged from several
+   dedicated session, not a quick pick. Untouched again this session.
+5. `L115(b)` (pull-model interpolation) remains flagged from several
    sessions ago as needing a new runtime-callback ABI surface -- also
-   not a quick pick.
-5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   not a quick pick. Untouched again this session.
+6. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
    `llvm-project`) are incremental from here -- no reconfigure needed.
-6. If picking up `addStringMetadataToLoop` or any other boolean loop-
-   attribute code elsewhere in this codebase, double check the overload
-   actually being called -- the `const char*`-vs-`StringRef` footgun
-   documented in this session's `L128(c)` roadmap row is easy to
-   reintroduce accidentally and produces no warning.
+7. **Reminder for future sessions doing a source-swap-to-baseline
+   check**: `git show <commit>:<path> > <tmpfile>` + `cp` over the
+   working copy + rebuild + test + `cp` back the saved "with-fix"
+   version is faster and safer than `git stash`/`git worktree` for a
+   single-file, already-committed change -- no risk of losing
+   uncommitted work, no full second build tree needed. Always `git
+   status --short` afterward to confirm a clean, zero-diff restore
+   before committing anything else.
