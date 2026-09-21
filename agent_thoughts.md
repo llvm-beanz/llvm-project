@@ -97218,3 +97218,106 @@ this session; the 30-second sanity check caught it.
    future session has re-derived what it needs from them -- kept for
    now since they contain the actual crash addresses referenced in
    this entry.
+
+## Session: L128(a) root-caused for real (source-level, not just disassembly)
+
+**TL;DR**: Found the *actual* bug behind `L128(a)`'s JIT crash. It's not
+a wild pointer, not stack overflow, not heap corruption -- it's a plain
+ordering bug: the vertex shader's exported signature gets captured
+*before* the one pass that would have found the missing attribute even
+runs. Didn't fix it (too big a change for the time left), but the fix
+location is now a one-line pointer to `GraphicsPipeline.cpp:541`.
+
+**What I did, in order**:
+1. Confirmed `FeMe CPU Vulkan Device` (standing instruction, every
+   session).
+2. Checked on the `pipeline.monolithic.blend.*` sweep that had been
+   running across 3 sessions -- **it finished, 0 Fail**. Closed that out,
+   committed, cleaned up its scratch logs.
+3. Built a **much faster repro** for `L128(a)`: instead of driving the
+   full `deqp-vk` CTS binary under `valgrind` (minutes per iteration), I
+   wrote a tiny 5-attribute vertex shader directly in MLIR SPIR-V dialect
+   text and ran it through `feme/unittests/Vulkan/DrawTest.cpp`'s own
+   in-process GTest harness (`FeMeVulkanTests`). Seconds per run instead
+   of minutes. **This is the single biggest process win from this
+   session** -- landed it as a disabled test
+   (`DrawTest.L128ARowCount5Repro`) so nobody has to redo this setup work.
+4. Disassembled the crash with `gdb` + `FEME_CPU_JIT_DEBUG_SUPPORT=1`:
+   found the exact instruction (`ldr w17, [x15, #108]`) and the exact
+   null pointer (`x15` = `InputLayout->Elements`, confirmed against
+   `RuntimeABI.h`'s struct offsets).
+5. Added temporary debug prints (reverted, not landed) to trace *why*
+   `Elements` was null. Turned out the shader's exported signature
+   metadata simply never got the `attr` element at all.
+6. Followed the trail through `CompiledStage.cpp` and
+   `GraphicsPipeline.cpp` and found: the signature gets captured in
+   `createStage()` *before* `runPipeline()` runs, specifically to dodge
+   a dangling-pointer risk from `EntryWrapperPass` renaming/erasing
+   functions. But the pass that actually builds a *correct* signature
+   for a graphics shader isn't inside `runPipeline` at all -- it's a
+   separate, earlier call in `GraphicsPipeline.cpp:541`, and *that* one
+   runs before any loop-unrolling exists anywhere in the pipeline. A
+   `RowCount>4` array attribute accessed via a loop (not yet unrolled)
+   is invisible to it.
+7. This also explains why last session's forced-unroll prototype
+   (placed inside `runPipeline`/`Pipeline.cpp`) didn't fix the crash even
+   though it made the shader compile: it fixed the *wrong*, redundant
+   `CanonicalizeStagePass` call. The real one had already run and missed
+   `attr` by the time the prototype's unroll pass ever executed.
+8. Reverted every diagnostic change except the (disabled) fast-repro
+   test. Wrote up the finding in `Roadmap.md` (`L128(b)`) and
+   `VulkanCTSReport.md`. Reran the 3 target CTS cases directly to confirm
+   no regression (still fail identically, as expected since no
+   functional code changed).
+
+**Why I didn't just fix it**: the real fix means adding a loop-unrolling
+pass ahead of `GraphicsPipeline.cpp:541`'s `CanonicalizeStagePass` call --
+a change to a pipeline stage every single graphics shader compile goes
+through. That needs careful design (what loop shapes are safe to force-
+unroll unconditionally at that point in the pipeline?) and a full
+regression sweep, not a rushed end-of-session patch. Better to hand off
+a precise, actionable finding than a half-tested change to shared
+infrastructure.
+
+**Commits** (3, each with the Copilot co-author trailer):
+1. `DrawTest.cpp` -- the disabled fast-repro test + shader.
+2. `Roadmap.md` -- new `L128(b)` row with the full root-cause writeup.
+3. `VulkanCTSReport.md` -- session summary + CTS regression confirmation.
+
+**Roadmap**: `L128(b)` added (one level of nesting, per the "no more
+than one lowercase letter deep" rule). `L128`/`L128(a)` left as-is
+(still open, now superseded in detail by `L128(b)`).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed, no new Vulkan functionality shipped this session.
+
+**Scratch logs**: this session's `/tmp/ctsrun/l128a/*` and
+`/tmp/ctsrun/l128b/*` (gdb/disassembly logs, IR dumps, CTS qpa) have
+all been cleaned up -- everything worth keeping is now written into
+`Roadmap.md`'s `L128(b)` row.
+
+## Suggested next steps
+
+1. **Implement the real `L128`/`L128(a)` fix**: add a loop-unrolling (or
+   constant-GEP-recognition) pass inside `feme::vulkan::compileGraphicsStage`,
+   immediately *before* its `CanonicalizeStagePass().run(...)` call at
+   `GraphicsPipeline.cpp:541`. This is the concrete, now-confirmed fix
+   location -- not inside `feme::cpu::runPipeline`/`Pipeline.cpp`, which
+   is too late (see `L128(b)` in `Roadmap.md` for the full why).
+2. **Validate against `DrawTest.L128ARowCount5Repro`** (flip its `#if 0`
+   to `#if 1`): should reproduce the crash before the fix and pass
+   cleanly after. Much faster than CTS/valgrind for iterating.
+3. **Then confirm against the real CTS cases**: the 3
+   `vertex_input.max_attributes.query_max_attributes.*` fails should
+   finally pass once the fix lands.
+4. **Regression-test broadly** once a fix is in place: `ninja
+   check-feme`, plus at minimum a `vertex_input.*` and `pipeline.*`
+   sweep, since this pass sits ahead of the signature-building step
+   every graphics shader compile goes through.
+5. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   remains the largest not-yet-started cross-repo item -- needs its own
+   dedicated session.
+6. `L115(b)` (pull-model interpolation) remains flagged from several
+   sessions ago as needing a new runtime-callback ABI surface -- also
+   not a quick pick.
+7. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`,
+   `llvm-project`) are incremental from here -- no reconfigure needed.
