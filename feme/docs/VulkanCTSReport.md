@@ -8945,3 +8945,121 @@ attempted this session. `L134`'s other 2 sub-rows (`L134(a)`, `L134(c)`)
 remain open. No feature/extension inventory changes (a correctness fix
 to existing color-attachment binding, no new Vulkan functionality
 shipped this session).
+
+## Session: `L134(i)` -- `B10G11R11_UFLOAT_PACK32` color-attachment support fixed
+
+### Change
+
+`L134(b)`'s own investigation (previous session) split out `L134(i)`: 6
+`dEQP-VK.draw.renderpass.output_location.array.*` cases
+(`b10g11r11-ufloat-pack32-{highp,mediump}`, plain and
+`-output-{float,vec2}`) failed with `"Vulkan color attachment format is
+not supported"` -- `RenderPass.cpp`'s `isSupportedColorAttachmentFormat`
+never listed `ResourceFormat::R11G11B10_FLOAT`.
+
+Contrary to a stale `ImageFixture.cpp` comment claiming a real
+`packClearColor` case already existed for this format, neither a
+`packClearColor` nor an `unpackColor` special case actually existed --
+verified via `grep`/`awk` before writing the fix. The format packs as
+one opaque 4-byte word with no alpha channel
+(`FormatInfo{1, 4, false}`), exactly like the adjacent `E5B9G9R9_UFLOAT`
+special case, but fell through to the generic per-component path
+(`Components=1`) instead.
+
+Fixed by adding `encodeR11G11B10Float`/`decodeR11G11B10Float` helpers,
+mirroring `runtime/CPU/FeMeRuntimeCPU.c`'s authoritative
+`femeRTPackR11G11B10Float`/`femeRTUnpackR11G11B10Float` shift amounts
+exactly (11-bit R/G fields with a 6-bit mantissa, a 10-bit B field with
+a 5-bit mantissa, unsigned/no sign bit, negative clamped to zero), wired
+into new `packClearColor`/`unpackColor` special cases modeled on
+`E5B9G9R9_UFLOAT`'s, plus adding `ResourceFormat::R11G11B10_FLOAT` to
+`isSupportedColorAttachmentFormat`'s switch.
+
+New unit tests `ImageFixtureTest.PacksAndUnpacksR11G11B10Float{MidRange,
+Zero,ClampsNegativeToZero}`/`RoundTripsR11G11B10FloatFixtureFormat`
+(confirmed via a stash/rebuild round-trip to fail identically pre-fix
+with `"clear color has 4 component(s), expected 1"`).
+
+`ninja check-feme`: 3,289/3,292 Passed, 3 Unsupported, 0 Failed (+4 new
+tests, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.*output_location.array*` (28 cases): **23 Pass, 5 Fail**
+  (was 18 Pass, 10 Fail). The remaining 5 fails are all `feme-cpu-simdize`
+  crashes -- the original 4 `L134(h)` cases, plus a newly-surfaced 5th
+  (`b10g11r11-ufloat-pack32-highp-output-vec2`) that was previously
+  masked behind this session's now-fixed format-support gap and turns
+  out to hit the exact same `L134(h)`-class crash once that gap closed.
+
+### Results
+
+`L134(i)` is fixed and CTS-verified, with no residual format-support
+gap: every remaining `output_location.array.*` fail is purely
+`L134(h)`'s own, separately-tracked scope (now grown from 4 to 5 cases).
+No feature/extension inventory changes (a correctness fix to an
+existing format's color-attachment eligibility, no new Vulkan
+functionality shipped this session).
+
+## Session: `L134(h)` -- narrowing vector-to-vector bitcast widening fixed
+
+### Change
+
+`L134(b)`'s own investigation split out `L134(h)`: 4 (later 5, once
+`L134(i)` closed its own unrelated gap and unmasked a 5th case)
+`dEQP-VK.draw.renderpass.output_location.array.*` cases crashed
+`feme-cpu-simdize` with `error: feme-cpu-simdize: function 'main' has a
+divergent value '.bc' of vector type; only a constant-index
+insertelement chain, ...` on a vector-wider-than-scalar (e.g. `vec2[3]`)
+fragment-output array shape.
+
+A new `FEME_DEBUG_DUMP_PRE_SIMDIZE`-gated (temporary, reverted before
+commit) LLVM-IR dump right before `SIMDizePass` runs, taken against one
+of the crashing cases, found the crashing `.bc`-named divergent value is
+genuinely a `BitCastInst`: `bitcast <4 x i1> %cond to <2 x i2>`, the
+shape a `dEQP-VK.draw.renderpass.output_location.array` verify shader's
+own `any(notEqual(a.xy, b.xy))`-style 2-component boolean reduction
+takes once compiled -- `fcmp une <4 x float>` produces a genuine
+`<4 x i1>` (SPIR-V pads the 2-component swizzle's own comparison out to
+the full `vec4` width), then packs pairs of those booleans into a
+`<2 x i2>` before an `extractelement`/`icmp eq 0` pulls out just the low
+pair actually needed.
+
+`SIMDize.cpp`'s `IsSupportedProducer` only recognized a `CastInst` whose
+operand shared the result's element count, plus the pre-existing L89g
+scalar<->vector bitcast special cases (`bitcast i128 to <4 x i32>` and
+its inverse) -- this narrowing *vector-to-vector* bitcast (fewer,
+proportionally wider destination elements than source elements) fell
+through to the "divergent value of vector type" diagnostic instead.
+
+Fixed by adding `isVectorNarrowingBitCast`/`widenVectorNarrowingBitCast`
+(`SIMDize.cpp`), generalizing the existing `widenVectorToScalarBitCast`'s
+zext/shift/or recomposition (itself this shape's single-destination-
+element special case, `M == 1`) to a genuinely vector destination: each
+of the `M` destination components is rebuilt from its own run of `N/M`
+already-decomposed source components, packed at their own bit offsets,
+using the same little/big-endian component ordering the existing
+scalar<->vector bitcast lowerings already use.
+
+New unit test `SIMDizeTest.WidensNarrowingVectorBitCastFromBooleanReduction`
+(a minimal `fcmp`/`bitcast <4 x i1> to <2 x i2>`/`extractelement`
+reduction, confirmed via a stash/rebuild round-trip to fail identically
+pre-fix).
+
+`ninja check-feme`: 3,290/3,293 Passed, 3 Unsupported, 0 Failed (+1 new
+test, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `dEQP-VK.draw.*output_location.array*` (28 cases): **28 Pass, 0 Fail**
+  (was 23 Pass, 5 Fail). This whole family, originally estimated at 24
+  cases and eventually found to span 28 across `L134(b)`/`L134(h)`/
+  `L134(i)`, is now fully closed.
+
+### Results
+
+`L134(h)` is fixed and CTS-verified; combined with `L134(i)`'s earlier
+fix this same session, `L134(b)`'s entire `output_location.array.*`
+family is now closed end to end. No feature/extension inventory changes
+(a compiler correctness fix, no new Vulkan functionality shipped this
+session).
