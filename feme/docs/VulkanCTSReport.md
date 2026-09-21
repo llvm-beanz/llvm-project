@@ -7596,3 +7596,81 @@ functional change to validate).
 result; new `L130` row filed and closed in the same edit (investigated,
 confirmed CTS-side gap, no feme action needed). See `agent_thoughts.md`
 for the full narrative and next steps.
+
+## Roadmap L129: push-constant bind-point state isolation fix
+
+Fixed the gap the prior session's investigation confirmed had no
+concrete CTS repro anywhere in dEQP-VK -- the same shared-state bug
+`L125(t)` fixed for descriptor sets, but for push constants instead.
+
+### Root cause
+
+`executeCommandsInto` (`CommandBuffer.cpp`) threaded a single shared
+`std::vector<uint8_t> &PushConstants` through both the compute-dispatch
+path and the graphics-draw path. `vkCmdPushConstants`'s `stageFlags`
+argument was entirely discarded (an unnamed parameter, with a stale
+comment claiming "V3's single compute stage means every push constant
+is compute-visible" -- no longer true since graphics support exists).
+
+### Fix
+
+- `RecordedCommand` gained a `VkShaderStageFlags StageFlags` field
+  (reused for the `PushConstants` command kind).
+- `vkCmdPushConstants`/`vkCmdPushConstants2` now capture and thread the
+  real `stageFlags` through to `CommandBuffer::pushConstants()`.
+- `executeCommandsInto`'s single `PushConstants` parameter was split
+  into two independent vectors, `PushConstantsGraphics` and
+  `PushConstantsCompute`, each independently sized/zeroed to
+  `maxPushConstantsSize`.
+- The `PushConstants` execution case now checks `Cmd.StageFlags` and
+  writes (with independent bounds checks) into one or both vectors --
+  a push whose mask spans both bind points (e.g.
+  `VERTEX_BIT | COMPUTE_BIT`) correctly writes into both, unlike a
+  descriptor-set bind which only ever targets one bind point.
+- All Dispatch/DispatchIndirect cases now consume only
+  `PushConstantsCompute`; all Draw/DrawIndexed/DrawIndirect/
+  DrawMeshTasks/DrawIndirectByteCount cases now consume only
+  `PushConstantsGraphics`; `ExecuteCommands` and the top-level
+  `executeCommandBuffer` entry point thread both vectors through.
+
+### Testing
+
+As the prior session established, no CTS bucket exercises this gap, so
+a hand-written unit test was required, mirroring `L125(t)`'s own
+methodology: new test `PushConstantDispatchTest.
+GraphicsOnlyPushDoesNotClobberComputeBoundPushConstants` pushes a real
+value at `VK_SHADER_STAGE_COMPUTE_BIT`, then an unrelated sentinel at
+`VK_SHADER_STAGE_VERTEX_BIT` to the same byte range (no real graphics
+pipeline/draw needed, since `vkCmdPushConstants` performs no validation
+against any bound pipeline layout), dispatches, and confirms the result
+reflects only the compute push. Confirmed via a stash/rebuild
+round-trip: fails identically to the real bug pre-fix
+(`Result == 0xCAFEF00D`, the sentinel, instead of the expected `42`),
+passes post-fix.
+
+`ninja check-feme`: **3,274/3,277 Passed, 3 Unsupported, 0 Failed**
+(+1 new test, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- `pipeline.*.push_constant.lifetime.*` (63 cases): unchanged at
+  **27 Pass, 0 Fail, 36 NotSupported**, exactly matching the prior
+  session's baseline -- confirms no regression (this bucket still
+  cannot detect the fix itself, as already established; it isn't
+  designed to stress cross-bind-point isolation).
+- `pipeline.monolithic.push_constant.*` broader sweep (65 cases): **50
+  Pass, 9 Fail, 6 NotSupported**. The 9 fails are pipeline-creation
+  failures (`JIT session error: Symbols not found: [ spirv_var_NN ]`,
+  `OpTypeArray count <id> ... must come from a constant, specialization
+  constant, or supported specialization constant operation`) -- nothing
+  to do with push-constant bind-point routing. Confirmed
+  **pre-existing and unrelated** via a revert-and-rerun (stash the
+  implementation fix, rebuild, rerun): all 9 fail identically without
+  this fix too. Out of scope for this row; not investigated further.
+
+### Results
+
+`Roadmap.md`'s `L129` row struck through and rewritten as fixed. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- pure correctness fix, no new feature/extension surface. See
+`agent_thoughts.md` for the full narrative and next steps.
