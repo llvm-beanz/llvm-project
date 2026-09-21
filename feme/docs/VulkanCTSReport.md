@@ -8320,3 +8320,107 @@ full re-sweep of its entire CTS family completes cleanly with no
 sibling regressions. No feature/extension inventory changes (a
 correctness fix to existing lowering, no new Vulkan functionality
 shipped this session).
+
+## Session: L132 root-caused and fixed -- barycentric-weight-sum precision gap
+
+Continuing directly from the prior session's `L132` filing. Confirmed
+`FeMe CPU Vulkan Device` at session start (standing requirement).
+
+**Checked the still-running background sweep** (PID 12156, the
+`interface_matching`-excluded `pipeline.monolithic.*` follow-up, now
+spanning 4+ sessions): still running, mid-`blend.*`, 0 new fails.
+Left running throughout this session (not required to close anything);
+not yet finished as of this session's end either.
+
+**Reproduced and precisely enumerated `L132`'s failure set**: all 57
+`dEQP-VK.pipeline.monolithic.bind_buffers_2.*` fails are exactly the
+`single.*`/`separate.*`/`dynamic_stride.*` shape (every stride/offset/
+count combination, 100% of that shape, 0 exceptions) -- the sibling
+`bind_buffers_2.maintenance5.*` shape is 100% passing. Investigated and
+**ruled out** a Vulkan-loader entry-point-resolution gap (FeMe's ICD only
+implements the `EXT`-suffixed `vkCmdBindVertexBuffers2EXT`, not the
+1.3-promoted core `vkCmdBindVertexBuffers2`, but CTS's own generated
+`vkInitDeviceFunctionPointers.inl` already falls back to the `EXT` name
+when the core name resolves to null -- confirmed via a standalone C
+program against the real loader, and via reading CTS's own generated
+fallback code; not the bug).
+
+**Root cause**: the failing shape's own pixel check
+(`BindBuffers2Instance::iterate`,
+`vktPipelineBindVertexBuffers2Tests.cpp`) uses **exact** floating-point
+equality (`pix != colors[N]`), unlike the passing sibling shape's
+0.2-epsilon threshold comparison. The test's color varying is a
+genuinely **constant** per-instance attribute (identical across all 4
+vertices of one instance's triangle strip, fetched via an instance-rate
+binding). `feme/lib/Graphics/Executor.cpp`'s fragment-shader
+varying-interpolation loop computed every non-`Flat` varying via
+`B0*V0 + B1*V1 + B2*V2` (or the perspective-correct `Numerator/InvW`
+form), where `B0`/`B1`/`B2` are three *independently rounded* divisions
+(`edgeFn(...) / Area`) that are not provably `== 1.0f`/exactly
+self-cancelling when summed against `InvW`. For a genuinely constant
+`V0 == V1 == V2`, this can drift the interpolated result off the exact
+constant by a few ULPs -- invisible at the CTS log's 2-decimal display
+precision, invisible through any 8-bit-UNORM-quantized readback (every
+`Flat`/varying test elsewhere in this codebase's own unit-test suite
+uses one), but directly detected by this family's exact-equality check.
+
+**Fix**: added a `V0 == V1 && V1 == V2` short-circuit to the
+varying-interpolation loop, ahead of both the perspective and
+non-perspective smooth branches (mirroring the existing `Flat` branch's
+own `Value = V0`) -- a genuinely constant varying is now interpolated
+by definition rather than by (potentially lossy) arithmetic, which is
+both correct (linear interpolation of a constant is that constant, for
+any convex combination of weights) and matches real, spec-conformant
+hardware behavior (the reason this CTS family expects it exactly).
+
+Confirmed the hypothesis and the fix directly via a temporary
+source-swap-to-baseline round-trip (`Executor.cpp`'s pre-fix content
+saved to `/tmp`, copied over the working tree, rebuilt, re-tested,
+restored): the new regression unit test (below) fails identically to
+the real bug with the fix removed, and passes cleanly restored.
+
+### Testing
+
+Added `ExecutorTest.InterpolatesAGenuinelyConstantColorExactly`
+(`feme/unittests/Graphics/ExecutorTest.cpp`): renders the same
+oversized CCW triangle shape used elsewhere in this file, every vertex
+writing an identical (0.1, 0.2, 0.3, 0.4) color -- `0.1f`/`0.3f` have no
+exact binary representation, so any rounding asymmetry between the
+three per-vertex contributions shows up directly -- into a new
+`R32G32B32A32_FLOAT` attachment (via a new `buildPipelineWithFloatAttachment`
+helper) so the test can assert bit-exact equality on the raw float
+readback rather than an 8-bit-quantized byte, which would mask this
+exact class of bug. Confirmed via source-swap-to-baseline round-trip
+that this test fails (three of four channels off by 1 ULP) with the
+fix removed, and passes cleanly restored.
+
+`ninja check-feme`: 3,279/3,282 Passed, 3 Unsupported, 0 Failed (+1
+newly-added test, 0 regressions).
+
+### CTS (`feme_icd.json`, `FeMe CPU Vulkan Device`)
+
+- Full `dEQP-VK.pipeline.monolithic.bind_buffers_2.*` re-sweep (97
+  cases): **0 Fail** (73 Pass, 24 NotSupported) -- was 57 Fail /
+  16 Pass / 24 NotSupported before this fix. All 57 originally-filed
+  fails are now fixed, 0 exceptions.
+- Full `dEQP-VK.draw.*` regression sweep (29,451 cases, run both with
+  and without the fix): **224 Fail** in both runs, and the exact set of
+  224 failing case names is byte-for-byte identical between the two
+  runs (`diff` confirms) -- these are pre-existing, unrelated fails
+  (`indexed_draw`/`maintenance6`, `multiple_interpolation`,
+  `implicit_sample_shading`, `shader_layer`, `depth_clamp`, and a few
+  others), not a regression from this session's change. Not
+  investigated further this session (out of scope for `L132`); worth a
+  future dedicated session if not already tracked.
+
+### Results
+
+`L132` is now considered fully closed: all 57 originally-filed
+`bind_buffers_2.*` fails are fixed, confirmed via a clean re-sweep of
+the full family, and a broad `dEQP-VK.draw.*` regression sweep (chosen
+since this fix sits in the fragment-shader varying-interpolation path,
+which every draw call with a non-`Flat` varying exercises) shows 0 new
+fails, run both with and without the fix for a byte-for-byte identical
+224-case pre-existing fail set. No feature/extension inventory changes
+(a correctness fix to existing interpolation, no new Vulkan
+functionality shipped this session).
