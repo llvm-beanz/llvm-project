@@ -941,7 +941,47 @@ TEST_F(GraphicsPipelineTest, RecordsProtectedAccessCreateFlags) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap E19 (`VK_EXT_pipeline_creation_feedback`): two stages (vertex +
+/// Roadmap L134(g) (`VK_KHR_maintenance5`): a chained
+/// `VkPipelineCreateFlags2CreateInfoKHR` overrides
+/// `VkGraphicsPipelineCreateInfo::flags` entirely -- a legacy `flags` of
+/// `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` (which would otherwise divert this
+/// call into building an unlinkable `VK_EXT_graphics_pipeline_library`
+/// library object instead of a complete, executable pipeline) must be
+/// ignored once a flags2 override without that bit is present, exactly
+/// mirroring `dEQP-VK.draw.renderpass.basic_draw.misc.maintenance5`'s own
+/// deliberately-contradictory legacy-vs-flags2 CTS coverage.
+TEST_F(GraphicsPipelineTest, Flags2CreateInfoOverridesLegacyLibraryBit) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  // Deliberately wrong/garbage legacy value: a conformant implementation
+  // must prefer the chained flags2 override below instead.
+  Info.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkPipelineCreateFlags2CreateInfoKHR Flags2Info{};
+  Flags2Info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR;
+  Flags2Info.flags = VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR;
+  Info.pNext = &Flags2Info;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  // A pipeline library object is never linkable/executable; getting a real,
+  // complete `GraphicsPipeline` back here (not a `GraphicsLibrary`) is what
+  // confirms the legacy library bit was correctly ignored.
+  auto *Obj = fromHandle<Pipeline>(Pipe);
+  ASSERT_EQ(Obj->kind(), Pipeline::Kind::Graphics);
+  EXPECT_EQ(Obj->createFlags() & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR, 0u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+
 /// fragment) get two feedback slots, both `VALID_BIT`-only on a cache
 /// miss, matching `PipelineTest.ReportsPipelineCreationFeedback`'s compute
 /// counterpart.
