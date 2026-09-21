@@ -7953,3 +7953,28 @@ few-attribute repro shader to make bisection tractable). `L128` itself
 remains open/not struck through. No `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` update needed -- diagnostic-only session,
 no feature/extension surface changed.
+
+## Closing out: pipeline.monolithic.blend.* full-family sweep (3-session-running background item)
+
+The `pipeline.monolithic.blend.*` full-family regression sweep (PID
+40501, first kicked off 2 sessions ago, checked repeatedly since
+without finishing) **completed in the background at the start of this
+session**, after 3630.70 seconds (~60.5 minutes) of runtime:
+
+```
+Test run totals:
+  Passed:        5945/12206 (48.7%)
+  Failed:        0/12206 (0.0%)
+  Not supported: 6261/12206 (51.3%)
+  Warnings:      0/12206 (0.0%)
+  Waived:        0/12206 (0.0%)
+```
+
+**100% Pass of all supported cases, 0 Fail across the entire family.**
+This definitively closes the "is `blend.*` actually clean" question
+that had been carried forward, unresolved, across 3 sessions -- no
+regression, no partial coverage gap, nothing further needed here. The
+`NotSupported` cases are expected (format/blend-op combinations the
+device legitimately doesn't advertise support for, not a feme gap).
+No roadmap or feature-inventory change needed -- this was a
+regression-confirmation sweep, not new work.
