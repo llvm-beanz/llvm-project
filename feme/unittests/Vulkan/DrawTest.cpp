@@ -7669,6 +7669,263 @@ TEST_F(DrawTest, GeometryStageLayerOutputRoutesToANonMultiviewLayer) {
   vkFreeMemory(Device, LayeredMemory, nullptr);
 }
 
+/// (Roadmap L134(e)) A vertex stage (no geometry stage at all) writing a
+/// constant `gl_Layer` output past 31 -- the same oversized triangle as
+/// `FullscreenVertexSource`, routed to layer 33 of a 40-layer, plain
+/// (non-multiview) render target. Exercises `dEQP-VK.draw.*.shader_layer.
+/// {vertex,tessellation}_shader_256`'s own regression shape: a `uint32_t`-
+/// mask predecessor of `CommandBuffer.cpp`'s `viewsToClear` silently
+/// clamped any `Binding.Layers > 32` into the same 32 mask bits, leaving
+/// every layer from 32 up entirely uncleared (whatever `Image::data()`'s
+/// backing store happened to start as, not `LOAD_OP_CLEAR`'s own solid
+/// clear color) -- this test's untouched layer 35 (also past the 32-bit
+/// boundary, but not the draw's own target) is what actually catches that
+/// gap: `vkCreateImage`'s zero-initialization would make an unfixed clear
+/// gap indistinguishable from a correctly-applied one unless the test's
+/// own clear color is deliberately non-zero.
+constexpr llvm::StringLiteral LayerThirtyThreeVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ShaderLayer], [SPV_EXT_shader_viewport_index_layer]> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @out_layer built_in("Layer") : !spirv.ptr<i32, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    %layer = spirv.Constant 33 : i32
+    %layerp = spirv.mlir.addressof @out_layer : !spirv.ptr<i32, Output>
+    spirv.Store "Output" %layerp, %layer : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos, @out_layer
+}
+)mlir";
+
+/// (Roadmap L134(e)) See `LayerThirtyThreeVertexSource`'s own comment: a
+/// plain (non-multiview) 40-layer render target must have every one of its
+/// 40 layers cleared up front by `LOAD_OP_CLEAR`, not just its first 32 --
+/// `CommandBuffer.cpp`'s `viewsToClear` used to build a `uint32_t` mask
+/// that silently saturated at 32 bits, leaving layers 32-39 here entirely
+/// uncleared, matching the exact gap `dEQP-VK.draw.*.shader_layer.
+/// {vertex,tessellation}_shader_256` (256 layers) exposed.
+TEST_F(DrawTest, ClearsEveryLayerOfALayeredRenderTargetPastThirtyTwo) {
+  constexpr uint32_t LayerCount = 40;
+  constexpr uint32_t TargetLayer = 33;
+  constexpr uint32_t UntouchedLayer = 35;
+
+  VkImage LayeredImage = VK_NULL_HANDLE;
+  VkDeviceMemory LayeredMemory = VK_NULL_HANDLE;
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {Extent, Extent, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = LayerCount;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &LayeredImage),
+            VK_SUCCESS);
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, LayeredImage, &Reqs);
+  VkMemoryAllocateInfo MemAllocInfo{};
+  MemAllocInfo.allocationSize = Reqs.size;
+  ASSERT_EQ(vkAllocateMemory(Device, &MemAllocInfo, nullptr, &LayeredMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, LayeredImage, LayeredMemory, 0),
+            VK_SUCCESS);
+
+  // (Roadmap L134(e)) A fresh `vkAllocateMemory` is not contractually
+  // required to start zeroed, but the fixture ICD's own allocator does
+  // zero it; poison every byte instead so this test cannot pass merely
+  // because a correctly-behaving clear and an unfixed clear-skip happen
+  // to look identical against a zero-initialized backing store.
+  std::memset(fromHandle<Image>(LayeredImage)->data(), 0xAB,
+              fromHandle<Image>(LayeredImage)->sizeInBytes());
+
+  VkImageView LayeredView = VK_NULL_HANDLE;
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = LayeredImage;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = LayerCount;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &LayeredView),
+            VK_SUCCESS);
+
+  // A plain (no `VkRenderPassMultiviewCreateInfo`) single-subpass render
+  // pass: `viewMask == 0` throughout.
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 1;
+  PassInfo.pAttachments = &Attachment;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LayeredPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LayeredPass),
+            VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LayeredPass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &LayeredView;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = LayerCount;
+  VkFramebuffer LayeredFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LayeredFb),
+            VK_SUCCESS);
+
+  VkShaderModule VertexModule = createModule(LayerThirtyThreeVertexSource);
+  VkShaderModule FragmentModule = createModule(RedFragmentSource);
+  ASSERT_NE(VertexModule, VK_NULL_HANDLE);
+  ASSERT_NE(FragmentModule, VK_NULL_HANDLE);
+
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = VertexModule;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = FragmentModule;
+  Stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo PipeInfo{};
+  PipeInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  PipeInfo.stageCount = 2;
+  PipeInfo.pStages = Stages;
+  PipeInfo.pVertexInputState = &VertexInput;
+  PipeInfo.pInputAssemblyState = &InputAssembly;
+  PipeInfo.pViewportState = &ViewportState;
+  PipeInfo.pRasterizationState = &Raster;
+  PipeInfo.pMultisampleState = &Multisample;
+  PipeInfo.pColorBlendState = &Blend;
+  PipeInfo.layout = Layout;
+  PipeInfo.renderPass = LayeredPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &PipeInfo,
+                                      nullptr, &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValue{};
+  ClearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LayeredPass;
+  PassBegin.framebuffer = LayeredFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 1;
+  PassBegin.pClearValues = &ClearValue;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Layer 35 was never the vertex stage's `gl_Layer` target, and its own
+  // index (past 31) is exactly what an unfixed 32-bit clear mask would
+  // have skipped: it must read back as `LOAD_OP_CLEAR`'s own solid black,
+  // not this test's own `0xAB` poison. Layer 33 is the vertex stage's
+  // actual `gl_Layer == 33` target: it must read back as the fragment
+  // stage's solid red.
+  const auto *Data =
+      static_cast<const uint8_t *>(fromHandle<Image>(LayeredImage)->data());
+  size_t LayerSizeBytes = (size_t)Extent * Extent * 4;
+  const uint8_t *TargetLayerData = Data + (size_t)TargetLayer * LayerSizeBytes;
+  const uint8_t *UntouchedLayerData =
+      Data + (size_t)UntouchedLayer * LayerSizeBytes;
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      size_t Off = ((size_t)Y * Extent + X) * 4;
+      EXPECT_EQ(UntouchedLayerData[Off + 0], 0x00)
+          << "layer " << UntouchedLayer << " (untouched) at (" << X << ", "
+          << Y << ")";
+      EXPECT_EQ(UntouchedLayerData[Off + 1], 0x00)
+          << "layer " << UntouchedLayer << " (untouched) at (" << X << ", "
+          << Y << ")";
+      EXPECT_EQ(UntouchedLayerData[Off + 2], 0x00)
+          << "layer " << UntouchedLayer << " (untouched) at (" << X << ", "
+          << Y << ")";
+      EXPECT_EQ(UntouchedLayerData[Off + 3], 0xFF)
+          << "layer " << UntouchedLayer << " (untouched) at (" << X << ", "
+          << Y << ")";
+      EXPECT_EQ(TargetLayerData[Off + 0], 0xFF)
+          << "layer " << TargetLayer << " (gl_Layer target) at (" << X
+          << ", " << Y << ")";
+      EXPECT_EQ(TargetLayerData[Off + 1], 0x00)
+          << "layer " << TargetLayer << " (gl_Layer target) at (" << X
+          << ", " << Y << ")";
+      EXPECT_EQ(TargetLayerData[Off + 2], 0x00)
+          << "layer " << TargetLayer << " (gl_Layer target) at (" << X
+          << ", " << Y << ")";
+      EXPECT_EQ(TargetLayerData[Off + 3], 0xFF)
+          << "layer " << TargetLayer << " (gl_Layer target) at (" << X
+          << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, FragmentModule, nullptr);
+  vkDestroyShaderModule(Device, VertexModule, nullptr);
+  vkDestroyFramebuffer(Device, LayeredFb, nullptr);
+  vkDestroyRenderPass(Device, LayeredPass, nullptr);
+  vkDestroyImageView(Device, LayeredView, nullptr);
+  vkDestroyImage(Device, LayeredImage, nullptr);
+  vkFreeMemory(Device, LayeredMemory, nullptr);
+}
+
 /// (Roadmap H173) A real, genuinely-imported SPIR-V multi-stream geometry
 /// entry point: stream 0 emits a degenerate decoy triangle (a plain,
 /// `Location`-only varying with no `Position`, so it can never be
