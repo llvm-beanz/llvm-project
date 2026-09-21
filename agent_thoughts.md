@@ -98349,3 +98349,35 @@ session's own scoping; none are quick picks.
 6. This session's scratch (`/tmp/ctsrun/l134h/`, `/tmp/l134h_dump.log`,
    `/tmp/ctsrun/l134i/`) has already been cleaned up; nothing left over
    to delete.
+
+## Session: L134(c) `multiple_interpolation` -- one sub-bug fixed, one still open
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Working tree was clean (no stash to restore).
+
+**Done this session:**
+
+1. Reproduced `L134(c)` (`multiple_interpolation.*`, 64 of `L134`'s 224 cases) and found it's actually **two distinct failure classes**, not one:
+   - `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation (a real bug — fixed this session).
+   - `"smooth produced different results"` (a genuine render-value mismatch — still open).
+2. Root-caused and fixed class 1: `CanonicalizeStage.cpp`'s single-member-block "plain path" folded in a member's own `XfbOffset` but never its `Location`/interpolation flags. Fixed by folding all of them, same pattern as the existing `XfbOffset` fold.
+3. New test `CanonicalizeStageTest.PreservesLocationForSingleMemberBlockWithPerMemberDecoration`, confirmed to fail pre-fix via stash/rebuild round-trip.
+4. `ninja check-feme`: 3,291/3,294 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+5. CTS re-run: the pipeline-creation crash is gone. All 16 `multiple_interpolation.*` fails are now uniformly class 2 (`"smooth produced different results"`).
+6. Updated `Roadmap.md` (`L134(c)` row, not struck through — only 1 of 2 sub-bugs fixed) and `VulkanCTSReport.md` (new write-up).
+7. Committed in 2 pieces: the code+test fix, then the docs update.
+
+**Not done / still open:**
+
+- Class 2 (`"smooth produced different results"`) is **not fixed, not root-caused**. Confirmed it reproduces on the simplest possible case — `separate.no_sample_decoration.1_sample`, no block, no multisampling, no sample decoration — so it's unrelated to this session's block/`Location` fix. It's a more fundamental gap in how `smooth`/`flat`/`noperspective`/`centroid`/`sample` interpolation is distinguished for plain (non-block) fragment varyings.
+- `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases) not started.
+- `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets`) not started.
+- `L115(b)` (pull-model interpolation) not started.
+
+## Suggested next steps
+
+1. **(next real work, ~1-2 hrs)** Root-cause `L134(c)`'s class 2. Start with `dEQP-VK.draw.renderpass.multiple_interpolation.separate.no_sample_decoration.1_sample` — smallest, simplest repro (no multisampling, no block, no sample decoration). The CTS test (`vktDrawMultipleInterpolationTests.cpp` line ~801) compares a combined-shader render against 4-5 single-varying reference renders; check whether `Executor.cpp`'s per-varying `Interpolation` field is actually distinct per element for `separate` mode's individually-declared (non-block) varyings, or whether they're all silently defaulting to smooth.
+2. `L134(a)` (`indexed_draw`/`maintenance6`, 64 cases) — still untouched, the other open `L134` sub-row.
+3. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) — still the largest not-yet-started cross-repo item, needs its own dedicated session.
+4. `L115(b)` (pull-model interpolation) — still flagged as needing a new runtime-callback ABI surface, not a quick pick.
+5. `ninja check-feme` and both CTS build directories (`VK-GL-CTS`, `llvm-project`) are incremental from here — no reconfigure needed.
+6. **(~2 min)** `/tmp/ctsrun/l134c/` (this session's scratch: `dump.txt`/`dump2.txt`/`dump3.txt`/`sweep.qpa`/`one.qpa`) and `/tmp/l134c_frag.frag`/`.spv` can be deleted once a future session no longer needs them — nothing in either is referenced by anything committed.
