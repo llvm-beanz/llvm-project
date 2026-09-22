@@ -99715,3 +99715,114 @@ it fail with `i64 12`/`i64 24`) and passes with it.
    `/tmp/sroa_*`, `/tmp/UnrollDiag*`, and `/tmp/mintest.ll` deleted;
    the one artifact worth keeping (the unit test) is committed, not
    left in `/tmp`.
+
+# Session: L148 root-caused (subgroups.ballot_broadcast hang) -- fix scoped, not implemented
+
+**Confirmed device first**: `FeMe CPU Vulkan Device`. Same ICD path as always
+(`VK_ICD_FILENAMES=.../build/tools/feme/tools/feme-vulkan/feme_icd.json`).
+
+**Stale next-steps note**: the handoff said "L124(o) still untouched." It's
+not -- `L124(a)` through `L124(v)` are all struck through already, landed
+across several prior sessions. Skipped it, went looking for genuinely open
+work instead.
+
+## What got done this session
+
+1. Reproduced `subgroupbroadcast_vec2_requiredsubgroupsize128`'s hang: still
+   running after a 600s (10 minute) timeout for one test case. This is a real
+   performance cliff, not an aggressive CTS-harness timeout.
+2. `gdb`-attached to the live process twice, ~35s apart. Both times: stuck in
+   upstream LLVM's `PromoteMem2Reg::run()`, called from FeMe's
+   `OptimizerPipeline::run` (plain `buildPerModuleDefaultPipeline`, not a
+   FeMe-authored pass) via `SROAPass`. Different PC each time -> genuinely
+   slow, not an infinite loop.
+3. This directly answers `L126(a)`'s own open question: it's **middle-end
+   promotion cost (SROA/mem2reg), not backend codegen scaling**.
+4. Quantified the IR shape (temporary debug dump, reverted before commit):
+   - 64-wide (passes, ~26s): 7 BBs, 92,442 insts, 385 allocas.
+   - 128-wide (hangs): 7 BBs, 364,958 insts, 769 allocas.
+   - ~4x instructions for 2x width -> way worse than linear.
+5. Traced the *source* of the blowup, not just where compile time goes:
+   `grep -c "OpGroupNonUniformBroadcast "` on the compiled SPIR-V disassembly
+   -> **exactly 64 static call sites at 64-wide, 128 at 128-wide**. The CTS
+   test itself statically unrolls one `subgroupBroadcast` per possible source
+   lane (`N == WaveSize`, baked into the test source, not FeMe's doing).
+6. Each call site costs `O(WaveSize)` in `feme/lib/Transforms/CPU/
+   WaveLowering.cpp`'s `lowerReadLaneViaMemory` (3 new `[W x T]` scratch
+   allocas + an unconditional `O(W)` lane loop, *every* call site, regardless
+   of whether the result is actually uniform). `N == W` call sites * `O(W)`
+   each = the observed `O(W^2)` total IR. That's the real root cause -- not
+   an LLVM defect, a FeMe missed-optimization.
+7. Found the exact reason it's missed: `BroadcastConversionPattern`
+   (`SPIRVToLLVMPatterns.cpp`) already documents that SPIR-V's
+   `OpGroupNonUniformBroadcast` guarantees its `Id` operand is dynamically
+   uniform, but *deliberately* routes it through the same
+   `llvm.spv.wave.readlane` intrinsic/`WaveCallKind::ReadLane` machinery as
+   the genuinely-divergent-index `Shuffle`/`Rotate` ops, and says so in its
+   own comment ("honouring it would only be an optimization, and
+   deliberately is not one this pattern tries to make"). `WaveUniformity.cpp`
+   confirms it can't tell Broadcast and Shuffle apart once they share one
+   intrinsic, so it conservatively marks the result divergent, which means
+   the existing "narrow to lane 0 if uniform" code path in `SIMDize.cpp`
+   never even fires for Broadcast today.
+
+## The fix (scoped in detail, not implemented)
+
+Written up in full in `feme/docs/Roadmap.md`'s `L148` row and
+`feme/docs/VulkanCTSReport.md`. Short version: give Broadcast its own
+intrinsic (`llvm.spv.wave.broadcast`, a new entry in upstream
+`IntrinsicsSPIRV.td` next to the existing `spv_wave_*` family) and its own
+`WaveCallKind::Broadcast` whose lowering is a direct O(1) extract+select --
+no scratch allocas, no loop. That takes each of the `N == W` call sites from
+`O(W)` to `O(1)`, so total IR (and therefore SROA/mem2reg's own compile
+time on it) drops from `O(W^2)` to `O(W)`.
+
+**Why not implemented this session**: it's 5 files, one of them a shared
+upstream intrinsic table, and the existing `llvm.spv.wave.readlane`/
+`WaveCallKind::ReadLane` code is also load-bearing for `Shuffle`/`Rotate`/
+`ReadLaneAt` -- a change here needs a real `subgroups.*` CTS re-run (not
+just `ballot_broadcast`) to be sure nothing else regressed, and that didn't
+fit in the same session as the diagnosis. Landing an unverified change to
+shared SIMD-lowering machinery blind felt like the wrong tradeoff.
+
+## Cleanup done
+
+- Reverted the temporary `FEME_DUMP_PRE_OPTIMIZER_STATS` debug dump in
+  `feme/lib/Target/CPU/CompiledStage.cpp` (used only to get the BBs/Insts/
+  Allocas numbers above). Tree is clean, no functional diff this session.
+- Deleted all `/tmp/l148_*` scratch (QPAs, stdout/stderr captures).
+- `feme/docs/Roadmap.md`: updated `L148` and `L126(a)` rows with the full
+  root-cause chain and fix plan; neither struck through (not fixed yet).
+- `feme/docs/VulkanCTSReport.md`: new section with the same findings and the
+  BBs/Insts/Allocas table.
+- No FeMe test/behavior changed, so `Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` untouched (confirmed, not just assumed).
+
+## Suggested next steps
+
+1. **(dedicated session, ~half a day)** Implement the `L148` fix exactly as
+   scoped above: new `llvm.spv.wave.broadcast` intrinsic
+   (`IntrinsicsSPIRV.td`) -> `BroadcastConversionPattern` emits it ->
+   new `WaveCallKind::Broadcast` (`WaveCalls.h/.cpp`, scalar `RetTy`) ->
+   `SIMDize.cpp` dispatch (mirror the existing `isVectorOperandReduceKind`
+   per-component-decompose shape for `vec2`/`vec3`/`vec4` cases) -> new
+   `lowerBroadcast` in `WaveLowering.cpp` (one `extractelement` for the
+   uniform index, one masked `extractelement`+`select`, no allocas, no
+   loop). Test each translation phase per usual convention. Re-run the full
+   14-case cluster plus a broader `subgroups.*` sweep before calling it
+   done, since `Shuffle`/`Rotate`/`ReadLaneAt` share the machinery being
+   touched and must not regress.
+2. If step 1's fix doesn't fully resolve the hang, check the secondary,
+   unconfirmed hypothesis noted in the `L148` row: `SROA::runSROA`'s own
+   do-while loop may re-invoke `PromoteMemToReg` (and rebuild
+   `PromoteMemoryToRegister.cpp`'s `LargeBlockInfo` from scratch) multiple
+   times per function as post-promotion allocas trickle in. Not pursued
+   this session since the `O(W^2)`-IR explanation looked sufficient on its
+   own.
+3. `binding_model.shader_access` (11,834 cases, `L147`'s big remaining
+   cluster) is still untouched and still wants its own dedicated session
+   given the scale.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is still
+   the largest not-yet-started cross-repo item.
+5. No scratch left over -- all `/tmp/l148_*` files deleted, debug
+   instrumentation reverted, working tree clean before this commit.
