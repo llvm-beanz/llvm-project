@@ -55,19 +55,11 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~1 session, highest value):** `L146` -- run
-   `run_vulkan_cts.py` against the real 54-group, ~3.2M-case list to
-   produce the first `L145`-verified failure baseline. Expect several
-   hours given the historical full-run cost, plus the new solo-verify
-   round on top. This is what makes all future per-cluster triage
-   trustworthy without a manual spot-check first.
-2. **Do NOT** restart per-cluster bisection on `L141`-`L144` or `L94`'s
-   crash list without going through `L146`'s fresh, verified list first.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   -- still the largest not-yet-started cross-repo item, if a session
-   wants real compiler work instead of infrastructure work.
-4. Both CTS build directories and `check-feme` remain incremental --
-   no reconfigure needed for `L146`.
-5. No scratch left over to clean up this session (all `/tmp/l146_*`
-   and the demo case-list files generated in the CTS build tree already
-   deleted).
+1. **(highest value, exact-match lead)** `L147` -- start with
+   `mesh_shader.ext` (85 cases, exact match to `L143`'s old estimate,
+   smallest cluster). Isolate one case, run it under both this
+   session's method (solo, single process) and `L141`-`L144`'s old
+   method (whole group, one shared process) at the *current* revision
+   to see if the isolation method itself is the variable, before
+   touching git bisection. If it reproduces both ways at current HEAD,
+   next bisect between `d627b4d3e286` and `d828c5cd4a0c`.
