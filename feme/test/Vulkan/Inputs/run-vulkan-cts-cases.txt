@@ -1,0 +1,4 @@
+dEQP-VK.x.pass
+dEQP-VK.x.crash
+dEQP-VK.x.flaky
+dEQP-VK.x.fail

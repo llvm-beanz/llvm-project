@@ -1,0 +1,44 @@
+// run_vulkan_cts.py (roadmap L145/G2(b)) must reconstruct results across
+// batch/recovery rounds and, before trusting any Fail result, re-run it
+// again in complete isolation: a case that only fails under contention is
+// reported as flaky and excluded from the final Fail count, while a case
+// that fails identically alone is a verified, real failure.
+//
+// Inputs/fake-deqp-vk.py stands in for a real deqp-vk: dEQP-VK.x.crash
+// crashes mid-record whenever it shares a process with another case (so a
+// --batch-size of 2 forces a recovery round at --recovery-batch-sizes=1),
+// dEQP-VK.x.flaky fails only when run alongside another case (so it is
+// Fail after the batch/recovery rounds but Pass once verified alone),
+// dEQP-VK.x.fail fails unconditionally (a real, confirmed failure), and
+// dEQP-VK.x.pass always passes.
+//
+// RUN: rm -rf %t.out %t.cwd
+// RUN: mkdir -p %t.cwd
+// RUN: %python %S/../../utils/run_vulkan_cts.py \
+// RUN:   --deqp-vk %S/Inputs/fake-deqp-vk.py \
+// RUN:   --case-list %S/Inputs/run-vulkan-cts-cases.txt \
+// RUN:   --cwd %t.cwd --output-dir %t.out --batch-size 2 --workers 2 \
+// RUN:   --recovery-batch-sizes 1 --final-timeout 10 \
+// RUN:   --write-verified-failures %t.verified-failures.txt
+// RUN: FileCheck %s < %t.out/report.txt
+// RUN: FileCheck --check-prefix=VERIFIED %s < %t.verified-failures.txt
+//
+// CHECK: Total cases: 4
+// CHECK: Completed cases: 4
+// CHECK: Unrun cases: 0
+// CHECK: Result counts:
+// CHECK-DAG:   Fail: 1
+// CHECK-DAG:   Pass: 3
+// CHECK: Unexpected failure names:
+// CHECK-NEXT:   dEQP-VK.x.fail
+// CHECK: Flaky (Fail under contention, different result alone):
+// CHECK-NEXT:   dEQP-VK.x.flaky: Fail -> Pass
+//
+// VERIFIED: dEQP-VK.x.fail
+// VERIFIED-NOT: dEQP-VK.x.flaky
+
+// The crash case's own recovery is what makes the finest recovery round's
+// timeout matter: a batch/recovery round that never resolves it (for
+// instance if a future change dropped the finest recovery size) would leave
+// it Unrun instead of Pass, which the checks above would already catch via
+// "Unrun cases: 0", so no separate check is needed for it here.
