@@ -1160,24 +1160,33 @@ public:
   }
 };
 
-/// Converts `spirv.GroupNonUniformBroadcast` (roadmap L89e) directly to
-/// `llvm.spv.wave.readlane`, exactly as `ShuffleConversionPattern` above
-/// does: "Result is the Value of the invocation identified by the id Id"
-/// is the same sentence both ops' spec text uses, and this intrinsic
-/// already implements it for every scalar, vector and `i1` operand shape
-/// the `dEQP-VK.subgroups.ballot_broadcast` group exercises.
+/// Converts `spirv.GroupNonUniformBroadcast` (roadmap L89e) to
+/// `llvm.spv.wave.broadcast` -- a distinct intrinsic from `Shuffle`'s own
+/// `llvm.spv.wave.readlane`, even though both compute "the Value of the
+/// invocation identified by the id Id" per their identical spec text.
 ///
-/// The only difference from `Shuffle` is a *restriction*: `Broadcast`
+/// The difference that justifies a separate intrinsic: `Broadcast`
 /// additionally requires Id to be dynamically uniform (a constant before
-/// SPIR-V 1.5). Nothing needs to be done with that guarantee here --
-/// `lowerReadLane`'s per-lane gather computes the right answer for a
-/// uniform index as the special case where every lane happens to read the
-/// same source lane -- so honouring it would only be an optimization, and
-/// deliberately is not one this pattern tries to make: `spv_wave_readlane`
-/// is conservatively treated as divergent by `WaveUniformity.cpp` (see
-/// `ShuffleConversionPattern`'s own note), and narrowing that for this op
-/// alone would need its own uniformity evidence rather than a promise the
-/// SPIR-V producer made.
+/// SPIR-V 1.5), a guarantee `Shuffle` does not make. Originally this
+/// pattern reused `llvm.spv.wave.readlane` outright and deliberately did
+/// not exploit that guarantee (see roadmap `L148`'s root-cause writeup in
+/// `feme/docs/VulkanCTSReport.md`): `WaveUniformity.cpp` has no way to
+/// distinguish a genuinely-uniform Broadcast call from a
+/// possibly-divergent Shuffle one once both share a single intrinsic, so
+/// it conservatively treats every `spv_wave_readlane` call as divergent,
+/// and `feme::cpu::WaveLowering.cpp`'s `lowerReadLane` always builds a
+/// full per-lane `<W x T>` gather (three `O(WaveSize)` scratch allocas
+/// plus an `O(WaveSize)` loop) even for a call whose index happens to be
+/// uniform. For `ballot_broadcast`'s own CTS shape -- one static
+/// `subgroupBroadcast` call per possible source lane, i.e. `N ==
+/// WaveSize` call sites, each costing `O(WaveSize)` -- that produces
+/// `O(WaveSize^2)` total IR, which is what made
+/// `dEQP-VK.subgroups.ballot_broadcast.compute.*_requiredsubgroupsize{64,128}`
+/// hang for minutes inside LLVM's own `SROA`/`PromoteMem2Reg` on the
+/// resulting IR size. Giving Broadcast its own intrinsic lets
+/// `feme::cpu::SIMDizePass`'s `widenWaveCall` and
+/// `feme::cpu::WaveLowering.cpp`'s new `lowerBroadcast` treat it as the
+/// always-uniform, `O(1)` operation it actually is instead.
 class BroadcastConversionPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::GroupNonUniformBroadcastOp> {
@@ -1197,7 +1206,7 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
     Rewriter.replaceOp(
         Op,
-        createIntrinsicCall(Rewriter, Op.getLoc(), "llvm.spv.wave.readlane",
+        createIntrinsicCall(Rewriter, Op.getLoc(), "llvm.spv.wave.broadcast",
                             ResultType, {Adaptor.getValue(), Adaptor.getId()}));
     return mlir::success();
   }
