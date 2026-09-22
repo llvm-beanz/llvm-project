@@ -20,6 +20,7 @@
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -133,6 +134,45 @@ UnrollConstantTripCountStageLoopsPass::run(Module &M, ModuleAnalysisManager &) {
   FPM.addPass(InstCombinePass());
   FPM.addPass(SimplifyCFGPass());
 
+  // `SROAPass`/`InstCombinePass` above turn a whole-aggregate `alloca` of
+  // e.g. a `matNx3` stage-IO temporary (`[K x <3 x float>]`, one `<3 x
+  // float>` per matrix column) into `K` separate, literal-byte-offset
+  // `getelementptr`s -- offsets `InstCombine` computes, and permanently
+  // bakes in as plain integer constants with no further type information,
+  // from \p M's *current* `DataLayout`. At this point in the pipeline that
+  // is still `importShaderModule`'s own SPIR-V-execution-model one (see
+  // this function's own header comment, and `CanonicalizeStagePass`'s
+  // preserved-until-`Pipeline.cpp`'s-host-substitution rationale, roadmap
+  // H82) -- which, for `feme-vulkan`'s in-process MLIR SPIR-V-to-LLVM
+  // translation, is MLIR's own generic placeholder
+  // (`e-ve-i64:64-n8:16:32:64-G10`), *not* a real target's. That
+  // placeholder has no explicit vector-alignment spec at all, so it
+  // resolves a `<3 x float>` array element's ABI size/alignment to its
+  // tightly-packed 12-byte store size, not the 16-byte-rounded-up-to-a-
+  // power-of-two size every real target (and LLVM's own default,
+  // built-in rule for a vector type the data layout string does not
+  // otherwise override, see `DataLayout::getAlignment`) actually gives
+  // it. Every *other* place this same `[K x <3 x float>]` value's layout
+  // matters -- SPIR-V's own `Offset`-decoration-derived struct layout
+  // `CanonicalizeStagePass` resolves against (std140/std430, which pads
+  // a 3-vector to a 4-vector's size for exactly this reason), and the
+  // real host `DataLayout` substituted later in `Pipeline.cpp` -- agrees
+  // on the padded, 16-byte stride. Baking in the *placeholder*'s
+  // tightly-packed 12-byte stride here instead is a genuine, silent
+  // byte-offset mismatch against every one of those (this pass's own
+  // roadmap L150 miscompile). Temporarily substituting a plain, default-
+  // constructed `DataLayout` (LLVM's built-in defaults; deliberately
+  // *not* a real target's, so as not to reintroduce a dependency this
+  // library does not otherwise have on `FeMeTargetCPU`/a `TargetMachine`)
+  // for the ordinary LLVM-IR-optimization work this `FunctionPassManager`
+  // does resolves the mismatch: its vector-alignment rule already agrees
+  // with every real target's on this shape, and the module's actual
+  // `DataLayout` is restored immediately afterward, so nothing else in
+  // the pipeline (in particular `CanonicalizeStagePass`, run immediately
+  // after this pass returns) is affected.
+  DataLayout OriginalDL = M.getDataLayout();
+  M.setDataLayout(DataLayout());
+
   bool Changed = false;
   for (Function &F : M) {
     // Scoped to Vertex/Fragment entry points only -- see this pass's own
@@ -148,6 +188,8 @@ UnrollConstantTripCountStageLoopsPass::run(Module &M, ModuleAnalysisManager &) {
     PreservedAnalyses PA = FPM.run(F, FAM);
     Changed |= !PA.areAllPreserved();
   }
+
+  M.setDataLayout(OriginalDL);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

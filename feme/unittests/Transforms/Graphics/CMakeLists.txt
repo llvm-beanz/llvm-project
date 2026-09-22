@@ -8,6 +8,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeTransformsGraphicsTests
   CanonicalizeStageTest.cpp
+  UnrollConstantTripCountLoopsTest.cpp
   ValidateStageTest.cpp
   )
 target_link_libraries(FeMeTransformsGraphicsTests
