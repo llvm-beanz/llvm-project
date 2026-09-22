@@ -1,5 +1,6 @@
 ---
-model: gpt-5.6-sol
+model: claude-sonnet-5
+resume: 6e011932-a46a-43ae-97b3-283c96c999ff
 ---
 # Initial Guidelines
 
@@ -52,10 +53,18 @@ file.
 
 # Request
 
-Can you run a full CTS run against the feme ICD, then analyze the results to
-update the VulkanCTSReport and Roadmap?
+Can you continue the work on feme? The last agent's suggested next steps are:
 
-When you update the roadmap please re-triage all the open milestones and resort
-milestone lists so that closed milestones are at the top of the milestone tables
-and open milestones are at the bottom. Please pay particular attention to the L
-and H series milestones as they are most focused on the CTS.
+1. **L141 (~1-2 hours for first reduction):** compare one
+   `binding_model.shader_access` buffer case and one storage-image case against
+   the baseline revision.
+2. **L142 (~1 hour for first reduction):** bisect one newly failing UBO case;
+   unchanged NotSupported coverage makes this likely a true pass-to-fail
+   regression.
+3. **L144 (~1-2 hours):** separate graphics and compute texture-gather
+   failures, then compare implementation-offset and dynamic-offset behavior.
+4. **L94:** start with the two compatible-render-pass crashes or four
+   `spirv_assembly` output-component crashes before the larger crash clusters.
+5. Keep the full-run artifacts under
+   `/home/dev/dev/VK-GL-CTS/run/feme-20260921-full/`; they include QPAs,
+   process logs, status files, final reconciliation, and aggregate analysis.
