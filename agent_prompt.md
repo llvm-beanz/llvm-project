@@ -55,26 +55,27 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(smaller, natural next pick)** `L149` -- reduce
-   `permutation_0.mesh_only`/`permutation_0.task_mesh`, dump the actual
-   per-vertex/per-primitive values the test compares (not just the
-   pass/fail summary) to see whether every permutation is off by one
-   shared pattern (one mesh-output-wiring bug) or varies per-permutation
-   (the permutation logic itself is at fault).
-2. **(much larger scope, now unblocked)** `L147`'s remaining clusters --
-   start with `ubo.*` (713 cases, next-smallest after `mesh_shader.ext`)
-   now that the isolation-method question is closed for the whole row.
-   `binding_model.shader_access` (11,834 cases, the overwhelming
-   majority) is the eventual big one but likely wants its own dedicated
-   session given the scale.
+1. **(~15 min, easy win)** File or draft an upstream VK-GL-CTS issue/PR
+   against `vktMeshShaderInOutTestsEXT.cpp`: `PerPrimitiveData` and
+   `PerVertexData` need to pad their `Vec3`/`IVec3` array fields to
+   16-byte-stride (e.g. store as `Vec4`/`IVec4` and only fill the first
+   3 components, or add explicit trailing padding members) to match the
+   `std430` layout the test's own generated GLSL declares. Until that
+   lands upstream, this specific 90-case cluster should be treated as
+   an expected/known-CTS-issue failure, not a FeMe regression to chase.
+2. **`L147`'s remaining clusters** -- `ubo.*` (713 cases, next-smallest
+   after `mesh_shader.ext`, which is now fully triaged: 1 fixed, 90
+   explained as CTS-side). `binding_model.shader_access` (11,834 cases,
+   the overwhelming majority) is the eventual big one, likely wants its
+   own dedicated session given the scale.
 3. **`L148`** (14-case `subgroups.ballot_broadcast.*.
    requiredsubgroupsize{64,128}` hang cluster from `L146`) is still
    untouched -- a hang, not a crash, so expect to need a debugger or
-   verbose logging rather than a stdout diagnostic the way this
-   session's bug had one.
+   verbose logging rather than a stdout diagnostic.
 4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
    -- still the largest not-yet-started cross-repo item, if a session
    wants a change of pace from CTS triage.
-5. No scratch left over this session (`/tmp/l147test/` already
-   deleted -- the minimal repro itself is preserved properly as the new
-   committed lit test, not left in `/tmp`).
+5. `/tmp/l149/*` scratch (QPAs, stdout/stderr captures, the
+   `offsetof_test.cpp`/binary) can be deleted; nothing there is
+   referenced by anything committed. Both CTS build directories and
+   `check-feme` remain incremental -- no reconfigure needed.
