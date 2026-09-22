@@ -10442,10 +10442,13 @@ one smaller shared alloca.
 
 A minimally-stubbed but otherwise real, standalone, runnable
 reproduction (extracted directly from FeMe's own translation output --
-not synthetic/hand-written IR) is preserved at
-`feme/docs/upstream/sroa_matNx3_offset_miscompile_repro.ll`:
-unoptimized it prints `result=1.000000` (correct); after
-`opt -passes='inline,sroa'` it prints `result=0.000000` (wrong), on the
+not synthetic/hand-written IR) was preserved at
+`feme/docs/upstream/sroa_matNx3_offset_miscompile_repro.ll` (**since
+removed** -- see the "L150 follow-up" section below: this diagnosis was
+itself superseded, and the repro is superseded in turn by
+`UnrollConstantTripCountLoopsTest.cpp`'s unit test):
+unoptimized it printed `result=1.000000` (correct); after
+`opt -passes='inline,sroa'` it printed `result=0.000000` (wrong), on the
 exact same inputs. The full writeup, bisection notes, a caution about a
 `lli`-JIT-internal-optimizer confound encountered while narrowing this
 (see the doc for detail -- single-pass `-passes=inline`-only tests run
@@ -10463,3 +10466,93 @@ instrumentation (`Pipeline.cpp`'s two `FEME_DUMP_IR_PRENORMALIZE`/
 finding; `check-feme` remains 3,302/3,305 Passed (unchanged, 0 Failed).
 See `feme/docs/Roadmap.md`'s `L150` row for the full writeup and next
 steps.
+
+## L150 follow-up: corrected root cause -- FeMe-internal `DataLayout`-ordering bug, not upstream LLVM; fixed
+
+A further follow-up session **twice overturned** the finding above.
+First, dumping the IR immediately after `importShaderModule` returns
+(genuinely before *any* FeMe pass runs, earlier than the prior
+session's own `FEME_DUMP_IR_PRENORMALIZE` point) showed a single,
+self-consistent whole-aggregate `store [3 x <3 x float>] %46, ptr %2`
+-- no manual byte-offset GEPs at all, and therefore no pre-existing
+FeMe-IR-generation bug either, contrary to what that earlier dump point
+(which, it turns out, already ran *after* a previously-unknown FeMe
+pass) had suggested.
+
+Direct, step-by-step instrumentation of `feme::graphics::
+UnrollConstantTripCountStageLoopsPass` (temporary `PrintFunctionPass`
+dumps between each of its six sub-passes, reverted after use) then
+pinpointed the exact moment the bad offsets first appear: the "after
+sroa" dump is correct (typed, non-literal `getelementptr [3 x <3 x
+float>], ptr %1, i32 0, i32 1`); the very next "after instcombine" dump
+already shows the wrong, literal `getelementptr inbounds nuw i8, ptr
+%1, i64 12`. Curiously, this exact miscanonicalization could *not* be
+reproduced by running an apparently-identical IR snapshot through the
+`opt` CLI with a matching `-passes=` pipeline -- every CLI attempt gave
+the mathematically correct 16/32-byte result.
+
+The actual discrepancy turned out to be the `target datalayout` string
+itself, not the pass pipeline: the real module, at the exact point
+`UnrollConstantTripCountStageLoopsPass` runs, still carries MLIR
+SPIR-V-to-LLVM translation's own generic placeholder datalayout
+(`e-ve-i64:64-n8:16:32:64-G10`) -- every earlier `opt`-CLI reproduction
+attempt had (reasonably, but incorrectly) substituted a real target's
+datalayout string so `opt`/`lli` would accept the file, silently
+curing the bug in the process. That placeholder has no explicit
+vector-alignment specification at all, so `InstCombine` computes a
+`<3 x float>` array element's stride under it as the tightly-packed
+12 bytes, not the 16-byte, power-of-two-rounded-up stride every real
+target (and LLVM's own built-in default rule for a vector type the
+datalayout string does not otherwise override) actually gives it --
+and which is also what std140/std430's own vec3-padded-to-vec4 rule,
+and the real host `DataLayout` `Pipeline.cpp` substitutes in *later*
+(after `CanonicalizeStagePass` runs, per that file's own roadmap-H82
+comment), both already agree on. `UnrollConstantTripCountStageLoopsPass`
+bakes in its `InstCombine`-computed offset as a plain, no-longer-type-
+tagged integer literal, so once computed under the wrong datalayout it
+can never self-correct once the real datalayout is substituted in
+afterward -- a genuine, silent byte-offset mismatch, this pass's own
+roadmap `L150` miscompile, confirmed to be entirely FeMe-internal (not
+upstream LLVM, and not "pre-existing FeMe IR generation" either).
+
+**Fixed**: `UnrollConstantTripCountStageLoopsPass::run` now saves the
+module's current `DataLayout`, temporarily substitutes a plain,
+default-constructed one (LLVM's own built-in rules; deliberately *not*
+a real target's, so `FeMeTransformsGraphics` does not gain a new
+dependency on `FeMeTargetCPU`/a `TargetMachine` it does not otherwise
+need) for the duration of its internal `FunctionPassManager` run, then
+restores the original `DataLayout` immediately afterward -- the same
+temporary-substitute-then-restore idiom already used, for an analogous
+reason, by `CompiledStage.cpp`'s `getGroupSharedRequirements` call.
+
+Added a new unit test, `feme/unittests/Transforms/Graphics/
+UnrollConstantTripCountLoopsTest.cpp`
+(`UnrollConstantTripCountLoopsTest.MatrixColumnStrideIsPadded`):
+confirmed to fail (asserting the wrong 12/24-byte offsets) without the
+fix, and pass (16/32-byte offsets, and the module's original
+placeholder `DataLayout` restored on return) with it. `ninja
+check-feme` is fully green: 3,303/3,306 Passed, 3 Unsupported, 0
+Failed (unchanged pass/fail counts aside from the one new test added).
+
+Re-ran the real failing case
+(`dEQP-VK.ubo.single_basic_type.std140.highp.mat3.vertex`): now
+`Pass`. Re-ran the full `dEQP-VK.ubo.single_basic_type.*` sub-cluster
+(3,384 cases): **0 Failed** (down from 137), 1,936 Passed, 1,448
+NotSupported (unrelated feature-support gaps, e.g. `uint8_t` types
+needing `uniformAndStorageBuffer8BitAccess`). Also re-ran the full,
+top-level `dEQP-VK.ubo.*` cluster this same session (13,240 cases,
+`L147`'s original 713-case failure cluster's parent group): **0
+Failed** (down from 713), 5,687 Passed, 7,553 NotSupported -- this one
+fix resolves the entirety of `L147`'s `ubo.*` failures, not just the
+`single_basic_type` sub-cluster this row started from.
+
+The prior sessions' now-superseded upstream-LLVM writeup
+(`feme/docs/upstream/LLVM-SROA-matNx3-offset-miscompile.md`) has been
+retracted and now points here instead; nothing was ever filed
+upstream, and nothing needs to be, since the defect was FeMe-internal
+all along. All temporary debug/dump instrumentation added while
+narrowing this down (in `GraphicsPipeline.cpp`, `Pipeline.cpp`, and
+`UnrollConstantTripCountLoops.cpp`) was reverted before landing the
+actual fix; the only functional diff in that file is the `DataLayout`
+substitution described above. See `feme/docs/Roadmap.md`'s `L150` row
+for the up-to-date summary.
