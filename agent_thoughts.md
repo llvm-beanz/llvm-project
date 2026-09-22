@@ -99108,3 +99108,103 @@ for reasons unrelated to this session's own changes (none were made).
    lists, `report.txt`, `verified-failures.txt`) -- reuse these
    directly for `L147`/`L148` triage rather than re-running the full
    suite. `/tmp` scratch diff files from this session already deleted.
+
+# Session: L147 -- mesh_shader.ext triaged, isolation-method question resolved, 1 real bug fixed
+
+## TL;DR
+
+Picked up `L146`'s highest-value next step: root-cause the smallest,
+most-exactly-matching cluster (`mesh_shader.ext`, 85/91 cases) among the
+13,881 newly-verified failures, specifically to answer whether these
+are real bugs or an artifact of this session's stricter one-case-per-
+process isolation (since `L141`-`L144` found similarly-sized clusters
+"not reproducible" using a looser method). **Answer: real bug, not an
+artifact.** Found and fixed one genuine compiler defect (1 of 91 cases),
+confirmed the other 90 are a distinct, separately-scoped issue (filed
+as `L149`), and -- most importantly for future sessions -- closed the
+isolation-method question for the *entire* `L147` row, so nobody needs
+to re-litigate solo-vs-group methodology before root-causing the much
+bigger remaining clusters (`binding_model.shader_access` above all).
+
+## The methodology test, and why it mattered
+
+Ran `dEQP-VK.mesh_shader.ext.builtin.num_work_groups_task_and_mesh`
+(smallest failing case in the group) two ways at current HEAD:
+- Solo, one case per process (this session's/`L146`'s own method).
+- As part of the whole `dEQP-VK.mesh_shader.ext.*` group in one shared
+  process (`L141`-`L144`'s own old method).
+
+**Both reproduced the exact same failure.** That, plus confirming via
+`git log d627b4d3e286..d828c5cd4a0c` that literally no compiler source
+changed in that whole window (one commit touched `feme/lib`, and it
+only edited an unused feature-inventory data file), rules out both
+live hypotheses from `L146`'s own writeup: not an isolation-method
+artifact, and not a revision-to-revision regression either. The only
+remaining explanation is that `L141`-`L144`'s original "not
+reproducible" finding was itself a false negative -- something about
+that investigation's own build/environment state, not something
+generalizable about solo-in-one-process verification being unreliable.
+This is a genuinely useful thing to have nailed down: it means this
+session's whole 13,881-case list can be trusted and root-caused
+directly, without a repeat of this same methodology question for every
+cluster.
+
+## The actual bug
+
+`error: 'llvm.getelementptr' op index 2 indexing a struct is out of
+bounds` at `vkCreateGraphicsPipelines` time. Reduced with `feme-opt
+--feme-convert-spirv-to-llvm` on a minimal repro (a
+`TaskPayloadWorkgroupEXT` struct of two `vec3` members, mirroring the
+failing test's own `TaskData{parentId, parentSize}`) -- this took maybe
+15 minutes once I had the actual SPIR-V dump from the CTS log
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1` plus reading the QPA's own
+`SpirVAssemblySource` section) to know what shape to reduce.
+
+Root cause: `OffsetStructMemberReorderAccessChainPattern`'s own
+tight-vector-fixup gate (`MayNeedTightVectorFixup`) still required
+`StructTy.hasOffset()`, a leftover from before roadmap `L104` widened
+that same substitution to cover every struct needing it (not just an
+offset-decorated block/buffer struct). A `TaskPayloadWorkgroupEXT`
+struct carries no `Offset` decorations at all (it isn't a block/buffer
+storage class), so this stale gate silently opted this whole storage
+class out of a fix `L104` had already made generally applicable
+everywhere else in the same file. One-line fix (drop the `hasOffset()`
+clause); the substitution logic itself needed no changes, since it was
+already conditional on the field actually needing the wrapper.
+
+## What I did NOT find, and correctly didn't chase
+
+The other 90 `mesh_shader.ext` failures are a completely different bug
+-- a rendering-*value* mismatch (`vktMeshShaderInOutTestsEXT.cpp:1590`),
+confined to `in_out.32_bits_only.permutation_*`, nothing to do with
+pipeline creation or GEPs at all. I confirmed this is a single,
+consistent signature across all 90 (not a mix of several different
+things) and stopped there rather than trying to also root-cause it in
+the same session -- filed as its own row (`L149`) since it's a
+genuinely separate investigation (numeric reduction, not IR reduction).
+
+## Suggested next steps
+
+1. **(smaller, natural next pick)** `L149` -- reduce
+   `permutation_0.mesh_only`/`permutation_0.task_mesh`, dump the actual
+   per-vertex/per-primitive values the test compares (not just the
+   pass/fail summary) to see whether every permutation is off by one
+   shared pattern (one mesh-output-wiring bug) or varies per-permutation
+   (the permutation logic itself is at fault).
+2. **(much larger scope, now unblocked)** `L147`'s remaining clusters --
+   start with `ubo.*` (713 cases, next-smallest after `mesh_shader.ext`)
+   now that the isolation-method question is closed for the whole row.
+   `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority) is the eventual big one but likely wants its own dedicated
+   session given the scale.
+3. **`L148`** (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster from `L146`) is still
+   untouched -- a hang, not a crash, so expect to need a debugger or
+   verbose logging rather than a stdout diagnostic the way this
+   session's bug had one.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants a change of pace from CTS triage.
+5. No scratch left over this session (`/tmp/l147test/` already
+   deleted -- the minimal repro itself is preserved properly as the new
+   committed lit test, not left in `/tmp`).
