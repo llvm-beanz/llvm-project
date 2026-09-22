@@ -42,6 +42,8 @@ StringRef kindName(WaveCallKind Kind) {
     return "feme.cpu.wave.all_equal";
   case WaveCallKind::ReadLane:
     return "feme.cpu.wave.readlane";
+  case WaveCallKind::Broadcast:
+    return "feme.cpu.wave.broadcast";
   case WaveCallKind::ActiveCountBits:
     return "feme.cpu.wave.active_countbits";
   case WaveCallKind::PrefixBitCount:
@@ -87,6 +89,8 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
     return WaveCallKind::AllEqual;
   if (Name == "feme.cpu.wave.readlane")
     return WaveCallKind::ReadLane;
+  if (Name == "feme.cpu.wave.broadcast")
+    return WaveCallKind::Broadcast;
   if (Name == "feme.cpu.wave.active_countbits")
     return WaveCallKind::ActiveCountBits;
   if (Name == "feme.cpu.wave.prefix_bitcount")
@@ -119,14 +123,15 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
 }
 
 /// Whether \p Kind's value operand is type-overloaded (`AllEqual`/
-/// `ReadLane`, which operate on whatever scalar type `T` the source
-/// intrinsic was called with, plus the roadmap step R4 reduce/scan kinds
-/// -- `Active{Sum,Product,Max,UMax,Min,UMin,BitAnd,BitOr,BitXor}` and
+/// `ReadLane`/`Broadcast`, which operate on whatever scalar type `T` the
+/// source intrinsic was called with, plus the roadmap step R4 reduce/scan
+/// kinds -- `Active{Sum,Product,Max,UMax,Min,UMin,BitAnd,BitOr,BitXor}` and
 /// `Prefix{Sum,Product}`, all of which likewise share DXIL's `OverloadTy`)
 /// rather than always `i1` (`Any`/`All`/`ActiveCountBits`/`PrefixBitCount`)
 /// or absent (`GetLaneCount`/`IsFirstLane`).
 bool hasTypeOverloadedOperand(WaveCallKind Kind) {
   return Kind == WaveCallKind::AllEqual || Kind == WaveCallKind::ReadLane ||
+         Kind == WaveCallKind::Broadcast ||
          Kind == WaveCallKind::ActiveSum ||
          Kind == WaveCallKind::ActiveProduct ||
          Kind == WaveCallKind::ActiveMax || Kind == WaveCallKind::ActiveUMax ||
@@ -144,7 +149,9 @@ bool hasOperand(WaveCallKind Kind) {
          Kind != WaveCallKind::IsFirstLane;
 }
 
-bool hasLaneIndex(WaveCallKind Kind) { return Kind == WaveCallKind::ReadLane; }
+bool hasLaneIndex(WaveCallKind Kind) {
+  return Kind == WaveCallKind::ReadLane || Kind == WaveCallKind::Broadcast;
+}
 
 /// Appends the scalar type mangling used for a type-overloaded operand,
 /// e.g. `f32`, `i32`, `i1` -- same convention `ResourceCalls` uses.
@@ -242,6 +249,14 @@ CallInst *createWaveCall(IRBuilderBase &Builder, WaveCallKind Kind,
     // `WaveCallKind::ReadLane`'s comment), so each output lane may read a
     // different source lane.
     RetTy = FixedVectorType::get(ElementType, WaveSize);
+    break;
+  case WaveCallKind::Broadcast:
+    // Unlike `ReadLane`, the lane index here is spec-guaranteed uniform
+    // (see `WaveCallKind::Broadcast`'s own comment), so the result is a
+    // single scalar `T` shared by every lane, not a wide `<W x T>` gather
+    // -- this is exactly what avoids the `O(WaveSize)`-per-call-site cost
+    // `ReadLane`'s wide result forces in `WaveLowering.cpp`.
+    RetTy = ElementType;
     break;
   case WaveCallKind::PrefixBitCount:
     RetTy = FixedVectorType::get(I32Ty, WaveSize);
@@ -346,6 +361,8 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
   case Intrinsic::dx_wave_readlane:
   case Intrinsic::spv_wave_readlane:
     return WaveCallKind::ReadLane;
+  case Intrinsic::spv_wave_broadcast:
+    return WaveCallKind::Broadcast;
   case Intrinsic::dx_wave_active_countbits:
   case Intrinsic::spv_wave_active_countbits:
     return WaveCallKind::ActiveCountBits;

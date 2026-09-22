@@ -58,6 +58,7 @@ TEST(WaveCallsTest, IsDivergentWaveCallResultMatchesDesignTable) {
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::All));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::AllEqual));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::ReadLane));
+  EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::Broadcast));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::ActiveCountBits));
 }
 
@@ -149,6 +150,30 @@ TEST(WaveCallsTest, ReadLaneCarriesLaneIndexOperand) {
   std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
   ASSERT_TRUE(Matched);
   EXPECT_EQ(Matched->Kind, WaveCallKind::ReadLane);
+  EXPECT_EQ(Matched->WideOperand, Operand);
+  EXPECT_EQ(Matched->WideLaneIndex, LaneIndex);
+  EXPECT_FALSE(verifyModule(*H.M, &errs()));
+}
+
+TEST(WaveCallsTest, BroadcastCarriesLaneIndexAndIsScalar) {
+  Harness H(4);
+  Value *Operand = ConstantVector::getSplat(
+      ElementCount::getFixed(4), ConstantInt::get(Type::getInt32Ty(H.Ctx), 7));
+  Value *LaneIndex = ConstantVector::getSplat(
+      ElementCount::getFixed(4), ConstantInt::get(Type::getInt32Ty(H.Ctx), 0));
+  CallInst *CI = createWaveCall(H.Builder, WaveCallKind::Broadcast, 4, H.Mask,
+                                Operand, LaneIndex);
+  // Unlike `ReadLane`'s always-wide `<W x T>` result, `Broadcast`'s lane
+  // index is spec-guaranteed uniform (see `WaveCallKind::Broadcast`'s own
+  // comment), so its result is a plain scalar `T` -- this is the crux of
+  // the `L148` fix: it lets `FunctionWidener::widenWaveCall` and
+  // `lowerBroadcast` skip the `O(WaveSize)` gather machinery entirely.
+  EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+  EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::Broadcast));
+
+  std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, WaveCallKind::Broadcast);
   EXPECT_EQ(Matched->WideOperand, Operand);
   EXPECT_EQ(Matched->WideLaneIndex, LaneIndex);
   EXPECT_FALSE(verifyModule(*H.M, &errs()));

@@ -77,6 +77,21 @@ enum class WaveCallKind : uint8_t {
   /// the case where every lane's gather happens to read the same source
   /// lane.
   ReadLane,
+  /// `subgroupBroadcast`/`OpGroupNonUniformBroadcast` (roadmap `L148`): `T`
+  /// operand plus an `i32` lane index the SPIR-V spec *guarantees* is
+  /// dynamically uniform (unlike `ReadLane`'s own index, which may not
+  /// be), so unlike `ReadLane` this is always a genuine uniform broadcast:
+  /// every lane reads the exact same source lane, computed once (see
+  /// WaveLowering.cpp's `lowerBroadcast`). Split out from `ReadLane` as its
+  /// own kind specifically so this guarantee is not lost -- reusing
+  /// `ReadLane`'s always-`<W x T>`, always-per-lane-gather lowering for a
+  /// call that is provably uniform produced `O(WaveSize)` IR per call site
+  /// where `O(1)` suffices, which is what made
+  /// `dEQP-VK.subgroups.ballot_broadcast.compute.*_requiredsubgroupsize{64,128}`
+  /// hang (its shader source has `N == WaveSize` static broadcast call
+  /// sites, so the old per-site `O(WaveSize)` cost compounded into
+  /// `O(WaveSize^2)` total IR).
+  Broadcast,
   /// `WaveActiveCountBits`/`WaveAllBitCount`: `i1` operand, uniform `i32`
   /// result.
   ActiveCountBits,
@@ -154,7 +169,7 @@ struct MatchedWaveCall {
   /// null for `GetLaneCount`/`IsFirstLane`, which have none.
   llvm::Value *WideOperand = nullptr;
   /// The widened lane-index operand (`<WaveSize x i32>`), only for
-  /// `ReadLane`; null otherwise.
+  /// `ReadLane`/`Broadcast`; null otherwise.
   llvm::Value *WideLaneIndex = nullptr;
 };
 
