@@ -55,16 +55,22 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **L141 (~1-2 hours for first reduction):** compare one
-   `binding_model.shader_access` buffer case and one storage-image case against
-   the baseline revision.
-2. **L142 (~1 hour for first reduction):** bisect one newly failing UBO case;
-   unchanged NotSupported coverage makes this likely a true pass-to-fail
-   regression.
-3. **L144 (~1-2 hours):** separate graphics and compute texture-gather
-   failures, then compare implementation-offset and dynamic-offset behavior.
-4. **L94:** start with the two compatible-render-pass crashes or four
-   `spirv_assembly` output-component crashes before the larger crash clusters.
-5. Keep the full-run artifacts under
-   `/home/dev/dev/VK-GL-CTS/run/feme-20260921-full/`; they include QPAs,
-   process logs, status files, final reconciliation, and aggregate analysis.
+1. **(Highest value, ~1 day):** `L145` -- before trusting any future
+   full-run numbers, the harness needs a mandatory second pass: re-run
+   every case that came back `Fail` or `Crashed`/`TimedOut` in a solo,
+   otherwise-idle process, and only report it as real if it reproduces.
+   The batch/worker driver script itself isn't in this repo (ad hoc from
+   a prior session) -- either find/recreate it or write a small one and
+   commit it under `feme/utils/`, wired to call
+   `vk_cts_reconcile.py` the same way the existing run did.
+2. **Do NOT** restart per-cluster bisection on `L141`/`L142`/`L143`/`L144`
+   without a freshly-verified failure list first -- you'll be chasing
+   ghosts, as this session's own evidence shows.
+3. `L94`'s crash-elimination row is still open but now also suspect --
+   don't spend a session on its specific 120 signatures without a fresh,
+   `L145`-verified crash list either.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, if a session wants
+   real compiler work instead of infrastructure work.
+5. No scratch left over to clean up this session (`/tmp/ctsrun/l141/`
+   already deleted).
