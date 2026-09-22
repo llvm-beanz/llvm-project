@@ -9942,3 +9942,100 @@ trailing vector-lane index, plain non-block `Interpolant` global).
 CTS-verified. No feature/extension inventory changes (compiler
 correctness fix only -- no new Vulkan functionality shipped this
 session).
+
+## Session: `L141`-`L144` investigated -- all four found not reproducible; `L145` filed for the full-run harness itself
+
+### Investigation
+
+Started per the prior session's own suggested ordering (`L141` first: one
+buffer case, one storage-image case, compared against baseline). The very
+first isolated repro attempt --
+`dEQP-VK.binding_model.shader_access.primary_cmd_buf.bind.uniform_buffer.
+compute.descriptor_array.offset_view_zero` (a `compute`-stage variant) --
+passed immediately. Broadened to the exact case name recorded as `Fail` in
+the fresh full run's own `failures-final.txt`
+(`...uniform_buffer.fragment.descriptor_array.offset_view_zero`, the
+`fragment`-stage sibling): **also passed**, both via `--deqp-case` and
+via the exact QPA record's own failure text confirmed first (`vk.
+createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at
+vkRefUtil.cpp:37`, from `qpa/batch-00188.qpa`, the fresh run's own
+recorded batch for this case).
+
+Suspecting resource contention under the fresh run's own "1,800-case
+batches, six concurrent workers" methodology (documented in this same
+file's prior "Full Vulkan CTS re-triage" session), re-ran `batch-00188`
+(the exact 1,800-case list that batch recorded, replayed verbatim via
+`--deqp-caselist-file`) as its own single process: **1,800/1,800 Pass,
+0 Fail.** Re-ran it again under two different 6-way-concurrent replays:
+six adjacent `binding_model.shader_access` batches together, and the
+same batch alongside five large `pipeline`-group batches (for memory
+pressure, since `pipeline` is by far the largest group and would be
+running concurrently in nearly every worker during a real full sweep).
+**Neither concurrent replay reproduced a single failure** -- every batch
+in every combination completed 100% Pass (modulo genuine, expected
+`NotSupported` cases).
+
+Extracted every one of `L141`'s own recorded `Fail` cases directly from
+`failures-final.txt` (26,288 cases, a superset of the row's own
+11,832-case estimate, which undercounted some already-baseline-expected
+failures folded into the same cluster) and replayed all of them as one
+single, otherwise-idle `deqp-vk` process: **26,288/26,288 Pass, 0 Fail.**
+
+Repeated the identical solo-replay methodology for `L142` (`ubo.*`, 708
+recorded failures: **708/708 Pass**), `L143` (`mesh_shader.ext.*`, 91
+recorded failures: **91/91 Pass**, this row was not in the prior
+session's own next-steps list but shares the identical pattern and was
+checked opportunistically), and `L144` (`glsl.texture_gather.*`, 474
+recorded failures: **330 Pass, 144 NotSupported, 0 Fail**).
+
+Extended the same check to `L94`'s own crash/timeout list: extracted all
+136 case names the fresh run recorded as `Crashed`/`TimedOut` (from
+`reconcile-final.txt`'s own "Unrun case names" section, 120 + 16) and
+re-ran each as its own isolated single-case process (matching the run's
+own final-recovery methodology exactly): **121 Pass, 15 NotSupported, 0
+Crash, 0 Timeout** -- none reproduced either.
+
+### Conclusion
+
+None of `L141`, `L142`, `L143`, `L144`, or `L94`'s own crash/timeout list
+reproduce against the exact same FeMe revision (`d627b4d3e286`) the fresh
+full run measured, under any of: a bare solo re-run, a verbatim-batch
+solo re-run, or two different flavors of 6-way-concurrent replay. This
+strongly indicates these are not real per-case product regressions but
+an artifact of the fresh full run's own execution conditions -- either
+genuine host contention this session's own, more limited-scale replay
+attempts could not reproduce (e.g. the original run's six long-lived
+worker processes competing with each other, or with some other unrelated
+concurrent load on the shared host, across the run's own multi-hour
+duration), or a bug in the run's own harness/reconciliation tooling
+(which is not committed to this repository -- the batch/worker driver
+script that produced `/home/dev/dev/VK-GL-CTS/run/feme-20260921-full/`
+was run ad hoc by the prior session and does not exist in this checkout
+to inspect directly; only `feme/utils/vk_cts_reconcile.py`, the
+result-reconciliation half, is committed, and it was not the layer this
+session found a defect in).
+
+This was **not** fixed this session -- no source change was made to any
+of `feme/lib/Vulkan/Descriptor.cpp`, `CommandBuffer.cpp`,
+`SPIRVResourceLowering.cpp`, `SPIRVToLLVMPatterns.cpp`, or
+`FeMeRuntimeCPU.c` (the files `L141`/`L142`/`L144`'s own roadmap rows had
+named as likely culprits), because no bug was found in any of them to
+fix. `ninja check-feme` was re-confirmed clean at its existing baseline
+(3,300/3,300 Passed, 3 Unsupported, 0 Failed -- unchanged from the prior
+session's own close, since nothing in the compiler changed this session).
+
+### Results
+
+`L141`, `L142`, `L143`, `L144` all struck through in `Roadmap.md` as
+"investigated, not reproducible" (not as "fixed" -- nothing was broken to
+fix). A new row, `L145`, was filed to own the actual open question this
+leaves: why did the fresh full run produce 13,875 unexpected `Fail`
+results (and 120 crashes) that do not reproduce under any tested replay
+condition, and what would make a *future* full run's results trustworthy
+without this same manual spot-check. `L94` was **not** struck through
+(its own crash list is now suspect for the identical reason, but "0
+crashes on an isolated per-case re-run" does not by itself establish "0
+crashes on a real full sweep," which was not re-attempted this session
+given its multi-hour cost) -- its row was annotated with this session's
+findings and a pointer to `L145` instead. No feature/extension inventory
+changes (investigation only, no functionality changed).
