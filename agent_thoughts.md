@@ -99522,3 +99522,99 @@ session chasing one more `grep`.
    this session's investigation has been deleted, and the VK-GL-CTS
    checkout used for the L149 fix attempt is back to a clean `git
    status`.
+
+# Session: L150 root cause -- upstream LLVM `SROAPass` miscompile, not FeMe
+
+**Confirmed at session start:** `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`.
+
+## What this session did
+
+Picked up the prior session's #1 next step: find the *exact* origin of
+`L150`'s `ubo.single_basic_type.*.matNx3.*` offset bug (a 137-case
+sub-cluster of `L147`). Answer found: **it's not FeMe's bug at all -- it's
+a genuine miscompile in upstream LLVM's `SROAPass`**, triggered only when
+it runs after inlining a specific nested-call, argument-marshaling
+pattern.
+
+## The proof, in order
+
+1. Dumped IR right out of MLIR SPIR-V-to-LLVM translation (before *any*
+   FeMe pass runs). Clean: tight 36-byte `[3 x <3 x float>]` alloca,
+   3 columns at offsets 0/12/24, correct. **Rules out FeMe's own
+   `SPIRVToLLVMPatterns.cpp`.**
+2. Extracted that exact clean module into a standalone `.ll` file. Ran it
+   through plain `opt -passes='inline,sroa'` -- no FeMe pass involved at
+   all -- and got the **exact same bug**: a merged 32-byte alloca reading
+   back 2 of 3 columns at offsets 4/20 instead of 0/12.
+3. Bisected: `-passes='sroa'` alone (no inline, run on the original
+   un-inlined functions) -- correct. `SROAPass` needs the inlined,
+   multi-alloca-merge opportunity to trigger; it isn't broken in general.
+4. Built a minimally-stubbed but *real* (not hand-written) runnable
+   repro and ran it under `lli`: unoptimized -> `1.0` (correct); after
+   `opt -passes='inline,sroa'` -> `0.0` (wrong). Same inputs, only the
+   pass pipeline differs.
+
+## Heisenbug I hit and how I resolved it (read this if you re-derive this)
+
+Testing `-passes=inline` *alone* (no `sroa`) through `lli` gave
+inconsistent results depending on totally unrelated changes (adding a
+`printf` flipped wrong->right). This is **`lli`'s own JIT re-applying its
+own default optimizer on load**, independent of `opt -passes=`. It is not
+evidence that plain `inline` alone (no SROA anywhere) is sufficient.
+Trust the `opt -passes='inline,sroa' -S ...; lli <result>` two-step
+invocation, not single-pass tests piped straight into `lli`.
+
+## What's committed this session
+
+1. `feme/docs/upstream/sroa_matNx3_offset_miscompile_repro.ll` -- the
+   real, minimally-stubbed, standalone reproduction.
+2. `feme/docs/upstream/LLVM-SROA-matNx3-offset-miscompile.md` -- draft
+   upstream issue content, bisection notes, likely-location guess
+   (`SROA.cpp`'s alloca-slicing/merging logic), and candidate FeMe-side
+   mitigations for later.
+3. `feme/docs/Roadmap.md` `L150` row and `feme/docs/VulkanCTSReport.md`
+   `L150` section updated to reflect the conclusive finding.
+4. No functional/compiler code change this session (root-cause tracing
+   only) -- confirmed `check-feme` is unchanged at 3,302/3,305 Passed,
+   0 Failed, and the specific CTS case
+   (`dEQP-VK.ubo.single_basic_type.std140.highp.mat3.vertex`) still
+   fails exactly as before (expected -- no fix applied yet).
+5. Temporary `Pipeline.cpp` debug dump instrumentation from this and the
+   prior session was reverted (`git checkout --`) before any commit.
+
+## Suggested next steps
+
+1. **(~15 min, easy win)** File the upstream LLVM issue using
+   `feme/docs/upstream/LLVM-SROA-matNx3-offset-miscompile.md`'s
+   "Suggested filing content" section and the attached repro `.ll` --
+   needs a human with push/issue access to `llvm/llvm-project`'s
+   tracker (this session cannot file it).
+2. **(~1 session)** Implement a FeMe-side mitigation so `L147`'s
+   `ubo.*` `single_basic_type` cluster (137 cases) can pass without
+   waiting on an upstream LLVM fix -- see the doc's "FeMe-side
+   mitigation status" section for 3 candidate approaches, ordered from
+   least to most invasive. Start with approach 1 (widen `<3 x float>`
+   marshaling allocas to `<4 x float>` before/instead of relying on
+   generic `SROAPass`, mirroring the `L124`
+   `getTightMatrixType`/`getTightNestedStructType` precedent).
+3. Once fixed, check whether `L147`'s other `ubo.*` sub-clusters
+   (`random` 134, `2_level_array` 86, `single_basic_array` 81,
+   `3_level_array` 59, `multi_nested_struct` 50,
+   `instance_array_basic_type` 46, `single_struct` 33,
+   `single_nested_struct_array` 31, `multi_basic_types` 27,
+   `single_nested_struct` 16, `single_struct_array` 12,
+   `link_by_binding` 1) also hit the same `matNx3` signature, before
+   assuming they're independent bugs.
+4. `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority of `L147`) is still the eventual big one, likely wants its
+   own dedicated session given the scale.
+5. **`L148`** (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster) is still untouched -- a
+   hang, not a crash, expect to need a debugger or verbose logging.
+6. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants a change of pace from CTS triage.
+7. No scratch left over this session -- all `/tmp/l150_*`/`/tmp/sroa_*`
+   files deleted; the one artifact worth keeping
+   (`sroa_matNx3_offset_miscompile_repro.ll`) was promoted into
+   `feme/docs/upstream/` and is committed, not left in `/tmp`.
