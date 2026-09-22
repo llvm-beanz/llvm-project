@@ -99618,3 +99618,100 @@ invocation, not single-pass tests piped straight into `lli`.
    files deleted; the one artifact worth keeping
    (`sroa_matNx3_offset_miscompile_repro.ll`) was promoted into
    `feme/docs/upstream/` and is committed, not left in `/tmp`.
+
+# 2026-09-22: L150 fixed -- FeMe-internal `DataLayout`-ordering bug, not upstream LLVM
+
+**Fixed and committed.** `dEQP-VK.ubo.*` cluster: 713 Fail -> 0 Fail
+(13,240 cases re-swept). `check-feme`: 3,303/3,306 Passed, 0 Failed.
+
+## What was wrong, in one line
+
+`UnrollConstantTripCountStageLoopsPass` ran `SROAPass`+`InstCombinePass`
+while the module still had MLIR's placeholder `DataLayout`
+(`e-ve-i64:64-n8:16:32:64-G10`, no vector-alignment spec), so a
+`<3 x float>` array's column stride got baked in as a literal 12 bytes
+instead of the correct, padded 16 -- permanently, since the literal has
+no type tag left to fix once the real `DataLayout` shows up later.
+
+## Why this took so long (2 prior sessions got it wrong)
+
+1. Session A: blamed upstream LLVM `SROAPass`/inliner. Wrong -- was
+   testing extracted IR with a *substituted* real-target datalayout
+   (needed so `opt`/`lli` would accept the file), which accidentally
+   cured the exact bug being chased.
+2. Session B (this session, first half): blamed "pre-existing FeMe IR
+   generation." Also wrong -- was looking at IR that had *already* gone
+   through the previously-unknown `UnrollConstantTripCountStageLoopsPass`.
+3. This session (second half): found the *true* earliest IR (right
+   after `importShaderModule`, before any pass) was clean. Then
+   instrumented every sub-pass inside `UnrollConstantTripCountLoops.cpp`
+   with `PrintFunctionPass` to catch the exact moment it broke:
+   "after sroa" correct, "after instcombine" wrong. Then built a
+   standalone driver (reusing the real unittest's link command, object
+   file swapped) to call the pass directly outside the full pipeline --
+   it did NOT reproduce the bug with a "fixed up" datalayout string, but
+   DID reproduce it the instant I fed it the real, un-substituted
+   placeholder datalayout string. That was the tell.
+
+**Lesson for next time:** if a standalone `.ll` repro needs its
+`target datalayout` line "fixed" to be accepted by `opt`/`lli`, that
+edit itself might be curing the bug. Try the literal, unmodified
+datalayout string first, even if the tool complains.
+
+## The fix
+
+`feme/lib/Transforms/Graphics/UnrollConstantTripCountLoops.cpp`: save
+`M.getDataLayout()`, substitute a plain `DataLayout()` (LLVM's built-in
+defaults -- already agree with every real target on this shape, and
+don't require pulling in `FeMeTargetCPU`/a `TargetMachine`, which would
+be a layering violation this library doesn't otherwise need) before the
+per-function pass loop, restore the original after. Same
+substitute-then-restore idiom already used in `CompiledStage.cpp`.
+
+New unit test: `UnrollConstantTripCountLoopsTest.MatrixColumnStrideIsPadded`.
+Confirmed it fails without the fix (reverted the fix, rebuilt, watched
+it fail with `i64 12`/`i64 24`) and passes with it.
+
+## Committed (3 commits)
+
+1. `feme: fix matNx3 offset miscompile in UnrollConstantTripCountLoops`
+   -- the fix + unit test.
+2. `feme/docs: correct L150 root cause, retract upstream LLVM claim`
+   -- `Roadmap.md`/`VulkanCTSReport.md` updated, retracted
+   `feme/docs/upstream/LLVM-SROA-matNx3-offset-miscompile.md` (no
+   upstream LLVM issue needed -- it was never filed, correctly, since
+   it was never an upstream bug), deleted the now-superseded
+   `sroa_matNx3_offset_miscompile_repro.ll`.
+3. This entry.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- this is a correctness fix, not a new feature/extension bit.
+
+## Suggested next steps
+
+1. **(highest value, next real Vulkan-correctness item)** `L124(o)`:
+   `getMatrixWholeAccess`'s non-wrapper-branch nested-struct walk +
+   `getTightNestedStructType`/`getTightMatrixType` widening -- still
+   the standing item from several sessions back, untouched by this
+   session.
+2. `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority of `L147`) is still the eventual big one; wants its own
+   dedicated session given the scale.
+3. `L148` (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster) still untouched -- a
+   hang, not a crash; expect to need a debugger, not stdout diagnostics.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, for a session
+   wanting a change of pace from CTS triage.
+5. Worth a 5-minute check next session: do any of `L147`'s other
+   `ubo.*` sub-clusters (`random` 134, `2_level_array` 86, etc. --
+   though the full `ubo.*` sweep this session came back 0 Failed, so
+   this is likely already moot; only worth re-checking if a *future*
+   regression reintroduces `ubo.*` fails) share this same
+   `DataLayout`-ordering bug shape. Given the full sweep already shows
+   0 Failed, this step is probably already done implicitly -- skip
+   unless something regresses.
+6. No scratch left over this session -- all `/tmp/l150_*`,
+   `/tmp/sroa_*`, `/tmp/UnrollDiag*`, and `/tmp/mintest.ll` deleted;
+   the one artifact worth keeping (the unit test) is committed, not
+   left in `/tmp`.
