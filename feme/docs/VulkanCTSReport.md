@@ -10316,3 +10316,44 @@ creation-time rejection, confined entirely to
 `in_out.32_bits_only.permutation_*.{mesh_only,task_mesh}`. This is
 unrelated to the fix above (different code path -- output *values*, not
 pipeline creation) and is filed separately as roadmap `L149`.
+
+## L149: `mesh_shader.ext.in_out.32_bits_only.*` -- root-caused, not a FeMe bug
+
+Investigated the remaining 90-case cluster from `L147`. Traced through
+the full mesh pipeline (workgroup dispatch, primitive-count/indices
+extraction, rasterization/coverage, `gl_PrimitiveID` routing) via
+direct runtime instrumentation -- all confirmed correct. The QPA's own
+embedded fragment shader source showed the "missing triangle" visual
+symptom is actually the shader's own designed failure-color path (solid
+black is the *fail* branch of ~16 per-attribute checks), reframing this
+as a value-correctness bug in one checked attribute, not a rendering
+gap.
+
+Isolated the bad attribute to `prim_f32d3_flat_0` (a per-primitive
+`flat vec3`). Root cause, confirmed at three independent levels:
+
+1. `vktMeshShaderInOutTestsEXT.cpp`'s `PerPrimitiveData`/`PerVertexData`
+   C++ structs use `tcu::Vec3` (a bare `float[3]`, no padding) and
+   upload them via one raw `deMemcpy` -- giving this field a tight
+   offset of 224 and total buffer size/`range` of exactly 960 bytes
+   (independently confirmed via a small standalone `offsetof`/`sizeof`
+   program mirroring the struct).
+2. The compiled SPIR-V (embedded in the QPA, identical in both the mesh
+   and fragment stage modules) decorates this field `Offset 240`,
+   per the GLSL `std430` spec's mandatory 16-byte array stride for
+   `vec3` members (spec-correct, confirmed independently).
+3. A temporary raw-memory dump of the actual bound host buffer at
+   `vkUpdateDescriptorSets` time confirmed the true bytes are tightly
+   packed exactly as `sizeof()` predicts (`224..247` = `1111/1112/1113`
+   twice, no gap) -- so any Vulkan-conformant reader honoring the
+   SPIR-V's own `Offset 240` decoration, which FeMe correctly does,
+   reads the wrong 16-byte window on *every* compliant driver, not just
+   FeMe's.
+
+This is a `vec3`-in-array std430-packing mismatch in the CTS test's own
+host-side struct vs. its declared GLSL layout -- present in the test
+source itself, not in FeMe. No FeMe code change applies. All temporary
+debug instrumentation (`Executor.cpp`, `Descriptor.cpp`) was reverted
+after confirming the finding; `check-feme` remains 3,302/3,305 Passed
+(unchanged). Next step is upstream: file/patch VK-GL-CTS to pad its
+`vec3` per-primitive/per-vertex fields to `vec4`-equivalent storage.
