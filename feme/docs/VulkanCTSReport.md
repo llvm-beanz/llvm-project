@@ -10376,7 +10376,7 @@ full (`git status` there is clean); no FeMe code changed. The doc now
 records this negative result as a caveat for whoever files this
 upstream next.
 
-## L150: `ubo.single_basic_type.*.matNx3.*` -- root cause confirmed, fix not yet located
+## L150: `ubo.single_basic_type.*.matNx3.*` -- root cause confirmed: upstream LLVM `SROAPass` miscompile
 
 Began root-causing `L147`'s `ubo.*` cluster (713 cases). The largest
 sub-cluster, `single_basic_type` (137 cases), narrows to one exact
@@ -10409,13 +10409,57 @@ extracted (offsets 4/20), the 3rd-column compare term evaluates to
 back to 0/12 in the same standalone repro flips the result to the
 correct `1.0`.
 
-This mismatched-offset IR already exists immediately after
-`feme::cpu::PreparePass`'s `SROAPass` run (confirmed via a temporary
-dump at that point), so the exact originating pass -- upstream LLVM's
-`SROAPass` itself, or FeMe's own SPIR-V-to-LLVM composite/function-call-
-argument lowering feeding it an already-wrong access pattern -- is not
-yet pinned down. No fix is implemented yet. All temporary debug/dump
-instrumentation (`Descriptor.cpp`, `Pipeline.cpp`) was reverted after
-confirming the finding; `check-feme` remains 3,302/3,305 Passed
-(unchanged, 0 Failed). See `feme/docs/Roadmap.md`'s `L150` row for the
-full writeup and next steps.
+**Follow-up session: exact originating pass identified.** Dumped the IR
+straight out of MLIR SPIR-V-to-LLVM translation, before any FeMe pass
+runs (`FEME_DUMP_IR_PRENORMALIZE`, temporary debug env var, reverted
+after use): that IR is completely clean and correct -- a tight 36-byte
+`[3 x <3 x float>]` alloca with all 3 columns at the expected offsets
+0/12/24, and three separate small helper functions each doing a
+straightforward per-column `getelementptr`+`load`. This rules out
+FeMe's own `SPIRVToLLVMPatterns.cpp` composite/function-call-argument
+lowering entirely -- the bad offsets are not present pre-`Normalize`.
+
+Extracted this real, clean pre-`Normalize` module verbatim into a
+standalone `.ll` file and ran it through plain upstream
+`opt -passes='inline,sroa'` (marking the three helper functions
+`internal` so the generic inliner will inline them, but touching
+nothing else) -- this **exactly reproduces** the same buggy
+32-byte-merged-alloca, 4/20-offset shape seen in the real pipeline's
+post-`Normalize` dump. Since no FeMe-authored pass is involved in this
+`opt` invocation at all, this is conclusive: **the miscompile is
+introduced by generic upstream LLVM, not by FeMe.**
+
+Bisected further to isolate which pass: `opt -passes='sroa'` alone, run
+on the *original, not-yet-inlined* functions, preserves the correct
+result -- `SROAPass` by itself, with nothing to coalesce across
+separate small functions, does not trigger the bug. The bug requires
+the specific alloca-merging opportunity that only exists **after**
+inlining flattens the nested `compare_mat3` -> `compare_vec3` ->
+`compare_scalar` call chain into one function with several small,
+disjoint-lifetime `<3 x float>`/`float` marshaling allocas; `SROAPass`
+then mis-computes the byte offset when coalescing several of those into
+one smaller shared alloca.
+
+A minimally-stubbed but otherwise real, standalone, runnable
+reproduction (extracted directly from FeMe's own translation output --
+not synthetic/hand-written IR) is preserved at
+`feme/docs/upstream/sroa_matNx3_offset_miscompile_repro.ll`:
+unoptimized it prints `result=1.000000` (correct); after
+`opt -passes='inline,sroa'` it prints `result=0.000000` (wrong), on the
+exact same inputs. The full writeup, bisection notes, a caution about a
+`lli`-JIT-internal-optimizer confound encountered while narrowing this
+(see the doc for detail -- single-pass `-passes=inline`-only tests run
+*through* `lli` were non-deterministic because `lli` applies its own
+default optimization level on top, independent of `opt`'s `-passes=`
+flag), and suggested upstream-filing content are at
+`feme/docs/upstream/LLVM-SROA-matNx3-offset-miscompile.md`.
+
+**Not yet filed upstream** (needs a human with push/issue access to
+`llvm/llvm-project`'s public tracker), and **no FeMe-side fix or
+workaround is implemented yet** -- see that doc's "FeMe-side mitigation
+status" section for candidate approaches. All temporary debug/dump
+instrumentation (`Pipeline.cpp`'s two `FEME_DUMP_IR_PRENORMALIZE`/
+`FEME_DUMP_IR_POSTNORMALIZE` blocks) was reverted after confirming the
+finding; `check-feme` remains 3,302/3,305 Passed (unchanged, 0 Failed).
+See `feme/docs/Roadmap.md`'s `L150` row for the full writeup and next
+steps.
