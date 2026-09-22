@@ -55,11 +55,26 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(highest value, exact-match lead)** `L147` -- start with
-   `mesh_shader.ext` (85 cases, exact match to `L143`'s old estimate,
-   smallest cluster). Isolate one case, run it under both this
-   session's method (solo, single process) and `L141`-`L144`'s old
-   method (whole group, one shared process) at the *current* revision
-   to see if the isolation method itself is the variable, before
-   touching git bisection. If it reproduces both ways at current HEAD,
-   next bisect between `d627b4d3e286` and `d828c5cd4a0c`.
+1. **(smaller, natural next pick)** `L149` -- reduce
+   `permutation_0.mesh_only`/`permutation_0.task_mesh`, dump the actual
+   per-vertex/per-primitive values the test compares (not just the
+   pass/fail summary) to see whether every permutation is off by one
+   shared pattern (one mesh-output-wiring bug) or varies per-permutation
+   (the permutation logic itself is at fault).
+2. **(much larger scope, now unblocked)** `L147`'s remaining clusters --
+   start with `ubo.*` (713 cases, next-smallest after `mesh_shader.ext`)
+   now that the isolation-method question is closed for the whole row.
+   `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority) is the eventual big one but likely wants its own dedicated
+   session given the scale.
+3. **`L148`** (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster from `L146`) is still
+   untouched -- a hang, not a crash, so expect to need a debugger or
+   verbose logging rather than a stdout diagnostic the way this
+   session's bug had one.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants a change of pace from CTS triage.
+5. No scratch left over this session (`/tmp/l147test/` already
+   deleted -- the minimal repro itself is preserved properly as the new
+   committed lit test, not left in `/tmp`).
