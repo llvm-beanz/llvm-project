@@ -55,22 +55,19 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(Highest value, ~1 day):** `L145` -- before trusting any future
-   full-run numbers, the harness needs a mandatory second pass: re-run
-   every case that came back `Fail` or `Crashed`/`TimedOut` in a solo,
-   otherwise-idle process, and only report it as real if it reproduces.
-   The batch/worker driver script itself isn't in this repo (ad hoc from
-   a prior session) -- either find/recreate it or write a small one and
-   commit it under `feme/utils/`, wired to call
-   `vk_cts_reconcile.py` the same way the existing run did.
-2. **Do NOT** restart per-cluster bisection on `L141`/`L142`/`L143`/`L144`
-   without a freshly-verified failure list first -- you'll be chasing
-   ghosts, as this session's own evidence shows.
-3. `L94`'s crash-elimination row is still open but now also suspect --
-   don't spend a session on its specific 120 signatures without a fresh,
-   `L145`-verified crash list either.
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
-   still the largest not-yet-started cross-repo item, if a session wants
-   real compiler work instead of infrastructure work.
-5. No scratch left over to clean up this session (`/tmp/ctsrun/l141/`
-   already deleted).
+1. **(~1 session, highest value):** `L146` -- run
+   `run_vulkan_cts.py` against the real 54-group, ~3.2M-case list to
+   produce the first `L145`-verified failure baseline. Expect several
+   hours given the historical full-run cost, plus the new solo-verify
+   round on top. This is what makes all future per-cluster triage
+   trustworthy without a manual spot-check first.
+2. **Do NOT** restart per-cluster bisection on `L141`-`L144` or `L94`'s
+   crash list without going through `L146`'s fresh, verified list first.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants real compiler work instead of infrastructure work.
+4. Both CTS build directories and `check-feme` remain incremental --
+   no reconfigure needed for `L146`.
+5. No scratch left over to clean up this session (all `/tmp/l146_*`
+   and the demo case-list files generated in the CTS build tree already
+   deleted).
