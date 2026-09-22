@@ -10232,3 +10232,87 @@ its first real full-scale use.
 from `L145`'s own session, since nothing in the compiler changed this
 session either), 3 Unsupported, 0 Failed. No feature/extension inventory
 changes (measurement/triage session only).
+
+# L147: mesh_shader.ext triaged -- isolation-method question resolved, 1 real bug fixed
+
+## The key open question this session answered
+
+`L146`'s full-suite diff found 13,881 newly, solo-verified `Fail` cases,
+two of whose group counts (`mesh_shader.ext` 85, `glsl.texture_gather`
+474) matched `L141`-`L144`'s own old, since-struck estimates almost
+exactly. Those rows had been closed as "not reproducible" using a
+looser solo-verification method (all cases of a group re-run together
+in one shared process). This session picked the smallest exact-match
+cluster (`mesh_shader.ext`) to determine whether the difference was a
+real regression or an artifact of this session's own stricter
+one-case-per-process isolation.
+
+**Method**: isolated
+`dEQP-VK.mesh_shader.ext.builtin.num_work_groups_task_and_mesh` (the
+group's smallest failing case) and ran it two ways at the current FeMe
+revision (`d828c5cd4a0c`): (1) solo, one case per process (this
+session's/`L146`'s own method), and (2) as part of a full
+`dEQP-VK.mesh_shader.ext.*` run in one shared process (`L141`-`L144`'s
+own old method). **Both reproduced the identical failure.** Separately,
+`git log d627b4d3e286..d828c5cd4a0c` shows only one commit touching
+`feme/lib`/`feme/include` in that whole window, and it only edits an
+unrelated feature-inventory data file (`AdvertisedPromotedFeatures.txt`,
+not consumed by any code path) -- so no compiler behavior could have
+changed between the two revisions either.
+
+**Conclusion**: this is a real, deterministic bug, not an isolation
+artifact and not a revision-to-revision regression. The prior
+"not reproducible" conclusion for `L141`-`L144` must itself have been a
+false negative in whatever investigation produced it (stale build,
+wrong binary, or some other now-unrecoverable methodological gap) --
+not evidence that solo-in-one-process verification is generally
+unreliable. This closes the open methodology question for the whole
+`L147` row: the remaining, much larger clusters (`binding_model.
+shader_access` above all) can go straight to root-causing without
+re-litigating isolation method first.
+
+## The bug, and the fix
+
+`error: 'llvm.getelementptr' op index 2 indexing a struct is out of
+bounds` / `vkCreateGraphicsPipelines: failed to convert spirv dialect
+module to the llvm dialect`, at pipeline-creation time.
+
+Reduced via `feme-opt --feme-convert-spirv-to-llvm` on a minimal
+`TaskPayloadWorkgroupEXT` struct of two `vector<3xi32>` members (mirrors
+the failing test's own GLSL `struct TaskData { uvec3 parentId; uvec3
+parentSize; }`), accessed via a two-level `spirv.AccessChain`. Root
+cause: `OffsetStructMemberReorderAccessChainPattern`'s own
+`MayNeedTightVectorFixup` match-decision gate still required
+`StructTy.hasOffset()`, left over from before roadmap `L104` widened its
+own tight-vector marker-struct substitution to cover *every* struct
+needing it, not just an offset-decorated (block/buffer) one.
+`TaskPayloadWorkgroupEXT` structs carry no `Offset` decorations at all,
+so this gate refused to let the pattern fire, and the access chain fell
+through to a generic pattern with no knowledge of the marker-struct
+wrapper -- emitting a `getelementptr` one index too shallow.
+
+Fix: drop the stale `StructTy.hasOffset()` requirement from the gate
+(`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`); the
+substitution logic inside the pattern was already unconditional (it
+only inserts the extra index when a field genuinely needed the
+tight-vector wrapper), so this only changes whether *non-offset*
+structs needing the fixup get to use it.
+
+New lit test: `spirv-to-llvm-task-payload-vec3.mlir` (2 cases: reading
+each of the struct's two members' components). `check-feme`: 3,302/3,305
+Passed (+1 new test), 3 Unsupported, 0 Failed.
+
+## CTS impact
+
+`dEQP-VK.mesh_shader.ext.builtin.num_work_groups_task_and_mesh` now
+passes (confirmed individually). Re-ran the whole `mesh_shader.ext`
+group: **366 Pass / 91 Fail -> 367 Pass / 90 Fail** -- exactly the one
+case this fix targets, no other change (positive or negative).
+
+The remaining 90 failures are a single, distinct signature: every one
+fails `vktMeshShaderInOutTestsEXT.cpp:1590` ("Result does not match
+reference"), a rendering-correctness mismatch rather than a
+creation-time rejection, confined entirely to
+`in_out.32_bits_only.permutation_*.{mesh_only,task_mesh}`. This is
+unrelated to the fix above (different code path -- output *values*, not
+pipeline creation) and is filed separately as roadmap `L149`.
