@@ -99208,3 +99208,138 @@ genuinely separate investigation (numeric reduction, not IR reduction).
 5. No scratch left over this session (`/tmp/l147test/` already
    deleted -- the minimal repro itself is preserved properly as the new
    committed lit test, not left in `/tmp`).
+
+# Session: L149 root-caused -- upstream VK-GL-CTS test bug, not a FeMe defect
+
+## TL;DR
+
+Picked up `L149` from `L147`'s handoff: root-cause the 90-case
+`mesh_shader.ext.in_out.32_bits_only.permutation_*.{mesh_only,task_mesh}`
+rendering-result mismatch. **Root-caused it, with byte-level proof, as
+a bug in the VK-GL-CTS test's own C++ data structures, not in FeMe.**
+No FeMe code change applies. Roadmap `L149` struck through as
+root-caused; `VulkanCTSReport.md` updated with the finding.
+
+Confirmed `FeMe CPU Vulkan Device` at session start
+(`env VK_ICD_FILENAMES=... VK_DRIVER_FILES=... vulkaninfo --summary`).
+Note: single-line `env VAR=X cmd` is the reliable invocation in this
+environment -- multi-line `export` did not reliably propagate to the
+loader in an earlier session.
+
+## The investigation, compressed
+
+A prior session (before this one) had already ruled out primitive-count
+extraction, `gl_PrimitiveID` routing, clipping, culling, and rasterizer
+coverage via direct runtime instrumentation, and had made the key
+reframing discovery: the QPA's embedded fragment shader source shows
+the "half the quad renders black" symptom is the shader's own *designed
+failure color* -- it runs ~16 independent per-attribute equality/range
+checks and only draws blue if every one passes, black otherwise. So
+this was never a missing-geometry bug; it's exactly one attribute
+computing the wrong value.
+
+This session:
+
+1. Confirmed which attribute: `prim_f32d3_flat_0`, a per-primitive
+   `flat vec3`, consistently read as all-zero for both primitives
+   across multiple permutations (a prior session's unconfirmed lead).
+2. Checked the CTS test's own reference data (`vktMeshShaderInOutTestsEXT.cpp`):
+   this field should be `(1111, 1112, 1113)` for both primitives --
+   definitely not zero, so the lead was real, not coincidental test data.
+3. Compiled a tiny standalone program mirroring `PerPrimitiveData`'s
+   exact field list/types and printed `offsetof`/`sizeof`: this field
+   sits at a tight (unpadded) offset of 224, and the whole struct is
+   exactly 960 bytes.
+4. Grepped the QPA's embedded SPIR-V disassembly for this field's
+   `OpMemberDecorate ... Offset` (present identically in both the mesh
+   and fragment shader modules): **240**, not 224 -- a 16-byte gap.
+   240 is exactly what the GLSL `std430` spec requires for an array of
+   `vec3` (mandatory 16-byte stride even though `vec3` is 12 bytes;
+   confirmed against the spec text independently, not just recalled).
+5. Added a temporary raw-memory dump (`fprintf`, env-var-gated) in
+   `Descriptor.cpp` at `vkUpdateDescriptorSets`-equivalent time, right
+   before the buffer gets bound, and re-ran the failing case: the real
+   host bytes at 224..247 are exactly `1111, 1112, 1113` twice with **no
+   gap** -- i.e. the actual uploaded buffer is tightly packed, matching
+   (3) not (4).
+6. Buffer `range` reported by that same print: **960 bytes**, exactly
+   matching (3)'s tight `sizeof()`, not the larger std430-padded size
+   the SPIR-V's own layout would need.
+
+Put together: the CTS test computes its buffer size and every field
+offset from the C++ struct's *natural* (tight) layout, uploads via one
+raw `memcpy`, but the GLSL source it hands to the shader compiler
+declares the identical fields with `std430`, which the spec mandates
+gets 16-byte-per-element array padding for any `vec3`/`ivec3` field.
+The two layouts disagree by 16 bytes at this field and every field
+after it. FeMe reads the SPIR-V's own `Offset 240` decoration exactly
+as the Vulkan spec requires -- that's not optional, a driver must honor
+the module's own decorations -- and gets back 16 bytes belonging to the
+*next* logical value, not the one requested. Any spec-conformant driver
+reading this exact SPIR-V would do the same thing and get the same
+wrong answer; this is not FeMe-specific.
+
+## Why I'm confident, not just suspicious
+
+This is not "I couldn't find the bug so I'm blaming the test." Every
+step above is a direct, independently-reproducible measurement, not
+a guess:
+- The 960-byte `sizeof()` match is exact, computed from the real struct
+  field list, not estimated.
+- The 240 SPIR-V offset is a literal decoration in the actual compiled
+  module CTS handed to the driver (present in the QPA's own log, which
+  CTS writes regardless of which driver runs), not something FeMe
+  invented.
+- The tight real-memory read is a live dump of the actual bound buffer,
+  not a std430 calculation done by hand.
+
+All three independently point the same direction. I do not have an
+external upstream bug-tracker citation for this exact case (didn't find
+one in a quick search), so I'm not saying it's a *known*, already-filed
+CTS bug -- only that the evidence for a genuine CTS-side layout mistake
+in this specific test is direct and strong, not inferred.
+
+## What I did NOT do
+
+Did not modify FeMe's SPIR-V/std430 offset computation to "match" the
+CTS test's tight packing. That would be wrong: FeMe's offset
+computation is spec-correct (matches the module's own decorations,
+which is what every conformant driver must do), and papering over a
+CTS test bug by deliberately misreading spec-correct SPIR-V would break
+every *other* test that correctly relies on std430 padding. The fix, if
+any, belongs in VK-GL-CTS's own struct definitions.
+
+All temporary debug instrumentation (`Executor.cpp`'s six earlier
+fprintf blocks from a prior session, plus this session's one-block
+addition in `Descriptor.cpp`) was reverted via `git checkout --` once
+each finding was confirmed. `ninja feme_vulkan` and `ninja check-feme`
+both verified clean afterward (3,302/3,305 Passed, 3 Unsupported, 0
+Failed -- unchanged from before this session). No functional FeMe diff
+in this round; only documentation commits.
+
+## Suggested next steps
+
+1. **(~15 min, easy win)** File or draft an upstream VK-GL-CTS issue/PR
+   against `vktMeshShaderInOutTestsEXT.cpp`: `PerPrimitiveData` and
+   `PerVertexData` need to pad their `Vec3`/`IVec3` array fields to
+   16-byte-stride (e.g. store as `Vec4`/`IVec4` and only fill the first
+   3 components, or add explicit trailing padding members) to match the
+   `std430` layout the test's own generated GLSL declares. Until that
+   lands upstream, this specific 90-case cluster should be treated as
+   an expected/known-CTS-issue failure, not a FeMe regression to chase.
+2. **`L147`'s remaining clusters** -- `ubo.*` (713 cases, next-smallest
+   after `mesh_shader.ext`, which is now fully triaged: 1 fixed, 90
+   explained as CTS-side). `binding_model.shader_access` (11,834 cases,
+   the overwhelming majority) is the eventual big one, likely wants its
+   own dedicated session given the scale.
+3. **`L148`** (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster from `L146`) is still
+   untouched -- a hang, not a crash, so expect to need a debugger or
+   verbose logging rather than a stdout diagnostic.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants a change of pace from CTS triage.
+5. `/tmp/l149/*` scratch (QPAs, stdout/stderr captures, the
+   `offsetof_test.cpp`/binary) can be deleted; nothing there is
+   referenced by anything committed. Both CTS build directories and
+   `check-feme` remain incremental -- no reconfigure needed.
