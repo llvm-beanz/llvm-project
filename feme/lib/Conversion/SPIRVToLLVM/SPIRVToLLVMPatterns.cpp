@@ -6806,23 +6806,40 @@ public:
            ++I)
         NeedsRemap = PhysicalIndexOf[I] != I;
     }
-    // (Roadmap H124o) A struct needing no member reordering/padding at
-    // all may still have a member whose own vector type needed
-    // `getTightVectorArrayType`'s marker-struct substitution (roadmap
-    // H101j) -- e.g. a `float3`/`uint3` member immediately followed by a
-    // sibling with no room for the raw LLVM vector's own (possibly
-    // wider) natural size. MLIR's generic `AccessChainPattern` forwards
-    // every further (vector-component) index straight through, one level
-    // too shallow for that extra wrapper -- exactly the same problem
+    // (Roadmap H124o, no longer gated on StructTy.hasOffset() -- L147) A
+    // struct needing no member reordering/padding at all may still have a
+    // member whose own vector type needed `getTightVectorArrayType`'s
+    // marker-struct substitution (roadmap H101j) -- e.g. a `float3`/
+    // `uint3` member immediately followed by a sibling with no room for
+    // the raw LLVM vector's own (possibly wider) natural size. MLIR's
+    // generic `AccessChainPattern` forwards every further (vector-
+    // component) index straight through, one level too shallow for that
+    // extra wrapper -- exactly the same problem
     // `remapNestedStructMemberIndices`'s own vector-leaf check now fixes.
     // Proceed through this pattern's own rewrite whenever *either* an
     // index needs remapping *or* the access reaches far enough past the
     // member selector that such a tight-vector-wrapped component index
     // could be in play; `remapNestedStructMemberIndices` itself is a
     // no-op when neither turns out to apply, so this never changes an
-    // already-correct access chain's own output.
-    bool MayNeedTightVectorFixup = StructTy && StructTy.hasOffset() &&
-                                   Op.getIndices().size() > MemberIndexPos + 1;
+    // already-correct access chain's own output. This condition used to
+    // also require `StructTy.hasOffset()`, matching this whole pattern's
+    // own name (it exists to fix up an *offset-decorated* block struct's
+    // member reordering) -- but L104's own tight-vector substitution
+    // (`substituteTightVectorMembersIfNeeded`) was deliberately widened
+    // to apply to *every* struct, not just an offset-decorated one (e.g.
+    // a `TaskPayloadWorkgroupEXT` struct of two `vec3` members, which
+    // carries no `Offset` decorations at all but still needs its second
+    // member's own natural 16-byte room accounted for). This gate was
+    // never updated to match, so a non-offset struct needing only the
+    // tight-vector fixup (not a member reorder) fell through to a
+    // generic access-chain pattern with no knowledge of the marker-struct
+    // wrapper at all, producing a `getelementptr` one level too shallow
+    // (`dEQP-VK.mesh_shader.ext.builtin.num_work_groups_task_and_mesh`'s
+    // own `'llvm.getelementptr' op index 2 indexing a struct is out of
+    // bounds` verifier failure, reduced in
+    // `spirv-to-llvm-task-payload-vec3.mlir`).
+    bool MayNeedTightVectorFixup =
+        StructTy && Op.getIndices().size() > MemberIndexPos + 1;
     if (!StructTy || !(NeedsRemap || MayNeedTightVectorFixup))
       return Rewriter.notifyMatchFailure(
           Op, "no leading offset pad, member reordering, or tight-vector "
