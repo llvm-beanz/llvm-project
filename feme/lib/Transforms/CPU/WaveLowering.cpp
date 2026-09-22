@@ -70,6 +70,10 @@
 //                       `X[I[L]]` if lane `I[L]` is active, else zero --
 //                       a genuine gather, since `I` is not required uniform
 //                       (see WaveCalls.h)
+//   Broadcast(X, I)  -> single guarded extract: `X[I]` if lane `I` is
+//                       active, else zero -- `I` *is* spec-guaranteed
+//                       uniform (unlike `ReadLane`'s), so this is `O(1)`,
+//                       not a gather (roadmap `L148`; see `lowerBroadcast`)
 //   ActiveCountBits  -> `ctpop(bitcast (M & X) to iW)`
 //   PrefixBitCount   -> exclusive running `ctpop`-style count of `M & X`,
 //                       lane by lane (the "lane loop for large W" option --
@@ -523,6 +527,30 @@ Value *lowerReadLane(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
   return Result;
 }
 
+/// `wave.broadcast` (roadmap `L148`): unlike `lowerReadLane` above, this
+/// call's lane index is spec-guaranteed uniform (see
+/// `WaveCallKind::Broadcast`'s own comment in `WaveCalls.h`), so every
+/// lane of \p WideLaneIndex already holds the identical source lane --
+/// lane 0 is read arbitrarily, not because it is special. That collapses
+/// the whole operation to three `extractelement`s and one `select`, with
+/// no scratch allocas and no `O(WaveSize)` loop: exactly the `O(1)`-per-
+/// call-site cost that resolves the `dEQP-VK.subgroups.ballot_broadcast.
+/// compute.*_requiredsubgroupsize{64,128}` hang, whose shader source has
+/// `N == WaveSize` static broadcast call sites (so the old, `ReadLane`-
+/// shared `O(WaveSize)`-per-site cost compounded into `O(WaveSize^2)`
+/// total IR -- see `L148`'s writeup in `feme/docs/VulkanCTSReport.md`).
+Value *lowerBroadcast(IRBuilder<> &Builder, Value *WideMask,
+                      Value *WideOperand, Value *WideLaneIndex,
+                      unsigned WaveSize) {
+  Type *ElemTy = cast<VectorType>(WideOperand->getType())->getElementType();
+  Value *Zero = Constant::getNullValue(ElemTy);
+  Value *SrcIdx =
+      Builder.CreateExtractElement(WideLaneIndex, Builder.getInt32(0));
+  Value *LaneActive = Builder.CreateExtractElement(WideMask, SrcIdx);
+  Value *RawVal = Builder.CreateExtractElement(WideOperand, SrcIdx);
+  return Builder.CreateSelect(LaneActive, RawVal, Zero);
+}
+
 /// `wave.active.countbits`: `ctpop(bitcast (M & X) to iW)`.
 Value *lowerActiveCountBits(IRBuilder<> &Builder, Value *WideMask,
                             Value *WideOperand, unsigned WaveSize) {
@@ -709,6 +737,10 @@ void lowerWaveCall(const MatchedWaveCall &Matched) {
   case WaveCallKind::ReadLane:
     Result = lowerReadLane(Builder, Matched.WideMask, Matched.WideOperand,
                            Matched.WideLaneIndex, W);
+    break;
+  case WaveCallKind::Broadcast:
+    Result = lowerBroadcast(Builder, Matched.WideMask, Matched.WideOperand,
+                            Matched.WideLaneIndex, W);
     break;
   case WaveCallKind::ActiveCountBits:
     Result =
