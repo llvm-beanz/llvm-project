@@ -10727,3 +10727,84 @@ needed. This is a pure internal-lowering performance/correctness fix
 for an already-exposed feature (`shaderSubgroupExtendedTypes`-adjacent
 `VK_KHR_shader_subgroup_extended_types`/core 1.1 subgroup ops); no
 new Vulkan feature or extension support was added or altered.
+
+## L151: `ballot_broadcast.compute.subgroupbroadcastfirst_*` -- bisected to a `LinearizePass` loop-restructuring bug, not yet fixed
+
+Investigated the newly-discovered `nonconst_*`/`broadcastfirst_*`
+correctness failures `L148`'s own verification sweep opened as `L151`.
+Started, per this session's own explicit instruction, by dumping
+actual-vs-expected values before touching any code.
+
+Confirmed `FeMe CPU Vulkan Device` first, as required every session.
+
+Reproduced `subgroupbroadcastfirst_int_requiredsubgroupsize4` directly:
+`0 / 7 values passed`. Read the CTS source (`vktSubgroupsTestsUtils.cpp`'s
+`makeComputeOrMeshTest`) to learn the QPA's own "7" is the count of
+`localSize` sweep iterations the harness retries the same shader body at
+(`{1,1,1}`, `{4,1,1}`, `{1,4,1}`, `{1,1,4}`, `{32,4,1}`, `{1,4,32}`,
+`{3,5,7}`), not a literal invocation count -- all 7 failed, ruling out an
+initial "only the partial-wave case fails" hypothesis outright.
+
+Hand-traced the full `SpirVAssemblySource` from the QPA log: the shader
+computes `ballot(true)`, manually walks `subgroupBallotBitExtract` in a
+`for`-loop-with-`break` to find the group's first active invocation,
+calls `subgroupBroadcastFirst` and compares its result against
+`data[manually-found-index]`, then -- for every invocation *except* the
+one at that first index -- takes a divergent `if` branch that repeats
+the exact same loop-with-break a second time as an independent
+re-verification.
+
+Built a from-scratch, non-CTS-harness reproducer to get a direct,
+numeric actual-vs-expected read: compiled small hand-written GLSL
+compute shaders with `glslangValidator` (`--target-env vulkan1.3`,
+matching the real CTS shader's SPIR-V version) and dispatched them
+directly via `feme-run --wave-size=N --groups=X,Y,Z --heap=...`,
+bypassing `deqp-vk`/the real Vulkan API entirely. Bisected through 11
+progressively-narrower variants:
+
+- A minimal `WaveReadLaneFirst`-only HLSL repro (partial-wave, 7-of-8
+  lanes active) via `dxc` confirmed the *basic* partial-wave
+  broadcast-first path is correct in isolation (`0 0 0 0 4 4 4`, exactly
+  matching per-subgroup "first active lane" semantics) -- ruling out
+  partial waves as `L151`'s trigger.
+- A minimal GLSL gather-then-broadcast repro (`Data[WaveGetLaneIndex()]`
+  broadcast via `WaveReadLaneFirst`) also computed correctly in
+  isolation.
+- A GLSL repro matching the real shader's exact structure (ballot +
+  loop-with-break to find "first" + `subgroupBroadcastFirst` +
+  comparison, with the divergent double-check branch) reproduced the
+  bug: the invocation that does *not* enter the divergent `if` branch
+  (correctly, per real subgroup semantics, since `subgroupBallot(true)`
+  inside a divergent region only ballots the invocations actually
+  present there) ends up with its own *earlier*, purely-uniform,
+  pre-branch computed diagnostic value silently zeroed.
+- Narrowed further: a *trivial* divergent `if` body (a plain arithmetic
+  add) does **not** corrupt the earlier value; a *second* bare
+  `subgroupBallot` call with no loop inside the `if` also does **not**;
+  only reintroducing a **second `for`-loop-with-`break`** inside the
+  divergent region (structurally similar to the one already used before
+  the branch) reproduces the corruption, even when the second loop
+  reuses the exact same, already-computed ballot mask (no new ballot
+  call at all).
+
+This points squarely at `feme/lib/Transforms/CPU/Linearize.cpp`'s loop
+restructuring machinery (`LoopLinearizer`, `foldRedundantFlowBlocksInCycle`,
+`matchExitCheckWithRelay`) most likely mishandling two independently
+linearized loops that happen to share the same block shape within one
+function -- a stale mask, a misidentified relay block, or a PHI/SSA
+value mixup during the second loop's own restructuring are all
+plausible mechanisms, none yet confirmed to an exact line.
+
+**Not yet fixed this session** -- the actual `LinearizePass` mechanism
+was not traced past this bisection; deliberately stopped here to hand
+off a small, precise, reliably-reproducing repro shape rather than risk
+an unconfirmed fix to a wide, invasive CFG-restructuring pass. No `/tmp`
+scratch kept (all `repro*` directories under `/tmp/l151` deleted at
+session end; the repro shape is fully described above and in
+`Roadmap.md`'s `L151` row so a future session can regenerate it in
+minutes via `glslangValidator`/`feme-run` rather than needing the
+original files).
+
+No CTS-wide re-run performed this session (no code change was made to
+validate). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change (pure investigation, no feature/extension surface touched).
