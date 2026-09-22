@@ -98984,3 +98984,127 @@ perform this methodology again.
 5. No scratch left over to clean up this session (all `/tmp/l146_*`
    and the demo case-list files generated in the CTS build tree already
    deleted).
+
+# Session: L146 full-suite run through the new harness -- first verified baseline
+
+## TL;DR
+
+Ran the harness `L145` built last session against the *real* full CTS
+suite for the first time: 3,244,369 cases, 54 groups, ~5 hours
+wall-clock including three manual straggler interventions. Got a real,
+trustworthy result: 82,207 solo-verified `Fail`, 104 genuinely unrun.
+Diffed against the old checked-in baseline: 91,922 fixed, 68,326 still
+failing, **13,881 newly failing that need root-causing** (opened as
+`L147`) -- and a brand-new 14-case hang cluster (`L148`). `L94`
+narrowed: 90 of its 120 crashes confirmed real, 32
+(`synchronization`/`synchronization2`) did not reproduce and were
+dropped from its scope. No compiler code changed this session -- this
+was pure measurement/triage.
+
+## What happened, in order
+
+1. Confirmed `FeMe CPU Vulkan Device` (had to fix a stale
+   `VK_ICD_FILENAMES` env var from leftover shell state first --
+   re-exporting fresh in the same command fixed it).
+2. Rebuilt `check-feme`: still 3,301/3,304 Passed, unchanged from
+   `L145`'s own closing state -- confirmed nothing regressed before
+   starting the CTS run.
+3. Generated the full case list (`deqp-vk --deqp-runmode=txt-caselist`):
+   exactly 3,244,369 cases across 54 groups, matching the historical
+   count precisely.
+4. **Process-management mistake, caught immediately**: first launch
+   attempt used `nohup ... & disown` inside a sync bash call, which
+   violates the tool-usage rule against shell-level detachment. Killed
+   the parent and every orphaned `deqp-vk` child manually (`pkill` is
+   disallowed -- had to `kill <pid>` one at a time), cleared the
+   partial output dir, and relaunched correctly with the `bash` tool's
+   own `mode="async"` (attached, not detached).
+5. Monitored to completion (~5 hours), with three manual
+   interventions -- each time, one batch (or a small cluster of
+   batches at finer granularity) got stuck at zero progress across
+   repeated rechecks while every other worker sat idle, because
+   `ThreadPoolExecutor.result()` blocks the *whole round* on the single
+   slowest future. Traced all three stalls to the same root cause:
+   `dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcast_*_requiredsubgroupsize{64,128}`
+   -- a real, deterministic hang, not just slowness (confirmed by the
+   test name never advancing). Killed the stuck process each time to
+   let the harness's own crash-tolerant recovery reprocess at a finer,
+   more parallel batch size, exactly as designed.
+6. Final size-1 recovery round (with its 60-second timeout) correctly
+   classified the persistent hangs as unrun rather than hanging the
+   whole harness indefinitely -- this is the harness working as
+   intended, just needing a human to force the issue at coarser batch
+   sizes where no timeout applies yet.
+7. Verification round (82,279 `Fail` cases, re-run solo): completed in
+   ~35 minutes, confirming 82,207 as genuinely `Fail`.
+8. Diffed the verified-failures list against the checked-in `G2(a)`
+   baseline (had to `export LC_ALL=C` before `sort`+`comm` to avoid
+   locale-driven spurious diff noise) -- see counts above.
+
+## The one finding worth flagging loudest
+
+`mesh_shader.ext` (85 cases) and `glsl.texture_gather` (474 cases) in
+this session's "new failures" list match `L143`/`L144`'s own old,
+struck-through estimates *exactly* -- not approximately. Those rows
+were closed as "not reproducible" using a *different* solo-verification
+method (all cases of a group re-run together in one shared process,
+not one-case-per-process). This session's stricter isolation should,
+if anything, make false failures *less* likely, not more -- yet the
+same clusters came back failing, with exact counts. Two live
+hypotheses, neither ruled out yet:
+(a) a real regression landed between FeMe `d627b4d3e286`
+    (`L141`-`L144`'s tested revision) and `d828c5cd4a0c` (this run's
+    revision), or
+(b) something about single-case-process isolation itself (cold-start
+    vs. warm ICD/driver state) causes a real bug that a shared-process
+    solo re-run masks.
+`L147` starts with `mesh_shader.ext` (smallest, cleanest signal) to
+distinguish these before touching the much bigger
+`binding_model.shader_access` cluster (11,834 cases, the vast majority
+of the 13,881 total).
+
+## What did NOT reproduce (also worth remembering)
+
+`synchronization`/`synchronization2`'s 32 cases from `L94`'s original
+120-crash list completed cleanly in this run -- dropped from `L94`'s
+scope. This is a reminder that not everything in a "verified" baseline
+stays put forever; group-level pass rates can shift between sessions
+for reasons unrelated to this session's own changes (none were made).
+
+## Suggested next steps
+
+1. **(highest value, exact-match lead)** `L147` -- start with
+   `mesh_shader.ext` (85 cases, exact match to `L143`'s old estimate,
+   smallest cluster). Isolate one case, run it under both this
+   session's method (solo, single process) and `L141`-`L144`'s old
+   method (whole group, one shared process) at the *current* revision
+   to see if the isolation method itself is the variable, before
+   touching git bisection. If it reproduces both ways at current HEAD,
+   next bisect between `d627b4d3e286` and `d828c5cd4a0c`.
+2. **(~1-2 hours)** `L148` -- the 14-case
+   `subgroups.ballot_broadcast.*.requiredsubgroupsize{64,128}` hang.
+   Start with the smallest vector-width case
+   (`subgroupbroadcast_vec2_requiredsubgroupsize128`) under verbose
+   FeMe logging or a debugger -- a hang won't produce its own
+   diagnostic on stdout/stderr the way `L94`'s original crashes did, so
+   don't expect the same investigative shortcuts to work here.
+3. **After `L147`/`L148` make progress**, revisit whether to regenerate
+   `test/Vulkan/Inputs/vk-cts-expected-failures.txt` from
+   `feme-l146-verified/verified-failures.txt` -- deliberately NOT done
+   this session, since blessing 13,881 unexplained new failures as
+   "expected" without investigation would hide real regressions from
+   future `check-feme` runs.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants compiler work instead of CTS triage.
+5. Consider (not urgent): giving `run_vulkan_cts.py` an optional coarse
+   per-batch timeout at every recovery round, not just the size-1
+   round, so a genuine hang doesn't require a manual `kill` to unstick
+   an otherwise-idle set of workers. Not attempted this session, to
+   avoid changing a script in the middle of its first full-scale real
+   use.
+6. Full run artifacts retained under
+   `/home/dev/dev/VK-GL-CTS/run/feme-l146-verified/` (QPAs, logs, case
+   lists, `report.txt`, `verified-failures.txt`) -- reuse these
+   directly for `L147`/`L148` triage rather than re-running the full
+   suite. `/tmp` scratch diff files from this session already deleted.
