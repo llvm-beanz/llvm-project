@@ -10556,3 +10556,72 @@ narrowing this down (in `GraphicsPipeline.cpp`, `Pipeline.cpp`, and
 actual fix; the only functional diff in that file is the `DataLayout`
 substitution described above. See `feme/docs/Roadmap.md`'s `L150` row
 for the up-to-date summary.
+
+## L148/L126(a): `subgroups.ballot_broadcast.*.requiredsubgroupsize{64,128}` hang -- root-caused, not yet fixed
+
+Reproduced the 14-case hang cluster directly:
+`dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcast_vec2_requiredsubgroupsize128`
+times out under a 20s timeout, and still has not completed after a
+600s (10 minute) timeout for a *single* test case -- confirming this
+is a genuine severe performance cliff, not merely a CTS-harness timeout
+set too aggressively.
+
+Root cause, confirmed via `gdb` backtrace on the live, ~100%-CPU,
+not-blocked process (sampled twice, ~35s apart, at different PCs both
+times -- ruling out a simple stuck loop, i.e. this is slow, not an
+infinite loop): the process is spinning inside upstream LLVM's
+`(anonymous namespace)::PromoteMem2Reg::run()`, reached through FeMe's
+own `OptimizerPipeline::run` (the plain, unmodified
+`PassBuilder::buildPerModuleDefaultPipeline` -- not a FeMe-authored
+pass) invoking `SROAPass`. This directly answers `L126(a)`'s own open
+question ("distinguish middle-end promotion cost from backend
+scaling"): it is **middle-end promotion cost**, not backend codegen.
+
+Quantified the actual IR shape driving this cost by temporarily
+dumping per-function `BBs`/`Insts`/`Allocas` counts right before the
+optimizer pipeline runs (reverted afterward, not a committed change):
+
+| Case | BBs | Insts | Allocas | Wall time |
+|---|---|---|---|---|
+| `requiredsubgroupsize64` (passes) | 7 | 92,442 | 385 | ~26s |
+| `requiredsubgroupsize128` (hangs) | 7 | 364,958 | 769 | still running at 600s |
+
+~4x instructions for a 2x width increase, ~2x allocas -- confirmed via
+`grep -c "OpGroupNonUniformBroadcast " <qpa disassembly>` to be exactly
+64 static broadcast call sites for the 64-wide case and 128 for the
+128-wide case: the CTS test's own shader source statically unrolls one
+`subgroupBroadcast` call per possible source lane (`N == WaveSize`
+call sites, baked into the test itself, not a FeMe unrolling
+artifact).
+
+Each call site's own cost traces to
+`feme/lib/Transforms/CPU/WaveLowering.cpp`'s `lowerReadLaneViaMemory`
+(the `WaveSize >= 16` fast path, itself a fix for an even-worse
+`O(WaveSize^2)`-machine-instruction straight-line-vector form per
+roadmap `L89b`): it allocates 3 new `[WaveSize x T]` scratch arrays and
+runs an explicit `O(WaveSize)` lane loop *per call site*,
+unconditionally -- so `N == WaveSize` call sites each costing
+`O(WaveSize)` produces the observed `O(WaveSize^2)` total IR. The
+resulting instruction/alloca count is itself large enough that even a
+linear-time optimizer pass would be slow; combined with SROA/mem2reg's
+own cost on a shape this large (few blocks, hundreds of allocas, huge
+per-block instruction counts), the wall-clock scaling is far worse than
+`O(WaveSize^2)` alone would suggest.
+
+**Not yet fixed.** The concrete fix (exploiting SPIR-V's own guarantee
+that `OpGroupNonUniformBroadcast`'s `Id` operand is dynamically
+uniform, unlike the general `Shuffle`/`Rotate` ops that currently share
+its exact intrinsic/lowering machinery) is fully scoped in
+`feme/docs/Roadmap.md`'s `L148` row -- it spans a new upstream
+`IntrinsicsSPIRV.td` entry, `SPIRVToLLVMPatterns.cpp`, `WaveCalls.h/.cpp`,
+`SIMDize.cpp`, and `WaveLowering.cpp`, and needs a broad `subgroups.*`
+CTS re-run (not just `ballot_broadcast`) to validate before landing
+given how widely the existing `WaveCallKind::ReadLane` machinery is
+shared. Deliberately left for a dedicated future session rather than
+implemented blind here.
+
+No functional diff lands with this update; the temporary
+`FEME_DUMP_PRE_OPTIMIZER_STATS` debug instrumentation used to gather
+the numbers above was reverted before committing. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` are unaffected (no feature/extension
+support changed).
