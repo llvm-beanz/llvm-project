@@ -35,6 +35,7 @@ alphaToOne
 pipelineStatisticsQuery
 vertexPipelineStoresAndAtomics
 fragmentStoresAndAtomics
+shaderImageGatherExtended = roadmap L125(g): ImageGatherPattern already forwards the Component operand and every femeCpuImageGather*V4F32 runtime entry point handles it; the fresh full CTS run confirms the feature is advertised, with residual texture-gather correctness tracked by L144
 shaderStorageImageMultisample
 shaderStorageImageExtendedFormats
 shaderStorageImageReadWithoutFormat
