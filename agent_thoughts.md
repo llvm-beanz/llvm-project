@@ -98849,3 +98849,77 @@ failures. The largest regressions are `binding_model.shader_access` (11,832),
 5. Keep the full-run artifacts under
    `/home/dev/dev/VK-GL-CTS/run/feme-20260921-full/`; they include QPAs,
    process logs, status files, final reconciliation, and aggregate analysis.
+
+# Session: L141-L144 investigated -- all false positives, L145 filed for the real bug
+
+**Do this first if you're picking this up:** read `L145` in `Roadmap.md`
+before doing any more CTS-driven triage. Don't trust a single full-run's
+`Fail`/`Crashed` counts as-is.
+
+## What happened, in one line
+
+The prior session's four "regression" roadmap rows (`L141` binding_model,
+`L142` ubo, `L144` texture_gather, plus `L143` mesh_shader checked along
+the way) **do not reproduce** -- every single recorded `Fail` case passes
+when re-run outside the original full-sweep harness. Same story for
+`L94`'s 136-case crash/timeout list: 0 crashes on isolated re-run.
+
+## Evidence (in case you don't believe it either)
+
+1. Picked the exact case name from `L141`'s own `failures-final.txt`,
+   ran it alone: **Pass.**
+2. Replayed the exact 1,800-case batch that case's `Fail` QPA record came
+   from, verbatim, as its own process: **1,800/1,800 Pass.**
+3. Replayed that same batch under two different 6-way-concurrent setups
+   (adjacent binding_model batches; mixed with heavy `pipeline` batches
+   for memory pressure): **still 100% Pass, both times.**
+4. Went big: pulled every recorded `Fail` case for `L141`/`L142`/`L143`/
+   `L144` straight out of `failures-final.txt` (26,288 + 708 + 91 + 474 =
+   27,561 cases) and replayed each whole set solo, one process per group:
+   **0 Fail across all four, every time.**
+5. Did the same for `L94`'s own 136 `Crashed`/`TimedOut` case names
+   (isolated single-case processes, matching the run's own recovery
+   methodology exactly): **0 Crash, 0 Timeout.**
+
+## What this means
+
+The fresh full run's 13,875 "unexpected failures" and 120 "crashes" are
+mostly (maybe entirely) noise from *how the sweep was run*, not from what
+the compiler does. I could not pin down exactly why -- my own light-scale
+concurrent replays didn't reproduce it either, so it's either genuine
+contention at a scale/duration I didn't replicate (six *long-lived*
+workers over *hours*, not six short batches over minutes), or some other
+concurrent load on the shared host during that specific run, or a bug in
+the (uncommitted, ad hoc) batch/worker driver script itself.
+
+## Wins this session
+
+- Saved probably several sessions' worth of wasted effort "root-causing"
+  four large failure clusters that were never real bugs.
+- Found and documented a real gap in the CTS methodology: ordinary `Fail`
+  results never get the same re-verification treatment
+  crashes/timeouts already do. Filed as `L145`.
+- `check-feme` re-confirmed clean at baseline (3,300/3,300 Passed, 0
+  Failed) -- no source changed this session, nothing to regress.
+
+## Suggested next steps
+
+1. **(Highest value, ~1 day):** `L145` -- before trusting any future
+   full-run numbers, the harness needs a mandatory second pass: re-run
+   every case that came back `Fail` or `Crashed`/`TimedOut` in a solo,
+   otherwise-idle process, and only report it as real if it reproduces.
+   The batch/worker driver script itself isn't in this repo (ad hoc from
+   a prior session) -- either find/recreate it or write a small one and
+   commit it under `feme/utils/`, wired to call
+   `vk_cts_reconcile.py` the same way the existing run did.
+2. **Do NOT** restart per-cluster bisection on `L141`/`L142`/`L143`/`L144`
+   without a freshly-verified failure list first -- you'll be chasing
+   ghosts, as this session's own evidence shows.
+3. `L94`'s crash-elimination row is still open but now also suspect --
+   don't spend a session on its specific 120 signatures without a fresh,
+   `L145`-verified crash list either.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, if a session wants
+   real compiler work instead of infrastructure work.
+5. No scratch left over to clean up this session (`/tmp/ctsrun/l141/`
+   already deleted).
