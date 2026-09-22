@@ -61,18 +61,30 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~20 min, easy start)** `L151`: get one single-case repro going --
-   `dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcastfirst_int_requiredsubgroupsize4`
-   is probably the smallest/simplest failing case (scalar type, smallest
-   subgroup size). Dump actual vs. expected values from the QPA log first,
-   before touching any code.
-2. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged
-   cluster) -- still wants its own dedicated session given the scale. Nothing
-   this session changes that.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
-   the largest not-yet-started cross-repo item, for a session wanting a change
-   of pace from CTS triage.
-4. No scratch left in `/tmp` worth keeping from this session --
-   `/tmp/ctsrun/*.qpa` and `/tmp/broadcast_*.ll`/`/tmp/l148_*` are safe to
-   delete; nothing in them is referenced by anything committed (the QPA data
-   that mattered is already summarized in `VulkanCTSReport.md`).
+1. **(highest value, pick this up first, ~1-2 hrs)** Regenerate the
+   `repro11`-shape GLSL shader described above (ballot + loop-with-break to find
+   "first" + `subgroupBroadcastFirst`, then a divergent `if` for every non-first
+   lane containing a second loop-with-break reusing the same mask) via
+   `glslangValidator --target-env vulkan1.3` + `feme-run --wave-size=4
+   --groups=1,1,1`. Dump the widened/linearized IR at each phase (`-mllvm
+   -print-after=` or FeMe's own phase-dump flags) to see exactly where the first
+   lane's earlier value gets clobbered -- likely inside
+   `LoopLinearizer::run()`'s per-cycle restructuring, watch specifically what
+   happens to blocks dominated by the FIRST loop once the SECOND, same-shaped
+   loop is processed.
+2. Once traced, implement a localized fix (matching `L147`/`L148`'s own
+   template: small pattern fix + reduced lit test), test each phase touched
+   (`LinearizePass`, likely also `SIMDize.cpp` if the bug is actually in PHI
+   widening, not restructuring itself), then re-run
+   `subgroupbroadcastfirst_*`/`nonconst_*` plus a broad `subgroups.*` sweep to
+   check for regressions in anything else using loops/divergent branches.
+3. Check whether `nonconst_*` (105/112, still failing) shares this exact root
+   cause once `broadcastfirst_*` is fixed -- both may resolve together, or may
+   be independent.
+4. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged
+   cluster) -- still wants its own dedicated session given the scale.
+5. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+   the largest not-yet-started cross-repo item.
+6. No scratch left in `/tmp` -- everything under `/tmp/l151` (11 GLSL repro
+   variants, one QPA log) deleted at session end; regenerate from this entry's
+   description, not from leftover files.
