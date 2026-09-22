@@ -98766,3 +98766,86 @@ the full CTS pipeline is fiddly. Two dead ends, one working path:
    `llvm-project`) are incremental from here -- no reconfigure needed.
 4. No scratch left over to clean up this session (`/tmp/l140dbg/`,
    `/tmp/l140_repro.qpa`, `/tmp/ctsrun/l140/` all deleted).
+
+# Session: Full FeMe Vulkan CTS run and roadmap re-triage
+
+**Do this first if picking up the next CTS task:** reduce one
+`dEQP-VK.binding_model.shader_access.*` failure from roadmap L141. It is the
+largest newly unexpected cluster (11,832 cases) and therefore the
+highest-leverage correctness regression.
+
+## Outcome
+
+The complete Vulkan CTS case list was attempted against the FeMe ICD:
+
+- 3,244,369 total and measured; 0 unattempted.
+- 591,111 Pass, 82,264 Fail, 2,570,802 NotSupported.
+- 47 QualityWarning, 9 InternalError, 120 Crash, 16 Timeout.
+- Relative to the checked-in 160,248-case expected-failure baseline, 91,859
+  expected failures are resolved, 68,389 remain, and 13,875 current failures
+  are newly unexpected.
+
+`pipeline` is the largest win (+83,698 Pass / -79,178 Fail). `draw`,
+`dynamic_state`, `compute`, `multiview`, and `ssbo` now have no ordinary
+failures. The largest regressions are `binding_model.shader_access` (11,832),
+`ubo` (707), `glsl.texture_gather` (474), and `mesh_shader.ext` (85).
+
+## What happened
+
+1. The required bare `vulkaninfo --summary | grep deviceName` selected
+   llvmpipe, not FeMe. Following `feme/.instructions.md`, every trusted Vulkan
+   invocation then set
+   `VK_DRIVER_FILES=$PWD/build/tools/feme/tools/feme-vulkan/feme_icd.json`;
+   that reported `FeMe CPU Vulkan Device`.
+2. Confirmed the existing `Release` build has assertions enabled and uses
+   `ccache` for C and C++. `ninja -C build check-feme` completed with 3,300
+   passed, 3 unsupported, and 0 failed before the CTS run.
+3. Generated all 3,244,369 cases at VK-GL-CTS revision `880f31a2bd9c`.
+   The initial run used bounded 1,800-case processes and disabled the CTS
+   shader cache. Recovery narrowed incomplete tails through 200-case,
+   20-case, and one-case processes.
+4. The final one-case recovery was essential. It prevented a crash or timeout
+   near the front of a batch from hiding later cases and reduced the old
+   ambiguous "unrun" bucket to zero. `vk_cts_reconcile.py` accepted only QPA
+   records with matching end markers and rejected contradictory retries.
+5. Re-triaged every roadmap table and stably reordered each milestone list so
+   closed rows precede open rows. H35, H49, H52, H57, H67, H173(d), L96,
+   L106, L124, and L128(c) now meet their scoped acceptance criteria. H52(a)
+   tracks the two non-crashing domain-origin residuals; L141-L144 track the
+   four largest newly unexpected clusters.
+6. Corrected inventory source-of-truth drift:
+   `PhysicalDeviceInfo.cpp` and `Vulkan14FeatureInventory.md` already reported
+   `shaderImageGatherExtended`, but
+   `AdvertisedPromotedFeatures.txt` omitted it. The manifest now matches the
+   runtime, and the generated feature and extension inventories match their
+   checked-in tables.
+
+## Decisions
+
+- A zero-failure family was closed only when supported cases actually passed.
+  Honest `NotSupported` results were retained and called out; they were not
+  counted as implementation success.
+- Crash milestones were separated from ordinary correctness residuals. H52 is
+  closed because its process crash is gone, while H52(a) owns the two remaining
+  ordinary failures.
+- The old expected-failure file was used as a comparison baseline, not
+  rewritten from this run. The 13,875 newly unexpected failures need review
+  before any baseline update so regressions are not normalized away.
+- Existing deeply nested historical milestone names were preserved, but new
+  work uses only top-level rows or one lowercase suffix.
+
+## Suggested next steps
+
+1. **L141 (~1-2 hours for first reduction):** compare one
+   `binding_model.shader_access` buffer case and one storage-image case against
+   the baseline revision.
+2. **L142 (~1 hour for first reduction):** bisect one newly failing UBO case;
+   unchanged NotSupported coverage makes this likely a true pass-to-fail
+   regression.
+3. **L144 (~1-2 hours):** separate graphics and compute texture-gather
+   failures, then compare implementation-offset and dynamic-offset behavior.
+4. **L94:** start with the two compatible-render-pass crashes or four
+   `spirv_assembly` output-component crashes before the larger crash clusters.
+5. Keep the full-run artifacts under
+   `/home/dev/dev/VK-GL-CTS/run/feme-20260921-full/`; they include QPAs,
+   process logs, status files, final reconciliation, and aggregate analysis.
