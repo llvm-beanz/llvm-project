@@ -10357,3 +10357,65 @@ debug instrumentation (`Executor.cpp`, `Descriptor.cpp`) was reverted
 after confirming the finding; `check-feme` remains 3,302/3,305 Passed
 (unchanged). Next step is upstream: file/patch VK-GL-CTS to pad its
 `vec3` per-primitive/per-vertex fields to `vec4`-equivalent storage.
+
+## L149 follow-up: upstream fix draft attempted, found incomplete
+
+Drafted the suggested upstream VK-GL-CTS fix as
+`feme/docs/upstream/VK-GL-CTS-mesh-shader-vec3-std430.md`. Attempted
+the fix itself against a scratch copy of the VK-GL-CTS checkout: wrapped
+the affected `tcu::Vec3`/`tcu::IVec3` fields in a padded, `alignas(16)`
+wrapper struct and rebuilt `deqp-vk`. Result: **2/80 passing** on the
+`mesh_shader.ext.in_out.32_bits_only.*` cluster, worse than the 0/90
+baseline once compared against a fresh failing line number
+(`vktMeshShaderInOutTestsEXT.cpp:1623` vs. the original `:1590`) --
+confirming the fix needs the same padding treatment applied to the
+struct's `vec2`/scalar field groups too, not just `vec3`/`ivec3`, since
+sub-16-byte groups between `vec3` groups can still leave later offsets
+out of sync with std430's own rules. Reverted the VK-GL-CTS checkout in
+full (`git status` there is clean); no FeMe code changed. The doc now
+records this negative result as a caveat for whoever files this
+upstream next.
+
+## L150: `ubo.single_basic_type.*.matNx3.*` -- root cause confirmed, fix not yet located
+
+Began root-causing `L147`'s `ubo.*` cluster (713 cases). The largest
+sub-cluster, `single_basic_type` (137 cases), narrows to one exact
+signature: every failing type is a **3-row** matrix (`mat2x3`, `mat3`,
+`mat4x3`; both majorness, both `std140`/`std430`, all precisions).
+3-column matrices with 2 or 4 rows are unaffected.
+
+Reproduced the smallest case
+(`dEQP-VK.ubo.single_basic_type.std140.highp.mat3.vertex`) solo and
+ruled out, in order: wrong resource-load offsets (independently
+confirmed correct against the SPIR-V's own `MatrixStride`/`Offset`
+decorations), wrong reference data (the test's own reference matrix is
+a genuine, compile-time zero constant, not a placeholder), wrong
+uploaded UBO data (a temporary raw-buffer dump confirmed the real host
+bytes are exactly zero, matching the reference), and `<3 x float>`
+vector-store legalization spilling into adjacent memory (ruled out via
+a standalone `llc`-compiled `.ll` reproduction that stores exactly 12
+bytes with no corruption).
+
+The actual bug: the inlined `compare_mat3` comparison packs the
+matrix's 2nd/3rd columns into a 32-byte scratch alloca via
+`store <3 x float>` at byte offsets 0 and 12 (correct, tight-packed),
+but reads them back via `load <3 x float>` at byte offsets **4 and 20**
+instead -- a systematic mismatch that straddles the column boundary and,
+for the higher offset, reads past the alloca's own initialized region.
+Confirmed causally, not just by inspection: extracted the exact IR
+sequence into a standalone `.ll` file and ran it under `lli` -- as
+extracted (offsets 4/20), the 3rd-column compare term evaluates to
+`0.0` (matching the real failure); patching just those two load offsets
+back to 0/12 in the same standalone repro flips the result to the
+correct `1.0`.
+
+This mismatched-offset IR already exists immediately after
+`feme::cpu::PreparePass`'s `SROAPass` run (confirmed via a temporary
+dump at that point), so the exact originating pass -- upstream LLVM's
+`SROAPass` itself, or FeMe's own SPIR-V-to-LLVM composite/function-call-
+argument lowering feeding it an already-wrong access pattern -- is not
+yet pinned down. No fix is implemented yet. All temporary debug/dump
+instrumentation (`Descriptor.cpp`, `Pipeline.cpp`) was reverted after
+confirming the finding; `check-feme` remains 3,302/3,305 Passed
+(unchanged, 0 Failed). See `feme/docs/Roadmap.md`'s `L150` row for the
+full writeup and next steps.
