@@ -10091,3 +10091,144 @@ full-run measurements.
 `ninja check-feme` re-confirmed clean at 3,301/3,304 Passed (the +1 over the
 prior session's 3,300 is this session's own new lit test), 3 Unsupported, 0
 Failed. No feature/extension inventory changes (tooling-only session).
+
+# L146: full-suite run through the new `L145` harness -- first verified baseline
+
+## Outcome
+
+**Ran `run_vulkan_cts.py` against the complete 3,244,369-case, 54-group
+`dEQP-VK` case list** (FeMe `d828c5cd4a0c`, CTS
+`880f31a2bd9cd0659f84f3f80dafd07f2e693f6d`, same case list as `G2(a)`'s
+own checked-in baseline). No compiler source changed this session --
+this is a measurement/triage session, following directly from `L145`'s
+harness landing last session.
+
+```
+Total cases: 3,244,369
+Completed cases: 3,244,265
+Unrun cases: 104
+Result counts:
+  Fail: 82,207
+  InternalError: 9
+  NotSupported: 2,570,802
+  Pass: 591,200
+  QualityWarning: 47
+```
+
+Full artifacts (every round's QPAs/logs/case-lists, `report.txt`,
+`verified-failures.txt`) are retained under
+`/home/dev/dev/VK-GL-CTS/run/feme-l146-verified/`.
+
+### Comparison against the `G2(a)` baseline
+
+Diffing `verified-failures.txt` (this run's 82,207 solo-verified `Fail`
+cases) against `test/Vulkan/Inputs/vk-cts-expected-failures.txt`
+(160,248 `Fail` cases at FeMe `aa5742ca7ed1`, the revision `G2(a)`
+generated it from):
+
+- **91,922 cases fixed**: `Fail` in the old baseline, not `Fail` now.
+  This is the accumulated effect of every session's fixes since
+  `aa5742ca7ed1` (dozens of rows across this document) -- not
+  attributable to any single change, and not itself actionable further.
+- **68,326 cases still fail identically** in both runs.
+- **13,881 cases are newly, solo-verified `Fail`** -- not in the old
+  baseline at all. Filed as roadmap `L147`. Unlike `L141`-`L144` (which
+  investigated similarly-sized clusters and found them **not**
+  reproducible under a same-process solo re-run), every one of these
+  13,881 survived this run's own one-case-per-process, 60-second-timeout
+  verification round, so they are trustworthy findings, not contention
+  artifacts. Breakdown by group:
+
+  | Group | New Fail count | Note |
+  |---|---|---|
+  | `binding_model.shader_access.*` | 11,834 | close to `L141`'s own old 11,832 estimate |
+  | `ubo.*` | 713 | close to `L142`'s own old 707/708 estimate |
+  | `glsl.texture_gather.*` | 474 | **exact match** to `L144`'s own old estimate |
+  | `api.copy_and_blit.*` | 280 | |
+  | `pipeline.pipeline_library.*` | 82 | |
+  | `mesh_shader.ext.*` | 85 | **exact match** to `L143`'s own old estimate |
+  | `api.image_clearing.*` | 98 | |
+  | `pipeline.monolithic.*` | 66 | |
+  | `pipeline.fast_linked_library.*` | 58 | |
+  | `transform_feedback.*` | 48 | |
+  | `glsl.arrays.*` | 31 | |
+  | `graphicsfuzz.*` | 28 | |
+  | `tessellation.*` | 27 | |
+  | `glsl.struct.*` | 18 | |
+  | `subgroups.*` | 16 | |
+  | `glsl.atomic_operations.*` | 16 | |
+  | `glsl.conversions.*` | 4 | |
+  | `glsl.builtin.*` | 2 | |
+  | `memory_model` | 1 | |
+
+  The exact/near-exact matches on `mesh_shader.ext` and
+  `glsl.texture_gather` against `L141`-`L144`'s own struck-through
+  estimates are worth investigating directly: either the same
+  underlying gap those rows found "not reproducible" at FeMe
+  `d627b4d3e286` has since become a genuine, reproducible regression by
+  `d828c5cd4a0c`, or this run's stricter one-case-per-process isolation
+  (as opposed to those rows' own "all cases of a group in one shared
+  process" solo method) surfaces a failure mode the looser isolation
+  missed. `L147` starts with the smallest, most exactly-matching
+  cluster (`mesh_shader.ext`, 85 cases) to distinguish these hypotheses
+  before attempting the much larger `binding_model.shader_access`
+  cluster.
+
+### The 104 unrun cases: `L94` confirmed, plus one new cluster
+
+Unlike `L141`-`L144`'s `Fail` results, this run's 104 unrun cases *are*
+a meaningful confirmation of `L94`'s own historical 120-crash-signature
+list -- because this run's own final recovery round used a real
+60-second per-case timeout (the same one `L94`'s own investigation note
+used to conclude "0 crashes on an isolated per-case re-run"), and this
+time 90 cases still did not complete even under that same methodology:
+
+| Group | Unrun count | vs. `L94`'s original count |
+|---|---|---|
+| `glsl.indexing.varying_array.*` + `glsl.builtin.precision.frexpstruct*` | 28 | matches `glsl` 28 exactly |
+| `tessellation.winding.*.hlsl_*` | 24 | matches `tessellation` 24 exactly |
+| `texture.texel_buffer.uniform.*` | 10 | matches `texture` 10 exactly |
+| `graphicsfuzz.*` | 19 | close to `graphicsfuzz` 18 |
+| `spirv_assembly.instruction.graphics.indexing.output.component_*` | 4 | matches `spirv_assembly` 4 exactly |
+| `api.*` | 2 | matches `api` 2 exactly |
+| `pipeline.*.misc.compatible_render_pass` | 2 | matches `pipeline` 2 exactly |
+| `synchronization.*` | 1 | **not** the old 12 -- 11 of 12 now complete |
+
+`synchronization2`'s 20 cases from `L94`'s original list are entirely
+absent from this run's unrun list -- all 20 completed. Between these
+two groups, 31 of the original 32 `synchronization`/`synchronization2`
+cases no longer hang; `L94` is updated to drop them from its scope.
+
+**New this run**: 14 `subgroups.ballot_broadcast.compute.subgroupbroadcast_*_requiredsubgroupsize{64,128}`
+cases hung at every batch granularity this session's own harness tried
+(1800-case, 200-case, and 20-case batches all had to be killed by hand
+mid-run before the harness's own recovery logic could proceed past
+them; only the size-1 round's 60-second timeout finally, correctly,
+classified them as unrun). Filed as roadmap `L148` -- not in `L94`'s
+original list at all, so a distinct finding, not a re-confirmation.
+
+### Harness observations (informational, no `run_vulkan_cts.py` change needed)
+
+The harness worked exactly as designed, but its own "no timeout except
+at the finest recovery size" tradeoff (documented in its own module
+docstring, matching the historical full-run methodology) meant three
+manual interventions were needed this session: one 1800-case batch and
+one set of six 200-case batches all serialized on the exact
+`subgroupbroadcast_*_requiredsubgroupsize128` hang cluster above, each
+one requiring a manual `kill` to let the harness's own recovery logic
+proceed to a finer, more parallel batch size sooner rather than waiting
+out an indefinite hang. This is a real usability gap (a hang in a large
+batch blocks that entire batch's other, otherwise-fine cases from being
+scored until the whole process is killed) but not a correctness bug --
+the harness's own final, size-1 round with its timeout is what actually,
+correctly classified these cases, exactly as designed. A future session
+could consider adding an optional coarse per-batch timeout (distinct
+from the mandatory fine-grained one) to reduce how often a hang forces
+a manual kill, but this was not attempted this session to avoid
+changing a freshly-committed, freshly-tested script in the middle of
+its first real full-scale use.
+
+`ninja check-feme` re-confirmed clean at 3,301/3,304 Passed (unchanged
+from `L145`'s own session, since nothing in the compiler changed this
+session either), 3 Unsupported, 0 Failed. No feature/extension inventory
+changes (measurement/triage session only).
