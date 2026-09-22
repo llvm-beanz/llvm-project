@@ -55,27 +55,45 @@ file.
 
 Can you continue the work on feme? The last agent's suggested next steps are:
 
-1. **(~15 min, easy win)** File or draft an upstream VK-GL-CTS issue/PR
-   against `vktMeshShaderInOutTestsEXT.cpp`: `PerPrimitiveData` and
-   `PerVertexData` need to pad their `Vec3`/`IVec3` array fields to
-   16-byte-stride (e.g. store as `Vec4`/`IVec4` and only fill the first
-   3 components, or add explicit trailing padding members) to match the
-   `std430` layout the test's own generated GLSL declares. Until that
-   lands upstream, this specific 90-case cluster should be treated as
-   an expected/known-CTS-issue failure, not a FeMe regression to chase.
-2. **`L147`'s remaining clusters** -- `ubo.*` (713 cases, next-smallest
-   after `mesh_shader.ext`, which is now fully triaged: 1 fixed, 90
-   explained as CTS-side). `binding_model.shader_access` (11,834 cases,
-   the overwhelming majority) is the eventual big one, likely wants its
+1. **(highest value, pick this up first)** Finish tracing `L150`'s
+   offset bug to its exact origin: dump the IR *before* `Normalize.run()`
+   in `Pipeline.cpp` (i.e. straight out of MLIR SPIR-V-to-LLVM
+   translation, before *any* FeMe pass touches it) and check whether the
+   4/20 offsets are already present there. If yes, the bug is in
+   `SPIRVToLLVMPatterns.cpp`'s composite/function-call-argument
+   lowering (start there, cross-reference against the `L124`
+   `getTightMatrixType`/`getMatrixWholeAccess` family for the pattern of
+   how a similar bug was fixed there, but expect this to be a *different*
+   code path -- local/function-argument marshaling, not memory-block
+   access chains). If the bad offsets are *not* yet present pre-SROA,
+   the bug is upstream in LLVM's `SROAPass` itself for this exact
+   `<3 x float>`-in-struct slicing pattern -- shrink the standalone `.ll`
+   repro already used this session (`store <3xfloat>` at 0/12, read back
+   at 4/20) down further and consider whether it's worth an upstream LLVM
+   report.
+2. Once traced, implement and test the fix following the `L147`
+   `OffsetStructMemberReorderAccessChainPattern` fix as a template: a
+   localized pattern fix plus a minimal reduced lit test, not a broad
+   rewrite.
+3. **`L147`'s remaining `ubo.*` sub-clusters** once `single_basic_type`
+   is actually fixed: `random` (134), `2_level_array` (86),
+   `single_basic_array` (81), `3_level_array` (59),
+   `multi_nested_struct` (50), `instance_array_basic_type` (46),
+   `single_struct` (33), `single_nested_struct_array` (31),
+   `multi_basic_types` (27), `single_nested_struct` (16),
+   `single_struct_array` (12), `link_by_binding` (1) -- worth checking
+   whether any of these also hit the same `matNx3` signature once it's
+   fixed, before assuming they're independent bugs.
+4. `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority of `L147`) is still the eventual big one, likely wants its
    own dedicated session given the scale.
-3. **`L148`** (14-case `subgroups.ballot_broadcast.*.
-   requiredsubgroupsize{64,128}` hang cluster from `L146`) is still
-   untouched -- a hang, not a crash, so expect to need a debugger or
-   verbose logging rather than a stdout diagnostic.
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+5. **`L148`** (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster) is still untouched -- a
+   hang, not a crash, expect to need a debugger or verbose logging.
+6. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
    -- still the largest not-yet-started cross-repo item, if a session
    wants a change of pace from CTS triage.
-5. `/tmp/l149/*` scratch (QPAs, stdout/stderr captures, the
-   `offsetof_test.cpp`/binary) can be deleted; nothing there is
-   referenced by anything committed. Both CTS build directories and
-   `check-feme` remain incremental -- no reconfigure needed.
+7. No scratch left over this session -- everything under `/tmp` from
+   this session's investigation has been deleted, and the VK-GL-CTS
+   checkout used for the L149 fix attempt is back to a clean `git
+   status`.
