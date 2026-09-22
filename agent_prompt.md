@@ -61,30 +61,18 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(dedicated session, ~half a day)** Implement the `L148` fix exactly as
-   scoped above: new `llvm.spv.wave.broadcast` intrinsic
-   (`IntrinsicsSPIRV.td`) -> `BroadcastConversionPattern` emits it ->
-   new `WaveCallKind::Broadcast` (`WaveCalls.h/.cpp`, scalar `RetTy`) ->
-   `SIMDize.cpp` dispatch (mirror the existing `isVectorOperandReduceKind`
-   per-component-decompose shape for `vec2`/`vec3`/`vec4` cases) -> new
-   `lowerBroadcast` in `WaveLowering.cpp` (one `extractelement` for the
-   uniform index, one masked `extractelement`+`select`, no allocas, no
-   loop). Test each translation phase per usual convention. Re-run the full
-   14-case cluster plus a broader `subgroups.*` sweep before calling it
-   done, since `Shuffle`/`Rotate`/`ReadLaneAt` share the machinery being
-   touched and must not regress.
-2. If step 1's fix doesn't fully resolve the hang, check the secondary,
-   unconfirmed hypothesis noted in the `L148` row: `SROA::runSROA`'s own
-   do-while loop may re-invoke `PromoteMemToReg` (and rebuild
-   `PromoteMemoryToRegister.cpp`'s `LargeBlockInfo` from scratch) multiple
-   times per function as post-promotion allocas trickle in. Not pursued
-   this session since the `O(W^2)`-IR explanation looked sufficient on its
-   own.
-3. `binding_model.shader_access` (11,834 cases, `L147`'s big remaining
-   cluster) is still untouched and still wants its own dedicated session
-   given the scale.
-4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is still
-   the largest not-yet-started cross-repo item.
-5. No scratch left over -- all `/tmp/l148_*` files deleted, debug
-   instrumentation reverted, working tree clean before this commit.
-
+1. **(~20 min, easy start)** `L151`: get one single-case repro going --
+   `dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcastfirst_int_requiredsubgroupsize4`
+   is probably the smallest/simplest failing case (scalar type, smallest
+   subgroup size). Dump actual vs. expected values from the QPA log first,
+   before touching any code.
+2. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged
+   cluster) -- still wants its own dedicated session given the scale. Nothing
+   this session changes that.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still
+   the largest not-yet-started cross-repo item, for a session wanting a change
+   of pace from CTS triage.
+4. No scratch left in `/tmp` worth keeping from this session --
+   `/tmp/ctsrun/*.qpa` and `/tmp/broadcast_*.ll`/`/tmp/l148_*` are safe to
+   delete; nothing in them is referenced by anything committed (the QPA data
+   that mattered is already summarized in `VulkanCTSReport.md`).
