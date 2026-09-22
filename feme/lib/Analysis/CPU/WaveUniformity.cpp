@@ -244,8 +244,15 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   // `Default`, so the generic operand-divergence rule applies instead
   // (conservative: divergent whenever either operand is, including a
   // divergent value read through a uniform index, which is stricter than
-  // necessary but never unsound).
+  // necessary but never unsound). `spv_wave_broadcast` (roadmap `L148`),
+  // by contrast, backs only `OpGroupNonUniformBroadcast`, whose Id operand
+  // the SPIR-V spec *requires* to be dynamically uniform -- exactly
+  // `dx_wave_readlane`'s own HLSL guarantee, just spelled out explicitly
+  // as a distinct intrinsic instead of inferred from a language rule -- so
+  // it keeps this same `AlwaysUniform` classification rather than being
+  // left at `Default` the way its `spv_wave_readlane` sibling is.
   case Intrinsic::dx_wave_readlane:
+  case Intrinsic::spv_wave_broadcast:
   case Intrinsic::dx_wave_get_lane_count:
   case Intrinsic::spv_wave_get_lane_count:
   case Intrinsic::dx_wave_any:
