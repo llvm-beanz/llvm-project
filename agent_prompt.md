@@ -61,29 +61,30 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(highest value, next real Vulkan-correctness item)** `L124(o)`:
-   `getMatrixWholeAccess`'s non-wrapper-branch nested-struct walk +
-   `getTightNestedStructType`/`getTightMatrixType` widening -- still
-   the standing item from several sessions back, untouched by this
-   session.
-2. `binding_model.shader_access` (11,834 cases, the overwhelming
-   majority of `L147`) is still the eventual big one; wants its own
-   dedicated session given the scale.
-3. `L148` (14-case `subgroups.ballot_broadcast.*.
-   requiredsubgroupsize{64,128}` hang cluster) still untouched -- a
-   hang, not a crash; expect to need a debugger, not stdout diagnostics.
-4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) --
-   still the largest not-yet-started cross-repo item, for a session
-   wanting a change of pace from CTS triage.
-5. Worth a 5-minute check next session: do any of `L147`'s other
-   `ubo.*` sub-clusters (`random` 134, `2_level_array` 86, etc. --
-   though the full `ubo.*` sweep this session came back 0 Failed, so
-   this is likely already moot; only worth re-checking if a *future*
-   regression reintroduces `ubo.*` fails) share this same
-   `DataLayout`-ordering bug shape. Given the full sweep already shows
-   0 Failed, this step is probably already done implicitly -- skip
-   unless something regresses.
-6. No scratch left over this session -- all `/tmp/l150_*`,
-   `/tmp/sroa_*`, `/tmp/UnrollDiag*`, and `/tmp/mintest.ll` deleted;
-   the one artifact worth keeping (the unit test) is committed, not
-   left in `/tmp`.
+1. **(dedicated session, ~half a day)** Implement the `L148` fix exactly as
+   scoped above: new `llvm.spv.wave.broadcast` intrinsic
+   (`IntrinsicsSPIRV.td`) -> `BroadcastConversionPattern` emits it ->
+   new `WaveCallKind::Broadcast` (`WaveCalls.h/.cpp`, scalar `RetTy`) ->
+   `SIMDize.cpp` dispatch (mirror the existing `isVectorOperandReduceKind`
+   per-component-decompose shape for `vec2`/`vec3`/`vec4` cases) -> new
+   `lowerBroadcast` in `WaveLowering.cpp` (one `extractelement` for the
+   uniform index, one masked `extractelement`+`select`, no allocas, no
+   loop). Test each translation phase per usual convention. Re-run the full
+   14-case cluster plus a broader `subgroups.*` sweep before calling it
+   done, since `Shuffle`/`Rotate`/`ReadLaneAt` share the machinery being
+   touched and must not regress.
+2. If step 1's fix doesn't fully resolve the hang, check the secondary,
+   unconfirmed hypothesis noted in the `L148` row: `SROA::runSROA`'s own
+   do-while loop may re-invoke `PromoteMemToReg` (and rebuild
+   `PromoteMemoryToRegister.cpp`'s `LargeBlockInfo` from scratch) multiple
+   times per function as post-promotion allocas trickle in. Not pursued
+   this session since the `O(W^2)`-IR explanation looked sufficient on its
+   own.
+3. `binding_model.shader_access` (11,834 cases, `L147`'s big remaining
+   cluster) is still untouched and still wants its own dedicated session
+   given the scale.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) is still
+   the largest not-yet-started cross-repo item.
+5. No scratch left over -- all `/tmp/l148_*` files deleted, debug
+   instrumentation reverted, working tree clean before this commit.
+
