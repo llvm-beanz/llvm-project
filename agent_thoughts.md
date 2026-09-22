@@ -99343,3 +99343,182 @@ in this round; only documentation commits.
    `offsetof_test.cpp`/binary) can be deleted; nothing there is
    referenced by anything committed. Both CTS build directories and
    `check-feme` remain incremental -- no reconfigure needed.
+
+# Session: L149 upstream draft + L150 (`ubo.*` `matNx3` root-cause)
+
+**TL;DR:** Two things this session. (1) Tried to actually *fix* L149's
+upstream CTS bug, not just describe it -- the fix didn't fully work,
+said so honestly, reverted the experiment, kept the writeup as a draft
+with the negative result documented. (2) Root-caused (not yet fixed)
+`L147`'s next cluster, `ubo.single_basic_type.*.matNx3.*` (137 cases):
+a genuine FeMe-side offset bug, confirmed computationally with a
+standalone IR repro, but not yet traced to the exact pass that
+introduces it. `vulkaninfo` confirmed `FeMe CPU Vulkan Device` at
+session start. `check-feme` confirmed clean (3,302/3,305 Passed, 3
+Unsupported, 0 Failed) before any commits, after reverting all
+temporary debug instrumentation.
+
+## What happened, in order
+
+### 1. L149 upstream draft: tried the fix, it didn't work, said so
+
+Last session's next-step #1 was "draft an upstream VK-GL-CTS
+issue/PR" for the `vec3`/std430 mismatch. Drafting a description felt
+like half a job -- so instead of just writing "pad the Vec3 fields to
+Vec4", I actually tried it against a scratch copy of the VK-GL-CTS
+checkout to see if the suggested fix works.
+
+It didn't, not fully. Wrapped `tcu::Vec3`/`tcu::IVec3` in an
+`alignas(16)` padded struct, rebuilt `deqp-vk`, ran the affected
+cluster: 2/80 passing (worse than doing nothing, once you account for
+the fact the failing line number moved). The real issue: this struct
+has other field-width groups (`vec2`, scalar) interleaved with the
+`vec3` groups, and std430 alignment is a whole-struct property -- fixing
+just the `vec3` groups' *own* padding doesn't fix the *cumulative*
+offset drift those other groups can introduce downstream. A real fix
+needs the same treatment applied everywhere, not a single sed pass.
+
+Reverted the CTS checkout in full (`git status` clean there). Updated
+`feme/docs/upstream/VK-GL-CTS-mesh-shader-vec3-std430.md` with this as
+an honest caveat, instead of quietly deleting the evidence that the
+first attempt didn't work. Better to hand the next person (upstream or
+here) a "here's what I tried and why it wasn't enough" than a clean
+description that turns out to be wrong when someone actually applies
+it.
+
+### 2. L150: `ubo.*` triage, actually a real find this time
+
+`L147`'s next cluster after `mesh_shader.ext` is `ubo.*` (713 cases).
+Broke it down by sub-category; `single_basic_type` (137, the largest)
+turned out to have an extremely clean signature: **every failing case
+is a matrix with exactly 3 rows** (`mat2x3`/`mat3`/`mat4x3`), regardless
+of majorness, layout, or precision. 3-column matrices with 2 or 4 rows
+are fine.
+
+Reproduced the smallest case solo
+(`dEQP-VK.ubo.single_basic_type.std140.highp.mat3.vertex` -- Fail,
+"Detected non-white pixels"). Then spent the bulk of this session's
+time ruling things out one at a time, in this order:
+
+- **Resource-load offsets wrong?** No -- dumped the IR, cross-checked
+  against the SPIR-V's own `MatrixStride`/`Offset` decorations, they
+  match perfectly (0/16/32 for `mat3`, `MatrixStride=16`, exactly
+  std140).
+- **Wrong reference data?** No -- read the QPA's embedded SPIR-V
+  disassembly, the test's own reference matrix for this specific seed
+  really is a compile-time-baked all-zero constant. Not a template
+  placeholder bug, genuinely zero.
+- **Wrong uploaded UBO data?** No -- added a temporary env-gated raw
+  buffer dump in `Descriptor.cpp` (same technique as a previous
+  session's L149 debugging), confirmed the real host bytes are exactly
+  zero, matching the reference.
+- **`<3 x float>` store legalization spilling into adjacent memory?**
+  No -- wrote a minimal standalone `.ll` reproduction of the exact
+  store pattern, compiled with the in-tree `llc`, confirmed it writes
+  exactly 12 bytes with zero corruption of neighboring memory.
+- **Decoded the rendered output image** (the QPA embeds a base64 PNG) --
+  every single pixel is solid magenta, meaning the vertex shader's
+  pass/fail scalar is uniformly 0 across the whole draw. Not a partial/
+  interpolation bug, a deterministic wrong-answer bug.
+
+The actual find: the inlined `compare_mat3` GLSL helper packs the
+matrix's 2nd/3rd columns into a 32-byte scratch alloca via
+`store <3 x float>` at byte offsets **0 and 12** (correct, tight-
+packed) -- but reads them back via `load <3 x float>` at byte offsets
+**4 and 20** instead. Not a coincidental instrumentation artifact --
+I proved this is *causal*, not just correlated: extracted the exact IR
+sequence into a standalone `.ll` file with a stub resource-load
+returning 0.0, ran it under `lli`. As extracted (with the buggy 4/20
+offsets), the 3rd-column compare term evaluates to `0.0` -- matching
+the real failure. Then patched *only* those two load offsets back to
+the correct 0/12 in the same file and reran: result flips to the
+correct `1.0`. That's about as close to a proof as you get without
+staring at assembly for a week.
+
+Where I ran out of runway: the bad-offset IR *already exists*
+immediately after `feme::cpu::PreparePass`'s `SROAPass` runs (checked
+by adding a temporary dump right after `Normalize.run()` in
+`Pipeline.cpp` and comparing). So either upstream LLVM's `SROAPass`
+itself is miscomputing a slice offset for this `<3 x float>`-in-struct
+pattern (plausible but SROA is heavily used/tested elsewhere, so I'd
+want strong evidence before believing that), or -- more likely -- the
+*pre-SROA* IR coming out of FeMe's own SPIR-V-to-LLVM composite/
+function-call-argument lowering already encodes the wrong access
+pattern, and SROA is just faithfully preserving it. That file
+(`SPIRVToLLVMPatterns.cpp`) is also home to the `L124`
+`getTightMatrixType`/`getTightNestedStructType`/`getMatrixWholeAccess`
+family, though those specifically handle memory-block matrix access
+chains, not local/function-argument composite marshaling -- so this
+might be a related-but-distinct gap in the same neighborhood, not
+literally the same code path.
+
+Didn't push further to find the exact line given the session's time
+budget -- better to hand off a confirmed, reproducible root cause with
+a clear next step than to either give up early or burn the whole
+session chasing one more `grep`.
+
+## Housekeeping this session
+
+- Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+  Device` at the very start, per standing instructions.
+- Reverted **two** pieces of temporary debug scaffolding before wrapping
+  up: the `FEME_UBO_DEBUG` raw-buffer dump added to
+  `feme/lib/Vulkan/Descriptor.cpp`, and a `FEME_DUMP_IR_EARLY` module
+  dump added to `feme/lib/Target/CPU/Pipeline.cpp`. Both were purely
+  diagnostic (env-var-gated, no behavior change when unset) but neither
+  belongs in a committed diff.
+- Rebuilt and ran `check-feme` *after* reverting both, to confirm a
+  clean baseline before any commits: **3,302/3,305 Passed, 3
+  Unsupported, 0 Failed** -- unchanged from the last known-clean run.
+- Deleted all `/tmp` scratch from this session (`vec3_test*`,
+  `ubo_*`, `vshader_test*.ll`, `result.png`, `img_b64_raw.txt`, the
+  reverted VK-GL-CTS backup file).
+- No functional FeMe source diff lands this session -- only
+  documentation (`Roadmap.md`'s `L149` update + new `L150` row,
+  `VulkanCTSReport.md`, this file). The `ubo.*`/`matNx3` bug itself is
+  root-caused but not yet fixed.
+
+## Suggested next steps
+
+1. **(highest value, pick this up first)** Finish tracing `L150`'s
+   offset bug to its exact origin: dump the IR *before* `Normalize.run()`
+   in `Pipeline.cpp` (i.e. straight out of MLIR SPIR-V-to-LLVM
+   translation, before *any* FeMe pass touches it) and check whether the
+   4/20 offsets are already present there. If yes, the bug is in
+   `SPIRVToLLVMPatterns.cpp`'s composite/function-call-argument
+   lowering (start there, cross-reference against the `L124`
+   `getTightMatrixType`/`getMatrixWholeAccess` family for the pattern of
+   how a similar bug was fixed there, but expect this to be a *different*
+   code path -- local/function-argument marshaling, not memory-block
+   access chains). If the bad offsets are *not* yet present pre-SROA,
+   the bug is upstream in LLVM's `SROAPass` itself for this exact
+   `<3 x float>`-in-struct slicing pattern -- shrink the standalone `.ll`
+   repro already used this session (`store <3xfloat>` at 0/12, read back
+   at 4/20) down further and consider whether it's worth an upstream LLVM
+   report.
+2. Once traced, implement and test the fix following the `L147`
+   `OffsetStructMemberReorderAccessChainPattern` fix as a template: a
+   localized pattern fix plus a minimal reduced lit test, not a broad
+   rewrite.
+3. **`L147`'s remaining `ubo.*` sub-clusters** once `single_basic_type`
+   is actually fixed: `random` (134), `2_level_array` (86),
+   `single_basic_array` (81), `3_level_array` (59),
+   `multi_nested_struct` (50), `instance_array_basic_type` (46),
+   `single_struct` (33), `single_nested_struct_array` (31),
+   `multi_basic_types` (27), `single_nested_struct` (16),
+   `single_struct_array` (12), `link_by_binding` (1) -- worth checking
+   whether any of these also hit the same `matNx3` signature once it's
+   fixed, before assuming they're independent bugs.
+4. `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority of `L147`) is still the eventual big one, likely wants its
+   own dedicated session given the scale.
+5. **`L148`** (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster) is still untouched -- a
+   hang, not a crash, expect to need a debugger or verbose logging.
+6. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants a change of pace from CTS triage.
+7. No scratch left over this session -- everything under `/tmp` from
+   this session's investigation has been deleted, and the VK-GL-CTS
+   checkout used for the L149 fix attempt is back to a clean `git
+   status`.
