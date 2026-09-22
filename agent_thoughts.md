@@ -98923,3 +98923,64 @@ the (uncommitted, ad hoc) batch/worker driver script itself.
    real compiler work instead of infrastructure work.
 5. No scratch left over to clean up this session (`/tmp/ctsrun/l141/`
    already deleted).
+
+# L145: crash-tolerant CTS harness with solo re-verification (committed)
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` first, per
+standing instructions.
+
+## What got done
+
+1. Wrote `feme/utils/run_vulkan_cts.py`: the missing driver script `L145`
+   called for. Splits a case list into batches, runs them concurrently,
+   recovers incomplete batches at progressively finer sizes (same
+   cadence this report's own "Method" section already documents), then
+   adds the step that was actually missing: re-runs every `Fail` result
+   once more, alone, before trusting it. A case that flips result on
+   that solo re-run is reported as flaky, not folded into the final
+   failure count.
+2. Wrote `test/Vulkan/run-vulkan-cts.test`, a lit test against a
+   synthetic `fake-deqp-vk.py` fixture (no real Vulkan device needed)
+   covering all three behaviors: batch-crash recovery, a
+   contention-only flaky Fail flipping to Pass on solo verify, and a
+   real Fail staying Fail either way.
+3. Ran a 500-case demonstration sweep against the real `deqp-vk`
+   (`dEQP-VK.api.info.*`) to confirm the harness also works end-to-end
+   against genuine CTS, not just the synthetic fixture: 500/500
+   completed, 0 unrun, 0 failures.
+4. Updated `Roadmap.md`: struck through `L145` (root cause was the
+   missing verification pass, now fixed), filed `L146` for the actual
+   full-suite run through the new harness, and noted `G2(b)`'s progress
+   (the driver script it called for now exists; CI wiring itself still
+   waits on a CI environment existing).
+5. Updated `VulkanCTSReport.md` with this session's write-up and demo
+   run results.
+6. `ninja check-feme`: 3,301/3,304 Passed (the +1 is this session's own
+   new test), 3 Unsupported, 0 Failed -- confirmed clean.
+
+## Why this matters
+
+Every one of the last several sessions' "regressions" (`L141`-`L144`,
+120 of `L94`'s crashes) turned out to be contention artifacts from a
+harness with no re-verification step. That step now exists, is tested,
+and is committed -- future sessions don't need to re-derive or manually
+perform this methodology again.
+
+## Suggested next steps
+
+1. **(~1 session, highest value):** `L146` -- run
+   `run_vulkan_cts.py` against the real 54-group, ~3.2M-case list to
+   produce the first `L145`-verified failure baseline. Expect several
+   hours given the historical full-run cost, plus the new solo-verify
+   round on top. This is what makes all future per-cluster triage
+   trustworthy without a manual spot-check first.
+2. **Do NOT** restart per-cluster bisection on `L141`-`L144` or `L94`'s
+   crash list without going through `L146`'s fresh, verified list first.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, if a session
+   wants real compiler work instead of infrastructure work.
+4. Both CTS build directories and `check-feme` remain incremental --
+   no reconfigure needed for `L146`.
+5. No scratch left over to clean up this session (all `/tmp/l146_*`
+   and the demo case-list files generated in the CTS build tree already
+   deleted).
