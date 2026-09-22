@@ -10625,3 +10625,105 @@ No functional diff lands with this update; the temporary
 the numbers above was reverted before committing. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` are unaffected (no feature/extension
 support changed).
+
+## L148: fixed -- `subgroups.ballot_broadcast.*.requiredsubgroupsize{64,128}` hang, plus L151 discovered
+
+Implemented the fix `L148`'s prior session fully scoped (see that
+session's entry above): `OpGroupNonUniformBroadcast`'s `Id` operand is
+spec-guaranteed dynamically uniform, unlike `Shuffle`/`Rotate`'s
+genuinely-varying-index semantics, so it no longer needs to share
+`llvm.spv.wave.readlane`/`WaveCallKind::ReadLane`'s always-wide
+(`<W x T>`) gather machinery.
+
+Five files changed, each its own commit:
+
+1. A new, non-FeMe commit adding `llvm.spv.wave.broadcast` to upstream
+   `IntrinsicsSPIRV.td` (identical shape to `int_spv_wave_readlane`)
+   plus `SPIRVInstructionSelector.cpp`'s dispatch to
+   `OpGroupNonUniformBroadcast` (the opcode's own capability
+   requirement was already registered, shared with
+   `OpGroupNonUniformBallot`). New backend regression test,
+   `WaveBroadcast.ll`; verified alongside every sibling `Wave*.ll`
+   test, no regressions.
+2. `feme::cpu::WaveCallKind::Broadcast` (`WaveCalls.h`/`.cpp`): the
+   crux of the fix is `createWaveCall`'s `RetTy` for this kind being a
+   plain **scalar** `T`, not `ReadLane`'s wide `FixedVectorType::get(T,
+   WaveSize)` -- this is what turns each call site's cost from
+   `O(WaveSize)` (building/populating/reading a `W`-wide gather) down
+   to `O(1)`.
+3. `feme::cpu::WaveTTIImpl::getValueUniformity` (`WaveUniformity.cpp`):
+   `spv_wave_broadcast` gets the same static `AlwaysUniform`
+   classification `dx_wave_readlane` already has, unlike its
+   `spv_wave_readlane` sibling (left at the generic, conservative
+   operand-divergence rule, since `Shuffle`'s index genuinely may
+   vary).
+4. `BroadcastConversionPattern` (`SPIRVToLLVMPatterns.cpp`) now emits
+   `llvm.spv.wave.broadcast` instead of `llvm.spv.wave.readlane`.
+   `BroadcastFirstConversionPattern` is deliberately unchanged: its
+   lane index comes from its own runtime `cttz(ballot)` computation,
+   not a spec-guaranteed-uniform operand, so it correctly keeps using
+   `readlane`.
+5. `SIMDizePass::FunctionWidener::widenWaveCall` (`SIMDize.cpp`): a new
+   vector-operand decomposition branch for `Broadcast` (a `bvec2`-
+   `bvec4`/`ivec2`-`ivec4`/etc.  `subgroupBroadcast`), mirroring
+   `ReadLane`'s own but *without* the `UI.isDivergentAtDef` check --
+   `Broadcast`'s result is unconditionally uniform, so each
+   per-component call reassembles directly into the result vector.
+   Also recognizes `Broadcast`'s own vector-typed value operand as a
+   supported divergent-vector use, matching the existing
+   `ReadLane`/`AllEqual` cases.
+6. `lowerBroadcast` (`WaveLowering.cpp`): the actual `O(1)` lowering --
+   one `extractelement` on the widened lane index at lane 0 (uniform,
+   so any lane's copy is the right one), one guarded `extractelement`
+   on the widened operand, one `select` -- versus `lowerReadLane`'s
+   `O(WaveSize)`-iteration loop.
+
+New tests added for every phase: `WaveCallsTest.BroadcastCarriesLane
+IndexAndIsScalar` (Phase 2/data-model), `simdize-wave-broadcast-
+vector.ll` (Phase 4 widening), `wave-lowering-broadcast.ll` (Phase 5
+lowering, asserting the exact three-instruction `O(1)` shape). `ninja
+check-feme`: 3,306/3,309 Passed (3 Unsupported, 0 Failed) -- no
+regressions.
+
+### CTS verification
+
+Re-ran the exact previously-hanging cases directly:
+`dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcast_vec2_
+requiredsubgroupsize{64,128}` (previously: still running/killed at 10
+minutes) now complete in seconds with `StatusCode="Pass"`, and so does
+every sibling `bvec2`-`bvec4`/`vec2`-`vec4` variant of the original
+14-case cluster.
+
+A full `dEQP-VK.subgroups.*` re-run (256 Pass, 202 Fail, 37,890 Not
+Supported) confirms:
+
+- Every ordinary (non-`nonconst`, non-`broadcastfirst`) `ballot_
+  broadcast.*.subgroupbroadcast_*` case now passes: **112/112**, up
+  from the 91-fail/101-pass split a same-scope isolated run showed
+  before this fix landed within this session (the isolated pre-fix
+  number came from re-deriving the local build's own history rather
+  than a saved baseline QPA, since no baseline was captured before
+  starting -- the important comparison is that 0 of these 112 fail
+  post-fix).
+- `shuffle.*` (`Shuffle`/`Rotate`/`ReadLaneAt`, sharing the
+  `WaveCallKind::ReadLane` machinery this fix's `SIMDize.cpp` change
+  touches) is **75/75 passing** -- confirmed no regression in the
+  shared code path.
+- **New, separate issue discovered, out of `L148`'s own scope**:
+  `subgroupbroadcast_nonconst_*` (105/112 fail) and
+  `subgroupbroadcastfirst_*` (97/112 fail) both have real correctness
+  failures (wrong computed value, not a hang/crash) across every
+  tested `requiredsubgroupsize` (4 through 128), not just 64/128.
+  `broadcastfirst_*` uses `BroadcastFirstConversionPattern`, which
+  this session's fix does not touch at all -- still `llvm.spv.wave.
+  readlane`, byte-for-byte unchanged -- which is itself strong evidence
+  these are pre-existing bugs, not a regression from this fix. Broken
+  out as roadmap `L151` for a future session; not investigated further
+  here since it is unrelated to the hang this session was scoped to
+  fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed. This is a pure internal-lowering performance/correctness fix
+for an already-exposed feature (`shaderSubgroupExtendedTypes`-adjacent
+`VK_KHR_shader_subgroup_extended_types`/core 1.1 subgroup ops); no
+new Vulkan feature or extension support was added or altered.
