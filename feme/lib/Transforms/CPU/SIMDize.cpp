@@ -1435,6 +1435,17 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
                 WaveCallKind::ReadLane &&
             UserCI->getArgOperand(0) == &I)
           continue;
+        // (Roadmap L148) `Broadcast`'s own value operand: the uniform-
+        // index counterpart of the `ReadLane` case just above, decomposed
+        // the same way by `widenWaveCall`'s dedicated `Broadcast` vector
+        // branch (one `feme.cpu.wave.broadcast` per component, all
+        // sharing this call's single widened lane index). Only the value
+        // operand qualifies here too: the lane index is always scalar.
+        if (Callee &&
+            classifyWaveCall(Callee->getIntrinsicID()) ==
+                WaveCallKind::Broadcast &&
+            UserCI->getArgOperand(0) == &I)
+          continue;
         // (roadmap H124a) A vector-typed `WaveActiveSum`/`Max`/`BitAnd`/
         // ...'s own operand -- decomposed the same way by `widenWaveCall`'s
         // own dedicated vector-reduce branch (one per-component reduce
@@ -2093,6 +2104,33 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
     return;
   }
 
+  // (Roadmap L148) The `Broadcast` counterpart of the `ReadLane` branch
+  // just above, for a vector-operand `subgroupBroadcast`/
+  // `OpGroupNonUniformBroadcast` (the group's `vec2`/`vec3`/`vec4` cases).
+  // Unlike `ReadLane`, `Broadcast`'s result is *unconditionally* uniform
+  // (see `WaveCallKind::Broadcast`'s own comment), so there is no
+  // `UI.isDivergentAtDef` check here: every component's own per-call
+  // result is already the scalar `T` `createWaveCall` now builds for this
+  // kind (see its `RetTy` switch), reassembled directly into the `<N x T>`
+  // vector `CI`'s users expect, exactly like the `AllEqual` branch above.
+  if (Kind == WaveCallKind::Broadcast && CI.getType()->isVectorTy()) {
+    SmallVector<Value *, 4> Components =
+        getVectorComponents(CI.getArgOperand(0), Builder);
+    Value *WideIndex = getWidened(CI.getArgOperand(1), Builder);
+
+    Value *Result = PoisonValue::get(CI.getType());
+    for (auto [Idx, Component] : llvm::enumerate(Components)) {
+      CallInst *ComponentCall = createWaveCall(
+          Builder, Kind, WaveSize, WideMask, Component, WideIndex, CI.getName());
+      Result = Builder.CreateInsertElement(Result, ComponentCall,
+                                           Builder.getInt32(Idx));
+    }
+    Result->takeName(&CI);
+    CI.replaceAllUsesWith(Result);
+    ToErase.push_back(&CI);
+    return;
+  }
+
   // (roadmap H124a) The reduce-kind counterpart of `AllEqual`/`ReadLane`
   // above: `GroupNonUniformReducePattern` (SPIRVToLLVMPatterns.cpp) hands
   // a vector operand straight to its matching `llvm.spv.wave.reduce.*`/
@@ -2157,7 +2195,7 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   if (Kind != WaveCallKind::GetLaneCount && Kind != WaveCallKind::IsFirstLane)
     WideOperand = getWidened(CI.getArgOperand(0), Builder);
   Value *WideLaneIndex = nullptr;
-  if (Kind == WaveCallKind::ReadLane)
+  if (Kind == WaveCallKind::ReadLane || Kind == WaveCallKind::Broadcast)
     WideLaneIndex = getWidened(CI.getArgOperand(1), Builder);
 
   CallInst *NewCall = createWaveCall(Builder, Kind, WaveSize, WideMask,
@@ -2210,6 +2248,14 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   // that shape regardless), so the uniform case still needs one lane
   // extracted back to the scalar type `CI`'s existing (uniform) users
   // expect.
+  //
+  // `Broadcast` needs none of that special-casing: unlike `ReadLane`, its
+  // index is always spec-guaranteed uniform (see its own enumerator
+  // comment), so `isDivergentWaveCallResult` already always answers
+  // `false` for it, and `createWaveCall` already builds its scalar `T`
+  // result directly (not the wide `<W x T>` shape `ReadLane` needs) -- it
+  // falls straight through to the plain `CI.replaceAllUsesWith(NewCall)`
+  // branch below with no extraction step.
   bool ResultDivergent = Kind == WaveCallKind::ReadLane
                              ? UI.isDivergentAtDef(&CI)
                              : isDivergentWaveCallResult(Kind);
