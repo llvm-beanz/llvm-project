@@ -58,5 +58,32 @@ file.
 
 # Request
 
-Can you please fix the issue described in
-feme/docs/upstream/LLVM-SROA-matNx3-offset-miscompile.md?
+Can you please work on the FeMe ICD implementation? The previous session gave
+the next steps:
+
+1. **(highest value, next real Vulkan-correctness item)** `L124(o)`:
+   `getMatrixWholeAccess`'s non-wrapper-branch nested-struct walk +
+   `getTightNestedStructType`/`getTightMatrixType` widening -- still
+   the standing item from several sessions back, untouched by this
+   session.
+2. `binding_model.shader_access` (11,834 cases, the overwhelming
+   majority of `L147`) is still the eventual big one; wants its own
+   dedicated session given the scale.
+3. `L148` (14-case `subgroups.ballot_broadcast.*.
+   requiredsubgroupsize{64,128}` hang cluster) still untouched -- a
+   hang, not a crash; expect to need a debugger, not stdout diagnostics.
+4. `L125(m)`/`L125(n)` (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, for a session
+   wanting a change of pace from CTS triage.
+5. Worth a 5-minute check next session: do any of `L147`'s other
+   `ubo.*` sub-clusters (`random` 134, `2_level_array` 86, etc. --
+   though the full `ubo.*` sweep this session came back 0 Failed, so
+   this is likely already moot; only worth re-checking if a *future*
+   regression reintroduces `ubo.*` fails) share this same
+   `DataLayout`-ordering bug shape. Given the full sweep already shows
+   0 Failed, this step is probably already done implicitly -- skip
+   unless something regresses.
+6. No scratch left over this session -- all `/tmp/l150_*`,
+   `/tmp/sroa_*`, `/tmp/UnrollDiag*`, and `/tmp/mintest.ll` deleted;
+   the one artifact worth keeping (the unit test) is committed, not
+   left in `/tmp`.
