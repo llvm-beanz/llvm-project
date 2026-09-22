@@ -10039,3 +10039,55 @@ crashes on a real full sweep," which was not re-attempted this session
 given its multi-hour cost) -- its row was annotated with this session's
 findings and a pointer to `L145` instead. No feature/extension inventory
 changes (investigation only, no functionality changed).
+
+# L145: `run_vulkan_cts.py` -- crash-tolerant harness with solo re-verification
+
+## Outcome
+
+**Closed the actual root cause `L145` was filed against: the missing
+verification pass, not a compiler bug.** No source change was made to any
+compiler pass this session -- this is a pure test/tooling addition.
+`feme/utils/run_vulkan_cts.py` reproduces the batch/recovery cadence this
+report's own "Method" section already documents (initial batches, then
+progressively finer recovery batches for anything that does not complete),
+reusing `vk_cts_reconcile.py`'s QPA parsing/merging/reporting rather than a
+second implementation, and adds the step that was missing: every case whose
+merged batch/recovery result is `Fail` is re-run once more, entirely alone;
+a case that flips result on that solo re-run is reported as flaky (excluded
+from `--write-verified-failures`) instead of being trusted as a real
+regression. This is exactly the manual step the `L141`-`L144` session had to
+perform by hand, now automated and covered by a lit test
+(`test/Vulkan/run-vulkan-cts.test`) against a synthetic fake-`deqp-vk`
+fixture, so future sessions do not need to re-derive this methodology from
+scratch or trust an ad hoc, uncommitted script again.
+
+## Demonstration run
+
+To confirm the new harness works end-to-end against a real `deqp-vk`
+binary (not just the synthetic fixture), 500 `dEQP-VK.api.info.*` cases
+were generated from this session's build (`--deqp-runmode=txt-caselist`)
+and run through `run_vulkan_cts.py` (`--batch-size 100 --workers 4
+--recovery-batch-sizes 20,1 --final-timeout 30`) against
+`deqp-vk` from `/home/dev/dev/VK-GL-CTS/build`:
+
+```
+Total cases: 500
+Completed cases: 500
+Unrun cases: 0
+Changed cases: 500 (Unrun -> NotSupported/Pass, no baseline supplied)
+Unexpected failures: 0
+```
+
+All 500 completed in the initial round (no recovery or verification rounds
+were needed for this particular subset -- `api.info.*` is a self-validating,
+extension-probing group with no rendering, so this run does not by itself
+demonstrate the verification round catching a real flaky case; that is
+already covered by the lit test's synthetic fixture, which deliberately
+constructs one). This was not a full-suite run; `L146` (filed this session)
+tracks running the new harness against the complete 54-group case list to
+produce the actual trustworthy successor to the `L94`/`L141`-`L144`
+full-run measurements.
+
+`ninja check-feme` re-confirmed clean at 3,301/3,304 Passed (the +1 over the
+prior session's 3,300 is this session's own new lit test), 3 Unsupported, 0
+Failed. No feature/extension inventory changes (tooling-only session).
