@@ -74,9 +74,25 @@ bool tryUnmergeResourcePointerPHI(PHINode &PN) {
 
   // Collect the `load`s using this PHI as their pointer operand before
   // mutating anything -- rewriting invalidates `PN`'s use-list iterators.
+  //
+  // Crucially, only a `load` in `PN`'s own parent block qualifies: `PN`'s
+  // incoming-block list is only guaranteed to match the *real* CFG
+  // predecessors of `PN`'s own parent block. A `load` sunk into some
+  // later block (past additional control flow downstream of the merge --
+  // e.g. an outer, unrelated `if` that only uses the loaded value along
+  // one path) is not reachable from each incoming block directly, so
+  // reusing `PN`'s incoming-block list for a new `PHINode` placed at that
+  // sunk `load`'s site would produce a `PHINode` whose incoming blocks no
+  // longer match its own parent's actual predecessors -- invalid IR that
+  // silently mis-renders rather than failing loudly (found via CTS's
+  // `binding_model.shader_access.*vertex_fragment*`, roadmap L175: the
+  // combined-vertex+fragment shape adds exactly this kind of extra outer
+  // diamond around the switch-merged resource load).
   SmallVector<LoadInst *, 4> Loads;
   for (User *U : PN.users())
-    if (auto *LI = dyn_cast<LoadInst>(U); LI && LI->getPointerOperand() == &PN)
+    if (auto *LI = dyn_cast<LoadInst>(U); LI &&
+                                          LI->getPointerOperand() == &PN &&
+                                          LI->getParent() == PN.getParent())
       Loads.push_back(LI);
   if (Loads.empty())
     return false;
