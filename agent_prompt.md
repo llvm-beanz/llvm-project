@@ -61,20 +61,17 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~30-60 min)** `L152`: root-cause `subgroupbroadcast_nonconst_*` (105/112 failing, every
-   `requiredsubgroupsize`). Start with a single-case repro
-   (`subgroupbroadcast_nonconst_int_requiredsubgroupsize4` is likely simplest) via `deqp-vk`,
-   then the same `glslangValidator`/`feme-run` fast-iteration pattern this session and `L148`
-   both used -- dump actual vs. expected before touching code. It shares the `L148`-added
-   `llvm.spv.wave.broadcast`/`WaveCallKind::Broadcast` path (112/112 passing for the constant-
-   index form), so the bug is likely specific to how a non-constant-but-uniform index reaches
-   `lowerBroadcast`, not the merge-mask bug this session just fixed.
-2. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged cluster) --
-   still wants its own dedicated session given the scale. Nothing this session changes that.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest
+1. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged cluster) --
+   still wants its own dedicated session given the scale. With `ballot_broadcast.*` now fully
+   closed, this is the single largest remaining known-failing CTS cluster.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest
    not-yet-started cross-repo item, for a session wanting a change of pace from CTS triage.
-4. ~~Worth double-checking: does the fix generalize to a cycle nested two diamonds deep~~ --
-   checked this session with a quick, uncommitted `feme-opt` probe (`if (a) { if (b) { <loop>;
-   } } <store>`): the store correctly threads through both merges (`sideeffect.merge6 =
-   select(c1, sideeffect.merge, sideeffect.f)`, where `sideeffect.merge` is itself the *inner*
-   diamond's own `select(c2, ...)`). No issue found; nothing further needed here.
+3. **(~15 min)** Worth a quick sanity pass next session: re-run the full `subgroups.*` sweep
+   once more from a clean build to confirm the "zero fails" result is stable (this session's
+   sweep completed without the prior session's unrelated `.amber`-file-not-found harness abort,
+   so it's the first time the *entire* cluster has been swept end-to-end in one run -- worth one
+   more confirmation before treating "0 known fails in `subgroups.*`" as fully settled).
+4. With `subgroups.*` fully green, consider broadening the next CTS sweep beyond
+   `subgroups.*`/`ubo.*`/`binding_model.*` to find the next-largest untriaged cluster overall --
+   no specific candidate identified yet this session, but worth a `deqp-vk --deqp-case='dEQP-VK.*'`
+   totals-only pass (no full log) to rank remaining clusters by failure count before picking one.
