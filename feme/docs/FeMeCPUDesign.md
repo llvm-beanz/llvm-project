@@ -2037,19 +2037,40 @@ binding_model.shader_access tests, where the fragment stage's own extra
 exactly this). Rewriting a sunk `load` is only sound when its block is
 reachable from the merge block via a single, unbranched chain of blocks
 (each having exactly one predecessor) — this proves the merge block
-dominates it and that no memory write intervenes anywhere along that one
-path, so the new value-`PHINode` this pass builds at the merge block (in
-the old pointer-`phi`'s own position) already dominates the sunk `load`'s
-site and can simply replace it directly, without needing to rebuild any
-further merge along the way (roadmap L176). A `load` reachable only via
-more than one control-flow path (a second, independent join point
-downstream of the first) is left untouched — this pass has no way to
-re-merge a value at that second join point too; an earlier revision of
-this pass naively reused the `PHINode`'s incoming-block list at any sunk
-load's site regardless of reachability shape, producing a `PHINode`
-whose incoming blocks no longer matched its own parent's real CFG
-predecessors — invalid IR that silently mis-rendered on real hardware
-rather than failing loudly (see roadmap L175's own discovery of this).
+dominates it — and no instruction along that one path could write to the
+resource/image heap a resource pointer addresses, so the new
+value-`PHINode` this pass builds at the merge block (in the old
+pointer-`phi`'s own position) already dominates the sunk `load`'s site and
+can simply replace it directly, without needing to rebuild any further
+merge along the way (roadmap L176). That write-safety check does *not*
+use plain `Instruction::mayWriteToMemory()` verbatim: a `feme.stage.*`
+call (e.g. `feme.stage.input.load`, `feme::isStageOpCall`) carries no LLVM
+`memory(...)` attribute yet at the point in the pipeline this pass runs,
+so a blanket `mayWriteToMemory()` check treats every one of them as an
+unknown, possibly-heap-writing call — but a `feme.stage.*` call is, by
+construction (see "Canonical stage operations" above), scoped entirely to
+a shader's own per-invocation signature/state, group-shared/task-payload
+memory, or execution-mask bookkeeping, never the resource/image heap a
+resource pointer addresses. The pass therefore recognizes any
+`feme::isStageOpCall` as never disqualifying a chain, falling back to
+`mayWriteToMemory()` for everything else. This distinction is what
+`vertex_fragment.single_descriptor.2d`'s real-world shape needed: its
+fragment-stage module computes the very branch condition leading to the
+sunk `load` with a `feme.stage.input.load` call sitting directly between
+the merge phi and the block's terminator, which an earlier revision of
+this write-safety check (correctly, but overly conservatively) treated as
+disqualifying, leaving that case — and the whole `vertex_fragment.*`
+`binding_model.shader_access` cluster alongside it — failing
+`vkCreateGraphicsPipelines` even though the chain-rewrite logic itself
+was already correct. A `load` reachable only via more than one
+control-flow path (a second, independent join point downstream of the
+first) is left untouched — this pass has no way to re-merge a value at
+that second join point too; an earlier revision of this pass naively
+reused the `PHINode`'s incoming-block list at any sunk load's site
+regardless of reachability shape, producing a `PHINode` whose incoming
+blocks no longer matched its own parent's real CFG predecessors — invalid
+IR that silently mis-rendered on real hardware rather than failing
+loudly (see roadmap L175's own discovery of this).
 
 This arrangement preserves the useful properties of the dynamic-only
 execution model:

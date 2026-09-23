@@ -11428,3 +11428,88 @@ disproven) and new row `L177` (this fix). `L176` (fully generalizing
 the pass to also handle the `vertex_fragment` sunk-load shape, rather
 than just declining to rewrite it) remains the only open item from this
 bug family.
+
+## 2026-09-24: L176 fixed -- `binding_model.shader_access.*vertex_fragment*` fully resolved (11,576/11,576 pass)
+
+The prior session's `L176` chain-based generalization of
+`SPIRVUnmergeResourceLoadsPass` (`findLinearChainTo`/`isPathFreeOfWrites`,
+converting `sunk_load_after_merge` from a negative to a positive lit-test
+case) was correct in design and passed every hand-crafted lit test, but
+**the real-world `storage_image.vertex_fragment.single_descriptor.2d` CTS
+repro still failed identically** (`vkCreateGraphicsPipelines`:
+`VK_ERROR_INITIALIZATION_FAILED`, the original `L155`-style "unsupported
+raised operation" message, unchanged). This session root-caused and fixed
+the gap.
+
+**Root cause**: `Pipeline.cpp` was temporarily instrumented with two new
+env-var-guarded `PrintModulePass` dump points
+(`FEME_DUMP_IR_L176_PRE`/`FEME_DUMP_IR_L176_POST`, reverted before this
+session ended) bracketing `SPIRVUnmergeResourceLoadsPass`, to see the
+real fragment-stage module's IR immediately before and after the pass
+runs (the pre-existing `FEME_DUMP_IR` dump point never reaches a module
+that fails this early in the pipeline). Comparing the two dumps showed
+the pass declined to rewrite the phi at all -- the pre-pass and post-pass
+IR were identical. The real merge block's shape:
+
+```llvm
+2:
+  %.0.in.in = phi ptr [ %7, %5 ], [ %10, %8 ], [ %13, %11 ], [ %16, %14 ]
+  %3 = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+  %4 = icmp slt i32 %3, 2
+  br i1 %4, label %22, label %23
+22:
+  %.0.in = load <4 x float>, ptr %.0.in.in, align 4
+  ...
+```
+
+`%22` is reachable from the merge block (`%2`) via a single unbranched
+edge (its unique predecessor is `%2`), which `findLinearChainTo` correctly
+identifies. But `isPathFreeOfWrites`'s walk from the phi to the load
+crosses the `%3 = call i32 @feme.stage.input.load.i32(...)` call sitting
+between the phi and the branch -- and this call has no LLVM `memory(...)`
+attribute yet at the point in the pipeline this pass runs (that
+annotation, if any, is only added later), so `Instruction::
+mayWriteToMemory()` conservatively (and, for this specific call, wrongly)
+treats it as a possible write, correctly-but-unhelpfully causing the pass
+to decline the rewrite.
+
+**Fix**: added `mayWriteResourceMemory()`, which first checks
+`feme::isStageOpCall` (the existing `feme::StageOps` API,
+`feme/lib/Core/StageOps.cpp`) -- a `feme.stage.*` call is, by
+construction, scoped entirely to a shader's own per-invocation
+signature/state, group-shared or task-payload memory, or execution-mask
+bookkeeping, never the resource/image heap a `llvm.spv.resource.
+getpointer` result addresses -- and only falls back to
+`mayWriteToMemory()` for everything else. Used in both
+`isSafeToHoistLoadAfter` (the same-block predecessor check) and
+`isPathFreeOfWrites` (the cross-block chain check), for consistency,
+since both share the identical over-conservatism root cause.
+
+Added a new positive lit test,
+`sunk_load_after_merge_with_intervening_stage_op`, reproducing this exact
+real-world shape (a `feme.stage.input.load` call between the merge phi
+and the branch leading to the sunk load).
+
+**Validation**:
+- `feme-opt` manual run + `opt -passes=verify` + `FileCheck`: all pass.
+- `ninja check-feme`: 3311/3314, 3 unsupported, 0 regressions.
+- Original repro (`storage_image.vertex_fragment.single_descriptor.2d`):
+  now passes (1/1, 100%; was failing before this session's fix).
+- `binding_model.shader_access.*storage_image.vertex_fragment*` (the
+  originally-reported cluster's own binding type): **1704/1704 (100%)
+  pass, 0 fail**.
+- Full `binding_model.shader_access.*vertex_fragment*` sweep (every
+  binding type -- `storage_image`, `combined_image_sampler(_immutable)`,
+  `sampler_immutable`, `uniform_buffer(_dynamic)`, `storage_buffer
+  (_dynamic)`, `uniform_texel_buffer`, `storage_texel_buffer`, etc. --
+  every stage-combination and descriptor-set-shape variant):
+  **11,576/11,576 (100%) pass, 0 failures, 0 regressions**. This
+  confirms the entire `vertex_fragment.*` `binding_model.shader_access`
+  cluster -- open since `L175` first discovered it -- is now fully
+  resolved.
+
+See `Roadmap.md`'s updated `L176` row (struck through, fixed and
+CTS-verified). No `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` updates needed -- this is a correctness fix
+to an already-listed, already-supported feature, not new
+feature/extension coverage.
