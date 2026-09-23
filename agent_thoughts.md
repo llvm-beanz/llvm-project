@@ -100128,3 +100128,63 @@ deleted at session end -- the repro shapes and all findings are fully described 
    `subgroups.*`/`ubo.*`/`binding_model.*` to find the next-largest untriaged cluster overall --
    no specific candidate identified yet this session, but worth a `deqp-vk --deqp-case='dEQP-VK.*'`
    totals-only pass (no full log) to rank remaining clusters by failure count before picking one.
+
+# Session: L153 fixed -- `pImmutableSamplers` support; L154/L155 discovered
+
+**Vulkan device confirmed**: `FeMe CPU Vulkan Device` (mandatory first check, done).
+
+## What's done
+
+1. Fixed `binding_model.shader_access.*combined_image_sampler_immutable*`
+   (`L147`'s last big untriaged cluster, 11,834+ cases). Root cause:
+   `VkDescriptorSetLayoutBinding::pImmutableSamplers` was never read anywhere
+   in FeMe. Fix: capture it at `vkCreateDescriptorSetLayout` time, seed each
+   `DescriptorSet`'s sampler half at allocation time, preserve it (don't
+   overwrite) in `write()`. 3 commits: warning-fix prep, the real fix + 2
+   new unit tests, design-doc update.
+2. Full post-fix CTS re-run: **0 fails** in `combined_image_sampler_immutable.*`
+   across all 12,273 `shader_access` cases. `ninja check-feme`: 3310/3310.
+3. Roadmap/CTS report updated and committed (`L153` struck through as fixed).
+
+## Two new bugs found, NOT fixed this session (both confirmed pre-existing,
+## not regressions, via git-checkout A/B against the pre-fix `.so`)
+
+- **`L154`** (small, ~2 cases): `descriptor_copy.misc.copy_immutable_sampler_*`.
+  `vkUpdateDescriptorSets`'s copy loop doesn't span into the next binding
+  number when `descriptorCount` exceeds one binding's own array size (spec
+  requires it to). Good, self-contained starting point for a future session.
+- **`L155`** (large, 1,479 cases -- likely the next-biggest `binding_model.*`
+  signature): any `storage_image`/`storage_buffer(_dynamic)`/
+  `uniform_buffer(_dynamic)`/texel-buffer/`with_push*` binding used from a
+  `vertex`/`fragment`/`vertex_fragment` graphics pipeline fails
+  `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED` (the
+  same binding types all pass in `compute`). Root cause already narrowed via
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1`: `UnsupportedOps.cpp` rejects the
+  resource handle as unnormalizable. Not yet traced further.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, highest value)** Pick up `L155` first: `storage_image.
+   fragment.single_descriptor` is the smallest repro (non-array, so rules out
+   an array-indexing-specific gap). Read `UnsupportedOps.cpp`'s normalization
+   logic side-by-side with whatever the working `compute`-stage path does to
+   find where they diverge, before scoping a fix. 1,479 cases is a lot of
+   ground to cover once found -- confirm the fix generalizes across all the
+   affected binding types, not just `storage_image`.
+2. **(~30-45 min)** `L154` next: fix `Descriptor.cpp`'s
+   `vkUpdateDescriptorSets` copy loop to walk into subsequent binding numbers
+   once the current one's array is exhausted (mirror the write-side
+   per-element bounds-check shape). Small, isolated, good session-starter if
+   `L155` feels too big to start cold.
+3. Two other `binding_model.*` clusters surfaced but **not yet triaged at
+   all** this session (found only as raw fail-counts during the regression
+   sweep, no root-cause investigation done): `descriptorset_random` (198
+   fails) and `inline_uniform_blocks` (9 fails). Worth a look once `L154`/
+   `L155` are done.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, for a session wanting
+   a change of pace from CTS triage.
+5. No scratch left in `/tmp` from this session -- all `binding_model_*`/
+   `full_sweep`/`isolated*` logs and QPA files deleted; nothing in them was
+   referenced by anything committed (the numbers that mattered are already
+   in `VulkanCTSReport.md`).
