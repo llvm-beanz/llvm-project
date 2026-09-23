@@ -11513,3 +11513,79 @@ CTS-verified). No `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` updates needed -- this is a correctness fix
 to an already-listed, already-supported feature, not new
 feature/extension coverage.
+
+## L178/L179 fixed -- `descriptorset_random`'s 88 `.ialimitlow.*` pipeline-creation failures resolved (198 -> 118 fails)
+
+Continued the prior session's `binding_model.shader_access` never-triaged
+next steps: `descriptorset_random` (198 fails, the largest of the three
+remaining clusters). Categorized the 198 into two classes: 88 exclusively
+`.frag`-stage `vkCreateGraphicsPipelines` rejections (all `.ialimitlow.*`,
+"input attachment limit low" cases), and 110 image-verification
+(pixel-mismatch) failures, a separate, uninvestigated class.
+
+**`L178` root cause**: `FEME_VULKAN_LOG_CREATION_ERRORS=1` again showed
+`UnsupportedOps.cpp`'s "unrelated bystander" diagnostic naming a
+`spirv.VulkanBuffer` handle. A temporary `FEME_DUMP_IR_DSR_PRE_CHECK` dump
+point (mirroring prior sessions' own technique, reverted before this
+session ended) placed immediately before `checkSupportedRaisedOps`
+(earlier than the pre-existing `FEME_DUMP_IR` point, which never fires
+for a module failing this early) showed the real problem elsewhere: three
+`target("spirv.SignedImage", ..., 6, ...)` (`Dim::SubpassData`, i.e.
+subpass-input) handle reads sharing one `set`/`binding` but differing only
+in a constant `0`/`1`/`2` fourth ("index") operand -- the signature of an
+*array* of subpassInput variables (`uAttachments[3]`), matching the test
+name's own `ia` suffix. `SPIRVToLLVMPatterns.cpp`'s `SubpassLoadPattern`/
+`getSubpassVariable` only unwrapped a direct `spirv.Load(spirv.mlir.
+addressof(...))` chain, not one with an intervening `spirv.AccessChain`
+(array indexing), so these reads fell through to the generic (here,
+incorrect) `ImageReadPattern` lowering instead of `feme.stage.subpass.
+load`. Fixed by extending `getSubpassVariable` to unwrap one
+`spirv.AccessChain` level via the existing `getConstantMemberIndex`
+helper, mirroring `ResourceArrayAccessChainPattern`'s handling of ordinary
+resource arrays; a non-constant array index is declined rather than
+miscompiled.
+
+**`L179` root cause** (surfaced immediately after `L178`'s fix let these
+reads reach `SubpassLoadPattern` at all): an `llvm.insertelement`
+verifier failure, since `feme::StageOpKind::SubpassLoad`'s builder and
+lowering always assumed an `f32` result, but these particular
+`ialimitlow` cases are `isubpassInput` (integer-format) attachments,
+which read an `i32`. Fixed by threading a real result `Type` through
+`createStageSubpassLoad`/`getOrInsertSubpassLoadFunc`/`SubpassLoadPattern`
+(`SubpassLoad` was already marked overloaded in `StageOps.cpp`'s table,
+so no new mangling infrastructure was needed) and `FragmentWrapper.cpp`'s
+`lowerFragmentSubpassLoad` (picks `feme::cpu::createLoad2D` vs
+`createLoad2DI32` based on the call's own already-widened element type).
+
+New lit test cases (`spirv-to-llvm-subpass-load.mlir`: constant
+array-index, non-constant-decline, and integer-format shapes) and a new
+unit test (`StageOpsTest.cpp`).
+
+**Validation**:
+- `feme-opt` + `FileCheck`: all new and existing subpass-load lit cases
+  pass.
+- `ninja check-feme`: 3312/3315, 3 unsupported, 0 regressions (up from
+  the established 3311/3314 baseline -- 3 net new lit tests, no
+  failures).
+- Original repro (`descriptorset_random.sets4.constant.*.ialimitlow.0`):
+  now passes.
+- Full 88-case `.ialimitlow.*` pipeline-creation-failure subset: 80/88
+  now pass (the remaining 8 hit the separate, still-open
+  image-verification bug class below, not a pipeline-creation failure).
+- Full `dEQP-VK.binding_model.descriptorset_random.*` sweep: 910 pass /
+  118 fail / 34,120 not-supported (up from 830 pass / 198 fail
+  pre-session) -- **all 88 pipeline-creation failures resolved, 0
+  regressions**.
+
+**Still open**: 118 image-verification (pixel-mismatch) failures remain
+in `descriptorset_random` -- a distinct, not-yet-root-caused bug class
+(confirmed distinct by both its own failure signature and by this
+session's own before/after sweep, which shows these 118 were already
+failing before `L178`/`L179`, unaffected by either fix). A quick
+post-fix stage-suffix breakdown: 30 `.frag.*`, 22 `.vert.*`, 22
+`.comp.*` (74 of 118; the remaining ~44 need a closer look at their own
+test-name suffixes). See `Roadmap.md`'s new `L180` row. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed -- this is a correctness fix to an already-listed, already-
+supported feature (input attachments), not new feature/extension
+coverage.
