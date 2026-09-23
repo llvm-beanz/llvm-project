@@ -100577,3 +100577,113 @@ remained).
 4. **(~5 min)** No scratch left in `/tmp` -- all `l176_*`/`l176v2*` dump
    and log files and the `Pipeline.cpp.bak` backup deleted; everything
    worth keeping is already quoted in `VulkanCTSReport.md`/this file.
+
+# Session: descriptorset_random -- L178 (subpassInput array reads) + L179 (integer-format subpassInput) fixed, 88 pipeline-creation fails resolved
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo` first, per standing
+rule. Picked up the prior session's next step: `binding_model.shader_
+access`'s never-triaged `descriptorset_random` cluster (198 fails, the
+biggest of three leftover clusters).
+
+## What fixed it
+
+Two bugs, found back to back, both in the subpass-input (input-attachment)
+read path:
+
+1. **`L178`**: `SPIRVToLLVMPatterns.cpp`'s `SubpassLoadPattern`/
+   `getSubpassVariable` only recognized a subpassInput variable read
+   directly (`spirv.Load(spirv.mlir.addressof(...))`). An *array* of
+   subpassInput variables (`uAttachments[3]`, a legal Vulkan/GLSL shape)
+   reads through an extra `spirv.AccessChain` first, which the helper
+   didn't unwrap -- so the read silently fell through to the generic,
+   wrong `ImageReadPattern` lowering, tripping `UnsupportedOps.cpp`'s
+   "unsupported raised operation" check on an unrelated resource handle
+   later. Fixed by unwrapping one `spirv.AccessChain` level, reusing the
+   existing `getConstantMemberIndex` helper (already used 7 other places
+   in the same file) to read its constant index, mirroring the sibling
+   `ResourceArrayAccessChainPattern`'s own array-of-resources handling.
+2. **`L179`**: fixing #1 let these reads reach `SubpassLoadPattern` for
+   the first time -- which then hit a *second*, previously-latent bug:
+   `feme::StageOpKind::SubpassLoad` always assumed `f32`, but these
+   particular `ialimitlow` cases are `isubpassInput` (integer format),
+   producing an `llvm.insertelement` verifier failure. `SubpassLoad` was
+   already marked `Overloaded` in `StageOps.cpp`'s table (for an
+   unrelated reason -- widening symbol collision), so this was a small
+   fix: thread a real `Type` through `createStageSubpassLoad`
+   (optional param, defaults to `f32`, existing callers unaffected),
+   `getOrInsertSubpassLoadFunc`, and `FragmentWrapper.cpp`'s
+   `lowerFragmentSubpassLoad` (picks `createLoad2D` vs `createLoad2DI32`
+   off the call's own already-widened element type).
+
+## How it was found (~1.5 hrs)
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` gave the same "unrelated bystander"
+diagnostic every time (`UnsupportedOps.cpp`'s own comment warns about
+this -- it names whichever `handlefrombinding` iterates first, not the
+real cause). Added a new temporary dump point,
+`FEME_DUMP_IR_DSR_PRE_CHECK` (reverted before committing), immediately
+before `checkSupportedRaisedOps` -- earlier than the existing
+`FEME_DUMP_IR`, which never fires for a module failing this early.
+Manually scanning the dumped IR (not trusting the diagnostic's named
+handle) found three `Dim::SubpassData` handle reads sharing one
+`set`/`binding`, differing only in a constant `0`/`1`/`2` index --
+recognized this as an array shape from having read
+`ResourceArrayAccessChainPattern` on a prior session. Test name's own
+`ia` = input attachment suffix confirmed the read.
+
+## Validation (all done, all green)
+
+- New lit test cases (`spirv-to-llvm-subpass-load.mlir`): constant
+  array-index, non-constant-decline, integer-format -- all pass.
+- New unit test (`StageOpsTest.cpp`, `SubpassLoadCanReadIntegerFormat
+  Attachment`): passes.
+- `ninja check-feme`: 3312/3315, 3 unsupported, **0 regressions**.
+- Original repro: now passes.
+- Full 88-case `.ialimitlow.*` pipeline-creation subset: **80/88 now
+  pass** (remaining 8 hit the separate image-verification bug below).
+- Full `descriptorset_random` sweep: **910 pass / 118 fail** (was 830 /
+  198) -- all 88 pipeline-creation failures resolved, 0 regressions.
+
+## Docs updated
+
+- `Roadmap.md`: `L178`/`L179` rows struck through (fixed), new open
+  `L180` row for the remaining 118 image-verification fails.
+- `VulkanCTSReport.md`: new dated section with root-cause writeup and
+  sweep numbers.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked,
+  no update needed -- `shaderInputAttachmentArray{Dynamic,NonUniform}
+  Indexing` correctly stay "no" (this fix is constant-index-only, same
+  as before).
+- `StageOps.h`: `SubpassLoad`'s own doc comment corrected -- it used to
+  claim "always f32," which this session disproved.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, highest value)** `L180`: root-cause `descriptorset_
+   random`'s remaining 118 image-verification (pixel-mismatch) failures
+   -- confirmed a separate bug class from `L178`/`L179` (these 118 were
+   already failing pre-session, untouched by either fix). Stage-suffix
+   breakdown so far: 30 `.frag.*`, 22 `.vert.*`, 22 `.comp.*` (74 of
+   118; ~44 need their own suffix breakdown, not done this session).
+   Pick the smallest failing case per stage bucket, dump actual-vs-
+   expected pixels first -- `L175`'s own history is a specific warning
+   against assuming one root cause too early across sub-shapes that
+   only share a failure symptom.
+2. **(~15 min)** Still not done, mentioned by the last two sessions:
+   add an `assert`/`opt -passes=verify` step after
+   `SPIRVUnmergeResourceLoadsPass` runs in debug builds --
+   `SPIRVToLLVMPatterns.cpp` just found its own second and third
+   found-by-CTS-not-by-review latent bugs (`L178`/`L179`), suggesting
+   this class of "pass declines silently, only a much later stage
+   fails" gap is worth a general defensive check, not just in the one
+   pass it was originally floated for.
+3. **`inline_uniform_blocks` (9 fails)** -- still never-triaged, smaller
+   than `descriptorset_random`, good if `L180` feels too big to start
+   cold.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item.
+5. **(~5 min)** `/tmp` cleanup needed: `dsr_*` logs/qpa files,
+   `Pipeline.cpp.bak`, `pipeline_fail_cases*.txt`, `dsr_remaining_fails.
+   txt`, and the large stdout-capture temp files under
+   `/tmp/*-copilot-tool-output-*` this session generated -- everything
+   worth keeping is already quoted in `VulkanCTSReport.md`/this file.
