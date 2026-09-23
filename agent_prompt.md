@@ -61,28 +61,20 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs)** `L176`: fully generalize `SPIRVUnmergeResourceLoadsPass`
-   to handle the `vertex_fragment` sunk-load shape (currently just
-   declines to rewrite it, which is safe but leaves 147 `storage_image`
-   cases -- likely several hundred once other binding types are
-   counted -- failing `vkCreateGraphicsPipelines` instead of passing).
-   Needs a real design for reconstructing the merge at the sunk load's
-   new location and re-threading it through whatever extra blocks it
-   was sunk across.
-2. **`binding_model_shader_access`/`descriptorset_random` (198
-   fails)/`inline_uniform_blocks` (9 fails)** -- still not triaged at
-   all, mentioned by several prior sessions, still waiting.
+1. **(~1-2 hrs)** `binding_model.shader_access` still has three
+   never-triaged clusters from several sessions ago, now that
+   `vertex_fragment.*` is fully green: `descriptorset_random` (198
+   fails), `inline_uniform_blocks` (9 fails), and the still-mentioned
+   `binding_model.shader_access` shader-access cluster more broadly.
+   `descriptorset_random` is the bigger one -- start there.
+2. **(~15 min)** Given this session found a *second* found-by-CTS-not-
+   by-review bug in the same pass, worth actually doing the "assert or
+   opt -passes=verify after this pass in debug builds" idea a prior
+   session floated instead of just noting it -- would have caught the
+   original `L177` shape at `check-feme` time.
 3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
    -- still the largest not-yet-started cross-repo item, good for a
    change-of-pace session.
-4. **(~15 min)** Given `SPIRVUnmergeResourceLoadsPass` now has two
-   found-by-CTS-not-by-review bugs, consider adding a defensive
-   `assert` or an `opt -passes=verify` step directly after the pass
-   runs in debug builds -- would have caught both bugs at compile time
-   in a `check-feme` run instead of needing a CTS sweep to surface them.
-   Not done this session; just a design idea worth 15 minutes of
-   consideration next time this pass is touched.
-5. No scratch left in `/tmp` -- all `l177_*` dump/log files and the
-   `CommandBuffer.cpp.bak`/`ResourceHeap.cpp.bak` backups deleted;
-   everything worth keeping is already quoted in
-   `VulkanCTSReport.md`/this file.
+4. **(~5 min)** No scratch left in `/tmp` -- all `l176_*`/`l176v2*` dump
+   and log files and the `Pipeline.cpp.bak` backup deleted; everything
+   worth keeping is already quoted in `VulkanCTSReport.md`/this file.
