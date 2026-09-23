@@ -61,27 +61,27 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs, highest value)** Pick up `L155` first: `storage_image.
-   fragment.single_descriptor` is the smallest repro (non-array, so rules out
-   an array-indexing-specific gap). Read `UnsupportedOps.cpp`'s normalization
-   logic side-by-side with whatever the working `compute`-stage path does to
-   find where they diverge, before scoping a fix. 1,479 cases is a lot of
-   ground to cover once found -- confirm the fix generalizes across all the
-   affected binding types, not just `storage_image`.
-2. **(~30-45 min)** `L154` next: fix `Descriptor.cpp`'s
-   `vkUpdateDescriptorSets` copy loop to walk into subsequent binding numbers
-   once the current one's array is exhausted (mirror the write-side
-   per-element bounds-check shape). Small, isolated, good session-starter if
-   `L155` feels too big to start cold.
-3. Two other `binding_model.*` clusters surfaced but **not yet triaged at
-   all** this session (found only as raw fail-counts during the regression
-   sweep, no root-cause investigation done): `descriptorset_random` (198
-   fails) and `inline_uniform_blocks` (9 fails). Worth a look once `L154`/
-   `L155` are done.
+1. **(~1-2 hrs, highest value)** Pick up `L175` first:
+   `storage_image.vertex_fragment.single_descriptor.2d` is the smallest
+   repro for sub-shape (2) (no array, one descriptor set -- just both
+   stages reading the same resource in one pipeline). Dump actual vs.
+   expected pixel values before touching any code; check whether this is
+   a resource-heap-slot aliasing issue (e.g. the vertex and fragment
+   stage's own separately-normalized handles ending up pointing at the
+   same heap slot when they shouldn't, or vice versa) before assuming a
+   shared root cause with sub-shape (1) (`multiple_descriptor_sets` in a
+   single-stage pipeline) -- they may be independent bugs that just
+   happen to share a failure symptom.
+2. **(~30-45 min)** `L154` still open: fix `Descriptor.cpp`'s
+   `vkUpdateDescriptorSets` copy loop to walk into subsequent binding
+   numbers once the current one's array is exhausted. Small, isolated,
+   good session-starter if `L175` feels too big to start cold.
+3. Two `binding_model.*` clusters from two sessions ago still **not
+   triaged at all**: `descriptorset_random` (198 fails) and
+   `inline_uniform_blocks` (9 fails).
 4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
-   still the largest not-yet-started cross-repo item, for a session wanting
-   a change of pace from CTS triage.
-5. No scratch left in `/tmp` from this session -- all `binding_model_*`/
-   `full_sweep`/`isolated*` logs and QPA files deleted; nothing in them was
-   referenced by anything committed (the numbers that mattered are already
-   in `VulkanCTSReport.md`).
+   still the largest not-yet-started cross-repo item, for a session
+   wanting a change of pace from CTS triage.
+5. No scratch left in `/tmp` from this session -- all `l155_*` logs/qpa
+   files deleted; nothing in them was referenced by anything committed
+   (the numbers that mattered are already in `VulkanCTSReport.md`).
