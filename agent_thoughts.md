@@ -100374,3 +100374,109 @@ step 2 below.
    `VulkanCTSReport.md`/this file. Also delete
    `/tmp/Pipeline.cpp.presession_bak` (no longer needed, both reverts
    already `diff`-verified clean).
+
+# Session: L177 -- L175's `multiple_descriptor_sets` root-caused as a *second*, independent bug in the same pass; Vulkan-layer hypothesis disproved
+
+**Start here next session**: pick up `L176` (item 2 below) or the
+untriaged `binding_model.*` clusters (item 3) -- both fully open.
+
+## What got done (in order)
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo` (mandatory check).
+2. Baseline: `ninja check-feme` 3311/3311, 0 regressions, before any
+   changes.
+3. Started from last session's handoff hypothesis: `multiple_descriptor_sets`
+   is a Vulkan-layer descriptor-set/heap-population bug. Added debug
+   instrumentation to `ResourceHeap.cpp`/`CommandBuffer.cpp` (both
+   reverted after use) to check it.
+4. **The hypothesis was wrong.** Both descriptor sets' image-heap slots
+   are populated correctly -- confirmed via dumps showing both
+   `(Space, BaseRegister)` ranges matched, both bound, both valid. Last
+   session had only checked the *earliest* pre-normalize IR dump (which
+   looked fine); the actual bug lives in a *later* pass, which that
+   dump never covered.
+5. Re-attempted `FEME_DUMP_IR=1` on the same case, reproduced last
+   session's unexplained `deqp-vk` segfault -- this time caught it live
+   with `gdb -batch -ex run -ex bt`. **Root cause of the segfault**:
+   LLVM's own `Module::print`/`AssemblyWriter` crashing while printing
+   genuinely invalid IR (not a printer/dump-mechanism quirk).
+6. Added two more temporary dump points (`PrintModulePass` inserted
+   directly into `Pipeline.cpp`'s pass list, before/after
+   `SPIRVUnmergeResourceLoadsPass`) to bisect which pass produces the
+   bad IR. `opt -passes=verify` confirmed: `PHI nodes not grouped at
+   top of basic block!` -- straight from `SPIRVUnmergeResourceLoadsPass`
+   itself, a *second*, independent bug from last session's
+   `sunk_load_after_merge` fix.
+7. **The actual bug**: when two independent phi-of-pointer merges share
+   one block (second switch's merge block has `[phi, non-phi fadd using
+   first switch's value, load-being-unmerged, ...]`), the pass inserted
+   the new value-phi at the *load's* position -- fine when the load is
+   the phi's very next instruction, invalid once something else sits
+   between them.
+8. Fixed with a one-line change:
+   `ValuePHI->insertBefore(LI->getIterator())` ->
+   `ValuePHI->insertBefore(PN.getIterator())` -- anchor on the *old
+   phi's* position instead, which IR validity at pass-entry guarantees
+   is already correctly placed.
+9. Added a new positive-case lit test (`two_merges_share_a_block`).
+   Confirmed it fails (live verifier error, via `git stash` on just the
+   `.cpp` fix) without the fix, passes with it.
+10. `ninja check-feme`: 3311/3311, 0 regressions.
+11. CTS-verified: original repro now passes (1/1, 100%); full
+    `storage_image.*` sweep (1,176 cases) went from 867/1176 to
+    1029/1176 passing, with the remaining 147 failures confirmed
+    (via a breakdown of every failing case name) to be *exclusively*
+    the still-open `L176` `vertex_fragment.*` cluster -- zero new
+    regressions. A broader cross-binding-type sweep found zero fails in
+    everything it completed before its own timeout.
+12. Committed in 2 pieces: the fix+test, then the doc updates
+    (`Roadmap.md`, `VulkanCTSReport.md`). Checked
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` --
+    confirmed no-op (pure correctness fix, no new feature surface).
+
+## Why this mattered (the actual headline)
+
+Same lesson as last session, but sharper: **a prior session's own
+inference about where a bug "must" be (downstream/Vulkan-layer, because
+the earliest IR dump looked fine) was itself wrong**, because it never
+checked *later* pipeline stages. When a bug's symptom is "the earliest
+thing I checked looks correct," that's evidence about the earliest
+thing, not about where the bug actually is. Should have checked
+post-`SPIRVUnmergeResourceLoadsPass` IR immediately, given that pass's
+already-known history of one miscompile this exact area.
+
+Also: `SPIRVUnmergeResourceLoadsPass` has now had two independent
+invariant-violation bugs found by CTS regression sweeps, both from
+shapes its own hand-written tests never covered (single-switch only).
+Worth asking, next time this pass is touched, whether a *third* variant
+exists -- e.g. three-or-more-merges-sharing-a-block, or two merges
+sharing a block with zero intervening instructions but different
+incoming-value types.
+
+## Suggested next steps
+
+1. **(~1-2 hrs)** `L176`: fully generalize `SPIRVUnmergeResourceLoadsPass`
+   to handle the `vertex_fragment` sunk-load shape (currently just
+   declines to rewrite it, which is safe but leaves 147 `storage_image`
+   cases -- likely several hundred once other binding types are
+   counted -- failing `vkCreateGraphicsPipelines` instead of passing).
+   Needs a real design for reconstructing the merge at the sunk load's
+   new location and re-threading it through whatever extra blocks it
+   was sunk across.
+2. **`binding_model_shader_access`/`descriptorset_random` (198
+   fails)/`inline_uniform_blocks` (9 fails)** -- still not triaged at
+   all, mentioned by several prior sessions, still waiting.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, good for a
+   change-of-pace session.
+4. **(~15 min)** Given `SPIRVUnmergeResourceLoadsPass` now has two
+   found-by-CTS-not-by-review bugs, consider adding a defensive
+   `assert` or an `opt -passes=verify` step directly after the pass
+   runs in debug builds -- would have caught both bugs at compile time
+   in a `check-feme` run instead of needing a CTS sweep to surface them.
+   Not done this session; just a design idea worth 15 minutes of
+   consideration next time this pass is touched.
+5. No scratch left in `/tmp` -- all `l177_*` dump/log files and the
+   `CommandBuffer.cpp.bak`/`ResourceHeap.cpp.bak` backups deleted;
+   everything worth keeping is already quoted in
+   `VulkanCTSReport.md`/this file.
