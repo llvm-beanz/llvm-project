@@ -972,6 +972,32 @@ private:
   /// root and use it directly when they all agree (see `run`).
   DenseMap<BasicBlock *, SmallVector<BasicBlock *, 2>> ExitToBoundaryBlocks;
 
+  /// Roadmap L151: for every block `validate` stopped at (see
+  /// `CycleBoundaryBlocks`), the reconvergence point (`End`, possibly
+  /// `nullptr` for "the rest of the function") that walk was validating
+  /// towards when it stopped -- i.e. what a nested cycle's own exit-block
+  /// root must eventually reach before some *other*, enclosing root's own
+  /// walk takes over (see `RootEnd`). Like `CycleBoundaryMasks`, never
+  /// cleared between roots and keyed on whichever walk reaches a given
+  /// boundary block first, since that is the same walk `run` uses to seed
+  /// `RootEnd` for the boundary block's own exit root(s) immediately
+  /// after recording it.
+  DenseMap<BasicBlock *, BasicBlock *> CycleBoundaryEnd;
+
+  /// Roadmap L151: for every cycle-exit block `run` has added as its own
+  /// root, the reconvergence point (from `CycleBoundaryEnd`) that root's
+  /// own `flatten` call must stop at -- `nullptr` (the default a missing
+  /// key's lookup yields) for the common case of a cycle not nested in
+  /// any enclosing diamond's arm, in which case that root's own walk
+  /// correctly continues all the way to a `ret`, exactly as before this
+  /// map existed. Without this, an exit root nested inside an enclosing
+  /// diamond's arm would walk *past* that diamond's own merge point and
+  /// re-mask its (already correctly merged, by the enclosing diamond's
+  /// own root) downstream code with this root's own narrower, stale mask
+  /// instead -- see the file's `L151` roadmap entry for the miscompile
+  /// this caused.
+  DenseMap<BasicBlock *, BasicBlock *> RootEnd;
+
   /// Roadmap H75: every masked-load result `applyStageMasks` has produced
   /// so far, across every root `flatten` has processed in this `run` --
   /// see `applyStageMasks`'s own `MaskedLoads` parameter comment, and
@@ -1020,6 +1046,19 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
     if (isInCycle(Cur) &&
         (isLoopControlEdge(Cur, T) || isLoopControlEdge(Cur, Fsucc))) {
       CycleBoundaryBlocks.insert(Cur);
+      // Roadmap L151: remember the reconvergence point (if any) this walk
+      // was headed for when it stopped here, so `run` can seed this
+      // cycle's own exit-block root with the *same* one (see `RootEnd`)
+      // instead of always assuming the cycle's exit reaches a `ret`
+      // directly. A cycle nested inside an enclosing diamond's arm (e.g.
+      // a second, sibling loop inside an `if`'s true arm) has its exit
+      // block's own downstream code -- up to and including that diamond's
+      // merge -- *shared* with the enclosing diamond's other arm; without
+      // this, the exit-block root's own `flatten` walk would independently
+      // re-walk (and re-mask, with a stale, narrower mask) that same
+      // shared tail after the enclosing root's walk already merged and
+      // masked it correctly.
+      CycleBoundaryEnd.try_emplace(Cur, End);
       return true; // Stop here; LoopLinearizer's problem, not an error.
     }
 
@@ -1290,7 +1329,16 @@ bool DiamondFlattener::run() {
   SmallPtrSet<BasicBlock *, 8> Considered{&F.getEntryBlock()};
   for (unsigned I = 0; I != Roots.size(); ++I) {
     CycleBoundaryBlocks.clear();
-    if (!validate(Roots[I], nullptr))
+    // Roadmap L151: a cycle-exit root discovered below by an *earlier*
+    // iteration already has its own `RootEnd` entry (see below) recorded
+    // before that iteration ends -- use it here too so this root's own
+    // validation does not needlessly re-walk (and, more importantly,
+    // does not itself have to reason about) code past whatever enclosing
+    // diamond's own arm this cycle was nested in; the entry root itself,
+    // and any cycle-exit root not nested in an enclosing diamond's arm,
+    // simply get `nullptr` back (this map's default), unchanged from
+    // before this map existed.
+    if (!validate(Roots[I], RootEnd.lookup(Roots[I])))
       return false;
     for (BasicBlock *CycleBlock : CycleBoundaryBlocks) {
       SmallVector<BasicBlock *, 2> Exits;
@@ -1301,8 +1349,14 @@ bool DiamondFlattener::run() {
         // `flatten` records for them (see `CycleBoundaryMasks`) instead of
         // always assuming every lane reaches it.
         ExitToBoundaryBlocks[Exit].push_back(CycleBlock);
-        if (Considered.insert(Exit).second)
+        if (Considered.insert(Exit).second) {
           Roots.push_back(Exit);
+          // Roadmap L151: seed this new root's own `End` (see `RootEnd`)
+          // from whichever walk recorded `CycleBlock` first -- consistent
+          // with `CycleBoundaryMasks`'s own "first walk is authoritative"
+          // rule for the exact same kind of boundary-block ambiguity.
+          RootEnd.try_emplace(Exit, CycleBoundaryEnd.lookup(CycleBlock));
+        }
       }
     }
   }
@@ -1371,7 +1425,18 @@ bool DiamondFlattener::run() {
       if (Seen && !Mixed)
         EntryMasks = Candidate;
     }
-    flatten(Root, nullptr, EntryMasks, nullptr);
+    // Roadmap L151: stop this root's own walk at whichever reconvergence
+    // point (if any) `RootEnd` recorded for it, redirecting the edge that
+    // would otherwise land there right back at itself (a no-op redirect;
+    // see `flatten`'s own `RedirectTo` comment) -- i.e. reach it and
+    // return without touching it or anything past it, leaving that
+    // entirely to whichever *other* root's own walk owns the enclosing
+    // diamond this cycle was nested in. `nullptr` (this map's default for
+    // the entry root, and any cycle-exit root not nested in an enclosing
+    // diamond's arm) preserves this call's pre-existing "walk all the way
+    // to a `ret`" behavior exactly.
+    BasicBlock *End = RootEnd.lookup(Root);
+    flatten(Root, End, EntryMasks, /*RedirectTo=*/End);
   }
   return true;
 }
