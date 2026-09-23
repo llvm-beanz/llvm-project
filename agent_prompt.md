@@ -61,20 +61,31 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs)** `binding_model.shader_access` still has three
-   never-triaged clusters from several sessions ago, now that
-   `vertex_fragment.*` is fully green: `descriptorset_random` (198
-   fails), `inline_uniform_blocks` (9 fails), and the still-mentioned
-   `binding_model.shader_access` shader-access cluster more broadly.
-   `descriptorset_random` is the bigger one -- start there.
-2. **(~15 min)** Given this session found a *second* found-by-CTS-not-
-   by-review bug in the same pass, worth actually doing the "assert or
-   opt -passes=verify after this pass in debug builds" idea a prior
-   session floated instead of just noting it -- would have caught the
-   original `L177` shape at `check-feme` time.
-3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   -- still the largest not-yet-started cross-repo item, good for a
-   change-of-pace session.
-4. **(~5 min)** No scratch left in `/tmp` -- all `l176_*`/`l176v2*` dump
-   and log files and the `Pipeline.cpp.bak` backup deleted; everything
+1. **(~1-2 hrs, highest value)** `L180`: root-cause `descriptorset_
+   random`'s remaining 118 image-verification (pixel-mismatch) failures
+   -- confirmed a separate bug class from `L178`/`L179` (these 118 were
+   already failing pre-session, untouched by either fix). Stage-suffix
+   breakdown so far: 30 `.frag.*`, 22 `.vert.*`, 22 `.comp.*` (74 of
+   118; ~44 need their own suffix breakdown, not done this session).
+   Pick the smallest failing case per stage bucket, dump actual-vs-
+   expected pixels first -- `L175`'s own history is a specific warning
+   against assuming one root cause too early across sub-shapes that
+   only share a failure symptom.
+2. **(~15 min)** Still not done, mentioned by the last two sessions:
+   add an `assert`/`opt -passes=verify` step after
+   `SPIRVUnmergeResourceLoadsPass` runs in debug builds --
+   `SPIRVToLLVMPatterns.cpp` just found its own second and third
+   found-by-CTS-not-by-review latent bugs (`L178`/`L179`), suggesting
+   this class of "pass declines silently, only a much later stage
+   fails" gap is worth a general defensive check, not just in the one
+   pass it was originally floated for.
+3. **`inline_uniform_blocks` (9 fails)** -- still never-triaged, smaller
+   than `descriptorset_random`, good if `L180` feels too big to start
+   cold.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item.
+5. **(~5 min)** `/tmp` cleanup needed: `dsr_*` logs/qpa files,
+   `Pipeline.cpp.bak`, `pipeline_fail_cases*.txt`, `dsr_remaining_fails.
+   txt`, and the large stdout-capture temp files under
+   `/tmp/*-copilot-tool-output-*` this session generated -- everything
    worth keeping is already quoted in `VulkanCTSReport.md`/this file.
