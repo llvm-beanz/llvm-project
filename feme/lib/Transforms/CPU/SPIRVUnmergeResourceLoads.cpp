@@ -101,7 +101,18 @@ bool tryUnmergeResourcePointerPHI(PHINode &PN) {
   for (LoadInst *LI : Loads) {
     PHINode *ValuePHI = PHINode::Create(LI->getType(), PN.getNumIncomingValues(),
                                          LI->getName() + ".unmerged");
-    ValuePHI->insertBefore(LI->getIterator());
+    // Insert at `PN`'s own position, not `LI`'s: `PN` is a `PHINode`, so
+    // (the input IR being valid) it is guaranteed to already sit among
+    // the block's leading run of phis. `LI` is not -- when this block
+    // holds more than one independent phi-of-pointer merge (e.g. a
+    // second switch's own resource access sharing a store/merge block
+    // with an already-lowered value from an earlier one), a non-phi
+    // instruction can legally sit between `PN` and its own `LI`, and
+    // inserting a new phi there would violate the "phis grouped at the
+    // top of the block" invariant -- exactly the invalid-IR shape found
+    // via CTS's `binding_model.shader_access.*multiple_descriptor_sets*`
+    // (roadmap L175/L177).
+    ValuePHI->insertBefore(PN.getIterator());
     for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
       Value *InVal = PN.getIncomingValue(I);
       BasicBlock *InBB = PN.getIncomingBlock(I);

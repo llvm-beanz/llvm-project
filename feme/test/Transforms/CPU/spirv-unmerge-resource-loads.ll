@@ -154,3 +154,77 @@ use:
 skip:
   ret float 0.000000e+00
 }
+
+; Two independent phi-of-pointer merges sharing one block (e.g. two
+; consecutive switches over the same quadrant-style index, each with its
+; own resource access, whose second switch's merge block also uses the
+; first switch's already-lowered value): the second phi's own `load` is
+; not the block's very first instruction (a non-phi use of the first
+; switch's value sits between the block's leading phi and that load).
+; The new value-`PHINode` this pass builds for the second merge must be
+; inserted at the *old* pointer-`phi`'s own position, not the *load*'s,
+; or it ends up after a non-phi instruction -- violating the "phis
+; grouped at the top of the block" IR invariant. Found via CTS's
+; `binding_model.shader_access.*multiple_descriptor_sets*` (roadmap
+; L175/L177): an earlier revision of this pass produced exactly this
+; invalid shape here.
+; CHECK-LABEL: define float @two_merges_share_a_block(
+; CHECK: merge2:
+; CHECK-NEXT: %[[SECOND:.*]] = phi float
+; CHECK-NEXT: %sum = fadd float %v1.unmerged, 0.000000e+00
+; CHECK-NEXT: %total = fadd float %sum, %[[SECOND]]
+define float @two_merges_share_a_block(i32 %idx) {
+entry:
+  switch i32 %idx, label %b1 [
+    i32 0, label %a1
+  ]
+
+a1:
+  %ha1 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %pa1 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %ha1, <2 x i32> <i32 1, i32 1>)
+  br label %merge1
+
+b1:
+  %hb1 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %pb1 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %hb1, <2 x i32> <i32 2, i32 2>)
+  br label %merge1
+
+merge1:
+  %p1 = phi ptr [ %pa1, %a1 ], [ %pb1, %b1 ]
+  %v1 = load float, ptr %p1, align 4
+  switch i32 %idx, label %b2 [
+    i32 0, label %a2
+  ]
+
+a2:
+  %ha2 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 1, i32 0, i32 1, i32 0, ptr null)
+  %pa2 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %ha2, <2 x i32> <i32 1, i32 1>)
+  br label %merge2
+
+b2:
+  %hb2 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 1, i32 0, i32 1, i32 0, ptr null)
+  %pb2 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %hb2, <2 x i32> <i32 2, i32 2>)
+  br label %merge2
+
+merge2:
+  ; `%p2`'s own `load` (`%v2`) is not `merge2`'s first instruction: the
+  ; non-phi `%sum` below (using `%v1`, from the earlier merge) sits
+  ; between them in program order.
+  %p2 = phi ptr [ %pa2, %a2 ], [ %pb2, %b2 ]
+  %sum = fadd float %v1, 0.000000e+00
+  %v2 = load float, ptr %p2, align 4
+  %total = fadd float %sum, %v2
+  ret float %total
+}
