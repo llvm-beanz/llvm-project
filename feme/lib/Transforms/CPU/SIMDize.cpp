@@ -1986,23 +1986,36 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   Value *WideMask =
       Kind == WaveCallKind::GetLaneCount ? nullptr : Env.EntryMask;
 
-  // (Roadmap H149) `IsFirstLane` has no operand of its own for
-  // `feme::cpu::LinearizePass` to narrow the way `Ballot`'s predicate or a
-  // reduce's value operand get narrowed there (`int_dx_wave_is_first_lane`/
-  // `int_spv_wave_is_first_lane` are fixed-arity, zero-operand intrinsics)
-  // -- that pass instead attaches the region's own live mask as a
-  // `"feme.divergence.mask"` operand bundle on `CI` whenever it is not
-  // known-constant-true (see Linearize.cpp's own comment). AND its
-  // widened value into `WideMask` here so `lowerIsFirstLane` finds the
-  // correct "first among the invocations still active in this divergent
-  // region" lane, not "first among the wave's whole original entry mask"
-  // -- `Env.EntryMask` alone still covers the common, not-narrowed (no
-  // bundle) case unchanged.
-  if (Kind == WaveCallKind::IsFirstLane) {
+  // (Roadmap H149, extended by L152) `IsFirstLane` has no operand of its
+  // own for `feme::cpu::LinearizePass` to narrow the way `Ballot`'s
+  // predicate or a reduce's value operand get narrowed there
+  // (`int_dx_wave_is_first_lane`/`int_spv_wave_is_first_lane` are
+  // fixed-arity, zero-operand intrinsics) -- that pass instead attaches
+  // the region's own live mask as a `"feme.divergence.mask"` operand
+  // bundle on `CI` whenever it is not known-constant-true (see
+  // Linearize.cpp's own comment). AND its widened value into `WideMask`
+  // here so `lowerIsFirstLane` finds the correct "first among the
+  // invocations still active in this divergent region" lane, not "first
+  // among the wave's whole original entry mask" -- `Env.EntryMask` alone
+  // still covers the common, not-narrowed (no bundle) case unchanged.
+  // `Broadcast` needs this exact same narrowing for an analogous reason
+  // (roadmap `L152`): its own `Id` operand identifies the *source lane*,
+  // not "is the current lane active", so it cannot narrow `WideMask` the
+  // way `Ballot`'s predicate or a reduce's value operand can -- `feme::
+  // cpu::WaveLoweringPass::lowerBroadcast`'s "any lane `WideMask` marks
+  // active will do" logic (see that function's own comment) silently
+  // picked an active-per-the-*whole-wave* lane that was not actually one
+  // of the invocations calling this particular `Broadcast` at all
+  // whenever it sat inside a divergent region narrower than the whole
+  // wave (e.g. `dEQP-VK.subgroups.ballot_broadcast.compute.
+  // subgroupbroadcast_nonconst_*`'s own "lane id that is only uniform
+  // across active lanes" case), so `Linearize.cpp` attaches the same
+  // bundle to a `Broadcast` call too.
+  if (Kind == WaveCallKind::IsFirstLane || Kind == WaveCallKind::Broadcast) {
     if (auto Bundle = CI.getOperandBundle("feme.divergence.mask"))
       WideMask = Builder.CreateAnd(WideMask,
                                    getWidened(Bundle->Inputs[0], Builder),
-                                   "wave.is_first_lane.masked");
+                                   "wave.divergence.masked");
   }
 
   // (roadmap L7t) `subgroupAllEqual`/`WaveActiveAllEqual` is the one

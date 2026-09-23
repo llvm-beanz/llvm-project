@@ -637,6 +637,45 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
           Call->replaceAllUsesWith(NewCall);
           Call->eraseFromParent();
         }
+        // (roadmap L152) `subgroupBroadcast`/`OpGroupNonUniformBroadcast`
+        // needs this exact same "narrow to invocations still active
+        // *here*" treatment `WaveIsFirstLane` gets immediately above, for
+        // an analogous reason: unlike `Ballot`'s predicate or a reduce's
+        // value operand, `Broadcast`'s own `Id` operand identifies the
+        // *source lane*, not "is the current lane active", so it cannot
+        // narrow `feme::cpu::FunctionWidener::widenWaveCall`'s own
+        // `WideMask` the way those operands do -- that function seeds
+        // every wave call's `WideMask` from the wave's whole, original
+        // `Env.EntryMask`, narrowing it further only when a call's own
+        // operand does, or (for `IsFirstLane`, and now `Broadcast` too)
+        // when this bundle does. Missing this let `feme::cpu::
+        // WaveLoweringPass::lowerBroadcast`'s "any lane `WideMask` marks
+        // active will do" logic (see that function's own comment) pick a
+        // lane active per the *whole wave*'s original entry mask that was
+        // not actually one of the invocations calling this particular
+        // `Broadcast` at all, whenever it sat inside a divergent region
+        // narrower than the whole wave -- found reducing `dEQP-VK.
+        // subgroups.ballot_broadcast.compute.subgroupbroadcast_nonconst_*`
+        // (its own "lane id that is only uniform across active lanes"
+        // case) down to this exact shape. Unlike `IsFirstLane`,
+        // `Broadcast` is not a fixed-arity, zero-operand intrinsic, so its
+        // existing operands are preserved on the replacement call
+        // alongside the new bundle rather than dropped.
+        if (ID == Intrinsic::spv_wave_broadcast &&
+            !isKnownConstantMask(Masks.Live)) {
+          OperandBundleDef DivergenceMask("feme.divergence.mask",
+                                          ArrayRef<Value *>(Masks.Live));
+          CallInst *NewCall = CallInst::Create(
+              Call->getFunctionType(), Call->getCalledOperand(),
+              {Call->getArgOperand(0), Call->getArgOperand(1)},
+              ArrayRef<OperandBundleDef>(DivergenceMask), "",
+              Call->getIterator());
+          NewCall->setCallingConv(Call->getCallingConv());
+          NewCall->setAttributes(Call->getAttributes());
+          NewCall->takeName(Call);
+          Call->replaceAllUsesWith(NewCall);
+          Call->eraseFromParent();
+        }
       }
       continue;
     }

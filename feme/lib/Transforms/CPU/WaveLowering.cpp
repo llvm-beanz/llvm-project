@@ -527,25 +527,47 @@ Value *lowerReadLane(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
   return Result;
 }
 
-/// `wave.broadcast` (roadmap `L148`): unlike `lowerReadLane` above, this
-/// call's lane index is spec-guaranteed uniform (see
-/// `WaveCallKind::Broadcast`'s own comment in `WaveCalls.h`), so every
-/// lane of \p WideLaneIndex already holds the identical source lane --
-/// lane 0 is read arbitrarily, not because it is special. That collapses
-/// the whole operation to three `extractelement`s and one `select`, with
-/// no scratch allocas and no `O(WaveSize)` loop: exactly the `O(1)`-per-
-/// call-site cost that resolves the `dEQP-VK.subgroups.ballot_broadcast.
-/// compute.*_requiredsubgroupsize{64,128}` hang, whose shader source has
-/// `N == WaveSize` static broadcast call sites (so the old, `ReadLane`-
-/// shared `O(WaveSize)`-per-site cost compounded into `O(WaveSize^2)`
-/// total IR -- see `L148`'s writeup in `feme/docs/VulkanCTSReport.md`).
+/// `wave.broadcast` (roadmap `L148`, index-source fixed by `L152`): unlike
+/// `lowerReadLane` above, this call's lane index is spec-guaranteed
+/// uniform -- but only *across the invocations actually calling it* (see
+/// `WaveCallKind::Broadcast`'s own comment in `WaveCalls.h`), i.e. across
+/// the lanes \p WideMask marks active, not necessarily across the whole,
+/// possibly-wider \p WideLaneIndex vector. A call guarded by an enclosing
+/// divergent `if` (e.g. `dEQP-VK.subgroups.ballot_broadcast.compute.
+/// subgroupbroadcast_nonconst_*`'s own "lane id that is only uniform
+/// across active lanes" case) still has this pass's predication model
+/// compute *some* value for every lane's own copy of the index expression
+/// -- masked-off lanes' copies are simply meaningless, not identical to
+/// the active lanes' shared one. Reading a fixed, always-in-bounds-but-
+/// not-necessarily-active lane (lane 0, as this originally did) silently
+/// used a masked-off lane's own meaningless index whenever lane 0 itself
+/// was not one of the invocations actually calling this broadcast,
+/// producing a wrong source lane -- and, doubly wrong, then reading
+/// *that* wrong lane's own mask bit (usually false) to decide activity,
+/// zeroing the result outright instead of returning the correct
+/// broadcast value. Fixed by reading the index from the first lane
+/// `WideMask` itself marks active (`getClampedFirstActiveLaneIndex`,
+/// already used by `lowerAllEqual` above for the same "any active lane
+/// will do" reasoning) instead of a hardcoded lane 0: any active lane's
+/// copy of the index is, by the spec guarantee, the identical value every
+/// other active lane's copy holds, so which one is picked does not
+/// matter, as long as it is guaranteed active. This keeps the whole
+/// operation at exactly four `extractelement`s, one `select`, and the
+/// `cttz`/`select` `getClampedFirstActiveLaneIndex` already builds -- no
+/// scratch allocas, no `O(WaveSize)` loop: still the `O(1)`-per-call-site
+/// cost that resolves the `dEQP-VK.subgroups.ballot_broadcast.compute.*_
+/// requiredsubgroupsize{64,128}` hang, whose shader source has `N ==
+/// WaveSize` static broadcast call sites (see `L148`'s writeup in
+/// `feme/docs/VulkanCTSReport.md`).
 Value *lowerBroadcast(IRBuilder<> &Builder, Value *WideMask,
                       Value *WideOperand, Value *WideLaneIndex,
                       unsigned WaveSize) {
   Type *ElemTy = cast<VectorType>(WideOperand->getType())->getElementType();
   Value *Zero = Constant::getNullValue(ElemTy);
+  Value *AnyActiveLane =
+      getClampedFirstActiveLaneIndex(Builder, WideMask, WaveSize);
   Value *SrcIdx =
-      Builder.CreateExtractElement(WideLaneIndex, Builder.getInt32(0));
+      Builder.CreateExtractElement(WideLaneIndex, AnyActiveLane);
   Value *LaneActive = Builder.CreateExtractElement(WideMask, SrcIdx);
   Value *RawVal = Builder.CreateExtractElement(WideOperand, SrcIdx);
   return Builder.CreateSelect(LaneActive, RawVal, Zero);
