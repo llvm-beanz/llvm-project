@@ -100188,3 +100188,73 @@ deleted at session end -- the repro shapes and all findings are fully described 
    `full_sweep`/`isolated*` logs and QPA files deleted; nothing in them was
    referenced by anything committed (the numbers that mattered are already
    in `VulkanCTSReport.md`).
+
+# Session: L155 fixed via new `SPIRVUnmergeResourceLoadsPass`; L175 discovered
+
+**Vulkan device confirmed**: `FeMe CPU Vulkan Device` (mandatory first check, done).
+
+## What's done
+
+1. Root-caused and fixed `L155` (`binding_model.shader_access.*`'s
+   1,479-case `vkCreateGraphicsPipelines`-rejection cluster). Real cause:
+   an upstream, graphics-stage-only `InstCombinePass`
+   (`UnrollConstantTripCountStageLoopsPass`, runs before this pipeline
+   even starts) folds a phi-of-per-branch-loads into a phi-of-pointers +
+   one shared load -- an ordinary LLVM canonicalization that defeats
+   `SPIRVResourceLoweringPass`'s "flat access only" matchers.
+2. Fix: new pass `feme::cpu::SPIRVUnmergeResourceLoadsPass`
+   (`feme-cpu-spirv-unmerge-resource-loads`) that finds and undoes exactly
+   that shape. Must run **before** `PreparePass`'s `LowerSwitchPass` --
+   found this the hard way, first placement (after `PreparePass`) fixed
+   nothing.
+3. New lit test (`spirv-unmerge-resource-loads.ll`), 4 commits (pass +
+   registration + test, pipeline wiring, design-doc update, roadmap/CTS
+   report update).
+4. `ninja check-feme`: 3311/3311 (0 regressions, +1 new test).
+5. CTS re-run: original 20-case repro (`storage_image.fragment.
+   single_descriptor.*`) now 20/20. Broad `binding_model.shader_access.*`
+   sweep (~40,000 cases): **zero** remaining `vkCreateGraphicsPipelines`
+   rejections anywhere -- `L155` is fully closed.
+6. Roadmap/CTS report updated and committed (`L155` struck through,
+   `L174` added for the fix).
+
+## One new bug found, NOT fixed this session (confirmed not a regression
+## -- these cases never reached `vkCreateGraphicsPipelines` before this
+## fix, so no prior sweep could have seen them)
+
+- **`L175`** (~3,000 cases): "Image verification failed" (real pixel
+  mismatch, not a creation error) for two overlapping shapes, both still
+  non-`compute`-stage only: (1) any binding spanning **more than one
+  descriptor set** in a single-stage pipeline (single-descriptor-set form
+  of the same binding/stage/array shape passes fine); (2) **any** binding
+  used from a **`vertex_fragment`** (both stages, one pipeline) pipeline,
+  regardless of descriptor-set count or array shape. Also seen for
+  `with_template`/`with_push*`/`bind2` API variants. Not yet
+  root-caused -- just classified via targeted single-case checks.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, highest value)** Pick up `L175` first:
+   `storage_image.vertex_fragment.single_descriptor.2d` is the smallest
+   repro for sub-shape (2) (no array, one descriptor set -- just both
+   stages reading the same resource in one pipeline). Dump actual vs.
+   expected pixel values before touching any code; check whether this is
+   a resource-heap-slot aliasing issue (e.g. the vertex and fragment
+   stage's own separately-normalized handles ending up pointing at the
+   same heap slot when they shouldn't, or vice versa) before assuming a
+   shared root cause with sub-shape (1) (`multiple_descriptor_sets` in a
+   single-stage pipeline) -- they may be independent bugs that just
+   happen to share a failure symptom.
+2. **(~30-45 min)** `L154` still open: fix `Descriptor.cpp`'s
+   `vkUpdateDescriptorSets` copy loop to walk into subsequent binding
+   numbers once the current one's array is exhausted. Small, isolated,
+   good session-starter if `L175` feels too big to start cold.
+3. Two `binding_model.*` clusters from two sessions ago still **not
+   triaged at all**: `descriptorset_random` (198 fails) and
+   `inline_uniform_blocks` (9 fails).
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, for a session
+   wanting a change of pace from CTS triage.
+5. No scratch left in `/tmp` from this session -- all `l155_*` logs/qpa
+   files deleted; nothing in them was referenced by anything committed
+   (the numbers that mattered are already in `VulkanCTSReport.md`).
