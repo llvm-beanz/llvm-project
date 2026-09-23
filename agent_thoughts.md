@@ -100041,3 +100041,90 @@ minutes if needed.
    } } <store>`): the store correctly threads through both merges (`sideeffect.merge6 =
    select(c1, sideeffect.merge, sideeffect.f)`, where `sideeffect.merge` is itself the *inner*
    diamond's own `select(c2, ...)`). No issue found; nothing further needed here.
+
+# Session: L152 fixed -- `Broadcast`'s `WideMask` never narrowed to its divergent region
+
+## What happened
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` (mandatory first step).
+2. Read `vktSubgroupsBallotBroadcastTests.cpp` for `nonconst_*`'s exact shape: a divergent
+   `if (sgInvocation >= sgSize/2) { id = sgInvocation & ~((sgSize/2)-1);
+   op = subgroupBroadcast(data[sgInvocation], id); }` -- `id` is spec-guaranteed uniform only
+   among the invocations that enter the `if`, not across the whole (possibly wider) wave.
+3. Built a minimal GLSL repro (`glslangValidator --target-env vulkan1.3` + direct
+   `feme-run --wave-size=4 --groups=1,1,1`) mirroring that exact shape. Confirmed it reproduces:
+   lanes 2/3 (which enter the `if`) got `0` instead of the expected `30` (`data[2]`).
+4. **First fix attempt failed**: switched `lowerBroadcast`'s hardcoded lane-0 read to
+   `getClampedFirstActiveLaneIndex` (the same helper `lowerAllEqual` already uses). Rebuilt,
+   re-ran -- still `0 0`. This ruled out "just pick any active lane" as sufficient on its own.
+5. Added temporary env-var-gated `M.print(errs(), nullptr)` dumps in `Pipeline.cpp` (same
+   pattern as `L151`), rebuilt, captured IR after `LinearizePass` and after `SIMDizePass`. Found
+   the real bug: the unwidened `llvm.spv.wave.broadcast.i32` call carried **no mask operand or
+   divergence bundle at all** -- unlike `feme.cpu.resource.load.raw.i32` in the same function,
+   which correctly got `i1 %live.t`.
+6. Traced `FunctionWidener::widenWaveCall` in `SIMDize.cpp`: it seeds every wave call's
+   `WideMask` from the wave's whole, original `Env.EntryMask`, narrowing it further only for (a)
+   a call's own operand support (`Ballot`'s predicate, a reduce's value), or (b) — the one
+   existing exception, from `H149` — `IsFirstLane`'s own `"feme.divergence.mask"` operand
+   bundle. **`Broadcast` had none of these three paths.** So even the corrected
+   `getClampedFirstActiveLaneIndex` lookup (step 4) still picked from the wrong, too-broad mask.
+7. **Real fix**, generalizing `H149`'s own pattern:
+   - `Linearize.cpp`: attach `"feme.divergence.mask"` to a `spv.wave.broadcast` call whenever
+     its live mask is not known-constant-true, preserving the call's existing operands (unlike
+     `IsFirstLane`, which is zero-arity).
+   - `SIMDize.cpp`: extend the `IsFirstLane`-only `WideMask` narrowing check to also cover
+     `Broadcast`.
+   - `WaveLowering.cpp`: keep the `getClampedFirstActiveLaneIndex` fix from step 4 -- necessary,
+     but only correct once `WideMask` itself is properly narrowed by the two changes above.
+8. Verified: wave-size-4 repro now correctly produces `30 30`. A second wave-size-8 repro
+   confirms the fix generalizes (`50 50 50 50` for lanes 4-7).
+9. Reverted the temporary `Pipeline.cpp` debug instrumentation (never committed).
+10. Added a reduced Linearize+SIMDize+WaveLowering lit test
+    (`wave-lowering-broadcast-narrowed-in-divergent-region.ll`), confirmed to fail (hardcoded
+    lane 0, wrong mask) without the fix. Updated the pre-existing `wave-lowering-broadcast.ll`'s
+    `CHECK` lines for the now-always-computed active-lane lookup (its own always-lane-0 case is
+    unchanged in *result*, since it has no divergence bundle and the entry mask is never
+    partial there -- only the exact instruction sequence changed).
+11. `ninja check-feme`: 3308/3308 non-unsupported tests passing.
+12. Full CTS re-run against the live driver:
+    - `ballot_broadcast.compute.subgroupbroadcast_nonconst_*`: 112/112 passing (0 fails, down
+      from 105/112 failing).
+    - Full `subgroups.*` sweep (48,705 cases, no harness abort this time): **zero fails total**,
+      confirming no regression in `IsFirstLane`/`subgroupElect` (shares the extended
+      conditional) or the vector-operand `Broadcast` path, and that `L148`/`L151`'s own fixes
+      still hold.
+13. Committed in 2 pieces: the code fix + 2 lit tests, then the docs update.
+14. Updated `Roadmap.md` (`L152` struck through) and `VulkanCTSReport.md` (new
+    `## L152: fixed` section). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+    change (pure correctness fix, no feature/extension surface touched).
+
+## What now works
+
+`dEQP-VK.subgroups.ballot_broadcast.*` is **entirely closed** -- 0 known fails across the whole
+cluster (both the `L148`/`L151`-fixed constant-index and `broadcastfirst_*` cases, and this
+session's `nonconst_*` fix). The full `dEQP-VK.subgroups.*` sweep (48,705 cases) has zero known
+failures. Try it: `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json deqp-vk
+-n dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcast_nonconst_int_requiredsubgroupsize4`.
+
+## Cleanup
+
+`/tmp/l152/` (2 repro shaders, 2 heap YAMLs, IR dump, QPA logs from this session's CTS re-runs)
+deleted at session end -- the repro shapes and all findings are fully described above and in
+`VulkanCTSReport.md`, so a future session can regenerate either in minutes if needed.
+
+## Suggested next steps
+
+1. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged cluster) --
+   still wants its own dedicated session given the scale. With `ballot_broadcast.*` now fully
+   closed, this is the single largest remaining known-failing CTS cluster.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest
+   not-yet-started cross-repo item, for a session wanting a change of pace from CTS triage.
+3. **(~15 min)** Worth a quick sanity pass next session: re-run the full `subgroups.*` sweep
+   once more from a clean build to confirm the "zero fails" result is stable (this session's
+   sweep completed without the prior session's unrelated `.amber`-file-not-found harness abort,
+   so it's the first time the *entire* cluster has been swept end-to-end in one run -- worth one
+   more confirmation before treating "0 known fails in `subgroups.*`" as fully settled).
+4. With `subgroups.*` fully green, consider broadening the next CTS sweep beyond
+   `subgroups.*`/`ubo.*`/`binding_model.*` to find the next-largest untriaged cluster overall --
+   no specific candidate identified yet this session, but worth a `deqp-vk --deqp-case='dEQP-VK.*'`
+   totals-only pass (no full log) to rank remaining clusters by failure count before picking one.
