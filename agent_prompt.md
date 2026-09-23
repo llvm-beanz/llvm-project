@@ -61,31 +61,28 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(highest value, ~1-2 hrs)** Root-cause `multiple_descriptor_sets`:
-   start by reading `feme/lib/Vulkan/Descriptor*.cpp`'s
-   `vkUpdateDescriptorSets`/`image_heap`-population path, comparing a
-   single-descriptor-set case against a two-descriptor-set case to find
-   where the second set's binding gets lost before it ever reaches the
-   shader. The shader IR is confirmed correct (see above), so this is a
-   Vulkan-layer bug, not an LLVM-pass bug -- don't waste time back in
-   `SPIRVResourceLoweringPass`/`Linearize.cpp` for this one.
-2. **(~1-2 hrs, once above is fixed or as a standalone task)** `L176`:
-   generalize `SPIRVUnmergeResourceLoadsPass` to correctly re-thread the
-   merge through a sunk load instead of just declining to rewrite it.
-   This would restore `vertex_fragment.*` support (121 `storage_image`
-   cases alone, likely several hundred once other binding types are
-   counted). More invasive than this session's fix -- needs a real
-   design for how to reconstruct the merge at the phi's own block and
-   propagate it through whatever extra blocks the load was sunk across.
-3. **`binding_model_shader_access`/`descriptorset_random`
-   (198 fails)/`inline_uniform_blocks` (9 fails)** -- still not triaged
-   at all, mentioned by prior sessions, still waiting.
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+1. **(~1-2 hrs)** `L176`: fully generalize `SPIRVUnmergeResourceLoadsPass`
+   to handle the `vertex_fragment` sunk-load shape (currently just
+   declines to rewrite it, which is safe but leaves 147 `storage_image`
+   cases -- likely several hundred once other binding types are
+   counted -- failing `vkCreateGraphicsPipelines` instead of passing).
+   Needs a real design for reconstructing the merge at the sunk load's
+   new location and re-threading it through whatever extra blocks it
+   was sunk across.
+2. **`binding_model_shader_access`/`descriptorset_random` (198
+   fails)/`inline_uniform_blocks` (9 fails)** -- still not triaged at
+   all, mentioned by several prior sessions, still waiting.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
    -- still the largest not-yet-started cross-repo item, good for a
    change-of-pace session.
-5. **(~5 min)** Clean up `/tmp/l175_*` scratch (PNG dumps, `.ll` dumps,
-   `.log` files) -- everything worth keeping is already quoted in
-   `VulkanCTSReport.md`/this file. Also delete
-   `/tmp/Pipeline.cpp.presession_bak` (no longer needed, both reverts
-   already `diff`-verified clean).
-
+4. **(~15 min)** Given `SPIRVUnmergeResourceLoadsPass` now has two
+   found-by-CTS-not-by-review bugs, consider adding a defensive
+   `assert` or an `opt -passes=verify` step directly after the pass
+   runs in debug builds -- would have caught both bugs at compile time
+   in a `check-feme` run instead of needing a CTS sweep to surface them.
+   Not done this session; just a design idea worth 15 minutes of
+   consideration next time this pass is touched.
+5. No scratch left in `/tmp` -- all `l177_*` dump/log files and the
+   `CommandBuffer.cpp.bak`/`ResourceHeap.cpp.bak` backups deleted;
+   everything worth keeping is already quoted in
+   `VulkanCTSReport.md`/this file.
