@@ -1190,6 +1190,20 @@ the ICD does not yet list `VK_EXT_descriptor_indexing` in
 | Inline uniform block | Byte-blob descriptor storage | Object model only (E14); dispatch consumption deferred |
 | Acceleration structure | None | Out of scope |
 
+**Immutable samplers (roadmap L153).** `VkDescriptorSetLayoutBinding::
+pImmutableSamplers` bakes a `SAMPLER`/`COMBINED_IMAGE_SAMPLER` binding's
+sampler half into the layout itself: per spec, an application never supplies
+it again via `vkUpdateDescriptorSets` (a `COMBINED_IMAGE_SAMPLER` write to
+such a binding still applies its image half, but the write's own
+`VkDescriptorImageInfo::sampler` field is ignored, not applied). `Descriptor.
+{h,cpp}` models this by capturing each array element's sampler handle onto
+`DescriptorSetLayoutBinding::ImmutableSamplers` at `vkCreateDescriptorSetLayout`
+time, seeding `DescriptorSet`'s own per-element `DescriptorImageBinding::Samp`
+from it at construction time (the only way an immutable-sampler binding's
+sampler half is ever populated), and having `DescriptorSet::write` preserve
+that seeded value rather than overwrite it from an incoming write's own
+(spec-ignored) sampler field.
+
 Descriptor updates obey Vulkan's host synchronization rules. Queue submission
 must preserve the visibility and lifetime semantics of update-after-bind and
 descriptor update templates before advertising those features. The first
