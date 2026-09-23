@@ -13,6 +13,7 @@
 
 #include "feme/Transforms/CPU/SPIRVUnmergeResourceLoads.h"
 
+#include "feme/Core/StageOps.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -39,6 +40,29 @@ bool isSPIRVResourceGetPointerCall(const Value *V) {
          Callee->getIntrinsicID() == Intrinsic::spv_resource_getpointer;
 }
 
+/// Returns true if \p I could write to memory a resource pointer this pass
+/// rewrites (a `llvm.spv.resource.getpointer` result) could ever alias.
+/// Plain `Instruction::mayWriteToMemory()` is too conservative for this
+/// pass's purposes: a `feme.stage.*` call (`feme::isStageOpCall`) is, by
+/// construction (see feme/docs/FeMeGraphicsDesign.md's "Canonical stage
+/// operations" section), scoped entirely to a shader's own per-invocation
+/// signature/state, group-shared or task-payload memory, or execution-mask
+/// bookkeeping -- never the resource/image heap a `llvm.spv.resource.
+/// getpointer` result addresses -- but such calls have no LLVM `memory(...)`
+/// attribute yet at the point in the pipeline this pass runs (that
+/// annotation, if any, is added later), so `mayWriteToMemory()` alone
+/// treats every one of them as an unknown, possibly-heap-writing call.
+/// Found via CTS's `binding_model.shader_access.*vertex_fragment*`
+/// (roadmap L176): the real-world sunk-load shape has exactly one
+/// `feme.stage.input.load` call sitting between the merge phi and its own
+/// sunk load, which an earlier, stricter revision of this check treated as
+/// disqualifying, defeating the rewrite this pass exists to perform.
+bool mayWriteResourceMemory(const Instruction &I) {
+  if (const auto *CI = dyn_cast<CallInst>(&I); CI && feme::isStageOpCall(*CI))
+    return false;
+  return I.mayWriteToMemory();
+}
+
 /// Returns true if every instruction in \p BB strictly after \p After (and
 /// before \p BB's terminator) is free of any memory-write side effect --
 /// i.e. hoisting a `load` that currently reads through \p BB's incoming
@@ -47,7 +71,7 @@ bool isSPIRVResourceGetPointerCall(const Value *V) {
 bool isSafeToHoistLoadAfter(const Instruction *After) {
   for (const Instruction *I = After->getNextNode(); I && !I->isTerminator();
        I = I->getNextNode()) {
-    if (I->mayWriteToMemory())
+    if (mayWriteResourceMemory(*I))
       return false;
   }
   return true;
@@ -108,7 +132,7 @@ bool isPathFreeOfWrites(const PHINode &PN, ArrayRef<BasicBlock *> Chain,
   for (const Instruction *I = PN.getNextNode(); I; I = I->getNextNode()) {
     if (I == LI)
       return true;
-    if (I->mayWriteToMemory())
+    if (mayWriteResourceMemory(*I))
       return false;
     if (I->isTerminator())
       break;
@@ -118,7 +142,7 @@ bool isPathFreeOfWrites(const PHINode &PN, ArrayRef<BasicBlock *> Chain,
     for (const Instruction &I : *BB) {
       if (&I == LI)
         return true;
-      if (I.mayWriteToMemory())
+      if (mayWriteResourceMemory(I))
         return false;
     }
   }

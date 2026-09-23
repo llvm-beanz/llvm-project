@@ -251,6 +251,65 @@ skip2:
   ret float 0.000000e+00
 }
 
+; A load sunk past an intervening `feme.stage.*` call is still rewritten:
+; unlike a real memory write, a `feme.stage.input.load` call (`feme::
+; isStageOpCall`) never touches the resource/image heap a `llvm.spv.
+; resource.getpointer` result addresses, even though it carries no LLVM
+; `memory(...)` attribute of its own at this point in the pipeline (so a
+; plain `mayWriteToMemory()` check alone -- the *only* check an earlier
+; revision of this pass used -- would conservatively (and incorrectly)
+; treat it as disqualifying). Found via CTS's `binding_model.shader_access.
+; *vertex_fragment*` (roadmap L176): the real-world fragment-stage module
+; has exactly this shape -- a `feme.stage.input.load` reads the branch
+; condition itself, sitting directly between the merge phi and the block's
+; terminator, and the sunk load lives one block further down one of that
+; branch's arms.
+; CHECK-LABEL: define float @sunk_load_after_merge_with_intervening_stage_op(
+; CHECK: merge:
+; CHECK-NEXT: %v.unmerged = phi <4 x float>
+; CHECK-NEXT: %cond = call i32 @feme.stage.input.load.i32(
+; CHECK-NEXT: %tst = icmp
+; CHECK-NEXT: br i1 %tst, label %use, label %skip
+; CHECK: use:
+; CHECK-NEXT: %s = extractelement <4 x float> %v.unmerged, i64 0
+define float @sunk_load_after_merge_with_intervening_stage_op(i32 %idx) {
+entry:
+  switch i32 %idx, label %case1 [
+    i32 0, label %case0
+  ]
+
+case0:
+  %h0 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %p0 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %h0, <2 x i32> <i32 1, i32 1>)
+  br label %merge
+
+case1:
+  %h1 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %p1 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %h1, <2 x i32> <i32 2, i32 2>)
+  br label %merge
+
+merge:
+  %p = phi ptr [ %p0, %case0 ], [ %p1, %case1 ]
+  %cond = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+  %tst = icmp slt i32 %cond, 2
+  br i1 %tst, label %use, label %skip
+
+use:
+  %v = load <4 x float>, ptr %p, align 4
+  %s = extractelement <4 x float> %v, i64 0
+  ret float %s
+
+skip:
+  ret float 0.000000e+00
+}
+
+declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
 
 ; Two independent phi-of-pointer merges sharing one block (e.g. two
 ; consecutive switches over the same quadrant-style index, each with its
