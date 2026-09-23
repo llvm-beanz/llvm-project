@@ -99957,3 +99957,87 @@ than to gamble on an unconfirmed fix to this file.
    not-yet-started cross-repo item.
 6. No scratch left in `/tmp` -- everything under `/tmp/l151` (11 GLSL repro variants, one QPA
    log) deleted at session end; regenerate from this entry's description, not from leftover files.
+
+# Session: L151 fixed -- `DiamondFlattener` double-masking a diamond's shared merge tail
+
+Fixed. `subgroupbroadcastfirst_*` went from 105 fails to 0. Full details below.
+
+## What just happened
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` (mandatory first step, done).
+2. Regenerated the prior session's minimal GLSL repro (a ballot + loop-with-break finding
+   "first" + `subgroupBroadcastFirst`, then a divergent `if` for every non-first lane containing
+   a *second*, same-shaped loop, before an unconditional store) via `glslangValidator` +
+   `feme-run --wave-size=4 --groups=1,1,1`. Confirmed it still reproduces: lane 0 (which
+   correctly skips the `if`) reads `0` instead of the expected `2570`.
+3. Added temporary env-var-gated `M.print(errs(), nullptr)` dumps in
+   `feme/lib/Target/CPU/Pipeline.cpp` before/after `LinearizePass` and after `SIMDizePass`
+   (mirroring the file's own existing `FEME_DUMP_IR` convention). Rebuilt `feme-run`, captured
+   all three IR phases, hand-traced them.
+4. Found the smoking gun: `DiamondFlattener::flatten` computes a correct, merged post-`if` mask
+   at the reconvergence block -- but it's never used. The final store instead uses an *earlier*
+   value: the `if`'s own entry mask into the nested loop (constant-false for a lane that skips
+   the `if`).
+5. Root-caused the exact mechanism: `DiamondFlattener::run()` treats a cycle's exit block as its
+   own independent "root," always walking it all the way to a `ret`. When that cycle is nested
+   inside an enclosing diamond's arm, the enclosing diamond's own root already correctly walks
+   through and masks the reconvergence block and everything after it -- but the cycle-exit
+   root's own separate walk, unaware of this, walks past the same reconvergence block *again*
+   and re-masks it with its own stale, narrower mask. Whichever root runs later wins, silently
+   overwriting the correct merge.
+6. **Fixed** (`feme/lib/Transforms/CPU/Linearize.cpp`): added `CycleBoundaryEnd` (records the
+   enclosing region's own reconvergence point the moment `validate()` stops at a cycle boundary)
+   and `RootEnd` (seeds each cycle-exit root with it), so a nested cycle's exit-root walk stops
+   at the enclosing diamond's own merge point instead of re-walking past it. ~30 lines, one file.
+7. Verified the fix directly: repro now produces `2570 2570 2570 2570` for all four lanes.
+8. Added a reduced Linearize lit test
+   (`resource-call-after-diamond-with-nested-loop-in-arm.ll`), confirmed to fail (using the
+   stale entry mask) without the fix and pass with it.
+9. Reverted the temporary `Pipeline.cpp` debug instrumentation (never committed).
+10. `ninja check-feme`: 3307/3307 passing, 3 pre-existing unsupported, 0 failed.
+11. Full CTS re-run against the live driver:
+    - `ballot_broadcast.*`: all 105 previously-failing `subgroupbroadcastfirst_*` now pass.
+    - Near-complete `subgroups.*` sweep (47,723 cases; harness hit an unrelated pre-existing
+      `.amber` file-not-found error past that point and stopped): zero regressions anywhere
+      else, including `shuffle.*` (shares this same pass, 0 fails).
+    - Remaining 105 fails in `ballot_broadcast.*` are all `subgroupbroadcast_nonconst_*` --
+      confirmed a **separate, unrelated** bug (uses the same `L148`-added constant-index
+      Broadcast path, which is 112/112 passing, but with a non-constant index).
+12. Committed in 2 pieces: the code fix + test, then the docs update.
+13. Updated `Roadmap.md` (`L151` struck through, new `L152` row opened for `nonconst_*`) and
+    `VulkanCTSReport.md` (new `## L151: fixed` section). `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change (pure correctness fix, no feature/extension surface
+    touched).
+
+## What now works
+
+`dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcastfirst_*` -- all 105 previously
+failing cases pass. Try it: `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json
+deqp-vk -n dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcastfirst_int_requiredsubgroupsize4`.
+
+## Cleanup
+
+`/tmp/l151c` (repro shader, heap YAML, IR dump used for this session's trace) and
+`/tmp/ctsrun_l151` (QPA logs) deleted at session end -- the repro shape and all findings are
+fully described above and in `VulkanCTSReport.md`, so a future session can regenerate either in
+minutes if needed.
+
+## Suggested next steps
+
+1. **(~30-60 min)** `L152`: root-cause `subgroupbroadcast_nonconst_*` (105/112 failing, every
+   `requiredsubgroupsize`). Start with a single-case repro
+   (`subgroupbroadcast_nonconst_int_requiredsubgroupsize4` is likely simplest) via `deqp-vk`,
+   then the same `glslangValidator`/`feme-run` fast-iteration pattern this session and `L148`
+   both used -- dump actual vs. expected before touching code. It shares the `L148`-added
+   `llvm.spv.wave.broadcast`/`WaveCallKind::Broadcast` path (112/112 passing for the constant-
+   index form), so the bug is likely specific to how a non-constant-but-uniform index reaches
+   `lowerBroadcast`, not the merge-mask bug this session just fixed.
+2. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged cluster) --
+   still wants its own dedicated session given the scale. Nothing this session changes that.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest
+   not-yet-started cross-repo item, for a session wanting a change of pace from CTS triage.
+4. ~~Worth double-checking: does the fix generalize to a cycle nested two diamonds deep~~ --
+   checked this session with a quick, uncommitted `feme-opt` probe (`if (a) { if (b) { <loop>;
+   } } <store>`): the store correctly threads through both merges (`sideeffect.merge6 =
+   select(c1, sideeffect.merge, sideeffect.f)`, where `sideeffect.merge` is itself the *inner*
+   diamond's own `select(c2, ...)`). No issue found; nothing further needed here.
