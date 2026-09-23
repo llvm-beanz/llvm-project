@@ -61,27 +61,31 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs, highest value)** Pick up `L175` first:
-   `storage_image.vertex_fragment.single_descriptor.2d` is the smallest
-   repro for sub-shape (2) (no array, one descriptor set -- just both
-   stages reading the same resource in one pipeline). Dump actual vs.
-   expected pixel values before touching any code; check whether this is
-   a resource-heap-slot aliasing issue (e.g. the vertex and fragment
-   stage's own separately-normalized handles ending up pointing at the
-   same heap slot when they shouldn't, or vice versa) before assuming a
-   shared root cause with sub-shape (1) (`multiple_descriptor_sets` in a
-   single-stage pipeline) -- they may be independent bugs that just
-   happen to share a failure symptom.
-2. **(~30-45 min)** `L154` still open: fix `Descriptor.cpp`'s
-   `vkUpdateDescriptorSets` copy loop to walk into subsequent binding
-   numbers once the current one's array is exhausted. Small, isolated,
-   good session-starter if `L175` feels too big to start cold.
-3. Two `binding_model.*` clusters from two sessions ago still **not
-   triaged at all**: `descriptorset_random` (198 fails) and
-   `inline_uniform_blocks` (9 fails).
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
-   still the largest not-yet-started cross-repo item, for a session
-   wanting a change of pace from CTS triage.
-5. No scratch left in `/tmp` from this session -- all `l155_*` logs/qpa
-   files deleted; nothing in them was referenced by anything committed
-   (the numbers that mattered are already in `VulkanCTSReport.md`).
+1. **(highest value, ~1-2 hrs)** Root-cause `multiple_descriptor_sets`:
+   start by reading `feme/lib/Vulkan/Descriptor*.cpp`'s
+   `vkUpdateDescriptorSets`/`image_heap`-population path, comparing a
+   single-descriptor-set case against a two-descriptor-set case to find
+   where the second set's binding gets lost before it ever reaches the
+   shader. The shader IR is confirmed correct (see above), so this is a
+   Vulkan-layer bug, not an LLVM-pass bug -- don't waste time back in
+   `SPIRVResourceLoweringPass`/`Linearize.cpp` for this one.
+2. **(~1-2 hrs, once above is fixed or as a standalone task)** `L176`:
+   generalize `SPIRVUnmergeResourceLoadsPass` to correctly re-thread the
+   merge through a sunk load instead of just declining to rewrite it.
+   This would restore `vertex_fragment.*` support (121 `storage_image`
+   cases alone, likely several hundred once other binding types are
+   counted). More invasive than this session's fix -- needs a real
+   design for how to reconstruct the merge at the phi's own block and
+   propagate it through whatever extra blocks the load was sunk across.
+3. **`binding_model_shader_access`/`descriptorset_random`
+   (198 fails)/`inline_uniform_blocks` (9 fails)** -- still not triaged
+   at all, mentioned by prior sessions, still waiting.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, good for a
+   change-of-pace session.
+5. **(~5 min)** Clean up `/tmp/l175_*` scratch (PNG dumps, `.ll` dumps,
+   `.log` files) -- everything worth keeping is already quoted in
+   `VulkanCTSReport.md`/this file. Also delete
+   `/tmp/Pipeline.cpp.presession_bak` (no longer needed, both reverts
+   already `diff`-verified clean).
+
