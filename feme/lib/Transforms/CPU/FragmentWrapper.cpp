@@ -433,23 +433,26 @@ Value *loadFragmentPositionComponent(IRBuilder<> &Builder,
 
 /// Roadmap F8a: lowers `feme.stage.subpass.load(attachment_index,
 /// component, sample)` (see `feme::StageOpKind::SubpassLoad`) into a
-/// `feme.cpu.image.load.2d.v4f32` call against \p F's own
-/// `subpass_input_heap`/`subpass_input_heap_count` parameters (added by
-/// `feme::cpu::SPIRVSubpassLoweringPass`, surviving `feme::cpu::SIMDizePass`
-/// widening unchanged, exactly like `image_heap`), at the invocation's own
-/// fragment location -- `subpassLoad`'s coordinate is always relative to the
-/// current fragment (see SPIRVToLLVMPatterns.cpp's `SubpassLoadPattern`,
-/// which never threads a coordinate operand through at all), truncated
-/// towards zero: `FemeFragmentInvocation::Position` is always a pixel
-/// center (`x + 0.5`, `y + 0.5`), so simple truncation recovers the integer
-/// texel address, matching every other fragment-position-derived texel
-/// address in this file. Mip is always 0 (a render-target attachment has no
-/// mip chain of its own); \p CI's own `sample` operand (roadmap F8c) is
-/// threaded straight through to `createLoad2D`'s own `Sample` parameter,
-/// rather than the constant 0 every other caller of it still passes,
-/// since this is the one caller that can genuinely address another sample
-/// of a multisampled attachment. The returned `<4 x float>` texel is
-/// narrowed to the requested component -- mirroring
+/// `feme.cpu.image.load.2d.v4f32`/`.v4i32` call (roadmap L179: whichever
+/// matches \p CI's own, already-widened element type -- `f32` for a plain
+/// `subpassInput`, `i32` for an `isubpassInput`/`usubpassInput`) against
+/// \p F's own `subpass_input_heap`/`subpass_input_heap_count` parameters
+/// (added by `feme::cpu::SPIRVSubpassLoweringPass`, surviving
+/// `feme::cpu::SIMDizePass` widening unchanged, exactly like
+/// `image_heap`), at the invocation's own fragment location --
+/// `subpassLoad`'s coordinate is always relative to the current fragment
+/// (see SPIRVToLLVMPatterns.cpp's `SubpassLoadPattern`, which never
+/// threads a coordinate operand through at all), truncated towards zero:
+/// `FemeFragmentInvocation::Position` is always a pixel center (`x + 0.5`,
+/// `y + 0.5`), so simple truncation recovers the integer texel address,
+/// matching every other fragment-position-derived texel address in this
+/// file. Mip is always 0 (a render-target attachment has no mip chain of
+/// its own); \p CI's own `sample` operand (roadmap F8c) is threaded
+/// straight through to `createLoad2D`/`createLoad2DI32`'s own `Sample`
+/// parameter, rather than the constant 0 every other caller of either
+/// still passes, since this is the one caller that can genuinely address
+/// another sample of a multisampled attachment. The returned `<4 x T>`
+/// texel is narrowed to the requested component -- mirroring
 /// `lowerFragmentInputLoad`'s own per-lane, masked-select shape above.
 Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
                                 const WaveBodyEnv &WEnv,
@@ -491,9 +494,20 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
     feme::cpu::ImageCallEnv ImgEnv;
     ImgEnv.ImageHeap = SubpassInputHeap;
     ImgEnv.ImageHeapCount = SubpassInputHeapCount;
-    CallInst *Texel = feme::cpu::createLoad2D(
-        Builder, ImgEnv, AttachmentIndex, X, Y, Builder.getInt32(0), Sample,
-        Active);
+    // Roadmap L179: an `isubpassInput`/`usubpassInput` attachment widens
+    // this call's own result to a `<W x i32>` (mirroring the `<W x f32>`
+    // a plain `subpassInput` widens to -- see `StageOpKind::SubpassLoad`'s
+    // comment), so the per-lane scalar element type CI's own (already-
+    // widened) type carries tells us which of the image heap's two
+    // per-format load intrinsics to read the texel back with.
+    bool IsIntFormat = CI.getType()->getScalarType()->isIntegerTy();
+    CallInst *Texel =
+        IsIntFormat
+            ? feme::cpu::createLoad2DI32(Builder, ImgEnv, AttachmentIndex, X,
+                                         Y, Builder.getInt32(0), Sample,
+                                         Active)
+            : feme::cpu::createLoad2D(Builder, ImgEnv, AttachmentIndex, X, Y,
+                                      Builder.getInt32(0), Sample, Active);
     auto *IndexConst = dyn_cast<ConstantInt>(Component);
     Value *LaneResult =
         IndexConst

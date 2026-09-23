@@ -173,6 +173,22 @@ TEST_F(StageOpsTest, SubpassLoadCarriesExplicitSample) {
   ASSERT_EQ(getStageOpConstantOperand(*CI, 2), 3u);
 }
 
+// Roadmap L179: an `isubpassInput`/`usubpassInput` attachment reads back an
+// `i32`, not `SubpassLoad`'s default `f32` -- both must round-trip through
+// `isStageOpCall`/`getCalledFunction` distinctly, mirroring every other
+// overloaded `feme.stage.*` op's own per-type mangled name.
+TEST_F(StageOpsTest, SubpassLoadCanReadIntegerFormatAttachment) {
+  CallInst *CI = createStageSubpassLoad(B, /*AttachmentIndex=*/1,
+                                        /*Component=*/0, /*Sample=*/nullptr,
+                                        B.getInt32Ty());
+  EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.subpass.load.i32");
+  EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 1u);
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*CI, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::SubpassLoad);
+}
+
 /// (Roadmap H6i) `TaskPayloadStore` is overloaded on its `value` operand --
 /// the second argument, unlike `OutputStore`'s fourth -- and its first
 /// (`offset`) operand round-trips as an ordinary constant `i32`.

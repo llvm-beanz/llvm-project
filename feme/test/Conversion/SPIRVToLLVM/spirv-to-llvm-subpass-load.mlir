@@ -104,6 +104,27 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment]
 
 // -----
 
+// Roadmap L179: an `isubpassInput` (signed-integer-format input
+// attachment) reads back through `feme.stage.subpass.load.i32`, the
+// `SubpassLoad` op's integer overload, rather than the default `.f32` one
+// every prior case in this file uses.
+
+// CHECK-LABEL: llvm.func @load_subpass_signed
+// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load.i32(%{{.*}}, %{{.*}}, %{{.*}}) : (i32, i32, i32) -> i32
+// CHECK: llvm.return %[[R]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
+  spirv.GlobalVariable @in_signed bind(0, 0) {input_attachment_index = 0 : i32} : !spirv.ptr<!spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+  spirv.func @load_subpass_signed() -> si32 "None" {
+    %0 = spirv.mlir.addressof @in_signed : !spirv.ptr<!spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>
+    %zero = spirv.Constant dense<0> : vector<2xi32>
+    %2 = spirv.ImageRead %1, %zero : !spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, vector<2xi32> -> si32
+    spirv.ReturnValue %2 : si32
+  }
+}
+
+// -----
+
 // A non-constant array index into a subpassInput array is declined
 // (`getSubpassVariable` returns `std::nullopt`) rather than miscompiled --
 // `feme::StageOpKind::SubpassLoad`'s own `AttachmentIndex` operand is a

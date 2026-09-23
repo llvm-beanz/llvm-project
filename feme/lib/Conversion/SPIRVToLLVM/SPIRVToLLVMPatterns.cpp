@@ -7364,31 +7364,42 @@ std::optional<SubpassVariableAccess> getSubpassVariable(mlir::Value Image) {
   return SubpassVariableAccess{Global, ArrayIndexOffset};
 }
 
-/// Declares (or finds) the `feme.stage.subpass.load.f32` function
+/// Declares (or finds) the `feme.stage.subpass.load.<suffix>` function
 /// `SubpassLoadPattern` calls: `(i32 attachment_index, i32 component,
-/// i32 sample) -> f32`, matching `feme::StageOpKind::SubpassLoad`'s
-/// always-`f32` shape (see StageOps.h) -- an ordinary named call, not an
+/// i32 sample) -> <ElementTy>`, matching `feme::StageOpKind::SubpassLoad`'s
+/// overloaded shape (see StageOps.h) -- an ordinary named call, not an
 /// `llvm.spv.*` intrinsic, since `feme.stage.*` calls (StageOps.h's file
 /// comment) are FeMe's own vocabulary rather than a real target-independent
-/// LLVM intrinsic. Named with the explicit `.f32` type suffix
-/// `feme::getOrInsertStageOp` gives every overloaded `feme.stage.*` op
-/// (SubpassLoad is marked overloaded for exactly this reason -- see
+/// LLVM intrinsic. \p ElementTy (roadmap L179) is either `f32` (a plain
+/// `subpassInput`) or `i32` (an `isubpassInput`/`usubpassInput` -- SPIR-V's
+/// `OpTypeImage`/LLVM's own `target("spirv.SignedImage"/"UnsignedImage",
+/// ...)` don't distinguish signed from unsigned any further than this, and
+/// neither does this callee: both read back the same bit pattern, exactly
+/// like `feme::cpu::createLoad2DI32` itself). Named with the explicit type
+/// suffix `feme::getOrInsertStageOp` gives every overloaded `feme.stage.*`
+/// op (SubpassLoad is marked overloaded for exactly this reason -- see
 /// `StageOpKind::SubpassLoad`'s comment): `feme::cpu::SIMDizePass` widens
-/// this scalar declaration into a *different*, `<W x f32>`-returning one
-/// later, and the two must not collide under one name, or
+/// this scalar declaration into a *different*, `<W x ElementTy>`-returning
+/// one later, and the two must not collide under one name, or
 /// `CallBase::getCalledFunction`'s function-type check (used throughout
 /// this codebase, not least `feme::isStageOpCall`) would refuse to
-/// recognize either call once both exist.
+/// recognize either call once both exist -- nor may the `f32` and `i32`
+/// declarations collide with each other, for the same reason.
 mlir::LLVM::LLVMFuncOp
 getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
-                           mlir::ModuleOp Module) {
-  constexpr llvm::StringLiteral Name = "feme.stage.subpass.load.f32";
+                           mlir::ModuleOp Module, mlir::Type ElementTy) {
+  bool IsInt = mlir::isa<mlir::IntegerType>(ElementTy);
+  llvm::StringRef Name = IsInt ? "feme.stage.subpass.load.i32"
+                               : "feme.stage.subpass.load.f32";
   if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
     return Existing;
   mlir::OpBuilder::InsertionGuard Guard(Rewriter);
   Rewriter.setInsertionPointToStart(Module.getBody());
+  mlir::Type LLVMElementTy =
+      IsInt ? static_cast<mlir::Type>(Rewriter.getI32Type())
+            : static_cast<mlir::Type>(mlir::Float32Type::get(Rewriter.getContext()));
   auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
-      mlir::Float32Type::get(Rewriter.getContext()),
+      LLVMElementTy,
       {Rewriter.getI32Type(), Rewriter.getI32Type(), Rewriter.getI32Type()});
   return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name,
                                         FuncTy, mlir::LLVM::Linkage::External);
@@ -7466,10 +7477,15 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
     auto VectorTy = mlir::dyn_cast<mlir::VectorType>(ResultType);
     unsigned NumComponents = VectorTy ? VectorTy.getNumElements() : 1;
+    mlir::Type ElementTy = VectorTy ? VectorTy.getElementType() : ResultType;
+    if (!ElementTy.isF32() && !mlir::isa<mlir::IntegerType>(ElementTy))
+      return Rewriter.notifyMatchFailure(
+          Op, "subpass image element type is neither f32 nor an integer "
+              "type");
 
     mlir::Location Loc = Op.getLoc();
     mlir::LLVM::LLVMFuncOp Callee = getOrInsertSubpassLoadFunc(
-        Rewriter, Op->getParentOfType<mlir::ModuleOp>());
+        Rewriter, Op->getParentOfType<mlir::ModuleOp>(), ElementTy);
     mlir::Value IndexConst = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, Rewriter.getI32Type(),
         Rewriter.getI32IntegerAttr(static_cast<int32_t>(

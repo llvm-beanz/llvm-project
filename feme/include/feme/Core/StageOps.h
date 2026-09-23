@@ -121,13 +121,19 @@ enum class StageOpKind : uint8_t {
   /// `Dim::SubpassData`, read through `OpImageRead`'s subpass-local form).
   /// Reads one scalar component of the currently-bound color/depth/stencil
   /// render-target attachment mapped to \c attachment_index at the
-  /// invocation's own fragment location -- not a descriptor-set image, and
-  /// per-lane always `f32` -- like `InputLoad`, it is marked overloaded
-  /// (StageOps.cpp's table) purely so `feme::cpu::SIMDizePass`'s widened
-  /// `<W x f32>` form gets a distinct symbol from the scalar declaration
-  /// `feme::spirv::SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) creates,
-  /// not because a real shader ever requests a different result type (see
-  /// FragmentWrapper.cpp's `lowerFragmentSubpassLoad`). \c sample (roadmap
+  /// invocation's own fragment location -- not a descriptor-set image.
+  /// Like `InputLoad`, it is marked overloaded (StageOps.cpp's table) both
+  /// so `feme::cpu::SIMDizePass`'s widened `<W x T>` form gets a distinct
+  /// symbol from the scalar declaration `feme::spirv::SubpassLoadPattern`
+  /// (SPIRVToLLVMPatterns.cpp) creates, and (roadmap L179) because a real
+  /// shader's attachment format can genuinely vary the per-lane scalar
+  /// type read back -- `f32` for a plain `subpassInput`, or a signed/
+  /// unsigned `i32` for an `isubpassInput`/`usubpassInput` -- unlike this
+  /// comment's own prior claim that it was always `f32`, which
+  /// `descriptorset_random`'s own CTS coverage of integer-format input
+  /// attachments disproved (see FragmentWrapper.cpp's
+  /// `lowerFragmentSubpassLoad`, which now branches on the actual result
+  /// type to pick `feme::cpu::createLoad2D` vs `createLoad2DI32`). \c sample (roadmap
   /// F8c) selects which sample of a multisampled attachment to read,
   /// always a constant `0` for a single-sample one -- GLSL's plain
   /// `subpassInput`'s implicit form has no sample of its own to name, so
@@ -290,11 +296,17 @@ llvm::CallInst *createStageStreamCut(llvm::IRBuilderBase &B, uint32_t Stream);
 /// `StageOpKind::SubpassLoad`'s comment). \p Sample defaults (when null)
 /// to a constant `i32 0`, so single-sample callers are unaffected; pass a
 /// real (constant or divergent) `i32` value to read another sample of a
-/// multisampled attachment (roadmap F8c). Always returns `f32`.
+/// multisampled attachment (roadmap F8c). \p ResultTy (roadmap L179)
+/// selects the scalar type read back -- a `subpassInput`'s attachment can
+/// be any of Vulkan's three numeric-format classes, not only floating
+/// point (an `isubpassInput`/`usubpassInput` reads a signed/unsigned `i32`
+/// instead) -- and defaults (when null) to `f32`, so existing callers that
+/// only ever read a floating-point attachment are unaffected.
 llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
                                        uint32_t AttachmentIndex,
                                        uint32_t Component,
-                                       llvm::Value *Sample = nullptr);
+                                       llvm::Value *Sample = nullptr,
+                                       llvm::Type *ResultTy = nullptr);
 
 /// `feme.stage.task.payload.store(offset, value)`, where \p Offset is the
 /// constant byte offset within the task payload this store writes (see
