@@ -10808,3 +10808,95 @@ original files).
 No CTS-wide re-run performed this session (no code change was made to
 validate). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
 no change (pure investigation, no feature/extension surface touched).
+
+## L151: fixed -- `DiamondFlattener` double-masking a diamond's shared merge tail
+
+Picked up exactly where the prior session's bisection left off (a
+divergent `if` whose true arm contains a `for`-loop-with-`break`,
+followed by an unconditional store every lane must reach, corrupting a
+lane that correctly skips the `if`). Regenerated the same GLSL repro via
+`glslangValidator --target-env vulkan1.3` + direct `feme-run --wave-size=4
+--groups=1,1,1` dispatch (bypassing `deqp-vk` for fast iteration) and
+confirmed it still reproduces: `binding[0:0][0]: 0 2570 2570 2570` (lane
+0's store incorrectly skipped; expected `2570` uniformly).
+
+Added temporary, env-var-gated `M.print(errs(), nullptr)` dumps directly
+in `feme/lib/Target/CPU/Pipeline.cpp` (mirroring its own existing
+`FEME_DUMP_IR` convention) immediately before/after `LinearizePass` and
+after `SIMDizePass`, rebuilt `feme-run`, and captured all three phases of
+IR for the repro. Hand-traced the after-linearize dump and found the
+smoking gun: `DiamondFlattener::flatten`'s own diamond-merge logic
+correctly computes a properly-merged post-`if` mask (`sideeffect.merge10`/
+`live.merge9`) at the reconvergence block, but the final store instead
+used a *different*, earlier-defined value (`sideeffect.merge12`/
+`live.merge11` -- the `if`'s own *entry* mask into its nested loop,
+constant-false for a lane that correctly skips the `if`) -- the correctly
+merged value was computed but never used anywhere in the function.
+
+Root cause, pinned to an exact mechanism: `DiamondFlattener::run()`
+treats every cycle's exit block as its own independent "root" (see
+`diamond-after-loop.ll`'s own comment for why -- a cycle's own body is
+`LoopLinearizer`'s problem, but the code after it is squarely this
+pass's), and always calls `flatten(Root, /*End=*/nullptr, ...)` for every
+root, walking it all the way to a `ret`. When a cycle is nested inside an
+*enclosing* diamond's arm (as the second loop here is, nested in the
+`if`'s true arm), the enclosing diamond's own root (`flatten()`'s
+top-level call from the function entry) already correctly walks through
+the diamond's own reconvergence block, computes the merge, and continues
+past it to the shared tail code (including the final store). But the
+cycle's own exit-block root, having no knowledge that it is nested inside
+that enclosing diamond, *also* independently walks all the way past the
+same reconvergence block and re-applies `applyStageMasks` to it a second
+time, this time seeded with its own narrower, stale entry mask (the
+enclosing `if`'s own entry mask into the loop) -- silently overwriting
+the correct merge with the wrong one, since both roots are processed in
+the same mutation loop and whichever runs later wins.
+
+**Fix** (`feme/lib/Transforms/CPU/Linearize.cpp`): record the enclosing
+region's own reconvergence point (`End`) at the exact moment `validate()`
+stops at a cycle boundary (new `CycleBoundaryEnd` map, mirroring the
+existing `CycleBoundaryMasks`' "first walk is authoritative" philosophy),
+and seed each cycle-exit root with it (new `RootEnd` map) so that root's
+own `flatten()`/`validate()` calls stop there instead of continuing past
+it -- leaving that reconvergence block and everything after it entirely
+to whichever root's own walk owns the enclosing diamond.
+
+Verified against the live driver: the same repro now produces
+`2570 2570 2570 2570` for all four lanes. Added a reduced Linearize lit
+test (`resource-call-after-diamond-with-nested-loop-in-arm.ll`) covering
+this exact shape, confirmed to fail (using the loop's own stale entry
+mask instead of the diamond's merge) without this fix. `ninja check-feme`
+is clean (3307/3307 non-unsupported tests passing).
+
+Full CTS re-run against the live FeMe CPU Vulkan driver
+(`FeMe CPU Vulkan Device`, confirmed via `vulkaninfo --summary`):
+- `dEQP-VK.subgroups.ballot_broadcast.*`: all 105 previously-failing
+  `subgroupbroadcastfirst_*` cases now pass (0 fails, down from 105).
+  The remaining 105 fails in this cluster are all `subgroupbroadcast_
+  nonconst_*` -- confirmed a genuinely separate, unrelated bug (this
+  fix does not touch the `nonconst_*` code path's own failure at all;
+  see the still-open item below).
+- A near-complete `dEQP-VK.subgroups.*` sweep (47,723 of the full
+  case list; the harness's own resource loader hit an unrelated,
+  pre-existing `.amber` file-not-found error on
+  `subgroup_uniform_control_flow.discard.*` past that point, aborting
+  the run after printing its final totals) shows **zero regressions**
+  anywhere else: the only 105 fails in the entire sweep are the exact
+  same pre-existing `nonconst_*` cluster above. In particular,
+  `shuffle.*` (`Shuffle`/`Rotate`/`ReadLaneAt`, sharing `DiamondFlattener`
+  with everything else this pass touches) has zero fails, confirming no
+  regression in that shared machinery.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+(a pure control-flow-linearization correctness fix touches no
+feature/extension surface).
+
+**Still open, out of this row's scope**: `subgroupbroadcast_nonconst_*`
+(105/112 failing across every subgroup size) is a separate, unrelated
+bug -- it uses the same `llvm.spv.wave.broadcast`/`WaveCallKind::Broadcast`
+path `L148`'s fix added (which is 112/112 passing for the *constant*-index
+form), but with a non-compile-time-constant (still spec-required
+dynamically-uniform) index expression. Not yet investigated at all this
+session; needs its own single-case repro and actual-vs-expected dump
+before scoping a fix, following the same pattern this row and `L148`
+both used.
