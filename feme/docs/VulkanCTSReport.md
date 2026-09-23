@@ -10989,3 +10989,123 @@ surface).
 
 This closes out the `ballot_broadcast.*` cluster entirely: as of this
 fix, the full `dEQP-VK.subgroups.*` sweep has zero known failures.
+
+## L153: fixed -- `binding_model.shader_access.*combined_image_sampler_immutable*` (`VkDescriptorSetLayoutBinding::pImmutableSamplers` never read)
+
+`L147`'s own triage left `binding_model.shader_access.*` (11,834 cases)
+as the single largest untriaged cluster once `ballot_broadcast.*` closed
+via `L151`/`L152`. Ran a background `dEQP-VK.binding_model.shader_access.*`
+sweep and stopped at a decisive, 100%-consistent signature well before
+the full sweep finished: every single `Fail` (945/945 at the 13% mark)
+was `combined_image_sampler_immutable`; every other binding shape passed.
+
+**Root cause**: `vkCreateDescriptorSetLayout` never read
+`VkDescriptorSetLayoutBinding::pImmutableSamplers` at all. Per spec, an
+immutable-sampler binding's sampler handle is captured once, at
+layout-creation time, from `pImmutableSamplers`, and is fixed for the
+layout's entire lifetime; `vkUpdateDescriptorSets` never supplies one
+again (the CTS's own `vktBindingShaderAccessTests.cpp` either omits the
+sampler-half write entirely for a plain immutable `SAMPLER` binding, or
+writes `VK_NULL_HANDLE` into a `COMBINED_IMAGE_SAMPLER` write's `sampler`
+field, which per spec must be ignored, not applied). Since FeMe never
+captured the field, every such binding's sampler half stayed
+permanently null, producing "Invalid result values" on every affected
+case.
+
+**Fix** (`feme/lib/Vulkan/Descriptor.h`/`.cpp`):
+- New `DescriptorSetLayoutBinding::ImmutableSamplers` field, captured
+  from `pImmutableSamplers[0..descriptorCount)` in
+  `vkCreateDescriptorSetLayout` whenever non-null and the binding's type
+  is a sampler type.
+- `DescriptorSet`'s constructor seeds each image-binding array
+  element's `.Samp` from the layout's `ImmutableSamplers` list at
+  `vkAllocateDescriptorSets` time -- the only mechanism by which an
+  immutable-sampler binding's sampler half is ever populated.
+- `DescriptorSet::write`'s image/sampler overload now preserves that
+  seeded value (instead of overwriting it with the incoming, typically
+  null, write value) whenever the binding has immutable samplers.
+
+Two new unit tests added to `DescriptorTest.cpp`
+(`ImmutableSamplerSeedsDescriptorAtAllocationTime`,
+`ImmutableSamplerArraySeedsEachElementIndependently`), both confirmed to
+fail without the fix (via a temporary, reverted neutralization of the
+two behavioral changes) and pass with it. `ninja check-feme`:
+3310/3310 non-unsupported tests passing (up from a 3308/3308 pre-session
+baseline), 0 regressions.
+
+Full CTS re-run against the live FeMe CPU Vulkan driver
+(`FeMe CPU Vulkan Device`, confirmed via `vulkaninfo --summary`), against
+the rebuilt, fixed `libfeme_vulkan.so` (the first sweep, started before
+the rebuild, was discarded per this project's own "rebuild before
+trusting any result" rule, and confirmed via a targeted git-checkout A/B
+that the newly-discovered `L155` failures below reproduce identically
+against the pre-fix `.so` too, ruling out a regression from this fix):
+- `dEQP-VK.binding_model.shader_access.*`: 12,273 cases (current CTS's
+  actual count; `L147`'s own original 11,834 estimate was evidently
+  slightly stale). **0 fails** in every `combined_image_sampler_immutable.*`
+  case -- this fix's own target signature is fully closed. 1,479 fails
+  remain, but every one is a *different*, unrelated, pre-existing
+  signature (`storage_image`/`storage_buffer(_dynamic)`/`uniform_buffer(_dynamic)`/
+  `{storage,uniform}_texel_buffer`/`with_push*` bindings, only in
+  `vertex`/`fragment`/`vertex_fragment` stages, never `compute`) -- broken
+  out as new row `L155` below, since it is unrelated to samplers and
+  reproduces identically on the pre-fix `.so`.
+- A broader `dEQP-VK.binding_model.*` sweep (not just `shader_access`) run
+  concurrently to check for regressions in the `write()` behavior change,
+  which applies to *any* binding with a non-empty `ImmutableSamplers`
+  list, not just `COMBINED_IMAGE_SAMPLER`: `descriptor_copy` (19
+  pre-existing fails, see `L154` below), `descriptorset_random` (198
+  pre-existing fails, not yet triaged), `inline_uniform_blocks` (9
+  pre-existing fails, not yet triaged), `image_array_m11`/`image_atomic`/
+  `mutable_descriptor` (14,310 cases)/`push_constant_bank`: 0 fails in
+  everything swept before the sweep was stopped (once `shader_access`
+  itself -- this row's actual target -- was fully confirmed, continuing
+  to sweep unrelated, much larger clusters was out of this session's
+  scope; none of the three pre-existing fail counts above changed from
+  before this fix to after it).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- immutable samplers are core Vulkan 1.0 `VkDescriptorSetLayoutBinding`
+API surface, not a Vulkan 1.4 feature or a distinct extension.
+
+**Newly discovered, separate, small issue while regression-sweeping (not
+fixed this session, not a regression from this fix)**:
+`dEQP-VK.binding_model.descriptor_copy.misc.copy_immutable_sampler_*`
+(2 cases) fail with a color-buffer mismatch. Root cause identified by
+reading the CTS source (`vktBindingDescriptorCopyTests.cpp`): the test
+builds one binding per sampler via `addSingleSamplerBinding` (each with
+`descriptorCount == 1`), then issues a single `VkCopyDescriptorSet` with
+`descriptorCount > 1` starting at the first such binding -- per spec,
+when a copy's `descriptorCount` exceeds one binding's remaining array
+elements, the copy is defined to continue into the *next* consecutive
+binding number(s). FeMe's `vkUpdateDescriptorSets` copy loop only
+consults a single binding's own array (`Src->imageBindingArray`/
+`bindingArray`) and never spans into a subsequent binding, so anything
+past the first binding's single element is silently dropped. This is
+unrelated to `pImmutableSamplers` itself (it would reproduce with any
+multi-binding, `descriptorCount`-spanning copy, immutable sampler or
+not) -- filed as a new, small, untriaged item for a future session (see
+`Roadmap.md`).
+
+**Newly discovered, separate, large issue while regression-sweeping (not
+fixed this session, not a regression from this fix -- confirmed
+reproduces identically against the pre-fix `.so` via a targeted
+git-checkout A/B test)**: 1,479 of `binding_model.shader_access.*`'s own
+cases fail, all sharing one signature entirely unrelated to samplers:
+`vkCreateGraphicsPipelines` returns `VK_ERROR_INITIALIZATION_FAILED` for
+any `storage_image`/`storage_buffer(_dynamic)`/`uniform_buffer(_dynamic)`/
+`{storage,uniform}_texel_buffer`/`with_push*` binding used from a
+`vertex`, `fragment`, or `vertex_fragment` stage graphics pipeline
+(the identical binding shapes all pass in `compute` stage). Root cause,
+read via the opt-in `FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic this
+project's own `Diagnostics.h` already provides: `UnsupportedOps.cpp`
+rejects a `llvm.spv.resource.handlefrombinding` call as "a register-bound
+resource handle the FeMe CPU target cannot normalize into a heap access
+or the root-constant block" for these binding/stage combinations. Even a
+single, non-array `storage_image` binding fails, so this is not
+specifically about descriptor arrays -- it looks like a broader gap in
+how non-compute-stage graphics pipelines normalize image/buffer resource
+handles versus how compute pipelines do. Filed as a new, larger,
+untriaged item for a future dedicated session (see `Roadmap.md`'s `L155`)
+-- worth investigating whether this is one root cause or several, given
+the range of affected binding types.
