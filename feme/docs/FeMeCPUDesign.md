@@ -2004,6 +2004,28 @@ the resource heap and of each other, so `ResourceInfo` reports one
 discovery") and a host materializes each heap from the ranges of its own
 class. See that pass's header comment for its exact scope.
 
+`feme::cpu::SPIRVUnmergeResourceLoadsPass`
+(`feme-cpu-spirv-unmerge-resource-loads`, roadmap L174) runs immediately
+before `PreparePass` (specifically, before `PreparePass`'s own
+`LowerSwitchPass`, which would otherwise rebuild a `switch`'s single flat
+merge block into a nested tree of icmp-chain diamonds before this pass
+ever sees it -- see this pass's own header comment for why running order
+matters). It exists because `SPIRVResourceLoweringPass`'s own matchers
+require a `llvm.spv.resource.getpointer` call's result to be used
+directly by a `load`/`store` in the `getpointer` call's own block, never
+indirected through a `PHINode` -- a requirement an otherwise-ordinary
+upstream `InstCombinePass` run (`feme::graphics::
+UnrollConstantTripCountStageLoopsPass`, a graphics-stage-only pass that
+runs before this pipeline is ever invoked) can silently violate by
+folding a `load` of a `PHINode` of per-branch `getpointer` results into a
+`PHINode` of the *pointers* instead, with one shared `load` at the merge
+point (`InstCombinePHI.cpp`'s `foldPHIArgLoadIntoPHI`). This pass detects
+exactly that shape and undoes it, restoring the "flat access" invariant
+`SPIRVResourceLoweringPass` depends on before it ever runs. A no-op for
+any module that never had this shape to begin with, in particular every
+`compute`-stage module (nothing upstream of this pipeline ever runs
+`InstCombinePass` over one).
+
 This arrangement preserves the useful properties of the dynamic-only
 execution model:
 
