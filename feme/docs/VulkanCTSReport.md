@@ -11223,3 +11223,100 @@ Filed as a new item for a future dedicated session (see `Roadmap.md`'s
 cause (e.g. some form of resource-handle/descriptor-heap-slot aliasing
 whenever a pipeline has more than one distinct live access path to a
 resource-heap-normalized handle) or are two independent bugs.
+
+## 2026-09-23: L175 (`vertex_fragment` sub-shape) root-caused as a miscompile in L174's own fix; safety-patched
+
+Picked up `L175`'s `vertex_fragment` sub-shape, starting from
+`storage_image.vertex_fragment.single_descriptor.2d` as the smallest
+repro. Confirmed via `deqp-vk` (`FEME_VULKAN_LOG_CREATION_ERRORS=1`):
+`Fail (Image verification failed)`, a genuine pixel-correctness bug.
+Decoded the QPA log's embedded `Result`/`Reference`/`ErrorMask` PNGs:
+only one quadrant (top-right) was wrong (`(0,0,0,0)` vs. the correct
+`(73,255,128,255)`); the others matched exactly. Reading the CTS's own
+shader-generation source (`vktBindingShaderAccessTests.cpp`) narrowed
+this to the fragment-stage module's own resource access specifically
+(the wrong quadrant uses the fragment shader's *own* access, not the
+vertex-shader-computed passthrough the other two quadrants use).
+
+**Root cause, precisely identified**: dumped the actual IR
+`feme::cpu::runPipeline` sees for this case (`FEME_DUMP_IR=1`, plus two
+temporary, env-var-guarded dump points added and later fully reverted
+in `Pipeline.cpp` for finer-grained before/after-`LinearizePass`
+comparisons) and ran it through `opt -passes=verify`. The fragment
+module's dump was **invalid IR**: a `PHINode` (one of `L174`'s own
+`.unmerged`-named nodes) listed 5 incoming `(block, value)` pairs, but
+4 of the 5 listed blocks were not actually CFG predecessors of the
+phi's own parent block at all. This is exactly what happens when
+`feme::cpu::SPIRVUnmergeResourceLoadsPass` (added last session for
+`L174`) — which assumed, without checking, that any `load` reading
+through its target resource-pointer `PHINode` lives in that `PHINode`'s
+own parent block — encounters a case where that assumption is false:
+`vertex_fragment` mode's fragment shader has an *extra* outer
+`if (quadrant_id < 2) use_own_access else use_passthrough` diamond
+downstream of the switch's own merge point, and because the loaded
+value is only used along one arm of that diamond, an earlier
+`InstCombine`/code-sinking pass sinks the `load` past the phi's own
+block into that later, conditionally reached block. The pass then
+built its replacement value-`PHINode` at the *sunk load's* site but
+reused the *original* phi's incoming-block list — producing invalid IR
+that was silently accepted downstream and mis-rendered wrong pixels on
+real hardware, rather than failing loudly. This is a genuine miscompile
+risk in `L174`'s own fix from last session, only now exposed because
+`vertex_fragment` is the first shape with this extra outer diamond.
+
+**Fix**: added a conservative safety check
+(`LI->getParent() == PN.getParent()`) to the load-collection loop in
+`SPIRVUnmergeResourceLoads.cpp`'s `tryUnmergeResourcePointerPHI`, with
+a comment explaining the invariant. Loads sunk to a different block are
+now safely skipped (left untouched) rather than corrupted. Added a new
+negative-case lit test (`sunk_load_after_merge`) to
+`spirv-unmerge-resource-loads.ll` reproducing the minimal shape and
+asserting it's left untouched. `ninja check-feme`: 3311/3311, 0
+regressions (checked before and after reverting the temporary debug
+dumps from `Pipeline.cpp`).
+
+**CTS re-run**: the original repro
+(`storage_image.vertex_fragment.single_descriptor.2d`) now correctly
+and loudly fails `vkCreateGraphicsPipelines` with the original,
+`L155`-style diagnosed "unsupported raised operation" message instead
+of silently mis-rendering — a strictly safer failure mode (nothing
+that previously passed now fails), though it does narrow `L174`'s
+effective scope for this combined-stage shape (tracked as a new,
+separate follow-up, `L176`). Swept all 147
+`storage_image.vertex_fragment.*` cases: all 147 now fail with the same
+loud, diagnosed rejection (no crashes, no silent corruption). A broader
+`primary_cmd_buf.bind.storage_image.*` regression sweep (1,176 cases,
+867 pass / 309 fail) confirms the fix's blast radius is exactly these
+121 `vertex_fragment.*` cases plus the still-open, unrelated
+`multiple_descriptor_sets.*` sub-shape (188 fails) below, with no other
+regressions anywhere else in `storage_image.*`.
+
+**`multiple_descriptor_sets` (single-stage) sub-shape confirmed a
+wholly separate, still-open bug**, unaffected by this session's fix
+(still fails identically with/without it, as expected since it lacks
+the extra outer diamond that caused `vertex_fragment`'s bug). Its
+failure signature is qualitatively different and more severe: decoding
+`storage_image.fragment.multiple_descriptor_sets.single_descriptor.2d`'s
+QPA images shows **all four quadrants** read exactly `(0,0,0,0)` (vs.
+a uniform non-zero reference in every quadrant), rather than
+`vertex_fragment`'s single wrong quadrant. A pre-linearize IR dump of
+this case shows the fragment shader's own IR is structurally sound: it
+correctly sums both descriptor sets' image loads (using distinct
+resource-heap indices, `0` and `1`, for the two sets) and divides by 2
+before storing — ruling out shader codegen as the cause and pointing
+instead toward the Vulkan-layer descriptor-set/resource-heap population
+for a *second* descriptor set specifically (`feme/lib/Vulkan/
+Descriptor*.cpp`/the `image_heap` population path are the next places
+to look; not yet investigated further this session). Separately, a
+`FEME_DUMP_IR=1` attempt against this case's full, late-pipeline
+(post-SIMDize) dump hit an unexplained `deqp-vk` segfault mid-print;
+re-attempting with an earlier, smaller (pre-linearize) dump point
+avoided it cleanly, so the segfault looks specific to printing the
+very large, fully-widened module rather than a genuine pipeline
+correctness bug, but this has not been root-caused and is noted as an
+open, unresolved item.
+
+See `Roadmap.md`'s updated `L175` (narrowed to just
+`multiple_descriptor_sets`, still open) and new `L176` (generalizing
+`SPIRVUnmergeResourceLoadsPass` to correctly handle a sunk load, rather
+than merely detecting and avoiding it).

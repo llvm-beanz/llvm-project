@@ -2026,6 +2026,25 @@ any module that never had this shape to begin with, in particular every
 `compute`-stage module (nothing upstream of this pipeline ever runs
 `InstCombinePass` over one).
 
+This pass only rewrites the shape when the `load` reading through the
+pointer `PHINode` still lives in that `PHINode`'s own parent block. A
+`load` that some earlier pass has sunk into a later, conditionally
+reached block (which happens whenever additional divergent control flow
+sits downstream of the merge and only uses the loaded value along one
+path — the shape roadmap L175 found in the `vertex_fragment` combined-
+stage binding_model.shader_access tests, where the fragment stage's own
+extra `if (quadrant_id < 2) ...` diamond after the switch's merge causes
+exactly this) is deliberately left untouched rather than rewritten:
+naively reusing the `PHINode`'s incoming-block list at the sunk load's
+own site produces a `PHINode` whose incoming blocks no longer match its
+own parent's real CFG predecessors — invalid IR that an earlier version
+of this pass produced and that silently mis-rendered on real hardware
+rather than failing loudly (see roadmap L175/L176). Declining to rewrite
+means such cases fall back to the original, loudly diagnosed
+`vkCreateGraphicsPipelines` rejection instead; L176 tracks fully
+generalizing this pass to correctly re-thread the merge through the
+sunk load's own block instead of merely detecting and avoiding it.
+
 This arrangement preserves the useful properties of the dynamic-only
 execution model:
 
