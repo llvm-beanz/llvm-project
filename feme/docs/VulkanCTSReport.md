@@ -11320,3 +11320,111 @@ See `Roadmap.md`'s updated `L175` (narrowed to just
 `multiple_descriptor_sets`, still open) and new `L176` (generalizing
 `SPIRVUnmergeResourceLoadsPass` to correctly handle a sunk load, rather
 than merely detecting and avoiding it).
+
+## 2026-09-23: L177: `L175`'s `multiple_descriptor_sets` sub-shape root-caused as a *second*, independent miscompile in `SPIRVUnmergeResourceLoadsPass` (not the Vulkan layer)
+
+**Started from**: the previous session's hypothesis that
+`multiple_descriptor_sets` (the still-open sub-shape of `L175`) was a
+Vulkan-layer descriptor-set/resource-heap-population bug -- the
+fragment shader's own IR had already been confirmed structurally sound
+in that session, pointing (it was reasoned) downstream, toward
+`feme/lib/Vulkan/Descriptor*.cpp`/`ResourceHeap.cpp`'s heap-population
+path instead.
+
+**That hypothesis turned out to be wrong.** Targeted, env-var-guarded
+debug instrumentation added to `feme/lib/Target/CPU/ResourceHeap.cpp`'s
+`materializeHeap` and `feme/lib/Vulkan/CommandBuffer.cpp`'s
+`buildBoundResources`/`buildImageAndSamplerBinding` (dumping every
+bound descriptor set, `(Space, BaseRegister)` range match, and image
+view/bound status) confirmed the Vulkan layer correctly binds and
+matches **both** descriptor sets' image-heap slots for the failing
+`storage_image.fragment.multiple_descriptor_sets.single_descriptor.2d`
+case: `BoundSets.size()=2`, both non-null; `Space=0/Binding=0` and
+`Space=1/Binding=0` both correctly captured with `Array.size()=1`
+each; both `Range`s correctly matched (`HeapBase=0`/`HeapBase=1`, no
+`NO MATCH` lines); both image views/images valid and bound. The prior
+session had only checked the *earliest* pre-normalize IR dump (which
+looked structurally sound) and never checked later pipeline stages for
+corruption -- the actual bug is introduced by a *later* pass.
+
+**Re-investigating later pipeline stages instead**: re-attempted
+`FEME_DUMP_IR=1` against the same case and reproduced the exact
+`deqp-vk` segfault the prior session had noted but left unexplained --
+this time captured live with `gdb -batch -ex run -ex bt --args
+./deqp-vk ...`. The backtrace showed the crash inside LLVM's own
+`Module::print`/`AssemblyWriter::printInstruction`/`createSlotTracker`,
+mid-print of one of `SPIRVUnmergeResourceLoadsPass`'s own
+`%.pn.unmerged = phi <4 x float> [ poison, ...` nodes -- i.e. **the
+segfault is LLVM's IR printer choking on genuinely invalid IR**, not a
+dump-mechanism or large-module-printing artifact as previously
+speculated.
+
+Added two further temporary dump points (via
+`Normalize.addPass(llvm::PrintModulePass(errs()))` inserted directly
+into `Pipeline.cpp`'s `ModulePassManager` construction, immediately
+before and immediately after `SPIRVUnmergeResourceLoadsPass`) to bisect
+exactly which pass produces the invalid IR. `opt -passes=verify` on the
+split-out fragment module confirmed: `PHI nodes not grouped at top of
+basic block!` -- a different verifier error than `L175`'s
+`vertex_fragment` bug, produced by the same pass, before `PreparePass`
+even runs.
+
+**Root cause**: the fragment shader has **two independent
+phi-of-pointer merges sharing one block** -- a first switch's own merge
+in block `2` (phi immediately followed by its load, nothing between --
+safe), and a *second*, independent switch's own merge in block `15`,
+whose instruction order is `[phi (pointer merge), %.0 = fadd (using the
+FIRST switch's already-loaded value), %.pn = load (the load being
+unmerged), %.3 = fadd]`. When the pass rewrote the second phi, it
+called `ValuePHI->insertBefore(LI->getIterator())` -- inserting the new
+value-phi at the *load's* position (index 3), which sits *after* the
+intervening non-phi `%.0 = fadd` (index 2). This violates LLVM's "phis
+grouped at the top of a block" invariant. This shape -- two independent
+phi-of-pointer merges sharing one block with an intervening non-phi
+instruction between them -- was never exercised by `L174`'s or `L175`'s
+own tests (both single-switch).
+
+**Fix**: changed `ValuePHI->insertBefore(LI->getIterator())` to
+`ValuePHI->insertBefore(PN.getIterator())` in
+`SPIRVUnmergeResourceLoads.cpp`'s `tryUnmergeResourcePointerPHI` --
+anchoring the new phi's insertion point on the *old phi's own
+position* (guaranteed, by IR validity at pass entry, to already sit
+among the block's leading run of phis) rather than the old load's.
+Added a new positive-case lit test (`two_merges_share_a_block`) to
+`spirv-unmerge-resource-loads.ll` reproducing the minimal shape;
+confirmed (via `git stash` on just the `.cpp` fix) that it fails with
+the exact live verifier error without the fix, and passes with it
+restored. `ninja check-feme`: 3311/3311, 0 regressions.
+
+**CTS re-run**:
+- The original repro
+  (`storage_image.fragment.multiple_descriptor_sets.single_descriptor.2d`)
+  now passes: `1/1 (100.0%)`.
+- Confirmed both stage modules' post-fix IR verifies clean
+  (`opt -passes=verify`, exit 0 for both).
+- Confirmed the fix does not regress `L175`/`L176`'s still-open
+  `vertex_fragment` safety patch: `vertex_fragment.single_descriptor.2d`
+  still correctly and loudly fails `vkCreateGraphicsPipelines` with the
+  same diagnosed "unsupported raised operation" rejection, unchanged.
+- Full `binding_model.shader_access.primary_cmd_buf.bind.storage_image.*`
+  regression sweep (1,176 cases): **1029/1176 pass (87.5%), 147/1176
+  fail (12.5%)** -- up from 867/1176 pass / 309/1176 fail pre-`L177`.
+  Confirmed via a breakdown of every remaining failing case name that
+  **all 147 remaining failures are exclusively `vertex_fragment.*`**
+  (`L176`'s still-open item) -- every other cluster, including every
+  `multiple_descriptor_sets.*`/`multiple_discontiguous_descriptor_sets.*`
+  shape across `vertex`/`fragment`/`geometry`/`tess_ctrl`/`tess_eval`
+  stages, now passes. Zero new regressions.
+- A broader `binding_model.shader_access.*multiple_descriptor_sets*`
+  sweep (all binding types, all stages -- large enough that it did not
+  finish within its own sweep timeout) found **zero failures** in every
+  case it completed (several hundred cases across
+  `combined_image_sampler_immutable`/`storage_image` and multiple
+  stages) before being cut off.
+
+See `Roadmap.md`'s updated `L175` (multiple_descriptor_sets sub-shape
+now resolved, its Vulkan-layer hypothesis explicitly noted as
+disproven) and new row `L177` (this fix). `L176` (fully generalizing
+the pass to also handle the `vertex_fragment` sunk-load shape, rather
+than just declining to rewrite it) remains the only open item from this
+bug family.
