@@ -100480,3 +100480,100 @@ incoming-value types.
    `CommandBuffer.cpp.bak`/`ResourceHeap.cpp.bak` backups deleted;
    everything worth keeping is already quoted in
    `VulkanCTSReport.md`/this file.
+
+# Session: L176 finished -- vertex_fragment CTS cluster fully resolved (0/11576 fail)
+
+**Confirmed at session start**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`.
+
+**Bottom line up front**: the `L176` fix from two sessions ago was
+incomplete. It passed every lit test but did not fix the real CTS case.
+This session found why, fixed it for real, and the entire
+`vertex_fragment.*` `binding_model.shader_access` cluster (11,576 cases)
+now passes 100%.
+
+## What was wrong
+
+The prior session's chain-based rewrite logic
+(`findLinearChainTo`/`isPathFreeOfWrites`) was correct in design. But its
+write-safety check used plain `Instruction::mayWriteToMemory()`, which
+treats *any* call to a function with no proven memory effects as a
+possible write. The real fragment-stage module has a
+`feme.stage.input.load` call sitting directly between the merge phi and
+the branch leading to the sunk load -- and that call has no LLVM
+`memory(...)` attribute at this point in the pipeline, so the check
+conservatively declined the rewrite every time. Lit tests never
+exercised this exact shape (no test had a call in that position), so they
+all passed while the real bug stayed alive.
+
+**Lesson for next time**: a fix that passes hand-crafted lit tests is not
+validated until it also passes the actual CTS repro. Do the CTS run
+*before* committing "done," not just after.
+
+## What fixed it
+
+1. Added `mayWriteResourceMemory()` in `SPIRVUnmergeResourceLoads.cpp`:
+   recognizes any `feme::isStageOpCall` (existing `feme::StageOps` API) as
+   never touching the resource/image heap this pass cares about, since
+   `feme.stage.*` calls are, by construction, scoped to per-invocation
+   signature/state, group-shared/task-payload memory, or execution masks
+   -- never the resource heap. Falls back to `mayWriteToMemory()` for
+   everything else.
+2. Added lit test `sunk_load_after_merge_with_intervening_stage_op`
+   reproducing the exact real-world shape.
+3. Committed as `0da124fb4bdc` (~15 min once root-caused).
+
+## How it was found (~1 hr)
+
+Reused the prior session's technique: temporary env-var-guarded
+`PrintModulePass` dumps bracketing the pass in `Pipeline.cpp`
+(`FEME_DUMP_IR_L176_PRE`/`_POST`), since the existing `FEME_DUMP_IR` dump
+point is too late to see a module that fails this early. Diffing pre vs.
+post showed the phi was never touched at all -- meaning the decline path
+was firing, not the rewrite path. From there it was a matter of walking
+`isPathFreeOfWrites`'s loop by hand against the dumped IR to find the one
+instruction it stumbled on. Reverted the temporary instrumentation before
+committing (confirmed via `git status --short` -- only intended files
+remained).
+
+## Validation (all done, all green)
+
+- `feme-opt` + `opt -passes=verify` + `FileCheck`: pass.
+- `ninja check-feme`: 3311/3314, 3 unsupported, **0 regressions**.
+- Original repro (`storage_image.vertex_fragment.single_descriptor.2d`):
+  now passes (was failing before this session).
+- `binding_model.shader_access.*storage_image.vertex_fragment*`:
+  1704/1704 (100%).
+- Full `binding_model.shader_access.*vertex_fragment*` (all binding
+  types, all stages, ~40 min sweep): **11,576/11,576 (100%) pass, 0
+  fail, 0 regressions**.
+
+## Docs updated
+
+- `Roadmap.md`: `L176` row struck through, fixed.
+- `VulkanCTSReport.md`: new dated section with the root-cause writeup and
+  full sweep numbers.
+- `FeMeCPUDesign.md`: `SPIRVUnmergeResourceLoadsPass` section now
+  describes `mayWriteResourceMemory()`'s `feme.stage.*` recognition.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked,
+  no update needed (this is a correctness fix to an already-listed
+  feature, not new coverage).
+
+## Suggested next steps
+
+1. **(~1-2 hrs)** `binding_model.shader_access` still has three
+   never-triaged clusters from several sessions ago, now that
+   `vertex_fragment.*` is fully green: `descriptorset_random` (198
+   fails), `inline_uniform_blocks` (9 fails), and the still-mentioned
+   `binding_model.shader_access` shader-access cluster more broadly.
+   `descriptorset_random` is the bigger one -- start there.
+2. **(~15 min)** Given this session found a *second* found-by-CTS-not-
+   by-review bug in the same pass, worth actually doing the "assert or
+   opt -passes=verify after this pass in debug builds" idea a prior
+   session floated instead of just noting it -- would have caught the
+   original `L177` shape at `check-feme` time.
+3. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, good for a
+   change-of-pace session.
+4. **(~5 min)** No scratch left in `/tmp` -- all `l176_*`/`l176v2*` dump
+   and log files and the `Pipeline.cpp.bak` backup deleted; everything
+   worth keeping is already quoted in `VulkanCTSReport.md`/this file.
