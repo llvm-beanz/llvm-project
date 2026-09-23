@@ -106,20 +106,25 @@ merge:
 
 ; A `load` reading through a resource-pointer `phi` but *sunk* into a
 ; later block (here, only one arm of an unrelated, subsequent `if`
-; actually uses the loaded value) is left untouched: `%p`'s incoming
-; blocks (`case0`/`case1`) are only guaranteed to be the real CFG
-; predecessors of `%p`'s own parent block (`merge`), not of `%use` (the
-; sunk load's block) -- rewriting here would produce a new `PHINode` in
-; `%use` whose incoming blocks don't match `%use`'s actual predecessor
-; (`merge`), i.e. invalid IR. Found via CTS's
-; `binding_model.shader_access.*vertex_fragment*` (roadmap L175/L176):
-; the combined-vertex+fragment shape's own extra, outer `if` (choosing
-; between this stage's own resource access and a passed-through value
-; from the other stage) is exactly this shape, and an earlier revision
-; of this pass silently produced invalid IR for it instead of leaving it
-; untouched.
+; actually uses the loaded value) is now correctly rewritten: `%use` is
+; reachable from `merge` via a single, unbranched chain (`%use`'s only
+; predecessor is `merge` itself), so `merge` provably dominates `%use`
+; and the merged value this pass builds in `merge` is well-defined at
+; `%use`'s own site too -- no need to rebuild any further merge along
+; the way, just thread the new value-phi's result directly through.
+; Found via CTS's `binding_model.shader_access.*vertex_fragment*`
+; (roadmap L175/L176): the combined-vertex+fragment shape's own extra,
+; outer `if` (choosing between this stage's own resource access and a
+; passed-through value from the other stage) is exactly this shape. An
+; earlier revision of this pass declined to rewrite this shape at all
+; (a safe, but overly conservative, fix for a distinct miscompile bug
+; -- see the `two_merges_share_a_block` test below for that one).
 ; CHECK-LABEL: define float @sunk_load_after_merge(
-; CHECK: phi ptr
+; CHECK: merge:
+; CHECK-NEXT: %v.unmerged = phi <4 x float>
+; CHECK-NEXT: br i1 %cond, label %use, label %skip
+; CHECK: use:
+; CHECK-NEXT: %s = extractelement <4 x float> %v.unmerged, i64 0
 define float @sunk_load_after_merge(i32 %idx, i1 %cond) {
 entry:
   switch i32 %idx, label %case1 [
@@ -154,6 +159,98 @@ use:
 skip:
   ret float 0.000000e+00
 }
+
+; A load sunk past an intervening memory write is left untouched: `%other`
+; may be written between `merge` and `%use`'s own load, so hoisting the
+; load back to right after each incoming block's own `getpointer` call (as
+; `sunk_load_after_merge` above does) could observe a different value than
+; the original, unmoved `load` does. `isPathFreeOfWrites` exists
+; specifically to catch this and decline to rewrite.
+; CHECK-LABEL: define float @sunk_load_after_merge_with_intervening_write(
+; CHECK: phi ptr
+define float @sunk_load_after_merge_with_intervening_write(
+    i32 %idx, i1 %cond, ptr %other) {
+entry:
+  switch i32 %idx, label %case1 [
+    i32 0, label %case0
+  ]
+
+case0:
+  %h0 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %p0 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %h0, <2 x i32> <i32 1, i32 1>)
+  br label %merge
+
+case1:
+  %h1 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %p1 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %h1, <2 x i32> <i32 2, i32 2>)
+  br label %merge
+
+merge:
+  %p = phi ptr [ %p0, %case0 ], [ %p1, %case1 ]
+  br i1 %cond, label %use, label %skip
+
+use:
+  store float 0.000000e+00, ptr %other, align 4
+  %v = load <4 x float>, ptr %p, align 4
+  %s = extractelement <4 x float> %v, i64 0
+  ret float %s
+
+skip:
+  ret float 0.000000e+00
+}
+
+; A load sunk into a block reachable via *more than one* control-flow
+; path is left untouched: `%use` here has two predecessors (`merge` and
+; `other`), so it is not reachable from `merge` via a single, unbranched
+; chain -- `findLinearChainTo` returns `std::nullopt` (via
+; `getUniquePredecessor` returning null), and this pass has no way to
+; re-merge a value at this second, independent join point.
+; CHECK-LABEL: define float @sunk_load_reachable_via_two_paths(
+; CHECK: phi ptr
+define float @sunk_load_reachable_via_two_paths(i32 %idx, i1 %cond1, i1 %cond2) {
+entry:
+  switch i32 %idx, label %case1 [
+    i32 0, label %case0
+  ]
+
+case0:
+  %h0 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %p0 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %h0, <2 x i32> <i32 1, i32 1>)
+  br label %merge
+
+case1:
+  %h1 = call target("spirv.Image", float, 1, 0, 0, 0, 2, 4)
+      @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_0_0_0_2_4t(
+          i32 0, i32 0, i32 1, i32 0, ptr null)
+  %p1 = call ptr @llvm.spv.resource.getpointer.p0.tspirv.Image_f32_1_0_0_0_2_4t.v2i32(
+      target("spirv.Image", float, 1, 0, 0, 0, 2, 4) %h1, <2 x i32> <i32 2, i32 2>)
+  br label %merge
+
+merge:
+  %p = phi ptr [ %p0, %case0 ], [ %p1, %case1 ]
+  br i1 %cond1, label %use, label %other
+
+other:
+  br i1 %cond2, label %use, label %skip2
+
+use:
+  %v = load <4 x float>, ptr %p, align 4
+  %s = extractelement <4 x float> %v, i64 0
+  ret float %s
+
+skip2:
+  ret float 0.000000e+00
+}
+
 
 ; Two independent phi-of-pointer merges sharing one block (e.g. two
 ; consecutive switches over the same quadrant-style index, each with its

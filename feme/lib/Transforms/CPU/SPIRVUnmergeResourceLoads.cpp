@@ -24,6 +24,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
 
+#include <optional>
+
 using namespace llvm;
 using namespace feme::cpu;
 
@@ -51,6 +53,78 @@ bool isSafeToHoistLoadAfter(const Instruction *After) {
   return true;
 }
 
+/// If \p To is reachable from \p From via a single, unbranched chain of
+/// blocks -- i.e. \p To, and every block between it and \p From, has
+/// exactly one predecessor, so \p From provably dominates \p To and no
+/// other control-flow path can reach it -- returns that chain in forward
+/// order (excluding \p From, including \p To). Returns an empty chain if
+/// \p From == \p To (no cross-block hoisting needed at all). Returns
+/// `std::nullopt` if \p To is reachable only via more than one
+/// control-flow path (this pass has no way to re-merge a value at such a
+/// join point) or not reachable from \p From by a forward chain at all.
+///
+/// This is deliberately a narrower, cheaper check than a full
+/// `DominatorTree` query: every real-world shape this pass has needed to
+/// handle so far (roadmap L175/L176's `vertex_fragment` sunk load: an
+/// outer `if`'s single-predecessor arm) is exactly this "linear
+/// extension" shape, and restricting to it keeps the safety argument
+/// below (see `isPathFreeOfWrites`) a simple straight-line walk rather
+/// than a full multi-path reachability analysis.
+std::optional<SmallVector<BasicBlock *, 4>> findLinearChainTo(BasicBlock *From,
+                                                               BasicBlock *To) {
+  if (From == To)
+    return SmallVector<BasicBlock *, 4>{};
+
+  SmallVector<BasicBlock *, 4> Chain;
+  BasicBlock *Cur = To;
+  // Bound the backward walk by the function's own block count: this
+  // guards against an (unexpected, but not impossible) cycle in the
+  // "unique predecessor" chain that never actually reaches `From`.
+  for (unsigned Bound = From->getParent()->size(); Cur != From; --Bound) {
+    if (Bound == 0)
+      return std::nullopt;
+    Chain.push_back(Cur);
+    BasicBlock *Pred = Cur->getUniquePredecessor();
+    if (!Pred)
+      return std::nullopt;
+    Cur = Pred;
+  }
+  std::reverse(Chain.begin(), Chain.end());
+  return Chain;
+}
+
+/// Returns true if nothing between \p PN (exclusive) and \p LI (exclusive)
+/// -- first the rest of \p PN's own parent block, then each block of
+/// \p Chain in turn, the last of which contains \p LI itself -- may write
+/// to memory. This is the cross-block generalization of
+/// `isSafeToHoistLoadAfter`: it proves that computing \p LI's value as
+/// early as immediately after each incoming block's own `getpointer` call
+/// (already checked safe *within* that incoming block by
+/// `isSafeToHoistLoadAfter`) remains safe all the way through to \p LI's
+/// original site, however many extra blocks of \p Chain that site was
+/// sunk across.
+bool isPathFreeOfWrites(const PHINode &PN, ArrayRef<BasicBlock *> Chain,
+                        const LoadInst *LI) {
+  for (const Instruction *I = PN.getNextNode(); I; I = I->getNextNode()) {
+    if (I == LI)
+      return true;
+    if (I->mayWriteToMemory())
+      return false;
+    if (I->isTerminator())
+      break;
+  }
+
+  for (const BasicBlock *BB : Chain) {
+    for (const Instruction &I : *BB) {
+      if (&I == LI)
+        return true;
+      if (I.mayWriteToMemory())
+        return false;
+    }
+  }
+  llvm_unreachable("LI must be reachable via PN's own block or Chain");
+}
+
 /// If \p PN is a pointer-typed `PHINode` all of whose incoming values are
 /// `llvm.spv.resource.getpointer` calls each residing in their own
 /// incoming block (with nothing but side-effect-free instructions between
@@ -75,30 +149,40 @@ bool tryUnmergeResourcePointerPHI(PHINode &PN) {
   // Collect the `load`s using this PHI as their pointer operand before
   // mutating anything -- rewriting invalidates `PN`'s use-list iterators.
   //
-  // Crucially, only a `load` in `PN`'s own parent block qualifies: `PN`'s
-  // incoming-block list is only guaranteed to match the *real* CFG
-  // predecessors of `PN`'s own parent block. A `load` sunk into some
-  // later block (past additional control flow downstream of the merge --
-  // e.g. an outer, unrelated `if` that only uses the loaded value along
-  // one path) is not reachable from each incoming block directly, so
-  // reusing `PN`'s incoming-block list for a new `PHINode` placed at that
-  // sunk `load`'s site would produce a `PHINode` whose incoming blocks no
-  // longer match its own parent's actual predecessors -- invalid IR that
-  // silently mis-renders rather than failing loudly (found via CTS's
-  // `binding_model.shader_access.*vertex_fragment*`, roadmap L175: the
-  // combined-vertex+fragment shape adds exactly this kind of extra outer
-  // diamond around the switch-merged resource load).
-  SmallVector<LoadInst *, 4> Loads;
-  for (User *U : PN.users())
-    if (auto *LI = dyn_cast<LoadInst>(U); LI &&
-                                          LI->getPointerOperand() == &PN &&
-                                          LI->getParent() == PN.getParent())
-      Loads.push_back(LI);
+  // A `load` need not live in `PN`'s own parent block: it may have been
+  // sunk into a later block by an earlier pass (e.g. an outer, unrelated
+  // `if` that only uses the loaded value along one path -- the
+  // `vertex_fragment`-stage shape roadmap L175/L176 found). That is only
+  // safe to rewrite if that later block is reachable from `PN`'s parent
+  // via a single, unbranched chain of blocks (`findLinearChainTo`): this
+  // proves `PN`'s parent provably dominates the load's block, so the
+  // merged value this pass builds there is well-defined at the load's
+  // site too, without needing to rebuild any further merge along the
+  // way. A load reachable only via more than one control-flow path (a
+  // second, independent join downstream of this one) is left untouched
+  // -- this pass has no way to re-merge a value at that second join
+  // point too.
+  struct PendingLoad {
+    LoadInst *LI;
+    SmallVector<BasicBlock *, 4> Chain;
+  };
+  SmallVector<PendingLoad, 4> Loads;
+  for (User *U : PN.users()) {
+    auto *LI = dyn_cast<LoadInst>(U);
+    if (!LI || LI->getPointerOperand() != &PN)
+      continue;
+    std::optional<SmallVector<BasicBlock *, 4>> Chain =
+        findLinearChainTo(PN.getParent(), LI->getParent());
+    if (!Chain || !isPathFreeOfWrites(PN, *Chain, LI))
+      continue;
+    Loads.push_back({LI, std::move(*Chain)});
+  }
   if (Loads.empty())
     return false;
 
   bool Changed = false;
-  for (LoadInst *LI : Loads) {
+  for (PendingLoad &Pending : Loads) {
+    LoadInst *LI = Pending.LI;
     PHINode *ValuePHI = PHINode::Create(LI->getType(), PN.getNumIncomingValues(),
                                          LI->getName() + ".unmerged");
     // Insert at `PN`'s own position, not `LI`'s: `PN` is a `PHINode`, so
@@ -122,6 +206,11 @@ bool tryUnmergeResourcePointerPHI(PHINode &PN) {
       ClonedLoad->insertAfter(cast<Instruction>(InVal));
       ValuePHI->addIncoming(ClonedLoad, InBB);
     }
+    // `ValuePHI` dominates `LI`'s own site whether or not they share a
+    // block: same-block, this is the ordinary "phi feeds a load further
+    // down the same block" case; cross-block, `Pending.Chain` already
+    // proved `PN`'s (and so `ValuePHI`'s) parent block is the sole route
+    // to `LI`'s block, which is exactly the dominance this relies on.
     LI->replaceAllUsesWith(ValuePHI);
     LI->eraseFromParent();
     Changed = true;

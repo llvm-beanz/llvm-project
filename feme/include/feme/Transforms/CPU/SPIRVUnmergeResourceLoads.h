@@ -59,6 +59,23 @@
 // intermediate "get a pointer to this binding" call this bug could ever
 // apply to); a no-op for a DXIL-sourced module.
 //
+// A qualifying `load` need not live in the merge block itself: an earlier
+// pass may have sunk it into a later block (e.g. a `vertex_fragment`
+// pipeline's own extra, outer `if` choosing between this stage's own
+// resource access and a value passed through from the other stage --
+// roadmap L175/L176). This pass rewrites such a sunk `load` too, as long
+// as its block is reachable from the merge block via a single,
+// unbranched chain of blocks (each having exactly one predecessor) --
+// which proves the merge block dominates it and that no memory write
+// intervenes anywhere along that one path -- since the newly built
+// value-`PHINode` (placed at the merge block, where the old pointer-phi
+// was) then already dominates the sunk `load`'s site and can simply
+// replace it directly, without needing to rebuild any further merge
+// along the way. A `load` reachable only via more than one control-flow
+// path (a second, independent join downstream of this one) is left
+// untouched -- this pass has no way to re-merge a value at that second
+// join point.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_SPIRVUNMERGERESOURCELOADS_H
