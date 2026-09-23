@@ -1126,8 +1126,12 @@ TEST(PatchUnboundedResourceRangesTest, RewritesUnboundedRangeToLayoutCount) {
   ASSERT_TRUE(M) << Err.getMessage().str();
 
   DescriptorSetLayout SetLayout({
-      DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
-      DescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3},
+      DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                 /*VariableCount=*/false,
+                                 /*ImmutableSamplers=*/{}},
+      DescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3,
+                                 /*VariableCount=*/false,
+                                 /*ImmutableSamplers=*/{}},
   });
   PipelineLayout Layout({&SetLayout}, {});
 
@@ -1179,7 +1183,9 @@ TEST(PatchUnboundedResourceRangesTest, LeavesUndeclaredBindingUnpatched) {
   ASSERT_TRUE(M) << Err.getMessage().str();
 
   DescriptorSetLayout SetLayout(
-      {DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}});
+      {DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                  /*VariableCount=*/false,
+                                  /*ImmutableSamplers=*/{}}});
   PipelineLayout Layout({&SetLayout}, {});
 
   patchUnboundedResourceRanges(*M, Layout);
@@ -1192,9 +1198,9 @@ TEST(PatchUnboundedResourceRangesTest, LeavesUndeclaredBindingUnpatched) {
         CI->getCalledFunction()->getIntrinsicID() !=
             llvm::Intrinsic::spv_resource_handlefrombinding)
       continue;
-    EXPECT_EQ(llvm::cast<llvm::ConstantInt>(CI->getArgOperand(2))
-                  ->getZExtValue(),
-              0u);
+    EXPECT_EQ(
+        llvm::cast<llvm::ConstantInt>(CI->getArgOperand(2))->getZExtValue(),
+        0u);
   }
 }
 
