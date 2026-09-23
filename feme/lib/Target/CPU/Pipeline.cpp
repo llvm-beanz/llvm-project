@@ -30,6 +30,7 @@
 #include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/SPIRVSubpassLowering.h"
+#include "feme/Transforms/CPU/SPIRVUnmergeResourceLoads.h"
 #include "feme/Transforms/CPU/TaskPayloadWrapper.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
@@ -369,6 +370,29 @@ Expected<PipelineResult> runPipeline(Module &M,
     // module's `llvm.dx.thread.id` already is. A no-op for a DXIL-sourced
     // module, which has no such construct to fold.
     Normalize.addPass(SPIRVBuiltinFoldingPass());
+    // (roadmap L174/L155) A graphics-stage pipeline's own upstream
+    // `feme::graphics::UnrollConstantTripCountStageLoopsPass` runs
+    // `InstCombinePass` over the raw SPIR-V-imported module before this
+    // pipeline ever sees it (see that pass's header comment) -- which can
+    // fold a `load` of a `PHINode` of per-branch `llvm.spv.resource.
+    // getpointer` results into a `PHINode` of the *pointers* instead, with
+    // one shared `load` at the merge point. `feme::cpu::
+    // SPIRVResourceLoweringPass`'s own matchers below require the "flat",
+    // block-local `getpointer`-then-`load` shape that canonicalization
+    // defeats; undo it here, before `PreparePass`'s own `LowerSwitchPass`
+    // runs -- `LowerSwitch` rebuilds a `switch`'s single flat merge block
+    // into a nested tree of `NodeBlock`/`LeafBlock` icmp-chain diamonds,
+    // each level of which would otherwise need its own phi-of-pointer
+    // *and* phi-of-pointer undo, not just the one flat merge this pass
+    // matches. Undoing the merge on the still-flat, single-merge-block
+    // shape here, before that restructuring happens, keeps only the
+    // *loaded values* (never the pointers) live across `LowerSwitch`'s
+    // later-introduced tree of blocks -- an ordinary, already-supported
+    // phi-of-values merge. A no-op module that never had this shape in
+    // the first place (in particular, every `compute`-stage module:
+    // nothing upstream of this pipeline ever runs `InstCombinePass` over
+    // one).
+    Normalize.addPass(SPIRVUnmergeResourceLoadsPass());
     Normalize.addPass(PreparePass(Opts.EntryPoint, Opts.Stage));
     Normalize.addPass(BoundResourceNormalizationPass());
     // Lowers the one register-bound constant buffer "Root constants" in
