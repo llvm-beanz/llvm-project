@@ -11109,3 +11109,117 @@ handles versus how compute pipelines do. Filed as a new, larger,
 untriaged item for a future dedicated session (see `Roadmap.md`'s `L155`)
 -- worth investigating whether this is one root cause or several, given
 the range of affected binding types.
+
+## L174: fixed -- `binding_model.shader_access.*`'s `vkCreateGraphicsPipelines`-rejection cluster (`L155`); `L175` opened for a distinct correctness cluster
+
+Picked up `L155` (1,479 previously-untriaged `binding_model.shader_access.*`
+fails, every one a `vkCreateGraphicsPipelines`/`VK_ERROR_INITIALIZATION_FAILED`
+signature for a `storage_image`/`storage_buffer(_dynamic)`/
+`uniform_buffer(_dynamic)`/texel-buffer/`with_push*` binding used from a
+`vertex`, `fragment`, or `vertex_fragment` stage graphics pipeline, never
+`compute`). Started with the smallest repro,
+`storage_image.fragment.single_descriptor.*` (20 cases, all failing
+identically).
+
+**Root cause**: not anything in `feme::cpu::UnsupportedOps.cpp` itself (the
+pass reporting the failure), nor in `feme::cpu::SPIRVResourceLoweringPass`
+(the pass whose matchers the failing handle didn't survive) -- both are
+working exactly as designed. The real cause is upstream of this pipeline
+entirely: `feme::graphics::UnrollConstantTripCountStageLoopsPass`
+(`GraphicsPipeline.cpp`, a graphics-stage-only pass that runs before
+`feme::cpu::runPipeline` is ever invoked) runs a generic `InstCombinePass`
+over the raw SPIR-V-imported module as part of its own loop-unroll cleanup.
+The CTS's own `quadrant_id`-based if/else-if resource-access idiom
+(`vktBindingShaderAccessTests.cpp`'s `genResourceAccessSource`, shared
+identically by every one of `L155`'s affected binding-type test generators)
+compiles, for a fragment/vertex-stage shader, to a `PHINode` of per-branch
+`llvm.spv.resource.getpointer` results feeding one shared `load` at the
+merge block. `InstCombinePHI.cpp`'s `foldPHIArgLoadIntoPHI` -- an entirely
+ordinary, unrelated LLVM canonicalization that would be beneficial in
+almost any other context -- folds this into the *opposite* shape: a
+`PHINode` of the *pointers* themselves, with one shared `load` reading
+through it. `feme::cpu::SPIRVResourceLoweringPass`'s own matchers
+(`hasOnlySupportedStorageImageUses` and its buffer-side analogs)
+categorically require the "flat" shape -- a `getpointer` call's result
+used directly by a `load`/`store` in that call's own block, never
+indirected through a `PHINode` -- so this canonicalization silently
+defeats them. This explains every part of `L155`'s signature at once: why
+every affected binding type failed identically (they all share the same
+CTS-shader-generation idiom), and why only `vertex`/`fragment`/
+`vertex_fragment` stage was affected (nothing upstream of
+`feme::cpu::runPipeline` ever runs `InstCombinePass` over a
+`compute`-stage module -- confirmed via direct pre/post-`InstCombine` IR
+dumps at multiple pipeline stages, comparing the identical GLSL idiom's
+`compute`-stage output, which never has this shape, against its
+`fragment`-stage output, which always does).
+
+**Fix**: a new pass, `feme::cpu::SPIRVUnmergeResourceLoadsPass`
+(`feme-cpu-spirv-unmerge-resource-loads`,
+`feme/lib/Transforms/CPU/SPIRVUnmergeResourceLoads.cpp`), that finds
+exactly this phi-of-pointer-then-shared-load shape (verifying every
+incoming value is a `llvm.spv.resource.getpointer` call in its own
+incoming block, with nothing memory-effecting between that call and the
+block's terminator, so hoisting the load earlier is never observably
+different) and undoes it: clones the `load` into each incoming block
+right after its own `getpointer` call, then replaces the original shared
+`load` with a new `PHINode` of the *loaded values* instead of the
+pointers. One important ordering subtlety found by experiment, not by
+inspection: this pass must run *before* `feme::cpu::PreparePass`'s own
+`LowerSwitchPass`. First placement attempt put it right before
+`BoundResourceNormalizationPass` (after `PreparePass`, matching a first
+guess at "early in Normalize, but tidy about not disturbing anything
+before it") -- this did not fix anything at all, because by that point
+`LowerSwitchPass` had already rewritten the `switch`'s one flat merge
+block into a nested tree of `NodeBlock`/`LeafBlock` icmp-chain diamonds,
+each level of which had *independently* re-derived its own phi-of-pointer
+merge from the original (still-merged) shape -- our pass's simple,
+single-flat-merge-block matcher does not (and, by design, should not) walk
+a whole nested tree fixing every level. Moving the pass to run first in
+the `Normalize` pass list (right after `SPIRVBuiltinFoldingPass`, before
+`PreparePass`) fixes it correctly: the *loaded values* (never the
+pointers) are what stays live across `LowerSwitchPass`'s later-introduced
+tree of blocks, an ordinary, already-supported phi-of-values merge.
+
+New reduced lit test, `spirv-unmerge-resource-loads.ll`: a 3-way-switch
+positive case (the exact repro shape, confirmed to fail -- i.e. leave the
+phi-of-pointer shape untouched -- without the fix) and a negative case (a
+`phi ptr` whose incoming values are *not* all `getpointer` calls, left
+untouched by design). `ninja check-feme`: 3311/3311 (up from 3310/3310,
+the one new test), 0 regressions.
+
+**CTS re-run**: `storage_image.fragment.single_descriptor.*` (the
+original 20-case repro) now 20/20 passing. Ran a broad
+`binding_model.shader_access.*` sweep afterward (~40,000 cases --
+`primary_cmd_buf`/`secondary_cmd_buf` × `bind`/`bind2` API variants ×
+every binding type in the suite, larger than `L147`'s original 11,834
+estimate, which evidently only covered a subset of these axes) with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`: **zero** occurrences of the original
+"unsupported raised operation" diagnostic anywhere in the sweep --
+`L155`'s `vkCreateGraphicsPipelines`-rejection signature is completely
+eliminated.
+
+**Newly discovered, separate cluster while regression-sweeping (not a
+regression from this fix -- these cases never reached
+`vkCreateGraphicsPipelines` before this fix landed, so they were
+invisible to every prior sweep)**: ~3,000 cases now fail with "Image
+verification failed" -- a genuine pixel-mismatch/correctness bug, not a
+creation/compile error (confirmed zero "unsupported raised operation"
+diagnostics anywhere in this new cluster). Two overlapping sub-shapes,
+both still non-`compute`-stage only: (1) any binding using more than one
+descriptor set (`multiple_descriptor_sets.*`) for the same binding types
+`L155` covered, in a single-stage (`vertex`- or `fragment`-only) pipeline
+-- confirmed the single-descriptor-set form of the identical binding
+type/stage/array shape (e.g. `storage_image.fragment.single_descriptor.*`
+and `.descriptor_array.*`) is 100% passing, so this is specific to
+spanning more than one descriptor set, not array indexing or the binding
+type itself; (2) any binding of these types used from a `vertex_fragment`
+(both stages in one pipeline) graphics pipeline at all, regardless of
+descriptor-set count or array shape -- even the plainest possible case,
+`storage_image.vertex_fragment.single_descriptor.2d`, fails this way.
+Also seen identically for the `with_template`/`with_push*`/`bind2`
+(`vkCmdPushDescriptorSet`-analog) API variants of the same binding types.
+Filed as a new item for a future dedicated session (see `Roadmap.md`'s
+`L175`) -- worth checking whether sub-shapes (1) and (2) share one root
+cause (e.g. some form of resource-handle/descriptor-heap-slot aliasing
+whenever a pipeline has more than one distinct live access path to a
+resource-heap-normalized handle) or are two independent bugs.
