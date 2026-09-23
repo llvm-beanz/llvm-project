@@ -72,3 +72,56 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment]
     spirv.ReturnValue %2 : f32
   }
 }
+
+// -----
+
+// Roadmap L178: an *array* of subpassInput variables (`layout
+// (input_attachment_index = 1) uniform subpassInput uAttachments[3];`) --
+// e.g. `descriptorset_random`'s own `ialimitlow` CTS coverage -- reads
+// through one extra `spirv.AccessChain` selecting a compile-time-constant
+// element between the `spirv.Load` and the `spirv.mlir.addressof`
+// (`getSubpassVariable`'s `SubpassVariableAccess::ArrayIndexOffset`); per
+// the Vulkan input-attachment model, array element N reads attachment
+// index `InputAttachmentIndex + N` -- here `1 + 2 = 3`.
+
+// CHECK-LABEL: llvm.func @load_subpass_array_elem
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK: llvm.mlir.constant(3 : i32)
+// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load.f32(%{{.*}}, %{{.*}}, %{{.*}}) : (i32, i32, i32) -> f32
+// CHECK: llvm.return %[[R]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
+  spirv.GlobalVariable @in_color_array bind(0, 0) {input_attachment_index = 1 : i32} : !spirv.ptr<!spirv.array<3 x !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, UniformConstant>
+  spirv.func @load_subpass_array_elem() -> f32 "None" {
+    %0 = spirv.mlir.addressof @in_color_array : !spirv.ptr<!spirv.array<3 x !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, UniformConstant>
+    %idx = spirv.Constant 2 : i32
+    %ac = spirv.AccessChain %0[%idx] : !spirv.ptr<!spirv.array<3 x !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, UniformConstant>, i32 -> !spirv.ptr<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %ac : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>
+    %zero = spirv.Constant dense<0> : vector<2xi32>
+    %2 = spirv.ImageRead %1, %zero : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, vector<2xi32> -> f32
+    spirv.ReturnValue %2 : f32
+  }
+}
+
+// -----
+
+// A non-constant array index into a subpassInput array is declined
+// (`getSubpassVariable` returns `std::nullopt`) rather than miscompiled --
+// `feme::StageOpKind::SubpassLoad`'s own `AttachmentIndex` operand is a
+// host-side constant with no dynamic-index overload (see
+// `getSubpassVariable`'s own comment) -- so `ImageReadPattern`'s ordinary,
+// generic resource-image lowering handles this read instead.
+
+// CHECK-LABEL: llvm.func @load_subpass_array_dynamic
+// CHECK-NOT: llvm.call @feme.stage.subpass.load
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.getpointer"
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
+  spirv.GlobalVariable @in_color_array_dyn bind(0, 0) {input_attachment_index = 1 : i32} : !spirv.ptr<!spirv.array<3 x !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, UniformConstant>
+  spirv.func @load_subpass_array_dynamic(%idx : i32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @in_color_array_dyn : !spirv.ptr<!spirv.array<3 x !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, UniformConstant>
+    %ac = spirv.AccessChain %0[%idx] : !spirv.ptr<!spirv.array<3 x !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>, UniformConstant>, i32 -> !spirv.ptr<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %ac : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>
+    %zero = spirv.Constant dense<0> : vector<2xi32>
+    %2 = spirv.ImageRead %1, %zero : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, vector<2xi32> -> f32
+    spirv.ReturnValue %2 : f32
+  }
+}

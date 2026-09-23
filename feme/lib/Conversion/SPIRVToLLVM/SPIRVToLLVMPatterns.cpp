@@ -7310,18 +7310,58 @@ using ImageReadPattern = ImageLoadPattern<mlir::spirv::ImageReadOp>;
 using ImageFetchPattern = ImageLoadPattern<mlir::spirv::ImageFetchOp>;
 
 /// The `spirv.GlobalVariable` \p Image's `spirv.Load` reads, tracing through
-/// its `spirv.mlir.addressof`, or a null op if \p Image was not produced
-/// that way (every subpassInput read this milestone supports is: GLSL/
-/// glslang always loads the image handle from its own module-scope variable
-/// immediately before reading it, exactly like every other resource image).
-mlir::spirv::GlobalVariableOp getSubpassVariable(mlir::Value Image) {
+/// its `spirv.mlir.addressof`, or a null result if \p Image was not
+/// produced that way (every subpassInput read this milestone supports is:
+/// GLSL/glslang always loads the image handle from its own module-scope
+/// variable immediately before reading it, exactly like every other
+/// resource image). One extra `spirv.AccessChain` selecting an array
+/// element may sit between the `spirv.Load` and the `spirv.mlir.addressof`
+/// -- a legal, if unusual, Vulkan shape: an *array* of subpassInput
+/// variables (`layout(input_attachment_index = N) uniform subpassInput
+/// uAttachments[K];`), first exercised by this project's own
+/// `descriptorset_random` CTS coverage (roadmap L178). Per the Vulkan
+/// input-attachment model, array element `i` reads attachment index
+/// `N + i` -- a compile-time-constant per-element offset, unlike an
+/// ordinary image array's own genuinely dynamic per-lane index -- so only
+/// a compile-time-constant array-selecting index is recovered
+/// (`getConstantMemberIndex`, despite its name generic over any single
+/// `spirv.AccessChain` index, constant or not); a genuinely dynamic array
+/// index is declined (returns `std::nullopt`) rather than miscompiled,
+/// since `feme::StageOpKind::SubpassLoad`'s own `AttachmentIndex` operand
+/// is itself always a compile-time constant (`createStageSubpassLoad`) and
+/// has no way to carry a dynamic one yet.
+struct SubpassVariableAccess {
+  mlir::spirv::GlobalVariableOp Global;
+  /// The array-selecting index's value (0 for a plain, non-arrayed
+  /// subpassInput), added to the variable's own `InputAttachmentIndex`
+  /// decoration to get the real attachment index this specific read
+  /// selects.
+  uint32_t ArrayIndexOffset = 0;
+};
+
+std::optional<SubpassVariableAccess> getSubpassVariable(mlir::Value Image) {
   auto Load = Image.getDefiningOp<mlir::spirv::LoadOp>();
   if (!Load)
-    return nullptr;
-  auto AddrOf = Load.getPtr().getDefiningOp<mlir::spirv::AddressOfOp>();
+    return std::nullopt;
+  mlir::Value Pointer = Load.getPtr();
+  uint32_t ArrayIndexOffset = 0;
+  if (auto AccessChain = Pointer.getDefiningOp<mlir::spirv::AccessChainOp>()) {
+    if (AccessChain.getIndices().size() != 1)
+      return std::nullopt;
+    std::optional<uint64_t> Index =
+        getConstantMemberIndex(AccessChain.getIndices()[0]);
+    if (!Index)
+      return std::nullopt;
+    ArrayIndexOffset = static_cast<uint32_t>(*Index);
+    Pointer = AccessChain.getBasePtr();
+  }
+  auto AddrOf = Pointer.getDefiningOp<mlir::spirv::AddressOfOp>();
   if (!AddrOf)
-    return nullptr;
-  return getReferencedGlobal(AddrOf);
+    return std::nullopt;
+  mlir::spirv::GlobalVariableOp Global = getReferencedGlobal(AddrOf);
+  if (!Global)
+    return std::nullopt;
+  return SubpassVariableAccess{Global, ArrayIndexOffset};
 }
 
 /// Declares (or finds) the `feme.stage.subpass.load.f32` function
@@ -7353,6 +7393,7 @@ getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
   return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name,
                                         FuncTy, mlir::LLVM::Linkage::External);
 }
+
 
 /// Converts a `spirv.ImageRead` whose image is `Dim::SubpassData` -- a GLSL
 /// `subpassLoad()`, i.e. roadmap F8a's dynamic-rendering-local-read shader
@@ -7408,10 +7449,12 @@ public:
       return Rewriter.notifyMatchFailure(
           Op, "Sample image operand needs exactly one operand argument");
 
-    mlir::spirv::GlobalVariableOp Global = getSubpassVariable(Op.getImage());
-    if (!Global)
+    std::optional<SubpassVariableAccess> SubpassAccess =
+        getSubpassVariable(Op.getImage());
+    if (!SubpassAccess)
       return Rewriter.notifyMatchFailure(
           Op, "subpass image is not read directly from its own variable");
+    mlir::spirv::GlobalVariableOp Global = SubpassAccess->Global;
     auto IndexAttr =
         Global->getAttrOfType<mlir::IntegerAttr>("input_attachment_index");
     if (!IndexAttr)
@@ -7429,7 +7472,8 @@ public:
         Rewriter, Op->getParentOfType<mlir::ModuleOp>());
     mlir::Value IndexConst = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, Rewriter.getI32Type(),
-        Rewriter.getI32IntegerAttr(static_cast<int32_t>(IndexAttr.getInt())));
+        Rewriter.getI32IntegerAttr(static_cast<int32_t>(
+            IndexAttr.getInt() + SubpassAccess->ArrayIndexOffset)));
     mlir::Value SampleVal =
         HasSample ? Adaptor.getOperandArguments()[0]
                   : mlir::LLVM::ConstantOp::create(
